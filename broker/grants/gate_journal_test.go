@@ -60,13 +60,19 @@ func (r *rig) openFailing() *failStore {
 	return fs
 }
 
-// invoice puts one invoice send to sam up for the owner's approval.
-func (r *rig) invoice(id, rec string) {
+// submitInvoice submits one invoice send of record rec to sam, unflushed.
+func (r *rig) submitInvoice(id, rec string) {
 	r.t.Helper()
 	x := sam()
 	x.Record = rec
 	r.ver.set(rec, x)
 	r.effect(id, "invoice.send", map[string]any{"record": rec}, "sam@example.com")
+}
+
+// invoice puts one invoice send to sam up for the owner's approval.
+func (r *rig) invoice(id, rec string) {
+	r.t.Helper()
+	r.submitInvoice(id, rec)
 	r.g.Flush()
 	if st := r.state(id); st.State != journal.Pending {
 		r.t.Fatalf("%s: %s %q, want pending", id, st.State, st.Permission.Reason)
@@ -135,6 +141,7 @@ func TestAnswerIsJournaledBeforeAuthorize(t *testing.T) {
 	if st := r.state("agent/c"); st.State != journal.Pending {
 		t.Fatalf("agent/c: %s, want still pending", st.State)
 	}
+	r.unsaved(t)
 }
 
 // TestAllowedApprovalIsJournaled (ADP-9): an approval the checker holds

@@ -30,13 +30,7 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	}
 
 	r.advance(time.Hour)
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	ask("a")
 	if r.g.Reserve(false) {
 		t.Fatal("a question went ahead of a waiting approval request")
@@ -128,13 +122,7 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 func TestAnAgedQuestionGoesAheadOfABatchOnceAnHour(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.RequestsPerHour = 3 })
 	r.grant(mailGrant()) // the grant's request: one text
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	ask("a")
 	if r.g.Reserve(false) {
 		t.Fatal("a question went ahead of a waiting batch")
