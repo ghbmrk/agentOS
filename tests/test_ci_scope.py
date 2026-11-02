@@ -256,7 +256,7 @@ CI_PREAMBLE_LINES = [
 # change to this list.
 MACHINES_LINES = [
     '  machines:',
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 60',
     '    steps:',
     '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
@@ -692,8 +692,8 @@ class WiringTest(unittest.TestCase):
             "top-level defaults after NEL": (ci, ci.rstrip("\n") + "\x85" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "top-level defaults after LS": (ci, ci.rstrip("\n") + "\u2028" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
-            "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-latest\n  hostcheck:"),
-            "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
+            "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-24.04\n  hostcheck:"),
+            "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-24.04\n  hostcheck:"),
             "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
             "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),

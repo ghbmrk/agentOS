@@ -70,7 +70,7 @@ LANE_GATE_LINES = [
     "jobs:",
     "  lane-gate:",
     "    name: lane-gate",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
@@ -109,7 +109,7 @@ PREMERGE_LINES = [
     '  premerge-gate:',
     '    name: premerge-gate',
     "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]",
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
@@ -189,7 +189,7 @@ PREMERGE_LINES = [
     '    name: merge',
     '    needs: premerge-gate',
     "    if: needs.premerge-gate.outputs.merge-head != ''",
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: bot # deployment branches: main only; holds BOT_PR_TOKEN',
     '    permissions: {}',
@@ -256,7 +256,7 @@ INTAKE_LINES = [
     "    if: >-",
     "      contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)",
     "      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
@@ -289,7 +289,63 @@ def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     return problems
 
 
+# CI-hostcheck-runner-2604 (#4785): a floating label (ubuntu-latest) moves every job to a new
+# runner image when GitHub chooses, so required checks change under unchanged code. Each runs-on
+# names one image by its version, written out: no expression, alias or list could pick another.
+PINNED_RUNNER = re.compile(r"""(["']?)(ubuntu-\d\d\.\d\d|macos-\d+|windows-\d{4})(-arm)?\1""")
+RUNS_ON_KEY = re.compile(r"""^\s*(?:-\s+)?["']?runs-on["']?\s*:(.*)$""")
+FLOATING = re.compile(r"[\w.]-latest\b")
+
+
+def runner_label_problems(text):
+    """Return each runs-on that is not one pinned image label, and each floating -latest label."""
+    problems = []
+    # splitlines breaks at every character YAML might (\r, \x85,  ), so no runs-on hides
+    # inside what reads here as a comment.
+    for i, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        code = re.split(r"\s#", line, maxsplit=1)[0]
+        m = RUNS_ON_KEY.match(code)
+        if m and not PINNED_RUNNER.fullmatch(m.group(1).strip()):
+            problems.append("line %d: runs-on %r is not one pinned image label" % (i, m.group(1).strip()))
+        if FLOATING.search(code):
+            problems.append("line %d: floating runner label in %r" % (i, code.strip()))
+    return problems
+
+
 class WorkflowTest(unittest.TestCase):
+    def test_runners_pinned(self):
+        for wf in self.files():
+            with self.subTest(wf.name):
+                text = wf.read_text()
+                self.assertIn("runs-on:", text)
+                self.assertEqual(runner_label_problems(text), [])
+
+    def test_runner_pin_check_catches_mutants(self):
+        text = (WORKFLOWS / "ci.yml").read_text()
+        job = "    runs-on: ubuntu-24.04\n"
+        self.assertIn(job, text)
+        edits = {
+            "ubuntu-latest": "    runs-on: ubuntu-latest\n",
+            "quoted": "    runs-on: 'ubuntu-latest'\n",
+            "quoted key": '    "runs-on": ubuntu-24.04-latest\n',
+            "macos-latest": "    runs-on: macos-latest\n",
+            "matrix": "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    runs-on: ${{ matrix.os }}\n",
+            "variable": "    runs-on: ${{ vars.RUNNER }}\n",
+            "list": "    runs-on: [self-hosted, linux]\n",
+            "group": "    runs-on:\n      group: big\n",
+            "alias": "    runs-on: *runner\n",
+            "self-hosted": "    runs-on: self-hosted\n",
+            "hidden by carriage return": "    # pinned\r    runs-on: ubuntu-latest\n",
+        }
+        for name, new in edits.items():
+            with self.subTest(name):
+                self.assertTrue(runner_label_problems(text.replace(job, new, 1)), name)
+        for label in ("ubuntu-22.04", "ubuntu-24.04-arm", '"ubuntu-24.04"'):
+            with self.subTest(label):
+                self.assertEqual(runner_label_problems(text.replace(job, f"    runs-on: {label}\n", 1)), [])
+
     def files(self):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
         self.assertTrue(files)
@@ -479,7 +535,7 @@ class WorkflowTest(unittest.TestCase):
         text = (WORKFLOWS / "lane-gate.yml").read_text()
         gate = LANE_GATE_RUN[2]
         step = "      - name: Lane gate (base copy of tools/risk_tier.py)\n"
-        job = "    runs-on: ubuntu-latest\n"
+        job = "    runs-on: ubuntu-24.04\n"
         edits = {
             "job continue-on-error": (job, job + "    continue-on-error: true\n"),
             "step continue-on-error": (step, step + "        continue-on-error: true\n"),
@@ -507,7 +563,7 @@ class WorkflowTest(unittest.TestCase):
             "persist credentials": ("persist-credentials: false", "persist-credentials: true"),
             "contents write": ("  contents: read\njobs:", "  contents: write\njobs:"),
             "write-all": ("permissions:\n  contents: read\njobs:", "permissions: write-all\njobs:"),
-            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
             "carriage return in comment": ("# CTRL-lane-gate (docs/LANES.md)",
                                            "# CTRL-lane-gate\r    if: false\r# (docs/LANES.md)"),
         }
@@ -547,7 +603,7 @@ class WorkflowTest(unittest.TestCase):
             "shell override": (step, step + "        shell: python {0}\n"),
             "not isolated": ("python3 -I tools", "python3 tools"),
             "no concurrency": ("  cancel-in-progress: false", "  cancel-in-progress: true"),
-            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
             "carriage return in comment": ("# One run at a time", "# One\r    if: false\r# run at a time"),
         }
         for name, (old, new) in edits.items():

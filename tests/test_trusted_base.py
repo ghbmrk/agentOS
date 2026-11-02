@@ -443,7 +443,7 @@ PIN = [
     "jobs:",
     "  trusted-base:",
     "    name: trusted-base",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 10",
     "    permissions:",
     "      contents: read",
@@ -511,7 +511,7 @@ class Workflow(unittest.TestCase):
                          (" --pr \"$PR_NUMBER\"", ""),
                          ("--detach \"$RUNNER_TEMP/head\" \"$MERGE\"", "--detach \"$RUNNER_TEMP/head\" \"$HEAD_SHA\""),
                          ("--detach \"$RUNNER_TEMP/base\" HEAD", "--detach \"$RUNNER_TEMP/base\" \"$(git merge-base HEAD \"$HEAD_SHA\")\""),
-                         ("    runs-on: ubuntu-latest", "    continue-on-error: true\n    runs-on: ubuntu-latest")]:
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
 

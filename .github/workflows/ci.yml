@@ -39,7 +39,7 @@ env:
 # skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -200,7 +200,7 @@ jobs:
     # job passed. On a records-only change it passes with them (CI-par-4).
     needs: [broker-race, broker-checks]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Every race shard and the broker checks passed
@@ -213,7 +213,7 @@ jobs:
   broker-race:
     # The broker's race tests, split by package across the shards (tools/ci_split.py). Each
     # shard first checks the split covers `go list ./...` with no gap and no duplicate.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -312,7 +312,7 @@ jobs:
   broker-checks:
     # Format, vet, the OP-2 model at its full bounds and the decoder fuzz rounds, beside the
     # race shards.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -406,7 +406,7 @@ jobs:
   machines:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
     # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -668,7 +668,7 @@ jobs:
     # The host-untouched check (HOST-1e; A1, HW-8) on a QEMU/OVMF/swtpm host
     # with a Windows-like second disk, booting the stand-in guest until P2-1's
     # image boots here. Each QEMU process also has the harness's own timeout.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
