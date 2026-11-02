@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -403,67 +404,136 @@ func TestTagAndTokenLabelsDiffer(t *testing.T) {
 }
 
 // #4427: every secret the page derives (a cookie's tag, a screen's token)
-// is compared only in constant time. In csrf.go a call to tag or mac may
-// only be an argument of hmac.Equal, or be encoded or appended when a
-// pair is issued; never assigned, returned bare, or compared with == or
-// bytes.Equal. Revert mutants: either hmac.Equal replaced by bytes.Equal
-// or a string ==, or a tag held in a variable, fail here.
+// is compared only in constant time. The secret functions are tag, mac
+// and every method that returns one of their results (token, mint). In
+// csrf.go a call to one may only be an argument of hmac.Equal, returned
+// as it is or base64-encoded (issuing a token), or appended to the
+// cookie it tags; never held in a variable, compared, or passed to any
+// other function. Outside csrf.go only render may call one (token), to
+// put the token on a screen. Revert mutants: hmac.Equal replaced by
+// bytes.Equal or string(..) !=, an encoded compare such as
+// header != EncodeToString(s.mac(c)) beside the kept hmac.Equal, or a
+// tag held in a variable, each fail here.
 func TestSecretsCompareInConstantTime(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "csrf.go", nil, 0)
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := func(call *ast.CallExpr) bool {
-		switch fn := call.Fun.(type) {
-		case *ast.Ident:
-			return fn.Name == "append"
-		case *ast.SelectorExpr:
-			if x, ok := fn.X.(*ast.Ident); ok && x.Name == "hmac" && fn.Sel.Name == "Equal" {
-				return true
+	var files []*ast.File
+	for _, p := range pkgs {
+		for _, f := range p.Files {
+			files = append(files, f)
+		}
+	}
+	// secretCall is the secret method a call expression invokes on s.
+	secret := map[string]bool{"tag": true, "mac": true}
+	secretCall := func(n ast.Node) (string, bool) {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return "", false
+		}
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return "", false
+		}
+		if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "s" || !secret[sel.Sel.Name] {
+			return "", false
+		}
+		return sel.Sel.Name, true
+	}
+	contains := func(n ast.Node) (found bool) {
+		ast.Inspect(n, func(m ast.Node) bool {
+			if _, ok := secretCall(m); ok {
+				found = true
 			}
-			return fn.Sel.Name == "EncodeToString"
+			return !found
+		})
+		return found
+	}
+	// Close secret over methods that return a secret.
+	for grew := true; grew; {
+		grew = false
+		for _, f := range files {
+			for _, d := range f.Decls {
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || fd.Recv == nil || fd.Body == nil || secret[fd.Name.Name] {
+					continue
+				}
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					if r, ok := n.(*ast.ReturnStmt); ok && !secret[fd.Name.Name] {
+						for _, e := range r.Results {
+							if contains(e) {
+								secret[fd.Name.Name], grew = true, true
+							}
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	if !secret["token"] || !secret["mint"] {
+		t.Fatalf("secret methods %v: token and mint no longer return a secret, so this check no longer sees them", secret)
+	}
+	isCall := func(n ast.Node, pkg, name string) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		switch fn := c.Fun.(type) {
+		case *ast.Ident:
+			return pkg == "" && fn.Name == name
+		case *ast.SelectorExpr:
+			x, ok := fn.X.(*ast.Ident)
+			return fn.Sel.Name == name && (pkg == "*" || ok && x.Name == pkg)
 		}
 		return false
 	}
-	var stack []ast.Node
-	uses, equals := 0, 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		if n == nil {
-			stack = stack[:len(stack)-1]
+	equals := 0
+	for _, f := range files {
+		name := filepath.Base(fset.Position(f.Pos()).Filename)
+		var stack []ast.Node
+		var fn string
+		ast.Inspect(f, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			if fd, ok := n.(*ast.FuncDecl); ok {
+				fn = fd.Name.Name
+			}
+			if isCall(n, "hmac", "Equal") {
+				equals++
+			}
+			if m, ok := secretCall(n); ok {
+				at := fset.Position(n.Pos())
+				parent := stack[len(stack)-1]
+				var grand ast.Node
+				if len(stack) > 1 {
+					grand = stack[len(stack)-2]
+				}
+				var ok bool
+				if name == "csrf.go" {
+					_, ret := parent.(*ast.ReturnStmt)
+					_, gret := grand.(*ast.ReturnStmt)
+					_, gset := grand.(*ast.AssignStmt)
+					ok = ret || isCall(parent, "hmac", "Equal") ||
+						isCall(parent, "*", "EncodeToString") && gret ||
+						isCall(parent, "", "append") && gset && m == "tag"
+				} else {
+					_, set := parent.(*ast.AssignStmt)
+					ok = m == "token" && fn == "render" && set
+				}
+				if !ok {
+					t.Errorf("%s: s.%s is used other than in hmac.Equal or to issue a pair", at, m)
+				}
+			}
+			stack = append(stack, n)
 			return true
-		}
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "hmac" && sel.Sel.Name == "Equal" {
-					equals++
-				}
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "s" && (sel.Sel.Name == "tag" || sel.Sel.Name == "mac") {
-					uses++
-					parent, ok := stack[len(stack)-1].(*ast.CallExpr)
-					if !ok || !allowed(parent) {
-						t.Errorf("s.%s at offset %d is used outside hmac.Equal, an encode or an append", sel.Sel.Name, call.Pos())
-					}
-				}
-			}
-		}
-		if b, ok := n.(*ast.BinaryExpr); ok && (b.Op == token.EQL || b.Op == token.NEQ) {
-			for _, e := range []ast.Expr{b.X, b.Y} {
-				if c, ok := e.(*ast.CallExpr); ok {
-					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "string" {
-						t.Errorf("a byte value is compared with %s at offset %d", b.Op, b.Pos())
-					}
-				}
-			}
-		}
-		stack = append(stack, n)
-		return true
-	})
-	for _, imp := range f.Imports {
-		if imp.Path.Value == `"bytes"` {
-			t.Error("csrf.go imports bytes: compare secrets with hmac.Equal")
-		}
+		})
 	}
-	if uses < 4 || equals < 2 {
-		t.Errorf("found %d tag/mac calls and %d hmac.Equal calls: the check no longer sees csrf.go's comparisons", uses, equals)
+	if equals < 2 {
+		t.Errorf("found %d hmac.Equal calls: the check no longer sees csrf.go's comparisons", equals)
 	}
 }
