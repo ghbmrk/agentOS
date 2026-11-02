@@ -22,17 +22,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      trace: ${{ steps.gen.outputs.trace }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
       - name: Regenerate TRACE.md
-        id: gen
         run: |
           python3 tools/trace.py
-          echo "trace=$(base64 -w0 TRACE.md)" >> "$GITHUB_OUTPUT"
+      # The artifact is also the proof premerge --bot checks the PR against (MAIN-PROT-3, #757):
+      # only this run's jobs can upload it, so it carries what main's code generated.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: trace
+          path: TRACE.md
+          retention-days: 2
+          if-no-files-found: error
   commit:
     needs: generate
     runs-on: ubuntu-latest
@@ -54,12 +58,14 @@ jobs:
         with:
           ref: main
           token: ${{ secrets.BOT_PR_TOKEN || github.token }}
+      # Outside the checkout, so the artifact can place nothing but the copied TRACE.md in it.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: trace
+          path: ${{ runner.temp }}/trace
       - name: Open or update the TRACE.md PR if changed
-        env:
-          TRACE_B64: ${{ needs.generate.outputs.trace }}
         run: |
-          test -n "$TRACE_B64"
-          printf '%s' "$TRACE_B64" | base64 -d > TRACE.md
+          cp "$RUNNER_TEMP/trace/TRACE.md" TRACE.md
           if git diff --quiet -- TRACE.md; then
             echo "TRACE.md unchanged"
             # main already matches: an open PR from an earlier run is obsolete.
@@ -70,7 +76,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -qC "$BRANCH"
-          git commit -qm "trace: regenerate TRACE.md for ${GITHUB_SHA::7}" -- TRACE.md
+          # Bot-Run names this run, whose artifact premerge --bot compares the PR with (MAIN-PROT-3, #757).
+          git commit -qm "trace: regenerate TRACE.md for ${GITHUB_SHA::7}" -m "Bot-Run: $GITHUB_RUN_ID" -- TRACE.md
           # Rebuilt from main each run, so the PR stays up to date with main.
           git push -qf origin "HEAD:refs/heads/$BRANCH"
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
