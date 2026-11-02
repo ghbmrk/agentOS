@@ -184,12 +184,12 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 		target[a], shared[m], want[m] = m, cs, true
 	}
 	for name := range have {
-		if !want[name] && chainName(name) {
+		if !want[name] && isGroupChain(name) {
 			w.line("delete chain inet " + Table + " " + name)
 		}
 	}
 	for name := range have {
-		if !want[name] && !chainName(name) {
+		if !want[name] && !isGroupChain(name) {
 			w.line("delete quota inet " + Table + " " + name)
 		}
 	}
@@ -259,9 +259,9 @@ func sharedName(cs []string) string {
 	return "m_" + hex.EncodeToString(h[:8])
 }
 
-// chainName is whether a drop object's name is a chain's (a group's or a
+// isGroupChain is whether a drop object's name is a chain's (a group's or a
 // shared address's) rather than a quota's.
-func chainName(name string) bool {
+func isGroupChain(name string) bool {
 	return strings.HasPrefix(name, "g_") || strings.HasPrefix(name, "m_")
 }
 
@@ -337,7 +337,7 @@ func capObjects(listing []byte) (map[string]bool, error) {
 	out := map[string]bool{}
 	for _, o := range doc.Nftables {
 		switch {
-		case o.Chain != nil && o.Chain.Family == "inet" && o.Chain.Table == Table && chainName(o.Chain.Name):
+		case o.Chain != nil && o.Chain.Family == "inet" && o.Chain.Table == Table && isGroupChain(o.Chain.Name):
 			out[o.Chain.Name] = true
 		case o.Quota != nil && o.Quota.Family == "inet" && o.Quota.Table == Table:
 			out[o.Quota.Name] = true
