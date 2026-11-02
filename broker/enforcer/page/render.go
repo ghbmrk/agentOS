@@ -71,7 +71,7 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	for _, p := range next.Pairs {
 		for _, s := range [][2]string{{p.A, p.B}, {p.B, p.A}} {
 			if unpinned(next, p, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, p, s[0])) {
-				add("%s will not show up by name on %s: it has no mDNS names pinned, so none of its announcements cross the pair.", s[0], s[1])
+				add("%s won't find %s by name: %s announces no names across this pair.", s[1], s[0], s[0])
 			}
 		}
 	}

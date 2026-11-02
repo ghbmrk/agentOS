@@ -128,6 +128,9 @@ type rig struct {
 	// screen g.s drew (csrf.go); do posts with them.
 	cookie, token string
 	tokenOf       *Server
+	// heard is the mDNS names the relay heard on each Wi-Fi identity's
+	// VLAN (Config.Heard).
+	heard map[string][][]string
 }
 
 // newRig is a page over an engine holding home(1), on a fake clock.
@@ -146,7 +149,7 @@ func newRig(t *testing.T) *rig {
 	if _, err := e.Tick(policy.Wait); err != nil {
 		t.Fatal(err)
 	}
-	g := &rig{t: t, e: e, a: a, ch: &fakeChannel{}, now: time.Now(), remote: ownerAddr}
+	g := &rig{t: t, e: e, a: a, ch: &fakeChannel{}, now: time.Now(), remote: ownerAddr, heard: map[string][][]string{}}
 	g.cert, err = NewCert(rp, g.now)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +159,8 @@ func newRig(t *testing.T) *rig {
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		Policy: e, Channel: g.ch, Cert: g.cert.Leaf, Zone: zone,
-		Now: func() time.Time { return g.now },
+		Now:   func() time.Time { return g.now },
+		Heard: func(wifi string) [][]string { return g.heard[wifi] },
 	})
 	if err != nil {
 		t.Fatal(err)

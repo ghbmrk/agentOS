@@ -420,16 +420,24 @@ func (c *claims) elsewhere(k, iface string, now time.Time) bool {
 }
 
 // Filter is the relay's memory of names: for each interface, the names
-// claimed by what was heard there, and the host and instance names its
-// sender showed are its own.
+// claimed by what was heard there, the host and instance names its
+// sender showed are its own in what the relay passed, and those it
+// proved its own in anything it said, passed or not (Prove), with their
+// labels as heard.
 type Filter struct {
 	mu         sync.Mutex
 	claimed    claims
 	hosts, ins map[string]names
+	proved     map[string]names
+	said       map[string]map[string]name
 }
 
 func NewFilter() *Filter {
-	return &Filter{claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}}, hosts: map[string]names{}, ins: map[string]names{}}
+	return &Filter{
+		claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}},
+		hosts:   map[string]names{}, ins: map[string]names{},
+		proved: map[string]names{}, said: map[string]map[string]name{},
+	}
 }
 
 func table(m map[string]names, iface string) names {
@@ -591,6 +599,98 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		return nil
 	}
 	return out.bytes()
+}
+
+// Prove notes the host and instance names m, a response heard on iface
+// from port 5353, proves its sender's own, by the record filter's own
+// rule (ENF-f-m3, m4) and whatever its sender pinned or any pair
+// carries (D-266): a host whose address record is on link, never the
+// enforcer's own, and an instance whose SRV names such a host, each of
+// class IN, shown, and claimed on no other interface. A name is the
+// sender's until its record's TTL, at most ownHold, and a goodbye (TTL
+// 0) with no live record beside it ends it now. Each interface keeps
+// at most maxNames, swept as the claims are, so only what is heard on an
+// interface fills its table.
+func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.Time) {
+	if m.flags&flagQR == 0 {
+		return
+	}
+	rs := slices.Concat(m.answers, m.additional)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := table(f.proved, iface)
+	said := f.said[iface]
+	if said == nil {
+		said = map[string]name{}
+		f.said[iface] = said
+	}
+	// Each name proved once a packet, with its longest TTL there.
+	type proof struct {
+		n   name
+		ttl uint32
+	}
+	got := map[string]proof{}
+	own := func(r record) bool {
+		return r.class&0x7FFF == classIN && r.name.shown() && !f.claimed.elsewhere(r.name.key(), iface, now)
+	}
+	note := func(r record) {
+		k := r.name.key()
+		if p, ok := got[k]; !ok || r.ttl > p.ttl {
+			got[k] = proof{r.name, r.ttl}
+		}
+	}
+	for _, r := range rs {
+		if (r.typ == typeA || r.typ == typeAAAA) && r.name.host() && mine(link, r.data) && own(r) {
+			note(r)
+		}
+	}
+	isHost := func(n name) bool {
+		k := n.key()
+		p, ok := got[k]
+		return ok && p.ttl > 0 || !ok && t.has(k, now)
+	}
+	for _, r := range rs {
+		if r.typ == typeSRV && r.name.instance() && r.target.shown() && isHost(r.target) && own(r) {
+			note(r)
+		}
+	}
+	for k, p := range got {
+		if p.ttl == 0 {
+			delete(t, k)
+			delete(said, k)
+			continue
+		}
+		t.add(k, now.Add(min(time.Duration(p.ttl)*time.Second, ownHold)), now, func(d string) { delete(said, d) })
+		n := make(name, len(p.n))
+		for i, l := range p.n {
+			n[i] = strings.Clone(l) // not the whole packet's copy
+		}
+		said[k] = n
+	}
+}
+
+// Heard is the names the sender on iface proved its own (Prove) that it
+// still holds at now and no other interface claims, as it said them,
+// sorted: the names the enforcer's page may pin for the device there
+// (D-266). A name a policy cannot pin is left out: one with a dot in a
+// label, which the page would show as other labels, or an instance whose
+// service label is only its underscore.
+func (f *Filter) Heard(iface string, now time.Time) [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out [][]string
+	for k, until := range f.proved[iface] {
+		n := f.said[iface][k]
+		switch {
+		case !until.After(now), f.claimed.elsewhere(k, iface, now):
+		case slices.ContainsFunc(n, func(l string) bool { return strings.Contains(l, ".") }):
+		case n.instance() && len(n[1]) < 2:
+		default:
+			out = append(out, slices.Clone(n))
+		}
+	}
+	slices.SortFunc(out, slices.Compare)
+	return out
 }
 
 // pins is the names one interface's device pinned (policy.Device.MDNS),

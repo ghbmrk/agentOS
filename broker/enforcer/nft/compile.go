@@ -207,7 +207,7 @@ func devices(d policy.Document, l Layout) ([]device, error) {
 			return nil, fmt.Errorf("%w: devices %q and %q share VLAN %d", ErrPolicy, other, dev.ID, n)
 		}
 		seen[n] = dev.ID
-		out = append(out, device{vlan: n, iface: l.Trunk + "." + strconv.Itoa(n), d: dev})
+		out = append(out, device{vlan: n, iface: l.deviceIface(n), d: dev})
 	}
 	slices.SortFunc(out, func(a, b device) int { return a.vlan - b.vlan })
 	return out, nil
@@ -466,15 +466,13 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("iifname { " + q(l.Owner) + ", " + q(l.Admin) + " } tcp dport " + port(l.PagePort) + " accept")
 	w.line("iifname " + core + " tcp dport " + port(l.ChannelPort) + " accept")
 	// Slice f's relays: the Wake-on-LAN relay hears only the core, and the
-	// mDNS relay only the two ends of a signed pair (NET-2, NET-3).
+	// mDNS relay the two ends of a signed pair and every device's VLAN,
+	// whose own names it hears without passing them on (NET-2, NET-3,
+	// D-266).
 	w.line("iifname " + core + " udp dport " + strconv.Itoa(WoLPort) + " accept")
 	var ends []string
-	for _, p := range paths {
-		for _, e := range []string{p.From, p.To} {
-			if !slices.Contains(ends, q(e)) {
-				ends = append(ends, q(e))
-			}
-		}
+	for _, e := range hears(devs, paths) {
+		ends = append(ends, q(e))
 	}
 	if len(ends) > 0 {
 		slices.Sort(ends)

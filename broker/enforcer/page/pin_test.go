@@ -4,6 +4,7 @@ package page
 
 import (
 	"encoding/base64"
+	"html"
 	"net/http"
 	"slices"
 	"strings"
@@ -54,6 +55,8 @@ func TestMDNSNamesOnTheScreen(t *testing.T) {
 // sign; renamed, it opens (#4144, UX lens on #4145).
 func TestMDNSConflictOnTheScreen(t *testing.T) {
 	g := newRig(t)
+	g.heard["vlan104"] = [][]string{{"Den", "_airplay", "_tcp", "local"}}
+	g.heard["vlan102"] = [][]string{{"Dex", "_airplay", "_tcp", "local"}}
 	ok := edit(2, func(d *policy.Document) {
 		dev(d, "tv").MDNS = [][]string{{"Den", "_airplay", "_tcp", "local"}}
 		dev(d, "cam").MDNS = [][]string{{"Dex", "_airplay", "_tcp", "local"}}
@@ -125,7 +128,7 @@ func TestMDNSMoveShowsNames(t *testing.T) {
 // isolated, held back), gets no such line.
 func TestUnpinnedPairSaysSo(t *testing.T) {
 	line := func(d, other string) string {
-		return d + " will not show up by name on " + other + ": it has no mDNS names pinned, so none of its announcements cross the pair."
+		return other + " won't find " + d + " by name: " + d + " announces no names across this pair."
 	}
 	withLaptop := func(d *policy.Document) {
 		d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
@@ -207,7 +210,7 @@ func TestUnpinnedPairSaysSo(t *testing.T) {
 	}
 	// The line reaches the screen the owner signs.
 	g := newRig(t)
-	if screen, _, _ := g.open(edit(2, func(d *policy.Document) { d.Pairs = []policy.Pair{{A: "cam", B: "tv"}} }), "pair"); !strings.Contains(screen, "will not show up by name on cam") {
+	if screen, _, _ := g.open(edit(2, func(d *policy.Document) { d.Pairs = []policy.Pair{{A: "cam", B: "tv"}} }), "pair"); !strings.Contains(html.UnescapeString(screen), "cam won't find tv by name: tv announces no names across this pair.") {
 		t.Errorf("the screen lacks the unpinned line:\n%s", screen)
 	}
 }

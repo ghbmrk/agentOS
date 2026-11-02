@@ -25,3 +25,31 @@ func Announces(d policy.Document, l Layout) (map[string][][]string, error) {
 	}
 	return out, nil
 }
+
+// Hears is every interface slice f's mDNS relay listens on: each signed
+// pair's ends, which it relays between, and every Devices-network
+// device's VLAN, paired or not, where it only hears, so it knows which
+// names each device proves its own (D-266). An isolated device's is not
+// among them: it reaches nothing, the enforcer included. The ruleset
+// admits mDNS from exactly these.
+func Hears(d policy.Document, l Layout) ([]string, error) {
+	devs, paths, err := compiled(d, l)
+	if err != nil {
+		return nil, err
+	}
+	return hears(devs, paths), nil
+}
+
+func hears(devs []device, paths []Path) []string {
+	var out []string
+	for _, v := range devs {
+		if !v.d.Isolated {
+			out = append(out, v.iface)
+		}
+	}
+	for _, p := range paths {
+		out = append(out, p.From, p.To)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
