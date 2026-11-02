@@ -241,24 +241,21 @@ func TestHeldAddressPrunedAndGivenBack(t *testing.T) {
 	}
 }
 
-// TestDropHoldsSharedAddressesMerged (ENF-cap-trip-c-2): the kernel's
-// groups merge at every address the counter holds destinations for, live
-// or not, so the kernel's cap is never below the counter's: an address two
-// destinations' sets hold, idle today, is one drop group with both caps
-// and both counts, while the counter's own groups stay apart until it
-// carries bytes. Mutant: the drop grouped by live addresses only drops an
-// honest core at one destination's cap when the shared address starts
-// carrying bytes.
-func TestDropHoldsSharedAddressesMerged(t *testing.T) {
+// TestDropChargesHeldSharedAddressToEach (ENF-cap-trip-c-2, L3 on #4611):
+// the kernel's groups are the counter's. An address two destinations' sets
+// hold, idle today, is in both groups and charged to both quotas, so it
+// never raises either one's own cap: a's own address stays at a's cap of
+// 100, where the counter trips. Mutant: the drop merging groups at held
+// addresses gives addrB the cap 200, so 40 bytes past a's cap leave.
+func TestDropChargesHeldSharedAddressToEach(t *testing.T) {
 	c := NewCounter((&clock{noon}).now, twoCap)
 	c.Resolved("a.example", addrB)
-	c.Add(held(reading(1, 7, addrB, 40), map[string][]netip.Addr{"a.example": {addrA, addrB}, "b.example": {addrA}}))
-	if g := groupOf(t, c.Counts(), "a.example"); len(g.Dests) != 1 {
-		t.Fatalf("counter groups %+v, want a.example alone", g)
-	}
+	sets := map[string][]netip.Addr{"a.example": {addrA, addrB}, "b.example": {addrA}}
+	c.Add(held(reading(1, 7, addrB, 40), sets))
 	p := c.Drop()
 	want := nft.Drop{Day: Day(noon), EdgeCap: 50, EdgeCount: 7, Groups: []nft.DropGroup{
-		{Dests: []string{"a.example", "b.example"}, Caps: []uint64{100, 100}, Cap: 200, Count: 40, Addrs: []netip.Addr{addrA, addrB}},
+		{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100, Count: 40, Addrs: []netip.Addr{addrA, addrB}},
+		{Dests: []string{"b.example"}, Caps: []uint64{100}, Cap: 100, Addrs: []netip.Addr{addrA}},
 	}}
 	if !reflect.DeepEqual(p, want) {
 		t.Fatalf("drop %+v, want %+v", p, want)
@@ -267,7 +264,33 @@ func TestDropHoldsSharedAddressesMerged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, fmt.Sprintf("over %d bytes used %d bytes", 201, 40)) {
-		t.Fatalf("drop text has no quota of 201 used 40:\n%s", text)
+	if !strings.Contains(text, fmt.Sprintf("over %d bytes used %d bytes", 101, 40)) || strings.Contains(text, "over 201 ") {
+		t.Fatalf("drop text: want a's quota of 101 used 40 and no merged one:\n%s", text)
+	}
+	// The counter agrees: more to a's own address trips a alone.
+	if o := c.Add(held(reading(1, 7, addrB, 140), sets)); len(o) != 1 || !reflect.DeepEqual(o[0].Dests, []string{"a.example"}) || o[0].Cap != 100 {
+		t.Fatalf("overruns %+v, want a.example past 100", o)
+	}
+}
+
+// TestRestoreFitsRetiredCapsUnderRaisedCaps (#4611 L3 and Security
+// blocker): Restore fits the saved retired caps under the caps it restarts
+// with, which can be higher than those at the save. Saved with b=2^63
+// listed and a=2^63 retired, sharing an address, and restored under
+// b=2^63+5, the counts still encode. Mutant: Restore without fitRetired
+// stops every capped send until midnight.
+func TestRestoreFitsRetiredCapsUnderRaisedCaps(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, Caps{Core: map[string]uint64{"a.example": 1 << 63}})
+	c.Resolved("a.example", addrA)
+	c.SetCaps(Caps{Core: map[string]uint64{"b.example": 1 << 63}})
+	c.Resolved("b.example", addrA)
+	c.Add(reading(1, 0, addrA, 10))
+	r, err := Restore(clk.now, Caps{Core: map[string]uint64{"b.example": 1<<63 + 5}}, c.Save())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.EncodeCounts(r.Counts()); err != nil {
+		t.Fatalf("restored under raised caps: counts do not encode: %v", err)
 	}
 }

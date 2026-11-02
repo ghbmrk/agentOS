@@ -288,23 +288,22 @@ func (c *Counter) roll() {
 func (c *Counter) live(a netip.Addr) bool { return c.resolved[a] == c.day || c.bytes[a] > 0 }
 
 // Drop is the day's counts as the firewall's in-kernel drop takes them
-// (nft.Drops): groups as Counts has them, except that every address the
-// counter holds destinations for joins them, not only those resolved or
-// carrying bytes today, and its addresses. The kernel cannot tell when an
-// address shared by two groups' destinations starts carrying bytes, which
-// merges the two (ENF-cap-3), so it holds them merged already: its cap is
-// never below the counter's, so it never drops a byte the counter lets
-// pass, and where the groups are the same, as once the shared address
-// carries bytes, it drops at the counter's edge to the byte
-// (ASSUMPTIONS ENF-cap-trip-c-2). The caller adds a reading first, and applies it after every
-// reading and with every ruleset load, so the kernel drops past each cap
-// from the counts the enforcer holds, a restored count included
-// (ASSUMPTIONS ENF-cap-6).
+// (nft.Drops): Counts' groups, each with the addresses the counter holds
+// destinations of it for. An address that joins its groups (resolved or
+// carrying bytes today) is in its one group. One that does not, held by
+// the sets of destinations in several groups, is in each: its first byte
+// would merge them (ENF-cap-3), which the kernel cannot do, so its bytes
+// are charged to every one of their quotas. Each group's quota then counts
+// at least its share of any merged group's count, so no merge lets a byte
+// past a cap the counter would trip on; until the next update merges
+// them, an honest core sending there near a cap may see drops but no trip
+// (ASSUMPTIONS ENF-cap-trip-c-2). The caller adds a reading first, and
+// applies it after every reading and with every ruleset load.
 func (c *Counter) Drop() nft.Drop {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.roll()
-	groups, _ := c.groupsBy(func(netip.Addr) bool { return true })
+	groups, _ := c.groups()
 	out := nft.Drop{Day: c.day, Groups: make([]nft.DropGroup, len(groups)), EdgeCap: c.caps.Edge, EdgeCount: c.edge}
 	at := map[string]int{}
 	for i, g := range groups {
@@ -314,10 +313,16 @@ func (c *Counter) Drop() nft.Drop {
 		out.Groups[i] = nft.DropGroup{Dests: g.dests, Caps: g.own, Cap: g.cap, Count: g.count}
 	}
 	for a, ds := range c.dests {
+		in := map[int]bool{}
 		for d := range ds {
-			i := at[d] // every destination of an address is in one group
+			// A destination in no group (an idle address's, taken off the
+			// list) has no cap: the address is left to the drop's default.
+			if i, ok := at[d]; ok {
+				in[i] = true
+			}
+		}
+		for i := range in {
 			out.Groups[i].Addrs = append(out.Groups[i].Addrs, a)
-			break
 		}
 	}
 	for i := range out.Groups {
@@ -328,11 +333,7 @@ func (c *Counter) Drop() nft.Drop {
 
 // groups is the day's cap groups and the bytes no destination resolved to.
 // The caller holds c.mu.
-func (c *Counter) groups() ([]group, uint64) { return c.groupsBy(c.live) }
-
-// groupsBy is groups with the addresses join says join their destinations'
-// groups. The caller holds c.mu.
-func (c *Counter) groupsBy(join func(netip.Addr) bool) ([]group, uint64) {
+func (c *Counter) groups() ([]group, uint64) {
 	parent := map[string]string{}
 	var find func(string) string
 	find = func(d string) string {
@@ -354,7 +355,7 @@ func (c *Counter) groupsBy(join func(netip.Addr) bool) ([]group, uint64) {
 		find(d)
 	}
 	for a, ds := range c.dests {
-		if !join(a) {
+		if !c.live(a) {
 			continue
 		}
 		var first string

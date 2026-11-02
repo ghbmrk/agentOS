@@ -111,13 +111,13 @@ func TestDropsKeepsUnchangedQuotas(t *testing.T) {
 }
 
 // TestDropsRefuses: a state the text cannot hold to the byte is refused:
-// a destination in two groups, an address in two, a group with no
+// a destination in two groups, an address twice in one, a group with no
 // destination or unsorted ones, and an address not in its plain form.
 func TestDropsRefuses(t *testing.T) {
 	a := netip.MustParseAddr("203.0.113.30")
 	for name, g := range map[string][]DropGroup{
 		"dest twice": {{Dests: []string{"a.example"}, Caps: []uint64{1}}, {Dests: []string{"a.example"}, Caps: []uint64{1}}},
-		"addr twice": {{Dests: []string{"a.example"}, Caps: []uint64{1}, Addrs: []netip.Addr{a}}, {Dests: []string{"b.example"}, Caps: []uint64{1}, Addrs: []netip.Addr{a}}},
+		"addr twice": {{Dests: []string{"a.example"}, Caps: []uint64{1}, Addrs: []netip.Addr{a, a}}},
 		"no dest":    {{}},
 		"unsorted":   {{Dests: []string{"b.example", "a.example"}, Caps: []uint64{1, 1}}},
 		"caps short": {{Dests: []string{"a.example"}}},
@@ -131,7 +131,8 @@ func TestDropsRefuses(t *testing.T) {
 
 // TestUpdateOnlyTakesADropText: the loader applies a text outside a full
 // load only when it is a drop update (its first line is DropHeader), so
-// nothing else can change the running ruleset without replacing it.
+// a text in any other form is refused. It checks only the first line;
+// the rest is Drops' own output, built by the enforcer.
 func TestUpdateOnlyTakesADropText(t *testing.T) {
 	l := load.Loader{Bin: "/nonexistent/nft"}
 	for _, text := range []string{"flush ruleset\n", "add rule inet enforcer forward accept\n", DropHeader + " \n", DropHeader} {
@@ -142,5 +143,35 @@ func TestUpdateOnlyTakesADropText(t *testing.T) {
 	text := mustDrops(t, twoCaps(), []byte(`{"nftables": []}`), Drop{})
 	if err := l.Update(context.Background(), text); err == nil || strings.Contains(err.Error(), "not a byte-cap drop update") {
 		t.Errorf("Update(Drops text) refused for its form: %v", err)
+	}
+}
+
+// TestDropsChargesSharedAddressToEachGroup (L3 on #4611): an address in
+// two groups (held by both sets, idle today) goes to a chain of its own
+// that charges each group's quota in turn, and each group's own addresses
+// to its own quota alone, so the shared address raises neither cap.
+func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
+	own, both := netip.MustParseAddr("203.0.113.30"), netip.MustParseAddr("203.0.113.10")
+	a := DropGroup{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100, Addrs: []netip.Addr{both, own}}
+	b := DropGroup{Dests: []string{"b.example"}, Caps: []uint64{200}, Cap: 200, Addrs: []netip.Addr{both}}
+	text := mustDrops(t, twoCaps(), nil, Drop{Day: 1, Groups: []DropGroup{a, b}})
+	ga, qa := groupNames(1, a)
+	gb, qb := groupNames(1, b)
+	m := sharedName([]string{ga, gb})
+	if ga > gb {
+		m = sharedName([]string{gb, ga})
+	}
+	for _, want := range []string{
+		"ip daddr vmap { 203.0.113.10 : goto " + m + ", 203.0.113.30 : goto " + ga + " }",
+		"add rule inet enforcer " + m + ` quota name "` + qa + `" goto cap_over`,
+		"add rule inet enforcer " + m + ` quota name "` + qb + `" goto cap_over`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("drop text lacks %q:\n%s", want, text)
+		}
+	}
+	running := fmt.Sprintf(`{"nftables": [{"chain": {"family": "inet", "table": "enforcer", "name": %q}}]}`, m)
+	if text := mustDrops(t, twoCaps(), []byte(running), Drop{Day: 1, Groups: []DropGroup{{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100}}}); !strings.Contains(text, "delete chain inet enforcer "+m+"\n") {
+		t.Errorf("a stale shared chain is kept:\n%s", text)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 var ErrLoad = errors.New("load: ruleset refused; the previous one stays")
@@ -87,8 +88,13 @@ func (l Loader) QuotaPast(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("load: quota probe: %v", err)
 	}
-	c.WriteToUDP([]byte{0}, &net.UDPAddr{IP: loop, Port: 9})
+	_, err = c.WriteToUDP([]byte{0}, &net.UDPAddr{IP: loop, Port: 9})
 	c.Close()
+	// The quota's drop refuses the send (EPERM); any other failure means
+	// the datagram never reached the quota, so the probe says nothing.
+	if err != nil && !errors.Is(err, syscall.EPERM) {
+		return false, fmt.Errorf("load: quota probe: %v", err)
+	}
 	cmd := exec.CommandContext(ctx, l.Bin, "-j", "list", "counter", "inet", probeTable, "hit")
 	cmd.Env = []string{}
 	out, err := cmd.Output()

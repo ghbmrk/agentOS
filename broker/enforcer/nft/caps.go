@@ -89,6 +89,8 @@ type Drop struct {
 // DropGroup is one cap group: its destinations by their names on the
 // signed list, sorted, each one's own cap, their one cap, the bytes the
 // core sent them today, and the addresses the counter gives them today.
+// An address in several groups is one the counter keeps them apart at,
+// because it carried nothing today; its bytes are charged to each.
 type DropGroup struct {
 	Dests []string
 	Caps  []uint64
@@ -158,13 +160,35 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 	}
 	qe := edgeQuota(p.Day, p.EdgeCap)
 	quota(qe, p.EdgeCap, p.EdgeCount)
+	// An address the counter gives several groups (one their sets hold,
+	// carrying nothing today, so the counter keeps them apart) is charged
+	// to every one of their quotas, in a chain of its own per set of
+	// groups.
+	groupsOf := map[netip.Addr][]string{}
+	for _, g := range p.Groups {
+		c, _ := groupNames(p.Day, g)
+		for _, a := range g.Addrs {
+			groupsOf[a] = append(groupsOf[a], c)
+		}
+	}
+	target := map[netip.Addr]string{}
+	shared := map[string][]string{} // shared chain -> its groups' chains
+	for a, cs := range groupsOf {
+		if len(cs) == 1 {
+			target[a] = cs[0]
+			continue
+		}
+		slices.Sort(cs)
+		m := sharedName(cs)
+		target[a], shared[m], want[m] = m, cs, true
+	}
 	for name := range have {
-		if !want[name] && strings.HasPrefix(name, "g_") {
+		if !want[name] && chainName(name) {
 			w.line("delete chain inet " + Table + " " + name)
 		}
 	}
 	for name := range have {
-		if !want[name] && !strings.HasPrefix(name, "g_") {
+		if !want[name] && !chainName(name) {
 			w.line("delete quota inet " + Table + " " + name)
 		}
 	}
@@ -181,15 +205,23 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 			w.line("add rule inet " + Table + " " + c + " " + r)
 		}
 	}
+	for _, m := range slices.Sorted(maps.Keys(shared)) {
+		if have[m] {
+			continue
+		}
+		w.line("add chain inet " + Table + " " + m)
+		for _, c := range shared[m] {
+			for _, r := range capped(chains[c], capOf(p, c)) {
+				w.line("add rule inet " + Table + " " + m + " " + r)
+			}
+		}
+	}
 	for _, v6 := range []bool{false, true} {
 		ch := capDropChain(v6)
 		var elems []string
-		for _, g := range p.Groups {
-			c, _ := groupNames(p.Day, g)
-			for _, a := range g.Addrs {
-				if a.Is6() == v6 {
-					elems = append(elems, a.String()+" : goto "+c)
-				}
+		for a, c := range target {
+			if a.Is6() == v6 {
+				elems = append(elems, a.String()+" : goto "+c)
 			}
 		}
 		if len(elems) > 0 {
@@ -217,6 +249,19 @@ func capped(q string, limit uint64) []string {
 		return nil
 	}
 	return []string{"quota name " + strconv.Quote(q) + " goto " + dropChain}
+}
+
+// sharedName is the chain that charges an address to each of the groups
+// whose chains are cs, sorted: one name per set of groups.
+func sharedName(cs []string) string {
+	h := sha256.Sum256([]byte(strings.Join(cs, "\x00")))
+	return "m_" + hex.EncodeToString(h[:8])
+}
+
+// chainName is whether a drop object's name is a chain's (a group's or a
+// shared address's) rather than a quota's.
+func chainName(name string) bool {
+	return strings.HasPrefix(name, "g_") || strings.HasPrefix(name, "m_")
 }
 
 func capOf(p Drop, chain string) uint64 {
@@ -252,11 +297,12 @@ func edgeQuota(day uint32, limit uint64) string {
 }
 
 // check refuses a state the text could not hold to the byte: a group
-// without destinations, a destination or an address in two groups, or an
-// address not in its plain form.
+// without destinations, a destination in two groups, an address twice in
+// one, or an address not in its plain form.
 func (p Drop) check() error {
-	dests, addrs := map[string]bool{}, map[netip.Addr]bool{}
+	dests := map[string]bool{}
 	for _, g := range p.Groups {
+		addrs := map[netip.Addr]bool{}
 		if len(g.Dests) == 0 || len(g.Caps) != len(g.Dests) || !slices.IsSorted(g.Dests) {
 			return fmt.Errorf("%w: group %v", ErrDrop, g.Dests)
 		}
@@ -290,7 +336,7 @@ func capObjects(listing []byte) (map[string]bool, error) {
 	out := map[string]bool{}
 	for _, o := range doc.Nftables {
 		switch {
-		case o.Chain != nil && o.Chain.Family == "inet" && o.Chain.Table == Table && strings.HasPrefix(o.Chain.Name, "g_"):
+		case o.Chain != nil && o.Chain.Family == "inet" && o.Chain.Table == Table && chainName(o.Chain.Name):
 			out[o.Chain.Name] = true
 		case o.Quota != nil && o.Quota.Family == "inet" && o.Quota.Table == Table:
 			out[o.Quota.Name] = true

@@ -217,11 +217,15 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 }
 
 // NET-2 Byte caps (ENF-cap-3): destinations that share an address are one
-// group with one cap, the sum of theirs, in the kernel too. An honest core
-// sends the whole group cap to the shared address without a drop or a
-// trip, and the next byte is dropped and trips the group. Catches a drop
-// that holds each destination to its own cap (an honest core cut at half
-// its group's cap) or charges one packet to two quotas.
+// group with one cap, the sum of theirs, in the kernel too, once the
+// shared address carries bytes. Before that, its sets hold it but the
+// counter keeps the two apart, so its first bytes are charged to both
+// destinations' quotas; the next reading merges them and the update gives
+// the group one quota from the counter's count. An honest core then sends
+// the whole group cap without a drop or a trip, and the next byte is
+// dropped and trips the group. Catches a drop that holds each destination
+// to its own cap after the merge (an honest core cut at half its group's
+// cap) or charges one packet to the merged quota twice.
 func TestCapGroupSharesOneDrop(t *testing.T) {
 	if !nft.InNetns(t) {
 		return
@@ -231,11 +235,55 @@ func TestCapGroupSharesOneDrop(t *testing.T) {
 	r.answer("d.example", nft.NetAllow)
 	r.expectOver("nothing sent", r.read())
 	// 32 payload bytes are 60 IP bytes.
-	r.send("core", nft.NetAllow, 32, true, "60 of the group's 120")
+	r.send("core", nft.NetAllow, 32, true, "60 of the group's 120, charged to both")
+	r.expectOver("the shared address carries bytes", r.read())
 	r.send("core", nft.NetAllow, 32, true, "120 of the group's 120")
 	r.expectOver("at the group's cap", r.read())
 	r.send("core", nft.NetAllow, 32, false, "past the group's cap")
 	r.expectOver("past the group's cap", r.read(), traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"c.example", "d.example"}, Cap: 120, Count: 180})
+}
+
+// NET-2 Byte caps, ENF-cap-3 (L3 on #4611): an address two destinations'
+// sets hold, carrying nothing today, never raises either one's own cap in
+// the kernel. a's own address stops at a's cap, as the counter trips
+// there, however much b's cap has left. Catches a drop that merges groups
+// at idle held addresses, giving a's own address the cap a+b until the
+// next reading.
+func TestCapHeldSharedAddressRaisesNoCap(t *testing.T) {
+	if !nft.InNetns(t) {
+		return
+	}
+	r := newRig(t, capDoc(map[string]uint64{"a.example": 100, "b.example": 100}, 1<<20))
+	r.answer("a.example", nft.NetCore)
+	r.answer("a.example", nft.NetAllow)
+	r.answer("b.example", nft.NetAllow)
+	r.expectOver("nothing sent", r.read())
+	r.send("core", nft.NetCore, 22, true, "a's own address, 50 of 100")
+	r.send("core", nft.NetCore, 22, true, "a's own address, 100 of 100")
+	r.send("core", nft.NetCore, 22, false, "a's own address past a's cap")
+	r.expectOver("a past its own cap", r.read(), traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"a.example"}, Cap: 100, Count: 150})
+}
+
+// NET-2 Byte caps (L3 R1 and Security on #4611): a load that carries no
+// drop state fails closed: the core reaches nothing on the internet and
+// the edge nothing either, though the core's allow set and names hold the
+// address. Catches a default drop chain that passes.
+func TestCapLoadWithoutDropFailsClosed(t *testing.T) {
+	if !nft.InNetns(t) {
+		return
+	}
+	r := newRig(t, capDoc(map[string]uint64{"a.example": 1 << 20}, 1<<20))
+	r.answer("a.example", nft.NetCore)
+	r.read()
+	r.send("core", nft.NetCore, 22, true, "with the drop state")
+	r.send("edge", nft.NetOther, 22, true, "the edge with the drop state")
+	text, err := nft.Reload(r.d, nft.FixtureLayout(), r.h.List())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.h.Load(text)
+	r.send("core", nft.NetCore, 22, false, "a load without the drop state")
+	r.send("edge", nft.NetOther, 22, false, "the edge after a load without the drop state")
 }
 
 // NET-2 Byte caps, ENF-cap-6: the day's count survives an enforcer
