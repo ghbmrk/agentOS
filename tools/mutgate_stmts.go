@@ -3,13 +3,13 @@
 //
 //	go run mutgate_stmts.go FILE.go...
 //
-// It prints one JSON array: {"file", "line", "col", "start", "end"} for every statement in a
-// statement list (a block, a case or select clause body, and the clauses of a switch or select)
-// of each file, where file is the base name, line and col are where the statement starts in the
-// file's own lines and start/end are its byte offsets; cover_line and cover_col are where coverage
-// is judged.
-// Declarations (`var`, `const`, `type`, `:=`) and empty statements are left out: deleting one
-// never compiles or changes nothing.
+// It prints one JSON array of sites, one for every statement in a statement list (a block, a
+// case or select clause body, and the clauses of a switch or select): file is the base name, line
+// and col where the statement starts in the file's own lines, start/end its byte offsets,
+// cover_line/cover_col where coverage is judged, and keep_at/keep_default where the keep-alive
+// of a deleted clause goes (see site). Declarations (`var`, `const`, `type`, `:=`) and empty
+// statements are left out: deleting one never compiles or changes nothing. A file holding a
+// `//line` directive is refused.
 // It reads the files as data with go/parser and runs nothing in them.
 package main
 
@@ -21,6 +21,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type site struct {
@@ -33,6 +34,13 @@ type site struct {
 	// cover block starts after its colon, or is empty) the start of its switch or select.
 	CoverLine int `json:"cover_line"`
 	CoverCol  int `json:"cover_col"`
+	// Where a deleted clause's keep-alive statements (`_ = NAME`) go, since a switch or select
+	// body takes only clauses: right after the colon of another clause of a switch (where its init
+	// and type-switch variables are in scope), or before a select (labels included), whose clause
+	// variables are each clause's own. -1 for any other site, whose keep-alive takes its place.
+	KeepAt int `json:"keep_at"`
+	// A switch clause with no sibling is replaced by `default:` and its keep-alive.
+	KeepDefault bool `json:"keep_default"`
 }
 
 func deletable(s ast.Stmt) bool {
@@ -49,7 +57,7 @@ func main() {
 	sites := []site{}
 	fset := token.NewFileSet()
 	for _, path := range os.Args[1:] {
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution|parser.ParseComments)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -57,33 +65,73 @@ func main() {
 		// PositionFor(..., false): the file's own lines, which the diff numbers; a `//line`
 		// directive would otherwise renumber a site out of the added-line match.
 		pos := func(p token.Pos) token.Position { return fset.PositionFor(p, false) }
-		add := func(list []ast.Stmt, cover token.Pos) {
-			for _, s := range list {
-				_, caseClause := s.(*ast.CaseClause)
-				_, commClause := s.(*ast.CommClause)
-				if deletable(s) && (caseClause || commClause) == cover.IsValid() {
-					p, e, c := pos(s.Pos()), pos(s.End()), pos(s.Pos())
-					if cover.IsValid() {
-						c = pos(cover)
-					}
-					sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset, c.Line, c.Column})
+		// A `//line` directive also renames or renumbers the file in the cover profile, so its
+		// sites could not be judged: the file is refused rather than read as NOT COVERED.
+		for _, g := range f.Comments {
+			for _, c := range g.List {
+				if strings.HasPrefix(c.Text, "//line ") || strings.HasPrefix(c.Text, "/*line ") {
+					fmt.Fprintf(os.Stderr, "%s:%d: a //line directive; mutgate cannot judge its coverage\n", path, pos(c.Pos()).Line)
+					os.Exit(1)
 				}
 			}
 		}
+		add := func(s ast.Stmt, cover token.Pos, keepAt int, keepDefault bool) {
+			if deletable(s) {
+				p, e, c := pos(s.Pos()), pos(s.End()), pos(s.Pos())
+				if cover.IsValid() {
+					c = pos(cover)
+				}
+				sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset, c.Line, c.Column, keepAt, keepDefault})
+			}
+		}
+		addList := func(list []ast.Stmt) {
+			for _, s := range list {
+				add(s, token.NoPos, -1, false)
+			}
+		}
+		// A switch's clauses: the keep-alive goes after another clause's colon, or replaces the
+		// clause with `default:` when it has no sibling.
+		switchClauses := func(sw ast.Stmt, body *ast.BlockStmt) {
+			for i, s := range body.List {
+				keepAt := -1
+				for j, o := range body.List {
+					if j != i {
+						keepAt = pos(o.(*ast.CaseClause).Colon).Offset + 1
+						break
+					}
+				}
+				add(s, sw.Pos(), keepAt, keepAt < 0)
+			}
+		}
+		labeled := map[ast.Stmt]token.Pos{}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.LabeledStmt:
+				labeled[n.Stmt] = n.Pos()
 			case *ast.SwitchStmt:
-				add(n.Body.List, n.Pos())
+				switchClauses(n, n.Body)
 			case *ast.TypeSwitchStmt:
-				add(n.Body.List, n.Pos())
+				switchClauses(n, n.Body)
 			case *ast.SelectStmt:
-				add(n.Body.List, n.Pos())
-			case *ast.BlockStmt: // a switch or select body's clauses are added above
-				add(n.List, token.NoPos)
+				before := n.Pos()
+				if l, ok := labeled[n]; ok {
+					before = l
+				}
+				for _, s := range n.Body.List {
+					add(s, n.Pos(), pos(before).Offset, false)
+				}
+			case *ast.BlockStmt:
+				if len(n.List) > 0 {
+					switch n.List[0].(type) {
+					case *ast.CaseClause, *ast.CommClause: // a switch or select body: added above
+						return true
+					}
+				}
+				addList(n.List)
 			case *ast.CaseClause:
-				add(n.Body, token.NoPos)
+				addList(n.Body)
 			case *ast.CommClause:
-				add(n.Body, token.NoPos)
+				addList(n.Body)
 			}
 			return true
 		})

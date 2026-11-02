@@ -312,44 +312,90 @@ def is_covered(blocks, site):
     return any(start <= pos < end for start, end in blocks.get(site["file"], ()))
 
 
-def deleted(src, site, keep=b""):
-    """src (bytes) with the statement at site replaced by keep (one line), its line breaks kept."""
-    return src[:site["start"]] + keep + b"\n" * src.count(b"\n", site["start"], site["end"]) + src[site["end"]:]
+def deleted(src, site, names=()):
+    """src (bytes) with the statement at site deleted, its line breaks kept, and `_ = NAME` for
+    each of names where a statement may stand: in its place, or for a clause (a switch or select
+    body takes only clauses) where the site's keep_at says, or as a `default:` clause."""
+    gone = b"\n" * src.count(b"\n", site["start"], site["end"])
+    head, tail = src[:site["start"]], src[site["end"]:]
+    if not names:
+        return head + gone + tail
+    keep = b"; ".join(b"_ = " + n.encode() for n in names)
+    if site.get("keep_default"):
+        return head + b"default: " + keep + gone + tail
+    at = site.get("keep_at", -1)
+    if at < 0:
+        return head + keep + gone + tail
+    keep = b" " + keep + b"; "  # valid after a clause's colon and before a statement alike
+    if at < site["start"]:
+        return src[:at] + keep + src[at:site["start"]] + gone + tail
+    return head + gone + src[site["end"]:at] + keep + src[at:]
 
 
 BUILD_ERROR = re.compile(r"^\S*?([^/\s:]+\.go):(\d+):(\d+): (.*)$")
-UNUSED_VAR = re.compile(r"declared and not used: (\w+)$")
+UNUSED_VAR = re.compile(r"^declared and not used: (\w+)$|^(\w+) declared and not used$")  # the latter: a type-switch variable
 UNUSED_IMPORT = re.compile(r'"[^"]+" imported (?:as \w+ )?and not used$')
+UNUSED_LABEL = re.compile(r"label \w+ defined and not used$")
 
 
-def kept_alive(src, site, stderr):
-    """The deletion at site with the variables and imports it left unused kept in use (`_ = NAME`
-    in its place, the import renamed `_`), when those are the build's only errors, else None.
-
-    Deleting a variable's only use, the common guard `v, err := f(); if err != nil { ... }`, does
-    not compile, and a NOT VIABLE guard would never be tested (Security on #4597), so the guard is
-    deleted as go-mutesting's statement remover deletes it."""
-    names, imports = [], []
+def fixes(stderr, file):
+    """(names, [(line, col, kind)]) a failed build of file asks for, or None when another error
+    stands: unused variables (kept with `_ = NAME`), imports (renamed `_`) and labels (dropped)."""
+    names, spots = [], []
     for row in stderr.split("\n"):
         m = BUILD_ERROR.match(row)
         if not m:
             continue
-        if m.group(1) != site["file"]:
+        if m.group(1) != file:
             return None
         if var := UNUSED_VAR.search(m.group(4)):
-            names.append(var.group(1))
+            names.append(var.group(1) or var.group(2))
         elif UNUSED_IMPORT.search(m.group(4)):
-            imports.append((int(m.group(2)), int(m.group(3))))
+            spots.append((int(m.group(2)), int(m.group(3)), "import"))
+        elif UNUSED_LABEL.search(m.group(4)):
+            spots.append((int(m.group(2)), int(m.group(3)), "label"))
         else:
             return None
-    if not names and not imports:
-        return None
-    lines = deleted(src, site, b"; ".join(b"_ = " + n.encode() for n in dict.fromkeys(names))).split(b"\n")
-    for line, col in imports:  # imports sit above every statement, so the deletion moved none of them
-        text = lines[line - 1]
-        head, rest = text[:col - 1], text[col - 1:]
-        lines[line - 1] = head + (b"_ " + rest if rest.startswith(b'"') else re.sub(rb"^\w+", b"_", rest))
+    return (names, spots) if names or spots else None
+
+
+def respelled(text, spots):
+    """text with each unused import at (line, col) renamed `_` and each unused label blanked."""
+    lines = text.split(b"\n")
+    for line, col, kind in sorted(spots, reverse=True):
+        head, rest = lines[line - 1][:col - 1], lines[line - 1][col - 1:]
+        if kind == "label":
+            rest = re.sub(rb"^\w+\s*:", lambda m: b" " * len(m.group(0)), rest)
+        else:
+            rest = b"_ " + rest if rest.startswith(b'"') else re.sub(rb"^\w+", b"_", rest)
+        lines[line - 1] = head + rest
     return b"\n".join(lines)
+
+
+def build_mutant(src, site, build, mutant, pkg_dir):
+    """Whether the deletion at site builds, once the variables, imports and labels it left unused
+    are kept in use or dropped (Security on #4597): deleting a variable's only use, the common
+    guard `v, err := f(); if err != nil { ... }`, does not compile as it stands, and a NOT VIABLE
+    guard would never be tested, so it is deleted as go-mutesting's statement remover deletes it.
+    Each round reads the errors of the text it built; a third failure, or any other error, is NOT VIABLE."""
+    names, text = [], deleted(src, site)
+    for _ in range(3):
+        mutant.write_bytes(text)
+        built = subprocess.run(build, cwd=pkg_dir, capture_output=True)
+        if built.returncode == 0:
+            return True
+        asked = fixes(built.stderr.decode(errors="replace"), site["file"])
+        if asked is None:
+            return False
+        new = [n for n in asked[0] if n not in names]
+        if new:
+            names += new
+            text = deleted(src, site, names)  # imports and labels it names again at their new spots
+        elif asked[1]:
+            text = respelled(text, asked[1])
+        else:
+            return False
+    return False
 
 
 def run_tests(binary, cwd, timeout):
@@ -402,15 +448,10 @@ def deletion_mutants(pkg, added, tmp, lister):
             # The mutant keeps the file's name: the compiler names the overlay's file in its errors.
             mutant, overlay, binary = tmp / "mutant" / site["file"], tmp / "overlay.json", tmp / "mutant.test"
             mutant.parent.mkdir(exist_ok=True)
-            src = src_path.read_bytes()
             overlay.write_text(json.dumps({"Replace": {str(src_path): str(mutant)}}))
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
-            mutant.write_bytes(deleted(src, site))
-            built = subprocess.run(build, cwd=pkg_dir, capture_output=True)
-            if built.returncode and (alive := kept_alive(src, site, built.stderr.decode(errors="replace"))):
-                mutant.write_bytes(alive)
-                built = subprocess.run(build, cwd=pkg_dir, capture_output=True)
-            status = "NOT VIABLE" if built.returncode else run_tests(binary, pkg_dir, timeout)
+            built = build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir)
+            status = run_tests(binary, pkg_dir, timeout) if built else "NOT VIABLE"
         out.append({"file": site["file"], "type": DELETION, "status": status, "line": site["line"],
                     "column": site["col"]})
     return out, None

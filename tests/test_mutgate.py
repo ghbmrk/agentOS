@@ -719,14 +719,6 @@ class Deletion(unittest.TestCase):
         self.assertEqual(cover[(12, 2)], (11, 2))
         self.assertEqual(cover[(13, 3)], (13, 3))
 
-    def test_lister_numbers_the_files_own_lines_whatever_a_line_directive_says(self):
-        # L3 on #4597: a PR-added `//line` must not renumber a site out of the added-line match.
-        src = "package p\n\nfunc f() {\n//line p.go:900\n\tg()\n}\n\nfunc g() {}\n"
-        with tempfile.TemporaryDirectory() as d:
-            (pathlib.Path(d) / "p.go").write_text(src)
-            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, check=True)
-        self.assertEqual([(s["line"], s["cover_line"]) for s in json.loads(r.stdout)], [(5, 5)])
-
     def test_deleted_keeps_every_other_line_where_it_was(self):
         src = b"a\n\tif x {\n\t\ty()\n\t}\nz\n"
         start = src.index(b"if")
@@ -933,6 +925,107 @@ func TestClass(t *testing.T) {
         self.assertEqual(got[6], "KILLED")   # case n > 9: Class(10) checks it
         self.assertEqual(got[16], "KILLED")  # case v := <-c: Pick(c) checks it
         self.assertEqual(got[18], "LIVED")   # default: no test reads an empty channel
+
+    def test_a_clause_that_is_a_variables_only_use_is_deleted_and_tested(self):
+        # Round 2 on #4597: a deleted clause's `_ = NAME` cannot stand in a switch or select body,
+        # so it goes after a sibling clause's colon, before the select, or in a lone `default:`.
+        pr = """package hint
+
+import "strconv"
+
+func Allow(s string) string {
+	a, err := strconv.Atoi(s)
+	switch {
+	case err != nil:
+		return "deny"
+	default:
+		return strconv.Itoa(a)
+	}
+}
+
+func Good(s string) string {
+	switch good := s != ""; {
+	case !good:
+		return "deny"
+	}
+	return "ok"
+}
+
+func Kind(x any) string {
+	switch v := x.(type) {
+	case int:
+		return strconv.Itoa(v)
+	default:
+		return "other"
+	}
+}
+
+func Drain(c chan int, stop chan bool) int {
+	n := 0
+	select {
+	case <-stop:
+		return n
+	case v := <-c:
+		return v
+	}
+}
+
+func Loop(xs []int) int {
+	t := 0
+L:
+	for _, x := range xs {
+		if x < 0 {
+			break L
+		}
+		t += x
+	}
+	return t
+}
+"""
+        test = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestAll(t *testing.T) {
+	if Allow("12") != "12" || Good("x") != "ok" || Kind("s") != "other" || Loop([]int{1, -1, 2}) != 1 {
+		t.Fatal("all")
+	}
+	c := make(chan int, 1)
+	c <- 4
+	if Drain(c, make(chan bool)) != 4 {
+		t.Fatal("drain")
+	}
+}
+"""
+        got = self.deletion_verdicts("package hint\n", pr, test)
+        self.assertEqual(got[8], "LIVED")    # case err != nil: err kept after default's colon
+        self.assertEqual(got[17], "LIVED")   # case !good: the only clause, so `default: _ = good`
+        self.assertEqual(got[25], "LIVED")   # case int: v kept in the default clause
+        self.assertEqual(got[35], "LIVED")   # case <-stop: n kept before the select
+        self.assertEqual(got[37], "TIMED OUT")  # case v := <-c: Drain(c) blocks without it
+        # Deleting `if x < 0 { break L }` or `break L` leaves L unused: the label is dropped and tested.
+        self.assertEqual((got[46], got[47]), ("KILLED", "KILLED"))
+        # Every NOT VIABLE left is a deletion that leaves a function without its return.
+        self.assertEqual(sorted(k for k, v in got.items() if v == "NOT VIABLE"), [7, 10, 11, 20, 24, 27, 28, 34, 38, 51])
+
+    def test_unused_label_and_import_spellings(self):
+        text = b'package p\n\nimport (\n\tl "log"\n\t"os"\n)\n\nfunc f() {\nL:\n\tfor {\n\t}\n}\n'
+        got = mutgate.respelled(text, [(4, 2, "import"), (5, 2, "import"), (9, 1, "label")])
+        self.assertEqual(got, b'package p\n\nimport (\n\t_ "log"\n\t_ "os"\n)\n\nfunc f() {\n  \n\tfor {\n\t}\n}\n')
+        self.assertEqual(mutgate.fixes("./a.go:5:1: label L defined and not used\n", "a.go"), ([], [(5, 1, "label")]))
+        self.assertIsNone(mutgate.fixes("./a.go:5:1: undefined: x\n", "a.go"))
+        self.assertIsNone(mutgate.fixes("./b.go:5:2: declared and not used: x\n", "a.go"))
+
+    def test_a_line_directive_is_refused(self):
+        # Round 2 on #4597: `//line other.go:7` renames the file in the cover profile too, so every
+        # later site would read NOT COVERED; the lister refuses the file instead.
+        src = "package p\n\nfunc f() {\n//line other.go:7\n\tg()\n}\n\nfunc g() {}\n"
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "p.go").write_text(src)
+            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("a //line directive", r.stderr)
 
     def test_delete_needs_gremlins_result_and_passing_tests(self):
         with tempfile.TemporaryDirectory() as d:
