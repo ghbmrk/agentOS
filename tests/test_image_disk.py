@@ -118,7 +118,11 @@ def build_steps():
 
 
 def step(name):
-    return next(b for n, b in build_steps()[1] if n == name)
+    """The one step named NAME; a second step of that name fails, so no test reads the wrong one."""
+    blocks = [b for n, b in build_steps()[1] if n == name]
+    if len(blocks) != 1:
+        raise AssertionError("%d steps are named %s" % (len(blocks), name))
+    return blocks[0]
 
 
 def run_script(name):
@@ -167,6 +171,9 @@ class DiskBudgetTest(unittest.TestCase):
         """Runs the test's own copy of a step (copy_of), never the step's text; FS maps mount points to
         (avail, used) MB, else one file system "/" has them."""
         script = copy_of(name, run_script(name))
+        # The copies run as `shell: bash` runs a step (bash -e -o pipefail), so the step must say so.
+        if name != "Free runner disk" and "\n        shell: bash\n" not in step(name):
+            raise AssertionError("%s: the test runs its copy as `shell: bash`; the step no longer says that" % name)
         (self.t / "bin" / "fs.json").write_text(json.dumps(fs or {"/": (avail_mb, used_mb)}))
         dmi = self.t / "dmi"
         dmi.mkdir(exist_ok=True)
@@ -235,6 +242,13 @@ class DiskBudgetTest(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "differs from the test's copy"):
                         self.run_step(name, avail_mb=40 * 1024, used_mb=50000)
                     self.assertFalse(marker.exists())
+            # A second step of the same name, or another shell, fails too: the test would not match CI.
+            for edited in (block + "\n" + block,
+                           block.replace("        shell: bash\n", "        shell: sh\n")):
+                mutant.write_text(text.replace(block, edited))
+                with self.subTest(name=name, edited=edited[:60]), mock.patch.dict(globals(), WORKFLOW=mutant):
+                    with self.assertRaises(AssertionError):
+                        self.run_step(name, avail_mb=40 * 1024, used_mb=50000)
         # A step with no copy here cannot run at all, even one whose text is a plain `run: |` block.
         with self.assertRaises(KeyError):
             self.run_step("Install build and boot tools")
