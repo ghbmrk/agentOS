@@ -55,9 +55,11 @@ package privfile
 // A root unit's own namespace, search, stream and credential settings are
 // read (rootPathKeys, #4589), and its Environment= sets only rootEnv names;
 // rootOwned means in rootTrees, so a root unit's WorkingDirectory=
-// /var/lib/agentos is refused. A packaged unit's service or socket drop-in
-// is read alone, as a unit that runs as root and whose user owns its
-// directories (#4677).
+// /var/lib/agentos is refused. unitTree holds the units of a built root
+// file system to the same rules, read as systemd loads them, a packaged
+// unit's User= and drop-ins included (#4677); until CI runs it on each
+// image it builds, a packaged unit's service or socket drop-in under
+// image/ is outside the check.
 
 import (
 	"fmt"
@@ -562,6 +564,9 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 	if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 		t.Fatalf("shipped shapes: %v", err)
 	}
+	if err := unitTree(fsTree(t, imageUnits(files)), nil); err != nil {
+		t.Fatalf("shipped shapes in a tree: %v", err)
+	}
 	for name, c := range map[string]struct{ path, text, want string }{
 		// #4589.
 		"a root directory in /tmp":         {unit, "[Service]\nExecStart=/bin/true\nRootDirectory=/tmp/r\n", `path "/tmp/r"`},
@@ -605,14 +610,6 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		"an open configuration directory":         {"image/mkosi/agentos-x.service", "[Service]\nUser=agentos-x\nExecStart=/bin/true\nConfigurationDirectory=agentos-x\nConfigurationDirectoryMode=0770\n", `mode 0770 /etc/agentos-x, in or above /etc`},
 		"a .. directory":                          {"image/mkosi/agentos-x.service", "[Service]\nExecStart=/bin/true\nRuntimeDirectory=x/../systemd\n", `want a plain relative path`},
 		"an absolute directory":                   {"image/mkosi/agentos-x.service", "[Service]\nExecStart=/bin/true\nRuntimeDirectory=/etc/x\n", `want a plain relative path`},
-		// #4677 Security R-1: a packaged unit's drop-ins.
-		"a bind in a packaged unit's drop-in":    {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nBindPaths=/var/lib/agentos-x:/usr/lib/agentos\n", `path "/var/lib/agentos-x"`},
-		"a preload in a packaged unit's drop-in": {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n", `variable "LD_PRELOAD"`},
-		"a bare program in a packaged drop-in":   {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nExecStartPre=agentos-side\n", `plain absolute path`},
-		"a packaged prefix drop-in":              {"image/mkosi/systemd-.service.d/z.conf", "[Service]\nWorkingDirectory=/tmp\n", `path "/tmp"`},
-		"a packaged socket's drop-in":            {"image/mkosi/systemd-udevd-control.socket.d/z.conf", "[Socket]\nExecStartPre=/bin/sh -c ${X}\n", `holds a $ substitution`},
-		"a type-wide drop-in":                    {"image/mkosi/service.d/z.conf", "[Service]\nStandardOutput=file:/tmp/o\n", `path "/tmp/o"`},
-		"a packaged drop-in's directory":         {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nStateDirectory=agentos-x\n", `the unit's user owns /var/lib/agentos-x, in or above`},
 		// #4677 Security R-2: what else a root unit loads or reads.
 		"a preload":                   {unit, "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", `variable "LD_PRELOAD"`},
 		"a shell's env file":          {unit, "[Service]\nExecStart=/bin/sh -c x\nEnvironment=GOMEMLIMIT=1 BASH_ENV=/tmp/x\n", `variable "BASH_ENV"`},
@@ -629,10 +626,8 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		"a terminal in /tmp":          {unit, "[Service]\nExecStart=/bin/true\nTTYPath=/tmp/tty\n", `path "/tmp/tty"`},
 		"an opened file":              {unit, "[Service]\nExecStart=/bin/true\nOpenFile=/var/lib/agentos-x/f:fd\n", `path "/var/lib/agentos-x/f"`},
 		"an opened file with a blank": {unit, "[Service]\nExecStart=/bin/true\nOpenFile=/usr /etc:fd\n", `path "/usr /etc"`},
-		"an opened file in a drop-in": {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nOpenFile=/tmp/x:in\n", `path "/tmp/x"`},
 		"an imported credential":      {unit, "[Service]\nExecStart=/bin/true\nImportCredential=*\n", `ImportCredential= searches`},
 		"a named import":              {unit, "[Service]\nExecStart=/bin/true\nImportCredential=a\n", `ImportCredential= searches`},
-		"a packaged import":           {"image/mkosi/systemd-sysctl.service.d/z.conf", "[Service]\nImportCredential=sysctl.*\n", `ImportCredential= searches`},
 		"a BPF program":               {unit, "[Service]\nExecStart=/bin/true\nBPFProgram=egress:/tmp/p\n", `path "/tmp/p"`},
 		"an ingress filter":           {unit, "[Service]\nExecStart=/bin/true\nIPIngressFilterPath=/tmp/f\n", `path "/tmp/f"`},
 		"an egress filter":            {unit, "[Service]\nExecStart=/bin/true\nIPEgressFilterPath=/usr:/tmp\n", `path "/usr:/tmp"`},
@@ -664,6 +659,9 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 			if bins, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
 			}
+			if err := unitTree(fsTree(t, imageUnits(files)), nil); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("unitTree: got %v, want a refusal with %q", err, c.want)
+			}
 		})
 	}
 	t.Run("a grant root runs nothing in", func(t *testing.T) {
@@ -687,57 +685,86 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
 		}
-	})
-	// #4677 Security R-1: an image/ unit's own drop-in is read only with it,
-	// and a type-wide drop-in alone reaches packaged units.
-	t.Run("a user unit's own drop-in", func(t *testing.T) {
-		files := clone(files)
-		files["image/mkosi/agentos-user.service.d/z.conf"] = "[Service]\nWorkingDirectory=/tmp\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+		if err := unitTree(fsTree(t, imageUnits(files)), nil); err != nil {
 			t.Fatal(err)
 		}
 	})
-	// #4698 Security 2: a unit of that name in another image does not own
-	// the drop-in, which is still read alone.
-	t.Run("refuses a drop-in only another image's unit names", func(t *testing.T) {
-		files := clone(files)
-		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
-		files["image/camnode/overlay/etc/systemd/system/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`) {
-			t.Fatalf("got %v, want a refusal", err)
-		}
-		// A drop-in in another image that its own image's user unit owns.
-		files["image/camnode/overlay/etc/systemd/system/agentos-cam.service"] = "[Service]\nUser=cam\nExecStart=/bin/true\n"
-		files["image/camnode/board/etc/systemd/system/agentos-cam.service.d/z.conf"] = "[Service]\nWorkingDirectory=/tmp\n"
-		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
-		// Its own image's unit of that name owns it.
-		files["image/mkosi/x/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
-			t.Fatalf("a drop-in its own image's user unit owns: %v", err)
-		}
-	})
-	t.Run("refuses a type-wide drop-in with no unit under image/", func(t *testing.T) {
-		files := map[string]string{
-			"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n",
-			"image/mkosi/service.d/z.conf":    "[Service]\nWorkingDirectory=/tmp\n",
-		}
-		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), `path "/tmp"`) {
-			t.Fatalf("got %v, want a refusal", err)
-		}
-	})
-	// #4677 Security R-1: a broker binary a packaged unit's drop-in runs is
-	// root-side, the packaged unit's User= unseen.
-	t.Run("a broker binary a packaged unit's drop-in runs", func(t *testing.T) {
-		files := clone(files)
-		files[unit] = "[Service]\nUser=agentos-root\nExecStart=/usr/lib/agentos/agentos-side\n"
-		if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 0 {
-			t.Fatalf("got %q, %v, want none", bins, err)
-		}
-		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nUser=agentos-root\nExecStartPre=/usr/lib/agentos/agentos-side\n"
-		if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
-			t.Fatalf("got %q, %v, want [./cmd/agentos-side]", bins, err)
-		}
-	})
+}
+
+// unitTree reads a built root file system's units as systemd loads them,
+// so a packaged unit is read with its own User= and every drop-in of its
+// names (#4677 Security R-1; Mark's choice A on #4698).
+func TestUnitTree(t *testing.T) {
+	const (
+		lib = "/usr/lib/systemd/system/"
+		etc = "/etc/systemd/system/"
+	)
+	pkg := func(string) bool { return false }
+	ourDropins := func(p string) bool { return strings.Contains(p, ".d/") || p == "/etc/fstab" }
+	ourEtc := func(p string) bool { return strings.HasPrefix(p, etc) }
+	root := "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n"
+	user := "[Service]\nUser=systemd-x\nExecStart=/usr/lib/systemd/systemd-x\n"
+	for name, c := range map[string]struct {
+		files map[string]string
+		ours  func(string) bool
+		want  string
+	}{
+		"a bind in a packaged root unit's drop-in":               {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/z.conf": "[Service]\nBindPaths=/var/lib/agentos-x:/usr/lib/agentos\n"}, ourDropins, `path "/var/lib/agentos-x"`},
+		"a preload in a packaged root unit's drop-in":            {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd.service.d/z.conf": "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"}, ourDropins, `variable "LD_PRELOAD"`},
+		"a bare program in a packaged drop-in":                   {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/z.conf": "[Service]\nExecStartPre=agentos-side\n"}, ourDropins, `plain absolute path`},
+		"an opened file in a drop-in":                            {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/z.conf": "[Service]\nOpenFile=/tmp/x:in\n"}, ourDropins, `path "/tmp/x"`},
+		"a packaged import":                                      {map[string]string{lib + "systemd-sysctl.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-sysctl\n", etc + "systemd-sysctl.service.d/z.conf": "[Service]\nImportCredential=sysctl.*\n"}, ourDropins, `ImportCredential= searches`},
+		"a prefix drop-in":                                       {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins, `path "/tmp"`},
+		"a prefix drop-in no unit reads":                         {map[string]string{etc + "agentos-.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins, `path "/tmp"`},
+		"a type-wide drop-in":                                    {map[string]string{etc + "service.d/z.conf": "[Service]\nStandardOutput=file:/tmp/o\n"}, ourDropins, `path "/tmp/o"`},
+		"a socket's drop-in":                                     {map[string]string{lib + "systemd-udevd-control.socket": "[Socket]\nListenSequentialPacket=/run/udev/control\n", etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nExecStartPre=/bin/sh -c ${X}\n"}, ourDropins, `holds a $ substitution`},
+		"a drop-in for a unit not in the tree":                   {map[string]string{etc + "agentos-gone.service.d/z.conf": "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"}, ourDropins, `variable "LD_PRELOAD"`},
+		"a root command a drop-in adds to a user unit":           {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Service]\nExecStartPre=+/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"}, ourDropins, `variable "LD_PRELOAD"`},
+		"a packaged user unit's directory, granted":              {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Service]\nRuntimeDirectory=systemd\n"}, ourDropins, `the unit's user owns /run/systemd, in or above /run/systemd`},
+		"a drop-in that makes a user unit's directory another's": {map[string]string{lib + "systemd-x.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-x\nRuntimeDirectory=systemd\n", etc + "systemd-x.service.d/z.conf": "[Service]\nUser=systemd-x\n"}, ourDropins, `the unit's user owns /run/systemd`},
+		// A higher unit file masks a lower one: the root one in /etc runs.
+		"a drop-in on the unit /etc masks": {map[string]string{lib + "x.service": user, etc + "x.service": root, lib + "x.service.d/z.conf": "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"}, nil, `variable "LD_PRELOAD"`},
+		// Links are read in the tree, not on the host.
+		"an absolute link":                                 {map[string]string{lib + "x.service": root, etc + "x.service": "-> " + lib + "x.service", etc + "x.service.d/z.conf": "[Service]\nTTYPath=/tmp/t\n"}, nil, `path "/tmp/t"`},
+		"a linked drop-in directory":                       {map[string]string{lib + "x.service": root, "/usr/share/x/z.conf": "[Service]\nTTYPath=/tmp/t\n", etc + "x.service.d": "-> /usr/share/x"}, nil, `path "/tmp/t"`},
+		"a linked unit directory":                          {map[string]string{"/usr/share/x/x.service": root, "/usr/share/x/x.service.d/z.conf": "[Service]\nTTYPath=/tmp/t\n", "/etc/systemd": "-> /usr/share/y", "/usr/share/y/system": "-> ../x"}, nil, `path "/tmp/t"`},
+		"a root command and a path in an alias's drop-ins": {map[string]string{lib + "x.service": user, etc + "y.service": "-> " + lib + "x.service", etc + "x.service.d/a.conf": "[Service]\nExecStartPre=+/bin/true\n", etc + "y.service.d/b.conf": "[Service]\nTTYPath=/tmp/t\n"}, ourDropins, `path "/tmp/t"`},
+		"an alias's drop-in":                               {map[string]string{lib + "x.service": root, etc + "y.service": "-> " + lib + "x.service", etc + "y.service.d/z.conf": "[Service]\nTTYPath=/tmp/t\n"}, ourDropins, `path "/tmp/t"`},
+		"an instance's drop-in":                            {map[string]string{lib + "x@.service": root, etc + "x@a.service.d/z.conf": "[Service]\nTTYPath=/tmp/t\n"}, ourDropins, `path "/tmp/t"`},
+		"a template's drop-in":                             {map[string]string{lib + "x@.service": root, etc + "x@.service.d/z.conf": "[Service]\nTTYPath=/tmp/t\n"}, ourDropins, `path "/tmp/t"`},
+		"a unit of ours":                                   {map[string]string{etc + "getty@.service": "[Service]\nExecStart=-/sbin/agetty - $TERM\nTTYPath=/dev/%I\n"}, nil, `holds a $ substitution`},
+		"a type in a mount drop-in":                        {map[string]string{lib + "tmp.mount": "[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n", etc + "tmp.mount.d/z.conf": "[Mount]\nType=fuse.agentos\n"}, ourDropins, `Type=fuse.agentos`},
+		"a helper in fstab":                                {map[string]string{"/etc/fstab": "x /x fuse.agentos defaults 0 0\n"}, ourDropins, `fuse.agentos`},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			if err := unitTree(fsTree(t, c.files), c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want a refusal with %q", err, c.want)
+			}
+		})
+	}
+	bad := "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+	for name, c := range map[string]struct {
+		files map[string]string
+		ours  func(string) bool
+	}{
+		// A package's own lines are not held, though a drop-in of ours is.
+		"a packaged unit as shipped":           {map[string]string{etc + "getty@.service": "[Service]\nExecStart=-/sbin/agetty - $TERM\nTTYPath=/dev/%I\n", "/etc/fstab": "proc /proc proc defaults 0 0\ndevpts /dev/pts devpts gid=5 0 0\n"}, pkg},
+		"a drop-in of ours in a packaged unit": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=-/sbin/agetty - $TERM\nTTYPath=/dev/%I\n", lib + "getty@.service.d/p.conf": "[Service]\nExecStart=\nExecStart=-/sbin/agetty -o %I - $TERM\n", etc + "getty@.service.d/z.conf": "[Service]\nEnvironment=GOMEMLIMIT=1\n"}, ourEtc},
+		"a user unit's own drop-in":            {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n" + "Environment=LD_PRELOAD=/tmp/x.so\n"}, ourDropins},
+		// A higher unit file masks a lower one: the user one in /etc runs.
+		"a drop-in on a unit /etc makes a user's": {map[string]string{lib + "x.service": root, etc + "x.service": user, lib + "x.service.d/z.conf": bad}, nil},
+		"a masked unit":                  {map[string]string{lib + "x.service": root, etc + "x.service": "-> /dev/null", lib + "x.service.d/z.conf": bad}, nil},
+		"an empty unit file":             {map[string]string{lib + "x.service": root, etc + "x.service": "", lib + "x.service.d/z.conf": bad}, nil},
+		"a masked drop-in":               {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": bad, etc + "x.service.d/z.conf": "-> /dev/null"}, nil},
+		"a drop-in a higher one masks":   {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": bad, etc + "x.service.d/z.conf": "[Service]\n"}, nil},
+		"an instance of a user template": {map[string]string{lib + "x@.service": user, etc + "x@a.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := unitTree(fsTree(t, c.files), c.ours); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 // mount(8) runs a helper as root for a type or option that names one, so a
@@ -1328,6 +1355,46 @@ func clone(m map[string]string) map[string]string {
 		c[k] = v
 	}
 	return c
+}
+
+// fsTree writes files, by their path in the tree, under a new root file
+// system and returns it; a value "-> target" is a link to target.
+func fsTree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for p, text := range files {
+		f := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if target, ok := strings.CutPrefix(text, "-> "); ok {
+			if err := os.Symlink(target, f); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := os.WriteFile(f, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// imageUnits places the units and drop-ins of a fakeRepo's files in
+// /usr/lib/systemd/system, as an image installs them.
+func imageUnits(files map[string]string) map[string]string {
+	out := map[string]string{}
+	for p, text := range files {
+		dir := path.Base(path.Dir(p))
+		switch {
+		case !strings.HasPrefix(p, "image/"):
+		case unitTypes[path.Ext(p)]:
+			out["/usr/lib/systemd/system/"+path.Base(p)] = text
+		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
+			out["/usr/lib/systemd/system/"+dir+"/"+path.Base(p)] = text
+		}
+	}
+	return out
 }
 
 func repoRoot(t *testing.T) string {
@@ -1963,8 +2030,6 @@ func rootBinaries(root string) ([]string, error) {
 		return nil, err
 	}
 	seen := map[string]bool{}
-	var progs []string // the programs a unit runs as root
-	var grants []grant // the paths a unit gives another uid
 	// mount(8), umount(8), systemd-fsck and systemd-makefs run
 	// /sbin/<tool>.<type> as root for a file system of that type, whatever
 	// unit, fstab line or package mounts it, so a broker binary of such a
@@ -1993,175 +2058,20 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
-	// A unit is read with every drop-in systemd reads for it. A service or
-	// socket drop-in directory may also reach a unit a package ships (a
-	// packaged unit's own x.service.d, a type-wide service.d, a prefix's
-	// agentos-.service.d), whose User= the lint does not see, so each of its
-	// files is also read alone as a unit that runs as root and whose user
-	// owns its directories (#4677 Security R-1). Only an image/ unit's own
-	// name.d in the same image (image/<image>/...), which no packaged unit of
-	// that name reads there, is not: image/ holds more than one image, and a
-	// unit in one does not reach another's drop-ins (#4698 Security 2).
-	type unitRead struct {
-		name     string
-		paths    []string
-		packaged bool
-	}
-	var reads []unitRead
-	own := map[string]bool{} // image + "/" + a unit's name.d
-	imageOf := func(p string) string {
-		rel, _ := filepath.Rel(filepath.Join(root, "image"), p)
-		return strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
-	}
+	// A unit is read with every drop-in under image/ of a name systemd
+	// reads for it. A packaged unit's drop-ins, and units a package or build
+	// step ships, are read on the built root file systems (unitTree, #4677).
+	c := &unitCheck{root: root, pkgs: pkgs, seen: seen}
 	for p, name := range units {
-		own[imageOf(p)+"/"+name+".d"] = true
 		paths := []string{p}
 		for _, dir := range dropinDirs(name) {
 			paths = append(paths, dropins[dir]...)
 		}
-		reads = append(reads, unitRead{name, paths, false})
-	}
-	for dir, confs := range dropins {
-		name := strings.TrimSuffix(dir, ".d")
-		if !strings.Contains(name, ".") {
-			name = "." + name // service.d
-		}
-		if !execUnits[path.Ext(name)] {
-			continue
-		}
-		for _, f := range confs {
-			if !own[imageOf(f)+"/"+dir] {
-				reads = append(reads, unitRead{name, []string{f}, true})
-			}
-		}
-	}
-	for _, r := range reads {
-		name, paths := r.name, r.paths
-		if filepath.Ext(name) == ".mount" {
-			if _, err := mountLines(root, paths, true); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		// A later User= or DynamicUser= replaces an earlier one, and drop-ins
-		// sort across directories, so any assignment that runs as root (an
-		// empty, root or 0 User=, a false DynamicUser=) counts as root
-		// wherever it sits: an over-approximation that never drops a root
-		// binary (#3951 L3 3).
-		asUser, asRoot := false, r.packaged
-		owned := r.packaged // a User= or DynamicUser= that may be another uid owns the unit's directories
-		type execLine struct{ file, key, value string }
-		var lines []execLine
-		var env []envLine
-		var settings []envLine // rootPathKeys and dirBases lines
-		section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
-		for _, f := range paths {
-			b, err := os.ReadFile(f)
-			if err != nil {
-				return nil, err
-			}
-			rel, _ := filepath.Rel(root, f)
-			ul, err := unitLines(string(b))
-			if err != nil {
-				return nil, fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
-			}
-			for _, line := range ul {
-				k, v := line.key, line.value
-				switch {
-				case line.section != section:
-					// systemd reads a unit's User= and Exec lines only in its
-					// type's own section.
-				case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment" || k == "PAMName":
-					env = append(env, envLine{f, k, v})
-				case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
-					// A User=%i template is root for its root instance, and
-					// every other instance owns its directories (#4656 L3 1).
-					asRoot, owned = true, owned || mayBeRoot(v)
-				case k == "User":
-					asUser = true
-				case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
-					asUser = true
-				case k == "DynamicUser":
-					asRoot = true
-				case rootPathKeys[k] || dirBases[strings.TrimSuffix(k, "Mode")] != "":
-					settings = append(settings, envLine{f, k, v})
-				case k == "ExecPaths":
-					// Paths that may run, not commands.
-				case strings.HasPrefix(k, "Exec"):
-					lines = append(lines, execLine{f, k, v})
-				}
-			}
-		}
-		rootCmds := len(progs)
-		for _, l := range lines {
-			rel, _ := filepath.Rel(root, l.file)
-			cmds, err := execWords(l.value)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
-			}
-			for _, words := range cmds {
-				if len(words) == 0 {
-					continue // an empty ExecStart= resets the list
-				}
-				prefix := words[0][:len(words[0])-len(strings.TrimLeft(words[0], "@-:+!|"))]
-				prog := words[0][len(prefix):]
-				// systemd resolves a bare program through its own search path
-				// (v239), | hands the line to a shell, and % and $ substitute;
-				// none is read, so a program is a plain absolute path (#4390).
-				// A wrapper (with-uids) runs its first argument, so that holds
-				// no $ substitution either, and no word holds a % specifier
-				// (agentos-%i in a template); $$ and %% are literal.
-				if strings.Contains(prefix, "|") || !strings.HasPrefix(prog, "/") || substitutes(prog, '$') || path.Clean(prog) != prog {
-					return nil, fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value)
-				}
-				for _, w := range words {
-					if substitutes(w, '%') {
-						return nil, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w)
-					}
-				}
-				if asUser && !asRoot && !strings.ContainsAny(prefix, "+!") {
-					continue
-				}
-				progs = append(progs, prog)
-				// systemd fills in $X and ${X} before a wrapper or shell runs
-				// the result, so a root command holds none but a whole-word
-				// ${X} of unitVars (#4494).
-				for i, w := range words[1:] {
-					if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
-						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
-					}
-				}
-				// A program's arguments may name another a wrapper (with-uids
-				// execs "$@") or shell runs: every absolute token counts, in a
-				// quoted shell script too.
-				for _, w := range append([]string{prog}, words[1:]...) {
-					for _, tok := range nameToken.FindAllString(w, -1) {
-						if pkg, ok := pkgs[path.Base(tok)]; ok && strings.HasPrefix(tok, "/") {
-							seen[pkg] = true
-						}
-					}
-				}
-			}
-		}
-		// What the unit makes for its user is a grant (#4584), and what a
-		// root command reads, runs and searches lies in trees root owns
-		// (#4589).
-		g, err := unitGrants(root, settings, asUser || owned)
-		if err != nil {
+		if err := c.unit(name, paths, false, nil); err != nil {
 			return nil, err
 		}
-		grants = append(grants, g...)
-		if len(progs) == rootCmds && !r.packaged {
-			continue
-		}
-		for _, l := range append(settings, env...) {
-			if err := rootPathSetting(l.key, l.value); err != nil {
-				rel, _ := filepath.Rel(root, l.file)
-				return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
-			}
-		}
 	}
-	if err := runBinaries(root, pkgs, seen, progs, grants); err != nil {
+	if err := runBinaries(root, pkgs, seen, c.progs, c.grants); err != nil {
 		return nil, err
 	}
 
@@ -2171,6 +2081,396 @@ func rootBinaries(root string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// unitCheck holds what reading units finds: the broker packages (by pkgs)
+// a root command names, the programs units run as root and the paths they
+// let another uid write.
+type unitCheck struct {
+	root   string            // a message names a file relative to it
+	pkgs   map[string]string // broker binary name -> package
+	seen   map[string]bool
+	progs  []string
+	grants []grant
+}
+
+// unit reads the unit name from paths: its unit file and the drop-ins
+// systemd reads for it, or, alone, one drop-in read with no unit file, as a
+// unit that runs as root and whose user owns its directories. A file in
+// trusted is a package's: its User=, DynamicUser= and *Directory= lines are
+// read, and a command in it that may run as root holds the unit's other
+// files to a root command's rules, but its own commands and settings are
+// not held (#4677).
+func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[string]bool) error {
+	if filepath.Ext(name) == ".mount" {
+		_, err := mountLines(c.root, paths, !alone)
+		return err
+	}
+	// A later User= or DynamicUser= replaces an earlier one, and drop-ins
+	// sort across directories, so any assignment that runs as root (an
+	// empty, root or 0 User=, a false DynamicUser=) counts as root
+	// wherever it sits: an over-approximation that never drops a root
+	// binary (#3951 L3 3).
+	asUser, asRoot := false, alone
+	owned := alone // a User= or DynamicUser= that may be another uid owns the unit's directories
+	type execLine struct {
+		file, key, value string
+		trusted          bool
+	}
+	var lines []execLine
+	var env []envLine
+	var settings []envLine // rootPathKeys and dirBases lines
+	section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
+	for _, f := range paths {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(c.root, f)
+		ul, err := unitLines(string(b))
+		if err != nil {
+			return fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
+		}
+		for _, line := range ul {
+			k, v := line.key, line.value
+			switch {
+			case line.section != section:
+				// systemd reads a unit's User= and Exec lines only in its
+				// type's own section.
+			case trusted[f] && k != "User" && k != "DynamicUser" && dirBases[strings.TrimSuffix(k, "Mode")] == "" && !strings.HasPrefix(k, "Exec"):
+				// A package's setting.
+			case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment" || k == "PAMName":
+				env = append(env, envLine{f, k, v})
+			case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
+				// A User=%i template is root for its root instance, and
+				// every other instance owns its directories (#4656 L3 1).
+				asRoot, owned = true, owned || mayBeRoot(v)
+			case k == "User":
+				asUser = true
+			case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
+				asUser = true
+			case k == "DynamicUser":
+				asRoot = true
+			case rootPathKeys[k] || dirBases[strings.TrimSuffix(k, "Mode")] != "":
+				settings = append(settings, envLine{f, k, v})
+			case k == "ExecPaths":
+				// Paths that may run, not commands.
+			case strings.HasPrefix(k, "Exec"):
+				lines = append(lines, execLine{f, k, v, trusted[f]})
+			}
+		}
+	}
+	rootCmd := false
+	for _, l := range lines {
+		if l.trusted {
+			// A package's command is not held, but one that may run as
+			// root holds the unit's own settings as a root command's.
+			rootCmd = rootCmd || l.value != "" && (!asUser || asRoot || strings.ContainsAny(l.value, "+!"))
+			continue
+		}
+		rel, _ := filepath.Rel(c.root, l.file)
+		cmds, err := execWords(l.value)
+		if err != nil {
+			return fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+		}
+		for _, words := range cmds {
+			if len(words) == 0 {
+				continue // an empty ExecStart= resets the list
+			}
+			prefix := words[0][:len(words[0])-len(strings.TrimLeft(words[0], "@-:+!|"))]
+			prog := words[0][len(prefix):]
+			// systemd resolves a bare program through its own search path
+			// (v239), | hands the line to a shell, and % and $ substitute;
+			// none is read, so a program is a plain absolute path (#4390).
+			// A wrapper (with-uids) runs its first argument, so that holds
+			// no $ substitution either, and no word holds a % specifier
+			// (agentos-%i in a template); $$ and %% are literal.
+			if strings.Contains(prefix, "|") || !strings.HasPrefix(prog, "/") || substitutes(prog, '$') || path.Clean(prog) != prog {
+				return fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value)
+			}
+			for _, w := range words {
+				if substitutes(w, '%') {
+					return fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w)
+				}
+			}
+			if asUser && !asRoot && !strings.ContainsAny(prefix, "+!") {
+				continue
+			}
+			rootCmd = true
+			c.progs = append(c.progs, prog)
+			// systemd fills in $X and ${X} before a wrapper or shell runs
+			// the result, so a root command holds none but a whole-word
+			// ${X} of unitVars (#4494).
+			for i, w := range words[1:] {
+				if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
+					return fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
+				}
+			}
+			// A program's arguments may name another a wrapper (with-uids
+			// execs "$@") or shell runs: every absolute token counts, in a
+			// quoted shell script too.
+			for _, w := range append([]string{prog}, words[1:]...) {
+				for _, tok := range nameToken.FindAllString(w, -1) {
+					if pkg, ok := c.pkgs[path.Base(tok)]; ok && strings.HasPrefix(tok, "/") {
+						c.seen[pkg] = true
+					}
+				}
+			}
+		}
+	}
+	// What the unit makes for its user is a grant (#4584), and what a
+	// root command reads, runs and searches lies in trees root owns
+	// (#4589).
+	g, err := unitGrants(c.root, settings, asUser || owned)
+	if err != nil {
+		return err
+	}
+	c.grants = append(c.grants, g...)
+	if !rootCmd && !alone {
+		return nil
+	}
+	for _, l := range append(settings, env...) {
+		if err := rootPathSetting(l.key, l.value); err != nil {
+			rel, _ := filepath.Rel(c.root, l.file)
+			return fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+		}
+	}
+	return nil
+}
+
+// unitDirs are the directories systemd loads system units and drop-ins
+// from, highest first (path-lookup.c): a unit file in a higher one masks
+// one of its name in a lower one, and a unit reads the drop-ins of its
+// names from every one, a .conf in a higher one masking one of its name in
+// a lower one.
+var unitDirs = []string{
+	"/etc/systemd/system.control", "/run/systemd/system.control", "/run/systemd/transient", "/run/systemd/generator.early",
+	"/etc/systemd/system", "/etc/systemd/system.attached", "/run/systemd/system", "/run/systemd/system.attached",
+	"/run/systemd/generator", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system",
+	"/run/systemd/generator.late",
+}
+
+// unitTree holds the units of the root file system at fsRoot to the unit
+// rules, read as systemd loads them (#4677): each unitDirs unit file,
+// followed through links in the tree, an alias read with its target, a
+// file linked to /dev/null or empty masking its name, and a template's
+// file read for an instance a drop-in directory names; with every drop-in
+// of each of its names, so a packaged unit's User= is seen. A unit is held
+// when ours reports one of its files, by its path in the tree (nil
+// reports every file); a file ours does not report is a package's (unit's
+// trusted). A drop-in ours reports in a type-wide, prefix or other
+// directory no unit reads by its own name is also read alone, as one a
+// transient or generated unit may read; and /etc/fstab, if ours. What a
+// unit lets another uid write may not lie in or above rootTrees or a
+// program a held unit runs as root.
+func unitTree(fsRoot string, ours func(string) bool) error {
+	if ours == nil {
+		ours = func(string) bool { return true }
+	}
+	files := map[string]string{}            // unit name -> its file's path in the tree; "" when masked
+	alias := map[string]string{}            // alias -> the unit it names
+	confs := map[string]map[string]string{} // drop-in directory -> .conf name -> path; "" when masked
+	for _, dir := range unitDirs {
+		d, err := inRoot(fsRoot, dir)
+		if err != nil {
+			return err
+		}
+		ents, err := os.ReadDir(filepath.Join(fsRoot, d))
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		for _, e := range ents {
+			name := e.Name()
+			p, err := inRoot(fsRoot, path.Join(d, name))
+			if err != nil {
+				return err
+			}
+			fi, err := os.Stat(filepath.Join(fsRoot, p))
+			switch {
+			case unitTypes[path.Ext(name)] && hasKey(files, name):
+				// A higher file of this name masks it.
+			case unitTypes[path.Ext(name)] && (p == "/dev/null" || err == nil && fi.Mode().IsRegular() && fi.Size() == 0):
+				files[name] = ""
+			case unitTypes[path.Ext(name)]:
+				if err != nil {
+					return err
+				}
+				files[name] = p
+				if t := path.Base(p); t != name && unitTypes[path.Ext(t)] {
+					alias[name] = t
+				}
+			case isDropinDir(name) && err == nil && fi.IsDir():
+				if confs[name] == nil {
+					confs[name] = map[string]string{}
+				}
+				cs, err := os.ReadDir(filepath.Join(fsRoot, p))
+				if err != nil {
+					return err
+				}
+				for _, c := range cs {
+					if !strings.HasSuffix(c.Name(), ".conf") || hasKey(confs[name], c.Name()) {
+						continue
+					}
+					q, err := inRoot(fsRoot, path.Join(p, c.Name()))
+					if err != nil {
+						return err
+					}
+					if q == "/dev/null" {
+						q = ""
+					}
+					confs[name][c.Name()] = q
+				}
+			}
+		}
+	}
+	// Each unit with its names: its own, its aliases' and, for an instance
+	// a drop-in directory names, its template's file.
+	names := map[string][]string{}
+	for n := range files {
+		t := n
+		if a, ok := alias[n]; ok {
+			t = a
+		}
+		names[t] = append(names[t], n)
+	}
+	for dir := range confs {
+		n := strings.TrimSuffix(dir, ".d")
+		base := strings.TrimSuffix(n, path.Ext(n))
+		if at := strings.Index(base, "@"); at > 0 && at < len(base)-1 && !hasKey(files, n) {
+			if tmpl := base[:at+1] + path.Ext(n); files[tmpl] != "" {
+				files[n] = files[tmpl]
+				names[n] = append(names[n], n)
+			}
+		}
+	}
+	c := &unitCheck{root: fsRoot, seen: map[string]bool{}}
+	own := map[string]bool{} // the drop-in directories of a unit's own names
+	for t, ns := range names {
+		file := files[t]
+		if !hasKey(files, t) {
+			file = files[ns[0]] // an alias of a unit no unitDirs file names
+		}
+		for _, n := range ns {
+			own[n+".d"] = true
+		}
+		if file == "" {
+			continue // masked
+		}
+		paths, held := []string{filepath.Join(fsRoot, file)}, ours(file)
+		trusted := map[string]bool{paths[0]: !held}
+		read := map[string]bool{}
+		for _, n := range ns {
+			for _, dir := range dropinDirs(n) {
+				var cs []string
+				for c := range confs[dir] {
+					cs = append(cs, c)
+				}
+				sort.Strings(cs)
+				for _, cn := range cs {
+					q := confs[dir][cn]
+					if q == "" || read[q] {
+						continue
+					}
+					read[q] = true
+					f := filepath.Join(fsRoot, q)
+					paths = append(paths, f)
+					trusted[f] = !ours(q)
+					held = held || ours(q)
+				}
+			}
+		}
+		if held {
+			if err := c.unit(t, paths, false, trusted); err != nil {
+				return err
+			}
+		}
+	}
+	for dir, cs := range confs {
+		if own[dir] {
+			continue
+		}
+		name := strings.TrimSuffix(dir, ".d")
+		if !strings.Contains(name, ".") {
+			name = "." + name // service.d
+		}
+		for _, q := range cs {
+			if q == "" || !ours(q) {
+				continue
+			}
+			if err := c.unit(name, []string{filepath.Join(fsRoot, q)}, true, nil); err != nil {
+				return err
+			}
+		}
+	}
+	if p, err := inRoot(fsRoot, "/etc/fstab"); err != nil {
+		return err
+	} else if _, err := os.Stat(filepath.Join(fsRoot, p)); err == nil && ours(p) {
+		if err := fstabLines(fsRoot, filepath.Join(fsRoot, p)); err != nil {
+			return err
+		}
+	}
+	return grantsHeld(c.grants, append(append([]string{}, rootTrees...), c.progs...))
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// inRoot resolves p, an absolute path in the root file system at fsRoot, as
+// the kernel would with fsRoot as /: a link's target, absolute or not, is
+// read in the tree, and .. stops at its root. It returns the resolved path
+// in the tree; from the first missing component on, p is returned as
+// given.
+func inRoot(fsRoot, p string) (string, error) {
+	done, rest := "/", strings.Split(p, "/")
+	for links := 0; len(rest) > 0; {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			done = path.Dir(done)
+			continue
+		}
+		next := path.Join(done, c)
+		fi, err := os.Lstat(filepath.Join(fsRoot, next))
+		switch {
+		case os.IsNotExist(err):
+			return path.Join(append([]string{next}, rest...)...), nil
+		case err != nil:
+			return "", err
+		case fi.Mode()&os.ModeSymlink == 0:
+			done = next
+			continue
+		}
+		if links++; links > 40 {
+			return "", fmt.Errorf("%s: more than 40 links", p)
+		}
+		t, err := os.Readlink(filepath.Join(fsRoot, next))
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(t, "/") {
+			done = "/"
+		}
+		rest = append(strings.Split(t, "/"), rest...)
+	}
+	return done, nil
+}
+
+// grantsHeld fails on a grant in or above held, a tree or program root
+// reads or runs.
+func grantsHeld(grants []grant, held []string) error {
+	for _, g := range grants {
+		if h, ok := inOrAbove(g.path, held); ok {
+			return fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h)
+		}
+	}
+	return nil
 }
 
 // plainFS are the file system types a mount may name: in-kernel types
@@ -2567,10 +2867,8 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 	for path := range listed {
 		held = append(held, path)
 	}
-	for _, g := range grants {
-		if h, ok := inOrAbove(g.path, held); ok {
-			return fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h)
-		}
+	if err := grantsHeld(grants, held); err != nil {
+		return err
 	}
 	for path, used := range listed {
 		if !used {
