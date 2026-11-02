@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"net/http"
 	"net/http/httptest"
@@ -406,21 +407,26 @@ func TestTagAndTokenLabelsDiffer(t *testing.T) {
 }
 
 // #4427: a tag or a token is a secret, which == cannot compare (it holds
-// a slice) and whose only comparison, equal, is hmac.Equal. This pins its
-// other exits: outside secret's own methods no package code names its
-// bytes; IssueToken is called from no Go code, only from a template, and only
-// as the screen's token; seal is only ever a cookie's Value; fmt prints
-// none of its bytes; and the package imports neither reflect nor unsafe.
-// So no code can hold a tag or token as bytes or a string to compare.
-// Revert mutants: a method reading secretSum, a Go call of IssueToken or seal
-// whose result is held, a template printing .Token, or Format removed,
-// each fail here.
+// a slice). This pins its structure: secret's methods are exactly equal,
+// IssueToken, seal and Format; equal's body is the one hmac.Equal return;
+// no declaration outside secret's methods names its bytes; Go code never
+// calls IssueToken, and uses seal only as a cookie's Value; a template shows
+// the token only as .Token.IssueToken; fmt prints none of a secret formatted
+// itself; and the package imports neither reflect nor unsafe.
+// Out of scope (found only in review): fmt on a struct holding a secret in an
+// unexported field, seal into a throwaway cookie then compare, and Go-string
+// templates calling IssueToken.
+// Revert mutants, each failing here: a method reading secretSum, an exported
+// Bytes() accessor, equal rewritten as string(x)==string(b), a Go call of
+// IssueToken or seal whose result is held, a template printing .Token, a
+// package-level func literal reading secretSum, or Format removed.
 func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var methods []string
 	for _, p := range pkgs {
 		for _, f := range p.Files {
 			for _, imp := range f.Imports {
@@ -429,30 +435,47 @@ func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 				}
 			}
 			for _, d := range f.Decls {
-				fd, ok := d.(*ast.FuncDecl)
-				if !ok {
-					continue
+				name, own := "declaration", false
+				if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
+					if ts, ok := gd.Specs[0].(*ast.TypeSpec); ok && ts.Name.Name == "secret" {
+						continue
+					}
 				}
-				own := false
-				if fd.Recv != nil {
-					if id, ok := fd.Recv.List[0].Type.(*ast.Ident); ok && id.Name == "secret" {
-						own = true
+				if fd, ok := d.(*ast.FuncDecl); ok {
+					name = fd.Name.Name
+					if fd.Recv != nil {
+						rt := fd.Recv.List[0].Type
+						if st, ok := rt.(*ast.StarExpr); ok {
+							rt = st.X
+						}
+						if id, ok := rt.(*ast.Ident); ok && id.Name == "secret" {
+							own = true
+							methods = append(methods, fd.Name.Name)
+							if fd.Name.Name == "equal" {
+								var sb strings.Builder
+								printer.Fprint(&sb, fset, fd.Body.List)
+								const want = "return len(x.secretSum) == sha256.Size && hmac.Equal(x.secretSum, b)"
+								if sb.String() != want {
+									t.Errorf("equal's body is %q, want %q", sb.String(), want)
+								}
+							}
+						}
 					}
 				}
 				var stack []ast.Node
-				ast.Inspect(fd, func(n ast.Node) bool {
+				ast.Inspect(d, func(n ast.Node) bool {
 					if n == nil {
 						stack = stack[:len(stack)-1]
 						return true
 					}
 					at := fset.Position(n.Pos())
 					if id, ok := n.(*ast.Ident); ok && id.Name == "secretSum" && !own {
-						t.Errorf("%s: %s reads a secret's bytes", at, fd.Name.Name)
+						t.Errorf("%s: %s reads a secret's bytes", at, name)
 					}
 					if sel, ok := n.(*ast.SelectorExpr); ok {
 						switch sel.Sel.Name {
 						case "IssueToken":
-							t.Errorf("%s: %s calls IssueToken; only a template may", at, fd.Name.Name)
+							t.Errorf("%s: %s calls IssueToken; only a template may", at, name)
 						case "seal":
 							call, _ := stack[len(stack)-1].(*ast.CallExpr)
 							var kv *ast.KeyValueExpr
@@ -467,7 +490,7 @@ func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 								return k, ok
 							}()
 							if call == nil || call.Fun != sel || kv == nil || kv.Value != call || key == nil || key.Name != "Value" {
-								t.Errorf("%s: %s uses seal other than as a cookie's Value", at, fd.Name.Name)
+								t.Errorf("%s: %s uses seal other than as a cookie's Value", at, name)
 							}
 						}
 					}
@@ -476,6 +499,10 @@ func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 				})
 			}
 		}
+	}
+	slices.Sort(methods)
+	if got, want := strings.Join(methods, ","), "Format,IssueToken,equal,seal"; got != want {
+		t.Errorf("secret's methods are %s, want %s", got, want)
 	}
 	tmpls, err := filepath.Glob("templates/*.html")
 	if err != nil || len(tmpls) == 0 {
@@ -497,5 +524,14 @@ func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 	if out := fmt.Sprintf("%v %+v %#v %s %q %x %X %d %o %b %c %U", x, x, x, x, x, x, x, x, x, x, x, x); strings.Contains(out, "canary") ||
 		strings.Contains(out, "6361") || strings.Contains(out, "[1 2") || strings.Contains(out, "\\x01") {
 		t.Errorf("fmt prints a secret's bytes: %s", out)
+	}
+}
+
+// A zero secret equals nothing, not even an empty header token.
+func TestZeroSecretEqualsNothing(t *testing.T) {
+	for _, b := range [][]byte{nil, {}, make([]byte, 32)} {
+		if (secret{}).equal(b) {
+			t.Errorf("zero secret equals %d bytes", len(b))
+		}
 	}
 }

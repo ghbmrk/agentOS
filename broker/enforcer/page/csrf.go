@@ -39,11 +39,12 @@ import (
 //
 // A tag and a token are each a secret: a type whose only comparison is
 // equal, which runs hmac.Equal in constant time. Its slice field makes ==
-// on it a compile error, Format keeps fmt from printing its bytes, and its
-// bytes leave it only into a response: IssueToken, called by a screen's
-// template and from no Go code, and seal, which mint writes straight into
-// the cookie it sets. No Go code ever holds either as bytes or a string to
-// compare; TestSecretsLeaveOnlyByTheirExits pins those exits.
+// on it a compile error and its method set is pinned to equal, IssueToken,
+// seal and Format (Format keeps fmt from printing a secret formatted
+// itself). TestSecretsLeaveOnlyByTheirExits pins that structure. Out of
+// scope: fmt on a struct holding a secret in an unexported field, sealing
+// into a throwaway cookie then comparing, and Go-string templates that call
+// IssueToken; reviewers catch those (#4427, D-250).
 const (
 	tokenCookie = "__Host-enforcer"
 	tokenHeader = "X-Enforcer-Token"
@@ -68,8 +69,10 @@ var errToken = errors.New("this screen is out of date; reload it and try again")
 // secret is a MAC the page derives under its token key.
 type secret struct{ secretSum []byte }
 
-// equal reports, in constant time, whether b is x.
-func (x secret) equal(b []byte) bool { return hmac.Equal(x.secretSum, b) }
+// equal reports, in constant time, whether b is x; a zero secret equals nothing.
+func (x secret) equal(b []byte) bool {
+	return len(x.secretSum) == sha256.Size && hmac.Equal(x.secretSum, b)
+}
 
 // IssueToken is x as a screen carries it; only templates call it.
 func (x secret) IssueToken() string { return base64.RawURLEncoding.EncodeToString(x.secretSum) }
