@@ -20,9 +20,12 @@
 // one Screen writes, in a place Screen fixes, into the response it is
 // handed, and Tokens holds the key only inside a closure, so fmt of a
 // Tokens, or of anything holding one, prints at most a code address. The
-// page imports this package as internal, so no other package can. TestAPI
-// pins that surface, and that MACs are compared only by hmac.Equal,
-// through go/types.
+// page imports this package as internal, so no other package can name
+// it, and both import only an allowlist (no unsafe, reflect, os or
+// syscall; ARC2's enforcerWebImports). Code elsewhere in the process that
+// reads process memory is not stopped (ASSUMPTIONS ENF-page-csrf-1).
+// TestAPI pins that surface, and that every MAC goes straight into
+// hmac.Equal or the response, through go/types.
 package csrf
 
 import (
@@ -42,8 +45,9 @@ const (
 )
 
 // PairLife is how long after its cookie was drawn a pair still passes
-// Check; past it a tap fails with "reload it", as after a restart. ReuseFor is how long a new screen may keep a cookie: half of
-// PairLife, so a screen that keeps one still has at least half a day.
+// Check; past it a tap fails with "reload it", as after a restart.
+// ReuseFor is how long a new screen may keep a cookie: half of PairLife,
+// so a screen that keeps one still has at least half a day.
 const (
 	PairLife = 24 * time.Hour
 	ReuseFor = PairLife / 2

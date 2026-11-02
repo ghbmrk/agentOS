@@ -448,7 +448,8 @@ func topLevel(t *testing.T) []string {
 // html/template's or text/template's Execute or ExecuteTemplate is used (called, or taken as
 // a method value) anywhere but inside render, or if render is used other
 // than by a call (#4784): so every screen is drawn by render, which hands
-// it to csrf.Screen.
+// it to csrf.Screen. It also fails the test if the page uses net/http's
+// file API (Dir, FileServer, ServeFile, ...), which opens files by name.
 func renderedScreens(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -501,6 +502,13 @@ func renderedScreens(t *testing.T) []string {
 		fn, ok := o.(*types.Func)
 		return ok && fn.Pkg() != nil && (fn.Pkg().Path() == "html/template" || fn.Pkg().Path() == "text/template") && (fn.Name() == "Execute" || fn.Name() == "ExecuteTemplate")
 	}
+	// The page opens no file by name: with net/http's file API it could
+	// seek /proc/self/mem, and the import allowlist (ARC2's
+	// enforcerWebImports) already keeps os and syscall out.
+	fileAPI := func(o types.Object) bool {
+		return o.Pkg() != nil && o.Pkg().Path() == "net/http" && slices.Contains([]string{
+			"Dir", "FS", "FileServer", "FileServerFS", "ServeFile", "ServeFileFS", "NewFileTransport", "NewFileTransportFS"}, o.Name())
+	}
 	var names []string
 	for _, f := range fl {
 		var inRender []ast.Node
@@ -548,6 +556,9 @@ func renderedScreens(t *testing.T) []string {
 			}
 			if exec(o) && !inside(id.Pos()) {
 				t.Errorf("%s: a template is executed outside render", fset.Position(id.Pos()))
+			}
+			if fileAPI(o) {
+				t.Errorf("%s: the page uses net/http's %s, which opens files by name (#4778)", fset.Position(id.Pos()), o.Name())
 			}
 		}
 	}

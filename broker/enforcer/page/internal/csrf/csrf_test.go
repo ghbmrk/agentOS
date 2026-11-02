@@ -182,76 +182,146 @@ func surface(pkg *types.Package) (got, problems []string) {
 	return got, problems
 }
 
-// compareProblems lists each comparison in files that could compare a MAC
-// other than in constant time: a ==, !=, <, <=, > or >= between two
-// non-constant operands of string, byte or array type, a switch whose tag
-// and a case are both non-constant strings, or any call other than
-// crypto/hmac.Equal that compares bytes. Every MAC is compared by
-// hmac.Equal, exactly twice (Check's token and age's tag). Objects are
-// resolved through types.Info, so a renamed import or a local named hmac
-// does not count. Revert mutant: either hmac.Equal replaced by a string
-// compare fails.
+// compareProblems pins where every MAC goes (#4427 item 3, #4786, #4788).
+// Each call of a Tokens' mac field (resolved through types.Info, not by
+// name) must be, as it stands, an argument of crypto/hmac.Equal, of
+// base64's EncodeToString (the token Screen writes), or the spread final
+// argument of an append inside one (the cookie's tag): so a MAC is never
+// held in a variable, converted, wrapped in an interface, used as a map
+// key or walked by a loop, and the only comparison that ever sees one is
+// hmac.Equal. hmac.Equal is called exactly twice, once in Check and once
+// in age, each with a MAC argument, so no dummy call can stand in for
+// either. Revert mutants: a string compare, an any()-wrapped compare, a
+// byte loop or a map lookup in Check or age, or a dummy hmac.Equal, each
+// fail.
 func compareProblems(files []*ast.File, info *types.Info) []string {
 	var problems []string
-	equal := 0
-	constant := func(e ast.Expr) bool { return info.Types[e].Value != nil }
-	risky := func(e ast.Expr) bool {
-		t := info.TypeOf(e)
-		if t == nil {
+	pkgFunc := func(c *ast.CallExpr, path, name string) bool {
+		var id *ast.Ident
+		switch fn := c.Fun.(type) {
+		case *ast.Ident:
+			id = fn
+		case *ast.SelectorExpr:
+			id = fn.Sel
+		}
+		if id == nil {
 			return false
 		}
-		switch u := t.Underlying().(type) {
-		case *types.Basic:
-			return u.Info()&types.IsString != 0 || u.Kind() == types.Byte || u.Kind() == types.Uint8
-		case *types.Array:
-			return true
-		}
-		return false
+		o, ok := info.Uses[id].(*types.Func)
+		return ok && o.Pkg() != nil && o.Pkg().Path() == path && o.Name() == name
 	}
+	isMac := func(e ast.Expr) bool {
+		c, ok := ast.Unparen(e).(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		v, ok := info.Uses[sel.Sel].(*types.Var)
+		return ok && v.IsField() && v.Name() == "mac" && v.Pkg() != nil && v.Pkg().Path() == "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
+	}
+	equalIn := map[string]int{}
 	for _, f := range files {
+		allowed := map[ast.Expr]bool{}
+		var fn string
 		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.BinaryExpr:
-				switch n.Op {
-				case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
-					if !constant(n.X) && !constant(n.Y) && (risky(n.X) || risky(n.Y)) {
-						problems = append(problems, fmt.Sprintf("%s: a variable-time comparison %s", f.Name.Name, types.ExprString(n)))
+			if fd, ok := n.(*ast.FuncDecl); ok {
+				fn = fd.Name.Name
+			}
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch {
+			case pkgFunc(c, "crypto/hmac", "Equal"):
+				mac := false
+				for _, a := range c.Args {
+					if isMac(a) {
+						allowed[ast.Unparen(a)] = true
+						mac = true
 					}
 				}
-			case *ast.SwitchStmt:
-				if n.Tag != nil && !constant(n.Tag) && risky(n.Tag) {
-					for _, c := range n.Body.List {
-						for _, e := range c.(*ast.CaseClause).List {
-							if !constant(e) {
-								problems = append(problems, fmt.Sprintf("%s: a variable-time switch case %s", f.Name.Name, types.ExprString(e)))
-							}
+				if mac {
+					equalIn[fn]++
+				} else {
+					problems = append(problems, fmt.Sprintf("%s: hmac.Equal in %s compares no MAC", f.Name.Name, fn))
+				}
+			case isEncode(c, info):
+				for _, a := range c.Args {
+					a = ast.Unparen(a)
+					if isMac(a) {
+						allowed[a] = true
+					}
+					if ap, ok := a.(*ast.CallExpr); ok && ap.Ellipsis.IsValid() && len(ap.Args) == 2 && isMac(ap.Args[1]) {
+						if b, ok := info.Uses[identOf(ap.Fun)].(*types.Builtin); ok && b.Name() == "append" {
+							allowed[ast.Unparen(ap.Args[1])] = true
 						}
-					}
-				}
-			case *ast.CallExpr:
-				var id *ast.Ident
-				switch fn := n.Fun.(type) {
-				case *ast.Ident:
-					id = fn
-				case *ast.SelectorExpr:
-					id = fn.Sel
-				}
-				if id == nil {
-					break
-				}
-				if o, ok := info.Uses[id].(*types.Func); ok && o.Pkg() != nil {
-					if o.Pkg().Path() == "crypto/hmac" && o.Name() == "Equal" {
-						equal++
 					}
 				}
 			}
 			return true
 		})
+		// Every use of the mac field is an allowed call, a compare with nil
+		// (a Tokens New did not make), or New's keyed field in the literal
+		// that builds a Tokens: never a func value held elsewhere.
+		ok := map[*ast.Ident]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.BinaryExpr:
+				x, y := ast.Unparen(n.X), ast.Unparen(n.Y)
+				if _, isNil := info.Uses[identOf(y)].(*types.Nil); isNil {
+					if sel, isSel := x.(*ast.SelectorExpr); isSel && (n.Op == token.EQL || n.Op == token.NEQ) {
+						ok[sel.Sel] = true
+					}
+				}
+			case *ast.KeyValueExpr:
+				if id, isID := n.Key.(*ast.Ident); isID {
+					ok[id] = true
+				}
+			case ast.Expr:
+				if isMac(n) {
+					if !allowed[n] {
+						problems = append(problems, fmt.Sprintf("%s: a MAC is used other than in hmac.Equal or the response: %s", f.Name.Name, types.ExprString(n)))
+					}
+					ok[n.(*ast.CallExpr).Fun.(*ast.SelectorExpr).Sel] = true
+				}
+			}
+			return true
+		})
+		for id, o := range info.Uses {
+			if v, isVar := o.(*types.Var); isVar && v.IsField() && v.Name() == "mac" && v.Pkg() == info.Uses[id].Pkg() &&
+				v.Pkg().Path() == "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf" &&
+				id.Pos() >= f.Pos() && id.Pos() < f.End() && !ok[id] {
+				problems = append(problems, fmt.Sprintf("%s: the mac field is used other than by a call", f.Name.Name))
+			}
+		}
 	}
-	if equal != 2 {
-		problems = append(problems, fmt.Sprintf("hmac.Equal is called %d times, want 2 (Check's token, age's tag)", equal))
+	if equalIn["Check"] != 1 || equalIn["age"] != 1 || len(equalIn) != 2 {
+		problems = append(problems, fmt.Sprintf("hmac.Equal over a MAC is called %v, want once in Check and once in age", equalIn))
 	}
 	return problems
+}
+
+func identOf(e ast.Expr) *ast.Ident {
+	switch e := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		return e
+	case *ast.SelectorExpr:
+		return e.Sel
+	}
+	return nil
+}
+
+// isEncode is a call of (*encoding/base64.Encoding).EncodeToString.
+func isEncode(c *ast.CallExpr, info *types.Info) bool {
+	id := identOf(c.Fun)
+	if id == nil {
+		return false
+	}
+	o, ok := info.Uses[id].(*types.Func)
+	return ok && o.Pkg() != nil && o.Pkg().Path() == "encoding/base64" && o.Name() == "EncodeToString"
 }
 
 // checked is this package's non-test Go files, type-checked. A type-check
