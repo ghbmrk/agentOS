@@ -130,7 +130,8 @@ type rig struct {
 	cookie, token string
 	tokenOf       *Server
 	// heard is the mDNS names the relay heard on each Wi-Fi identity's
-	// VLAN (Config.Heard).
+	// VLAN, and on the Owner and Household networks by the network's
+	// name (Config.Heard).
 	heard map[string][][]string
 }
 
@@ -160,8 +161,13 @@ func newRig(t *testing.T) *rig {
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		Policy: e, Channel: g.ch, Cert: g.cert.Leaf, Zone: zone,
-		Now:   func() time.Time { return g.now },
-		Heard: func(wifi string) [][]string { return g.heard[wifi] },
+		Now: func() time.Time { return g.now },
+		Heard: func(network, wifi string) [][]string {
+			if network != policy.NetDevices {
+				return g.heard[network]
+			}
+			return g.heard[wifi]
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

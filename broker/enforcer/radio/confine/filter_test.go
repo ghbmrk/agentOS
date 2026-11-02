@@ -80,6 +80,11 @@ func TestFilterDeniesEachEntry(t *testing.T) {
 		{"clone, a thread", sysClone, auditArchX8664, syscall.CLONE_VM | syscall.CLONE_THREAD, retAllow},
 		{"clone, a user namespace", sysClone, auditArchX8664, syscall.CLONE_NEWUSER, eperm},
 		{"clone, a network namespace", sysClone, auditArchX8664, syscall.CLONE_NEWNET, eperm},
+		{"clone, a thread in a new namespace", sysClone, auditArchX8664, syscall.CLONE_VM | syscall.CLONE_THREAD | syscall.CLONE_NEWNET, eperm},
+		// No stack starts a process (#4521): fork's clone, and vfork's
+		// (posix_spawn, system).
+		{"clone, a process", sysClone, auditArchX8664, uint32(syscall.SIGCHLD), eperm},
+		{"clone, a vfork", sysClone, auditArchX8664, syscall.CLONE_VM | syscall.CLONE_VFORK | uint32(syscall.SIGCHLD), eperm},
 		{"socket, a listed family", sysSocket, auditArchX8664, syscall.AF_UNIX, retAllow},
 		{"socket, another family", sysSocket, auditArchX8664, syscall.AF_PACKET, eperm},
 		{"socketpair, another family", sysSocketpair, auditArchX8664, syscall.AF_INET, eperm},
@@ -116,7 +121,7 @@ func TestFilterDeniesEachEntry(t *testing.T) {
 // reaches it (a call the build host's headers lack, or one outside the
 // namespace and mount class).
 var pinned = map[string]uint32{
-	"ptrace": 101, "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161, "unshare": 272, "setns": 308,
+	"ptrace": 101, "fork": 57, "vfork": 58, "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161, "unshare": 272, "setns": 308,
 	"bpf": 321, "kexec_load": 246, "kexec_file_load": 320,
 	"init_module": 175, "finit_module": 313, "delete_module": 176,
 	"keyctl": 250, "add_key": 248, "request_key": 249, "perf_event_open": 298, "userfaultfd": 323,

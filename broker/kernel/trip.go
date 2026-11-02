@@ -120,17 +120,19 @@ type tripResumed struct {
 
 // trips is the decoy part of the state.
 type trips struct {
-	set     bool
-	entries []decoy.Entry
-	m       *match.Matcher
-	honey   map[key.ID]int // a honey key's ID -> its entry
-	log     []Trip         // every trip, in order
+	table **table // the logged table, or nil; fmt prints a pointer to a pointer as an address (DECOY-a-7)
+	log   []Trip  // every trip, in order
 	// paused is the keys a trip paused, which only ResumeTrip lifts, each
 	// to whether the owner had paused it before: that pause stays.
 	paused  map[key.ID]bool
 	stopped bool   // planning stopped by a trip
 	full    uint64 // the newest full trip, which set the pause
 	resumes int
+}
+
+type table struct {
+	entries []decoy.Entry
+	m       *match.Matcher
 }
 
 // HoneyKey makes a honey key from r, for decoy.Generate (decoy.Own): a root
@@ -154,7 +156,7 @@ var HoneyKeys = decoy.Own{Kind: decoy.KHoneyKey, Place: decoy.PPlannerView, Make
 
 // LogDecoyTable logs the box's decoy table, once, at first boot (KRN-1).
 func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
-	if k.s.decoys.set {
+	if k.s.decoys.table != nil {
 		return ErrDecoysSet
 	}
 	if t.Len() == 0 {
@@ -172,10 +174,10 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
 		return errors.New("kernel: a call trip names its exit")
 	}
-	if !k.s.decoys.set {
+	if k.s.decoys.table == nil {
 		return ErrNoDecoy
 	}
-	id, ok := k.s.decoys.m.Dest(a)
+	id, ok := (*k.s.decoys.table).m.Dest(a)
 	if !ok {
 		return ErrNoDecoy
 	}
@@ -260,9 +262,10 @@ func (d *trips) held() bool { return d.stopped || len(d.paused) > 0 }
 
 // honeyOf is the table entry of the honey key ky is or extends.
 func (d *trips) honeyOf(ky key.Key) (int, bool) {
-	for _, id := range chain(ky) {
-		if e, ok := d.honey[id]; ok {
-			return e, true
+	for i, en := range (*d.table).entries {
+		var hk key.Key
+		if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil && slices.Contains(chain(ky), hk.Tip()) {
+			return i, true
 		}
 	}
 	return 0, false
@@ -290,7 +293,7 @@ func chain(ky key.Key) []key.ID {
 // the full response.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
-	if !d.set {
+	if d.table == nil {
 		return nil
 	}
 	var hit *Trip
@@ -300,8 +303,8 @@ func (s *State) tripOf(p Plan) *Trip {
 	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	steps, _ := json.Marshal(p.Steps)
-	for _, id := range d.m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
-		if pl := d.entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
+	for _, id := range (*d.table).m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
+		if pl := (*d.table).entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
 			t := &Trip{Cause: CauseValue, Exit: ExitKernel, Entry: id, Response: RespFull, Plan: p.ID}
 			if err == nil {
 				t.Scopes = v.Scopes()
@@ -325,7 +328,7 @@ func (s *State) tripOf(p Plan) *Trip {
 		for _, n := range names {
 			if a, ok := destOf(st.Args[n]); ok {
 				for _, f := range ipform.Forms(a) {
-					if id, ok := d.m.Dest(f); ok {
+					if id, ok := (*d.table).m.Dest(f); ok {
 						t.Cause, t.Entry = CauseDest, id
 						return t
 					}
@@ -398,7 +401,7 @@ func (b ownerTrip) again(s *State) (Trip, derived, bool) {
 // scope and its extension's chain, which hold its funding key (Hold).
 func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 	d := &s.decoys
-	if !d.set || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
+	if d.table == nil || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
 		return nil
 	}
 	id, ok := d.honeyOf(ky)
@@ -450,7 +453,7 @@ func (s *State) resumeOK(b tripResumed) bool {
 // at Extend or Issue is a trip.owner entry, derived again from its key.
 func (s *State) tripOK(t Trip, rejected string) bool {
 	d := &s.decoys
-	if !d.set || t.Entry < 0 || t.Entry >= len(d.entries) || t.Exit == "" {
+	if d.table == nil || t.Entry < 0 || t.Entry >= len((*d.table).entries) || t.Exit == "" {
 		return false
 	}
 	switch t.Cause {
@@ -506,20 +509,14 @@ func (s *State) applyTrip(e Entry) error {
 	d := &s.decoys
 	switch e.Type {
 	case TDecoyTable:
-		if d.set {
+		if d.table != nil {
 			return nil
 		}
 		t, err := decoy.FromEvent(e.V, e.Body)
 		if err != nil {
 			return fmt.Errorf("entry %d %s: %w", e.Seq, e.Type, ErrCorrupt)
 		}
-		d.set, d.entries, d.m, d.honey = true, t.Entries(), t.Matcher(), map[key.ID]int{}
-		for i, en := range d.entries {
-			var hk key.Key
-			if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil {
-				d.honey[hk.Tip()] = i
-			}
-		}
+		d.table = new(&table{t.Entries(), t.Matcher()})
 	case TTrip:
 		t, err := body[Trip](e)
 		if err != nil {

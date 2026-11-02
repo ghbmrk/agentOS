@@ -10,9 +10,10 @@ first (SECONDS, then file size), and the step prints each module's wall time, th
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
 Exit 1 if any module failed or did not run, or if the longest unit runs over FLOOR seconds and
 over LONG_POLE times the ideal: that one unit then sets the step's length. A unit is a module, so
-split it (SPLIT), or for a module already split, its slowest part (one test with any class setup
-it ran), which further splitting cannot shorten: the step says the module is at its split limit. A module listed in SERIAL runs alone after the pool drains: one that cannot share the
-runner with another module goes there, with its reason.
+split it (SPLIT), or for a module already split, its slowest part (one test with any class or
+module setup and teardown its worker ran around it), which further splitting cannot shorten: the
+step says the module is at its split limit. A module listed in SERIAL runs alone after the pool
+drains: one that cannot share the runner with another module goes there, with its reason.
 A module listed in SPLIT runs as `unit_tests.py --split <module>` under the same strace: that one
 process forks worker processes, each taking the next test from a shared counter, so the module's
 slowest test, not the module, sets the step's floor (CI-par-3). Its last line names that slowest
@@ -37,8 +38,10 @@ import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# bind: a fixed port or socket name shared by two modules is a clash (tests/clash_audit.py).
-STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e", "trace=open,openat,openat2,bind",
+# bind: a fixed port or socket name shared by two modules is a clash; symlink, symlinkat, chdir
+# and fchdir let tests/clash_audit.py resolve a path the kernel gave no file for, as it was walked.
+STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e",
+          "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
           "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
 SERIAL = {}
@@ -82,20 +85,30 @@ class _Claimed(unittest.TestSuite):
         self.all, self.counter, self.ran, self.parts = tests, counter, ran, parts
 
     def __iter__(self):
-        # A part's time runs from handing out its test to asking for the next: the test, its class
-        # and module setup if this worker had not set them up, and the previous class's teardown.
-        start = None
+        # A part's time runs from handing out its test to handing out the next, or to the end of
+        # run(): the test, its class and module setup if this worker had not set them up, the
+        # previous class's teardown, and for the worker's last part its final class and module
+        # teardown.
         while True:
-            if start is not None:
-                self.parts[self.ran[-1]] = time.monotonic() - start
             with self.counter.get_lock():
                 i = self.counter.value
                 self.counter.value += 1
             if i >= len(self.all):
                 return
+            self._close()
             self.ran.append(i)
-            start = time.monotonic()
+            self.start = time.monotonic()
             yield self.all[i]
+
+    def _close(self):
+        if self.ran:
+            self.parts[self.ran[-1]] = time.monotonic() - self.start
+
+    def run(self, result, debug=False):
+        try:
+            return super().run(result, debug)
+        finally:
+            self._close()
 
 
 def _flatten(suite):
@@ -251,11 +264,15 @@ def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, 
     for m in failed:
         write(f"::error::{m} failed\n")
     pole = long_pole(results, jobs, split)
-    if pole and pole[0] in split:
-        what = f"its slowest part, {pole[3][1]}, took" if pole[3] else "it named no slowest part and took"
-        write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT): {what} {pole[1]:.0f}s, over "
-              f"{LONG_POLE} times the step's ideal {pole[2]:.0f}s. It is at its split limit: shorten that test "
-              f"or break it into smaller tests\n")
+    if pole and pole[0] in split and pole[3]:
+        write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT): its slowest part, {pole[3][1]}, "
+              f"took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s. It is at its split "
+              f"limit: a part is the test plus any class or module setup and teardown its worker ran around it, "
+              f"so shorten that test or that setup or teardown, or break the test into smaller ones\n")
+    elif pole and pole[0] in split:
+        write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT), but its run gave no slowest part "
+              f"(it stopped before its last line: see its log above), so its whole time counts: {pole[1]:.0f}s, "
+              f"over {LONG_POLE} times the step's ideal {pole[2]:.0f}s\n")
     elif pole:
         write(f"::error::{pole[0]} took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s: "
               f"split it (tools/unit_tests.py SPLIT)\n")

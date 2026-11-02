@@ -62,9 +62,12 @@ type Host struct {
 // Proc is a stack's process as its launcher holds it (*confine.Proc).
 // Stop kills it and returns once it, and every process it started, has
 // exited and been reaped; it may be called more than once, and alongside
-// the launcher's own wait.
+// the launcher's own wait. Pid is its process id, above 0 for a process
+// that was started: a nil *confine.Proc held in a Proc gives 0, so Attach
+// refuses it rather than panicking at the link's first fault (#4521).
 type Proc interface {
 	Stop() error
+	Pid() int
 }
 
 // Conn is a stack's link: a socket the host can put a write deadline on,
@@ -132,7 +135,7 @@ func (h *Host) Attach(s Stack, p Proc, conn Conn) error {
 	if Declared[s] == nil {
 		return fmt.Errorf("radio: stack %q not declared", s)
 	}
-	if p == nil || conn == nil {
+	if p == nil || p.Pid() <= 0 || conn == nil {
 		return errors.New("radio: attach needs the stack's process and link")
 	}
 	h.amu[s].Lock()

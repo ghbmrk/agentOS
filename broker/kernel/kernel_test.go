@@ -68,7 +68,7 @@ func (r *rig) tick(now int64) error {
 }
 
 func cfg(r *rig) kernel.Config {
-	return kernel.Config{Store: r.store, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv,
+	return kernel.Config{Store: r.store, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Key: logKey,
 		Rand: rand.NewChaCha8([32]byte{1})}
 }
 

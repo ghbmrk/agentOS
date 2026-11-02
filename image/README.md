@@ -18,12 +18,13 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `mkosi/tmpfiles.allow` | Every tmpfiles.d line the image may ship; `mkosi.finalize` fails the build on any other (#1543) |
 | `mkosi/exec.allow` | Every udev rules file, generator, modules-load.d, modprobe.d, sysctl.d and binfmt.d file, and systemd shutdown and sleep hook, the image may ship, by its SHA-256; `mkosi.finalize` fails the build on any other (#1556, #2176) |
 | `mkosi/mkosi.extra/` | Health check gating boot-complete, boot report, broker unit, root growth, the noexec `etc/fstab` and `/tmp` drop-in, the weekly reboot (`agentos-reboot.timer`, UPD-10) and its monthly restore drill (`agentos-drill-report.service`, #2932) |
-| `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest; fails the release on a private key or Owner Card anywhere on the disk outside `/usr` slot A (HW-1, IMG-1-1) |
+| `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest, the `/usr` list read back from the verified partition (#4059); fails the release on a private key or Owner Card anywhere on the disk outside `/usr` slot A (HW-1, IMG-1-1) |
+| `compare_manifests.py` | The reproduce job's comparison of two builds of one commit: package manifests, initrds member by member (`--initrd`, IMG-2) and `/usr` lists path by path (`--usr`), differences only in time or link count last (#4059, #4471) |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop, and that a host disk attached on the first boot comes out unchanged (ONB-2, IMG-1-1) |
 | `probe_inbound.py` | Probes box ports through QEMU's host forwards for `ci_boot.sh`: dropped, answered or error |
 
 Outputs in OUT: `agentos_V.raw` (the drive), `agentos_V.usr.raw` and `.usr-verity.raw` (the
-release's `/usr`), `agentos_V+3.conf` (its boot entry), `agentos_V.release.json`, the package
+release's `/usr`), `agentos_V.usr.list` (every `/usr` path's type, mode, owner, mtime, link count, size and hash or link target), `agentos_V+3.conf` (its boot entry), `agentos_V.release.json`, the package
 manifest, the dpkg status and os-release the vulnerability scan reads, and `SHA256SUMS`. Write the `.raw` to a drive with `dd` or any image writer.
 
 Assumptions and gaps: [ASSUMPTIONS.md](ASSUMPTIONS.md).

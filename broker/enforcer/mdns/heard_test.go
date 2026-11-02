@@ -117,6 +117,37 @@ func TestHeardOwnNames(t *testing.T) {
 	}
 }
 
+// TestHeardInstanceNeedsItsHost: an instance is offered only while the
+// host its SRV named is offered too (#4565, L3 on #4531): once another
+// interface claims that host, or the host's own record ends, the relay
+// would pass the instance's SRV nowhere, so the card offers neither. A
+// later SRV naming another live host offers it again.
+func TestHeardInstanceNeedsItsHost(t *testing.T) {
+	f := NewFilter()
+	f.Prove("ap0.105", printerLink, response([]record{
+		a("Printer.local", "10.13.0.2", 120),
+		a("Spare.local", "10.13.0.2", 60),
+		srv("Office._ipp._tcp.local", "Printer.local", 120),
+	}, nil), t0)
+	if got, want := f.Heard("ap0.105", t0), heardNames("Office._ipp._tcp.local", "Printer.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("heard %q, want %q", got, want)
+	}
+	// Another interface claims the host: neither is offered.
+	f.Hear("hh0", response([]record{a("Printer.local", "10.11.0.2", 120)}, nil), t0.Add(time.Second))
+	if got, want := f.Heard("ap0.105", t0.Add(time.Second)), heardNames("Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("heard %q with the host claimed elsewhere, want %q", got, want)
+	}
+	// The SRV moves to a host the sender still holds: offered again.
+	f.Prove("ap0.105", printerLink, response([]record{srv("Office._ipp._tcp.local", "Spare.local", 120)}, nil), t0.Add(2*time.Second))
+	if got, want := f.Heard("ap0.105", t0.Add(2*time.Second)), heardNames("Office._ipp._tcp.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("heard %q on the new host, want %q", got, want)
+	}
+	// That host's TTL ends before the instance's: the instance goes with it.
+	if got := f.Heard("ap0.105", t0.Add(61*time.Second)); len(got) != 0 {
+		t.Errorf("heard %q after the host's TTL", got)
+	}
+}
+
 // TestHeardBounded: a flood of names on one interface keeps at most
 // maxNames there, and its labels go with the names a sweep drops.
 func TestHeardBounded(t *testing.T) {
@@ -133,7 +164,8 @@ func TestHeardBounded(t *testing.T) {
 // unpaired device's VLAN, nft.Hears) is listened on, read under its own
 // limit, and its sender's names are learned, but nothing heard there
 // goes anywhere (D-266, acceptance 4); a paired interface still relays.
-// HeardBy finds a device's names by its Wi-Fi identity.
+// HeardBy finds a device's names by its Wi-Fi identity, and a person's
+// network's by the network (#4411).
 func TestHearOnlyPassesNothing(t *testing.T) {
 	hears, err := nft.Hears(fixturePolicy(), fixtureLayout())
 	if err != nil {
@@ -165,14 +197,30 @@ func TestHearOnlyPassesNothing(t *testing.T) {
 		t.Errorf("heard %q, want %q", got, want)
 	}
 	r.f.Prove("ap0.101", printerLink, response([]record{a("now.local", "10.13.0.2", 120)}, nil), time.Now())
-	if got := heard("vlan101"); !slices.EqualFunc(got, heardNames("now.local"), slices.Equal) {
+	if got := heard("devices", "vlan101"); !slices.EqualFunc(got, heardNames("now.local"), slices.Equal) {
 		t.Errorf("HeardBy(vlan101) = %q", got)
 	}
-	if got := heard("vlan105"); len(got) != 0 {
+	if got := heard("devices", "vlan105"); len(got) != 0 {
 		t.Errorf("HeardBy(vlan105) = %q", got)
 	}
-	if got := heard("not-a-vlan"); got != nil {
+	if got := heard("devices", "not-a-vlan"); got != nil {
 		t.Errorf("HeardBy(not-a-vlan) = %q", got)
+	}
+	household := []netip.Prefix{netip.MustParsePrefix("10.11.0.1/24")}
+	r.f.Prove("hh0", household, response([]record{a("macbook.local", "10.11.0.2", 120)}, nil), time.Now())
+	r.f.Prove("own0", household, response([]record{a("phone.local", "10.11.0.3", 120)}, nil), time.Now())
+	for _, c := range []struct {
+		network, wifi string
+		want          [][]string
+	}{
+		{"household", "", heardNames("macbook.local")},
+		{"owner", "vlan101", heardNames("phone.local")}, // one network: the identity is not read
+		{"guests", "", nil},
+		{"household", "vlan101", heardNames("macbook.local")},
+	} {
+		if got := heard(c.network, c.wifi); !slices.EqualFunc(got, c.want, slices.Equal) {
+			t.Errorf("HeardBy(%s, %s) = %q, want %q", c.network, c.wifi, got, c.want)
+		}
 	}
 	// The read limit holds on a hear-only interface too.
 	for range readBurst {
@@ -189,9 +237,10 @@ func TestHearOnlyPassesNothing(t *testing.T) {
 }
 
 // TestHearOnly: real packets, through the loaded ruleset and a relay that
-// also hears every device's VLAN, over IPv4 and IPv6 (D-266, acceptance
-// 4): the unpaired TV's announcement and query reach no other host, the
-// relay learns the TV's names, and the paired printer's answer still
+// also hears every device's VLAN and the Owner network, over IPv4 and
+// IPv6 (D-266, acceptance 4; #4411): the unpaired TV's announcement and
+// query and an unpaired Owner network's announcement reach no other host,
+// the relay learns their names, and the paired printer's answer still
 // reaches Household.
 func TestHearOnly(t *testing.T) {
 	for _, v6 := range []bool{false, true} {
@@ -260,6 +309,7 @@ func hearOnly(t *testing.T, v6 bool) {
 	send("ap0.101", response([]record{a("tv-answer.local", addr("ap0.101"), 120), srv("Den._airplay._tcp.local", "tv-answer.local", 120)}, nil))
 	send("ap0.101", &message{questions: []question{{dn("tv-query.local"), typeA, 1}}})
 	send("ap0.105", response([]record{a("printer-answer.local", addr("ap0.105"), 120)}, nil))
+	send("own0", response([]record{a("phone-answer.local", addr("own0"), 120)}, nil)) // no pair: heard only (#4411)
 	heard := map[string][]string{}
 	buf := make([]byte, maxPacket)
 	for ifc, c := range socks {
@@ -286,5 +336,8 @@ func hearOnly(t *testing.T, v6 bool) {
 	}
 	if got, want := f.Heard("ap0.101", time.Now()), heardNames("Den._airplay._tcp.local", "tv-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("the relay heard the TV prove %q, want %q", got, want)
+	}
+	if got, want := f.Heard("own0", time.Now()), heardNames("phone-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("the relay heard the Owner network prove %q, want %q", got, want)
 	}
 }

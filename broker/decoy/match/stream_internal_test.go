@@ -29,3 +29,27 @@ func TestStreamScansInChunks(t *testing.T) {
 		t.Fatalf("a full chunk did not scan: pending %d, tail %d", s.pending, len(s.buf))
 	}
 }
+
+// KRN-12: the joined tail is carried across a chunk edge, and a JSON
+// escape split there is joined, so a wrapped value across the edge trips
+// (#4500).
+func TestStreamJoinsAcrossChunks(t *testing.T) {
+	v := []byte("q7Xz2pL9mW4vR8tY3nB6kJ5h")
+	m := New([]Value{{ID: 4, Bytes: v}}, nil)
+	for cut := 1; cut < len(v); cut++ {
+		for _, br := range []string{"\n", `\n`, `\r\n`, `\\n`, `\\\\r\\\\n`} {
+			w := string(v[:cut]) + br + string(v[cut:])
+			for at := range len(br) + 1 {
+				s := m.Stream()
+				s.Write([]byte(strings.Repeat("a", carryPattern-cut-at) + w[:cut+at]))
+				if s.pending != 0 {
+					t.Fatalf("no chunk scanned before the edge: pending %d", s.pending)
+				}
+				s.Write([]byte(w[cut+at:]))
+				if r := s.Result(); len(r.Trips) != 1 {
+					t.Fatalf("%q cut at %d+%d across a chunk edge tripped %v", w, cut, at, r.Trips)
+				}
+			}
+		}
+	}
+}

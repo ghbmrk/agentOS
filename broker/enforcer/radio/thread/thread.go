@@ -57,7 +57,10 @@ var ErrRadio = errors.New("thread: radio URL refused")
 // only confine links os/exec (arc2).
 func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
 	// The URL is the last argument: it must not read as an option.
-	if !strings.HasPrefix(radioURL, "spinel+") || strings.ContainsAny(radioURL, " \t\n") {
+	// Not forkpty: ot-daemon would start the radio as its own child, and
+	// no stack starts a process (confine, ENF-k-12).
+	scheme, _, _ := strings.Cut(radioURL, "://")
+	if !strings.HasPrefix(radioURL, "spinel+") || strings.ContainsAny(radioURL, " \t\n") || strings.Contains(scheme, "forkpty") {
 		return nil, ErrRadio
 	}
 	if !strings.HasPrefix(state, "/") {

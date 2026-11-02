@@ -2,6 +2,7 @@ package confine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -32,7 +34,17 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if len(os.Args) == 2 && os.Args[1] == leakArg {
-		os.Exit(leakStderr())
+		os.Exit(leakStderr(false))
+	}
+	if len(os.Args) == 3 && os.Args[1] == leakArg && os.Args[2] == "exit" {
+		os.Exit(leakStderr(true))
+	}
+	if len(os.Args) == 2 && os.Args[1] == sleepArg {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
+	if len(os.Args) == 3 && os.Args[1] == initArg {
+		os.Exit(initSignal(os.Args[2]))
 	}
 	if len(os.Args) == 4 && os.Args[1] == viewArg {
 		os.Exit(viewProbe(os.Args[2], os.Args[3]))
@@ -75,8 +87,8 @@ const (
 )
 
 // liveCases is every filter rule the live probes claim: each of
-// stacks_test.go's namespace and mount keys, and the other mount calls
-// on the list but pivot_root, open_tree_attr, statmount and listmount. The interpreter model
+// stacks_test.go's namespace, mount and process keys, and the other mount calls
+// on the list but pivot_root, open_tree_attr, statmount, listmount and vfork. The interpreter model
 // (TestFilterDeniesEachEntry) covers every line of the list; this table
 // shows the kernel itself refusing these with the filter's EPERM, in a
 // process the kernel would otherwise let make them.
@@ -85,6 +97,10 @@ var liveCases = []liveCase{
 	{"unshare-mnt", "unshare", syscall.SYS_UNSHARE, func(*probeState) [6]uintptr { return [6]uintptr{syscall.CLONE_NEWNS} }},
 	{"clone-net", "", sysClone, func(*probeState) [6]uintptr { return [6]uintptr{syscall.CLONE_NEWNET | uintptr(syscall.SIGCHLD)} }},
 	{"clone-user", "", sysClone, func(*probeState) [6]uintptr { return [6]uintptr{syscall.CLONE_NEWUSER | uintptr(syscall.SIGCHLD)} }},
+	// A new process (#4521). Not vfork: its child would run on the
+	// caller's stack, which this raw fork cannot give it.
+	{"clone-process", "", sysClone, func(*probeState) [6]uintptr { return [6]uintptr{uintptr(syscall.SIGCHLD)} }},
+	{"fork", "fork", 57, func(*probeState) [6]uintptr { return [6]uintptr{} }},
 	{"setns", "setns", sysSetns, func(p *probeState) [6]uintptr { return [6]uintptr{p.netns, syscall.CLONE_NEWNET} }},
 	{"mount", "mount", syscall.SYS_MOUNT, func(p *probeState) [6]uintptr {
 		return [6]uintptr{p.str("none"), p.path("m"), p.str("tmpfs"), 0, p.str("")}
@@ -116,12 +132,12 @@ var probeDirs = []string{"t", "u", "m", "v"}
 // kernel sees one thread (it refuses unshare(CLONE_NEWUSER) to a threaded
 // caller with EINVAL, which a probe would misread as a refusal) and a
 // namespace it makes ends with it; a mount change stays in the probe's
-// mount namespace, which ends with the probe. The child inherits the
-// filter. It
-// returns the call's errno, 0 for success, or an error when the child did
-// not exit (the filter killed it).
-func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {
-	pid, e := forkCall(nr, a)
+// mount namespace, which ends with the probe. The child installs the
+// filter (fprog, 0 for none) itself, since under it the probe could not
+// fork. It returns the call's errno, 0 for success, or an error when the
+// child did not exit (the filter killed it) or could not install it.
+func attempt(nr uintptr, a [6]uintptr, fprog uintptr) (syscall.Errno, error) {
+	pid, e := forkCall(nr, a, fprog)
 	if e != 0 {
 		return 0, fmt.Errorf("fork: %v", e)
 	}
@@ -132,21 +148,45 @@ func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {
 	if !ws.Exited() {
 		return 0, fmt.Errorf("child ended by %v", ws.Signal())
 	}
+	if ws.ExitStatus() == noFilter {
+		return 0, errors.New("the child could not install the filter")
+	}
 	return syscall.Errno(ws.ExitStatus()), nil
 }
 
-// forkCall forks; the child makes the call and exits with its errno. The
-// child runs only raw system calls, with no stack check, as the runtime's
-// own fork does.
+// noFilter is the child's exit when it could not install the filter: no
+// errno the cases expect.
+const noFilter = 255
+
+// forkCall forks; the child installs the filter at fprog, unless 0, then
+// makes the call and exits with its errno. A call that made a process of
+// its own (fork with no filter) exits 0 in that process too. The child
+// runs only raw system calls, with no stack check, as the runtime's own
+// fork does.
 //
 //go:nosplit
-func forkCall(nr uintptr, a [6]uintptr) (int, syscall.Errno) {
+func forkCall(nr uintptr, a [6]uintptr, fprog uintptr) (int, syscall.Errno) {
 	pid, _, e := syscall.RawSyscall6(syscall.SYS_CLONE, uintptr(syscall.SIGCHLD), 0, 0, 0, 0, 0)
 	if e == 0 && pid == 0 {
+		if fprog != 0 {
+			if _, _, e = syscall.RawSyscall(syscall.SYS_PRCTL, 38, 1, 0); e == 0 { // PR_SET_NO_NEW_PRIVS
+				_, _, e = syscall.RawSyscall(sysSeccomp, 1, 0, fprog) // SECCOMP_SET_MODE_FILTER
+			}
+			if e != 0 {
+				syscall.RawSyscall(syscall.SYS_EXIT_GROUP, noFilter, 0, 0)
+			}
+		}
 		_, _, e = syscall.RawSyscall6(nr, a[0], a[1], a[2], a[3], a[4], a[5])
 		syscall.RawSyscall(syscall.SYS_EXIT_GROUP, uintptr(e), 0, 0)
 	}
 	return int(pid), e
+}
+
+// sockFprog is struct sock_fprog for prog, for the child to install.
+type sockFprog struct {
+	n    uint16
+	_    [6]byte
+	insn *insn
 }
 
 // liveProbe sets up its mounts and descriptors, installs the filter the
@@ -187,26 +227,27 @@ func liveProbe(variant, dir string) int {
 		args[i] = c.args(p)
 	}
 	fam := slices.Sorted(slices.Values(Thread(1, 1, "/s", "/r", "/d").Families))
+	var prog []insn
 	switch {
 	case variant == "none":
 	case variant == "shipped":
-		if err := install(filter(fam)); err != nil {
-			return fail(err)
-		}
+		prog = filter(fam)
 	case strings.HasPrefix(variant, "drop:"):
 		mutant := slices.DeleteFunc(slices.Clone(denyList), func(d denied) bool { return d.Name == variant[5:] })
 		if len(mutant) != len(denyList)-1 {
 			return fail(fmt.Errorf("%s: no such line", variant))
 		}
-		if err := install(filterOf(mutant, fam)); err != nil {
-			return fail(err)
-		}
+		prog = filterOf(mutant, fam)
 	default:
 		return fail(fmt.Errorf("variant %q", variant))
 	}
+	var fprog *sockFprog
+	if prog != nil {
+		fprog = &sockFprog{n: uint16(len(prog)), insn: &prog[0]}
+	}
 	out := map[string]int{}
 	for i, c := range liveCases {
-		e, err := attempt(c.nr, args[i])
+		e, err := attempt(c.nr, args[i], uintptr(unsafe.Pointer(fprog)))
 		if err != nil {
 			return fail(fmt.Errorf("%s: %w", c.name, err))
 		}
@@ -215,6 +256,8 @@ func liveProbe(variant, dir string) int {
 	// The calls point at p's strings and use f's descriptor.
 	runtime.KeepAlive(p)
 	runtime.KeepAlive(f)
+	runtime.KeepAlive(fprog)
+	runtime.KeepAlive(prog)
 	json.NewEncoder(os.Stdout).Encode(out)
 	return 0
 }
@@ -326,13 +369,13 @@ func TestFilterRefusesLive(t *testing.T) {
 
 // TestLiveCasesNameTheirLines (NET-2 Confined radio stacks): each live
 // case calls the number of the deny-list line it names, and the clone
-// cases carry a CLONE_NEW* flag, so a mutant that drops a line is the
-// mutant of that case's call.
+// cases carry a CLONE_NEW* flag or make a process (no CLONE_THREAD), so a
+// mutant that drops a line is the mutant of that case's call.
 func TestLiveCasesNameTheirLines(t *testing.T) {
 	for _, c := range liveCases {
 		if c.entry == "" {
-			if a := c.args(&probeState{}); c.nr != sysClone || a[0]&cloneNew == 0 {
-				t.Errorf("%s: call %d flags %#x, want clone with a CLONE_NEW* flag", c.name, c.nr, a[0])
+			if a := c.args(&probeState{}); c.nr != sysClone || (a[0]&cloneNew == 0 && a[0]&cloneThread != 0) {
+				t.Errorf("%s: call %d flags %#x, want clone with a CLONE_NEW* flag or without CLONE_THREAD", c.name, c.nr, a[0])
 			}
 			continue
 		}

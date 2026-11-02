@@ -210,8 +210,9 @@ type form struct {
 
 // New makes a matcher. A value is matched raw and in the encodings a sender
 // most often wraps it in: JSON string, URL query, lower and upper hex, and
-// base64 in either alphabet at any offset. An empty value is skipped: a
-// destination-only entry. dests maps an address to the ID a trip names it by.
+// base64 in either alphabet at any offset, in text as written and joined. An
+// empty value is skipped: a destination-only entry. dests maps an address to
+// the ID a trip names it by.
 func New(values []Value, dests map[netip.Addr]int) *Matcher {
 	m := &Matcher{dests: map[netip.Addr]int{}}
 	for _, v := range values {
@@ -289,6 +290,7 @@ func (m *Matcher) Scan(b []byte) Result {
 type Stream struct {
 	m       *Matcher
 	buf     []byte // the carried tail, then the bytes not yet scanned
+	joined  []byte // buf with line breaks removed, kept the same way
 	pending int
 	res     Result
 }
@@ -301,6 +303,7 @@ func (m *Matcher) Stream() *Stream { return &Stream{m: m} }
 // never fails.
 func (s *Stream) Write(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
+	s.joined = join(s.joined, p)
 	s.pending += len(p)
 	if s.pending >= carryPattern {
 		s.scan()
@@ -308,22 +311,38 @@ func (s *Stream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// scan matches the pending bytes with the carried tail and keeps the tail.
+// join appends p to dst without CR, LF or their JSON escapes at any depth
+// (whose '\\'s may end dst), so wrapped base64 or hex, raw or in JSON, matches.
+func join(dst, p []byte) []byte {
+	for _, c := range p {
+		switch {
+		case c == '\r' || c == '\n':
+		case (c == 'r' || c == 'n') && len(dst) > 0 && dst[len(dst)-1] == '\\':
+			dst = bytes.TrimRight(dst, `\`)
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst
+}
+
+// scan matches the pending bytes with the carried tail, as written and
+// joined, and keeps both tails.
 func (s *Stream) scan() {
-	w := s.buf
 	for _, f := range s.m.forms {
-		if bytes.Contains(w, f.b) {
+		if bytes.Contains(s.buf, f.b) || bytes.Contains(s.joined, f.b) {
 			s.res.add(f.id)
 		}
 	}
-	if !s.res.Pattern && Pattern(string(w)) {
+	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
 	keep := max(s.m.carry, carryPattern)
-	if len(w) > keep {
-		w = w[len(w)-keep:]
-	}
-	s.buf, s.pending = append([]byte(nil), w...), 0
+	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, keep), 0
+}
+
+func tail(w []byte, keep int) []byte {
+	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
 // Result scans what is pending and returns what the stream has found.

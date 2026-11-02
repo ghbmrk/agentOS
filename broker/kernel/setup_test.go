@@ -167,7 +167,6 @@ func mustJSON(t *testing.T, v any) []byte {
 // key, or keys signed for another box, reach the clerks.
 func TestLoggedAnchorsReadOnlyThisBoxsSetup(t *testing.T) {
 	s := newSetupRig(t)
-	var logKey [32]byte // cfg's
 	if a, ok, err := kernel.LoggedAnchors(s.store.B, logKey, s.head.pub); ok || err != nil || a != nil {
 		t.Fatalf("an empty log: %v, %v, %v", a, ok, err)
 	}
