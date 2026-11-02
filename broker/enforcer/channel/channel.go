@@ -174,8 +174,11 @@ type Event struct {
 	Code   wire.Code
 	Reason string // fixed text
 	// Dropped is how many of a cut core's lines went unlogged past
-	// KindPaused's bucket since the line before this one, so the record
-	// keeps how much a cut core tried (#4657).
+	// KindPaused's bucket since the core's line before this one, so the
+	// record keeps how much a cut core tried (#4657). Only the core's own
+	// lines carry it, never a failed hello's or the quiet line (#4683). A
+	// sink must keep it: the logged lines plus the sum of Dropped are
+	// everything the cut core sent (ENF-d-4).
 	Dropped int
 }
 
@@ -243,7 +246,8 @@ type Channel struct {
 	// bucket and go unlogged (#4558, #4606).
 	pausedQuiet bool
 	// dropped counts a cut core's lines dropped past KindPaused's bucket
-	// since the last line logged, which carries it (Event.Dropped).
+	// since the core's last line logged; the next one carries it
+	// (Event.Dropped). It is in memory only: a restart loses it (ENF-d-4).
 	dropped int
 	// queued holds the Log, Alerts, Answer and Cut.Trip calls made under
 	// mu; release runs them after unlocking, so a sink that calls the
@@ -475,10 +479,10 @@ func (c *Channel) preAuth(reason string, err error) error {
 	now := c.cfg.Now()
 	if c.preAuthB.Take(c.rateNow()) {
 		c.preAuthQuiet = false
-		c.log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
+		c.logAside(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
 		c.preAuthQuiet = true
-		c.log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
+		c.logAside(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
 	}
 	return err
 }
@@ -488,9 +492,9 @@ func (c *Channel) preAuth(reason string, err error) error {
 // outside the format while it is cut (#4606). They share KindPaused's
 // bucket; past it one line says they go unlogged, so a tripped core
 // cannot fill the log however it sends them; the next line logged after
-// the bucket refills ends that. Each line dropped is counted, and the next
-// line logged, of any kind, carries the count (#4657). A trip is always
-// logged. The caller holds c.mu.
+// the bucket refills ends that. Each line dropped is counted, and the
+// core's next line logged carries the count (#4657, #4683). A trip is
+// always logged. The caller holds c.mu.
 func (c *Channel) logPaused(now time.Time) bool {
 	if c.pausedB.Take(c.rateNow()) {
 		c.pausedQuiet = false
@@ -498,7 +502,7 @@ func (c *Channel) logPaused(now time.Time) bool {
 	}
 	if !c.pausedQuiet {
 		c.pausedQuiet = true
-		c.log(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "a cut core's lines over the limit: dropped unlogged until the rate falls"})
+		c.logAside(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "a cut core's lines over the limit: dropped unlogged until the rate falls"})
 	}
 	c.dropped++
 	return false
@@ -519,6 +523,13 @@ func (c *Channel) logCut(e Event) {
 // holds c.mu.
 func (c *Channel) log(e Event) {
 	e.Dropped, c.dropped = c.dropped, 0
+	c.logAside(e)
+}
+
+// logAside queues a line that is not the core's own (a failed hello, or
+// the quiet line), so it carries no count of the core's dropped lines,
+// which stays for the core's next line (#4683). The caller holds c.mu.
+func (c *Channel) logAside(e Event) {
 	c.queued = append(c.queued, func() { c.cfg.Log(e) })
 }
 

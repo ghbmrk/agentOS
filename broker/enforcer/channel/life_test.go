@@ -739,3 +739,131 @@ func waitLines(t *testing.T, r *rig, n int) {
 		}
 	}
 }
+
+// TestDropCountEdges (#4683, A18): the count of a cut core's dropped lines
+// counts only lines the bucket dropped and lands only on the core's own
+// lines. A failed hello, logged on its own bucket while a count is
+// pending, neither carries the count nor adds to it; at Reflashed the
+// re-trip's line, always logged, is not counted and carries the count.
+// Revert mutants: a failed hello's line carrying the count; a failed hello
+// counted; the Reflashed re-trip's line counted as dropped or bucketed.
+func TestDropCountEdges(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(4 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	want := 3 * l.Burst
+
+	f, err := wire.Encode(wire.ToEnforcer, wire.Announce{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(r.events())
+	if !r.connect().closed(frameBytes(f.Type, f.Payload)) {
+		t.Fatal("a frame before the hello was not dropped")
+	}
+	ev := r.events()[n:]
+	if len(ev) != 1 || ev[0].Kind != KindHello || ev[0].Code != wire.Refused {
+		t.Fatalf("a failed hello logged %+v, want its one line", ev)
+	}
+	if ev[0].Dropped != 0 {
+		t.Errorf("a failed hello's line carried the cut core's count %d", ev[0].Dropped)
+	}
+
+	// Reflashed: the reconnect is bucketed and dropped (one more), and the
+	// malformed frame is a new trip, logged with the count.
+	r.cut.set(Reflashed)
+	n = len(r.events())
+	if !r.dial().closed(frameBytes(wire.TCommand, []byte{1})) {
+		t.Fatal("a malformed frame did not end the connection")
+	}
+	want++
+	var got []Event
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindFrame {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("the Reflashed core's malformed frame logged %d lines, want 1", len(got))
+	}
+	if got[0].Dropped != want {
+		t.Errorf("the re-trip's line carried %d dropped lines, want %d", got[0].Dropped, want)
+	}
+}
+
+// TestDropCountRestart (#4683, ENF-d-4): the count lives in the channel's
+// memory, so a restart of the channel loses a count no line has carried
+// yet; the quiet line already logged records that lines were dropped, and
+// the restarted channel's first line carries none.
+func TestDropCountRestart(t *testing.T) {
+	var cfg Config
+	r := newRig(t, func(c *Config) { cfg = *c })
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(2 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	quiet := 0
+	for _, e := range r.events() {
+		if e.Kind == KindPaused {
+			quiet++
+		}
+	}
+	if quiet != 1 {
+		t.Fatalf("%d quiet lines before the restart, want 1", quiet)
+	}
+	ch, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ch = ch
+	n := len(r.events())
+	cl = r.dial()
+	waitLines(t, r, n+1)
+	if e := r.events()[n]; e.Dropped != 0 {
+		t.Errorf("the restarted channel's first line carried %d dropped lines, want 0", e.Dropped)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}
+
+// TestEveryEventFieldRendered (#4683, ENF-d-4, ENF-d-8): the owner's line
+// and the detail view show every Event field but At, which slice l's
+// renderer shows in the configured zone. A field a render drops, such as
+// Dropped, breaks the invariant that the logged lines plus the sum of
+// Dropped equal what the cut core sent. A new field fails here until it is
+// rendered.
+func TestEveryEventFieldRendered(t *testing.T) {
+	base := Event{Kind: KindFrame, Reason: "r"}
+	typ := reflect.TypeOf(base)
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if name == "At" {
+			continue
+		}
+		e := base
+		v := reflect.ValueOf(&e).Elem().Field(i)
+		switch {
+		case name == "Code": // OK has no word; any other code shows
+			v.Set(reflect.ValueOf(wire.Refused))
+		case v.Kind() == reflect.String:
+			v.SetString(v.String() + "x")
+		case v.CanInt():
+			v.SetInt(7)
+		case v.CanUint():
+			v.SetUint(7)
+		default:
+			t.Fatalf("field %s of kind %s: teach this test to set it", name, v.Kind())
+		}
+		if e.Line() == base.Line() || e.Detail() == base.Detail() {
+			t.Errorf("Event.%s is not rendered: %q", name, e.Line())
+		}
+	}
+}
