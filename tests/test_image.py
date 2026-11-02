@@ -1578,6 +1578,84 @@ class ConfigTest(unittest.TestCase):
         wait = sum(min(2 ** n, 60) for n in range(20))
         self.assertTrue(600 <= wait <= 1200, wait)
 
+    def test_build_apt_reads_only_the_pinned_files(self):
+        # #4591: the test above reads only the retry file, so a second file in the build's apt
+        # config (apt.conf.d, apt.conf, trusted.gpg.d, auth.conf.d, preferences.d) could set
+        # Acquire::AllowInsecureRepositories and pass on review alone. Every entry of the tree is
+        # pinned by path and kind, so any addition, symlink or rename here needs a deliberate edit.
+        why = "#4591 pins what mkosi's build-time apt reads; change this test deliberately"
+        tree = MK / "mkosi.pkgmngr"
+        got = []
+
+        def fail(err):
+            raise err
+        for d, dirs, files in os.walk(tree, onerror=fail):
+            for n in dirs + files:
+                p = pathlib.Path(d, n)
+                kind = "link" if p.is_symlink() else "dir" if p.is_dir() else "file"
+                got.append((p.relative_to(tree).as_posix(), kind))
+        self.assertEqual(sorted(got), [
+            ("etc", "dir"),
+            ("etc/apt", "dir"),
+            ("etc/apt/apt.conf.d", "dir"),
+            ("etc/apt/apt.conf.d/80-agentos-retries", "file"),
+            ("etc/apt/sources.list.d", "dir"),
+            ("etc/apt/sources.list.d/mkosi.sources", "file"),
+        ], why)
+        # Nothing else feeds mkosi v24.3 config or packages. Its defaults are mkosi.* names beside a
+        # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
+        # so both config folders' mkosi.* names are pinned.
+        self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
+            "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
+            "mkosi.repart"], why)
+        self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
+                         ["mkosi.conf", "mkosi.finalize"], why)
+        # The two configs are held to one strict form, so this test never models mkosi's parser:
+        # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
+        # (no "@", no space before "="), or an indented continuation while a setting is open (a
+        # comment keeps it open, as initrd/mkosi.conf's RemoveFiles= relies on; a blank line or a
+        # section closes it). Any other line fails. Each config may use only the keys listed here,
+        # so a key that reads a config, script, tree, mirror or repo (Include=, ConfigureScripts=,
+        # PrepareScripts=, PackageManagerTrees=, PackageDirectories=, LocalMirror=, ToolsTree=,
+        # RepositoryKeyCheck=, ...) needs a deliberate edit here; InitrdInclude= is pinned whole.
+        keys = {
+            MK / "mkosi.conf": {
+                "BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format",
+                "Hostname", "ImageId", "InitrdInclude", "KernelCommandLine",
+                "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror",
+                "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
+                "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
+                "UnifiedKernelImages", "WithDocs"},
+            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+        }
+        for conf, allowed in keys.items():
+            settings, cur = [], None
+            for n, line in enumerate(conf.read_text().splitlines(), 1):
+                where = "%s:%d: %r" % (conf.relative_to(ROOT), n, line)
+                if not line.strip():
+                    cur = None
+                elif line.startswith("#"):
+                    pass
+                elif re.fullmatch(r"\[[A-Za-z]+\]", line):
+                    cur = None
+                elif m := re.fullmatch(r"([A-Z][A-Za-z0-9]*)=(.*)", line):
+                    cur = (m[1], [m[2].strip()])
+                    settings.append((where, cur))
+                elif line[0] in " \t" and cur is not None:
+                    cur[1].append(line.strip())
+                else:
+                    self.fail("%s: not the strict mkosi config form; %s" % (where, why))
+            for where, (k, v) in settings:
+                self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
+                if k == "InitrdInclude":
+                    self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+        # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
+        # runs mkosi (its config dir, flags and tree) is #4647's row: a line pin of shell cannot hold.
+        wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
+            'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
+            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
+
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
         # Only Debian's main component, in mkosi.conf and in the build's apt sources, from the same
