@@ -60,10 +60,13 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.mu.Unlock()
 		msg := errMalformed.Error()
-		if errors.Is(err, policy.ErrNameHeld) {
+		switch {
+		case errors.Is(err, policy.ErrNameHeld):
 			// Two devices pin one mDNS name: say which, so the owner renames
 			// one or declines before signing (#4144).
 			msg = strings.TrimPrefix(err.Error(), "policy: ")
+		case errors.Is(err, errUnheard):
+			msg = err.Error() // the device and the name (D-266)
 		}
 		http.Error(w, msg, http.StatusBadRequest)
 		return

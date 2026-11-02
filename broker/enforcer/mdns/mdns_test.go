@@ -343,7 +343,7 @@ func pairOnly(t *testing.T, v6 bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, plan(t)) }()
+	go func() { done <- Serve(ctx, plan(t), nil) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -539,7 +539,7 @@ func pinnedAfterRestart(t *testing.T, v6 bool) {
 	serve := func() func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- Serve(ctx, plan(t)) }()
+		go func() { done <- Serve(ctx, plan(t), nil) }()
 		time.Sleep(200 * time.Millisecond)
 		return func() {
 			cancel()

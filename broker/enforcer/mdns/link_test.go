@@ -77,4 +77,26 @@ func TestCasterAddedThroughLink(t *testing.T) {
 	if out, outs := relayer(signed(doc(nil))).handle("ap0.109", 5353, announce, t0); out != nil {
 		t.Errorf("the unpinned caster passed %x to %v", out, outs)
 	}
+
+	// The enforcer-filled path (D-266, #4488): before the pair the
+	// caster is on its VLAN and the relay only hears it; the names it
+	// heard are what the page pins, and once signed they pass.
+	unpaired := doc(nil)
+	unpaired.Pairs = nil
+	hears, err := nft.Hears(unpaired, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := nft.Paths(unpaired, fixtureLayout())
+	before := newRelayer(NewPlan(paths, nil).Hearing(hears), func(string) []netip.Prefix { return printerLink }, t0)
+	if out, outs := before.handle("ap0.109", 5353, announce, t0); out != nil {
+		t.Errorf("the unpaired caster passed %x to %v", out, outs)
+	}
+	heard := before.f.Heard("ap0.109", t0)
+	if want := [][]string{{"Living Room", "_cast", "_tcp", "local"}, {"caster", "local"}}; !slices.EqualFunc(heard, want, slices.Equal) {
+		t.Fatalf("heard %q, want %q", heard, want)
+	}
+	if out, outs := relayer(signed(doc(heard))).handle("ap0.109", 5353, announce, t0); out == nil || !slices.Equal(outs, []string{"own0"}) {
+		t.Errorf("the caster pinned from what was heard went to %v", outs)
+	}
 }
