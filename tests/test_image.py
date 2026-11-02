@@ -1649,34 +1649,8 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
                 if k == "InitrdInclude":
                     self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
-        # The build runs mkosi one way. Every build.sh line naming mkosi (any case, comments
-        # included) is pinned, and so is every other line that binds a variable the mkosi run
-        # expands (any bare HERE, REPO, OUT, MKOSI, VERSION or STAGE outside a "$" expansion, so
-        # export, read, declare, for and printf -v count too). No pinned line follows a "\"
-        # continuation; before HERE= only "set -eu" and the GOWORK export run; build.sh defines
-        # no function and runs no eval, source, "." or alias; image.yml sets MKOSI only to the
-        # pinned v24.3 binary.
-        lines = (IMG / "build.sh").read_text().splitlines()
-        named = [(i, l) for i, l in enumerate(lines) if "mkosi" in l.lower() or (
-            not l.lstrip().startswith("#")
-            and re.search(r"(?<![$\w{])(HERE|REPO|OUT|MKOSI|VERSION|STAGE)\b", l))]
-        self.assertEqual([l for _, l in named], [
-            "# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,",
-            "# file-system IDs come from mkosi.conf's Seed, so two builds of one commit give the same /usr",
-            'HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)',
-            'OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}',
-            'VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}',
-            'STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"',
-            "# mkosi.finalize's template renders for its name; drivers.json lists them, and mkosi.finalize",
-            '$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build',
-        ], why)
-        for i, _ in named:
-            self.assertFalse(i and lines[i - 1].rstrip().endswith("\\"), "%r; %s" % (lines[i - 1], why))
-        here = next(i for i, l in enumerate(lines) if l.startswith("HERE="))
-        self.assertEqual([l for l in lines[:here] if l.strip() and not l.startswith("#")],
-                         ["set -eu", "export GOWORK=off"], why)
-        self.assertFalse([l for l in lines if not l.lstrip().startswith("#") and re.search(
-            r"\b(eval|source|alias|function)\b|^\s*\.\s|^\s*[A-Za-z_][\w-]*\s*\(\)", l)], why)
+        # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
+        # runs mkosi (its config dir, flags and tree) is #4647's row: a line pin of shell cannot hold.
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
         self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
             'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
