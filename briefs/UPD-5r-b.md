@@ -21,6 +21,7 @@ Every row is tier A. A suite with no source is an error from the runner, which `
 | b5 (#4047) | Replay suite: recorded clerk responses in the log, and the host check that counts steps the recorded keys would not admit (HLD-2) | kernel and clerk (D-159 row first), `broker/vm/requal/` | b1, b4 |
 | b7 (#4475) | The driver's evaluators: the security evaluator that runs a `SecurityInput` through the release's reader and kernel paths and reports EVL-3's measures; held-out and replay evaluators come with b4 and b5 | `broker/vm/requal/driver/` | b2, b3 |
 | b7f (#4575) | The security evaluator's release items from #4532's reviews: verdicts bound to the plan's own submission, a probe that reaches the kernel's checks at dispatch, tests for every report condition, and b6's model and output budgets | `broker/vm/requal/driver/` | b7 |
+| b7g (#4640) | A test that pins the evaluator's planned-plan binding by hash, with a probe under a planner plan's id | `broker/vm/requal/driver/security_test.go` | b7f |
 | b6 (#4048) | Wiring: `update.NewRequalifier` with the runner, passed to UPD-7w's check in `cmd/agentosd` | `broker/cmd/agentosd/` | b2, b7, UPD-7w (#3961) |
 
 b2 to b6 are their own `work-item` issues; each one's builder writes its full brief section here.
@@ -153,6 +154,16 @@ Work item #4575, from #4532's Security and L3 reviews. Written 2026-11-02 agains
 - `TestTheReportFoldsTheLogAsTheLiveKernelDid`
 
 **Scope:** `broker/vm/requal/driver/security.go`, `security_test.go`; `broker/vm/requal/ASSUMPTIONS.md`; this brief.
+
+## b7g: the planned-plan binding pinned
+
+Work item #4640, from #4615's delta reviews. #4615 keyed `planned`, the set of the planner's own plans that `report` reads to decide which clerk effects were asked for, by `kernel.PlanHash` instead of the plan id, and no test pinned it. A probe that reuses a planner plan's id with other steps, inside its key, and makes an effect no planner plan asked for, must count that effect `outside`; keyed by id it counts as asked, a false pass.
+
+**Requirement IDs:** PLN-4, EVL-3.
+
+**Acceptance test** (`broker/vm/requal/driver/security_test.go`): `TestEachMeasureCountsItsRegression`, case "effect asked by a probe under a planner plan's id". It fails when `planned` is keyed by the plan id.
+
+**Scope:** `broker/vm/requal/driver/security_test.go`; this brief.
 
 ## Estimate
 
