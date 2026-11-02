@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -137,11 +139,27 @@ func probeNet(kind, policy, page string) {
 			}
 		}
 	}
-	report, _ := json.Marshal(out)
+	// The report is served in two halves, one per probe device, since an
+	// answer is bounded by MaxData.
+	halves := [2]map[string]string{{}, {}}
+	keys := slices.Sorted(maps.Keys(out))
+	for i, k := range keys {
+		halves[i*2/len(keys)][k] = out[k]
+	}
+	var reports [2][]byte
+	for i := range halves {
+		reports[i], _ = json.Marshal(halves[i])
+	}
 	NewServer(StackThread, os.NewFile(3, "interface")).Serve(func(r Request) ([]byte, Code) {
-		return report, CodeOK
+		if r.Device == probeDevices[1] {
+			return reports[1], CodeOK
+		}
+		return reports[0], CodeOK
 	})
 }
+
+// probeDevices name the two halves of a net probe's report.
+var probeDevices = [2]string{"probe", "probe2"}
 
 // held keeps the probe's tun descriptor open while it serves.
 var held int
@@ -245,19 +263,21 @@ func TestStacksConfined(t *testing.T) {
 	matterProfile := probeView(confine.Matter(matterUID, matterUID, own("matter", matterUID)))
 
 	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
-		h, err := NewHost(Config{Devices: []Device{{Name: "probe", Stack: StackThread}}, Timeout: 20 * time.Second,
-			Notify: func(Notification) {}, Log: func(string) {}})
+		h, err := NewHost(Config{Devices: []Device{{Name: probeDevices[0], Stack: StackThread}, {Name: probeDevices[1], Stack: StackThread}},
+			Timeout: 20 * time.Second, Notify: func(Notification) {}, Log: func(string) {}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		h.Attach(StackThread, p, conn)
-		b, err := h.State("probe")
-		if err != nil {
-			t.Fatalf("read through the interface: %v", err)
-		}
 		got := map[string]string{}
-		if err := json.Unmarshal(b, &got); err != nil {
-			t.Fatal(err)
+		for _, d := range probeDevices {
+			b, err := h.State(d)
+			if err != nil {
+				t.Fatalf("read %s through the interface: %v", d, err)
+			}
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for k, v := range got {
 			t.Logf("%-28s %s", k, v)
