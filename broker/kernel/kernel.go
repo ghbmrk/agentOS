@@ -337,9 +337,8 @@ func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, p
 	return k, nil
 }
 
-// Format prints no field in any verb: the log holds the decoy table, its key and the box's signing key (DECOY-a-7, CLK-1).
+// Format prints no field in any verb, where fmt reaches a Kernel directly (DECOY-b-8).
 func (Kernel) Format(f fmt.State, _ rune) { fmt.Fprint(f, "kernel") }
-func (Log) Format(f fmt.State, _ rune)    { fmt.Fprint(f, "log") }
 func (k *Kernel) State() *State           { return k.s }
 func (k *Kernel) Log() *Log               { return k.log }
 
@@ -473,7 +472,7 @@ type Admitted struct {
 // by one clerk or several, never share the same remaining budget (#2613 item
 // 1). One that is never settled stays charged at its worst case.
 func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *key.Refusal) {
-	if k.log.broken {
+	if (*k.log.p).broken {
 		// A call admitted now could not be metered, and may follow a
 		// widening whose anchor failed (KRN-5).
 		return Admitted{}, &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
@@ -629,7 +628,7 @@ func (k *Kernel) owner(now int64, typ string, body any) error {
 	}
 	err := k.log.Anchor()
 	if err != nil && Widening(typ) {
-		k.log.broken = true
+		(*k.log.p).broken = true
 	}
 	return err
 }
