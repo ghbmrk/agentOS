@@ -662,19 +662,35 @@ func secretRecv(fd *ast.FuncDecl) bool {
 // srcImporter type-checks the package's imports from source, once.
 var srcImporter = sync.OnceValue(func() types.Importer { return importer.ForCompiler(token.NewFileSet(), "source", nil) })
 
-// writerProblems checks, with the files type-checked, that every response
-// writer the package touches is one net/http handed a handler (#4685 route
-// 2 and 3): no expression of a concrete type implementing
-// http.ResponseWriter (a declared or promoted method set, of this package's
-// type or another's), and every expression of type http.ResponseWriter is a
-// function's own parameter. So mint, render and every handler write onto,
-// and set the cookie on, only the writer they were called with, which
-// traces back to ServeHTTP's. Type errors are problems too.
+// writerProblems checks facts only the type-checked files show (#4685,
+// Security on #4731). Type errors are problems too.
+//
+//   - Every name in a secret method's body resolves to an object in
+//     secretUses (crypto/hmac.Equal, crypto/sha256.Size, the builtins, ...)
+//     or to the method's own locals, whatever the file's imports or the
+//     package's other declarations shadow or alias (item 4).
+//   - render's buffer is a strings.Builder of package strings, and every
+//     ParseFS, Execute and ExecuteTemplate is html/template's.
+//   - Every use of the name headers is the package's headers func, the one
+//     the syntactic check reads (so a local headers cannot read the map).
+//   - Every response writer the package touches is one net/http called a
+//     handler with (routes 2 and 3): the package declares no type
+//     parameters, and every expression whose type implements
+//     http.ResponseWriter (concrete, interface, promoted methods, any
+//     package's type) is a parameter of a declared function, of type
+//     exactly http.ResponseWriter. So no stand-in can be built, asserted,
+//     stored, returned or received by a func literal.
 func writerProblems(fset *token.FileSet, files []*ast.File) []string {
 	var out []string
+	bad := func(n ast.Node, format string, a ...any) {
+		out = append(out, fset.Position(n.Pos()).String()+": "+fmt.Sprintf(format, a...))
+	}
 	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
 	conf := types.Config{Importer: srcImporter(), Error: func(err error) { out = append(out, "type check: "+err.Error()) }}
-	pkg, _ := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page", fset, files, info)
+	pkg, err := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page", fset, files, info)
+	if pkg == nil {
+		return append(out, fmt.Sprintf("type check: %v", err))
+	}
 	var rw types.Type
 	for _, imp := range pkg.Imports() {
 		if imp.Path() == "net/http" {
@@ -687,33 +703,103 @@ func writerProblems(fset *token.FileSet, files []*ast.File) []string {
 	iface := rw.Underlying().(*types.Interface)
 	params := map[types.Object]bool{}
 	for _, f := range files {
-		ast.Inspect(f, func(n ast.Node) bool {
-			if ft, ok := n.(*ast.FuncType); ok && ft.Params != nil {
-				for _, fl := range ft.Params.List {
-					for _, id := range fl.Names {
-						params[info.Defs[id]] = true
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok {
+				if gd, ok := d.(*ast.GenDecl); ok {
+					for _, sp := range gd.Specs {
+						if ts, ok := sp.(*ast.TypeSpec); ok && ts.TypeParams != nil {
+							bad(ts, "%s has type parameters", ts.Name.Name)
+						}
 					}
+				}
+				continue
+			}
+			if fd.Type.TypeParams != nil {
+				bad(fd, "%s has type parameters", fd.Name.Name)
+			}
+			for _, fl := range fd.Type.Params.List {
+				for _, id := range fl.Names {
+					params[info.Defs[id]] = true
+				}
+			}
+			if secretRecv(fd) {
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					id, ok := n.(*ast.Ident)
+					if !ok || info.Uses[id] == nil {
+						return true
+					}
+					if k := useKey(pkg, info.Uses[id]); !slices.Contains(secretUses, k) {
+						bad(id, "secret.%s's %s is %s", fd.Name.Name, id.Name, k)
+					}
+					return true
+				})
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.ValueSpec:
+					if t := info.TypeOf(n.Type); fd.Name.Name == "render" && (t == nil || t.String() != "strings.Builder") {
+						bad(n, "render's buffer is a %v, not package strings' Builder", t)
+					}
+				case *ast.SelectorExpr:
+					switch n.Sel.Name {
+					case "ParseFS", "Execute", "ExecuteTemplate":
+						if o := info.Uses[n.Sel]; o == nil || o.Pkg() == nil || o.Pkg().Path() != "html/template" {
+							bad(n, "%s's %s is not html/template's", fd.Name.Name, n.Sel.Name)
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "headers" && info.Uses[id] != nil {
+				if o, isFunc := info.Uses[id].(*types.Func); !isFunc || o != pkg.Scope().Lookup("headers") {
+					bad(id, "headers here is not the package's headers func")
 				}
 			}
 			return true
 		})
 	}
 	for e, tv := range info.Types {
-		if tv.IsType() || tv.Type == nil {
+		if tv.IsType() || tv.Type == nil || !types.Implements(tv.Type, iface) {
 			continue
 		}
-		at := fset.Position(e.Pos()).String()
-		if _, isIface := tv.Type.Underlying().(*types.Interface); !isIface && types.Implements(tv.Type, iface) {
-			out = append(out, fmt.Sprintf("%s: %s is a %s, which can stand in for a response", at, types.ExprString(e), tv.Type))
-		}
-		if types.Identical(tv.Type, rw) {
-			id, ok := e.(*ast.Ident)
-			if !ok || !params[info.Uses[id]] {
-				out = append(out, fmt.Sprintf("%s: %s is a response writer other than a function's own parameter", at, types.ExprString(e)))
-			}
+		id, ok := e.(*ast.Ident)
+		if !ok || !params[info.Uses[id]] || !types.Identical(tv.Type, rw) {
+			bad(e, "%s is a %s that is not a declared function's own http.ResponseWriter parameter, so it can stand in for a response", types.ExprString(e), tv.Type)
 		}
 	}
 	return out
+}
+
+// secretUses is every object a secret method's body may name: "local" is
+// the method's own receiver, parameters and variables.
+var secretUses = []string{
+	"local", "universe.len", "universe.append", "universe.nil", "universe.true",
+	"pkg crypto/hmac", "crypto/hmac.Equal", "pkg crypto/sha256", "crypto/sha256.Size",
+	"pkg encoding/base64", "encoding/base64.RawURLEncoding", "encoding/base64.EncodeToString",
+	"pkg net/http", "net/http.SetCookie", "net/http.Cookie", "net/http.Name", "net/http.Value", "net/http.Path",
+	"net/http.Secure", "net/http.HttpOnly", "net/http.SameSite", "net/http.SameSiteStrictMode",
+	"github.com/ghbmrk/agentos/broker/enforcer/page.tokenCookie", "github.com/ghbmrk/agentos/broker/enforcer/page.secretSum",
+}
+
+// useKey names the object o resolves to, in secretUses' terms.
+func useKey(pkg *types.Package, o types.Object) string {
+	switch o := o.(type) {
+	case *types.PkgName:
+		return "pkg " + o.Imported().Path()
+	case *types.Var:
+		if !o.IsField() && o.Pkg() == pkg && o.Parent() != pkg.Scope() {
+			return "local"
+		}
+	}
+	if o.Pkg() == nil {
+		return "universe." + o.Name()
+	}
+	return o.Pkg().Path() + "." + o.Name()
 }
 
 // onlyToResponse is whether exec, in fd, writes into a local buffer b that
@@ -867,7 +953,7 @@ func TestExitCheckCatchesEachRoute(t *testing.T) {
 	var b strings.Builder
 	s.render(tee{&b, inner{w}}, r, "enrol.html", map[string]any{})
 	return b.String()
-}`, want: "which can stand in for a response"},
+}`, want: "can stand in for a response"},
 		{name: "buffer tee", add: teeFile + `type btee struct {
 	*bytes.Buffer
 	inner
@@ -877,11 +963,11 @@ func leak(s *Server, w http.ResponseWriter, r *http.Request) string {
 	b := new(bytes.Buffer)
 	s.mint(btee{b, inner{w}})
 	return b.String()
-}`, want: "which can stand in for a response"},
+}`, want: "can stand in for a response"},
 		{name: "ServeHTTP tee", add: teeFile + `func leak(s *Server, w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	s.ServeHTTP(tee{&b, inner{w}}, r)
-}`, want: "which can stand in for a response"},
+}`, want: "can stand in for a response"},
 		{name: "foreign recorder", add: `import (
 	"net/http"
 	"net/http/httptest"
@@ -891,17 +977,86 @@ func leak(s *Server, r *http.Request) string {
 	w := httptest.NewRecorder()
 	s.render(w, r, "home.html", map[string]any{})
 	return w.Body.String()
-}`, want: "*net/http/httptest.ResponseRecorder, which can stand in"},
+}`, want: "httptest.NewRecorder() is a *net/http/httptest.ResponseRecorder that is not"},
 		{name: "writer from a call", add: `import "net/http"
 
 func leak(s *Server, r *http.Request, mk func() http.ResponseWriter) {
 	s.render(mk(), r, "home.html", map[string]any{})
-}`, want: "mk() is a response writer other than"},
+}`, want: "mk() is a net/http.ResponseWriter that is not"},
 		{name: "writer in a field", add: `import "net/http"
 
 type holder struct{ w http.ResponseWriter }
 
-func leak(h holder, s *Server, r *http.Request) { s.render(h.w, r, "home.html", map[string]any{}) }`, want: "h.w is a response writer other than"},
+func leak(h holder, s *Server, r *http.Request) { s.render(h.w, r, "home.html", map[string]any{}) }`, want: "h.w is a net/http.ResponseWriter that is not"},
+		{name: "generic tee", add: `import (
+	"net/http"
+	"strings"
+)
+
+type hw[H any] interface {
+	Header() H
+	WriteHeader(int)
+}
+
+type tee[H any] struct {
+	hw[H]
+	*strings.Builder
+}
+
+func leakVia[R http.ResponseWriter, G hw[H], H any](s *Server, w R, g G, r *http.Request) string {
+	var b strings.Builder
+	x := any(tee[H]{g, &b}).(R)
+	s.render(x, r, "enrol.html", map[string]any{})
+	return b.String()
+}`, want: "leakVia has type parameters"},
+		{name: "generic tee's writer", add: `import (
+	"net/http"
+	"strings"
+)
+
+type hw[H any] interface {
+	Header() H
+	WriteHeader(int)
+}
+
+type tee[H any] struct {
+	hw[H]
+	*strings.Builder
+}
+
+func leakVia[R http.ResponseWriter, G hw[H], H any](s *Server, w R, g G, r *http.Request) {
+	s.render(any(tee[H]{g, nil}).(R), r, "enrol.html", map[string]any{})
+}`, want: "any(tee[H]{…}).(R) is a R that is not"},
+		{name: "asserted writer", add: `import "net/http"
+
+func leak(s *Server, x any, r *http.Request) { s.render(x.(http.ResponseWriter), r, "home.html", map[string]any{}) }`, want: "x.(http.ResponseWriter) is a net/http.ResponseWriter that is not"},
+		{name: "type switch writer", add: `import "net/http"
+
+func leak(s *Server, x any, r *http.Request) {
+	switch w := x.(type) {
+	case http.ResponseWriter:
+		s.render(w, r, "home.html", map[string]any{})
+	}
+}`, want: "w is a net/http.ResponseWriter that is not"},
+		{name: "func literal writer", add: `import "net/http"
+
+var leak = func(s *Server, w http.ResponseWriter, r *http.Request) { s.render(w, r, "home.html", map[string]any{}) }`, want: "w is a net/http.ResponseWriter that is not"},
+		{name: "fake strings", swap: swap{"home.go", "var b strings.Builder", "var b fakeBuilder"}, add: `import "strings"
+
+type fakeBuilder = struct{ strings.Builder }`, want: "render's buffer is a"},
+		{name: "hmac package var", swap: swap{"csrf.go", "\t\"crypto/hmac\"\n", ""}, add: `import (
+	"bytes"
+	realhmac "crypto/hmac"
+	"hash"
+)
+
+var hmac = struct {
+	New   func(func() hash.Hash, []byte) hash.Hash
+	Equal func(a, b []byte) bool
+}{realhmac.New, bytes.Equal}`, want: "secret.equal's hmac is github.com/ghbmrk/agentos/broker/enforcer/page.hmac"},
+		{name: "len shadowed", add: "func len(b []byte) int { return 32 }", want: "secret.equal's len is github.com/ghbmrk/agentos/broker/enforcer/page.len"},
+		{name: "text/template by type", swap: swap{"server.go", "\t\"html/template\"\n", "\ttemplate \"text/template\"\n"}, want: "New's ParseFS is not html/template's"},
+		{name: "local headers", swap: swap{"server.go", "\theaders(w.Header())\n", "\theaders := func(h map[string][]string) { _ = h[\"Set-Cookie\"] }\n\theaders(w.Header())\n"}, want: "headers here is not the package's headers func"},
 		// #4685 items 4 and 5.
 		{name: "equal moved", swap: swap{"csrf.go", "func (x secret) equal(b []byte) bool {\n\treturn x.secretSum != nil && len(x.secretSum()) == sha256.Size && hmac.Equal(x.secretSum(), b)\n}", ""},
 			add:  "import (\n\thmac \"bytes\"\n\t\"crypto/sha256\"\n)\n\nfunc (x secret) equal(b []byte) bool {\n\treturn x.secretSum != nil && len(x.secretSum()) == sha256.Size && hmac.Equal(x.secretSum(), b)\n}",
