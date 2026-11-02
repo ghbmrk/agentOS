@@ -20,3 +20,6 @@ DeviceAllow=/dev/mapper/control rw
 
 [Install]
 RequiredBy=boot-complete.target
+# Also on a boot of an entry that is not counted (a blessed release), where the boot-counting
+# generator does not pull boot-complete.target in: the self-check runs and reports on every boot.
+WantedBy=multi-user.target
