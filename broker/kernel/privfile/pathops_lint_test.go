@@ -14,8 +14,8 @@ package privfile
 // mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
 // plain type and no helper option (#4380), and over a tree root reads or
 // runs no bind, move or loop, a source only a device under /dev outside
-// worldTrees and magicTrees, with no .. step or % specifier, and a tmpfs
-// only with a mode no other uid writes (#4516);
+// openDevs, with no .. step or % specifier, no " in its options, and a
+// tmpfs only with a mode no other uid writes (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
 // or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
@@ -546,7 +546,7 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"image/mkosi/agentos-side.service":  "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
 		unit:                                "[Mount]\nWhat=/dev/x\nWhere=/var/lib/x\nType=ext4\nOptions=nosuid,nodev,noexec\n",
 		"image/mkosi/tmp.mount.d/50-x.conf": "[Mount]\nOptions=mode=1777,nosuid,nodev,noexec,size=50%%\n",
-		"image/mkosi/mkosi.extra/etc/fstab": "# x\ntmpfs /run tmpfs mode=0755,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs nosuid\ntmpfs /var/tmp/x tmpfs mode=0777\n",
+		"image/mkosi/mkosi.extra/etc/fstab": "# x\ntmpfs /run tmpfs mode=0755,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs nosuid\ntmpfs /var/tmp/x tmpfs mode=0777,x-a=\"b,c\"\n",
 		"image/x/run-camboot.mount":         "[Mount]\nType=vfat\nOptions=uid=990,gid=990,umask=0077\n",
 	}
 	if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 0 {
@@ -598,6 +598,8 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"an image in /run/shm":              {"image/mkosi/mkosi.extra/etc/fstab", "/run/shm/x.img /usr squashfs ro 0 0\n", `source /run/shm/x.img`},
 		"a /dev/fd source":                  {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/3 /etc ext4 ro 0 0\n", `source /dev/fd/3`},
 		"a /dev/stdin source in a unit":     {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/stdin\nType=squashfs\n", `What=/dev/stdin`},
+		"a /dev/stdout source":              {"image/mkosi/mkosi.extra/etc/fstab", "/dev/stdout /etc ext4 ro 0 0\n", `source /dev/stdout`},
+		"a /dev/stderr source":              {"image/mkosi/mkosi.extra/etc/fstab", "/dev/stderr /etc ext4 ro 0 0\n", `source /dev/stderr`},
 		"a /proc source in a unit":          {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/proc/self/fd/3\nType=squashfs\n", `What=/proc/self/fd/3`},
 		"a .. after /dev/fd in fstab":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/../root/tmp/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/fd/../root/tmp/x.img`},
 		"a .. after /dev/fd in a unit":      {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/fd/../root/tmp/x.img\nType=squashfs\n", `What=/dev/fd/../root/tmp/x.img`},
@@ -616,6 +618,9 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a default tmpfs unit over /etc":    {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=nosuid\n", `sets no mode=`},
 		"a tmpfs unit with no Options=":     {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\n", `with no Options=`},
 		"a tmpfs in a drop-in over /etc":    {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=ramfs\n", `with no Options=`},
+		// #4559 Security 1: libmount keeps a quoted value whole.
+		"a quoted mode in fstab":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs x-a=\",mode=0755,\",nosuid 0 0\n", `quote a value`},
+		"a quoted mode in a unit": {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=\",mode=0755,\",nosuid\n", `quote a value`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -968,9 +973,15 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 			t.Fatalf("got %q, %v, want a refusal naming /opt/y/helper", bins, err)
 		}
 	})
-	// #4516 (#4494 Security delta R-1): /var/lock is /run/lock.
-	t.Run("refuses a grant on a root program spelled through /var/lock", func(t *testing.T) {
-		for prog, grant := range map[string]string{"/run/lock/agentos-v/x": "/var/lock/agentos-v/x", "/var/lock/agentos-w/x": "/run/lock/agentos-w/x"} {
+	// #4516 (#4494 Security delta R-1): /var/lock is /run/lock, /run/shm is
+	// /dev/shm, and /var/run/shm is both.
+	t.Run("refuses a grant on a root program spelled through an alias", func(t *testing.T) {
+		for prog, grant := range map[string]string{
+			"/run/lock/agentos-v/x":    "/var/lock/agentos-v/x",
+			"/var/lock/agentos-w/x":    "/run/lock/agentos-w/x",
+			"/dev/shm/agentos-v/x":     "/run/shm/agentos-v/x", // #4559 L3 1: /run/shm is /dev/shm
+			"/var/run/shm/agentos-w/x": "/dev/shm/agentos-w/x", // and the aliases chain
+		} {
 			files := clone(files)
 			files[programsFile] = "/bin/false exits 1\n"
 			files["image/mkosi/agentos-side.service"] += "ExecStartPre=+" + prog + "\n"
@@ -1412,17 +1423,12 @@ var rootTrees = []string{
 // the tree it lands in (#4494 L3 1, #4516).
 var pathAliases = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock", "/run/shm": "/dev/shm"}
 
-// magicTrees hold links to another process's view (/proc/<pid>/root,
-// /proc/self/fd, /dev/fd and /dev/std*, which lead there), so a path through
-// one reaches any tree; no root command or held mount source names one
-// (#4559 Security delta 1).
-var magicTrees = []string{"/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
-
-// worldTrees are the trees any uid may make a file in (1777, and
-// /dev/mqueue), so no root command names a path in one, as its program or
-// as an argument a wrapper may run, whatever grant a tmpfiles.d line makes
-// (#4494 Security delta R-1, #4559 Security 3).
-var worldTrees = []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/run/lock"}
+// openDevs are the paths under /dev that hold no device: any uid may make a
+// file in /dev/shm and /dev/mqueue, and /dev/fd and /dev/std* link to
+// another process's files, so heldSource refuses a mount source in one like
+// any other path (#4516, #4559 Security delta 1). What a root command names
+// there is #4493's.
+var openDevs = []string{"/dev/shm", "/dev/mqueue", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
 
 // unalias is p with a leading pathAliases link resolved.
 func unalias(p string) string {
@@ -1684,9 +1690,15 @@ var linkOptions = map[string]bool{"bind": true, "rbind": true, "move": true, "lo
 // uhelper= make mount(8) or umount(8) run /sbin/umount.<name> as root.
 // On a mount point in or above rootTrees (held), it also refuses an option
 // of ownerOptions or linkOptions, and a mode= with a group or other write
-// bit, any of which could hand that tree to another uid (#4494, #4516). It
-// reports whether the list holds a mode= it read.
+// bit, any of which could hand that tree to another uid (#4494, #4516). A
+// held list with a " is refused: libmount keeps a quoted value whole, so a
+// mode= inside x-a=",mode=0755," would be counted here and never reach the
+// kernel (#4559 Security 1). It reports whether the list holds a mode= it
+// read.
 func mountOptions(opts string, held bool) (bool, error) {
+	if held && strings.Contains(opts, `"`) {
+		return false, fmt.Errorf("options %s quote a value on a mount in or above a tree root reads or runs; mount(8) splits a quoted list unlike this lint", opts)
+	}
 	moded := false
 	for _, o := range strings.Split(opts, ",") {
 		k, v, _ := strings.Cut(strings.TrimSpace(o), "=")
@@ -1707,8 +1719,8 @@ func mountOptions(opts string, held bool) (bool, error) {
 
 // heldSource reports whether a mount's source may sit over a tree root
 // reads or runs: a name with no slash (tmpfs, UUID=x, LABEL=x) or a device
-// under /dev, outside worldTrees and magicTrees. A path elsewhere, /dev/shm,
-// /dev/mqueue and /run/shm among them, names a directory or image file, which
+// under /dev, outside openDevs. A path elsewhere, /run/shm among them, or in
+// openDevs names a directory or image file, which
 // mount(8) binds or loop-mounts (#4516, #4559 L3 1, Security delta 1).
 func heldSource(what string) bool {
 	if strings.Contains(what, "%") {
@@ -1721,9 +1733,8 @@ func heldSource(what string) bool {
 		return false
 	}
 	what = path.Clean(what)
-	_, world := inTree(what, worldTrees)
-	_, magic := inTree(what, magicTrees)
-	return strings.HasPrefix(what, "/dev/") && !world && !magic
+	_, open := inTree(what, openDevs)
+	return strings.HasPrefix(what, "/dev/") && !open
 }
 
 // tmpfsTypes default their root directory to 1777 unless a mode= says
