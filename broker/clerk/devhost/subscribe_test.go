@@ -21,7 +21,7 @@ import (
 // subDecl is the fixture with a subscription, and a second reading kind.
 func subDecl() devslot.Declaration {
 	d := fixture.Declaration()
-	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, Subscribe: true})
+	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, MaxWrites: 1, Subscribe: true})
 	d.Readings = append(d.Readings, "smoke")
 	return d
 }

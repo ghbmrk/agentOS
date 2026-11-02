@@ -19,7 +19,7 @@ import (
 // withWatch is the fixture with a subscription.
 func withWatch() devslot.Declaration {
 	d := fixture.Declaration()
-	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, Subscribe: true})
+	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, MaxWrites: 1, Subscribe: true})
 	return d
 }
 
