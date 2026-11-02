@@ -22,6 +22,9 @@ func TestKernelConfigPrintsNoKey(t *testing.T) {
 	head := ed25519.NewKeyFromSeed(logKey[:])
 	link := ed25519.NewKeyFromSeed(append(logKey[1:], 7))
 	c := KernelConfig{Key: logKey, Pub: head.Public().(ed25519.PublicKey), Sign: head, LinkKey: link}
+	if got := fmt.Sprintf("%v %+v", c, &c); got != "proc.KernelConfig proc.KernelConfig" {
+		t.Fatalf("a config prints as %q", got)
+	}
 	for _, v := range []any{c, &c} {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X", "%t", "%e", "%c", "%U", "%o", "%b"} {
 			out := strings.ToLower(fmt.Sprintf(verb, v))

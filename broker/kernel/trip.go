@@ -485,16 +485,12 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 	return false
 }
 
-// planTripOK checks a plan rejection's trip as its fold must: tripOK, and
-// byte for byte the trip tripOf derives again from the state, so no logged
-// field, such as a session a forged entry names, stops a session or pauses a
-// key that the plan itself does not (KRN-6, HLD-5).
+// planTripOK checks a plan rejection's trip as its fold must: byte for byte
+// the trip tripOf derives again from the state, whose shape tripOK always
+// accepts, so no logged field, such as a session a forged entry names, stops
+// a session or pauses a key that the plan itself does not (KRN-6, HLD-5).
 func (s *State) planTripOK(p Plan, t Trip) bool {
-	again := s.tripOf(p)
-	if again == nil || !s.tripOK(t, p.ID) {
-		return false
-	}
-	a, _ := json.Marshal(again)
+	a, _ := json.Marshal(s.tripOf(p)) // "null" for no trip, which no body equals
 	b, _ := json.Marshal(t)
 	return bytes.Equal(a, b)
 }

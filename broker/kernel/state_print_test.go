@@ -45,6 +45,9 @@ func TestStatePrintsNoDecoy(t *testing.T) {
 		t.Fatalf("the table has no honey key: %d secrets", len(secrets))
 	}
 	c := cfg(r)
+	if got := fmt.Sprintf("%v %+v %s", c, &c, c); got != "kernel.Config kernel.Config kernel.Config" {
+		t.Fatalf("a config prints as %q", got)
+	}
 	printsNone(t, secrets, true, r.k, c, &c)
 
 	// After honey-key trips at a plan, at Extend and in an Issue batch, the
