@@ -298,15 +298,21 @@ func (s *Server) heardOn(cur policy.Document, d policy.Device, taken func([]stri
 // fill is the names heard for d (heardOn) that no device in doc pins or
 // holds, hosts before instances so an instance's host comes first, as
 // many as d has room for under policy.MaxMDNS, and how many more there
-// were (#4565, #4601). An instance whose host another device pins is
-// left out with that host, since the relay would pass its SRV nowhere
-// (Security on #4596).
+// were (#4565, #4601). For a Devices-network device, an instance whose
+// host another device pins or holds is left out with that host, since
+// the relay would pass its SRV nowhere (Security on #4596). Holds are
+// never announced, so a person's network's instance is held whoever
+// holds its host (L3 on #4631).
 func (s *Server) fill(cur, doc policy.Document, d policy.Device) ([][]string, int) {
 	other := func(n []string) bool {
 		return slices.ContainsFunc(doc.Devices, func(o policy.Device) bool { return o.ID != d.ID && listed(o.MDNS, n) })
 	}
+	var taken func([]string) bool
+	if d.Network == policy.NetDevices {
+		taken = other
+	}
 	var out [][]string
-	for _, n := range s.heardOn(cur, d, other) {
+	for _, n := range s.heardOn(cur, d, taken) {
 		if !listed(out, n) && !listed(d.MDNS, n) && !other(n) {
 			out = append(out, slices.Clone(n))
 		}

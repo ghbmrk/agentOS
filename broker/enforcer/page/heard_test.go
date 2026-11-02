@@ -338,7 +338,36 @@ func TestHeardFillBounded(t *testing.T) {
 	two.Devices = append(two.Devices, policy.Device{ID: "phone", Network: policy.NetHousehold, Everyday: true})
 	two.Pairs = append(two.Pairs, policy.Pair{A: "phone", B: "tv"})
 	if offs := g.s.offers(two); len(offs) != 1 || offs[0].ID != "phone" || len(offs[0].Names) != 6 || offs[0].More != 0 {
-		t.Errorf("offers with desk paired: %+v", offs)
+		t.Errorf("offers with phone paired: %+v", offs)
+	}
+}
+
+// TestHeardHoldsSplitAcrossDevices: a person's network's instances left
+// out of a full device are offered for its next paired device, though
+// their hosts are held by the first (L3 on #4631): holds are never
+// announced, so the host rule that keeps a Devices-network instance with
+// its host does not apply to them.
+func TestHeardHoldsSplitAcrossDevices(t *testing.T) {
+	g := newRig(t)
+	var person [][]string
+	for i := range 20 {
+		h := []string{fmt.Sprintf("h%02d", i), "local"}
+		in := []string{fmt.Sprintf("Mac%02d", i), "_airplay", "_tcp", "local"}
+		person = append(person, h, in)
+		g.host[policy.MDNSKey(in)] = h
+	}
+	g.heard["household"] = person
+	// laptop holds macbook.local already: room for 31, hosts first.
+	screen, id, ch := g.open(pairedTV(2), "pair")
+	if want := "9 more names heard on the household network are left out"; !strings.Contains(html.UnescapeString(screen), want) {
+		t.Errorf("the card lacks %q:\n%s", want, screen)
+	}
+	cur := g.sign(id, ch)
+	two := clone(cur)
+	two.Devices = append(two.Devices, policy.Device{ID: "phone", Network: policy.NetHousehold, Everyday: true})
+	two.Pairs = append(two.Pairs, policy.Pair{A: "phone", B: "tv"})
+	if offs := g.s.offers(two); len(offs) != 1 || offs[0].ID != "phone" || len(offs[0].Names) != 9 {
+		t.Errorf("offers with phone paired: %+v", offs)
 	}
 }
 
