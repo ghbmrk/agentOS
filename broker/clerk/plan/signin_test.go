@@ -24,13 +24,14 @@ func TestPlanForgetEndsALateCodeExchange(t *testing.T) {
 	if err := p.BeginSignIn("g"); err != nil {
 		t.Fatal(err)
 	}
+	form := deviceSteps(t, p, "g")
 	type done struct {
 		resp *http.Response
 		d    string
 	}
 	out := make(chan done, 1)
 	go func() {
-		resp, d := p.Do(context.Background(), "g", req("POST", "/oauth/token", codeForm(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
+		resp, d := p.Do(context.Background(), "g", req("POST", "/oauth/token", form, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
 		out <- done{resp, d}
 	}()
 	for f.exchanges.Load() == 0 {
