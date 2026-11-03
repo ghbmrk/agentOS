@@ -106,6 +106,13 @@ func TestPort1IsFixedByHardwareNotRoutes(t *testing.T) {
 			t.Errorf("%s: chose %q", name, got)
 		}
 	}
+	// #4881 L3 1: the two-port refusal tells the operator to replace the root step, since a drop-in
+	// ExecStartPre= line alone appends after the image's, which refuses first.
+	if _, err := Port1(tree(with(map[string]nic{"enp0s31f6": i219, "enp1s0": onboard1c0}))); err == nil ||
+		!strings.Contains(err.Error(), `an empty "ExecStartPre=" line, then "ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -iface <port>`) ||
+		!strings.Contains(err.Error(), `"Environment=AGENTOS_PAGE_IFACE=<port>"`) {
+		t.Errorf("two fixed ports: %v", err)
+	}
 	if got, err := Port1(t.TempDir()); err == nil {
 		t.Fatalf("no sysfs tree named %q", got)
 	}
