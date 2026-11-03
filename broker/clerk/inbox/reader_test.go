@@ -142,6 +142,11 @@ func TestAnUnclassifiedReadSaysWhyTheReadFailed(t *testing.T) {
 		return "personal", nil
 	}
 	read := Read(context.Background(), ask, ms)
+	for i, c := range cases {
+		if want := strings.TrimPrefix(strings.TrimPrefix(c.reason, "unclassified"), "-"); read[i].Class != "" || read[i].Why != want {
+			t.Errorf("error %v, reply %q: Read gave class %q, why %q; want why %q", c.err, c.reply, read[i].Class, read[i].Why, want)
+		}
+	}
 	if c := read[len(cases)]; c.Class != "personal" || c.Why != "" {
 		t.Fatalf("classed mail: class %q, why %q", c.Class, c.Why)
 	}
