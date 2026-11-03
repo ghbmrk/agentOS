@@ -9,8 +9,8 @@
 // only their addresses and also drops any connection or request from
 // another source, unanswered. Every response refuses framing, and every
 // state-changing request must come from the page's own origin with the
-// anti-forgery token one of its screens drew (csrf.go), checked in one
-// place before any route sees it.
+// anti-forgery token one of its screens drew (csrf.go, internal/csrf),
+// checked in one place before any route sees it.
 //
 // It also serves slice s's asserted actions (package action): every
 // turn-on or open of a safety-list device, unlock or disarm, camera off or
@@ -29,7 +29,8 @@
 //
 // It is enforcer code: it imports the standard library, broker/kernel/key,
 // broker/enforcer/policy, broker/enforcer/action, broker/enforcer/pairseal,
-// broker/enforcer/enrol and rsc.io/qr only (broker/daemon/arc2_test.go).
+// broker/enforcer/enrol, its own internal/csrf and rsc.io/qr only
+// (broker/daemon/arc2_test.go).
 // Its assumptions are in ASSUMPTIONS.md.
 package page
 
@@ -47,6 +48,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
+	"github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -150,10 +152,10 @@ type Server struct {
 	sync  syncState
 	tmpl  *template.Template
 	book  *action.Book // nil when Config.Act is
-	// tokenKey keys the anti-forgery tokens (csrf.go); posts is every
-	// state-changing route, which ServeHTTP reaches only past guard.
-	tokenKey []byte
-	posts    map[string]post
+	// tokens draws and checks the anti-forgery pairs (csrf.go); posts is
+	// every state-changing route, which ServeHTTP reaches only past guard.
+	tokens *csrf.Tokens
+	posts  map[string]post
 }
 
 // post is a state-changing route. An enrol route is served whenever
@@ -201,8 +203,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, chals: map[string]*challenge{}}
 	var err error
-	if s.tokenKey, err = newTokenKey(); err != nil {
-		return nil, err
+	var ok bool
+	if s.tokens, ok = csrf.New(cfg.Now); !ok {
+		return nil, ErrConfig
 	}
 	t, err := template.New("").Funcs(funcs).Funcs(template.FuncMap{"when": s.when}).ParseFS(files, "templates/*.html")
 	if err != nil {

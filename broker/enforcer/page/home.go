@@ -137,20 +137,3 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"Limits":   Limits,
 	})
 }
-
-// render draws a screen for r with its anti-forgery token (csrf.go).
-func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
-	tok, err := s.token(w, r)
-	if err != nil {
-		http.Error(w, "page error", http.StatusInternalServerError)
-		return
-	}
-	data["Token"] = tok
-	var b strings.Builder
-	if err := s.tmpl.ExecuteTemplate(&b, name, data); err != nil {
-		http.Error(w, "page error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(b.String()))
-}

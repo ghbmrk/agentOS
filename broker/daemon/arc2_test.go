@@ -294,7 +294,10 @@ var enforcer = map[string]struct {
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
 	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "rsc.io/qr"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "enforcer/page/internal/csrf", "rsc.io/qr"}, enforcerWebForbid},
+	// The page's anti-forgery pair (#4685, enforcerCSRF): the standard
+	// library only.
+	"enforcer/page/internal/csrf": {nil, enforcerWebForbid},
 	// Enrolment (slice c): the case code, the recovery code and the
 	// passkey's handover; it texts through the alert kinds.
 	"enforcer/enrol": {[]string{"kernel/key", "enforcer/policy", "enforcer/alert"}, droneForbid},
@@ -364,6 +367,10 @@ var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
 // other enforcer package imports it.
 const enforcerWeb = "enforcer/page"
+
+// enforcerCSRF is the page's anti-forgery package: it links net/http for
+// the page alone, which is its only importer (Go's internal rule).
+const enforcerCSRF = "enforcer/page/internal/csrf"
 
 // enforcerSSH is the one enforcer package that links a third-party
 // package: the access point pusher (slice g) reaches OpenWrt's admin over
@@ -469,12 +476,16 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 	}
 }
 
+// enforcerLinks are the module packages outside broker/enforcer that the
+// enforcer may link (ENF decision 1, STO-4).
+var enforcerLinks = []string{"kernel/key", "drone", "camwire"}
+
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package but the access point
 // pusher's SSH client (enforcerSSH, slice g); only the page
-// (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
+// (enforcerWeb, slice b, with its anti-forgery package enforcerCSRF) speaks HTTP or TLS, and only the firewall loader
 // and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
@@ -484,7 +495,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerSSH {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerCSRF && rel != enforcerSSH {
 			rest = append(rest, p)
 		}
 	}
@@ -494,7 +505,6 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("go list: %v", err)
 		}
-		links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
 		for _, dep := range strings.Fields(string(out)) {
 			rel := strings.TrimPrefix(dep, module)
 			switch {
@@ -504,7 +514,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 					t.Errorf("%s has no import rule in the enforcer map", dep)
 				}
 			case strings.HasPrefix(dep, module):
-				if !links[rel] {
+				if !slices.Contains(enforcerLinks, rel) {
 					t.Errorf("the enforcer links %s", dep)
 				}
 			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
@@ -529,6 +539,48 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
+	}
+}
+
+// TestARC2EnforcerHoldsOnlyGoSource completes ARC2's per-package bans on
+// unsafe and C for the enforcer, which is trusted base (KRN-2, STO-4) and
+// parses what the network sends it: no directory of the enforcer, nor of
+// a module package it may link (enforcerLinks), holds a source the Go
+// compiler does not check for memory safety (assembly, C, C++, Fortran,
+// Objective-C, SWIG or a prebuilt object), whatever its build constraints
+// (#4789). It is not a secrecy device between enforcer packages, which
+// trust one another (ASSUMPTIONS ENF-page-csrf-2). The roots are the list
+// TestEnforcerImportsNothingFromAgentOS holds (#4798), so a module package
+// the enforcer is later allowed to link is scanned too.
+func TestARC2EnforcerHoldsOnlyGoSource(t *testing.T) {
+	foreign := []string{".s", ".S", ".sx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".f", ".F", ".for", ".f90", ".swig", ".swigcxx", ".syso"}
+	roots := append([]string{"enforcer"}, enforcerLinks...)
+	n := 0
+	for _, root := range roots {
+		err := filepath.WalkDir(filepath.Join("..", root), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				// Only the enforcer's own tree is walked whole; a linked
+				// module package is one directory.
+				if d.Name() == "testdata" || (root != "enforcer" && p != filepath.Join("..", root)) {
+					return filepath.SkipDir
+				}
+				n++
+				return nil
+			}
+			if slices.Contains(foreign, filepath.Ext(p)) {
+				t.Errorf("%s: an enforcer package holds only Go source", p)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n < len(enforcer) {
+		t.Fatalf("scanned %d directories, the enforcer map names %d packages", n, len(enforcer))
 	}
 }
 
