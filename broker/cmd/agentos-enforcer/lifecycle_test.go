@@ -138,16 +138,33 @@ func (a *authenticator) signed(cd []byte) ([]byte, []byte) {
 	return ad, sig
 }
 
-// fakeFire is the nft loader: it keeps every ruleset loaded, and with
-// fail set refuses the next load as nft refuses a bad text.
+// fakeFire is the nft loader: it keeps every ruleset loaded, with fail
+// set refuses the next load as nft refuses a bad text, and with stall set
+// hangs each load until its context ends, as a hung nft would.
 type fakeFire struct {
 	mu     sync.Mutex
 	loads  []string
 	fail   bool
+	stall  bool
 	listed int
+	// Each load's context, and the time it had left when the load began.
+	ctxs []context.Context
+	left []time.Duration
 }
 
-func (f *fakeFire) Load(_ context.Context, s string) error {
+func (f *fakeFire) Load(ctx context.Context, s string) error {
+	left := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
+	f.mu.Lock()
+	stall := f.stall
+	f.ctxs, f.left = append(f.ctxs, ctx), append(f.left, left)
+	f.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail {
@@ -211,6 +228,10 @@ type box struct {
 	now time.Time
 	el  time.Duration
 	log []string
+	// failing names the state files whose Save fails (fileStore.fault);
+	// waits replaces the daemon's channel and firewall timeouts.
+	failing map[string]bool
+	waits   deps
 
 	d *Enforcer
 	b *browser
@@ -225,13 +246,13 @@ func newBox(t *testing.T, withCore bool) *box {
 	if err := os.Chmod(x.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := enrol.Provision(fileStore{filepath.Join(x.dir, fileEnrol)}, caseCode, nil); err != nil {
+	if err := enrol.Provision(fileStore{path: filepath.Join(x.dir, fileEnrol)}, caseCode, nil); err != nil {
 		t.Fatal(err)
 	}
 	if withCore {
 		_, x.core, _ = ed25519.GenerateKey(rand.Reader)
 		pub := base64.StdEncoding.EncodeToString(x.core.Public().(ed25519.PublicKey))
-		if err := (fileStore{filepath.Join(x.dir, fileCoreKey)}).Save([]byte(pub)); err != nil {
+		if err := (fileStore{path: filepath.Join(x.dir, fileCoreKey)}).Save([]byte(pub)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,16 +263,40 @@ func newBox(t *testing.T, withCore bool) *box {
 
 func (x *box) start() {
 	x.t.Helper()
-	d, err := open(x.cfg, x.dir, deps{
-		Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
-		Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
-		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
-		Logf: func(s string) { x.mu.Lock(); x.log = append(x.log, s); x.mu.Unlock() },
-	})
+	d, err := x.open()
 	if err != nil {
 		x.t.Fatal(err)
 	}
 	x.d, x.b = d, &browser{x: x}
+}
+
+// open boots the daemon on this box's disk.
+func (x *box) open() (*Enforcer, error) {
+	return open(x.cfg, x.dir, deps{
+		Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
+		Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
+		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
+		Logf: func(s string) { x.mu.Lock(); x.log = append(x.log, s); x.mu.Unlock() },
+		SaveFault: func(path string) error {
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			if x.failing[filepath.Base(path)] {
+				return errors.New("disk: no space left")
+			}
+			return nil
+		},
+		HelloWait: x.waits.HelloWait, IdleWait: x.waits.IdleWait, FireWait: x.waits.FireWait,
+	})
+}
+
+// fail makes Save of the state file name fail (on) or work again.
+func (x *box) fail(name string, on bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.failing == nil {
+		x.failing = map[string]bool{}
+	}
+	x.failing[name] = on
 }
 
 // restart is a power loss and boot: nothing survives but the disk.
@@ -463,7 +508,7 @@ func (x *box) serve() string {
 // answered the hello with its own.
 func (x *box) dial(addr string, priv ed25519.PrivateKey) (*core, bool) {
 	x.t.Helper()
-	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // the hello authenticates
+	c, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // the hello authenticates
 	if err != nil {
 		x.t.Fatal(err)
 	}
@@ -484,7 +529,7 @@ func (x *box) dial(addr string, priv ed25519.PrivateKey) (*core, bool) {
 		return nil, false
 	}
 	eh, ok := m.(wire.Hello)
-	enf, kerr := channelKey(fileStore{filepath.Join(x.dir, fileChannelKey)}, nil)
+	enf, kerr := channelKey(fileStore{path: filepath.Join(x.dir, fileChannelKey)}, nil)
 	if !ok || kerr != nil || eh.Verify(wire.RoleEnforcer, enf.Public().(ed25519.PublicKey), exp) != nil {
 		x.t.Fatalf("the enforcer's hello does not verify: %T", m)
 	}
@@ -545,6 +590,8 @@ func (c *core) read() wire.Code {
 // where the row says power is lost. Catches pieces that pass alone and
 // fail together.
 func TestLifecycle(t *testing.T) {
+	failSafeRows(t) // #4755: failsafe_test.go
+
 	// First boot, factory state: only the enrolment page answers, and the
 	// firewall holds default deny, the empty policy's ruleset.
 	t.Run("first boot", func(t *testing.T) {
