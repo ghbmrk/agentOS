@@ -160,6 +160,7 @@ type (
 		stores    []string // the stores that held items at the erase
 		confirmed map[string]bool
 		reads     map[string]firstRead // each lineage that read an item, at its first read
+		cancelled []string             // the plans its erase cancelled, by lineage then log order
 	}
 	firstRead struct {
 		at    int64
@@ -228,7 +229,7 @@ func (s *State) applyErase(e Entry) error {
 		if st := s.subjects[b.Subject]; st != nil && !st.erased {
 			st.erased, st.erasedAt, st.stores, st.confirmed = true, e.At, holding(st.items), map[string]bool{}
 			s.owing[b.Subject] = true
-			s.cancelReaders(st.reads)
+			s.cancelReaders(st)
 		}
 	case TEraseConfirmed:
 		b, err := body[eraseConfirmed](e)
@@ -259,17 +260,16 @@ func (s *State) applyErase(e Entry) error {
 	return nil
 }
 
-// cancelReaders cancels, in the erase's own transition, each plan not yet
-// ended that a reader of the erased subject submitted after its first read:
-// an ID under "<lineage>/" (guest plan IDs) logged after that read's entry,
-// so it may carry what the read gave. The log's order, not its clock,
-// decides, so no crash falls between the erase and the cancel and a replay
-// cancels the same plans (LOG-4, D-169, #3870).
-func (s *State) cancelReaders(reads map[string]firstRead) {
-	for l, r := range reads {
-		for _, id := range s.Order[r.plans:] {
-			if strings.HasPrefix(id, l+"/") {
-				s.cancel(s.Plans[id], CErased, "")
+// cancelReaders cancels in the erase's own transition, and lists on st, each
+// plan not yet ended that a reader of st logged under "<lineage>/" (guest plan
+// IDs) after its first read, so it may carry what the read gave. Log order
+// decides, not the clock, so a replay cancels the same plans (LOG-4, D-169).
+func (s *State) cancelReaders(st *subjectState) {
+	for _, l := range slices.Sorted(maps.Keys(st.reads)) {
+		for _, id := range s.Order[st.reads[l].plans:] {
+			if p := s.Plans[id]; strings.HasPrefix(id, l+"/") && (p.Status == SPending || p.Status == SActive) {
+				s.cancel(p, CErased, "")
+				st.cancelled = append(st.cancelled, id)
 			}
 		}
 	}
@@ -396,9 +396,8 @@ func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int6
 		case st == nil:
 			rep.Unnamed = append(rep.Unnamed, sub)
 		case st.erased:
-			// A delete still owed stays listed in Unerased under KeyTable
-			// and is retried; a key back after its delete was confirmed
-			// keeps content closed.
+			// A delete still owed stays in Unerased under KeyTable and is
+			// retried; a key back after its confirmed delete keeps content closed.
 			if err := keys.Delete(sub); err != nil && st.confirmed[KeyTable] {
 				return ContentReport{}, err
 			}
@@ -642,7 +641,8 @@ type Confirmation struct {
 	StillHeld []BackupHold `json:"stillHeld,omitempty"`
 	// BackupsUnknown: no backup list is open (OpenBackups), so any older
 	// backup may still hold the subject's items.
-	BackupsUnknown bool `json:"backupsUnknown,omitempty"`
+	BackupsUnknown bool     `json:"backupsUnknown,omitempty"`
+	Cancelled      []string `json:"cancelled,omitempty"` // the plans it cancelled (cancelReaders)
 }
 
 // BackupHold is an older backup that may still hold an erased subject's
@@ -722,7 +722,7 @@ func (k *Kernel) Confirm(c Confirmation) Confirmation {
 	if st == nil || !st.erased {
 		return c
 	}
-	out := Confirmation{Subject: c.Subject, Unconfirmed: st.unconfirmed()}
+	out := Confirmation{Subject: c.Subject, Unconfirmed: st.unconfirmed(), Cancelled: slices.Clone(st.cancelled)}
 	for _, s := range st.stores {
 		if st.confirmed[s] {
 			out.Confirmed = append(out.Confirmed, s)
