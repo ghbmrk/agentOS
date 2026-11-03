@@ -75,6 +75,8 @@ function shown(r) {
     // factory reset the owner is already on this one.
     document.getElementById("net-new").hidden = !n.setup_replaced;
     document.getElementById("net-kept").hidden = !!n.setup_replaced;
+    // A failed enrolment's card comes back on the retry, so it is not "shown only now".
+    document.getElementById("net-once").hidden = !r.recovery;
     document.getElementById("rejoin").hidden = !n.setup_replaced;
     document.getElementById("ssid").textContent = n.ssid;
     document.getElementById("password").textContent = n.password;
@@ -95,14 +97,12 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.disabled = true;
     try { shown(await enrol(ef.elements.code.value, ef.dataset.rp)); say(""); }
     catch (err) {
-      if (err.body && err.body.network) {
-        // Nothing enrolled; the card shows, with its words, whether the
-        // setup Wi-Fi is already gone (a first enrolment) or not (after a
-        // reset).
+      if (err.body && err.body.network && err.body.network.setup_replaced) {
+        // Nothing enrolled, but the setup Wi-Fi is already gone: show the
+        // Owner network's card so the owner can join it and enrol there.
+        // After a reset the owner is already on it, so the form stays.
         shown({ network: err.body.network });
-        say("Not enrolled: " + err.message + (err.body.network.setup_replaced
-          ? ". Save the network below, join it, open this page again and enrol with the same code."
-          : ". Try again with the same code."));
+        say("Not enrolled: " + err.message + ". Save the network below, join it, open this page again and enrol with the same code.");
         return;
       }
       say("Not enrolled: " + err.message); btn.disabled = false;
