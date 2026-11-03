@@ -612,33 +612,171 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 	}
 }
 
-// TestEveryBoundIsRecorded: every fixed bound the package declares is named
-// in ASSUMPTIONS.md's bounds row with its basis (RES-5-readerwire-maxconns),
-// so a new cap cannot land without one.
-func TestEveryBoundIsRecorded(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "readerwire.go", nil, 0)
-	must(t, err)
-	rec, err := os.ReadFile("ASSUMPTIONS.md")
-	must(t, err)
-	var n int
-	for _, d := range f.Decls {
-		g, ok := d.(*ast.GenDecl)
-		if !ok || g.Tok != token.CONST {
-			continue
-		}
-		for _, sp := range g.Specs {
-			for _, id := range sp.(*ast.ValueSpec).Names {
-				if id.Name == "version" || id.Name == "opRead" {
-					continue // the frame's own names, not bounds
-				}
-				n++
-				if !bytes.Contains(rec, []byte("`"+id.Name+"`")) {
-					t.Errorf("the bound %s has no record in ASSUMPTIONS.md", id.Name)
-				}
-			}
+// boundsRow prefixes the ASSUMPTIONS.md rows that record each fixed bound
+// with its basis (RES-5-readerwire-maxconns-1 and -2).
+const boundsRow = "| RES-5-readerwire-maxconns-"
+
+// timeUnits are the time package's units: a duration built from one outside
+// a const declaration is a bound with no name.
+var timeUnits = map[string]bool{"Nanosecond": true, "Microsecond": true,
+	"Millisecond": true, "Second": true, "Minute": true, "Hour": true}
+
+// boundProblems lists every fixed bound in srcs (file name to Go source,
+// the package's non-test files) that lacks a record in rec's bounds rows: a
+// constant not named in backticks in one of those rows (a mention in any
+// other row or in prose does not count), and any number other than 0 or 1,
+// or any time unit, written outside a const declaration, since such a bound
+// has no name to record.
+func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
+	t.Helper()
+	var rows strings.Builder
+	for _, line := range strings.Split(rec, "\n") {
+		if strings.HasPrefix(line, boundsRow) {
+			rows.WriteString(line)
 		}
 	}
+	if rows.Len() == 0 {
+		return []string{"ASSUMPTIONS.md has no " + strings.TrimPrefix(boundsRow, "| ") + " row"}
+	}
+	var out []string
+	var n int
+	fset := token.NewFileSet()
+	for name, src := range srcs {
+		f, err := parser.ParseFile(fset, name, src, 0)
+		must(t, err)
+		ast.Inspect(f, func(node ast.Node) bool {
+			switch x := node.(type) {
+			case *ast.GenDecl:
+				if x.Tok != token.CONST {
+					return true
+				}
+				for _, sp := range x.Specs {
+					for _, id := range sp.(*ast.ValueSpec).Names {
+						if id.Name == "version" || id.Name == "opRead" {
+							continue // the frame's own names, not bounds
+						}
+						n++
+						if !strings.Contains(rows.String(), "`"+id.Name+"`") {
+							out = append(out, fmt.Sprintf("the bound %s has no record in a %s row", id.Name, boundsRow))
+						}
+					}
+				}
+				return false // a const's own literals are what it names
+			case *ast.BasicLit:
+				if (x.Kind == token.INT || x.Kind == token.FLOAT || x.Kind == token.IMAG) && x.Value != "0" && x.Value != "1" {
+					out = append(out, fmt.Sprintf("%s: the literal %s is a bound with no name: make it a recorded constant", fset.Position(x.Pos()), x.Value))
+				}
+			case *ast.SelectorExpr:
+				if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "time" && timeUnits[x.Sel.Name] {
+					out = append(out, fmt.Sprintf("%s: time.%s outside a const is a bound with no name: make it a recorded constant", fset.Position(x.Pos()), x.Sel.Name))
+				}
+			}
+			return true
+		})
+	}
 	if n == 0 {
-		t.Fatal("no bounds found")
+		out = append(out, "no bounds found")
+	}
+	return out
+}
+
+// packageSources reads every non-test Go file in the package.
+func packageSources(t *testing.T) map[string]string {
+	t.Helper()
+	ents, err := os.ReadDir(".")
+	must(t, err)
+	srcs := map[string]string{}
+	for _, e := range ents {
+		if name := e.Name(); strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
+			b, err := os.ReadFile(name)
+			must(t, err)
+			srcs[name] = string(b)
+		}
+	}
+	return srcs
+}
+
+// TestEveryBoundIsRecorded: every fixed bound in the package's non-test files
+// is a constant named in an ASSUMPTIONS.md bounds row with its basis
+// (RES-5-readerwire-maxconns-*), so a new cap cannot land without one: not
+// as a literal, not in a new file, and not recorded only in another row.
+// REQ: RES-5
+func TestEveryBoundIsRecorded(t *testing.T) {
+	rec, err := os.ReadFile("ASSUMPTIONS.md")
+	must(t, err)
+	srcs := packageSources(t)
+	if _, ok := srcs["readerwire.go"]; !ok {
+		t.Fatal("readerwire.go not read")
+	}
+	for _, p := range boundProblems(t, srcs, string(rec)) {
+		t.Error(p)
+	}
+}
+
+// TestTheBoundsRecordCatchesEachGap: each gap #4849 names fails the check,
+// starting from the package as it stands.
+func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
+	b, err := os.ReadFile("ASSUMPTIONS.md")
+	must(t, err)
+	rec := string(b)
+	// unrecord drops the backticks around each name in the bounds rows only.
+	unrecord := func(names ...string) string {
+		lines := strings.Split(rec, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, boundsRow) {
+				for _, n := range names {
+					line = strings.ReplaceAll(line, "`"+n+"`", n)
+				}
+				lines[i] = line
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	withFile := func(name, src string) map[string]string {
+		srcs := packageSources(t)
+		srcs[name] = src
+		return srcs
+	}
+	cases := []struct {
+		name string
+		srcs map[string]string
+		rec  string
+		want []string
+	}{
+		{"named only in another row", packageSources(t),
+			unrecord("MaxReply") + "| OTHER-1 | `MaxReply` is named here only. | - | - |\n",
+			[]string{"the bound MaxReply has no record"}},
+		{"named only in prose", packageSources(t),
+			unrecord("maxConns") + "\nSee `maxConns`.\n",
+			[]string{"the bound maxConns has no record"}},
+		{"an unrecorded constant in a new file", withFile("extra.go", "package readerwire\n\nconst maxExtra = 3\n"), rec,
+			[]string{"the bound maxExtra has no record"}},
+		{"an unrecorded constant inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"), rec,
+			[]string{"the bound maxLocal has no record"}},
+		{"the backoff constants lose their record", packageSources(t), unrecord("acceptBackoffMin", "acceptBackoffMax"),
+			[]string{"the bound acceptBackoffMin has no record", "the bound acceptBackoffMax has no record"}},
+		{"a bound written as a literal", withFile("extra.go", "package readerwire\n\nimport \"time\"\n\nfunc f() []byte {\n\ttime.Sleep(5 * time.Millisecond)\n\treturn make([]byte, 4096)\n}\n"), rec,
+			[]string{"extra.go:6:13: the literal 5", "extra.go:6:17: time.Millisecond", "extra.go:7:22: the literal 4096"}},
+		{"a time unit alone", withFile("extra.go", "package readerwire\n\nimport \"time\"\n\nvar wait = time.Second\n"), rec,
+			[]string{"extra.go:5:12: time.Second"}},
+		{"no bounds rows", packageSources(t), strings.ReplaceAll(rec, boundsRow, "| RES-5-other-"),
+			[]string{"ASSUMPTIONS.md has no RES-5-readerwire-maxconns- row"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := boundProblems(t, c.srcs, c.rec)
+			if len(got) != len(c.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(c.want), c.want)
+			}
+			for _, w := range c.want {
+				var hit bool
+				for _, g := range got {
+					hit = hit || strings.HasPrefix(g, w)
+				}
+				if !hit {
+					t.Errorf("problems = %q, want one starting %q", got, w)
+				}
+			}
+		})
 	}
 }

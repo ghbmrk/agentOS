@@ -52,6 +52,11 @@ const (
 	// one call at a time, and the other slots hold calls whose caller went
 	// away while the model still runs.
 	maxConns = 8
+	// acceptBackoffMin and acceptBackoffMax pace the accept loop's retries
+	// after a failed accept (out of descriptors), doubling from the first to
+	// the second, as net/http does.
+	acceptBackoffMin = 5 * time.Millisecond
+	acceptBackoffMax = time.Second
 
 	version = 1
 	opRead  = "read"
@@ -263,7 +268,7 @@ func Serve(ln net.Listener, model Ask) error {
 
 func serve(ln net.Listener, model Ask, timeout time.Duration) error {
 	slots := make(chan struct{}, maxConns)
-	wait := 5 * time.Millisecond
+	wait := acceptBackoffMin
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -271,10 +276,10 @@ func serve(ln net.Listener, model Ask, timeout time.Duration) error {
 				return nil
 			}
 			time.Sleep(wait)
-			wait = min(2*wait, time.Second)
+			wait = min(wait+wait, acceptBackoffMax)
 			continue
 		}
-		wait = 5 * time.Millisecond
+		wait = acceptBackoffMin
 		select {
 		case slots <- struct{}{}:
 			go func() {
