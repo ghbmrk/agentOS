@@ -72,32 +72,45 @@ func TestAPI(t *testing.T) {
 
 // compares is the constant-time rule (#4427 item 3), resolved through
 // go/types over every declaration of the package: Check and age each call
-// crypto/hmac.Equal; no ==, != or switch compares a string or an array
-// with anything but a constant; and no other package's Equal, Compare or
+// crypto/hmac.Equal; no ==, != or switch compares operands that may hold
+// a string or an array (a struct holding one, or an interface) unless
+// one side is a constant or nil; and no other package's Equal, Compare or
 // DeepEqual is named, called or held in a variable. It catches an honest
 // regression, not a deliberate rewrite such as a byte loop: the body is
 // read whole in review (ASSUMPTIONS ENF-page-csrf-1).
 func compares(files []*ast.File, info *types.Info) []string {
 	var problems []string
 	equalIn := map[string]bool{}
-	variable := func(es ...ast.Expr) bool {
-		for _, e := range es {
-			switch u := info.TypeOf(e).Underlying().(type) {
-			case *types.Basic:
-				if u.Info()&types.IsString == 0 {
-					return false
+	// holds is whether a value of type t may hold a string or an array a
+	// compare would walk: one itself, a struct with one inside, or an
+	// interface, which may carry either (#4819).
+	var holds func(t types.Type) bool
+	holds = func(t types.Type) bool {
+		switch u := t.Underlying().(type) {
+		case *types.Basic:
+			return u.Info()&types.IsString != 0
+		case *types.Array, *types.Interface:
+			return true
+		case *types.Struct:
+			for i := range u.NumFields() {
+				if holds(u.Field(i).Type()) {
+					return true
 				}
-			case *types.Array:
-			default:
-				return false
 			}
 		}
+		return false
+	}
+	// variable is a compare of operands that may hold a string or an
+	// array, none of them a constant or nil.
+	variable := func(es ...ast.Expr) bool {
+		held := false
 		for _, e := range es {
-			if info.Types[e].Value != nil {
+			if tv := info.Types[e]; tv.Value != nil || tv.IsNil() {
 				return false
 			}
+			held = held || holds(info.TypeOf(e))
 		}
-		return true
+		return held
 	}
 	for _, f := range files {
 		for _, d := range f.Decls {
@@ -109,7 +122,7 @@ func compares(files []*ast.File, info *types.Info) []string {
 				switch n := n.(type) {
 				case *ast.BinaryExpr:
 					if (n.Op == token.EQL || n.Op == token.NEQ) && variable(n.X, n.Y) {
-						problems = append(problems, fmt.Sprintf("%s: %s compares strings or arrays", where, types.ExprString(n)))
+						problems = append(problems, fmt.Sprintf("%s: %s may compare strings or arrays", where, types.ExprString(n)))
 					}
 				case *ast.SwitchStmt:
 					if n.Tag == nil {

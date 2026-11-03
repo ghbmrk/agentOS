@@ -369,7 +369,10 @@ var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 const enforcerWeb = "enforcer/page"
 
 // enforcerCSRF is the page's anti-forgery package: it links net/http for
-// the page alone, which is its only importer (Go's internal rule).
+// the page alone. Go's internal rule admits any package under
+// enforcer/page; the enforcer map pins the page as its only importer,
+// since every enforcer package needs a rule there and only the page's
+// allows it.
 const enforcerCSRF = "enforcer/page/internal/csrf"
 
 // enforcerSSH is the one enforcer package that links a third-party
@@ -548,7 +551,10 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 // a module package it may link (enforcerLinks), holds a source the Go
 // compiler does not check for memory safety (assembly, C, C++, Fortran,
 // Objective-C, SWIG or a prebuilt object), whatever its build constraints
-// (#4789). It is not a secrecy device between enforcer packages, which
+// (#4789). It scans agentOS's own packages only: third-party code the
+// enforcer links (enforcerWebDeps, enforcerSSHDeps; golang.org/x/crypto
+// holds assembly) is trusted as any dependency is and not scanned. It is
+// not a secrecy device between enforcer packages, which
 // trust one another (ASSUMPTIONS ENF-page-csrf-2). The roots are the list
 // TestEnforcerImportsNothingFromAgentOS holds (#4798), so a module package
 // the enforcer is later allowed to link is scanned too.

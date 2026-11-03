@@ -121,28 +121,46 @@ func (p Price) cost(in, out int64) (int64, error) {
 }
 
 // owe makes a log write. A failure is kept and retried before the next call
-// (flush), so the call whose write failed is the last.
+// (flush), so the call whose write failed is the last. A write the log
+// refuses as text it cannot carry is dropped, never kept: no retry cures
+// it, so keeping it would shut the clerk for good (#4809).
 func (c *Clerk) owe(now int64, write func(now int64) error) error {
-	if err := write(now); err != nil {
-		c.owed = append(c.owed, func(now int64) error {
-			// A retry of a settlement whose answer was lost after it landed:
-			// the kernel settles an admission once, so it is recorded.
-			if err := write(now); !errors.Is(err, kernel.ErrNotAdmitted) {
-				return err
-			}
-			return nil
-		})
-		return err
+	err := write(now)
+	if r := refused(err); err == nil || r != nil {
+		return r
 	}
-	return nil
+	c.owed = append(c.owed, func(now int64) error {
+		// A retry of a settlement whose answer was lost after it landed:
+		// the kernel settles an admission once, so it is recorded.
+		if err := write(now); !errors.Is(err, kernel.ErrNotAdmitted) {
+			return err
+		}
+		return nil
+	})
+	return err
 }
 
+// refused is err as the dropped write it means, when the log refused the
+// write's text, and else nil.
+func refused(err error) error {
+	if !errors.Is(err, kernel.ErrNotText) {
+		return nil
+	}
+	return fmt.Errorf("model: a log write the log refuses was dropped: %w", err)
+}
+
+// flush retries the owed writes in order. One the log refuses as text is
+// dropped and fails only the call that found it.
 func (c *Clerk) flush(now int64) error {
 	for len(c.owed) > 0 {
-		if err := c.owed[0](now); err != nil {
+		err := c.owed[0](now)
+		if err != nil && refused(err) == nil {
 			return fmt.Errorf("model: unrecorded usage, no calls until the log records it: %w", err)
 		}
 		c.owed = c.owed[1:]
+		if err != nil {
+			return refused(err)
+		}
 	}
 	return nil
 }
@@ -156,7 +174,8 @@ func (c *Clerk) flush(now int64) error {
 // The reply is withheld if the spend cannot be recorded. A paid reply is kept
 // when only its pool reading fails: a reading the log refuses is recorded as a
 // full pool instead, since a reading can only narrow, and one the log cannot
-// write is owed until its reset time.
+// write is owed until its reset time. A write the log refuses as text is
+// dropped and the reply withheld (Settle).
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
 	adm, err := c.Admit(now, plan, route, tokens(prompt), maxOut)
 	if err != nil {
@@ -203,7 +222,10 @@ func (c *Clerk) Admit(now int64, plan, route string, in, maxOut int64) (*Admissi
 // admitted input and out output tokens) if callErr is nil, and else the
 // admitted worst case; and the pool reading, if any. A second Settle
 // records nothing and returns the first one's answer. An error is spend
-// the log has not recorded: no further call is made until it has.
+// the log has not recorded: no further call is made until it has. An error
+// that is kernel.ErrNotText is a write the log refused and the clerk
+// dropped, which shuts nothing: dropped spend leaves the admission charged
+// at its worst case, a dropped reading leaves the pool on its last one.
 func (s *Admission) Settle(now int64, u Usage, out int64, callErr error) error {
 	s.once.Do(func() { s.err = s.c.settle(now, s, u, out, callErr) })
 	return s.err
@@ -250,7 +272,7 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 			}
 			ws = append(ws, r)
 		}
-		_ = c.owe(now, func(now int64) error {
+		perr := c.owe(now, func(now int64) error {
 			// A window that has reset since the reading is not read again.
 			ws := slices.DeleteFunc(slices.Clone(ws), func(w kernel.WindowReading) bool { return now >= w.ResetAt })
 			if len(ws) == 0 || c.Ledger.ReadPool(now, p.Pool, ws) == nil {
@@ -261,6 +283,9 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 			}
 			return c.Ledger.ReadPool(now, p.Pool, ws)
 		})
+		if errors.Is(perr, kernel.ErrNotText) {
+			merr = errors.Join(merr, perr) // dropped, so the call says so
+		}
 	}
 	return merr
 }
