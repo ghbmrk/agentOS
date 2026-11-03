@@ -1,0 +1,321 @@
+# What starting agentos-keeper-kernel.service can start or stop, as the built image's own systemd
+# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start U" is a unit the unlock
+# step can start, "stop U KIND T" a unit one of those stops, "generator G failed" a generator that
+# found nothing to read in the build's tree. Regenerate with, as root, after an image build:
+#   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
+start -.slice
+start agentos-inbound.service
+start agentos-keeper-kernel.service
+start agentos-keeper-link-capture.service
+start agentos-keeper.slice
+start agentos-link.service
+start agentos.slice
+start dev-hugepages.mount
+start dev-mqueue.mount
+start emergency.service
+start emergency.target
+start first-boot-complete.target
+start kmod-static-nodes.service
+start ldconfig.service
+start local-fs-pre.target
+start local-fs.target
+start modprobe@configfs.service
+start modprobe@dm_mod.service
+start modprobe@efi_pstore.service
+start modprobe@fuse.service
+start modprobe@loop.service
+start network-pre.target
+start nss-lookup.target
+start proc-sys-fs-binfmt_misc.automount
+start proc-sys-fs-binfmt_misc.mount
+start run-lock.mount
+start swap.target
+start sys-fs-fuse-connections.mount
+start sys-kernel-config.mount
+start sys-kernel-debug.mount
+start sys-kernel-tracing.mount
+start sys-subsystem-net-devices-agentos\x2dlink.device
+start sysinit.target
+start system-modprobe.slice
+start system.slice
+start systemd-ask-password-console.path
+start systemd-ask-password-console.service
+start systemd-binfmt.service
+start systemd-boot-random-seed.service
+start systemd-boot-update.service
+start systemd-confext.service
+start systemd-firstboot.service
+start systemd-hibernate-clear.service
+start systemd-hwdb-update.service
+start systemd-journal-catalog-update.service
+start systemd-journal-flush.service
+start systemd-journald-audit.socket
+start systemd-journald-dev-log.socket
+start systemd-journald.service
+start systemd-journald.socket
+start systemd-machine-id-commit.service
+start systemd-modules-load.service
+start systemd-network-generator.service
+start systemd-pcrlock-file-system.service
+start systemd-pcrlock-firmware-code.service
+start systemd-pcrlock-firmware-config.service
+start systemd-pcrlock-machine-id.service
+start systemd-pcrlock-make-policy.service
+start systemd-pcrlock-secureboot-authority.service
+start systemd-pcrlock-secureboot-policy.service
+start systemd-pcrmachine.service
+start systemd-pcrphase-sysinit.service
+start systemd-pcrphase.service
+start systemd-pstore.service
+start systemd-random-seed.service
+start systemd-remount-fs.service
+start systemd-repart.service
+start systemd-resolved.service
+start systemd-sysctl.service
+start systemd-sysext.service
+start systemd-sysusers.service
+start systemd-tmpfiles-setup-dev-early.service
+start systemd-tmpfiles-setup-dev.service
+start systemd-tmpfiles-setup.service
+start systemd-tpm2-setup-early.service
+start systemd-tpm2-setup.service
+start systemd-udev-load-credentials.service
+start systemd-udev-trigger.service
+start systemd-udevd-control.socket
+start systemd-udevd-kernel.socket
+start systemd-udevd.service
+start systemd-update-done.service
+start tmp.mount
+stop -.slice RequiredBy -.mount
+stop -.slice RequiredBy agentos.slice
+stop -.slice RequiredBy dev-full.mount
+stop -.slice RequiredBy dev-hugepages.mount
+stop -.slice RequiredBy dev-mqueue.mount
+stop -.slice RequiredBy dev-null.mount
+stop -.slice RequiredBy dev-random.mount
+stop -.slice RequiredBy dev-urandom.mount
+stop -.slice RequiredBy dev-zero.mount
+stop -.slice RequiredBy init.scope
+stop -.slice RequiredBy proc-sys-fs-binfmt_misc.mount
+stop -.slice RequiredBy sys-fs-fuse-connections.mount
+stop -.slice RequiredBy sys-kernel-config.mount
+stop -.slice RequiredBy sys-kernel-debug.mount
+stop -.slice RequiredBy sys-kernel-tracing.mount
+stop -.slice RequiredBy system.slice
+stop -.slice RequiredBy user.slice
+stop -.slice RequiredBy usr.mount
+stop agentos-inbound.service RequiredBy agentos-egress.service
+stop agentos-inbound.service RequiredBy agentos-keeper-link-capture.service
+stop agentos-inbound.service RequiredBy agentos-link.service
+stop agentos-inbound.service RequiredBy agentos-localui.service
+stop agentos-inbound.service RequiredBy agentosd.service
+stop agentos-inbound.service RequiredBy systemd-networkd.service
+stop agentos-inbound.service RequiredBy systemd-resolved.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-camera.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-enroll.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-homekit.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-kernel.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-link-capture.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-mail.service
+stop agentos-keeper.slice RequiredBy agentos-keeper-pageca.service
+stop agentos.slice RequiredBy agentos-keeper.slice
+stop agentos.slice RequiredBy agentosd.service
+stop emergency.service ConflictedBy sysinit.target
+stop emergency.service ConflictedBy syslog.socket
+stop emergency.service ConflictedBy systemd-ask-password-console.path
+stop emergency.service ConflictedBy systemd-ask-password-console.service
+stop emergency.service ConflictedBy systemd-ask-password-wall.path
+stop emergency.service Conflicts rescue.service
+stop emergency.service RequiredBy emergency.target
+stop emergency.target ConflictedBy initrd-cleanup.service
+stop emergency.target ConflictedBy initrd-parse-etc.service
+stop emergency.target ConflictedBy sysinit.target
+stop ldconfig.service Conflicts initrd-switch-root.target
+stop modprobe@configfs.service RequiredBy sys-kernel-config.mount
+stop modprobe@fuse.service RequiredBy sys-fs-fuse-connections.mount
+stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-keeper-link-capture.service
+stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-link.service
+stop sysinit.target Conflicts emergency.service
+stop sysinit.target Conflicts emergency.target
+stop sysinit.target RequiredBy agentos-boot-report.service
+stop sysinit.target RequiredBy agentos-camdecode.socket
+stop sysinit.target RequiredBy agentos-drill-report.service
+stop sysinit.target RequiredBy agentos-drive-id.service
+stop sysinit.target RequiredBy agentos-egress-setup.path
+stop sysinit.target RequiredBy agentos-egress-setup.service
+stop sysinit.target RequiredBy agentos-egress.service
+stop sysinit.target RequiredBy agentos-fallback.service
+stop sysinit.target RequiredBy agentos-health.service
+stop sysinit.target RequiredBy agentos-imapconn.socket
+stop sysinit.target RequiredBy agentos-keeper-camera.service
+stop sysinit.target RequiredBy agentos-keeper-enroll.path
+stop sysinit.target RequiredBy agentos-keeper-enroll.service
+stop sysinit.target RequiredBy agentos-keeper-homekit.service
+stop sysinit.target RequiredBy agentos-keeper-kernel.service
+stop sysinit.target RequiredBy agentos-keeper-link-capture.service
+stop sysinit.target RequiredBy agentos-keeper-mail.service
+stop sysinit.target RequiredBy agentos-keeper-pageca.service
+stop sysinit.target RequiredBy agentos-keeper-rotate.socket
+stop sysinit.target RequiredBy agentos-keeper-setup.socket
+stop sysinit.target RequiredBy agentos-link.service
+stop sysinit.target RequiredBy agentos-localui-claim.service
+stop sysinit.target RequiredBy agentos-localui.service
+stop sysinit.target RequiredBy agentos-modem-env.path
+stop sysinit.target RequiredBy agentos-modem-env.service
+stop sysinit.target RequiredBy agentos-modem.service
+stop sysinit.target RequiredBy agentos-reboot.service
+stop sysinit.target RequiredBy agentos-reboot.timer
+stop sysinit.target RequiredBy agentos-recovery-restart.path
+stop sysinit.target RequiredBy agentosd.path
+stop sysinit.target RequiredBy agentosd.service
+stop sysinit.target RequiredBy basic.target
+stop sysinit.target RequiredBy boot-complete.target
+stop sysinit.target RequiredBy console-getty.service
+stop sysinit.target RequiredBy dbus.service
+stop sysinit.target RequiredBy dbus.socket
+stop sysinit.target RequiredBy fstrim.service
+stop sysinit.target RequiredBy fstrim.timer
+stop sysinit.target RequiredBy getty-static.service
+stop sysinit.target RequiredBy getty@tty1.service
+stop sysinit.target RequiredBy rc-local.service
+stop sysinit.target RequiredBy rescue.target
+stop sysinit.target RequiredBy systemd-ask-password-wall.service
+stop sysinit.target RequiredBy systemd-hostnamed.service
+stop sysinit.target RequiredBy systemd-hostnamed.socket
+stop sysinit.target RequiredBy systemd-logind.service
+stop sysinit.target RequiredBy systemd-pcrphase.service
+stop sysinit.target RequiredBy systemd-tmpfiles-clean.timer
+stop sysinit.target RequiredBy systemd-user-sessions.service
+stop system-modprobe.slice RequiredBy modprobe@configfs.service
+stop system-modprobe.slice RequiredBy modprobe@dm_mod.service
+stop system-modprobe.slice RequiredBy modprobe@drm.service
+stop system-modprobe.slice RequiredBy modprobe@efi_pstore.service
+stop system-modprobe.slice RequiredBy modprobe@fuse.service
+stop system-modprobe.slice RequiredBy modprobe@loop.service
+stop system.slice RequiredBy agentos-boot-report.service
+stop system.slice RequiredBy agentos-camdecode.socket
+stop system.slice RequiredBy agentos-drill-report.service
+stop system.slice RequiredBy agentos-drive-id.service
+stop system.slice RequiredBy agentos-egress-setup.service
+stop system.slice RequiredBy agentos-egress.service
+stop system.slice RequiredBy agentos-fallback.service
+stop system.slice RequiredBy agentos-health.service
+stop system.slice RequiredBy agentos-imapconn.socket
+stop system.slice RequiredBy agentos-inbound.service
+stop system.slice RequiredBy agentos-keeper-rotate.socket
+stop system.slice RequiredBy agentos-keeper-setup.socket
+stop system.slice RequiredBy agentos-link.service
+stop system.slice RequiredBy agentos-localui-claim.service
+stop system.slice RequiredBy agentos-localui.service
+stop system.slice RequiredBy agentos-modem-env.service
+stop system.slice RequiredBy agentos-modem.service
+stop system.slice RequiredBy agentos-reboot.service
+stop system.slice RequiredBy console-getty.service
+stop system.slice RequiredBy dbus.service
+stop system.slice RequiredBy dbus.socket
+stop system.slice RequiredBy emergency.service
+stop system.slice RequiredBy etc-machine\x2did.mount
+stop system.slice RequiredBy fstrim.service
+stop system.slice RequiredBy getty-static.service
+stop system.slice RequiredBy initrd-cleanup.service
+stop system.slice RequiredBy initrd-parse-etc.service
+stop system.slice RequiredBy initrd-switch-root.service
+stop system.slice RequiredBy initrd-udevadm-cleanup-db.service
+stop system.slice RequiredBy kmod-static-nodes.service
+stop system.slice RequiredBy ldconfig.service
+stop system.slice RequiredBy rc-local.service
+stop system.slice RequiredBy rescue.service
+stop system.slice RequiredBy run-lock.mount
+stop system.slice RequiredBy syslog.socket
+stop system.slice RequiredBy system-getty.slice
+stop system.slice RequiredBy system-modprobe.slice
+stop system.slice RequiredBy systemd-ask-password-console.service
+stop system.slice RequiredBy systemd-ask-password-wall.service
+stop system.slice RequiredBy systemd-battery-check.service
+stop system.slice RequiredBy systemd-binfmt.service
+stop system.slice RequiredBy systemd-bless-boot.service
+stop system.slice RequiredBy systemd-boot-random-seed.service
+stop system.slice RequiredBy systemd-boot-update.service
+stop system.slice RequiredBy systemd-bootctl.socket
+stop system.slice RequiredBy systemd-bsod.service
+stop system.slice RequiredBy systemd-confext.service
+stop system.slice RequiredBy systemd-creds.socket
+stop system.slice RequiredBy systemd-firstboot.service
+stop system.slice RequiredBy systemd-fsck-root.service
+stop system.slice RequiredBy systemd-hibernate-clear.service
+stop system.slice RequiredBy systemd-hibernate-resume.service
+stop system.slice RequiredBy systemd-hostnamed.service
+stop system.slice RequiredBy systemd-hostnamed.socket
+stop system.slice RequiredBy systemd-hwdb-update.service
+stop system.slice RequiredBy systemd-initctl.service
+stop system.slice RequiredBy systemd-initctl.socket
+stop system.slice RequiredBy systemd-journal-catalog-update.service
+stop system.slice RequiredBy systemd-journal-flush.service
+stop system.slice RequiredBy systemd-journald-audit.socket
+stop system.slice RequiredBy systemd-journald-dev-log.socket
+stop system.slice RequiredBy systemd-journald.service
+stop system.slice RequiredBy systemd-journald.socket
+stop system.slice RequiredBy systemd-logind.service
+stop system.slice RequiredBy systemd-machine-id-commit.service
+stop system.slice RequiredBy systemd-modules-load.service
+stop system.slice RequiredBy systemd-network-generator.service
+stop system.slice RequiredBy systemd-networkd-persistent-storage.service
+stop system.slice RequiredBy systemd-networkd-wait-online.service
+stop system.slice RequiredBy systemd-networkd.service
+stop system.slice RequiredBy systemd-networkd.socket
+stop system.slice RequiredBy systemd-pcrextend.socket
+stop system.slice RequiredBy systemd-pcrlock-file-system.service
+stop system.slice RequiredBy systemd-pcrlock-firmware-code.service
+stop system.slice RequiredBy systemd-pcrlock-firmware-config.service
+stop system.slice RequiredBy systemd-pcrlock-machine-id.service
+stop system.slice RequiredBy systemd-pcrlock-make-policy.service
+stop system.slice RequiredBy systemd-pcrlock-secureboot-authority.service
+stop system.slice RequiredBy systemd-pcrlock-secureboot-policy.service
+stop system.slice RequiredBy systemd-pcrlock.socket
+stop system.slice RequiredBy systemd-pcrmachine.service
+stop system.slice RequiredBy systemd-pcrphase-initrd.service
+stop system.slice RequiredBy systemd-pcrphase-sysinit.service
+stop system.slice RequiredBy systemd-pcrphase.service
+stop system.slice RequiredBy systemd-pstore.service
+stop system.slice RequiredBy systemd-quotacheck-root.service
+stop system.slice RequiredBy systemd-random-seed.service
+stop system.slice RequiredBy systemd-remount-fs.service
+stop system.slice RequiredBy systemd-repart.service
+stop system.slice RequiredBy systemd-resolved.service
+stop system.slice RequiredBy systemd-sysctl.service
+stop system.slice RequiredBy systemd-sysext.service
+stop system.slice RequiredBy systemd-sysext.socket
+stop system.slice RequiredBy systemd-sysusers.service
+stop system.slice RequiredBy systemd-tmpfiles-clean.service
+stop system.slice RequiredBy systemd-tmpfiles-setup-dev-early.service
+stop system.slice RequiredBy systemd-tmpfiles-setup-dev.service
+stop system.slice RequiredBy systemd-tmpfiles-setup.service
+stop system.slice RequiredBy systemd-tpm2-setup-early.service
+stop system.slice RequiredBy systemd-tpm2-setup.service
+stop system.slice RequiredBy systemd-udev-load-credentials.service
+stop system.slice RequiredBy systemd-udev-settle.service
+stop system.slice RequiredBy systemd-udev-trigger.service
+stop system.slice RequiredBy systemd-udevd-control.socket
+stop system.slice RequiredBy systemd-udevd-kernel.socket
+stop system.slice RequiredBy systemd-udevd.service
+stop system.slice RequiredBy systemd-update-done.service
+stop system.slice RequiredBy systemd-user-sessions.service
+stop system.slice RequiredBy tmp.mount
+stop systemd-ask-password-console.path Conflicts emergency.service
+stop systemd-ask-password-console.service Conflicts emergency.service
+stop systemd-ask-password-console.service Conflicts initrd-switch-root.target
+stop systemd-confext.service Conflicts initrd-switch-root.target
+stop systemd-journald.socket RequiredBy systemd-journald.service
+stop systemd-network-generator.service Conflicts initrd-switch-root.target
+stop systemd-repart.service Conflicts initrd-switch-root.target
+stop systemd-resolved.service Conflicts initrd-switch-root.target
+stop systemd-sysext.service Conflicts initrd-switch-root.target
+stop systemd-sysusers.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup-dev-early.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup-dev.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup.service Conflicts initrd-switch-root.target
+stop systemd-udev-load-credentials.service Conflicts initrd-switch-root.target
+stop systemd-udev-trigger.service ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd-control.socket ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd-kernel.socket ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd.service ConflictedBy initrd-udevadm-cleanup-db.service
