@@ -650,7 +650,7 @@ func TestHeldBreakOnlyAtItsPlace(t *testing.T) {
 // in its JSON form with a %0a put in anywhere but inside that break (a break
 // split by another is not removed), as its joined form is matched too
 // (#4743, Security on #4742 and #4845), whole and in two writes; one whose
-// joined form is under 10 bytes only as written.
+// joined form is under MinJoined (10) bytes only as written.
 func TestBreakTextValueMatched(t *testing.T) {
 	v := `Z\/\n1YZ%n"q7`
 	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
@@ -669,6 +669,10 @@ func TestBreakTextValueMatched(t *testing.T) {
 	}
 	if got := short.Scan([]byte("Z%0a" + v[1:11])).Trips; len(got) != 0 {
 		t.Fatalf("%q's 9-byte joined form tripped %v", v[:11], got)
+	}
+	// one MinJoined bytes long, joined, still trips (L3 on #4845)
+	if got := match.New([]match.Value{{ID: 3, Bytes: []byte("q7Xz2pL9mW\n")}}, nil).Scan([]byte("q7Xz2%0apL9mW")).Trips; !slices.Equal(got, []int{3}) {
+		t.Fatalf("a %d-byte joined form tripped %v, want [3]", match.MinJoined, got)
 	}
 }
 

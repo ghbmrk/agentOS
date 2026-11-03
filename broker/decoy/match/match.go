@@ -179,8 +179,9 @@ func Pattern(text string) bool {
 	return n > 0
 }
 
-// MaxValue bounds one table value, so a stream's carried tail stays small.
-const MaxValue = 1 << 10
+// MaxValue bounds one table value, so a stream's carried tail stays small;
+// MinJoined is decoy.MinValue, the shortest joined form matched (#4743).
+const MaxValue, MinJoined = 1 << 10, 10
 
 // carryPattern is how much of a stream's past bytes a write is scanned with
 // for CLK-4's patterns, so a token split across two writes still matches.
@@ -258,11 +259,10 @@ func encodings(v []byte) [][]byte {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	// Each form is also matched as joined text holds it, '\' runs as one and
-	// breaks (a PEM's LFs) removed, unless under decoy.MinValue (#4743).
+	// Each form is also matched as joined text holds it: '\' runs as one, breaks (a PEM's LFs) removed.
 	for _, f := range out[:3] {
 		s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}}).Stream()
-		if s.join(f); len(s.joined) >= 10 && !bytes.Equal(s.joined, f) {
+		if s.join(f); len(s.joined) >= MinJoined && !bytes.Equal(s.joined, f) {
 			out = append(out, s.joined)
 		}
 	}
@@ -495,9 +495,8 @@ func (s *Stream) matchBreak(br cut) {
 	}
 }
 
-// follows reports whether f comes at joined[j:], where a held JSON break
-// may stand for one of f's '\'s. It compares f whole between its '\'s and
-// walks the held breaks in order, as j only grows (#4743).
+// follows reports whether f comes at joined[j:], where a held JSON break may stand for
+// one of f's '\'s, comparing f whole between them and walking held breaks in order (#4743).
 func (s *Stream) follows(j int, f []byte) bool {
 	t := s.joined
 	b, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })

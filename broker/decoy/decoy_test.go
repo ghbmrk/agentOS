@@ -666,3 +666,10 @@ func TestSSHDecoyBreaksChanged(t *testing.T) {
 		}
 	}
 }
+
+// KRN-12: the matcher's shortest joined form is the table's shortest value.
+func TestMinJoinedIsMinValue(t *testing.T) {
+	if match.MinJoined != MinValue {
+		t.Fatalf("match.MinJoined %d, decoy.MinValue %d", match.MinJoined, MinValue)
+	}
+}
