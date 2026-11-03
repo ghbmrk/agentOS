@@ -252,6 +252,8 @@ func encodings(v []byte) [][]byte {
 		j, _ := json.Marshal(string(t))
 		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))
 		for _, f := range []string{string(t), js, strings.ReplaceAll(js, "/", `\/`), q, strings.ReplaceAll(q, "+", "%20"), url.PathEscape(string(t))} {
+			// carry holds every break to f's end, as a stream's does, so a '\' a %0a split off a run joins it here
+			// as there; at 0 a break is let go early and the joined form is one a stream never makes (#4871).
 			s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
 			if s.join([]byte(f + "\x00")); len(s.joined) > MinJoined {
 				out = append(out, s.joined[:len(s.joined)-1])
