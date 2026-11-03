@@ -54,7 +54,7 @@ Each morning at 8:00 the box texts you one short digest, even on a quiet day, wh
 
 The enforcer's key can change anything on its access point, the Wi-Fi box beside it. So whenever the enforcer may have been compromised, also reset the access point once the enforcer is trusted again:
 
-1. **Factory-reset the access point.** With it powered on, hold its reset button for about 10 seconds, then let go. It restarts with its factory settings and a new key of its own, and its Wi-Fi networks are gone for now.
-2. **Re-pin its key.** Keep its cable in the enforcer's access-point port, and on the enforcer's page choose to set up the access point again. The enforcer takes the access point's new key, then puts back its networks and Wi-Fi passwords.
+1. **Factory-reset the access point.** With it powered on, hold its reset button for about 10 seconds, then let go. It restarts with its factory settings and a new key of its own, and its Wi-Fi networks are gone for now. A reset clears the settings an attacker could change, but not deeper changes to the access point's own software. For those, reinstall its software from its recovery mode, or replace the access point if you want to be sure.
+2. **Re-pin its key.** Keep its cable in the enforcer's access-point port. Its Wi-Fi is gone, so connect a laptop (or a phone with a cable adapter) to the enforcer's wired admin port, open the enforcer's page, and choose to set up the access point again. The enforcer takes the access point's new key, then puts back its networks and Wi-Fi passwords.
 
 Until you re-pin it, the enforcer refuses to talk to the reset access point, because its key changed.
