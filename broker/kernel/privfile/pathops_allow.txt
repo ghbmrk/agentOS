@@ -50,7 +50,7 @@ allow broker/sockets/sockets.go Server.Start os.Chmod that socket, and the check
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
 allow broker/cmd/agentos-link/capture.go linkCapture os.CreateTemp a 0600 file in /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write; O_CREAT|O_EXCL at a fresh random name refuses a link there
-allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made
+allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made, or Verified.Fetch's temp file in filepath.Dir(dst), which is safe only while every Fetch caller passes a dst whose parent no other uid can write (today apply/bootab's own staging directory)
 allow broker/update/store.go InitStore os.MkdirAll makes the store directory its caller names; outside tests and updatetest only agentos-release calls it, on a directory inside its own os.MkdirTemp directory, and no unit starts agentos-release (agentosd opens an existing store, Store{Dir})
 allow broker/update/store.go Verified.Fetch os.CreateTemp its one caller, apply/bootab, fetches into a directory its own os.MkdirTemp just made in a staging directory it checked this process owns and only it writes; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/update/repo.go Init os.MkdirAll only agentos-release calls Init, as the maintainer on the maintainer's machine (no unit starts it), in the repository directory the maintainer names
@@ -100,7 +100,7 @@ allow broker/vm/gvisor/gvisor.go Runtime.launch os.MkdirAll r.StateDir, runsc's 
 allow broker/vm/gvisor/gvisor.go keepConsole os.OpenFile console.log in the root-held machine directory, or exec.log in runsc's root-held --root
 allow broker/vm/gvisor/gvisor.go notRun os.Open runsc's --log file, which Exec's CreateTemp made in runsc's root-held --root
 allow broker/vm/gvisor/gvisor.go fileTail os.Open console.log in the root-held machine directory
-allow broker/vm/gvisor/gvisor.go clipped os.Open a runsc log file Exec's CreateTemp made in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go clipped os.Open a runsc log file Exec's CreateTemp made in runsc's root-held --root, or runsc.err in a one-shot's or stream's directory (RunOnce, StartStream), which those make in the same root-held --root
 allow broker/vm/gvisor/gvisor.go writeBundle os.MkdirAll the machine's bundle directory, root-held beside its layer
 allow broker/vm/gvisor/gvisor.go writeBundle os.WriteFile config.json in the root-held bundle directory, which no guest reaches
 allow broker/vm/gvisor/gvisor.go Runtime.Exec os.MkdirAll runsc's --root, root-held

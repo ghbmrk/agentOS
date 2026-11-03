@@ -751,3 +751,45 @@ func TestStoreParentChainIsOwnOnly(t *testing.T) {
 		f.must(os.Chown(parent, 0, 0))
 	}
 }
+
+// A drive or mirror directory is read beneath its root: a link planted as a
+// parent directory (metadata/ or targets/) or as the file itself is refused,
+// so a source cannot point a read outside its own tree (REV-CHK-links-update-r,
+// #3989).
+func TestDirSourceRefusesLinkedParent(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "timestamp.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "metadata")); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := DirSource(root).Open("metadata/timestamp.json"); err == nil {
+		rc.Close()
+		t.Fatal("Open followed a linked metadata/ directory out of the source")
+	}
+
+	// A link inside the tree to a file inside the tree is refused too.
+	if err := os.Mkdir(filepath.Join(root, "targets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "targets", "real")
+	if err := os.WriteFile(real, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(root, "targets", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := DirSource(root).Open("targets/link"); err == nil {
+		rc.Close()
+		t.Fatal("Open followed a link at the file")
+	}
+
+	// A plain file beneath the root still opens.
+	rc, err := DirSource(root).Open("targets/real")
+	if err != nil {
+		t.Fatalf("plain file: %v", err)
+	}
+	rc.Close()
+}
