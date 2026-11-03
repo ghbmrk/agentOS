@@ -167,6 +167,48 @@ func TestEraseConfirmationNamesTheCancelledPlans(t *testing.T) {
 	}
 }
 
+// The cancelled plans a Confirmation names are the caller's own copy: a
+// caller that reverses the list Erase returned and overwrites an element of
+// the list Confirm returned changes neither the next Confirm nor what a
+// restart folds (LOG-4, #4870). Catches Confirm handing out the kernel's own
+// slice instead of a clone.
+func TestEraseConfirmationCancelledIsACopy(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := r.k.OpenSubject(0)
+	must(t, err)
+	h, err := r.k.Seal(0, sub, "mail", "message", []byte("lunch on Tuesday"))
+	must(t, err)
+	if _, err := r.k.ReadFor(1, h, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	held := r.derive(key.LimitHold(hour, hour))
+	r.plan("agent/a", held, st(key.Unsubscribe, "m1"))
+	r.plan("agent/b", held, st(key.Unsubscribe, "m2"))
+	c, err := r.k.Erase(2, sub)
+	must(t, err)
+	want := []string{"agent/a", "agent/b"}
+	if !slices.Equal(c.Cancelled, want) {
+		t.Fatalf("the erase names %q, want %q", c.Cancelled, want)
+	}
+	slices.Reverse(c.Cancelled)
+	got := r.k.Confirm(kernel.Confirmation{Subject: sub})
+	if !slices.Equal(got.Cancelled, want) {
+		t.Fatalf("after the caller reversed Erase's list Confirm names %q, want %q", got.Cancelled, want)
+	}
+	got.Cancelled[0] = "agent/forged"
+	if again := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(again, want) {
+		t.Fatalf("after the caller overwrote Confirm's list Confirm names %q, want %q", again, want)
+	}
+	r.replays()
+	r.boot(3)
+	if after := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(after, want) {
+		t.Fatalf("after a restart the erase names %q, want %q", after, want)
+	}
+}
+
 // Submit refuses a plan JSON cannot round-trip with JSON's own error, not
 // ErrNotText, and logs nothing: an ES256 owner whose RP ID is 100 bytes that
 // are not UTF-8 is written as 300 bytes of U+FFFD, past the 253 an RP ID may
