@@ -1,5 +1,5 @@
-"""tools/mutgate.py: the REQ-claim gate over gremlins results (MUT-tierA, #1814), and the
-workflow that runs it on pull requests (REV-CHK-mut, #3899).
+"""tools/mutgate.py: the mutation gate over gremlins results (MUT-tierA, #1814; REV-PROOF-mut,
+#4908), and the workflow that runs it on pull requests (REV-CHK-mut, #3899).
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
@@ -38,27 +38,38 @@ diff --git a/broker/hint/hint_test.go b/broker/hint/hint_test.go
 LIVE = {"hint": [("hint.go", 11, "CONDITIONALS_BOUNDARY"), ("hint.go", 40, "CONDITIONALS_NEGATION")]}
 
 
+def gate(diff, live, waived=None):
+    """violations() on the target lines a diff that changes non-test files gives each package of live."""
+    added = mutgate.added_lines(diff)[0]
+    return mutgate.violations({p: mutgate.diff_targets(added, p) for p in live}, live, waived)
+
+
 class Gate(unittest.TestCase):
     def test_live_mutant_on_added_line_in_claimed_package_fails(self):
         self.assertEqual(
-            mutgate.violations(DIFF, LIVE),
+            gate(DIFF, LIVE),
             [("hint", "broker/hint/hint.go", 11, "CONDITIONALS_BOUNDARY")],
         )
 
-    def test_no_marker_no_claim(self):
-        self.assertEqual(mutgate.violations(DIFF.replace("REQ:", "NOTE:"), LIVE), [])
+    def test_claimed_needs_no_req_marker(self):
+        # REV-PROOF-mut (#4908): #2637, #2703 and #3476 guarded lines with no `REQ:` marker.
+        diff = DIFF.replace("REQ: CRED-1", "a comment")
+        self.assertEqual(gate(diff, LIVE), [("hint", "broker/hint/hint.go", 11, "CONDITIONALS_BOUNDARY")])
+        self.assertEqual(mutgate.claimed(diff, packages=["hint"]), ["hint"])
+        source_only = diff.split("diff --git a/broker/hint/hint_test.go")[0]
+        self.assertEqual(mutgate.claimed(source_only, packages=["hint"]), ["hint"])
 
     def test_survivor_on_untouched_line_or_other_package_passes(self):
-        self.assertEqual(mutgate.violations(DIFF, {"hint": [("hint.go", 40, "X")]}), [])
-        self.assertEqual(mutgate.violations(DIFF, {"mail": [("hint.go", 11, "X")]}), [])
+        self.assertEqual(gate(DIFF, {"hint": [("hint.go", 40, "X")]}), [])
+        self.assertEqual(gate(DIFF, {"mail": [("hint.go", 11, "X")]}), [])
 
     def test_survivor_in_a_test_file_is_not_counted(self):
-        self.assertEqual(mutgate.violations(DIFF, {"hint": [("hint_test.go", 2, "X")]}), [])
+        self.assertEqual(gate(DIFF, {"hint": [("hint_test.go", 2, "X")]}), [])
 
     def test_added_lines_follow_hunk_numbers(self):
-        added, marked = mutgate.added_lines(DIFF)
+        added, tests = mutgate.added_lines(DIFF)
         self.assertEqual(added["broker/hint/hint.go"], {11, 12})
-        self.assertEqual(marked, {"broker/hint/hint_test.go"})
+        self.assertEqual(tests, {"broker/hint/hint_test.go": {2}})
 
     def test_added_lines_split_on_newline_only(self):
         # #4028: a Go comment may carry any of these; str.splitlines() broke the diff line there.
@@ -66,7 +77,7 @@ class Gate(unittest.TestCase):
             diff = DIFF.replace("+\tif x > 1 {\n", f"+// a{ch}b\n+\tif x > 1 {{\n")
             added, _ = mutgate.added_lines(diff)
             self.assertEqual(added["broker/hint/hint.go"], {11, 12, 13}, repr(ch))
-            self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 12, "X")]}),
+            self.assertEqual(gate(diff, {"hint": [("hint.go", 12, "X")]}),
                              [("hint", "broker/hint/hint.go", 12, "X")], repr(ch))
 
     def test_added_lines_skip_the_no_newline_marker(self):
@@ -77,8 +88,8 @@ class Gate(unittest.TestCase):
         diff += "\\ No newline at end of file\n"
         self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3}})
         # a LIVED mutant on the first added line is read, not skipped
-        diff = diff.replace("broker/x/a.go", "broker/hint/hint.go").replace("+n1", "+n1\n+// REQ: CRED-1")
-        self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 2, "X")]}),
+        diff = diff.replace("broker/x/a.go", "broker/hint/hint.go")
+        self.assertEqual(gate(diff, {"hint": [("hint.go", 2, "X")]}),
                          [("hint", "broker/hint/hint.go", 2, "X")])
 
     def test_added_lines_read_quoted_and_tab_suffixed_headers(self):
@@ -187,14 +198,29 @@ class Gate(unittest.TestCase):
             self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T")]})
             self.assertEqual(mutgate.package_of("broker/vm/gvisor/a.go"), "vm/gvisor")
 
-    def test_tier_a_packages_are_tier_a(self):
-        pkgs = mutgate.tier_a_packages()
+    def test_tier_b_package_is_claimed(self):
+        # REV-PROOF-mut (#4908): tier B is gated as tier A is; a tier-C path never is.
+        pkgs = mutgate.gated_packages()
         self.assertIn("netguard", pkgs)
-        self.assertNotIn("quota", pkgs)
+        self.assertEqual(mutgate.risk_tier.tier_of("broker/quota/quota.go")[0], "B")
+        self.assertIn("quota", pkgs)
+        diff = DIFF.replace("broker/hint/", "broker/quota/").replace("REQ: CRED-1", "x")
+        self.assertEqual(mutgate.claimed(diff), ["quota"])
+        self.assertEqual(gate(diff, {"quota": [("hint.go", 11, "X")]}), [("quota", "broker/quota/hint.go", 11, "X")])
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("a", "b", "c"):
+                (pathlib.Path(d) / name).mkdir()
+                (pathlib.Path(d) / name / "a.go").write_text("package x\n")
+            real = mutgate.risk_tier.tier_of
+            mutgate.risk_tier.tier_of = lambda p: (p.split("/")[1].upper(), p)
+            try:
+                self.assertEqual(mutgate.gated_packages(pathlib.Path(d)), ["a", "b"])
+            finally:
+                mutgate.risk_tier.tier_of = real
 
     def test_prefix_listed_packages_are_tier_a(self):
         # #3948 blocker: only exact core-list names counted, so packages under a prefix line were skipped.
-        pkgs = mutgate.tier_a_packages()
+        pkgs = mutgate.gated_packages()
         for pkg in ("kernel/key", "kernel/privfile", "clerk/inbox/imapsmtp"):
             self.assertIn(pkg, pkgs)
             diff = DIFF.replace("broker/hint/", f"broker/{pkg}/")
@@ -202,27 +228,27 @@ class Gate(unittest.TestCase):
 
     def test_tier_a_packages_match_risk_tier_on_every_package(self):
         # Every .go file, not a made-up name, through the tier rule premerge uses: a package is
-        # in the set when any of its files is tier A (#3948 Security delta 2).
+        # in the set when any of its files is tier A or B (#3948 Security delta 2, #4908).
         broker = ROOT / "broker"
-        pkgs = set(mutgate.tier_a_packages())
+        pkgs = set(mutgate.gated_packages())
         for d in sorted({f.parent for f in broker.rglob("*.go")}):
             rel = d.relative_to(broker).as_posix()
             if rel == "." or {"vendor", "testdata"} & set(rel.split("/")):
                 continue
-            want = any(mutgate.risk_tier.tier_of(f.relative_to(ROOT).as_posix())[0] == "A" for f in d.glob("*.go"))
+            want = any(mutgate.risk_tier.tier_of(f.relative_to(ROOT).as_posix())[0] in "AB" for f in d.glob("*.go"))
             self.assertEqual(rel in pkgs, want, rel)
 
-    def test_one_tier_a_file_puts_its_package_in(self):
-        # A tier rule naming one .go file in an otherwise tier-B package must still count.
+    def test_one_gated_file_puts_its_package_in(self):
+        # A tier rule naming one .go file in an otherwise tier-C package must still count.
         with tempfile.TemporaryDirectory() as d:
             for name in ("a.go", "b.go"):
                 (pathlib.Path(d) / "quota").mkdir(exist_ok=True)
                 (pathlib.Path(d) / "quota" / name).write_text("package quota\n")
             real = mutgate.risk_tier.tier_of
             for one in ("broker/quota/a.go", "broker/quota/b.go"):
-                mutgate.risk_tier.tier_of = lambda p, one=one: ("A", p) if p == one else ("B", p)
+                mutgate.risk_tier.tier_of = lambda p, one=one: ("A", p) if p == one else ("C", p)
                 try:
-                    self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["quota"], one)
+                    self.assertEqual(mutgate.gated_packages(pathlib.Path(d)), ["quota"], one)
                 finally:
                     mutgate.risk_tier.tier_of = real
 
@@ -235,12 +261,12 @@ class Gate(unittest.TestCase):
                 (pathlib.Path(d) / name / "a.go").write_text("package x\n")
         with tempfile.TemporaryDirectory() as d:
             tree(d, ["kernel/ok", "kernel/vendor/v", "kernel/testdata/t"])
-            self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["kernel/ok"])
+            self.assertEqual(mutgate.gated_packages(pathlib.Path(d)), ["kernel/ok"])
         for odd in ("kernel/key+v2", "kernel/key~old", "kernel/a b", "kernel/$(x)"):
             with tempfile.TemporaryDirectory() as d:
                 tree(d, ["kernel/ok", odd])
                 with self.assertRaises(ValueError, msg=odd) as cm:
-                    mutgate.tier_a_packages(pathlib.Path(d))
+                    mutgate.gated_packages(pathlib.Path(d))
                 self.assertIn(odd, str(cm.exception))
 
     def test_report_and_cli(self):
@@ -271,21 +297,24 @@ def gremlins_json(statuses, lived=None):
 
 class Claimed(unittest.TestCase):
     # REV-CHK-mut: gremlins runs only where the gate can fail, so the run is the claim, not the package list.
-    def test_claimed_is_marked_tier_a_packages_only(self):
-        self.assertEqual(mutgate.claimed(DIFF, tier_a=["hint", "mail"]), ["hint"])
-        self.assertEqual(mutgate.claimed(DIFF, tier_a=["mail"]), [])
-        self.assertEqual(mutgate.claimed(DIFF.replace("REQ:", "NOTE:"), tier_a=["hint"]), [])
-        self.assertEqual(mutgate.claimed(DOCS_ONLY, tier_a=["hint"]), [])
+    def test_claimed_is_changed_listed_packages_only(self):
+        self.assertEqual(mutgate.claimed(DIFF, packages=["hint", "mail"]), ["hint"])
+        self.assertEqual(mutgate.claimed(DIFF, packages=["mail"]), [])
+        self.assertEqual(mutgate.claimed(DOCS_ONLY, packages=["hint"]), [])
+        # A non-Go file in the package is no claim; a test file alone is (#4908).
+        other = DIFF.replace("hint/hint.go", "hint/notes.md").replace("hint/hint_test.go", "hint/x.json")
+        self.assertEqual(mutgate.claimed(other, packages=["hint"]), [])
+        tests_only = DIFF.split("diff --git a/broker/hint/hint_test.go")[1]
+        self.assertEqual(mutgate.claimed("diff --git a/broker/hint/hint_test.go" + tests_only, packages=["hint"]), ["hint"])
 
     def test_claimed_covers_every_package_violations_reads(self):
-        # Any tier-A package outside claimed() could never yield a violation, whatever survives
+        # Any listed package outside claimed() could never yield a violation, whatever survives
         # there. The real tier list, not an injected one, so a prefix-line package counts (#3948).
         pkgs = ["netguard", "kernel/privfile", "clerk/inbox/imapsmtp", "quota"]
         diff = "".join(DIFF.replace("broker/hint/", f"broker/{p}/") for p in pkgs)
         live = {p: [("hint.go", 11, "X")] for p in pkgs}
-        tier_a = set(mutgate.tier_a_packages())
-        found = {v[0] for v in mutgate.violations(diff, live)} & tier_a
-        self.assertEqual(found, set(pkgs) - {"quota"})
+        found = {v[0] for v in gate(diff, live)}
+        self.assertEqual(found, set(pkgs))
         self.assertEqual(set(mutgate.claimed(diff)), found)
 
     def test_claimed_cli_on_a_real_diff(self):
@@ -396,7 +425,7 @@ class Shape(unittest.TestCase):
 
     def run_stub(self, file_name):
         """mutgate.py run on a real tier-A package, with a stub gremlins reporting one LIVED mutant in file_name."""
-        pkg = mutgate.tier_a_packages()[0]
+        pkg = mutgate.gated_packages()[0]
         with tempfile.TemporaryDirectory() as d:
             stub = pathlib.Path(d) / "bin"
             stub.mkdir()
@@ -410,7 +439,7 @@ class Shape(unittest.TestCase):
                                    str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
 
     def test_run_fails_on_a_module_relative_file_name(self):
-        pkg = mutgate.tier_a_packages()[0]
+        pkg = mutgate.gated_packages()[0]
         name = sorted(f.name for f in (ROOT / "broker" / pkg).glob("*.go") if not f.name.endswith("_test.go"))[0]
         r = self.run_stub(f"{pkg.split('/')[-1]}/{name}")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -489,7 +518,7 @@ class Shape(unittest.TestCase):
         # A mutant gremlins skipped on a line the gate reads fails the run, not the gate empty.
         r, _ = self.run_diff_stub(skipped_line=3)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("gremlins skipped mutants on lines this diff adds in broker/hint/: [('hint.go', 3)]", r.stderr)
+        self.assertIn("gremlins skipped mutants on target lines in broker/hint/: [('hint.go', 3)]", r.stderr)
 
     def test_gremlins_diff_counts_a_moved_file_as_added(self):
         # #4147: broker_diff passes --no-renames, so gremlins' own diff must not detect the move
@@ -532,9 +561,11 @@ class Shape(unittest.TestCase):
 class Verify(unittest.TestCase):
     # REV-CHK-mut-selftest (#4106): the JSON comes from a job that ran the PR's tests, so the
     # deciding job reads it as data and rechecks everything `run` checks before it gates.
-    def verify(self, results, req=True, src="package netguard\nvar a = 1 + 1\n"):
-        """mutgate.py verify in a temp repo whose last commit adds broker/netguard/a.go line 2 (and a
-        REQ marker unless req is False), on a results dir holding {file name: JSON or raw text}."""
+    def verify(self, results, test="package netguard\n", src="package netguard\nvar a = 1 + 1\n", body=None,
+               summary=False):
+        """mutgate.py verify in a temp repo whose last commit adds broker/netguard/a.go line 2 (with src)
+        and a_test.go (unless test is None), on a results dir holding {file name: JSON or raw text},
+        with the PR body body; with summary, the summary file's text is set on the result."""
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
             shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
@@ -546,7 +577,9 @@ class Verify(unittest.TestCase):
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
             (pkg / "a.go").write_text(src)
-            (pkg / "a_test.go").write_text("package netguard\n// %s: CRED-1\n" % ("REQ" if req else "NOTE"))
+            if test is not None:
+                (pkg / "a_test.go").write_text(test)
+            (pathlib.Path(d) / "notes.md").write_text("x\n")
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
             res = pathlib.Path(d) / "res"
@@ -556,8 +589,17 @@ class Verify(unittest.TestCase):
                 name = name if "/" in name else f"mutants-0/{name}"
                 (res / name).parent.mkdir(exist_ok=True)
                 (res / name).write_text(data if isinstance(data, str) else json.dumps(data))
-            return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "verify",
-                                   str(res), "--git", "HEAD~1"], capture_output=True, text=True)
+            extra = []
+            if body is not None:
+                (pathlib.Path(d) / "body.md").write_bytes(body.encode())
+                extra += ["--body", str(pathlib.Path(d) / "body.md")]
+            if summary:
+                extra += ["--summary", str(pathlib.Path(d) / "summary.md")]
+            r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "verify",
+                                str(res), "--git", "HEAD~1", *extra], capture_output=True, text=True)
+            if summary:
+                r.summary = (pathlib.Path(d) / "summary.md").read_text()
+            return r
 
     @staticmethod
     def result(status, line=2, file_name="a.go"):
@@ -635,7 +677,7 @@ class Verify(unittest.TestCase):
             (self.result("RUNNABLE"), "mutants gremlins did not run"),
             (self.result("LIVED", line=1, file_name="netguard/a.go"), "not files in broker/netguard/"),
             (self.result("LIVED", line=1, file_name="gone.go"), "not files in broker/netguard/"),
-            (self.result("SKIPPED"), "gremlins skipped mutants on lines this diff adds"),
+            (self.result("SKIPPED"), "gremlins skipped mutants on target lines"),
             # #4573: gremlins' JSON without `delete`'s pass, or a count that is not its mutants'.
             ({k: v for k, v in self.result("KILLED").items() if k != "statement_deletions"},
              "holds no statement-deletion pass"),
@@ -669,8 +711,9 @@ class Verify(unittest.TestCase):
         self.assertIn("broker/netguard/a.go:2 deleting the whole statement holding line 2 survives", r.stdout)
 
     def test_no_claim_needs_no_result(self):
-        r = self.verify({}, req=False)
+        r = self.verify({}, test=None, src="package netguard\n", summary=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("changes no .go line", r.summary)
 
 
 GO_MOD = "module example.invalid/broker\n\ngo 1.22\n"
@@ -857,6 +900,9 @@ class Deletion(unittest.TestCase):
                 (18, mutgate.DELETION, "NOT VIABLE"),  # Last's return
             ])
             self.assertEqual((data["statement_deletions"], data["mutants_lived"], data["mutants_total"]), (5, 1, 5))
+            # #4908: a deletion's verdict names the test that failed first, for the summary table.
+            self.assertEqual({m["line"]: m.get("killed_by") for m in data["files"][0]["mutations"]
+                              if m["type"] == mutgate.DELETION and m["status"] == "KILLED"}, {6: "TestKeep"})
             # A second pass on the same result is refused, not counted twice.
             r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -1213,6 +1259,253 @@ func set(n, m int) {
             self.assertEqual(data["statement_deletions"], 5)
 
 
+# REV-PROOF-mut (#4908): a diff that changes only a package's tests mutates the lines they run.
+TWO_SRC = """package hint
+
+func Up(n int) int {
+	if n > 10 {
+		return 10
+	}
+	return n + 1
+}
+
+func Down(n int) int {
+	return n - 1
+}
+"""
+TWO_TEST = """package hint
+
+import "testing"
+
+func TestUp(t *testing.T) {
+	if Up(1) != 2 || Up(20) != 10 {
+		t.Fatal("up")
+	}
+}
+
+func TestDown(t *testing.T) {
+	if Down(3) != 2 {
+		t.Fatal("down")
+	}
+}
+"""
+
+
+class TestOnly(unittest.TestCase):
+    def repo(self, d, test_pr, src=TWO_SRC, test_base=TWO_TEST):
+        """A temp repo whose last commit changes only broker/hint/hint_test.go, to test_pr."""
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+        shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+        shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+        (pathlib.Path(d) / "broker" / "go.mod").write_text(GO_MOD)
+        pkg = pathlib.Path(d) / "broker" / "hint"
+        pkg.mkdir()
+        (pkg / "hint.go").write_text(src)
+        (pkg / "hint_test.go").write_text(test_base)
+        git("init", "-q")
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+        (pkg / "hint_test.go").write_text(test_pr)
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+        return git
+
+    def mutgate(self, d, *args, env=None):
+        return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
+                              capture_output=True, text=True,
+                              env={**os.environ, "GOFLAGS": "", "GOWORK": "off", **(env or {})})
+
+    def stub(self, d, mutations):
+        """A gremlins on PATH that records `git diff --merge-base` of its -D ref and writes mutations."""
+        stub = pathlib.Path(d) / "bin"
+        stub.mkdir()
+        out = json.dumps({"files": [{"file_name": "hint.go", "mutations": mutations}],
+                          "mutants_lived": sum(m["status"] == "LIVED" for m in mutations)})
+        (stub / "gremlins").write_text(
+            f"#!/bin/sh\ngit diff --merge-base \"$4\" > \"{d}/seen\"\n"
+            f"while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{out}' > \"$2\"\n")
+        (stub / "gremlins").chmod(0o755)
+        return {"PATH": f"{stub}:{os.environ['PATH']}"}
+
+    def test_test_only_diff_mutates_covered_lines(self):
+        # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
+        # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.
+        weak = TWO_TEST.replace("Up(20) != 10", "Up(20) < 0")
+        mutations = [{"type": "CONDITIONALS_BOUNDARY", "status": "LIVED", "line": 4, "column": 7},
+                     {"type": "ARITHMETIC_BASE", "status": "KILLED", "line": 7, "column": 11}]
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, weak)
+            self.assertEqual(mutgate.claimed(git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1").stdout,
+                                             packages=["hint"]), ["hint"])
+            head, ref = git("rev-parse", "HEAD").stdout, git("symbolic-ref", "HEAD").stdout
+            out = pathlib.Path(d) / "res" / "mutants-0"
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env=self.stub(d, mutations))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            # HEAD, the branch and the tree are as they were.
+            self.assertEqual((git("rev-parse", "HEAD").stdout, git("symbolic-ref", "HEAD").stdout), (head, ref))
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+            data = json.loads((out / "hint.json").read_text())
+            covered = data["targets"]["lines"]["hint.go"]
+            self.assertEqual(data["targets"]["tests"], ["TestUp"])
+            self.assertTrue({3, 4, 5, 7} <= set(covered), covered)
+            self.assertFalse({10, 11} & set(covered), covered)  # Down: only TestDown runs it
+            # Gremlins' own diff marks exactly those lines, relative to the package.
+            seen = mutgate.added_lines((pathlib.Path(d) / "seen").read_text())[0]
+            self.assertEqual(seen, {"hint.go": set(covered)})
+            r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            summary = pathlib.Path(d) / "summary.md"
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1", "--summary", str(summary))
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/hint/hint.go:4 CONDITIONALS_BOUNDARY survives", r.stdout)
+            # Deleting `return 10` lives too: nothing checks the clamp now.
+            self.assertIn("broker/hint/hint.go:5 deleting the whole statement holding line 5 survives", r.stdout)
+            self.assertNotIn("hint.go:11", r.stdout)
+            table = summary.read_text()
+            self.assertIn("the lines TestUp cover", table)
+            self.assertIn("| broker/hint/hint.go:4:7 | CONDITIONALS\\_BOUNDARY | **LIVED**: no test fails |", table)
+            self.assertIn("killed (gremlins names no test)", table)
+            self.assertIn("| broker/hint/hint.go:5:3 | STATEMENT\\_DELETION | **LIVED**: no test fails |", table)
+            # The record must name the tests verify names itself, and lines of the package's own files.
+            for bad in ({**data["targets"], "tests": ["TestDown"]}, {**data["targets"], "tests": None},
+                        {"tests": ["TestUp"], "lines": {"hint_test.go": [5]}},
+                        {"tests": ["TestUp"], "lines": {"../x.go": [1]}},
+                        {"tests": ["TestUp"], "lines": {"hint.go": ["4"]}}, None):
+                with self.subTest(bad):
+                    forged = dict(json.loads((out / "hint.json").read_text()))
+                    if bad is None:
+                        forged.pop("targets")
+                    else:
+                        forged["targets"] = bad
+                    (out / "hint.json").write_text(json.dumps(forged))
+                    r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertRegex(r.stderr, "holds no record of the lines|records covered lines")
+
+    def test_a_change_outside_one_test_runs_every_test(self):
+        # A helper, TestMain, an import or a deleted test is not one test's change: every test's
+        # covered lines are the targets, which caps the set at the package's covered lines.
+        for name, test in (
+                ("helper", TWO_TEST + "\nfunc helper() int { return 1 }\n"),
+                ("import", TWO_TEST.replace('import "testing"', 'import (\n\t"testing"\n)')),
+                ("deleted test", TWO_TEST.split("func TestDown")[0])):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                git = self.repo(d, test)
+                diff = git("diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1").stdout
+                broker = mutgate.BROKER
+                mutgate.BROKER = pathlib.Path(d) / "broker"
+                try:
+                    self.assertIsNone(mutgate.changed_tests(mutgate.added_lines(diff)[1], "hint"))
+                finally:
+                    mutgate.BROKER = broker
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, TWO_TEST + "\nfunc helper() int { return 1 }\n")
+            out = pathlib.Path(d) / "out"
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env=self.stub(d, []))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+            self.assertIsNone(data["targets"]["tests"])
+            self.assertTrue({4, 5, 7, 11} <= set(data["targets"]["lines"]["hint.go"]))
+
+    def test_test_functions_name_the_changed_tests(self):
+        text = TWO_TEST + "\nfunc TestMain(m *testing.M) {\n\tm.Run()\n}\n\nfunc Testhelper() {}\n\nfunc FuzzUp(f *testing.F) {}\n"
+        rows = text.split("\n")
+        at = lambda s: rows.index(s) + 1
+        self.assertEqual(mutgate.test_functions(text, {at('\t\tt.Fatal("up")')}), {"TestUp"})
+        self.assertEqual(mutgate.test_functions(text, {at('\t\tt.Fatal("up")'), at('\t\tt.Fatal("down")')}),
+                         {"TestUp", "TestDown"})
+        self.assertEqual(mutgate.test_functions(text, {at("func FuzzUp(f *testing.F) {}")}), {"FuzzUp"})
+        for line in (1, at('import "testing"'), at("\tm.Run()"), at("func Testhelper() {}")):
+            self.assertIsNone(mutgate.test_functions(text, {line}), rows[line - 1])
+        # A hunk that only deletes touches the lines either side; one deleting a declaration, or the file, is every test.
+        diff = ("diff --git a/broker/h/a_test.go b/broker/h/a_test.go\n--- a/broker/h/a_test.go\n+++ b/broker/h/a_test.go\n"
+                "@@ -7 +6,0 @@\n-\tx()\n")
+        self.assertEqual(mutgate.added_lines(diff)[1], {"broker/h/a_test.go": {6, 7}})
+        self.assertEqual(mutgate.added_lines(diff.replace("-\tx()", "-func TestGone(t *testing.T) {"))[1],
+                         {"broker/h/a_test.go": None})
+        gone = ("diff --git a/broker/h/a_test.go b/broker/h/a_test.go\n--- a/broker/h/a_test.go\n+++ /dev/null\n"
+                "@@ -1,2 +0,0 @@\n-package h\n-\n")
+        self.assertEqual(mutgate.added_lines(gone)[1], {"broker/h/a_test.go": None})
+        self.assertEqual(mutgate.claimed(gone, packages=["h"]), ["h"])
+
+    def test_tests_that_cover_nothing_run_no_gremlins(self):
+        # Gremlins' -D mutates every line when its diff is empty, so no target line means no run.
+        test = TWO_TEST.replace("func TestDown(t *testing.T) {\n\tif Down(3) != 2 {", "func TestDown(t *testing.T) {\n\tif 3 != 3 {")
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, test)
+            out = pathlib.Path(d) / "res" / "mutants-0"
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": "/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent) + ":" + os.path.dirname(shutil.which("go"))})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}})
+            self.assertFalse((pathlib.Path(d) / "seen").exists())
+            self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class Equivalent(unittest.TestCase):
+    """REV-PROOF-mut (#4908): `Mutant-equivalent: <path>:<line> <reason>` in the PR body waives one site."""
+
+    def setUp(self):
+        self.v = Verify()
+
+    @staticmethod
+    def result(*lines):
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": n, "column": 9} for n in lines]
+        return {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": len(muts), "statement_deletions": 0}
+
+    SRC = "package netguard\nvar a = 1 + 1\nvar b = 2 + 2\n"
+
+    def test_equivalent_line_waives_only_its_site(self):
+        ok = "Mutant-equivalent: broker/netguard/a.go:2 a and b are never read, so no value tells the mutants apart\n"
+        r = self.v.verify({"netguard.json": self.result(2)}, src=self.SRC, body="Intro.\n\n" + ok)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for body in (
+                ok.replace("a.go:2", "a.go:3"),                       # another line
+                ok.replace("broker/netguard/a.go", "broker/netguard/b.go"),
+                ok.replace("broker/netguard/a.go", "broker/netguard/*.go"),  # never a pattern
+                ok.replace("a.go:2", "a.go:1-9"),                     # never a range
+                ok.replace("a.go:2", "a.go:02"),
+                "Mutant-equivalent: broker/netguard/a.go:2\n",        # no reason
+                "Mutant-equivalent: broker/netguard/a.go:2 .\n",
+                "  " + ok,                                             # not at the line's start
+                ok.replace("Mutant-equivalent", "mutant-equivalent"),
+                "Mutant-equivalent: all\n",
+                ""):
+            with self.subTest(body):
+                r = self.v.verify({"netguard.json": self.result(2)}, src=self.SRC, body=body)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        # Two survivors, one waived: the other still fails, and the table shows each verdict.
+        r = self.v.verify({"netguard.json": self.result(2, 3)}, src=self.SRC, body=ok.replace("\n", "\r\n"), summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("a.go:2 ", r.stdout)
+        self.assertIn("broker/netguard/a.go:3 ARITHMETIC_BASE survives", r.stdout)
+        rows = [l for l in r.summary.split("\n") if l.startswith("| broker/")]
+        self.assertEqual(rows, [
+            "| broker/netguard/a.go:3:9 | ARITHMETIC\\_BASE | **LIVED**: no test fails |",
+            "| broker/netguard/a.go:2:9 | ARITHMETIC\\_BASE | equivalent: a and b are never read, so no value tells the mutants apart |",
+        ])
+
+    def test_untrusted_body_cannot_change_the_gate(self):
+        # The body is the PR author's text: parsed for waiver lines only, never run or read as options.
+        hostile = ("$(touch pwned) `touch pwned` \"; exit 0; '\n--git HEAD\n--summary /etc/x\n"
+                   "Mutant-equivalent: broker/netguard/a.go:3 waives another site | <img src=x> `x`\n"
+                   "Mutant-equivalent: broker/netguard/a.go:2\x00 hidden\n"
+                   "\udcff   Mutant-equivalent: broker/netguard/a.go:2 behind a separator\n")
+        r = self.v.verify({"netguard.json": self.result(2, 3)}, src=self.SRC,
+                          body=hostile.encode("utf-8", "surrogateescape").decode("utf-8", "replace"), summary=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("broker/netguard/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+        self.assertNotIn("a.go:3 ", r.stdout)
+        self.assertFalse(pathlib.Path("pwned").exists())
+        # The reason reaches the table as text: no column break, no markup.
+        row = [l for l in r.summary.split("\n") if l.startswith("| broker/netguard/a.go:3")][0]
+        self.assertEqual(row.count(" | "), 2, row)
+        self.assertIn("waives another site \\| \\<img src=x\\> \\`x\\`", row)
+        self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3): "waives another site | <img src=x> `x`"})
+
+
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""
     m = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][\w-]*:\n|\Z)", text.split("\njobs:\n", 1)[1])
@@ -1326,6 +1619,30 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("merge-multiple", steps[4])  # one directory per artifact: verify refuses a duplicate
         self.assertIn("RESULTS: ${{ runner.temp }}/mutants", steps[6])
         self.assertIn('python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"', steps[6])
+
+    def test_pr_body_reaches_the_gate_as_data_only(self):
+        # #4908: the body is the PR author's text. It enters once, through the gate step's env, and
+        # the script writes it to a file for the base's tool: no `${{ }}` in any script line.
+        self.assertEqual(self.text.count("github.event.pull_request.body"), 1)
+        gate = job(self.text, "mutgate").split("      - name: Gate (MUT-tierA)\n", 1)[1]
+        self.assertIn("          PR_BODY: ${{ github.event.pull_request.body }}\n", gate)
+        script = gate.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+        script = "\n".join(l[10:] for l in script.split("\n"))
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$OUT/argv"\ncp "$RUNNER_TEMP/pr-body.md" "$OUT/body"\n')
+            (stub / "python3").chmod(0o755)
+            body = "$(touch pwned) `touch pwned` \"; exit 7; '\n-n\n%s %d\\n\nMutant-equivalent: broker/x/a.go:1 r\n"
+            env = {"PATH": f"{stub}:/usr/bin:/bin", "OUT": d, "RUNNER_TEMP": d, "RESULTS": "R", "BASE": "B",
+                   "GITHUB_STEP_SUMMARY": "S", "PR_BODY": body}
+            r = subprocess.run(["bash", "-e", "-c", script], cwd=d, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((pathlib.Path(d) / "body").read_text(), body)
+            self.assertEqual((pathlib.Path(d) / "argv").read_text().split("\n")[:-1], [
+                "-I", "tools/mutgate.py", "verify", "R", "--git", "B", "--body", f"{d}/pr-body.md", "--summary", "S"])
+            self.assertFalse((pathlib.Path(d) / "pwned").exists())
 
     def test_base_copy_step_drops_files_the_pr_adds_under_tools(self):
         # A PR-added tools/fnmatch.py would be imported by risk_tier under the base's mutgate.py.
