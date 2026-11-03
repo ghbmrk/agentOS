@@ -72,9 +72,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return enrol.Provision(fileStore{filepath.Join(*state, fileEnrol)}, strings.TrimSpace(string(b)), nil)
+		return enrol.Provision(fileStore{path: filepath.Join(*state, fileEnrol)}, strings.TrimSpace(string(b)), nil)
 	case *pub:
-		k, err := channelKey(fileStore{filepath.Join(*state, fileChannelKey)}, nil)
+		k, err := channelKey(fileStore{path: filepath.Join(*state, fileChannelKey)}, nil)
 		if err != nil {
 			return err
 		}
@@ -108,17 +108,17 @@ func run(args []string) error {
 	defer d.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// A channel listener that stops for anything but a temporary error
+	// (ServeChannel retries those) stops the daemon, so the service
+	// manager restarts it rather than leave the channel down (#4755 item 5).
+	chDown := make(chan error, 1)
 	if d.ch != nil {
 		ln, err := net.Listen("tcp", cfg.Channel.String())
 		if err != nil {
 			return err
 		}
 		defer ln.Close()
-		go func() {
-			if err := d.ServeChannel(ln); err != nil && !errors.Is(err, net.ErrClosed) {
-				logger.Print("channel: " + err.Error())
-			}
-		}()
+		go func() { chDown <- d.ServeChannel(ln) }()
 	} else {
 		logger.Print("channel: " + errNoCore.Error())
 	}
@@ -128,6 +128,8 @@ func run(args []string) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-chDown:
+			return fmt.Errorf("channel listener stopped: %w", err)
 		case <-t.C:
 		case <-d.changed:
 		}

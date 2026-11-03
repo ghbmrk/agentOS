@@ -52,12 +52,14 @@ var exempt = map[string]string{
 
 // within names the exempt packages, by the same key, that are cut only
 // from the paths of importers under the directories it lists (separated
-// by spaces); any other importer reaches os/exec through them and fails
-// the gate (#3754 Security 1). The enforcer's daemon (ENF-l, #3670) is
-// enforcer code outside broker/enforcer, held to the enforcer's imports
-// by arc2_test.go (enforcerMain), so it may run the firewall loader.
+// by spaces), or, for an entry written "=dir", from that one package and
+// not its subpackages; any other importer reaches os/exec through them
+// and fails the gate (#3754 Security 1). The enforcer's daemon (ENF-l,
+// #3670) is enforcer code outside broker/enforcer, held to the enforcer's
+// imports by arc2_test.go (enforcerMain), which checks that one package
+// only, so the cut is that one package's too (#4755 item 9).
 var within = map[string]string{
-	"enforcer/nft/load":      "enforcer cmd/agentos-enforcer",
+	"enforcer/nft/load":      "enforcer =cmd/agentos-enforcer",
 	"enforcer/radio/confine": "enforcer",
 }
 
@@ -225,6 +227,12 @@ func gate(t *testing.T, dir, mod string, exempt, within, inPlace map[string]stri
 		}
 		k := key(importer)
 		for _, d := range strings.Fields(ds) {
+			if exact, ok := strings.CutPrefix(d, "="); ok {
+				if k == exact {
+					return true
+				}
+				continue
+			}
 			if k == d || strings.HasPrefix(k, d+"/") {
 				return true
 			}
@@ -656,6 +664,43 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 				t.Errorf("reported, but passes: %s", g)
 			}
 		}
+	}
+	if t.Failed() {
+		t.Logf("got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// #4755 item 9: an exemption written "=dir" is cut for that one package
+// only. A subpackage of the daemon that reaches the firewall loader,
+// directly or by a package outside, reaches os/exec, so a future
+// cmd/agentos-enforcer/x cannot run nft past arc2's one-package rule.
+func TestWithinExactCutsOnlyThatPackage(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.25\n",
+		"childproc/c.go": childprocFixture,
+		"enf/load/l.go":  "package load\nimport \"os/exec\"\nfunc Load() error { return exec.Command(\"/nft\").Run() }\n",
+		"cmd/enf/m.go":   "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enf/x/x.go": "package x\nimport \"example.com/m/enf/load\"\nvar L = load.Load\n",
+		"cmd/enf/y/y.go": "package y\nimport _ \"example.com/m/cmd/enf/x\"\n",
+		"cmd/enfz/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+	})
+	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf =cmd/enf"}, nil)
+	for _, w := range []string{
+		"example.com/m/cmd/enf/x: reaches os/exec (example.com/m/cmd/enf/x -> example.com/m/enf/load -> os/exec)",
+		"example.com/m/cmd/enf/y: reaches os/exec",
+		"example.com/m/cmd/enfz: reaches os/exec",
+	} {
+		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
+			t.Errorf("not reported: %s", w)
+		}
+	}
+	for _, g := range got {
+		if strings.HasPrefix(g, "example.com/m/cmd/enf:") || strings.HasPrefix(g, "example.com/m/enf/") {
+			t.Errorf("reported, but passes: %s", g)
+		}
+	}
+	if !strings.HasPrefix(strings.Fields(within["enforcer/nft/load"])[1], "=") {
+		t.Error("the daemon's cut for the firewall loader covers its subpackages; arc2 checks only cmd/agentos-enforcer itself")
 	}
 	if t.Failed() {
 		t.Logf("got:\n%s", strings.Join(got, "\n"))

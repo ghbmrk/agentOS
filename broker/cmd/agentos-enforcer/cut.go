@@ -26,6 +26,10 @@ type cut struct {
 	mu     sync.Mutex
 	stage  channel.Stage
 	reason string
+	// unsaved: a trip decided here whose cut.json write failed. Persist
+	// retries it each tick and at Close, and the channel listener takes
+	// no connection meanwhile (#4755 item 1).
+	unsaved bool
 }
 
 type cutState struct {
@@ -61,7 +65,8 @@ func (c *cut) Stage() channel.Stage {
 
 // Trip cuts the core. A core already cut costs nothing more: no write, no
 // alert (#4606). The stage is in force before the write, so a failed
-// write still leaves the core cut until a restart; it is logged.
+// write still leaves the core cut; the trip is then unsaved, and Persist
+// retries the write until it lands (KRN-12 Response, #4755 item 1).
 func (c *cut) Trip(reason string) {
 	c.mu.Lock()
 	if c.stage == channel.Tripped {
@@ -69,16 +74,48 @@ func (c *cut) Trip(reason string) {
 		return
 	}
 	c.stage, c.reason = channel.Tripped, reason
-	b, _ := json.Marshal(cutState{Tripped: true, Reason: reason})
-	err := c.store.Save(b)
+	err := c.saveLocked()
 	c.mu.Unlock()
 	if err != nil {
-		c.logf("cut: trip not saved: " + err.Error())
+		c.logf("cut: trip not saved, retried each tick; the channel takes no connection until it is: " + err.Error())
 	}
 	if _, err := c.alerts.Raise(alert.Trip, coreDevice); err != nil {
 		c.logf("cut: trip alert: " + err.Error())
 	}
 	c.alerts.Paused()
+}
+
+// saveLocked writes the stage in force; c.mu is held. A failure marks the
+// state unsaved.
+func (c *cut) saveLocked() error {
+	b, _ := json.Marshal(cutState{Tripped: c.stage == channel.Tripped, Reason: c.reason})
+	err := c.store.Save(b)
+	c.unsaved = err != nil
+	return err
+}
+
+// Persist retries an unsaved trip's write. The run loop calls it each
+// tick and Close once more, so a trip outlives a disk that failed for a
+// while; only a power loss before any write lands loses it (ASSUMPTIONS
+// ENF-l-5).
+func (c *cut) Persist() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.unsaved {
+		return nil
+	}
+	if err := c.saveLocked(); err != nil {
+		return err
+	}
+	c.logf("cut: trip saved")
+	return nil
+}
+
+// Unsaved reports whether a trip decided here is not yet on disk.
+func (c *cut) Unsaved() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.unsaved
 }
 
 // Paused is the page's view of the channel: paused while the core is
@@ -99,7 +136,7 @@ func (c *cut) Resume() error {
 		c.mu.Unlock()
 		return err // still cut: a lift that is not saved does not happen
 	}
-	c.stage, c.reason = channel.Open, ""
+	c.stage, c.reason, c.unsaved = channel.Open, "", false
 	c.mu.Unlock()
 	return errors.Join(c.alerts.Resumed(), c.alerts.Lifted(coreDevice))
 }
