@@ -119,7 +119,8 @@ class Manager:
         self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation",
                                              "private",
                                              "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant),
-                                             os.ttyname(self.slave), "--log-target=console"] + cmdline.split(),
+                                             os.ttyname(self.slave), "--log-target=console", "--log-level=info"]
+                                     + cmdline.split(),
                                      stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
         try:
@@ -134,10 +135,18 @@ class Manager:
             pass
 
     def _pump(self, wait):
-        """Copy what the pty holds to self.log, waiting up to WAIT seconds for some. None once it is closed."""
+        """Copy what the pty holds to self.log, waiting up to WAIT seconds for some. None once it is closed.
+        The wait is outside the lock, so a reader that takes it never waits behind a select (Python's lock
+        is not fair: a thread that releases and retakes it can starve the other)."""
+        try:
+            ready = select.select([self.master], [], [], wait)[0]
+        except (OSError, ValueError):
+            return None
+        if not ready:
+            return 0
         with self.lock:
             try:
-                if not select.select([self.master], [], [], wait)[0]:
+                if not select.select([self.master], [], [], 0)[0]:
                     return 0
                 data = os.read(self.master, 65536)
             except (OSError, ValueError):

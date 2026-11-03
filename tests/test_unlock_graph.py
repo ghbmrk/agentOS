@@ -253,6 +253,40 @@ class OfflineSystemdTest(unittest.TestCase):
         os.close(master)
         os.close(slave)
 
+    def test_the_reader_is_not_starved_by_a_live_drain_thread(self):
+        # Security 6596357788: the drain held the lock across its select, and Python 3.12's unfair lock let
+        # it starve failed_generators() and stop().
+        import threading
+        import time
+        master, slave = os.openpty()
+        with tempfile.NamedTemporaryFile() as log:
+            m = offline_systemd.Manager.__new__(offline_systemd.Manager)
+            m.log, m.master, m.lock = log, master, threading.Lock()
+            m.manager = lambda props: {"GeneratorsStartTimestampMonotonic": "1",
+                                       "GeneratorsFinishTimestampMonotonic": "2"}
+            drain = threading.Thread(target=m._drain, daemon=True)
+            drain.start()
+            seen = []
+
+            def read():  # in a thread, so a starved reader fails the test instead of hanging it
+                for i in range(20):
+                    os.write(slave, b"/etc/systemd/system-generators/g%d failed with exit status 1.\n" % i)
+                    end = time.monotonic() + 5  # the pty hands bytes to its reader asynchronously
+                    while "g%d" % i not in m.failed_generators() and time.monotonic() < end:
+                        time.sleep(0.01)
+                    seen.append("g%d" % i in m.failed_generators())
+            reader = threading.Thread(target=read, daemon=True)
+            reader.start()
+            reader.join(60)
+            self.assertFalse(reader.is_alive(), "failed_generators() waited a minute for the drain thread's lock")
+            self.assertEqual(seen, [True] * 20)
+            os.close(slave)
+            with m.lock:
+                os.close(master)
+                m.master = -1
+            drain.join(5)
+            self.assertFalse(drain.is_alive())
+
 
 class AllowFileTest(unittest.TestCase):
     def test_the_shipped_list_reads_and_holds_the_unlock_unit(self):
@@ -315,8 +349,10 @@ class HostSystemdTest(unittest.TestCase):
             for script, name in (("exit 3", "agentos-plant-generator"), ("kill -SEGV $$", "agentos-plant-generator"),
                                  ("exit 3", "agentos plant-generator")):
                 with self.subTest(script=script, name=name), tempfile.TemporaryDirectory() as p:
-                    g.plant_tree(root, {"etc/systemd/system-generators/" + name: "#!/bin/sh\n%s\n" % script}, p)
-                    _, generators, v = g.run(root, "/usr", "ro quiet", base, p, major=major)
+                    g.plant_tree(root, {"etc/systemd/system-generators/" + name: "#!/bin/sh\n%s\n" % script,
+                                        # the manager's own log level holds whatever the tree or command line asks
+                                        "etc/systemd/system.conf.d/99-plant.conf": "[Manager]\nLogLevel=crit\n"}, p)
+                    _, generators, v = g.run(root, "/usr", "ro quiet systemd.log_level=crit", base, p, major=major)
                     self.assertEqual(generators, {name})
                     self.assertIn("generator %s failed: not on unlock.allow; review it and add the line there" % name, v)
             # The manager cannot reach the runner's hostname or global sysctls (Security 6593364293 1).
