@@ -2,7 +2,6 @@ package localui
 
 import (
 	"html"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -195,7 +194,7 @@ func TestSR3_3ASuggestionIsNotTheFinalCard(t *testing.T) {
 	}
 	for i := range 300 { // a clean checked record, so the silent-failure gate is open (D-309)
 		at := a.clock().Add(-80*24*time.Hour + time.Duration(i)*time.Hour)
-		if err := o.Record(attention.Outcome{Clerk: "mail", Step: strconv.Itoa(i), Ran: at, At: at}); err != nil {
+		if err := o.Record(attention.Outcome{Clerk: "mail", Step: time.Duration(i).String(), Ran: at, At: at}); err != nil {
 			t.Fatal(err)
 		}
 	}
