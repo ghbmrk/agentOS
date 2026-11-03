@@ -19,25 +19,8 @@ WORKFLOW = ROOT / ".github" / "workflows" / "mutgate.yml"
 sys.path.insert(0, str(ROOT / "tools"))
 import mutgate  # noqa: E402
 
-# Every temporary repository below commits, and a commit may start `git maintenance run --auto`
-# detached, which writes into .git/objects while TemporaryDirectory removes it (#4811).
-_NO_BACKGROUND_GIT = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
-                      "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"}
-_saved_env = {}
-
-
-def setUpModule():
-    for k, v in _NO_BACKGROUND_GIT.items():
-        _saved_env[k] = os.environ.get(k)
-        os.environ[k] = v
-
-
-def tearDownModule():
-    for k, old in _saved_env.items():
-        if old is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = old
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 DIFF = """\
 diff --git a/broker/hint/hint.go b/broker/hint/hint.go

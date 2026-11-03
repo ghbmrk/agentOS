@@ -26,6 +26,8 @@ import risk_tier  # noqa: E402
 import srclint  # noqa: E402
 import trace  # noqa: E402
 import trusted_base  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 
 def _old_core_dirs(tree):

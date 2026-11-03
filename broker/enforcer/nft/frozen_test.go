@@ -214,7 +214,8 @@ func TestDeviceTrafficCounted(t *testing.T) {
 		t.Errorf("the TV's destinations: %q, want only %s", got, netAllow)
 	}
 	for name, vals := range elems {
-		if strings.HasPrefix(name, "t") && name != TrafficSet(101, false) {
+		// The refused sets are TestRefusedWhereExact's.
+		if strings.HasPrefix(name, "t") && name != TrafficSet(101, false) && !strings.HasSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "_4"), "_6"), "_refused") {
 			t.Errorf("set %s counted %q", name, vals)
 		}
 	}

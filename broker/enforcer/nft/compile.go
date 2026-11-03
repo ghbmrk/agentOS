@@ -53,11 +53,23 @@ func TrafficOut(vlan int) string          { return "t" + strconv.Itoa(vlan) + "_
 func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_in" }
 
 // TrafficRefused counts every packet refused from the device on vlan, by
-// any rule that logs its refusals, so the count stays exact however few of
-// them are logged (refuse, #4432).
-func TrafficRefused(vlan int) string { return "t" + strconv.Itoa(vlan) + "_refused" }
+// any rule that logs its refusals, and RefusedSet counts them per
+// destination address: at most RefusedSize addresses per family, each
+// dropped a day after its last refused packet. Both count every packet,
+// however few are logged (#4432), so a device cannot choose which of its
+// refusals its summary shows (#4765); only more than RefusedSize addresses
+// in a day leave some out, which a full set shows.
+func TrafficRefused(vlan int) string      { return "t" + strconv.Itoa(vlan) + "_refused" }
+func RefusedSet(vlan int, v6 bool) string { return "t" + strconv.Itoa(vlan) + "_refused" + fam(v6) }
 
-const TrafficSize = 64
+// TrafficSize bounds a device's TrafficSet, the internet addresses its
+// allow list reached. RefusedSize bounds its RefusedSet, which holds any
+// address the device chooses, so it is larger: a device refused at
+// RefusedSize addresses in a day has made itself conspicuous.
+const (
+	TrafficSize = 64
+	RefusedSize = 1024
+)
 
 // The shared segments are the ones several hosts share (Guests, Owner,
 // Household): each is one interface pair to the enforcer, so the
@@ -186,46 +198,52 @@ const (
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
-	LogLines    = "log_lines"    // refusals written to the kernel log (refuse)
+	LogLines    = "log_lines"    // lines written to the kernel log (logged)
 )
 
-// Log prefixes. Each names a refusal: every rule that logs with one of
-// them drops, and the forward chain logs nothing else from a device but
-// the accepted core and edge connections, which carry the device's VLAN
-// in their own prefixes. Slice i's summaries count a device's blocked
-// traffic from these lines (broker/enforcer/traffic).
+// Log prefixes. Each names a refusal or a box's connection to a device,
+// and each rule that logs with one ends in that prefix's chain (logged),
+// so no other rule writes a line. A refusal's line comes in on the
+// interface that sent it, a box's connection's goes out on the device's
+// VLAN (OUT=). The lines are for the journal only: a device's summary
+// counts its refusals from TrafficRefused and RefusedSet, not from lines.
 const (
-	LogInbound   = "enf inbound "
-	LogAPAdmin   = "enf ap-admin "
-	LogISP       = "enf isp "
-	LogNonGlobal = "enf nonglobal "
-	LogCoreEdge  = "enf core-edge "
-	LogDNS       = "enf dns "
-	LogDrop      = "enf drop "
+	LogInbound    = "enf inbound "
+	LogAPAdmin    = "enf ap-admin "
+	LogISP        = "enf isp "
+	LogNonGlobal  = "enf nonglobal "
+	LogCoreEdge   = "enf core-edge "
+	LogDNS        = "enf dns "
+	LogDrop       = "enf drop "
+	LogEdgeDevice = "enf edge-dev "
+	LogCoreDevice = "enf core-dev "
+	LogCoreStream = "enf core-stream "
 )
 
-// refusals pairs each refusal's log prefix with its counter.
-var refusals = []struct{ prefix, counter string }{
-	{LogInbound, Inbound}, {LogAPAdmin, APAdminDrop}, {LogISP, ISPDrop}, {LogNonGlobal, Blocked},
-	{LogCoreEdge, CoreEdge}, {LogDNS, DNSOutside}, {LogDrop, Blocked}, {LogCap, CapDrop},
-}
+// prefix is one log prefix, the counter that counts every packet its
+// rules log, and the verdict its chain ends in.
+type prefix struct{ prefix, counter, verdict string }
 
-// BlockedPrefixes is every log prefix that names a refusal.
-var BlockedPrefixes = func() []string {
-	var ps []string
-	for _, r := range refusals {
-		ps = append(ps, r.prefix)
+// refusals are the prefixes of the packets the enforcer refuses; accepts
+// those of the connections a box starts to a device (ENF-e-2).
+var (
+	refusals = []prefix{
+		{LogInbound, Inbound, "drop"}, {LogAPAdmin, APAdminDrop, "drop"}, {LogISP, ISPDrop, "drop"}, {LogNonGlobal, Blocked, "drop"},
+		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogCap, CapDrop, "drop"},
 	}
-	return ps
-}()
+	accepts = []prefix{{LogEdgeDevice, EdgeDevice, "accept"}, {LogCoreDevice, CoreDevice, "accept"}, {LogCoreStream, CoreStream, "accept"}}
+)
 
-// A refusal's lines are the enforcer's to rate, not a device's: each
-// prefix logs at most LineRate packets a minute, after a burst of
-// LineBurst, from each interface (a device's VLAN, the WAN, a segment), so
-// a flood of refused packets cannot fill the journal (#4432, P4). Lines
-// sets hold one bucket per interface for at most LineSize interfaces (more
-// than the 4094 VLANs and the named networks); an interface idle for
-// LineIdle seconds has a full bucket again, so its entry goes.
+// Lines are the enforcer's to rate, not a sender's: each prefix logs at
+// most LineRate packets a minute, after a burst of LineBurst, per
+// interface (a refusal's incoming one: a device's VLAN, the WAN, a
+// segment; a box's connection's outgoing one, the device's VLAN), so
+// neither a flood of refused packets nor a box opening connection after
+// connection can fill the journal (#4432, #4762, P4). The count and the
+// verdict never wait on a bucket. Lines sets hold one bucket per interface
+// for at most LineSize interfaces (more than the 4094 VLANs and the named
+// networks); an interface idle for LineIdle seconds has a full bucket
+// again, so its entry goes.
 const (
 	LineRate  = 10
 	LineBurst = 10
@@ -233,10 +251,11 @@ const (
 	LineIdle  = 60
 )
 
-// refuse is the chain a refused packet with log prefix p ends in: it is
-// counted on p's counter and its device's TrafficRefused, logged within
-// its interface's bucket of p's lines set, and dropped.
-func refuse(p string) string { return "refuse_" + slug(p) }
+// logged is the chain a packet logged with prefix p ends in: it is
+// counted on p's counter (and a refused one on its device's, refusedDecls),
+// logged within its interface's bucket of p's lines set, and given p's
+// verdict.
+func logged(p string) string { return "log_" + slug(p) }
 func lines(p string) string  { return "lines_" + slug(p) }
 func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
 
@@ -552,7 +571,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	}
 
 	capDecls(w)
-	refuseDecls(w, devs)
+	loggedDecls(w, devs)
 	for _, sg := range segments(l) {
 		for _, v6 := range []bool{false, true} {
 			for _, s := range []struct {
@@ -596,10 +615,13 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// does a DHCP or DHCPv6 answer to the enforcer's own client on the WAN:
 	// until the WAN has its lease, no route leads back to the server (NET-2
 	// Fails safe, #4078). Only an answer addressed to the enforcer itself,
-	// from a source no interface routes, passes: once leased the server is
-	// routed out of the WAN and passes the check below, and a source another
-	// interface routes (the core, a person's network, a device) is the
-	// internet posing as a segment and is dropped (#4764). A DHCPv6 server
+	// from a source no interface routes and none of the enforcer's own
+	// addresses, passes: once leased the server is routed out of the WAN and
+	// passes the check below, and a source another interface routes (the
+	// core, a person's network, a device) or the enforcer holds (its address
+	// on any segment, a broadcast) is the internet posing as a segment or as
+	// the enforcer and is dropped (#4764, #4771); the fib reports a local
+	// source as missing too, so the second test is needed. A DHCPv6 server
 	// answering from such an address first resolves the client's link-local
 	// address, so its neighbour discovery, on the link (hop limit 255) and
 	// to the enforcer, passes on the same terms. An answer to be forwarded
@@ -609,9 +631,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line(`iif "lo" accept`)
 	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
-	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing accept")
-	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing accept")
-	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing accept")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
+	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
 	w.close()
 
@@ -627,7 +649,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("iifname " + wan + " udp sport 67 udp dport 68 accept")
 	w.line("iifname " + wan + " udp sport 547 udp dport 546 accept")
 	w.line("iifname " + wan + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept")
-	w.line("iifname " + wan + " goto " + refuse(LogInbound))
+	w.line("iifname " + wan + " goto " + logged(LogInbound))
 	w.line("icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept")
 	w.line("iifname " + served + " udp dport { 53, 67, 547 } accept")
 	w.line("iifname " + served + " tcp dport 53 accept")
@@ -665,19 +687,22 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// ways (NET-3, NET-7).
 	g := q(l.Guests)
 	var fwd []rule
-	add := func(in, out, tail, verdict string, m ...match) {
-		fwd = append(fwd, rule{in: in, out: out, m: m, tail: tail, verdict: verdict})
+	add := func(in, out, verdict string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: verdict})
 	}
 	refused := func(in, out, prefix string, m ...match) {
-		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: "drop", refuse: refuse(prefix)})
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: "drop", logged: logged(prefix)})
+	}
+	admitted := func(in, out, prefix string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: "accept", logged: logged(prefix)})
 	}
 	refused(wan, "", LogInbound)
-	add(g, wan, "", "accept", daddr(false, "!= @isp_4"), daddr(false, "!= @nonglobal_4"))
-	add(g, wan, "", "accept", daddr(true, "!= @isp_6"), daddr(true, "!= @nonglobal_6"))
-	add(g, "", "", "drop")
-	add("{ "+q(l.Owner)+", "+q(l.Household)+" }", "", "", "jump people")
-	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(false, "@ap_4"))
-	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(true, "@ap_6"))
+	add(g, wan, "accept", daddr(false, "!= @isp_4"), daddr(false, "!= @nonglobal_4"))
+	add(g, wan, "accept", daddr(true, "!= @isp_6"), daddr(true, "!= @nonglobal_6"))
+	add(g, "", "drop")
+	add("{ "+q(l.Owner)+", "+q(l.Household)+" }", "", "jump people")
+	add(q(l.Admin), q(l.APMgmt), "accept", daddr(false, "@ap_4"))
+	add(q(l.Admin), q(l.APMgmt), "accept", daddr(true, "@ap_6"))
 	refused("", "", LogAPAdmin, daddr(false, "@ap_4"))
 	refused("", "", LogAPAdmin, daddr(true, "@ap_6"))
 	refused("", "", LogISP, daddr(false, "@isp_4"))
@@ -687,10 +712,10 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	refused(edge, core, LogCoreEdge)
 	refused(core, edge, LogCoreEdge)
 	// From here on, oifname WAN is the internet.
-	add(q(l.Admin), core, "", "accept", l4Ports("tcp", port(l.CorePagePort)))
-	add(edge, wan, "", "accept")
-	add(core, wan, "", "accept", daddr(false, "@"+CoreSet(false)))
-	add(core, wan, "", "accept", daddr(true, "@"+CoreSet(true)))
+	add(q(l.Admin), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
+	add(edge, wan, "accept")
+	add(core, wan, "accept", daddr(false, "@"+CoreSet(false)))
+	add(core, wan, "accept", daddr(true, "@"+CoreSet(true)))
 	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
 	// before any allow set is consulted (NET-3).
 	refused(T, wan, LogDNS, daddr(false, "@doh_4"))
@@ -698,29 +723,28 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	refused(T, wan, LogDNS, match{"meta l4proto { tcp, udp } th dport { 53, 853 }", "ct protocol { tcp, udp } ct original proto-dst { 53, 853 }"})
 	for _, v := range devs {
 		i := q(v.iface)
-		vl := strconv.Itoa(v.vlan)
 		if v.internet() {
-			add(i, wan, "", "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
-			add(i, wan, "", "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
+			add(i, wan, "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
+			add(i, wan, "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
 		}
 		for _, m := range dports(v.d.Control) {
 			if v.online() {
-				add(edge, i, `log prefix "enf edge-dev `+vl+` " counter name `+q(EdgeDevice), "accept", m)
+				admitted(edge, i, LogEdgeDevice, m)
 			}
 			if v.offline() {
-				add(core, i, `log prefix "enf core-dev `+vl+` " counter name `+q(CoreDevice), "accept", m)
+				admitted(core, i, LogCoreDevice, m)
 			}
 		}
 		for _, m := range dports(v.d.Stream) {
 			if v.stream() {
-				add(core, i, `log prefix "enf core-stream `+vl+` " counter name `+q(CoreStream), "accept", m)
+				admitted(core, i, LogCoreStream, m)
 			}
 		}
 	}
 	for _, p := range paths {
 		if p.Both {
-			add(q(p.From), q(p.To), "", "accept")
-			add(q(p.To), q(p.From), "", "accept")
+			add(q(p.From), q(p.To), "accept")
+			add(q(p.To), q(p.From), "accept")
 		}
 	}
 
@@ -791,7 +815,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		highs = append(highs, fmt.Sprintf("0x%08x", idx[q(n)]<<16))
 	}
 	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " ct mark != 0x00000000 ct mark and 0x0000ffff != { " + strings.Join(lows, ", ") + " }" +
-		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } goto " + refuse(LogDrop)
+		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } goto " + logged(LogDrop)
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
@@ -836,7 +860,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, r := range fwd {
 		w.line(r.first())
 	}
-	w.line("goto " + refuse(LogDrop))
+	w.line("goto " + logged(LogDrop))
 	w.close()
 
 	w.open("chain people")
@@ -959,37 +983,59 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	return w.b.String(), devs, nil
 }
 
-// refuseDecls declares each refusal prefix's lines set and refuse chain,
-// and the refused map from each device's VLAN interface to its
-// TrafficRefused. A refused packet is counted first, on its prefix's
-// counter and, from a device's VLAN, on the device's, so both stay exact;
+// loggedDecls declares each prefix's lines set and chain, and for each
+// device its RefusedSet and the chain that counts its refusals, which the
+// refused map reaches from the device's VLAN interface. A logged packet is
+// counted first, on its prefix's counter and, refused from a device's
+// VLAN, on the device's counter and its destination's, so all stay exact;
 // the lines rule then logs it only while its interface's bucket holds a
-// token, and the last rule drops what the bucket held back.
-func refuseDecls(w *writer, devs []device) {
+// token, and the last rule gives the prefix's verdict whether or not it
+// did. A failed map lookup, a full set or an empty bucket ends only its
+// own rule.
+func loggedDecls(w *writer, devs []device) {
 	q := strconv.Quote
 	var byDev []string
 	for _, v := range devs {
-		byDev = append(byDev, q(v.iface)+" : "+q(TrafficRefused(v.vlan)))
+		byDev = append(byDev, q(v.iface)+" : jump "+trafficChain(v.vlan, "refused"))
+		for _, v6 := range []bool{false, true} {
+			w.open("set " + RefusedSet(v.vlan, v6))
+			w.line("type " + map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6] + ";")
+			w.line("size " + strconv.Itoa(RefusedSize) + ";")
+			w.line("flags dynamic,timeout;")
+			w.line("timeout 1d;")
+			w.close()
+		}
+		w.open("chain " + trafficChain(v.vlan, "refused"))
+		w.line("counter name " + q(TrafficRefused(v.vlan)))
+		w.line("update @" + RefusedSet(v.vlan, false) + " { ip daddr counter }")
+		w.line("update @" + RefusedSet(v.vlan, true) + " { ip6 daddr counter }")
+		w.close()
 	}
 	w.open("map refused")
-	w.line("type ifname : counter;")
+	w.line("type ifname : verdict;")
 	if len(byDev) > 0 {
 		w.line("elements = { " + strings.Join(byDev, ", ") + " }")
 	}
 	w.close()
 	limit := "limit rate " + strconv.Itoa(LineRate) + "/minute burst " + strconv.Itoa(LineBurst) + " packets"
-	for _, r := range refusals {
+	for _, r := range slices.Concat(refusals, accepts) {
+		key, refusal := "iif", r.verdict == "drop"
+		if !refusal {
+			key = "oif"
+		}
 		w.open("set " + lines(r.prefix))
-		w.line("typeof iif;")
+		w.line("typeof " + key + ";")
 		w.line("size " + strconv.Itoa(LineSize) + ";")
 		w.line("flags dynamic,timeout;")
 		w.line("timeout " + secs(LineIdle) + ";")
 		w.close()
-		w.open("chain " + refuse(r.prefix))
+		w.open("chain " + logged(r.prefix))
 		w.line("counter name " + q(r.counter))
-		w.line("counter name iifname map @refused")
-		w.line("update @" + lines(r.prefix) + " { iif " + limit + " } counter name " + q(LogLines) + " log prefix " + q(r.prefix) + " drop")
-		w.line("drop")
+		if refusal {
+			w.line("iifname vmap @refused")
+		}
+		w.line("update @" + lines(r.prefix) + " { " + key + " " + limit + " } counter name " + q(LogLines) + " log prefix " + q(r.prefix))
+		w.line(r.verdict)
 		w.close()
 	}
 }

@@ -4,6 +4,7 @@ package nft
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"net"
 	"os"
@@ -298,43 +299,56 @@ func TestWANLeases(t *testing.T) {
 // TestDHCPAnswersOnlyToTheEnforcer (#4078, A18 Segments): the reverse-path
 // exemption for DHCP and DHCPv6 answers holds only on the WAN, only for a
 // packet addressed to the enforcer itself, and only from a source no
-// interface routes: one from the internet to the enforcer's WAN address in
-// the core's, the Owner network's or a device's name (#4764), one from the
-// internet to a device, and one from a device to the enforcer, each with a
-// source address routed out of another interface, are still dropped as
-// spoofed. Catches
-// an exemption that lets the internet pose as a segment, or a segment as
-// another, on the DHCP client ports.
+// interface routes and the enforcer does not hold: one from the internet to
+// the enforcer's WAN address (or, over IPv4, its broadcast addresses) in
+// the core's, the Owner network's or a device's name (#4764) or in the
+// enforcer's own (#4771), one from the internet to a device, and one from a
+// device to the enforcer, each with a source address routed out of another
+// interface or local, are still dropped as spoofed. Catches an exemption
+// that lets the internet pose as a segment or as the enforcer, or a
+// segment as another, on the DHCP client ports.
 func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	if !inNetns(t) {
 		return
 	}
 	h := build(t)
+	added := map[string]bool{}
 	spoof := func(from *host, nw, src, dst string, sport, dport int) {
-		if nw == "udp6" {
+		switch k := from.name + " " + src; {
+		case added[k]:
+		case nw == "udp6":
+			added[k] = true
 			h.in(from, "ip", "addr", "add", src+"/128", "dev", "lo", "nodad")
-		} else {
+		default:
+			added[k] = true
 			h.in(from, "ip", "addr", "add", src+"/32", "dev", "lo")
 		}
 		// The DHCP ports are taken by the hosts' echo listeners, so the
-		// datagram is written whole on a raw socket.
+		// datagram is written whole on a raw socket. A broadcast leaves
+		// through the host's own link.
 		within(t, from, func() {
-			c, err := net.DialIP(map[string]string{"udp4": "ip4:udp", "udp6": "ip6:udp"}[nw], &net.IPAddr{IP: net.ParseIP(src)}, &net.IPAddr{IP: net.ParseIP(dst)})
+			lc := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
+				return raw.Control(func(fd uintptr) {
+					if nw == "udp6" { // the kernel fills the checksum at offset 6
+						unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_CHECKSUM, 6)
+						return
+					}
+					unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+					unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "eth0")
+				})
+			}}
+			c, err := lc.ListenPacket(context.Background(), map[string]string{"udp4": "ip4:udp", "udp6": "ip6:udp"}[nw], src)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer c.Close()
-			if nw == "udp6" { // the kernel fills the checksum at offset 6
-				raw, _ := c.SyscallConn()
-				raw.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_CHECKSUM, 6) })
-			}
 			payload := []byte("answer")
 			udp := binary.BigEndian.AppendUint16(nil, uint16(sport))
 			udp = binary.BigEndian.AppendUint16(udp, uint16(dport))
 			udp = binary.BigEndian.AppendUint16(udp, uint16(8+len(payload)))
 			udp = append(binary.BigEndian.AppendUint16(udp, 0), payload...)
 			for range 3 {
-				if _, err := c.Write(udp); err != nil {
+				if _, err := c.WriteTo(udp, &net.IPAddr{IP: net.ParseIP(dst)}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -346,33 +360,52 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	for _, src := range []string{"10.50.0.2", "10.10.0.2", devAddr(104)} {
 		spoof(h.hosts["isp"], "udp4", src, enfWAN, 67, 68)
 	}
+	// ... in the enforcer's own names, its core and a device VLAN address,
+	// which the fib reports as missing as it does an unrouted source
+	// (#4771) ...
+	for _, src := range []string{"10.50.0.1", "10.101.0.1"} {
+		spoof(h.hosts["isp"], "udp4", src, enfWAN, 67, 68)
+	}
+	// ... and in the core's name to the WAN's broadcast addresses (#4764).
+	for _, dst := range []string{"192.168.1.255", "255.255.255.255"} {
+		spoof(h.hosts["isp"], "udp4", "10.50.0.2", dst, 67, 68)
+	}
 	// From the internet, in a device's name, to another device.
 	spoof(h.hosts["isp"], "udp4", devAddr(102), devAddr(101), 67, 68)
 	// From a device, in another's name, to the enforcer's address on its own VLAN.
 	spoof(h.hosts["101"], "udp4", devAddr(103), "10.101.0.1", 67, 68)
-	want := 15
+	want := 27
 	if h.v6 {
-		spoof(h.hosts["isp"], "udp6", devAddr6(104), "2001:db8:1::2", 547, 546)
+		h.seg6("core")
+		h.seg6("owner")
+		// The core's, the Owner network's, a device's and the enforcer's own
+		// core and device VLAN addresses, to the enforcer's WAN address.
+		for _, src := range []string{seg6Addr("core", 0), seg6Addr("owner", 0), devAddr6(104), seg6Net("core") + "1", "fd00:101::1"} {
+			spoof(h.hosts["isp"], "udp6", src, "2001:db8:1::2", 547, 546)
+		}
 		spoof(h.hosts["isp"], "udp6", devAddr6(102), devAddr6(101), 547, 546)
 		spoof(h.hosts["101"], "udp6", devAddr6(103), "fd00:101::1", 547, 546)
-		// Neighbour discovery from the internet, in a device's name, to the
-		// enforcer's WAN address: on the link (hop limit 255), still spoofed.
-		within(t, h.hosts["isp"], func() {
-			c, err := net.DialIP("ip6:ipv6-icmp", &net.IPAddr{IP: net.ParseIP(devAddr6(104))}, &net.IPAddr{IP: net.ParseIP("2001:db8:1::2")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer c.Close()
-			raw, _ := c.SyscallConn()
-			raw.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_UNICAST_HOPS, 255) })
-			ns := append([]byte{135, 0, 0, 0, 0, 0, 0, 0}, net.ParseIP("2001:db8:1::2").To16()...) // the kernel fills the checksum
-			for range 3 {
-				if _, err := c.Write(ns); err != nil {
+		// Neighbour discovery from the internet, in a device's name and in
+		// the enforcer's own, to the enforcer's WAN address: on the link
+		// (hop limit 255), still spoofed.
+		for _, src := range []string{devAddr6(104), "fd00:101::1"} {
+			within(t, h.hosts["isp"], func() {
+				c, err := net.DialIP("ip6:ipv6-icmp", &net.IPAddr{IP: net.ParseIP(src)}, &net.IPAddr{IP: net.ParseIP("2001:db8:1::2")})
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-		})
-		want = 27
+				defer c.Close()
+				raw, _ := c.SyscallConn()
+				raw.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_UNICAST_HOPS, 255) })
+				ns := append([]byte{135, 0, 0, 0, 0, 0, 0, 0}, net.ParseIP("2001:db8:1::2").To16()...) // the kernel fills the checksum
+				for range 3 {
+					if _, err := c.Write(ns); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+		}
+		want += 3*7 + 3*2
 	}
 	// An IPv6 sender resolves its next hop first, so its datagrams may
 	// land a little after the writes return.
