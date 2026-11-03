@@ -3,7 +3,10 @@ package kernel_test
 // REQ: LOG-4, KRN-7, LOG-7
 
 import (
+	"crypto/ecdh"
+	crand "crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -103,4 +106,24 @@ func TestEraseCancelsByLogOrderNotClock(t *testing.T) {
 		t.Fatalf("early is %s, late is %s", r.status("a/early"), r.status("a/late"))
 	}
 	r.replays()
+}
+
+// Submit refuses a plan JSON cannot round-trip with JSON's own error, not
+// ErrNotText, and logs nothing: an ES256 owner whose RP ID is 100 bytes that
+// are not UTF-8 is written as 300 bytes of U+FFFD, past the 253 an RP ID may
+// hold, so it does not read back (#4760). Catches Submit dropping or
+// renaming asLogged's error.
+func TestSubmitReturnsTheEncodingsError(t *testing.T) {
+	r := newRig(t)
+	ec, err := ecdh.P256().GenerateKey(crand.Reader)
+	must(t, err)
+	owner, err := key.ES256(strings.Repeat("\xff", 100), ec.PublicKey().Bytes())
+	must(t, err)
+	k := r.ck
+	k.Root.Owner = owner
+	n := len(r.k.Log().Entries())
+	err = r.k.Submit(0, r.sign(kernel.Plan{ID: "p1", Key: k, Steps: []kernel.PlanStep{st(key.Unsubscribe, "m1")}}))
+	if !errors.Is(err, key.ErrMalformed) || errors.Is(err, kernel.ErrNotText) || len(r.k.Log().Entries()) != n {
+		t.Fatalf("a plan the log cannot hold: %v, %d entries", err, len(r.k.Log().Entries())-n)
+	}
 }

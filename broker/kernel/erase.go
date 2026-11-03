@@ -162,8 +162,8 @@ type (
 		reads     map[string]firstRead // each lineage that read an item, at its first read
 	}
 	firstRead struct {
-		at  int64
-		seq uint64
+		at    int64
+		plans int // len(State.Order) at the read: the plans logged before it
 	}
 	itemOf struct {
 		subject string
@@ -252,7 +252,7 @@ func (s *State) applyErase(e Entry) error {
 				st.reads = map[string]firstRead{}
 			}
 			if _, ok := st.reads[b.Lineage]; !ok {
-				st.reads[b.Lineage] = firstRead{e.At, e.Seq}
+				st.reads[b.Lineage] = firstRead{e.At, len(s.Order)}
 			}
 		}
 	}
@@ -266,11 +266,10 @@ func (s *State) applyErase(e Entry) error {
 // decides, so no crash falls between the erase and the cancel and a replay
 // cancels the same plans (LOG-4, D-169, #3870).
 func (s *State) cancelReaders(reads map[string]firstRead) {
-	for _, id := range s.Order {
-		for l, r := range reads {
-			if p := s.Plans[id]; p.Seq > r.seq && strings.HasPrefix(id, l+"/") {
-				s.cancel(p, CErased, "")
-				break
+	for l, r := range reads {
+		for _, id := range s.Order[r.plans:] {
+			if strings.HasPrefix(id, l+"/") {
+				s.cancel(s.Plans[id], CErased, "")
 			}
 		}
 	}
