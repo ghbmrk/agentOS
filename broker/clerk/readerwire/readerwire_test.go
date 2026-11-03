@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"os"
@@ -347,12 +350,15 @@ func TestModelErrorsStayClosed(t *testing.T) {
 	}
 }
 
-// TestServeBoundsConcurrency: at most eight calls run at once, and a hung
-// model ends at the connection's deadline.
+// TestServeBoundsConcurrency: at most maxConns calls run at once; call
+// maxConns+1 is answered busy at once, never queued, and pauses its dialer;
+// once a slot frees, a call is served again. A hung model ends at the
+// connection's deadline.
 func TestServeBoundsConcurrency(t *testing.T) {
-	var now, peak atomic.Int32
+	var now, peak, entered atomic.Int32
 	release := make(chan struct{})
 	path := reader(t, func(ctx context.Context, _ string) (string, error) {
+		entered.Add(1)
 		n := now.Add(1)
 		defer now.Add(-1)
 		for {
@@ -366,7 +372,7 @@ func TestServeBoundsConcurrency(t *testing.T) {
 	}, 30*time.Second)
 	var wg sync.WaitGroup
 	var ok atomic.Int32
-	for range 20 {
+	for range maxConns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -378,17 +384,46 @@ func TestServeBoundsConcurrency(t *testing.T) {
 	for deadline := time.Now().Add(10 * time.Second); now.Load() < maxConns && time.Now().Before(deadline); {
 		time.Sleep(10 * time.Millisecond)
 	}
-	time.Sleep(200 * time.Millisecond)
-	if p := peak.Load(); p != maxConns {
-		t.Errorf("%d calls ran at once, want %d", p, maxConns)
+	if n := now.Load(); n != maxConns {
+		t.Fatalf("%d calls running, want %d", n, maxConns)
+	}
+	// Call maxConns+1, several times: each is refused busy at once, the
+	// model is never entered for it, and the dialer pauses.
+	for range 5 {
+		a := Dial(path, me(), 30*time.Second)
+		start := time.Now()
+		if got, err := a(context.Background(), "x"); got != "" || !errors.Is(err, ErrBusy) {
+			t.Fatalf("call %d: %q, %v", maxConns+1, got, err)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("the busy answer took %v", d)
+		}
+		if !paused(a) {
+			t.Error("a busy reader did not pause the dialer")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if e := entered.Load(); e != maxConns {
+		t.Errorf("the model was entered %d times, want %d", e, maxConns)
 	}
 	close(release)
 	wg.Wait()
-	if ok.Load() != 20 {
-		t.Errorf("%d of 20 waiting calls were answered", ok.Load())
+	if ok.Load() != maxConns {
+		t.Errorf("%d of %d running calls were answered", ok.Load(), maxConns)
 	}
-	if peak.Load() > maxConns {
-		t.Errorf("%d calls ran at once", peak.Load())
+	if p := peak.Load(); p != maxConns {
+		t.Errorf("%d calls ran at once, want %d", p, maxConns)
+	}
+	// The slots are free again: a call is served.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		r, err := Dial(path, me(), 5*time.Second)(context.Background(), "x")
+		if err == nil && r == "bulk" {
+			break
+		}
+		if !errors.Is(err, ErrBusy) || time.Now().After(deadline) {
+			t.Fatalf("after the release: %q, %v", r, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	hung := reader(t, func(ctx context.Context, _ string) (string, error) { <-ctx.Done(); return "spam", ctx.Err() }, 300*time.Millisecond)
@@ -398,6 +433,59 @@ func TestServeBoundsConcurrency(t *testing.T) {
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("a hung model held the call %v", d)
+	}
+}
+
+// TestBusyIsReadHoweverTheConnectionEnds: a busy answer sent before the
+// call is read is ErrBusy whether the reader closed before the call was
+// written (the write fails) or after (the answer ends in a reset); any other
+// answer on such a connection is the reader's failure, and busy with bytes
+// after it is malformed.
+func TestBusyIsReadHoweverTheConnectionEnds(t *testing.T) {
+	early := func(t *testing.T, ans string, before bool) string {
+		t.Helper()
+		path := sock(t)
+		ln, err := net.Listen("unix", path)
+		must(t, err)
+		t.Cleanup(func() { ln.Close() })
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				if !before {
+					// Let the call land unread, so the close resets.
+					time.Sleep(50 * time.Millisecond)
+				}
+				c.Write([]byte(ans))
+				c.Close()
+			}
+		}()
+		return path
+	}
+	big := strings.Repeat("a", MaxPrompt)
+	for _, before := range []bool{true, false} {
+		name := map[bool]string{true: "answered at accept", false: "answered once the call landed"}[before]
+		t.Run(name, func(t *testing.T) {
+			for range 20 {
+				a := Dial(early(t, `{"err":"busy"}`+"\n", before), me(), 5*time.Second)
+				if got, err := a(context.Background(), big); got != "" || !errors.Is(err, ErrBusy) {
+					t.Fatalf("busy: %q, %v", got, err)
+				}
+				if !paused(a) {
+					t.Fatal("busy did not pause")
+				}
+			}
+			a := Dial(early(t, `{"reply":"spam"}`+"\n", before), me(), 5*time.Second)
+			if got, err := a(context.Background(), big); got != "" || !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("a reply on a call never read: %q, %v", got, err)
+			}
+		})
+	}
+	r := rawReader(t, `{"err":"busy"}`+"\nx")
+	if got, err := Dial(r.path, me(), 5*time.Second)(context.Background(), "x"); got != "" || !errors.Is(err, ErrMalformed) {
+		t.Fatalf("busy with trailing data: %q, %v", got, err)
 	}
 }
 
@@ -495,5 +583,36 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 				t.Errorf("readerwire links keeper code %s", dep)
 			}
 		}
+	}
+}
+
+// TestEveryBoundIsRecorded: every fixed bound the package declares is named
+// in ASSUMPTIONS.md's bounds row with its basis (RES-5-readerwire-maxconns),
+// so a new cap cannot land without one.
+func TestEveryBoundIsRecorded(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "readerwire.go", nil, 0)
+	must(t, err)
+	rec, err := os.ReadFile("ASSUMPTIONS.md")
+	must(t, err)
+	var n int
+	for _, d := range f.Decls {
+		g, ok := d.(*ast.GenDecl)
+		if !ok || g.Tok != token.CONST {
+			continue
+		}
+		for _, sp := range g.Specs {
+			for _, id := range sp.(*ast.ValueSpec).Names {
+				if id.Name == "version" || id.Name == "opRead" {
+					continue // the frame's own names, not bounds
+				}
+				n++
+				if !bytes.Contains(rec, []byte("`"+id.Name+"`")) {
+					t.Errorf("the bound %s has no record in ASSUMPTIONS.md", id.Name)
+				}
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no bounds found")
 	}
 }

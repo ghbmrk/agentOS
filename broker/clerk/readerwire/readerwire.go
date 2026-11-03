@@ -46,7 +46,11 @@ const (
 	pause = 60 * time.Second
 	// serveTimeout is the serving end's deadline for one connection.
 	serveTimeout = 60 * time.Second
-	// maxConns is how many calls the serving end runs at once.
+	// maxConns is how many calls the serving end runs at once; one more is
+	// answered busy at once, unread, and never queued. Its basis is
+	// ASSUMPTIONS.md row RES-5-readerwire-maxconns-1: the mail clerk asks
+	// one call at a time, and the other slots hold calls whose caller went
+	// away while the model still runs.
 	maxConns = 8
 
 	version = 1
@@ -66,9 +70,16 @@ var (
 	// ErrMalformed is an answer the frame does not admit: that mail fails,
 	// and the reader is not paused.
 	ErrMalformed = errors.New("readerwire: malformed answer")
+	// ErrBusy is the answer when the reader already runs maxConns calls:
+	// the call is refused at once, never queued, and the reader is paused,
+	// since only calls whose caller went away can fill it.
+	ErrBusy = errors.New("readerwire: busy")
 )
 
-var words = map[string]error{"unavailable": ErrUnavailable, "refused": ErrRefused, "too-large": ErrTooLarge}
+var words = map[string]error{"unavailable": ErrUnavailable, "refused": ErrRefused, "too-large": ErrTooLarge, "busy": ErrBusy}
+
+// busyLine is the busy answer on the wire, its newline left off.
+var busyLine, _ = json.Marshal(answer{Err: word("busy")})
 
 type call struct {
 	V      int    `json:"v"`
@@ -112,7 +123,8 @@ func readLine(br *bufio.Reader, max int) ([]byte, error) {
 		if err == nil {
 			return nil, errLong
 		}
-		return nil, err
+		// The line is whole, but the connection ended in an error, not EOF.
+		return line[:len(line)-1], err
 	}
 	return line[:len(line)-1], nil
 }
@@ -123,7 +135,7 @@ func readLine(br *bufio.Reader, max int) ([]byte, error) {
 // stays unclassified. After a failure of the reader itself (a dial error, a
 // wrong uid, a deadline, a lost answer, unavailable or refused) the next
 // calls fail at once, with nothing dialled, for a minute, so a down reader
-// costs a read at most one timeout.
+// costs a read at most one timeout. A busy reader pauses the calls too.
 func Dial(sock string, uid int, timeout time.Duration) Ask {
 	return newDialer(sock, uid, timeout, time.Now).ask
 }
@@ -190,14 +202,20 @@ func (d *dialer) call(ctx context.Context, prompt string) (reply string, down bo
 	conn.SetDeadline(own)
 	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
-	if _, err := conn.Write(append(b, '\n')); err != nil {
-		return "", true, ErrUnavailable
-	}
-	if uc, ok := conn.(*net.UnixConn); ok {
+	_, werr := conn.Write(append(b, '\n'))
+	if uc, ok := conn.(*net.UnixConn); ok && werr == nil {
 		uc.CloseWrite()
 	}
 	line, err := readLine(bufio.NewReader(io.LimitReader(conn, maxAnswer+1)), maxAnswer)
+	// A full reader answers busy and closes before it reads the call, so
+	// the call's write may fail, or the answer end in a reset, not EOF: the
+	// busy line alone is read however the connection ended after it.
+	if !errors.Is(err, errLong) && bytes.Equal(line, busyLine) {
+		return "", true, ErrBusy
+	}
 	switch {
+	case werr != nil:
+		return "", true, ErrUnavailable
 	case errors.Is(err, errLong):
 		return "", false, ErrMalformed
 	case err != nil:
@@ -226,8 +244,8 @@ func Listen(path string, mailUID int) (net.Listener, error) {
 }
 
 // Serve is the reader's end: it answers each call on ln with model's reply,
-// at most eight at once (the rest wait in the listen backlog), until ln
-// closes. A model error is answered unavailable (refused when it is
+// at most eight at once, until ln closes; a call past the eighth is answered
+// busy at once, unread, and never waits. A model error is answered unavailable (refused when it is
 // ErrRefused) and a reply over MaxReply too-large: never with the model's
 // text.
 func Serve(ln net.Listener, model Ask) error {
@@ -238,10 +256,8 @@ func serve(ln net.Listener, model Ask, timeout time.Duration) error {
 	slots := make(chan struct{}, maxConns)
 	wait := 5 * time.Millisecond
 	for {
-		slots <- struct{}{}
 		conn, err := ln.Accept()
 		if err != nil {
-			<-slots
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
@@ -250,10 +266,18 @@ func serve(ln net.Listener, model Ask, timeout time.Duration) error {
 			continue
 		}
 		wait = 5 * time.Millisecond
-		go func() {
-			defer func() { <-slots }()
-			serveConn(conn, model, timeout)
-		}()
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				serveConn(conn, model, timeout)
+			}()
+		default:
+			// Answered before the call is read: the answer is a few bytes
+			// into an empty socket, so it never blocks the accept loop.
+			write(conn, answer{Err: word("busy")})
+			conn.Close()
+		}
 	}
 }
 
