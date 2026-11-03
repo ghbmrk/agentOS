@@ -65,6 +65,11 @@ SAFE = re.compile(r"[A-Za-z0-9:_.@\\+-]+\Z")
 PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths")
 # systemd will not start a bad-setting or error unit, but its files are held as a loaded one's: stricter.
 STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
+# The states whose unit has read its drop-ins (DropInPaths): only an instance in one of these stands for
+# its template's drop-in directory. A masked or not-found instance applies none, while another instance
+# (a generated systemd-cryptsetup@dev, logind's getty@ttyN) still would (#4779 L3 round 2). An error
+# unit may stop loading before them, so it does not count either: its template's drop-ins are read alone.
+READS = ("loaded", "bad-setting")
 # The top links of a merged /usr: the only links a dpkg path may be resolved through.
 MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
 # A drop-in of ours on a packaged root unit: the lint must refuse it, or a pass of the built tree
@@ -254,8 +259,10 @@ def records(view, shown, dirs, prov):
             raise SystemExit("unit rules: %s: load state %r; systemd cannot load it" % (name, s["LoadState"]))
         if s["LoadState"] == "not-found":
             continue  # a name no unit loads under: its drop-ins are read alone below
+        # A masked or error name stands for its own directory: no other unit loads under that name.
         own |= {n + ".d" for n in words(s, "Names")}
-        instances |= {template_of(n) for n in words(s, "Names")} - {None}
+        if s["LoadState"] in READS:
+            instances |= {template_of(n) for n in words(s, "Names")} - {None}
         if s["LoadState"] == "masked" or s["Id"] in done:
             continue
         done.add(s["Id"])

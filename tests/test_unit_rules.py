@@ -185,6 +185,7 @@ class RecordsTest(unittest.TestCase):
                               ["y.service"]),
                 "t@agentos-unit-lint.service": ("loaded", LIB + "t@.service", [ETC + "t@.service.d/t.conf"]),
                 "lone@agentos-unit-lint.service": ("not-found", "", []),
+                "lone@m.service": ("masked", "/dev/null", []),  # #4779 L3 2: masked stands for no template dir
                 "gone.service": ("not-found", "", []),
                 "gen.service": ("loaded", "/run/systemd/generator/gen.service", []),
                 "m.service": ("masked", "/etc/systemd/system/m.service", [])})

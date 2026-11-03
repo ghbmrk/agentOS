@@ -782,8 +782,11 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// tree, not folded by spelling.
 		"a link whose .. leaves the search path through a link": {map[string]string{etc + "x.service": "-> /usr/share/l/../../lib/systemd/system/y.service", "/usr/share/l": "-> /usr/share/doc/p/ex/sub", "/usr/share/doc/p/ex/sub/.keep": "", "/usr/share/doc/p/lib/systemd/system/y.service": badRoot, lib + "y.service": root}, ourEtc, `variable "LD_PRELOAD"`},
 		// #4779 L3 2: a template drop-in directory no loaded instance reads.
-		"a template drop-in with no template":     {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
-		"a mode of ours on a package's directory": {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
+		"a template drop-in with no template": {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
+		// #4779 L3 round 2: a masked instance applies no drop-in, but any other instance would
+		"a template drop-in beside a masked instance":      {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "-> /dev/null"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in with its lint instance masked": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@agentos-unit-lint.service": "-> /dev/null"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a mode of ours on a package's directory":          {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
