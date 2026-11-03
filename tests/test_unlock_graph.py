@@ -95,6 +95,13 @@ class ReachTest(unittest.TestCase):
                                   "Triggers", "Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy",
                                   "RequiredBy", "RequisiteOf", "ConsistsOf"})
         self.assertEqual(g.SYSTEMD_MAJOR, "257")
+        # The stop walk's kinds, pinned as literals so that a tuple cannot shrink unseen (#4894 L3 1). In
+        # systemd 257's unit_dependency_atom: starting a unit stops its Conflicts=/ConflictedBy= units;
+        # UNIT_ATOM_PROPAGATE_STOP (RequiredBy, RequisiteOf, BoundBy, ConsistsOf) and PROPAGATE_STOP_GRACEFUL
+        # (PropagatesStopTo) carry a stop on; OnSuccess= and OnFailure= start a unit when this one stops.
+        self.assertEqual(g.STOP_ON_START, ("Conflicts", "ConflictedBy"))
+        self.assertEqual(g.PROPAGATE_STOP, ("PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf"))
+        self.assertEqual(g.STOP_STARTS, ("OnSuccess", "OnFailure"))
         self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState", "OnFailureJobMode", "OnSuccessJobMode"})
 
     def test_facts_are_the_root_each_edge_taken_and_failed_generators(self):
@@ -230,6 +237,19 @@ class ViolationsTest(unittest.TestCase):
                 spec["syslog.socket"] = ["%s: reboot.target" % kind]
                 spec["reboot.target"] = []
                 self.assertIn("%s starts reboot.target; %s" % (U, g.WHY), self.v(spec))
+
+    def test_a_unit_both_stopped_and_started_is_walked_both_ways(self):
+        # #4894 L3 2: the stop is popped first, and the later start must still walk what the unit starts.
+        units = {U: {"edges": [("Wants", "x.service"), ("Conflicts", "x.service")]},
+                 "x.service": {"edges": [("Wants", "bad.service"), ("RequiredBy", "y.service")]}}
+        started, stopped, edges = g.closure(units)
+        self.assertEqual(started, {U, "x.service", "bad.service"})
+        self.assertEqual(stopped, {"x.service", "y.service"})
+        self.assertIn("start bad.service Wants from x.service", edges)
+        self.assertIn("stop x.service RequiredBy y.service", edges)
+        # And in the other order: a unit started first is still walked as stopped.
+        units[U]["edges"].reverse()
+        self.assertEqual(g.closure(units)[:2], (started, stopped))
 
     def test_a_stopped_unit_with_an_action_or_isolate_is_refused(self):
         # #4823's failure path: a unit with SuccessAction=reboot that the unlock step's Conflicts= stops.
