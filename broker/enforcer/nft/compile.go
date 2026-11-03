@@ -599,8 +599,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// from a source no interface routes, passes: once leased the server is
 	// routed out of the WAN and passes the check below, and a source another
 	// interface routes (the core, a person's network, a device) is the
-	// internet posing as a segment and is dropped (#4764). An answer to be
-	// forwarded is checked like any other packet.
+	// internet posing as a segment and is dropped (#4764). A DHCPv6 server
+	// answering from such an address first resolves the client's link-local
+	// address, so its neighbour discovery, on the link (hop limit 255) and
+	// to the enforcer, passes on the same terms. An answer to be forwarded
+	// is checked like any other packet.
 	w.open("chain rpf")
 	w.line("type filter hook prerouting priority raw; policy accept;")
 	w.line(`iif "lo" accept`)
@@ -608,6 +611,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing accept")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing accept")
+	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing accept")
 	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
 	w.close()
 

@@ -355,7 +355,24 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 		spoof(h.hosts["isp"], "udp6", devAddr6(104), "2001:db8:1::2", 547, 546)
 		spoof(h.hosts["isp"], "udp6", devAddr6(102), devAddr6(101), 547, 546)
 		spoof(h.hosts["101"], "udp6", devAddr6(103), "fd00:101::1", 547, 546)
-		want = 24
+		// Neighbour discovery from the internet, in a device's name, to the
+		// enforcer's WAN address: on the link (hop limit 255), still spoofed.
+		within(t, h.hosts["isp"], func() {
+			c, err := net.DialIP("ip6:ipv6-icmp", &net.IPAddr{IP: net.ParseIP(devAddr6(104))}, &net.IPAddr{IP: net.ParseIP("2001:db8:1::2")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			raw, _ := c.SyscallConn()
+			raw.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_UNICAST_HOPS, 255) })
+			ns := append([]byte{135, 0, 0, 0, 0, 0, 0, 0}, net.ParseIP("2001:db8:1::2").To16()...) // the kernel fills the checksum
+			for range 3 {
+				if _, err := c.Write(ns); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		want = 27
 	}
 	// An IPv6 sender resolves its next hop first, so its datagrams may
 	// land a little after the writes return.
