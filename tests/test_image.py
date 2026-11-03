@@ -4092,7 +4092,7 @@ class SystemdDiffTest(MustRun, unittest.TestCase):
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
     masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
     skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
-    MustRun fails any skip of it; GitHub's ubuntu-latest runners have it (systemd 255,
+    MustRun fails any skip of it; GitHub's ubuntu-24.04 runners have it (systemd 255,
     whose conf-files.c listing is the same as 257.13's)."""
     # REQ: DEV-2, CH-9, C13
 
@@ -5027,7 +5027,7 @@ class TreeAccessTest(unittest.TestCase):
 
 class KmodDiffTest(MustRun, unittest.TestCase):
     """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
-    install line kmod took, in order. GitHub's ubuntu-latest runners have kmod 31, whose config
+    install line kmod took, in order. GitHub's ubuntu-24.04 runners have kmod 31, whose config
     reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
     # REQ: CH-7, HW-10
     WORDS = (b"install", b"install", b"btusb", b"bt-usb", b"bt[_-]sb", b"b]t", b"[x", b"/bin/false", b"#",
