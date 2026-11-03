@@ -386,6 +386,16 @@ class CoreTree(unittest.TestCase):
         os.remove(os.path.join(self.head, "broker/old/old.go"))
         self.assertEqual(self.check(extra_own=5, head_ceil=ceilings(n + 10))[0], 0)
 
+    def test_an_old_core_dir_only_the_head_lists_counts(self):
+        # L3 finding 1 on #4946: the head side of the directory union. A head that adds broker/new
+        # to tools/old_core.txt with new Go lines grows trusted lines like any other code.
+        write(self.head, tb.OLD_CORE, "broker/new\n")
+        write(self.head, "broker/new/n.go", "package n\n" + "// n\n" * 49)
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        self.assertIn(f"trusted-lines {n} -> {n + 50} ends above its ceiling {n}", out)
+
     def test_spec_words_are_capped(self):
         write(self.base, "SPEC.md", "a b c")
         write(self.base, tb.CEILINGS, ceilings(10**6, 4))
