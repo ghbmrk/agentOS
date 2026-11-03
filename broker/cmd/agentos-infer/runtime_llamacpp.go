@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,16 +29,21 @@ import (
 // path as a child of this service and speaks to it over a unix socket in a
 // private directory, so the service needs no network, not even loopback
 // (INFER-A3, INFER-A11). The server is a separate executable and is never
-// linked: this binary stays CGO_ENABLED=0.
-func newRuntime(path string) Runtime { return &llama{exe: path, ready: 2 * time.Minute} }
+// linked: this binary stays CGO_ENABLED=0. call is the service's bound on one
+// runtime call, which the dimension probe inside Load keeps to as well.
+func newRuntime(path string, call time.Duration) Runtime {
+	return &llama{exe: path, ready: 2 * time.Minute, probe: call}
+}
 
 // llama is the Runtime over one llama-server child at a time.
 type llama struct {
 	exe   string
 	ready time.Duration // the most Load waits for the server to answer health
+	probe time.Duration // the most Load waits for the dimension probe; 0 is defaultProbe
 
-	mu  sync.RWMutex
-	cur *llamaProc // nil before the first Load and after a failed one
+	load sync.Mutex // one Load at a time, so no Load replaces a server another just started
+	mu   sync.RWMutex
+	cur  *llamaProc // nil before the first Load and after a failed one
 }
 
 // llamaProc is one running llama-server and the way to reach it.
@@ -57,6 +63,12 @@ const (
 	// (INFER-A6); llama-server divides --ctx-size across its slots.
 	slots      = 2
 	slotTokens = 2048
+	// defaultProbe bounds the dimension probe when no call bound is set; it
+	// is the service's own default CallTimeout.
+	defaultProbe = 30 * time.Second
+	// dirPrefix starts each socket directory's name; the creating process's
+	// pid follows it, so a later service can tell a dead one's directory.
+	dirPrefix = "llama-"
 )
 
 var (
@@ -66,6 +78,8 @@ var (
 )
 
 func (l *llama) Load(path string) (int, error) {
+	l.load.Lock()
+	defer l.load.Unlock()
 	embed, err := modelIsEmbedding(path)
 	l.stop()
 	if err != nil {
@@ -82,8 +96,16 @@ func (l *llama) Load(path string) (int, error) {
 	l.cur = p
 	l.mu.Unlock()
 	// The dimension is what the server returns, not what the file claims:
-	// an output head can differ from the embedding length.
-	vs, err := l.Embed([]string{"dimension probe"})
+	// an output head can differ from the embedding length. The probe keeps
+	// to the call bound: the service holds its load lock meanwhile, so a
+	// server that hangs after health must fail the load, not stall callers.
+	limit := l.probe
+	if limit <= 0 {
+		limit = defaultProbe
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	vs, err := l.embed(ctx, []string{"dimension probe"})
+	cancel()
 	if err != nil || len(vs) != 1 || len(vs[0]) == 0 || len(vs[0]) > infer.MaxDim {
 		l.stop()
 		return 0, errBadReply
@@ -114,7 +136,8 @@ func (p *llamaProc) close() {
 // web UI, no slots endpoint, no network fetch, and its log discarded since the
 // service's log carries no request text (INF-8).
 func (l *llama) start(model string) (*llamaProc, error) {
-	dir, err := os.MkdirTemp("", "llama-")
+	sweepDeadDirs(os.TempDir())
+	dir, err := os.MkdirTemp("", fmt.Sprintf("%s%d-", dirPrefix, os.Getpid()))
 	if err != nil {
 		return nil, err
 	}
@@ -197,12 +220,12 @@ func (l *llama) proc() (*llamaProc, error) {
 
 // post sends one JSON request and decodes the reply into out, reading at
 // most limit bytes of it. The server's body is never put in an error.
-func (p *llamaProc) post(path string, body, out any, limit int64) error {
+func (p *llamaProc) post(ctx context.Context, path string, body, out any, limit int64) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, "http://localhost"+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost"+path, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -229,6 +252,10 @@ func (p *llamaProc) post(path string, body, out any, limit int64) error {
 // OpenAI-style endpoint (pooled and L2-normalised by the model's own
 // pooling).
 func (l *llama) Embed(texts []string) ([][]float32, error) {
+	return l.embed(context.Background(), texts)
+}
+
+func (l *llama) embed(ctx context.Context, texts []string) ([][]float32, error) {
 	p, err := l.proc()
 	if err != nil {
 		return nil, err
@@ -239,7 +266,7 @@ func (l *llama) Embed(texts []string) ([][]float32, error) {
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
-	err = p.post("/v1/embeddings", map[string]any{"input": texts, "encoding_format": "float"}, &r, maxEmbeddingBody)
+	err = p.post(ctx, "/v1/embeddings", map[string]any{"input": texts, "encoding_format": "float"}, &r, maxEmbeddingBody)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +281,45 @@ func (l *llama) Embed(texts []string) ([][]float32, error) {
 		out[*d.Index] = d.Embedding
 	}
 	return out, nil
+}
+
+// sweepDeadDirs removes the socket directories under tmp that a process of
+// this user made and that process is gone: close removes a directory, but a
+// service killed outright (SIGKILL, an OOM kill) leaves its own behind. A
+// directory is removed only if it is a real directory (not a link) owned by
+// this uid, named dirPrefix<pid>-..., and no process <pid> exists. A live
+// process's directory, this one's included, is kept; a reused pid only keeps
+// a dead one's directory a while longer. Errors are ignored: this is
+// hygiene, and a failed sweep never fails a load.
+func sweepDeadDirs(tmp string) {
+	ents, err := os.ReadDir(tmp)
+	if err != nil {
+		return
+	}
+	uid := uint32(os.Geteuid())
+	for _, e := range ents {
+		rest, ok := strings.CutPrefix(e.Name(), dirPrefix)
+		if !ok || e.Type()&os.ModeType != os.ModeDir {
+			continue
+		}
+		ds, _, ok := strings.Cut(rest, "-")
+		pid, err := strconv.Atoi(ds)
+		if !ok || err != nil || pid <= 0 {
+			continue
+		}
+		path := filepath.Join(tmp, e.Name())
+		fi, err := os.Lstat(path)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != uid {
+			continue
+		}
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			continue // alive, or alive under another uid (EPERM)
+		}
+		os.RemoveAll(path)
+	}
 }
 
 // modelIsEmbedding reads the model's GGUF header for what the model is.

@@ -2,13 +2,16 @@
 
 package main
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // newRuntime is the runtime adapter. This build has none: every load is
 // Unavailable, so the service answers but never embeds. The runtime of
 // INFER-SVC Q1 replaces this file with its own runtime_<name>.go
 // (ASSUMPTIONS INFER-A1).
-func newRuntime(path string) Runtime { return noRuntime{} }
+func newRuntime(path string, call time.Duration) Runtime { return noRuntime{} }
 
 type noRuntime struct{}
 
