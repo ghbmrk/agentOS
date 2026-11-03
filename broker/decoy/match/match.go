@@ -55,7 +55,6 @@ var (
 	lower       = regexp.MustCompile(`[a-z]`)
 	upper       = regexp.MustCompile(`[A-Z]`)
 	digit       = regexp.MustCompile(`[0-9]`)
-	slashRun    = regexp.MustCompile(`\\+`)
 )
 
 // Detect returns text with known token formats, secret-named URL parameters
@@ -180,8 +179,9 @@ func Pattern(text string) bool {
 	return n > 0
 }
 
-// MaxValue bounds one table value, so a stream's carried tail stays small.
-const MaxValue = 1 << 10
+// MaxValue bounds one table value, so a stream's carried tail stays small;
+// MinJoined is decoy.MinValue, the shortest joined form matched (#4743).
+const MaxValue, MinJoined = 1 << 10, 10
 
 // carryPattern is how much of a stream's past bytes a write is scanned with
 // for CLK-4's patterns, so a token split across two writes still matches.
@@ -259,9 +259,11 @@ func encodings(v []byte) [][]byte {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	for _, f := range out[:2] { // joined text counts a run of '\'s as one
-		if c := slashRun.ReplaceAll(f, []byte(`\`)); !bytes.Equal(c, f) {
-			out = append(out, c)
+	// Each form is also matched as joined text holds it: '\' runs as one, breaks (a PEM's LFs) removed.
+	for _, f := range out[:3] {
+		s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}}).Stream()
+		if s.join(f); len(s.joined) >= MinJoined && !bytes.Equal(s.joined, f) {
+			out = append(out, s.joined)
 		}
 	}
 	return out
@@ -485,38 +487,35 @@ func (s *Stream) matchBreak(br cut) {
 	for _, k := range [2]int{beside(before, after), 0} {
 		for _, h := range s.m.slash[k] {
 			f, i := s.m.forms[h[0]], h[1]
-			if bytes.HasSuffix(before, f.b[:i]) && s.follows(br.at, f.b[i+1:]) {
+			if i <= len(before) /* a prefix not there costs one byte */ && (i == 0 || before[len(before)-i] == f.b[0]) &&
+				bytes.HasSuffix(before, f.b[:i]) && s.follows(br.at, f.b[i+1:]) {
 				s.res.add(f.id)
 			}
 		}
 	}
 }
 
-// follows reports whether f comes at joined[j:], where a held JSON break
-// may stand for one of f's '\'s.
+// follows reports whether f comes at joined[j:], where a held JSON break may stand for
+// one of f's '\'s, comparing f whole between them and walking held breaks in order (#4743).
 func (s *Stream) follows(j int, f []byte) bool {
 	t := s.joined
-	for i := 0; i < len(f); {
-		if j < len(t) && t[j] == f[i] {
-			i, j = i+1, j+1
-		} else if f[i] == '\\' && s.jsonBreakAt(j) {
-			i++
-		} else {
+	b, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })
+	for {
+		k := bytes.IndexByte(f, '\\')
+		if k < 0 || !bytes.HasPrefix(t[j:], f[:k]) {
+			return k < 0 && bytes.HasPrefix(t[j:], f)
+		}
+		if j, f = j+k, f[k+1:]; j < len(t) && t[j] == '\\' {
+			j++
+			continue
+		}
+		for b < len(s.breaks) && (s.breaks[b].at < j || s.breaks[b].at == j && s.breaks[b].b[0] == '0') {
+			b++ // a URL break stands for no '\'
+		}
+		if b == len(s.breaks) || s.breaks[b].at != j {
 			return false
 		}
 	}
-	return true
-}
-
-// jsonBreakAt reports whether a JSON break is held at j.
-func (s *Stream) jsonBreakAt(j int) bool {
-	i, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })
-	for ; i < len(s.breaks) && s.breaks[i].at == j; i++ {
-		if s.breaks[i].b[0] != '0' {
-			return true
-		}
-	}
-	return false
 }
 
 // beside keys a '\' by the bytes before and after it, 0 at either end.
