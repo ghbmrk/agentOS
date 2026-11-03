@@ -194,7 +194,7 @@ const (
 	RADropped   = "ra_dropped"   // router advertisements from any segment
 	DNSOutside  = "dns_outside"  // a device's outside or encrypted DNS
 	DNSRedirect = "dns_redirect" // a device's port-53 traffic answered by the enforcer
-	Spoofed     = "spoofed"      // a source address not routed back out of its interface
+	Spoofed     = "spoofed"      // a source not routed back out of its interface, or an IPv4 broadcast, multicast or 0.0.0.0 one outside DHCP (rpf)
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
@@ -610,13 +610,17 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// conntrack or any service sees it, so no segment can pose as the
 	// upstream resolver, the internet or another segment, and a forged
 	// answer never reaches the resolver that fills the allow sets (NET-2
-	// The core's list). The unspecified sources of a DHCP request and of
-	// IPv6 address setup have no route and pass to the rules below. Then an
-	// IPv4 broadcast or multicast source (the limited broadcast, a subnet's
-	// broadcast, a group) is dropped and counted on every interface: the fib
-	// routes the WAN subnet's own broadcast back out of the WAN, so the
-	// general check below would pass it, and with rp_filter off the kernel
-	// would deliver it (#4841). IPv6 has no broadcast, and its stack drops a
+	// The core's list). The unspecified sources of a DHCP request (UDP 68
+	// to 67) and of IPv6 address setup have no route and pass to the rules
+	// below. Then an IPv4 broadcast or multicast source (the limited
+	// broadcast, a subnet's broadcast, a group) is dropped and counted on
+	// every interface: the fib routes the WAN subnet's own broadcast back
+	// out of the WAN, so the general check below would pass it, and with
+	// rp_filter off the kernel would deliver it (#4841). The fib types
+	// 0.0.0.0 as broadcast, so any other unspecified source is dropped and
+	// counted here too, by intent: nothing can answer it, though the general
+	// check passes one to the limited broadcast or a link-local group
+	// (#4855). IPv6 has no broadcast, and its stack drops a
 	// multicast source before this hook. A DHCP or DHCPv6 answer to the
 	// enforcer's own client on the WAN passes: until the WAN has its lease,
 	// no route leads back to the server (NET-2 Fails safe, #4078). Only an
