@@ -327,7 +327,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-l-ap-stalled | ENF-l-ap-stalled: the page shows a stalled access point push (push.ErrStalled, Watch's Abandoned count) | ENF-g-aplock-leak PR | queued(tier A; lane primary; brief briefs/ENF.md) |
 | NET-2-cap-sizing | NET-2-cap-sizing: each destination's byte cap is sized at signing from its declaration (CLK-14), shown on the confirm screen (D-248) | #4376, #4557 | queued (release; tier A) |
 | ENF-cap-gro | ENF-cap-gro: the core's and the edge's ports count every segment's header (GRO off) (NET-2 Byte caps) | #4557 | queued (release; tier A) |
-| UNLOCK-unit-deps | UNLOCK-unit-deps: the unlock unit's Upholds=/Wants=/Requires=/Requisite=/BindsTo=/PropagatesStopTo= are on a closed list, and refusals name the allowed value and the file (#4654 Security 6579433215) | UNLOCK-unit-every-assignment (#4644) | building (release; tier A) |
 | ENF-shared-nd | ENF-shared-nd: the enforcer's neighbour entries on a shared segment follow the address's hold | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
 | IMG-diff-oracle-time | IMG-diff-oracle-time: DiffOracleTest runs in under 60 seconds as a whole class. | — | queued (release; tier C; size S; from #4674 reviews) |
 | ENF-shared-quota | ENF-shared-quota: one host cannot fill its shared segment's holds or records | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
@@ -464,8 +463,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-plan-workspaces | MIG-4-plan-workspaces: the clerk drops the turn blob's workspaces (paths, remote URLs, commit) from what it sends the provider | #3133 live Codex capture; #4630 | queued (release; tier A; from #4585 UX) |
 | REV-CHK-links-localui | REV-CHK-links-localui: agentos-localui's root -admit-port1 step goes through privfile | #4493 package build | queued(tier A; sub B directories) |
 | KRN-2-std-files | a manager-opened StandardOutput/StandardError file on a non-root unit cannot sit in a world tree (KRN-2), found by D-271's review | D-271 (#4493) | queued (release; tier A; found by D-271's review) |
-| TEST-mkosi-scripts-pin | TEST-mkosi-scripts-pin: a test refuses package installs and fetches in mkosi.postinst, mkosi.finalize and the build's extra tree. Release; from PR #4620 Security. | #4591 | building (release; tier A) |
-| TEST-apt-sources-pin | TEST-apt-sources-pin: a test holds mkosi.sources to a closed, case-insensitive field list. Release; from PR #4620 Security. | #4591 | building (release; tier A) |
 | REV-CHK-links-ns2 | REV-CHK-links-ns2: packaged units' drop-ins, the rest of a root unit's load settings, and the #4656 lint nits | #4656 Security and L3 reviews | escalated (release; tier A; kernel lane) |
 | IMG-mkosi-run-bound | IMG-mkosi-run-bound: CI runs the pinned mkosi on the committed config in its own job, out of build.sh's reach; finalize checks installed packages against the signed apt lists. Release; split from #4647. | #4647 | queued (release; tier A) |
 | REV-CHK-links-ns3 | REV-CHK-links-ns3: what a root unit's EnvironmentFile= holds | #4677 build | queued (release; tier A; kernel lane) |
@@ -478,8 +475,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | RES-5-readerwire-reason | RES-5-readerwire-reason: an unclassified mail's record does not say why the reader failed | - | building (release; tier A) |
 | ENF-page-csrf-later-ae | ENF-page-csrf-later-ae: checkImports skips _test.go files, so a test file under another enforcer package can import csrf unseen | #4843 | queued (release; tier A; from #4843 review) |
-| DECOY-match-wrap-6 | DECOY-match-wrap-6: the matcher's joined-form miss next to a \ run, the KSSH JSON form wording and the \x x512 near-copy cost are stated or closed | #4845 | building (release; tier A; from #4845 review) |
-| RES-5-readerwire-bounds-consts | RES-5-readerwire-bounds-consts: the bounds check misses bounds built from allowed literals | - | building (release; tier A) |
 | DECOY-match-wrap-7 | DECOY-match-wrap-7: the DECOY-a-5 worst case states the \/ x512 figure (11.8x against the 12x gate), and match.go drops its no-op carry | #4868, #4853 | queued (release; tier A; size XS; from #4868 reviews) |
 | RES-5-readerwire-bounds-fold | RES-5-readerwire-bounds-fold: fold the literal walk into the type-checked check, and close the local-shadow gap | - | queued (release; tier A) |
 | G1-e2e-later-fu8 | G1-e2e-later-fu8: the e2e file gate refuses a memfd or SysV segment reached through /proc/<pid>/fd, or E8 shows no path reaches one (HW-10, ONB-3) | #4727 | building (release; tier A; size XS; from #4727 reviews) |
