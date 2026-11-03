@@ -24,8 +24,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
 
 const roleEnv = "AGENTOS_READERWIRE_TEST_ROLE"
@@ -122,8 +120,8 @@ func fakeReader(t *testing.T, ans string, hang bool) *raw {
 
 func me() int { return os.Getuid() }
 
-// TestReadRoundTrip: a fake model's class word comes back as the reply, and
-// inbox.Read over it classes the mail.
+// TestReadRoundTrip: a fake model's class word comes back as the reply
+// (inbox.Read over the frame: inbox_test.go).
 func TestReadRoundTrip(t *testing.T) {
 	var got string
 	path := reader(t, func(_ context.Context, p string) (string, error) {
@@ -133,13 +131,6 @@ func TestReadRoundTrip(t *testing.T) {
 	ask := Dial(path, me(), 5*time.Second)
 	if r, err := ask(context.Background(), "a prompt"); err != nil || r != " Spam\n" || got != "a prompt" {
 		t.Fatalf("ask = %q, %v; the model saw %q", r, err, got)
-	}
-	mails := inbox.Read(context.Background(), inbox.Ask(ask), []inbox.Mail{{Raw: []byte("Subject: win\r\n\r\nbuy now")}})
-	if len(mails) != 1 || mails[0].Class != "spam" {
-		t.Fatalf("inbox.Read over the frame: %+v", mails)
-	}
-	if !strings.HasSuffix(got, "buy now") {
-		t.Fatalf("the reader did not get the mail: %q", got)
 	}
 }
 
@@ -339,10 +330,6 @@ func TestModelErrorsStayClosed(t *testing.T) {
 		got, err := ask(context.Background(), "Subject: hi")
 		if got != "" || !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "spam") || strings.Contains(err.Error(), "Subject") {
 			t.Errorf("model error %q reached the mail clerk as %q, %v", e, got, err)
-		}
-		mails := inbox.Read(context.Background(), inbox.Ask(Dial(path, me(), 5*time.Second)), []inbox.Mail{{Raw: []byte("Subject: hi\r\n\r\n")}})
-		if mails[0].Class != "" {
-			t.Errorf("model error %q classed the mail %q", e, mails[0].Class)
 		}
 	}
 	path := reader(t, func(context.Context, string) (string, error) { return "spam", fmt.Errorf("no route: %w", ErrRefused) }, 5*time.Second)
