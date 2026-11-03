@@ -44,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -379,7 +380,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	root, err := st.ClerkRoot()
 	must(t, err)
-	r.keys.Log, r.keys.Head, r.keys.ClerkRoot = handoff.Hide(logKey), handoff.Hide(head), handoff.Hide(root)
+	r.keys.Log, r.keys.Head, r.keys.ClerkRoot = secret.Hide(logKey), secret.Hide(head), secret.Hide(root)
 	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
@@ -403,7 +404,7 @@ func (r *rig) enrollCounter(st *seal.Store) handoff.Counter {
 	for _, p := range []string{filepath.Join(dir, "anchor"), dir} {
 		must(t, os.Lchown(p, r.kernelUID, r.kernelG))
 	}
-	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: handoff.Hide(auth)}
+	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)}
 }
 
 func (r *rig) anchorDir() string { return filepath.Join(r.dir, "k", "anchor") }
@@ -1789,7 +1790,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	var root [32]byte
 	edit(func(st *seal.Store) {
-		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: handoff.Hide(seed), Step: 42})
+		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed), Step: 42})
 		must(t, err)
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 		root, err = st.ClerkRoot()
@@ -1853,7 +1854,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	// A directory others can reach gets none, and the kernel still starts.
 	edit(func(st *seal.Store) {
-		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: handoff.Hide(seed)})
+		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed)})
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 	})
 	must(t, os.Chmod(filepath.Dir(path), 0o755))

@@ -56,6 +56,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -203,16 +204,16 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
 	}
 	logKey, err := st.LogKey()
-	if k.Log = handoff.Hide(logKey); err != nil {
+	if k.Log = secret.Hide(logKey); err != nil {
 		return nil, err
 	}
 	head, err := st.HeadKey()
-	if k.Head = handoff.Hide(head); err != nil {
+	if k.Head = secret.Hide(head); err != nil {
 		return nil, err
 	}
 	if request != nil {
 		rec, err := lostCard(st, request, head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
-		if k.NewRecovery = handoff.Hide(rec); err != nil {
+		if k.NewRecovery = secret.Hide(rec); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the card you hold: your lost-card request: %v\n", err)
 		} else if err := os.Remove(c.request); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove the lost-card request I carried out: %v\n", err)
@@ -252,18 +253,18 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	}
 	if ok {
 		ca, err := handoff.ParsePageCA(raw)
-		k.PageCA = handoff.Hide(ca)
+		k.PageCA = secret.Hide(ca)
 		clear(raw)
 		if err != nil {
 			return nil, fmt.Errorf("agentos-unlock: the page authority in my store: %w", err)
 		}
 	}
 	link, edge, err := linkKeys(st)
-	if k.LinkKey, k.FirstEdge = handoff.Hide(link), edge; err != nil {
+	if k.LinkKey, k.FirstEdge = secret.Hide(link), edge; err != nil {
 		return nil, err
 	}
 	root, err := st.ClerkRoot()
-	if k.ClerkRoot = handoff.Hide(root); err != nil {
+	if k.ClerkRoot = secret.Hide(root); err != nil {
 		return nil, err
 	}
 	if c.checkerSeed != "" {
@@ -717,7 +718,7 @@ func counter(st *seal.Store) (handoff.Counter, error) {
 		clear(r.Auth)
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store does not read")
 	}
-	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: handoff.Hide(r.Auth)}, nil
+	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(r.Auth)}, nil
 }
 
 // kernelTPM opens the kernel's own connection to the TPM at path: the

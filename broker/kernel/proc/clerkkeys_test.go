@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -308,7 +309,7 @@ func TestRunKernelNeedsTheClerkRootToHandKeys(t *testing.T) {
 	dir := t.TempDir()
 	cfg := MainConfig{Log: filepath.Join(dir, "log"), KeyDir: filepath.Join(dir, "keys"), ContentDir: filepath.Join(dir, "content"), BackupDir: filepath.Join(dir, "b"),
 		ClerkKeys: map[string]KeyClerk{"mail": {Socket: filepath.Join(dir, "k"), Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}}}
-	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: handoff.Hide(headPriv)}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: secret.Hide(headPriv)}, &kernel.MemAnchor{})
 	if err == nil || !strings.Contains(err.Error(), "no clerk root key") {
 		t.Fatalf("got %v, want a refusal for the missing clerk root key", err)
 	}

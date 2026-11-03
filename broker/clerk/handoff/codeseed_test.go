@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: CH-4, CLK-1, STO-2
@@ -12,7 +14,7 @@ import (
 // The code seed's store form reads back as written, and anything off its
 // shape (no tag, no seed, an oversized seed, a negative step) is refused.
 func TestCodeSeedRoundTrip(t *testing.T) {
-	s := CodeSeed{Seed: Hide(bytes.Repeat([]byte{7}, 20)), Step: 59000123}
+	s := CodeSeed{Seed: secret.Hide(bytes.Repeat([]byte{7}, 20)), Step: 59000123}
 	b, err := EncodeCodeSeed(s)
 	if err != nil {
 		t.Fatal(err)
@@ -23,8 +25,8 @@ func TestCodeSeedRoundTrip(t *testing.T) {
 	}
 	for name, v := range map[string]CodeSeed{
 		"no seed":       {Step: 1},
-		"too long":      {Seed: Hide(make([]byte, MaxCodeSeed+1))},
-		"negative step": {Seed: Hide([]byte{1}), Step: -1},
+		"too long":      {Seed: secret.Hide(make([]byte, MaxCodeSeed+1))},
+		"negative step": {Seed: secret.Hide([]byte{1}), Step: -1},
 	} {
 		if _, err := EncodeCodeSeed(v); !errors.Is(err, ErrCodeSeed) {
 			t.Errorf("%s: encoded", name)
@@ -48,7 +50,7 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 	key := bytes.Repeat([]byte{1}, 32)
 	other := bytes.Repeat([]byte{2}, 32)
 	seed := []byte("canary-seed-0123456789")
-	blob, err := SealCodeSeed(key, CodeSeed{Seed: Hide(seed), Step: 9})
+	blob, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide(seed), Step: 9})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,9 +81,9 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 // if a bound is off by one either way.
 func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	for name, v := range map[string]CodeSeed{
-		"largest seed": {Seed: Hide(make([]byte, MaxCodeSeed))},
-		"step 0":       {Seed: Hide([]byte{1}), Step: 0},
-		"largest step": {Seed: Hide([]byte{1}), Step: 1 << 62},
+		"largest seed": {Seed: secret.Hide(make([]byte, MaxCodeSeed))},
+		"step 0":       {Seed: secret.Hide([]byte{1}), Step: 0},
+		"largest step": {Seed: secret.Hide([]byte{1}), Step: 1 << 62},
 	} {
 		b, err := EncodeCodeSeed(v)
 		if err != nil {
@@ -107,7 +109,7 @@ func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	}
 
 	key := bytes.Repeat([]byte{1}, 32)
-	blob, err := SealCodeSeed(key, CodeSeed{Seed: Hide(make([]byte, MaxCodeSeed)), Step: 3})
+	blob, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide(make([]byte, MaxCodeSeed)), Step: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +122,7 @@ func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	if _, err := OpenCodeSeed(key, append(bytes.Clone(blob), 0)); !errors.Is(err, ErrCodeSeed) {
 		t.Fatalf("a file past MaxSealedSeed: %v", err)
 	}
-	least, err := SealCodeSeed(key, CodeSeed{Seed: Hide([]byte{1}), Step: 4})
+	least, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide([]byte{1}), Step: 4})
 	if err != nil {
 		t.Fatal(err)
 	}

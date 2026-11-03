@@ -12,6 +12,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -37,8 +38,8 @@ func newBox(t *testing.T) *box {
 	ref, err := tpmseal.DefineCounter(b.sw.TPM(), srk, []byte("store id"), auth)
 	must(t, err)
 	b.keys = handoff.KernelKeys{
-		Head:    handoff.Hide(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))),
-		Counter: handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: handoff.Hide(auth)},
+		Head:    secret.Hide(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))),
+		Counter: handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)},
 	}
 	c := tpmseal.Counter{TPM: b.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
 	must(t, proc.InitCounterAnchor(b.dir, filepath.Join(t.TempDir(), "log"), c, b.keys.Head.Get()))
@@ -102,7 +103,7 @@ func TestTheKernelOpensTheCounterAnchor(t *testing.T) {
 func TestTheCounterMustBeTheEnrolledOne(t *testing.T) {
 	b := newBox(t)
 	for name, mut := range map[string]func(*handoff.Counter){
-		"auth": func(c *handoff.Counter) { c.Auth = handoff.Hide([]byte("fedcba9876543210fedcba9876543210")) },
+		"auth": func(c *handoff.Counter) { c.Auth = secret.Hide([]byte("fedcba9876543210fedcba9876543210")) },
 		"name": func(c *handoff.Counter) { c.Name = bytes.Clone(c.Name); c.Name[len(c.Name)-1] ^= 1 },
 		"srk":  func(c *handoff.Counter) { c.SRK = bytes.Clone(c.SRK); c.SRK[len(c.SRK)-1] ^= 1 },
 	} {
