@@ -7,8 +7,11 @@
 // the owner's passkey tap, which makes the key, live after KEY-4's grant
 // hold.
 //
-// It also keeps A10's split of owner approvals into necessary and
-// avoidable. The package uses no inference.
+// A class is proposed only once its clerk's measured silent-failure rate
+// is low enough (D-309): the share of its effects the owner later
+// corrected that the clerk's own check of the resulting state did not
+// flag (OWN-13). It also keeps A10's split of owner approvals into
+// necessary and avoidable. The package uses no inference.
 //
 // Assumptions are listed in ASSUMPTIONS.md next to this file.
 package attention
@@ -100,6 +103,11 @@ type Config struct {
 	// ShortID gives the owner-facing ID of a suggestion (CH-12). Nil: S1,
 	// S2, ...
 	ShortID func(taken func(string) bool) (string, error)
+	// MaxSilentPerMille is the highest silent-failure rate, per mille, at
+	// which a clerk's classes may be proposed (D-309), read as the
+	// one-sided 95% upper bound (Measure.Bound). Default 10 (1%). There is
+	// no off switch: the gate is a rule, not a candidate (HLD-3).
+	MaxSilentPerMille int
 }
 
 // class is one shape of request: a clerk, a verb, and whether it is a
@@ -138,6 +146,11 @@ type state struct {
 	Seq       int               `json:"seq"`
 	Necessary int               `json:"necessary"`
 	Avoidable int               `json:"avoidable"`
+	// Clerks holds each clerk's checked effects and failures (D-309).
+	Clerks map[string]*record `json:"clerks,omitempty"`
+	// Now is the latest time any decision or outcome carried: the
+	// measure's clock, so it needs no wall clock and replays identically.
+	Now time.Time `json:"now"`
 }
 
 // Optimizer is safe for concurrent use.
@@ -177,6 +190,12 @@ func New(cfg Config) (*Optimizer, error) {
 			o.st.Classes = map[string]*class{}
 		}
 	}
+	if o.st.Clerks == nil {
+		o.st.Clerks = map[string]*record{}
+	}
+	if cfg.MaxSilentPerMille < 1 {
+		o.cfg.MaxSilentPerMille = 10
+	}
 	return o, nil
 }
 
@@ -207,6 +226,7 @@ func (o *Optimizer) Observe(d Decision) error {
 	reply := d.Thread && d.Verb == key.Send
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.tick(d.At)
 	k := classKey(d.Clerk, d.Verb, reply)
 	c := o.st.Classes[k]
 	if d.Approved && !d.Wrong {
@@ -278,7 +298,7 @@ func (o *Optimizer) earnedLocked(c *class) bool {
 			return false
 		}
 	}
-	return o.cfg.UserContent == nil || !o.cfg.UserContent(c.Clerk)
+	return (o.cfg.UserContent == nil || !o.cfg.UserContent(c.Clerk)) && o.measureLocked(c.Clerk).Ready
 }
 
 // reset ends the run; the edit-rate window (Recent) is kept, since it
@@ -329,6 +349,9 @@ type Suggestion struct {
 	// owner confirms the key.
 	Text   string
 	Detail []Term
+	// Detection is the clerk's measure that let the suggestion through
+	// (D-309), for the owner page.
+	Detection Measure
 }
 
 // evidence is the owner-facing run: strict for a templated key, unedited
@@ -422,7 +445,8 @@ func (o *Optimizer) Suggestions() ([]Suggestion, error) {
 			Short: c.Short, Clerk: c.Clerk, Caveats: cs, Approved: c.Run, Since: c.Since,
 			Text: evidence(c) + fmt.Sprintf(" Suggestion: %s To set it up, open my Wi-Fi page. Reply NO %s to stop suggesting it.",
 				summary(c, perDay), c.Short),
-			Detail: Describe(c.Clerk, c.Reply, cs),
+			Detail:    Describe(c.Clerk, c.Reply, cs),
+			Detection: o.measureLocked(c.Clerk),
 		})
 	}
 	if dirty {

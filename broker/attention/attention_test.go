@@ -32,7 +32,27 @@ func newOpt(t *testing.T, st Store, mod func(*Config)) *Optimizer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, c := range testClerks {
+		clean(t, o, c, t0.Add(-60*24*time.Hour), 300)
+	}
 	return o
+}
+
+// testClerks are the clerks these tests run on; newOpt gives each a clean
+// checked record, so the silent-failure gate (D-309) is open unless a test
+// says otherwise.
+var testClerks = []string{"books", "mail", "paste"}
+
+// clean records n checked effects on clerk, one an hour from start, none
+// flagged or corrected.
+func clean(t *testing.T, o *Optimizer, clerk string, start time.Time, n int) {
+	t.Helper()
+	for i := range n {
+		at := start.Add(time.Duration(i) * time.Hour)
+		if err := o.Record(Outcome{Clerk: clerk, Step: clerk + "-" + strconv.Itoa(i), Ran: at, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // invoice is a verified, templated send: the template is the content class
@@ -517,6 +537,7 @@ func TestCannotEnact(t *testing.T) {
 func TestTextFitsThreeSegments(t *testing.T) {
 	o := newOpt(t, &memStore{}, nil)
 	long := strings.Repeat("a", 64)
+	clean(t, o, long, t0.Add(-60*24*time.Hour), 300)
 	for i := 0; i < 10; i++ {
 		d := invoice(i)
 		d.Clerk, d.Verb, d.Amount = long, key.Buy, 99999999999

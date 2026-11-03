@@ -2,6 +2,7 @@ package localui
 
 import (
 	"html"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -191,6 +192,12 @@ func TestSR3_3ASuggestionIsNotTheFinalCard(t *testing.T) {
 	o, err := attention.New(attention.Config{Store: &memBytes{}, Threshold: 2, UserContent: func(string) bool { return false }})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for i := range 300 { // a clean checked record, so the silent-failure gate is open (D-309)
+		at := a.clock().Add(-80*24*time.Hour + time.Duration(i)*time.Hour)
+		if err := o.Record(attention.Outcome{Clerk: "mail", Step: strconv.Itoa(i), Ran: at, At: at}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i := range 2 {
 		if err := o.Observe(attention.Decision{Clerk: "mail", Verb: key.Send, Approved: true, Verified: true, Content: "template:inv-std",
