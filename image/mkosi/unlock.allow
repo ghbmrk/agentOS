@@ -4,89 +4,184 @@
 # (#4822, #4823), "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator
 # that found nothing to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
-start -.slice
-start agentos-inbound.service
+start -.slice Requires from agentos.slice
+start -.slice Requires from dev-hugepages.mount
+start -.slice Requires from dev-mqueue.mount
+start -.slice Requires from proc-sys-fs-binfmt_misc.mount
+start -.slice Requires from sys-fs-fuse-connections.mount
+start -.slice Requires from sys-kernel-config.mount
+start -.slice Requires from sys-kernel-debug.mount
+start -.slice Requires from sys-kernel-tracing.mount
+start -.slice Requires from system.slice
+start agentos-fallback.service OnFailure from agentos-health.service
+start agentos-inbound.service Requires from agentos-keeper-link-capture.service
+start agentos-inbound.service Requires from agentos-link.service
+start agentos-inbound.service Requires from systemd-resolved.service
+start agentos-inbound.service Wants from sysinit.target
 start agentos-keeper-kernel.service
-start agentos-keeper-link-capture.service
-start agentos-keeper.slice
-start agentos-link.service
-start agentos.slice
-start dev-hugepages.mount
-start dev-mqueue.mount
-start emergency.service
-start emergency.target
-start first-boot-complete.target
-start kmod-static-nodes.service
-start ldconfig.service
-start local-fs-pre.target
-start local-fs.target
-start modprobe@configfs.service
-start modprobe@dm_mod.service
-start modprobe@efi_pstore.service
-start modprobe@fuse.service
-start modprobe@loop.service
-start network-pre.target
-start nss-lookup.target
-start proc-sys-fs-binfmt_misc.automount
-start proc-sys-fs-binfmt_misc.mount
-start run-lock.mount
-start swap.target
-start sys-fs-fuse-connections.mount
-start sys-kernel-config.mount
-start sys-kernel-debug.mount
-start sys-kernel-tracing.mount
-start sys-subsystem-net-devices-agentos\x2dlink.device
-start sysinit.target
-start system-modprobe.slice
-start system.slice
-start systemd-ask-password-console.path
-start systemd-ask-password-console.service
-start systemd-binfmt.service
-start systemd-boot-random-seed.service
-start systemd-boot-update.service
-start systemd-confext.service
-start systemd-firstboot.service
-start systemd-hibernate-clear.service
-start systemd-hwdb-update.service
-start systemd-journal-catalog-update.service
-start systemd-journal-flush.service
-start systemd-journald-audit.socket
-start systemd-journald-dev-log.socket
-start systemd-journald.service
-start systemd-journald.socket
-start systemd-machine-id-commit.service
-start systemd-modules-load.service
-start systemd-network-generator.service
-start systemd-pcrlock-file-system.service
-start systemd-pcrlock-firmware-code.service
-start systemd-pcrlock-firmware-config.service
-start systemd-pcrlock-machine-id.service
-start systemd-pcrlock-make-policy.service
-start systemd-pcrlock-secureboot-authority.service
-start systemd-pcrlock-secureboot-policy.service
-start systemd-pcrmachine.service
-start systemd-pcrphase-sysinit.service
-start systemd-pcrphase.service
-start systemd-pstore.service
-start systemd-random-seed.service
-start systemd-remount-fs.service
-start systemd-repart.service
-start systemd-resolved.service
-start systemd-sysctl.service
-start systemd-sysext.service
-start systemd-sysusers.service
-start systemd-tmpfiles-setup-dev-early.service
-start systemd-tmpfiles-setup-dev.service
-start systemd-tmpfiles-setup.service
-start systemd-tpm2-setup-early.service
-start systemd-tpm2-setup.service
-start systemd-udev-load-credentials.service
-start systemd-udev-trigger.service
-start systemd-udevd-control.socket
-start systemd-udevd-kernel.socket
-start systemd-udevd.service
-start systemd-update-done.service
-start tmp.mount
+start agentos-keeper-link-capture.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
+start agentos-keeper.slice Requires from agentos-keeper-kernel.service
+start agentos-keeper.slice Requires from agentos-keeper-link-capture.service
+start agentos-link.service Wants from agentos-keeper-kernel.service
+start agentos-link.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
+start agentos.slice Requires from agentos-keeper.slice
+start dev-hugepages.mount Wants from sysinit.target
+start dev-mqueue.mount Wants from sysinit.target
+start emergency.service Requires from emergency.target
+start emergency.target OnFailure from initrd-cleanup.service
+start emergency.target OnFailure from initrd-parse-etc.service
+start emergency.target OnFailure from initrd.target
+start emergency.target OnFailure from local-fs.target
+start first-boot-complete.target Wants from systemd-firstboot.service
+start first-boot-complete.target Wants from systemd-random-seed.service
+start kmod-static-nodes.service Wants from sysinit.target
+start ldconfig.service Wants from sysinit.target
+start local-fs-pre.target Wants from systemd-remount-fs.service
+start local-fs-pre.target Wants from systemd-tmpfiles-setup-dev-early.service
+start local-fs-pre.target Wants from systemd-tmpfiles-setup-dev.service
+start local-fs.target Wants from sysinit.target
+start modprobe@configfs.service Requires from sys-kernel-config.mount
+start modprobe@dm_mod.service Wants from systemd-repart.service
+start modprobe@efi_pstore.service Wants from systemd-pstore.service
+start modprobe@fuse.service Requires from sys-fs-fuse-connections.mount
+start modprobe@loop.service Wants from systemd-repart.service
+start network-pre.target Wants from agentos-inbound.service
+start network-pre.target Wants from systemd-network-generator.service
+start nss-lookup.target Wants from systemd-resolved.service
+start proc-sys-fs-binfmt_misc.automount Wants from sysinit.target
+start proc-sys-fs-binfmt_misc.mount Triggers from proc-sys-fs-binfmt_misc.automount
+start run-lock.mount Wants from local-fs.target
+start swap.target Wants from sysinit.target
+start sys-fs-fuse-connections.mount Wants from sysinit.target
+start sys-kernel-config.mount Wants from sysinit.target
+start sys-kernel-debug.mount Wants from sysinit.target
+start sys-kernel-tracing.mount Wants from sysinit.target
+start sys-subsystem-net-devices-agentos\x2dlink.device BindsTo from agentos-keeper-link-capture.service
+start sys-subsystem-net-devices-agentos\x2dlink.device BindsTo from agentos-link.service
+start sysinit.target Requires from agentos-fallback.service
+start sysinit.target Requires from agentos-keeper-kernel.service
+start sysinit.target Requires from agentos-keeper-link-capture.service
+start sysinit.target Requires from agentos-link.service
+start sysinit.target Requires from systemd-pcrphase.service
+start system-modprobe.slice Requires from modprobe@configfs.service
+start system-modprobe.slice Requires from modprobe@dm_mod.service
+start system-modprobe.slice Requires from modprobe@efi_pstore.service
+start system-modprobe.slice Requires from modprobe@fuse.service
+start system-modprobe.slice Requires from modprobe@loop.service
+start system.slice Requires from agentos-fallback.service
+start system.slice Requires from agentos-inbound.service
+start system.slice Requires from agentos-link.service
+start system.slice Requires from emergency.service
+start system.slice Requires from kmod-static-nodes.service
+start system.slice Requires from ldconfig.service
+start system.slice Requires from run-lock.mount
+start system.slice Requires from system-modprobe.slice
+start system.slice Requires from systemd-ask-password-console.service
+start system.slice Requires from systemd-binfmt.service
+start system.slice Requires from systemd-boot-random-seed.service
+start system.slice Requires from systemd-boot-update.service
+start system.slice Requires from systemd-confext.service
+start system.slice Requires from systemd-firstboot.service
+start system.slice Requires from systemd-hibernate-clear.service
+start system.slice Requires from systemd-hwdb-update.service
+start system.slice Requires from systemd-journal-catalog-update.service
+start system.slice Requires from systemd-journal-flush.service
+start system.slice Requires from systemd-journald-audit.socket
+start system.slice Requires from systemd-journald-dev-log.socket
+start system.slice Requires from systemd-journald.service
+start system.slice Requires from systemd-journald.socket
+start system.slice Requires from systemd-machine-id-commit.service
+start system.slice Requires from systemd-modules-load.service
+start system.slice Requires from systemd-network-generator.service
+start system.slice Requires from systemd-pcrlock-file-system.service
+start system.slice Requires from systemd-pcrlock-firmware-code.service
+start system.slice Requires from systemd-pcrlock-firmware-config.service
+start system.slice Requires from systemd-pcrlock-machine-id.service
+start system.slice Requires from systemd-pcrlock-make-policy.service
+start system.slice Requires from systemd-pcrlock-secureboot-authority.service
+start system.slice Requires from systemd-pcrlock-secureboot-policy.service
+start system.slice Requires from systemd-pcrmachine.service
+start system.slice Requires from systemd-pcrphase-sysinit.service
+start system.slice Requires from systemd-pcrphase.service
+start system.slice Requires from systemd-pstore.service
+start system.slice Requires from systemd-random-seed.service
+start system.slice Requires from systemd-remount-fs.service
+start system.slice Requires from systemd-repart.service
+start system.slice Requires from systemd-resolved.service
+start system.slice Requires from systemd-sysctl.service
+start system.slice Requires from systemd-sysext.service
+start system.slice Requires from systemd-sysusers.service
+start system.slice Requires from systemd-tmpfiles-setup-dev-early.service
+start system.slice Requires from systemd-tmpfiles-setup-dev.service
+start system.slice Requires from systemd-tmpfiles-setup.service
+start system.slice Requires from systemd-tpm2-setup-early.service
+start system.slice Requires from systemd-tpm2-setup.service
+start system.slice Requires from systemd-udev-load-credentials.service
+start system.slice Requires from systemd-udev-trigger.service
+start system.slice Requires from systemd-udevd-control.socket
+start system.slice Requires from systemd-udevd-kernel.socket
+start system.slice Requires from systemd-udevd.service
+start system.slice Requires from systemd-update-done.service
+start system.slice Requires from tmp.mount
+start systemd-ask-password-console.path Wants from sysinit.target
+start systemd-ask-password-console.service Triggers from systemd-ask-password-console.path
+start systemd-binfmt.service Wants from sysinit.target
+start systemd-boot-random-seed.service Wants from sysinit.target
+start systemd-boot-update.service Wants from sysinit.target
+start systemd-confext.service Wants from sysinit.target
+start systemd-firstboot.service Wants from sysinit.target
+start systemd-hibernate-clear.service Wants from sysinit.target
+start systemd-hwdb-update.service Wants from sysinit.target
+start systemd-journal-catalog-update.service Wants from sysinit.target
+start systemd-journal-flush.service Wants from sysinit.target
+start systemd-journald-audit.socket Wants from systemd-journald.service
+start systemd-journald-dev-log.socket Wants from systemd-journald.service
+start systemd-journald.service Triggers from systemd-journald-audit.socket
+start systemd-journald.service Triggers from systemd-journald-dev-log.socket
+start systemd-journald.service Triggers from systemd-journald.socket
+start systemd-journald.service Wants from sysinit.target
+start systemd-journald.service Wants from systemd-journal-flush.service
+start systemd-journald.socket Requires from systemd-journald.service
+start systemd-journald.socket Wants from systemd-journald.service
+start systemd-machine-id-commit.service Wants from sysinit.target
+start systemd-modules-load.service Wants from sysinit.target
+start systemd-network-generator.service Wants from sysinit.target
+start systemd-pcrlock-file-system.service Wants from sysinit.target
+start systemd-pcrlock-firmware-code.service Wants from sysinit.target
+start systemd-pcrlock-firmware-config.service Wants from sysinit.target
+start systemd-pcrlock-machine-id.service Wants from sysinit.target
+start systemd-pcrlock-make-policy.service Wants from sysinit.target
+start systemd-pcrlock-secureboot-authority.service Wants from sysinit.target
+start systemd-pcrlock-secureboot-policy.service Wants from sysinit.target
+start systemd-pcrmachine.service Wants from sysinit.target
+start systemd-pcrphase-sysinit.service Wants from sysinit.target
+start systemd-pcrphase.service Wants from sysinit.target
+start systemd-pstore.service Wants from sysinit.target
+start systemd-random-seed.service Wants from sysinit.target
+start systemd-remount-fs.service Wants from local-fs.target
+start systemd-repart.service Wants from sysinit.target
+start systemd-resolved.service Wants from sysinit.target
+start systemd-sysctl.service Wants from sysinit.target
+start systemd-sysext.service Wants from sysinit.target
+start systemd-sysusers.service Wants from sysinit.target
+start systemd-tmpfiles-setup-dev-early.service Wants from sysinit.target
+start systemd-tmpfiles-setup-dev.service Wants from sysinit.target
+start systemd-tmpfiles-setup.service Wants from sysinit.target
+start systemd-tpm2-setup-early.service Wants from sysinit.target
+start systemd-tpm2-setup.service Wants from sysinit.target
+start systemd-udev-load-credentials.service Wants from sysinit.target
+start systemd-udev-load-credentials.service Wants from systemd-udevd.service
+start systemd-udev-trigger.service Wants from sysinit.target
+start systemd-udevd-control.socket Wants from systemd-udevd.service
+start systemd-udevd-kernel.socket Wants from systemd-udevd.service
+start systemd-udevd.service Triggers from systemd-udevd-control.socket
+start systemd-udevd.service Triggers from systemd-udevd-kernel.socket
+start systemd-udevd.service Wants from sysinit.target
+start systemd-udevd.service Wants from systemd-udev-trigger.service
+start systemd-update-done.service Wants from sysinit.target
+start tmp.mount Wants from agentos-keeper-link-capture.service
+start tmp.mount Wants from agentos-link.service
+start tmp.mount Wants from local-fs.target
 stop -.slice RequiredBy -.mount
 stop -.slice RequiredBy agentos.slice
 stop -.slice RequiredBy dev-full.mount
@@ -105,6 +200,7 @@ stop -.slice RequiredBy sys-kernel-tracing.mount
 stop -.slice RequiredBy system.slice
 stop -.slice RequiredBy user.slice
 stop -.slice RequiredBy usr.mount
+stop agentos-health.service RequiredBy boot-complete.target
 stop agentos-inbound.service RequiredBy agentos-egress.service
 stop agentos-inbound.service RequiredBy agentos-keeper-link-capture.service
 stop agentos-inbound.service RequiredBy agentos-link.service
@@ -119,8 +215,17 @@ stop agentos-keeper.slice RequiredBy agentos-keeper-kernel.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-link-capture.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-mail.service
 stop agentos-keeper.slice RequiredBy agentos-keeper-pageca.service
+stop agentos-localui-claim.service RequiredBy agentos-localui.service
 stop agentos.slice RequiredBy agentos-keeper.slice
 stop agentos.slice RequiredBy agentosd.service
+stop agentosd.service RequiredBy agentos-localui.service
+stop agentosd.service RequiredBy agentos-modem.service
+stop basic.target RequiredBy initrd.target
+stop basic.target RequiredBy multi-user.target
+stop boot-complete.target RequiredBy agentos-drill-report.service
+stop boot-complete.target RequiredBy agentos-drive-id.service
+stop boot-complete.target RequiredBy systemd-bless-boot.service
+stop dbus.socket RequiredBy dbus.service
 stop emergency.service ConflictedBy sysinit.target
 stop emergency.service ConflictedBy syslog.socket
 stop emergency.service ConflictedBy systemd-ask-password-console.path
@@ -134,6 +239,7 @@ stop emergency.target ConflictedBy sysinit.target
 stop ldconfig.service Conflicts initrd-switch-root.target
 stop modprobe@configfs.service RequiredBy sys-kernel-config.mount
 stop modprobe@fuse.service RequiredBy sys-fs-fuse-connections.mount
+stop rescue.service RequiredBy rescue.target
 stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-keeper-link-capture.service
 stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-link.service
 stop sysinit.target Conflicts emergency.service

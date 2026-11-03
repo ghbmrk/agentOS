@@ -407,9 +407,9 @@ class AllowFileTest(unittest.TestCase):
         self.assertTrue(g.ALLOW.read_text().startswith(g.ALLOW_HEADER))
         self.assertIn("start " + U, allowed)
         self.assertFalse({"start " + s for s in g.SHUTDOWN} & allowed)
-        for line in allowed:
+        for line in allowed - {"start " + U}:
             self.assertRegex(line, r"^(start \S+ (%s) from \S+|stop \S+ (%s) \S+|generator \S+ failed)$"
-                             % ("|".join(g.START_KINDS), "|".join(g.STOP_KINDS)) if line != "start " + U else "")
+                             % ("|".join(g.START_KINDS), "|".join(g.STOP_KINDS)))
 
     def test_each_control_is_a_path_a_review_found(self):
         self.assertEqual(len(g.CONTROLS), 5)
