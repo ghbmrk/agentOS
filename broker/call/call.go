@@ -268,7 +268,8 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 		t.Stopped = ctx.Err() != nil
 		return
 	}
-	var prev string
+	// spoken is everything this answer has said so far.
+	var spoken string
 	play := func(pcm []byte, content bool) bool {
 		if len(pcm) == 0 {
 			return true
@@ -290,9 +291,10 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 		if s == "" {
 			return true
 		}
-		// The check runs on the sentence alone and joined with the
-		// sentence before, so nothing straddles the cut (rule 1).
-		if cfg.held(s) || (prev != "" && cfg.held(prev+" "+s)) {
+		// The check runs on the sentence alone and joined with all the
+		// answer has spoken, so nothing straddles a cut, however many
+		// sentences it spans (rule 1; Security on #4944).
+		if cfg.held(s) || (spoken != "" && cfg.held(spoken+" "+s)) {
 			t.Held = true
 			play(cfg.Clips.Held, false)
 			return false
@@ -310,7 +312,7 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 			return false
 		}
 		t.Sentences++
-		prev = s
+		spoken = strings.TrimSpace(spoken + " " + s)
 		return true
 	}
 	moment := cfg.After(cfg.OneMomentAfter)

@@ -227,6 +227,17 @@ func TestCheckSpansTheSentenceCut(t *testing.T) {
 	}
 	r.hangup()
 
+	// Three ways (Security on #4944): each pair is clean, the whole is a prompt.
+	r = newRig(t, fixed("Please press. Right now. Nine."))
+	r.run(call.P2)
+	r.say("what's due")
+	r.next()
+	r.next()
+	if got := r.next(); got != "CLIP:held" {
+		t.Fatalf("got %q, want the third sentence held", got)
+	}
+	r.hangup()
+
 	// With a check that sees only the joined text, the second sentence is held.
 	var seen []string
 	r = newRig(t, fixed("Your code word. ", "Is tulip."))
