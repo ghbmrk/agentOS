@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"golang.org/x/crypto/chacha20poly1305"
+
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 )
 
 // The encrypted session (HAP R2 6.5.2): each frame is a 2-byte little-endian
@@ -16,8 +18,11 @@ import (
 // replayed, reordered or altered frame fails to open and ends the session.
 const maxFrame = 1024
 
+// frameCipher holds one direction's session key inside its AEAD, behind a
+// handoff.Secret, so no print of a session's frames shows it (CLK-1,
+// DECOY-b-8, #4837).
 type frameCipher struct {
-	aead cipher.AEAD
+	aead handoff.Secret[cipher.AEAD]
 	n    uint64
 }
 
@@ -26,7 +31,7 @@ func newFrameCipher(key []byte) (*frameCipher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &frameCipher{aead: a}, nil
+	return &frameCipher{aead: handoff.Hide(a)}, nil
 }
 
 func (c *frameCipher) nonce() ([]byte, error) {
@@ -56,7 +61,7 @@ func (fw *frameWriter) Write(p []byte) (int, error) {
 			return 0, err
 		}
 		out = append(out, hdr...)
-		out = fw.c.aead.Seal(out, nonce, p[done:done+n], hdr)
+		out = fw.c.aead.Get().Seal(out, nonce, p[done:done+n], hdr)
 		done += n
 	}
 	if _, err := fw.w.Write(out); err != nil {
@@ -101,7 +106,7 @@ func (fr *frameReader) next() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plain, err := fr.c.aead.Open(nil, nonce, fr.ct[2:2+n+16], fr.ct[:2])
+	plain, err := fr.c.aead.Get().Open(nil, nonce, fr.ct[2:2+n+16], fr.ct[:2])
 	if err != nil {
 		return nil, fmt.Errorf("%w: frame does not authenticate", ErrProtocol)
 	}

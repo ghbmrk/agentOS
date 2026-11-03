@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 )
 
 // KeyHolder holds the box's controller long-term key (iOSDeviceLTSK,
@@ -17,10 +19,12 @@ type KeyHolder interface {
 }
 
 // MemoryKeyHolder keeps the key in memory. It is for tests and for a holder
-// part b wraps; it prints and marshals no field.
+// part b wraps; it marshals no field, and its key sits in a handoff.Secret,
+// so no print of it or of a struct that holds it shows the key (CLK-1,
+// DECOY-b-8, #4837).
 type MemoryKeyHolder struct {
 	id   string
-	priv ed25519.PrivateKey
+	priv handoff.Secret[ed25519.PrivateKey]
 }
 
 // NewMemoryKeyHolder builds a holder from a 32-byte seed.
@@ -31,18 +35,15 @@ func NewMemoryKeyHolder(id string, seed []byte) (*MemoryKeyHolder, error) {
 	if err := checkPairingID(id); err != nil {
 		return nil, err
 	}
-	return &MemoryKeyHolder{id: id, priv: ed25519.NewKeyFromSeed(seed)}, nil
+	return &MemoryKeyHolder{id: id, priv: handoff.Hide(ed25519.NewKeyFromSeed(seed))}, nil
 }
 
 func (k *MemoryKeyHolder) PairingID() string { return k.id }
 func (k *MemoryKeyHolder) PublicKey() ed25519.PublicKey {
-	return append(ed25519.PublicKey(nil), k.priv.Public().(ed25519.PublicKey)...)
+	return append(ed25519.PublicKey(nil), k.priv.Get().Public().(ed25519.PublicKey)...)
 }
-func (k *MemoryKeyHolder) Sign(msg []byte) ([]byte, error) { return ed25519.Sign(k.priv, msg), nil }
-
-// Format prints no field, whatever the verb.
-func (k MemoryKeyHolder) Format(f fmt.State, _ rune) {
-	fmt.Fprint(f, "homekit.MemoryKeyHolder{key: redacted}")
+func (k *MemoryKeyHolder) Sign(msg []byte) ([]byte, error) {
+	return ed25519.Sign(k.priv.Get(), msg), nil
 }
 
 // Pin is what pair-setup pins (DEV-3): the accessory's pairing ID and its

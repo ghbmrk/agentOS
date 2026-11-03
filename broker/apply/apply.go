@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/check"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/update"
@@ -126,9 +127,11 @@ type Config struct {
 	// takes no other key (CLK-2). The key's authority is the project's
 	// signing threshold, not the owner's: Do activates only a release that
 	// passed the TUF threshold and is newer than the installed one (UPD-2,
-	// UPD-8), so the key adds no power beyond that check.
+	// UPD-8), so the key adds no power beyond that check. Holder is behind
+	// a handoff.Secret, so a line that formats a Config or an Applier shows
+	// no key (CLK-1, DECOY-b-8, #4837).
 	Key    key.Key
-	Holder ed25519.PrivateKey
+	Holder handoff.Secret[ed25519.PrivateKey]
 	Pinned key.PublicKey
 	// Paused reports the pinned channel (UPD-4): no plan is submitted, a
 	// release handed over in this boot is withdrawn instead of restarted
@@ -355,7 +358,7 @@ func New(cfg Config) (*Applier, error) {
 		cfg.InCall == nil || cfg.Working == nil || cfg.Stopped == nil {
 		return nil, errors.New("apply: Kernel, Activator, Store, Pipeline, State, InCall, Working and Stopped are required")
 	}
-	if !cfg.Pinned.Valid() || len(cfg.Holder) != ed25519.PrivateKeySize || !pinnedKey(cfg.Key, cfg.Pinned) {
+	if !cfg.Pinned.Valid() || len(cfg.Holder.Get()) != ed25519.PrivateKeySize || !pinnedKey(cfg.Key, cfg.Pinned) {
 		return nil, errors.New("apply: Key must be the image-pinned update key for activate, and Holder its holder")
 	}
 	if cfg.Excluded == nil {
@@ -1034,7 +1037,7 @@ func (a *Applier) planLocked() (kernel.Plan, error) {
 	a.st = next
 	plan := kernel.Plan{ID: fmt.Sprintf("upd:apply:%d:n%d", p.Version, next.Seq), Key: a.cfg.Key,
 		Steps: []kernel.PlanStep{Step(a.rel)}}
-	return kernel.SignPlan(plan, a.cfg.Holder), nil
+	return kernel.SignPlan(plan, a.cfg.Holder.Get()), nil
 }
 
 func parseID(id string) (int64, bool) {
