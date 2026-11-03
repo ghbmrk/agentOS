@@ -154,9 +154,10 @@ func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	return p
 }
 
-// ErrNotText refuses a plan with a string that is not valid UTF-8: JSON
-// would encode it as U+FFFD, so two different plans could share a signature.
-var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
+// ErrNotText refuses a string that is not valid UTF-8: JSON would encode it
+// as U+FFFD, so two different plans could share a signature, and a log entry
+// would name what its caller did not (Log.Append).
+var ErrNotText = errors.New("kernel: text is not valid UTF-8")
 
 // VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
 func VerifyPlan(p Plan, owners []key.PublicKey) (*key.Verified, error) {

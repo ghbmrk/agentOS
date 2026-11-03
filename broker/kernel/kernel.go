@@ -2,9 +2,11 @@ package kernel
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -699,7 +701,11 @@ func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 
 // Submit logs a plan and decides it at once.
 func (k *Kernel) Submit(now int64, p Plan) error {
-	if k.s.Plans[p.ID] != nil {
+	var logged Plan // decided as the log holds it, as Issue and Extend decide on keys
+	if b, err := json.Marshal(p); err != nil || json.Unmarshal(b, &logged) != nil {
+		return ErrNotText
+	}
+	if p = logged; k.s.Plans[p.ID] != nil {
 		return ErrDuplicatePlan
 	}
 	if _, err := k.emit(now, TPlanSubmit, p); err != nil {
@@ -770,6 +776,9 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 // its finding in Outcome (done, notdone, unknown or OUnreached).
 func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
+	// A clerk's text is logged as JSON would write it (Log.Append refuses
+	// other text): nothing looks it up, so no answer is lost over it.
+	res.Outcome, res.Detail = strings.ToValidUTF8(res.Outcome, "\uFFFD"), strings.ToValidUTF8(res.Detail, "\uFFFD")
 	if c.Kind == ActProbe {
 		// Only a done step is listed: no other finding's line is logged.
 		if res.Outcome != "done" || !shown(res.Covered) {
