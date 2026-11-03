@@ -667,6 +667,51 @@ func TestSSHDecoyBreaksChanged(t *testing.T) {
 	}
 }
 
+// KRN-12, DECOY-a-5: the built-in SSH decoy also trips URL-path-escaped
+// (%20 for spaces, as url.PathEscape and encodeURIComponent write it), in
+// JSON with '/' escaped as `\/`, and as its body alone, without the header
+// and footer lines: raw, joined, JSON- and URL-escaped and rewrapped (#4853,
+// Security on #4845).
+func TestSSHDecoyOtherEncodings(t *testing.T) {
+	v := ""
+	for !strings.Contains(v, "/") {
+		var err error
+		if v, err = sshKey(rand.Reader); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	lines := strings.Split(strings.TrimSuffix(v, "\n"), "\n")
+	body := strings.Join(lines[1:len(lines)-1], "\n")
+	var wrap64 []string
+	for flat := strings.ReplaceAll(body, "\n", ""); len(flat) > 0; flat = flat[min(64, len(flat)):] {
+		wrap64 = append(wrap64, flat[:min(64, len(flat))])
+	}
+	jsonSlash := func(s string) string {
+		j, _ := json.Marshal(s)
+		return strings.ReplaceAll(string(j[1:len(j)-1]), "/", `\/`)
+	}
+	crlf := strings.ReplaceAll(v, "\n", "\r\n")
+	for _, s := range []string{
+		url.PathEscape(v),
+		url.PathEscape(crlf),
+		strings.ReplaceAll(url.QueryEscape(v), "+", "%20"),
+		jsonSlash(v),
+		jsonSlash(crlf),
+		body,
+		strings.ReplaceAll(body, "\n", ""),
+		strings.ReplaceAll(body, "\n", "\r\n"),
+		strings.Join(wrap64, "\n"),
+		jsonSlash(body),
+		url.QueryEscape(body),
+		url.PathEscape(strings.Join(wrap64, "\n")),
+	} {
+		if got := m.Scan([]byte(`{"a":"` + s + `"}`)).Trips; !slices.Equal(got, []int{1}) {
+			t.Fatalf("%.80q tripped %v, want [1]", s, got)
+		}
+	}
+}
+
 // KRN-12: the matcher's shortest joined form is the table's shortest value.
 func TestMinJoinedIsMinValue(t *testing.T) {
 	if match.MinJoined != MinValue {

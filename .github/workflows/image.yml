@@ -203,6 +203,14 @@ jobs:
               msg = c.rstrip("\n").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print("::%s title=image check %d/%d::%s" % (level, i + 1, len(chunks), msg))
           PY
+      # #4667: what starting the unlock unit can start, from the built image's own systemd in test mode
+      # (generators run, the boot entry's command line) rather than a model of how it reads units. The
+      # control first: each path a #4696 review found must add a refusal, or a pass means nothing.
+      - name: What the unlock step can start (image/unlock_graph.py)
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
+          sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e

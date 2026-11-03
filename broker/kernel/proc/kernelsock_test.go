@@ -360,6 +360,8 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 		{fmt.Errorf("%w: %s: %s", kernel.ErrRetryRefused, kernel.CBroken, "detail"), kernel.ErrRetryRefused},
 		{fmt.Errorf("submit: %w", kernel.ErrDuplicatePlan), kernel.ErrDuplicatePlan},
 		{kernel.ErrNotParked, kernel.ErrNotParked},
+		{kernel.ErrNotText, kernel.ErrNotText}, // as the log returns it
+		{fmt.Errorf("append: %w", kernel.ErrNotText), kernel.ErrNotText},
 		{errors.New("kernel: something else"), nil},
 	} {
 		sock := filepath.Join(shortDir(t), "w.sock")
