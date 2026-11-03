@@ -13,6 +13,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -605,14 +606,14 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 const boundsRow = "| RES-5-readerwire-maxconns-"
 
 // boundProblems lists every constant in srcs (file name to Go source, the
-// package's non-test files) that lacks a record in rec's bounds rows: a
-// package-level constant not named in backticks in one of those rows (a
-// mention in any other row or in prose does not count), and a constant
-// declared inside a function, which is refused when it reuses a recorded
-// name (it would shadow the bound) and otherwise needs a record like any
-// other. Only the frame's own names, readerwire.go's package-level version
-// and opRead, are exempt. A number written outside a const is
-// constProblems' check (bounds_test.go).
+// package's non-test files) that is not a recorded package-level bound: a
+// package-level constant not named in backticks in one of rec's bounds rows
+// (a mention in any other row or in prose does not count), and every
+// constant declared inside a function, which no record can clear: it is
+// reported as shadowing when a package-level constant has its name, and is
+// otherwise told to move to package level. Only the frame's own names,
+// readerwire.go's package-level version and opRead, are exempt. A number
+// written outside a const is constProblems' check (bounds_test.go).
 func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	t.Helper()
 	var rows strings.Builder
@@ -628,9 +629,24 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	var out []string
 	var n int
 	fset := token.NewFileSet()
-	for name, src := range srcs {
-		f, err := parser.ParseFile(fset, name, src, 0)
+	files := map[string]*ast.File{}
+	pkgConsts := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(srcs)) {
+		f, err := parser.ParseFile(fset, name, srcs[name], 0)
 		must(t, err)
+		files[name] = f
+		for _, d := range f.Decls {
+			if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.CONST {
+				for _, sp := range g.Specs {
+					for _, id := range sp.(*ast.ValueSpec).Names {
+						pkgConsts[id.Name] = true
+					}
+				}
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		f := files[name]
 		top := map[ast.Decl]bool{}
 		for _, d := range f.Decls {
 			top[d] = true
@@ -647,8 +663,10 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 					}
 					n++
 					switch {
-					case !top[x] && recorded(id.Name):
-						out = append(out, fmt.Sprintf("%s: the local const %s shadows the recorded bound %s: use the package's own", fset.Position(id.Pos()), id.Name, id.Name))
+					case !top[x] && pkgConsts[id.Name]:
+						out = append(out, fmt.Sprintf("%s: the local const %s shadows the package's bound %s: use the package's own", fset.Position(id.Pos()), id.Name, id.Name))
+					case !top[x]:
+						out = append(out, fmt.Sprintf("%s: the local const %s is a bound no record can clear: move it to package level and name it in a %s row", fset.Position(id.Pos()), id.Name, boundsRow))
 					case !recorded(id.Name):
 						out = append(out, fmt.Sprintf("the bound %s has no record in a %s row", id.Name, boundsRow))
 					}
@@ -791,14 +809,17 @@ func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
 			[]string{"the bound maxConns has no record"}},
 		{"an unrecorded constant in a new file", withFile("extra.go", "package readerwire\n\nconst maxExtra = 3\n"), rec,
 			[]string{"the bound maxExtra has no record"}},
-		{"an unrecorded constant inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"), rec,
-			[]string{"the bound maxLocal has no record"}},
+		{"a constant inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"), rec,
+			[]string{"extra.go:4:8: the local const maxLocal is a bound no record can clear: move it to package level"}},
+		{"a constant inside a function, recorded", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"),
+			strings.Replace(rec, boundsRow+"2 |", boundsRow+"2 | `maxLocal`", 1),
+			[]string{"extra.go:4:8: the local const maxLocal is a bound no record can clear: move it to package level"}},
 		{"the backoff constants lose their record", packageSources(t), unrecord("acceptBackoffMin", "acceptBackoffMax"),
 			[]string{"the bound acceptBackoffMin has no record", "the bound acceptBackoffMax has no record"}},
 		{"a local const shadowing a recorded name", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxConns = 4096\n\treturn maxConns\n}\n"), rec,
-			[]string{"extra.go:4:8: the local const maxConns shadows the recorded bound maxConns"}},
+			[]string{"extra.go:4:8: the local const maxConns shadows the package's bound maxConns"}},
 		{"a cap named version inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst version = 4096\n\treturn version\n}\n"), rec,
-			[]string{"the bound version has no record"}},
+			[]string{"extra.go:4:8: the local const version shadows the package's bound version"}},
 		{"no constants at all", map[string]string{"readerwire.go": "package readerwire\n"}, rec,
 			[]string{"no bounds found"}},
 		{"no bounds rows", packageSources(t), strings.ReplaceAll(rec, boundsRow, "| RES-5-other-"),

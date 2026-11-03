@@ -38,11 +38,11 @@ var loadOnce = sync.OnceValues(func() (*lintload.Loaded, error) {
 //   - 0 or 1, by value, passes;
 //   - the frame's newline, the literal '\n' alone, passes;
 //   - an expression that names one of the package's own package-level
-//     constants (bar the frame's version and opRead) is anchored; a const
-//     declared inside a function anchors nothing, so it cannot shadow a
-//     recorded name with another value (#4874): it passes, and each constant
-//     part of it is checked by the same rule, so maxCall+1 passes and
-//     maxConns*(1+1) does not;
+//     constants (bar the frame's version and opRead) is anchored: it
+//     passes, and each constant part of it is checked by the same rule, so
+//     maxCall+1 passes and maxConns*(1+1) does not. A const declared inside
+//     a function anchors nothing, so it cannot shadow a recorded name with
+//     another value (#4874);
 //   - anything else fails.
 //
 // A source that does not type-check fails closed. That the package's
@@ -259,13 +259,11 @@ func TestServeSleepsAfterAFailedAccept(t *testing.T) {
 	}
 }
 
-// TestEachBoundKeepsItsRecordedValue: each package-level constant has the
-// value its ASSUMPTIONS.md bounds row states, and none is left unpinned, so a
-// bound cannot change while its record keeps the old value (#4874).
-// REQ: RES-5
-func TestEachBoundKeepsItsRecordedValue(t *testing.T) {
+// pinnedBounds is a hand mirror of each package-level constant's value: the
+// figures in the ASSUMPTIONS.md bounds rows are kept equal to it by hand.
+func pinnedBounds() map[string]constant.Value {
 	ms, s := int64(time.Millisecond), int64(time.Second)
-	want := map[string]constant.Value{
+	return map[string]constant.Value{
 		"MaxPrompt":        constant.MakeInt64(24 << 10),
 		"MaxReply":         constant.MakeInt64(64),
 		"maxCall":          constant.MakeInt64(4*((24<<10+2)/3) + 64),
@@ -279,41 +277,100 @@ func TestEachBoundKeepsItsRecordedValue(t *testing.T) {
 		"version":          constant.MakeInt64(1),
 		"opRead":           constant.MakeString("read"),
 	}
-	got := packageConsts(t, packageSources(t))
-	for name, v := range got {
-		w, ok := want[name]
-		switch {
-		case !ok:
-			t.Errorf("%s = %s is not pinned here: add its recorded value", name, v)
-		case !constant.Compare(v, token.EQL, w):
-			t.Errorf("%s = %s, its record states %s: change both or neither", name, v, w)
-		}
-	}
-	for name := range want {
-		if _, ok := got[name]; !ok {
-			t.Errorf("%s is pinned here but is no longer a constant of the package", name)
-		}
+}
+
+// TestEachBoundKeepsItsRecordedValue: each package-level constant has the
+// value pinnedBounds holds, and none is left unpinned, so a bound cannot
+// change without its pin and its row changing too (#4874).
+// REQ: RES-5
+func TestEachBoundKeepsItsRecordedValue(t *testing.T) {
+	for _, p := range pinProblems(packageConsts(t, packageSources(t)), pinnedBounds()) {
+		t.Error(p)
 	}
 }
 
-// TestAnUnpinnedBoundFails: a new package-level constant, or a pinned one
-// with another value, is seen by the pin's reader.
-func TestAnUnpinnedBoundFails(t *testing.T) {
-	srcs := packageSources(t)
-	srcs["extra.go"] = "package readerwire\n\nconst maxExtra = 3\n"
-	if v, ok := packageConsts(t, srcs)["maxExtra"]; !ok || v.String() != "3" {
-		t.Fatalf("maxExtra = %v (found %v), want 3", v, ok)
+// pinProblems lists each constant in got that want does not pin or pins at
+// another value, and each name want pins that got lacks. A duration prints
+// as one, as the rows state it.
+func pinProblems(got map[string]*types.Const, want map[string]constant.Value) []string {
+	show := func(c *types.Const, v constant.Value) string {
+		if n, ok := constant.Int64Val(v); ok && c != nil && types.TypeString(c.Type(), nil) == "time.Duration" {
+			return time.Duration(n).String()
+		}
+		return v.String()
 	}
-	srcs = packageSources(t)
-	srcs["readerwire.go"] = strings.Replace(srcs["readerwire.go"], "maxConns = 8", "maxConns = 9", 1)
-	if v := packageConsts(t, srcs)["maxConns"]; v == nil || v.String() != "9" {
-		t.Fatalf("maxConns = %v after the edit, want 9", v)
+	var out []string
+	for _, name := range slices.Sorted(maps.Keys(got)) {
+		c := got[name]
+		w, ok := want[name]
+		switch {
+		case !ok:
+			out = append(out, fmt.Sprintf("%s = %s is not pinned: add it to pinnedBounds and name it in backticks in a %s row with its basis", name, show(c, c.Val()), boundsRow))
+		case !constant.Compare(c.Val(), token.EQL, w):
+			out = append(out, fmt.Sprintf("%s = %s, but pinnedBounds holds %s: change pinnedBounds and the %s row's figure with it", name, show(c, c.Val()), show(c, w), boundsRow))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(want)) {
+		if _, ok := got[name]; !ok {
+			out = append(out, fmt.Sprintf("%s is in pinnedBounds but is no longer a constant of the package: drop it there and from the %s row", name, boundsRow))
+		}
+	}
+	return out
+}
+
+// TestPinProblemsCatchEachGap: an unpinned constant, a changed value and a
+// vanished name each fail the pin, with a duration shown as one.
+func TestPinProblemsCatchEachGap(t *testing.T) {
+	withSrc := func(file, src string) map[string]*types.Const {
+		srcs := packageSources(t)
+		srcs[file] = src
+		return packageConsts(t, srcs)
+	}
+	edit := func(old, new string) map[string]*types.Const {
+		srcs := packageSources(t)
+		if !strings.Contains(srcs["readerwire.go"], old) {
+			t.Fatalf("readerwire.go holds no %q", old)
+		}
+		return withSrc("readerwire.go", strings.Replace(srcs["readerwire.go"], old, new, 1))
+	}
+	without := func(name string) map[string]*types.Const {
+		got := packageConsts(t, packageSources(t))
+		delete(got, name)
+		return got
+	}
+	cases := []struct {
+		name string
+		got  map[string]*types.Const
+		want []string
+	}{
+		{"as it stands", packageConsts(t, packageSources(t)), nil},
+		{"an unpinned constant", withSrc("extra.go", "package readerwire\n\nconst maxExtra = 3\n"),
+			[]string{"maxExtra = 3 is not pinned: add it to pinnedBounds"}},
+		{"a changed value", edit("maxConns = 8", "maxConns = 9"),
+			[]string{"maxConns = 9, but pinnedBounds holds 8"}},
+		{"a changed duration", edit("pause = 60 * time.Second", "pause = 61 * time.Second"),
+			[]string{"pause = 1m1s, but pinnedBounds holds 1m0s"}},
+		{"a vanished name", without("maxAnswer"),
+			[]string{"maxAnswer is in pinnedBounds but is no longer a constant"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := pinProblems(c.got, pinnedBounds())
+			if len(got) != len(c.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(c.want), c.want)
+			}
+			for i, w := range c.want {
+				if !strings.HasPrefix(got[i], w) {
+					t.Errorf("problem %d = %q, want one starting %q", i, got[i], w)
+				}
+			}
+		})
 	}
 }
 
 // packageConsts type-checks srcs as the package and returns each
-// package-level constant's value by name.
-func packageConsts(t *testing.T, srcs map[string]string) map[string]constant.Value {
+// package-level constant by name.
+func packageConsts(t *testing.T, srcs map[string]string) map[string]*types.Const {
 	t.Helper()
 	l, err := loadOnce()
 	if err != nil {
@@ -327,10 +384,10 @@ func packageConsts(t *testing.T, srcs map[string]string) map[string]constant.Val
 	}
 	pkg, _, err := l.Check("github.com/ghbmrk/agentos/broker/clerk/readerwire", files)
 	must(t, err)
-	out := map[string]constant.Value{}
+	out := map[string]*types.Const{}
 	for _, n := range pkg.Scope().Names() {
 		if c, ok := pkg.Scope().Lookup(n).(*types.Const); ok {
-			out[n] = c.Val()
+			out[n] = c
 		}
 	}
 	return out
