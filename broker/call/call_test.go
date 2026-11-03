@@ -25,11 +25,17 @@ type line struct {
 	gate          bool
 	answered      bool
 	number        string
+	// cut gets one value each time speech is stopped mid-sentence.
+	cut     chan struct{}
+	inSay   int
+	overlap bool
+	sayErr  error
+	empty   bool
 }
 
 func newLine() *line {
 	l := &line{active: make(chan struct{}), ended: make(chan struct{}), speech: make(chan []byte),
-		keys: make(chan byte, 4), saying: make(chan string, 64), number: "+15550100"}
+		keys: make(chan byte, 4), saying: make(chan string, 64), number: "+15550100", cut: make(chan struct{}, 8)}
 	close(l.active)
 	return l
 }
@@ -43,11 +49,19 @@ func (l *line) Number() string               { return l.number }
 func (l *line) Answer(context.Context) error { l.answered = true; return nil }
 func (l *line) Say(ctx context.Context, pcm []byte) error {
 	l.mu.Lock()
-	gate := l.gate
+	gate, err := l.gate, l.sayErr
+	l.inSay++
+	l.overlap = l.overlap || l.inSay > 1
+	l.empty = l.empty || len(pcm) == 0
 	l.mu.Unlock()
+	defer func() { l.mu.Lock(); l.inSay--; l.mu.Unlock() }()
 	l.saying <- string(pcm)
+	if err != nil {
+		return err
+	}
 	if gate {
 		<-ctx.Done()
+		l.cut <- struct{}{}
 		return ctx.Err()
 	}
 	l.mu.Lock()
@@ -56,15 +70,33 @@ func (l *line) Say(ctx context.Context, pcm []byte) error {
 	return nil
 }
 
+func (l *line) setGate(g bool) { l.mu.Lock(); l.gate = g; l.mu.Unlock() }
+
+// wasCut waits for speech to be stopped mid-sentence.
+func (l *line) wasCut(t *testing.T) {
+	t.Helper()
+	select {
+	case <-l.cut:
+	case <-time.After(5 * time.Second):
+		t.Fatal("speech was not stopped")
+	}
+}
+
 func (l *line) spoken() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.said...)
 }
 
-type recognizer struct{ out chan call.Heard }
+type recognizer struct {
+	out chan call.Heard
+	ctx chan context.Context
+}
 
-func (r recognizer) Listen(context.Context, <-chan []byte) <-chan call.Heard { return r.out }
+func (r recognizer) Listen(ctx context.Context, _ <-chan []byte) <-chan call.Heard {
+	r.ctx <- ctx
+	return r.out
+}
 
 // answerer returns the scripted chunks for each turn's text.
 type answerer struct {
@@ -109,36 +141,57 @@ type rig struct {
 	ans *answerer
 	cfg call.Config
 	rep chan call.Report
+	err chan error
 }
 
 func newRig(t *testing.T, script func(call.Ask) []string) *rig {
-	r := &rig{t: t, l: newLine(), rec: recognizer{make(chan call.Heard)}, ans: &answerer{script: script}, rep: make(chan call.Report, 1)}
+	r := &rig{t: t, l: newLine(), rec: recognizer{make(chan call.Heard), make(chan context.Context, 1)}, ans: &answerer{script: script}, rep: make(chan call.Report, 1), err: make(chan error, 1)}
 	r.cfg = call.Config{Recognizer: r.rec, Answerer: r.ans, Synthesizer: synth{}, Clips: clips,
 		After: func(time.Duration) <-chan time.Time { return nil }}
 	return r
 }
 
-func (r *rig) run(rung call.Rung) {
+func (r *rig) run(rung call.Rung) { r.runCtx(context.Background(), rung) }
+
+func (r *rig) runCtx(ctx context.Context, rung call.Rung) {
 	go func() {
-		rep, err := call.Run(context.Background(), r.cfg, r.l, rung)
-		if err != nil {
-			r.t.Error(err)
-		}
+		rep, err := call.Run(ctx, r.cfg, r.l, rung)
+		r.err <- err
 		r.rep <- rep
 	}()
+}
+
+// end waits for the loop to return, without hanging up.
+func (r *rig) end() (call.Report, error) {
+	r.t.Helper()
+	select {
+	case err := <-r.err:
+		rep := <-r.rep
+		r.l.mu.Lock()
+		defer r.l.mu.Unlock()
+		if r.l.overlap {
+			r.t.Error("two sounds played at once")
+		}
+		if r.l.empty {
+			r.t.Error("played empty audio")
+		}
+		return rep, err
+	case <-time.After(5 * time.Second):
+		r.t.Fatal("loop did not end")
+		return call.Report{}, nil
+	}
 }
 
 func (r *rig) say(text string) { r.rec.out <- call.Heard{Text: text, Final: true} }
 
 func (r *rig) hangup() call.Report {
+	r.t.Helper()
 	close(r.l.ended)
-	select {
-	case rep := <-r.rep:
-		return rep
-	case <-time.After(5 * time.Second):
-		r.t.Fatal("loop did not end on hang-up")
-		return call.Report{}
+	rep, err := r.end()
+	if err != nil {
+		r.t.Fatal(err)
 	}
+	return rep
 }
 
 // next waits for the next audio played.
@@ -276,7 +329,16 @@ func TestZeroStopsSpeech(t *testing.T) {
 	r.run(call.P2)
 	r.say("read my mail")
 	r.next() // blocked mid-sentence
+	for _, k := range []byte("12#*") {
+		r.l.keys <- k // no other key stops it
+	}
+	select {
+	case <-r.l.cut:
+		t.Fatal("a key other than 0 stopped speech")
+	case <-time.After(50 * time.Millisecond):
+	}
 	r.l.keys <- '0'
+	r.l.wasCut(t)
 	r.quiet()
 	rep := r.hangup()
 	if len(rep.Turns) != 1 || !rep.Turns[0].Stopped {
@@ -292,10 +354,15 @@ func TestBargeInStopsAndStartsANewTurn(t *testing.T) {
 	if got := r.next(); got != "S:Answer to first." {
 		t.Fatal(got)
 	}
+	r.rec.out <- call.Heard{Text: " "} // noise with no words stops nothing
+	select {
+	case <-r.l.cut:
+		t.Fatal("an empty partial stopped speech")
+	case <-time.After(50 * time.Millisecond):
+	}
 	r.rec.out <- call.Heard{Text: "wait"} // the owner talks over the box
-	r.l.mu.Lock()
-	r.l.gate = false
-	r.l.mu.Unlock()
+	r.l.wasCut(t)
+	r.l.setGate(false)
 	r.say("second")
 	if got := r.next(); got != "S:Answer to second." {
 		t.Fatal(got)
@@ -304,6 +371,23 @@ func TestBargeInStopsAndStartsANewTurn(t *testing.T) {
 	if len(rep.Turns) != 2 || !rep.Turns[0].Stopped || rep.Turns[1].Stopped {
 		t.Fatalf("turns = %+v", rep.Turns)
 	}
+	for i, a := range r.ans.asks {
+		if a.Turn != i+1 || rep.Turns[i].N != i+1 {
+			t.Fatalf("turn %d numbered %d and %d", i+1, a.Turn, rep.Turns[i].N)
+		}
+	}
+	// A new question with no partial first still stops the answer being
+	// spoken before the next one starts: one sound at a time.
+	r = newRig(t, func(a call.Ask) []string { return []string{"Answer to " + a.Text + "."} })
+	r.l.gate = true
+	r.run(call.P2)
+	r.say("first")
+	r.next()
+	r.say("second")
+	r.l.wasCut(t)
+	r.next()
+	r.l.setGate(false)
+	r.hangup()
 	// Saying "stop" stops speech and asks nothing.
 	r = newRig(t, fixed("Long."))
 	r.l.gate = true

@@ -109,6 +109,15 @@ type Config struct {
 	// Now and After are the clock (default time.Now, time.After).
 	Now   func() time.Time
 	After func(time.Duration) <-chan time.Time
+	// Token checks the speed-dial token's keys; the kernel holds the token
+	// and limits tries across calls. Nil means no token: every call is P0.
+	Token func(keys string) bool
+	// TokenWindow is how long Serve waits after the call is up for the
+	// token's keys (default 6 s: a contact's pause is 2 to 3 s per comma).
+	TokenWindow time.Duration
+	// Done, if set, gets each turn's record as the turn ends, so timing
+	// is reported while the call goes on.
+	Done func(Turn)
 }
 
 // Turn is one owner turn's record.
@@ -134,13 +143,20 @@ type Report struct {
 // MaxSentence caps a sentence that has no end mark, in runes.
 const MaxSentence = 300
 
+// ErrDeaf is returned when the recognizer stops during a call: nothing
+// the owner says can be heard any more.
+var ErrDeaf = errors.New("call: the recognizer stopped")
+
 // ErrNotOwner is returned for a call from a number other than the owner's.
 var ErrNotOwner = errors.New("call: not the owner's number")
 
-// Serve answers a ringing call from the owner's number and runs the loop
-// at P0, the rung a call the owner placed carries until the token exists
-// (briefs/VOICE-ro.md rule 4). Any other caller is left ringing for the
-// line's own rules; nothing here answers it.
+// MaxToken caps the keys read as the speed-dial token.
+const MaxToken = 32
+
+// Serve answers a ringing call from the owner's number, reads the
+// speed-dial token, and runs the loop at P2 if the token checks and at P0
+// otherwise (briefs/VOICE-ro.md rule 4). Any other caller is left ringing
+// for the line's own rules; nothing here answers it.
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
@@ -148,7 +164,52 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	if err := c.Answer(ctx); err != nil {
 		return Report{}, err
 	}
-	return Run(ctx, cfg, c, P0)
+	cfg = cfg.withDefaults()
+	return Run(ctx, cfg, c, cfg.token(ctx, c))
+}
+
+// token reads the speed-dial token: the handset's contact holds the box's
+// number, a pause and the token, so the phone keys it once the call is up
+// (flip-phone note §2.1). Keys up to '#', MaxToken keys, or the end of
+// TokenWindow are the token, checked once by cfg.Token; they reach nothing
+// else, and none of them is STOP. A call whose token does not check, or
+// that keys none, stays at P0.
+func (cfg Config) token(ctx context.Context, l Line) Rung {
+	if cfg.Token == nil {
+		return P0
+	}
+	active, keys := l.Active(), l.Keys()
+	var window <-chan time.Time // opens when the call is up
+	var b strings.Builder
+	for b.Len() < MaxToken {
+		select {
+		case <-active:
+			active = nil
+			window = cfg.After(cfg.TokenWindow)
+		case k, ok := <-keys:
+			if !ok {
+				return P0
+			}
+			if k == '#' {
+				return cfg.check(b.String())
+			}
+			b.WriteByte(k)
+		case <-window:
+			return cfg.check(b.String())
+		case <-l.Ended(): // Run returns at once
+			return P0
+		case <-ctx.Done():
+			return P0
+		}
+	}
+	return cfg.check(b.String())
+}
+
+func (cfg Config) check(token string) Rung {
+	if token != "" && cfg.Token(token) {
+		return P2
+	}
+	return P0
 }
 
 // Run holds one call until it ends or ctx is done. Turns are answered one
@@ -177,6 +238,9 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 	var cur *running
 	finish := func() {
 		rep.Turns = append(rep.Turns, *cur.turn)
+		if cfg.Done != nil {
+			cfg.Done(*cur.turn)
+		}
 		cur = nil
 	}
 	stop := func() {
@@ -203,9 +267,9 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 		case <-done:
 			finish()
 		case k, ok := <-keys:
-			if !ok {
-				keys = nil
-				continue
+			if !ok { // keys close when the call ends
+				stop()
+				return rep, nil
 			}
 			// 0 is STOP (flip-phone note §2.2 rule 4). No other key does
 			// anything on a read-only call: none means yes.
@@ -214,8 +278,8 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 			}
 		case h, ok := <-heard:
 			if !ok {
-				heard = nil
-				continue
+				stop()
+				return rep, ErrDeaf
 			}
 			if !h.Final {
 				if strings.TrimSpace(h.Text) != "" {
@@ -253,6 +317,9 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.TokenWindow <= 0 {
+		cfg.TokenWindow = 6 * time.Second
 	}
 	if cfg.After == nil {
 		cfg.After = time.After
@@ -379,13 +446,7 @@ func Cut(s string) (sentence, rest string, cut bool) {
 	if utf8.RuneCountInString(s) <= MaxSentence {
 		return "", s, false
 	}
-	b := len(s)
-	for i := range s {
-		if utf8.RuneCountInString(s[:i]) == MaxSentence {
-			b = i
-			break
-		}
-	}
+	b := len(string([]rune(s)[:MaxSentence]))
 	if sp := strings.LastIndexFunc(s[:b], unicode.IsSpace); sp > 0 {
 		b = sp
 	}
@@ -395,25 +456,19 @@ func Cut(s string) (sentence, rest string, cut bool) {
 // keyPrompt is the spoken prompt grammar (flip-phone note §2.2 rule 2): a
 // keypad verb or "key" followed within three words by a digit or key name.
 // Only the box asks for a key, and only inside a window it opens itself.
-// On CH-12's folds 1 reads as l and 0 as o, so those letters count there.
+// On CH-12's folds 1 reads as l and 0 as o, so those letters count too.
 const (
 	keyVerb  = `(?i)\b(press|pressing|presses|pressed|key|keys|keypad|dial|dialing|dialling|enter|entering|push|tap|hit|type)\b[^\p{L}\p{N}]*(?:[\p{L}']+[^\p{L}\p{N}]+){0,3}?`
 	keyNames = `\d|zero|oh|one|two|three|four|five|six|seven|eight|nine|pound|hash|star|asterisk`
 )
 
-var (
-	keyPrompt     = regexp.MustCompile(keyVerb + `(` + keyNames + `)\b`)
-	keyPromptFold = regexp.MustCompile(keyVerb + `(` + keyNames + `|l|o)\b`)
-)
+var keyPrompt = regexp.MustCompile(keyVerb + `(` + keyNames + `|l|o)\b`)
 
 // KeyPrompt reports text telling the listener to press a key, on the text
 // and on each of CH-12's folds (homoglyphs, marks, invisible joins).
 func KeyPrompt(s string) bool {
-	if keyPrompt.MatchString(s) {
-		return true
-	}
-	for _, f := range owner.CheckFolds(s) {
-		if keyPromptFold.MatchString(f) {
+	for _, f := range append([]string{s}, owner.CheckFolds(s)...) {
+		if keyPrompt.MatchString(f) {
 			return true
 		}
 	}
