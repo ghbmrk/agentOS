@@ -24,12 +24,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/go-tpm/tpm2/transport"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card"
@@ -41,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -70,6 +74,10 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Fprintln(os.Stderr, unlockAndExec(r.Config(), r.pins))
 		os.Exit(2)
+	case "move":
+		os.Exit(moveRole())
+	case "taken":
+		os.Exit(takenRole())
 	case "kernel":
 		var cfg kernelRole
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
@@ -93,6 +101,157 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(3)
+}
+
+// moveRole is the unlock step's hand-off move, with the runtime's poller
+// made first, as the step's store, pipes and TPM connection make it, and then
+// given time to poll before the exec would come (#4474). 0 when the runtime
+// lived, the moved descriptors are open across the exec, and every other one
+// above 2 (here one the parent left on 3, and one opened without the flag)
+// is close-on-exec.
+func moveRole() int {
+	fail := func(f string, a ...any) int { fmt.Fprintf(os.Stderr, f+"\n", a...); return 2 }
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return fail("%v", err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer w.Close()
+	leak, err := syscall.Open(os.DevNull, syscall.O_RDONLY, 0)
+	if err != nil {
+		return fail("%v", err)
+	}
+	// The runtime's own descriptors (its poller's here) sit below the move's
+	// targets, and nothing holds the targets, so the move replaces none. A
+	// test runner may leave its own open higher up; those are a parent's.
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return fail("%v", err)
+	}
+	for _, e := range fds {
+		n, _ := strconv.Atoi(e.Name())
+		to, _ := os.Readlink("/proc/self/fd/" + e.Name())
+		if n == handoff.KeyFD || n == handoff.TPMFD || strings.HasPrefix(to, "anon_inode:") && n >= handoff.KeyFD {
+			return fail("descriptor %d (%s) is in the move's way", n, to)
+		}
+	}
+	// r and f stay reachable through the move: else their finalizers may
+	// close the descriptors before Dup3 copies them, as handOff's defers
+	// prevent there.
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
+	if err != nil {
+		return fail("%v", err)
+	}
+	// Each of the runtime's threads polls in this time: sysmon once 10 ms
+	// pass with no poll, and the sleeping goroutine's thread for its timer.
+	time.Sleep(200 * time.Millisecond)
+	for fd, want := range map[int]string{handoff.KeyFD: "pipe:", handoff.TPMFD: os.DevNull} {
+		to, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+		fl, ferr := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || ferr != nil || !strings.HasPrefix(to, want) || fl&unix.FD_CLOEXEC != 0 {
+			return fail("descriptor %d is %q, flags %d (%v, %v), not the moved %s", fd, to, fl, err, ferr, want)
+		}
+	}
+	for _, fd := range []int{3, leak} {
+		if fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC == 0 {
+			return fail("descriptor %d would reach the kernel (flags %d, %v)", fd, fl, err)
+		}
+	}
+	return 0
+}
+
+// TestTheMoveLeavesTheRuntimesDescriptors: the unlock step's move onto
+// handoff's descriptors never overwrites the runtime's poller, which another
+// thread would poll before the exec, killing the step with "netpoll failed"
+// (#4474); and only the moved descriptors and 0 to 2 cross the exec, though
+// the parent left one open on 3.
+//
+// REQ: STO-2, CLK-1
+func TestTheMoveLeavesTheRuntimesDescriptors(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		f, err := os.Open(os.DevNull)
+		must(t, err)
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=move"}
+		cmd.ExtraFiles = []*os.File{f}
+		out, err := cmd.CombinedOutput()
+		f.Close()
+		if err != nil {
+			t.Fatalf("the move: %v\n%s", err, out)
+		}
+	}
+}
+
+// takenRole holds the hand-off slot named in AGENTOS_UNLOCK_SLOT open
+// before the move. 0 when the move refuses with the named error, the held
+// descriptor is still the one it opened, and neither slot took a moved one.
+func takenRole() int {
+	fail := func(f string, a ...any) int { fmt.Fprintf(os.Stderr, f+"\n", a...); return 2 }
+	slot, err := strconv.Atoi(os.Getenv("AGENTOS_UNLOCK_SLOT"))
+	if err != nil {
+		return fail("%v", err)
+	}
+	held, err := os.CreateTemp("", "held")
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer os.Remove(held.Name())
+	if err := syscall.Dup3(int(held.Fd()), slot, 0); err != nil {
+		return fail("%v", err)
+	}
+	var want syscall.Stat_t
+	if err := syscall.Fstat(slot, &want); err != nil {
+		return fail("%v", err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer w.Close()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return fail("%v", err)
+	}
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
+	named := fmt.Sprintf("agentos-unlock: descriptor %d is already open at hand-off", slot)
+	if err == nil || err.Error() != named {
+		return fail("the move over an open %d: %v, want %q", slot, err, named)
+	}
+	var got syscall.Stat_t
+	if err := syscall.Fstat(slot, &got); err != nil || got.Dev != want.Dev || got.Ino != want.Ino {
+		return fail("descriptor %d no longer holds what it held (%v)", slot, err)
+	}
+	for _, other := range []int{handoff.KeyFD, handoff.TPMFD} {
+		if other == slot {
+			continue
+		}
+		if _, err := unix.FcntlInt(uintptr(other), unix.F_GETFD, 0); err != syscall.EBADF {
+			return fail("descriptor %d took a moved one though the move was refused (%v)", other, err)
+		}
+	}
+	return 0
+}
+
+// TestTheMoveRefusesAnOpenSlot: a descriptor already on handoff.KeyFD or
+// handoff.TPMFD is never overwritten by the move; the step is refused by
+// name and the descriptor stays open (#4523).
+//
+// REQ: STO-2, CLK-1
+func TestTheMoveRefusesAnOpenSlot(t *testing.T) {
+	for _, slot := range []int{handoff.KeyFD, handoff.TPMFD} {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=taken", "AGENTOS_UNLOCK_SLOT=" + strconv.Itoa(slot), "TMPDIR=" + t.TempDir()}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("slot %d: %v\n%s", slot, err, out)
+		}
+	}
 }
 
 // kernelRole is the kernel main's configuration: its one argument after
@@ -215,12 +374,13 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	}
 	r.anchor, err = st.Anchor()
 	must(t, err)
-	r.keys.Log, err = st.LogKey()
+	logKey, err := st.LogKey()
 	must(t, err)
-	r.keys.Head, err = st.HeadKey()
+	head, err := st.HeadKey()
 	must(t, err)
-	r.keys.ClerkRoot, err = st.ClerkRoot()
+	root, err := st.ClerkRoot()
 	must(t, err)
+	r.keys.Log, r.keys.Head, r.keys.ClerkRoot = secret.Hide(logKey), secret.Hide(head), secret.Hide(root)
 	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
@@ -239,12 +399,12 @@ func (r *rig) enrollCounter(st *seal.Store) handoff.Counter {
 	must(t, st.Put(handoff.CounterEntry, b))
 	dir := r.anchorDir()
 	must(t, os.Mkdir(dir, 0o700))
-	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
-	must(t, proc.InitCounterAnchor(dir, r.mainConfig().Log, c, r.keys.Head))
+	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
+	must(t, proc.InitCounterAnchor(dir, r.mainConfig().Log, c, r.keys.Head.Get()))
 	for _, p := range []string{filepath.Join(dir, "anchor"), dir} {
 		must(t, os.Lchown(p, r.kernelUID, r.kernelG))
 	}
-	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: auth}
+	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)}
 }
 
 func (r *rig) anchorDir() string { return filepath.Join(r.dir, "k", "anchor") }
@@ -454,7 +614,7 @@ func TestASetupOnlyKernelTakesTheOwnersKeysOnce(t *testing.T) {
 	}
 	info, err := o.SetupInfo()
 	must(t, err)
-	box := r.keys.Head.Public().(ed25519.PublicKey)
+	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	if !info.Open || !info.Box.Equal(box) {
 		t.Fatalf("setup info %+v, want open over the box's head key", info)
 	}
@@ -561,7 +721,7 @@ func TestTheKernelRefusesALogUnderAnotherKey(t *testing.T) {
 	r := newRig(t, true)
 	other := proc.KernelConfig{
 		Log: r.mainConfig().Log, Anchor: &kernel.MemAnchor{}, Key: [32]byte{1},
-		Pub: r.keys.Head.Public().(ed25519.PublicKey), Sign: r.keys.Head, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))},
+		Pub: r.keys.Head.Get().Public().(ed25519.PublicKey), Sign: r.keys.Head.Get(), Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))},
 	}
 	h, err := proc.OpenKernel(other, time.Now().UnixMilli())
 	must(t, err)
@@ -640,7 +800,8 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 
 	// LOG-2: a store with no counter, or one that does not read, hands
 	// the kernel nothing, so no kernel starts without its anchor.
-	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal()) + `}`)} {
+	ref := string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal())
+	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + ref + `}`), "null auth": []byte(`{"ref":` + ref + `,"auth":null}`)} {
 		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
 		must(t, err)
 		if v == nil {
@@ -931,7 +1092,7 @@ func TestUnlockHandsThePageCA(t *testing.T) {
 		return k
 	}
 	put(v)
-	if k := handed(); !bytes.Equal(k.PageCA, v) || len(k.Anchors) != 2 {
+	if k := handed(); !bytes.Equal(k.PageCA.Get(), v) || len(k.Anchors) != 2 {
 		t.Fatal("the hand-off's page authority is not the store's")
 	}
 	cmd, out := r.boot()
@@ -942,7 +1103,7 @@ func TestUnlockHandsThePageCA(t *testing.T) {
 	}
 
 	put(nil)
-	if k := handed(); k.PageCA != nil || len(k.Anchors) != 2 {
+	if k := handed(); k.PageCA.Get() != nil || len(k.Anchors) != 2 {
 		t.Fatal("no entry: handed an authority")
 	}
 	cmd, out = r.boot()
@@ -990,7 +1151,7 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		r.reboot() // each unlock caps the tpm slot (#2977)
 		role := r.role(&r.policy.PublicKey, r.anchor)
 		c := role.Config()
-		c.passphrase = pass
+		c.passphrase = secret.Hide(pass)
 		b, err := unlock(c, role.pins)
 		if err != nil {
 			return handoff.KernelKeys{}, err
@@ -1004,8 +1165,8 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		return handoff.ReadKeys(pr)
 	}
 	k, err := handed(nil)
-	if err != nil || k.Slot != handoff.SlotTPM || k.LinkKey != nil || k.FirstEdge != nil {
-		t.Fatalf("a tpm unlock of a store with neither entry: slot %q, link %v, edge %x, %v", k.Slot, k.LinkKey != nil, k.FirstEdge, err)
+	if err != nil || k.Slot != handoff.SlotTPM || k.LinkKey.Get() != nil || k.FirstEdge != nil {
+		t.Fatalf("a tpm unlock of a store with neither entry: slot %q, link %v, edge %x, %v", k.Slot, k.LinkKey.Get() != nil, k.FirstEdge, err)
 	}
 	if k, err = handed(phrase); err != nil || k.Slot != handoff.SlotPassphrase {
 		t.Fatalf("a passphrase unlock: slot %q, %v", k.Slot, err)
@@ -1021,7 +1182,7 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		must(t, st.Put(handoff.FirstEdgeEntry, edge))
 	})
 	for _, pass := range [][]byte{nil, phrase} {
-		if k, err := handed(pass); err != nil || !k.LinkKey.Equal(link) || !k.FirstEdge.Equal(edge) {
+		if k, err := handed(pass); err != nil || !k.LinkKey.Get().Equal(link) || !k.FirstEdge.Equal(edge) {
 			t.Fatalf("the store's link keys (passphrase %v): %v", pass != nil, err)
 		}
 	}
@@ -1108,7 +1269,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	r := newRig(t, true)
 	path := filepath.Join(r.dir, "clerks", "anchors")
 	k := handed(r, path)
-	if k.ClerkRoot == ([32]byte{}) || k.ClerkRoot != root(r) {
+	if k.ClerkRoot.Get() == ([32]byte{}) || k.ClerkRoot.Get() != root(r) {
 		t.Fatal("the hand-off's clerk root key is not the store's")
 	}
 	if a := written(path); len(a) != 2 || a[0] != key.Ed25519(gen(1)) || a[1] != key.Ed25519(gen(2)) {
@@ -1126,7 +1287,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	}
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	box := r.keys.Head.Public().(ed25519.PublicKey)
+	box := r.keys.Head.Get().Public().(ed25519.PublicKey)
 	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
 	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
 	must(t, r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
@@ -1153,7 +1314,7 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	// A directory others can write gets no file, and the kernel's
 	// hand-off is unchanged.
 	must(t, os.Chmod(filepath.Dir(path), 0o777))
-	if k := handed(r, path); k.ClerkRoot != root(r) {
+	if k := handed(r, path); k.ClerkRoot.Get() != root(r) {
 		t.Fatal("a refused anchors file changed the hand-off")
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -1249,7 +1410,7 @@ func lostCardApproval(old string) handoff.Approval {
 // ask writes a, signed with the store's head key, as the owner's request.
 func (r *rig) ask(a handoff.Approval) []byte {
 	r.t.Helper()
-	b, err := handoff.SignApproval(r.keys.Head, a)
+	b, err := handoff.SignApproval(r.keys.Head.Get(), a)
 	must(r.t, err)
 	must(r.t, os.WriteFile(r.request, b, 0o600))
 	return b
@@ -1263,7 +1424,7 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 	r.reboot()
 	role := r.role(&r.policy.PublicKey, r.anchor)
 	c := role.Config()
-	c.passphrase = pass
+	c.passphrase = secret.Hide(pass)
 	pr, pw, err := os.Pipe()
 	must(r.t, err)
 	saved := os.Stderr
@@ -1328,11 +1489,11 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	release()
 	res := <-done
 	k := res.k
-	if res.err != nil || len(k.NewRecovery) != handoff.MadeCardLen || res.out != "" {
-		t.Fatalf("the lost-card unlock: %v, card of %d bytes, stderr %q", res.err, len(k.NewRecovery), res.out)
+	if res.err != nil || len(k.NewRecovery.Get()) != handoff.MadeCardLen || res.out != "" {
+		t.Fatalf("the lost-card unlock: %v, card of %d bytes, stderr %q", res.err, len(k.NewRecovery.Get()), res.out)
 	}
 	// The printed card's key opens the store (#3410).
-	next := printed(t, k.NewRecovery)
+	next := printed(t, k.NewRecovery.Get())
 	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
 		t.Fatal("the old recovery key still opens the store")
 	}
@@ -1340,7 +1501,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatal("the old passphrase still opens the store")
 	}
 	// The new card's passphrase, as the page prints it, opens the store.
-	pass, err := words.FromSeed(k.NewRecovery[handoff.CardKeyLen:])
+	pass, err := words.FromSeed(k.NewRecovery.Get()[handoff.CardKeyLen:])
 	must(t, err)
 	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
 	must(t, err)
@@ -1419,10 +1580,10 @@ func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
 	r := lostRig(t)
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	k, out, err := r.unlockOnce(nil)
-	if err != nil || len(k.NewRecovery) != handoff.MadeCardLen {
+	if err != nil || len(k.NewRecovery.Get()) != handoff.MadeCardLen {
 		t.Fatalf("the lost-card unlock: %v, stderr %q", err, out)
 	}
-	made := k.NewRecovery
+	made := k.NewRecovery.Get()
 	pass, err := words.FromSeed(made[handoff.CardKeyLen:])
 	must(t, err)
 	// Route A's write (agentos-enroll -rotate-recovery): the recovery slot
@@ -1471,7 +1632,7 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	_, other, err := ed25519.GenerateKey(nil)
 	must(t, err)
 	valid := func() []byte {
-		b, err := handoff.SignApproval(r.keys.Head, lostCardApproval(old))
+		b, err := handoff.SignApproval(r.keys.Head.Get(), lostCardApproval(old))
 		must(t, err)
 		return b
 	}
@@ -1489,10 +1650,10 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	forged := valid()
 	forged[len(forged)-1] ^= 1
 	for name, put := range map[string]func(){
-		"card route":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, card), 0o600)) },
-		"expired":      func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, expired), 0o600)) },
-		"stale":        func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, stale), 0o600)) },
-		"pre-e1 old":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, preE1), 0o600)) },
+		"card route":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), card), 0o600)) },
+		"expired":      func() { must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), expired), 0o600)) },
+		"stale":        func() { must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), stale), 0o600)) },
+		"pre-e1 old":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), preE1), 0o600)) },
 		"other kernel": func() { must(t, os.WriteFile(r.request, sign(other, lostCardApproval(old)), 0o600)) },
 		"forged":       func() { must(t, os.WriteFile(r.request, forged, 0o600)) },
 		"oversized":    func() { must(t, os.WriteFile(r.request, append(valid(), make([]byte, maxRequest)...), 0o600)) },
@@ -1511,20 +1672,20 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		k, out, err := r.unlockOnce(nil)
 		now, rerr := os.ReadFile(r.store)
 		must(t, rerr)
-		if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, r.recovery)) || !bytes.Equal(was, now) {
-			t.Errorf("%s: %v, new key %v, store changed %v", name, err, k.NewRecovery != nil, !bytes.Equal(was, now))
+		if err != nil || k.NewRecovery.Get() != nil || !bytes.Equal(k.Recipient, recipientWire(t, r.recovery)) || !bytes.Equal(was, now) {
+			t.Errorf("%s: %v, new key %v, store changed %v", name, err, k.NewRecovery.Get() != nil, !bytes.Equal(was, now))
 		}
 		if strings.Count(out, "\n") != 1 || !strings.Contains(out, "lost-card request") {
 			t.Errorf("%s: stderr %q, want one line on the request", name, out)
 		}
 	}
 	os.RemoveAll(r.request)
-	if k, out, err := r.unlockOnce(nil); err != nil || k.NewRecovery != nil || out != "" {
-		t.Fatalf("no request: %v, new key %v, stderr %q", err, k.NewRecovery != nil, out)
+	if k, out, err := r.unlockOnce(nil); err != nil || k.NewRecovery.Get() != nil || out != "" {
+		t.Fatalf("no request: %v, new key %v, stderr %q", err, k.NewRecovery.Get() != nil, out)
 	}
 
 	// The kernel starts on the old recipient past an expired request.
-	must(t, os.WriteFile(r.request, sign(r.keys.Head, expired), 0o600))
+	must(t, os.WriteFile(r.request, sign(r.keys.Head.Get(), expired), 0o600))
 	cmd, out := r.boot()
 	r.up(cmd, out)
 	if v, err := r.owner().Backups(); err != nil || v.Recipient != old {
@@ -1575,8 +1736,8 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 		k, said, err := two.unlockOnce(nil)
 		now, rerr := os.ReadFile(two.store)
 		must(t, rerr)
-		if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
-			t.Errorf("%s: %v, new key %v, store changed %v", c.name, err, k.NewRecovery != nil, !bytes.Equal(was, now))
+		if err != nil || k.NewRecovery.Get() != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
+			t.Errorf("%s: %v, new key %v, store changed %v", c.name, err, k.NewRecovery.Get() != nil, !bytes.Equal(was, now))
 		}
 		if strings.Count(said, "\n") != 1 || !strings.Contains(said, "lost-card request") {
 			t.Errorf("%s: stderr %q, want one line on the request", c.name, said)
@@ -1599,14 +1760,14 @@ func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
 	k, out, err := r.unlockOnce(phrase)
 	now, rerr := os.ReadFile(r.store)
 	must(t, rerr)
-	if err != nil || k.Slot != handoff.SlotPassphrase || k.NewRecovery != nil || !bytes.Equal(was, now) || out != "" {
-		t.Fatalf("a passphrase unlock: %v, slot %q, new key %v, store changed %v, stderr %q", err, k.Slot, k.NewRecovery != nil, !bytes.Equal(was, now), out)
+	if err != nil || k.Slot != handoff.SlotPassphrase || k.NewRecovery.Get() != nil || !bytes.Equal(was, now) || out != "" {
+		t.Fatalf("a passphrase unlock: %v, slot %q, new key %v, store changed %v, stderr %q", err, k.Slot, k.NewRecovery.Get() != nil, !bytes.Equal(was, now), out)
 	}
 	if left, err := os.ReadFile(r.request); err != nil || !bytes.Equal(left, b) {
 		t.Fatalf("the request was not left for a tpm boot: %v", err)
 	}
-	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != handoff.MadeCardLen {
-		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery != nil)
+	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery.Get()) != handoff.MadeCardLen {
+		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery.Get() != nil)
 	}
 }
 
@@ -1630,7 +1791,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	var root [32]byte
 	edit(func(st *seal.Store) {
-		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: seed, Step: 42})
+		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed), Step: 42})
 		must(t, err)
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 		root, err = st.ClerkRoot()
@@ -1659,7 +1820,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 		must(t, err)
 		return k
 	}
-	if k := handed(); k.ClerkRoot != root {
+	if k := handed(); k.ClerkRoot.Get() != root {
 		t.Fatal("the hand-off's clerk root is not the store's")
 	}
 	blob, err := os.ReadFile(path)
@@ -1677,7 +1838,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	sealer, err := ck.Sealer()
 	must(t, err)
 	got, err := handoff.OpenCodeSeed(sealer, blob)
-	if err != nil || !bytes.Equal(got.Seed, seed) || got.Step != 42 {
+	if err != nil || !bytes.Equal(got.Seed.Get(), seed) || got.Step != 42 {
 		t.Fatalf("the checker's key opens %+v, %v", got, err)
 	}
 	mk, _ := clerkkey.Derive(&root, "mail")
@@ -1694,11 +1855,11 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	// A directory others can reach gets none, and the kernel still starts.
 	edit(func(st *seal.Store) {
-		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: seed})
+		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed)})
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 	})
 	must(t, os.Chmod(filepath.Dir(path), 0o755))
-	if k := handed(); k.ClerkRoot != root {
+	if k := handed(); k.ClerkRoot.Get() != root {
 		t.Fatal("a refused seed file changed the hand-off")
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {

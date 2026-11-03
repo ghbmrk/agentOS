@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -124,6 +125,18 @@ type rig struct {
 	now    time.Time
 	cert   Cert
 	remote netip.Addr
+	// The phone browser's anti-forgery cookie and token, from the last
+	// screen g.s drew (csrf.go); do posts with them.
+	cookie, token string
+	tokenOf       *Server
+	// heard is the mDNS names the relay heard on each Wi-Fi identity's
+	// VLAN, and on the Owner and Household networks by the network's
+	// name (Config.Heard).
+	heard map[string][][]string
+	// host is the host each heard instance's SRV names, by the
+	// instance's policy.MDNSKey: Config.Heard leaves out an instance whose
+	// host is taken, as mdns.Filter.Heard does.
+	host map[string][]string
 }
 
 // newRig is a page over an engine holding home(1), on a fake clock.
@@ -142,7 +155,7 @@ func newRig(t *testing.T) *rig {
 	if _, err := e.Tick(policy.Wait); err != nil {
 		t.Fatal(err)
 	}
-	g := &rig{t: t, e: e, a: a, ch: &fakeChannel{}, now: time.Now(), remote: ownerAddr}
+	g := &rig{t: t, e: e, a: a, ch: &fakeChannel{}, now: time.Now(), remote: ownerAddr, heard: map[string][][]string{}, host: map[string][]string{}}
 	g.cert, err = NewCert(rp, g.now)
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +166,20 @@ func newRig(t *testing.T) *rig {
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		Policy: e, Channel: g.ch, Cert: g.cert.Leaf, Zone: zone,
 		Now: func() time.Time { return g.now },
+		Heard: func(network, wifi string, taken func([]string) bool) [][]string {
+			k := wifi
+			if network != policy.NetDevices {
+				k = network
+			}
+			var out [][]string
+			for _, n := range g.heard[k] {
+				h, ok := g.host[policy.MDNSKey(n)]
+				if taken == nil || !taken(n) && !(ok && taken(h)) {
+					out = append(out, n)
+				}
+			}
+			return out
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -184,12 +211,17 @@ func (g *rig) do(method, path string, body any, hdr ...string) *httptest.Respons
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
+	if method != http.MethodGet && g.tokenOf != g.s {
+		g.screen()
+	}
 	req := httptest.NewRequest(method, "https://"+rp+path, rd)
 	req.RemoteAddr = netip.AddrPortFrom(g.remote, 50000).String()
-	if method == http.MethodPost {
+	if method != http.MethodGet {
 		req.Header.Set("Origin", "https://"+rp)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Cookie", tokenCookie+"="+g.cookie)
+		req.Header.Set(tokenHeader, g.token)
 	} else {
 		req.Header.Set("Sec-Fetch-Site", "cross-site") // opened from a text
 		req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -205,7 +237,39 @@ func (g *rig) do(method, path string, body any, hdr ...string) *httptest.Respons
 	}
 	w := httptest.NewRecorder()
 	g.s.ServeHTTP(w, req)
+	g.keep(w)
 	return w
+}
+
+var reToken = regexp.MustCompile(`<meta name="enforcer-token" content="([A-Za-z0-9_-]+)">`)
+
+// keep keeps the anti-forgery cookie and token a screen of g.s set, as the
+// phone's browser would.
+func (g *rig) keep(w *httptest.ResponseRecorder) {
+	g.t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == tokenCookie {
+			m := reToken.FindStringSubmatch(w.Body.String())
+			if m == nil {
+				g.t.Fatalf("a screen set the cookie with no token:\n%s", w.Body)
+			}
+			g.cookie, g.token, g.tokenOf = c.Value, m[1], g.s
+		}
+	}
+}
+
+// screen opens a screen of g.s, for its token: the enrolment screen when
+// the page has one, else home.
+func (g *rig) screen() {
+	g.t.Helper()
+	path := "/"
+	if g.s.cfg.Enrol != nil {
+		path = "/enrol"
+	}
+	g.do(http.MethodGet, path, nil)
+	if g.tokenOf != g.s {
+		g.t.Fatalf("%s drew no token", path)
+	}
 }
 
 // linkFor is the proposal link the core would text for next.
@@ -746,6 +810,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
 		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
 		"Control":     func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
+		"MDNS":        func(d *policy.Device) { d.MDNS = append(d.MDNS, []string{"z", "local"}) },
 	}
 	// A stream port only a camera or microphone carries, and a change
 	// from one of those classes to the other, so these rows run on one.
@@ -753,9 +818,16 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Class":  func(d *policy.Device) { d.Class = policy.ClassMicrophone },
 		"Stream": func(d *policy.Device) { d.Stream = append(d.Stream, policy.Port{Proto: policy.ProtoUDP, Num: 554}) },
 	}
+	// A safeguard only a class that needs one records (#3872), so this row
+	// runs on a garage door.
+	doors := map[string]func(d *policy.Device){
+		"Safeguards": func(d *policy.Device) { d.Safeguards = policy.Needs(policy.ClassGarageDoor) },
+	}
 	docs := map[string]func(d *policy.Document){
 		"Version":      nil, // the page picks it; it is in the serial, not the diff
 		"Destinations": func(d *policy.Document) { d.Destinations = append(d.Destinations, "z.example") },
+		"Caps":         func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 5} },
+		"EdgeCap":      func(d *policy.Document) { d.EdgeCap = 5 },
 		"Devices":      nil, // the device rows above
 		"Pairs":        func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
 		"Standing":     func(d *policy.Document) { d.Standing[0].ToMS++ },
@@ -774,7 +846,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Device": func(h *policy.Hold) { h.Device = "tv" }, "Kind": func(h *policy.Hold) { h.Kind = policy.HoldFix },
 	}
 	for ty, m := range map[reflect.Type][]string{
-		reflect.TypeOf(policy.Device{}): keys(devs, recorders), reflect.TypeOf(policy.Document{}): keys(docs),
+		reflect.TypeOf(policy.Device{}): keys(devs, recorders, doors), reflect.TypeOf(policy.Document{}): keys(docs),
 		reflect.TypeOf(policy.StandingRule{}): keys(rules), reflect.TypeOf(policy.Pair{}): keys(pairs),
 		reflect.TypeOf(policy.Hold{}): keys(holds), reflect.TypeOf(policy.Port{}): {"Num", "Proto"},
 	} {
@@ -823,6 +895,21 @@ func TestEveryFieldRendered(t *testing.T) {
 		}
 		differs("a new camera's "+name, added(camera), added(func(v *policy.Device) { camera(v); f(v) }))
 		differs("the camera's "+name, base, func() policy.Document { d := clone(base); f(dev(&d, "cam")); return d }())
+	}
+	for name, f := range doors {
+		door := func(v *policy.Device) { v.Class = policy.ClassGarageDoor }
+		differs("a new garage door's "+name, added(door), added(func(v *policy.Device) { door(v); f(v) }))
+		withDoor := func(g ...string) policy.Document {
+			d := clone(base)
+			d.Devices = append(d.Devices, policy.Device{ID: "garage", Network: policy.NetDevices, Class: policy.ClassGarageDoor, Safeguards: g})
+			return d
+		}
+		was := withDoor(policy.SafeguardObstructionReversal)
+		is := clone(was)
+		f(dev(&is, "garage"))
+		if slices.Equal(Describe(was, was, zone), Describe(was, is, zone)) {
+			t.Errorf("the garage door's %s: the diff does not show it", name)
+		}
 	}
 	// Each field changed on a device, pair, rule or hold already there.
 	for name, f := range devs {
@@ -1073,5 +1160,52 @@ func TestTimesInOwnersZone(t *testing.T) {
 	c.Zone = nil
 	if _, err := New(c); !errors.Is(err, ErrConfig) {
 		t.Errorf("a page with no zone: %v, want refused", err)
+	}
+}
+
+// TestCapLines: the owner signs each byte cap as an exact number of bytes
+// (NET-2 Byte caps, D-248): when a destination is listed, whenever its cap
+// or the edge's changes, and a destination listed with none is said to get
+// nothing, since a cap left out lets nothing through. A name the core chose
+// is shown in printable ASCII on the cap line too.
+func TestCapLines(t *testing.T) {
+	zone := time.UTC
+	base := edit(1, func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 2_000_000_000}; d.EdgeCap = 999 })
+	for name, c := range map[string]struct {
+		f    func(d *policy.Document)
+		want string
+	}{
+		"listed with a cap": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "backup.example")
+			d.Caps["backup.example"] = 64 << 30
+		}, "Let agentOS send backup.example up to 68,719,476,736 bytes (about 68.7 GB) a day."},
+		"listed with none": {func(d *policy.Document) { d.Destinations = append(d.Destinations, "x.example") },
+			"agentOS may send x.example nothing: it has no daily byte cap."},
+		"raised": {func(d *policy.Document) { d.Caps["models.example"] = 2_000_000_001 },
+			"Change what agentOS may send models.example a day from up to 2,000,000,000 bytes (about 2.0 GB) to up to 2,000,000,001 bytes (about 2.0 GB)."},
+		"dropped": {func(d *policy.Document) { d.Caps = nil },
+			"Change what agentOS may send models.example a day from up to 2,000,000,000 bytes (about 2.0 GB) to nothing."},
+		"edge": {func(d *policy.Document) { d.EdgeCap = 1 },
+			"Change what the edge may send to the internet a day from up to 999 bytes to up to 1 byte."},
+		"hostile name": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "moc.\u202eevil")
+			d.Caps["moc.\u202eevil"] = 1000
+		}, `Let agentOS send "moc.\u202eevil" up to 1,000 bytes (about 1.0 kB) a day.`},
+	} {
+		next := clone(base)
+		next.Caps = maps.Clone(base.Caps)
+		next.Version = 2
+		c.f(&next)
+		if got := Describe(base, next, zone); !slices.Contains(got, c.want) {
+			t.Errorf("%s: %q, want the line %q", name, got, c.want)
+		}
+	}
+	if got := Describe(base, edit(2, func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 2_000_000_000}; d.EdgeCap = 999 }), zone); !slices.Equal(got, []string{noChange}) {
+		t.Errorf("unchanged caps: %q", got)
+	}
+	for n, want := range map[uint64]string{999_949: "up to 999,949 bytes (about 999.9 kB)", 999_950: "up to 999,950 bytes (about 1.0 MB)", ^uint64(0): "up to 18,446,744,073,709,551,615 bytes (about 18.4 EB)"} {
+		if got := capWords(n); got != want {
+			t.Errorf("capWords(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

@@ -13,8 +13,7 @@ run itself executes (D29, CI-PATHS), so CLAUDE.md and the other process document
 records too. A path outside it, an empty change, or any doubt gives `full`: every
 non-Markdown file, and any Markdown a Go test, a go:embed or the image reads (for
 instance docs/owners-guide.md, and SPEC.md, which broker/browser's test reads).
-tests/test_ci_scope.py fails if a Go file names a record path. tools/g1_scope.py reuses `is_record`, so widening the set
-widens the G1 freeze's records-only pass as well.
+tests/test_ci_scope.py fails if a Go file names a record path.
 
 The workflows run the base commit's copy of this file (`git show BASE:tools/ci_scope.py`),
 so a PR cannot widen the set for itself; a PR that edits this file is outside the set and
@@ -31,7 +30,7 @@ import sys
 
 # Record files, by exact path. The last line is CI-PATHS (D29): prose whose readers are
 # the doc checks the records run executes (doclint, board, trace, metrics, risk_tier,
-# specslice, g1_scope, product-name), plus two orphan notes.
+# specslice, product-name), plus two orphan notes.
 RECORD_FILES = frozenset({
     "BOARD.md", "LATER.md", "LEDGER.md", "DECISIONS.md", "METRICS.md", "TRACE.md",
     "docs/MARK-QUEUE.md",

@@ -366,6 +366,9 @@ type MailConfig struct {
 	wrote   func()
 	stepMax int           // sendersStepMax when 0
 	pause   time.Duration // sendersPause when 0
+	// saveStop is each save of the records of read mail and senders'
+	// privfile.WriteAtomic stop; nil runs every step. Tests only.
+	saveStop func(i int) bool
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 	// gmail is the Gmail API's root, token endpoint, consent page and
@@ -412,7 +415,7 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 		return nil, mark, err
 	}
 	today := c.today()
-	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms, mark)
+	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms, mark, c.saveStop)
 	var keys map[string]string
 	if c.DKIM != nil {
 		raws := make([][]byte, len(ms))

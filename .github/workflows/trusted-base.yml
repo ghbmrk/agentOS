@@ -9,7 +9,11 @@ name: trusted-base
 # cannot keep an older, larger budget (KRN-2cap-harden, #2945); a merge that conflicts fails
 # the step. Both trees are checked out as worktrees and only listed by `go list` (vendored,
 # offline, GOTOOLCHAIN=local); no PR code is built or run. `edited` reruns it when the body
-# changes. tests/test_trusted_base.py pins every line below.
+# changes. Two more steps (REV-PROOF-claims, #4909) hold text a tool computes to the tool: a
+# trusted-core growth decision the PR adds must carry `trusted_base.py measure --sentence` output
+# for the PR it names (fetched by number, listed by `go list` the same way), and a body that
+# closes an issue must name a follow-up for any part of it the body defers (tools/claims.py).
+# tests/test_trusted_base.py pins every line below.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -18,7 +22,7 @@ permissions:
 jobs:
   trusted-base:
     name: trusted-base
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -53,3 +57,13 @@ jobs:
           git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/head" "$MERGE"
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/body.txt"
           python3 -I tools/trusted_base.py check --base-tree "$RUNNER_TEMP/base" --head-tree "$RUNNER_TEMP/head" --body "$RUNNER_TEMP/body.txt" --pr "$PR_NUMBER" --markdown "$GITHUB_STEP_SUMMARY"
+      - name: Measure sentences of added trusted-core growth decisions (base copy, D-159)
+        if: ${{ !cancelled() }}
+        run: python3 -I tools/trusted_base.py claims --base-tree "$RUNNER_TEMP/base" --head-tree "$RUNNER_TEMP/head" --repo . --fetch origin --markdown "$GITHUB_STEP_SUMMARY"
+      - name: Closing keywords against deferred parts (base copy of tools/claims.py)
+        if: ${{ !cancelled() }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/claims-body.txt"
+          python3 -I tools/claims.py closes --body "$RUNNER_TEMP/claims-body.txt" --markdown "$GITHUB_STEP_SUMMARY"

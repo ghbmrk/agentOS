@@ -84,10 +84,13 @@ func (r *rig) sessionOnly(stopped, alive string, at int64) {
 	}
 }
 
-// A honey key, or one derived from it, is refused and logs a trip that
-// stops only its session (KRN-12 Trips, Response). Catches a careless
-// planner stopping the box, or a honey key that authorizes.
-func TestHoneyKeyTripsSessionOnly(t *testing.T) {
+// A honey key, or one derived from it, is refused and logs a session trip
+// that stops no session: it is signed by no owner, so no chain under it
+// verifies, and a task its links claim is a claim (KRN-12 Trips, Response;
+// HLD-5). Catches a careless planner stopping the box, a honey key that
+// authorizes, or a guest that stops another session by claiming its task
+// under a honey key (#4649).
+func TestHoneyKeyTripStopsNoClaimedSession(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
 	must(t, r.k.OpenTask(0, "t1"))
@@ -97,7 +100,7 @@ func TestHoneyKeyTripsSessionOnly(t *testing.T) {
 	var honey key.Key
 	must(t, json.Unmarshal([]byte(entry(t, tb, decoy.PPlannerView).Value), &honey))
 	// The intruder holds the honey key's issuer (no passkey of this box)
-	// and derives a key for session t1 from it.
+	// and derives a key claiming session t1 from it.
 	issuer := key.Ed25519Signer(ed25519.NewKeyFromSeed(honeySeed[:ed25519.SeedSize]))
 	intruder := gen(40)
 	hk, err := key.ClerkKey(honey, issuer, intruder.pub, 0, 1<<20, key.LimitTask("t1"))
@@ -108,13 +111,15 @@ func TestHoneyKeyTripsSessionOnly(t *testing.T) {
 		t.Fatalf("honey plan %s/%s, want rejected as a trip", r.status("p1"), r.k.State().Plans["p1"].Reject)
 	}
 	tr := r.trips(1, 1)
-	if tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespSession || tr.Session != "t1" || tr.Plan != "p1" {
+	if tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespSession || tr.Session != "" || tr.Plan != "p1" {
 		t.Fatalf("trip %+v", tr)
 	}
-	if r.status("p0") != kernel.SCancelled {
-		t.Fatalf("the stopped session's plan is %s", r.status("p0"))
+	if _, ok := r.k.State().Task("t1", 2); !ok || r.status("p0") != kernel.SActive {
+		t.Fatalf("the claimed session stopped: its plan is %s", r.status("p0"))
 	}
-	r.sessionOnly("t1", "t2", 2)
+	if r.k.State().Tripped() || len(r.k.State().Changes.Paused) != 0 {
+		t.Fatal("a honey key at a plan paused keys or stopped planning")
+	}
 
 	// The bare honey root, with no session, is refused and trips too.
 	must(t, r.k.Submit(3, kernel.Plan{ID: "p2", Key: honey, Steps: []kernel.PlanStep{st(key.Trash, "m2")}}))
@@ -381,8 +386,8 @@ func TestTripEntryBounds(t *testing.T) {
 
 // A plan that cites decoys of different weights gets the strongest response
 // any of them needs: a host value beside a sandbox value or a honey key is
-// the full response, and a honey key beside a sandbox value stays
-// session-only (KRN-12 Response). Catches a weaker decoy listed first
+// the full response, and so is a sandbox value beside a honey key, whose
+// key verifies for no session (KRN-12 Response, HLD-5). Catches a weaker decoy listed first
 // masking a breach.
 func TestStrongestDecoyResponseWins(t *testing.T) {
 	// A sandbox value then a host value, from a planner session.
@@ -399,10 +404,7 @@ func TestStrongestDecoyResponseWins(t *testing.T) {
 	}
 
 	// A honey key with a host value, and with a sandbox value.
-	for i, c := range []struct {
-		value string
-		full  bool
-	}{{host.Value, true}, {sandbox.Value, false}} {
+	for i, value := range []string{host.Value, sandbox.Value} {
 		r := newRig(t)
 		tb := r.decoys()
 		must(t, r.k.OpenTask(0, "t1"))
@@ -413,16 +415,13 @@ func TestStrongestDecoyResponseWins(t *testing.T) {
 		intruder := gen(40)
 		hk, err := key.ClerkKey(honey, issuer, intruder.pub, 0, 1<<20, key.LimitTask("t1"))
 		must(t, err)
-		must(t, r.k.Submit(1, kernel.SignPlan(kernel.Plan{ID: "h", Key: hk, Steps: []kernel.PlanStep{st(key.Trash, c.value)}}, intruder.priv)))
+		must(t, r.k.Submit(1, kernel.SignPlan(kernel.Plan{ID: "h", Key: hk, Steps: []kernel.PlanStep{st(key.Trash, value)}}, intruder.priv)))
 		tr := r.trips(1, 1)
-		switch {
-		case c.full && (tr.Response != kernel.RespFull || tr.Cause != kernel.CauseValue || !r.k.State().Tripped()):
-			t.Fatalf("%d: honey key and host value: trip %+v", i, tr)
-		case !c.full && (tr.Response != kernel.RespSession || tr.Cause != kernel.CauseHoneyKey || tr.Session != "t1"):
-			t.Fatalf("%d: honey key and sandbox value: trip %+v", i, tr)
+		if tr.Response != kernel.RespFull || tr.Cause != kernel.CauseValue || tr.Session != "" || !r.k.State().Tripped() {
+			t.Fatalf("%d: honey key and a value: trip %+v", i, tr)
 		}
-		if !c.full {
-			r.sessionOnly("t1", "t2", 2)
+		if _, ok := r.k.State().Task("t1", 2); !ok {
+			t.Fatalf("%d: the session the honey key claims stopped", i)
 		}
 	}
 }
@@ -453,8 +452,8 @@ func honeyKey(t *testing.T, tb decoy.Table, task string) (key.Key, key.Key, pair
 }
 
 // While a trip's pause is in force, a hostile session that keeps citing
-// honey keys or decoy values under keys already paused still trips (its
-// session stops, each trip is logged) but sends no new full text and does
+// honey keys or decoy values under keys already paused still trips (each
+// trip is logged, and a honey key's claimed session is not stopped) but sends no new full text and does
 // not move what the owner's resume signs; an exit's call trip meanwhile
 // does not void that signature either (KRN-12 Response, KEY-4). Catches an
 // intruder keeping the owner from resuming, or a trip lost in a pause.
@@ -497,8 +496,8 @@ func TestRepeatTripsDuringAPauseKeepTheResume(t *testing.T) {
 	if r.k.State().Tripped() {
 		t.Fatal("the owner's signature did not lift the pause")
 	}
-	if _, ok := r.k.State().Task("t1", 32); ok {
-		t.Fatal("the honey session outlived its trip")
+	if _, ok := r.k.State().Task("t1", 32); !ok {
+		t.Fatal("a honey key's claim stopped the session it names")
 	}
 	r.replays()
 }
@@ -618,8 +617,9 @@ func forgedTripFoldsNothing(t *testing.T, r *rig, es []kernel.Entry, what string
 	}
 }
 
-// A planner session's plan whose key does not verify, carrying a sandbox or
-// view value, stops only the session its key names, never planning box-wide
+// A planner session's unsigned plan, under a key whose chain verifies,
+// carrying a sandbox or view value, stops only the session its key serves,
+// never planning box-wide
 // (KRN-12 Response). Catches a future submit path that lets injected content
 // stop the box.
 func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
@@ -645,10 +645,10 @@ func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
 // A honey key cited through Extend or in an Issue batch is refused and gets
 // the full response: both are owner-side calls no planner session makes, so
 // planner-view content reached the owner path (KRN-12 Response, "Any other
-// decoy value gets the full response"). Extend pauses the honey key's IDs
-// and the held plan's scope and funding key, Issue the honey key's IDs; both
-// stop planning until the passkey resume. Catches an owner-side breach that
-// stops only one request.
+// decoy value gets the full response"). Extend pauses the held plan's scope
+// and funding key, and neither pauses the honey key's own IDs, which would
+// name it in the state (#4574 item 1); both stop planning until the passkey
+// resume. Catches an owner-side breach that stops only one request.
 func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
@@ -666,10 +666,15 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 		t.Fatalf("extend trip %+v", tr)
 	}
 	ch, p := r.k.State().Changes, r.k.State().Plans["t1"]
-	want := append([]key.ID{honey.Tip(), hk.Tip(), r.k.State().SpendHeld["t1"].Funding}, p.Scopes...)
+	want := append([]key.ID{r.k.State().SpendHeld["t1"].Funding}, p.Scopes...)
 	for _, id := range want {
 		if !ch.Paused[id] || !slices.Contains(tr.Scopes, id) {
 			t.Fatalf("scope %s not paused by %v", id, tr.Scopes)
+		}
+	}
+	for _, id := range []key.ID{honey.Tip(), hk.Tip()} {
+		if _, ok := ch.Paused[id]; ok || slices.Contains(tr.Scopes, id) {
+			t.Fatalf("the honey chain's %s is in the paused scope", id)
 		}
 	}
 	if !r.k.State().Tripped() {
@@ -693,7 +698,7 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	if err := r2.k.Issue(4, approve([]key.Key{honey2}, r2.owner, r2.spare), honey2); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
 		t.Fatalf("a honey key in an Issue batch: %v", err)
 	}
-	if tr := r2.trips(1, 1); tr.Response != kernel.RespFull || tr.Plan != "" || !slices.Equal(tr.Scopes, []key.ID{honey2.Tip()}) || !r2.k.State().Tripped() {
+	if tr := r2.trips(1, 1); tr.Response != kernel.RespFull || tr.Plan != "" || len(tr.Scopes) != 0 || len(r2.k.State().Changes.Paused) != 0 || !r2.k.State().Tripped() {
 		t.Fatalf("issue trip %+v", tr)
 	}
 	if _, ok := r2.k.State().Grants[honey2.Tip()]; ok {
@@ -778,6 +783,7 @@ func TestOwnerTripIsDerivedAgain(t *testing.T) {
 		"call trip at the kernel":  forge(kernel.TTrip, fmt.Sprintf(`{"cause":"honey-key","exit":"kernel","entry":%d,"response":"call"}`, honeyEntry(t, tb))),
 		"owner trip, no honey key": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, cb, full(r.ck.Tip()))),
 		"owner trip, forged scope": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(r.ck.Tip()))),
+		"owner trip, honey scope":  forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(honey.Tip()))),
 		"owner trip, unknown op":   forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"pause","key":%s,"trip":%s}`, hb, full(honey.Tip()))),
 		"owner trip, extra field":  forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s,"x":1}`, hb, full(honey.Tip()))),
 	} {
@@ -791,7 +797,7 @@ func TestOwnerTripIsDerivedAgain(t *testing.T) {
 			t.Fatalf("%s: rederive %v", name, err)
 		}
 	}
-	derived := forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(honey.Tip())))
+	derived := forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":{"cause":"honey-key","exit":"kernel","entry":%d,"response":"full"}}`, hb, honeyEntry(t, tb)))
 	re, err := kernel.Replay(r.anchors(), derived)
 	must(t, err)
 	if !re.Tripped() {
@@ -851,7 +857,7 @@ func TestOwnerPauseAfterTripOutlivesResume(t *testing.T) {
 // A honey key given in-process with a link that is not valid UTF-8, at
 // Extend or Issue, still trips in full: the trip is derived from the key as
 // the log holds it, so the fold and Rederive derive the same one and the
-// pause holds (KRN-6, KRN-12 Response). Catches a refused call whose trip
+// pause and planning stop hold (KRN-6, KRN-12 Response). Catches a refused call whose trip
 // folds to nothing because the log's JSON rewrote the key (#4283 item 1).
 func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 	for _, op := range []string{kernel.OpExtend, kernel.OpIssue} {
@@ -877,9 +883,14 @@ func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 			t.Fatalf("%s: %v", op, err)
 		}
 		tr := r.trips(1, 1)
-		want := []key.ID{honey.Tip(), logged.Tip()}
+		var want []key.ID
 		if op == kernel.OpExtend {
-			want = append(want, r.k.State().Plans["t1"].Scopes...)
+			want = r.k.State().Plans["t1"].Scopes
+		}
+		for _, id := range []key.ID{honey.Tip(), logged.Tip()} {
+			if slices.Contains(tr.Scopes, id) {
+				t.Fatalf("%s: the honey chain's %s is in the paused scope", op, id)
+			}
 		}
 		for _, id := range want {
 			if !r.k.State().Changes.Paused[id] || !slices.Contains(tr.Scopes, id) {
@@ -892,22 +903,22 @@ func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 	}
 }
 
-// A honey key at Extend naming a plan that is not held pauses only the
-// honey key's own chain: Extend would refuse that plan, so its scope is not
+// A honey key at Extend naming a plan that is not held pauses no key, only
+// planning: Extend would refuse that plan, so its scope is not
 // what the key touched (KRN-12 Response, "paused what it touched"). Catches
 // a cited plan ID pausing an unrelated active plan's keys (#4283 item 5).
 func TestHoneyKeyAtExtendOfAnUnheldPlanPausesOnlyItself(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
-	honey, hk, _ := honeyKey(t, tb, "t1")
+	_, hk, _ := honeyKey(t, tb, "t1")
 	var rf *key.Refusal
 	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
 		t.Fatalf("a honey key extending an unheld plan: %v", err)
 	}
 	tr := r.trips(1, 1)
-	if want := []key.ID{honey.Tip(), hk.Tip()}; !slices.Equal(tr.Scopes, want) {
-		t.Fatalf("scopes %v, want the honey chain %v", tr.Scopes, want)
+	if len(tr.Scopes) != 0 || !r.k.State().Tripped() {
+		t.Fatalf("scopes %v, want none and planning stopped", tr.Scopes)
 	}
 	for _, id := range r.k.State().Plans["t1"].Scopes {
 		if r.k.State().Changes.Paused[id] {
@@ -935,5 +946,67 @@ func TestOnlyAnActivePlanIsHeld(t *testing.T) {
 	}
 	if _, held := r.k.State().SpendHeld["t1"]; held {
 		t.Fatal("the cancelled plan was held")
+	}
+}
+
+// A plan whose key's chain does not verify against the owners stops no
+// session, whatever task its links claim: a guest in session t1 that forges
+// a link naming t2 and sends a view value gets the full response, and t2
+// plans on until the owner resumes; a rejection logged with its trip's
+// session changed to another task folds no trip and is a divergence, since
+// the fold derives the trip again (HLD-5, CH-15, KRN-6). Catches a guest
+// stopping another session by claiming its task (#4649).
+func TestForgedChainStopsNoClaimedSession(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t2"))
+	r.plan("b0", r.serve("t2"), st(key.Trash, "m0"))
+	forged := r.serve("t2")
+	forged.Links = slices.Clone(forged.Links)
+	last := &forged.Links[len(forged.Links)-1]
+	last.Sig = slices.Clone(last.Sig)
+	last.Sig[0] ^= 1
+	if _, err := key.Chain(forged, r.anchors()); err == nil || key.TaskOf(forged) != "t2" {
+		t.Fatalf("the forged chain should claim t2 and fail: %v", err)
+	}
+	step := st(key.Send, "x@example.com")
+	step.Args["body"] = entry(t, tb, decoy.PPlannerView).Value
+	r.plan("a1", forged, step)
+	tr := r.trips(1, 1)
+	if tr.Response != kernel.RespFull || tr.Session != "" || tr.Plan != "a1" || !r.k.State().Tripped() {
+		t.Fatalf("a view value under a forged chain: trip %+v", tr)
+	}
+	if _, ok := r.k.State().Task("t2", 2); !ok || r.status("b0") != kernel.SActive {
+		t.Fatalf("the claimed session t2 stopped: its plan is %s", r.status("b0"))
+	}
+
+	// A verified session trip, its logged session changed to t2.
+	r2 := newRig(t)
+	tb2 := r2.decoys()
+	must(t, r2.k.OpenTask(0, "t1"))
+	must(t, r2.k.OpenTask(0, "t2"))
+	step.Args["body"] = entry(t, tb2, decoy.PPlannerView).Value
+	r2.plan("a1", r2.serve("t1"), step)
+	if tr := r2.trips(1, 1); tr.Session != "t1" {
+		t.Fatalf("a verified session's trip %+v", tr)
+	}
+	es := slices.Clone(r2.k.Log().Entries())
+	e := &es[len(es)-1]
+	if e.Type != kernel.TPlanRejected || !bytes.Contains(e.Body, []byte(`"session":"t1"`)) {
+		t.Fatalf("the newest entry is %s %s", e.Type, e.Body)
+	}
+	e.Body = bytes.ReplaceAll(e.Body, []byte(`"session":"t1"`), []byte(`"session":"t2"`))
+	re, err := kernel.Replay(r2.anchors(), es)
+	must(t, err)
+	if len(re.Trips()) != 0 {
+		t.Fatalf("a rejection naming another session folded its trip: %+v", re.Trips())
+	}
+	if _, ok := re.Task("t2", 2); !ok {
+		t.Fatal("a forged rejection stopped t2")
+	}
+	var d *kernel.Divergence
+	if _, err := kernel.Rederive(r2.anchors(), r2.k.Box(), es); !errors.As(err, &d) || d.Seq != e.Seq {
+		t.Fatalf("a forged rejection's session: rederive %v", err)
 	}
 }

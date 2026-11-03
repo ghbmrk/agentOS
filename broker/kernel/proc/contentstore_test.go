@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: LOG-4, KRN-erase, CLK-1
@@ -314,7 +315,7 @@ func TestALooseContentStoreStopsTheStart(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "Vision", "../keys", "a/b", strings.Repeat("a", 33), kernel.KeyTable} {
-		if _, err := OpenContentStores(filepath.Join(t.TempDir(), "c"), []string{bad}); !errors.Is(err, ErrStoreName) {
+		if _, _, err := OpenContentStores(filepath.Join(t.TempDir(), "c"), []string{bad}); !errors.Is(err, ErrStoreName) {
 			t.Errorf("store %q: %v, want ErrStoreName", bad, err)
 		}
 	}
@@ -322,7 +323,7 @@ func TestALooseContentStoreStopsTheStart(t *testing.T) {
 
 // The real process never starts without its content directory.
 func TestRunKernelNeedsAContentDir(t *testing.T) {
-	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir(), BackupDir: t.TempDir()}, handoff.KernelKeys{Head: headPriv}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir(), BackupDir: t.TempDir()}, handoff.KernelKeys{Head: secret.Hide(headPriv)}, &kernel.MemAnchor{})
 	if !errors.Is(err, ErrNoContentDir) {
 		t.Fatalf("got %v, want ErrNoContentDir", err)
 	}

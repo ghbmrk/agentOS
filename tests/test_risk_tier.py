@@ -9,6 +9,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import risk_tier as rt  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -30,7 +32,6 @@ class RiskTierTest(unittest.TestCase):
             "tools/hostcheck_hw8.json": "A",
             "tools/hostcheck_standin.sh": "A",
             "tests/test_hostcheck.py": "A",
-            "tools/g1_scope_g2.txt": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
             # loops is A through its core.txt allow lines.
@@ -350,7 +351,7 @@ class RiskTierTest(unittest.TestCase):
     def test_merge_gate_tools_tests_and_lens_rules_are_a(self):
         # Security on #1953: paths that left premerge's Mark-only list keep the full review.
         for f in ("tools/premerge.py", "tests/test_premerge.py", "tests/test_risk_tier_custody.py",
-                  "tests/test_ci_scope.py", "tests/test_g1_scope.py", "tests/test_workflows.py",
+                  "tests/test_ci_scope.py", "tests/test_workflows.py",
                   "tests/test_merge_queue.py", "tests/test_lane.py", "reviews/l3/README.md",
                   "reviews/security/README.md"):
             self.assertEqual(rt.tier_of(f)[0], "A", f)

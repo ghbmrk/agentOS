@@ -116,6 +116,7 @@ func (Secrets) Format(f fmt.State, _ rune) { fmt.Fprint(f, "devslot.Secrets{key:
 var (
 	ErrUnknownOp  = errors.New("devslot: undeclared operation")
 	ErrUndeclared = errors.New("devslot: frame is not a declared shape, not sent")
+	ErrWrites     = errors.New("devslot: write past the operation's MaxWrites, not sent")
 	ErrUnpinned   = errors.New("devslot: frame not from the pinned device's declared channel")
 	ErrTooLarge   = errors.New("devslot: frame larger than declared")
 	ErrReading    = errors.New("devslot: reading refused")
@@ -266,6 +267,7 @@ type link struct {
 	inflight sync.WaitGroup
 	mu       sync.Mutex
 	done     bool
+	writes   int   // frames this operation has written, at most op.MaxWrites
 	refused  error // the first refusal; the operation then fails with it
 	// emu puts one reported reading on the bus at a time.
 	emu      sync.Mutex
@@ -297,6 +299,18 @@ func (l *link) close(cancel context.CancelFunc) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.refused
+}
+
+// count takes one of the operation's MaxWrites, if one is left. A write the
+// transport then fails still counts: it may have reached the device.
+func (l *link) count() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.writes >= l.op.MaxWrites {
+		return false
+	}
+	l.writes++
+	return true
 }
 
 func (l *link) refuse(err error) error {
@@ -331,6 +345,9 @@ func (l *link) Write(ctx context.Context, ch string, frame []byte) error {
 	c, ok := l.channel(ch)
 	if !ok || !l.d.match(l.op, ch, frame) {
 		return l.refuse(ErrUndeclared)
+	}
+	if !l.count() {
+		return l.refuse(ErrWrites)
 	}
 	ctx, end := l.ctx(ctx)
 	defer end()

@@ -59,11 +59,24 @@ func TestNoPolicyTextInRuleset(t *testing.T) {
 	d.Devices[0].ID = `tv";accept;#`
 	d.Pairs = nil
 	d.Destinations = []string{`x"}accept`}
+	d.Caps = map[string]uint64{`x"}accept`: 5}
 	d.Devices[0].Allow = []string{`y{accept}`}
 	got, err := Compile(d, fixtureLayout())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The drop state names destinations only by hashes, too.
+	p := fresh(d)
+	p.Groups[0].Addrs = []netip.Addr{netip.MustParseAddr("203.0.113.9")}
+	drops, err := Drops(d, fixtureLayout(), nil, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got += drops
+	// A hardware address is read only as part of a shared segment's host
+	// record (#4324) or address claim (#4480), never to tell devices apart
+	// (D-225).
+	got = stripKeys(got)
 	for _, s := range []string{"accept;#", `x"`, "y{", "tv.example", "core.example", "speaker", "ether"} {
 		if strings.Contains(got, s) {
 			t.Errorf("ruleset carries %q", s)
@@ -116,21 +129,22 @@ func TestPathsFollowTheDocument(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The connection marks are TestEveryAcceptBound's.
-		return strings.Contains(markSet.ReplaceAllString(got, ""), s)
+		// The connection marks are TestEveryAcceptBound's, and every
+		// device's refusal chain, isolated or not, TestLinesBound's.
+		return strings.Contains(refusedMap.ReplaceAllString(markSet.ReplaceAllString(got, ""), ""), s)
 	}
 	d := fixturePolicy()
 	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept`
 	edgeTV := `iifname "edge0" oifname "ap0.101"`
 	coreSpk := `iifname "core0" oifname "ap0.102"`
 	pair := `iifname "ap0.106" oifname "ap0.107" accept`
-	people := `iifname "hh0" oifname "ap0.105" accept`
+	people := `iifname "hh0" oifname "ap0.105" goto learn`
 	for _, s := range []string{tvNet, edgeTV, coreSpk, pair, people} {
 		if !has(d, s) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`} {
+	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" goto log_`, `oifname "ap0.104" udp`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`, `iifname "ap0.105" oifname "hh0" goto`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}
@@ -155,16 +169,16 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	// the core a camera only on its stream ports while it is offline
 	// (NET-2 Device paths, Cameras and microphones; ENF-e-2).
 	for _, s := range []string{
-		`iifname "edge0" oifname "ap0.101" tcp dport { 80 } log`,
-		`iifname "core0" oifname "ap0.102" tcp dport { 80 } log`,
-		`iifname "core0" oifname "ap0.102" udp dport { 123 } log`,
-		`iifname "core0" oifname "ap0.104" tcp dport { 554 } log prefix "enf core-stream 104 " counter name "core_stream" accept`,
+		`iifname "edge0" oifname "ap0.101" tcp dport { 80 } goto log_edge_dev`,
+		`iifname "core0" oifname "ap0.102" tcp dport { 80 } goto log_core_dev`,
+		`iifname "core0" oifname "ap0.102" udp dport { 123 } goto log_core_dev`,
+		`iifname "core0" oifname "ap0.104" tcp dport { 554 } goto log_core_stream`,
 	} {
 		if !has(d, s) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`oifname "ap0.105" log`, `oifname "ap0.105" tcp`, `oifname "ap0.104" tcp dport { 80 }`, `oifname "ap0.103" tcp`} {
+	for _, s := range []string{`oifname "ap0.105" goto log_`, `oifname "ap0.105" tcp`, `oifname "ap0.104" tcp dport { 80 }`, `oifname "ap0.103" tcp`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}
@@ -186,4 +200,15 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	if has(none, `oifname "ap0.102"`) {
 		t.Error("the core reaches an everyday device with no control port")
 	}
+}
+
+// stripKeys is text without the shared segments' host record and address
+// claim keys, the only places the ruleset reads a hardware address or a
+// packet's own source address as a value.
+func stripKeys(text string) string {
+	for _, v6 := range []bool{false, true} {
+		text = strings.ReplaceAll(text, hostKey(v6), "")
+		text = strings.ReplaceAll(text, claimKey(v6), "")
+	}
+	return text
 }

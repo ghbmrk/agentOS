@@ -286,15 +286,18 @@ var enforcer = map[string]struct {
 	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
-	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice f: dnsmasq configuration
-	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the pair relay
-	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the Wake-on-LAN relay
-	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice i: traffic summaries
+	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid},                  // slice f: dnsmasq configuration
+	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the pair relay
+	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the Wake-on-LAN relay
+	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid}, // slice i: traffic summaries; byte-cap counts (#4174)
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
 	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "rsc.io/qr"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "enforcer/page/internal/csrf", "rsc.io/qr"}, enforcerWebForbid},
+	// The page's anti-forgery pair (#4685, enforcerCSRF): the standard
+	// library only.
+	"enforcer/page/internal/csrf": {nil, enforcerWebForbid},
 	// Enrolment (slice c): the case code, the recovery code and the
 	// passkey's handover; it texts through the alert kinds.
 	"enforcer/enrol": {[]string{"kernel/key", "enforcer/policy", "enforcer/alert"}, droneForbid},
@@ -336,6 +339,30 @@ var coreEnforcer = map[string]struct {
 	// The pairing clerks' sealing helper (slice r): seals to the
 	// enforcer's pairing key with pairseal and holds no private key.
 	"clerk/enfpair": {[]string{"enforcer/pairseal"}, forbiddenStd},
+	// The kernel's byte-cap check (#4173): the summary interval and the
+	// cap edge from the shared format definition, never a copy (D-255).
+	"kernel/capgate": {[]string{"enforcer/wire"}, forbiddenStd},
+	// The kernel's check of every channel message before it is sent
+	// (#4373): the format, the rates and the bucket from the shared
+	// format definition, never a copy (D-255).
+	"kernel/chancheck": {[]string{"enforcer/wire"}, forbiddenStd},
+}
+
+// enforcerMain is the enforcer's daemon (slice l, #3670): the one
+// composition root that links the page, the nft loader and the rest
+// together. It imports only enforcer packages, kernel/key and x/sys/unix
+// for CLOCK_BOOTTIME (#4507), starts no process itself and serves no
+// HTTP of its own; TestEnforcerImportsNothingFromAgentOS holds its
+// dependencies to the enforcer's.
+const enforcerMain = "cmd/agentos-enforcer"
+
+var enforcerMainRule = struct {
+	allowed []string
+	forbid  []string
+}{
+	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/enrol", "enforcer/heads", "enforcer/nft",
+		"enforcer/nft/load", "enforcer/page", "enforcer/policy", "enforcer/wire", "golang.org/x/sys/unix"},
+	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
 }
 
 // enforcerWebDeps are the third-party packages the page links: rsc.io/qr
@@ -357,6 +384,13 @@ var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
 // other enforcer package imports it.
 const enforcerWeb = "enforcer/page"
+
+// enforcerCSRF is the page's anti-forgery package: it links net/http for
+// the page alone. Go's internal rule admits any package under
+// enforcer/page; the enforcer map pins the page as its only importer,
+// since every enforcer package needs a rule there and only the page's
+// allows it.
+const enforcerCSRF = "enforcer/page/internal/csrf"
 
 // enforcerSSH is the one enforcer package that links a third-party
 // package: the access point pusher (slice g) reaches OpenWrt's admin over
@@ -415,6 +449,7 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range coreEnforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
+	checkImports(t, enforcerMain, enforcerMainRule.allowed, enforcerMainRule.forbid, nil)
 }
 
 // TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
@@ -428,7 +463,7 @@ func TestCoreLinksOnlyEnforcerFormats(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Fields(line)
 		pkg := strings.TrimPrefix(f[0], module)
-		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") {
+		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") || pkg == enforcerMain {
 			continue
 		}
 		for _, im := range f[1:] {
@@ -462,12 +497,16 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 	}
 }
 
+// enforcerLinks are the module packages outside broker/enforcer that the
+// enforcer may link (ENF decision 1, STO-4).
+var enforcerLinks = []string{"kernel/key", "drone", "camwire"}
+
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package but the access point
 // pusher's SSH client (enforcerSSH, slice g); only the page
-// (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
+// (enforcerWeb, slice b, with its anti-forgery package enforcerCSRF) speaks HTTP or TLS, and only the firewall loader
 // and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
@@ -477,7 +516,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerSSH {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerCSRF && rel != enforcerSSH {
 			rest = append(rest, p)
 		}
 	}
@@ -487,17 +526,18 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("go list: %v", err)
 		}
-		links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
 		for _, dep := range strings.Fields(string(out)) {
 			rel := strings.TrimPrefix(dep, module)
 			switch {
+			case rel == enforcerMain && slices.Contains(pkgs, module+enforcerMain):
+				// the daemon itself, when it is the package checked
 			case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
 				own[rel] = true
 				if _, ok := enforcer[rel]; !ok {
 					t.Errorf("%s has no import rule in the enforcer map", dep)
 				}
 			case strings.HasPrefix(dep, module):
-				if !links[rel] {
+				if !slices.Contains(enforcerLinks, rel) {
 					t.Errorf("the enforcer links %s", dep)
 				}
 			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
@@ -520,8 +560,230 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }), enforcerWebDeps...)
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
+	// The daemon links every enforcer package; nothing else of agentOS,
+	// no third party but the page's QR encoder and x/sys/unix, and no RPC,
+	// mail or plugin loader.
+	check([]string{module + enforcerMain}, []string{"net/rpc", "net/smtp", "plugin"},
+		append(slices.Clone(enforcerWebDeps), "golang.org/x/sys/unix")...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
+	}
+}
+
+// TestARC2EnforcerHoldsOnlyGoSource completes ARC2's per-package bans on
+// unsafe and C for the enforcer, which is trusted base (KRN-2, STO-4) and
+// parses what the network sends it: no directory of the enforcer, nor of
+// a module package it may link (enforcerLinks), holds a source the Go
+// compiler does not check for memory safety (assembly, C, C++, Fortran,
+// Objective-C, SWIG or a prebuilt object), whatever its build constraints
+// (#4789). It scans agentOS's own packages only: third-party code the
+// enforcer links (enforcerWebDeps, enforcerSSHDeps; golang.org/x/crypto
+// holds assembly) is trusted as any dependency is and not scanned. It is
+// not a secrecy device between enforcer packages, which
+// trust one another (ASSUMPTIONS ENF-page-csrf-2). The roots are the
+// enforcer's tree, its daemon (enforcerMain, #4818: a .s or .syso in the
+// daemon's main package links into the same process) and the list
+// TestEnforcerImportsNothingFromAgentOS holds (#4798), so a module package
+// the enforcer is later allowed to link is scanned too.
+func TestARC2EnforcerHoldsOnlyGoSource(t *testing.T) {
+	bad, n, err := foreignSources("..", arc2EnforcerRoots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range bad {
+		t.Errorf("%s: an enforcer package holds only Go source", p)
+	}
+	if n < len(enforcer)+1 {
+		t.Fatalf("scanned %d directories, the enforcer map names %d packages and the daemon is one more", n, len(enforcer))
+	}
+}
+
+// arc2EnforcerRoots are the directories TestARC2EnforcerHoldsOnlyGoSource
+// scans: the enforcer's tree, walked whole, and each other root as one
+// directory.
+func arc2EnforcerRoots() []string {
+	return append([]string{"enforcer", enforcerMain}, enforcerLinks...)
+}
+
+// foreignSources walks roots under base and returns every file the Go
+// compiler does not check for memory safety, whatever its build
+// constraints, with the number of directories walked. Only "enforcer" is
+// walked whole; testdata is skipped.
+func foreignSources(base string, roots []string) (bad []string, dirs int, err error) {
+	foreign := []string{".s", ".S", ".sx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".f", ".F", ".for", ".f90", ".swig", ".swigcxx", ".syso"}
+	for _, root := range roots {
+		err := filepath.WalkDir(filepath.Join(base, root), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == "testdata" || (root != "enforcer" && p != filepath.Join(base, root)) {
+					return filepath.SkipDir
+				}
+				dirs++
+				return nil
+			}
+			if slices.Contains(foreign, filepath.Ext(p)) {
+				bad = append(bad, p)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return bad, dirs, nil
+}
+
+// TestARC2RootsIncludeEnforcerDaemon plants an assembly file and a
+// prebuilt object in a copy of the daemon's directory: the scan must
+// report both (#4818).
+func TestARC2RootsIncludeEnforcerDaemon(t *testing.T) {
+	base := t.TempDir()
+	for _, r := range arc2EnforcerRoots() {
+		if err := os.MkdirAll(filepath.Join(base, r), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	planted := []string{filepath.Join(base, enforcerMain, "start_amd64.s"), filepath.Join(base, enforcerMain, "rsrc.syso")}
+	for _, p := range append(slices.Clone(planted), filepath.Join(base, enforcerMain, "main.go")) {
+		if err := os.WriteFile(p, []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bad, _, err := foreignSources(base, arc2EnforcerRoots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(bad)
+	slices.Sort(planted)
+	if !slices.Equal(bad, planted) {
+		t.Errorf("foreignSources reported %v, want %v", bad, planted)
+	}
+}
+
+// enforcerTestHTTP are the enforcer directories whose _test.go files may
+// import net/http (and its subpackages) or crypto/tls, and why; checkImports
+// reads no test file, so TestEnforcerTestFilesKeepImportPins holds test
+// files to the page's pins (#4852, ASSUMPTIONS ENF-page-csrf-2).
+var enforcerTestHTTP = map[string]string{
+	enforcerWeb:       "the page's own tests drive its handler",
+	enforcerCSRF:      "the anti-forgery pair's tests set and read cookies",
+	"enforcer/action": "the action tests drive the page's challenge handler with httptest",
+	enforcerMain:      "the daemon's lifecycle test drives the page it serves over TLS",
+}
+
+// TestEnforcerTestFilesKeepImportPins: no _test.go file in the enforcer or
+// its daemon imports enforcerCSRF unless it sits in the page's or the
+// csrf package's own directory (Go's internal rule would admit any
+// package under enforcer/page), and none imports net/http or crypto/tls
+// outside enforcerTestHTTP (#4852).
+func TestEnforcerTestFilesKeepImportPins(t *testing.T) {
+	bad, n, err := enforcerTestImportViolations("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range bad {
+		t.Error(b)
+	}
+	if n == 0 {
+		t.Fatal("read no enforcer test file")
+	}
+}
+
+// enforcerTestImportViolations reads every _test.go file under
+// base/enforcer and base/cmd/agentos-enforcer, skipping testdata, and
+// returns each import that breaks the pins, with the number of files read.
+func enforcerTestImportViolations(base string) (bad []string, files int, err error) {
+	for _, root := range []string{"enforcer", enforcerMain} {
+		err := filepath.WalkDir(filepath.Join(base, root), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == "testdata" || (root == enforcerMain && p != filepath.Join(base, root)) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
+			files++
+			dir, err := filepath.Rel(base, filepath.Dir(p))
+			if err != nil {
+				return err
+			}
+			dir = filepath.ToSlash(dir)
+			af, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+			for _, im := range af.Imports {
+				ip, _ := strconv.Unquote(im.Path.Value)
+				switch {
+				case ip == module+enforcerCSRF && dir != enforcerWeb && dir != enforcerCSRF:
+					bad = append(bad, p+" imports "+ip+"; only the page and its own tests may")
+				case ip == "net/http" || strings.HasPrefix(ip, "net/http/") || ip == "crypto/tls":
+					if _, ok := enforcerTestHTTP[dir]; !ok {
+						bad = append(bad, p+" imports "+ip+"; list its directory in enforcerTestHTTP with a reason")
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return bad, files, nil
+}
+
+// TestEnforcerTestFilePinsCatchPlants plants test files that break each
+// pin, beside allowed ones, and checks the scan reports exactly the
+// planted breaks (#4852).
+func TestEnforcerTestFilePinsCatchPlants(t *testing.T) {
+	base := t.TempDir()
+	write := func(rel, imp string) string {
+		p := filepath.Join(base, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("package x\n\nimport _ \""+imp+"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	csrf := module + enforcerCSRF
+	write("enforcer/page/ok_test.go", csrf)
+	write("enforcer/page/internal/csrf/ok_test.go", csrf)
+	write("enforcer/page/ok2_test.go", "net/http/httptest")
+	write("enforcer/action/ok_test.go", "net/http")
+	write(enforcerMain+"/ok_test.go", "crypto/tls")
+	write("enforcer/radio/testdata/ignored_test.go", csrf)
+	write("enforcer/radio/plain.go", csrf) // not a test file: checkImports' job
+	want := []string{
+		write("enforcer/radio/x_test.go", csrf),
+		write("enforcer/page/sub/y_test.go", csrf), // under page, so Go's internal rule admits it
+		write(enforcerMain+"/z_test.go", csrf),
+		write("enforcer/wol/w_test.go", "net/http/httptest"),
+		write("enforcer/dns/v_test.go", "crypto/tls"),
+	}
+	bad, n, err := enforcerTestImportViolations(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, b := range bad {
+		got = append(got, strings.SplitN(b, " ", 2)[0])
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("reported %v, want %v", got, want)
+	}
+	if n != 10 {
+		t.Errorf("read %d test files, want 10", n)
 	}
 }
 

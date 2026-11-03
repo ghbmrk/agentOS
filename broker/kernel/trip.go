@@ -120,17 +120,19 @@ type tripResumed struct {
 
 // trips is the decoy part of the state.
 type trips struct {
-	set     bool
-	entries []decoy.Entry
-	m       *match.Matcher
-	honey   map[key.ID]int // a honey key's ID -> its entry
-	log     []Trip         // every trip, in order
+	table **table // the logged table, or nil; fmt prints a pointer to a pointer as an address (DECOY-a-7)
+	log   []Trip  // every trip, in order
 	// paused is the keys a trip paused, which only ResumeTrip lifts, each
 	// to whether the owner had paused it before: that pause stays.
 	paused  map[key.ID]bool
 	stopped bool   // planning stopped by a trip
 	full    uint64 // the newest full trip, which set the pause
 	resumes int
+}
+
+type table struct {
+	entries []decoy.Entry
+	m       *match.Matcher
 }
 
 // HoneyKey makes a honey key from r, for decoy.Generate (decoy.Own): a root
@@ -154,7 +156,7 @@ var HoneyKeys = decoy.Own{Kind: decoy.KHoneyKey, Place: decoy.PPlannerView, Make
 
 // LogDecoyTable logs the box's decoy table, once, at first boot (KRN-1).
 func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
-	if k.s.decoys.set {
+	if k.s.decoys.table != nil {
 		return ErrDecoysSet
 	}
 	if t.Len() == 0 {
@@ -172,10 +174,10 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
 		return errors.New("kernel: a call trip names its exit")
 	}
-	if !k.s.decoys.set {
+	if k.s.decoys.table == nil {
 		return ErrNoDecoy
 	}
-	id, ok := k.s.decoys.m.Dest(a)
+	id, ok := (*k.s.decoys.table).m.Dest(a)
 	if !ok {
 		return ErrNoDecoy
 	}
@@ -260,9 +262,10 @@ func (d *trips) held() bool { return d.stopped || len(d.paused) > 0 }
 
 // honeyOf is the table entry of the honey key ky is or extends.
 func (d *trips) honeyOf(ky key.Key) (int, bool) {
-	for _, id := range chain(ky) {
-		if e, ok := d.honey[id]; ok {
-			return e, true
+	for i, en := range (*d.table).entries {
+		var hk key.Key
+		if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil && slices.Contains(chain(ky), hk.Tip()) {
+			return i, true
 		}
 	}
 	return 0, false
@@ -283,25 +286,23 @@ func chain(ky key.Key) []key.ID {
 // rejection decide logs, and Rederive agree (KRN-6). A table value that
 // needs the full response gives it whatever else the plan cites (KRN-12);
 // otherwise the first of a honey key, a table value in the steps and a table
-// destination names the session-only trip. The planner session is the task
-// the key's well-formed links name, verified or not: a forged claim can stop
-// only the session it names. A key with no such claim (no task, or a
-// malformed chain) has no session, so a sandbox or view value under it gets
-// the full response.
+// destination names the session-only trip. The planner session is
+// sessionOf's: a forged chain, a honey key's included, has none, so it stops
+// no session, and a sandbox or view value under it gets the full response.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
-	if !d.set {
+	if d.table == nil {
 		return nil
 	}
 	var hit *Trip
-	session := key.TaskOf(p.Key)
+	session := s.sessionOf(p)
 	if id, ok := d.honeyOf(p.Key); ok {
 		hit = &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: session}
 	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	steps, _ := json.Marshal(p.Steps)
-	for _, id := range d.m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
-		if pl := d.entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
+	for _, id := range (*d.table).m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
+		if pl := (*d.table).entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
 			t := &Trip{Cause: CauseValue, Exit: ExitKernel, Entry: id, Response: RespFull, Plan: p.ID}
 			if err == nil {
 				t.Scopes = v.Scopes()
@@ -325,7 +326,7 @@ func (s *State) tripOf(p Plan) *Trip {
 		for _, n := range names {
 			if a, ok := destOf(st.Args[n]); ok {
 				for _, f := range ipform.Forms(a) {
-					if id, ok := d.m.Dest(f); ok {
+					if id, ok := (*d.table).m.Dest(f); ok {
 						t.Cause, t.Entry = CauseDest, id
 						return t
 					}
@@ -334,6 +335,19 @@ func (s *State) tripOf(p Plan) *Trip {
 		}
 	}
 	return nil
+}
+
+// sessionOf is the planner session plan p comes from: the task its key's
+// chain names when that chain verifies against the owners (key.Chain), else
+// none (HLD-5). A claim alone, such as a link a guest forged to name another
+// session's task, never picks the session a trip stops. A honey key is
+// signed by no owner, so neither it nor a key extending it has a session.
+func (s *State) sessionOf(p Plan) string {
+	v, err := key.Chain(p.Key, s.owners(p.Key))
+	if err != nil {
+		return ""
+	}
+	return v.Limits.Task
 }
 
 // destOf reads an address a step names literally: a bare address, an
@@ -370,8 +384,9 @@ type ownerTrip struct {
 func (k *Kernel) ownerKeys(now int64, op, plan string, given ...key.Key) ([]key.Key, error) {
 	keys := make([]key.Key, len(given))
 	for i, g := range given {
-		if b, err := json.Marshal(g); err != nil || json.Unmarshal(b, &keys[i]) != nil {
-			return nil, errors.New("kernel: a key the log cannot hold")
+		var err error
+		if keys[i], err = asLogged(g); err != nil {
+			return nil, err
 		}
 		if t := k.s.ownerTripOf(op, plan, keys[i]); t != nil {
 			if _, err := k.emit(now, TTripOwner, ownerTrip{op, keys[i], *t}); err != nil {
@@ -394,11 +409,14 @@ func (b ownerTrip) again(s *State) (Trip, derived, bool) {
 }
 
 // ownerTripOf is the trip of owner call op citing ky, or nil: pure over the
-// state. It pauses the honey key's own IDs and, at Extend, the held plan's
-// scope and its extension's chain, which hold its funding key (Hold).
+// state. At Extend it pauses the held plan's scope and its extension's
+// chain, which hold its funding key (Hold). It pauses none of ky's own IDs:
+// ky is signed by no owner, so pausing them narrows nothing, and a paused
+// scope that named them would tell a reader of the state which key is the
+// honey key (DECOY-b-8).
 func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 	d := &s.decoys
-	if !d.set || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
+	if d.table == nil || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
 		return nil
 	}
 	id, ok := d.honeyOf(ky)
@@ -413,7 +431,6 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 			}
 		}
 	}
-	add(chain(ky)...)
 	if _, held := s.SpendHeld[plan]; held && op == OpExtend {
 		if p := s.Plans[plan]; p != nil {
 			add(p.Scopes...)
@@ -427,8 +444,8 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 
 // rejection is decide's entry for refusing plan p with r: a trip refusal
 // carries its trip, so both are one append (CH-15).
-func (s *State) rejection(p *PlanState, r *key.Refusal) planRejected {
-	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail}
+func (s *State) rejection(p *PlanState, r *Refusal) planRejected {
+	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail, Session: r.Session, Step: r.Step}
 	if r.Code == CTrip {
 		b.Trip = s.tripOf(p.Plan)
 	}
@@ -450,7 +467,7 @@ func (s *State) resumeOK(b tripResumed) bool {
 // at Extend or Issue is a trip.owner entry, derived again from its key.
 func (s *State) tripOK(t Trip, rejected string) bool {
 	d := &s.decoys
-	if !d.set || t.Entry < 0 || t.Entry >= len(d.entries) || t.Exit == "" {
+	if d.table == nil || t.Entry < 0 || t.Entry >= len((*d.table).entries) || t.Exit == "" {
 		return false
 	}
 	switch t.Cause {
@@ -467,6 +484,16 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 		return rejected == "" && t.Session == "" && len(t.Scopes) == 0 && t.Plan == "" && t.Exit != ExitKernel
 	}
 	return false
+}
+
+// planTripOK checks a plan rejection's trip as its fold must: byte for byte
+// the trip tripOf derives again from the state, whose shape tripOK always
+// accepts, so no logged field, such as a session a forged entry names, stops
+// a session or pauses a key that the plan itself does not (KRN-6, HLD-5).
+func (s *State) planTripOK(p Plan, t Trip) bool {
+	a, _ := json.Marshal(s.tripOf(p)) // "null" for no trip, which no body equals
+	b, _ := json.Marshal(t)
+	return bytes.Equal(a, b)
 }
 
 // addTrip folds trip t, logged in entry e.
@@ -506,20 +533,14 @@ func (s *State) applyTrip(e Entry) error {
 	d := &s.decoys
 	switch e.Type {
 	case TDecoyTable:
-		if d.set {
+		if d.table != nil {
 			return nil
 		}
 		t, err := decoy.FromEvent(e.V, e.Body)
 		if err != nil {
 			return fmt.Errorf("entry %d %s: %w", e.Seq, e.Type, ErrCorrupt)
 		}
-		d.set, d.entries, d.m, d.honey = true, t.Entries(), t.Matcher(), map[key.ID]int{}
-		for i, en := range d.entries {
-			var hk key.Key
-			if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil {
-				d.honey[hk.Tip()] = i
-			}
-		}
+		d.table = new(&table{t.Entries(), t.Matcher()})
 	case TTrip:
 		t, err := body[Trip](e)
 		if err != nil {
@@ -567,9 +588,6 @@ func (s *State) stopSession(task string) {
 		if p.Status != SActive || p.Plan.Task() != task {
 			continue
 		}
-		p.Status, p.Cancel, p.CancelDetail = SCancelled, CTrip, ""
-		if st := &p.Steps[p.Next]; sendable(st.Phase) {
-			s.cancelUnsent(p, st)
-		}
+		s.cancel(p, CTrip, "")
 	}
 }

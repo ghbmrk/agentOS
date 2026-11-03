@@ -398,7 +398,7 @@ func TestFindsClerkKeys(t *testing.T) {
 		clerks []string
 	}{
 		{"clerk root key", root[:], nil},
-		{"key of clerk bank", bank.Key[:], []string{"bank"}},
+		{"key of clerk bank", bank.Key.Ref()[:], []string{"bank"}},
 		{"sealer key of clerk bank", sl, []string{"bank"}},
 		{"handle secret of clerk bank", hs, append([]string{"bank"}, shippedClerks...)},
 	} {
@@ -417,7 +417,7 @@ func TestFindsClerkKeys(t *testing.T) {
 		want, _ := clerkkey.Derive(&root, c)
 		hit := false
 		for _, n := range ns {
-			hit = hit || n.Name == "key of clerk "+c && bytes.Equal(n.Value, want.Key[:])
+			hit = hit || n.Name == "key of clerk "+c && bytes.Equal(n.Value, want.Key.Ref()[:])
 		}
 		if !hit {
 			t.Errorf("no needle for the shipped clerk %s's key", c)

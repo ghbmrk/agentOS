@@ -45,15 +45,16 @@ Also read the `agent_warm_wake` line: **PASS** means waking the agent from its o
 
 ## 2. S2: modem test (about 20 minutes per modem)
 
-Use one PC that passed S1, ideally the N95 floor machine.
+Use any PC that boots the drive with no keys (section 1, one row is enough; S1's three vendors can wait, D-104): the M6 Ultra, or the N95 floor machine.
 
 - [ ] SIM checked in a phone (can call and text), SIM PIN off.
 - [ ] On a laptop, open `s2.conf` on the TESTKIT drive. Set `RUN_S2=yes` and `OWNER_NUMBER=` your mobile number with country code (e.g. `+15551234567`). Save, eject.
 - [ ] PC off. SIM in **modem A**, antennas on. Plug in modem and SSD. Keep your phone nearby.
 - [ ] Power on. Touch no keys. After the reboots (about 5 minutes; on its first run a Quectel modem restarts once to turn on its audio, a setting it keeps; the result file shows how to undo it), you get a text:
   - [ ] **Reply `PING`.**
-  - [ ] The box **calls you**. Answer. It reads 4 digits twice. **Press those digits on your keypad.** It hangs up after about 40 s.
-  - [ ] A text asks you to **call the box**. Call the number that texted you. It answers and reads 4 new digits. **Press them.**
+  - [ ] The box **calls you**. Answer. It reads 4 digits twice. **Press those digits on your keypad, then count aloud from one to ten.** It hangs up after about 50 s.
+  - [ ] A text asks you to **call the box**. Call the number that texted you. It answers and reads 4 new digits. **Press them, then count aloud from one to ten.**
+  - [ ] Nothing to do while the box texts its own number once, to check that a long text arrives whole.
   - [ ] A final text, "S2 done: …", then the PC switches off.
 - [ ] Repeat with **modem B** (same SIM).
 

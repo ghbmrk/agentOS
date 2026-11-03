@@ -24,11 +24,13 @@ const Name = "mail"
 const minRetentionDays = 7
 
 // Mail is one message as the fake reader returns it: the clerk reads Raw and
-// the class itself; neither leaves the clerk.
+// the class itself; neither leaves the clerk. Why is the word Read gives a
+// mail whose read failed (readFailed); it is never read from JSON.
 type Mail struct {
 	ID    string `json:"id"`
 	Raw   []byte `json:"raw"`
 	Class string `json:"class"`
+	Why   string `json:"-"`
 }
 
 // Item is all the planner sees of a mail: its id, its class and, when VRB-2
@@ -106,7 +108,8 @@ func (a *Account) Handle(addr string) string {
 
 // NewAccount reads every mail once. A mail with no class from the closed list
 // is left alone and recorded as an unclassified read, so a reader that fails
-// is seen, not mistaken for an inbox with nothing to tidy. A mail is
+// is seen, not mistaken for an inbox with nothing to tidy; a read that failed
+// says why, as unclassified-<word> for a word of readFailed only. A mail is
 // unsubscribable when the reader calls it bulk, it is not an alert and VRB-2
 // holds; only then does the planner get a handle. The
 // world is read again when a step runs, so a verdict that has aged out is not
@@ -126,7 +129,11 @@ func NewAccount(anchors []key.PublicKey, secret []byte, world func() World, mail
 			m.Class = ""
 		}
 		if m.Class == "" {
-			a.refuse("read", m.ID, "unclassified")
+			reason := "unclassified"
+			if readFailed[m.Why] {
+				reason += "-" + m.Why
+			}
+			a.refuse("read", m.ID, reason)
 		}
 		it := Item{Mail: m.ID, Class: m.Class}
 		a.mails[m.ID] = m

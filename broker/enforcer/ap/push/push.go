@@ -8,13 +8,14 @@
 // golang.org/x/crypto/ssh (broker/daemon/arc2_test.go): OpenWrt's admin
 // paths are SSH or HTTP, the enforcer links no HTTP client, and an SSH
 // client is not code to write again. Every command it runs is one of
-// three fixed strings over a path from ap.Paths; file contents go only on
-// stdin, never into a command.
+// four fixed strings over a path from ap.Paths, a hash and a Sync's
+// token; file contents go only on stdin, never into a command.
 package push
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -34,7 +36,55 @@ import (
 var (
 	ErrPath   = errors.New("push: not an access point path")
 	ErrVerify = errors.New("push: access point does not hold what was written")
+	// ErrSuperseded is a Sync whose write or reload the access point
+	// refused because a later claim holds it (exit status refusedExit):
+	// a claim of an earlier Sync that timed out waiting for the lock
+	// landed after this Sync's own. It wrote nothing more, and the next
+	// Sync, at Watch's next tick, claims afresh.
+	ErrSuperseded = errors.New("push: a later claim holds the access point")
+	// ErrStalled is a Sync refused because MaxAbandoned session opens of
+	// earlier Syncs are still waiting on connections that ended under
+	// them. The access point keeps ending connections in x/crypto's open
+	// window, by design or by fault, and each such open holds a
+	// goroutine and a closed connection that nothing frees, so the
+	// Pusher opens no more until the enforcer restarts.
+	// ErrNoTimeout is a Sync whose claim found no timeout command on the
+	// access point: every reload would fail, so the Sync writes nothing
+	// it could not apply (#4429).
+	ErrNoTimeout = errors.New("push: the access point has no timeout command, so nothing written could be applied")
+	// ErrHostKey is a pinned host key of a type push does not accept: DSA,
+	// a certificate or a security key.
+	ErrHostKey = errors.New("push: pinned host key type not accepted")
+	ErrStalled = errors.New("push: too many session opens left waiting on dropped connections; the access point needs checking and the enforcer a restart")
 )
+
+// MaxAbandoned is how many session opens a Pusher may leave waiting
+// (open) before it refuses every Sync with ErrStalled: about 20 KB each,
+// so a hostile access point can hold about 320 KB of the enforcer's
+// memory at most.
+const MaxAbandoned = 16
+
+// refusedExit is the exit status of a write or reload the access point
+// refuses because its Sync's token is no longer the newest claim:
+// EX_TEMPFAIL, which no command push runs uses for anything else (a
+// failed cat, hash check, flock or mv is 1; a missing command 127; a
+// command a signal ended 128 and up; timeout's own 124 and 125). The
+// reload's own status passes through timeout, so applyCmd turns a
+// reload_config that itself exits 75 into 1.
+const refusedExit = 75
+
+// noTimeoutExit is a claim's status when the access point has no
+// timeout command (EX_UNAVAILABLE): Sync returns ErrNoTimeout.
+const noTimeoutExit = 69
+
+// reloadBound is how long the reload may hold the access point's lock:
+// busybox timeout ends reload_config after it, so a hung reload (a ubus
+// call procd never answers) holds up the next claim, and the revocations
+// it carries, for this long at most, rather than until ubus's own
+// 30-second call timeout. Ending reload_config early loses nothing: it
+// sends its change events before it records what it has sent, so a cut
+// reload sends them again at the next Sync.
+const reloadBound = 20 * time.Second
 
 // MaxFile bounds what Sync reads back from the access point, so a hostile
 // one cannot fill the enforcer's memory.
@@ -59,8 +109,13 @@ type Pusher struct {
 	Timeout time.Duration
 
 	// mu keeps two Syncs of this Pusher from overlapping; there is one
-	// Pusher per access point (ENF-g-8).
+	// Pusher per access point (ENF-g-8). It cannot order a command a
+	// timed-out Sync left running on the access point against the next
+	// Sync's; the access point's lock and token do (claimCmd).
 	mu sync.Mutex
+	// left counts the session opens of this Pusher's Syncs still
+	// waiting after their Sync stopped waiting for them (open).
+	left atomic.Int64
 }
 
 // Result is what one Sync did.
@@ -71,6 +126,10 @@ type Result struct {
 	// Applied reports that at least one file was written and the
 	// reload after it succeeded.
 	Applied bool
+	// Abandoned is how many session opens of this Pusher's Syncs are
+	// still waiting on connections that ended under them (open), as the
+	// Sync ended. From MaxAbandoned on, Sync returns ErrStalled.
+	Abandoned int
 }
 
 // Sync makes the access point hold exactly files: it reads each back,
@@ -80,10 +139,15 @@ type Result struct {
 // write that failed, a connection that dropped) is finished by the next
 // one: reload_config applies only configs that changed since
 // its last run, so an in-sync reload is a no-op. Syncs of one Pusher run
-// one at a time.
-func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
+// one at a time, and once a Sync has claimed the access point, no command
+// an earlier Sync left running there writes or reloads (claimCmd).
+func (p *Pusher) Sync(ctx context.Context, files []ap.File) (res Result, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	defer func() { res.Abandoned = p.abandoned() }()
+	if p.abandoned() >= MaxAbandoned {
+		return Result{}, ErrStalled
+	}
 	for _, f := range files {
 		if !slices.Contains(ap.Paths, f.Path) {
 			return Result{}, fmt.Errorf("%w: %q", ErrPath, f.Path)
@@ -103,9 +167,16 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
 
-	var res Result
+	tok := token()
+	if _, err := p.run(ctx, c, claimCmd(tok), nil); err != nil {
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) && exit.ExitStatus() == noTimeoutExit {
+			err = fmt.Errorf("%w: %w", ErrNoTimeout, err)
+		}
+		return Result{}, fmt.Errorf("push: claim: %w", err)
+	}
 	for _, f := range files {
-		same, err := holds(c, f)
+		same, err := p.holds(ctx, c, f)
 		if err != nil {
 			return res, err
 		}
@@ -116,20 +187,27 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	// A write that fails does not stop the others or the reload: the
 	// files written are on the access point and would not read as drift
 	// next time, so every file is tried and the reload runs, and the
-	// errors are returned together.
+	// errors are returned together. A refused write ends the Sync: every
+	// later command of it would be refused too. So does a write that
+	// ended without an exit status (the connection dropped or the Sync's
+	// Timeout closed it): no later command of it can run.
 	var errs []error
 	wrote := 0
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
-			if _, err := run(c, writeCmd(f.Path, f.Data), f.Data); err != nil {
-				errs = append(errs, fmt.Errorf("push: write %s: %w", f.Path, err))
+			if _, err := p.run(ctx, c, writeCmd(f.Path, tok, f.Data), f.Data); err != nil {
+				err = fmt.Errorf("push: write %s: %w", f.Path, superseded(err))
+				if errors.Is(err, ErrSuperseded) || !exited(err) {
+					return res, errors.Join(append(errs, err)...)
+				}
+				errs = append(errs, err)
 				continue
 			}
 			wrote++
 		}
 	}
-	if _, err := run(c, applyCmd, nil); err != nil {
-		errs = append(errs, fmt.Errorf("push: reload: %w", err))
+	if _, err := p.run(ctx, c, applyCmd(tok), nil); err != nil {
+		errs = append(errs, fmt.Errorf("push: reload: %w", superseded(err)))
 	} else {
 		res.Applied = wrote > 0
 	}
@@ -137,7 +215,7 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 		return res, errors.Join(errs...)
 	}
 	for _, f := range files {
-		same, err := holds(c, f)
+		same, err := p.holds(ctx, c, f)
 		if err != nil {
 			return res, err
 		}
@@ -150,14 +228,14 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 
 // Watch runs Sync with cfg's files now and every interval until ctx ends,
 // reporting each outcome, so drift on the access point is pushed back
-// within one interval. cfg is read each time, so a new policy version or
+// within one interval; each Result carries the abandoned opens' count. cfg is read each time, so a new policy version or
 // a revoked password reaches the access point at the next tick.
 func (p *Pusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]ap.File, error), report func(Result, error)) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		files, err := cfg()
-		var res Result
+		res := Result{Abandoned: p.abandoned()}
 		if err == nil {
 			res, err = p.Sync(ctx, files)
 		}
@@ -170,9 +248,34 @@ func (p *Pusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]a
 	}
 }
 
+// abandoned is how many of p's session opens are still waiting after
+// their Sync stopped waiting for them.
+func (p *Pusher) abandoned() int { return int(p.left.Load()) }
+
+// exited reports whether err is a command's own failure, its exit
+// status, rather than the connection's.
+func exited(err error) bool {
+	var exit *ssh.ExitError
+	return errors.As(err, &exit)
+}
+
+// superseded marks err as ErrSuperseded when the access point refused
+// the command for a newer claim.
+func superseded(err error) error {
+	var exit *ssh.ExitError
+	if errors.As(err, &exit) && exit.ExitStatus() == refusedExit {
+		return fmt.Errorf("%w: %w", ErrSuperseded, err)
+	}
+	return err
+}
+
 func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 	if p.HostKey == nil || p.Signer == nil || p.Dial == nil {
 		return nil, errors.New("push: no pinned host key, enforcer key or admin-port dialer")
+	}
+	algos, err := hostKeyAlgos(p.HostKey)
+	if err != nil {
+		return nil, err
 	}
 	conn, err := p.Dial(ctx, "tcp", p.Addr)
 	if err != nil {
@@ -185,7 +288,7 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 		User:              "root",
 		Auth:              []ssh.AuthMethod{ssh.PublicKeys(p.Signer)},
 		HostKeyCallback:   ssh.FixedHostKey(p.HostKey),
-		HostKeyAlgorithms: []string{p.HostKey.Type()},
+		HostKeyAlgorithms: algos,
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, p.Addr, cfg)
 	if err != nil {
@@ -195,40 +298,120 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
-// The three commands. A path is always one of ap.Paths, which hold no
+// hostKeyAlgos is the host key algorithms the pinned key k may sign
+// with: its own for ed25519 and ECDSA, and for RSA only the SHA-2
+// signatures (rsa-sha2-512, rsa-sha2-256), never ssh-rsa's SHA-1, which
+// an RSA key's own type would allow (#4087). Any other type is refused.
+func hostKeyAlgos(k ssh.PublicKey) ([]string, error) {
+	switch t := k.Type(); t {
+	case ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521:
+		return []string{t}, nil
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}, nil
+	default:
+		return nil, fmt.Errorf("%w: %q", ErrHostKey, t)
+	}
+}
+
+// The commands. A path is always one of ap.Paths, which hold no
 // character a shell reads specially; the temporary file sits on /etc's
 // own filesystem, so mv replaces the file in one rename, and umask keeps
 // the passwords readable by root only.
+//
+// A Sync that times out closes the connection without waiting for the
+// command it was running, which can keep running on the access point
+// (ENF-g-10, #4313). So each Sync first claims the access point: under the
+// access point's lock (busybox flock on lockPath) it writes a fresh
+// random token to tokenPath and removes every temporary file. A write
+// reads stdin into a temporary file of its own path and token and checks
+// its hash with no lock held, so a write whose stdin never ends holds
+// nothing; only the move into place, and the reload, take the lock, and
+// they run only while tokenPath still holds their own Sync's token. A
+// command a timed-out Sync left behind therefore either moves its file
+// before the next Sync's claim, which waits for the lock, or finds the
+// newer token and does nothing but exit refusedExit: a late old write
+// cannot put back an older config, such as a revoked password. Reads
+// take no lock: mv
+// replaces a file in one rename. The lock and token are on the access
+// point's tmpfs, so a reboot, which ends every command, also clears them.
 const (
 	readPrefix = "cat "
-	applyCmd   = "reload_config"
+	lockPath   = "/tmp/agentos-ap.lock"
+	tokenPath  = "/tmp/agentos-ap.sync"
 )
 
-// tmpPath is the temporary file for path: one per path, so no two writes
-// share one, and on /etc's own filesystem.
-func tmpPath(path string) string {
-	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + ".new"
+// token is a Sync's claim on the access point: 128 random bits in hex.
+func token() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// locked runs cmd holding the access point's lock on file descriptor 9,
+// which the shell keeps open, and so the lock held, until cmd ends.
+func locked(cmd string) string {
+	return "{ flock -x 9 && " + cmd + "; } 9>" + lockPath
+}
+
+// owns is true on the access point only while tok is the newest claim;
+// otherwise its status is refusedExit, without ending the shell.
+func owns(tok string) string {
+	return "{ [ \"$(cat " + tokenPath + ")\" = " + tok + " ] || (exit " + fmt.Sprint(refusedExit) + "); }"
+}
+
+// tmpGlob matches every temporary file tmpPath names.
+const tmpGlob = "/etc/agentos-ap-*.new"
+
+// claimCmd makes tok the newest claim and removes the temporary files
+// of earlier Syncs, which a reboot mid-write would otherwise leave on
+// /etc. A write of an earlier Sync still running then fails its hash
+// check or its move. An access point with no timeout command, on which
+// every reload would fail, refuses the claim with noTimeoutExit, so
+// nothing is written that could not be applied (#4429).
+func claimCmd(tok string) string {
+	return locked("{ command -v timeout >/dev/null || exit " + fmt.Sprint(noTimeoutExit) + "; } && echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
+}
+
+// applyCmd reloads while tok is the newest claim, for reloadBound at
+// most. reload_config does not get the lock's descriptor, so nothing it
+// starts can hold the lock, nor the session's output, so nothing it
+// leaves running when the bound ends it holds the Sync's command open.
+// A reload_config that itself exits refusedExit exits 1, so only a newer
+// claim reads as ErrSuperseded (#4429).
+func applyCmd(tok string) string {
+	return locked(owns(tok) + " && { timeout " + fmt.Sprint(int(reloadBound/time.Second)) + " reload_config 9>&- </dev/null >/dev/null 2>&1 || { s=$?; [ $s = " +
+		fmt.Sprint(refusedExit) + " ] && s=1; exit $s; }; }")
+}
+
+// tmpPath is the temporary file for path in the Sync holding tok: one per
+// path and Sync, so no two writes share one, and on /etc's own
+// filesystem.
+func tmpPath(path, tok string) string {
+	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + "." + tok + ".new"
 }
 
 func readCmd(path string) string { return readPrefix + path }
 
-// writeCmd stores data at path: it reads stdin into the path's temporary
-// file and moves that over path only if the file's SHA-256 is data's, so
-// a stdin cut short (a dropped connection, a deadline) leaves path alone;
-// a failed move or check removes the temporary file. The hash is hex.
-func writeCmd(path string, data []byte) string {
+// writeCmd stores data at path while tok is the newest claim: it reads
+// stdin into the temporary file and, only if the file's SHA-256 is
+// data's, takes the lock and moves it over path while tok is the newest
+// claim, so a stdin cut short (a dropped connection, a deadline) leaves
+// path alone. Reading and the hash take no lock, so a stdin that never
+// ends holds up no other Sync. A failed check, a newer claim or a failed
+// move removes the temporary file and keeps the failure's status, so a
+// newer claim exits refusedExit. The hash is hex.
+func writeCmd(path, tok string, data []byte) string {
 	sum := sha256.Sum256(data)
-	t := tmpPath(path)
+	t := tmpPath(path, tok)
 	return "umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
-		" ] && mv -f " + t + " " + path + " || { rm -f " + t + "; false; }"
+		" ] && " + locked(owns(tok)+" && mv -f "+t+" "+path) + " || { s=$?; rm -f " + t + "; exit $s; }"
 }
 
 // holds reports whether the access point's file at f.Path is exactly
 // f.Data; a missing file is not.
-func holds(c *ssh.Client, f ap.File) (bool, error) {
-	out, err := run(c, readCmd(f.Path), nil)
-	var exit *ssh.ExitError
-	if errors.As(err, &exit) {
+func (p *Pusher) holds(ctx context.Context, c *ssh.Client, f ap.File) (bool, error) {
+	out, err := p.run(ctx, c, readCmd(f.Path), nil)
+	if exited(err) {
 		return false, nil // cat failed: absent or unreadable
 	}
 	if err != nil {
@@ -241,8 +424,8 @@ func holds(c *ssh.Client, f ap.File) (bool, error) {
 
 // run runs one command with stdin, returning at most MaxFile+1 bytes of
 // its output.
-func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
-	s, err := c.NewSession()
+func (p *Pusher) run(ctx context.Context, c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
+	s, err := p.open(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -263,4 +446,51 @@ func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
 		return nil, err
 	}
 	return b, rerr
+}
+
+// newSession opens a session channel; tests replace it.
+var newSession = (*ssh.Client).NewSession
+
+// open opens a session on c, bounded by ctx. Closing c does not always
+// end a NewSession (ENF-g-aplock-hang, #4441): golang.org/x/crypto/ssh
+// adds the new channel to the connection's list and sends the open
+// request, then waits for the answer. If the connection has already
+// ended, its read loop has already closed every channel it listed, so
+// it never closes this one, and the send can still report success,
+// because the transport records a failed write without returning it.
+// That NewSession waits forever, so open stops waiting when ctx ends,
+// which Sync's Timeout bounds. The goroutine left waiting then holds
+// only the closed connection; it is left only when a connection ends
+// in that window, since a Sync opens no session after a command it ran
+// ended without an exit status. The access point chooses when its
+// connection ends, so it can aim at that window: p counts each open
+// left waiting until it returns, closing the session it got, and Sync
+// refuses to run from MaxAbandoned on (ENF-g-aplock-leak, #4554).
+func (p *Pusher) open(ctx context.Context, c *ssh.Client) (*ssh.Session, error) {
+	type opened struct {
+		s   *ssh.Session
+		err error
+	}
+	done := make(chan opened)
+	gone := make(chan struct{})
+	ns := newSession
+	go func() {
+		s, err := ns(c)
+		select {
+		case done <- opened{s, err}:
+		case <-gone:
+			if s != nil {
+				s.Close()
+			}
+			p.left.Add(-1)
+		}
+	}()
+	select {
+	case o := <-done:
+		return o.s, o.err
+	case <-ctx.Done():
+		p.left.Add(1)
+		close(gone)
+		return nil, fmt.Errorf("push: open session: %w", ctx.Err())
+	}
 }

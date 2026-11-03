@@ -5,18 +5,19 @@ package childproc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
-	"go/importer"
 	"go/parser"
-	"go/token"
 	"go/types"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 // The canaries are synthetic (CLAUDE.md): an owner number in the
@@ -53,35 +54,41 @@ var surface = []string{
 	"Options: struct{Dir string; Stdin io.Reader; Stdout io.Writer; Stderr io.Writer; SysProcAttr *syscall.SysProcAttr; ExtraFiles []*os.File; WaitDelay time.Duration; KillGroup bool; OnCancel func()}",
 }
 
-// checkPkg type-checks the non-test Go files of dir, or src when given,
-// with the stdlib source importer (no new module).
-func checkPkg(t *testing.T, dir string, src map[string]string) *types.Package {
+var (
+	loadOnce sync.Once
+	loaded   *lintload.Loaded
+	loadErr  error
+)
+
+// checkPkg returns package childproc as the shared lint loader type-checks
+// it, failing on a file of it the loader leaves unread, or src type-checked
+// against the same export data when given.
+func checkPkg(t *testing.T, src map[string]string) *types.Package {
 	t.Helper()
-	fset := token.NewFileSet()
-	var files []*ast.File
-	if src == nil {
-		names, _ := filepath.Glob(filepath.Join(dir, "*.go"))
-		for _, n := range names {
-			if strings.HasSuffix(n, "_test.go") {
-				continue
-			}
-			f, err := parser.ParseFile(fset, n, nil, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files = append(files, f)
+	loadOnce.Do(func() {
+		loaded, loadErr = lintload.Load(".", lintload.Build{Also: []string{"fmt", "io", "os/exec", "reflect", "unsafe"}}, ".")
+		if loadErr == nil && len(loaded.Packages) != 1 {
+			loadErr = fmt.Errorf("loaded %d packages, want childproc alone", len(loaded.Packages))
 		}
-	} else {
-		for n, s := range src {
-			f, err := parser.ParseFile(fset, n, s, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files = append(files, f)
-		}
+	})
+	if loadErr != nil {
+		t.Fatal(loadErr)
 	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
-	pkg, err := conf.Check("childproc", fset, files, nil)
+	if src == nil {
+		if unread, err := lintload.Unread(loaded); err != nil || len(unread) != 0 {
+			t.Fatalf("files the check does not read: %q (%v)", unread, err)
+		}
+		return loaded.Packages[0].Types
+	}
+	var files []*ast.File
+	for n, s := range src {
+		f, err := parser.ParseFile(loaded.Fset, n, s, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	pkg, _, err := loaded.Check("childproc", files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +96,7 @@ func checkPkg(t *testing.T, dir string, src map[string]string) *types.Package {
 }
 
 func TestTheHandleIsOpaque(t *testing.T) {
-	pkg := checkPkg(t, ".", nil)
+	pkg := checkPkg(t, nil)
 	if bad := leaks(pkg); len(bad) > 0 {
 		t.Fatalf("childproc's API yields what it must not (brief D1):\n%s", strings.Join(bad, "\n"))
 	}
@@ -99,7 +106,7 @@ func TestTheHandleIsOpaque(t *testing.T) {
 }
 
 func TestOpaqueCheckCatchesALeak(t *testing.T) {
-	pkg := checkPkg(t, "", map[string]string{"x.go": `package childproc
+	pkg := checkPkg(t, map[string]string{"x.go": `package childproc
 import ("fmt"; "io"; "os/exec"; "reflect"; "unsafe")
 type A struct{ exec.Cmd }
 type B struct{ C *exec.Cmd }
@@ -170,7 +177,7 @@ func (d *D) Recv(c <-chan fmt.Stringer) {}
 
 // A changed result type changes the pin, not only a new name (#651 L3 1).
 func TestTheSurfacePinsSignatures(t *testing.T) {
-	pkg := checkPkg(t, "", map[string]string{"x.go": `package childproc
+	pkg := checkPkg(t, map[string]string{"x.go": `package childproc
 import "fmt"
 type C struct{ X int }
 func (C) Raw() fmt.Stringer { return nil }

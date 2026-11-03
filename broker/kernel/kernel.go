@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -23,34 +24,43 @@ const (
 	CExtension = "extension"  // the key cannot extend this hold
 	CHeld      = "held"       // the task is held until the owner extends it (LOG-7)
 	CBroken    = "log-broken" // a write failed: no spend until the log is reopened (KRN-5)
+	CErased    = "erased"     // the owner erased a subject the plan's lineage read before submitting it (LOG-4)
 )
+
+// Refusal is Admit's: the check, its step and a verified key's task (PLN-4).
+type Refusal struct {
+	key.Refusal
+	Step    *int
+	Session string
+}
 
 // Admit decides a submitted plan against the state. It is pure: the same state
 // and plan give the same answer in the live kernel, a replay and the sim (KRN-1).
 // The plan is authorized whole, every step charged against the ones before it.
-func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
+func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
-		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
+		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}}
 	}
 	if t := s.tripOf(p); t != nil {
-		return key.ID{}, nil, &key.Refusal{Code: CTrip, Detail: t.Cause}
+		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CTrip, Detail: t.Cause}}
 	}
 	if s.decoys.stopped {
-		return key.ID{}, nil, &key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}
+		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}}
 	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err != nil {
-		return key.ID{}, nil, &key.Refusal{Code: CKey, Detail: err.Error()}
+		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CKey, Detail: err.Error()}}
 	}
+	on := func(r *key.Refusal, step *int) *Refusal { return &Refusal{*r, step, v.Limits.Task} }
 	if r := Live(s, v, now); r != nil {
-		return key.ID{}, nil, r
+		return key.ID{}, nil, on(r, nil)
 	}
 	if r := OneOff(s, s.owners(p.Key), s.Anchors, p, now); r != nil {
-		return key.ID{}, nil, r
+		return key.ID{}, nil, on(r, nil)
 	}
 	if t := v.Limits.Task; t != "" {
 		if _, ok := s.Task(t, now); !ok {
-			return key.ID{}, nil, &key.Refusal{Code: CTask, Detail: "the key's task is not live"}
+			return key.ID{}, nil, on(&key.Refusal{Code: CTask, Detail: "the key's task is not live"}, nil)
 		}
 	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
@@ -59,15 +69,15 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	for i := range p.Steps {
 		st := p.Step(i)
 		if !key.Valid(st.Verb) {
-			return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}
+			return key.ID{}, nil, on(&key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}, &i)
 		}
 		if r := v.Authorize(st, ctx); r != nil {
-			return key.ID{}, nil, r
+			return key.ID{}, nil, on(r, &i)
 		}
 		if c, _ := key.ClassOf(st.Verb); c.Irreversible() {
 			fp := Fingerprint(st)
 			if fresh[fp] || repeats(s, v.Root(), st, p.ID, now) {
-				return key.ID{}, nil, &key.Refusal{Code: CDuplicate, Detail: string(st.Verb)}
+				return key.ID{}, nil, on(&key.Refusal{Code: CDuplicate, Detail: string(st.Verb)}, &i)
 			}
 			fresh[fp] = true
 		}
@@ -312,8 +322,12 @@ var ErrDuplicatePlan = errors.New("kernel: plan id already used")
 
 // Boot opens a kernel over a log: replay it, decide any plan that was
 // submitted but not decided, and mark every step that was in flight unknown,
-// to be probed (KRN-8). pinned is the image's pinned roots (Pin).
+// to be probed (KRN-8). pinned is the image's pinned roots (Pin). A Log
+// Open did not make is refused, so the kernel never reaches a nil record.
 func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, pinned ...key.Key) (*Kernel, error) {
+	if _, err := l.fields(); err != nil {
+		return nil, err
+	}
 	s, err := Replay(anchors, l.Entries(), pinned...)
 	if err != nil {
 		return nil, err
@@ -337,8 +351,10 @@ func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, p
 	return k, nil
 }
 
-func (k *Kernel) State() *State { return k.s }
-func (k *Kernel) Log() *Log     { return k.log }
+// Format prints no field in any verb, where fmt reaches a Kernel directly (DECOY-b-8).
+func (Kernel) Format(f fmt.State, _ rune) { fmt.Fprint(f, "kernel") }
+func (k *Kernel) State() *State           { return k.s }
+func (k *Kernel) Log() *Log               { return k.log }
 
 // emit logs first, then folds: a failed write leaves the state as it was.
 func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
@@ -470,7 +486,7 @@ type Admitted struct {
 // by one clerk or several, never share the same remaining budget (#2613 item
 // 1). One that is never settled stays charged at its worst case.
 func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *key.Refusal) {
-	if k.log.broken {
+	if (*k.log.p).broken {
 		// A call admitted now could not be metered, and may follow a
 		// widening whose anchor failed (KRN-5).
 		return Admitted{}, &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
@@ -566,7 +582,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	}
 	ext = logged[0]
 	h, ok := k.s.SpendHeld[plan]
-	if !ok {
+	if !ok || k.s.Plans[plan].Status != SActive { // an ended plan's hold releases nothing
 		return &key.Refusal{Code: CNotHeld, Detail: plan}
 	}
 	if r := k.citedLive(now, k.s.Plans[plan]); r != nil {
@@ -626,7 +642,7 @@ func (k *Kernel) owner(now int64, typ string, body any) error {
 	}
 	err := k.log.Anchor()
 	if err != nil && Widening(typ) {
-		k.log.broken = true
+		(*k.log.p).broken = true
 	}
 	return err
 }
@@ -685,6 +701,10 @@ func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 
 // Submit logs a plan and decides it at once.
 func (k *Kernel) Submit(now int64, p Plan) error {
+	p, err := asLogged(p) // decided as the log holds it, as Issue and Extend decide on keys
+	if err != nil {
+		return err
+	}
 	if k.s.Plans[p.ID] != nil {
 		return ErrDuplicatePlan
 	}
@@ -756,6 +776,9 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 // its finding in Outcome (done, notdone, unknown or OUnreached).
 func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
+	// A clerk's text is logged as JSON would write it (Log.Append refuses
+	// other text): nothing looks it up, so no answer is lost over it.
+	res.Outcome, res.Detail = strings.ToValidUTF8(res.Outcome, "\uFFFD"), strings.ToValidUTF8(res.Detail, "\uFFFD")
 	if c.Kind == ActProbe {
 		// Only a done step is listed: no other finding's line is logged.
 		if res.Outcome != "done" || !shown(res.Covered) {

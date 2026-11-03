@@ -1,0 +1,27 @@
+name: acceptance
+# A closed issue withdraws every assurance/vulncheck.json record that cites it, which fails each
+# vulncheck scan applying them (#2919 was closed while 71 image records cited it). On each close,
+# main's tools/vulncheck.py reopen reopens a cited issue with a comment and leaves any other
+# closed. The issue number is the only event value it reads, so no issue text reaches the shell.
+# tests/test_workflows.py pins every line.
+on:
+  issues:
+    types: [closed]
+permissions:
+  contents: read
+jobs:
+  reopen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # reopen a cited issue and comment on it
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Reopen the issue if a vulncheck record cites it (tools/vulncheck.py reopen)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: python3 -I tools/vulncheck.py reopen "$ISSUE"

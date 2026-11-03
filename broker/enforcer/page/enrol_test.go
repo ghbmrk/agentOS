@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -37,16 +38,30 @@ func (n *nopAlerts) Recovery(p bool)                                { n.recovery
 type enrolRig struct {
 	*rig
 	book *enrol.Book
+	bs   *bookStore
 	cert Cert
+}
+
+// bookStore is the book's store; with fail set, every save fails.
+type bookStore struct {
+	memStore
+	fail bool
+}
+
+func (b *bookStore) Save(raw []byte) error {
+	if b.fail {
+		return errors.New("store failed")
+	}
+	return b.memStore.Save(raw)
 }
 
 func newEnrolRig(t *testing.T) *enrolRig {
 	t.Helper()
-	bs := &memStore{}
+	bs := &bookStore{}
 	if err := enrol.Provision(bs, caseCode, nil); err != nil {
 		t.Fatal(err)
 	}
-	g := &enrolRig{rig: &rig{t: t, now: time.UnixMilli(1_800_000_000_000), remote: ownerAddr, ch: &fakeChannel{}}}
+	g := &enrolRig{rig: &rig{t: t, now: time.UnixMilli(1_800_000_000_000), remote: ownerAddr, ch: &fakeChannel{}}, bs: bs}
 	b, err := enrol.Open(enrol.Config{Name: rp, Store: bs, Network: &fakeNetwork{}, Alerts: &nopAlerts{}, Now: func() time.Time { return g.now }})
 	if err != nil {
 		t.Fatal(err)
@@ -258,5 +273,45 @@ func TestEnrolmentScreens(t *testing.T) {
 	}
 	if w := g.do(http.MethodGet, "/enrol", nil); !strings.Contains(w.Body.String(), "factory reset") {
 		t.Errorf("enrolment screen after reset:\n%s", w.Body)
+	}
+}
+
+// TestEnrolAnswerFollowsState (HW-10, NET-4; #4388 items 2 and 3): a
+// first enrolment whose save fails still answers with the Owner network's
+// card, so the owner, cut off from the setup network, can join it and
+// enrol again; the answer says whether this enrolment replaced the setup
+// network, so the screen does not tell an owner enrolling after a factory
+// reset that a setup network just went away.
+func TestEnrolAnswerFollowsState(t *testing.T) {
+	g := newEnrolRig(t)
+	a := newAuthenticator(t)
+	g.bs.fail = true
+	code, out := g.enrolAs(a, caseCode)
+	net, _ := out["network"].(map[string]any)
+	if code == http.StatusOK || out["error"] == "" || out["recovery"] != nil || net == nil || net["ssid"] != "Home" || net["qr"] == nil {
+		t.Fatalf("failed save: %d %v", code, out)
+	}
+	if net["setup_replaced"] != true {
+		t.Errorf("failed first enrolment: %v", net)
+	}
+	g.bs.fail = false
+	code, out = g.enrolAs(a, caseCode)
+	net, _ = out["network"].(map[string]any)
+	if code != http.StatusOK || out["recovery"] == nil || net == nil || net["setup_replaced"] != true {
+		t.Fatalf("first enrolment: %d %v", code, out)
+	}
+	if w := g.do(http.MethodPost, "/enrol/reset", map[string]string{"code": caseCode}); w.Code != http.StatusOK {
+		t.Fatalf("reset: %d %s", w.Code, w.Body)
+	}
+	code, out = g.enrolAs(newAuthenticator(t), caseCode)
+	net, _ = out["network"].(map[string]any)
+	if code != http.StatusOK || net == nil || net["setup_replaced"] != false {
+		t.Fatalf("enrolment after a reset: %d %v", code, out)
+	}
+	page := g.do(http.MethodGet, "/enrol", nil).Body.String()
+	for _, id := range []string{`id="net-new"`, `id="net-kept"`} {
+		if !strings.Contains(page, id) {
+			t.Errorf("enrolment screen lacks %s", id)
+		}
 	}
 }

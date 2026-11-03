@@ -515,7 +515,7 @@ func TestTheUnitWiresTheSetupFiles(t *testing.T) {
 		"LimitCORE":          {"0"},
 		// #1688: the mask below binds `+` commands too, so the hand-over is a unit of its own;
 		// the one `+` step is port 1's admission, which reads no state (HW12-port1-set).
-		"ExecStartPre": {"+/usr/lib/agentos/agentos-localui -admit-port1 -iface ${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1"},
+		"ExecStartPre": {"+/usr/lib/agentos/agentos-localui -admit-port1 -port1-file /run/agentos-localui/port1"},
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
@@ -1066,11 +1066,20 @@ func TestUnitAdmitsPort1AsRootAndClosesOnStop(t *testing.T) {
 	for k, want := range map[string][]string{
 		"RuntimeDirectory":     {"agentos-localui"},
 		"RuntimeDirectoryMode": {"0700"},
-		"ExecStartPre":         {"+/usr/lib/agentos/agentos-localui -admit-port1 -iface ${AGENTOS_PAGE_IFACE} -port1-file " + file},
+		"ExecStartPre":         {"+/usr/lib/agentos/agentos-localui -admit-port1 -port1-file " + file},
 		"ExecStopPost":         {"+/usr/sbin/nft flush set inet agentos_inbound page"},
 	} {
 		if got := set[k]; strings.Join(got, "|") != strings.Join(want, "|") {
 			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	// #4816: a root command takes nothing the manager's environment can set
+	// (DefaultEnvironment=, systemd.setenv=), so it cannot choose the link.
+	for _, k := range []string{"ExecStartPre", "ExecStopPost"} {
+		for _, l := range set[k] {
+			if strings.HasPrefix(l, "+") && strings.ContainsAny(l, "$%") {
+				t.Errorf("root %s takes a substitution: %s", k, l)
+			}
 		}
 	}
 	if len(set["ExecStart"]) != 1 || !strings.Contains(set["ExecStart"][0], " -port1-file "+file+" ") {

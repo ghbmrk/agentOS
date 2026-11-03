@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -20,7 +22,13 @@ import (
 // after every step of its file write (privfile.WriteAtomic: 0 create the
 // temporary, 1 write, 2 sync, 3 close, 4 rename, 5 sync the directory), as
 // a crash would, and the test checks that what the process holds and what
-// is on disk agree, then and after a restart.
+// is on disk agree, then and after a restart. A save stopped after its
+// rename is accounted for at the next start (#4368): an unnamed key and
+// an unlogged item are kept and reported (a stale log the anchor still
+// takes cannot tell them from a live subject's), the records file is
+// joined with the log, a snapshot is removed, a restore's staging is
+// removed by the next restore, and the anchor's whole file opens on no
+// head.
 
 // stopAt is a write stop that ends the write after step.
 func stopAt(step int) func(int) bool { return func(i int) bool { return i == step } }
@@ -47,7 +55,7 @@ func names(t *testing.T, dir string) []string {
 	return out
 }
 
-// REQ: STO-1, STO-2
+// REQ: STO-1, LOG-2
 // Enrollment's anchor start stopped at any step leaves either no head file,
 // so the anchor does not open and enrollment starts it again, or the whole
 // file, which opens on no head; never a file that opens on something else.
@@ -95,7 +103,7 @@ func fileContent(t *testing.T, b *bbox) (*FileKeys, *FileContent) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stores, err := OpenContentStores(b.cfg.ContentDir, b.cfg.Stores)
+	stores, _, err := OpenContentStores(b.cfg.ContentDir, b.cfg.Stores)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,10 +115,11 @@ func fileContent(t *testing.T, b *bbox) (*FileKeys, *FileContent) {
 
 // REQ: LOG-4
 // A subject whose key put is stopped is never opened: nothing is logged,
-// and after a restart the start names a key the put left whole as
-// unnamed, so the kernel's view of the table is what is on disk. A later
-// subject opens and seals. Revert mutant: OpenSubject logging before the
-// put (a stopped put leaves a logged subject with no key, Missing).
+// the next start removes a temporary the put left and names a key it
+// left whole as unnamed, so the kernel's view of the table is what is on
+// disk. A later subject opens and seals. Revert mutants: OpenSubject
+// logging before the put (a stopped put leaves a logged subject with no
+// key, Missing); OpenFileKeys keeping a temporary.
 func TestASubjectKeyPutCrashDuringTheFileWrite(t *testing.T) {
 	for step := range 6 {
 		b := newBBox(t, recipientWire(t, testRK))
@@ -135,6 +144,13 @@ func TestASubjectKeyPutCrashDuringTheFileWrite(t *testing.T) {
 		rep := b.h.Content()
 		if !slices.Equal(rep.Unnamed, onDisk) || len(rep.Missing) != 0 {
 			t.Fatalf("step %d: after a restart the start found %+v, on disk %q", step, rep, onDisk)
+		}
+		var want []string
+		for _, sub := range onDisk {
+			want = append(want, sub+keyExt)
+		}
+		if got := names(t, b.cfg.KeyDir); !slices.Equal(got, want) {
+			t.Fatalf("step %d: after a restart the table holds %q, want %q", step, got, want)
 		}
 		for _, sub := range onDisk {
 			err := b.h.With(func(k *kernel.Kernel) error {
@@ -163,9 +179,10 @@ func readsBack(t *testing.T, b *bbox, h kernel.Hash) bool {
 // REQ: LOG-4
 // An item whose store put is stopped is never logged: the kernel refuses
 // to read it, before and after a restart, whether the put left nothing,
-// a temporary (removed at the start) or the whole file, and the subject
-// seals again. Revert mutant: Seal logging before the put (a logged item
-// whose file is missing).
+// a temporary (removed at the start) or the whole file (kept, and named
+// by the start's Unlogged), and the subject seals again. Revert mutants:
+// Seal logging before the put (a logged item whose file is missing); the
+// start not reporting an unlogged item.
 func TestAContentPutCrashDuringTheFileWrite(t *testing.T) {
 	for step := range 6 {
 		b := newBBox(t, recipientWire(t, testRK))
@@ -204,6 +221,13 @@ func TestAContentPutCrashDuringTheFileWrite(t *testing.T) {
 		}
 		if got := names(t, b.storeDir()); len(got) != len(items) {
 			t.Fatalf("step %d: after a restart the store holds %q", step, got)
+		}
+		var want []string
+		for _, h := range items {
+			want = append(want, "vision/"+hex.EncodeToString(h[:]))
+		}
+		if got := b.h.Unlogged(); !slices.Equal(got, want) {
+			t.Fatalf("step %d: the start reported unlogged %q, want %q", step, got, want)
 		}
 		if h := b.seal(sub, []byte(canary)); !readsBack(t, b, h) {
 			t.Fatalf("step %d: the subject's next item does not read back", step)
@@ -288,8 +312,8 @@ func TestASnapshotCopyCrashDuringTheFileWrite(t *testing.T) {
 
 // REQ: BAK-1
 // A restored item's write stopped at any step leaves every item before it
-// whole and the stopped one either absent or whole, never torn; a restore
-// that fails there drops its staging (RestoreSections).
+// whole and the stopped one either absent or whole, never torn (the
+// staging is dropped with the restore: TestARestoreStoppedInAnItemWrite).
 func TestARestoredItemCrashDuringTheFileWrite(t *testing.T) {
 	first, second := []byte("first sealed item"), []byte("second sealed item")
 	for step := range 6 {
@@ -322,6 +346,296 @@ func TestARestoredItemCrashDuringTheFileWrite(t *testing.T) {
 		}
 		if len(want) != 0 {
 			t.Fatalf("step %d: missing %v", step, slices.Collect(maps.Keys(want)))
+		}
+	}
+}
+
+// stages lists the restore stagings in dir.
+func stages(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	for _, f := range names(t, dir) {
+		if strings.HasPrefix(f, restoreStage) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// REQ: BAK-1
+// A restore stopped in an item's write at any step returns the stop,
+// leaves the content folder absent and drops its staging, so no restored
+// item is in place; a restore that a crash cut off, which runs no defer,
+// leaves its staging, and the next restore removes it (#4368). Revert
+// mutants: the deferred RemoveAll dropped (a staging left after the
+// stop); RestoreSections not removing an old staging.
+func TestARestoreStoppedInAnItemWrite(t *testing.T) {
+	ct := []byte("a sealed item")
+	for step := range 6 {
+		parent := t.TempDir()
+		content := filepath.Join(parent, "content")
+		obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
+		stopped(t, step, restoreSections(obj, nil, content, stopAt(step)))
+		if _, err := os.Stat(content); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("step %d: the content folder is in place: %v", step, err)
+		}
+		if got := stages(t, parent); len(got) != 0 {
+			t.Fatalf("step %d: the staging stayed: %q", step, got)
+		}
+	}
+	parent := t.TempDir()
+	left := filepath.Join(parent, restoreStage+"crash", "vision")
+	if err := os.MkdirAll(left, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(left, itemName(sha256.Sum256(ct))), ct, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
+	if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); err != nil {
+		t.Fatal(err)
+	}
+	if got := stages(t, parent); len(got) != 0 {
+		t.Fatalf("a crashed restore's staging stayed after the next restore: %q", got)
+	}
+	if got := names(t, filepath.Join(parent, "content", "vision")); !slices.Equal(got, []string{itemName(sha256.Sum256(ct))}) {
+		t.Fatalf("the restore after the sweep put back %q", got)
+	}
+}
+
+// REQ: LOG-4
+// The start names an item as unlogged unless the log names it in that
+// store: a copy of a logged item in another store's folder is reported
+// and kept, and the logged one still reads. Revert mutant: unlogged
+// ignoring the store.
+func TestAnItemInAStoreTheLogDoesNotNameIsReported(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	h := b.seal(b.subject(), []byte(canary))
+	ct, err := os.ReadFile(filepath.Join(b.storeDir(), itemName(h)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(b.cfg.ContentDir, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, itemName(h)), ct, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.restart()
+	if got, want := b.h.Unlogged(), []string{"other/" + hex.EncodeToString(h[:])}; !slices.Equal(got, want) {
+		t.Fatalf("unlogged %q, want %q", got, want)
+	}
+	if got := names(t, other); len(got) != 1 || !readsBack(t, b, h) {
+		t.Fatalf("the other store holds %q, or the logged item does not read back", got)
+	}
+}
+
+// REQ: LOG-4
+// The start's stderr line counts each of a missing key, an unnamed key and
+// an unlogged item alone, and is empty when there is none.
+func TestTheStartReportCountsEachKind(t *testing.T) {
+	if got := startReport(kernel.ContentReport{}, nil); got != "" {
+		t.Fatalf("an empty start reports %q", got)
+	}
+	for _, c := range []struct {
+		r    kernel.ContentReport
+		u    []string
+		want string
+	}{
+		{kernel.ContentReport{Missing: []string{"a"}}, nil, "lacks 1 open subjects' keys and holds 0 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{Unnamed: []string{"a", "b"}}, nil, "lacks 0 open subjects' keys and holds 2 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{}, []string{"vision/00"}, "lacks 0 open subjects' keys and holds 0 keys no subject names; the stores hold 1 items"},
+		{kernel.ContentReport{Missing: []string{"a"}, Unnamed: []string{"b"}}, nil, "lacks 1 open subjects' keys and holds 1 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{Unnamed: []string{"b"}}, []string{"vision/00"}, "lacks 0 open subjects' keys and holds 1 keys no subject names; the stores hold 1 items"},
+	} {
+		if got := startReport(c.r, c.u); !strings.Contains(got, c.want) {
+			t.Fatalf("report %q, want %q", got, c.want)
+		}
+	}
+}
+
+// REQ: LOG-4
+// A stale copy of the log that the anchor still takes (the entries after
+// the last owner action are missing) opens and deletes nothing: the
+// subject it lacks is an unnamed key and its item an unlogged one, and
+// once the real log is back the item reads and nothing is missing
+// (Security, #4395). Revert mutant: the start deleting unnamed keys or
+// unlogged items.
+func TestAStaleLogTheAnchorTakesDeletesNothing(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.addTarget("drive", false)
+	old := b.logBytes()
+	sub := b.subject()
+	item := b.seal(sub, []byte(canary))
+	real := b.logBytes()
+	b.h.Close()
+	if err := os.WriteFile(b.cfg.Log, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if got := b.h.Content(); !slices.Equal(got.Unnamed, []string{sub}) || len(got.Missing) != 0 {
+		t.Fatalf("the stale start reported %+v, want only %s unnamed", got, sub)
+	}
+	if got, want := b.h.Unlogged(), []string{"vision/" + hex.EncodeToString(item[:])}; !slices.Equal(got, want) {
+		t.Fatalf("the stale start reported unlogged %q, want %q", got, want)
+	}
+	b.h.Close()
+	if err := os.WriteFile(b.cfg.Log, real, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if got := b.h.Content(); len(got.Missing)+len(got.Unnamed) != 0 || len(b.h.Unlogged()) != 0 {
+		t.Fatalf("with the real log back the start reported %+v and unlogged %q", got, b.h.Unlogged())
+	}
+	if !readsBack(t, b, item) {
+		t.Fatal("with the real log back the item does not read")
+	}
+}
+
+// REQ: LOG-4
+// Only an item file under its canonical name (lowercase hex, .item) is an
+// item: an uppercase-hex name, a bare hash or a short hash is neither
+// reported nor removed (#4414). Revert mutants: the start without its name
+// check or its length check (a short hash then stops the start).
+func TestOnlyACanonicalItemNameIsReportedUnlogged(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	h := sha256.Sum256([]byte("not logged"))
+	x := hex.EncodeToString(h[:])
+	odd := []string{strings.ToUpper(x) + itemExt, x, "ab" + itemExt}
+	for _, f := range odd {
+		if err := os.WriteFile(filepath.Join(b.storeDir(), f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.restart()
+	if got := b.h.Unlogged(); len(got) != 0 {
+		t.Fatalf("the start reported unlogged %q for non-item names", got)
+	}
+	if got := names(t, b.storeDir()); !slices.Equal(got, slices.Sorted(slices.Values(odd))) {
+		t.Fatalf("the store holds %q, want %q kept", got, odd)
+	}
+}
+
+// REQ: BAK-1
+// A restore holds the lock beside the content folder over its sweep and
+// its staging: a second restore into the same parent while the first is
+// writing is refused and removes nothing, the first then completes whole,
+// and once it is over the second runs (#4413). Revert mutants: no lock
+// (the second's sweep removes the first's live staging); the lock taken
+// after the sweep.
+func TestARestoreHoldsTheLockOverItsSweep(t *testing.T) {
+	ct := []byte("a sealed item")
+	sec := map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))}
+	parent := t.TempDir()
+	paused, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	first := objectWith(t, sec)
+	go func() {
+		once := false
+		done <- restoreSections(first, nil, filepath.Join(parent, "a"), func(int) bool {
+			if !once {
+				once = true
+				close(paused)
+				<-release
+			}
+			return false
+		})
+	}()
+	<-paused
+	if err := RestoreSections(objectWith(t, sec), nil, filepath.Join(parent, "b")); !errors.Is(err, ErrRestoreLocked) {
+		close(release)
+		<-done
+		t.Fatalf("a restore beside a running one: %v, want ErrRestoreLocked", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the first restore: %v", err)
+	}
+	want := []string{itemName(sha256.Sum256(ct))}
+	if got := names(t, filepath.Join(parent, "a", "vision")); !slices.Equal(got, want) {
+		t.Fatalf("the first restore put back %q", got)
+	}
+	if err := RestoreSections(objectWith(t, sec), nil, filepath.Join(parent, "b")); err != nil {
+		t.Fatalf("the second restore once the first is over: %v", err)
+	}
+	if got := names(t, filepath.Join(parent, "b", "vision")); !slices.Equal(got, want) {
+		t.Fatalf("the second restore put back %q", got)
+	}
+	if got := stages(t, parent); len(got) != 0 {
+		t.Fatalf("stagings left: %q", got)
+	}
+}
+
+// REQ: BAK-1
+// A restore that cannot take its lock, list the content folder's parent or
+// remove a crashed staging there stops with that error and puts nothing
+// in place, and so does one whose lock file is a FIFO, a link or open to
+// other uids (#4413, Security on #4457). Revert mutants: each of those
+// errors ignored; the lock opened without O_NOFOLLOW, without O_NONBLOCK
+// (the test hangs) or without its CheckFile.
+func TestARestoreStopsOnAParentItCannotUse(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the modes; CI runs these as a plain user")
+	}
+	ct := []byte("a sealed item")
+	for _, c := range []struct {
+		name string
+		mode os.FileMode
+		// at makes what c locks down, in parent, and returns it.
+		at func(parent string) string
+	}{
+		{"lock", 0o500, func(p string) string { return p }},
+		{"list", 0o300, func(p string) string {
+			// The lock is there already, so only the listing fails.
+			if err := os.WriteFile(filepath.Join(p, restoreLock), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"plain lock file", 0o700, func(p string) string {
+			// A FIFO would hang an open that waits for a writer.
+			if err := syscall.Mkfifo(filepath.Join(p, restoreLock), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"lock file closed to others", 0o700, func(p string) string {
+			if err := os.WriteFile(filepath.Join(p, restoreLock), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"lock file that is not a link", 0o700, func(p string) string {
+			own := filepath.Join(t.TempDir(), "own")
+			if err := os.WriteFile(own, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(own, filepath.Join(p, restoreLock)); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"remove", 0o500, func(p string) string {
+			left := filepath.Join(p, restoreStage+"crash")
+			if err := os.MkdirAll(filepath.Join(left, "vision"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return left
+		}},
+	} {
+		parent := t.TempDir()
+		dir := c.at(parent)
+		if err := os.Chmod(dir, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) })
+		obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
+		if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); err == nil || c.mode != 0o700 && !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("no %s: %v, want it refused", c.name, err)
+		}
+		os.Chmod(dir, 0o700)
+		if _, err := os.Stat(filepath.Join(parent, "content")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("no %s: the content folder is in place: %v", c.name, err)
 		}
 	}
 }

@@ -1,7 +1,10 @@
 package plan
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 )
 
@@ -23,11 +26,52 @@ type Body struct {
 	// Tools are the CLI's own tools, by namespace and name; any other
 	// tool, a hosted one above all, is refused.
 	Tools []Tool
+	// Meta is client_metadata's allowlist: each key the CLI sets, with the
+	// shape of its value (text, or text holding JSON). Any other key, or a
+	// value out of shape, is refused, so a CLI that starts sending more is
+	// a declaration change.
+	Meta map[string]Value
 	// Stream requires "stream": true, so the answer is the event stream
 	// whose last event the clerk meters (#3128 Security 1): the guest does
 	// not choose how its call is metered.
 	Stream bool
 }
+
+// Value is the declared shape of a JSON value. An object key is optional
+// unless Required names it, and any key not in Fields is refused.
+type Value struct {
+	Kind string
+	// Max is the most bytes a text, a map key or a JSON text may hold.
+	Max int
+	// Only, for a text, lists the only values it may take.
+	Only []string
+	// Null allows null in place of the value.
+	Null bool
+	// Fields are an object's keys.
+	Fields map[string]Value
+	// Required are the Fields an object must hold.
+	Required []string
+	// Each is a map's entry value, or the value a JSON text holds.
+	Each *Value
+}
+
+// The value kinds. A JSON text is a string holding one JSON value of shape
+// Each; the clerk sends its own encoding of it, so the provider parses
+// exactly what was checked, whatever its parser does with a repeated key.
+// Off is a flag that may only be false: a provider-read request the guest
+// does not get to make for the plan. Drop, only as an object's field, is a
+// key the clerk takes in any shape and never sends: guest data the provider
+// does not need (#4632).
+const (
+	KindText   = "text"
+	KindInt    = "int"
+	KindBool   = "bool"
+	KindOff    = "off"
+	KindObject = "object"
+	KindMap    = "map"
+	KindJSON   = "json"
+	KindDrop   = "drop"
+)
 
 // Tool is one declared tool. An empty Namespace is a tool outside any.
 type Tool struct{ Namespace, Name, Type string }
@@ -50,7 +94,7 @@ const (
 	bodyKey     = "key"     // an undeclared top-level key
 	bodyStore   = "store"   // store set to anything but false
 	bodyStream  = "stream"  // a declared stream not set to true
-	bodyMeta    = "meta"    // client_metadata not an object of strings
+	bodyMeta    = "meta"    // client_metadata not an object of declared keys holding short strings
 	bodyInput   = "input"   // an input item out of its declared types
 	bodyContent = "content" // a content part out of its declared types
 	bodyTool    = "tool"    // a tool undeclared, hosted or out of place
@@ -71,6 +115,14 @@ func (b *Body) validate() error {
 	}
 	if b.Stream && !contains(b.Keys, "stream") {
 		return fmt.Errorf("clerk: a streamed body declares its stream key")
+	}
+	if contains(b.Keys, "client_metadata") != (len(b.Meta) > 0) {
+		return fmt.Errorf("clerk: a body declares client_metadata together with its keys")
+	}
+	for k, v := range b.Meta {
+		if k == "" || (v.Kind != KindText && v.Kind != KindJSON) || v.Null || !v.valid(0) {
+			return fmt.Errorf("clerk: client_metadata key %q is out of shape", k)
+		}
 	}
 	for _, k := range b.Keys {
 		if contains(hostedKeys, k) {
@@ -125,10 +177,16 @@ func (b *Body) check(body []byte) ([]byte, string) {
 		if !ok {
 			return nil, bodyMeta
 		}
-		for _, v := range meta {
-			if _, text := v.(string); !text {
+		for k, v := range meta {
+			shape, declared := b.Meta[k]
+			if !declared {
 				return nil, bodyMeta
 			}
+			c, ok := shape.send(v)
+			if !ok {
+				return nil, bodyMeta
+			}
+			meta[k] = c
 		}
 	}
 	if t, ok := obj["tools"]; ok {
@@ -340,4 +398,134 @@ func remote(v any, key string, depth int) string {
 		}
 	}
 	return ""
+}
+
+// valid holds a declared shape to one kind with what that kind needs. A
+// JSON text sits only at the top, so check never needs to rewrite a value
+// below it; depth bounds a shape whose Each points back into itself.
+func (v Value) valid(depth int) bool {
+	if depth > maxDepth || (v.Kind != KindObject && v.Required != nil) {
+		return false
+	}
+	switch v.Kind {
+	case KindInt, KindBool, KindOff:
+		return v.Max == 0 && v.Only == nil && v.Fields == nil && v.Each == nil
+	case KindText:
+		return v.Max > 0 && v.Fields == nil && v.Each == nil
+	case KindObject:
+		for k, f := range v.Fields {
+			if k == "" || !(f.valid(depth+1) || f.dropped()) {
+				return false
+			}
+		}
+		for _, k := range v.Required {
+			if _, declared := v.Fields[k]; !declared {
+				return false
+			}
+		}
+		return len(v.Fields) > 0 && v.Max == 0 && v.Only == nil && v.Each == nil
+	case KindJSON:
+		if depth > 0 {
+			return false
+		}
+		fallthrough
+	case KindMap:
+		return v.Max > 0 && v.Only == nil && v.Fields == nil && v.Each != nil && v.Each.valid(depth+1)
+	}
+	return false
+}
+
+// dropped reports a field the clerk deletes unread: KindDrop and nothing
+// else, so a drop shape cannot also claim a cap or a list it never applies.
+func (v Value) dropped() bool {
+	return v.Kind == KindDrop && v.Max == 0 && v.Only == nil && !v.Null && v.Fields == nil && v.Required == nil && v.Each == nil
+}
+
+// send holds a top-level value to the shape and returns the value to send:
+// x itself, or for a JSON text the clerk's own encoding of what it checked.
+func (v Value) send(x any) (any, bool) {
+	if v.Kind != KindJSON || x == nil {
+		return x, v.check(x)
+	}
+	s, ok := x.(string)
+	if !ok || len(s) > v.Max {
+		return x, false
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var in any
+	if dec.Decode(&in) != nil {
+		return x, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return x, false
+	}
+	if !v.Each.check(in) {
+		return x, false
+	}
+	out, err := encodeJSON(in)
+	if err != nil || len(out) > v.Max {
+		return x, false
+	}
+	return string(out), true
+}
+
+// check holds x, which sits below any JSON text, to the shape.
+func (v Value) check(x any) bool {
+	if x == nil {
+		return v.Null
+	}
+	switch v.Kind {
+	case KindText:
+		s, ok := x.(string)
+		return ok && len(s) <= v.Max && (v.Only == nil || contains(v.Only, s))
+	case KindInt:
+		n, ok := x.(json.Number)
+		if !ok {
+			return false
+		}
+		_, err := strconv.ParseInt(string(n), 10, 64)
+		return err == nil
+	case KindBool:
+		_, ok := x.(bool)
+		return ok
+	case KindOff:
+		return x == false
+	case KindObject:
+		obj, ok := x.(map[string]any)
+		if !ok {
+			return false
+		}
+		for _, k := range v.Required {
+			if _, held := obj[k]; !held {
+				return false
+			}
+		}
+		for k, f := range obj {
+			shape, declared := v.Fields[k]
+			if shape.dropped() {
+				delete(obj, k)
+				continue
+			}
+			if !declared || !shape.check(f) {
+				return false
+			}
+		}
+		return true
+	default:
+		// valid admits a map or a top-level JSON text here, and send
+		// unwraps a JSON text before check; the kind test keeps a JSON
+		// shape, or one that skipped valid, closed rather than read as a
+		// map (TestCheckReadsOnlyAMapAsAMap).
+		obj, ok := x.(map[string]any)
+		if !ok || v.Kind != KindMap {
+			return false
+		}
+		for k, f := range obj {
+			if len(k) > v.Max || !v.Each.check(f) {
+				return false
+			}
+		}
+		return true
+	}
 }

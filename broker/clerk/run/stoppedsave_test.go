@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
@@ -194,6 +197,112 @@ func TestMailSettingsWriteStoppedAtEveryStepSignsInWithItsOwnPassword(t *testing
 		}
 		if s, err := readMail(dir); err != nil || s != b || sec.Len() != 1 {
 			t.Fatalf("setup run again: %+v, %v, %d slots", s, err, sec.Len())
+		}
+	}
+}
+
+// The record of read mail's save stopped after each step, through its
+// caller lastOpened (#4236): on a good read and on a failing read that
+// found read mail, the read's answer stands, the owner is told the record
+// could not be saved, and a restart (lastOpened loads the record afresh)
+// reads the record from before the stop until the rename, the new one
+// after. The next read saves, and the line goes.
+//
+// REQ: VRB-2, STO-2
+func TestASeenSaveStoppedThroughLastOpenedSaysSoAndKeepsOneWhole(t *testing.T) {
+	long := "<" + strings.Repeat("l", 9<<10) + ">" // a read mail whose headers fail the read
+	for _, failing := range []bool{false, true} {
+		for i := 0; i < writeSteps; i++ {
+			r := newSeenRig(t)
+			r.srv.Deliver("INBOX", mailFrom("old@example.test", "<o1@example.test>"), `\Seen`)
+			if _, st := r.opened("2026-07-01"); has(st.Lines, "could not save") {
+				t.Fatalf("first read: %v", st.Lines)
+			}
+			r.srv.Deliver("INBOX", mailFrom("sam@example.test", "<s1@example.test>"), `\Seen`)
+			if failing {
+				r.srv.Deliver("INBOX", "From: x@spam.test\nMessage-ID: "+long+"\n\nbody\n", `\Seen`)
+			}
+			got, st := r.openedStop(today, stopAt(i))
+			if got["sam@example.test"] != today || got["old@example.test"] == "" {
+				t.Fatalf("failing %v, stopped after step %d: LastOpened %v; the read's answer must stand", failing, i, got)
+			}
+			if !has(st.Lines, "I could not save my record of the mail you read") || has(st.Lines, "Unsubscribing is paused") != failing {
+				t.Fatalf("failing %v, stopped after step %d: the owner is told %v", failing, i, st.Lines)
+			}
+
+			rec, loaded := loadSeen(r.dir, testSealer(), r.slot) // what a restart reads
+			want := 1
+			if i >= renamed {
+				want = 2
+			}
+			if loaded != seenLoaded || rec.Log.Since != "2026-07-01" || len(rec.Log.Seen) != want {
+				t.Fatalf("failing %v, stopped after step %d: the record %+v (%v); want %d entries", failing, i, rec.Log, loaded, want)
+			}
+
+			if failing {
+				r.srv.Remove("INBOX", long)
+			}
+			got, st = r.opened(today)
+			if has(st.Lines, "could not save") || has(st.Lines, "began") || got["sam@example.test"] != today || got["old@example.test"] != "2026-07-01" {
+				t.Fatalf("failing %v, the read after a stop at step %d: opened %v, status %v", failing, i, got, st.Lines)
+			}
+			if rec, loaded := loadSeen(r.dir, testSealer(), r.slot); loaded != seenLoaded || len(rec.Log.Seen) != 2 {
+				t.Fatalf("failing %v, the read after a stop at step %d: the record %+v (%v)", failing, i, rec.Log, loaded)
+			}
+		}
+	}
+}
+
+// The senders record's save stopped after each step, through its caller
+// readSenders (#4236): the step's read stands in memory, so the running
+// host's world holds the new sender; a restarted host reads the record from
+// before the stop until the rename, the new one after; and its read through
+// gives the same senders. The host's read goes through openMail, so the
+// record of read mail's save stops too, and the owner is told (#4613).
+//
+// REQ: VRB-2, D-141, STO-2
+func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
+	for i := 0; i < writeSteps; i++ {
+		srv := imaptest.Start(t)
+		srv.DeliverAt("INBOX", day(0), mailFrom("old@old.test", "<o1@old.test>"))
+		ctx, cancel := context.WithCancel(t.Context())
+		r := newSendersRigCtx(t, ctx, srv, nil)
+		r.full(t)
+		cancel()
+		r.idle()
+		slot := slotOf(mustRead(t, r.dir))
+
+		srv.DeliverAt("INBOX", day(1), mailFrom("new@new.test", "<n1@new.test>"))
+		r.cfg.saveStop = stopAt(i)
+		ctx, cancel = context.WithCancel(t.Context())
+		r.openCtx(t, ctx) // the record loads from disk, and each save stops
+		eventually(t, "the new sender", func() bool { return slices.Contains(r.h.world().KnownSenders, "new@new.test") })
+		cancel()
+		r.idle()
+		if w := r.h.world(); !slices.Equal(w.KnownSenders, []string{"new@new.test", "old@old.test"}) {
+			t.Fatalf("stopped after step %d: the running host's senders %v", i, w.KnownSenders)
+		}
+		// The host's read went through openMail, which hands the stop to
+		// lastOpened: the record of read mail's save stopped too (#4613).
+		if !has(r.h.status().Lines, "I could not save my record of the mail you read") {
+			t.Fatalf("stopped after step %d: the owner is told %q", i, r.h.status().Lines)
+		}
+
+		rec := loadSenders(r.dir, testSealer(), slot) // what a restart reads
+		if !rec.Rec.Complete() || rec.Rec.Senders["old@old.test"] == 0 || (rec.Rec.Senders["new@new.test"] != 0) != (i >= renamed) {
+			t.Fatalf("stopped after step %d: the record holds %v; want the record %s the rename", i, rec.Rec.Senders, map[bool]string{false: "before", true: "after"}[i >= renamed])
+		}
+
+		r.cfg.saveStop = nil
+		r.openCtx(t, t.Context()) // the restarted host
+		if w := r.full(t); !slices.Equal(w.KnownSenders, []string{"new@new.test", "old@old.test"}) {
+			t.Fatalf("restarted after a stop at step %d: senders %v", i, w.KnownSenders)
+		}
+		if has(r.h.status().Lines, "could not save") {
+			t.Fatalf("restarted after a stop at step %d: the owner is told %q", i, r.h.status().Lines)
+		}
+		if rec := loadSenders(r.dir, testSealer(), slot); rec.Rec.Senders["new@new.test"] == 0 {
+			t.Fatalf("restarted after a stop at step %d: the next save did not keep the new sender: %v", i, rec.Rec.Senders)
 		}
 	}
 }

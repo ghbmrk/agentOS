@@ -3,11 +3,11 @@ package radio
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -21,10 +21,6 @@ import (
 // probeArg makes this test binary the probe stack: it serves the BLE
 // interface on fd 3 and, asked to read, reports what it could reach.
 const probeArg = "radio-probe-stack"
-
-// idleArg makes this test binary a process that waits for its stdin to
-// close: the probe's ptrace target.
-const idleArg = "radio-probe-idle"
 
 const nestedEnv = "AGENTOS_RADIO_USERNS"
 
@@ -42,8 +38,12 @@ func TestMain(m *testing.M) {
 		probeNet(os.Args[2], os.Args[3], os.Args[4])
 		return
 	}
-	if len(os.Args) == 2 && os.Args[1] == idleArg {
-		io.Copy(io.Discard, os.Stdin)
+	if len(os.Args) == 2 && os.Args[1] == faultArg {
+		faultStack()
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == sleepArg {
+		time.Sleep(time.Hour)
 		return
 	}
 	os.Exit(m.Run())
@@ -84,7 +84,12 @@ func probeStack(policy, page string) {
 	out["AF_BLUETOOTH socket"] = try(sock(31))
 	out["unshare a user namespace"] = try(syscall.Unshare(syscall.CLONE_NEWUSER))
 	out["setuid 0"] = try(syscall.Setuid(0))
-	out["ptrace"] = ptraceChild(try)
+	out["ptrace"] = ptraceSelf(try)
+	if e := threadCall(syscall.SYS_FORK, [6]uintptr{}); e != 0 {
+		out["start a process"] = try(e)
+	} else {
+		out["start a process"] = "allowed"
+	}
 	out["AF_UNIX socket (the system bus)"] = try(sock(syscall.AF_UNIX))
 	var st syscall.Stat_t
 	out["inherited fd 100"] = try(syscall.Fstat(leakedFD, &st))
@@ -102,36 +107,24 @@ func probeStack(policy, page string) {
 	})
 }
 
-// ptraceChild seizes a child the probe started, so the probe never touches
-// a process it did not start: attaching to pid 1 stopped the runner's init
-// (#4091). PTRACE_SEIZE runs PTRACE_ATTACH's permission checks without
-// stopping the tracee.
+// ptraceSelf seizes the probe itself, so it never touches a process it did
+// not start (attaching to pid 1 stopped the runner's init, #4091), and
+// needs no child, which a confined stack cannot start (#4521).
+// PTRACE_SEIZE runs PTRACE_ATTACH's checks without stopping the tracee.
 //
-// A refused seize alone does not show the filter: the kernel also answers
-// EPERM under Yama's ptrace_scope 2, and ESRCH for a child that has gone
-// (#4116). So the probe first sends a malformed seize, with a nonzero addr,
-// which the kernel answers EIO before it checks any permission or the
-// target's state (ptrace_attach), or ESRCH when no such pid exists. Only a
-// filter in front of the call turns it into EPERM, so a confined "refused" needs both seizes to read EPERM,
-// and the unconfined control needs the seize to succeed and the malformed
-// one to read EIO. Anything else is no verdict. It takes the probes' try
-// for their shared call, but no single error is a verdict here.
-func ptraceChild(func(error) string) string {
-	cmd := exec.Command("/proc/self/exe", idleArg)
-	stdin, err := cmd.StdinPipe()
-	if err == nil {
-		err = cmd.Start()
-	}
-	if err != nil {
-		return fmt.Sprintf("untested: no target: %v", err)
-	}
-	defer func() {
-		cmd.Process.Kill()
-		stdin.Close()
-		cmd.Wait()
-	}()
+// A refused seize alone does not show the filter: the kernel answers EPERM
+// to a seize of the caller's own thread group, and under Yama's
+// ptrace_scope 2 (#4116). So the probe also sends a malformed seize, with
+// a nonzero addr, which the kernel answers EIO before it checks the target
+// or any permission (ptrace_attach). Only a filter in front of the call
+// turns it into EPERM, so a confined "refused" needs both seizes to read
+// EPERM, and "allowed" (the call reaches the kernel's ptrace_attach, as it
+// would for a target the stack may trace) needs the malformed one to read
+// EIO. Anything else is no verdict. It takes the probes' try for their
+// shared call, but no single error is a verdict here.
+func ptraceSelf(func(error) string) string {
 	seize := func(addr uintptr) syscall.Errno {
-		_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, 0x4206 /* PTRACE_SEIZE */, uintptr(cmd.Process.Pid), addr)
+		_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, 0x4206 /* PTRACE_SEIZE */, uintptr(os.Getpid()), addr)
 		return e
 	}
 	malformed := seize(1)
@@ -140,11 +133,24 @@ func ptraceChild(func(error) string) string {
 	switch {
 	case malformed == syscall.EPERM && e == syscall.EPERM:
 		return "refused"
-	case malformed == syscall.EIO && e == 0:
+	case malformed == syscall.EIO:
 		return "allowed"
 	}
 	return fmt.Sprintf("untested: malformed seize %d, seize %d", malformed, e)
 }
+
+// probeView widens a profile's view by what this test binary needs to run
+// as its stack: the loader, since it links cgo (net) and so is dynamic,
+// while the enforcer's binary is static (image/build.sh); and /proc,
+// which the probes read for their interfaces and status. The policy and the page stay
+// outside the view.
+func probeView(p confine.Profile) confine.Profile {
+	p.View = slices.Concat(p.View, confine.Loader(), []confine.Entry{{Path: "/proc", Kind: confine.Dir}})
+	return p
+}
+
+// bleProbe is the BLE profile widened by probeView.
+func bleProbe(uid uint32) confine.Profile { return probeView(confine.BLE(uid, uid)) }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
 // again as root of a user namespace that maps the runner's subordinate ids
@@ -222,7 +228,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	bin := filepath.Join(state, "radio.test")
 	copyFile(t, os.Args[0], bin)
 
-	read := func(t *testing.T, conn Conn) map[string]string {
+	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
 		// The host's read loop outlives the subtest (its link ends when the
 		// deferred Stop runs), so its log goes to a sink, not to t.
 		h, err := NewHost(Config{Devices: []Device{scale}, Timeout: 20 * time.Second,
@@ -230,7 +236,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.Attach(StackBLE, conn)
+		h.Attach(StackBLE, p, conn)
 		b, err := h.State(scale.Name)
 		if err != nil {
 			t.Fatalf("read through the interface: %v", err)
@@ -242,7 +248,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		return got
 	}
 
-	t.Run("confined", func(t *testing.T) {
+	confinedProbe := func(t *testing.T, p confine.Profile) {
 		f, err := syscall.Open(policy, syscall.O_RDONLY, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -252,19 +258,19 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		syscall.Close(f)
 		defer syscall.Close(leakedFD)
-		proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
+		proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer proc.Stop()
-		got := read(t, conn)
+		got := read(t, proc, conn)
 		for k, v := range got {
 			t.Logf("%-32s %s", k, v)
 		}
 		for _, k := range []string{"read the policy", "write the policy store", "dial the page",
 			"AF_INET socket", "AF_INET6 socket", "AF_NETLINK socket", "AF_PACKET socket",
-			"AF_BLUETOOTH socket", "unshare a user namespace", "setuid 0", "ptrace", "inherited fd 100"} {
+			"AF_BLUETOOTH socket", "unshare a user namespace", "setuid 0", "ptrace", "start a process", "inherited fd 100"} {
 			if !strings.HasPrefix(got[k], "refused") {
 				t.Errorf("confined stack: %s %s", k, got[k])
 			}
@@ -275,7 +281,18 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		if got["interfaces"] != "lo" {
 			t.Errorf("the stack sees interfaces %q, want lo only", got["interfaces"])
 		}
-	})
+	}
+	// The view alone hides the policy and the page (ENOENT), so the
+	// stack's user is checked as a barrier of its own, without a view,
+	// as the stacks that have none (#4369) rely on it.
+	userOnly := confine.BLE(4242, 4242)
+	userOnly.View = nil
+	for _, c := range []struct {
+		name string
+		p    confine.Profile
+	}{{"confined", bleProbe(4242)}, {"confined by its user alone", userOnly}} {
+		t.Run(c.name, func(t *testing.T) { confinedProbe(t, c.p) })
+	}
 
 	t.Run("unconfined control", func(t *testing.T) {
 		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
@@ -291,8 +308,8 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		theirs.Close()
 		defer func() { cmd.Process.Kill(); cmd.Wait() }()
-		got := read(t, ours)
-		for _, k := range []string{"read the policy", "dial the page", "AF_INET socket", "ptrace"} {
+		got := read(t, exited{}, ours)
+		for _, k := range []string{"read the policy", "dial the page", "AF_INET socket", "ptrace", "start a process"} {
 			if got[k] != "allowed" {
 				t.Errorf("unconfined probe: %s %s; the probe cannot see a missing confinement", k, got[k])
 			}
@@ -300,7 +317,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	})
 
 	t.Run("no socket families", func(t *testing.T) {
-		p := confine.BLE(4242, 4242)
+		p := bleProbe(4242)
 		p.Families = nil
 		proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
@@ -308,7 +325,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer proc.Stop()
-		if got := read(t, conn); got["AF_UNIX socket (the system bus)"] != "refused" {
+		if got := read(t, proc, conn); got["AF_UNIX socket (the system bus)"] != "refused" {
 			t.Errorf("a profile with no families opened a socket: %v", got)
 		}
 	})

@@ -29,7 +29,7 @@ concurrency:
 jobs:
   render:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -72,7 +72,7 @@ jobs:
   commit:
     needs: render
     if: needs.render.outputs.rendered == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
     # only, so branch workflows cannot read it (decision #1769).
@@ -110,7 +110,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -qC "$BRANCH"
-          git commit -qm "board: render BOARD.md from the work-item issues" -- BOARD.md
+          # Bot-Run names this run, whose artifact premerge --bot compares the PR with (MAIN-PROT-3, #757).
+          git commit -qm "board: render BOARD.md from the work-item issues" -m "Bot-Run: $GITHUB_RUN_ID" -- BOARD.md
           # Rebuilt from main each run, so the PR stays up to date with main.
           git push -qf origin "HEAD:refs/heads/$BRANCH"
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then

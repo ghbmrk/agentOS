@@ -41,9 +41,7 @@ func sentReply(t *testing.T) (*rig, func(id, rec, body string) journal.Status, t
 	t.Helper()
 	r, reply := replyRig(t)
 	reply("reply-1/r1", "thr-1", "Thanks, got it.")
-	r.advance(11 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(11 * time.Minute)
 	st := r.state("reply-1/r1")
 	if st.State != journal.Succeeded {
 		t.Fatalf("r1: %s", st.State)
@@ -63,18 +61,14 @@ func TestAnAutoReplysUndoWindowNeverConfirmsARepeat(t *testing.T) {
 	if st := reply("reply-1/r2", "thr-1", "Thanks, got it."); st.State != journal.Pending || len(r.own.queued) != 2 {
 		t.Fatalf("r2: %s %q, queued %d", st.State, st.Permission.Reason, len(r.own.queued))
 	}
-	r.advance(9*time.Minute + 30*time.Second)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(9*time.Minute + 30*time.Second)
 	st := r.state("reply-1/r1")
 	if st.State != journal.Succeeded {
 		t.Fatalf("r1: %s", st.State)
 	}
 	went := st.Attempts[0].Dispatched
 	asked := r.own.count()
-	r.advance(time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(time.Minute)
 	if st := r.state("reply-1/r2"); st.State != journal.Pending || r.exec.runs("reply-1/r2") != 0 {
 		t.Fatalf("r2 after its undo window: %s %q, ran %d", st.State, st.Permission.Reason, r.exec.runs("reply-1/r2"))
 	}
@@ -219,9 +213,7 @@ func TestTheDispatchRecheckRefusesAnApprovalThatDidNotSeeTheSendGo(t *testing.T)
 	if it.Retried.IsZero() {
 		t.Fatalf("s2's ask %+v, want it marked may go twice", it)
 	}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	approveLast(t, r)
 	st := r.state("agent/s2")
 	for end := time.Now().Add(10 * time.Second); st.State == journal.Pending && time.Now().Before(end); st = r.state("agent/s2") {

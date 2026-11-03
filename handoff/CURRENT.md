@@ -15,9 +15,9 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-096** Includes SPEC one log (SIM-sd) and the scope freeze and PR cap (off-gate scope frozen until G2 passes; open PRs capped at about 10 per lane; the cap was replaced by the scope-overlap conflict guard in D-111).
 - **D-097** Pull-first (STATUS is the primary owner view, only urgent classes pushed, daily digest removed) and key erasure.
 - **D-099** Both subscriptions are equal peers; no main one, no lane restriction between them, except during the D-139 migration until the old core is deleted (§3).
-- **D-128** G1 proven (run 39042850372); the G1 freeze (D-118) is off and the G2 freeze is on: until A4, A5, A9 and A14 pass on a VM, PRs touch only `tools/g1_scope_g2.txt` paths (the `g1-freeze` check runs every gate list). D-098 rows stay frozen.
+- **D-306** No path freeze (retires D-128's G2 freeze and D-198): any row's paths may be built; D-098 rows stay frozen.
 - The session posting the last required accept arms the merge (head = accepted head, CI green, OPERATING §7; D-120); PRs matching `tools/premerge.py --needs-mark` also need a separate Security accept at an equal head, and no PR waits for Mark's line (D-137). Asks to Mark are cards, never typed phrases.
-- **D-121** Speed rules (OPERATING §5): run CI's exact commands (and a `-count=N` stress run on new concurrency tests) before a PR or verdict; briefs pre-approve their guard files (`tools/risk_tier.py` class, `broker/daemon/arc2_test.go` allowlist, `tools/g1_scope.txt`); readiness reads the code; one push per round; on the G1 critical path stack on a review-accepted interface and run disjoint packages in parallel; tier-A builders on Opus, B/C on Sonnet, no model switch mid-session; fix a flake the second time. Tier A keeps two reviews (Security; Potency/UX/L3).
+- **D-121** Speed rules (OPERATING §5): run CI's exact commands (and a `-count=N` stress run on new concurrency tests) before a PR or verdict; briefs pre-approve their guard files (`tools/risk_tier.py` class, `broker/daemon/arc2_test.go` allowlist); readiness reads the code; one push per round; on the G1 critical path stack on a review-accepted interface and run disjoint packages in parallel; tier-A builders on Opus, B/C on Sonnet, no model switch mid-session; fix a flake the second time. Tier A keeps two reviews (Security; Potency/UX/L3).
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
 
@@ -43,10 +43,9 @@ Written by sub A at Mark's request. Sub B is already building here, so this snap
 1. Reviews owed on open PRs come before new builds. Use the one-thread shape above, and the last accept arms, whichever sub posts it.
 2. Before starting any row, check its issue for a claim and for merged work (`git log origin/main -- <dir>`), and check open PRs for overlapping files (D-111). Rows that read `queued` may already be merged or claimed.
 3. Then, in order: the UPD-5 requalification chain, deletion rows (D-245; kernel-lane rows one at a time across both subs), then the new-capability lanes in their own directories (enforcer, HomeKit, camera, vision, device slot, Withings, decoys, the CLK-8 line).
-4. **The G2 freeze is on** unless Mark retires it (card cmsg_01R91wiieBzMSvPKFsAJVvuKJDWtBhdEt62BCTwsh3PznR, recommended A, retire). A build PR outside `tools/g1_scope_g2.txt` (for example `broker/enforcer/`, `broker/vision/`, `broker/decoy/`, `device/` or a new `broker/cmd/agentos-*`) needs an `exempt-pr N` line naming its own number, so open the build PRs first. Then add their lines in one companion PR with its own Security accept (D-198), and re-run `g1-freeze` once it merges. Rows that share `image/` or `broker/core/core.txt` run one at a time.
+4. Rows that share `image/` or `broker/core/core.txt` run one at a time.
 
 **Waiting on Mark**
-- The G2-freeze card above.
 - The Muse and then Grok supervised capture: he said yes on 2026-10-29. The recorder refuses by default, and the Contributor-mode step sends no prompt.
 - The PREMERGE App settings steps (#3405).
 - Buying the OpenWrt One (D-228).

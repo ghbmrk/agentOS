@@ -28,7 +28,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/radio"
 )
 
-// SystemBus is the system bus's socket.
+// SystemBus is the system bus's socket, the one file confine.BLE's view
+// shows the stack: the same path as confine.SystemBus, which this package
+// cannot import (TestBusIsTheViewsBus holds them equal).
 const SystemBus = "/run/dbus/system_bus_socket"
 
 // Device is one device the stack serves: the host's name for it, its

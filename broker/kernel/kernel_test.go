@@ -68,7 +68,7 @@ func (r *rig) tick(now int64) error {
 }
 
 func cfg(r *rig) kernel.Config {
-	return kernel.Config{Store: r.store, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv,
+	return kernel.Config{Store: r.store, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Key: logKey,
 		Rand: rand.NewChaCha8([32]byte{1})}
 }
 
@@ -827,6 +827,56 @@ func TestPlanTextMustBeUTF8(t *testing.T) {
 	if r.status("p1") != kernel.SRejected || len(r.mail.Effects()) != 0 {
 		t.Fatalf("non-UTF-8 plan: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
 	}
+}
+
+// A plan ID that is not UTF-8 is decided as the log holds it, and no call
+// logs a string the log's JSON would rewrite, so nothing acts on an ID its
+// caller did not name or panics looking up the one it did (KRN-1, #4719).
+// Catches Submit deciding under the caller's ID after the log rewrote it,
+// which found no plan and panicked, and a cancel, undo or pool entry naming
+// a plan or pool the caller never named.
+func TestTextTheLogRewritesIsNeverActedOn(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Submit(0, r.sign(kernel.Plan{ID: "q\xff", Key: r.ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})))
+	if r.status("q\ufffd") != kernel.SRejected {
+		t.Fatalf("a plan the holder did not sign as logged: %s", r.status("q\ufffd"))
+	}
+	r.plan("p\ufffd", r.ck, st(key.Trash, "m1"))
+	if err := r.k.Submit(0, r.sign(kernel.Plan{ID: "p\xff", Key: r.ck, Steps: []kernel.PlanStep{st(key.Trash, "m2")}})); !errors.Is(err, kernel.ErrDuplicatePlan) {
+		t.Fatalf("a plan logged under a used ID: %v", err)
+	}
+	n := len(r.k.Log().Entries())
+	for name, call := range map[string]func() error{
+		"cancel":  func() error { return r.k.Cancel(1, "p\xff") },
+		"undo":    func() error { return r.k.Undo(1, "p\xff", 0) },
+		"read":    func() error { return r.k.ReadPool(1, "x\xff", []kernel.WindowReading{{Window: "w", Used: 1}}) },
+		"reserve": func() error { return r.k.Reserve(1, "x\xff", 10) },
+	} {
+		if err := call(); !errors.Is(err, kernel.ErrNotText) {
+			t.Errorf("%s of a name the log rewrites: %v", name, err)
+		}
+	}
+	if len(r.k.Log().Entries()) != n || r.status("p\ufffd") != kernel.SActive {
+		t.Fatalf("a refused call logged: %d entries, p is %s", len(r.k.Log().Entries())-n, r.status("p\ufffd"))
+	}
+	// Valid U+FFFD, and a backslash before "ufffd", are text as given.
+	must(t, r.k.ReadPool(1, "x\\ufffd", []kernel.WindowReading{{Window: "w", Used: 1}}))
+	must(t, r.k.Cancel(1, "p\ufffd"))
+	if _, read := r.k.State().Pools["x\\ufffd"]; r.status("p\ufffd") != kernel.SCancelled || !read {
+		t.Fatalf("valid text refused: p is %s", r.status("p\ufffd"))
+	}
+	// A clerk's answer in other text is logged, not lost.
+	r.plan("p2", r.ck, st(key.Trash, "m1"))
+	calls, err := r.k.Calls(2)
+	must(t, err)
+	if len(calls) != 1 {
+		t.Fatalf("%d calls, want p2's one", len(calls))
+	}
+	must(t, r.k.Answer(2, calls[0], kernel.Result{Outcome: "done\xff", Detail: "d\xff"}))
+	if got := r.k.State().Plans["p2"].Steps[0]; got.Detail != "d\ufffd" {
+		t.Fatalf("an answer in other text: %+v", got)
+	}
+	rederives(t, r)
 }
 
 // park runs plan p1 (one trash step) with every answer lost until the step

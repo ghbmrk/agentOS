@@ -44,13 +44,22 @@ var exempt = map[string]string{
 	// seccomp filter and exec the stack (syscall.Exec) with an empty
 	// environment. Same reason and same limits as the loader.
 	"enforcer/radio/confine": "the enforcer's radio launcher starts and execs the confined radio stacks; enforcer code cannot import childproc (ENF-k)",
+	// The source lints' shared loader (REV-CHK-lintload, #4273) runs go
+	// list. Only _test.go files import it, which its own
+	// TestOnlyTestsImportTheLoader holds, so no shipped binary links it.
+	"internal/lintload": "the source lints' loader runs go list; only _test.go files import it (TestOnlyTestsImportTheLoader)",
 }
 
 // within names the exempt packages, by the same key, that are cut only
-// from the paths of importers under one directory; any other importer
-// reaches os/exec through them and fails the gate (#3754 Security 1).
+// from the paths of importers under the directories it lists (separated
+// by spaces), or, for an entry written "=dir", from that one package and
+// not its subpackages; any other importer reaches os/exec through them
+// and fails the gate (#3754 Security 1). The enforcer's daemon (ENF-l,
+// #3670) is enforcer code outside broker/enforcer, held to the enforcer's
+// imports by arc2_test.go (enforcerMain), which checks that one package
+// only, so the cut is that one package's too (#4755 item 9).
 var within = map[string]string{
-	"enforcer/nft/load":      "enforcer",
+	"enforcer/nft/load":      "enforcer =cmd/agentos-enforcer",
 	"enforcer/radio/confine": "enforcer",
 }
 
@@ -63,7 +72,7 @@ var within = map[string]string{
 var inPlace = map[string]string{
 	// STO-2b-1 (#2884): after dropping to the kernel's ids, the unlock
 	// step replaces itself with the kernel main, with an empty environment
-	// and only the key pipe on fd 3, so no root process lives on with the
+	// and only the key pipe on handoff.KeyFD, so no root process lives on with the
 	// store key.
 	"cmd/agentos-unlock": "execs the kernel main in place after its privilege drop (STO-2b-1)",
 }
@@ -212,12 +221,23 @@ func gate(t *testing.T, dir, mod string, exempt, within, inPlace map[string]stri
 	cut := func(p string) bool { return p == mod+"/childproc" || exempt[key(p)] != "" }
 	// cutFrom: whether the edge from importer to p is cut.
 	cutFrom := func(importer, p string) bool {
-		d, ok := within[key(p)]
+		ds, ok := within[key(p)]
 		if !ok || !cut(p) {
 			return cut(p)
 		}
 		k := key(importer)
-		return k == d || strings.HasPrefix(k, d+"/")
+		for _, d := range strings.Fields(ds) {
+			if exact, ok := strings.CutPrefix(d, "="); ok {
+				if k == exact {
+					return true
+				}
+				continue
+			}
+			if k == d || strings.HasPrefix(k, d+"/") {
+				return true
+			}
+		}
+		return false
 	}
 	imports := map[string][]string{}
 	for _, n := range nodes {
@@ -614,6 +634,8 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"childproc/c.go": childprocFixture,
 		"enf/load/l.go":  "package load\nimport \"os/exec\"\nfunc Load() error { return exec.Command(\"/nft\").Run() }\n",
 		"enf/main/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enf/m.go":   "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enfx/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
 		"kernel/k.go":    "package kernel\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
 		"enfx/x.go":      "package enfx\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
 		"enf/via/v.go":   "package via\nimport \"example.com/m/kernel\"\n",
@@ -622,10 +644,11 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"enf/wrap/w.go":  "//go:build sometag\n\npackage wrap\nimport \"example.com/m/enf/load\"\nvar L = load.Load\n",
 		"kernel/zz.go":   "//go:build sometag\n\npackage kernel\nimport _ \"example.com/m/enf/wrap\"\n",
 	})
-	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf"}, nil)
+	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf cmd/enf"}, nil)
 	want := []string{
 		"example.com/m/kernel: reaches os/exec (example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
 		"example.com/m/enfx: reaches os/exec",
+		"example.com/m/cmd/enfx: reaches os/exec",
 		"example.com/m/enf/via: reaches os/exec (example.com/m/enf/via -> example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
 		"example.com/m/tag/u.go (not built): imports example.com/m/enf/load, which reaches os/exec",
 		"example.com/m/enf/wrap/w.go (not built): imports example.com/m/enf/load, which reaches os/exec",
@@ -636,11 +659,48 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		}
 	}
 	for _, g := range got {
-		for _, ok := range []string{"/enf/load", "/enf/main"} {
+		for _, ok := range []string{"/enf/load", "/enf/main", "/cmd/enf"} {
 			if strings.HasPrefix(g, "example.com/m"+ok+":") || strings.HasPrefix(g, "example.com/m"+ok+"/") {
 				t.Errorf("reported, but passes: %s", g)
 			}
 		}
+	}
+	if t.Failed() {
+		t.Logf("got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// #4755 item 9: an exemption written "=dir" is cut for that one package
+// only. A subpackage of the daemon that reaches the firewall loader,
+// directly or by a package outside, reaches os/exec, so a future
+// cmd/agentos-enforcer/x cannot run nft past arc2's one-package rule.
+func TestWithinExactCutsOnlyThatPackage(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.25\n",
+		"childproc/c.go": childprocFixture,
+		"enf/load/l.go":  "package load\nimport \"os/exec\"\nfunc Load() error { return exec.Command(\"/nft\").Run() }\n",
+		"cmd/enf/m.go":   "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enf/x/x.go": "package x\nimport \"example.com/m/enf/load\"\nvar L = load.Load\n",
+		"cmd/enf/y/y.go": "package y\nimport _ \"example.com/m/cmd/enf/x\"\n",
+		"cmd/enfz/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+	})
+	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf =cmd/enf"}, nil)
+	for _, w := range []string{
+		"example.com/m/cmd/enf/x: reaches os/exec (example.com/m/cmd/enf/x -> example.com/m/enf/load -> os/exec)",
+		"example.com/m/cmd/enf/y: reaches os/exec",
+		"example.com/m/cmd/enfz: reaches os/exec",
+	} {
+		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
+			t.Errorf("not reported: %s", w)
+		}
+	}
+	for _, g := range got {
+		if strings.HasPrefix(g, "example.com/m/cmd/enf:") || strings.HasPrefix(g, "example.com/m/enf/") {
+			t.Errorf("reported, but passes: %s", g)
+		}
+	}
+	if !strings.HasPrefix(strings.Fields(within["enforcer/nft/load"])[1], "=") {
+		t.Error("the daemon's cut for the firewall loader covers its subpackages; arc2 checks only cmd/agentos-enforcer itself")
 	}
 	if t.Failed() {
 		t.Logf("got:\n%s", strings.Join(got, "\n"))

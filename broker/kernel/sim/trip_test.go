@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/decoy"
@@ -77,7 +78,7 @@ func tripRun(t *testing.T, seed uint64) ([]kernel.Entry, []key.PublicKey, *kerne
 			ky = ck // no planner session
 		}
 		arg := fmt.Sprintf("m%d", i)
-		switch rng.IntN(5) {
+		switch rng.IntN(6) {
 		case 0:
 			arg = es[rng.IntN(len(es))].Value
 		case 1:
@@ -90,6 +91,12 @@ func tripRun(t *testing.T, seed uint64) ([]kernel.Entry, []key.PublicKey, *kerne
 				}
 			}
 			ky = hk
+		case 3: // a forged link claiming the task, with a view or sandbox value
+			ky.Links = slices.Clone(ky.Links)
+			l := &ky.Links[len(ky.Links)-1]
+			l.Sig = slices.Clone(l.Sig)
+			l.Sig[0] ^= 1
+			arg = es[rng.IntN(len(es))].Value
 		}
 		p := kernel.SignPlan(kernel.Plan{ID: fmt.Sprintf("p%d", i), Key: ky,
 			Steps: []kernel.PlanStep{{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"message": arg}}}}, holder)
@@ -123,6 +130,23 @@ func TestTripDeterministic(t *testing.T) {
 		}
 		if !reflect.DeepEqual(re.Trips(), k.State().Trips()) || len(re.Trips()) == 0 {
 			t.Fatalf("seed %d: replay folds %d trips, live %d", seed, len(re.Trips()), len(k.State().Trips()))
+		}
+		// A trip stops only a session its plan's key verified for (HLD-5).
+		forged := 0
+		for _, tr := range k.State().Trips() {
+			if tr.Response == kernel.RespSession && tr.Session == "" {
+				forged++
+			}
+			if tr.Session == "" {
+				continue
+			}
+			v, err := key.Chain(k.State().Plans[tr.Plan].Plan.Key, anchors)
+			if err != nil || v.Limits.Task != tr.Session {
+				t.Fatalf("seed %d: trip %+v stops a session its key does not verify for: %v", seed, tr, err)
+			}
+		}
+		if forged == 0 {
+			t.Fatalf("seed %d: no session trip under an unverified key", seed)
 		}
 		got, err := kernel.Rederive(anchors, k.Box(), es)
 		if err != nil {

@@ -7,7 +7,10 @@ package mdns
 // service instances whose SRV targets are those hosts, and their TXT and
 // PTR records. A name claimed on any other interface the relay hears is
 // never the sender's, so a paired device cannot take over a name of its
-// paired network or of another device.
+// paired network or of another device. Before any of that, a response
+// keeps only the names its sender's device pinned when the owner signed
+// it (#4144), so what the relay has or has not heard since it started
+// never widens what passes.
 
 import (
 	"net/netip"
@@ -417,16 +420,31 @@ func (c *claims) elsewhere(k, iface string, now time.Time) bool {
 }
 
 // Filter is the relay's memory of names: for each interface, the names
-// claimed by what was heard there, and the host and instance names its
-// sender showed are its own.
+// claimed by what was heard there, the host and instance names its
+// sender showed are its own in what the relay passed, and those it
+// proved its own in anything it said, passed or not (Prove), with their
+// labels as heard.
 type Filter struct {
 	mu         sync.Mutex
 	claimed    claims
 	hosts, ins map[string]names
+	proved     map[string]names
+	said       map[string]map[string]said
+}
+
+// said is a name a sender proved its own as it said it, and for an
+// instance the key of the host its SRV named.
+type said struct {
+	n    name
+	host string
 }
 
 func NewFilter() *Filter {
-	return &Filter{claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}}, hosts: map[string]names{}, ins: map[string]names{}}
+	return &Filter{
+		claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}},
+		hosts:   map[string]names{}, ins: map[string]names{},
+		proved: map[string]names{}, said: map[string]map[string]said{},
+	}
 }
 
 func table(m map[string]names, iface string) names {
@@ -588,6 +606,176 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		return nil
 	}
 	return out.bytes()
+}
+
+// Prove notes the host and instance names m, a response heard on iface
+// from port 5353, proves its sender's own, by the record filter's own
+// rule (ENF-f-m3, m4) and whatever its sender pinned or any pair
+// carries (D-266): a host whose address record is on link, never the
+// enforcer's own, and an instance whose SRV names such a host, each of
+// class IN, shown, and claimed on no other interface. A name is the
+// sender's until its record's TTL, at most ownHold, and a goodbye (TTL
+// 0) with no live record beside it ends it now. Each interface keeps
+// at most maxNames, swept as the claims are, so only what is heard on an
+// interface fills its table.
+func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.Time) {
+	if m.flags&flagQR == 0 {
+		return
+	}
+	rs := slices.Concat(m.answers, m.additional)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := table(f.proved, iface)
+	says := f.said[iface]
+	if says == nil {
+		says = map[string]said{}
+		f.said[iface] = says
+	}
+	// Each name proved once a packet, with its longest TTL there, and an
+	// instance's host from that record.
+	type proof struct {
+		n, host name
+		ttl     uint32
+	}
+	got := map[string]proof{}
+	own := func(r record) bool {
+		return r.class&0x7FFF == classIN && r.name.shown() && !f.claimed.elsewhere(r.name.key(), iface, now)
+	}
+	note := func(r record, host name) {
+		k := r.name.key()
+		if p, ok := got[k]; !ok || r.ttl > p.ttl {
+			got[k] = proof{r.name, host, r.ttl}
+		}
+	}
+	for _, r := range rs {
+		if (r.typ == typeA || r.typ == typeAAAA) && r.name.host() && mine(link, r.data) && own(r) {
+			note(r, nil)
+		}
+	}
+	isHost := func(n name) bool {
+		k := n.key()
+		p, ok := got[k]
+		return ok && p.ttl > 0 || !ok && t.has(k, now)
+	}
+	for _, r := range rs {
+		if r.typ == typeSRV && r.name.instance() && r.target.shown() && isHost(r.target) && own(r) {
+			note(r, r.target)
+		}
+	}
+	// A goodbye (TTL 0) for a host or instance the sender holds ends it
+	// now; one the packet proves live beside the goodbye is added again
+	// below. It needs no proof of its own: it only takes away a name
+	// heard on this same interface, so an SRV's goodbye ends its instance
+	// though its host says goodbye in the same packet.
+	for _, r := range rs {
+		k := r.name.key()
+		if r.ttl == 0 && ((r.typ == typeA || r.typ == typeAAAA) && r.name.host() || r.typ == typeSRV && r.name.instance()) {
+			delete(t, k)
+			delete(says, k)
+		}
+	}
+	for k, p := range got {
+		if p.ttl == 0 {
+			continue
+		}
+		t.add(k, now.Add(min(time.Duration(p.ttl)*time.Second, ownHold)), now, func(d string) { delete(says, d) })
+		n := make(name, len(p.n))
+		for i, l := range p.n {
+			n[i] = strings.Clone(l) // not the whole packet's copy
+		}
+		var host string
+		if p.host != nil {
+			host = p.host.key()
+		}
+		says[k] = said{n, host}
+	}
+}
+
+// Heard is the names the sender on iface proved its own (Prove) that it
+// still holds at now and no other interface claims, as it said them,
+// sorted: the names the enforcer's page may pin for the device there
+// (D-266). A name a policy cannot pin is left out: one with a dot in a
+// label, which the page would show as other labels, or an instance whose
+// service label is only its underscore. So is an instance whose SRV's
+// host is not offered with it, since the relay passes an SRV only on a
+// pinned host the sender still holds (#4565). With taken, a name taken
+// says another device pins is left out too, and so, by that rule, is
+// every instance on that host (#4601).
+func (f *Filter) Heard(iface string, now time.Time, taken func([]string) bool) [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	offered := func(k string) bool {
+		n := f.said[iface][k].n
+		switch {
+		case !f.proved[iface].has(k, now), f.claimed.elsewhere(k, iface, now):
+		case slices.ContainsFunc(n, func(l string) bool { return strings.Contains(l, ".") }):
+		case n.instance() && len(n[1]) < 2:
+		case taken != nil && taken(n):
+		default:
+			return true
+		}
+		return false
+	}
+	var out [][]string
+	for k, s := range f.said[iface] {
+		if offered(k) && (s.host == "" || offered(s.host)) {
+			out = append(out, slices.Clone(s.n))
+		}
+	}
+	slices.SortFunc(out, slices.Compare)
+	return out
+}
+
+// pins is the names one interface's device pinned (policy.Device.MDNS),
+// by key, and the service types of its pinned instances.
+type pins struct{ names, types map[string]bool }
+
+func newPins(ns [][]string) pins {
+	p := pins{names: map[string]bool{}, types: map[string]bool{}}
+	for _, l := range ns {
+		n := name(l)
+		p.names[n.key()] = true
+		if n.instance() {
+			p.types[n[1:].key()] = true
+		}
+	}
+	return p
+}
+
+// pin is m with only the response records whose every name is pinned: a
+// host's address records, an instance's SRV on a pinned host and its TXT,
+// a PTR to a pinned instance, and a service type enumeration's PTR to a
+// pinned instance's type. A query passes as it is: its questions name
+// what the asker wants, which pins do not bound. Unpinned, a response
+// keeps nothing, so an interface with no pins passes no records.
+func (p pins) pin(m *message) *message {
+	if m.flags&flagQR == 0 {
+		return m
+	}
+	ok := func(n name) bool { return p.names[n.key()] }
+	keep := func(r record) bool {
+		switch r.typ {
+		case typeA, typeAAAA, typeTXT:
+			return ok(r.name)
+		case typeSRV:
+			return ok(r.name) && ok(r.target)
+		case typePTR:
+			if r.name.key() == services.key() {
+				return p.types[r.target.key()]
+			}
+			return ok(r.target)
+		}
+		return false
+	}
+	out := &message{id: m.id, flags: m.flags}
+	for _, s := range []struct{ in, out *[]record }{{&m.answers, &out.answers}, {&m.additional, &out.additional}} {
+		for _, r := range *s.in {
+			if keep(r) {
+				*s.out = append(*s.out, r)
+			}
+		}
+	}
+	return out
 }
 
 // host: <host>.local (RFC 6762 §3), not a service name.

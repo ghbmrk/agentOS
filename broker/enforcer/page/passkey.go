@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
@@ -145,12 +147,32 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, errMalformed
 	}
 	next, err := policy.Decode(raw)
+	if errors.Is(err, policy.ErrNameHeld) || errors.Is(err, policy.ErrTooManyNames) {
+		return nil, nil, err // the screen names the conflict (#4144) or the count (#4601)
+	}
 	if err != nil {
 		return nil, nil, errMalformed
+	}
+	var ref *sealedRef
+	if len(q[pairseal.ParamDevice]) == 1 {
+		ref = &sealedRef{device: q[pairseal.ParamDevice][0], hash: q[pairseal.ParamHash][0]}
 	}
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
 	s.cfg.Lock.Unlock()
+	return s.drawn(cur, pend, next, ref, nil)
+}
+
+// drawn is the challenge for next against the policy in force, cur, and
+// the lines its card shows: next as the enforcer fills it from what it
+// heard (heard), at a version the page picks, its diff drawn from cur,
+// then the lines notes and heard add, then, with ref, the sealed
+// secret's line. s.mu is held.
+func (s *Server) drawn(cur policy.Document, pend []policy.Pending, next policy.Document, ref *sealedRef, notes []string) (*challenge, []string, error) {
+	next, left, err := s.heard(cur, next)
+	if err != nil {
+		return nil, nil, err
+	}
 	next.Version = s.version(cur, pend)
 	base, err := policy.Hash(cur)
 	if err != nil {
@@ -161,9 +183,8 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 	if lines[0] == noChange {
 		return nil, nil, errMalformed
 	}
-	var ref *sealedRef
-	if len(q[pairseal.ParamDevice]) == 1 {
-		ref = &sealedRef{device: q[pairseal.ParamDevice][0], hash: q[pairseal.ParamHash][0]}
+	lines = slices.Concat(lines, notes, left)
+	if ref != nil {
 		dev := next.Device(ref.device)
 		if s.cfg.Secrets == nil || !pairseal.Device(ref.device) || !hexHash(ref.hash) ||
 			dev == nil || dev.Everyday || cur.Device(ref.device) != nil {
@@ -177,6 +198,144 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, errMalformed
 	}
 	return &challenge{kind: "propose", prop: prop, class: class, base: base, secret: ref, msg: key.RootMsg(root)}, lines, nil
+}
+
+// errUnheard: a link pins a name on a Devices-network device that the
+// enforcer never heard it prove its own (D-266). The confirm screen says
+// which.
+var errUnheard = errors.New("the enforcer never heard")
+
+// heard is next with the mDNS names the enforcer heard proved their own
+// (Config.Heard, D-266, #4411), and a line for each device whose names
+// did not all fit. On a pair that gains its path with this link (the
+// pair is new, or its path returns), a Devices-network device that pins
+// no names is given the names heard on its VLAN, and an Owner or
+// Household device is given the names heard on its network as holds, so
+// no device may announce them. Either gets what fill gives it, and the
+// card lists each before the passkey. A name next pins on a Devices-network device
+// must have been heard there unless cur already pinned it on that device
+// on the Devices network, so the untrusted core never introduces one.
+// Only the link that opens the path fills, so what a device announces
+// later never touches an unrelated link, and a name another device holds
+// can block no link (Security on #4531); the home page offers what is
+// heard later (offers).
+func (s *Server) heard(cur, next policy.Document) (policy.Document, []string, error) {
+	next = clone(next)
+	for _, d := range next.Devices {
+		if d.Network != policy.NetDevices {
+			continue
+		}
+		var was [][]string
+		if o := cur.Device(d.ID); o != nil && o.Network == policy.NetDevices {
+			was = o.MDNS
+		}
+		heard := s.heardOn(cur, d, nil)
+		for _, n := range d.MDNS {
+			if !listed(was, n) && !listed(heard, n) {
+				return policy.Document{}, nil, fmt.Errorf("%w %s announce the name %s on its own address, so it cannot be pinned for %s: decline this link", errUnheard, ascii(d.ID), strconv.QuoteToASCII(policy.MDNSName(n)), ascii(d.ID))
+			}
+		}
+	}
+	// Devices first, then holds: a name both could take (which the relay's
+	// claims rule out) goes to the device that announces it. A person's
+	// network's names are the network's, so each network is filled once a
+	// card, on the first of its devices whose pair opens and that holds
+	// fewer than policy.MaxMDNS (Security on #4596), and the left-out
+	// line counts them once.
+	var left []string
+	held := map[string]bool{}
+	for _, devices := range []bool{true, false} {
+		for i := range next.Devices {
+			d := &next.Devices[i]
+			opens := slices.ContainsFunc(next.Pairs, func(p policy.Pair) bool {
+				return (p.A == d.ID || p.B == d.ID) && next.Linked(p.A) && next.Linked(p.B) &&
+					!(slices.Contains(cur.Pairs, p) && cur.Linked(p.A) && cur.Linked(p.B))
+			})
+			if !opens || (d.Network == policy.NetDevices) != devices || devices && len(d.MDNS) > 0 ||
+				held[d.Network] || len(d.MDNS) >= policy.MaxMDNS {
+				continue
+			}
+			if !devices {
+				held[d.Network] = true
+			}
+			ns, more := s.fill(cur, next, *d)
+			d.MDNS = append(d.MDNS, ns...)
+			if more > 0 {
+				left = append(left, leftLine(*d, more))
+			}
+		}
+	}
+	b, err := policy.Encode(next)
+	if err != nil {
+		return policy.Document{}, nil, err
+	}
+	next, err = policy.Decode(b)
+	return next, left, err
+}
+
+// heardOn is the names the enforcer heard proved their own where it
+// hears d: a Devices-network device's own VLAN, by its Wi-Fi identity in
+// cur, so a device added or given another identity has none yet; or the
+// Owner or Household network, one network each. Any other device has
+// none. taken is mdns.Filter.Heard's.
+func (s *Server) heardOn(cur policy.Document, d policy.Device, taken func([]string) bool) [][]string {
+	if s.cfg.Heard == nil {
+		return nil
+	}
+	switch d.Network {
+	case policy.NetDevices:
+		o := cur.Device(d.ID)
+		if o == nil || o.Network != policy.NetDevices || o.WiFi != d.WiFi || d.WiFi == "" {
+			return nil
+		}
+		return s.cfg.Heard(d.Network, d.WiFi, taken)
+	case policy.NetOwner, policy.NetHousehold:
+		return s.cfg.Heard(d.Network, "", taken)
+	}
+	return nil
+}
+
+// fill is the names heard for d (heardOn) that no device in doc pins or
+// holds, hosts before instances so an instance's host comes first, as
+// many as d has room for under policy.MaxMDNS, and how many more there
+// were (#4565, #4601). For a Devices-network device, an instance whose
+// host another device pins or holds is left out with that host, since
+// the relay would pass its SRV nowhere (Security on #4596). Holds are
+// never announced, so a person's network's instance is held whoever
+// holds its host (L3 on #4631).
+func (s *Server) fill(cur, doc policy.Document, d policy.Device) ([][]string, int) {
+	other := func(n []string) bool {
+		return slices.ContainsFunc(doc.Devices, func(o policy.Device) bool { return o.ID != d.ID && listed(o.MDNS, n) })
+	}
+	var taken func([]string) bool
+	if d.Network == policy.NetDevices {
+		taken = other
+	}
+	var out [][]string
+	for _, n := range s.heardOn(cur, d, taken) {
+		if !listed(out, n) && !listed(d.MDNS, n) && !other(n) {
+			out = append(out, slices.Clone(n))
+		}
+	}
+	slices.SortStableFunc(out, func(a, b []string) int { return len(a) - len(b) })
+	if room := max(policy.MaxMDNS-len(d.MDNS), 0); len(out) > room {
+		return out[:room], len(out) - room
+	}
+	return out, 0
+}
+
+// leftLine is the card's line for the more names heard for d than it has
+// room for (policy.MaxMDNS, #4601).
+func leftLine(d policy.Device, more int) string {
+	if d.Network == policy.NetDevices {
+		return fmt.Sprintf("%d more names %s announces are left out of this change, since one device pins at most %d names.", more, ascii(d.ID), policy.MaxMDNS)
+	}
+	return fmt.Sprintf("%d more names heard on the %s network are left out of this change, since one device holds at most %d names; the home page offers to hold them for another %s device with a pair.", more, d.Network, policy.MaxMDNS, d.Network)
+}
+
+// listed: ns holds n, as mDNS compares names (policy.MDNSKey).
+func listed(ns [][]string, n []string) bool {
+	return slices.ContainsFunc(ns, func(m []string) bool { return policy.MDNSKey(m) == policy.MDNSKey(n) })
 }
 
 // version picks the next version a challenge signs: above the policy in

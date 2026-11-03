@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // The CH-4 code-generator seed's way from setup to the checker
@@ -46,22 +48,22 @@ var ErrCodeSeed = errors.New("handoff: the code seed is damaged or missing")
 
 // CodeSeed is the seed and the last step a code spent on it.
 type CodeSeed struct {
-	Seed []byte
+	Seed secret.Secret[[]byte]
 	Step int64
 }
 
-// Wipe clears the seed.
-func (s *CodeSeed) Wipe() { clear(s.Seed) }
+// Wipe clears the seed in every copy of s.
+func (s *CodeSeed) Wipe() { secret.Drop(s.Seed) }
 
 // EncodeCodeSeed is CheckerSeedEntry's value: the tag, the step as a
 // big-endian uint64, then the seed.
 func EncodeCodeSeed(s CodeSeed) ([]byte, error) {
-	if len(s.Seed) == 0 || len(s.Seed) > MaxCodeSeed || s.Step < 0 {
+	if seed := s.Seed.Get(); len(seed) == 0 || len(seed) > MaxCodeSeed || s.Step < 0 {
 		return nil, ErrCodeSeed
 	}
 	b := append([]byte(codeSeedTag), make([]byte, 8)...)
 	binary.BigEndian.PutUint64(b[len(codeSeedTag):], uint64(s.Step))
-	return append(b, s.Seed...), nil
+	return append(b, s.Seed.Get()...), nil
 }
 
 // ParseCodeSeed reads EncodeCodeSeed's form. The seed is a copy of b's.
@@ -74,7 +76,7 @@ func ParseCodeSeed(b []byte) (CodeSeed, error) {
 	if step > 1<<62 {
 		return CodeSeed{}, ErrCodeSeed
 	}
-	return CodeSeed{Seed: bytes.Clone(rest[8:]), Step: int64(step)}, nil
+	return CodeSeed{Seed: secret.Hide(bytes.Clone(rest[8:])), Step: int64(step)}, nil
 }
 
 func seedAEAD(key []byte) (cipher.AEAD, error) {

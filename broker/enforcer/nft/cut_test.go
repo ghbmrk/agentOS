@@ -114,8 +114,8 @@ func (h *home) expectOpen(want bool, hs ...*held) {
 
 // NET-3, NET-7, A18: a load that removes a path also ends the connections
 // already open along it, both ways, and a load leaves the connections on
-// the paths it keeps open, the internet ones included although the load
-// empties the allow sets. Catches a "stop" the owner signed that the
+// the paths it keeps open, the internet ones included (their names stay
+// listed, so Reload keeps their answers). Catches a "stop" the owner signed that the
 // firewall applies to new connections only, while the old ones flow on
 // until they idle out.
 func TestCutPathEndsOpenConnections(t *testing.T) {
@@ -152,7 +152,7 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 		{name: "a port, a vendor cloud and a camera cut", doc: narrowed, cut: []string{"core control", "edge control", "tv internet", "tv internet v6", "core stream"}},
 	} {
 		t.Logf("case: %s", c.name)
-		h.load(base)
+		h.load(withDrops(t, cutPolicy(), base))
 		h.fillSets()
 		hs := map[string]*held{
 			"pair":           h.hold("a device pair", "106", "107", devAddr(107), 9301),
@@ -174,11 +174,7 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 			all = append(all, x)
 		}
 		h.expectOpen(true, all...)
-		text, err := Compile(c.doc, fixtureLayout())
-		if err != nil {
-			t.Fatal(err)
-		}
-		h.load(text)
+		h.reload(c.doc)
 		for name, x := range hs {
 			x.why = c.name + ": " + x.why
 			h.expectOpen(!slices.Contains(c.cut, name), x)
@@ -186,12 +182,62 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 	}
 }
 
-// fillSets puts the fixture's resolved addresses in the allow sets, as
-// slice f's resolver would after a load.
+// fillSets puts the fixture's resolved addresses in the allow sets and
+// their names' sets, as slice f's resolver would after a load.
 func (h *home) fillSets() {
-	run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, false), "{ "+netAllow+" }")
-	run(h.t, "nft", "add", "element", "inet", Table, CoreSet(false), "{ "+netCore+" }")
+	d := fixturePolicy()
+	h.answer(d, DeviceSet(101, false), "tv.example", netAllow)
+	h.answer(d, CoreSet(false), "core.example", netCore)
 	if h.v6 {
-		run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, true), "{ "+net6Allow+" }")
+		h.answer(d, DeviceSet(101, true), "tv.example", net6Allow)
+	}
+}
+
+// NET-3 (#4367, ENF-ct-bind-1): a connection open when this ruleset is
+// first loaded fails closed. One that conntrack already tracked, under an
+// earlier ruleset that set no mark, has mark 0, so the load cuts it, both
+// ways, and it stays cut; the cut happens once, since the same paths open
+// again for new connections, which the ruleset marks. One that conntrack
+// never saw (no ruleset used it) is picked up at its next packet as a new
+// connection and judged by the ruleset like any other: on an allowed path
+// it goes on, bound to that path, and on none it is refused and counted.
+func TestFirstLoadCutsOnce(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	text, err := Compile(cutPolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := func() {
+		h.load(withDrops(t, cutPolicy(), text))
+		h.fillSets()
+	}
+
+	h.load("flush ruleset\ntable inet before {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n\t\tct state established,related accept\n\t}\n}\n")
+	tracked := []*held{
+		h.hold("a device pair, tracked before the first load", "106", "107", devAddr(107), 9321),
+		h.hold("the edge to an online device, tracked before the first load", "edge", "101", devAddr(101), 9100),
+	}
+	h.expectOpen(true, tracked...)
+	load()
+	h.expectOpen(false, tracked...)
+	h.expectOpen(true,
+		h.hold("a device pair, after the first load", "106", "107", devAddr(107), 9322),
+		h.hold("the edge to an online device, after the first load", "edge", "101", devAddr(101), 9100),
+	)
+	h.expectOpen(false, tracked...)
+
+	run(t, "nft", "flush", "ruleset")
+	allowed := h.hold("a device pair, untracked before the load", "106", "107", devAddr(107), 9323)
+	none := h.hold("a device to a device on no path, untracked before the load", "102", "103", devAddr(103), 9324)
+	h.expectOpen(true, allowed, none)
+	load()
+	before := h.counter(Blocked)
+	h.expectOpen(true, allowed)
+	h.expectOpen(false, none)
+	if h.counter(Blocked) == before {
+		t.Error("the connection on no path was not counted as refused")
 	}
 }

@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"math"
 	mrand "math/rand/v2"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +29,7 @@ import (
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/decoy/match"
 )
 
 // rangeAddrs stands in for the enforcer's decoy range (decision 4, DECOY-d).
@@ -401,6 +404,14 @@ func TestTableSealedAndReplayed(t *testing.T) {
 	}
 	// Printing a table or an entry shows no value.
 	printed := fmt.Sprintf("%v %+v %#v %s %v %#v", tab, tab, tab, tab.Entries(), tab.Entries()[0], tab.Entries()[0])
+	// Nor does JSON, or a slog JSON handler (#3876).
+	js, err := json.Marshal(tab.Entries())
+	if err != nil || !bytes.Contains(js, []byte(`"decoy anthropic at sandbox.env to `)) {
+		t.Fatalf("JSON of the entries: %s, %v", js, err)
+	}
+	var lb bytes.Buffer
+	slog.New(slog.NewJSONHandler(&lb, nil)).Info("x", "entry", tab.Entries()[0], "entries", tab.Entries())
+	printed += string(js) + lb.String()
 	for _, e := range tab.Entries() {
 		if e.Value != "" && strings.Contains(printed, e.Value) {
 			t.Fatalf("printing shows %v's value", e)
@@ -592,4 +603,118 @@ func TestGenerateRules(t *testing.T) {
 		t.Fatalf("the table's stored form does not fit: %v", err)
 	}
 	t.Logf("stored form: %d bytes of %d", len(big.encode()), MaxStored)
+}
+
+// No two entries share a value, at Generate and when a table is read back,
+// so a value names one entry and a lookup's answer never depends on table
+// order (KRN-6). Catches two honey entries with one key, where the kernel's
+// first-match honey lookup and an older last-match log disagree (#4574).
+func TestDuplicateValuesRefused(t *testing.T) {
+	same := func(io.Reader) (string, error) { return "honey-0123456789abcdef0123456789abcdef", nil }
+	if _, err := Generate(newSeeded(5), rangeAddrs, Own{KHoneyKey, PPlannerView, same}, Own{KHoneyKey, PPlannerView, same}); err != ErrBadTable {
+		t.Fatalf("two honey entries with one value: %v", err)
+	}
+	tab, err := Generate(newSeeded(5), rangeAddrs, Own{KHoneyKey, PPlannerView, same})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FromEvent(1, Event(tab)); err != nil {
+		t.Fatalf("a table with one honey entry: %v", err)
+	}
+	for i, e := range tab.Entries() {
+		if e.Value == "" {
+			continue
+		}
+		dup := Table{entries: append(tab.Entries(), tab.Entries()[i])}
+		if _, err := FromEvent(1, Event(dup)); err != ErrBadTable {
+			t.Fatalf("a %s value twice, read back: %v", e.Kind, err)
+		}
+	}
+}
+
+// KRN-12, DECOY-a-5: the built-in SSH decoy, a PEM with LFs, trips with its
+// breaks changed, dropped or added to, raw and in its JSON form (Security
+// on #4845): CRLF, JSON \r\n, the trailing LF trimmed, every LF dropped, one
+// written as %0a, an extra %0a inside a line, rewrapped at 64 columns, and
+// URL-escaped with CRLF.
+func TestSSHDecoyBreaksChanged(t *testing.T) {
+	v, err := sshKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	lines := strings.Split(strings.TrimSuffix(v, "\n"), "\n")
+	body := strings.Join(lines[1:len(lines)-1], "")
+	var wrap64 []string
+	for i := 0; i < len(body); i += 64 {
+		wrap64 = append(wrap64, body[i:min(i+64, len(body))])
+	}
+	j, _ := json.Marshal(strings.ReplaceAll(v, "\n", "\r\n"))
+	for _, s := range []string{
+		v,
+		strings.ReplaceAll(v, "\n", "\r\n"),
+		string(j[1 : len(j)-1]),
+		url.QueryEscape(strings.ReplaceAll(v, "\n", "\r\n")),
+		strings.TrimSuffix(v, "\n"),
+		strings.ReplaceAll(v, "\n", ""),
+		strings.Replace(v, "\n", "%0a", 1),
+		lines[0] + "\n" + lines[1][:20] + "%0a" + lines[1][20:] + "\n" + strings.Join(lines[2:], "\n"),
+		lines[0] + "\n" + strings.Join(wrap64, "\n") + "\n" + lines[len(lines)-1] + "\n",
+	} {
+		if got := m.Scan([]byte(`{"a":"` + s + `"}`)).Trips; !slices.Equal(got, []int{1}) {
+			t.Fatalf("%.80q tripped %v, want [1]", s, got)
+		}
+	}
+}
+
+// KRN-12, DECOY-a-5: the built-in SSH decoy also trips URL-path-escaped
+// (%20 for spaces, as url.PathEscape and encodeURIComponent write it), in
+// JSON with '/' escaped as `\/`, and as its body alone, without the header
+// and footer lines: raw, joined, JSON- and URL-escaped and rewrapped (#4853,
+// Security on #4845).
+func TestSSHDecoyOtherEncodings(t *testing.T) {
+	v := ""
+	for !strings.Contains(v, "/") {
+		var err error
+		if v, err = sshKey(rand.Reader); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	lines := strings.Split(strings.TrimSuffix(v, "\n"), "\n")
+	body := strings.Join(lines[1:len(lines)-1], "\n")
+	var wrap64 []string
+	for flat := strings.ReplaceAll(body, "\n", ""); len(flat) > 0; flat = flat[min(64, len(flat)):] {
+		wrap64 = append(wrap64, flat[:min(64, len(flat))])
+	}
+	jsonSlash := func(s string) string {
+		j, _ := json.Marshal(s)
+		return strings.ReplaceAll(string(j[1:len(j)-1]), "/", `\/`)
+	}
+	crlf := strings.ReplaceAll(v, "\n", "\r\n")
+	for _, s := range []string{
+		url.PathEscape(v),
+		url.PathEscape(crlf),
+		strings.ReplaceAll(url.QueryEscape(v), "+", "%20"),
+		jsonSlash(v),
+		jsonSlash(crlf),
+		body,
+		strings.ReplaceAll(body, "\n", ""),
+		strings.ReplaceAll(body, "\n", "\r\n"),
+		strings.Join(wrap64, "\n"),
+		jsonSlash(body),
+		url.QueryEscape(body),
+		url.PathEscape(strings.Join(wrap64, "\n")),
+	} {
+		if got := m.Scan([]byte(`{"a":"` + s + `"}`)).Trips; !slices.Equal(got, []int{1}) {
+			t.Fatalf("%.80q tripped %v, want [1]", s, got)
+		}
+	}
+}
+
+// KRN-12: the matcher's shortest joined form is the table's shortest value.
+func TestMinJoinedIsMinValue(t *testing.T) {
+	if match.MinJoined != MinValue {
+		t.Fatalf("match.MinJoined %d, decoy.MinValue %d", match.MinJoined, MinValue)
+	}
 }

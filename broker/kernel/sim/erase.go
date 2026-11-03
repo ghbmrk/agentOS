@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // SIM-erase (docs/migration/cases.md §4): a forget reaches every derived
@@ -19,7 +20,10 @@ import (
 // the erase phase (the log, the key table or a store), reboots, lets the
 // owner erase again whatever the crash left unlogged, and ticks until done.
 // Stores also fail deletes now and then, for a while, and lineages keep
-// reading throughout, so a crash also falls on a read's entry.
+// reading throughout, so a crash also falls on a read's entry. Before the
+// erase phase lineages also submit plans, between their reads, whose steps
+// wait out a long hold: an erase must cancel each plan a reader submitted
+// after its first read, in its own entry (#3870).
 
 // machine counts durable writes and crashes at the armed one: that write
 // does not land, and none does until the reboot.
@@ -109,6 +113,7 @@ func (c crashStore) Delete(h kernel.Hash) error {
 type EraseResult struct {
 	Crashed bool   // the armed write was reached
 	Hit     string // what it fell on: log, key or store
+	Erased  int    // plans the erases cancelled
 }
 
 // RunErase runs seed with a crash at the crashAt-th write of the erase
@@ -120,6 +125,8 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 		nseed[i] = byte(rng.IntN(256))
 	}
 	head := gen(rng)
+	owner, spare, holder := gen(rng), gen(rng), gen(rng)
+	anchors := []key.PublicKey{owner.pk, spare.pk}
 	m := &machine{rng: rng}
 	disk := &Disk{rng: rng}
 	cfg := kernel.Config{Store: crashLog{disk, m}, Anchor: &kernel.MemAnchor{}, Pub: head.pub, Sign: head.priv, Rand: rand.NewChaCha8(nseed)}
@@ -133,7 +140,7 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 		m.crashed, m.left = false, 0
 		l, err := kernel.Open(cfg)
 		if err == nil {
-			k, err = kernel.Boot(l, nil, nil, now)
+			k, err = kernel.Boot(l, anchors, nil, now)
 		}
 		if err == nil {
 			_, err = k.OpenContent(keys, stores, now)
@@ -142,6 +149,28 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	}
 	if err := boot(); err != nil {
 		return EraseResult{}, err
+	}
+	root := key.Issue(owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Unsubscribe}, Serial: "erase"})
+	pk, err := key.ClerkKey(root, owner.pass, holder.pub, 0, 1<<40, key.LimitHold(1<<40, 1<<40)) // no step leaves its hold
+	if err != nil {
+		return EraseResult{}, err
+	}
+	if err := k.Issue(-kernel.GrantHold, approve([]key.Key{root, pk}, owner, spare), root, pk); err != nil {
+		return EraseResult{}, err
+	}
+	nplans := 0
+	submitOne := func() {
+		nplans++
+		l := fmt.Sprintf("lineage-%d", rng.IntN(3))
+		if rng.IntN(4) == 0 {
+			l += ".x" // shares a reader's prefix, not its lineage
+		}
+		step := kernel.PlanStep{Verb: key.Unsubscribe, Clerk: "mail", Args: map[string]string{}}
+		for _, n := range key.ArgNames(key.Unsubscribe) {
+			step.Args[n] = fmt.Sprintf("list-%d", nplans)
+		}
+		p := kernel.Plan{ID: fmt.Sprintf("%s/r%d", l, nplans), Key: pk, Steps: []kernel.PlanStep{step}}
+		k.Submit(now, kernel.SignPlan(p, holder.priv)) // a crash may refuse it
 	}
 
 	subs := make([]string, 2+rng.IntN(3))
@@ -186,9 +215,16 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	}
 	for range len(order) {
 		now++
+		if rng.IntN(4) == 0 {
+			submitOne()
+		}
 		if err := readOne(); err != nil {
 			return EraseResult{}, err
 		}
+	}
+	submitOne()
+	if err := k.Tick(now); err != nil { // logs each step's hold
+		return EraseResult{}, err
 	}
 	gone := map[string]bool{}
 	for _, s := range subs {
@@ -214,7 +250,7 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 			if err := readOne(); err != nil {
 				return err
 			}
-			if err := k.Tick(now); err != nil && !errors.Is(err, errCrash) {
+			if err := k.Tick(now); err != nil && !m.crashed { // after a crash, every write fails until the reboot
 				return err
 			}
 			if m.crashed {
@@ -233,10 +269,58 @@ func RunErase(seed uint64, crashAt int) (EraseResult, error) {
 	if err := settle(kernel.RetryMax); err != nil {
 		return res, err
 	}
-	if err := judgeErase(k, keys, stores, subs, gone, items); err != nil {
+	if err := judgeErase(k, anchors, keys, stores, subs, gone, items); err != nil {
+		return res, err
+	}
+	if res.Erased, err = judgePlans(k); err != nil {
 		return res, err
 	}
 	return res, judgeReads(k, gone, firsts)
+}
+
+// judgePlans checks, from the log's entries, that no plan a reader of an
+// erased subject submitted after its first read and before the erase is
+// live, and that every plan cancelled for an erase is one of those
+// (LOG-4, D-169). It returns how many the erases cancelled.
+func judgePlans(k *kernel.Kernel) (int, error) {
+	subjectOf := map[kernel.Hash]string{}
+	firstRead := map[[2]string]uint64{} // subject, lineage: the seq of its first read
+	erasedAt := map[string]uint64{}
+	for _, e := range k.Log().Entries() {
+		var b struct {
+			Subject, Lineage string
+			Hash             kernel.Hash
+		}
+		json.Unmarshal(e.Body, &b)
+		switch e.Type {
+		case kernel.TContentStored:
+			subjectOf[b.Hash] = b.Subject
+		case kernel.TContentRead:
+			if c := [2]string{subjectOf[b.Hash], b.Lineage}; firstRead[c] == 0 {
+				firstRead[c] = e.Seq
+			}
+		case kernel.TSubjectErased:
+			erasedAt[b.Subject] = e.Seq
+		}
+	}
+	n := 0
+	for id, p := range k.State().Plans {
+		owed := false
+		for c, r := range firstRead {
+			if at := erasedAt[c[0]]; at != 0 && r < p.Seq && p.Seq < at && strings.HasPrefix(id, c[1]+"/") {
+				owed = true
+			}
+		}
+		switch {
+		case owed && (p.Status == kernel.SPending || p.Status == kernel.SActive):
+			return n, fmt.Errorf("invariant: plan %s, submitted after its lineage read an erased subject, is %s", id, p.Status)
+		case p.Cancel == kernel.CErased && !owed:
+			return n, fmt.Errorf("invariant: plan %s was cancelled for an erase it did not follow", id)
+		case p.Cancel == kernel.CErased:
+			n++
+		}
+	}
+	return n, nil
 }
 
 // judgeReads checks that ErasedReads names each lineage that read an
@@ -259,10 +343,10 @@ func judgeReads(k *kernel.Kernel, gone map[string]bool, firsts map[[2]string]int
 
 // judgeErase checks the end state against the log and the stores, without
 // trusting the kernel's account of them.
-func judgeErase(k *kernel.Kernel, keys crashKeys, stores map[string]kernel.ContentStore,
+func judgeErase(k *kernel.Kernel, anchors []key.PublicKey, keys crashKeys, stores map[string]kernel.ContentStore,
 	subs []string, gone map[string]bool, items map[kernel.Hash]simItem) error {
 	es := k.Log().Entries()
-	re, err := kernel.Replay(nil, es)
+	re, err := kernel.Replay(anchors, es)
 	if err != nil {
 		return err
 	}

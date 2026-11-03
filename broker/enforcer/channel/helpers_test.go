@@ -69,7 +69,7 @@ func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
 func home() policy.Document {
 	d := policy.Document{Version: 1}
 	add := func(id string, everyday bool, s safety) {
-		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Class: s.class, Secure: s.secure})
+		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Class: s.class, Secure: s.secure, Safeguards: policy.Needs(s.class)})
 	}
 	add("lamp", true, safety{})
 	add("tv", true, safety{})
@@ -118,9 +118,19 @@ type radio struct {
 	mu   sync.Mutex
 	done []string
 	fail bool
+	// hold, if set, is a radio call that blocks: Do sends on entered and
+	// waits for hold to close.
+	hold, entered chan struct{}
 }
 
 func (r *radio) Do(device string, v wire.Verb, level uint8) error {
+	r.mu.Lock()
+	hold, entered := r.hold, r.entered
+	r.mu.Unlock()
+	if hold != nil {
+		entered <- struct{}{}
+		<-hold
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail {
@@ -139,9 +149,8 @@ func (r *radio) calls() []string {
 }
 
 type alerts struct {
-	mu     sync.Mutex
-	off    []string
-	paused int
+	mu  sync.Mutex
+	off []string
 	// reenter, if set, runs inside each call, as slice h's alerts will
 	// when they send a text back through the channel.
 	reenter func()
@@ -157,15 +166,36 @@ func (a *alerts) SafetyOff(device string, v wire.Verb) {
 	}
 }
 
-func (a *alerts) Paused() {
-	a.mu.Lock()
-	a.paused++
-	f := a.reenter
-	a.mu.Unlock()
-	if f != nil {
-		f()
-	}
+// cut is a fake core cut: Trip moves it to Tripped, as DECOY-d's does,
+// and the test moves it on as the owner's steps would.
+type cut struct {
+	mu      sync.Mutex
+	stage   Stage
+	reasons []string
+	// hold, if set, makes Trip block: it sends on entered and waits for
+	// hold to close before the stage moves, as a slow cut would.
+	hold, entered chan struct{}
 }
+
+func (c *cut) Trip(reason string) {
+	c.mu.Lock()
+	hold, entered := c.hold, c.entered
+	c.mu.Unlock()
+	if hold != nil {
+		entered <- struct{}{}
+		<-hold
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stage = Tripped
+	c.reasons = append(c.reasons, reason)
+}
+
+func (c *cut) Stage() Stage { c.mu.Lock(); defer c.mu.Unlock(); return c.stage }
+
+func (c *cut) set(s Stage) { c.mu.Lock(); c.stage = s; c.mu.Unlock() }
+
+func (c *cut) trips() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.reasons) }
 
 type heads struct{ n int }
 
@@ -180,14 +210,22 @@ type rig struct {
 	ch      *Channel
 	radio   *radio
 	alerts  *alerts
+	cut     *cut
 	core    ed25519.PrivateKey
 	enf     ed25519.PublicKey
 	revoked bool
 	answers []uint64
 
-	mu  sync.Mutex
-	now time.Time
-	log []Event
+	mu sync.Mutex
+	// now is the rate clock's time (Elapsed is now less start); the wall
+	// clock (Now) reads now plus wallStep, as a box whose wall clock was
+	// stepped would.
+	now      time.Time
+	wallStep time.Duration
+	log      []Event
+	// logReenter, if set, runs inside each log call, as a slice h sink
+	// that calls back into the channel would.
+	logReenter func()
 }
 
 // signedHome is the engine's store with home() signed and applied, made
@@ -225,7 +263,7 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 	}
 	_, core, _ := ed25519.GenerateKey(nil)
 	enfPub, enfPriv, _ := ed25519.GenerateKey(nil)
-	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
+	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, cut: &cut{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
 	c := Config{
 		Core:        core.Public().(ed25519.PublicKey),
 		Key:         enfPriv,
@@ -234,11 +272,24 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 		Radio:       r.radio,
 		Heads:       &heads{},
 		Alerts:      r.alerts,
+		Cut:         r.cut,
 		Fingerprint: func(string) ([wire.HashLen]byte, bool) { return sha256.Sum256([]byte("fp")), true },
 		Traffic:     func(d string) ([]byte, error) { return []byte("traffic of " + d), nil },
-		Answer:      func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
-		Log:         func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
-		Now:         func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
+		Counts: func() (wire.Counts, error) {
+			return wire.Counts{Day: 1, Groups: []wire.CountGroup{{Dests: []wire.CountDest{{Name: "a.example", Cap: 9}}, Count: 3}}}, nil
+		},
+		Answer: func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
+		Log: func(e Event) {
+			r.mu.Lock()
+			r.log = append(r.log, e)
+			f := r.logReenter
+			r.mu.Unlock()
+			if f != nil {
+				f()
+			}
+		},
+		Now:     func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Add(r.wallStep) },
+		Elapsed: func() time.Duration { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Sub(start) },
 	}
 	if cfg != nil {
 		cfg(&c)
@@ -362,3 +413,34 @@ func frameBytes(t Type, p []byte) []byte {
 
 // Type aliases the wire's frame type for frameBytes.
 type Type = wire.Type
+
+// challenge has the radio host send challenge id on r and returns the ID
+// its frame carries, which the channel chooses.
+func (cl *client) challenge(r *rig, id uint64) uint64 {
+	cl.t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(id, []byte{1}) }()
+	m, ok := cl.recv().(wire.Challenge)
+	if !ok || m.Answer {
+		cl.t.Fatalf("challenge %d: frame %+v", id, m)
+	}
+	if err := <-errc; err != nil {
+		cl.t.Fatalf("challenge %d: %v", id, err)
+	}
+	return m.ID
+}
+
+// tryChallenge runs Challenge(id) and returns its error, failing if it
+// neither returns nor sends within 2 s.
+func (cl *client) tryChallenge(r *rig, id uint64) error {
+	cl.t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(id, []byte{1}) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(2 * time.Second):
+		cl.t.Fatalf("challenge %d neither refused nor sent", id)
+		return nil
+	}
+}

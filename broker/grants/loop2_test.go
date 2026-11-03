@@ -1,7 +1,6 @@
 package grants
 
 import (
-	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -38,9 +37,7 @@ func TestLoop2PausesAGrantAndNothingElse(t *testing.T) {
 			t.Fatalf("%s from %s: %s", x.Action, x.Origin, st.State)
 		}
 	}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	pause := in("loop2/pause", OriginLoop2, journal.ActionGrantPause)
 	pause.Params = map[string]any{"finding": "advisory:f1"} // as agentosd records it
 	if st := r.submit(pause); st.State != journal.Succeeded {

@@ -3,7 +3,6 @@ package grants
 // REQ: CH-15, CAP-10, OP-4
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -30,13 +29,7 @@ func TestQuestionsReserveOnTheRequestBudget(t *testing.T) {
 	}
 
 	r.advance(time.Hour)
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	ask("a")
 	if r.g.Reserve(false) {
 		t.Fatal("a question went ahead of a waiting approval request")
@@ -93,9 +86,7 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 	for _, it := range items {
 		r.boot = append(r.boot, owner.Carried{Ref: it.Ref, Request: req, Asked: r.now(), Expires: r.now().Add(10 * time.Minute), Sum: owner.ItemSum(it)})
 	}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.open() // restart under STOP: nothing is re-issued yet
 	if !r.g.Reserve(false) || !r.g.Reserve(false) {
 		t.Fatal("questions refused on a fresh budget")
@@ -128,13 +119,7 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 func TestAnAgedQuestionGoesAheadOfABatchOnceAnHour(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.RequestsPerHour = 3 })
 	r.grant(mailGrant()) // the grant's request: one text
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	ask("a")
 	if r.g.Reserve(false) {
 		t.Fatal("a question went ahead of a waiting batch")

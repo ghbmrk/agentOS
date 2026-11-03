@@ -111,6 +111,9 @@ func (e Entry) String() string {
 // GoString is String, for %#v.
 func (e Entry) GoString() string { return e.String() }
 
+// MarshalJSON is String, for JSON and slog's JSON handler (#3876).
+func (e Entry) MarshalJSON() ([]byte, error) { return json.Marshal(e.String()) }
+
 // Table is the box's one decoy table. The zero Table is empty.
 type Table struct{ entries []Entry }
 
@@ -232,12 +235,19 @@ func knownPlace(p Place) bool {
 // check holds a table to the rules: known kinds and places, values from
 // MinValue to match.MaxValue bytes, the metadata entry valueless at the metadata address, and
 // every other entry a value to a decoy-range address (in range, when range
-// is given). A table read back gets the same check, minus the range.
+// is given), no two values the same, so a value names one entry and the
+// kernel's lookups never depend on table order (KRN-6, #4574). A table read
+// back gets the same check, minus the range.
 func (t Table) check(rng []netip.Addr) error {
 	if len(t.entries) == 0 {
 		return ErrBadTable
 	}
+	seen := make(map[string]bool, len(t.entries))
 	for _, e := range t.entries {
+		if e.Value != "" && seen[e.Value] {
+			return ErrBadTable
+		}
+		seen[e.Value] = true
 		if !knownKind(e.Kind) || !knownPlace(e.Place) || len(e.Value) > match.MaxValue {
 			return ErrBadTable
 		}

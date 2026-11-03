@@ -15,6 +15,8 @@ package thread
 
 import (
 	"errors"
+	"path"
+	"strconv"
 	"strings"
 )
 
@@ -29,40 +31,58 @@ const (
 	Infra = "infra0"
 )
 
-// Socket is ot-daemon's command socket, relative to its state directory:
+// Socket is ot-daemon's command socket, relative to its run directory:
 // tools/build-openthread.sh sets the daemon's socket base name to a relative path, and
-// both processes run in that directory.
+// both processes run in that directory, the only one the adapter's view
+// shows it (confine.ThreadAdapter), so it never sees the state directory.
 const Socket = "openthread-" + Netif + ".sock"
 
 // AdapterArg is the argument the enforcer's main (or a test's TestMain),
 // after confine.Trampoline, hands to Adapter.
 const AdapterArg = "agentos-thread-adapter"
 
-var ErrRadio = errors.New("thread: radio URL refused")
+var ErrRadio = errors.New("thread: radio path refused")
 
-// DaemonArgs are ot-daemon's arguments for the radio's spinel URL (the
-// nRF52840 RCP's serial device, owned by the Thread user; decision 11) and
-// its state directory (owned by the Thread user, mode 0700: the network's
-// dataset and keys, and the command socket); verbose also logs to stderr.
+// DaemonArgs makes ot-daemon's arguments for the radio (the nRF52840
+// RCP's serial device, owned by the Thread user; decision 11) at baud,
+// and its state directory (owned by the Thread user, mode 0700: the
+// network's dataset and keys); verbose also logs to stderr. It takes no
+// path itself: confine.Thread calls the result with the radio and state
+// directory its view binds, so the spinel URL can name no path but the
+// radio the view holds as a character device (ENF-k-12, #4639).
 //
 // The daemon (slice l) starts the stack in this order: ot-daemon under
-// confine.Thread with Dir set to the state directory; then the adapter,
-// the enforcer's own binary with AdapterArg, under confine.ThreadAdapter
-// with the same user and Dir, whose interface it attaches as
-// radio.StackThread; then the Matter controller with Spec.Net set to
-// ot-daemon's process. This package does not start them itself, so that
+// confine.Thread with that state directory, a run directory (owned by the
+// Thread user, mode 0700), where it makes its command socket, the RCP's
+// device and DaemonArgs; then the adapter, the enforcer's own binary with
+// AdapterArg, under confine.ThreadAdapter with the same user and the run
+// directory as Dir, whose interface it attaches as radio.StackThread;
+// then the Matter controller under confine.Matter with its storage
+// directory and Spec.Net set to ot-daemon's process. This package does not start them itself, so that
 // only confine links os/exec (arc2).
-func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
-	// The URL is the last argument: it must not read as an option.
-	if !strings.HasPrefix(radioURL, "spinel+") || strings.ContainsAny(radioURL, " \t\n") {
-		return nil, ErrRadio
+func DaemonArgs(baud int, verbose bool) func(radio, state string) ([]string, error) {
+	return func(radio, state string) ([]string, error) {
+		// The URL is the last argument: it must not read as an option,
+		// and it is the RCP's serial scheme with radio as its whole path.
+		// ot-daemon forks the radio as its own child when that path is a
+		// regular file (forkpty); confine.Thread's view binds radio only
+		// as a character device and fails the start otherwise, with the
+		// filter's fork refusal behind it (ENF-k-12). So radio is
+		// absolute, clean, and plain: no character that would end the
+		// path or start a query in the URL.
+		if !strings.HasPrefix(radio, "/") || path.Clean(radio) != radio || strings.Trim(radio, pathChars) != "" || baud <= 0 {
+			return nil, ErrRadio
+		}
+		if !strings.HasPrefix(state, "/") {
+			return nil, errors.New("thread: state directory must be absolute")
+		}
+		args := []string{"-I", Netif, "-B", Infra, "--data-path", state}
+		if verbose {
+			args = append(args, "-v")
+		}
+		return append(args, "spinel+hdlc+uart://"+radio+"?uart-baudrate="+strconv.Itoa(baud)), nil
 	}
-	if !strings.HasPrefix(state, "/") {
-		return nil, errors.New("thread: state directory must be absolute")
-	}
-	args := []string{"-I", Netif, "-B", Infra, "--data-path", state}
-	if verbose {
-		args = append(args, "-v")
-	}
-	return append(args, radioURL), nil
 }
+
+// pathChars are the characters a radio path may hold.
+const pathChars = "/._-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"

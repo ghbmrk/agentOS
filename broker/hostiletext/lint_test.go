@@ -132,10 +132,15 @@ func uncovered(checks []check, runs map[string]map[string]bool) []string {
 	return out
 }
 
-// allowLines reads allow.txt: "dir check reason" per line, # comments.
-func allowLines(t *testing.T) map[string]string {
+// allowLines reads an allow file (allow.txt by default): "dir check
+// reason" per line, # comments.
+func allowLines(t *testing.T, file ...string) map[string]string {
 	t.Helper()
-	b, err := os.ReadFile("allow.txt")
+	name := "allow.txt"
+	if len(file) > 0 {
+		name = file[0]
+	}
+	b, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +153,11 @@ func allowLines(t *testing.T) map[string]string {
 		}
 		f := strings.SplitN(line, " ", 3)
 		if len(f) != 3 || strings.TrimSpace(f[2]) == "" {
-			t.Fatalf("allow.txt:%d: want \"dir check reason\": %q", n, line)
+			t.Fatalf("%s:%d: want \"dir check reason\": %q", name, n, line)
 		}
 		k := f[0] + " " + f[1]
 		if _, dup := out[k]; dup {
-			t.Fatalf("allow.txt:%d: %s listed twice", n, k)
+			t.Fatalf("%s:%d: %s listed twice", name, n, k)
 		}
 		out[k] = f[2]
 	}

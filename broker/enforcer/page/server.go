@@ -8,7 +8,9 @@
 // It answers only the Owner network and the wired admin port: it binds
 // only their addresses and also drops any connection or request from
 // another source, unanswered. Every response refuses framing, and every
-// state-changing request must come from the page's own origin.
+// state-changing request must come from the page's own origin with the
+// anti-forgery token one of its screens drew (csrf.go, internal/csrf),
+// checked in one place before any route sees it.
 //
 // It also serves slice s's asserted actions (package action): every
 // turn-on or open of a safety-list device, unlock or disarm, camera off or
@@ -27,7 +29,8 @@
 //
 // It is enforcer code: it imports the standard library, broker/kernel/key,
 // broker/enforcer/policy, broker/enforcer/action, broker/enforcer/pairseal,
-// broker/enforcer/enrol and rsc.io/qr only (broker/daemon/arc2_test.go).
+// broker/enforcer/enrol, its own internal/csrf and rsc.io/qr only
+// (broker/daemon/arc2_test.go).
 // Its assumptions are in ASSUMPTIONS.md.
 package page
 
@@ -45,6 +48,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
+	"github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -119,12 +123,22 @@ type Config struct {
 	// Secrets takes safety-list devices' sealed secrets (slice r); nil
 	// refuses every link that carries one.
 	Secrets Secrets
-	Cert    tls.Certificate
-	Now     func() time.Time // nil means time.Now
+	// Heard is, for a device's network and Wi-Fi identity, the mDNS
+	// names the enforcer's relay heard proved their own where it hears
+	// that device (mdns.HeardBy): on a Devices-network device's VLAN, the
+	// names the page pins for it and the only ones it lets a link pin
+	// (D-266); on the Owner or Household network, the names it offers to
+	// hold for that network's devices (#4411). With taken, it leaves out
+	// a name taken says another device pins, and every instance on that
+	// host (#4601). nil has heard nothing.
+	Heard func(network, wifi string, taken func([]string) bool) [][]string
+	Cert  tls.Certificate
+	Now   func() time.Time // nil means time.Now
 }
 
 var (
-	ErrConfig = errors.New("page: bad config")
+	ErrConfig      = errors.New("page: bad config")
+	errCrossOrigin = errors.New("cross-origin")
 )
 
 // Server is the page.
@@ -138,6 +152,18 @@ type Server struct {
 	sync  syncState
 	tmpl  *template.Template
 	book  *action.Book // nil when Config.Act is
+	// tokens draws and checks the anti-forgery pairs (csrf.go); posts is
+	// every state-changing route, which ServeHTTP reaches only past guard.
+	tokens *csrf.Tokens
+	posts  map[string]post
+}
+
+// post is a state-changing route. An enrol route is served whenever
+// Config.Enrol is set, passkey in force or not; any other only while one
+// is (live).
+type post struct {
+	h     http.HandlerFunc
+	enrol bool
 }
 
 //go:embed templates static
@@ -176,6 +202,11 @@ func New(cfg Config) (*Server, error) {
 		cfg.Now = time.Now
 	}
 	s := &Server{cfg: cfg, chals: map[string]*challenge{}}
+	var err error
+	var ok bool
+	if s.tokens, ok = csrf.New(cfg.Now); !ok {
+		return nil, ErrConfig
+	}
 	t, err := template.New("").Funcs(funcs).Funcs(template.FuncMap{"when": s.when}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -185,6 +216,19 @@ func New(cfg Config) (*Server, error) {
 		if s.book, err = action.NewBook(cfg.Owner, cfg.Act, cfg.ActTimeout); err != nil {
 			return nil, err
 		}
+	}
+	s.posts = map[string]post{
+		"/approve":   {h: s.approve},
+		"/challenge": {h: s.challenge},
+		"/act":       {h: s.act},
+	}
+	if s.book != nil {
+		s.posts["/do"] = post{h: s.do}
+	}
+	if cfg.Enrol != nil {
+		s.posts["/enrol/begin"] = post{h: s.enrolBegin, enrol: true}
+		s.posts["/enrol/finish"] = post{h: s.enrolFinish, enrol: true}
+		s.posts["/enrol/reset"] = post{h: s.enrolReset, enrol: true}
 	}
 	return s, nil
 }
@@ -288,6 +332,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin", http.StatusForbidden)
 		return
 	}
+	if r.Method != http.MethodGet {
+		if err := s.guard(r); err != nil {
+			fail(w, http.StatusForbidden, err)
+			return
+		}
+		p, ok := s.posts[r.URL.Path]
+		switch {
+		case !ok || r.Method != http.MethodPost:
+			http.NotFound(w, r)
+		case !p.enrol && !s.live():
+			fail(w, http.StatusForbidden, errEnrolFirst)
+		default:
+			p.h(w, r)
+		}
+		return
+	}
 	if s.cfg.Enrol != nil && s.enrolRoute(w, r) {
 		return
 	}
@@ -305,33 +365,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/":
 		s.home(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/p":
-		s.confirm(w, r)
+		s.confirm(w, r, s.draft)
+	case r.Method == http.MethodGet && r.URL.Path == "/heard":
+		s.confirm(w, r, s.offered)
 	case r.Method == http.MethodGet && r.URL.Path == "/a" && s.book != nil:
 		s.action(w, r)
 	case r.Method == http.MethodGet && (r.URL.Path == "/page.js" || r.URL.Path == "/page.css"):
 		s.static(w, r)
-	case r.Method == http.MethodPost && (r.URL.Path == "/approve" || r.URL.Path == "/challenge" || r.URL.Path == "/act" ||
-		r.URL.Path == "/do" && s.book != nil):
-		if !s.sameOrigin(r) {
-			http.Error(w, "cross-origin", http.StatusForbidden)
-			return
-		}
-		switch r.URL.Path {
-		case "/approve":
-			s.approve(w, r)
-		case "/challenge":
-			s.challenge(w, r)
-		case "/do":
-			s.do(w, r)
-		default:
-			s.act(w, r)
-		}
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// enrolRoute serves the enrolment screens, whether or not a passkey is in
+// enrolRoute serves the enrolment screens' GETs, whether or not a passkey is in
 // force, and reports whether r was one of them.
 func (s *Server) enrolRoute(w http.ResponseWriter, r *http.Request) bool {
 	switch {
@@ -341,21 +387,6 @@ func (s *Server) enrolRoute(w http.ResponseWriter, r *http.Request) bool {
 		s.certificate(w, s.cfg.CA)
 	case r.Method == http.MethodGet && r.URL.Path == "/enrol/core.crt":
 		s.certificate(w, s.cfg.CoreCA)
-	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/enrol/"):
-		if !s.sameOrigin(r) {
-			http.Error(w, "cross-origin", http.StatusForbidden)
-			return true
-		}
-		switch r.URL.Path {
-		case "/enrol/begin":
-			s.enrolBegin(w, r)
-		case "/enrol/finish":
-			s.enrolFinish(w, r)
-		case "/enrol/reset":
-			s.enrolReset(w, r)
-		default:
-			http.NotFound(w, r)
-		}
 	default:
 		return false
 	}

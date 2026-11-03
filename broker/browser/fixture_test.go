@@ -15,10 +15,12 @@ import (
 	"time"
 )
 
-// The S5 driver behind the gate, against S5's local fixture site. Needs
-// python3 with Playwright and Chromium's headless shell; skipped where absent
-// (the broker CI job), and run by `go test ./browser` where they are.
-func TestFixtureThroughTheGate(t *testing.T) {
+// fixture starts the S5 driver behind a gate on S5's local fixture site and
+// its "evil" twin. Needs python3 with Playwright and Chromium's headless
+// shell; skipped where absent (the broker CI job), and run by
+// `go test ./browser` where they are.
+func fixture(t *testing.T, scrub Scrubber) (g *Gate, site, evil string) {
+	t.Helper()
 	s5, _ := filepath.Abs("../../spikes/S5-browser-actions")
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -53,22 +55,28 @@ sys.stdin.read()`)
 	}
 	t.Cleanup(func() { stdin.Close(); srv.Wait() })
 	ports := strings.Fields(mustLine(t, stdout))
-	site := "http://127.0.0.1:" + ports[0]
-	evil := "http://localhost:" + ports[1]
+	site = "http://127.0.0.1:" + ports[0]
+	evil = "http://localhost:" + ports[1]
 
-	const canaryURLToken = "s5CanaryUrlTokenR2d2C3po4BB8Kx9" // planted by the fixture
-	const canaryShown = "sk-ant-s5canaryDisplayedKey0123456789abcdef"
-	g, err := Start(context.Background(), Config{
+	g, err = Start(context.Background(), Config{
 		Driver:    wrapDriver(t, []string{py, filepath.Join(s5, "executor.py")}, []string{"S5_CHROME=" + chrome}),
 		Origins:   []string{site},
 		Workspace: filepath.Join(t.TempDir(), "ws"),
-		Scrub:     fakeScrubber{canaryShown},
+		Scrub:     scrub,
 		Timeout:   60 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
+	return g, site, evil
+}
+
+// The S5 driver behind the gate, against S5's local fixture site.
+func TestFixtureThroughTheGate(t *testing.T) {
+	const canaryURLToken = "s5CanaryUrlTokenR2d2C3po4BB8Kx9" // planted by the fixture
+	const canaryShown = "sk-ant-s5canaryDisplayedKey0123456789abcdef"
+	g, site, evil := fixture(t, fakeScrubber{canaryShown})
 	var transcript []string
 	do := func(req string) Result {
 		r, _, _ := g.do(context.Background(), []byte(req), nil)
@@ -113,6 +121,61 @@ sys.stdin.read()`)
 		if strings.Contains(all, c) {
 			t.Errorf("canary %q reached the agent", c)
 		}
+	}
+}
+
+// K16, against real Playwright: within one document an unchanged element
+// keeps its ref when the driver snapshots again (as it does inside a
+// screenshot), and a new document, even at the same URL, resolves no ref of
+// the old one, so the driver refuses what the gate cannot see changed.
+func TestFixtureRefsFollowTheDriversDocument(t *testing.T) {
+	g, site, _ := fixture(t, fakeScrubber{})
+	do := func(req string) Result {
+		r, _, _ := g.do(context.Background(), []byte(req), nil)
+		return r
+	}
+	email := regexp.MustCompile(`textbox "Email"[^\n]*\[ref=((?:f\d+)?e\d+)\]`)
+	refOf := func(what string) string {
+		t.Helper()
+		snap := do(`{"v":0,"verb":"snapshot"}`)
+		m := email.FindStringSubmatch(snap.Snapshot)
+		if !snap.OK || m == nil {
+			t.Fatalf("%s: no email field in %+v", what, snap)
+		}
+		return m[1]
+	}
+	login := `{"v":0,"verb":"navigate","url":"` + site + `/login.html"}`
+	if r := do(login); !r.OK {
+		t.Fatalf("navigate: %+v", r)
+	}
+	ref := refOf("first look")
+	if r := do(`{"v":0,"verb":"screenshot"}`); !r.OK {
+		t.Fatalf("screenshot: %+v", r)
+	}
+	if again := refOf("after the screenshot"); again != ref {
+		t.Fatalf("the email field's ref moved from %s to %s within one document", ref, again)
+	}
+	if r := do(`{"v":0,"verb":"type","ref":"` + ref + `","text":"a"}`); !r.OK {
+		t.Fatalf("type on the same document: %+v", r)
+	}
+	// The same URL loaded again is a new document: the gate keeps its refs
+	// (the URL did not change) and the driver refuses the old one.
+	if r := do(login); !r.OK {
+		t.Fatalf("navigate again: %+v", r)
+	}
+	if r := do(`{"v":0,"verb":"type","ref":"` + ref + `","text":"a"}`); r.OK || r.Error != "protocol" || !strings.Contains(r.Detail, "stale") {
+		t.Fatalf("type with a ref from the earlier document: %+v", r)
+	}
+	// Another page without a snapshot: the gate refuses the old page's
+	// ref itself, and nothing reaches the driver.
+	first := ref
+	ref = refOf("second document")
+	t.Logf("email field ref: %s in the first document, %s in the second", first, ref)
+	if r := do(`{"v":0,"verb":"navigate","url":"` + site + `/hop-check"}`); !r.OK {
+		t.Fatalf("navigate: %+v", r)
+	}
+	if r := do(`{"v":0,"verb":"click","ref":"` + ref + `"}`); r.Error != "unknown_ref" {
+		t.Fatalf("click with a ref from another page: %+v", r)
 	}
 }
 

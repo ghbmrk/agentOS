@@ -279,6 +279,10 @@ func TestClassifyClosedList(t *testing.T) {
 		"add a control port":    func(d *Document, s sub) { dev(d, s.x).Control = append(dev(d, s.x).Control, Port{ProtoTCP, 9}) },
 		"change a control port": func(d *Document, s sub) { dev(d, s.x).Control = []Port{{ProtoUDP, 9}} },
 		"remove a control port": func(d *Document, s sub) { dev(d, s.x).Control = nil }, // run on a base with a port below
+		// mDNS names: pinning one lets a device announce more across its
+		// pairs; unpinning one is not on the closed list either (#4144).
+		"pin an mDNS name":   func(d *Document, s sub) { dev(d, s.x).MDNS = [][]string{{"x", "local"}} },
+		"unpin an mDNS name": func(d *Document, s sub) { dev(d, s.x).MDNS = nil }, // run on a base with a name below
 	}
 	for sname, s := range subjects {
 		for name, c := range tight {
@@ -294,6 +298,8 @@ func TestClassifyClosedList(t *testing.T) {
 				dev(&base, s.x).Isolated = true
 			case "remove a control port":
 				dev(&base, s.x).Control = []Port{{ProtoTCP, 9}}
+			case "unpin an mDNS name":
+				dev(&base, s.x).MDNS = [][]string{{"x", "local"}}
 			}
 			next := base.normal() // a copy
 			f(&next, s)
@@ -314,6 +320,8 @@ func TestClassifyClosedList(t *testing.T) {
 		"remove a hold":                            func(d *Document) { d.Holds = nil },
 		"change a hold's kind":                     func(d *Document) { d.Holds[0].Kind = HoldFix },
 		"change the drone policy":                  func(d *Document) { d.Drone = strings.Repeat("ab", 32) },
+		"give a core destination a byte cap":       func(d *Document) { d.Caps = map[string]uint64{"mail.example": 10} },
+		"give the edge a byte cap":                 func(d *Document) { d.EdgeCap = 10 },
 		"rename the secure command":                func(d *Document) { dev(d, "lock").Secure = "bolt" },
 		"name a camera's command":                  func(d *Document) { dev(d, "cam").Secure = "off" },
 		"rename a device":                          func(d *Document) { dev(d, "tv").ID = "tv2"; d.Pairs[1].A = "tv2" },
@@ -358,8 +366,8 @@ func TestClassifyClosedList(t *testing.T) {
 	// Every field has a row: adding a field to the document without one
 	// fails here.
 	covered := map[string][]string{
-		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label", "Control", "Stream"},
+		"Document":     {"Version", "Destinations", "Caps", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
@@ -991,7 +999,7 @@ func TestNamingByClass(t *testing.T) {
 	}
 	for class, named := range want {
 		for _, s := range append(names, "") {
-			d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Class: class, Secure: s}}}
+			d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Class: class, Secure: s, Safeguards: Needs(class)}}}
 			_, err := Encode(d)
 			if ok := s == "" || s == named; (err == nil) != ok {
 				t.Errorf("a %q named %q: %v, want valid %v", class, s, err, ok)
@@ -1005,5 +1013,193 @@ func TestNamingByClass(t *testing.T) {
 		if _, err := Encode(d); (err == nil) != (class == "") {
 			t.Errorf("an everyday %q: %v", class, err)
 		}
+	}
+}
+
+// NET-2 Safety devices: "a garage door can be named only if it has
+// obstruction reversal and a pre-close warning". The signed policy records
+// the safeguards a class needs (Device.Safeguards), by class, and refuses
+// a document that names such a device without every one, so the channel
+// never carries a close to a door that would not reverse or warn. A
+// safeguard its class does not need, or on an everyday device, is refused
+// too, so the screen never shows a fact that means nothing. Recording and
+// dropping one are loosenings. Revert mutants: check skipping the Named
+// test passes the door with one safeguard; Named ignoring classNeeds
+// passes it with none.
+func TestGarageNeedsSafeguards(t *testing.T) {
+	door := func(secure string, g ...string) Document {
+		return Document{Version: 1, Devices: []Device{{ID: "garage", Network: NetDevices, Class: ClassGarageDoor, Secure: secure, Safeguards: g}}}
+	}
+	rev, warn := SafeguardObstructionReversal, SafeguardPreCloseWarning
+	for _, c := range []struct {
+		name string
+		d    Document
+		ok   bool
+	}{
+		{"named with both", door("close", rev, warn), true},
+		{"named with both, unsorted and twice", door("close", warn, rev, warn), true},
+		{"named with no safeguard", door("close"), false},
+		{"named without a pre-close warning", door("close", rev), false},
+		{"named without obstruction reversal", door("close", warn), false},
+		{"recorded, not named", door("", rev), true},
+		{"not named, none recorded", door(""), true},
+		{"an unknown safeguard", door("close", rev, warn, "light-curtain"), false},
+		{"a safeguard on a plug", Document{Version: 1, Devices: []Device{{ID: "p", Network: NetDevices, Class: ClassPlug, Secure: "off", Safeguards: []string{rev}}}}, false},
+		{"a safeguard on an untyped device", Document{Version: 1, Devices: []Device{{ID: "u", Network: NetDevices, Safeguards: []string{rev}}}}, false},
+		{"a safeguard on an everyday device", Document{Version: 1, Devices: []Device{{ID: "e", Network: NetDevices, Everyday: true, Safeguards: []string{rev}}}}, false},
+	} {
+		b, err := Encode(c.d)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: %v, want valid %v", c.name, err, c.ok)
+			continue
+		}
+		if !c.ok {
+			if !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: %v, want ErrMalformed", c.name, err)
+			}
+			continue
+		}
+		got, err := Decode(b)
+		if err != nil {
+			t.Fatalf("%s: decode: %v", c.name, err)
+		}
+		dv := got.Devices[0]
+		if want := dv.Secure != ""; dv.Named() != want {
+			t.Errorf("%s: Named() = %v, want %v", c.name, dv.Named(), want)
+		}
+	}
+
+	// Named on its own, for a device no document checked: the channel
+	// carries a command only to a Named device.
+	for _, c := range []struct {
+		d    Device
+		want bool
+	}{
+		{Device{Class: ClassGarageDoor, Secure: "close", Safeguards: []string{rev, warn}}, true},
+		{Device{Class: ClassGarageDoor, Secure: "close", Safeguards: []string{rev}}, false},
+		{Device{Class: ClassGarageDoor, Secure: "close"}, false},
+		{Device{Class: ClassGarageDoor, Safeguards: []string{rev, warn}}, false},
+		{Device{Class: ClassGarageDoor, Secure: "close", Everyday: true, Safeguards: []string{rev, warn}}, false},
+		{Device{Class: ClassPlug, Secure: "off"}, true},
+		{Device{Class: ClassCamera, Secure: "off"}, false},
+	} {
+		if got := c.d.Named(); got != c.want {
+			t.Errorf("%+v: Named() = %v, want %v", c.d, got, c.want)
+		}
+	}
+
+	// The set is canonical: order and repeats do not change the encoding,
+	// and an unsorted or repeated set does not decode (L3 on #4499).
+	canon, _ := Encode(door("close", rev, warn))
+	if b, _ := Encode(door("close", warn, rev, warn)); string(b) != string(canon) {
+		t.Errorf("order changes the encoding: %s, want %s", b, canon)
+	}
+	for _, alt := range []string{`"safeguards":["pre-close-warning","obstruction-reversal"]`, `"safeguards":["obstruction-reversal","obstruction-reversal","pre-close-warning"]`} {
+		bad := strings.Replace(string(canon), `"safeguards":["obstruction-reversal","pre-close-warning"]`, alt, 1)
+		if bad == string(canon) {
+			t.Fatalf("no safeguards in %s", canon)
+		}
+		if _, err := Decode([]byte(bad)); err == nil {
+			t.Errorf("decoded %s", alt)
+		}
+	}
+	// A door with no safeguards encodes as before: the field is omitted.
+	if b, _ := Encode(door("")); strings.Contains(string(b), "safeguards") {
+		t.Errorf("an empty set is written: %s", b)
+	}
+	// Needs is a copy: changing it changes no class's needs.
+	n := Needs(ClassGarageDoor)
+	n[0] = "x"
+	if !slices.Equal(Needs(ClassGarageDoor), []string{rev, warn}) {
+		t.Error("Needs returned the table itself")
+	}
+
+	// Recording or dropping a safeguard, with or without the naming, is a
+	// loosening: neither is on NET-4's closed list.
+	for name, pair := range map[string][2]Document{
+		"record one":           {door(""), door("", rev)},
+		"record the second":    {door("", rev), door("", rev, warn)},
+		"name with both":       {door(""), door("close", rev, warn)},
+		"drop one, unnamed":    {door("", rev, warn), door("", rev)},
+		"drop both and unname": {door("close", rev, warn), door("")},
+	} {
+		if got := Classify(pair[0], pair[1]); got.Tightening {
+			t.Errorf("%s: classified as a tightening: %+v", name, got)
+		}
+	}
+}
+
+// TestByteCapsCanonical: the signed list's byte caps (NET-2 Byte caps,
+// D-248) have one encoding, a cap left out is 0 and lets nothing through,
+// and a cap that is 0, names no listed destination, or makes the caps sum
+// past 2^64-1 is refused, so no group's cap overflows. Mutants: dropping
+// the zero check gives one cap two encodings; dropping the overflow check
+// lets a group's cap wrap under its count.
+func TestByteCapsCanonical(t *testing.T) {
+	capped := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}; d.EdgeCap = 5 })
+	b, err := Encode(capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"caps":{"mail.example":7,"models.example":9},"edge_cap":5`) {
+		t.Errorf("encoding %s", b)
+	}
+	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, capped.normal()) {
+		t.Fatalf("round trip: %v", err)
+	}
+	none, _ := Encode(home(1))
+	empty, _ := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{} }))
+	if string(none) != string(empty) || strings.Contains(string(none), "cap") {
+		t.Errorf("no caps encode as %s and %s", none, empty)
+	}
+	for name, f := range map[string]func(d *Document){
+		"a cap of 0":           func(d *Document) { d.Caps = map[string]uint64{"mail.example": 0} },
+		"a cap for no listing": func(d *Document) { d.Caps = map[string]uint64{"other.example": 1} },
+		"caps past 2^64-1":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1 << 63} },
+	} {
+		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
+	}
+	if _, err := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1} })); err != nil {
+		t.Errorf("caps summing to 2^64-1: %v", err)
+	}
+	for name, bad := range map[string][]byte{
+		"explicit zero": []byte(`{"version":1,"destinations":["a"],"caps":{"a":0},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"empty caps":    []byte(`{"version":1,"destinations":["a"],"caps":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"edge zero":     []byte(`{"version":1,"destinations":[],"edge_cap":0,"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+	} {
+		if _, err := Decode(bad); err == nil {
+			t.Errorf("%s: decoded", name)
+		}
+	}
+}
+
+// TestCapChangesAreLoosenings: a byte cap is not on NET-4's closed
+// tightening list, so raising one, lowering one, or changing the edge's
+// waits as a loosening; only the owner's signature changes a cap (NET-2
+// Byte caps: "asks the owner for a raise"). A raise must never be a
+// tightening that applies at once.
+func TestCapChangesAreLoosenings(t *testing.T) {
+	base := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100}; d.EdgeCap = 100 })
+	for name, f := range map[string]func(d *Document){
+		"raise a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 101} },
+		"lower a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 99} },
+		"drop a core cap":      func(d *Document) { d.Caps = nil },
+		"cap another listing":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1} },
+		"raise the edge's cap": func(d *Document) { d.EdgeCap = 101 },
+		"lower the edge's cap": func(d *Document) { d.EdgeCap = 99 },
+	} {
+		next := base.normal()
+		f(&next)
+		if c := Classify(base, next); c.Tightening {
+			t.Errorf("%s: %+v, want a loosening", name, c)
+		}
+	}
+	// A tightening still classifies as one beside the caps, so they do not
+	// block the closed list.
+	next, _ := Apply(base, Op{Kind: CutVendorCloud, Device: "tv"})
+	if c := Classify(base, next); !c.Tightening {
+		t.Errorf("cutting the TV's cloud with caps set: %+v", c)
 	}
 }

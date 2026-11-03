@@ -49,6 +49,13 @@ def go_flags(cmd):
     return set(re.findall(r'fs\.(?:String|Bool|Int|Duration|Uint)?(?:Var)?\((?:[^,]+, )?"([a-z-]+)"', src))
 
 
+def unlock_refusal(key, val, why, where=SYSTEM + "agentos-keeper-kernel.service"):
+    """#4667: an unlock unit's refusal names the file that set the value and what the key may be."""
+    allowed = {"FileDescriptorStoreMax": "FileDescriptorStoreMax=0"}.get(
+        key, key + "=none" if key.endswith("Action") else "no %s= at all" % key)
+    return "agentos-keeper-kernel.service: %s=%s in %s; %s; allowed: %s" % (key, val, where, why, allowed)
+
+
 class KeeperTreeTest(unittest.TestCase):
     """mkosi.finalize's keeper check on a tree holding the image's own units."""
 
@@ -350,9 +357,87 @@ class KeeperTreeTest(unittest.TestCase):
                 good = self.unit("agentos-keeper-kernel.service").read_text()
                 self.add("agentos-keeper-kernel.service", "Service", line)
                 key, val = line.split("=", 1)
-                self.assertEqual(self.v(), ["agentos-keeper-kernel.service: sets %s=%s; nothing reaches the unlock step "
-                                            "past descriptor 2 and no privilege survives its drop (#2899)" % (key, val)])
+                self.assertEqual(self.v(), [unlock_refusal(key, val, check.UNLOCK_DESCRIPTOR)])
                 self.unit("agentos-keeper-kernel.service").write_text(good)
+
+    def test_a_later_empty_assignment_does_not_hide_a_descriptor(self):
+        # #4306: systemd 257.13 never resets Sockets= and keeps the earlier FileDescriptorStoreMax= past an
+        # empty one, so the check reads every non-empty assignment, in the unit or a drop-in.
+        for key, val in (("Sockets", "a.socket"), ("FileDescriptorStoreMax", "4"), ("OpenFile", "/etc/hostname"),
+                         ("AmbientCapabilities", "CAP_SYS_ADMIN"), ("SecureBits", "keep-caps")):
+            with self.subTest(key):
+                d = write(self.root, SYSTEM + "agentos-keeper-kernel.service.d/99.conf",
+                          "[Service]\n%s=%s\n%s=\n" % (key, val, key))
+                self.assertEqual(self.v(), [unlock_refusal(key, val, check.UNLOCK_DESCRIPTOR,
+                                                           SYSTEM + "agentos-keeper-kernel.service.d/99.conf")])
+                d.unlink()
+        self.assertEqual(self.v(), [])
+
+    # #4644: one closed list of what the unlock unit may assign to each key that could hand it a descriptor
+    # or a privilege, or start a unit or a reboot when it stops; no empty or later assignment hides a value.
+    UNLOCK_BAD = (("Service", "Sockets", "a.socket"), ("Service", "OpenFile", "/etc/hostname"),
+                  ("Service", "FileDescriptorStoreMax", "4"), ("Service", "AmbientCapabilities", "CAP_SYS_ADMIN"),
+                  ("Service", "SecureBits", "keep-caps"), ("Unit", "StartLimitAction", "reboot"),
+                  ("Unit", "FailureAction", "reboot-force"), ("Service", "StartLimitAction", "reboot"),
+                  ("Service", "FailureAction", "reboot-force"), ("Unit", "SuccessAction", "reboot"),
+                  ("Unit", "JobTimeoutAction", "reboot-force"), ("Unit", "OnFailure", "reboot.target"),
+                  ("Unit", "OnSuccess", "reboot.target"))
+
+    def test_the_unlock_unit_assignments_are_one_closed_list(self):
+        self.assertEqual(sorted((s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS),
+                         sorted((s, k, {"FileDescriptorStoreMax": ("0",)}.get(k, ("none",) if k.endswith("Action") else ()))
+                                for s, k, _ in self.UNLOCK_BAD))
+        self.assertEqual({w for *_, w in check.UNLOCK_ASSIGNMENTS},
+                         {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START})
+
+    def test_no_later_assignment_hides_an_unlock_unit_value(self):
+        # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.
+        # Dependencies such as OnFailure= never reset; for the rest the check does not rest on how they do.
+        name = "agentos-keeper-kernel.service"
+        rule = {(s, k): (a, w) for s, k, a, w in check.UNLOCK_ASSIGNMENTS}
+        for section, key, val in self.UNLOCK_BAD:
+            allowed, why = rule[section, key]
+            want = [unlock_refusal(key, val, why)]
+            for later in ("", "none", "0"):
+                with self.subTest(section=section, key=key, later=later, form="unit then drop-in"):
+                    good = self.unit(name).read_text()
+                    self.add(name, section, "%s=%s" % (key, val))
+                    d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, later))
+                    # The later value is checked too: only an empty one or one on the key's list adds nothing.
+                    extra = [] if later == "" or later in allowed else [
+                        unlock_refusal(key, later, why, SYSTEM + name + ".d/99.conf")]
+                    self.assertEqual(self.v(), want + extra)
+                    d.unlink()
+                    self.unit(name).write_text(good)
+            with self.subTest(section=section, key=key, form="one drop-in"):
+                d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n%s=\n" % (section, key, val, key))
+                self.assertEqual(self.v(), [unlock_refusal(key, val, why, SYSTEM + name + ".d/99.conf")])
+                d.unlink()
+        self.assertEqual(self.v(), [])
+
+    def test_only_the_exact_listed_value_passes(self):
+        # Another case or spelling of a listed value is refused, whatever systemd would make of it.
+        name = "agentos-keeper-kernel.service"
+        for section, key, val, why in (("Unit", "FailureAction", "None", check.UNLOCK_ACTION),
+                                       ("Service", "FailureAction", "NONE", check.UNLOCK_ACTION),
+                                       ("Service", "FileDescriptorStoreMax", "00", check.UNLOCK_DESCRIPTOR)):
+            with self.subTest(section=section, key=key, val=val):
+                d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, val))
+                self.assertEqual(self.v(), [unlock_refusal(key, val, why, SYSTEM + name + ".d/99.conf")])
+                d.unlink()
+
+    def test_the_listed_values_pass(self):
+        # FileDescriptorStoreMax=0 keeps no descriptor; an action of none reboots nothing.
+        name = "agentos-keeper-kernel.service"
+        for section, key, allowed, _ in check.UNLOCK_ASSIGNMENTS:
+            for val in allowed:
+                with self.subTest(section=section, key=key, val=val):
+                    good = self.unit(name).read_text()
+                    self.add(name, section, "%s=%s" % (key, val))
+                    d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, val))
+                    self.assertEqual(self.v(), [])
+                    d.unlink()
+                    self.unit(name).write_text(good)
 
     def test_a_socket_unit_for_the_unlock_step_is_refused(self):
         write(self.root, SYSTEM + "agentos-keeper-kernel.socket", "[Socket]\nListenStream=/run/x.sock\n")
@@ -379,10 +464,10 @@ class KeeperTreeTest(unittest.TestCase):
                  ("StartLimitIntervalSec=infinity\n", "", "StartLimitIntervalSec is None; a zero or unset interval does not bound restarts (#2897)"),
                  ("StartLimitIntervalSec=infinity\n", "StartLimitIntervalSec=0\n", "StartLimitIntervalSec is 0; a zero or unset interval does not bound restarts (#2897)"),
                  ("StartLimitIntervalSec=infinity\n", "StartLimitIntervalSec=0s\n", "StartLimitIntervalSec is 0s; a zero or unset interval does not bound restarts (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nStartLimitAction=reboot\n", "StartLimitAction=reboot; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nFailureAction=reboot-force\n", "FailureAction=reboot-force; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nSuccessAction=reboot\n", "SuccessAction=reboot; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nJobTimeoutAction=reboot-force\n", "JobTimeoutAction=reboot-force; a reboot starts the unlock step again (#2897)"),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nStartLimitAction=reboot\n", unlock_refusal("StartLimitAction", "reboot", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nFailureAction=reboot-force\n", unlock_refusal("FailureAction", "reboot-force", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nSuccessAction=reboot\n", unlock_refusal("SuccessAction", "reboot", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nJobTimeoutAction=reboot-force\n", unlock_refusal("JobTimeoutAction", "reboot-force", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
                  ("[Service]\n", "[Service]\nStartLimitBurst=100\n", "a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree check does not model it (#2897)"))
         for old, new, want in cases:
             with self.subTest(new or old):
@@ -440,8 +525,7 @@ class KeeperTreeTest(unittest.TestCase):
                  ("[Service]\n", "[Service]\nExecStartPre=/usr/bin/systemd-run --on-active=1 /usr/bin/true\n",
                   "ExecStartPre=/usr/bin/systemd-run " + why),
                  ("[Unit]\n", "[Unit]\nOnFailure=reboot.target\n",
-                  "OnFailure=reboot.target starts a unit when the kernel stops, which the tree check does not model; "
-                  "its one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #2998)"))
+                  unlock_refusal("OnFailure", "reboot.target", check.UNLOCK_START)[len(name + ": "):]))
         for old, new, want in cases:
             with self.subTest(new):
                 good = self.unit(name).read_text()
@@ -590,7 +674,10 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("/agentos-keeper: enroll=skipped kernel=active/", ci)
         self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
         self.assertNotIn("my store holds none of your hardware keys", ci)
-        self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
+        # The report reads both units once their start jobs settle (#4474).
+        after = ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split()
+        self.assertIn("agentos-keeper-enroll.service", after)
+        self.assertIn("agentos-keeper-kernel.service", after)
         # The CI unit whose mounts outlive one command lifts the main-side mask in a drop-in that
         # sorts after it.
         for unit in ("agentos-e2e-seal.service",):

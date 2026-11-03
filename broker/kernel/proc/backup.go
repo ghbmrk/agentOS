@@ -1036,7 +1036,7 @@ func (h *Kernel) RecoveryRotate(now int64, next string, c key.Cosign) ([]byte, e
 			return err
 		}
 		var err error
-		out, err = handoff.SignApproval(h.head, a)
+		out, err = handoff.SignApproval((**h.head), a)
 		return err
 	})
 	return out, err
@@ -1059,7 +1059,7 @@ func (h *Kernel) SwitchRecipient(now int64, r, approval []byte) error {
 		return ErrArgs
 	}
 	next := backup.Recipient{X: x, EK: ek}
-	a, err := handoff.VerifyApproval(h.head.Public().(ed25519.PublicKey), approval, now)
+	a, err := handoff.VerifyApproval((**h.head).Public().(ed25519.PublicKey), approval, now)
 	if err != nil {
 		return err
 	}

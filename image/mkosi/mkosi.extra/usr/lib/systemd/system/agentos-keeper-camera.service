@@ -3,14 +3,14 @@
 # nothing else (CLK-1). Like the mail clerk it is a keeper unit and gets its key at every start and restart:
 # the service manager connects to the kernel's key socket for it (OpenFile=), the kernel hands the key only to
 # a process in this unit's cgroup, and the clerk gets it as descriptor 3 (MAIL-keys). It serves one socket, to
-# the owner side's uid (agentosd, root), dials each camera node's stream port on the home network (NET-2) and
-# decodes each stream in a gVisor sandbox of its own. runsc runs as this user, rootless, in a user namespace it
-# makes; each sandbox's group sits beside the clerk's own leaf of this unit's delegated group (CAM-host-11).
+# the owner side's uid (agentosd, root), and dials each camera node's stream port on the home network (NET-2).
+# It decodes no stream itself: each camera's decoder session is a connection to agentos-camdecode.socket,
+# which runs it in a gVisor sandbox under a user that is not this one (CAM-decoder-uid, #4134).
 [Unit]
 Description=agentOS camera clerk
 # No store, no kernel to hand the key: the first boot, before enrollment, starts none.
 ConditionPathExists=/var/lib/agentos-store/store
-After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-keeper-kernel.service network.target
+After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-keeper-kernel.service network.target agentos-camdecode.socket
 # The backoff below bounds the restarts, so no start limit stops the clerk for the rest of a boot.
 StartLimitIntervalSec=0
 
@@ -19,9 +19,7 @@ User=agentos-camera
 Group=agentos-camera
 ExecStart=/usr/lib/agentos/agentos-camera -dir /var/lib/agentos-camera \
         -owner-sock /run/agentos-camera/owner.sock -owner-uid 0 \
-        -runsc /usr/lib/agentos/runsc -runsc-root /run/agentos-camera/runsc \
-        -decode-root /usr/lib/agentos/images/camdecode \
-        -cgroup /sys/fs/cgroup/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service
+        -decoder /run/agentos-camdecode/conn.sock
 OpenFile=/run/agentos-kernel/key-camera.sock:clerk-key
 # The kernel's unit is started once its process is, before it listens, so the first start can find no key
 # socket: retry soon, then back off to every five minutes (MAIL-unit-2).
@@ -30,15 +28,11 @@ RestartSec=2
 RestartSteps=8
 RestartMaxDelaySec=5min
 StandardError=journal
-# The group's controllers are the clerk's to give its decoder sandboxes (cgroup.Controllers): it moves itself
-# into its leaf, and each sandbox's group, with its memory cap, is made beside it (RES-2).
-Delegate=cpu io memory pids
-# RES-2: at most 8 cameras (CAM-host-4), each decoder held to 512 MiB and 256 tasks by its own group
-# (camera.DefaultDecodeMem, gvisor's oneShotPids), and the clerk's 1 GiB and 64 tasks above them.
-MemoryMax=5G
-TasksMax=2112
-# The socket's and runsc's state directory, the clerk's own; the owner side reaches the socket, which admits
-# one uid.
+# RES-2: the clerk alone; each decoder session is held to its own unit's caps (agentos-camdecode@.service).
+MemoryMax=1G
+TasksMax=64
+# The owner socket's directory, the clerk's own and writable by no other uid; the owner side reaches the
+# socket, which admits one uid, and the server's uid it dials is the clerk's alone.
 RuntimeDirectory=agentos-camera
 RuntimeDirectoryMode=0755
 # The sealed store and the retained capture: tmpfiles.d makes the directory at boot, a keeper path the main
@@ -63,21 +57,19 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-# What runsc needs and the mail clerk's unit refuses (CAM-host-11): the user, mount, pid, network, IPC and UTS
-# namespaces it makes for each sandbox, so no RestrictNamespaces= (systemd's filter answers every clone3 with
-# ENOSYS, and the clerk starts runsc with clone3, straight into its sandbox's group); the system calls its
-# sentry and gofer make, which they filter themselves (gVisor's own seccomp) but those below; write-and-execute
-# memory for the sentry's guest code; and a writable cgroup tree, where the delegation's ownership leaves only
-# this unit's group the clerk's to write.
-# Still none of the calls no sandbox makes: CPU emulation, raw I/O, swap, reboot and the obsolete ones (with
-# ProtectClock= and ProtectKernelModules=, the clock's and the modules'). A call outside fails with EPERM.
-SystemCallFilter=~@cpu-emulation @obsolete @raw-io @reboot @swap
+# The mail clerk's profile: it starts no sandbox, so it makes no namespace and maps no writable code.
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged
+# A call outside the filter fails rather than killing the clerk mid-write.
 SystemCallErrorNumber=EPERM
 # No device but the standard pseudo-devices, and no TPM (#2889).
 PrivateDevices=yes
 DevicePolicy=closed
 # The camera nodes' stream ports, on the home network only (NET-2, DEV-2); the clerk's guard checks each pin
-# again (netguard). The decoder sandboxes have no network at all (runsc --network=none).
+# again (netguard). The decoder sessions have no network at all (agentos-camdecode@.service).
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
 IPAddressAllow=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7 fe80::/10

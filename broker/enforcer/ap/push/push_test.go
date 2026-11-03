@@ -7,9 +7,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -22,13 +26,21 @@ import (
 )
 
 // fakeAP is an SSH server that holds files and understands exactly the
-// three commands push sends; anything else fails the test.
+// four commands push sends; anything else fails the test. Like an access
+// point's shell, it keeps running a command after the client has closed
+// the connection, and it models the access point's lock (apLock, taken
+// only by a command that starts with flock) and token file (token, which
+// a command checks only if it carries the check).
 type fakeAP struct {
 	t       *testing.T
 	addr    string
 	hostKey ssh.PublicKey
+	apLock  sync.Mutex // the access point's flock on lockPath
 	mu      sync.Mutex
 	files   map[string][]byte
+	token   string   // tokenPath's content
+	events  []string // what took effect, in order: "claim 1", "write 1 <path>", "refused 1 <path>", "reload 1"
+	hold    *hold    // holds one write after its stdin has arrived
 	applies int
 	writes  int
 	logins  int
@@ -38,6 +50,12 @@ type fakeAP struct {
 	cut        map[string]bool // stdin of writes to these paths ends halfway
 	readFails  map[string]bool // reads of these paths print the file, then exit 1
 	failReload int             // the next this many reloads fail
+	failClaim  bool            // claims fail, as on an access point without flock
+	noTimeout  bool            // claims exit noTimeoutExit, as on an access point without timeout
+	supersede  bool            // a late claim lands right after each claim
+	drop       map[string]bool // a write of these paths drops the connection
+	silent     bool            // answers no session open, keeping the connection
+	conns      map[int]net.Conn
 
 	// newest is the login number of the newest connection that has run
 	// a command; interleaved is set when an older one runs a command
@@ -46,6 +64,45 @@ type fakeAP struct {
 	interleaved bool
 }
 
+// hold stalls the write of path on connection login: while its stdin is
+// still arriving (a command the access point starts late, or whose
+// stdin never ends) or once it holds the lock to move its file (one the
+// access point is slow to finish). The write then runs to its end
+// whatever the client did.
+type hold struct {
+	login   int
+	path    string
+	inLock  bool
+	arrived chan struct{} // closed when the held write has started
+	release chan struct{} // the test closes it to let the write go on
+	done    chan struct{} // closed when the held write has ended
+}
+
+func (f *fakeAP) holdWrite(login int, path string, inLock bool) *hold {
+	h := &hold{login: login, path: path, inLock: inLock, arrived: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
+	f.mu.Lock()
+	f.hold = h
+	f.mu.Unlock()
+	f.t.Cleanup(func() {
+		select {
+		case <-h.release:
+		default:
+			close(h.release)
+		}
+	})
+	return h
+}
+
+func (f *fakeAP) event(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+
+// tokenRE finds a Sync's token in a command: 32 hex digits standing
+// alone, which a 64-digit hash is not.
+var tokenRE = regexp.MustCompile(`\b[0-9a-f]{32}\b`)
+
 func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
 	t.Helper()
 	_, hk, _ := ed25519.GenerateKey(rand.Reader)
@@ -53,6 +110,13 @@ func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newFakeAPWithHostKey(t, client, signer)
+}
+
+// newFakeAPWithHostKey is a fake access point that signs with signer,
+// offering only the algorithms signer offers.
+func newFakeAPWithHostKey(t *testing.T, client ssh.PublicKey, signer ssh.Signer) *fakeAP {
+	t.Helper()
 	f := &fakeAP{t: t, hostKey: signer.PublicKey(), files: map[string][]byte{}}
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
@@ -90,9 +154,19 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	f.mu.Lock()
 	f.logins++
 	login := f.logins
+	if f.conns == nil {
+		f.conns = map[int]net.Conn{}
+	}
+	f.conns[login] = conn
 	f.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 	for nc := range chans {
+		f.mu.Lock()
+		silent := f.silent
+		f.mu.Unlock()
+		if silent {
+			continue
+		}
 		if nc.ChannelType() != "session" {
 			nc.Reject(ssh.UnknownChannelType, "")
 			continue
@@ -123,38 +197,15 @@ func (f *fakeAP) session(login int, ch ssh.Channel, reqs <-chan *ssh.Request) {
 
 func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if login < f.newest {
 		f.interleaved = true
 	}
 	f.newest = max(f.newest, login)
-	if cmd == applyCmd {
-		if f.failReload > 0 {
-			f.failReload--
-			return 1
-		}
-		f.applies++
-		return 0
-	}
+	f.mu.Unlock()
 	for _, p := range ap.Paths {
-		if strings.HasPrefix(cmd, "umask 077 && cat > "+tmpPath(p)+" ") {
-			b, _ := io.ReadAll(ch)
-			if f.cut[p] {
-				b = b[:len(b)/2] // stdin ended early
-			}
-			// The access point's own check: the hash in the command must
-			// be that of what arrived, or nothing is moved into place.
-			if cmd != writeCmd(p, b) || f.failWrite[p] {
-				return 1
-			}
-			f.writes++
-			if !f.stuck {
-				f.files[p] = b
-			}
-			return 0
-		}
-		switch cmd {
-		case readCmd(p):
+		if cmd == readCmd(p) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			b, ok := f.files[p]
 			if !ok {
 				return 1
@@ -165,6 +216,124 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 			}
 			return 0
 		}
+	}
+	tok := tokenRE.FindString(cmd)
+	// What the shell does with the command's two guards: the lock only
+	// if the command takes it, the token check only if it carries one.
+	takesLock := strings.HasPrefix(cmd, "{ flock -x 9 && ") && strings.HasSuffix(cmd, "; } 9>"+lockPath)
+	checks := strings.Contains(cmd, owns(tok)+" && ")
+	lock := func() func() {
+		if !takesLock {
+			return func() {}
+		}
+		f.apLock.Lock()
+		return f.apLock.Unlock
+	}
+	stale := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return checks && f.token != tok
+	}
+	switch {
+	case tok != "" && cmd == claimCmd(tok):
+		defer lock()()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failClaim {
+			return 1
+		}
+		if f.noTimeout {
+			return noTimeoutExit
+		}
+		f.token = tok
+		f.events = append(f.events, fmt.Sprint("claim ", login))
+		if f.supersede {
+			f.token = token()
+			f.events = append(f.events, "late claim")
+		}
+		return 0
+	case tok != "" && cmd == applyCmd(tok):
+		defer lock()()
+		if stale() {
+			f.event(fmt.Sprint("refused ", login, " reload"))
+			return refusedExit
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failReload > 0 {
+			f.failReload--
+			return 1
+		}
+		f.applies++
+		f.events = append(f.events, fmt.Sprint("reload ", login))
+		return 0
+	}
+	for _, p := range ap.Paths {
+		if !strings.Contains(cmd, "cat > "+tmpPath(p, tok)+" ") {
+			continue
+		}
+		f.mu.Lock()
+		drop := f.drop[p]
+		f.mu.Unlock()
+		if drop {
+			f.mu.Lock()
+			f.conns[login].Close()
+			f.mu.Unlock()
+			return 1
+		}
+		// The lock is taken where the command takes it: before stdin is
+		// read, or only for the move once the hash has checked.
+		lockFirst := takesLock
+		lockForMove := strings.Contains(cmd, " && { flock -x 9 && "+owns(tok)+" && mv -f ")
+		unlock := func() {}
+		defer func() { unlock() }()
+		if lockFirst {
+			unlock = lock()
+		}
+		f.mu.Lock()
+		h := f.hold
+		f.mu.Unlock()
+		held := h != nil && h.login == login && h.path == p
+		if held {
+			defer close(h.done)
+			close(h.arrived)
+			if !h.inLock {
+				<-h.release // stdin still arriving
+			}
+		}
+		b, _ := io.ReadAll(ch)
+		f.mu.Lock()
+		if f.cut[p] {
+			b = b[:len(b)/2] // stdin ended early
+		}
+		f.mu.Unlock()
+		// The access point's own check: the hash in the command must be
+		// that of what arrived, or nothing is moved into place.
+		if cmd != writeCmd(p, tok, b) {
+			return 1
+		}
+		if lockForMove && !lockFirst {
+			f.apLock.Lock()
+			unlock = f.apLock.Unlock
+		}
+		if held && h.inLock {
+			<-h.release // slow to move
+		}
+		if stale() {
+			f.event(fmt.Sprint("refused ", login, " ", p))
+			return refusedExit
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failWrite[p] {
+			return 1
+		}
+		f.writes++
+		if !f.stuck {
+			f.files[p] = b
+		}
+		f.events = append(f.events, fmt.Sprint("write ", login, " ", p))
+		return 0
 	}
 	f.t.Errorf("the access point was sent an unknown command %q", cmd)
 	return 127
@@ -395,23 +564,35 @@ func TestSyncsDoNotOverlap(t *testing.T) {
 }
 
 // TestTempFilePerPath: each path is written through a temporary file of
-// its own, on /etc, so no two writes can share one.
+// its own path and Sync, on /etc, so no two writes can share one, and
+// the claim's glob matches every one of them.
 func TestTempFilePerPath(t *testing.T) {
 	seen := map[string]string{}
+	tok, other := token(), token()
 	for _, p := range ap.Paths {
-		tp := tmpPath(p)
-		if !strings.HasPrefix(tp, "/etc/") || strings.Count(tp, "/") != 2 || strings.ContainsAny(tp, " ;|&$`'\"") {
-			t.Errorf("temporary file for %s: %q", p, tp)
+		for _, k := range []string{tok, other} {
+			tp := tmpPath(p, k)
+			if !strings.HasPrefix(tp, "/etc/") || strings.Count(tp, "/") != 2 || strings.ContainsAny(tp, " ;|&$`'\"*?[") {
+				t.Errorf("temporary file for %s: %q", p, tp)
+			}
+			if m, _ := path.Match(tmpGlob, tp); !m {
+				t.Errorf("the claim does not remove %s", tp)
+			}
+			if q, dup := seen[tp]; dup {
+				t.Errorf("%s and %s share %s", p, q, tp)
+			}
+			seen[tp] = p
 		}
-		if q, dup := seen[tp]; dup {
-			t.Errorf("%s and %s share %s", p, q, tp)
-		}
-		seen[tp] = p
 	}
-	// The write command itself uses its path's file and no other's.
+	for _, p := range ap.Paths {
+		if m, _ := path.Match(tmpGlob, p); m {
+			t.Errorf("the claim removes %s", p)
+		}
+	}
+	// The write command itself uses its path's and Sync's file and no other's.
 	for _, p := range ap.Paths {
 		for _, q := range ap.Paths {
-			if has := strings.Contains(writeCmd(p, nil), tmpPath(q)); has != (p == q) {
+			if has := strings.Contains(writeCmd(p, tok, nil), tmpPath(q, tok)) && !strings.Contains(writeCmd(p, tok, nil), other); has != (p == q) {
 				t.Errorf("write command for %s names the temporary file of %s: %v", p, q, has)
 			}
 		}
@@ -569,5 +750,600 @@ func TestNothingWrittenNotApplied(t *testing.T) {
 	res, err := p.Sync(context.Background(), config())
 	if err == nil || res.Applied {
 		t.Fatalf("sync: %+v %v", res, err)
+	}
+}
+
+// revoked is config() with a second station whose password has since
+// been revoked: what a Sync that timed out was still writing.
+func revoked() []ap.File {
+	c := config()
+	c[1].Data = append(bytes.Clone(c[1].Data), "config wifi-station\n\toption vid '102'\n\toption key 'CANARYREVOKEDAAAAAAAAAAAAA'\n"...)
+	return c
+}
+
+// TestLateWriteOfTimedOutSyncRefused: a Sync times out while the access
+// point has not yet started its write of the wireless file, which carries
+// a password since revoked; the command keeps running there after the
+// client has gone. The next Sync writes the config without that password.
+// When the old write then runs, it finds the newer claim and does
+// nothing, so the revoked password stays out. Catches a late write of a
+// timed-out Sync putting back an older config (ENF-g-10, #4313).
+func TestLateWriteOfTimedOutSyncRefused(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, false)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 5 * time.Second
+	if _, err := p.Sync(context.Background(), config()); err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	close(h.release)
+	<-h.done
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("the timed-out Sync's late write put back %q", got)
+	}
+	f.mu.Lock()
+	last := f.events[len(f.events)-1]
+	f.mu.Unlock()
+	if last != "refused 1 "+ap.PathWireless {
+		t.Fatalf("last event %q", last)
+	}
+	if res, err := p.Sync(context.Background(), config()); err != nil || len(res.Drift) != 0 {
+		t.Fatalf("sync after: %+v %v", res, err)
+	}
+}
+
+// TestSlowWriteEndsBeforeNextClaim: a Sync times out while its write
+// holds the access point's lock. The next Sync's claim waits for that
+// write to end, so the old write and every command of the new Sync run
+// one after the other, and the new Sync's write lands last. Catches two
+// Syncs' writes sharing a temporary file at once (ENF-g-10, #4313).
+func TestSlowWriteEndsBeforeNextClaim(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, true)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 5 * time.Second
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.Sync(context.Background(), config())
+		errc <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // the new claim is waiting on the lock
+	f.mu.Lock()
+	early := slices.Contains(f.events, "claim 2")
+	f.mu.Unlock()
+	close(h.release)
+	if err := <-errc; err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	<-h.done
+	if early {
+		t.Fatal("the next Sync claimed the access point while the old write held its lock")
+	}
+	f.mu.Lock()
+	ev := slices.Clone(f.events)
+	f.mu.Unlock()
+	old, claim := slices.Index(ev, "write 1 "+ap.PathWireless), slices.Index(ev, "claim 2")
+	if old < 0 || claim < old {
+		t.Fatalf("events %q", ev)
+	}
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("wireless holds %q", got)
+	}
+}
+
+// TestFailedClaimWritesNothing: an access point that cannot take the
+// claim (no flock, a full /tmp) gets no write and no reload, and the
+// Sync fails. Catches a Sync that writes without holding the claim.
+func TestFailedClaimWritesNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failClaim = true
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := p.Sync(context.Background(), config()); err == nil || !strings.Contains(err.Error(), "claim") {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, writes, applies, files := f.n(); writes != 0 || applies != 0 || files != 0 {
+		t.Fatalf("writes=%d applies=%d files=%d", writes, applies, files)
+	}
+}
+
+// TestNoTimeoutWritesNothing: an access point with no timeout command,
+// on which every reload would fail, refuses the claim, and the Sync
+// writes and reloads nothing and returns ErrNoTimeout. Catches written
+// files, a revocation among them, left on the access point unapplied
+// (#4429).
+func TestNoTimeoutWritesNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.noTimeout = true
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrNoTimeout) || errors.Is(err, ErrSuperseded) {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, writes, applies, files := f.n(); writes != 0 || applies != 0 || files != 0 {
+		t.Fatalf("writes=%d applies=%d files=%d", writes, applies, files)
+	}
+	if !strings.Contains(claimCmd(token()), "{ command -v timeout >/dev/null || exit 69; } && ") {
+		t.Errorf("claim does not check for timeout first: %q", claimCmd(token()))
+	}
+}
+
+// TestRSAHostKeyOnlySHA2: a pinned RSA host key is accepted only with a
+// SHA-2 signature: an access point offering rsa-sha2-512 is reached, one
+// offering only ssh-rsa (SHA-1) is refused before any login, and a DSA
+// or other key type is refused before any dial. Catches an RSA pin that
+// turns on SHA-1 host signatures (#4087).
+func TestRSAHostKeyOnlySHA2(t *testing.T) {
+	me := enforcerKey(t)
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := ssh.NewSignerFromKey(rk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		algo string
+		ok   bool
+	}{{ssh.KeyAlgoRSASHA512, true}, {ssh.KeyAlgoRSASHA256, true}, {ssh.KeyAlgoRSA, false}} {
+		as, err := ssh.NewSignerWithAlgorithms(rs.(ssh.AlgorithmSigner), []string{c.algo})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := newFakeAPWithHostKey(t, me.PublicKey(), as)
+		p := &Pusher{Addr: f.addr, HostKey: rs.PublicKey(), Signer: me, Dial: dial, Timeout: 5 * time.Second}
+		_, err = p.Sync(context.Background(), config())
+		if logins, _, _, _ := f.n(); (err == nil) != c.ok || (logins > 0) != c.ok {
+			t.Errorf("access point signing %s: err %v, logins %d", c.algo, err, logins)
+		}
+	}
+	for _, typ := range []string{ssh.KeyAlgoDSA, ssh.CertAlgoED25519v01, ssh.KeyAlgoSKED25519} {
+		dialed := false
+		d := func(ctx context.Context, n, a string) (net.Conn, error) { dialed = true; return dial(ctx, n, a) }
+		p := &Pusher{Addr: "127.0.0.1:1", HostKey: typedKey{rs.PublicKey(), typ}, Signer: me, Dial: d, Timeout: time.Second}
+		if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrHostKey) || dialed {
+			t.Errorf("%s pin: err %v, dialed %v", typ, err, dialed)
+		}
+	}
+}
+
+// typedKey is a public key reporting another type.
+type typedKey struct {
+	ssh.PublicKey
+	typ string
+}
+
+func (k typedKey) Type() string { return k.typ }
+
+// TestCommandsTakeTheLock: the claim, every write's move and the reload
+// run under the access point's lock, the move and the reload only while
+// their Sync's token is the newest; a write reads stdin with no lock
+// held; the claim removes earlier temporary files; and the reload does
+// not pass the lock's descriptor to what it starts. Each Sync draws a
+// new token.
+func TestCommandsTakeTheLock(t *testing.T) {
+	tok := token()
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(tok) || tok == token() {
+		t.Fatalf("token %q", tok)
+	}
+	for _, c := range []string{claimCmd(tok), applyCmd(tok)} {
+		if !strings.HasPrefix(c, "{ flock -x 9 && ") || !strings.HasSuffix(c, "; } 9>"+lockPath) {
+			t.Errorf("not under the lock: %q", c)
+		}
+	}
+	if !strings.HasPrefix(applyCmd(tok), "{ flock -x 9 && "+owns(tok)+" && ") {
+		t.Errorf("reload does not check the token first: %q", applyCmd(tok))
+	}
+	if !strings.HasSuffix(claimCmd(tok), " && rm -f "+tmpGlob+"; } 9>"+lockPath) {
+		t.Errorf("claim leaves earlier temporary files: %q", claimCmd(tok))
+	}
+	for _, p := range ap.Paths {
+		c := writeCmd(p, tok, []byte("x"))
+		read, move, ok := strings.Cut(c, " && { flock -x 9 && "+owns(tok)+" && mv -f "+tmpPath(p, tok)+" "+p+"; } 9>"+lockPath)
+		if !ok || strings.Contains(read, "flock") || !strings.HasPrefix(read, "umask 077 && cat > "+tmpPath(p, tok)+" && ") || move != " || { s=$?; rm -f "+tmpPath(p, tok)+"; exit $s; }" {
+			t.Errorf("write does not read unlocked and move under the lock with the token checked: %q", c)
+		}
+	}
+	if !strings.HasSuffix(applyCmd(tok), " && { timeout 20 reload_config 9>&- </dev/null >/dev/null 2>&1 || { s=$?; [ $s = 75 ] && s=1; exit $s; }; }; } 9>"+lockPath) {
+		t.Errorf("reload is unbounded or keeps the lock's descriptor or the session's output: %q", applyCmd(tok))
+	}
+	if reloadBound != 20*time.Second {
+		t.Errorf("reloadBound %v is not the bound the command carries", reloadBound)
+	}
+}
+
+// TestEndlessStdinHoldsNothing: a timed-out Sync's write whose stdin never
+// ends on the access point (a link that dropped before its end) does not
+// hold up the next Syncs, which write and reload as usual. Catches a
+// write that takes the access point's lock before reading stdin, which
+// would keep every revocation off the access point until it rebooted.
+func TestEndlessStdinHoldsNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, false) // released only at cleanup
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 2 * time.Second
+	for i := range 2 {
+		if res, err := p.Sync(context.Background(), config()); err != nil || (i == 0) != res.Applied {
+			t.Fatalf("sync %d behind an endless write: %+v %v", i, res, err)
+		}
+	}
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("wireless holds %q", got)
+	}
+}
+
+// TestSupersededSyncReportsIt: a Sync whose claim a later one replaced
+// (the claim of an earlier Sync that timed out waiting for the lock,
+// landing late) has its write, or with nothing to write its reload,
+// refused, and Sync returns ErrSuperseded, which no other failure
+// returns, so slice l's report can say the Sync is retried at the next
+// tick. A refused write ends the Sync: nothing more is sent. Catches a
+// refusal that reads like a failed write.
+func TestSupersededSyncReportsIt(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	f.mu.Lock()
+	f.supersede = true
+	f.mu.Unlock()
+	res, err := p.Sync(context.Background(), config())
+	if !errors.Is(err, ErrSuperseded) || res.Applied {
+		t.Fatalf("drifted sync: %+v %v", res, err)
+	}
+	f.mu.Lock()
+	ev := slices.Clone(f.events)
+	f.mu.Unlock()
+	if want := []string{"claim 1", "late claim", "refused 1 " + config()[0].Path}; !slices.Equal(ev, want) {
+		t.Fatalf("events %q, want %q", ev, want)
+	}
+	f.mu.Lock()
+	f.supersede = false
+	f.mu.Unlock()
+	if _, err := p.Sync(context.Background(), config()); err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	f.mu.Lock()
+	f.supersede = true
+	f.mu.Unlock()
+	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrSuperseded) || !strings.Contains(err.Error(), "reload") {
+		t.Fatalf("in-sync sync: %v", err)
+	}
+	for name, fail := range map[string]func(){
+		"write":  func() { f.failWrite = map[string]bool{config()[0].Path: true} },
+		"reload": func() { f.failReload = 1 },
+		"claim":  func() { f.failClaim = true },
+	} {
+		g := newFakeAP(t, me.PublicKey())
+		f = g
+		fail()
+		q := &Pusher{Addr: g.addr, HostKey: g.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+		if _, err := q.Sync(context.Background(), config()); err == nil || errors.Is(err, ErrSuperseded) {
+			t.Errorf("failed %s: %v", name, err)
+		}
+	}
+}
+
+// countSessions makes newSession count the sessions Sync opens and, from
+// the one numbered blockFrom on (0: none), wait without end, as
+// x/crypto's NewSession does on a connection that ended just before it
+// (#4441).
+func countSessions(t *testing.T, blockFrom int) func() int {
+	var mu sync.Mutex
+	n := 0
+	never := make(chan struct{})
+	orig := newSession
+	t.Cleanup(func() {
+		close(never)
+		newSession = orig
+	})
+	newSession = func(c *ssh.Client) (*ssh.Session, error) {
+		mu.Lock()
+		n++
+		block := blockFrom > 0 && n >= blockFrom
+		mu.Unlock()
+		if block {
+			<-never
+			return nil, errors.New("never")
+		}
+		return orig(c)
+	}
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// syncWithin runs p.Sync and fails the test if it has not returned
+// within d, rather than letting the test binary's own timeout end it.
+func syncWithin(t *testing.T, p *Pusher, files []ap.File, d time.Duration) (Result, error) {
+	t.Helper()
+	type out struct {
+		res Result
+		err error
+	}
+	c := make(chan out, 1)
+	go func() {
+		res, err := p.Sync(context.Background(), files)
+		c <- out{res, err}
+	}()
+	select {
+	case o := <-c:
+		return o.res, o.err
+	case <-time.After(d):
+		t.Fatalf("Sync with Timeout %v still running after %v", p.Timeout, d)
+		return Result{}, nil
+	}
+}
+
+// TestSessionOpenBoundedByTimeout: opening a session never answers, as
+// x/crypto's NewSession on a connection that ended a moment before it.
+// The Sync still ends at its Timeout with the deadline as its error.
+// Catches a Sync that waits on NewSession past its Timeout, which held a
+// broker-race shard for 25 minutes and would hold Watch, and the
+// revocations it carries, for ever (ENF-g-aplock-hang, #4441).
+func TestSessionOpenBoundedByTimeout(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	for _, from := range []int{1, 2, 5} { // the claim, a read, a write
+		t.Run(fmt.Sprint("session ", from), func(t *testing.T) {
+			n := countSessions(t, from)
+			p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+			start := time.Now()
+			_, err := syncWithin(t, p, config(), 10*time.Second)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err %v", err)
+			}
+			if el := time.Since(start); el > 3*time.Second {
+				t.Fatalf("Sync took %v", el)
+			}
+			if n() != from {
+				t.Fatalf("%d sessions asked for", n())
+			}
+		})
+	}
+}
+
+// TestDroppedConnectionEndsSync: the access point drops the connection
+// during the first of three writes. The Sync ends there with an error
+// and opens no other session on the dead connection, and the next Sync
+// writes everything. Catches a Sync that keeps asking a dropped
+// connection for sessions, each of which can wait until the Timeout
+// (#4441).
+func TestDroppedConnectionEndsSync(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.drop = map[string]bool{ap.PathNetwork: true}
+	n := countSessions(t, 0)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := syncWithin(t, p, config(), 10*time.Second); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dropped connection: err %v", err)
+	}
+	if n() != 1+3+1 { // claim, three reads, the dropped write
+		t.Fatalf("%d sessions opened on a connection that dropped at the first write", n())
+	}
+	f.mu.Lock()
+	f.drop = nil
+	f.mu.Unlock()
+	if res, err := syncWithin(t, p, config(), 10*time.Second); err != nil || !res.Applied || len(res.Drift) != 3 {
+		t.Fatalf("next sync: %+v %v", res, err)
+	}
+}
+
+// TestOpenAfterCloseReturns: with x/crypto's own NewSession, a session
+// opened just after the connection has closed, as Sync's write loop
+// does when its Timeout closes the connection under a running command,
+// returns by its context's end. Without open's bound, about one such
+// NewSession in thirty waited for ever under -race (#4441).
+func TestOpenAfterCloseReturns(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.set(ap.PathNetwork, []byte("x"))
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
+	for i := range 300 {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		c, err := p.connect(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go c.Close()
+		p.run(ctx, c, readCmd(ap.PathNetwork), nil) // ends when the close does
+		done := make(chan struct{})
+		go func() {
+			if s, err := p.open(ctx, c); err == nil {
+				s.Close()
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("open %d after close still waiting", i)
+		}
+		cancel()
+	}
+}
+
+// hostileOpens makes newSession, while on() is true, wait as x/crypto's
+// NewSession does when the access point ends the connection in its open
+// window (#4441, #4554), until wake is called; it then opens the session
+// for real and keeps it in got. The access point chooses when to end the
+// connection, so a hostile one can aim at that window on every Sync; the
+// hook stands in for the hit, which real x/crypto lands only now and
+// then.
+func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.Session) {
+	var mu sync.Mutex
+	hostile := false
+	var sessions []*ssh.Session
+	release := make(chan struct{})
+	var once sync.Once
+	wake = func() { once.Do(func() { close(release) }) }
+	orig := newSession
+	t.Cleanup(func() {
+		wake()
+		newSession = orig
+	})
+	newSession = func(c *ssh.Client) (*ssh.Session, error) {
+		mu.Lock()
+		h := hostile
+		mu.Unlock()
+		if !h {
+			return orig(c)
+		}
+		<-release
+		s, err := orig(c)
+		if err == nil {
+			mu.Lock()
+			sessions = append(sessions, s)
+			mu.Unlock()
+		}
+		return s, err
+	}
+	on = func(v bool) {
+		mu.Lock()
+		hostile = v
+		mu.Unlock()
+	}
+	got = func() []*ssh.Session {
+		mu.Lock()
+		defer mu.Unlock()
+		return sessions
+	}
+	return on, wake, got
+}
+
+// settles waits until p has no session open left waiting.
+func settles(t *testing.T, p *Pusher) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); p.abandoned() != 0; {
+		if time.Now().After(end) {
+			t.Fatalf("%d abandoned opens still counted", p.abandoned())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAbandonedOpensCountedAndCapped: a hostile access point lands every
+// Sync's claim in x/crypto's open window. Each Sync ends at its Timeout,
+// its Result and Watch's report count one more open left waiting, and
+// from MaxAbandoned on the Pusher refuses to Sync with ErrStalled and
+// dials nothing. Once the waiting opens return, the count falls to zero
+// and Sync runs again. Catches a Pusher that leaks one goroutine and
+// closed connection per Sync with no count and no bound
+// (ENF-g-aplock-leak, #4554).
+func TestAbandonedOpensCountedAndCapped(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	on, wake, _ := hostileOpens(t)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 100 * time.Millisecond}
+	on(true)
+	for i := 1; i <= MaxAbandoned; i++ {
+		res, err := syncWithin(t, p, config(), 10*time.Second)
+		if !errors.Is(err, context.DeadlineExceeded) || res.Abandoned != i {
+			t.Fatalf("sync %d: %+v %v", i, res, err)
+		}
+	}
+	logins, _, _, _ := f.n()
+	res, err := syncWithin(t, p, config(), 10*time.Second)
+	if !errors.Is(err, ErrStalled) || res.Abandoned != MaxAbandoned {
+		t.Fatalf("past the cap: %+v %v", res, err)
+	}
+	if l, _, _, _ := f.n(); l != logins {
+		t.Fatalf("a stalled Pusher dialled the access point (%d logins, was %d)", l, logins)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var reported []Result
+	var errs []error
+	p.Watch(ctx, time.Hour, func() ([]ap.File, error) { return config(), nil }, func(r Result, err error) {
+		reported, errs = append(reported, r), append(errs, err)
+		cancel()
+	})
+	if len(reported) != 1 || reported[0].Abandoned != MaxAbandoned || !errors.Is(errs[0], ErrStalled) {
+		t.Fatalf("Watch reported %+v %v", reported, errs)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	p.Watch(ctx, time.Hour, func() ([]ap.File, error) { return nil, errors.New("no policy") }, func(r Result, err error) {
+		if r.Abandoned != MaxAbandoned {
+			t.Errorf("Watch with a failed config reported %d abandoned opens", r.Abandoned)
+		}
+		cancel()
+	})
+
+	on(false)
+	wake()
+	settles(t, p)
+	if res, err := syncWithin(t, p, config(), 10*time.Second); err != nil || res.Abandoned != 0 || !res.Applied {
+		t.Fatalf("after the waiting opens returned: %+v %v", res, err)
+	}
+}
+
+// TestLateSessionOfAbandonedOpenClosed: an open its Sync stopped waiting
+// for that later gets a session closes it and stops counting itself.
+// Catches a late session left open on the access point, and a count that
+// never falls.
+func TestLateSessionOfAbandonedOpenClosed(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	on, wake, got := hostileOpens(t)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
+	c, err := p.connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	on(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := p.open(ctx, c); !errors.Is(err, context.DeadlineExceeded) || p.abandoned() != 1 {
+		t.Fatalf("open: %v, %d abandoned", err, p.abandoned())
+	}
+	wake()
+	settles(t, p)
+	s := got()
+	if len(s) != 1 {
+		t.Fatalf("%d late sessions", len(s))
+	}
+	if err := s[0].Close(); err != io.EOF {
+		t.Fatalf("late session still open: Close %v", err)
+	}
+}
+
+// TestSilentAccessPointLeavesNoCount: with x/crypto's own NewSession, an
+// access point that never answers a session open holds the Sync to its
+// Timeout; the connection's end then ends that open, so the count goes
+// back to zero. Catches a count of opens that have in fact returned,
+// which would stall an honest but slow access point.
+func TestSilentAccessPointLeavesNoCount(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.silent = true
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 100 * time.Millisecond}
+	for i := range MaxAbandoned + 1 {
+		// The connection's deadline and the Sync's end at the same time,
+		// so the open can end with either error.
+		if _, err := syncWithin(t, p, config(), 10*time.Second); err == nil {
+			t.Fatalf("sync %d succeeded with an access point that opens nothing", i)
+		}
+		settles(t, p)
 	}
 }

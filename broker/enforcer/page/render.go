@@ -27,6 +27,22 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	for _, h := range minus(old.Destinations, next.Destinations) {
 		add("Stop agentOS reaching %s.", h)
 	}
+	// NET-2 Byte caps: a destination's cap is said when it is listed and
+	// whenever it changes; a cap left out is nothing, so a destination
+	// listed without one is signed knowing agentOS can send it nothing.
+	for _, h := range next.Destinations {
+		switch was, listed := old.Caps[h], slices.Contains(old.Destinations, h); {
+		case !listed && next.Caps[h] == 0:
+			add("agentOS may send %s nothing: it has no daily byte cap.", h)
+		case !listed:
+			add("Let agentOS send %s %s a day.", h, capWords(next.Caps[h]))
+		case was != next.Caps[h]:
+			add("Change what agentOS may send %s a day from %s to %s.", h, capWords(was), capWords(next.Caps[h]))
+		}
+	}
+	if old.EdgeCap != next.EdgeCap {
+		add("Change what the edge may send to the internet a day from %s to %s.", capWords(old.EdgeCap), capWords(next.EdgeCap))
+	}
 	for _, d := range next.Devices {
 		o := old.Device(d.ID)
 		if o == nil {
@@ -40,11 +56,13 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 			if d.Isolated {
 				add("Keep %s isolated: it reaches nothing.", d.ID)
 			}
+			describeSafeguards(policy.Device{ID: d.ID}, d, add)
 			if d.Secure != "" {
 				add("Let %s's command %s apply at once, with no passkey.", d.ID, d.Secure)
 			}
 			add("Label %s %s.", d.ID, labelWords(d.Label))
 			describePorts(policy.Device{ID: d.ID}, d, add)
+			describeMDNS(policy.Device{ID: d.ID}, d, add)
 			continue
 		}
 		describeDevice(*o, d, add)
@@ -59,6 +77,19 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	}
 	for _, p := range pairsMinus(old.Pairs, next.Pairs) {
 		add("Stop %s and %s talking to each other directly.", p.A, p.B)
+	}
+	// NET-3 Casting (#4401): the relay passes a Devices-network device's
+	// announcements only for the names it pins, so a pair with a path and
+	// a side pinning none is signed knowing nothing on that side will be
+	// found. A pair with no path has its own line below. Said once: when
+	// the pair, the last pin's removal, the move onto Devices or the
+	// path's return is signed.
+	for _, p := range next.Pairs {
+		for _, s := range [][2]string{{p.A, p.B}, {p.B, p.A}} {
+			if unpinned(next, p, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, p, s[0])) {
+				add("%s won't find %s by name: %s announces no names across this pair.", s[1], s[0], s[0])
+			}
+		}
 	}
 	for _, r := range next.Standing {
 		i := slices.IndexFunc(old.Standing, func(o policy.StandingRule) bool { return o.ID == r.ID })
@@ -128,9 +159,17 @@ func plain(d policy.Document) policy.Document {
 	for i := range d.Destinations {
 		d.Destinations[i] = ascii(d.Destinations[i])
 	}
+	caps := make(map[string]uint64, len(d.Caps))
+	for h, n := range d.Caps {
+		caps[ascii(h)] = n
+	}
+	d.Caps = caps
 	for i := range d.Devices {
 		v := &d.Devices[i]
 		v.ID, v.WiFi, v.Class, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Class), ascii(v.Secure)
+		for j := range v.Safeguards {
+			v.Safeguards[j] = ascii(v.Safeguards[j])
+		}
 		for j := range v.Allow {
 			v.Allow[j] = ascii(v.Allow[j])
 		}
@@ -155,11 +194,43 @@ func clone(d policy.Document) policy.Document {
 		d.Devices[i].Allow = slices.Clone(d.Devices[i].Allow)
 		d.Devices[i].Control = slices.Clone(d.Devices[i].Control)
 		d.Devices[i].Stream = slices.Clone(d.Devices[i].Stream)
+		d.Devices[i].MDNS = slices.Clone(d.Devices[i].MDNS)
+		d.Devices[i].Safeguards = slices.Clone(d.Devices[i].Safeguards)
 	}
 	d.Pairs = slices.Clone(d.Pairs)
 	d.Standing = slices.Clone(d.Standing)
 	d.Holds = slices.Clone(d.Holds)
 	return d
+}
+
+// capWords is a daily byte cap as the owner signs it: "nothing" for 0,
+// which lets nothing through, else "up to" the exact number of bytes,
+// with a rounded size beside it once it reaches a thousand.
+func capWords(n uint64) string {
+	if n == 0 {
+		return "nothing"
+	}
+	digits := strconv.FormatUint(n, 10)
+	var b strings.Builder
+	for i, c := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	w := "up to " + b.String() + " bytes"
+	if n == 1 {
+		w = "up to 1 byte"
+	}
+	units := []string{"kB", "MB", "GB", "TB", "PB", "EB"}
+	if n < 1000 {
+		return w
+	}
+	f, u := float64(n)/1000, 0
+	for f >= 999.95 && u < len(units)-1 {
+		f, u = f/1000, u+1
+	}
+	return fmt.Sprintf("%s (about %.1f %s)", w, f, units[u])
 }
 
 func ascii(s string) string {
@@ -212,6 +283,7 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	default:
 		add("Record %s as %s, not %s.", d.ID, classWords(d.Class), classWords(o.Class))
 	}
+	describeSafeguards(o, d, add)
 	if o.Secure != d.Secure {
 		add("Change %s's one secure command from %s to %s.", d.ID, none(o.Secure), none(d.Secure))
 	}
@@ -219,6 +291,72 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 		add("Label %s %s, not %s.", d.ID, labelWords(d.Label), labelWords(o.Label))
 	}
 	describePorts(o, d, add)
+	describeMDNS(o, d, add)
+}
+
+// unpinned: pair p has a path in d (both ends Linked, as nft opens it)
+// and its end id is a Devices-network device that pins no mDNS name, so
+// it announces nothing across p (nft.Announces).
+func unpinned(d policy.Document, p policy.Pair, id string) bool {
+	v := d.Device(id)
+	return v != nil && v.Network == policy.NetDevices && len(v.MDNS) == 0 && d.Linked(p.A) && d.Linked(p.B)
+}
+
+// describeMDNS is each mDNS name d pins or unpins against o (NET-3
+// Casting, #4144): what a Devices-network device may announce across its
+// pairs, or a name held for an Owner or Household device. Names compare
+// exactly, so a change of case shows. A move onto or off the Devices
+// network changes what every name means, so then each old name is shown
+// unpinned and each new one pinned, in the new network's words.
+func describeMDNS(o, d policy.Device, add func(string, ...any)) {
+	has := func(s [][]string, n []string) bool {
+		return slices.ContainsFunc(s, func(m []string) bool { return slices.Equal(m, n) })
+	}
+	was, is := o.MDNS, d.MDNS
+	if (o.Network == policy.NetDevices) != (d.Network == policy.NetDevices) {
+		was, is = nil, nil
+	}
+	for _, n := range o.MDNS {
+		switch {
+		case has(is, n):
+		case o.Network == policy.NetDevices:
+			add("Stop %s announcing the name %s to what it is paired with.", d.ID, ascii(policy.MDNSName(n)))
+		default:
+			add("Stop holding the name %s for %s.", ascii(policy.MDNSName(n)), d.ID)
+		}
+	}
+	for _, n := range d.MDNS {
+		switch {
+		case has(was, n):
+		case d.Network == policy.NetDevices:
+			add("Let %s announce the name %s to the networks and devices it is paired with; no other device may use it.", d.ID, ascii(policy.MDNSName(n)))
+		default:
+			add("Hold the name %s for %s: no paired device may announce it.", ascii(policy.MDNSName(n)), d.ID)
+		}
+	}
+}
+
+// describeSafeguards is each safeguard d records or drops against o (NET-2
+// Safety devices, #3872): what the owner states the device does, which
+// its class needs before its secure command can be named.
+func describeSafeguards(o, d policy.Device, add func(string, ...any)) {
+	for _, g := range minus(o.Safeguards, d.Safeguards) {
+		add("Stop recording that %s %s.", d.ID, safeguardWords(g))
+	}
+	for _, g := range minus(d.Safeguards, o.Safeguards) {
+		add("Record that %s %s: check it does before you sign.", d.ID, safeguardWords(g))
+	}
+}
+
+// safeguardWords is a safeguard in the page's words.
+func safeguardWords(g string) string {
+	switch g {
+	case policy.SafeguardObstructionReversal:
+		return "stops and reverses when something is in its way"
+	case policy.SafeguardPreCloseWarning:
+		return "warns before it closes"
+	}
+	return "has the safeguard " + g
 }
 
 // describePorts is each control and stream port d opens or closes against

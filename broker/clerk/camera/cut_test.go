@@ -111,7 +111,7 @@ func TestClerkCutsDecoderOnOwnerChange(t *testing.T) {
 				n.Interval = time.Hour
 				st = &starts{runs: []func(io.Reader, io.Writer){gated(release)}}
 				var err error
-				d, err = NewDecoder(DecodeConfig{Start: st.start, Root: "/r", Cgroup: "/c",
+				d, err = NewDecoder(DecodeConfig{Start: st.start,
 					Out: func(Decoded) {
 						if changed.Load() {
 							late.Add(1)

@@ -98,6 +98,11 @@ wiring cmd/agentos-camera
 # kernel on descriptor 3, the controller key in its own sealed slot, and the
 # owner side's socket.
 wiring cmd/agentos-homekit
+# The requalification driver's security evaluator (UPD-5r-b7, #4475): inside the
+# sandbox, each case boots the release's own kernel on an in-memory log and its
+# mail clerk on a synthetic mailbox, with fixed synthetic keys; nothing it
+# builds holds a real log, key or account, and the sandbox has no network.
+wiring vm/requal/driver
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.

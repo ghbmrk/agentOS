@@ -7,9 +7,10 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// REQ: CH-10, CH-12
+// REQ: CH-10, CH-12, CH-21
 
 // L3 SHOULD on #178 (P2-2a f1): the page has already told the owner
 // "Approved ... Your agent can go ahead." when the gate denies a
@@ -40,7 +41,7 @@ func TestAPageApprovalOfAChangedItemTellsTheOwnerItDidNotRun(t *testing.T) {
 		t.Fatalf("want one notice, got %q", got)
 	}
 	n := got[0]
-	if !strings.HasPrefix(n, req+" did not run") || !strings.Contains(n, "Wi-Fi page") || !strings.HasSuffix(n, " Make the request again if still needed.") {
+	if !strings.HasPrefix(n, owner.InformQuote(req)+" did not run") || !strings.Contains(n, "Wi-Fi page") || !strings.HasSuffix(n, " Make the request again if still needed.") {
 		t.Fatalf("notice: %q", n)
 	}
 	if len(n) > 160 {
@@ -123,7 +124,7 @@ func TestAPageChangeNoticeNamesAStepEachOriginCanTake(t *testing.T) {
 			r.own.mu.Lock()
 			got := append([]string(nil), r.own.notes[before:]...)
 			r.own.mu.Unlock()
-			want := req + " did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed."
+			want := owner.InformQuote(req) + " did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed."
 			if len(got) != 1 || got[0] != want {
 				t.Fatalf("notices %q, want %q", got, want)
 			}
@@ -166,7 +167,7 @@ func TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded(t *testing.T) {
 	r.own.mu.Lock()
 	got := append([]string(nil), r.own.notes[before:]...)
 	r.own.mu.Unlock()
-	want := req + " did not run: it changed after my Wi-Fi page showed it. Nothing is needed."
+	want := owner.InformQuote(req) + " did not run: it changed after my Wi-Fi page showed it. Nothing is needed."
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("notices %q, want %q", got, want)
 	}

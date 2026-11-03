@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"runtime"
 	"slices"
@@ -58,7 +61,7 @@ func TestTimedOutUnlockNeverFollowsRelockOnHost(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec := newRecorder(t, StackBLE)
-		if err := h.Attach(StackBLE, rec.host.(Conn)); err != nil {
+		if err := h.Attach(StackBLE, exited{}, rec.host.(Conn)); err != nil {
 			t.Fatal(err)
 		}
 		var tap atomic.Int64
@@ -106,7 +109,7 @@ func TestSendRefusesAnEndedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := newRecorder(t, StackBLE)
-	h.Attach(StackBLE, rec.host.(Conn))
+	h.Attach(StackBLE, exited{}, rec.host.(Conn))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := h.Send(ctx, Request{Op: OpWrite, Device: "door", Char: "cmd", Data: []byte("unlock")}); !errors.Is(err, context.Canceled) {
@@ -193,7 +196,7 @@ func TestUnansweredBoundEndsLink(t *testing.T) {
 			}
 		}
 	}()
-	h.Attach(StackBLE, host)
+	h.Attach(StackBLE, exited{}, host)
 	alive := func() bool {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -229,19 +232,120 @@ func (s *stalled) Write(p []byte) (int, error) {
 	return s.Conn.Write(p)
 }
 
-// parkedOnWriteLock waits until a goroutine in Host.Send is parked on a
-// mutex: the second sender, queued behind the stalled write's lock.
+// writeLockLine is the line in host.go of Send's l.wmu.Lock(), read from
+// the source so that a mutant which moves code around Send still names
+// its own line.
+func writeLockLine(t *testing.T) int {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "host.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Send" || fn.Recv == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := c.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Lock" {
+				return true
+			}
+			if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "wmu" {
+				if line != 0 {
+					t.Fatalf("Send takes wmu at line %d and %d; the test names one", line, fset.Position(c.Pos()).Line)
+				}
+				line = fset.Position(c.Pos()).Line
+			}
+			return true
+		})
+	}
+	if line == 0 {
+		t.Fatal("Send in host.go takes no wmu.Lock()")
+	}
+	return line
+}
+
+// parkedOnWriteLock waits until a goroutine is parked in sync.(*Mutex).Lock
+// called from Host.Send's l.wmu.Lock(): the second sender, queued behind
+// the stalled write's lock. A wait on Host.mu, or any other lock in Send,
+// is a different frame line and does not count.
 func parkedOnWriteLock(t *testing.T) {
+	at := fmt.Sprintf("/host.go:%d", writeLockLine(t))
 	buf := make([]byte, 1<<20)
 	for range 2000 {
 		for g := range strings.SplitSeq(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
-			if strings.Contains(g, "radio.(*Host).Send") && strings.Contains(g, "sync.(*Mutex).Lock") && !strings.Contains(g, "(*stalled).Write") {
+			if parkedAt(g, at) {
 				return
 			}
 		}
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("the second send never queued on the write lock")
+}
+
+// parkedAt reports whether goroutine g's innermost frames are
+// sync.(*Mutex).Lock called from Host.Send at the file position at.
+func parkedAt(g, at string) bool {
+	lines := strings.Split(g, "\n")
+	lock := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "sync.(*Mutex).Lock(") {
+			lock = i
+			break
+		}
+	}
+	// Frames are a function line then a tab-indented position line; the
+	// caller of Lock is the next frame.
+	if lock < 0 || lock+3 >= len(lines) || !strings.Contains(lines[lock+2], "radio.(*Host).Send(") {
+		return false
+	}
+	pos, _, _ := strings.Cut(strings.TrimSpace(lines[lock+3]), " ")
+	return strings.HasSuffix(pos, at)
+}
+
+// parkedTrace is a goroutine parked on a mutex taken in Host.Send at
+// host.go:line, as runtime.Stack prints it (go1.26).
+func parkedTrace(line int) string {
+	return fmt.Sprintf(`goroutine 12 [sync.Mutex.Lock]:
+internal/sync.runtime_SemacquireMutex(0x1d86e36c53?, 0x0?, 0x76f400?)
+	/go/src/runtime/sema.go:95 +0x25
+internal/sync.(*Mutex).lockSlow(0x1daebd0de338)
+	/go/src/internal/sync/mutex.go:149 +0x15d
+internal/sync.(*Mutex).Lock(...)
+	/go/src/internal/sync/mutex.go:70
+sync.(*Mutex).Lock(...)
+	/go/src/sync/mutex.go:46
+github.com/ghbmrk/agentos/broker/enforcer/radio.(*Host).Send(0x1daebd0de2a0, {0x777228, 0x1daebd210230}, ...)
+	/src/broker/enforcer/radio/host.go:%d +0x615
+github.com/ghbmrk/agentos/broker/enforcer/radio.TestSendChecksContextUnderWriteLock.func4()
+	/src/broker/enforcer/radio/send_test.go:340 +0x152`, line)
+}
+
+// NET-6: parkedOnWriteLock counts only a wait on Send's wmu.Lock(). A
+// wait on any other mutex in Send (Host.mu) would let the test end the
+// context before the queued send reaches wmu, so a mutant that checks
+// the context before wmu.Lock() could pass that run.
+func TestParkedOnlyOnTheWriteLock(t *testing.T) {
+	w := writeLockLine(t)
+	at := fmt.Sprintf("/host.go:%d", w)
+	if !parkedAt(parkedTrace(w), at) {
+		t.Fatalf("a send parked at host.go:%d (wmu) is not matched", w)
+	}
+	for _, other := range []int{w - 14, w + 1, w * 10} {
+		if parkedAt(parkedTrace(other), at) {
+			t.Fatalf("a send parked at host.go:%d is taken for the wmu wait at %d", other, w)
+		}
+	}
+	notSend := strings.Replace(parkedTrace(w), "(*Host).Send(", "(*Host).readLoop(", 1)
+	if parkedAt(notSend, at) {
+		t.Fatal("a lock taken outside Send is matched")
+	}
 }
 
 // ENF-k-8, NET-6 ("the lock relocks automatically"): Send checks its
@@ -259,7 +363,7 @@ func TestSendChecksContextUnderWriteLock(t *testing.T) {
 		}
 		rec := newRecorder(t, StackBLE)
 		conn := &stalled{Conn: rec.host.(Conn), entered: make(chan struct{}), release: make(chan struct{})}
-		if err := h.Attach(StackBLE, conn); err != nil {
+		if err := h.Attach(StackBLE, exited{}, conn); err != nil {
 			t.Fatal(err)
 		}
 		slow := make(chan error, 1)

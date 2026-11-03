@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -74,10 +75,27 @@ func planProviderUsing(t *testing.T, calls *atomic.Int32, usage func(n int) stri
 	return p, roots
 }
 
+// deviceSteps answers Codex's device steps with a synthetic device id,
+// user code, authorization code and verifier, and passes the rest to h.
+func deviceSteps(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			io.WriteString(w, `{"device_auth_id":"real-device-1","user_code":"ABCD-12345","interval":"5"}`)
+		case "/api/accounts/deviceauth/token":
+			io.WriteString(w, `{"authorization_code":"real-code-1","code_challenge":"c","code_verifier":"real-verifier-1"}`)
+		default:
+			w.Header().Del("Content-Type")
+			h.ServeHTTP(w, r)
+		}
+	})
+}
+
 // planLoginAt is a plan login of mode, not signed in, whose provider is h.
 func planLoginAt(t *testing.T, mode plan.Mode, h http.Handler) (*plan.Login, *x509.CertPool) {
 	t.Helper()
-	srv := httptest.NewTLSServer(h)
+	srv := httptest.NewTLSServer(deviceSteps(h))
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())
@@ -108,17 +126,34 @@ func codeExchange(t *testing.T, p *plan.Login, guest string) {
 	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
 	}
-	resp, det := p.Do(context.Background(), guest, codeRequest(), nil)
+	resp, det := p.Do(context.Background(), guest, codeRequest(t, p, guest), nil)
 	if det != "" {
 		t.Fatalf("sign-in: %s", det)
 	}
 	resp.Body.Close()
 }
 
-// codeRequest is the CLI's code exchange.
-func codeRequest() *http.Request {
-	form := url.Values{"client_id": {"app_x"}, "code": {"ac"}, "code_verifier": {"v"}, "grant_type": {"authorization_code"},
-		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
+// codeRequest runs the CLI's device steps as sign-in guest guest and
+// returns its code exchange, carrying the placeholders the clerk gave it.
+func codeRequest(t *testing.T, p *plan.Login, guest string) *http.Request {
+	t.Helper()
+	step := func(path string, body any) map[string]string {
+		b, _ := json.Marshal(body)
+		r := httptest.NewRequest("POST", "http://127.0.0.1:18432"+path, strings.NewReader(string(b)))
+		r.Header.Set("Content-Type", "application/json")
+		resp, det := p.Do(context.Background(), guest, r, nil)
+		if det != "" {
+			t.Fatalf("%s: %s", path, det)
+		}
+		defer resp.Body.Close()
+		var out map[string]string
+		json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+	uc := step("/api/accounts/deviceauth/usercode", map[string]string{"client_id": "app_x"})
+	ct := step("/api/accounts/deviceauth/token", map[string]string{"device_auth_id": uc["device_auth_id"], "user_code": uc["user_code"]})
+	form := url.Values{"client_id": {"app_x"}, "code": {ct["authorization_code"]}, "code_verifier": {ct["code_verifier"]},
+		"grant_type": {"authorization_code"}, "redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
 	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token", strings.NewReader(form))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
@@ -166,10 +201,65 @@ func TestPlanGuestEndpointMetersEachCall(t *testing.T) {
 	}
 }
 
+// downLog is a meter socket whose log cannot write spend (down) or
+// refuses a pool reading's text (notText).
+type downLog struct {
+	model.Ledger
+	down, notText bool
+}
+
+func (d *downLog) Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error {
+	if d.down {
+		return errors.New("log down")
+	}
+	return d.Ledger.Meter(now, a, route, amount, source)
+}
+
+func (d *downLog) ReadPool(now int64, pool string, ws []kernel.WindowReading) error {
+	if d.notText {
+		return kernel.ErrNotText
+	}
+	return d.Ledger.ReadPool(now, pool, ws)
+}
+
+// The settle error the endpoint does not return is kept by the clerk: owed
+// spend refuses the guest's next call (plan-meter) until the log has it,
+// and a pool reading the log refused as text closes the pool, so the next
+// call is refused with the pool's code. Neither is sent (#4831, RES-5).
+func TestPlanGuestSettleErrorRefusesTheNextCall(t *testing.T) {
+	for name, tc := range map[string]struct {
+		log    downLog
+		status int
+		detail string
+	}{
+		"owed spend":      {downLog{down: true}, http.StatusServiceUnavailable, DPlanMeter},
+		"dropped reading": {downLog{notText: true}, http.StatusTooManyRequests, DPlanRefused + " " + kernel.CPool},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int32
+			login, _ := planProvider(t, &calls)
+			d := tc.log
+			_, call := planGuestOn(t, login, 1<<30, 1<<20, func(l model.Ledger) model.Ledger { d.Ledger = l; return &d })
+			if st, body := call(`{"model":"m","stream":true}`); st != 200 {
+				t.Fatalf("the first call: %d %q", st, body)
+			}
+			if st, body := call(`{"model":"m","stream":true}`); st != tc.status || !strings.Contains(body, tc.detail) || calls.Load() != 1 {
+				t.Fatalf("the next call: %d %q, provider calls %d", st, body, calls.Load())
+			}
+		})
+	}
+}
+
 // planGuest serves login's guest g on an endpoint charged to a live plan
 // with a spend cap of task, at a declared context window of window tokens
 // and 50 output tokens, and answers a client that posts a body as g.
 func planGuest(t *testing.T, login *plan.Login, task, window int64) (*box, func(string) (int, string)) {
+	t.Helper()
+	return planGuestOn(t, login, task, window, func(l model.Ledger) model.Ledger { return l })
+}
+
+// planGuestOn is planGuest with the clerk's ledger wrapped by on.
+func planGuestOn(t *testing.T, login *plan.Login, task, window int64, on func(model.Ledger) model.Ledger) (*box, func(string) (int, string)) {
 	t.Helper()
 	b := newBoxFor(t, filepath.Join(shortDir(t), "web.sock"), "model", key.Read)
 	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
@@ -193,7 +283,7 @@ func planGuest(t *testing.T, login *plan.Login, task, window int64) (*box, func(
 		t.Fatal(err)
 	}
 	c := &model.Clerk{Routes: map[string]model.Price{"codex": {InPerM: 1_000_000, OutPerM: 1_000_000, Pool: "codex"}},
-		Ledger: proc.Meter{Conn: serveMeter(t, b)}}
+		Ledger: on(proc.Meter{Conn: serveMeter(t, b)})}
 	sock := filepath.Join(shortDir(t), "plan.sock")
 	ln, err := ListenPlan(sock, os.Getuid())
 	if err != nil {

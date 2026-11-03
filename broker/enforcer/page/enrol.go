@@ -50,7 +50,7 @@ func (s *Server) enrolScreen(w http.ResponseWriter, r *http.Request) {
 	if due, ok := s.cfg.Enrol.Recovery(); ok {
 		data["Due"] = s.when(due.UnixMilli())
 	}
-	s.render(w, "enrol.html", data)
+	s.render(w, r, "enrol.html", data)
 }
 
 // certificate serves the enforcer's root certificate, or the core's page
@@ -151,23 +151,37 @@ func (s *Server) enrolFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.cfg.Enrol.Finish(a.ID, sig)
 	if err != nil {
-		fail(w, status(err), plainErr(err))
+		out := map[string]any{"error": plainErr(err).Error()}
+		if res.Card.SSID != "" {
+			// Nothing enrolled, but the setup network is gone: the card
+			// goes back with the error, so the owner can join the Owner
+			// network and enrol again there.
+			out["network"] = s.network(res)
+		}
+		writeJSON(w, status(err), out)
 		return
 	}
 	out := map[string]any{"recovery": grouped(res.Recovery)}
 	if !res.Due.IsZero() {
 		out["due"] = s.when(res.Due.UnixMilli())
 	} else {
-		// The passkey is enrolled and the setup network is gone, so the
-		// answer always carries the card; a QR that cannot be drawn is
-		// only left out.
-		network := map[string]any{"ssid": res.Card.SSID, "password": res.Card.Shown}
-		if code, err := qrOf(res.Card.QR); err == nil {
-			network["qr"] = code
-		}
-		out["network"] = network
+		// A passkey is in force and the setup network is gone, so the
+		// answer always carries the card.
+		out["network"] = s.network(res)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// network is the Owner network's card as the enrolment answer carries it,
+// and whether this enrolment replaced the setup network (only the first
+// does), so the screen's words follow the state. A QR that cannot be drawn
+// is only left out.
+func (s *Server) network(res enrol.Result) map[string]any {
+	network := map[string]any{"ssid": res.Card.SSID, "password": res.Card.Shown, "setup_replaced": res.SetupReplaced}
+	if code, err := qrOf(res.Card.QR); err == nil {
+		network["qr"] = code
+	}
+	return network
 }
 
 // enrolReset is a factory reset by the case code (NET-2 Hardening).

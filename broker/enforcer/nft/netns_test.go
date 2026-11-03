@@ -299,7 +299,7 @@ func build(t *testing.T) *home {
 	} else {
 		t.Log("no 802.1Q support here: each device VLAN is a veth named as its VLAN interface")
 	}
-	for _, vlan := range []int{101, 102, 103, 104, 105, 106, 107, 108} {
+	for _, vlan := range []int{101, 102, 103, 104, 105, 106, 107, 108, 109} {
 		h.device(ap, vlan)
 	}
 	h.loadFixture()
@@ -337,7 +337,7 @@ func (h *home) loadFixture() {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(h.t, fixturePolicy(), text))
 	// Slice f's resolver fills these from DNS; here they are filled
 	// directly, which is what "the sentences that need no DNS" means. The
 	// DoH address is in the TV's set to show the DNS block comes first.
@@ -346,7 +346,7 @@ func (h *home) loadFixture() {
 		run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, true), "{ "+net6Allow+" }")
 	}
 	run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(103, false), "{ "+netAllow+" }")
-	run(h.t, "nft", "add", "element", "inet", Table, CoreSet(false), "{ "+netCore+" }")
+	h.answer(fixturePolicy(), CoreSet(false), "core.example", netCore)
 }
 
 func (h *home) load(text string) {

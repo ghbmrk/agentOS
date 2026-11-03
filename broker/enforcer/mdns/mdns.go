@@ -11,6 +11,11 @@
 // devices, both pass both ways. A packet's side is the interface it came
 // in on, never its addresses or its records.
 //
+// It also hears every device's VLAN, paired or not, and passes nothing
+// from it that no pair carries: it learns there which names each device
+// proves its own (Filter.Heard), the only names the enforcer's page
+// offers to pin for it (D-266).
+//
 // It is enforcer code: it imports the standard library and the enforcer's
 // nft package only (broker/daemon/arc2_test.go). Its assumptions are in
 // ASSUMPTIONS.md.
@@ -39,14 +44,22 @@ var (
 	Group6 = netip.AddrPortFrom(netip.MustParseAddr(nft.MDNSGroup6), nft.MDNSPort)
 )
 
-// Plan is where each kind of packet goes from each interface.
+// Plan is where each kind of packet goes from each interface, and the
+// names each interface's responses may carry.
 type Plan struct {
 	queries, responses map[string][]string
+	pins               map[string]pins
+	hear               []string
 }
 
-// NewPlan is the plan for paths.
-func NewPlan(paths []nft.Path) Plan {
-	p := Plan{queries: map[string][]string{}, responses: map[string][]string{}}
+// NewPlan is the plan for paths, whose device interfaces announce only
+// the names announces pins for them (nft.Announces, #4144): an interface
+// with none passes no response records.
+func NewPlan(paths []nft.Path, announces map[string][][]string) Plan {
+	p := Plan{queries: map[string][]string{}, responses: map[string][]string{}, pins: map[string]pins{}}
+	for iface, ns := range announces {
+		p.pins[iface] = newPins(ns)
+	}
 	add := func(m map[string][]string, from, to string) {
 		if !slices.Contains(m[from], to) {
 			m[from] = append(m[from], to)
@@ -64,20 +77,26 @@ func NewPlan(paths []nft.Path) Plan {
 	return p
 }
 
+// Hearing is p also listening on ifaces (nft.Hears), where it only
+// hears: a packet from one goes where p's pairs carry it, and so from an
+// unpaired interface nowhere, but the names its sender proves its own
+// there are learned (Filter.Heard, D-266).
+func (p Plan) Hearing(ifaces []string) Plan {
+	p.hear = slices.Clone(ifaces)
+	return p
+}
+
 // Ifaces is every interface the plan listens on or sends to.
 func (p Plan) Ifaces() []string {
-	var out []string
+	out := slices.Clone(p.hear)
 	for _, m := range []map[string][]string{p.queries, p.responses} {
 		for from, tos := range m {
-			for _, i := range append([]string{from}, tos...) {
-				if !slices.Contains(out, i) {
-					out = append(out, i)
-				}
-			}
+			out = append(out, from)
+			out = append(out, tos...)
 		}
 	}
 	slices.Sort(out)
-	return out
+	return slices.Compact(out)
 }
 
 // Route is the interfaces a packet that came in on iface goes out on:
@@ -147,12 +166,14 @@ func (b *bucket) take(now time.Time) bool {
 	return true
 }
 
-// Serve relays along plan until ctx ends. Each interface gets one socket
-// per family, bound to that interface (SO_BINDTODEVICE) and to the group,
-// so a packet is heard only on the interface it came in on; the relay
-// hears none of its own sends. A packet leaves on the other interfaces in
-// its own family, as Filter rebuilds it.
-func Serve(ctx context.Context, plan Plan) error {
+// Serve relays along plan until ctx ends, keeping what it hears in f (a
+// new Filter if nil), which the page reads through HeardBy. Each
+// interface gets one socket per family, bound to that interface
+// (SO_BINDTODEVICE) and to the group, so a packet is heard only on the
+// interface it came in on; the relay hears none of its own sends. A
+// packet leaves on the other interfaces in its own family, as Filter
+// rebuilds it.
+func Serve(ctx context.Context, plan Plan, f *Filter) error {
 	ifaces := plan.Ifaces()
 	if len(ifaces) == 0 {
 		<-ctx.Done()
@@ -173,6 +194,9 @@ func Serve(ctx context.Context, plan Plan) error {
 		families = append(families, true)
 	}
 	r := newRelayer(plan, prefixes, time.Now())
+	if f != nil {
+		r.f = f
+	}
 	for _, name := range ifaces {
 		for _, v6 := range families {
 			c, err := listen(name, v6)
@@ -240,6 +264,9 @@ func newRelayer(plan Plan, link func(string) []netip.Prefix, now time.Time) *rel
 // handle is the message pkt, heard on iface from port, rebuilds to and
 // the interfaces it goes out on; none if it is over the read limit,
 // malformed, carried by no pair, over the rate limit or left empty.
+// Whether or not it goes anywhere, a well-formed message is heard: its
+// claims, and the names a response from port 5353 proves its sender's
+// own.
 func (r *relayer) handle(iface string, port uint16, pkt []byte, now time.Time) ([]byte, []string) {
 	if !r.reads[iface].take(now) {
 		return nil, nil
@@ -249,11 +276,18 @@ func (r *relayer) handle(iface string, port uint16, pkt []byte, now time.Time) (
 		return nil, nil
 	}
 	r.f.Hear(iface, m, now)
+	var link []netip.Prefix // a query's rebuilding needs none
+	if m.flags&flagQR != 0 {
+		link = r.link(iface)
+		if port == nft.MDNSPort {
+			r.f.Prove(iface, link, m, now)
+		}
+	}
 	outs := r.plan.Route(iface, port, pkt)
 	if len(outs) == 0 || !r.passes[iface].take(now) {
 		return nil, nil
 	}
-	out := r.f.Pass(iface, r.link(iface), m, now)
+	out := r.f.Pass(iface, link, r.plan.pins[iface].pin(m), now)
 	if out == nil || len(out) > maxPacket {
 		return nil, nil
 	}
@@ -344,4 +378,21 @@ func listen(name string, v6 bool) (*net.UDPConn, error) {
 		return nil, fmt.Errorf("%w: %s: %v", ErrRelay, name, err)
 	}
 	return pc.(*net.UDPConn), nil
+}
+
+// HeardBy is, for a device's network and Wi-Fi identity, the names f
+// heard proved its own where the relay hears that device under l
+// (nft.Layout.Iface, Filter.Heard): on a Devices-network device's own
+// VLAN, what the enforcer's page pins for a paired device and the only
+// names it lets a link pin (D-266); on the Owner or Household network,
+// the names the page offers to hold for that network's devices (#4411).
+// A device the relay hears nowhere has none. taken is Filter.Heard's.
+func HeardBy(f *Filter, l nft.Layout) func(network, wifi string, taken func([]string) bool) [][]string {
+	return func(network, wifi string, taken func([]string) bool) [][]string {
+		iface, ok := l.Iface(network, wifi)
+		if !ok {
+			return nil
+		}
+		return f.Heard(iface, time.Now(), taken)
+	}
 }

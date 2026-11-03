@@ -658,6 +658,41 @@ class TreeCheckTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("random-seed", r.stdout + r.stderr)
 
+    # #4647: no build script fetches a package outside mkosi's checked apt run. mkosi v24.3 gives
+    # mkosi.postinst and mkosi.finalize the network only with WithNetwork= (not on the config allow-list
+    # in ConfigTest), and the check confirms it held in the run itself, whatever flags the build passed.
+    LO_ONLY = ("Inter-|   Receive                            |  Transmit\n"
+               " face |bytes    packets errs drop fifo frame|bytes    packets\n"
+               "    lo:       0       0    0    0    0     0        0       0\n")
+
+    def test_scripts_run_with_no_network(self):
+        self.assertEqual(check.script_network_violations("0", self.LO_ONLY), [])
+        eth = self.LO_ONLY + "  eth0: 1 1 0 0 0 0 1 1\n"
+        why = "mkosi.postinst and mkosi.finalize run with no network, so they fetch no package outside mkosi's " \
+              "checked apt run (#4647)"
+        for flag, dev, want in (
+                ("1", self.LO_ONLY, ["WITH_NETWORK is 1; " + why]),
+                (None, self.LO_ONLY, ["WITH_NETWORK is None; " + why]),
+                ("0", eth, ["the script sandbox's network devices are lo, eth0, not lo alone; " + why]),
+                ("0", "unreadable (Permission denied)",
+                 ["the script sandbox's network devices are unknown: unreadable (Permission denied), not lo alone; " + why]),
+                ("0", "", ["the script sandbox's network devices are unknown: , not lo alone; " + why])):
+            with self.subTest(flag=flag, dev=dev):
+                self.assertEqual(check.script_network_violations(flag, dev), want)
+
+    def test_main_checks_the_network_only_when_mkosi_runs_it(self):
+        # Run as mkosi runs it (BUILDROOT, no argument) on a clean tree, from a session that has a
+        # network: the run fails on WITH_NETWORK alone when this host's sandbox has only lo.
+        r = subprocess.run([str(MK / "mkosi.finalize")], env=dict(os.environ, BUILDROOT=str(self.root), WITH_NETWORK="1"),
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("image check: WITH_NETWORK is 1; ", r.stdout)
+        # Given the tree as an argument (tests, tools), it checks the tree alone: no network line.
+        r = subprocess.run([str(MK / "mkosi.finalize"), str(self.root)], env=dict(os.environ, WITH_NETWORK="1"),
+                           capture_output=True, text=True)
+        self.assertIn("image check: ", r.stdout, r.stderr)
+        self.assertNotIn("(#4647)", r.stdout)
+
 
 ENTRY = """title Debian GNU/Linux 13 (trixie)
 version 6.12.48+deb13-amd64
@@ -1532,21 +1567,147 @@ class ConfigTest(unittest.TestCase):
     def test_snapshot_sources_outlive_their_valid_until(self):
         # The pinned snapshot's Release files expire a week after the timestamp; apt must still read
         # them (signatures checked), while live security.debian.org keeps the expiry check.
-        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"].rstrip("/")
-        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
-        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
-                   for s in text.split("\n\n")]
-        stanzas = [s for s in stanzas if s]
-        snap = [s for s in stanzas if s["URIs"].rstrip("/") == mirror]
-        live = [s for s in stanzas if s["URIs"].rstrip("/") != mirror]
-        self.assertEqual(len(snap), 1)
-        self.assertEqual(snap[0]["Suites"].split(), ["trixie", "trixie-updates"])
-        self.assertEqual(snap[0]["Check-Valid-Until"], "no")
-        self.assertEqual([s["Suites"] for s in live], ["trixie-security"])
-        self.assertNotIn("Check-Valid-Until", live[0])
-        for s in stanzas:
-            self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
-            self.assertNotIn("Trusted", s)
+        # #4651: apt reads deb822 field names in any case, and Allow-Insecure:, Allow-Weak: or
+        # trusted: in a stanza weaken its signature checks. So the file is held to one strict form
+        # (printable ASCII; each line empty, a column-0 "#" comment, or a column-0 "Field: value"
+        # with no continuation) and every stanza to exactly these fields and values, in this case
+        # and order: any other field, spelling or value fails. Only the snapshot's timestamp follows
+        # Mirror= in mkosi.conf.
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"]
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_bytes().decode("ascii")
+        why = "#4651 holds the build's apt sources to these fields; change this test deliberately"
+        self.assertRegex(text, r"\A[\x20-\x7e\n]*\Z", why)
+        stanzas, cur = [], []
+        for n, line in enumerate(text.split("\n"), 1):
+            if line == "":
+                if cur:
+                    stanzas.append(cur)
+                cur = []
+            elif not line.startswith("#"):
+                m = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*): (\S(?:.*\S)?)", line)
+                self.assertTrue(m, "mkosi.sources:%d: %r is not a column-0 'Field: value' line; %s" % (n, line, why))
+                cur.append((m[1], m[2]))
+        if cur:
+            stanzas.append(cur)
+        keyring = ("Signed-By", "/usr/share/keyrings/debian-archive-keyring.gpg")
+        self.assertEqual(stanzas, [
+            [("Types", "deb"), ("URIs", mirror), ("Suites", "trixie trixie-updates"), ("Components", "main"),
+             keyring, ("Check-Valid-Until", "no")],
+            [("Types", "deb"), ("URIs", "http://security.debian.org/debian-security"), ("Suites", "trixie-security"),
+             ("Components", "main"), keyring],
+        ], why)
+
+    def test_snapshot_fetch_retries_a_mirror_outage(self):
+        # #4518: one "503 No healthy backends" from the snapshot mirror outlasted apt's default
+        # 1+2+4 s of retries and killed the build. The build's apt (mkosi.pkgmngr, read through
+        # APT_CONFIG's Dir::Etc as mkosi v24.3 sets it) retries 20 times, the delay doubling to 60 s,
+        # about 15 minutes, then fails with apt's named error. The file sets nothing else, so it
+        # cannot loosen signature or hash checks. Read by real apt-config, as mkosi's apt reads it.
+        conf = MK / "mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries"
+        keys = re.findall(r'^([A-Za-z:]+) "([^"]*)";$', conf.read_text(), re.M)
+        want = {"Acquire::Retries": "20", "Acquire::Retries::Delay": "true",
+                "Acquire::Retries::Delay::Maximum": "60"}
+        self.assertEqual(dict(keys), want)
+        self.assertEqual(len(keys), len(want))
+        body = [l for l in conf.read_text().splitlines() if l.strip() and not l.startswith("//")]
+        self.assertEqual(len(body), len(want), "every non-comment line is one pinned key")
+        # The host's apt runs the fetch (no ToolsTree=), and the tree never reaches the image.
+        self.assertNotIn("ToolsTree", (MK / "mkosi.conf").read_text())
+        tool = reference_tool(self, "apt-config")
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(MK / "mkosi.pkgmngr/etc", tmp + "/etc")
+            pathlib.Path(tmp, "apt.conf").write_text('Dir::Etc "%s/etc/apt";\n' % tmp)
+            env = dict(os.environ, APT_CONFIG=tmp + "/apt.conf")
+            out = subprocess.run([tool, "dump", "Acquire::Retries"], env=env, check=True,
+                                 capture_output=True, text=True).stdout
+        got = dict(re.findall(r'^(\S+) "([^"]*)";$', out, re.M))
+        for k, v in want.items():
+            self.assertEqual(got.get(k), v, out)
+        # apt's backoff (acquire-worker.cc, apt 2.7): try n waits min(2**n, Maximum) seconds.
+        wait = sum(min(2 ** n, 60) for n in range(20))
+        self.assertTrue(600 <= wait <= 1200, wait)
+
+    def test_build_apt_reads_only_the_pinned_files(self):
+        # #4591: the test above reads only the retry file, so a second file in the build's apt
+        # config (apt.conf.d, apt.conf, trusted.gpg.d, auth.conf.d, preferences.d) could set
+        # Acquire::AllowInsecureRepositories and pass on review alone. Every entry of the tree is
+        # pinned by path and kind, so any addition, symlink or rename here needs a deliberate edit.
+        why = "#4591 pins what mkosi's build-time apt reads; change this test deliberately"
+        tree = MK / "mkosi.pkgmngr"
+        got = []
+
+        def fail(err):
+            raise err
+        for d, dirs, files in os.walk(tree, onerror=fail):
+            for n in dirs + files:
+                p = pathlib.Path(d, n)
+                kind = "link" if p.is_symlink() else "dir" if p.is_dir() else "file"
+                got.append((p.relative_to(tree).as_posix(), kind))
+        self.assertEqual(sorted(got), [
+            ("etc", "dir"),
+            ("etc/apt", "dir"),
+            ("etc/apt/apt.conf.d", "dir"),
+            ("etc/apt/apt.conf.d/80-agentos-retries", "file"),
+            ("etc/apt/sources.list.d", "dir"),
+            ("etc/apt/sources.list.d/mkosi.sources", "file"),
+        ], why)
+        # Nothing else feeds mkosi v24.3 config or packages. Its defaults are mkosi.* names beside a
+        # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
+        # so both config folders' mkosi.* names are pinned.
+        self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
+            "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
+            "mkosi.repart"], why)
+        self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
+                         ["mkosi.conf", "mkosi.finalize"], why)
+        # The two configs are held to one strict form, so this test never models mkosi's parser:
+        # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
+        # (no "@", no space before "="), or an indented continuation while a setting is open (a
+        # comment keeps it open, as initrd/mkosi.conf's RemoveFiles= relies on; a blank line or a
+        # section closes it). Any other line fails. Each config may use only the keys listed here,
+        # so a key that reads a config, script, tree, mirror or repo (Include=, ConfigureScripts=,
+        # PrepareScripts=, PackageManagerTrees=, PackageDirectories=, LocalMirror=, ToolsTree=,
+        # RepositoryKeyCheck=, ...) needs a deliberate edit here; InitrdInclude= is pinned whole.
+        keys = {
+            MK / "mkosi.conf": {
+                "BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format",
+                "Hostname", "ImageId", "InitrdInclude", "KernelCommandLine",
+                "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror",
+                "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
+                "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
+                "UnifiedKernelImages", "WithDocs"},
+            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+        }
+        for conf, allowed in keys.items():
+            settings, cur = [], None
+            for n, line in enumerate(conf.read_text().splitlines(), 1):
+                where = "%s:%d: %r" % (conf.relative_to(ROOT), n, line)
+                if not line.strip():
+                    cur = None
+                elif line.startswith("#"):
+                    pass
+                elif re.fullmatch(r"\[[A-Za-z]+\]", line):
+                    cur = None
+                elif m := re.fullmatch(r"([A-Z][A-Za-z0-9]*)=(.*)", line):
+                    cur = (m[1], [m[2].strip()])
+                    settings.append((where, cur))
+                elif line[0] in " \t" and cur is not None:
+                    cur[1].append(line.strip())
+                else:
+                    self.fail("%s: not the strict mkosi config form; %s" % (where, why))
+            for where, (k, v) in settings:
+                self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
+                if k == "InitrdInclude":
+                    self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+                # #4647: mkosi hands Environment= to apt-get and to mkosi.postinst and mkosi.finalize, so
+                # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
+                if k == "Environment":
+                    self.assertEqual(v, ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"], "%s: %s" % (where, why))
+        # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
+        # runs mkosi (its config dir, flags and tree) is #4690's row (from #4647): a line pin of shell cannot hold.
+        wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
+            'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
+            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
@@ -3958,12 +4119,33 @@ class ReferenceToolTest(unittest.TestCase):
         self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 
 
-class SystemdDiffTest(unittest.TestCase):
+class MustRun:
+    """#1543 P/UX R2, #4370: where CI requires the reference tools, the differential tests must have
+    run, every test of them. A skip in a test body or in reference_tool would otherwise pass quietly
+    among CI's other skips, so a test of a class with this first among its bases fails when it
+    skips. The check sits where the test runs: the unit-test step splits test_image across worker
+    processes (tools/unit_tests.py), so a later test cannot read an earlier one's result, and
+    running the classes a second time cost 237 s on every PR. That every test of the module ran is
+    the runner's own check (`discover` runs them all; `split` fails on a test not run)."""
+
+    def run(self, result=None):
+        before = len(result.skipped) if result is not None else 0
+        out = super().run(result)
+        if result is not None and os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1" \
+                and len(result.skipped) > before:
+            try:
+                raise AssertionError("%s skipped where AGENTOS_REQUIRE_REFERENCE_TOOLS=1" % self.id())
+            except AssertionError:
+                result.addFailure(self, sys.exc_info())
+        return out
+
+
+class SystemdDiffTest(MustRun, unittest.TestCase):
     """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
     masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
     skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
-    ReferenceDiffsRanTest fails on any skip; GitHub's ubuntu-latest runners have it (systemd 255,
+    MustRun fails any skip of it; GitHub's ubuntu-24.04 runners have it (systemd 255,
     whose conf-files.c listing is the same as 257.13's)."""
     # REQ: DEV-2, CH-9, C13
 
@@ -4006,7 +4188,7 @@ class SystemdDiffTest(unittest.TestCase):
                         self.assertEqual(mine, self.systemd_list(tmp, name))
 
 
-class TmpfilesDiffTest(unittest.TestCase):
+class TmpfilesDiffTest(MustRun, unittest.TestCase):
     """#1530: the guarded-path check against systemd-tmpfiles itself. Each case (Debian's lines,
     the image's, every review probe; a probe may be several lines, so a chain of lines is one case;
     and every file on tmpfiles.allow with all its listed lines, #1543 P/UX P1) is one tmpfiles.d
@@ -4617,27 +4799,58 @@ class CredstoreTest(unittest.TestCase):
 
 
 class ReferenceDiffsRanTest(unittest.TestCase):
-    """#1543 P/UX R2: where CI requires the reference tools, the differential tests must have run,
-    every test of them. A skip in a test body or in reference_tool would otherwise pass quietly among
-    CI's other skips, so this runs them again and fails on any skip."""
+    """#1543 P/UX R2, #4370: the three reference-diff classes carry MustRun, and MustRun fails a
+    skip and passes a test that ran once. Runs none of the classes."""
     # REQ: DEV-2, CH-9
 
-    def test_no_reference_diff_skips(self):
-        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") != "1":
-            self.skipTest("only where AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI)")
-        assert_all_ran(self, (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest))
+    def test_every_reference_diff_class_fails_on_a_skip(self):
+        for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest):
+            with self.subTest(c.__name__):
+                self.assertTrue(issubclass(c, MustRun))
+                self.assertTrue(unittest.TestLoader().getTestCaseNames(c))
 
+    @staticmethod
+    def class_level_fixtures(classes, namespace):
+        """#4522: MustRun sees a skip only through a test's own run; a SkipTest from setUpClass or
+        setUpModule is reported by the suite, so it would pass. Names every such fixture on a class
+        (or any base but unittest's own) and in the module."""
+        found = [c.__name__ + "." + n for c in classes for b in c.__mro__
+                 if b not in (unittest.TestCase, object) for n in ("setUpClass", "setUpModule")
+                 if n in vars(b)]
+        return found + [n for n in ("setUpModule",) if n in namespace]
 
-def assert_all_ran(case, classes):
-    """Run every test of CLASSES; fail CASE on any skip, any test not run, or any failure."""
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)
-    case.assertGreaterEqual(suite.countTestCases(), len(classes))
-    result = unittest.TestResult()
-    suite.run(result)
-    case.assertEqual(result.skipped, [])
-    case.assertEqual(result.testsRun, suite.countTestCases())
-    case.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+    def test_no_reference_diff_class_or_the_module_has_a_class_level_fixture(self):
+        classes = (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest)
+        self.assertEqual(self.class_level_fixtures(classes, vars(sys.modules[__name__])), [])
+
+        class Bad(MustRun, unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise unittest.SkipTest("reference tool missing")
+
+        self.assertEqual(self.class_level_fixtures((Bad,), {}), ["Bad.setUpClass"])
+        self.assertEqual(self.class_level_fixtures((), {"setUpModule": None}), ["setUpModule"])
+
+    def test_must_run_fails_a_skip_and_passes_a_run_once(self):
+        runs = []
+
+        class Skips(MustRun, unittest.TestCase):
+            def test_skips(self):
+                runs.append("skips")
+                self.skipTest("a differential test that did not run")
+
+        class Ran(MustRun, unittest.TestCase):
+            def test_ran(self):
+                runs.append("ran")
+
+        for required, cls, ok in (("1", Skips, False), ("1", Ran, True), ("", Skips, True)):
+            with self.subTest(required=required, case=cls.__name__):
+                runs.clear()
+                result = unittest.TestResult()
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": required}):
+                    unittest.TestLoader().loadTestsFromTestCase(cls).run(result)
+                self.assertEqual(result.wasSuccessful(), ok, result.failures + result.errors)
+                self.assertEqual(len(runs), 1)
 
 
 class DiffOracleTest(unittest.TestCase):
@@ -4645,7 +4858,7 @@ class DiffOracleTest(unittest.TestCase):
     it, which must make it fail. TmpfilesDiffTest must fail when systemd-tmpfiles writes nothing
     (its WRITES assertion: otherwise a run that compares nothing passes), and when a line the check
     passes writes /proc/sys (its passed-line assertion: the whole-tree re-check never reads /proc, /sys
-    or the ESP back). And assert_all_ran (ReferenceDiffsRanTest) must fail on a skip. Needs no
+    or the ESP back). And MustRun (ReferenceDiffsRanTest) must fail on a skip. Needs no
     reference tool: systemd-tmpfiles is replaced."""
     # REQ: DEV-2, CH-9
 
@@ -4670,12 +4883,14 @@ class DiffOracleTest(unittest.TestCase):
                 self.assertFalse(result.wasSuccessful())
                 self.assertIn(needle, str(result.failures))
 
-        class Skips(unittest.TestCase):
+        class Skips(MustRun, unittest.TestCase):
             def test_skips(self):
                 self.skipTest("a differential test that did not run")
 
-        with self.assertRaises(AssertionError):
-            assert_all_ran(self, (Skips,))
+        result = unittest.TestResult()
+        with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": "1"}):
+            unittest.TestLoader().loadTestsFromTestCase(Skips).run(result)
+        self.assertFalse(result.wasSuccessful())
 
     def test_allowlist_coverage_fails_on_a_harmful_group(self):
         # #1543 P/UX P4-1: the tests that run every group of tmpfiles.allow (TmpfilesDiffTest's
@@ -4773,13 +4988,13 @@ class TreeAccessTest(unittest.TestCase):
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
-    a link on the build host, and in the two functions that read the repository's allowlists (tmpfiles.allow,
-    exec.allow), not the tree. Only
+    a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
+    exec.allow), not the tree, and in script_net_dev, which reads the script sandbox's /proc (#4647). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries"))
+                         "allow_path", "allow_entries", "script_net_dev"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -4863,9 +5078,9 @@ class TreeAccessTest(unittest.TestCase):
                              ["etc", "etc/l.conf", "lib", "usr", "usr/lib", "usr/lib/sysctl.d", "usr/lib/sysctl.d/x.conf"])
 
 
-class KmodDiffTest(unittest.TestCase):
+class KmodDiffTest(MustRun, unittest.TestCase):
     """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
-    install line kmod took, in order. GitHub's ubuntu-latest runners have kmod 31, whose config
+    install line kmod took, in order. GitHub's ubuntu-24.04 runners have kmod 31, whose config
     reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
     # REQ: CH-7, HW-10
     WORDS = (b"install", b"install", b"btusb", b"bt-usb", b"bt[_-]sb", b"b]t", b"[x", b"/bin/false", b"#",
@@ -5332,7 +5547,9 @@ class UplinkTest(unittest.TestCase):
         # and prefixed): boot()'s console echo goes through guest_echo, which cuts ANSI/CR and other
         # non-printable bytes and puts "console| " in front of every line.
         s = (IMG / "ci_boot.sh").read_text()
-        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
+        # A Go command's crash header lines too (#4474), still through guest_echo.
+        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed\\|fatal error:\\|panic:\\|]: runtime: " "$log" '
+                      '| tail -40 | guest_echo || true\n', s)
         fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                      for f in ("clean", "guest_echo"))
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
@@ -5953,6 +6170,7 @@ UNIT_DEVICES = {
     "agentos-modem.service": ("agentos-modem", "closed; char-ttyUSB rw, char-alsa rw"),
     "agentos-devices.service": ("agentos-devices", "private"),
     "agentos-imapconn@.service": ("agentos-imapconn", "private"),
+    "agentos-camdecode@.service": ("camdec-%i", "private"),
 }
 DEVICE_POLICY_EXEMPT = {"agentosd.service": "IMG-4 (#917)"}
 

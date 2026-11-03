@@ -14,6 +14,8 @@ import unittest
 TOOLS = pathlib.Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS))
 import difflines  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 
 def git(cwd, *args):

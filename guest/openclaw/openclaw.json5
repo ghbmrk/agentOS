@@ -56,6 +56,9 @@
   gateway: {
     mode: "local", bind: "loopback", auth: { mode: "token" },
     tailscale: { mode: "off" }, reload: { mode: "off" },
+    // OpenClaw serves its Control UI by default; agentOS never uses it, and
+    // its assets carry the DOMPurify and KaTeX copies under #4302 (#4417).
+    controlUi: { enabled: false },
     http: { endpoints: { chatCompletions: { enabled: true } } },
   },
 }

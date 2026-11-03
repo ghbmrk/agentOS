@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +50,14 @@ func capture(t *testing.T) map[string]any {
 		"model": "gpt-m", "stream": true, "tool_choice": "auto", "parallel_tool_calls": false,
 		"reasoning": map[string]any{"effort": "low", "context": "all_turns"}, "store": false,
 		"include": []any{"reasoning.encrypted_content"}, "prompt_cache_key": "k", "text": map[string]any{"verbosity": "low"},
-		"client_metadata": map[string]any{"turn_id": "t1", "session_id": "s1", "thread_id": "th1"},
+		"client_metadata": map[string]any{
+			"x-codex-installation-id": "11111111-1111-4111-8111-111111111111",
+			"session_id":              "22222222-2222-4222-8222-222222222222",
+			"thread_id":               "22222222-2222-4222-8222-222222222222",
+			"x-codex-window-id":       "22222222-2222-4222-8222-222222222222:1",
+			"turn_id":                 "33333333-3333-4333-8333-333333333333",
+			"x-codex-turn-metadata":   `{"request_kind":"turn","workspaces":{}}`,
+		},
 		"input": []any{
 			map[string]any{"type": "additional_tools", "id": "at_1", "role": "developer", "tools": tools},
 			map[string]any{"type": "message", "id": "m1", "role": "developer", "content": text("instructions")},
@@ -162,7 +171,7 @@ func TestPlanModelBodyHeldToDeclaredShape(t *testing.T) {
 		"remote image": {mut(func(m map[string]any) {
 			item(m, 1)["content"] = []any{map[string]any{"type": "input_image", "image_url": "https://example.net/a.png"}}
 		}), "remote"},
-		"metadata of numbers": {mut(func(m map[string]any) { m["client_metadata"] = map[string]any{"a": 1} }), "meta"},
+		"metadata of numbers": {mut(func(m map[string]any) { m["client_metadata"] = map[string]any{"turn_id": 1} }), "meta"},
 		"hosted tool_choice":  {mut(func(m map[string]any) { m["tool_choice"] = map[string]any{"type": "web_search"} }), "choice"},
 		"tool_choice word":    {mut(func(m map[string]any) { m["tool_choice"] = "web" }), "choice"},
 	} {
@@ -216,6 +225,57 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		},
 		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
 		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
+		"client_metadata with no keys":             func(d *plan.Declaration) { d.Body.Meta = nil },
+		"metadata keys with no client_metadata": func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "store", "stream"}
+		},
+		"a metadata key with no cap": func(d *plan.Declaration) { d.Body.Meta = map[string]plan.Value{"turn_id": {Kind: plan.KindText}} },
+		"an empty metadata key": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"": {Kind: plan.KindText, Max: 8}}
+		},
+		"a metadata value that is not text": func(d *plan.Declaration) { d.Body.Meta = map[string]plan.Value{"n": {Kind: plan.KindInt}} },
+		"a metadata value that may be null": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"n": {Kind: plan.KindText, Max: 8, Null: true}}
+		},
+		"a JSON text holding nothing declared": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8}}
+		},
+		"an object with no fields": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject}}}
+		},
+		"an unknown kind": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: "number"}}}
+		},
+		"a map with no key cap": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Each: &plan.Value{Kind: plan.KindBool}}}}
+		},
+		"a flag with a cap": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindOff, Max: 1}}}
+		},
+		"a JSON text below the top level": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Max: 8,
+				Each: &plan.Value{Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindBool}}}}}
+		},
+		"a number with a word list": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindInt, Only: []string{"1"}}}}
+		},
+		"an object with an invalid field": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject,
+				Fields: map[string]plan.Value{"t": {Kind: plan.KindText}}}}}
+		},
+		"a required key not declared": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject,
+				Fields: map[string]plan.Value{"b": {Kind: plan.KindBool}}, Required: []string{"kind"}}}}
+		},
+		"a required key outside an object": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Max: 8,
+				Each: &plan.Value{Kind: plan.KindBool}, Required: []string{"kind"}}}}
+		},
+		"a shape that holds itself": func(d *plan.Declaration) {
+			self := plan.Value{Kind: plan.KindMap, Max: 8}
+			self.Each = &self
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &self}}
+		},
 		"no mode":         func(d *plan.Declaration) { d.Mode = "" },
 		"an unknown mode": func(d *plan.Declaration) { d.Mode = "allowed" },
 	} {
@@ -544,5 +604,361 @@ func TestTheCodexPoolIsNamedAsTheProviderNamesIt(t *testing.T) {
 		if _, err := plan.New(d, f.sec, f.roots); err == nil {
 			t.Errorf("%s: a pool declaration that cannot name its windows is refused", name)
 		}
+	}
+}
+
+// variant is a whole value of a declared shape with one part changed, and
+// whether the clerk must take it.
+type variant struct {
+	name string
+	val  any
+	ok   bool
+}
+
+// variants builds a value of shape v with every declared key present, and
+// one variant per declared key and limit: each text and map key at its cap
+// (taken) and one byte over it, in ASCII and in a two-byte character
+// (refused), each value of the wrong kind, an unknown key, a flag that must
+// be off turned on, and a JSON text that does not parse.
+func variants(v plan.Value) (any, []variant) {
+	over := func(n int) []variant {
+		return []variant{
+			{"one byte over its cap", strings.Repeat("a", n+1), false},
+			{"one byte over its cap in two-byte characters", "a" + strings.Repeat("é", n/2), n%2 == 1},
+		}
+	}
+	var good any
+	var alts []variant
+	switch v.Kind {
+	case plan.KindText:
+		if v.Only != nil {
+			good = v.Only[0]
+			for _, o := range v.Only {
+				alts = append(alts, variant{"value " + o, o, true})
+			}
+			alts = append(alts, variant{"an undeclared value", "x" + v.Only[0], false})
+		} else {
+			good = "a"
+			alts = append(alts, variant{"at its cap", strings.Repeat("a", v.Max), true})
+			alts = append(alts, variant{"at its cap in two-byte characters", strings.Repeat("é", v.Max/2), true})
+		}
+		alts = append(alts, over(v.Max)...)
+		alts = append(alts, variant{"a number", 1, false})
+	case plan.KindInt:
+		good = 1700000000000
+		alts = []variant{{"negative", -1, true}, {"a fraction", 1.5, false}, {"text", "1", false}}
+	case plan.KindBool:
+		good = true
+		alts = []variant{{"false", false, true}, {"text", "true", false}}
+	case plan.KindOff:
+		good = false
+		alts = []variant{{"on", true, false}, {"text", "false", false}}
+	case plan.KindObject:
+		obj := map[string]any{}
+		subs := map[string][]variant{}
+		for k, f := range v.Fields {
+			obj[k], subs[k] = variants(f)
+		}
+		with := func(k string, x any) map[string]any {
+			c := map[string]any{}
+			for kk, vv := range obj {
+				c[kk] = vv
+			}
+			c[k] = x
+			return c
+		}
+		good = obj
+		for k, list := range subs {
+			for _, a := range list {
+				alts = append(alts, variant{k + ": " + a.name, with(k, a.val), a.ok})
+			}
+			alts = append(alts, variant{k + " in another case", with(strings.ToUpper(k), obj[k]), false})
+		}
+		alts = append(alts, variant{"an undeclared key", with("x-undeclared", "a"), false},
+			variant{"not an object", []any{}, false})
+	case plan.KindMap:
+		each, list := variants(*v.Each)
+		good = map[string]any{"k": each}
+		for _, a := range list {
+			alts = append(alts, variant{"entry: " + a.name, map[string]any{"k": a.val}, a.ok})
+		}
+		alts = append(alts, variant{"a key at its cap", map[string]any{strings.Repeat("k", v.Max): each}, true})
+		for _, a := range over(v.Max) {
+			alts = append(alts, variant{"a key " + a.name, map[string]any{a.val.(string): each}, a.ok})
+		}
+		alts = append(alts, variant{"not an object", "k", false})
+	case plan.KindJSON:
+		in, list := variants(*v.Each)
+		text := func(x any) string { b, _ := json.Marshal(x); return string(b) }
+		good = text(in)
+		for _, a := range list {
+			alts = append(alts, variant{"held: " + a.name, text(a.val), a.ok})
+		}
+		alts = append(alts, variant{"not JSON", "{", false}, variant{"trailing data", text(in) + " {}", false},
+			variant{"over its cap", text(in) + strings.Repeat(" ", v.Max), false}, variant{"not text", in, false})
+	case plan.KindDrop:
+		// Taken in any shape, and dropped (TestPlanTurnMetadataSendsNoWorkspaces).
+		good = map[string]any{"k": "v"}
+		return good, []variant{{"text", "v", true}, {"a number", 1, true}, {"null", nil, true}}
+	}
+	if v.Null {
+		alts = append(alts, variant{"null", nil, true})
+	} else if v.Kind != plan.KindOff {
+		alts = append(alts, variant{"null", nil, false})
+	}
+	return good, alts
+}
+
+// client_metadata, and the turn metadata blob inside it, hold only the
+// keys the CLI sets, each value of its declared shape and within its cap:
+// every declared key and limit is tried, and a refused one is never sent
+// (#2117, #4580, CLK-7).
+func TestPlanClientMetadataHeldToItsKeys(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	with := func(meta any) string {
+		m := capture(t)
+		m["client_metadata"] = meta
+		return encode(t, m)
+	}
+	good, alts := variants(plan.Value{Kind: plan.KindObject, Fields: plan.Codex(nil).Body.Meta})
+	alts = append(alts, variant{"every declared key", good, true})
+	took := 0
+	for _, a := range alts {
+		before := f.hits()
+		resp, d := callWith(p, "g", ph, with(a.val), free)
+		switch {
+		case a.ok && d != "":
+			t.Errorf("%s: refused %q", a.name, d)
+		case a.ok:
+			read(t, resp)
+			took++
+		case resp != nil || d != plan.DBody+" meta":
+			t.Errorf("%s: answered %v, detail %q", a.name, resp != nil, d)
+		case f.hits() != before:
+			t.Errorf("%s: a refused client_metadata reached the provider", a.name)
+		}
+	}
+	if took == 0 || took == len(alts) {
+		t.Fatalf("took %d of %d", took, len(alts))
+	}
+}
+
+// A JSON text is held to its cap as the clerk sends it too: a blob within
+// its cap that the clerk's encoding would grow past it (U+2028 is sent
+// escaped, three bytes as six) is refused (#4580).
+func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	// Each key is 42 raw U+2028, 126 bytes, within the 128-byte key cap;
+	// 100 of them fit the cap raw and pass it escaped.
+	k := strings.Repeat("\u2028", 42)
+	var ns []string
+	for i := 0; i < 100; i++ {
+		ns = append(ns, `"`+string(rune('0'+i/10))+string(rune('0'+i%10))+k+`":{}`)
+	}
+	blob := `{"tool_namespaces_info":{` + strings.Join(ns, ",") + `}}`
+	if len(blob) > 16<<10 {
+		t.Fatalf("blob of %d bytes", len(blob))
+	}
+	m := capture(t)
+	m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+	before := f.hits()
+	if resp, d := callWith(p, "g", ph, encode(t, m), free); resp != nil || d != plan.DBody+" meta" {
+		t.Fatalf("answered %v, detail %q", resp != nil, d)
+	}
+	if f.hits() != before {
+		t.Fatal("sent")
+	}
+}
+
+// The provider never sees the guest's workspaces: their paths, git remote
+// URLs and latest commit can name a private project, and a turn needs none
+// of them (#4632). The clerk drops the key from the blob it sends, whatever
+// the key holds, and keeps the rest. CLI 0.162.1 itself omits the key when
+// it finds no git repository (responses_metadata.rs non_empty_workspaces),
+// so the provider already takes a blob without it.
+func TestPlanTurnMetadataSendsNoWorkspaces(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	ws := `{"/home/guest/secret-project":{"associated_remote_urls":{"origin":"https://git.example/secret-project.git"},` +
+		`"latest_git_commit_hash":"0123456789abcdef0123456789abcdef01234567","has_changes":true}}`
+	for _, blob := range []string{
+		`{"request_kind":"turn","workspaces":` + ws + `}`,
+		`{"request_kind":"turn","workspaces":{}}`,
+		`{"request_kind":"turn","workspaces":"/home/guest/secret-project"}`,
+		`{"request_kind":"turn","workspaces":null}`,
+	} {
+		m := capture(t)
+		m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if d != "" {
+			t.Fatalf("%s: %s", blob, d)
+		}
+		read(t, resp)
+		_, sent := f.last()
+		if strings.Contains(sent, "secret-project") || strings.Contains(sent, "0123456789abcdef") || strings.Contains(sent, "workspaces") {
+			t.Errorf("%s: sent %s", blob, sent)
+		}
+		var got struct {
+			Meta map[string]string `json:"client_metadata"`
+		}
+		if err := json.Unmarshal([]byte(sent), &got); err != nil {
+			t.Fatal(err)
+		}
+		if b := got.Meta["x-codex-turn-metadata"]; b != `{"request_kind":"turn"}` {
+			t.Errorf("%s: sent blob %s", blob, b)
+		}
+	}
+}
+
+// The security property, written from literals rather than from the
+// declaration, so widening the declaration fails here: a guest cannot ask
+// the provider to ingest history, turn analytics on, attribute a call to an
+// MCP server, or draw guardian credits for the plan (#4585 Security 1). An
+// MCP tool source is refused for its kind alone, with no server named, and
+// MCP attribution inside the blob as well as beside it (#4595). A source
+// that states no kind is refused too (#4652), and so is a function entry
+// that carries no source at all (#4678).
+func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	tool := func(source string) string {
+		return `{"tool_namespaces_info":{"functions":{"name":"functions","functions":{"exec":` +
+			`{"name":"exec","direct":true,"code_mode_name":null,"deferred":false,"source":` + source + `}}}}}`
+	}
+	for name, meta := range map[string]map[string]any{
+		"history ingest":                 {"x-codex-turn-metadata": `{"history_ingest_requested":true}`},
+		"analytics":                      {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
+		"an MCP tool source":             {"x-codex-turn-metadata": tool(`{"kind":"mcp","server_name":"s"}`)},
+		"an MCP tool source alone":       {"x-codex-turn-metadata": tool(`{"kind":"mcp"}`)},
+		"a tool source with no kind":     {"x-codex-turn-metadata": tool(`{}`)},
+		"a tool source with a null kind": {"x-codex-turn-metadata": tool(`{"kind":null}`)},
+		"a tool with no source": {"x-codex-turn-metadata": `{"tool_namespaces_info":{"functions":{"name":"functions","functions":` +
+			`{"exec":{"name":"exec","direct":true,"code_mode_name":null,"deferred":false}}}}}`},
+		"MCP attribution":                {"mcp_attribution": `{"status":"ok"}`},
+		"MCP attribution in a blob":      {"x-codex-turn-metadata": `{"mcp_attribution":{"status":"ok"}}`},
+		"MCP attribution text in a blob": {"x-codex-turn-metadata": `{"mcp_attribution":"{\"status\":\"ok\"}"}`},
+		"guardian credits":               {"guardian_credits_requested": "true"},
+		"guardian credits in a blob":     {"x-codex-turn-metadata": `{"guardian_credits_requested":"true"}`},
+	} {
+		m := capture(t)
+		m["client_metadata"] = meta
+		before := f.hits()
+		if resp, d := callWith(p, "g", ph, encode(t, m), free); resp != nil || d != plan.DBody+" meta" {
+			t.Errorf("%s: answered %v, detail %q", name, resp != nil, d)
+		}
+		if f.hits() != before {
+			t.Errorf("%s: sent", name)
+		}
+	}
+	m := capture(t)
+	m["client_metadata"] = map[string]any{"x-codex-turn-metadata": tool(`{"kind":"harness"}`)}
+	resp, d := callWith(p, "g", ph, encode(t, m), free)
+	if d != "" {
+		t.Fatalf("a harness tool source: %s", d)
+	}
+	read(t, resp)
+}
+
+// The top-level client_metadata keys and caps, as a fixed table rather than
+// read from the declaration: each id takes 128 bytes and refuses 129, the
+// blob refuses 16 KiB + 1, and no other key is taken (#4585 L3 1).
+func TestPlanClientMetadataCapsAreFixed(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	ids := []string{"x-codex-installation-id", "session_id", "thread_id", "x-codex-window-id", "turn_id",
+		"x-openai-subagent", "x-codex-parent-thread-id", "parent_turn_id", "root_turn_id"}
+	if got := len(plan.Codex(nil).Body.Meta); got != len(ids)+1 {
+		t.Fatalf("the declaration has %d client_metadata keys, want %d", got, len(ids)+1)
+	}
+	call := func(meta map[string]any) string {
+		m := capture(t)
+		m["client_metadata"] = meta
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if resp != nil {
+			read(t, resp)
+		}
+		return d
+	}
+	for _, k := range ids {
+		if d := call(map[string]any{k: strings.Repeat("a", 128)}); d != "" {
+			t.Errorf("%s at 128 bytes: %s", k, d)
+		}
+		if d := call(map[string]any{k: strings.Repeat("a", 129)}); d != plan.DBody+" meta" {
+			t.Errorf("%s at 129 bytes: %q", k, d)
+		}
+	}
+	if d := call(map[string]any{"x-codex-turn-metadata": "{}" + strings.Repeat(" ", 16<<10-1)}); d != plan.DBody+" meta" {
+		t.Errorf("a blob of 16 KiB + 1: %q", d)
+	}
+}
+
+// A provider-read flag cannot be smuggled past the check by repeating it:
+// the clerk sends its own encoding of the blob it checked, so the provider
+// sees one key, whichever of a repeated pair its parser keeps (#4580).
+func TestPlanTurnMetadataIsSentAsChecked(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	for _, blob := range []string{
+		`{"history_ingest_requested":true,"history_ingest_requested":false}`,
+		`{"analytics_enabled":true , "analytics_enabled":false}`,
+	} {
+		m := capture(t)
+		m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if d != "" {
+			t.Fatalf("%s: %s", blob, d)
+		}
+		read(t, resp)
+		_, sent := f.last()
+		var got struct {
+			Meta map[string]string `json:"client_metadata"`
+		}
+		if err := json.Unmarshal([]byte(sent), &got); err != nil {
+			t.Fatal(err)
+		}
+		if b := got.Meta["x-codex-turn-metadata"]; strings.Contains(b, "true") || strings.Count(b, `":false`) != 1 {
+			t.Errorf("%s: sent %s", blob, b)
+		}
+	}
+}
+
+// The Codex body (its keys, tools and client_metadata) is measured on one
+// CLI release, the one the image pins as CODEX_VERSION in
+// guest/codex/build-rootfs.sh. The declaration's Version names it, so a
+// CLI bump fails here until the same change requalifies the declaration,
+// and a newly declared tool or key cannot reach the plan as a refusal on
+// every turn unnoticed (#2115).
+func TestCodexBodyIsMeasuredOnThePinnedCLI(t *testing.T) {
+	raw, err := os.ReadFile("../../../guest/codex/build-rootfs.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^CODEX_VERSION=([0-9][0-9A-Za-z.+-]*)$`).FindAllSubmatch(raw, -1)
+	if len(m) != 1 {
+		t.Fatalf("build-rootfs.sh: %d CODEX_VERSION lines", len(m))
+	}
+	v := plan.Codex(nil).Version
+	if !regexp.MustCompile(`^codex-` + regexp.QuoteMeta(string(m[0][1])) + `-[0-9]+$`).MatchString(v) {
+		t.Fatalf("the Codex declaration is %q, measured on another CLI than the pinned %s", v, m[0][1])
 	}
 }

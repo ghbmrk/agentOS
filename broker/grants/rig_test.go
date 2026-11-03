@@ -35,6 +35,7 @@ type fakeOwner struct {
 	lateUndo   map[string]bool // UndoneAfterRelease
 	deadlines  []time.Time     // the deadline of each item asked by RequestEach or RequestLocalEach
 	slow       func()          // runs at the end of RequestEach: a slow text send
+	t          testing.TB      // checks each note as it is posted (#4579)
 }
 
 // expired refuses a re-issued item whose deadline has passed, as the
@@ -58,10 +59,19 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 			return "", owner.ErrLocalOnly // as the channel refuses it
 		}
 	}
-	id := fmt.Sprintf("R%d", len(f.order)+1)
+	id := f.reqID()
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
 	return id, nil
+}
+
+// reqID names the next request: secret-shaped, or plain "R<n>" in
+// eachIDShape's plain run (L3 on #4553, #4579).
+func (f *fakeOwner) reqID() string {
+	if _, plain := plainIDs.Load(f.t); plain {
+		return fmt.Sprintf("R%d", len(f.order)+1)
+	}
+	return fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
 }
 
 // RequestLocalEach records requests asked on the local page (P2-2a),
@@ -83,7 +93,7 @@ func (f *fakeOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) 
 			err = owner.ErrExpired
 			continue
 		}
-		ids[i] = fmt.Sprintf("R%d", len(f.order)+1)
+		ids[i] = f.reqID()
 		f.reqs[ids[i]] = []owner.Item{it}
 		f.order = append(f.order, ids[i])
 		f.local = append(f.local, ids[i])
@@ -132,7 +142,7 @@ func (f *fakeOwner) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queued = append(f.queued, ar)
-	q := owner.Queued{ID: fmt.Sprintf("Q%d", len(f.queued)), SendAt: f.now().Add(10 * time.Minute), Reply: ar}
+	q := owner.Queued{ID: fmt.Sprintf("sk-secret-shaped-queued-%d", len(f.queued)), SendAt: f.now().Add(10 * time.Minute), Reply: ar}
 	f.due = append(f.due, q)
 	return owner.QueueResult{Queued: &q}, nil
 }
@@ -158,17 +168,14 @@ func (f *fakeOwner) UndoneAfterRelease(id string) bool {
 	return f.lateUndo[id]
 }
 
-func (f *fakeOwner) Inform(text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.notes = append(f.notes, text)
-	f.classes = append(f.classes, owner.ClassUpdate)
-	return nil
-}
+func (f *fakeOwner) Inform(text string) error { return f.Post(owner.ClassUpdate, text) }
 
 func (f *fakeOwner) Post(class owner.Class, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if owner.AgentSecret(text) || owner.AgentVoice(text) { // at send, so a late note is seen (#4579)
+		f.t.Errorf("an owner note quotes agent text raw: %q", text)
+	}
 	f.notes = append(f.notes, text)
 	f.classes = append(f.classes, class)
 	return nil
@@ -325,14 +332,35 @@ func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Exec
 	return r
 }
 
+// tickAfter advances the clock by d, ticks the gate and waits for it.
+func (r *rig) tickAfter(d time.Duration) { r.advance(d); r.g.Tick(); r.g.Wait() }
+
 // open starts a gate and engine on the rig's journal: at first, and again
 // to simulate a restart.
 func (r *rig) open() {
 	r.t.Helper()
-	r.own = &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
+	r.own = r.newOwner()
 	r.openWith(func() Owner { return r.own })
 	r.g.Reissue(r.boot)
 	r.boot = nil
+}
+
+// newOwner makes the rig's owner channel. Its IDs are secret-shaped, so
+// Post fails the test if a note quotes one raw, not through
+// owner.InformQuote (CH-21, #4548).
+func (r *rig) newOwner() *fakeOwner {
+	return &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}, t: r.t}
+}
+
+// plainIDs holds the tests whose requests get plain IDs. eachIDShape alone
+// adds one, after the same body ran with secret-shaped IDs. Both shapes
+// quote as "A request", so a raw quote fails only the secret run, and only
+// the plain run tells a quoted request from a quoted hold (#4579).
+var plainIDs sync.Map
+
+func eachIDShape(t *testing.T, body func(t *testing.T)) {
+	t.Run("secret", body)
+	t.Run("plain", func(t *testing.T) { plainIDs.Store(t, true); body(t) })
 }
 
 // openWith starts a gate and engine with the owner channel mk returns,
@@ -354,6 +382,14 @@ func (r *rig) openWith(mk func() Owner) {
 	}
 	r.eng = eng
 	r.g.Attach(eng, mk())
+}
+
+// stop is STOP on the rig's engine; t fails if it is not recorded.
+func (r *rig) stop(t *testing.T) {
+	t.Helper()
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // effect does what the guest plane does for effect_request.
@@ -462,4 +498,38 @@ func sam() Verified {
 			Facts: owner.Facts{RecipientChecked: true, RecipientExists: true, RecipientByOwner: true, HasAmount: true, Amount: 12000}},
 		Recipients: []string{"sam@example.com"}, Record: "inv-1042", Edited: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 	}
+}
+
+// noteErrs records what the owner-note check reports, in place of failing.
+type noteErrs struct {
+	testing.TB
+	got []string
+}
+
+func (e *noteErrs) Errorf(format string, a ...any) { e.got = append(e.got, fmt.Sprintf(format, a...)) }
+
+// TestTheRigsOwnerChecksEachNoteAsItIsSent (#4579): Post checks a note
+// when it is sent, so one a gate goroutine posts after the test body
+// returns is checked too. Each secret-shaped ID is caught raw, and a plain
+// request ID quotes unlike a hold. REQ: CH-21
+func TestTheRigsOwnerChecksEachNoteAsItIsSent(t *testing.T) {
+	eachIDShape(t, func(t *testing.T) {
+		r := newRig(t, nil)
+		req := r.own.reqID()
+		_, plain := plainIDs.Load(t)
+		e := &noteErrs{TB: t}
+		r.own.t = e
+		r.own.QueueAutoReply(owner.AutoReply{Ref: "agent/r1"})
+		hold := r.own.hold(req, 1, owner.Item{Ref: "agent/h1"}).Hold
+		for _, id := range []string{req, r.own.due[0].ID, hold} {
+			n := len(e.got)
+			r.own.Inform(id + " did not run.")
+			if caught := len(e.got) > n; caught != (id != req || !plain) {
+				t.Fatalf("raw %q caught as it was sent: %v", id, caught)
+			}
+		}
+		if plain && owner.InformQuote(req) == owner.InformQuote(hold) {
+			t.Fatalf("plain request %q quotes as a hold does", req)
+		}
+	})
 }

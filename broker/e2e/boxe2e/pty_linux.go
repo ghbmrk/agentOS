@@ -34,7 +34,7 @@ type pluggedModem struct {
 func plugModem(carrier *modem.Carrier, uid int) (*pluggedModem, error) {
 	// Non-blocking, so the runtime poller owns the master and Close
 	// interrupts the copy goroutines' reads.
-	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	fd, err := openRaw("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

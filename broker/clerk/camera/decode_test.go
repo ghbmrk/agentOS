@@ -26,7 +26,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/camwire"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode"
-	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
 var picture = camwire.Shape{Width: 8, Height: 6}
@@ -85,11 +84,11 @@ type starts struct {
 	mu    sync.Mutex
 	runs  []func(io.Reader, io.Writer)
 	at    []time.Time
-	specs []gvisor.Stream
+	specs []Spec
 	procs []*fakeProc
 }
 
-func (s *starts) start(_ context.Context, st gvisor.Stream) (Proc, error) {
+func (s *starts) start(_ context.Context, st Spec) (Proc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	run := s.runs[min(len(s.at), len(s.runs)-1)]
@@ -158,7 +157,7 @@ func newDecRig(t *testing.T, mut func(*DecodeConfig), runs ...func(io.Reader, io
 	t.Helper()
 	r := &decRig{st: &starts{runs: runs}, out: &outs{}, rep: &reports{}, log: &lines{}}
 	cfg := DecodeConfig{
-		Start: r.st.start, Root: "/img/camdecode", Cgroup: "/sys/fs/cgroup/agentos/camdecode",
+		Start: r.st.start,
 		Stall: 200 * time.Millisecond, Idle: 5 * time.Second,
 		Backoff: Backoff{Min: 100 * time.Millisecond, Max: 400 * time.Millisecond},
 		Out:     r.out.add, Report: r.rep.add, Log: r.log.add,
@@ -204,13 +203,13 @@ func TestDecodeFormatMatchesDecoder(t *testing.T) {
 	r.d.Frame(testID, thermalN(1))
 	waitFor(t, "a start", func() bool { return r.st.n() == 1 })
 	spec := r.st.specs[0]
-	c, err := camdecode.ParseArgs(spec.Argv[1:])
-	if spec.Argv[0] != decoderBinary || err != nil || c.Video != picture || c.Thermal != lepton {
-		t.Errorf("argv %q parses to %+v, %v", spec.Argv, c, err)
+	argv := spec.Argv()
+	c, err := camdecode.ParseArgs(argv[1:])
+	if argv[0] != decoderBinary || err != nil || c.Video != picture || c.Thermal != lepton {
+		t.Errorf("argv %q parses to %+v, %v", argv, c, err)
 	}
-	if spec.Name != "camdecode-"+testID || spec.Root != "/img/camdecode" || spec.MemBytes != DefaultDecodeMem ||
-		spec.Cgroup != "/sys/fs/cgroup/agentos/camdecode" {
-		t.Errorf("stream %+v", spec)
+	if spec != (Spec{Video: picture, Thermal: lepton}) {
+		t.Errorf("spec %+v", spec)
 	}
 }
 
@@ -923,7 +922,7 @@ func TestDecoderBehindClerk(t *testing.T) {
 	rig := newRig(t, func(c *Config, _ *Node) {
 		var err error
 		st := &starts{runs: []func(io.Reader, io.Writer){decodes}}
-		d, err = NewDecoder(DecodeConfig{Start: st.start, Root: "/r", Cgroup: "/c", Out: out.add,
+		d, err = NewDecoder(DecodeConfig{Start: st.start, Out: out.add,
 			Report: func(id string, k Kind) {}})
 		if err != nil {
 			t.Fatal(err)

@@ -114,7 +114,7 @@ var netOK = map[string]allowance{
 			"syscall.CLONE_NEWIPC", "syscall.CLONE_NEWNET", "syscall.CLONE_NEWUSER", "syscall.Close", "syscall.Credential",
 			"syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.SysProcIDMap"}},
 	"journal": {"flock on the journal file", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.LOCK_NB"}},
-	"update":  {"flock on the update store; O_NOFOLLOW to open no planted link (#3942); Stat_t to read who owns each directory above the store (#3990)", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.O_NOFOLLOW", "syscall.Stat_t"}},
+	"update":  {"flock on the update store; O_NOFOLLOW to open no planted link (#3942); Stat_t to read who owns each directory above the store (#3990); openat2 RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS to read a drive beneath its root (#3989)", []string{"syscall.Flock", "syscall.LOCK_EX", "syscall.O_NOFOLLOW", "syscall.Stat_t", "syscall.O_DIRECTORY", "syscall.O_CLOEXEC", "golang.org/x/sys/unix.Openat2", "golang.org/x/sys/unix.OpenHow", "golang.org/x/sys/unix.O_RDONLY", "golang.org/x/sys/unix.O_CLOEXEC", "golang.org/x/sys/unix.RESOLVE_BENEATH", "golang.org/x/sys/unix.RESOLVE_NO_SYMLINKS", "golang.org/x/sys/unix.RESOLVE_NO_MAGICLINKS", "golang.org/x/sys/unix.EAGAIN", "golang.org/x/sys/unix.EINTR"}},
 	"vm/overlay": {"overlay files: xattrs, device nodes, stat, timestamps, the FICLONE ioctl for copies, and handle-relative deletion in a stopped worker's layer (CAP-8c), and directory handles to measure a layer past the path limit",
 		[]string{"syscall.Close", "syscall.Dup", "syscall.EEXIST", "syscall.EINVAL", "syscall.ELOOP", "syscall.ENAMETOOLONG", "syscall.ENOENT",
 			"syscall.ENOTDIR", "syscall.ENOTEMPTY", "syscall.ENXIO", "syscall.Fstat", "syscall.Getxattr", "syscall.Listxattr",
@@ -162,10 +162,10 @@ var netOK = map[string]allowance{
 	// kernel/proc's ListenClerk and ServeClerk, and the rest of the package
 	// they come in, which serves and dials only unix sockets (its dials are
 	// unixDialCalls), locks its own store and refuses to be dumpable.
-	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store, O_NOFOLLOW opens; no network client",
+	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store and restore lock, O_NOFOLLOW opens, O_NONBLOCK so the restore lock's open never waits on a FIFO; no network client",
 		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
 			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
-			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
+			"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
 		[]string{"syscall.PR_GET_DUMPABLE", "syscall.PR_SET_DUMPABLE", "syscall.RawSyscall6", "syscall.SYS_PRCTL"}},
 	"clerk/clerkkey": {"Fstat and the file type of a handed-in key descriptor; no network client",

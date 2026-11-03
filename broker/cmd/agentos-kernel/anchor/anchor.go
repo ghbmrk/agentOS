@@ -39,7 +39,7 @@ func Open(dir string, keys handoff.KernelKeys, f *os.File) (kernel.Anchor, error
 		TPM: t, SRK: keys.Counter.SRK, Auth: keys.Counter.Auth,
 		Ref: tpmseal.CounterRef{Handle: keys.Counter.Handle, Name: keys.Counter.Name},
 	}
-	a, err := proc.OpenCounterAnchor(dir, c, keys.Head)
+	a, err := proc.OpenCounterAnchor(dir, c, keys.Head.Get())
 	if err != nil {
 		return nil, fmt.Errorf("agentos-kernel: my log's anchor: %w", err)
 	}

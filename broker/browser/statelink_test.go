@@ -127,6 +127,134 @@ func TestClickOnAnUnseenRefIsRefused(t *testing.T) {
 	}
 }
 
+// K16: a ref names an element only in the driver's last snapshot of one
+// page. Once a reply comes from another page without a snapshot, the gate
+// keeps no refs, so a ref from the old page is refused rather than judged
+// as what it was there.
+func TestRefFromAnEarlierPageIsRefused(t *testing.T) {
+	mail := "https://shop.example.test/mail/"
+	h := newHarness(t, map[string]any{
+		"snapshot": pageReply(actionPage),
+		"click": []any{
+			map[string]any{"ok": true, "url": mail},
+			map[string]any{"ok": true, "url": "https://shop.example.test/products/kettle"},
+		},
+	}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	// A reply that stays on the page keeps its refs.
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e5"}`); !r.OK {
+		t.Fatalf("click on the page: %+v", r)
+	}
+	// A click that lands on another page: the next click is refused.
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e5"}`); !r.OK {
+		t.Fatalf("click that leaves: %+v", r)
+	}
+	for _, verb := range []string{"click", "download"} {
+		if r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"e5"}`); r.OK || r.Error != "unknown_ref" {
+			t.Fatalf("%s after the page changed: %+v", verb, r)
+		}
+	}
+	// A navigate's reply from another page does the same.
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if r := h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/gifts"}`); !r.OK {
+		t.Fatalf("navigate: %+v", r)
+	}
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e5"}`); r.OK || r.Error != "unknown_ref" {
+		t.Fatalf("click after navigate: %+v", r)
+	}
+	// A reply that names no page fails closed too.
+	h2 := newHarness(t, map[string]any{"snapshot": pageReply(actionPage),
+		"type": map[string]any{"ok": false, "error": "TimeoutError"}}, "", 0)
+	h2.do(t, `{"v":0,"verb":"snapshot"}`)
+	h2.do(t, `{"v":0,"verb":"type","ref":"e5","text":"x"}`)
+	if r := h2.do(t, `{"v":0,"verb":"click","ref":"e5"}`); r.Error != "unknown_ref" {
+		t.Fatalf("click after a reply with no page: %+v", r)
+	}
+	if got := forwarded(t, h, "click"); len(got) != 2 {
+		t.Fatalf("driver got %q", got)
+	}
+	if got := forwarded(t, h2, "click"); len(got) != 0 {
+		t.Fatalf("driver got %q", got)
+	}
+}
+
+// K16 (#4410 Security): a URL change within one document (a fragment, or a
+// router's pushState) clears the gate's refs while the driver still
+// resolves them. Typing or selecting on such a ref would be judged without
+// the screen's field and heading names, so a task approval could cover a
+// submit into "New password"; the gate refuses it like a click.
+func TestTypeOnARefTheGateNoLongerHoldsIsRefused(t *testing.T) {
+	page := "- main [ref=e1]:\n  - heading \"Change password\" [ref=e2]\n  - textbox \"New password\" [ref=e5]\n  - combobox \"Reminder\" [ref=e6]"
+	h := newHarness(t, map[string]any{"snapshot": shopReply("/account", page),
+		"navigate": map[string]any{"ok": true, "url": "https://shop.example.test/account#tips"}}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	// On the snapshot's own page the screen's names make it ask.
+	r, _, _ := h.g.do(context.Background(), []byte(`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1","submit":true}`), fixed(cover{"example.test"}))
+	if r.Error != "approval_required" || r.Approval == nil || r.Approval.Secret == "" {
+		t.Fatalf("type on the snapshot's page: %+v", r)
+	}
+	h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/account#tips"}`)
+	for _, raw := range []string{
+		`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1","submit":true}`,
+		`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1"}`,
+		`{"v":0,"verb":"select","ref":"e6","option":"never"}`,
+	} {
+		if r, _, _ := h.g.do(context.Background(), []byte(raw), fixed(cover{"example.test"})); r.Error != "unknown_ref" {
+			t.Fatalf("%s after the URL changed: %+v", raw, r)
+		}
+	}
+	for _, verb := range []string{"type", "select"} {
+		if got := forwarded(t, h, verb); len(got) != 0 {
+			t.Fatalf("driver got %q", got)
+		}
+	}
+}
+
+// K16: the driver snapshots again inside a screenshot, so its refs are
+// then those of its own look, not the agent's last snapshot. The gate keeps
+// the refs of its own snapshot after the shot, or none when the shot fails.
+func TestRefsAfterAScreenshotAreTheDriversLast(t *testing.T) {
+	later := `- generic [ref=e1]:
+  - link "Gifts" [ref=e30]:
+    - /url: /gifts`
+	h := newHarness(t, map[string]any{
+		"snapshot":   []any{pageReply(actionPage), pageReply(later)},
+		"screenshot": map[string]any{"ok": true, "url": "https://shop.example.test/mail/", "path": "out.bin", "bytes": 3},
+	}, "png", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if r := h.do(t, `{"v":0,"verb":"screenshot"}`); !r.OK {
+		t.Fatalf("screenshot: %+v", r)
+	}
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e5"}`); r.Error != "unknown_ref" {
+		t.Fatalf("click on a ref the driver's last look lacks: %+v", r)
+	}
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e30"}`); !r.OK {
+		t.Fatalf("click on a ref from the driver's last look: %+v", r)
+	}
+
+	// The driver withholds the shot after its own look: no refs are kept.
+	h = newHarness(t, map[string]any{
+		"snapshot":   pageReply(later),
+		"screenshot": map[string]any{"ok": false, "error": "withheld", "url": "https://shop.example.test/mail/"},
+	}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if r := h.do(t, `{"v":0,"verb":"screenshot"}`); r.Error != "withheld" {
+		t.Fatalf("screenshot: %+v", r)
+	}
+	if got := forwarded(t, h, "screenshot"); len(got) != 1 {
+		t.Fatalf("driver got %q", got)
+	}
+	for _, verb := range []string{"click", "download"} {
+		if r := h.do(t, `{"v":0,"verb":"`+verb+`","ref":"e30"}`); r.Error != "unknown_ref" {
+			t.Fatalf("%s after a failed screenshot: %+v", verb, r)
+		}
+	}
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e30"}`); !r.OK {
+		t.Fatalf("click after a new snapshot: %+v", r)
+	}
+}
+
 // Acceptance 5: ordinary navigation and links still pass.
 func TestOrdinaryLinksStillPass(t *testing.T) {
 	h := newHarness(t, map[string]any{"snapshot": pageReply(actionPage)}, "", 0)

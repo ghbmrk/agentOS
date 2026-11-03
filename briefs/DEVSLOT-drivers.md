@@ -143,6 +143,7 @@ The row said part (b) "waits on the device clerk host". No such row exists. `bri
   - The template's two `OpenFile=` lines (point 3).
   - The CI boot probe of a fixture driver instance.
   - Serial with the agentosd chain only if it edits `cmd/agentosd` (it should not).
+  - One `devhost.Host` per driver for the process's life. The host bounds re-subscribing itself (`MinSubscription`, DEVSLOT-subscribe-1, #4539), so the process may call `Subscribe` again at once after it returns.
   - Scope: `broker/cmd/agentos-devices/` (new), its unit, the driver template's key lines, and `image/ci_boot.sh` or the health check's probe. Guard files: `broker/core/core.txt` (`wiring cmd/agentos-devices`) and `tools/trusted_base_parsers.txt`.
   - **Acceptance tests:**
     - `TestTCPTransportRefusesWrongKey`.

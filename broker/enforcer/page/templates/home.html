@@ -1,7 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Home enforcer: {{.Name}}</title>
 <link rel="stylesheet" href="/page.css">
@@ -42,6 +38,13 @@
 <h2>agentOS channel</h2>
 <p>The channel is {{.Channel}}.</p>
 {{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
+
+{{if .Offers}}<h2>Names heard</h2>
+{{range .Offers}}<div class="pending">
+<p>{{.Line}}</p>
+<a href="/heard?d={{.ID}}">Review it and approve with your passkey</a>
+</div>
+{{end}}{{end}}
 
 <h2>Devices</h2>
 {{if .Devices}}<table>

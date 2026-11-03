@@ -57,7 +57,7 @@ func TestFrozenIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, frozenPolicy(), text))
 	run(t, "nft", "add", "element", "inet", Table, DeviceSet(101, false), "{ "+netAllow+" }")
 	h.expect(
 		probe{from: "106", addr: devAddr(107), port: 80, why: "a frozen device's pair"},
@@ -102,7 +102,7 @@ func TestDeviceTrafficCounted(t *testing.T) {
 	// A home with no device on a VLAN has no counting map at all (nft
 	// refuses an empty one).
 	empty, err := Compile(policy.Document{Version: 1}, fixtureLayout())
-	if err != nil || strings.Contains(empty, "vmap") || strings.Contains(empty, "_count") {
+	if err != nil || strings.Contains(empty, "_count") {
 		t.Errorf("a home with no devices: counting rules present (%v)", err)
 	}
 	if !inNetns(t) {
@@ -214,7 +214,8 @@ func TestDeviceTrafficCounted(t *testing.T) {
 		t.Errorf("the TV's destinations: %q, want only %s", got, netAllow)
 	}
 	for name, vals := range elems {
-		if strings.HasPrefix(name, "t") && name != TrafficSet(101, false) {
+		// The refused sets are TestRefusedWhereExact's.
+		if strings.HasPrefix(name, "t") && name != TrafficSet(101, false) && !strings.HasSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "_4"), "_6"), "_refused") {
 			t.Errorf("set %s counted %q", name, vals)
 		}
 	}

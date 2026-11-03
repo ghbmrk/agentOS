@@ -1,0 +1,20 @@
+# The camera clerk's decoder sessions (CAM-decoder-uid, #4134): the clerk's -decoder. Each connection
+# starts one fresh agentos-camdecode@.service, which runs that one session's gVisor sandbox under a
+# dynamic user of its own, so a sandbox escape holds neither the clerk's uid nor its files or socket.
+# Only the clerk's user connects.
+[Unit]
+Description=agentOS camera decoder: one connection per decoder session
+
+[Socket]
+ListenStream=/run/agentos-camdecode/conn.sock
+Accept=yes
+SocketUser=agentos-camera
+SocketGroup=agentos-camera
+SocketMode=0600
+DirectoryMode=0711
+# One session per admitted camera (CAM-host-4): with the service's MemoryMax= and TasksMax=, this is
+# the decoders' whole share (RES-2). A session past it is refused, and the clerk counts a fault.
+MaxConnections=8
+
+[Install]
+WantedBy=sockets.target

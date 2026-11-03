@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -63,7 +64,25 @@ const (
 	ReadFingerprint ReadWhat = 3
 	// ReadTraffic is a device's traffic summary (NET-5).
 	ReadTraffic ReadWhat = 4
+	// ReadCounts is the enforcer's byte-cap counts, the traffic summary
+	// the kernel's check reads once each SummaryInterval (NET-2 Byte caps;
+	// its body is Counts); it names no device.
+	ReadCounts ReadWhat = 5
 )
+
+// SummaryInterval is the interval between traffic summaries that this
+// format definition fixes (NET-2 The channel, D-255): the core asks for
+// one each interval, and the kernel takes a byte-cap count as fresh only
+// while it is no older than twice this, so one lost summary does not make
+// it stale (NET-2 Byte caps, broker/kernel/capgate). The enforcer and the
+// kernel both read it here, never a copy (ASSUMPTIONS ENF-d-w5).
+const SummaryInterval = time.Minute
+
+// PastCap is whether a byte count is past its cap: the count the enforcer
+// drops and trips on, and the one the kernel's check stops short of
+// (NET-2 Byte caps, D-255). A count at the cap is not past it. Both sides
+// call this one test, so they cannot disagree on the edge.
+func PastCap(count, cap uint64) bool { return count > cap }
 
 // Code is the enforcer's verdict on a request.
 type Code byte
@@ -124,8 +143,8 @@ type Tighten struct {
 	ToMS   int64
 }
 
-// Read asks for a read. Device is empty for ReadExport and names a device
-// otherwise.
+// Read asks for a read. Device is empty for ReadExport and ReadCounts and
+// names a device otherwise.
 type Read struct {
 	ID     uint64
 	What   ReadWhat
@@ -334,7 +353,7 @@ func Decode(d Direction, f Frame) (Msg, error) {
 		m = t
 	case TRead:
 		rd := Read{ID: r.u64(), What: ReadWhat(r.u8()), Device: r.name()}
-		if rd.What < ReadState || rd.What > ReadTraffic || (rd.What == ReadExport) != (rd.Device == "") {
+		if rd.What < ReadState || rd.What > ReadCounts || (rd.What == ReadExport || rd.What == ReadCounts) != (rd.Device == "") {
 			r.fail()
 		}
 		m = rd

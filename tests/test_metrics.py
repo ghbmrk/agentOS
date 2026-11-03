@@ -12,6 +12,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import metrics  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import git_env, setUpModule, tearDownModule  # noqa: E402,F401
 
 TZ = dt.timezone(dt.timedelta(hours=-4))
 
@@ -394,8 +396,9 @@ class GitHistoryTest(unittest.TestCase):
     def test_reads_trace_and_board_from_first_parent_history(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+            env = git_env({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                           "PATH": "/usr/bin:/bin"})
             git = lambda *a, date="2026-10-05T12:00:00-04:00": subprocess.run(
                 ["git", "-C", d, *a], check=True, capture_output=True,
                 env={**env, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
@@ -695,14 +698,14 @@ class LedgerStaleTest(unittest.TestCase):
         self.assertIn("2026-10-04 19:50", line)
         self.assertIn("36 hours", line)
 
-    def test_fresh_reading_or_exactly_36_hours_leaves_the_heading_first(self):
+    def test_fresh_reading_or_exactly_36_hours_leaves_the_owner_report_first(self):
         r = [{"at": "2026-10-04T19:50", "all": 23.0, "fable": 11.0}]
-        self.assertTrue(self.first_line("2026-10-06T11:50:00+00:00", r).startswith("# METRICS"))
-        self.assertTrue(self.first_line("2026-10-05T12:00:00+00:00", r).startswith("# METRICS"))
+        self.assertTrue(self.first_line("2026-10-06T11:50:00+00:00", r).startswith("## Owner outcomes"))
+        self.assertTrue(self.first_line("2026-10-05T12:00:00+00:00", r).startswith("## Owner outcomes"))
 
     def test_newest_reading_counts_and_no_reading_is_stale(self):
         r = [{"at": "2026-10-04T10:00", "all": 1.0, "fable": 0.0}, {"at": "2026-10-09T10:00", "all": 2.0, "fable": 0.0}]
-        self.assertTrue(self.first_line("2026-10-10T10:00:00+00:00", r).startswith("# METRICS"))
+        self.assertTrue(self.first_line("2026-10-10T10:00:00+00:00", r).startswith("## Owner outcomes"))
         self.assertIn("no reading", self.first_line("2026-10-10T10:00:00+00:00", []))
 
 
@@ -733,8 +736,9 @@ class GitFlagsTest(unittest.TestCase):
     def test_history_snapshots_carry_flags(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+            env = git_env({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                           "PATH": "/usr/bin:/bin"})
             subprocess.run(["git", "-C", d, "init", "-q", "-b", "main"], check=True, capture_output=True, env=env)
             (root / "BOARD.md").write_text("| ID | Package | Needs | State |\n|---|---|---|---|\n| P-1-r1 | J | x | queued |\n")
             subprocess.run(["git", "-C", d, "add", "."], check=True, capture_output=True, env=env)
@@ -836,6 +840,69 @@ class CommentVerdictTest(unittest.TestCase):
         p, calls = self._collect([], com, since="2026-10-06T00:00:00Z")
         self.assertIsNone(p["verdicts"])
         self.assertFalse([c for c in calls if c.startswith("issues/")])
+
+
+class OwnerOutcomesTest(unittest.TestCase):
+    """Decisions 8 item 4: the owner's weekly report leads, a few numbers, its reading time counted."""
+
+    def rec(self, **kw):
+        r = {"week": "2026-11-01", "journeys_run": 5, "journeys_passed": 4, "errands": 12,
+             "owner_seconds": 300, "silent_failures": 1}
+        r.update(kw)
+        return r
+
+    def test_no_record_gives_one_line_before_the_agents_part(self):
+        raw = raw_fixture()  # its newest reading is fresh, so no LEDGER banner
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertTrue(md.startswith("## Owner outcomes\n\nNo week on the real box is recorded yet."))
+        self.assertLess(md.index("## Owner outcomes"), md.index("# METRICS"))
+        self.assertEqual(md.index("# METRICS"), md.index("\n\n", md.index("No week")) + 2)
+
+    def test_latest_week_shows_three_numbers_with_its_reading_time_in_the_owner_seconds(self):
+        old = self.rec(week="2026-10-25", errands=1)
+        section = "\n".join(metrics.owner_section([self.rec(), old]))
+        self.assertIn("Week of 2026-11-01 on the real box.", section)
+        self.assertIn("- Journeys passed: 4 of 5", section)
+        self.assertIn("- Silent failures per 100 errands: 8.3", section)
+        read_s = int(section.split("Reading to here takes ")[1].split(" s")[0])
+        words = len(section.replace("- ", " ").replace("#", " ").split())
+        self.assertEqual(read_s, -(-words * 60 // metrics.READ_WPM))
+        self.assertLess(read_s, 20)  # a few numbers, not a table
+        self.assertIn(f"- Owner seconds per errand: {format(round((300 + read_s) / 12, 1), 'g')} (12 errands", section)
+
+    def test_the_ledger_banner_stays_first_and_its_reading_is_counted(self):
+        banner = ["**LEDGER.md has no reading; take one (D-086).**", ""]
+        plain = "\n".join(metrics.owner_section([]))
+        both = "\n".join(metrics.owner_section([], banner))
+        secs = lambda t: int(t.split("Reading this took ")[1].split(" s")[0])
+        self.assertGreater(secs(both), secs(plain))
+
+    def test_a_week_with_no_errands_prints_n_a_never_zero(self):
+        section = "\n".join(metrics.owner_section([self.rec(errands=0, silent_failures=0, journeys_run=0,
+                                                              journeys_passed=0)]))
+        self.assertIn("- Journeys passed: none run", section)
+        self.assertIn("- Owner seconds per errand: n/a", section)
+        self.assertIn("- Silent failures per 100 errands: n/a", section)
+
+    def test_records_are_checked_and_read_from_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(metrics.owner_records(d), [])
+            od = pathlib.Path(d, metrics.OWNER_DIR)
+            od.mkdir(parents=True)
+            (od / "2026-11-01.json").write_text(__import__("json").dumps(self.rec()))
+            self.assertEqual(metrics.owner_records(d), [self.rec()])
+        bad = [self.rec(week="2026-11-02"), self.rec(errands=-1), self.rec(errands=1.5), self.rec(errands=True),
+               self.rec(journeys_passed=6), self.rec(silent_failures=13), dict(self.rec(), note="x"),
+               {k: v for k, v in self.rec().items() if k != "errands"}]
+        for r in bad:
+            with self.assertRaises(ValueError, msg=r):
+                metrics.check_owner_record(r, r.get("week"))
+        with self.assertRaises(ValueError):
+            metrics.check_owner_record(self.rec(), "2026-10-25")  # name differs from the week
+
+    def test_committed_records_are_valid(self):
+        # A malformed record fails its own PR here, not the daily metrics run.
+        metrics.owner_records(metrics.ROOT)
 
 
 if __name__ == "__main__":

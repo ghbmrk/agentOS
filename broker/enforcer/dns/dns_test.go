@@ -40,6 +40,7 @@ func fixturePolicy() policy.Document {
 	return policy.Document{
 		Version:      7,
 		Destinations: []string{"core.example", "updates.core.example"},
+		Caps:         map[string]uint64{"core.example": 1 << 40, "updates.core.example": 1 << 40},
 		Devices: []policy.Device{
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example", "cdn.example"}, VendorCloud: true, Everyday: true},
 			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"speaker.example"}, Everyday: true},
@@ -116,6 +117,24 @@ func TestGolden(t *testing.T) {
 
 func has(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+"\n") }
 
+// fills is the nftset line that puts name's answers in the allow set set4
+// (and its IPv6 twin) of the fixture and in name's own sets there.
+func fills(t *testing.T, name, set4 string) string {
+	t.Helper()
+	sets, err := nft.AllowSets(fixturePolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range sets {
+		if a.Set4 == set4 {
+			p := "#inet#" + nft.Table + "#"
+			return "nftset=/" + name + "/4" + p + a.Set4 + ",4" + p + a.Named(name, false) + ",6" + p + a.Set6 + ",6" + p + a.Named(name, true)
+		}
+	}
+	t.Fatalf("no allow set %s", set4)
+	return ""
+}
+
 // TestListedNamesOnly: each listed view answers on its own interface
 // alone and forwards only its own list's names, each exactly, filling only
 // its own list's set; a device without internet resolves nothing, and
@@ -137,19 +156,19 @@ func TestListedNamesOnly(t *testing.T) {
 			"interface=core0",
 			"server=/core.example/198.51.100.53#53",
 			"local=/*.core.example/",
-			"nftset=/core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
-			"nftset=/updates.core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
+			fills(t, "core.example", "core_4"),
+			fills(t, "updates.core.example", "core_4"),
 		},
 		d101: {
 			"interface=ap0.101",
-			"nftset=/tv.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
-			"nftset=/cdn.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
+			fills(t, "tv.example", "d101_4"),
+			fills(t, "cdn.example", "d101_4"),
 		},
 		d102: {"interface=ap0.102"},
 		d103: {
 			"interface=ap0.103",
-			"nftset=/plug.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
-			"nftset=/cdn.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
+			fills(t, "plug.example", "d103_4"),
+			fills(t, "cdn.example", "d103_4"),
 		},
 		d108: {"interface=ap0.108"},
 	} {
@@ -239,6 +258,14 @@ func TestViewsAreOwnLists(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+		all, err := nft.AllowSets(d, fixtureLayout())
+		if err != nil {
+			t.Fatal(err)
+		}
+		setOf := map[string]nft.AllowSet{}
+		for _, a := range all {
+			setOf[a.Set4+","+a.Set6] = a
+		}
 		if len(f.Listed) != 1+len(d.Devices) {
 			t.Fatalf("seed %d: %d views for %d devices", seed, len(f.Listed), len(d.Devices))
 		}
@@ -249,8 +276,9 @@ func TestViewsAreOwnLists(t *testing.T) {
 					name, spec, _ := strings.Cut(rest, "/")
 					got = append(got, name)
 					named++
-					s4, s6, _ := strings.Cut(sets[v.Iface], ",")
-					if spec != "4#inet#"+nft.Table+"#"+s4+",6#inet#"+nft.Table+"#"+s6 {
+					a := setOf[sets[v.Iface]]
+					p := "#inet#" + nft.Table + "#"
+					if spec != "4"+p+a.Set4+",4"+p+a.Named(name, false)+",6"+p+a.Set6+",6"+p+a.Named(name, true) {
 						t.Errorf("seed %d: %s fills %q", seed, v.Iface, spec)
 					}
 				}
@@ -450,4 +478,53 @@ func dnsmasq(t *testing.T) string {
 	}
 	t.Skip("dnsmasq missing")
 	return ""
+}
+
+// leaseSeconds reads a dnsmasq lease time: a number of seconds, or a
+// number with an m, h, d or w suffix; "infinite" and anything else is -1.
+func leaseSeconds(s string) int {
+	if s == "" {
+		return -1
+	}
+	unit := map[byte]int{'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}[s[len(s)-1]]
+	if unit != 0 {
+		s = s[:len(s)-1]
+	} else {
+		unit = 1
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return -1
+	}
+	return n * unit
+}
+
+// TestLeaseCoversHold (#4702): every lease the DHCP instance writes, IPv4
+// and IPv6, is at least twice nft.ClaimTimeout, so a departed host's hold
+// on a shared segment has run out before its address can be leased to
+// another host (ENF-shared-src-1). It reads the generated lines, not the
+// constant, so a lease edited in either place fails here.
+func TestLeaseCoversHold(t *testing.T) {
+	var v4, v6 int
+	for _, l := range strings.Split(generate(t).DHCP, "\n") {
+		r, ok := strings.CutPrefix(l, "dhcp-range=")
+		if !ok {
+			continue
+		}
+		f := strings.Split(r, ",")
+		if strings.Contains(f[0], ":") {
+			v6++
+		} else {
+			v4++
+		}
+		if got := leaseSeconds(f[len(f)-1]); got < 2*nft.ClaimTimeout {
+			t.Errorf("%s: lease %ds is under twice the %ds hold", l, got, nft.ClaimTimeout)
+		}
+	}
+	if v4 == 0 || v6 == 0 {
+		t.Fatalf("fixture leases %d IPv4 and %d IPv6 ranges; want both", v4, v6)
+	}
+	if leaseSeconds("11h") != 39600 || leaseSeconds("600") != 600 || leaseSeconds("infinite") != -1 || leaseSeconds("") != -1 {
+		t.Fatal("leaseSeconds misreads dnsmasq lease times")
+	}
 }

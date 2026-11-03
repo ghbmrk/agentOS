@@ -1,12 +1,14 @@
 package page
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
 var funcs = template.FuncMap{
@@ -44,20 +46,30 @@ func sealedLine(line string) *shortLine {
 	return &shortLine{Text: pairseal.Statement(device, hash[:pairseal.ShortHash]+"…"), Hash: hash}
 }
 
-// confirm is the confirm screen for a proposal link: the change drawn by
-// the enforcer from the link's document and the policy in force, and the
-// challenge one tap signs for exactly that diff.
-func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
+// confirm is the confirm screen for a proposal link (draft) or a home
+// page offer (offered): the change drawn by the enforcer from the policy
+// in force, and the challenge one tap signs for exactly that diff. Both
+// count against one LinkLimit.
+func (s *Server) confirm(w http.ResponseWriter, r *http.Request, draw func(*http.Request) (*challenge, []string, error)) {
 	s.mu.Lock()
 	if !s.limit(&s.links) {
 		s.mu.Unlock()
 		http.Error(w, errLimited.Error(), http.StatusTooManyRequests)
 		return
 	}
-	c, lines, err := s.draft(r)
+	c, lines, err := draw(r)
 	if err != nil {
 		s.mu.Unlock()
-		http.Error(w, errMalformed.Error(), http.StatusBadRequest)
+		msg := errMalformed.Error()
+		switch {
+		case errors.Is(err, policy.ErrNameHeld), errors.Is(err, policy.ErrTooManyNames):
+			// Two devices pin one mDNS name, or one pins too many: say
+			// which, so the owner declines before signing (#4144, #4601).
+			msg = strings.TrimPrefix(err.Error(), "policy: ")
+		case errors.Is(err, errUnheard), errors.Is(err, errNoOffer):
+			msg = err.Error() // the device and the name (D-266)
+		}
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	id, err := s.put(c)
@@ -69,7 +81,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	waiting := len(s.cfg.Policy.Pending()) > 0
 	s.cfg.Lock.Unlock()
-	s.render(w, "confirm.html", map[string]any{
+	s.render(w, r, "confirm.html", map[string]any{
 		"Name":        s.cfg.Name,
 		"Lines":       lines,
 		"Consequence": consequence(c.class),
@@ -81,8 +93,10 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 }
 
 // home is the page's status: the policy in force, the loosening waiting
-// with its cancel, whether the passkey is synced, the channel's pause, each
-// device's label from the signed policy, and NET-1's limits.
+// with its cancel, whether the passkey is synced, the channel's pause, the
+// names heard since a device's pair was signed with a link to let or hold
+// them (#4566), each device's label from the signed policy, and NET-1's
+// limits.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
@@ -98,6 +112,10 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	devs := plain(cur).Devices
+	var offers []map[string]string
+	for _, o := range s.offers(cur) {
+		offers = append(offers, map[string]string{"ID": o.ID, "Line": o.Line(cur)})
+	}
 	keep, recovery := false, ""
 	if s.cfg.Enrol != nil {
 		keep = !s.cfg.Enrol.Kept()
@@ -105,7 +123,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			recovery = s.when(due.UnixMilli())
 		}
 	}
-	s.render(w, "home.html", map[string]any{
+	s.render(w, r, "home.html", map[string]any{
 		"Keep":     keep,
 		"Recovery": recovery,
 		"Enrol":    s.cfg.Enrol != nil,
@@ -115,16 +133,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"Sync":     sync,
 		"Channel":  channel,
 		"Devices":  devs,
+		"Offers":   offers,
 		"Limits":   Limits,
 	})
-}
-
-func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
-	var b strings.Builder
-	if err := s.tmpl.ExecuteTemplate(&b, name, data); err != nil {
-		http.Error(w, "page error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(b.String()))
 }

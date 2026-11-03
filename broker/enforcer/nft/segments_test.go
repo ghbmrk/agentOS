@@ -210,6 +210,10 @@ func TestCopiedMACGetsOwnList(t *testing.T) {
 		probe{from: "core", addr: devAddr(102), port: 80, want: connected, why: "control: the core to the impostor's control port"},
 	)
 	text, _ := Compile(fixturePolicy(), fixtureLayout())
+	// The only hardware address the ruleset reads is in a shared segment's
+	// host record (#4324) and address claim (#4480), which no device's
+	// traffic reaches.
+	text = stripKeys(text)
 	for _, s := range []string{"ether", "saddr 10.", "saddr fd"} {
 		if strings.Contains(text, s) {
 			t.Errorf("the ruleset identifies a device by %q", s)
@@ -325,9 +329,9 @@ func TestLoadFailureKeepsPrevious(t *testing.T) {
 	good, _ := Compile(fixturePolicy(), fixtureLayout())
 	open := strings.Replace(good, "policy drop;", "policy accept;", -1)
 	bad := []string{
-		open + "table inet broken {\n\tchain c {\n\t\tbogus\n\t}\n}\n",                            // fails at the end
-		strings.Replace(open, "counter name \"blocked\" drop", "counter name \"nosuch\" drop", 1), // a reference that does not resolve
-		strings.Replace(good, "flush ruleset\n", "", 1),                                           // would merge, not replace
+		open + "table inet broken {\n\tchain c {\n\t\tbogus\n\t}\n}\n",                  // fails at the end
+		strings.Replace(open, "counter name \"blocked\"", "counter name \"nosuch\"", 1), // a reference that does not resolve
+		strings.Replace(good, "flush ruleset\n", "", 1),                                 // would merge, not replace
 	}
 	l := load.Loader{Bin: nftBin}
 	for i, b := range bad {

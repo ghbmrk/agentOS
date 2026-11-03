@@ -37,8 +37,26 @@ gains nothing. It ratchets down on every merge with nothing to keep in step. A b
 no core file (one older than the file) is measured, with the head, by the file of the checkout
 the tool runs from, which is the base branch tip in CI.
 
+A decision that records trusted-core growth under D-159 carries the measure as this tool prints
+it (REV-PROOF-claims, #4909): `measure --sentence BASE HEAD --pr N` prints the one sentence, and
+`claims` fails a PR that adds such a decision (a DECISIONS.md row or a decisions/D-*.md file whose
+ID the base lacks, citing D-159 and saying "trusted-core growth") unless every sentence in it is
+this tool's output for the PR it names, measured from that PR head's merge base with the base
+tree's commit to the head. Every `PR #N` a decision names needs a sentence for #N, and a PR
+already merged into the base fails (its measure would read +0). BASE is the merge base:
+  git fetch origin pull/N/head && tools/trusted_base.py measure --sentence \\
+      "$(git merge-base origin/main FETCH_HEAD)" FETCH_HEAD --pr N Rows #4862
+hand-wrote "no new linked packages" over a measured +1; text the tool computes is not typed.
+
 Usage:
   tools/trusted_base.py measure [--tree DIR]       print one tree's measure; exit 1 if a package is unclassified
+  tools/trusted_base.py measure --sentence BASE HEAD --pr N [--tree REPO]
+      print the canonical measure sentence for the commits BASE (the PR head's merge base with
+      origin/main) and HEAD (the PR head) of the repository at REPO
+  tools/trusted_base.py claims --base-tree DIR --head-tree DIR --repo REPO [--onto REV] [--fetch REMOTE] [--markdown FILE]
+      check the measure sentences of the D-159 decisions the head adds; each named PR's head is
+      refs/remotes/pr/<N> in REPO (fetched from REMOTE's refs/pull/<N>/head with --fetch). Exit 0
+      pass, 1 a missing or wrong sentence, 2 a measurement or fetch error.
   tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--pr N] [--markdown FILE]
       the registry is the head tree's; the base tree's registry is read only to find
       reclassified parsers. Exit 0 pass, 1 growth without a reason or an unclassified
@@ -69,6 +87,17 @@ PLACEHOLDER = re.compile(r"(?i)^(todo|tbd|n/?a|none|reason|-+|\.+)$")
 
 class MeasureError(Exception):
     pass
+
+
+SENTENCE = ("trusted-base measure of #{pr}: core lines {base} to {head} ({delta:+d}) from merge base {base_sha}"
+            " to head {head_sha}, new linked packages: {new}")
+SENTENCE_PR = re.compile(r"trusted-base measure of #(\d+):")
+# A sentence ends at the end of the text, a closing bracket, `;`, a table bar, a line end, or a
+# full stop before a space: so "packages: none" cannot pass inside "packages: none, broker/x".
+SENTENCE_END = re.compile(r"$|[ \t]*[);|]|\n|\.(?:\s|$)")
+CLAIM_ROW = re.compile(r"^\|\s*(D-\d+)\s*\|")
+NAMED_PR = re.compile(r"\bPR #(\d+)(?!\d)")
+GROWTH = re.compile(r"(?i)trusted-core growth")
 
 
 def list_lines(text, where):
@@ -368,6 +397,127 @@ def core_table(base, head, owed, problems):
     return "\n".join(out) + "\n"
 
 
+def git(repo, *args):
+    r = subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise MeasureError(f"git {' '.join(args)}: {r.stderr.strip()[-500:]}")
+    return r.stdout.strip()
+
+
+def commit_of(repo, rev):
+    return git(repo, "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}")
+
+
+def core_at(repo, rev, tmp):
+    """measure_core of commit `rev`, checked out as a detached worktree under `tmp`."""
+    where = pathlib.Path(tmp, rev)
+    git(repo, "worktree", "add", "-q", "--detach", str(where), rev)
+    try:
+        core = read_core(where) or read_core(FALLBACK)
+        if core is None:
+            raise MeasureError(f"no {CORE} at {rev[:7]} or in this checkout")
+        own = module_path(where.resolve() / "broker")
+        return measure_core(where, core), own
+    finally:
+        git(repo, "worktree", "remove", "--force", str(where))
+
+
+def sentence(repo, base, head, pr):
+    """The canonical measure sentence for PR `pr` from commit `base` to commit `head`."""
+    import tempfile
+    base, head = commit_of(repo, base), commit_of(repo, head)
+    with tempfile.TemporaryDirectory() as tmp:
+        b, _ = core_at(repo, base, tmp)
+        h, own = core_at(repo, head, tmp)
+    new = sorted(("broker/" + p[len(own) + 1:]) if p.startswith(own + "/") else p for p in h["imports"] - b["imports"])
+    return SENTENCE.format(pr=int(pr), base=b["lines"], head=h["lines"], delta=h["lines"] - b["lines"],
+                           base_sha=base[:7], head_sha=head[:7], new=", ".join(new) or "none")
+
+
+def growth_claims(base_tree, head_tree):
+    """[(where, ID, text)] for each decision the head tree adds that records trusted-core growth
+    under D-159: a DECISIONS.md row or a decisions/D-*.md file whose ID the base tree lacks."""
+    def rows(tree):
+        p = pathlib.Path(tree, "DECISIONS.md")
+        return p.read_text().split("\n") if p.exists() else []
+    base_ids = {m.group(1) for m in map(CLAIM_ROW.match, rows(base_tree)) if m}
+    out = []
+    for n, line in enumerate(rows(head_tree), 1):
+        m = CLAIM_ROW.match(line)
+        if m and m.group(1) not in base_ids | {"D-159"} and "D-159" in line and GROWTH.search(line):
+            out.append((f"DECISIONS.md:{n}", m.group(1), line))
+    for f in sorted(pathlib.Path(head_tree, "decisions").glob("D-*.md")):
+        if f.stem == "D-159" or pathlib.Path(base_tree, "decisions", f.name).exists():
+            continue
+        text = f.read_text()
+        if "D-159" in text and GROWTH.search(text):
+            out.append((f"decisions/{f.name}", f.stem, text))
+    return out
+
+
+class Merged(Exception):
+    """The PR a sentence names has already merged into the base, so it has no growth left to measure."""
+
+
+COMMAND = "tools/trusted_base.py measure --sentence {base} {head} --pr {pr}"
+FETCH_COMMAND = ('git fetch origin pull/{pr}/head && tools/trusted_base.py measure --sentence'
+                 ' "$(git merge-base origin/main FETCH_HEAD)" FETCH_HEAD --pr {pr}')
+
+
+def check_claims(claims, expected):
+    """Problems with the claims' measure sentences. `expected(pr)` gives the tool's sentence and the
+    command that prints it, or raises Merged. Every `PR #N` a decision names needs a sentence."""
+    problems = []
+    for where, ident, text in claims:
+        prs = {int(m.group(1)) for m in SENTENCE_PR.finditer(text)}
+        if not prs:
+            problems.append(f"{where} ({ident}): records trusted-core growth under D-159 but has no measure sentence;"
+                            " paste the output of `" + FETCH_COMMAND.format(pr="<N>") + "`")
+        for named in sorted({int(m.group(1)) for m in NAMED_PR.finditer(text)} - prs):
+            problems.append(f"{where} ({ident}): names PR #{named} but has no measure sentence for it;"
+                            " paste the output of `" + FETCH_COMMAND.format(pr=named) + "`")
+        for m in SENTENCE_PR.finditer(text):
+            pr = int(m.group(1))
+            try:
+                want, command = expected(pr)
+            except Merged as e:
+                problems.append(f"{where} ({ident}): {e}")
+                continue
+            if not (text.startswith(want, m.start()) and SENTENCE_END.match(text, m.start() + len(want))):
+                got = text[m.start():].split("\n", 1)[0][:len(want) + 40]
+                problems.append(f"{where} ({ident}): the measure sentence is not the tool's output;"
+                                f" want `{want}` (from `{command}`), got `{got}`")
+    return problems
+
+
+def run_claims(base_tree, head_tree, repo, onto="HEAD", fetch=None):
+    claims = growth_claims(base_tree, head_tree)
+    cache = {}
+
+    def expected(pr):
+        if pr not in cache:
+            ref = f"refs/remotes/pr/{pr}"
+            if fetch:
+                git(repo, "fetch", "-q", "--no-tags", fetch, f"+refs/pull/{pr}/head:{ref}")
+            head, base_tip = commit_of(repo, ref), commit_of(repo, onto)
+            base = git(repo, "merge-base", base_tip, head)
+            if base == head:
+                # Merged (or never ahead): the measure would read +0 and "none", the #4862 claim.
+                cache[pr] = Merged(f"PR #{pr}'s head {head[:7]} is already in the base; record its measure"
+                                   " before it merges")
+            else:
+                cache[pr] = (sentence(repo, base, head, pr), COMMAND.format(base=base[:12], head=head[:12], pr=pr))
+        if isinstance(cache[pr], Merged):
+            raise cache[pr]
+        return cache[pr]
+
+    problems = check_claims(claims, expected)
+    out = ["", "## Trusted-core growth decisions (REV-PROOF-claims)", ""]
+    out += [f"- {where} ({ident})" for where, ident, _ in claims] or ["No decision added records trusted-core growth."]
+    out += ["", "**Fail:**" if problems else "**Pass.**"] + [f"- {p}" for p in problems]
+    return problems, "\n".join(out) + "\n"
+
+
 def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     rules = read_rules(head_tree, True)
     base_rules = read_rules(base_tree, False)
@@ -399,6 +549,15 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("measure")
     m.add_argument("--tree", default=str(pathlib.Path(__file__).resolve().parent.parent))
+    m.add_argument("--sentence", nargs=2, metavar=("BASE", "HEAD"), help="print the measure sentence for two commits")
+    m.add_argument("--pr", type=int, help="the growth PR the sentence names (with --sentence)")
+    k = sub.add_parser("claims")
+    k.add_argument("--base-tree", required=True)
+    k.add_argument("--head-tree", required=True)
+    k.add_argument("--repo", required=True, help="the repository holding the named PRs' heads")
+    k.add_argument("--onto", default="HEAD", help="the base commit a named PR's merge base is taken with")
+    k.add_argument("--fetch", help="remote to fetch refs/pull/<N>/head from")
+    k.add_argument("--markdown", help="also write the result to this file")
     c = sub.add_parser("check")
     c.add_argument("--base-tree", required=True)
     c.add_argument("--head-tree", required=True)
@@ -406,8 +565,14 @@ def main(argv=None):
     c.add_argument("--pr", type=int, help="the PR number a waiving decision row must name")
     c.add_argument("--markdown", help="also write the table to this file")
     a = ap.parse_args(argv)
+    if a.cmd == "measure" and a.sentence and a.pr is None:
+        ap.error("--sentence needs --pr")
     try:
-        if a.cmd == "measure":
+        if a.cmd == "measure" and a.sentence:
+            problems, text = [], sentence(a.tree, *a.sentence, a.pr) + "\n"
+        elif a.cmd == "claims":
+            problems, text = run_claims(a.base_tree, a.head_tree, a.repo, a.onto, a.fetch)
+        elif a.cmd == "measure":
             rules = read_rules(a.tree, True)
             m = measure(packages(a.tree), rules)
             problems = [f"{p} is linked into a trusted process but no line of {REGISTRY} classes it"
@@ -425,9 +590,12 @@ def main(argv=None):
             problems, text = run_check(a.base_tree, a.head_tree, body, pr=a.pr)
     except (MeasureError, OSError, ValueError) as e:
         print(f"trusted_base: {e}", file=sys.stderr)
+        if a.cmd in ("check", "claims") and a.markdown:
+            with open(a.markdown, "a") as f:
+                f.write(f"\n**Error ({a.cmd}):** {e}\n")
         return 2
     print(text, end="")
-    if a.cmd == "check" and a.markdown:
+    if a.cmd in ("check", "claims") and a.markdown:
         with open(a.markdown, "a") as f:
             f.write(text)
     return 1 if problems else 0

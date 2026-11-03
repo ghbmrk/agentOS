@@ -21,6 +21,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import trusted_base as tb  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWN = "github.com/ghbmrk/agentos/broker"
 
@@ -443,7 +445,7 @@ PIN = [
     "jobs:",
     "  trusted-base:",
     "    name: trusted-base",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 10",
     "    permissions:",
     "      contents: read",
@@ -479,6 +481,17 @@ PIN = [
     "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/body.txt\"",
     "          python3 -I tools/trusted_base.py check --base-tree \"$RUNNER_TEMP/base\" --head-tree \"$RUNNER_TEMP/head\""
     " --body \"$RUNNER_TEMP/body.txt\" --pr \"$PR_NUMBER\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+    "      - name: Measure sentences of added trusted-core growth decisions (base copy, D-159)",
+    "        if: ${{ !cancelled() }}",
+    "        run: python3 -I tools/trusted_base.py claims --base-tree \"$RUNNER_TEMP/base\" --head-tree \"$RUNNER_TEMP/head\""
+    " --repo . --fetch origin --markdown \"$GITHUB_STEP_SUMMARY\"",
+    "      - name: Closing keywords against deferred parts (base copy of tools/claims.py)",
+    "        if: ${{ !cancelled() }}",
+    "        env:",
+    "          PR_BODY: ${{ github.event.pull_request.body }}",
+    "        run: |",
+    "          printf '%s\\n' \"$PR_BODY\" > \"$RUNNER_TEMP/claims-body.txt\"",
+    "          python3 -I tools/claims.py closes --body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
 ]
 
 
@@ -511,7 +524,13 @@ class Workflow(unittest.TestCase):
                          (" --pr \"$PR_NUMBER\"", ""),
                          ("--detach \"$RUNNER_TEMP/head\" \"$MERGE\"", "--detach \"$RUNNER_TEMP/head\" \"$HEAD_SHA\""),
                          ("--detach \"$RUNNER_TEMP/base\" HEAD", "--detach \"$RUNNER_TEMP/base\" \"$(git merge-base HEAD \"$HEAD_SHA\")\""),
-                         ("    runs-on: ubuntu-latest", "    continue-on-error: true\n    runs-on: ubuntu-latest")]:
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04"),
+                         # REV-PROOF-claims (#4909): the claim steps run the base copies and cannot be skipped.
+                         ("python3 -I tools/claims.py", "python3 -I \"$RUNNER_TEMP/head/tools/claims.py\""),
+                         (" --fetch origin", ""),
+                         ("--body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\"",
+                          "--body \"$RUNNER_TEMP/claims-body.txt\" --markdown \"$GITHUB_STEP_SUMMARY\" || true"),
+                         ("--head-tree \"$RUNNER_TEMP/head\" --repo .", "--head-tree \"$RUNNER_TEMP/base\" --repo .")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
 
@@ -602,6 +621,188 @@ class MergeMeasure(unittest.TestCase):
         head = self.commit("branch adds a note")
         rc, out = self.measure(head)
         self.assertEqual(rc, 0, out)
+
+
+# REQ: REV-PROOF-claims
+CALC_EXTRA = ('package calc\n\nimport (\n\t"example.com/dec"\n\t"' + OWN + '/extra"\n)\n\n'
+              "func Add(a, b int) int { return a + b + dec.Decode(nil) + extra.X() }\n")
+GROWTH_ROW = ("| D-9 | 2026-11-03 | active | Trusted-core growth (D-159) for PR #7 (issue #6): calc links dec ({claim});"
+              " review checks each line | standing rule D-159 |\n")
+
+
+@unittest.skipUnless(shutil.which("go"), "go is not installed")
+class GrowthSentence(unittest.TestCase):
+    """REV-PROOF-claims (#4909): a D-159 decision carries the tool's measure sentence for its PR,
+    measured from that PR head's merge base to the head; #4862 hand-wrote "no new linked packages"
+    over a measured +1."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        saved, tb.FALLBACK = tb.FALLBACK, pathlib.Path(self.tmp, "no-fallback")
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        self.git("init", "-q", "-b", "main")
+        tree(self.repo, calc_dec=True)  # the base core already links dec: calc 5 lines, dec 3
+        write(self.repo, tb.CORE, CORE)
+        self.fork = self.commit("fork point")
+        self.git("checkout", "-qb", "grow")
+        write(self.repo, "broker/extra/extra.go", "package extra\n\nfunc X() int { return 1 }\n")
+        write(self.repo, "broker/calc/calc.go", CALC_EXTRA)  # 8 lines: calc +3, extra +3
+        self.grow = self.commit("calc links extra")
+        self.git("update-ref", "refs/remotes/pr/7", self.grow)
+        self.git("checkout", "-q", "main")
+        write(self.repo, "notes.txt", "main moves on\n")
+        self.commit("main moves on")
+        self.base, self.head = os.path.join(self.tmp, "base"), os.path.join(self.tmp, "head")
+        write(self.base, "DECISIONS.md", DECISIONS)
+
+    def git(self, *a):
+        return subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        self.git("commit", "-qm", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def claims(self, row="", files=()):
+        write(self.head, "DECISIONS.md", DECISIONS + row)
+        for name, text in files:
+            write(self.head, f"decisions/{name}", text)
+        return run(["claims", "--base-tree", self.base, "--head-tree", self.head, "--repo", self.repo])
+
+    def want(self):
+        rc, out = run(["measure", "--sentence", self.fork, self.grow, "--pr", "7", "--tree", self.repo])
+        self.assertEqual(rc, 0, out)
+        return out.strip()
+
+    def test_sentence_names_the_measure(self):
+        # The two fields #4862 got wrong: the delta, and the packages new against the base (dec is not).
+        self.assertEqual(self.want(), f"trusted-base measure of #7: core lines 8 to 14 (+6) from merge base"
+                                      f" {self.fork[:7]} to head {self.grow[:7]}, new linked packages: broker/extra")
+        self.assertEqual(self.git("worktree", "list").count("\n"), 0, "the measure leaves no worktree")
+
+    def test_sentence_needs_a_pr(self):
+        with self.assertRaises(SystemExit):
+            run(["measure", "--sentence", self.fork, self.grow])
+
+    def test_the_tools_sentence_passes(self):
+        rc, out = self.claims(GROWTH_ROW.format(claim=self.want()))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("DECISIONS.md:6 (D-9)", out)
+
+    def test_hand_written_claim_fails_naming_the_line(self):
+        # #4862: "no new linked packages" while the tool measures one.
+        rc, out = self.claims(GROWTH_ROW.format(claim="+11 core lines against main, no new linked packages"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("DECISIONS.md:6 (D-9): records trusted-core growth under D-159 but has no measure sentence", out)
+
+    def test_misworded_sentence_fails(self):
+        wrong = self.want().replace("broker/extra", "none")
+        rc, out = self.claims(GROWTH_ROW.format(claim=wrong))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("DECISIONS.md:6 (D-9): the measure sentence is not the tool's output", out)
+        self.assertIn(self.want(), out)
+
+    def test_extended_package_list_fails(self):
+        rc, out = self.claims(GROWTH_ROW.format(claim=self.want() + ", broker/other"))
+        self.assertEqual(rc, 1, out)
+
+    def test_stale_sentence_fails(self):
+        old = self.want()
+        self.git("checkout", "-q", "grow")
+        write(self.repo, "broker/calc/more.go", "package calc\n" + "// z\n" * 4)
+        self.git("update-ref", "refs/remotes/pr/7", self.commit("grow more"))
+        self.git("checkout", "-q", "main")
+        rc, out = self.claims(GROWTH_ROW.format(claim=old))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("is not the tool's output", out)
+
+    def test_sentence_for_another_pr_fails(self):
+        self.git("update-ref", "refs/remotes/pr/8", self.grow)
+        other = self.want().replace("of #7:", "of #8:")
+        rc, out = self.claims(GROWTH_ROW.format(claim=other))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("names PR #7 but has no measure sentence for it", out)
+
+    def test_decision_file_is_checked(self):
+        bad = "# D-9: growth\n\nStanding rule: D-159.\n\nPR #7 may grow (trusted-core growth, no new linked packages).\n"
+        rc, out = self.claims(files=[("D-9.md", bad)])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("decisions/D-9.md (D-9)", out)
+        good = bad.replace("no new linked packages", self.want())
+        self.assertEqual(self.claims(files=[("D-9.md", good)])[0], 0)
+
+    def test_existing_and_unrelated_decisions_are_not_read(self):
+        write(self.base, "decisions/D-1.md", "trusted-core growth under D-159, hand-written\n")
+        write(self.head, "decisions/D-1.md", "trusted-core growth under D-159, hand-written, edited\n")
+        row = "| D-10 | 2026-11-03 | active | cites D-159 about something else for PR #7 | Mark |\n"
+        rc, out = self.claims(row)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("No decision added records trusted-core growth.", out)
+
+    def test_unfetchable_pr_is_an_error(self):
+        rc, out = self.claims(GROWTH_ROW.format(claim=self.want().replace("of #7:", "of #99:")))
+        self.assertEqual(rc, 2, out)
+
+    def test_merged_pr_fails(self):
+        # L3 on #4913: once merged, the merge base is the head and the measure reads +0, "none".
+        self.git("merge", "-q", "--no-ff", "-m", "merge #7", "grow")
+        rc, out = self.claims(GROWTH_ROW.format(claim=f"trusted-base measure of #7: core lines 14 to 14 (+0) from merge"
+                                                      f" base {self.grow[:7]} to head {self.grow[:7]}, new linked packages: none"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"PR #7's head {self.grow[:7]} is already in the base; record its measure before it merges", out)
+
+    def test_every_named_pr_needs_a_sentence(self):
+        rc, out = self.claims(GROWTH_ROW.format(claim=self.want() + "; with PR #8"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("names PR #8 but has no measure sentence for it; paste the output of `git fetch origin pull/8/head", out)
+
+    def test_wrong_sentence_names_the_command(self):
+        rc, out = self.claims(GROWTH_ROW.format(claim=self.want().replace("+6", "+5")))
+        self.assertIn(f"tools/trusted_base.py measure --sentence {self.fork[:12]} {self.grow[:12]} --pr 7", out)
+
+    def test_edited_existing_row_is_not_read(self):
+        row = GROWTH_ROW.format(claim="hand-written")
+        write(self.base, "DECISIONS.md", DECISIONS + row)
+        rc, out = self.claims(row.replace("| active |", "| superseded |"))
+        self.assertEqual(rc, 0, out)
+
+    def test_d159_itself_is_not_read(self):
+        row = "| D-159 | 2026-10-24 | active | Trusted-core growth (D-159) standing rule for PR #7 | Mark |\n"
+        rc, out = self.claims(row, files=[("D-159.md", "# D-159: Trusted-core growth, PR #7 (D-159)\n")])
+        self.assertEqual(rc, 0, out)
+
+    def test_a_trees_own_core_file_beats_the_fallback(self):
+        other = os.path.join(self.tmp, "fallback")
+        write(other, tb.CORE, "root cmd/a\n")
+        saved, tb.FALLBACK = tb.FALLBACK, pathlib.Path(other)
+        self.addCleanup(setattr, tb, "FALLBACK", saved)
+        self.assertIn("core lines 8 to 14 (+6)", self.want())
+
+    def test_markdown_gets_the_result_and_errors(self):
+        summary = os.path.join(self.tmp, "summary.md")
+        write(self.head, "DECISIONS.md", DECISIONS + GROWTH_ROW.format(claim=self.want()))
+        argv = ["claims", "--base-tree", self.base, "--head-tree", self.head, "--repo", self.repo, "--markdown", summary]
+        self.assertEqual(run(argv)[0], 0)
+        self.assertIn("## Trusted-core growth decisions (REV-PROOF-claims)", pathlib.Path(summary).read_text())
+        write(self.head, "DECISIONS.md", DECISIONS + GROWTH_ROW.format(claim=self.want().replace("of #7:", "of #99:")))
+        self.assertEqual(run(argv)[0], 2)
+        self.assertIn("**Error (claims):**", pathlib.Path(summary).read_text())
+
+
+class SentenceEnd(unittest.TestCase):
+    def test_check_claims_pure(self):
+        def exp(pr):
+            return (f"trusted-base measure of #{pr}: core lines 1 to 2 (+1) from merge base aaaaaaa to head bbbbbbb,"
+                    " new linked packages: none", "cmd")
+        want = exp(12)[0]
+        for tail, ok in [("", True), (")", True), ("; review", True), (". Next", True), (" |", True),
+                         (", broker/x", False), ("x", False), (".go", False)]:
+            text = f"| D-9 | x | active | Trusted-core growth for PR #12 (D-159) ({want}{tail}"
+            self.assertEqual(tb.check_claims([("DECISIONS.md:1", "D-9", text)], exp) == [], ok, tail)
 
 
 if __name__ == "__main__":

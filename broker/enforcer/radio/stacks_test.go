@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -72,20 +74,19 @@ func probeNet(kind, policy, page string) {
 	} else {
 		out["inet6"] = try(err)
 	}
-	// The namespace and mount calls, each in a single-threaded child of
-	// its own (forkCall): a threaded caller gets EINVAL for
-	// unshare(CLONE_NEWUSER) whatever the filter says, so only EPERM
-	// counts as refused. This profile lacks the capability for most of
-	// them, so its EPERM may be the kernel's; confine's
-	// TestFilterRefusesLive shows each is the filter's, in a process the
-	// kernel would let make them (#4233).
+	// The namespace, mount and process calls, each on an OS thread of
+	// its own that is then discarded (threadCall), since a stack cannot
+	// fork a single-threaded child for them (#4521). A threaded caller
+	// gets EINVAL for unshare(CLONE_NEWUSER) and CLONE_NEWNS whatever the
+	// filter says, so only EPERM counts as refused. This profile lacks the
+	// capability for most of them, so its EPERM may be the kernel's;
+	// confine's TestFilterRefusesLive shows each is the filter's, in a
+	// process the kernel would let make them (#4233).
 	nsCall := func(nr uintptr, a ...uintptr) string {
 		var v [6]uintptr
 		copy(v[:], a)
-		e, err := attempt(nr, v)
+		e := threadCall(nr, v)
 		switch {
-		case err != nil:
-			return "untested: " + err.Error()
 		case e == syscall.EPERM:
 			return try(e)
 		case e == 0:
@@ -102,6 +103,8 @@ func probeNet(kind, policy, page string) {
 	out["unshare-user"] = nsCall(syscall.SYS_UNSHARE, syscall.CLONE_NEWUSER)
 	out["unshare-mnt"] = nsCall(syscall.SYS_UNSHARE, syscall.CLONE_NEWNS)
 	out["clone-net"] = nsCall(syscall.SYS_CLONE, syscall.CLONE_NEWNET|uintptr(syscall.SIGCHLD))
+	out["clone-process"] = nsCall(syscall.SYS_CLONE, uintptr(syscall.SIGCHLD))
+	out["fork"] = nsCall(syscall.SYS_FORK)
 	if f, err := os.Open("/proc/self/ns/net"); err == nil {
 		out["setns"] = nsCall(308 /* setns */, f.Fd(), syscall.CLONE_NEWNET)
 		f.Close()
@@ -109,7 +112,7 @@ func probeNet(kind, policy, page string) {
 	out["mount"] = nsCall(syscall.SYS_MOUNT, cstr("none"), cstr("/tmp"), cstr("tmpfs"), 0, cstr(""))
 	out["fsopen"] = nsCall(430 /* fsopen */, cstr("tmpfs"), 0)
 	out["setuid0"] = try(syscall.Setuid(0))
-	out["ptrace"] = ptraceChild(try)
+	out["ptrace"] = ptraceSelf(try)
 	if kind == "thread" {
 		// ot-daemon's own first step: a tun link named wpan0, held open.
 		out["wpan0"] = try(createTun("wpan0"))
@@ -136,11 +139,27 @@ func probeNet(kind, policy, page string) {
 			}
 		}
 	}
-	report, _ := json.Marshal(out)
+	// The report is served in two halves, one per probe device, since an
+	// answer is bounded by MaxData.
+	halves := [2]map[string]string{{}, {}}
+	keys := slices.Sorted(maps.Keys(out))
+	for i, k := range keys {
+		halves[i*2/len(keys)][k] = out[k]
+	}
+	var reports [2][]byte
+	for i := range halves {
+		reports[i], _ = json.Marshal(halves[i])
+	}
 	NewServer(StackThread, os.NewFile(3, "interface")).Serve(func(r Request) ([]byte, Code) {
-		return report, CodeOK
+		if r.Device == probeDevices[1] {
+			return reports[1], CodeOK
+		}
+		return reports[0], CodeOK
 	})
 }
+
+// probeDevices name the two halves of a net probe's report.
+var probeDevices = [2]string{"probe", "probe2"}
 
 // held keeps the probe's tun descriptor open while it serves.
 var held int
@@ -163,47 +182,39 @@ func createTun(name string) error {
 	return nil
 }
 
-// attempt makes one call in a child forked for it, which has one thread
-// and inherits the filter, so a namespace it makes ends with it (a mount
-// would stay in the stack's mount namespace).
-// It returns the call's errno (0: it succeeded), or an error when the
-// child did not exit on its own.
-func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {
-	pid, e := forkCall(nr, a)
-	if e != 0 {
-		return 0, fmt.Errorf("fork: %v", e)
-	}
-	var ws syscall.WaitStatus
-	if _, err := syscall.Wait4(pid, &ws, 0, nil); err != nil {
-		return 0, err
-	}
-	if !ws.Exited() {
-		return 0, fmt.Errorf("child ended by %v", ws.Signal())
-	}
-	return syscall.Errno(ws.ExitStatus()), nil
+// threadCall makes one call on a fresh locked OS thread, which exits with
+// its goroutine, so a namespace the call entered ends with it. It returns
+// the call's errno, 0 for success.
+func threadCall(nr uintptr, a [6]uintptr) syscall.Errno {
+	c := make(chan syscall.Errno, 1)
+	go func() {
+		runtime.LockOSThread() // never unlocked: the thread exits with this goroutine
+		c <- rawCall(nr, a)
+	}()
+	return <-c
 }
 
-// forkCall forks; the child makes the call and exits with its errno,
-// running only raw system calls with no stack check, as the runtime's own
-// fork does.
+// rawCall makes the call; a process it made (fork or clone let through;
+// never vfork, whose child would run on this thread's stack) exits at once, running only raw system calls with no stack
+// check, as the runtime's own fork does.
 //
 //go:nosplit
-func forkCall(nr uintptr, a [6]uintptr) (int, syscall.Errno) {
-	pid, _, e := syscall.RawSyscall6(syscall.SYS_CLONE, uintptr(syscall.SIGCHLD), 0, 0, 0, 0, 0)
-	if e == 0 && pid == 0 {
-		_, _, e = syscall.RawSyscall6(nr, a[0], a[1], a[2], a[3], a[4], a[5])
-		syscall.RawSyscall(syscall.SYS_EXIT_GROUP, uintptr(e), 0, 0)
+func rawCall(nr uintptr, a [6]uintptr) syscall.Errno {
+	r, _, e := syscall.RawSyscall6(nr, a[0], a[1], a[2], a[3], a[4], a[5])
+	if e == 0 && r == 0 && (nr == syscall.SYS_CLONE || nr == syscall.SYS_FORK) {
+		syscall.RawSyscall(syscall.SYS_EXIT_GROUP, 0, 0, 0)
 	}
-	return int(pid), e
+	return e
 }
 
-// TestStacksConfined (NET-2 Confined radio stacks): the Thread stack runs
-// as its own user in a user and network namespace the enforcer created as
-// root, holding only CAP_NET_ADMIN and CAP_NET_RAW there; it can create
-// wpan0 but sees only lo, wpan0 and infra0, cannot read or write the
-// policy store or reach the page, opens no netlink but route netlink (so
-// not nf_tables), cannot enter a new namespace or mount,
-// and runs with no-new-privileges under the seccomp filter. The Matter
+// TestStacksConfined (NET-2 Confined radio stacks; #4369): the Thread stack
+// runs as its own user in a user and network namespace the enforcer created
+// as root, holding only CAP_NET_ADMIN and CAP_NET_RAW there with its view
+// (CAP_SYS_ADMIN, which built the view, dropped); it can create wpan0
+// through the tun device its view shows but sees only lo, wpan0 and
+// infra0, cannot read or write the policy store or reach the page, opens no netlink but route netlink (so
+// not nf_tables), cannot enter a new namespace or mount, starts no
+// process (#4521), and runs with no-new-privileges under the seccomp filter. The Matter
 // controller, joined to that namespace as another user, sees the same
 // links with no capability at all. Catches a stack run unconfined.
 func TestStacksConfined(t *testing.T) {
@@ -235,21 +246,42 @@ func TestStacksConfined(t *testing.T) {
 	}
 	bin := filepath.Join(state, "radio.test")
 	copyFile(t, os.Args[0], bin)
+	// The stacks' own directories, which their views show them; the
+	// radio is a stand-in character device.
+	own := func(name string, uid int) string {
+		d := filepath.Join(state, name)
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(d, uid, uid); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	threadSpec, err := confine.Thread(threadUID, threadUID, own("thread-state", threadUID), own("thread-run", threadUID),
+		"/dev/null", "", func(string, string) ([]string, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadProfile := probeView(threadSpec.Profile)
+	matterProfile := probeView(confine.Matter(matterUID, matterUID, own("matter", matterUID)))
 
-	read := func(t *testing.T, conn Conn) map[string]string {
-		h, err := NewHost(Config{Devices: []Device{{Name: "probe", Stack: StackThread}}, Timeout: 20 * time.Second,
-			Notify: func(Notification) {}, Log: func(string) {}})
+	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
+		h, err := NewHost(Config{Devices: []Device{{Name: probeDevices[0], Stack: StackThread}, {Name: probeDevices[1], Stack: StackThread}},
+			Timeout: 20 * time.Second, Notify: func(Notification) {}, Log: func(string) {}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.Attach(StackThread, conn)
-		b, err := h.State("probe")
-		if err != nil {
-			t.Fatalf("read through the interface: %v", err)
-		}
+		h.Attach(StackThread, p, conn)
 		got := map[string]string{}
-		if err := json.Unmarshal(b, &got); err != nil {
-			t.Fatal(err)
+		for _, d := range probeDevices {
+			b, err := h.State(d)
+			if err != nil {
+				t.Fatalf("read %s through the interface: %v", d, err)
+			}
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
 		}
 		for k, v := range got {
 			t.Logf("%-28s %s", k, v)
@@ -257,7 +289,7 @@ func TestStacksConfined(t *testing.T) {
 		return got
 	}
 	refused := []string{"policy-r", "policy-w", "page", "packet", "nfnl",
-		"bt", "unshare-user", "unshare-mnt", "clone-net",
+		"bt", "unshare-user", "unshare-mnt", "clone-net", "clone-process", "fork",
 		"setns", "mount", "fsopen", "setuid0", "ptrace"}
 	confined := func(t *testing.T, got map[string]string, uid int, capEff string) {
 		t.Helper()
@@ -286,14 +318,14 @@ func TestStacksConfined(t *testing.T) {
 		}
 	}
 
-	thread, conn, err := confine.Start(confine.Spec{Profile: confine.Thread(threadUID, threadUID), Self: bin,
+	thread, conn, err := confine.Start(confine.Spec{Profile: threadProfile, Self: bin,
 		Path: bin, Args: []string{netProbeArg, "thread", policy, page}, Stderr: testWriter{t}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer thread.Stop()
 	t.Run("thread", func(t *testing.T) {
-		got := read(t, conn)
+		got := read(t, thread, conn)
 		// CAP_NET_ADMIN (12) and CAP_NET_RAW (13), in its own user namespace.
 		confined(t, got, threadUID, "0000000000003000")
 		if got["wpan0"] != "allowed" {
@@ -304,13 +336,13 @@ func TestStacksConfined(t *testing.T) {
 		}
 	})
 	t.Run("matter", func(t *testing.T) {
-		matter, conn, err := confine.Start(confine.Spec{Profile: confine.Matter(matterUID, matterUID), Net: thread,
+		matter, conn, err := confine.Start(confine.Spec{Profile: matterProfile, Net: thread,
 			Self: bin, Path: bin, Args: []string{netProbeArg, "matter", policy, page}, Stderr: testWriter{t}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer matter.Stop()
-		got := read(t, conn)
+		got := read(t, matter, conn)
 		confined(t, got, matterUID, "0000000000000000")
 		if !strings.HasPrefix(got["tun"], "refused") {
 			t.Errorf("the Matter controller created a link: %s", got["tun"])
@@ -328,8 +360,8 @@ func TestStacksConfined(t *testing.T) {
 		}
 	})
 	t.Run("a joining stack gets no capability or link", func(t *testing.T) {
-		for _, p := range []confine.Profile{confine.Thread(matterUID, matterUID), func() confine.Profile {
-			p := confine.Matter(matterUID, matterUID)
+		for _, p := range []confine.Profile{threadProfile, func() confine.Profile {
+			p := matterProfile
 			p.Links = []string{"rogue0"}
 			return p
 		}()} {
@@ -358,7 +390,7 @@ func TestStackOutlivesEndedThreads(t *testing.T) {
 	os.Chmod(dir, 0o755)
 	bin := filepath.Join(dir, "radio.test")
 	copyFile(t, os.Args[0], bin)
-	proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
+	proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
 		Args: []string{probeArg, filepath.Join(dir, "none"), filepath.Join(dir, "none.sock")}, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +411,7 @@ func TestStackOutlivesEndedThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Attach(StackBLE, conn)
+	h.Attach(StackBLE, proc, conn)
 	if _, err := h.State(scale.Name); err != nil {
 		t.Fatalf("the stack after threads ended: %v", err)
 	}

@@ -467,6 +467,13 @@ func (g *Gate) judge(raw []byte) (req Request, l link, effect, need bool, refuse
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
 		return req, l, false, false, &Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
 	}
+	if _, ok := g.refs[req.Ref]; req.Ref != "" && !ok {
+		// Every verb on a ref is judged from what the gate saw of it (its
+		// target, the screen's field and heading names), so a ref the gate
+		// does not hold, never shown or cleared with its page (K16), is
+		// refused whatever the verb.
+		return req, l, false, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+	}
 	l, effect, refused = g.judgeClosed(req)
 	need = effect
 	if refused == nil && g.cfg.LoggedOut {
@@ -741,6 +748,13 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	if res.Snapshot != "" {
 		// Read before filtering: a redaction must not hide a link's target.
 		g.refs, g.page = parseRefs(res.Snapshot, res.URL), res.URL
+	} else if res.URL != g.page || req.Verb == "screenshot" {
+		// A ref names an element only in the driver's last snapshot of one
+		// document (K16). A reply from another page, or a screenshot (the
+		// driver snapshots again to check it), leaves the gate no refs it can
+		// match to what the driver will act on, so it keeps none until the
+		// next snapshot.
+		g.refs, g.shown, g.page = nil, nil, res.URL
 	}
 	read := res.Snapshot != ""
 	// The driver's count is not trusted: the gate reports its own.

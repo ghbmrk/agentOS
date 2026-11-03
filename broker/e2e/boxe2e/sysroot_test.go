@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 // -sys-root, exactly as it finds a SIM7600G-H's AT port on the box.
 func TestFakeSysrootIsDiscovered(t *testing.T) {
 	root := t.TempDir()
+	writeHere(t, root)
 	if err := buildSysroot(root, "/dev/pts/7"); err != nil {
 		t.Fatal(err)
 	}
@@ -20,6 +22,9 @@ func TestFakeSysrootIsDiscovered(t *testing.T) {
 	}
 	if found[0].ATPort != filepath.Join(root, "dev/ttyUSB2") {
 		t.Fatalf("AT port %q", found[0].ATPort)
+	}
+	if dst, err := os.Readlink(filepath.Join(root, "dev/ttyUSB2")); err != nil || dst != "/dev/pts/7" {
+		t.Fatalf("dev/ttyUSB2 links to %q, %v", dst, err)
 	}
 	if dst, err := filepath.EvalSymlinks(filepath.Join(root, "dev")); err != nil || dst != filepath.Join(root, "dev") {
 		t.Fatal(dst, err)

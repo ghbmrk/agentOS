@@ -69,6 +69,10 @@ type KernelConfig struct {
 	Clock func() int64
 }
 
+// Format prints a KernelConfig as its type alone, never the log key or the
+// head key (CLK-1); fmt skips it where it skips kernel.Config's (DECOY-b-8).
+func (KernelConfig) Format(f fmt.State, _ rune) { fmt.Fprint(f, "proc.KernelConfig") }
+
 // Kernel is the kernel process's one kernel: every call to it goes through
 // one lock, so the owner side, the planner side and the clock never
 // interleave inside the kernel. Clerk calls run outside it (Tick), so STOP,
@@ -80,6 +84,9 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
+	// unlogged are the item files the start found in a store that no
+	// entry names in that store.
+	unlogged []string
 	// bk is the backups (backup.go); nil with no BackupDir.
 	bk *backups
 	// reseals is every backup re-seal running (reseal), and running each
@@ -96,16 +103,18 @@ type Kernel struct {
 	// firstEdge and link are KernelConfig's, set at open and never
 	// changed, so link is read without the lock: only LinkSide's
 	// linksign signs with it, and it never goes into a backup (BAK-1).
+	// The keys sit behind a pointer to a pointer, which fmt prints as an
+	// address in every verb and at any depth (DECOY-b-8, #4719).
 	firstEdge ed25519.PublicKey
-	link      ed25519.PrivateKey
+	link      **ed25519.PrivateKey
 	clock     func() int64 // KernelConfig's
 	// head is KernelConfig's Sign, the store's head key: it signs the
 	// recovery-key approvals the root steps verify (handoff.Approval).
 	// Set at open and never changed.
-	head ed25519.PrivateKey
+	head **ed25519.PrivateKey
 	// card is the recovery key a lost-card rotation made at this boot,
 	// held until the owner confirms the new card (kernelmain.go).
-	card recoveryCard
+	card **recoveryCard
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -116,6 +125,7 @@ type Kernel struct {
 // With a KeyDir it then opens the subject-key table and the content stores
 // in ContentDir, and re-applies every logged erase to them; a store an
 // erase names that is not there stays unconfirmed, and Tick retries it.
+// Keys and items no entry names are kept and reported (Content, Unlogged).
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
@@ -150,18 +160,20 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		return nil, err
 	}
 	k.PinChecker(cfg.Checker)
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock, head: cfg.Sign}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: new(&cfg.LinkKey), clock: cfg.Clock, head: new(&cfg.Sign), card: new(new(recoveryCard))}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		stores := map[string]kernel.ContentStore{}
+		var found map[string][]kernel.Hash
 		if err == nil && cfg.ContentDir != "" {
-			if stores, err = OpenContentStores(cfg.ContentDir, cfg.Stores); err != nil {
+			if stores, found, err = OpenContentStores(cfg.ContentDir, cfg.Stores); err != nil {
 				st.Close()
 				return nil, fmt.Errorf("run: the content stores: %w", err)
 			}
 		}
 		if err == nil {
 			h.content, err = k.OpenContent(keys, stores, now)
+			h.unlogged = unlogged(k.State(), found)
 		}
 		if err != nil {
 			st.Close()
@@ -184,6 +196,10 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // Content is what the start found in the subject-key table: subjects whose
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
+
+// Unlogged is every item file the start found in a content store that no
+// entry names in that store, as store/hash.
+func (h *Kernel) Unlogged() []string { return h.unlogged }
 
 // Tick starts the backup re-seals due (reseal) without waiting for them,
 // then runs every plan as far as now allows. It takes the due calls under the

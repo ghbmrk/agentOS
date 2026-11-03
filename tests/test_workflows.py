@@ -70,7 +70,7 @@ LANE_GATE_LINES = [
     "jobs:",
     "  lane-gate:",
     "    name: lane-gate",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
@@ -98,7 +98,7 @@ PREMERGE_LINES = [
     '  issue_comment:',
     '    types: [created, edited, deleted]',
     '  workflow_run:',
-    '    workflows: [ci, assurance, vulncheck, word-budget, g1-freeze, lane-gate, trusted-base, formal, keycheck, image, testkit-image]',
+    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image]',
     '    types: [completed]',
     'permissions:',
     '  contents: read',
@@ -109,7 +109,7 @@ PREMERGE_LINES = [
     '  premerge-gate:',
     '    name: premerge-gate',
     "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]",
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
@@ -118,6 +118,7 @@ PREMERGE_LINES = [
     '      contents: read',
     '      issues: read',
     '      pull-requests: read',
+    '      actions: read # a bot PR\'s writer run and its artifact',
     '      statuses: write # the `premerge` status on the PR head, nothing else',
     '    steps:',
     '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
@@ -154,19 +155,23 @@ PREMERGE_LINES = [
     '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
     '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
-    '          PR_CREATED=$(jq -r .created_at "$RUNNER_TEMP/pr.json")',
     '          state=failure',
     '          out=$(',
     '            [ "$BASE_REF" = main ] || { echo "base-not-main"; exit 1; }',
     '            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \\',
     '              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1',
     '            git cat-file -e "$HEAD_SHA^{commit}" || exit 1',
-    '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/timeline" \\',
-    '              --jq \'.[] | [(.event // ""), (.created_at // "")] | @tsv\' > "$RUNNER_TEMP/timeline.tsv" || exit 1',
-    '            python3 -I tools/g1_scope.py --git refs/remotes/pr/base "$HEAD_SHA" --pr "$PR_NUMBER" --pr-created "$PR_CREATED" \\',
-    '              --timeline "$RUNNER_TEMP/timeline.tsv" >&2 || { echo "g1-freeze"; exit 1; }',
     '            if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then',
-    '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"',
+    '              run_id=$(git log -1 --format=\'%(trailers:key=Bot-Run,valueonly)\' "$HEAD_SHA") || exit 1',
+    '              [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "bot-unproven no-run"; exit 1; }',
+    '              gh api "repos/$REPO/actions/runs/$run_id" > "$RUNNER_TEMP/run.json" || exit 1',
+    '              art=$(gh api --paginate "repos/$REPO/actions/runs/$run_id/artifacts?per_page=100" \\',
+    '                | jq -r --arg name "${HEAD_REF#bot/}" \'.artifacts[] | select(.name == $name and (.expired | not)) | .id\' \\',
+    '                | sort -n | tail -n 1) || exit 1',
+    '              [[ "$art" =~ ^[0-9]+$ ]] || { echo "bot-unproven no-output"; exit 1; }',
+    '              gh api "repos/$REPO/actions/artifacts/$art/zip" > "$RUNNER_TEMP/output.zip" || exit 1',
+    '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --run "$RUNNER_TEMP/run.json" \\',
+    '                --output "$RUNNER_TEMP/output.zip" --base refs/remotes/pr/base "$HEAD_SHA"',
     '            fi',
     '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \\',
     '              --jq \'.[] | {author_association, created_at, updated_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
@@ -184,7 +189,7 @@ PREMERGE_LINES = [
     '    name: merge',
     '    needs: premerge-gate',
     "    if: needs.premerge-gate.outputs.merge-head != ''",
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: bot # deployment branches: main only; holds BOT_PR_TOKEN',
     '    permissions: {}',
@@ -251,7 +256,7 @@ INTAKE_LINES = [
     "    if: >-",
     "      contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.issue.author_association)",
     "      && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 5",
     "    permissions:",
     "      contents: read",
@@ -266,6 +271,36 @@ INTAKE_LINES = [
     "          ISSUE: ${{ github.event.issue.number }}",
     '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"',
 ]
+
+
+# ACCEPT-reopen (#2919): acceptance.yml holds `issues: write` on every issue close, so it is
+# pinned line by line like intake.yml: one trigger, main's code, a credential-free checkout and a
+# run line whose only event value is the issue number, passed through env.
+ACCEPTANCE_LINES = [
+    'name: acceptance',
+    'on:',
+    '  issues:',
+    '    types: [closed]',
+    'permissions:',
+    '  contents: read',
+    'jobs:',
+    '  reopen:',
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      contents: read',
+    '      issues: write # reopen a cited issue and comment on it',
+    '    steps:',
+    '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
+    '        with:',
+    '          persist-credentials: false',
+    '      - name: Reopen the issue if a vulncheck record cites it (tools/vulncheck.py reopen)',
+    '        env:',
+    '          GITHUB_TOKEN: ${{ github.token }}',
+    '          ISSUE: ${{ github.event.issue.number }}',
+    '        run: python3 -I tools/vulncheck.py reopen "$ISSUE"',
+]
+
 
 def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     """Return why lane-gate.yml (or another `pinned` gate) differs from its pin; empty when it matches."""
@@ -284,7 +319,299 @@ def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     return problems
 
 
+# CI-hostcheck-runner-2604 (#4785, #4792): a floating label (ubuntu-latest) moves every job to a
+# new runner image when GitHub chooses, so required checks change under unchanged code. Every job
+# runs on RUNNER, written out; moving to another image is a reviewed edit of this line.
+RUNNER = "ubuntu-24.04"
+PLAIN_KEY = re.compile(r"([A-Za-z0-9_-]+):")
+# YAML breaks lines at \r, NEL, LS and PS too; a tab or other control character has no place here.
+NOT_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+# Only the ASCII space separates or indents: Python's strip() and \s also take U+00A0, U+3000
+# and the like, which YAML reads as part of a scalar (Security and L3 on #4820).
+SP = " "
+
+
+BLOCK_SCALAR = re.compile(r"(?:^|: |- )[|>][1-9]?[+-]?[1-9]?(?: +#.*)?$")
+
+
+def _quote_end(s, i):
+    """Return the index after the quoted scalar opening at s[i], or None if it runs past the line."""
+    q, i = s[i], i + 1
+    while i < len(s):
+        if q == '"' and s[i] == "\\":
+            i += 2
+        elif s[i] == q and q == "'" and s[i + 1:i + 2] == "'":
+            i += 2
+        elif s[i] == q:
+            return i + 1
+        else:
+            i += 1
+    return None
+
+
+def open_flow(s):
+    """Return why one line leaves a quoted scalar or flow collection open past its end, or None.
+
+    A scalar or collection that spans lines can make what reads here as a key be text inside
+    it (Security on #4820), so the reader refuses every one: each must close on its own line.
+    """
+    depth, i, start = 0, 0, True  # start: a quote or bracket here opens a node
+    while i < len(s):
+        c = s[i]
+        if c == SP:
+            i += 1
+        elif c == "#" and (i == 0 or s[i - 1] == SP):
+            break
+        elif start and c in "'\"":
+            i = _quote_end(s, i)
+            if i is None:
+                return "a quoted scalar runs past its line"
+            start = False
+        elif (start or depth) and c in "[{":
+            depth, i, start = depth + 1, i + 1, True
+        elif depth and c in "]}":
+            depth, i, start = depth - 1, i + 1, False
+        elif depth and c == ",":
+            i, start = i + 1, True
+        elif start and c == "-" and s[i + 1:i + 2] in ("", SP):
+            i += 1
+        elif c == ":" and (s[i + 1:i + 2] in ("", SP) or depth and s[i + 1:i + 2] in (",", "]", "}")):
+            i, start = i + 1, True
+        else:
+            i, start = i + 1, False
+    return "a flow collection runs past its line" if depth else None
+
+
+def workflow_runners(text):
+    """Return ({job: runs-on}, problems) for a workflow, reading the YAML fail-closed.
+
+    No YAML library is in CI's Python, and one that reads YAML 1.1 differs from GitHub's reader,
+    so a library would add a parser GitHub does not share. This reads only the subset the
+    workflows use: a top-level `jobs:` block mapping whose jobs are block mappings of plain keys
+    at two and four spaces. Any other form at those two levels (flow mapping, quoted or escaped
+    key, `?` key, anchor, alias, tag or merge key on a job or job key, odd indent), a runs-on
+    value continued on the next line, and any runs-on value but RUNNER are problems, so a key
+    GitHub reads as runs-on cannot hide from this reader.
+    """
+    problems = []
+    for n, l in enumerate(text.split("\n"), 1):
+        if NOT_TEXT.search(l):
+            problems.append("line %d: a control character, tab or YAML line break other than \\n" % n)
+    lines, block = [], None
+    for l in text.split("\n"):
+        if not l.strip(SP) or l.lstrip(SP).startswith("#"):
+            continue
+        indent = len(l) - len(l.lstrip(SP))
+        if block is not None and indent > block:
+            continue  # a block scalar's text (run: |), never structure
+        block = None
+        why = open_flow(l.lstrip(SP))
+        if why:
+            problems.append("line %r: %s" % (l, why))
+        if BLOCK_SCALAR.search(l.lstrip(SP)):
+            block = indent
+        lines.append(l)
+    top = {}
+    for i, l in enumerate(lines):
+        m = None if l[0] == SP else PLAIN_KEY.match(l)
+        if m:
+            top.setdefault(m.group(1), []).append(i)
+        elif l[0] != SP:
+            problems.append("top-level line %r is not a plain key" % l)
+    problems += ["top-level key %r appears %d times" % (k, len(v)) for k, v in top.items() if len(v) > 1]
+    starts = top.get("jobs", [])
+    if len(starts) != 1 or lines[starts[0]].rstrip(SP) != "jobs:":
+        return {}, problems + ["needs one block `jobs:`"]
+    jobs, job, key = {}, None, None
+    for l in lines[starts[0] + 1:]:
+        indent = len(l) - len(l.lstrip(SP))
+        body = re.split(r" +#", l.strip(SP), maxsplit=1)[0]
+        if indent == 0:
+            # No workflow has a top-level key after jobs:, so any column-0 line here is refused
+            # rather than read as the end of jobs: (it could be text inside a scalar).
+            problems.append("line %r: column 0 after jobs:" % l)
+            continue
+        if indent == 2:
+            m = re.fullmatch(r"([A-Za-z0-9_-]+):", body)
+            if not m:
+                problems.append("job line %r is not a plain key opening a block mapping" % l)
+                job = None
+                continue
+            job, key = m.group(1), None
+            if job in jobs:
+                problems.append("job %r appears twice" % job)
+            jobs[job] = []
+        elif indent == 4 and job:
+            m = re.fullmatch(r"([A-Za-z0-9_-]+):(?: +(.*))?", body)
+            if not m:
+                problems.append("%s: line %r is not a plain key" % (job, l))
+                key = None
+                continue
+            key = m.group(1)
+            if key == "runs-on":
+                jobs[job].append(m.group(2) or "")
+            elif key == "uses":
+                problems.append("%s: calls a reusable workflow, whose runs-on this cannot see" % job)
+        elif indent > 4 and job and key:
+            if key == "runs-on":
+                problems.append("%s: runs-on continues on line %r" % (job, l))
+        else:
+            problems.append("line %r: indent %d outside a job's plain keys" % (l, indent))
+    if not jobs:
+        problems.append("no jobs")
+    for job, runs in jobs.items():
+        if runs != [RUNNER]:
+            problems.append("%s: runs-on %r, must be exactly [%r]" % (job, runs, RUNNER))
+    return jobs, problems
+
+
+IMAGE_STEP = (
+    "        id: image\n"
+    '        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"\n')
+IMAGE_KEY = "${{ steps.image.outputs.os }}"
+
+
+def cache_key_problems(text):
+    """Return each actions/cache key or restore key that does not name the runner image (#4785).
+
+    A cache keyed only on runner.os ("Linux") restored ot-rcp built on ubuntu-26.04 onto 24.04,
+    where it could not run (GLIBC_2.42 not found). Each job with a cache computes the image in
+    IMAGE_STEP before its first cache step, and every key line carries it.
+    """
+    problems = []
+    jobs = re.split(r"^(?=  [A-Za-z0-9_-]+:\n)", text, flags=re.M)
+    for job in jobs:
+        blocks = re.split(r"^(?=      - )", job, flags=re.M)
+        caches = [b for b in blocks if re.search(r"^\s+(- )?uses:\s*actions/cache\b", b, re.M)]
+        if not caches:
+            continue
+        name = job.split(":", 1)[0].strip()
+        if IMAGE_STEP not in job[:job.index(caches[0])]:
+            problems.append("%s: no runner-image step before its first cache" % name)
+        for s in caches:
+            body = s.split("\n")
+            keys = [l for l in body if re.match(r"\s+(key|restore-keys):", l)]
+            if not keys:
+                problems.append("%s: cache step with no key" % name)
+            for i, l in enumerate(body):
+                if re.match(r"\s+key:", l) and IMAGE_KEY not in l:
+                    problems.append("%s: key %r does not name the runner image" % (name, l.strip()))
+                m = re.match(r"(\s+)restore-keys:\s*(.*)$", l)
+                if m:
+                    entries = [m.group(2)] if m.group(2) not in ("|", "") else []
+                    for nxt in body[i + 1:]:
+                        if len(nxt) - len(nxt.lstrip()) <= len(m.group(1)):
+                            break
+                        entries.append(nxt.strip())
+                    for e in entries:
+                        if IMAGE_KEY not in e:
+                            problems.append("%s: restore key %r does not name the runner image" % (name, e))
+    return problems
+
+
 class WorkflowTest(unittest.TestCase):
+    def test_cache_keys_name_the_runner_image(self):
+        seen = 0
+        for wf in self.files():
+            text = wf.read_text(encoding="utf-8")
+            seen += len(re.findall(r"uses:\s*actions/cache", text))
+            with self.subTest(wf.name):
+                self.assertEqual(cache_key_problems(text), [])
+        self.assertGreater(seen, 0)
+
+    def test_cache_key_check_catches_mutants(self):
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        edits = {
+            "os key": ("key: ot-bin-${{ steps.image.outputs.os }}-", "key: ot-bin-${{ runner.os }}-"),
+            "restore key": ("            go-build-broker-${{ steps.image.outputs.os }}-",
+                            "            go-build-broker-${{ runner.os }}-"),
+            "inline restore key": ("restore-keys: go-build-broker-${{ steps.image.outputs.os }}-",
+                                   "restore-keys: go-build-broker-"),
+            "no image step": (IMAGE_STEP + "      - name: Go build cache (CI-PATHS)\n        # The root",
+                              "      - name: Go build cache (CI-PATHS)\n        # The root"),
+            "image step after the cache": (IMAGE_STEP + "      - name: Go build cache (CI-PATHS)\n        # The root",
+                                           "        run: true\n      - name: Go build cache (CI-PATHS)\n        # The root"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertIn(old, text)
+                self.assertTrue(cache_key_problems(text.replace(old, new, 1)), name)
+
+    def test_runners_pinned(self):
+        for wf in self.files():
+            with self.subTest(wf.name):
+                jobs, problems = workflow_runners(wf.read_text(encoding="utf-8"))
+                self.assertTrue(jobs)
+                self.assertEqual(problems, [])
+
+    def test_runner_pin_check_catches_mutants(self):
+        # #4792: each form Security and L3 showed passing the text check on #4787, and more.
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        job = "    runs-on: ubuntu-24.04\n"
+        head = "\n  checks:\n" + job
+        self.assertIn(head, text)
+        edits = {
+            "ubuntu-latest": (job, "    runs-on: ubuntu-latest\n"),
+            "another release": (job, "    runs-on: ubuntu-26.04\n"),
+            "arm": (job, "    runs-on: ubuntu-24.04-arm\n"),
+            "non-ASCII digit": (job, "    runs-on: ubuntu-2\u0664.04\n"),
+            "quoted value": (job, "    runs-on: 'ubuntu-24.04'\n"),
+            "matrix": (job, "    runs-on: ${{ matrix.os }}\n"),
+            "list": (job, "    runs-on: [self-hosted, linux]\n"),
+            "group": (job, "    runs-on:\n      group: big\n"),
+            "alias": (job, "    runs-on: *runner\n"),
+            "anchor": (job, "    runs-on: &r ubuntu-24.04\n"),
+            "tag": (job, "    runs-on: !!str self-hosted\n"),
+            "continued plain scalar": (job, "    runs-on: ubuntu-24.04\n      self-hosted\n"),
+            "quoted key": (job, '    "runs-on": self-hosted\n'),
+            "escaped key": (job, '    "runs\\x2Don": self-hosted\n'),
+            "complex key": (job, "    ? runs-on\n    : self-hosted\n"),
+            "merge key": (job, "    <<: *defaults\n"),
+            "no runs-on": (job, ""),
+            "second runs-on": (job, job + job),
+            "flow mapping job": (head, "\n  checks: {runs-on: self-hosted}\n  checks2:\n" + job),
+            "quoted job key": (head, "\n  'checks':\n" + job),
+            "keys at six": (head, "\n  checks:\n      runs-on: self-hosted\n"),
+            "keys at three": (head, "\n  checks:\n   runs-on: self-hosted\n"),
+            "reusable workflow": (head, "\n  checks:\n    uses: other/repo/.github/workflows/x.yml@v1\n"),
+            "tab": (job, "    runs-on:\tubuntu-24.04\n"),
+            "no-break space after the value": (job, "    runs-on: ubuntu-24.04\u00a0\n"),
+            "ideographic space after the value": (job, "    runs-on: ubuntu-24.04\u3000\n"),
+            "ideographic space before a job key": (job, job + "\u3000   runs-on: self-hosted\n"),
+            "no-break space separator": (job, "    runs-on:\u00a0ubuntu-24.04\n"),
+            "no-break space before a comment": (job, "    runs-on: ubuntu-24.04\u00a0# pinned\n"),
+            "duplicate job id": (head, head + "  checks:\n" + job),
+            "top-level key after jobs": (head, head + "zz: y\n"),
+            "flow collection across lines": (job, job + "    env: {A: 1,\n      B: 2}\n"),
+            "second jobs": ("\njobs:\n", "\njobs: {}\njobs:\n"),
+            "document marker": ("\njobs:\n", "\n---\njobs:\n"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertTrue(workflow_runners(text.replace(old, new, 1))[1], name)
+        # A line break YAML honours hides a second runs-on in what reads here as a comment; the job
+        # keeps its pinned runs-on, so only the break character can fail it.
+        for name, brk in (("carriage return", "\r"), ("next line", "\x85"), ("line separator", "\u2028"),
+                          ("paragraph separator", "\u2029")):
+            with self.subTest(name):
+                jobs, problems = workflow_runners(text.replace(job, job + "    # pinned" + brk + "    runs-on: self-hosted\n", 1))
+                self.assertEqual(jobs["checks"], [RUNNER])
+                self.assertTrue(problems)
+                self.assertTrue(all("YAML line break" in p for p in problems), problems)
+        # Security on #4820: a quoted scalar spanning lines hid a column-0 line and a second
+        # runs-on; the job keeps a pinned runs-on the reader sees, so only the open scalar fails.
+        for name, q in (("single-quoted", "'"), ("double-quoted", '"')):
+            with self.subTest(name):
+                hidden = "    name: " + q + "abc\n" + job + "zz: y" + q + "\n    runs-on: self-hosted\n"
+                _, problems = workflow_runners(text.replace(job, hidden, 1))
+                self.assertTrue(any("quoted scalar runs past its line" in p for p in problems), problems)
+        for line in ("    if: ${{ github.event_name == 'push' }}", "    name: \"a \\\" b\" # c", "    name: 'it''s'",
+                     "    env: {A: '1', B: [x, \"y\"]}", "    if: x == 'a' || y"):
+            with self.subTest(line):
+                self.assertIsNone(open_flow(line.lstrip()), line)
+        jobs, problems = workflow_runners(text.replace(job, "    runs-on: ubuntu-24.04  # pinned\n", 1))
+        self.assertEqual((problems, jobs["checks"]), ([], [RUNNER]))
+
     def files(self):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
         self.assertTrue(files)
@@ -405,6 +732,22 @@ class WorkflowTest(unittest.TestCase):
         self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
         self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
 
+    def test_trace_and_metrics_cross_jobs_as_an_artifact(self):
+        # #1832: TRACE.md outgrew the 128 KiB env limit as base64 (trace run 41303991176: "Argument list too long"),
+        # and MAIN-PROT-3 (#757) needs the artifact as the proof premerge --bot compares the PR with. Each writer
+        # uploads its file from the read-only job, the commit job copies only that file in, and commits with Bot-Run.
+        for name, f in (("trace", "TRACE.md"), ("metrics", "METRICS.md"), ("board", "BOARD.md")):
+            text = (WORKFLOWS / f"{name}.yml").read_text()
+            gen, commit = text.split("\n  commit:\n", 1)
+            self.assertNotIn("base64", text, name)
+            uploads = [s for a, s in steps(gen) if a.startswith("actions/upload-artifact@")]
+            downloads = [s for a, s in steps(commit) if a.startswith("actions/download-artifact@")]
+            self.assertEqual((len(uploads), len(downloads)), (1, 1), name)
+            self.assertRegex(uploads[0], rf"name: {name}\n\s+path: {f}\n", name)
+            self.assertRegex(downloads[0], rf"name: {name}\n\s+path: \$\{{\{{ runner\.temp \}}\}}/{name}$", name)
+            self.assertIn(f'cp "$RUNNER_TEMP/{name}/{f}" {f}', commit, name)
+            self.assertRegex(commit, r'git commit -qm "[^"]+" -m "Bot-Run: \$GITHUB_RUN_ID" -- ' + f, name)
+
     def test_board_renders_on_a_schedule_not_per_issue_event(self):
         # BOARD-debounce (#3099): a render per issue event merged one main commit per label burst,
         # and main's strict up-to-date rule put every open PR behind each one. Renders run on a
@@ -458,7 +801,7 @@ class WorkflowTest(unittest.TestCase):
         text = (WORKFLOWS / "lane-gate.yml").read_text()
         gate = LANE_GATE_RUN[2]
         step = "      - name: Lane gate (base copy of tools/risk_tier.py)\n"
-        job = "    runs-on: ubuntu-latest\n"
+        job = "    runs-on: ubuntu-24.04\n"
         edits = {
             "job continue-on-error": (job, job + "    continue-on-error: true\n"),
             "step continue-on-error": (step, step + "        continue-on-error: true\n"),
@@ -486,7 +829,7 @@ class WorkflowTest(unittest.TestCase):
             "persist credentials": ("persist-credentials: false", "persist-credentials: true"),
             "contents write": ("  contents: read\njobs:", "  contents: write\njobs:"),
             "write-all": ("permissions:\n  contents: read\njobs:", "permissions: write-all\njobs:"),
-            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
             "carriage return in comment": ("# CTRL-lane-gate (docs/LANES.md)",
                                            "# CTRL-lane-gate\r    if: false\r# (docs/LANES.md)"),
         }
@@ -494,6 +837,14 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(old, text)
                 self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
+
+    def test_acceptance_is_pinned(self):
+        # ACCEPT-reopen (#2919): the shipped workflow equals its pin, and no other workflow
+        # runs the reopen command.
+        self.assertEqual(lane_gate_problems((WORKFLOWS / "acceptance.yml").read_text(), ACCEPTANCE_LINES), [])
+        for f in self.files():
+            if f.name != "acceptance.yml":
+                self.assertNotIn("vulncheck.py reopen", f.read_text(), f.name)
 
     def test_intake_is_pinned(self):
         # BOARD-INTAKE-wf (#2668, INTAKE-3): the shipped workflow equals its pin, and no other
@@ -526,7 +877,7 @@ class WorkflowTest(unittest.TestCase):
             "shell override": (step, step + "        shell: python {0}\n"),
             "not isolated": ("python3 -I tools", "python3 tools"),
             "no concurrency": ("  cancel-in-progress: false", "  cancel-in-progress: true"),
-            "self-hosted": ("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+            "self-hosted": ("runs-on: ubuntu-24.04", "runs-on: self-hosted"),
             "carriage return in comment": ("# One run at a time", "# One\r    if: false\r# run at a time"),
         }
         for name, (old, new) in edits.items():
@@ -544,20 +895,6 @@ class WorkflowTest(unittest.TestCase):
             'python3 -I tools/risk_tier.py --git "$BASE_SHA" "$HEAD_SHA" '
             '--pr-branch "$PR_BRANCH" --pr-title "$PR_TITLE"')
 
-    def test_g1_freeze_runs_only_the_base_copy(self):
-        # G1-freeze (#1687): the same shape as the lane gate, so a PR cannot widen the G1
-        # list, flip its switch or exempt itself; the base's list decides.
-        self.assert_runs_only_the_base_copy(
-            "g1-freeze.yml",
-            'python3 -I tools/g1_scope.py --git "$BASE_SHA" "$HEAD_SHA" --pr "$PR_NUMBER" '
-            '--pr-created "$PR_CREATED"')
-        text = (WORKFLOWS / "g1-freeze.yml").read_text()
-        # The opening time comes from the event, which the PR author cannot set.
-        self.assertIn("PR_CREATED: ${{ github.event.pull_request.created_at }}", text)
-        # The only fail-open is a base that predates the tool.
-        self.assertIn('if [ ! -f tools/g1_scope.py ]; then echo "g1 freeze: not active on this base"; exit 0; fi', text)
-        self.assertEqual(text.count("exit 0"), 1)
-
     def test_premerge_status_is_pinned(self):
         # PREMERGE-wire (#1860): triggers (PR pushes and PR comments), the `premerge` context, the
         # base-only checkout and the fail-closed status post are pinned line by line.
@@ -570,9 +907,6 @@ class WorkflowTest(unittest.TestCase):
                      ("          post \"$state\" \"$out\"", "          post success \"$out\""),
                      (") && state=success", ") || true; state=success"),
                      ("git cat-file -e \"$HEAD_SHA^{commit}\" || exit 1", "git cat-file -e \"$HEAD_SHA^{commit}\""),
-                     # PREMERGE-freeze (#3871): the freeze decides before any verdict, and its failure is the status.
-                     ('>&2 || { echo "g1-freeze"; exit 1; }', '>&2 || true'),
-                     ('> "$RUNNER_TEMP/timeline.tsv" || exit 1', '> "$RUNNER_TEMP/timeline.tsv"'),
                      ("          persist-credentials: false", "          persist-credentials: false\n          ref: refs/pull/1/head"),
                      # PREMERGE-source (#1943): the key's environment, the App token on the post,
                      # the token's one permission and the main-only base.
@@ -581,6 +915,10 @@ class WorkflowTest(unittest.TestCase):
                      ('GH_TOKEN="$STATUS_TOKEN" gh api -X POST', "gh api -X POST"),
                      ("          permission-statuses: write", "          permission-statuses: write\n          permission-contents: write"),
                      ('[ "$BASE_REF" = main ] || ', ""),
+                     # MAIN-PROT-3 (#757): a bot PR passes only with its writer run and that run's artifact.
+                     (' --run "$RUNNER_TEMP/run.json" \\\n                --output "$RUNNER_TEMP/output.zip"', ""),
+                     ("      actions: read # a bot PR's writer run and its artifact\n", ""),
+                     ('/zip" > "$RUNNER_TEMP/output.zip" || exit 1', '/zip" > "$RUNNER_TEMP/output.zip"'),
                      # ARM-on-accept (#3103): only a `same` from --check merges (not `bot`), only an open,
                      # non-draft, unarmed PR, only with every check green, pinned to the gate's head,
                      # with the main-only bot token.
@@ -637,6 +975,10 @@ STUB_GH = r"""#!/bin/sh
 case "$*" in
   "api -X POST "*) [ "$FAIL_AT" = post ] && [ ! -e "$STUBS/post-failed" ] && { : > "$STUBS/post-failed"; exit 1; }
                    echo "$*" >> "$STUBS/posts"; echo "$GH_TOKEN" >> "$STUBS/post-tokens"; exit 0 ;;
+  "api --paginate repos/o/r/actions/runs/41/artifacts?per_page=100") [ "$FAIL_AT" = artifacts ] && exit 1
+     echo '{"artifacts":[{"id":5,"name":"trace","expired":false},{"id":6,"name":"board","expired":false},{"id":4,"name":"trace","expired":true}]}' ;;
+  "api repos/o/r/actions/runs/41") [ "$FAIL_AT" = run ] && exit 1; echo '{"id":41}' ;;
+  "api repos/o/r/actions/artifacts/"*"/zip") [ "$FAIL_AT" = zip ] && exit 1; echo "$*" >> "$STUBS/zips" ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
                  echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
@@ -648,8 +990,13 @@ STUB_JQ = r"""#!/bin/sh
 exec "$REAL_JQ" "$@"
 """
 STUB_PY = r"""#!/bin/sh
-[ "$2" = tools/g1_scope.py ] && exit "$FREEZE"
+echo "$*" >> "$STUBS/py"
 echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
+"""
+# MAIN-PROT-3 (#757): `git log` answers the head commit's Bot-Run trailer; every other git call succeeds silently.
+STUB_GIT = r"""#!/bin/sh
+[ "$1" = log ] && printf '%s' "$TRAILER"
+exit 0
 """
 
 
@@ -692,20 +1039,19 @@ class PremergeRunTest(unittest.TestCase):
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 freeze=0, descriptions=None):
+                 descriptions=None, trailer="41\n", calls=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
             stubs = pathlib.Path(d)
-            for name, body in (("gh", STUB_GH), ("jq", STUB_JQ), ("python3", STUB_PY), ("git", "#!/bin/sh\nexit 0\n")):
+            for name, body in (("gh", STUB_GH), ("jq", STUB_JQ), ("python3", STUB_PY), ("git", STUB_GIT)):
                 (stubs / name).write_text(body)
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
-                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state,
-                   "FREEZE": str(freeze)}
+                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
@@ -716,6 +1062,9 @@ class PremergeRunTest(unittest.TestCase):
                 descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
+            if calls is not None:
+                for f in ("zips", "py"):
+                    calls.extend((stubs / f).read_text().splitlines() if (stubs / f).exists() else [])
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
 
     def test_failure_verdict_posts_failure_but_job_passes(self):
@@ -751,6 +1100,24 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_gate("same", base="stacked"), (0, ["failure"]))
         self.assertEqual(self.run_gate("bot", ref="bot/trace", base="stacked"), (0, ["failure"]))
 
+    def test_bot_pr_fetches_its_writer_run_and_artifact(self):
+        # MAIN-PROT-3 (#757): the head's Bot-Run trailer names the run; the gate fetches that run and its newest
+        # unexpired artifact named for the branch, and hands both to --bot. No trailer, no artifact or a failed
+        # read posts failure without calling --bot.
+        calls = []
+        self.assertEqual(self.run_gate("bot", ref="bot/trace", calls=calls), (0, ["success"]))
+        self.assertEqual(calls[0], "api repos/o/r/actions/artifacts/5/zip")
+        self.assertRegex(calls[1], r"^-I tools/premerge\.py --bot bot/trace --run \S+/run\.json --output \S+/output\.zip "
+                                   r"--base refs/remotes/pr/base a{40}$")
+        calls = []
+        self.assertEqual(self.run_gate("bot", ref="bot/board", calls=calls), (0, ["success"]))
+        self.assertEqual(calls[0], "api repos/o/r/actions/artifacts/6/zip")
+        for kw in ({"trailer": ""}, {"trailer": "41\n42"}, {"trailer": "41 x"}, {"trailer": "$(id)"},
+                   {"ref": "bot/metrics"}, {"fail_at": "run"}, {"fail_at": "artifacts"}, {"fail_at": "zip"}):
+            calls = []
+            self.assertEqual(self.run_gate("bot", **{"ref": "bot/trace", **kw}, calls=calls), (0, ["failure"]), kw)
+            self.assertFalse([c for c in calls if "premerge.py" in c], kw)
+
     def test_only_a_full_accept_on_an_open_unarmed_pr_merges(self):
         # ARM-on-accept (#3103): the gate hands the merge job the head it read, only on `same`.
         out = []
@@ -764,16 +1131,6 @@ class PremergeRunTest(unittest.TestCase):
             out = []
             self.run_gate(verdict, outputs=out, **kw)
             self.assertEqual(out, [], (verdict, kw))
-
-    def test_freeze_holds_an_accepted_head(self):
-        # PREMERGE-freeze (#3871): g1-freeze is not required, so auto-merge passed it red. A head
-        # main's g1_scope.py refuses posts `failure` and hands no head to the merge job, accept or bot.
-        for freeze in (1, 2):  # 1: outside the list; 2: cannot decide (fails closed)
-            for verdict, ref in (("same", "feature"), ("bot", "bot/trace")):
-                out, desc = [], []
-                self.assertEqual(self.run_gate(verdict, ref=ref, freeze=freeze, outputs=out, descriptions=desc),
-                                 (0, ["failure"]), (freeze, verdict))
-                self.assertEqual((out, desc), ([], ["g1-freeze"]), (freeze, verdict))
 
     def test_error_before_head_known_fails_the_job(self):
         # Residual named in #1946: with the pulls API down there is no head to post to.

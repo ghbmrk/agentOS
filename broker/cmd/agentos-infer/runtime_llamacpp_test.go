@@ -11,9 +11,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -351,5 +353,137 @@ func TestLlamaAdapterRefusesUnplaceableAndOversizeReplies(t *testing.T) {
 	}
 	if vs, err := l.Embed([]string{"status"}); err == nil {
 		t.Errorf("an error status was read as vectors: %v", vs)
+	}
+}
+
+// The adapter checks the status itself: a well-formed body under an error
+// status is refused here, not only by the service's checks after it.
+func TestLlamaAdapterChecksTheStatusItself(t *testing.T) {
+	l := newLlama(t)
+	if _, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err != nil {
+		t.Fatal(err)
+	}
+	if vs, err := l.Embed([]string{"okbody"}); !errors.Is(err, errHTTP) {
+		t.Fatalf("a well-formed reply under status 500: %v, %v; want errHTTP", vs, err)
+	}
+}
+
+// llamaDirs lists the socket directories under tmp.
+func llamaDirs(t *testing.T, tmp string) []string {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(tmp, dirPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// privateTmp points os.TempDir at a fresh directory for the test.
+func privateTmp(t *testing.T) string {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	return tmp
+}
+
+// A server that answers health and then hangs on the dimension probe fails
+// the load within the call bound, not the HTTP client's 10-minute backstop.
+func TestLlamaDimensionProbeKeepsToTheCallBound(t *testing.T) {
+	if l := newRuntime("x", 7*time.Second).(*llama); l.probe != 7*time.Second {
+		t.Fatalf("newRuntime's probe bound = %v; want the call bound", l.probe)
+	}
+	tmp := privateTmp(t)
+	l := newLlama(t)
+	l.probe = 300 * time.Millisecond
+	start := time.Now()
+	_, err := l.Load(writeModel(t, "hangprobe.gguf", gguf("qwen3", u32(3))))
+	if err == nil || errors.Is(err, ErrRefused) {
+		t.Fatalf("a hung probe: Load = %v; want an ordinary error", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("a hung probe held Load for %s", d)
+	}
+	if l.cur != nil || len(llamaDirs(t, tmp)) != 0 {
+		t.Fatalf("a hung probe left a server: %v %v", l.cur, llamaDirs(t, tmp))
+	}
+}
+
+// A probe that answers a bad dimension stops the server it ran on.
+func TestLlamaFailedProbeStopsTheServer(t *testing.T) {
+	tmp := privateTmp(t)
+	l := newLlama(t)
+	if _, err := l.Load(writeModel(t, "badprobe.gguf", gguf("qwen3", u32(3)))); err == nil || errors.Is(err, ErrRefused) {
+		t.Fatalf("a bad probe: Load = %v; want an ordinary error", err)
+	}
+	if l.cur != nil {
+		t.Fatal("a failed probe left the server current")
+	}
+	if d := llamaDirs(t, tmp); len(d) != 0 {
+		t.Fatalf("a failed probe left a socket directory: %v", d)
+	}
+}
+
+// Two Loads at once leave one server: neither replaces a server the other
+// started without stopping it.
+func TestLlamaConcurrentLoadsLeaveOneServer(t *testing.T) {
+	tmp := privateTmp(t)
+	l := newLlama(t)
+	m := writeModel(t, "e.gguf", gguf("qwen3", u32(3)))
+	for round := 0; round < 5; round++ {
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); l.Load(m) }()
+		}
+		wg.Wait()
+		d := llamaDirs(t, tmp)
+		if l.cur == nil || len(d) != 1 || d[0] != l.cur.dir {
+			t.Fatalf("round %d: socket directories %v, current %v; want the current server's alone", round, d, l.cur)
+		}
+	}
+	l.stop()
+	if d := llamaDirs(t, tmp); len(d) != 0 {
+		t.Fatalf("after stop: %v", d)
+	}
+}
+
+// A service killed outright leaves its socket directory; the next start
+// removes it, and only directories this uid made for a process now gone.
+func TestLlamaStartSweepsDeadServicesDirs(t *testing.T) {
+	tmp := privateTmp(t)
+	gone := exec.Command("true")
+	if err := gone.Run(); err != nil {
+		t.Skip("no true to run:", err)
+	}
+	dead := gone.Process.Pid
+	mk := func(name string) string {
+		p := filepath.Join(tmp, name)
+		if err := os.Mkdir(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(p, "s.sock"), nil, 0o600)
+		return p
+	}
+	deadDir := mk(fmt.Sprintf("%s%d-1", dirPrefix, dead))
+	liveDir := mk(fmt.Sprintf("%s%d-2", dirPrefix, os.Getpid()))
+	oldDir := mk(dirPrefix + "123456") // no pid in the name: not this sweep's to judge
+	target := t.TempDir()
+	link := filepath.Join(tmp, fmt.Sprintf("%s%d-3", dirPrefix, dead))
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(tmp, fmt.Sprintf("%s%d-4", dirPrefix, dead))
+	os.WriteFile(file, nil, 0o600)
+
+	l := newLlama(t)
+	if _, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Errorf("a dead service's directory remains: %v", err)
+	}
+	for _, p := range []string{liveDir, oldDir, link, file, target} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s was removed: %v", p, err)
+		}
 	}
 }

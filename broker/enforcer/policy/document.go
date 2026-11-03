@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -48,7 +50,19 @@ const (
 var (
 	ErrMalformed = errors.New("policy: malformed document")
 	ErrNotRising = errors.New("policy: version does not rise")
+	// ErrNameHeld: two devices pin one mDNS name (Device.MDNS). The error
+	// names the name and both devices, so the owner can rename one.
+	ErrNameHeld = errors.New("policy: one name is pinned twice")
+	// ErrTooManyNames: a device pins more than MaxMDNS mDNS names. The
+	// error names the device and the count.
+	ErrTooManyNames = errors.New("policy: a device pins too many names")
 )
+
+// MaxMDNS is the most mDNS names one device pins or holds (#4601): room
+// for its host and every service a casting device or printer announces,
+// and few enough that the owner reads them on the card before the
+// passkey.
+const MaxMDNS = 32
 
 // Document is one policy version: everything the enforcer enforces besides
 // the devices' secrets. Its canonical form (Encode) is what a version's key
@@ -57,11 +71,20 @@ type Document struct {
 	Version uint64 `json:"version"`
 	// Destinations is the core's signed destination list (NET-2 The core's
 	// list): host names the core may reach.
-	Destinations []string       `json:"destinations"`
-	Devices      []Device       `json:"devices"`
-	Pairs        []Pair         `json:"pairs"`
-	Standing     []StandingRule `json:"standing"`
-	Holds        []Hold         `json:"holds"`
+	Destinations []string `json:"destinations"`
+	// Caps is each core destination's daily byte cap (NET-2 Byte caps,
+	// D-248): the IP bytes the core may send it in one enforcer day, by
+	// its name on Destinations. A destination with no cap may be sent
+	// nothing, so a cap left out fails safe; a cap of 0 is written by
+	// leaving it out, so one cap has one encoding.
+	Caps map[string]uint64 `json:"caps,omitempty"`
+	// EdgeCap is the edge segment's one daily byte cap on what it sends
+	// to the internet (NET-2 Byte caps); 0 lets it send nothing.
+	EdgeCap  uint64         `json:"edge_cap,omitempty"`
+	Devices  []Device       `json:"devices"`
+	Pairs    []Pair         `json:"pairs"`
+	Standing []StandingRule `json:"standing"`
+	Holds    []Hold         `json:"holds"`
 	// Drone is the SHA-256, in hex, of the owner-signed drone flight policy
 	// (broker/drone), or empty when there is none.
 	Drone string `json:"drone"`
@@ -93,6 +116,13 @@ type Device struct {
 	// such as a lock's "lock" (NET-2 Safety devices); empty for none. Only
 	// the one name its class allows is valid (Nameable).
 	Secure string `json:"secure"`
+	// Safeguards is what qualification found the device has that its
+	// class needs before it can be named (NET-2 Safety devices), such as a
+	// garage door's obstruction reversal and pre-close warning: a sorted
+	// set from the closed list below, each one its class needs (Needs).
+	// The owner records them on the signed screen, never the device.
+	// Recording or dropping one is a loosening.
+	Safeguards []string `json:"safeguards,omitempty"`
 	// Label is how far the enforcer can contain the device (NET-1), from
 	// qualification and the enforcer's observation, never from what the
 	// device reports: LabelContained, LabelExceptRadio, or empty for not
@@ -108,6 +138,14 @@ type Device struct {
 	// vendor cloud (NET-2 Cameras and microphones). Empty for any other
 	// class.
 	Stream []Port `json:"stream"`
+	// MDNS is the mDNS names the device announces (NET-3 Casting, #4144),
+	// each as its labels: hosts (<host>.local) and service instances
+	// (<instance>.<_service>.<_tcp or _udp>.local). A paired device's
+	// records pass its pairs only for these names and the service types
+	// of these instances, so a name it starts announcing later needs a new
+	// signature. An Owner or Household device's names are held for it: no
+	// other device may pin them. Two devices never pin one name.
+	MDNS [][]string `json:"mdns,omitempty"`
 }
 
 // The NET-2 safety classes a device can carry; the empty class is unknown
@@ -155,10 +193,49 @@ var classSecure = map[string]string{
 
 // Nameable reports whether a device of class may be named safe for the
 // secure-direction command secure: the one name its class allows, and
-// none for an unknown or unnamable class.
+// none for an unknown or unnamable class. A device so named also needs
+// every safeguard its class needs (Device.Named).
 func Nameable(class, secure string) bool {
 	want, ok := classSecure[class]
 	return ok && want != "" && secure == want
+}
+
+// The safeguards a device can be recorded as having (NET-2 Safety
+// devices). An actuator whose secure direction moves something that can
+// trap or strike a person stops and reverses when something is in its way,
+// and warns before it moves.
+const (
+	SafeguardObstructionReversal = "obstruction-reversal"
+	SafeguardPreCloseWarning     = "pre-close-warning"
+)
+
+// classNeeds is the safeguards each class needs before it can be named,
+// by class, never by make or model (NET-2: "a garage door can be named
+// only if it has obstruction reversal and a pre-close warning"). A class
+// added to NET-2 whose secure direction moves something onto a person
+// adds a row here.
+var classNeeds = map[string][]string{
+	ClassGarageDoor: {SafeguardObstructionReversal, SafeguardPreCloseWarning},
+}
+
+// Needs is the safeguards a device of class needs before it can be named,
+// sorted; none for most classes.
+func Needs(class string) []string { return slices.Clone(classNeeds[class]) }
+
+// Named reports whether d may carry its secure-direction command: its
+// class allows that name (Nameable) and it records every safeguard its
+// class needs. The signed policy refuses any other naming, so every
+// device in a policy in force that names a command is Named.
+func (d Device) Named() bool {
+	if d.Everyday || !Nameable(d.Class, d.Secure) {
+		return false
+	}
+	for _, s := range classNeeds[d.Class] {
+		if !slices.Contains(d.Safeguards, s) {
+			return false
+		}
+	}
+	return true
 }
 
 // Recorder reports whether the device is a camera or a microphone.
@@ -280,10 +357,19 @@ func (d Document) SecureCommand(device, cmd string) bool {
 // empty, so equal documents encode equally. It copies, never aliasing d.
 func (d Document) normal() Document {
 	d.Destinations = sorted(d.Destinations)
+	if len(d.Caps) == 0 {
+		d.Caps = nil // omitted, as Decode reads it
+	} else {
+		d.Caps = maps.Clone(d.Caps)
+	}
 	devs := make([]Device, len(d.Devices))
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
 		dev.Control, dev.Stream = ports(dev.Control), ports(dev.Stream)
+		dev.MDNS = mdnsNames(dev.MDNS)
+		if dev.Safeguards = sorted(dev.Safeguards); len(dev.Safeguards) == 0 {
+			dev.Safeguards = nil // omitted, as Decode reads it
+		}
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -320,6 +406,78 @@ func ports(s []Port) []Port {
 	return slices.Compact(out)
 }
 
+// mdnsNames is s sorted by its labels, copied, without exact repeats; nil
+// when empty, so a device with none encodes no field.
+func mdnsNames(s [][]string) [][]string {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([][]string, len(s))
+	for i, n := range s {
+		out[i] = slices.Clone(n)
+	}
+	slices.SortFunc(out, slices.Compare)
+	return slices.CompactFunc(out, slices.Equal)
+}
+
+// MDNSKey is an mDNS name's identity: its labels, ASCII folded to lower
+// case as mDNS compares names (RFC 6762 §16), each after its length.
+func MDNSKey(n []string) string {
+	var b strings.Builder
+	for _, l := range n {
+		b.WriteByte(byte(len(l)))
+		for i := range len(l) {
+			c := l[i]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// MDNSName is n as a person reads it: its labels joined by dots, which no
+// label holds (mdnsName).
+func MDNSName(n []string) string { return strings.Join(n, ".") }
+
+// mdnsName: n is a host, <host>.local, or a service instance,
+// <instance>.<_service>.<_tcp or _udp>.local (RFC 6762 §3, RFC 6763
+// §4.1), whose every label is one to 63 bytes a person reads as it is
+// (mdnsLabel); so at most 140 bytes on the wire, inside DNS's 255.
+func mdnsName(n []string) bool {
+	if slices.ContainsFunc(n, func(l string) bool { return !mdnsLabel(l) }) {
+		return false
+	}
+	switch {
+	case len(n) < 2 || !strings.EqualFold(n[len(n)-1], "local"):
+		return false
+	case len(n) == 2:
+		return !strings.HasPrefix(n[0], "_")
+	case len(n) == 4:
+		return len(n[1]) > 1 && n[1][0] == '_' && (strings.EqualFold(n[2], "_tcp") || strings.EqualFold(n[2], "_udp"))
+	}
+	return false
+}
+
+// mdnsLabel is one to 63 bytes of valid UTF-8, not blank, with no dot,
+// control, format (bidi, zero-width, tag), separator other than a plain
+// space, variation selector or invisible filler: the pair relay's own rule
+// for a label it passes, and no dot, so a name shown joined by dots reads
+// as one set of labels.
+func mdnsLabel(l string) bool {
+	if l == "" || len(l) > 63 || !utf8.ValidString(l) || strings.TrimSpace(l) == "" || strings.Contains(l, ".") {
+		return false
+	}
+	for _, r := range l {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) ||
+			unicode.Is(unicode.Zs, r) && r != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
 func sorted(s []string) []string {
 	out := append([]string{}, s...)
 	slices.Sort(out)
@@ -329,11 +487,16 @@ func sorted(s []string) []string {
 // check refuses a document with a nameless or duplicate device, a Wi-Fi
 // identity that is not a name, an unknown network, label, class or port, an
 // everyday device with a safety class, a secure command its class cannot be
-// named for, a stream port on a device that is not a camera or microphone, a
+// named for or that lacks a safeguard its class needs, a safeguard its
+// class does not need, a stream port on a device that is not a camera or microphone, a
 // drone reference that is not a hash, a pair, rule or hold naming no device,
-// or an empty window.
+// an empty window, an mDNS name that is not one, or a byte cap that is 0,
+// is for no destination, or makes the caps sum past 2^64-1 (so no group's
+// cap, a sum of some of them, overflows); with ErrNameHeld one mDNS name
+// pinned twice; and with ErrTooManyNames a device with more than MaxMDNS.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
+	held := map[string]string{}
 	for i, dev := range d.Devices {
 		if !name(dev.ID) {
 			return bad("device id %q", dev.ID)
@@ -361,8 +524,16 @@ func (d Document) check() error {
 		if dev.Everyday && dev.Class != "" {
 			return bad("device %q: class %q is on the safety list", dev.ID, dev.Class)
 		}
+		for _, g := range dev.Safeguards {
+			if !slices.Contains(classNeeds[dev.Class], g) { // an everyday device has no class
+				return bad("device %q: a %q records no safeguard %q", dev.ID, dev.Class, g)
+			}
+		}
 		if dev.Secure != "" && (dev.Everyday || !Nameable(dev.Class, dev.Secure)) {
 			return bad("device %q: a %q cannot be named safe for %q", dev.ID, dev.Class, dev.Secure)
+		}
+		if dev.Secure != "" && !dev.Named() {
+			return bad("device %q: a %q is named safe for %q only with %s recorded", dev.ID, dev.Class, dev.Secure, strings.Join(classNeeds[dev.Class], " and "))
 		}
 		if len(dev.Stream) > 0 && !dev.Recorder() {
 			return bad("device %q: stream ports need a camera or microphone", dev.ID)
@@ -372,6 +543,24 @@ func (d Document) check() error {
 				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
 			}
 		}
+		if len(dev.MDNS) > MaxMDNS {
+			return fmt.Errorf("%w: %s pins %d names, and one device pins at most %d; drop %d before signing", ErrTooManyNames, dev.ID, len(dev.MDNS), MaxMDNS, len(dev.MDNS)-MaxMDNS)
+		}
+		for _, n := range dev.MDNS {
+			if !mdnsName(n) {
+				return bad("device %q mDNS name %q", dev.ID, n)
+			}
+			k := MDNSKey(n)
+			// The name is quoted in printable ASCII, as the signed screen
+			// shows it, so no letter in it reorders or imitates the line.
+			switch other, ok := held[k]; {
+			case ok && other == dev.ID:
+				return fmt.Errorf("%w: %s is listed twice for %s; keep one before signing", ErrNameHeld, strconv.QuoteToASCII(MDNSName(n)), dev.ID)
+			case ok:
+				return fmt.Errorf("%w: %s is %s's and %s's; rename one before signing", ErrNameHeld, strconv.QuoteToASCII(MDNSName(n)), other, dev.ID)
+			}
+			held[k] = dev.ID
+		}
 	}
 	if d.Drone != "" && !hash(d.Drone) {
 		return bad("drone policy %q", d.Drone)
@@ -380,6 +569,20 @@ func (d Document) check() error {
 		if !name(h) {
 			return bad("destination %q", h)
 		}
+	}
+	var total uint64
+	for _, h := range slices.Sorted(maps.Keys(d.Caps)) {
+		n := d.Caps[h]
+		if !slices.Contains(d.Destinations, h) {
+			return bad("byte cap for %q, which is not a destination", h)
+		}
+		if n == 0 {
+			return bad("byte cap 0 for %q: leave it out", h)
+		}
+		if total+n < total {
+			return bad("byte caps sum past 2^64-1")
+		}
+		total += n
 	}
 	for _, p := range d.Pairs {
 		if p.A == p.B || d.Device(p.A) == nil || d.Device(p.B) == nil {

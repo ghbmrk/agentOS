@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: CH-4, CLK-1, STO-2
@@ -12,19 +14,19 @@ import (
 // The code seed's store form reads back as written, and anything off its
 // shape (no tag, no seed, an oversized seed, a negative step) is refused.
 func TestCodeSeedRoundTrip(t *testing.T) {
-	s := CodeSeed{Seed: bytes.Repeat([]byte{7}, 20), Step: 59000123}
+	s := CodeSeed{Seed: secret.Hide(bytes.Repeat([]byte{7}, 20)), Step: 59000123}
 	b, err := EncodeCodeSeed(s)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := ParseCodeSeed(b)
-	if err != nil || !bytes.Equal(got.Seed, s.Seed) || got.Step != s.Step {
+	if err != nil || !bytes.Equal(got.Seed.Get(), s.Seed.Get()) || got.Step != s.Step {
 		t.Fatalf("round trip: %+v %v", got, err)
 	}
 	for name, v := range map[string]CodeSeed{
 		"no seed":       {Step: 1},
-		"too long":      {Seed: make([]byte, MaxCodeSeed+1)},
-		"negative step": {Seed: []byte{1}, Step: -1},
+		"too long":      {Seed: secret.Hide(make([]byte, MaxCodeSeed+1))},
+		"negative step": {Seed: secret.Hide([]byte{1}), Step: -1},
 	} {
 		if _, err := EncodeCodeSeed(v); !errors.Is(err, ErrCodeSeed) {
 			t.Errorf("%s: encoded", name)
@@ -48,7 +50,7 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 	key := bytes.Repeat([]byte{1}, 32)
 	other := bytes.Repeat([]byte{2}, 32)
 	seed := []byte("canary-seed-0123456789")
-	blob, err := SealCodeSeed(key, CodeSeed{Seed: seed, Step: 9})
+	blob, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide(seed), Step: 9})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 		t.Fatal("the sealed file holds the seed in the clear")
 	}
 	got, err := OpenCodeSeed(key, blob)
-	if err != nil || !bytes.Equal(got.Seed, seed) || got.Step != 9 {
+	if err != nil || !bytes.Equal(got.Seed.Get(), seed) || got.Step != 9 {
 		t.Fatalf("open: %+v %v", got, err)
 	}
 	if _, err := OpenCodeSeed(other, blob); !errors.Is(err, ErrCodeSeed) {
@@ -79,15 +81,15 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 // if a bound is off by one either way.
 func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	for name, v := range map[string]CodeSeed{
-		"largest seed": {Seed: make([]byte, MaxCodeSeed)},
-		"step 0":       {Seed: []byte{1}, Step: 0},
-		"largest step": {Seed: []byte{1}, Step: 1 << 62},
+		"largest seed": {Seed: secret.Hide(make([]byte, MaxCodeSeed))},
+		"step 0":       {Seed: secret.Hide([]byte{1}), Step: 0},
+		"largest step": {Seed: secret.Hide([]byte{1}), Step: 1 << 62},
 	} {
 		b, err := EncodeCodeSeed(v)
 		if err != nil {
 			t.Fatalf("%s: not encoded: %v", name, err)
 		}
-		if got, err := ParseCodeSeed(b); err != nil || got.Step != v.Step || !bytes.Equal(got.Seed, v.Seed) {
+		if got, err := ParseCodeSeed(b); err != nil || got.Step != v.Step || !bytes.Equal(got.Seed.Get(), v.Seed.Get()) {
 			t.Fatalf("%s: not parsed: %+v %v", name, got, err)
 		}
 	}
@@ -107,7 +109,7 @@ func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	}
 
 	key := bytes.Repeat([]byte{1}, 32)
-	blob, err := SealCodeSeed(key, CodeSeed{Seed: make([]byte, MaxCodeSeed), Step: 3})
+	blob, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide(make([]byte, MaxCodeSeed)), Step: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +122,7 @@ func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
 	if _, err := OpenCodeSeed(key, append(bytes.Clone(blob), 0)); !errors.Is(err, ErrCodeSeed) {
 		t.Fatalf("a file past MaxSealedSeed: %v", err)
 	}
-	least, err := SealCodeSeed(key, CodeSeed{Seed: []byte{1}, Step: 4})
+	least, err := SealCodeSeed(key, CodeSeed{Seed: secret.Hide([]byte{1}), Step: 4})
 	if err != nil {
 		t.Fatal(err)
 	}

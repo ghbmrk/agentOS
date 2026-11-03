@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -348,7 +349,7 @@ func TestCounterAnchorOnTheTPMCounter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
 	dir, priv := ownDir(t), headKey(t)
 	if err := InitCounterAnchor(dir, noLog(t), c, priv); err != nil {
 		t.Fatal(err)

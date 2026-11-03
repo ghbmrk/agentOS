@@ -8,7 +8,6 @@ import sys
 
 USB4_MIN_MBIT = 2350  # 94% of a 2.5GbE port 2; USB4 must at least match it
 USB4_MIN_S = 60
-AP_MIN_HELD_S = 600
 
 
 def score(m):
@@ -27,17 +26,6 @@ def score(m):
             why.append("%r Mbit/s (need >= %d)" % (m.get("mbit_per_s"), USB4_MIN_MBIT))
         if m.get("stalls") != 0:
             why.append("stalls: %r (need 0)" % m.get("stalls"))
-    elif kind == "ap":
-        if m.get("ap_mode_listed") is not True:
-            why.append("AP mode not listed by the radio")
-        if m.get("akm") != ["SAE"]:
-            why.append("key management %r (need only SAE)" % (m.get("akm"),))
-        if m.get("client_isolation") is not True:
-            why.append("client isolation off")
-        if m.get("phone_joined") is not True:
-            why.append("phone did not join")
-        if not isinstance(m.get("held_s"), (int, float)) or m["held_s"] < AP_MIN_HELD_S:
-            why.append("held %r s (need >= %d)" % (m.get("held_s"), AP_MIN_HELD_S))
     else:
         why.append("unknown spike %r" % kind)
     return not why, why

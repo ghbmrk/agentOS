@@ -114,8 +114,6 @@ func tokenProvider(calls *atomic.Int32, refresh func() map[string]any) http.Hand
 			json.NewEncoder(w).Encode(refresh())
 		case r.URL.Path == "/oauth/token":
 			json.NewEncoder(w).Encode(map[string]any{"access_token": "real-access-1", "refresh_token": "real-refresh-1", "id_token": fakeJWT("acct-1")})
-		case r.URL.Path == "/api/accounts/deviceauth/usercode":
-			io.WriteString(w, `{"device_auth_id":"dev-1","user_code":"ABCD-12345","interval":"5"}`)
 		case r.URL.Path == "/backend-api/codex/models":
 			io.WriteString(w, `{"models":[]}`)
 		default:
@@ -167,7 +165,7 @@ func TestPlanSignInShowsTheProvidersPageAndCode(t *testing.T) {
 		t.Fatalf("while signing: %+v", st)
 	}
 	_, guest := cli.started()
-	if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest()); code != 200 || strings.Contains(body, "real-") {
+	if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || strings.Contains(body, "real-") {
 		t.Fatalf("the CLI's code exchange: %d %q", code, body)
 	}
 	cli.waitStopped(t)
@@ -292,7 +290,7 @@ func TestPlanModeGate(t *testing.T) {
 			t.Fatalf("begun: %+v", b)
 		}
 		_, guest := cli.started()
-		if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest()); code != 200 {
+		if code, body := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 {
 			t.Fatalf("the sign-in without consent: %d %q", code, body)
 		}
 		cli.waitStopped(t)
@@ -429,8 +427,9 @@ func TestPlanSignInLateApprovalAfterTheWall(t *testing.T) {
 	}
 	_, guest := cli.started()
 	exchanged := make(chan int, 1)
+	exchange := codeRequest(t, login, guest)
 	go func() {
-		code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest())
+		code, _ := serve(PlanGuest{Login: login, Guest: guest}, exchange)
 		exchanged <- code
 	}()
 	<-reached
@@ -608,7 +607,7 @@ func servedOwner(t *testing.T, hosts ...*PlanHost) PlanOwner {
 // with a store of its own: a second wired plan.
 func namedLogin(t *testing.T, name string, mode plan.Mode, h http.Handler) *plan.Login {
 	t.Helper()
-	srv := httptest.NewTLSServer(h)
+	srv := httptest.NewTLSServer(deviceSteps(h))
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())

@@ -20,9 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
 	"go/types"
 	"io"
 	"os"
@@ -32,6 +29,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 const modPrefix = "github.com/ghbmrk/agentos/broker/"
@@ -114,75 +113,32 @@ type build struct {
 
 // builds are the settings the repo ships under: the host's with cgo on (CI
 // runs go test -race, which needs the C toolchain), image.yml's
-// agentos_e2e build of cmd/agentos-egress, and a non-linux GOOS, which
-// compiles each !linux file.
+// agentos_e2e build of cmd/agentos-egress with image/infer.sh's
+// infer_llamacpp build of cmd/agentos-infer (no file needs one tag without
+// the other), image/camnode/build.sh's linux/arm64 build, which compiles
+// each linux arm64-only file, and a non-linux GOOS, which compiles each
+// !linux file.
 var builds = []build{
 	{name: "host+cgo", env: []string{"CGO_ENABLED=1"}},
-	{name: "agentos_e2e", env: []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}, flags: []string{"-tags=agentos_e2e"}},
+	{name: "agentos_e2e", env: []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}, flags: []string{"-tags=agentos_e2e,infer_llamacpp"}},
+	{name: "linux-arm64", env: []string{"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0"}},
 	{name: "darwin", env: []string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0"}, partial: true},
 }
 
-type listed struct {
-	ImportPath      string
-	Dir             string
-	Export          string
-	CompiledGoFiles []string
-	DepOnly         bool
-	Error           *struct{ Err string }
-}
-
-// load runs go list under b on patterns with their dependencies and
-// returns the packages the patterns name and an importer over everyone's
-// export data. Under a partial build it leaves out each package that does
-// not compile.
-func load(t *testing.T, fset *token.FileSet, b build, patterns ...string) ([]listed, types.Importer) {
+// load lists patterns under b with their dependencies through the shared
+// lint loader and type-checks the packages they name. Under a partial build
+// it leaves out each package that does not compile.
+func load(t *testing.T, b build, patterns ...string) *lintload.Loaded {
 	t.Helper()
-	args := append([]string{"list", "-export", "-compiled", "-deps",
-		"-json=ImportPath,Dir,Export,CompiledGoFiles,DepOnly,Error"}, b.flags...)
+	lb := lintload.Build{Env: b.env, Flags: b.flags, Partial: b.partial}
 	if b.overlay != "" {
-		args = append(args, "-overlay="+b.overlay)
+		lb.Flags = append(append([]string{}, b.flags...), "-overlay="+b.overlay)
 	}
-	if b.partial {
-		args = append(args, "-e")
-	}
-	cmd := exec.Command("go", append(args, patterns...)...)
-	cmd.Dir = moduleRoot
-	cmd.Env = append(os.Environ(), b.env...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	l, err := lintload.Load(moduleRoot, lb, patterns...)
 	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.String())
+		t.Fatal(err)
 	}
-	export := map[string]string{}
-	var targets []listed
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var p listed
-		if err := dec.Decode(&p); err == io.EOF {
-			break
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		if b.partial && (p.Error != nil || p.Export == "") {
-			continue // a dependent of a failed package has no error, only no export data
-		}
-		if p.Error != nil {
-			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
-		}
-		export[p.ImportPath] = p.Export
-		if !p.DepOnly {
-			targets = append(targets, p)
-		}
-	}
-	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
-		e, ok := export[path]
-		if !ok || e == "" {
-			return nil, fmt.Errorf("no export data for %s", path)
-		}
-		return os.Open(e)
-	})
-	return targets, imp
+	return l
 }
 
 // symbol names a core function or method as core.txt does, or "" when obj
@@ -217,57 +173,29 @@ func symbol(obj types.Object, core map[string]bool) string {
 // patterns name, other than core and wiring packages, and returns one line
 // per package and write path it calls that core.txt does not open or allow.
 func writePaths(t *testing.T, l list, b build, patterns ...string) []string {
+	found, _ := writePathsLoaded(t, l, b, patterns...)
+	return found
+}
+
+// writePathsLoaded is writePaths, also returning the load, for Unread.
+func writePathsLoaded(t *testing.T, l list, b build, patterns ...string) ([]string, *lintload.Loaded) {
 	t.Helper()
-	fset := token.NewFileSet()
 	// Load the core with the patterns, so every core type is in hand for
 	// the interface pass whatever the patterns import.
 	all := append([]string{}, patterns...)
 	for p := range l.core {
 		all = append(all, "./"+p)
 	}
-	targets, imp := load(t, fset, b, all...)
-	coreTypes := namedTypes(t, imp, l.core, b.partial)
-	replaced := map[string]string{}
-	if b.overlay != "" {
-		o, err := os.ReadFile(b.overlay)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var ov struct{ Replace map[string]string }
-		if err := json.Unmarshal(o, &ov); err != nil {
-			t.Fatal(err)
-		}
-		replaced = ov.Replace
-	}
+	ld := load(t, b, all...)
+	fset := ld.Fset
+	coreTypes := namedTypes(t, ld.Importer, l.core, b.partial)
 	var found []string
-	for _, p := range targets {
-		pkg, ok := strings.CutPrefix(p.ImportPath, modPrefix)
+	for _, p := range ld.Packages {
+		pkg, ok := strings.CutPrefix(p.Path, modPrefix)
 		if !ok || l.core[pkg] || l.wiring[pkg] {
 			continue
 		}
-		var files []*ast.File
-		for _, name := range p.CompiledGoFiles {
-			if !filepath.IsAbs(name) {
-				name = filepath.Join(p.Dir, name)
-			}
-			src := name
-			if r, ok := replaced[name]; ok {
-				src = r
-			}
-			text, err := os.ReadFile(src)
-			if err != nil {
-				t.Fatal(err)
-			}
-			af, err := parser.ParseFile(fset, name, text, parser.SkipObjectResolution)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files = append(files, af)
-		}
-		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
-		if _, err := (&types.Config{Importer: imp}).Check(p.ImportPath, fset, files, info); err != nil {
-			t.Fatalf("type-check %s: %v", p.ImportPath, err)
-		}
+		info := p.Info
 		seen := map[string]bool{}
 		for id, obj := range info.Uses {
 			sym := symbol(obj, l.core)
@@ -297,7 +225,7 @@ func writePaths(t *testing.T, l list, b build, patterns ...string) []string {
 		}
 	}
 	sort.Strings(found)
-	return found
+	return found, ld
 }
 
 // namedTypes returns every non-generic, non-interface named type the core
@@ -355,18 +283,99 @@ func throughInterface(iface *types.Interface, coreTypes []*types.Named, core map
 
 func TestNoWritePathOutsideTheCore(t *testing.T) {
 	l := readList(t)
+	var loads []*lintload.Loaded
 	for _, b := range builds {
 		t.Run(b.name, func(t *testing.T) {
-			for _, f := range writePaths(t, l, b, "./...") {
+			found, ld := writePathsLoaded(t, l, b, "./...")
+			for _, f := range found {
 				t.Error(f + "; submit an intent instead, or open or allow it in broker/core/core.txt with a reason")
 			}
+			loads = append(loads, ld)
 		})
+	}
+	if t.Failed() {
+		return
+	}
+	// Every file some build of these platforms compiles is read by one of
+	// the builds, or named in unreadable.
+	unread, err := lintload.Unread(loads...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.Abs(moduleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range unreadErrors(root, unread, unreadable) {
+		t.Error(e)
 	}
 }
 
+// unreadErrors compares the files no build read (absolute) with listed
+// (keyed relative to root): an unread file listed names no error, an
+// unread file not listed names one, and so does a listed file no build
+// left unread.
+func unreadErrors(root string, unread []string, listed map[string]string) []string {
+	var errs []string
+	left := map[string]bool{}
+	for f := range listed {
+		left[f] = true
+	}
+	for _, f := range unread {
+		rel, _ := filepath.Rel(root, f)
+		rel = filepath.ToSlash(rel)
+		if listed[rel] == "" {
+			errs = append(errs, rel+": no build reads it, so its write paths go unchecked; add a build that compiles it")
+		}
+		delete(left, rel)
+	}
+	var stale []string
+	for f := range left {
+		stale = append(stale, f)
+	}
+	sort.Strings(stale)
+	for _, f := range stale {
+		errs = append(errs, "unreadable lists "+f+", which a build now reads or which is gone; remove the entry")
+	}
+	return errs
+}
+
+// The unread comparison passes a listed file and fails on an unread file
+// no entry names and on an entry no build left unread (#4447).
+func TestUnreadErrors(t *testing.T) {
+	root := filepath.FromSlash("/m")
+	abs := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
+	listed := map[string]string{"a/listed.go": "why"}
+	for _, c := range []struct {
+		name   string
+		unread []string
+		want   []string
+	}{
+		{"listed", []string{abs("a/listed.go")}, nil},
+		{"unlisted", []string{abs("a/listed.go"), abs("b/new.go")}, []string{"b/new.go: no build reads it"}},
+		{"stale", nil, []string{"unreadable lists a/listed.go, which a build now reads"}},
+	} {
+		got := unreadErrors(root, c.unread, listed)
+		ok := len(got) == len(c.want)
+		for i := range c.want {
+			ok = ok && strings.HasPrefix(got[i], c.want[i])
+		}
+		if !ok {
+			t.Errorf("%s: got %q, want prefixes %q", c.name, got, c.want)
+		}
+	}
+}
+
+// unreadable are the files no build here can compile, each with why its
+// write paths are held by review instead.
+var unreadable = map[string]string{
+	"cmd/agentos-camdecode/camdecode/h264.go": "cgo against libavcodec, whose headers CI does not install (image/camdecode.sh builds it); the decoder child decodes frames and holds no core package",
+	"cmd/agentos-vision/runtime_onnx.go":      "links ONNX Runtime through cgo, which only vision-real.yml installs; the inference child holds no core package",
+}
+
 // Each build reads the files only it compiles: a write path in a file
-// behind cgo, the agentos_e2e tag or !linux is found under that build and
-// no other. The package calls grants.Gate.Decide from all three files, and
+// behind cgo, the agentos_e2e tag, linux arm64 or !linux is found under that
+// build and no other. The package calls grants.Gate.Decide from all four files, and
 // writePaths names a package's write path once, at the first file it reads.
 func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 	// The overlay fills core/testdata itself, which holds no Go file: cgo
@@ -387,10 +396,11 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 		dir + "/cgo.go":   decide("cgo", "Cgo"),
 		dir + "/e2e.go":   decide("agentos_e2e", "E2E"),
 		dir + "/other.go": decide("!linux", "Other"),
+		dir + "/arm64.go": decide("linux && arm64", "Arm64"),
 	}
-	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "darwin": "other.go"}
-	if runtime.GOOS != "linux" {
-		want["host+cgo"] = "" // other.go compiles on the host too; either file may come first
+	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "linux-arm64": "arm64.go", "darwin": "other.go"}
+	if runtime.GOOS != "linux" || runtime.GOARCH == "arm64" {
+		want["host+cgo"] = "" // other.go or arm64.go compiles on the host too; either file may come first
 	}
 	ov := overlay(t, srcs)
 	l := readList(t)
@@ -399,12 +409,17 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("no expectation for build %s", b.name)
 		}
+		delete(want, b.name)
 		b.overlay = ov
 		found := writePaths(t, l, b, "./"+dir)
 		if len(found) != 1 || !strings.HasPrefix(found[0], dir+" calls core write path grants.Gate.Decide ") ||
-			!strings.Contains(found[0], "/"+file+":") {
+			file != "" && !strings.Contains(found[0], "/"+file+":") {
 			t.Errorf("%s: want exactly the grants.Gate.Decide call in %s, got %q", b.name, file, found)
 		}
+	}
+	// Each expected build exists, so dropping one from builds fails here.
+	for name := range want {
+		t.Errorf("builds has no %s build; its files go unread", name)
 	}
 }
 
@@ -460,8 +475,15 @@ func TestEveryCoreListEntryExists(t *testing.T) {
 		pats = append(pats, "./"+p)
 	}
 	sort.Strings(pats)
-	fset := token.NewFileSet()
-	_, imp := load(t, fset, build{}, pats...) // fails on a package that does not exist
+	var paths []string
+	for _, p := range pats {
+		paths = append(paths, modPrefix+strings.TrimPrefix(p, "./"))
+	}
+	ld, err := lintload.Load(moduleRoot, lintload.Build{Also: paths}) // fails on a package that does not exist
+	if err != nil {
+		t.Fatal(err)
+	}
+	imp := ld.Importer
 	syms := append([]string{}, l.open...)
 	for _, s := range l.allow {
 		syms = append(syms, s...)

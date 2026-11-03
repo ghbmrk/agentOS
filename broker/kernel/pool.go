@@ -332,7 +332,7 @@ func (k *Kernel) Reserve(now int64, pool string, reserve int64, cos ...key.Cosig
 // until that window resets. Past the reset time the provider gave, the
 // reopening is logged as a widening.
 func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
-	if k.log.broken {
+	if (*k.log.p).broken {
 		// The pool may have been reopened by a widening whose anchor failed
 		// (KRN-5, #2613 item 13).
 		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}

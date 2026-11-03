@@ -2,7 +2,7 @@
 // as root, it opens the sealed store's tpm slot, derives the kernel's keys,
 // closes the store, and becomes the kernel process: it drops to the kernel's
 // uid and gid and execs the kernel main, with the keys on an inherited pipe
-// (descriptor 3):
+// (handoff.KeyFD):
 //
 //	agentos-unlock -store /var/lib/agentos-store/store -uid 980 -gid 980 \
 //	    -exec /usr/lib/agentos/agentos-kernel -- -log ... -owner-sock ...
@@ -10,33 +10,19 @@
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
 // it before the exec, and the kernel gets only the log key, the head key,
 // the clerk root key, the log anchor's counter and the owner's anchors on
-// descriptor 3, and one connection to the TPM on descriptor 4 for that
+// handoff.KeyFD, and one connection to the TPM on handoff.TPMFD for that
 // counter (LOG-2, STO-1), since the kernel's uid can open no TPM itself. Before that hand-off it caps
 // the slot's boot path (#2977), so that connection unseals nothing for the
 // rest of the boot. The box's policy key and the store's anchor come
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
 //
-// With -clerk-anchors and -log, it also writes the owner's hardware keys to
-// a root-owned file for the clerks, which check every view the kernel hands
-// them against keys the kernel did not hand them (D-146, MAIL-keys). Those
-// keys come from the store only: its kernel/anchors entry, or, on a box whose
-// setup put them in the kernel's log, its clerks/anchors entry, which this
-// step copies from the log's first entry at the first boot that finds one
-// (#2995).
-//
-// With -recovery-request, it also carries out the owner's lost-card request
-// (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
-// the kernel approved for the store's current backup recipient makes a new
-// card, replaces the recovery slot, the passphrase slot and the recipient
-// with its recovery key and passphrase in one write, and hands the card
-// to the kernel, which shows it on the owner's page. A request that is not
-// one is ignored, with one line on stderr, and the box starts as ever.
-//
-// With -checker-seed, it also writes the owner's code-generator seed from
-// the store, sealed under the checker's clerk key, to a file only root
-// reads, for the checker's unit to load at each start (CH-4, MIG-4-exit-c2).
-// The kernel hands the checker that key, so the kernel never holds the seed.
+// With -clerk-anchors and -log, it also writes the owner's hardware keys for
+// the clerks (clerkAnchors; D-146, #2995); with -recovery-request, on a boot
+// that opened the tpm slot, it carries out the owner's lost-card request
+// (lostCard; REC-4, route B of D-201); with -checker-seed, it writes the
+// checker's sealed code seed (writeCheckerSeed; CH-4, MIG-4-exit-c2). Each
+// function's comment says how.
 package main
 
 import (
@@ -60,6 +46,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card/words"
@@ -69,6 +56,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -119,8 +107,9 @@ type config struct {
 	// of this PC's tpm slot, and the hand-off names that slot, so the
 	// kernel cuts the edge (§12.2, HW-15 "move"). Only tests set it: no
 	// flag takes it until the unknown-host unlock is built (ASSUMPTIONS
-	// EDGE-link-core-b-3).
-	passphrase []byte
+	// EDGE-link-core-b-3). A Secret, so a line that formats the config
+	// shows no passphrase (CLK-1, #4833).
+	passphrase secret.Secret[[]byte]
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -186,9 +175,9 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	defer t.Close()
 	var k handoff.KernelKeys
 	defer k.Wipe()
-	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase}
+	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase.Get()}
 	k.Slot = handoff.SlotPassphrase
-	if c.passphrase == nil {
+	if c.passphrase.Get() == nil {
 		pk, anchor, err := pins(t)
 		if err != nil {
 			return nil, err
@@ -215,15 +204,21 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if err := tpmseal.Cap(t, tpmSelections(st)); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
 	}
-	if k.Log, err = st.LogKey(); err != nil {
+	// The log key and the clerk root come back as arrays: each local copy
+	// is cleared once its Secret holds it, so k.Wipe leaves neither behind
+	// (STO-2a-e: best-effort, the #4835 review).
+	logKey, err := st.LogKey()
+	k.Log = secret.Hide(logKey)
+	if clear(logKey[:]); err != nil {
 		return nil, err
 	}
-	if k.Head, err = st.HeadKey(); err != nil {
+	head, err := st.HeadKey()
+	if k.Head = secret.Hide(head); err != nil {
 		return nil, err
 	}
 	if request != nil {
-		k.NewRecovery, err = lostCard(st, request, k.Head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
-		if err != nil {
+		rec, err := lostCard(st, request, head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
+		if k.NewRecovery = secret.Hide(rec); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the card you hold: your lost-card request: %v\n", err)
 		} else if err := os.Remove(c.request); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove the lost-card request I carried out: %v\n", err)
@@ -262,20 +257,24 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	if ok {
-		k.PageCA, err = handoff.ParsePageCA(raw)
+		ca, err := handoff.ParsePageCA(raw)
+		k.PageCA = secret.Hide(ca)
 		clear(raw)
 		if err != nil {
 			return nil, fmt.Errorf("agentos-unlock: the page authority in my store: %w", err)
 		}
 	}
-	if k.LinkKey, k.FirstEdge, err = linkKeys(st); err != nil {
+	link, edge, err := linkKeys(st)
+	if k.LinkKey, k.FirstEdge = secret.Hide(link), edge; err != nil {
 		return nil, err
 	}
-	if k.ClerkRoot, err = st.ClerkRoot(); err != nil {
+	root, err := st.ClerkRoot()
+	k.ClerkRoot = secret.Hide(root)
+	if clear(root[:]); err != nil {
 		return nil, err
 	}
 	if c.checkerSeed != "" {
-		writeCheckerSeed(c.checkerSeed, st, &k.ClerkRoot)
+		writeCheckerSeed(c.checkerSeed, st, k.ClerkRoot.Ref())
 	}
 	if c.clerkAnchors != "" {
 		ca, err := clerkAnchors(st, k, c.log)
@@ -517,7 +516,7 @@ func clerkAnchors(st *seal.Store, k handoff.KernelKeys, logPath string) ([]key.P
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log: %v\n", err)
 		return nil, nil
 	}
-	a, ok, err := kernel.LoggedAnchors(first, k.Log, k.Head.Public().(ed25519.PublicKey))
+	a, ok, err := kernel.LoggedAnchors(first, k.Log.Get(), k.Head.Get().Public().(ed25519.PublicKey))
 	if err != nil || !ok {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log's first entry: %v\n", err)
@@ -699,10 +698,12 @@ func tpmSelections(st *seal.Store) [][]uint {
 	return out
 }
 
-// counterRec is handoff.CounterEntry's value, as enrollment writes it.
+// counterRec is handoff.CounterEntry's value, as enrollment writes it. Its
+// auth sits behind a pointer to a pointer, which fmt prints as an address
+// and JSON reads through (CLK-1, #4833).
 type counterRec struct {
 	Ref  json.RawMessage `json:"ref"`
-	Auth []byte          `json:"auth"`
+	Auth **[]byte        `json:"auth"`
 }
 
 // counter reads the log anchor's counter from the store. A store without
@@ -720,12 +721,16 @@ func counter(st *seal.Store) (handoff.Counter, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store: %w", err)
 	}
+	var auth []byte
+	if r.Auth != nil { // JSON's null leaves it nil
+		auth = **r.Auth
+	}
 	ref, err := tpmseal.ParseCounterRef(r.Ref)
-	if err != nil || len(r.Auth) == 0 {
-		clear(r.Auth)
+	if err != nil || len(auth) == 0 {
+		clear(auth)
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store does not read")
 	}
-	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: r.Auth}, nil
+	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)}, nil
 }
 
 // kernelTPM opens the kernel's own connection to the TPM at path: the
@@ -882,20 +887,25 @@ func getres(trap uintptr) (r, e, s int) {
 	return int(a), int(b), int(c)
 }
 
-// inherit makes each descriptor survive the exec as the number it maps to;
-// every other descriptor Go opened is close-on-exec. Each is first copied
-// above every target, so moving one never overwrites another still to move.
+// inherit makes every descriptor above 2 close-on-exec (Linux 5.11), so none
+// a parent left open reaches the exec, then moves each onto the number it
+// maps to: handoff's, which no descriptor of the runtime's can be (#4474).
+// A target already open refuses the move before any descriptor moves, since
+// Dup3 would close what holds it (#4523).
 func inherit(fds map[int]int) error {
-	high := map[int]int{}
-	for fd, want := range fds {
-		h, _, e := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 16)
-		if e != 0 {
-			return e
-		}
-		high[int(h)] = want
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return err
 	}
-	for h, want := range high {
-		if err := syscall.Dup3(h, want, 0); err != nil {
+	for _, want := range fds {
+		if _, err := unix.FcntlInt(uintptr(want), unix.F_GETFD, 0); err != unix.EBADF {
+			if err != nil {
+				return fmt.Errorf("agentos-unlock: descriptor %d at hand-off: %w", want, err)
+			}
+			return fmt.Errorf("agentos-unlock: descriptor %d is already open at hand-off", want)
+		}
+	}
+	for fd, want := range fds {
+		if err := syscall.Dup3(fd, want, 0); err != nil {
 			return err
 		}
 	}

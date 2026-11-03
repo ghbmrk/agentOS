@@ -230,9 +230,7 @@ func TestRestartReissuesWhatTheOwnerWasAsked(t *testing.T) {
 	x := sam()
 	x.Record, x.Item.Amount, x.Item.Facts.Amount = "inv-2", "$900.00", 90000
 	r.ver.set("inv-2", x) // changed while the box was down
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.advance(5 * time.Minute)
 	r.boot = boot
 	r.open() // restart, still STOPped
@@ -483,13 +481,7 @@ func TestRequestsCoalesceAndArePaced(t *testing.T) {
 	})
 	r.grant(mailGrant())
 	base := r.own.count()
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	sent := func() int { return r.own.count() - base }
 
 	ask("a")
@@ -756,11 +748,7 @@ func TestGrantsUseOwnerQuietAndAllowance(t *testing.T) {
 	base := r.own.count()
 	sent := func() int { return r.own.count() - base }
 	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+		r.submitInvoice("agent/"+id, id)
 		r.advance(5 * time.Minute)
 		r.g.Tick()
 	}

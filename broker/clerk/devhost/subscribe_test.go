@@ -21,7 +21,7 @@ import (
 // subDecl is the fixture with a subscription, and a second reading kind.
 func subDecl() devslot.Declaration {
 	d := fixture.Declaration()
-	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, Subscribe: true})
+	d.Operations = append(d.Operations, devslot.Operation{Name: "watch", Verb: key.Read, Shapes: []string{"get"}, MaxWrites: 1, Subscribe: true})
 	d.Readings = append(d.Readings, "smoke")
 	return d
 }
@@ -66,8 +66,12 @@ func (n *notify) next(t *testing.T) devhost.Event {
 	}
 }
 
+// subHost lowers the MinSubscription floor to sub for the test, if sub is
+// below it, so a test of other behaviour need not wait out real instances;
+// TestNewRefusesShortSubscription holds the floor itself.
 func subHost(t *testing.T, d *dialer, s devhost.Sink, sub time.Duration, lim devhost.Limit, now func() time.Time) *devhost.Host {
 	t.Helper()
+	devhost.LowerMinSubscription(t, sub)
 	h, err := devhost.New(devhost.Config{
 		Decl: subDecl(), Pin: pin, Dialer: d, Transport: &transport{}, Sink: s,
 		Deadline: 5 * time.Second, Subscription: sub, Limit: lim, Now: now,
@@ -146,7 +150,7 @@ func TestSubscribeEmitsPerReading(t *testing.T) {
 		s := newNotify()
 		h, err := devhost.New(devhost.Config{
 			Decl: subDecl(), Pin: pin, Dialer: d, Transport: tr, Sink: s,
-			Deadline: time.Second, Subscription: 5 * time.Second, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
+			Deadline: time.Second, Subscription: devhost.MinSubscription, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -326,6 +330,11 @@ func TestDoPreemptsSubscription(t *testing.T) {
 	if d.dials != 3 {
 		t.Fatalf("%d dials, want the subscription, Do, and the resumed subscription", d.dials)
 	}
+	// The Do reached the driver, so the subscription resumes at once, not
+	// at the floor (30 s here).
+	if gap := d.at[2].Sub(d.at[1]); gap > 3*time.Second {
+		t.Fatalf("the subscription resumed %v after the Do, want at once", gap)
+	}
 }
 
 func TestSubscriptionIsItsOwnCall(t *testing.T) {
@@ -424,6 +433,21 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 	}
 }
 
+// condWaiting waits until a goroutine whose stack holds fn sleeps on a
+// sync.Cond.
+func condWaiting(t *testing.T, fn string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "[sync.Cond.Wait") && strings.Contains(g, fn) {
+				return
+			}
+		}
+	}
+	t.Fatalf("no goroutine in %s sleeps on the host's cond", fn)
+}
+
 // parked waits until a goroutine whose stack holds fn is parked on a mutex:
 // in this test, only h.mu is held long enough for a caller to park on it.
 func parked(t *testing.T, fn string) {
@@ -437,4 +461,280 @@ func parked(t *testing.T, fn string) {
 		}
 	}
 	t.Fatalf("no goroutine in %s parked on the host's mutex", fn)
+}
+
+// New refuses a subscription period below MinSubscription, so the host's
+// config alone cannot raise a subscription's write rate: each instance
+// writes up to MaxWrites, and instances start at most once per floor plus
+// once after each Do that reached the driver (#4515, #4539).
+func TestNewRefusesShortSubscription(t *testing.T) {
+	cfg := func(sub time.Duration) devhost.Config {
+		return devhost.Config{
+			Decl: subDecl(), Pin: pin, Dialer: &dialer{t: t}, Transport: &transport{}, Sink: &sink{},
+			Deadline: time.Second, Subscription: sub, Limit: devhost.Limit{Burst: 1, Window: time.Second},
+		}
+	}
+	// The floor's value is pinned here, not read from the constant, so a
+	// change to it fails this test (Security 6567176234 point 2 on #4525).
+	const floor = 30 * time.Second
+	if devhost.MinSubscription != floor {
+		t.Fatalf("MinSubscription is %v, want %v", devhost.MinSubscription, floor)
+	}
+	for _, sub := range []time.Duration{0, time.Millisecond, floor - time.Nanosecond} {
+		if _, err := devhost.New(cfg(sub)); err == nil {
+			t.Fatalf("New took a subscription period of %v, below %v", sub, floor)
+		}
+	}
+	if _, err := devhost.New(cfg(floor)); err != nil {
+		t.Fatalf("New refused the floor: %v", err)
+	}
+	// The test hook only lowers the floor (L3 6567176817 point 2 on #4525).
+	devhost.LowerMinSubscription(t, time.Hour)
+	if _, err := devhost.New(cfg(floor)); err != nil {
+		t.Fatalf("LowerMinSubscription raised the floor: %v", err)
+	}
+	// A declaration with no subscription needs no period.
+	c := cfg(0)
+	c.Decl = fixture.Declaration()
+	if _, err := devhost.New(c); err != nil {
+		t.Fatalf("New refused a declaration without a subscription: %v", err)
+	}
+}
+
+// gated is a sink whose first Emit signals in and then waits for out, so
+// the instance that emits holds the driver until the test lets it go.
+type gated struct {
+	sink
+	in, out chan struct{}
+	once    sync.Once
+}
+
+func (g *gated) Emit(e devhost.Event) error {
+	g.once.Do(func() { close(g.in); <-g.out })
+	return g.sink.Emit(e)
+}
+
+// REQ: DEV-4, CLK-3
+
+// TestSubscriptionFloorSpansCalls: no subscription instance starts within
+// the floor of the last one's start, across Subscribe calls and after a
+// preempting Do that never reached the driver, unless a Do did reach it
+// (#4539). So neither a quick re-Subscribe loop nor a stream of failing or
+// cancelled Do calls restarts instances, each with a fresh MaxWrites, faster
+// than the floor.
+func TestSubscriptionFloorSpansCalls(t *testing.T) {
+	// slack covers the statements between the host's start of an instance
+	// and its dial.
+	const slack = 10 * time.Millisecond
+	ends := func(t *testing.T, c net.Conn) {
+		if !declareSub(t, c) {
+			return
+		}
+		send(t, c, devslot.Msg{T: devslot.MsgDone})
+	}
+	refused := func(t *testing.T, c net.Conn) {
+		if !declareSub(t, c) {
+			return
+		}
+		send(t, c, reading("humidity", 0, okTime))
+		closed(c)
+	}
+	t.Run("again after an end", func(t *testing.T) {
+		const floor = 300 * time.Millisecond
+		d := &dialer{t: t, scripts: []script{ends, refused, ends}}
+		defer d.done.Wait()
+		h := subHost(t, d, &sink{}, floor, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("first Subscribe: %v", err)
+		}
+		if _, err := h.Subscribe(context.Background(), "watch"); !errors.Is(err, devslot.ErrReading) {
+			t.Fatalf("second Subscribe: %v, want the refusal", err)
+		}
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("third Subscribe: %v", err)
+		}
+		for i := 1; i < 3; i++ {
+			if gap := d.at[i].Sub(d.at[i-1]); gap < floor-slack {
+				t.Fatalf("instance %d started %v after the last, want at least %v", i, gap, floor)
+			}
+		}
+		// A Subscribe whose ctx ends while it waits returns ctx's error and
+		// dials nothing.
+		ctx, cancel := context.WithTimeout(context.Background(), floor/10)
+		defer cancel()
+		if _, err := h.Subscribe(ctx, "watch"); !errors.Is(err, context.DeadlineExceeded) || d.dials != 3 {
+			t.Fatalf("Subscribe cancelled at the floor: %v, %d dials; want ctx's error and none", err, d.dials)
+		}
+	})
+	// The floor's wait sleeps on the host's cond, not in a loop that spins
+	// on the lock until the floor passes (mutgate on #4560: host.go:326).
+	t.Run("the wait sleeps", func(t *testing.T) {
+		d := &dialer{t: t, scripts: []script{ends}}
+		defer d.done.Wait()
+		h := subHost(t, d, &sink{}, 5*time.Second, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("first Subscribe: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		out := make(chan error, 1)
+		go func() { _, err := h.Subscribe(ctx, "watch"); out <- err }()
+		condWaiting(t, "(*Host).acquire")
+		cancel()
+		if err := <-out; !errors.Is(err, context.Canceled) || d.dials != 1 {
+			t.Fatalf("Subscribe cancelled in the floor's wait: %v, %d dials; want ctx's error and one", err, d.dials)
+		}
+	})
+	t.Run("a Do that reached the driver", func(t *testing.T) {
+		one := func(t *testing.T, c net.Conn) {
+			if !declareSub(t, c) {
+				return
+			}
+			send(t, c, reading("temperature", 0, okTime))
+			send(t, c, devslot.Msg{T: devslot.MsgDone})
+		}
+		const floor = time.Second
+		d := &dialer{t: t, scripts: []script{ends, one, ends, ends}}
+		defer d.done.Wait()
+		h := subHost(t, d, &sink{}, floor, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("first Subscribe: %v", err)
+		}
+		if n, err := h.Do(context.Background(), "read-temperature"); n != 1 || err != nil {
+			t.Fatalf("Do: %d, %v", n, err)
+		}
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("second Subscribe: %v", err)
+		}
+		if gap := d.at[2].Sub(d.at[1]); gap > floor/2 {
+			t.Fatalf("the subscription waited %v after a Do that ran, want at once", gap)
+		}
+		// The Do's allowance is spent by that one start: the next waits the
+		// floor again (Security and L3 on #4560 point 1).
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("third Subscribe: %v", err)
+		}
+		if gap := d.at[3].Sub(d.at[2]); gap < floor-slack {
+			t.Fatalf("the start after the Do's was %v later, want at least the floor %v", gap, floor)
+		}
+	})
+	// held is a subscription instance that stays up until the host closes
+	// it, and reports when that was.
+	held := func(up, gone chan<- struct{}) script {
+		return func(t *testing.T, c net.Conn) {
+			if !declareSub(t, c) {
+				return
+			}
+			close(up)
+			c.SetReadDeadline(time.Now().Add(10 * time.Second))
+			for {
+				if _, err := devslot.ReadMsg(c); err != nil {
+					close(gone)
+					return
+				}
+			}
+		}
+	}
+	t.Run("a Do that failed to dial", func(t *testing.T) {
+		const floor = 500 * time.Millisecond
+		devhost.LowerMinSubscription(t, floor)
+		up, gone := make(chan struct{}), make(chan struct{})
+		d := &dialer{t: t, scripts: []script{held(up, gone), nil, ends}}
+		defer d.done.Wait()
+		h, err := devhost.New(devhost.Config{
+			Decl: subDecl(), Pin: pin, Dialer: d, Transport: &transport{}, Sink: &sink{},
+			Deadline: 5 * time.Second, Subscription: time.Minute, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make(chan error, 1)
+		go func() { _, err := h.Subscribe(context.Background(), "watch"); out <- err }()
+		<-up
+		if _, err := h.Do(context.Background(), "read-temperature"); !errors.Is(err, devhost.ErrDial) {
+			t.Fatalf("Do: %v, want ErrDial", err)
+		}
+		<-gone
+		if err := <-out; err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		if d.dials != 3 {
+			t.Fatalf("%d dials, want the subscription, the Do and the resumed subscription", d.dials)
+		}
+		if gap := d.at[2].Sub(d.at[0]); gap < floor-slack {
+			t.Fatalf("the subscription resumed %v after its last start, want at least the floor %v", gap, floor)
+		}
+	})
+	// A Do that preempts the instance and whose ctx then ends while it
+	// waits for the driver dials nothing and leaves the floor in place
+	// (Security and L3 on #4560 point 2). The instance holds the driver in
+	// the sink's Emit until the test lets it go, so the Do is still waiting
+	// when its ctx ends.
+	t.Run("a Do cancelled while it waits", func(t *testing.T) {
+		const floor = 500 * time.Millisecond
+		devhost.LowerMinSubscription(t, floor)
+		reported := func(t *testing.T, c net.Conn) {
+			if !declareSub(t, c) {
+				return
+			}
+			send(t, c, reading("temperature", 0, okTime))
+			closed(c)
+		}
+		d := &dialer{t: t, scripts: []script{reported, ends}}
+		defer d.done.Wait()
+		s := &gated{in: make(chan struct{}), out: make(chan struct{})}
+		h, err := devhost.New(devhost.Config{
+			Decl: subDecl(), Pin: pin, Dialer: d, Transport: &transport{}, Sink: s,
+			Deadline: 5 * time.Second, Subscription: time.Minute, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make(chan error, 1)
+		go func() { _, err := h.Subscribe(context.Background(), "watch"); out <- err }()
+		<-s.in
+		ctx, cancel := context.WithCancel(context.Background())
+		res := make(chan error, 1)
+		go func() { _, err := h.Do(ctx, "read-temperature"); res <- err }()
+		parked(t, "(*Host).Do")
+		cancel()
+		close(s.out)
+		if err := <-res; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Do: %v, want its ctx's error", err)
+		}
+		if err := <-out; err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		if d.dials != 2 {
+			t.Fatalf("%d dials, want the subscription and its resume, not the Do", d.dials)
+		}
+		if gap := d.at[1].Sub(d.at[0]); gap < floor-slack {
+			t.Fatalf("the subscription resumed %v after its last start, want at least the floor %v", gap, floor)
+		}
+	})
+	t.Run("a cancelled Do", func(t *testing.T) {
+		up, gone := make(chan struct{}), make(chan struct{})
+		d := &dialer{t: t, scripts: []script{held(up, gone)}}
+		defer d.done.Wait()
+		h := subHost(t, d, &sink{}, time.Minute, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		out := make(chan error, 1)
+		go func() { _, err := h.Subscribe(ctx, "watch"); out <- err }()
+		<-up
+		dctx, dcancel := context.WithCancel(context.Background())
+		dcancel()
+		if _, err := h.Do(dctx, "read-temperature"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled Do: %v, want its ctx's error", err)
+		}
+		select {
+		case <-gone:
+			t.Fatalf("a cancelled Do ended the subscription's instance")
+		case <-time.After(200 * time.Millisecond):
+		}
+		cancel()
+		<-gone
+		if err := <-out; !errors.Is(err, context.Canceled) || d.dials != 1 {
+			t.Fatalf("Subscribe: %v, %d dials; want ctx's error and one instance", err, d.dials)
+		}
+	})
 }
