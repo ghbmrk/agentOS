@@ -30,7 +30,7 @@ import (
 //
 // A test covers one when its identifier appears in the arguments of a
 // RunHeaders, RunHeaderValues or RunAddrs call in that directory; for a
-// method, its name.
+// method, with its receiver's type.
 var headerCheckName = regexp.MustCompile(`(?i)header`)
 
 // corpusRuns are the corpus entry points a covering call names.
@@ -157,11 +157,12 @@ func addrCheck(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// uncoveredCorpus is each check no corpus run in its directory names.
+// uncoveredCorpus is each check no corpus run in its directory names: its
+// name, and for a method its receiver's type too.
 func uncoveredCorpus(checks []check, runs map[string]map[string]bool) []string {
 	var out []string
 	for _, c := range checks {
-		if !runs[c.Dir][c.Name] {
+		if ids := runs[c.Dir]; !ids[c.Name] || c.Recv != "" && !ids[c.Recv] {
 			out = append(out, c.String())
 		}
 	}
@@ -204,8 +205,9 @@ func TestEveryHeaderAndAddressCheckRunsItsCorpus(t *testing.T) {
 
 // The scan finds each shape and sees a test that runs it: a list named
 // ...Headers, a header check, and an address check with no run fail; with
-// one, each passes. A header function taking no string, and a function
-// with no netip.Addr, are not checks.
+// one, each passes. A run outside hostiletext covers nothing, and a method
+// is covered only with its receiver's type. A header function taking no
+// string, and a function with no netip.Addr, are not checks.
 func TestScanFindsAnUnrunHeaderOrAddressCheck(t *testing.T) {
 	root := t.TempDir()
 	write := func(p, src string) {
@@ -225,6 +227,8 @@ func badHeader(h string) bool { return false }
 func checkHeader(n uint32) error { return nil }
 func (G) Reach(a netip.Addr, port uint16) error { return nil }
 func inAny(a ...netip.Addr) bool { return false }
+type H struct{}
+func (H) Reach(a netip.Addr, port uint16) error { return nil }
 func plain(s string) bool { return true }
 `)
 	write("old/old.go", "package old\nvar oldHeaders = []string{}\n")
@@ -232,7 +236,7 @@ func plain(s string) bool { return true }
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"foo sentHeaders", "foo badHeader", "foo G.Reach", "foo inAny"}
+	want := []string{"foo sentHeaders", "foo badHeader", "foo G.Reach", "foo inAny", "foo H.Reach"}
 	if got := uncoveredCorpus(checks, nil); !slices.Equal(got, want) {
 		t.Fatalf("uncovered %q, want %q", got, want)
 	}
@@ -242,13 +246,15 @@ func TestCorpus(t *testing.T) {
 	hostiletext.RunHeaders(t, badHeader, "Accept")
 	hostiletext.RunHeaders(t, func(h string) bool { return sentHeaders[h] }, "Accept")
 	hostiletext.RunAddrs(t, target, func(s string) bool { return G{}.Reach(parse(s), 1) == nil })
+	other.RunAddrs(t, target, func(s string) bool { return inAny(parse(s)) }) // not the corpus
+	hostiletext.RunAddrs(t, target, func(s string) bool { return lax.Reach(parse(s), 1) == nil }) // names Reach, not H
 }
 `)
 	checks, runs, err := scanCorpus(root, []string{"old"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := uncoveredCorpus(checks, runs); !slices.Equal(got, []string{"foo inAny"}) {
+	if got := uncoveredCorpus(checks, runs); !slices.Equal(got, []string{"foo inAny", "foo H.Reach"}) {
 		t.Fatalf("after the test, uncovered %q", got)
 	}
 }

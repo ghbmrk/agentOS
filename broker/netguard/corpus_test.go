@@ -27,7 +27,7 @@ func TestCheckRunsTheAddressCorpus(t *testing.T) {
 		})
 		hostiletext.RunAddrs(t, target, func(text string) bool {
 			var de *DeniedError
-			err := p.Check(context.Background(), netip.MustParseAddr(text), 443, "tcp")
+			err := (*Policy).Check(p, context.Background(), netip.MustParseAddr(text), 443, "tcp")
 			return errors.As(err, &de) && de.Reason == ReasonDecoy
 		})
 	}

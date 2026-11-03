@@ -40,6 +40,15 @@ func TestHeaderCorpusFailsLooseChecks(t *testing.T) {
 			t.Errorf("%s passes the header corpus", name)
 		}
 	}
+	// A named name in another case is refused too, even one the corpus
+	// does not hold.
+	fixed := []string{"Accept", "User-Agent"}
+	blind := func(h string) bool {
+		return slices.ContainsFunc(fixed, func(n string) bool { return strings.EqualFold(n, h) })
+	}
+	if bad := HeadersAccepted(blind, fixed...); !slices.Contains(bad, `accepts "accept", "Accept" in another case`) {
+		t.Errorf("a case-blind list of names outside the corpus passes: %q", bad)
+	}
 	if len(HeadersAccepted(exact)) == 0 {
 		t.Error("a check that names nothing it accepts passes")
 	}

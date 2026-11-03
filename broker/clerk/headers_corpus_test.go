@@ -31,17 +31,19 @@ func TestDeclarableHeadersRefuseTheCorpus(t *testing.T) {
 		_, err := shape(op, string(op.Verb), key.ArgNames(op.Verb), sec)
 		return err == nil
 	}
+	// The names each list may hold are written out (Exactly), not read
+	// from the list, so a widened list fails here.
 	t.Run("fixedHeaders", func(t *testing.T) {
 		hostiletext.RunHeaders(t, func(h string) bool {
 			return declares(Op{Headers: map[string]string{h: "v"}}, empty)
-		}, slices.Sorted(maps.Keys(fixedHeaders))...)
+		}, hostiletext.Exactly(t, slices.Collect(maps.Keys(fixedHeaders)), "Accept", "Accept-Language", "User-Agent")...)
 	})
 	t.Run("secretHeaders", func(t *testing.T) {
 		// An empty Header is the Authorization default, not a name the
 		// list holds.
 		hostiletext.RunHeaders(t, func(h string) bool {
 			return h != "" && declares(Op{Slot: "web", Header: h}, one)
-		}, slices.Sorted(maps.Keys(secretHeaders))...)
+		}, hostiletext.Exactly(t, slices.Collect(maps.Keys(secretHeaders)), "Authorization", "X-Api-Key")...)
 	})
 	t.Run("fixed header value", func(t *testing.T) {
 		hostiletext.RunHeaderValues(t, func(v string) bool {

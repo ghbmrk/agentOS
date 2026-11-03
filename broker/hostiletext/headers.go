@@ -135,7 +135,8 @@ var HeaderValues = []Entry{
 
 // HeadersAccepted lists what accept wrongly decides about header names:
 // each corpus entry it accepts that named does not hold exactly, each name
-// in named it refuses (the positive control), and named being empty. named
+// in named it refuses (the positive control), each named name in another
+// case it accepts, and named being empty. named
 // is what the list or check means to accept; "exactly" is byte for byte, so
 // "authorization" is not "Authorization".
 func HeadersAccepted(accept func(name string) bool, named ...string) []string {
@@ -153,7 +154,30 @@ func HeadersAccepted(accept func(name string) bool, named ...string) []string {
 			bad = append(bad, "accepts "+e.Name+" "+strconv.QuoteToASCII(e.Text))
 		}
 	}
+	// A named header in another case is another name: a case-blind list
+	// fails here even for names the corpus does not hold.
+	for _, n := range named {
+		for _, c := range cased(n) {
+			if !slices.Contains(named, c) && accept(c) {
+				bad = append(bad, "accepts "+strconv.Quote(c)+", "+strconv.Quote(n)+" in another case")
+			}
+		}
+	}
 	return bad
+}
+
+// Exactly returns want, the names a header list may hold as review
+// accepted them, and fails t unless list holds exactly those, in any order.
+// A test passes its result to RunHeaders, so the expected names are written
+// in the test, never read from the list under test: a widened list fails.
+func Exactly(t testing.TB, list []string, want ...string) []string {
+	t.Helper()
+	got := slices.Sorted(slices.Values(list))
+	w := slices.Sorted(slices.Values(want))
+	if !slices.Equal(got, w) {
+		t.Errorf("hostiletext headers: the list holds %q, review accepted %q", got, w)
+	}
+	return want
 }
 
 // RunHeaders fails t for each wrong decision HeadersAccepted finds. accept
