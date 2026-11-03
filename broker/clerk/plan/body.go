@@ -59,7 +59,9 @@ type Value struct {
 // Each; the clerk sends its own encoding of it, so the provider parses
 // exactly what was checked, whatever its parser does with a repeated key.
 // Off is a flag that may only be false: a provider-read request the guest
-// does not get to make for the plan.
+// does not get to make for the plan. Drop, only as an object's field, is a
+// key the clerk takes in any shape and never sends: guest data the provider
+// does not need (#4632).
 const (
 	KindText   = "text"
 	KindInt    = "int"
@@ -68,6 +70,7 @@ const (
 	KindObject = "object"
 	KindMap    = "map"
 	KindJSON   = "json"
+	KindDrop   = "drop"
 )
 
 // Tool is one declared tool. An empty Namespace is a tool outside any.
@@ -411,7 +414,7 @@ func (v Value) valid(depth int) bool {
 		return v.Max > 0 && v.Fields == nil && v.Each == nil
 	case KindObject:
 		for k, f := range v.Fields {
-			if k == "" || !f.valid(depth+1) {
+			if k == "" || !(f.valid(depth+1) || f.dropped()) {
 				return false
 			}
 		}
@@ -430,6 +433,12 @@ func (v Value) valid(depth int) bool {
 		return v.Max > 0 && v.Only == nil && v.Fields == nil && v.Each != nil && v.Each.valid(depth+1)
 	}
 	return false
+}
+
+// dropped reports a field the clerk deletes unread: KindDrop and nothing
+// else, so a drop shape cannot also claim a cap or a list it never applies.
+func (v Value) dropped() bool {
+	return v.Kind == KindDrop && v.Max == 0 && v.Only == nil && !v.Null && v.Fields == nil && v.Required == nil && v.Each == nil
 }
 
 // send holds a top-level value to the shape and returns the value to send:
@@ -494,6 +503,10 @@ func (v Value) check(x any) bool {
 		}
 		for k, f := range obj {
 			shape, declared := v.Fields[k]
+			if shape.dropped() {
+				delete(obj, k)
+				continue
+			}
 			if !declared || !shape.check(f) {
 				return false
 			}
