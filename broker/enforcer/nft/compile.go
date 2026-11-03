@@ -90,7 +90,8 @@ func segments(l Layout) []segment {
 // from a shared segment passes only from the hardware address that holds
 // its source address, or from a free address, which its hardware address
 // then holds. Each hold lasts ClaimTimeout from the address's last
-// forwarded packet, which is at most half the DHCP lease (12 h, dns.go), so
+// forwarded packet, which is at most half the DHCP lease (dns.LeaseHours;
+// dns fails to compile, and its TestLeaseCoversHold fails, otherwise), so
 // an address the DHCP server gives again after its lease ran out is free
 // by then; each set holds at most HostSize addresses.
 func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }

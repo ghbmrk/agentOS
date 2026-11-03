@@ -40,6 +40,18 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
+// LeaseHours is every DHCP lease, in hours. A shared segment's address
+// hold (nft.ClaimTimeout) must be at most half of it, so a departed host's
+// hold has run out before its address can be leased again
+// (ENF-shared-src-1, #4702): the constant below fails to compile when it is
+// not, and TestLeaseCoversHold reads the lines written.
+const LeaseHours = 12
+
+const _ uint = LeaseHours*3600 - 2*nft.ClaimTimeout
+
+// lease is LeaseHours as dnsmasq's lease field.
+var lease = strconv.Itoa(LeaseHours) + "h"
+
 var ErrConfig = errors.New("dns: configuration refused")
 
 // MaxTTL caps the TTL the listed instance hands out, so a device asks
@@ -155,14 +167,14 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	for _, n := range leased {
 		first, last := hosts4(n.Prefix4)
 		// dnsmasq serves a range on the interface whose address is in it.
-		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + ",12h")
+		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + "," + lease)
 		if n.Prefix6.IsValid() {
 			b := n.Prefix6.Addr().As16()
 			b[14], b[15] = 0x10, 0x00
 			lo := netip.AddrFrom16(b)
 			b[14], b[15] = 0xff, 0xff
 			hi := netip.AddrFrom16(b)
-			dhcp.add("dhcp-range=" + lo.String() + "," + hi.String() + ",64,12h")
+			dhcp.add("dhcp-range=" + lo.String() + "," + hi.String() + ",64," + lease)
 			v6 = true
 		}
 	}

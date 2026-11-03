@@ -479,3 +479,49 @@ func dnsmasq(t *testing.T) string {
 	t.Skip("dnsmasq missing")
 	return ""
 }
+
+// leaseSeconds reads a dnsmasq lease time: a number of seconds, or a
+// number with an m, h, d or w suffix; "infinite" and anything else is -1.
+func leaseSeconds(s string) int {
+	unit := map[byte]int{'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}[s[len(s)-1]]
+	if unit != 0 {
+		s = s[:len(s)-1]
+	} else {
+		unit = 1
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return -1
+	}
+	return n * unit
+}
+
+// TestLeaseCoversHold (#4702): every lease the DHCP instance writes, IPv4
+// and IPv6, is at least twice nft.ClaimTimeout, so a departed host's hold
+// on a shared segment has run out before its address can be leased to
+// another host (ENF-shared-src-1). It reads the generated lines, not the
+// constant, so a lease edited in either place fails here.
+func TestLeaseCoversHold(t *testing.T) {
+	var v4, v6 int
+	for _, l := range strings.Split(generate(t).DHCP, "\n") {
+		r, ok := strings.CutPrefix(l, "dhcp-range=")
+		if !ok {
+			continue
+		}
+		f := strings.Split(r, ",")
+		if strings.Contains(f[0], ":") {
+			v6++
+		} else {
+			v4++
+		}
+		if got := leaseSeconds(f[len(f)-1]); got < 2*nft.ClaimTimeout {
+			t.Errorf("%s: lease %ds is under twice the %ds hold", l, got, nft.ClaimTimeout)
+		}
+	}
+	if v4 == 0 || v6 == 0 {
+		t.Fatalf("fixture leases %d IPv4 and %d IPv6 ranges; want both", v4, v6)
+	}
+	if leaseSeconds("11h") != 39600 || leaseSeconds("600") != 600 || leaseSeconds("infinite") != -1 {
+		t.Fatal("leaseSeconds misreads dnsmasq lease times")
+	}
+}
