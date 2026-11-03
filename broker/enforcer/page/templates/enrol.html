@@ -39,17 +39,22 @@
 </form>
 {{end}}
 <div id="shown" hidden>
+<div id="recovery-box">
 <h2>Your recovery code</h2>
 <p>Write it down and keep it somewhere safe at home. It is shown only now. It can replace your passkey if you lose it.</p>
 <p class="code" id="recovery"></p>
 <p id="due"></p>
+</div>
 <div id="network" hidden>
 <h2>Your Owner Wi-Fi</h2>
-<p>The setup Wi-Fi is gone. Save this network now: it is the only one that reaches this page and agentOS's. It is shown only now.</p>
+<p id="net-new" hidden>The setup Wi-Fi is gone. Save this network now: it is the only one that reaches this page and agentOS's. It is shown only now.</p>
+<p id="net-kept" hidden>The factory reset left your Owner Wi-Fi as it was: this is still the only network that reaches this page and agentOS's. Keep it saved.</p>
 <p>Network: <span id="ssid"></span><br>Password: <span class="code" id="password"></span></p>
 <svg id="qr" class="qr" role="img" aria-label="Wi-Fi QR code"></svg>
+<div id="rejoin" hidden>
 <label>To confirm you saved it, type the password's last four characters<br><input id="last4" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
 <p id="joined" hidden>Now join that network, then open this page again.</p>
+</div>
 </div>
 </div>
 <p id="result" role="status"></p>

@@ -20,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/ap"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -77,6 +78,7 @@ func (a *authenticator) sign(msg []byte) []byte {
 type memStore struct {
 	b         []byte
 	n, failAt int
+	onSave    func() // called at each save that succeeds
 }
 
 var errStopped = errors.New("stopped before the write")
@@ -87,6 +89,9 @@ func (m *memStore) Save(b []byte) error {
 		return errStopped
 	}
 	m.b = slices.Clone(b)
+	if m.onSave != nil {
+		m.onSave()
+	}
 	return nil
 }
 
@@ -723,3 +728,194 @@ func TestCodesAndTickets(t *testing.T) {
 		t.Errorf("a fresh ticket: %v", err)
 	}
 }
+
+// TestRecoveryTextBeforeSave (NET-2 Texts and calls, NET-4; #4388 item
+// 1): the recovery code's text is raised before the book saves the
+// replacement, so a stop between the two cannot leave a replacement
+// waiting that the owner was never texted about. A stop at that save
+// leaves nothing waiting, and only a false alarm the owner clears.
+func TestRecoveryTextBeforeSave(t *testing.T) {
+	g, _, code := enrolled(t)
+	g.alerts.raised = nil
+	g.bs.failAt = g.bs.n + 1
+	if _, err := g.enrol(newAuthenticator(t), code); !errors.Is(err, errStopped) {
+		t.Fatalf("stop at the save: %v", err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeUsed}) {
+		t.Errorf("text not raised before the save: %v", g.alerts.raised)
+	}
+	g.reopen()
+	if _, ok := g.b.Recovery(); ok || g.alerts.recovery {
+		t.Error("a replacement waits after a stop before its save")
+	}
+	// Saved, the raise came first: the store saw it already raised.
+	b := newAuthenticator(t)
+	g.alerts.raised = nil
+	g.bs.failAt = 0
+	id, msg, err := g.b.Begin(code, b.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raisedAtSave := -1
+	g.bs.onSave = func() { raisedAtSave = len(g.alerts.raised) }
+	if _, err := g.b.Finish(id, b.sign(msg)); err != nil {
+		t.Fatal(err)
+	}
+	if raisedAtSave != 1 {
+		t.Errorf("alerts raised when the replacement was saved: %d", raisedAtSave)
+	}
+}
+
+// TestStoreFailureKeepsCard (HW-10, NET-4; #4388 item 2): if the book's
+// save fails after the access point replaced the setup network, the
+// answer still carries the Owner network's card, nothing is enrolled, and
+// the case code enrols again from the Owner network, showing the same
+// card. Catches an owner cut off from every network by a failed write.
+func TestStoreFailureKeepsCard(t *testing.T) {
+	g := newRig(t)
+	setup := g.ap.keys.Setup
+	a := newAuthenticator(t)
+	g.bs.failAt = g.bs.n + 1
+	res, err := g.enrol(a, caseCode)
+	if !errors.Is(err, errStopped) {
+		t.Fatalf("store failure: %v", err)
+	}
+	if g.ap.opens(setup) {
+		t.Fatal("fixture: the setup network is still up")
+	}
+	if res.Card.SSID != "Home" || res.Card.QR == "" || res.Recovery != "" {
+		t.Errorf("card not kept: %+v", res)
+	}
+	if g.b.Phase() != Factory || g.b.Owner().Valid() || len(g.alerts.raised) != 0 {
+		t.Fatalf("enrolled on a failed save: phase %s alerts %v", g.b.Phase(), g.alerts.raised)
+	}
+	again, err := g.enrol(a, caseCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Card != res.Card || len(again.Recovery) != CodeLen || g.b.Owner() != a.Public() {
+		t.Errorf("retry: %+v, owner %v", again, g.b.Owner())
+	}
+}
+
+// TestCardFollowsState (HW-10; #4388 item 3): only the first enrolment
+// replaces the setup network; an enrolment after a factory reset finds
+// the Owner network already in place, and says so.
+func TestCardFollowsState(t *testing.T) {
+	g := newRig(t)
+	res, err := g.enrol(newAuthenticator(t), caseCode)
+	if err != nil || !res.SetupReplaced {
+		t.Fatalf("first enrolment: %+v %v", res, err)
+	}
+	if err := g.b.FactoryReset(caseCode); err != nil {
+		t.Fatal(err)
+	}
+	after, err := g.enrol(newAuthenticator(t), caseCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SetupReplaced || after.Card != res.Card {
+		t.Errorf("after a reset: %+v, first card %+v", after, res.Card)
+	}
+}
+
+// TestResetMissesLeaveRecoveryOpen (NET-4, NET-2 Hardening; #4388 item
+// 4): misses on the factory reset and misses on the recovery code count
+// apart, so anyone on the Owner network who guesses at the reset cannot
+// lock the owner out of recovery for an hour, nor the reverse.
+func TestResetMissesLeaveRecoveryOpen(t *testing.T) {
+	g, _, code := enrolled(t)
+	for range MaxFailures {
+		if err := g.b.FactoryReset("WRONG-CASE-CODE-0000"); !errors.Is(err, ErrCode) {
+			t.Fatal(err)
+		}
+	}
+	if err := g.b.FactoryReset(caseCode); !errors.Is(err, ErrLimited) {
+		t.Fatalf("reset after %d misses: %v", MaxFailures, err)
+	}
+	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
+		t.Fatalf("recovery after reset misses: %v", err)
+	}
+
+	g2, _, code2 := enrolled(t)
+	x := newAuthenticator(t)
+	for range MaxFailures {
+		if _, _, err := g2.b.Begin("WRONG", x.Public()); !errors.Is(err, ErrCode) {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := g2.b.Begin(code2, x.Public()); !errors.Is(err, ErrLimited) {
+		t.Fatalf("recovery after %d misses: %v", MaxFailures, err)
+	}
+	if err := g2.b.FactoryReset(caseCode); err != nil {
+		t.Fatalf("reset after recovery misses: %v", err)
+	}
+}
+
+// TestFactoryResetTextsOwner (NET-2 Texts and calls, NET-2 Hardening,
+// NET-4; #4292): a factory reset by the case code raises FactoryReset
+// before it drops anything, so a reset cut short, or one whose text the
+// core refuses, still shows on the page; a wrong code raises nothing, and
+// the light stays off (D-254). Catches a reset by whoever opened the case
+// going unseen until the next enrolment.
+func TestFactoryResetTextsOwner(t *testing.T) {
+	g, _, _ := enrolled(t)
+	j := &journalMem{}
+	light := &lightMem{}
+	real, err := alert.New(alert.Config{Send: func(wire.Alert) error { return errors.New("core refused") },
+		Light: light, Journal: j, Now: func() time.Time { return g.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	both := &teeAlerts{fake: g.alerts, real: real}
+	g.b.cfg.Alerts = both
+	g.alerts.raised = nil
+	if err := g.b.FactoryReset("WRONG-CASE-CODE-0000"); !errors.Is(err, ErrCode) || len(g.alerts.raised) != 0 {
+		t.Fatalf("wrong code: %v, alerts %v", err, g.alerts.raised)
+	}
+	// Cut short at the book's save: the alert was already raised.
+	g.bs.failAt = g.bs.n + 1
+	if err := g.b.FactoryReset(caseCode); !errors.Is(err, errStopped) {
+		t.Fatalf("stop at the save: %v", err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.FactoryReset}) {
+		t.Fatalf("not raised before the save: %v", g.alerts.raised)
+	}
+	g.bs.failAt = 0
+	if err := g.b.FactoryReset(caseCode); err != nil {
+		t.Fatal(err)
+	}
+	st := real.Status()
+	if len(st.Open) != 1 || st.Open[0].Kind != alert.FactoryReset || st.Open[0].Sent || st.Colour != alert.Off {
+		t.Fatalf("page after a refused text: %+v", st)
+	}
+	if light.c != alert.Off {
+		t.Error("a factory reset lit the bulb")
+	}
+	if !strings.Contains(st.Open[0].Text, "enforcer's page at home") {
+		t.Errorf("text does not name the page: %q", st.Open[0].Text)
+	}
+}
+
+type journalMem struct{ b []byte }
+
+func (j *journalMem) Load() ([]byte, error) { return j.b, nil }
+func (j *journalMem) Append(b []byte) error { j.b = append(j.b, b...); return nil }
+func (j *journalMem) Truncate(n int) error  { j.b = j.b[:n]; return nil }
+
+type lightMem struct{ c alert.Colour }
+
+func (l *lightMem) Show(c alert.Colour) error { l.c = c; return nil }
+
+// teeAlerts records each raise in the fake and passes it to the real
+// alerts.
+type teeAlerts struct {
+	fake *fakeAlerts
+	real *alert.Alerts
+}
+
+func (t *teeAlerts) Raise(k alert.Kind, d string) (alert.Record, error) {
+	t.fake.Raise(k, d)
+	return t.real.Raise(k, d)
+}
+func (t *teeAlerts) Recovery(p bool) { t.fake.Recovery(p); t.real.Recovery(p) }

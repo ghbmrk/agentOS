@@ -21,7 +21,7 @@ async function post(path, body) {
   const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Enforcer-Token": token },
     body: JSON.stringify(body), credentials: "same-origin" });
   const j = await res.json();
-  if (!res.ok) throw new Error(j.error || res.statusText);
+  if (!res.ok) { const e = new Error(j.error || res.statusText); e.body = j; throw e; }
   return j;
 }
 
@@ -58,19 +58,29 @@ function drawQR(svg, q) {
   }
 }
 
+// shown shows an enrolment's answer: the recovery code, when the
+// replacement applies, and the Owner network's card. A failed enrolment
+// that already replaced the setup network answers with the card alone.
 function shown(r) {
   for (const f of document.querySelectorAll("form")) f.hidden = true;
   document.getElementById("shown").hidden = false;
-  document.getElementById("recovery").textContent = r.recovery;
+  document.getElementById("recovery-box").hidden = !r.recovery;
+  if (r.recovery) document.getElementById("recovery").textContent = r.recovery;
   if (r.due) document.getElementById("due").textContent =
     "Your new passkey replaces the old one at " + r.due + ". Come back to this page after that to finish.";
-  if (r.network) {
+  const n = r.network;
+  if (n) {
     document.getElementById("network").hidden = false;
-    document.getElementById("ssid").textContent = r.network.ssid;
-    document.getElementById("password").textContent = r.network.password;
-    if (r.network.qr) drawQR(document.getElementById("qr"), r.network.qr);
+    // Only the first enrolment replaced the setup network; after a
+    // factory reset the owner is already on this one.
+    document.getElementById("net-new").hidden = !n.setup_replaced;
+    document.getElementById("net-kept").hidden = !!n.setup_replaced;
+    document.getElementById("rejoin").hidden = !n.setup_replaced;
+    document.getElementById("ssid").textContent = n.ssid;
+    document.getElementById("password").textContent = n.password;
+    if (n.qr) drawQR(document.getElementById("qr"), n.qr);
     else document.getElementById("qr").hidden = true;
-    const pw = r.network.password.replace(/ /g, "");
+    const pw = n.password.replace(/ /g, "");
     document.getElementById("last4").addEventListener("input", e => {
       document.getElementById("joined").hidden = e.target.value.replace(/ /g, "").toUpperCase() !== pw.slice(-4).toUpperCase();
     });
@@ -84,7 +94,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const btn = ef.querySelector("button");
     btn.disabled = true;
     try { shown(await enrol(ef.elements.code.value, ef.dataset.rp)); say(""); }
-    catch (err) { say("Not enrolled: " + err.message); btn.disabled = false; }
+    catch (err) {
+      if (err.body && err.body.network) {
+        // Nothing enrolled, but the setup Wi-Fi is already gone.
+        shown({ network: err.body.network });
+        say("Not enrolled: " + err.message + ". Save the network below, join it, open this page again and enrol with the same code.");
+        return;
+      }
+      say("Not enrolled: " + err.message); btn.disabled = false;
+    }
   });
   const rf = document.getElementById("reset");
   if (rf) rf.addEventListener("submit", async e => {
