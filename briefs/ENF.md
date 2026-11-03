@@ -211,7 +211,9 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 **Scope:** `broker/cmd/agentos-enforcer/` (new), `tools/risk_tier.py` if needed.
 **Builds:** wires a to k, r and s into one daemon and its services (page, channel, nft loader, dnsmasq, AP push, radios, alerts) with their users and state paths; owns the lifecycle matrix test above.
-**Acceptance tests:** 1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
+**Acceptance tests:**
+1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
+2. NET-2, A18 (#4709): `agentos-enforcer::TestChannelLogKeepsEveryField`: the daemon's channel-log sink passes `channel.CheckSink`, storing each line and reading it back from its own storage. Catches a sink that loses `Event.Dropped` or a field added later.
 **Size:** about 130k. **Depends on:** ENF-a to ENF-i, ENF-k, ENF-r, ENF-s.
 
 ### ENF-m (#3671): the signed image (NET-2 Hardening, decision 7)
