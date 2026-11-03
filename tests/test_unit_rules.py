@@ -186,12 +186,14 @@ class RecordsTest(unittest.TestCase):
                 "t@agentos-unit-lint.service": ("loaded", LIB + "t@.service", [ETC + "t@.service.d/t.conf"]),
                 "lone@agentos-unit-lint.service": ("not-found", "", []),
                 "lone@m.service": ("masked", "/dev/null", []),  # #4779 L3 2: masked stands for no template dir
+                "lone@n.service": ("loaded", LIB + "t@.service", []),  # round 3: only the lint's own instance does
                 "gone.service": ("not-found", "", []),
                 "gen.service": ("loaded", "/run/systemd/generator/gen.service", []),
                 "m.service": ("masked", "/etc/systemd/system/m.service", [])})
             units = [(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]]
             self.assertEqual(units, [
                 ("gen.service", False, [("/run/systemd/generator/gen.service", True)]),  # a generated unit is read
+                ("lone@n.service", False, [(LIB + "t@.service", True)]),  # judged as itself, standing for nothing
                 ("t@agentos-unit-lint.service", False, [(LIB + "t@.service", True), (ETC + "t@.service.d/t.conf", True)]),
                 ("x.service", False, [(LIB + "x.service", False), (ETC + "x.service.d/a.conf", True),
                                       (ETC + "service.d/w.conf", True), (ETC + "y.service.d/y.conf", True)]),
@@ -274,6 +276,15 @@ class ShowTest(unittest.TestCase):
 
 
 class NamesTest(unittest.TestCase):
+    def test_no_file_may_be_the_lint_instance_s_own(self):
+        # #4779 round 3: the lint's instance stands for every instance a boot may start
+        for files in ({ETC + "t@agentos-unit-lint.service.d/u.conf": "u"}, {ETC + "t@agentos-unit-lint.service": "u"},
+                      {ETC + "a.target.wants/t@agentos-unit-lint.service": "-> /dev/null"}):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(files, **{LIB + "t@.service": "t"}))
+                with self.assertRaisesRegex(SystemExit, "lint's own instance"):
+                    r.names(v, r.unit_dirs(v))
+
     def test_every_name_a_unit_directory_holds(self):
         with tempfile.TemporaryDirectory() as d:
             v = tree(d, {LIB + "a.service": "", LIB + "t@.service": "", ETC + "t@b.service.d/z.conf": "",

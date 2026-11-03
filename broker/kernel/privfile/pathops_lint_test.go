@@ -785,8 +785,16 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a template drop-in with no template": {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
 		// #4779 L3 round 2: a masked instance applies no drop-in, but any other instance would
 		"a template drop-in beside a masked instance":      {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "-> /dev/null"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in with its lint instance masked": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@agentos-unit-lint.service": "-> /dev/null"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a mode of ours on a package's directory":          {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
+		"a template drop-in with its lint instance masked": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@agentos-unit-lint.service": "-> /dev/null"}, ourEtc, `lint's own instance`}, // round 3: refused by its name
+		// #4779 round 3: no instance but the lint's own, loaded, stands for its template's drop-ins
+		"a template drop-in beside a bad-setting lint instance": {map[string]string{lib + "x@.service": "[Service]\nExecStart=%I\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside a bad-setting template":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nUser=a:b\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside an error lint instance":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nDescription=" + strings.Repeat("a", 1100*1024) + "\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside an instance's own drop-in":   {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside an instance's own fragment":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside a non-root instance":         {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a file of the lint's own instance":                     {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
+		"a mode of ours on a package's directory":               {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {

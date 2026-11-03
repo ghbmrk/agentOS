@@ -26,7 +26,7 @@ prints records, it judges nothing.
 
 A drop-in of ours that a transient or later unit may read is also printed alone, to be read as a
 root unit's: one in a type-wide (service.d) or prefix (a-.service.d) directory, and one in a
-directory whose name no loaded unit, alias or loaded template instance has. /etc/fstab is printed
+directory whose name no unit or alias has (a template's: unless the lint's own instance, READS, loaded). /etc/fstab is printed
 whole when it is ours; the units its generator writes are read like any other.
 
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
@@ -65,11 +65,15 @@ SAFE = re.compile(r"[A-Za-z0-9:_.@\\+-]+\Z")
 PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths")
 # systemd will not start a bad-setting or error unit, but its files are held as a loaded one's: stricter.
 STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
-# The states whose unit has read its drop-ins (DropInPaths): only an instance in one of these stands for
-# its template's drop-in directory. A masked or not-found instance applies none, while another instance
-# (a generated systemd-cryptsetup@dev, logind's getty@ttyN) still would (#4779 L3 round 2). An error
-# unit may stop loading before them, so it does not count either: its template's drop-ins are read alone.
-READS = ("loaded", "bad-setting")
+# A template's drop-ins apply to every instance, and an instance a boot starts (a generated
+# systemd-cryptsetup@dev, logind's getty@ttyN, an Accept= socket's) can have any name. So they are judged
+# only as such an instance sees them: the lint's own instance (INSTANCE), which no file in the tree may
+# name (safe()), so systemd loads it from the template's fragment and drop-ins alone. It stands for the
+# template's directory only when it loaded and so read them; no other instance ever does (its own
+# fragment or drop-ins are not what the rest run: #4779 Security round 3). A masked, not-found,
+# bad-setting or error lint instance (which may stop loading before its drop-ins: L3 rounds 2 and 3)
+# leaves the directory to be read alone, as root.
+READS = ("loaded",)
 # The top links of a merged /usr: the only links a dpkg path may be resolved through.
 MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
 # A drop-in of ours on a packaged root unit: the lint must refuse it, or a pass of the built tree
@@ -155,6 +159,9 @@ def safe(name, where):
     if not SAFE.match(name):
         raise SystemExit("unit rules: %s/%r: a name with a byte outside [A-Za-z0-9:_.@\\+-], which "
                          "systemctl's reply could not carry unambiguously" % (where, name))
+    if "@" + INSTANCE + "." in name:
+        raise SystemExit("unit rules: %s/%s: a name of the lint's own instance, which stands for every "
+                         "instance a boot may start, so no file may be its own" % (where, name))
 
 
 def names(view, dirs):
@@ -262,7 +269,8 @@ def records(view, shown, dirs, prov):
         # A masked or error name stands for its own directory: no other unit loads under that name.
         own |= {n + ".d" for n in words(s, "Names")}
         if s["LoadState"] in READS:
-            instances |= {template_of(n) for n in words(s, "Names")} - {None}
+            instances |= {template_of(n) for n in words(s, "Names")
+                          if os.path.splitext(n)[0].endswith("@" + INSTANCE)}
         if s["LoadState"] == "masked" or s["Id"] in done:
             continue
         done.add(s["Id"])
