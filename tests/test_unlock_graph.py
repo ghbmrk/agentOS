@@ -1,7 +1,7 @@
 """image/unlock_graph.py: the unlock step's reach, as the image's own systemd shows it (#4667), and the
 offline_systemd harness it shares with the unit-rule lint (#4677).
 
-REQ: STO-2c
+REQ: STO-2
 """
 import os
 import pathlib
