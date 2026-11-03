@@ -48,6 +48,13 @@ var (
 	// window, by design or by fault, and each such open holds a
 	// goroutine and a closed connection that nothing frees, so the
 	// Pusher opens no more until the enforcer restarts.
+	// ErrNoTimeout is a Sync whose claim found no timeout command on the
+	// access point: every reload would fail, so the Sync writes nothing
+	// it could not apply (#4429).
+	ErrNoTimeout = errors.New("push: the access point has no timeout command, so nothing written could be applied")
+	// ErrHostKey is a pinned host key of a type push does not accept: DSA,
+	// a certificate or a security key.
+	ErrHostKey = errors.New("push: pinned host key type not accepted")
 	ErrStalled = errors.New("push: too many session opens left waiting on dropped connections; the access point needs checking and the enforcer a restart")
 )
 
@@ -61,8 +68,14 @@ const MaxAbandoned = 16
 // refuses because its Sync's token is no longer the newest claim:
 // EX_TEMPFAIL, which no command push runs uses for anything else (a
 // failed cat, hash check, flock or mv is 1; a missing command 127; a
-// command a signal ended 128 and up).
+// command a signal ended 128 and up; timeout's own 124 and 125). The
+// reload's own status passes through timeout, so applyCmd turns a
+// reload_config that itself exits 75 into 1.
 const refusedExit = 75
+
+// noTimeoutExit is a claim's status when the access point has no
+// timeout command (EX_UNAVAILABLE): Sync returns ErrNoTimeout.
+const noTimeoutExit = 69
 
 // reloadBound is how long the reload may hold the access point's lock:
 // busybox timeout ends reload_config after it, so a hung reload (a ubus
@@ -156,6 +169,10 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (res Result, err err
 
 	tok := token()
 	if _, err := p.run(ctx, c, claimCmd(tok), nil); err != nil {
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) && exit.ExitStatus() == noTimeoutExit {
+			err = fmt.Errorf("%w: %w", ErrNoTimeout, err)
+		}
 		return Result{}, fmt.Errorf("push: claim: %w", err)
 	}
 	for _, f := range files {
@@ -256,6 +273,10 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 	if p.HostKey == nil || p.Signer == nil || p.Dial == nil {
 		return nil, errors.New("push: no pinned host key, enforcer key or admin-port dialer")
 	}
+	algos, err := hostKeyAlgos(p.HostKey)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := p.Dial(ctx, "tcp", p.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("push: dial: %w", err)
@@ -267,7 +288,7 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 		User:              "root",
 		Auth:              []ssh.AuthMethod{ssh.PublicKeys(p.Signer)},
 		HostKeyCallback:   ssh.FixedHostKey(p.HostKey),
-		HostKeyAlgorithms: []string{p.HostKey.Type()},
+		HostKeyAlgorithms: algos,
 	}
 	sc, chans, reqs, err := ssh.NewClientConn(conn, p.Addr, cfg)
 	if err != nil {
@@ -275,6 +296,21 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 		return nil, fmt.Errorf("push: ssh: %w", err)
 	}
 	return ssh.NewClient(sc, chans, reqs), nil
+}
+
+// hostKeyAlgos is the host key algorithms the pinned key k may sign
+// with: its own for ed25519 and ECDSA, and for RSA only the SHA-2
+// signatures (rsa-sha2-512, rsa-sha2-256), never ssh-rsa's SHA-1, which
+// an RSA key's own type would allow (#4087). Any other type is refused.
+func hostKeyAlgos(k ssh.PublicKey) ([]string, error) {
+	switch t := k.Type(); t {
+	case ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521:
+		return []string{t}, nil
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}, nil
+	default:
+		return nil, fmt.Errorf("%w: %q", ErrHostKey, t)
+	}
 }
 
 // The commands. A path is always one of ap.Paths, which hold no
@@ -329,17 +365,22 @@ const tmpGlob = "/etc/agentos-ap-*.new"
 // claimCmd makes tok the newest claim and removes the temporary files
 // of earlier Syncs, which a reboot mid-write would otherwise leave on
 // /etc. A write of an earlier Sync still running then fails its hash
-// check or its move.
+// check or its move. An access point with no timeout command, on which
+// every reload would fail, refuses the claim with noTimeoutExit, so
+// nothing is written that could not be applied (#4429).
 func claimCmd(tok string) string {
-	return locked("echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
+	return locked("{ command -v timeout >/dev/null || exit " + fmt.Sprint(noTimeoutExit) + "; } && echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
 }
 
 // applyCmd reloads while tok is the newest claim, for reloadBound at
 // most. reload_config does not get the lock's descriptor, so nothing it
 // starts can hold the lock, nor the session's output, so nothing it
 // leaves running when the bound ends it holds the Sync's command open.
+// A reload_config that itself exits refusedExit exits 1, so only a newer
+// claim reads as ErrSuperseded (#4429).
 func applyCmd(tok string) string {
-	return locked(owns(tok) + " && timeout " + fmt.Sprint(int(reloadBound/time.Second)) + " reload_config 9>&- </dev/null >/dev/null 2>&1")
+	return locked(owns(tok) + " && { timeout " + fmt.Sprint(int(reloadBound/time.Second)) + " reload_config 9>&- </dev/null >/dev/null 2>&1 || { s=$?; [ $s = " +
+		fmt.Sprint(refusedExit) + " ] && s=1; exit $s; }; }")
 }
 
 // tmpPath is the temporary file for path in the Sync holding tok: one per
