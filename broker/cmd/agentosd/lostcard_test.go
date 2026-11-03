@@ -366,6 +366,11 @@ func TestLostCardDoneMarksOnlyTheCardItWipes(t *testing.T) {
 	if got := r.l.readShown(); got != (shown{ID: shownID}) {
 		t.Fatalf("a record naming another card was marked: %+v", got)
 	}
+	r.ck.card = nil // the card ID read fails; the wipe still answers
+	must(t, r.l.LostDone(ctx))
+	if got := r.l.readShown(); got != (shown{ID: shownID}) {
+		t.Fatalf("a record was marked with no card ID read: %+v", got)
+	}
 }
 
 // MIG-4-recovery-r4g (#4179): a failed read of the recipient in effect
