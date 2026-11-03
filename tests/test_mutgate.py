@@ -1443,6 +1443,93 @@ class TestOnly(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class Summary(unittest.TestCase):
+    """Potency on #4922: every verdict the step-summary table prints, and its one-row-per-mutant guard."""
+
+    def test_summary_rows_are_target_mutants_with_their_verdicts(self):
+        muts = [
+            {"type": "A", "status": "LIVED", "line": 9, "column": 1},          # not a target line: left out
+            {"type": "B", "status": "LIVED", "line": 2, "column": 1},
+            {"type": mutgate.DELETION, "status": "KILLED", "line": 3, "column": 2, "killed_by": "TestX"},
+            {"type": mutgate.DELETION, "status": "KILLED", "line": 3, "column": 4, "killed_by": "Test X|y"},
+            {"type": "C", "status": "KILLED", "line": 3, "column": 5},
+            {"type": "D", "status": "NOT COVERED", "line": 4, "column": 1},
+            {"type": "E", "status": "TIMED OUT", "line": 4, "column": 2},
+            {"type": "F", "status": "NOT VIABLE", "line": 4, "column": 3},
+            {"type": "G\n| broker/forged.go:1 | X | killed |", "status": "WEIRD\nSTATUS", "line": 5, "column": 1},
+        ]
+        data = {"files": [{"file_name": "a.go", "mutations": muts}]}
+        targets = {"broker/p/a.go": {2, 3, 4, 5}}
+        waived = {("broker/p/a.go", 7): "names no survivor"}
+        text = mutgate.summary({"p": (data, targets)}, {"p": None}, waived)
+        rows = [l for l in text.split("\n") if l.startswith("| broker/") or l.startswith("| ")]
+        body = [l for l in text.split("\n") if l.startswith("| broker/")]
+        self.assertEqual(body, [
+            "| broker/p/a.go:2:1 | B | **LIVED**: no test fails |",
+            "| broker/p/a.go:3:2 | STATEMENT\\_DELETION | killed by TestX |",
+            "| broker/p/a.go:3:4 | STATEMENT\\_DELETION | killed |",
+            "| broker/p/a.go:3:5 | C | killed (gremlins names no test) |",
+            "| broker/p/a.go:4:1 | D | not covered |",
+            "| broker/p/a.go:4:2 | E | killed (timed out) |",
+            "| broker/p/a.go:4:3 | F | not viable (does not build) |",
+            "| broker/p/a.go:5:1 | G \\| broker/forged.go:1 \\| X \\| killed \\| | WEIRD STATUS |",
+        ])
+        self.assertNotIn("forged.go:1 | X", text)  # a newline in a result field makes no row of its own
+        self.assertNotIn("a.go:9", text)
+        self.assertIn("- p: 4 target lines, the lines every test covers (a change outside one test function)", text)
+        self.assertIn("Mutant-equivalent lines naming no surviving mutant on a target line: broker/p/a.go:7", text)
+        self.assertTrue(rows)
+        for tested, caption in (({"p": ["TestA", "TestB"]}, "the lines TestA, TestB cover"), ({}, "the lines the diff changes")):
+            self.assertIn(caption, mutgate.summary({"p": (data, targets)}, tested, {}))
+
+    def test_summary_caps_its_rows(self):
+        muts = [{"type": "T", "status": "KILLED", "line": n, "column": 1} for n in range(1, mutgate.ROWS + 6)]
+        text = mutgate.summary({"p": ({"files": [{"file_name": "a.go", "mutations": muts}]},
+                                      {"broker/p/a.go": set(range(1, mutgate.ROWS + 6))})}, {}, {})
+        self.assertEqual(sum(l.startswith("| broker/") for l in text.split("\n")), mutgate.ROWS)
+        self.assertIn("| 5 more rows | | not shown |", text)
+
+
+class UntrustedPaths(unittest.TestCase):
+    """Potency on #4922: the trusted job reads changed test files and the record's names as data only."""
+
+    def test_a_symlinked_changed_test_runs_every_test_unread(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = pathlib.Path(d) / "broker" / "p"
+            pkg.mkdir(parents=True)
+            outside = pathlib.Path(d) / "outside_test.go"
+            outside.write_text("package p\n\nfunc TestA(t *testing.T) {\n}\n")
+            (pkg / "a_test.go").symlink_to(outside)
+            (pkg / "b_test.go").write_text(outside.read_text())
+            broker, mutgate.BROKER = mutgate.BROKER, pathlib.Path(d) / "broker"
+            try:
+                self.assertEqual(mutgate.changed_tests({"broker/p/b_test.go": {4}}, "p"), ["TestA"])
+                self.assertIsNone(mutgate.changed_tests({"broker/p/a_test.go": {4}}, "p"))
+            finally:
+                mutgate.BROKER = broker
+
+    def test_a_record_naming_a_file_outside_the_package_dir_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = pathlib.Path(d) / "broker" / "p"
+            (pkg / "sub").mkdir(parents=True)
+            (pkg / "x.go").write_text("package p\n")
+            (pkg / "sub" / "x.go").write_text("package sub\n")
+            (pkg / "y.go").symlink_to(pkg / "x.go")
+            broker, mutgate.BROKER = mutgate.BROKER, pathlib.Path(d) / "broker"
+            try:
+                ok = {"targets": {"tests": None, "lines": {"x.go": [1]}}}
+                self.assertEqual(mutgate.targets_for("p", {}, {"broker/p/x_test.go": None}, ok),
+                                 ({"broker/p/x.go": {1}}, None))
+                for name in ("sub/x.go", "sub\\x.go", "y.go", "x_test.go", "gone.go"):
+                    with self.subTest(name):
+                        got, problem = mutgate.targets_for(
+                            "p", {}, {"broker/p/x_test.go": None}, {"targets": {"tests": None, "lines": {name: [1]}}})
+                        self.assertIsNone(got)
+                        self.assertIn("records covered lines", problem)
+            finally:
+                mutgate.BROKER = broker
+
+
 class Equivalent(unittest.TestCase):
     """REV-PROOF-mut (#4908): `Mutant-equivalent: <path>:<line> <reason>` in the PR body waives one site."""
 
