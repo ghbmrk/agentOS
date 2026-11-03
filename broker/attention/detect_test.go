@@ -268,3 +268,32 @@ func TestCorrectionUsesItsStepsDay(t *testing.T) {
 		}
 	}
 }
+
+// D-309 (Potency on #4945, c26842dd): the record keeps only Window. An
+// effect older than Window leaves no entry, and as the clock passes Window
+// every day and step of an older record is dropped; an effect on the
+// window's first day still counts.
+func TestRecordKeepsOnlyTheWindow(t *testing.T) {
+	o := newOpt(t, &memStore{}, nil)
+	clean(t, o, "pay", t0.Add(-80*24*time.Hour), 300)
+	old := t0.Add(-200 * 24 * time.Hour)
+	recordAll(t, o, Outcome{Clerk: "pay", Step: "old", Ran: old, At: t0.Add(-60 * 24 * time.Hour)})
+	r := o.st.Clerks["pay"]
+	if _, ok := r.Steps["old"]; ok || r.Days[old.UTC().Format(dayFmt)] != nil {
+		t.Fatalf("an effect older than Window left an entry: %+v", r.Steps["old"])
+	}
+	steps, days := len(r.Steps), len(r.Days)
+	if steps != 300 || days == 0 {
+		t.Fatalf("steps %d, days %d", steps, days)
+	}
+
+	later := t0.Add(80 * 24 * time.Hour) // every clean effect is now older than Window
+	edge := later.Add(-Window).UTC().Truncate(24 * time.Hour)
+	recordAll(t, o, Outcome{Clerk: "pay", Step: "edge", Ran: edge, At: later})
+	if len(r.Steps) != 1 || len(r.Days) != 1 {
+		t.Fatalf("after Window: %d steps, %d days, want 1 and 1", len(r.Steps), len(r.Days))
+	}
+	if m := o.Measure("pay"); m.Effects != 1 {
+		t.Fatalf("an effect on the window's first day did not count: %+v", m)
+	}
+}

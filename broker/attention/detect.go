@@ -46,7 +46,7 @@ const (
 )
 
 // record is one clerk's effects, by the UTC day each ran, and each step
-// it has seen, so a step counts once however often its outcome is
+// it has seen within Window, so a step counts once however often its outcome is
 // delivered, and a correction is judged by the flag its effect carried.
 type record struct {
 	Days  map[string]*tally    `json:"days"`
@@ -99,7 +99,6 @@ func (o *Optimizer) Record(xs ...Outcome) error {
 
 func (o *Optimizer) recordLocked(x Outcome) {
 	o.tick(x.At)
-	o.tick(x.Ran)
 	r := o.st.Clerks[x.Clerk]
 	if r == nil {
 		r = &record{}
@@ -111,14 +110,13 @@ func (o *Optimizer) recordLocked(x Outcome) {
 	if r.Steps == nil {
 		r.Steps = map[string]*stepSeen{}
 	}
-	o.prune()
+	// Days that have left the window, with their steps, go at the end of
+	// every record, the outcome's own included.
+	defer o.prune()
 	// A known step is placed by the day its record holds, never by this
-	// outcome's own Ran; only a new step is placed, and windowed, by Ran.
+	// outcome's own Ran; only a new step is placed by Ran.
 	st := r.Steps[x.Step]
 	if st == nil {
-		if x.Ran.Before(o.st.Now.Add(-Window)) {
-			return
-		}
 		st = &stepSeen{Day: x.Ran.UTC().Format(dayFmt)}
 		r.Steps[x.Step] = st
 	}
