@@ -800,7 +800,8 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 
 	// LOG-2: a store with no counter, or one that does not read, hands
 	// the kernel nothing, so no kernel starts without its anchor.
-	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal()) + `}`)} {
+	ref := string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal())
+	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + ref + `}`), "null auth": []byte(`{"ref":` + ref + `,"auth":null}`)} {
 		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
 		must(t, err)
 		if v == nil {

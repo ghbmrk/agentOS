@@ -46,7 +46,7 @@ func Unmarshal(b []byte) (*Authority, error) {
 		return nil, errors.New("pageca: the sealed authority does not read")
 	}
 	var k []byte
-	if v.Key != nil && *v.Key != nil {
+	if v.Key != nil { // JSON's null leaves it nil
 		k = **v.Key
 	}
 	defer clear(k)

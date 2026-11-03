@@ -722,7 +722,7 @@ func counter(st *seal.Store) (handoff.Counter, error) {
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store: %w", err)
 	}
 	var auth []byte
-	if r.Auth != nil && *r.Auth != nil {
+	if r.Auth != nil { // JSON's null leaves it nil
 		auth = **r.Auth
 	}
 	ref, err := tpmseal.ParseCounterRef(r.Ref)
