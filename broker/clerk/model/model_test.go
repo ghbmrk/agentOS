@@ -851,6 +851,9 @@ func TestAWriteTheLogRefusesAsTextIsDroppedNotOwed(t *testing.T) {
 	if _, err := c.Call(2, "t", "api", "hi", 10); err != nil || f.calls != 2 || lg.reads != 2 {
 		t.Fatalf("the next call: %v, %d provider calls, %d reads", err, f.calls, lg.reads)
 	}
+	if _, err := c.Call(2, "t", "plan", "hi", 10); err == nil || f.calls != 2 {
+		t.Fatalf("the pool whose reading was dropped is closed: %v", err)
+	}
 }
 
 // An owed write whose retry the log refuses as text is dropped there: only
@@ -869,5 +872,101 @@ func TestAnOwedWriteRefusedAsTextOnItsRetryIsDropped(t *testing.T) {
 	lg.notText = false
 	if _, err := c.Call(3, "big", "api", "hi", 1); err != nil || f.calls != 2 || lg.meters != 3 {
 		t.Fatalf("the next call: %v, %d provider calls, %d meters, want 2 and 3", err, f.calls, lg.meters)
+	}
+}
+
+// A reading the log refuses as text is dropped, so the log keeps the pool on
+// its last, lower reading; the clerk keeps the pool closed until the dropped
+// reading's latest window reset, whether the drop is the first attempt or a
+// retry, and other routes run meanwhile (#4831, RES-5, KRN-1).
+func TestAPoolWhoseReadingIsDroppedIsClosedUntilItResets(t *testing.T) {
+	short, long := model.PoolWindow{Window: "5h", Used: 300, ResetAt: 10_000}, model.PoolWindow{Window: "7d", Used: 100, ResetAt: 50_000}
+	for name, tc := range map[string]struct {
+		retry bool
+		ws    []model.PoolWindow // the latest reset first and last, so it is the latest, not the last, that counts
+	}{
+		"first attempt":               {false, []model.PoolWindow{short, long}},
+		"first attempt, latest first": {false, []model.PoolWindow{long, short}},
+		"retry":                       {true, []model.PoolWindow{short, long}},
+		"retry, latest first":         {true, []model.PoolWindow{long, short}},
+	} {
+		retry := tc.retry
+		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Windows: tc.ws}}}
+		c, k, lg := rig(t, f)
+		if err := k.ReadPool(0, "codex-5h", []kernel.WindowReading{{Window: "5h", Used: 100, ResetAt: 10_000}}); err != nil {
+			t.Fatal(err)
+		}
+		lg.poolNotText, lg.failPool = !retry, retry
+		_, err := c.Call(1, "t", "plan", "hi", 10)
+		f.u.Pool = nil // later calls carry no reading of their own
+		if retry {
+			lg.failPool, lg.poolNotText = false, true
+			// the owed reading is retried here, refused as text and dropped
+			if _, err = c.Call(2, "t", "api", "hi", 10); f.calls != 1 {
+				t.Fatalf("%s: the call that found the drop is not made", name)
+			}
+		}
+		if !errors.Is(err, kernel.ErrNotText) {
+			t.Fatalf("%s: the drop is said: %v", name, err)
+		}
+		lg.poolNotText = false
+		if r := k.AdmitPool(3, "codex-5h"); r != nil {
+			t.Fatalf("%s: the log's pool is open on its last reading: %v", name, r)
+		}
+		calls := f.calls
+		var rf *key.Refusal
+		for _, now := range []int64{3, 10_000, 49_999} {
+			if _, err := c.Call(now, "t", "plan", "hi", 10); !errors.As(err, &rf) || rf.Code != kernel.CPool || f.calls != calls {
+				t.Fatalf("%s: at %d the pool is closed until the 7d reset: %v, %d calls", name, now, err, f.calls)
+			}
+		}
+		if _, err := c.Call(3, "t", "api", "hi", 10); err != nil || f.calls != calls+1 {
+			t.Fatalf("%s: another route runs: %v", name, err)
+		}
+		if _, err := c.Call(50_000, "t", "plan", "hi", 10); err != nil || f.calls != calls+2 {
+			t.Fatalf("%s: the pool reopens at the reset: %v", name, err)
+		}
+	}
+}
+
+// The error for a dropped write says the write was dropped, and wraps
+// kernel.ErrNotText, rather than being the bare kernel error (#4832 item 1).
+func TestADroppedWriteSaysItWasDropped(t *testing.T) {
+	for name, set := range map[string]func(*flaky){
+		"spend":   func(f *flaky) { f.notText = true },
+		"reading": func(f *flaky) { f.poolNotText = true },
+	} {
+		c, _, lg := rig(t, &fake{u: model.Usage{Reported: true, Pool: pw(300, 10_000)}})
+		set(lg)
+		_, err := c.Call(1, "t", "plan", "hi", 10)
+		if !errors.Is(err, kernel.ErrNotText) || err == kernel.ErrNotText ||
+			!strings.Contains(err.Error(), "a log write the log refuses was dropped") {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+// A meter the log cannot write, with a reading it refuses as text: the
+// error carries ErrNotText, yet the spend is owed, so the clerk is shut until
+// the log records it, and the pool stays closed after (#4832 item 2).
+func TestAnOwedMeterWithADroppedReadingShutsTheClerk(t *testing.T) {
+	f := &fake{u: model.Usage{In: 1, Out: 1, Reported: true, Pool: pw(300, 10_000)}}
+	c, _, lg := rig(t, f)
+	lg.fail, lg.poolNotText = true, true
+	reply, err := c.Call(1, "t", "plan", "hi", 10)
+	if !errors.Is(err, kernel.ErrNotText) || reply != "" {
+		t.Fatalf("the call: %q %v", reply, err)
+	}
+	lg.poolNotText = false
+	f.u.Pool = nil
+	if _, err := c.Call(2, "t", "api", "hi", 10); err == nil || errors.Is(err, kernel.ErrNotText) || f.calls != 1 {
+		t.Fatalf("the owed meter shuts the clerk: %v, %d calls", err, f.calls)
+	}
+	lg.fail = false
+	if _, err := c.Call(3, "t", "api", "hi", 10); err != nil || f.calls != 2 {
+		t.Fatalf("calls resume once the log records: %v", err)
+	}
+	if _, err := c.Call(4, "t", "plan", "hi", 10); err == nil || f.calls != 2 {
+		t.Fatalf("the pool stays closed: %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	crand "crypto/rand"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -106,6 +107,64 @@ func TestEraseCancelsByLogOrderNotClock(t *testing.T) {
 		t.Fatalf("early is %s, late is %s", r.status("a/early"), r.status("a/late"))
 	}
 	r.replays()
+}
+
+// The erase's Confirmation names the plans it cancelled, by lineage then in
+// log order: those a reader submitted after its first read and not yet
+// ended, never a plan from before the read, a lineage that read nothing, or
+// one already ended. It is read from the state, so a Confirm after a restart
+// names the same plans, and an erase of a subject nobody read names none
+// (LOG-4, D-169, #4858). Catches a Confirmation that drops the list, names a
+// plan the erase did not end, orders it by map iteration, or loses it at a
+// restart.
+func TestEraseConfirmationNamesTheCancelledPlans(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := r.k.OpenSubject(0)
+	must(t, err)
+	unread, err := r.k.OpenSubject(0)
+	must(t, err)
+	h, err := r.k.Seal(0, sub, "mail", "message", []byte("lunch on Tuesday"))
+	must(t, err)
+	_, err = r.k.Seal(0, unread, "mail", "message", []byte("x"))
+	must(t, err)
+	held := r.derive(key.LimitHold(hour, hour))
+	r.plan("agent/before", held, st(key.Unsubscribe, "m0"))
+	for _, l := range []string{"b", "agent"} {
+		if _, err := r.k.ReadFor(1, h, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.plan("b/1", held, st(key.Unsubscribe, "m5"))
+	r.plan("agent/z", held, st(key.Unsubscribe, "m1"))
+	r.plan("agent/private/a", held, st(key.Unsubscribe, "m2"))
+	r.plan("agent/done", r.ck, st(key.Unsubscribe, "m3"))
+	r.plan("agent.x/r", held, st(key.Unsubscribe, "m4"))
+	must(t, r.tick(2))
+	if got := r.status("agent/done"); got != kernel.SDone {
+		t.Fatalf("agent/done is %s before the erase, want done", got)
+	}
+	c, err := r.k.Erase(3, sub)
+	must(t, err)
+	want := []string{"agent/z", "agent/private/a", "b/1"}
+	if !slices.Equal(c.Cancelled, want) {
+		t.Fatalf("the erase names %q, want %q", c.Cancelled, want)
+	}
+	for _, id := range want {
+		if p := r.k.State().Plans[id]; p.Status != kernel.SCancelled || p.Cancel != kernel.CErased {
+			t.Errorf("%s is named but %s (%q)", id, p.Status, p.Cancel)
+		}
+	}
+	if c, err := r.k.Erase(4, unread); err != nil || c.Cancelled != nil {
+		t.Fatalf("an erase nobody read names %q: %v", c.Cancelled, err)
+	}
+	r.replays()
+	r.boot(5)
+	if got := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(got, want) {
+		t.Fatalf("after a restart the erase names %q, want %q", got, want)
+	}
 }
 
 // Submit refuses a plan JSON cannot round-trip with JSON's own error, not

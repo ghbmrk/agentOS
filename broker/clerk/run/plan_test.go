@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -200,10 +201,65 @@ func TestPlanGuestEndpointMetersEachCall(t *testing.T) {
 	}
 }
 
+// downLog is a meter socket whose log cannot write spend (down) or
+// refuses a pool reading's text (notText).
+type downLog struct {
+	model.Ledger
+	down, notText bool
+}
+
+func (d *downLog) Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error {
+	if d.down {
+		return errors.New("log down")
+	}
+	return d.Ledger.Meter(now, a, route, amount, source)
+}
+
+func (d *downLog) ReadPool(now int64, pool string, ws []kernel.WindowReading) error {
+	if d.notText {
+		return kernel.ErrNotText
+	}
+	return d.Ledger.ReadPool(now, pool, ws)
+}
+
+// The settle error the endpoint does not return is kept by the clerk: owed
+// spend refuses the guest's next call (plan-meter) until the log has it,
+// and a pool reading the log refused as text closes the pool, so the next
+// call is refused with the pool's code. Neither is sent (#4831, RES-5).
+func TestPlanGuestSettleErrorRefusesTheNextCall(t *testing.T) {
+	for name, tc := range map[string]struct {
+		log    downLog
+		status int
+		detail string
+	}{
+		"owed spend":      {downLog{down: true}, http.StatusServiceUnavailable, DPlanMeter},
+		"dropped reading": {downLog{notText: true}, http.StatusTooManyRequests, DPlanRefused + " " + kernel.CPool},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int32
+			login, _ := planProvider(t, &calls)
+			d := tc.log
+			_, call := planGuestOn(t, login, 1<<30, 1<<20, func(l model.Ledger) model.Ledger { d.Ledger = l; return &d })
+			if st, body := call(`{"model":"m","stream":true}`); st != 200 {
+				t.Fatalf("the first call: %d %q", st, body)
+			}
+			if st, body := call(`{"model":"m","stream":true}`); st != tc.status || !strings.Contains(body, tc.detail) || calls.Load() != 1 {
+				t.Fatalf("the next call: %d %q, provider calls %d", st, body, calls.Load())
+			}
+		})
+	}
+}
+
 // planGuest serves login's guest g on an endpoint charged to a live plan
 // with a spend cap of task, at a declared context window of window tokens
 // and 50 output tokens, and answers a client that posts a body as g.
 func planGuest(t *testing.T, login *plan.Login, task, window int64) (*box, func(string) (int, string)) {
+	t.Helper()
+	return planGuestOn(t, login, task, window, func(l model.Ledger) model.Ledger { return l })
+}
+
+// planGuestOn is planGuest with the clerk's ledger wrapped by on.
+func planGuestOn(t *testing.T, login *plan.Login, task, window int64, on func(model.Ledger) model.Ledger) (*box, func(string) (int, string)) {
 	t.Helper()
 	b := newBoxFor(t, filepath.Join(shortDir(t), "web.sock"), "model", key.Read)
 	root := key.Issue(key.Ed25519Signer(ownerPriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"})
@@ -227,7 +283,7 @@ func planGuest(t *testing.T, login *plan.Login, task, window int64) (*box, func(
 		t.Fatal(err)
 	}
 	c := &model.Clerk{Routes: map[string]model.Price{"codex": {InPerM: 1_000_000, OutPerM: 1_000_000, Pool: "codex"}},
-		Ledger: proc.Meter{Conn: serveMeter(t, b)}}
+		Ledger: on(proc.Meter{Conn: serveMeter(t, b)})}
 	sock := filepath.Join(shortDir(t), "plan.sock")
 	ln, err := ListenPlan(sock, os.Getuid())
 	if err != nil {

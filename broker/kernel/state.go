@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -750,11 +751,12 @@ func (s *State) Status() []Unsettled {
 }
 
 // PlanView is what the owner seam's plan read tells of a plan (PLN-4, PLN-5
-// (b)): its status, a rejected plan's failing check, and each step's phase,
-// its clerk's last answer and whether it was undone.
+// (b)): its status, a rejected plan's failing check or a cancelled plan's
+// code (never its detail), and each step's phase, clerk's last answer and undo.
 type PlanView struct {
 	Status string     `json:"status"` // "": no such plan
 	Reject string     `json:"reject,omitempty"`
+	Cancel string     `json:"cancel,omitempty"`
 	Steps  []StepView `json:"steps,omitempty"`
 }
 
@@ -764,13 +766,21 @@ type StepView struct {
 	Undone bool   `json:"undone,omitempty"`
 }
 
+// Held is SpendHeld less ended plans, whose holds no Extend releases (CNotHeld);
+// SpendHeld keeps them, so a honey-key Extend naming one still pauses its scope.
+func (s *State) Held() map[string]SpendHold {
+	out := maps.Clone(s.SpendHeld)
+	maps.DeleteFunc(out, func(id string, _ SpendHold) bool { return s.Plans[id].Status != SActive })
+	return out
+}
+
 // PlanView is plan id's view; its Status is empty when the log has no such plan.
 func (s *State) PlanView(id string) PlanView {
 	p := s.Plans[id]
 	if p == nil {
 		return PlanView{}
 	}
-	v := PlanView{Status: p.Status, Reject: p.Reject}
+	v := PlanView{Status: p.Status, Reject: p.Reject, Cancel: p.Cancel}
 	for _, st := range p.Steps {
 		v.Steps = append(v.Steps, StepView{st.Phase, st.Detail, st.Undone})
 	}
