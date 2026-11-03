@@ -483,6 +483,9 @@ func dnsmasq(t *testing.T) string {
 // leaseSeconds reads a dnsmasq lease time: a number of seconds, or a
 // number with an m, h, d or w suffix; "infinite" and anything else is -1.
 func leaseSeconds(s string) int {
+	if s == "" {
+		return -1
+	}
 	unit := map[byte]int{'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}[s[len(s)-1]]
 	if unit != 0 {
 		s = s[:len(s)-1]
@@ -521,7 +524,7 @@ func TestLeaseCoversHold(t *testing.T) {
 	if v4 == 0 || v6 == 0 {
 		t.Fatalf("fixture leases %d IPv4 and %d IPv6 ranges; want both", v4, v6)
 	}
-	if leaseSeconds("11h") != 39600 || leaseSeconds("600") != 600 || leaseSeconds("infinite") != -1 {
+	if leaseSeconds("11h") != 39600 || leaseSeconds("600") != 600 || leaseSeconds("infinite") != -1 || leaseSeconds("") != -1 {
 		t.Fatal("leaseSeconds misreads dnsmasq lease times")
 	}
 }
