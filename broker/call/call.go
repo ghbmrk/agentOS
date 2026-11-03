@@ -221,13 +221,24 @@ func (cfg Config) check(token string) Rung {
 // answered one at a time: a new final turn, any speech from the owner, or
 // the 0 key stops the answer being spoken first.
 func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
-	return cfg.withDefaults().run(ctx, l, rung, nil)
+	known := make(chan Rung, 1)
+	known <- rung
+	return cfg.withDefaults().run(ctx, l, rung, known)
 }
 
-// run is Run, with the rung still to come on token when token is not nil.
-// It listens from the start, so the owner's first words are heard while
-// the token is read; keys are the token's until it is read, and the first
-// answer waits for the rung.
+// callRung is the call's rung as the turns see it: ready closes once it is
+// known, and r is fixed from then on.
+type callRung struct {
+	ready chan struct{}
+	r     Rung
+}
+
+// run is Run, with the rung to come on token. It listens from the start,
+// so the owner's first words are heard while the token is read; keys are
+// the token's until it is read. A turn starts as soon as it is heard,
+// whether or not the rung is known yet, so its one clip deadline covers
+// the wait for the rung as well as the answerer and the synthesizer
+// (rule 5; UX on #4944).
 func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung) (Report, error) {
 	rep := Report{Rung: rung}
 	select {
@@ -240,19 +251,23 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
-	var keys <-chan byte
-	if token == nil {
-		keys = l.Keys()
-	}
-	// held is what the owner asked while the token was read.
-	var held *Heard
+	cr := &callRung{ready: make(chan struct{})}
+	var keys <-chan byte // nil while the token is read
 
 	type running struct {
 		cancel context.CancelFunc
 		done   chan struct{}
 		turn   *Turn
+		text   string
+		// asked is set by the turn before it asks the answerer, and read
+		// only after done.
+		asked bool
 	}
 	var cur *running
+	// carry is what the owner asked in a turn stopped before it reached
+	// the answerer (only while the rung is still being read), asked again
+	// with the owner's next words.
+	var carry string
 	finish := func() {
 		rep.Turns = append(rep.Turns, *cur.turn)
 		if cfg.Done != nil {
@@ -260,28 +275,31 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 		}
 		cur = nil
 	}
-	stop := func() {
+	// stop ends the current turn; keep carries its question forward if the
+	// answerer never saw it.
+	stop := func(keep bool) {
 		if cur == nil {
 			return
 		}
 		cur.cancel()
 		<-cur.done
+		if keep && !cur.asked {
+			carry = cur.text
+		}
 		finish()
 	}
 	n := 0
-	start := func(h Heard) {
+	start := func(text string, end time.Time) {
 		n++
 		tctx, tcancel := context.WithCancel(ctx)
-		r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}}
+		r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}, text: text}
 		cur = r
-		end := h.End
 		if end.IsZero() {
 			end = cfg.Now()
 		}
-		a := Ask{Text: h.Text, Rung: rep.Rung, Turn: n}
 		go func() {
 			defer close(r.done)
-			cfg.answer(tctx, l, a, end, r.turn)
+			cfg.turn(tctx, l, text, n, cr, end, r.turn, &r.asked)
 		}()
 	}
 	for {
@@ -291,53 +309,47 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 		}
 		select {
 		case <-ctx.Done():
-			stop()
+			stop(false)
 			return rep, ctx.Err()
 		case <-l.Ended():
-			stop()
+			stop(false)
 			return rep, nil
 		case <-done:
 			finish()
 		case r := <-token:
+			cr.r = r
+			close(cr.ready)
 			rep.Rung, token, keys = r, nil, l.Keys()
-			if held != nil {
-				start(*held)
-			}
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
-				stop()
+				stop(false)
 				return rep, nil
 			}
 			// 0 is STOP (flip-phone note §2.2 rule 4). No other key does
 			// anything on a read-only call: none means yes.
 			if k == '0' {
-				stop()
+				stop(false)
+				carry = ""
 			}
 		case h, ok := <-heard:
 			if !ok {
-				stop()
+				stop(false)
 				l.Say(ctx, cfg.Clips.Failed)
 				return rep, ErrDeaf
 			}
 			if !h.Final {
 				if strings.TrimSpace(h.Text) != "" {
-					stop() // barge-in
+					stop(true) // barge-in
 				}
 				continue
 			}
-			stop()
-			if stopWord(h.Text) || strings.TrimSpace(h.Text) == "" {
-				held = nil
+			stop(true)
+			text := strings.TrimSpace(carry + " " + h.Text)
+			carry = ""
+			if stopWord(h.Text) || text == "" {
 				continue
 			}
-			if token != nil { // the rung is not known yet
-				if held != nil {
-					h.Text = held.Text + " " + h.Text
-				}
-				held = &h
-				continue
-			}
-			start(h)
+			start(text, h.End)
 		}
 	}
 }
@@ -368,12 +380,14 @@ type sound struct {
 	err  error
 }
 
-// answer plays one answer into t. A producer writes, checks and
-// synthesizes the sentences while the one before plays; this loop plays
-// them one at a time and, while nothing has played, the one-moment clip
-// once the owner has waited OneMomentAfter since the end of their speech,
-// whether the answerer or the synthesizer is the slow one (rule 5).
-func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *Turn) {
+// turn plays one owner turn into t. It owns the turn's one clip deadline,
+// end plus OneMomentAfter, set once when the turn starts and spent at the
+// first audio, and every wait before that audio is a case of the one
+// select below: the call's rung, the answerer and the synthesizer (rule 5).
+// Once the rung is known a producer writes, checks and synthesizes the
+// sentences while the one before plays; this loop plays them one at a
+// time, and a sentence ready when the deadline falls goes before the clip.
+func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool) {
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer func() {
@@ -381,8 +395,19 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 			t.Stopped = true
 		}
 	}()
-	sounds := make(chan sound)
-	go cfg.produce(pctx, a, sounds)
+	rung := cr.ready
+	var sounds chan sound // nil until the rung is known
+	ask := func() {
+		rung = nil
+		*asked = true
+		sounds = make(chan sound)
+		go cfg.produce(pctx, Ask{Text: text, Rung: cr.r, Turn: n}, sounds)
+	}
+	select { // a known rung asks the answerer before the deadline is set
+	case <-rung:
+		ask()
+	default:
+	}
 	moment := cfg.After(cfg.OneMomentAfter - cfg.Now().Sub(end))
 	play := func(pcm []byte, content bool) bool {
 		if len(pcm) == 0 {
@@ -426,6 +451,8 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 		select {
 		case <-ctx.Done():
 			return
+		case <-rung:
+			ask()
 		case <-moment:
 			moment = nil
 			if t.FirstAudio != 0 {
