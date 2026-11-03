@@ -53,7 +53,7 @@ func (p Page) Validate() error {
 // state a peer on another port could set (WIFI-del-a3, CH-9). None, or
 // more than one, is an error: nothing in sysfs says which jack the owner
 // cabled to the enforcer, so a box with two fixed ports needs
-// AGENTOS_PAGE_IFACE, the unit's -iface (or a board's .link name) and the page serves nothing rather than guess.
+// -iface named on both of the unit's commands in a drop-in (or a board's .link name) and the page serves nothing rather than guess.
 func Port1(sys string) (string, error) {
 	ents, err := os.ReadDir(filepath.Join(sys, "class", "net"))
 	if err != nil {
@@ -84,7 +84,7 @@ func Port1(sys string) (string, error) {
 	case 1:
 		return found[0], nil
 	}
-	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 with AGENTOS_PAGE_IFACE in a drop-in for agentos-localui.service (-iface)")
+	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 in a drop-in for agentos-localui.service (-iface on its root ExecStartPre, and AGENTOS_PAGE_IFACE for the page)")
 }
 
 // Wired says why name, a port 1 named on the unit (-iface), is not a link
