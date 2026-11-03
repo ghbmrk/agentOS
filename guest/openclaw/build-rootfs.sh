@@ -28,7 +28,7 @@ echo "$NODE_SHA256  $work/node.tar.xz" | sha256sum -c -
 n=node-$NODE_VERSION-linux-x64
 tar -xJf "$work/node.tar.xz" --strip-components=1 -C usr/local "$n/bin/node" "$n/bin/npm" "$n/bin/npx" "$n/lib/node_modules/npm"
 
-# OpenClaw, unmodified (ARC-3), with every transitive dependency pinned by
+# OpenClaw, unmodified but for pruning (PLN-5, D-308), with every transitive dependency pinned by
 # the committed lockfile (npm ci checks each package's integrity). Install
 # scripts stay off, as in S4 (finding 8).
 cp "$here/package.json" "$here/package-lock.json" opt/openclaw/
@@ -38,6 +38,11 @@ got=$(PATH="$out/usr/local/bin:$PATH" node -e \
 	'console.log(require(process.argv[1]).packages["node_modules/openclaw"].integrity)' \
 	"$out/opt/openclaw/node_modules/.package-lock.json")
 [ "$got" = "$OPENCLAW_INTEGRITY" ] || { echo "openclaw integrity $got" >&2; exit 1; }
+# Files the guest never loads are deleted (D-308): the "pruned" entries of the vulnerability
+# gate's config for this lockfile, which tools/vulncheck.py then does not read. Any entry that
+# does not match the installed tree fails the build.
+PATH="$out/usr/local/bin:$PATH" node "$here/prune.js" "$repo/assurance/vulncheck.json" guest/openclaw/package-lock.json \
+	"$out/opt/openclaw"
 ln -sf /opt/openclaw/node_modules/.bin/openclaw usr/local/bin/openclaw
 
 # The host's shell and a few tools, with every library they and node load.
