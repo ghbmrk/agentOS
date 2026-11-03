@@ -147,11 +147,19 @@ type fakeFire struct {
 	fail   bool
 	stall  bool
 	listed int
+	// Each load's context, and the time it had left when the load began.
+	ctxs []context.Context
+	left []time.Duration
 }
 
 func (f *fakeFire) Load(ctx context.Context, s string) error {
+	left := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
 	f.mu.Lock()
 	stall := f.stall
+	f.ctxs, f.left = append(f.ctxs, ctx), append(f.left, left)
 	f.mu.Unlock()
 	if stall {
 		<-ctx.Done()
