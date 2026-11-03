@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 // Signing domains. A log head and a key never verify as one another (KEY-3).
@@ -300,6 +301,12 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 	bb, err := json.Marshal(body)
 	if err != nil {
 		return Entry{}, err
+	}
+	// json.Marshal writes text that is not UTF-8 as the escape \ufffd (and a
+	// valid U+FFFD as is): such an entry would name what its caller did not,
+	// and a lookup by the caller's text would miss it (KRN-1, #4719).
+	if bytes.Contains(bytes.ReplaceAll(bb, []byte(`\\`), nil), []byte(`\ufffd`)) || !utf8.Valid(bb) {
+		return Entry{}, ErrNotText
 	}
 	e := Entry{Seq: uint64(len(f.entries) + 1), At: at, Type: typ, V: v, Body: bb}
 	if len(f.entries) > 0 {

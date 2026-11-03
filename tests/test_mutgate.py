@@ -789,8 +789,15 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 1), "TIMED OUT")
             # The test binary's own child is gone too (dead, or a zombie awaiting its reaper).
             state = pathlib.Path(f"/proc/{int(pid.read_text())}/stat")
+
+            def gone():
+                # One read, no exists() check first: the reaper can remove the entry between the two (#4712).
+                try:
+                    return state.read_text().split(")")[-1].split()[0] in "ZX"
+                except (FileNotFoundError, ProcessLookupError):
+                    return True
             for _ in range(50):
-                if not state.exists() or state.read_text().split(")")[-1].split()[0] in "ZX":
+                if gone():
                     break
                 time.sleep(0.1)
             else:

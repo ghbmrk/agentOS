@@ -288,6 +288,35 @@ class ErrorLineEscapeTest(unittest.TestCase):
                          % json.dumps("MISMATCH " + EVIL))
 
 
+class ShownCapTest(unittest.TestCase):
+    """#4693: no value read from a build prints longer than SHOWN_CAP characters."""
+
+    def test_at_the_cap_prints_whole(self):
+        v = "a" * (cm.SHOWN_CAP - 2)
+        self.assertEqual(cm.shown(v), json.dumps(v))
+        self.assertEqual(len(cm.shown(v)), cm.SHOWN_CAP)
+
+    def test_past_the_cap_is_cut_with_its_full_length(self):
+        v = "a" * (cm.SHOWN_CAP - 1)
+        self.assertEqual(cm.shown(v), '"%s... (%d chars)' % ("a" * (cm.SHOWN_CAP - 1), cm.SHOWN_CAP + 1))
+        lst = ["b"] * cm.SHOWN_CAP
+        self.assertEqual(cm.shown(lst), "%s... (%d chars)" % (json.dumps(lst)[:cm.SHOWN_CAP], len(json.dumps(lst))))
+
+    def test_cut_escapes_stay_one_printable_line(self):
+        out = cm.shown(EVIL * 1000)
+        self.assertTrue(out.isascii() and out.isprintable(), out)
+        self.assertEqual(len(out), cm.SHOWN_CAP + len("... (%d chars)" % len(json.dumps(EVIL * 1000))))
+
+    def test_say_caps_a_line_that_missed_shown(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cm.say("MISMATCH \n" + "x" * 10 ** 6)
+        self.assertEqual(buf.getvalue(), cm.shown("MISMATCH \n" + "x" * 10 ** 6) + "\n")
+        self.assertLess(len(buf.getvalue()), cm.SHOWN_CAP + 30)
+
+
 class ShadowPinTest(unittest.TestCase):
     """systemd-firstboot stamps root's entry with today's date; the initrd's finalize pins it."""
 
@@ -676,6 +705,19 @@ class ReproduceJobTest(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0, r.stdout)
                 self.assertIn("MISMATCH boot file name %s" % json.dumps(bad), r.stdout)
                 self.assertNotIn("MISMATCH initrd", r.stdout)
+
+    def test_huge_boot_file_value_prints_capped(self):
+        # #4693: a release record whose boot map value is megabytes of text prints at most
+        # SHOWN_CAP characters of it on the MISMATCH line, with its full length.
+        big = "z" * (3 * 10 ** 6)
+        self.side("release-a", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/vmlinuz": big}))
+        self.side("release-b", self.initrd)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH "agentos/vmlinuz" a=%s b="%s"' % (cm.shown(big), "ef" * 32), r.stdout.splitlines())
+        self.assertIn("... (%d chars)" % (len(big) + 2), r.stdout)
+        self.assertLess(max(len(ln) for ln in r.stdout.splitlines()), 2 * cm.SHOWN_CAP)
+        assert_one_line_each(self, r.stdout)
 
     def test_a_boot_file_only_one_side_names_fails(self):
         self.side("release-a", self.initrd)

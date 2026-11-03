@@ -22,7 +22,8 @@ Usage: compare_manifests.py DIR_A DIR_B
                                              differing initrd member by member; exit 0 only when
                                              all match)
 Every line it prints goes through say(), and every name or value read from a build through
-shown(), so a build's output can never forge a log line (#4612, #4648)."""
+shown(), so a build's output can never forge a log line (#4612, #4648) and no value prints longer
+than SHOWN_CAP characters (#4693)."""
 import hashlib
 import json
 import pathlib
@@ -33,11 +34,17 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import finish_image  # noqa: E402  the initrd reader the build's Bluetooth check uses
 
+SHOWN_CAP = 1024
+
+
 def shown(v):
     """V as one JSON token: a name or value read from a build prints quoted, with every control
     and non-ASCII character escaped, so it can never end a log line, start a forged one or an
-    Actions workflow command (::...), or move the terminal (#4612)."""
-    return json.dumps(v)
+    Actions workflow command (::...), or move the terminal (#4612). A token longer than SHOWN_CAP
+    prints its first SHOWN_CAP characters and its full length, so one huge value cannot make a
+    huge log line (#4693); a cut token never ends the way a whole JSON value does."""
+    s = json.dumps(v)
+    return s if len(s) <= SHOWN_CAP else "%s... (%d chars)" % (s[:SHOWN_CAP], len(s))
 
 
 def say(line):
