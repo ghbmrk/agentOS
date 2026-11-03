@@ -89,10 +89,10 @@ var ErrOutcome = errors.New("attention: an outcome needs its clerk, step, Ran an
 //     is an error, never a silent zero.
 //  2. A step's effect counts at most once, and its correction at most once.
 //  3. Of a correction, only Clerk, Step and At are read. It is judged by
-//     the effect the record holds for its step and placed by that step's
-//     day; a correction that arrives first is placed by its own At (log
-//     time, never before the effect), and the effect that follows counts
-//     on that same day, so arrival order cannot drop it.
+//     the effect the record holds for its step and placed on that step's
+//     day, which is always its effect's Ran day. A correction that arrives
+//     first sits on its own At's day only until its effect arrives, then
+//     moves there, so both arrival orders give the same Measure.
 //  4. The window is enforced by pruning alone, after every clock move and
 //     every record, so Measure counts exactly what the record holds.
 //  5. Every input the record cannot judge moves the bound up or leaves
@@ -129,8 +129,10 @@ func (o *Optimizer) recordLocked(x Outcome) {
 	// Days that have left the window, with their steps, go at the end of
 	// every record, the outcome's own included (invariant 4).
 	defer o.prune()
-	// A known step is placed by the day its record holds; a new step by
-	// its effect's Ran, or by a correction's At (invariant 3).
+	// A step's day is its effect's Ran day, as in effects-first order.
+	// Until its effect arrives, a correction-only step sits provisionally
+	// on its correction's At (the log never stamps a correction before its
+	// effect), so its silent failure counts meanwhile (invariant 5).
 	st := r.Steps[x.Step]
 	if st == nil {
 		place := x.Ran
@@ -140,24 +142,43 @@ func (o *Optimizer) recordLocked(x Outcome) {
 		st = &stepSeen{Day: place.UTC().Format(dayFmt)}
 		r.Steps[x.Step] = st
 	}
-	t := r.Days[st.Day]
-	if t == nil {
-		t = &tally{}
-		r.Days[st.Day] = t
-	}
 	switch {
 	case !x.Corrected && !st.Effect:
+		if st.Corrected { // the correction came first: leave its provisional day
+			ranDay := x.Ran.UTC().Format(dayFmt)
+			if ranDay < o.st.Now.Add(-Window).UTC().Format(dayFmt) {
+				// As in effects-first order, an effect outside the window
+				// does not count and its correction stays silent.
+				return
+			}
+			o.day(r, st.Day).Silent--
+			st.Day = ranDay
+		}
+		t := o.day(r, st.Day)
 		st.Effect, st.Flagged = true, x.Flagged
 		t.Effects++
 		if x.Flagged {
 			t.Flagged++
 		}
+		if st.Corrected && !x.Flagged {
+			t.Silent++
+		}
 	case x.Corrected && !st.Corrected:
 		st.Corrected = true
 		if !(st.Effect && st.Flagged) {
-			t.Silent++
+			o.day(r, st.Day).Silent++
 		}
 	}
+}
+
+// day is r's tally for day d, made if absent.
+func (o *Optimizer) day(r *record, d string) *tally {
+	t := r.Days[d]
+	if t == nil {
+		t = &tally{}
+		r.Days[d] = t
+	}
+	return t
 }
 
 // tick advances the measure's clock and drops what has left the window,

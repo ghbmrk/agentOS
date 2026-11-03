@@ -287,31 +287,48 @@ func TestOutcomeNeedsBothTimes(t *testing.T) {
 	}
 }
 
-// D-309 invariant 3 (Security on #4945): arrival order cannot drop a
-// correction. Corrections first, carrying any Ran, then their effects 50
-// days old, count the same silent failures as effects first.
+// D-309 invariant 3 (Security on #4945, 6612913895 and 6613138577):
+// arrival order cannot change the measure. Effects 50 days old, some
+// flagged, and corrections of flagged and unflagged steps, logged the
+// next day or late (today), carrying any Ran: corrections-first gives the
+// same Measure as effects-first at every clock, and the silent ones count.
 func TestCorrectionEitherOrder(t *testing.T) {
 	ran := t0.Add(-50 * 24 * time.Hour)
-	for _, first := range []string{"correction", "effect"} {
-		for _, cran := range []time.Time{ran, t0.Add(-500 * 24 * time.Hour), t0.Add(500 * 24 * time.Hour)} {
-			o := newOpt(t, &memStore{}, nil)
+	day := 24 * time.Hour
+	for _, cat := range []time.Time{ran.Add(day), t0, t0.Add(60 * day)} { // the last logs the corrections after every effect has left the window
+		for _, cran := range []time.Time{ran, t0.Add(-500 * day), t0.Add(500 * day)} {
 			var effects, corrections []Outcome
 			for i := range 300 {
-				effects = append(effects, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: ran.Add(time.Duration(i) * time.Minute), At: ran})
+				effects = append(effects, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: ran.Add(time.Duration(i) * time.Minute), At: ran, Flagged: i >= 290})
 			}
-			for i := range 10 {
-				corrections = append(corrections, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: cran, At: ran.Add(24 * time.Hour), Corrected: true})
+			for i := 285; i < 295; i++ { // five silent, five caught
+				corrections = append(corrections, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: cran, At: cat, Corrected: true})
 			}
-			if first == "correction" {
-				recordAll(t, o, corrections...)
-				recordAll(t, o, effects...)
-			} else {
-				recordAll(t, o, effects...)
-				recordAll(t, o, corrections...)
+			var got [2][3]Measure
+			var silentHeld [2]int // held in the record, settled or not
+			for k, order := range [][][]Outcome{{corrections, effects}, {effects, corrections}} {
+				o := newOpt(t, &memStore{}, nil)
+				recordAll(t, o, order[0]...)
+				recordAll(t, o, order[1]...)
+				for _, d := range o.st.Clerks["pay"].Days {
+					silentHeld[k] += d.Silent
+				}
+				for c, clock := range []time.Time{t0, t0.Add(6 * day), t0.Add(8 * day)} {
+					recordAll(t, o, Outcome{Clerk: "other", Step: "tick" + strconv.Itoa(c), Ran: clock, At: clock})
+					got[k][c] = o.Measure("pay")
+				}
 			}
-			recordAll(t, o, Outcome{Clerk: "other", Step: "tick", Ran: t0, At: t0})
-			if m := o.Measure("pay"); m.Effects != 300 || m.Silent != 10 || m.Ready {
-				t.Fatalf("%s first, correction Ran %v: %+v", first, cran, m)
+			if got[0] != got[1] {
+				t.Fatalf("correction At %v, Ran %v: corrections first %+v, effects first %+v", cat, cran, got[0], got[1])
+			}
+			if cat.After(t0) {
+				for k := range silentHeld {
+					if silentHeld[k] != 10 {
+						t.Fatalf("correction At %v, Ran %v, order %d: %d silent held, want 10", cat, cran, k, silentHeld[k])
+					}
+				}
+			} else if m := got[1][0]; m.Effects != 300 || m.Flagged != 10 || m.Silent != 5 || m.Ready {
+				t.Fatalf("correction At %v, Ran %v: %+v", cat, cran, m)
 			}
 		}
 	}
@@ -334,6 +351,18 @@ func TestLiteralEdges(t *testing.T) {
 		recordAll(t, o, Outcome{Clerk: "pay", Step: "e", Ran: t0.Add(-c.age), At: t0})
 		if m := o.Measure("pay"); m.Effects != c.want {
 			t.Errorf("effect %v old: %d counted, want %d", c.age, m.Effects, c.want)
+		}
+	}
+	// The same edge when the correction arrives first (invariant 3).
+	for _, c := range []struct {
+		age  time.Duration
+		want int
+	}{{90 * day, 1}, {91 * day, 0}} {
+		o := newOpt(t, &memStore{}, nil)
+		recordAll(t, o, Outcome{Clerk: "pay", Step: "e", Ran: t0, At: t0.Add(-8 * day), Corrected: true},
+			Outcome{Clerk: "pay", Step: "e", Ran: t0.Add(-c.age), At: t0})
+		if m := o.st.Clerks["pay"].Days[t0.Add(-c.age).UTC().Format(dayFmt)]; (m != nil && m.Effects == 1 && m.Silent == 1) != (c.want == 1) {
+			t.Errorf("correction first, effect %v old: %+v", c.age, m)
 		}
 	}
 	o := newOpt(t, &memStore{}, nil)
