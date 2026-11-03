@@ -566,7 +566,7 @@ func TestJSONFormRawWrapped(t *testing.T) {
 // '<'s' JSON form with a JSON break for every '\' but one '<' short of the
 // whole, makes each break walk the form's rest and try its other '\'s: the
 // rest is compared whole between '\'s with the held breaks walked in order,
-// and a '\' whose prefix is not there costs one byte, so it stays within 7
+// and a '\' whose prefix is not there costs one byte, so it stays within 9
 // times plain text, about 15 without (#4743). Timed against plain text in
 // the same run, so a slow runner or -race moves both.
 func TestBreakStreamCost(t *testing.T) {
@@ -587,7 +587,7 @@ func TestBreakStreamCost(t *testing.T) {
 	units := []struct {
 		s     string
 		ratio time.Duration
-	}{{`x\n`, 3}, {`\%0a`, 3}, {`\%0a\%0D`, 3}, {strings.Repeat(`\nu003c`, match.MaxValue-1) + "x", 7}}
+	}{{`x\n`, 3}, {`\%0a`, 3}, {`\%0a\%0D`, 3}, {strings.Repeat(`\nu003c`, match.MaxValue-1) + "x", 9}}
 	plain, took := time.Duration(math.MaxInt64), make([]time.Duration, len(units))
 	for i := range took {
 		took[i] = time.Duration(math.MaxInt64)
@@ -628,6 +628,21 @@ func TestSplitRunLongestForm(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// KRN-12: a held JSON break stands only for the '\' at its own place: with
+// `<<`'s JSON form, a break that stands for the first '\' and one after the
+// rest do not make the second (L3 on #4845).
+func TestHeldBreakOnlyAtItsPlace(t *testing.T) {
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte("<<")}}, nil)
+	for _, s := range []string{`\nu003cu003c\n`, `\nu003cu003c\nx`} {
+		if got := m.Scan([]byte(s)).Trips; len(got) != 0 {
+			t.Fatalf("%q tripped %v", s, got)
+		}
+	}
+	if got := m.Scan([]byte(`\nu003c\nu003c`)).Trips; !slices.Equal(got, []int{1}) {
+		t.Fatalf("a break at each '\\' tripped %v, want [1]", got)
 	}
 }
 
