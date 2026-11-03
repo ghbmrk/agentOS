@@ -39,7 +39,7 @@ env:
 # skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -200,7 +200,7 @@ jobs:
     # job passed. On a records-only change it passes with them (CI-par-4).
     needs: [broker-race, broker-checks]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Every race shard and the broker checks passed
@@ -213,7 +213,7 @@ jobs:
   broker-race:
     # The broker's race tests, split by package across the shards (tools/ci_split.py). Each
     # shard first checks the split covers `go list ./...` with no gap and no duplicate.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -242,6 +242,11 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Runner image (cache keys, #4785)
+        if: steps.scope.outputs.records != 'true'
+        # Built outputs link the runner's libraries, so every cache key names the runner image.
+        id: image
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Go build cache (CI-PATHS)
         if: steps.scope.outputs.records != 'true'
         # One cache per shard; until a shard's own exists, the pre-split broker cache seeds it.
@@ -249,10 +254,10 @@ jobs:
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/.cache/go-build
-          key: go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          key: go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
           restore-keys: |
-            go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
-            go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+            go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+            go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Software TPM for the trusted-host slot (P2-4b)
         if: steps.scope.outputs.records != 'true'
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
@@ -308,11 +313,11 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/.cache/go-build
-          key: go-build-broker-race-${{ matrix.shard }}-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          key: go-build-broker-race-${{ matrix.shard }}-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
   broker-checks:
     # Format, vet, the OP-2 model at its full bounds and the decoder fuzz rounds, beside the
     # race shards.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -330,6 +335,10 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Runner image (cache keys, #4785)
+        # Built outputs link the runner's libraries, so every cache key names the runner image.
+        id: image
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Go build cache (CI-PATHS)
         # Keyed on the vendored module set; a restore-key hit from main seeds a PR run. Restore
         # only here: the save step at the end of the job runs on a push to main alone (D29).
@@ -337,8 +346,8 @@ jobs:
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/.cache/go-build
-          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
-          restore-keys: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+          key: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Format
         # Vendored third-party code keeps its upstream formatting.
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
@@ -401,12 +410,12 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/.cache/go-build
-          key: go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          key: go-build-broker-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
 
   machines:
     # Agent-machine lifecycle against the real kernel (P1-4): cgroup v2,
     # overlayfs, and gVisor. Needs root, so it runs the root-only tests too.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -421,13 +430,17 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Runner image (cache keys, #4785)
+        # Built outputs link the runner's libraries, so every cache key names the runner image.
+        id: image
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Go build cache (CI-PATHS)
         # The root test runs below use GOCACHE=/tmp/gocache. Restore only; saved on main (D29).
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/gocache
-          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
-          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
+          key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          restore-keys: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Install gVisor release-20260928.0 (checksum pinned)
         run: |
           B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64
@@ -566,7 +579,7 @@ jobs:
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
+          key: ot-bin-${{ steps.image.outputs.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: Build OpenThread from its pin (ENF-t)
         if: steps.otcache.outputs.cache-hit != 'true'
         run: sh tools/build-openthread.sh /tmp/ot-bin --sim
@@ -575,7 +588,7 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
+          key: ot-bin-${{ steps.image.outputs.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: The enforcer's Thread stack, confined (ENF-t, #3702)
         # ot-daemon from the pin runs in the Thread profile's user namespace, created by root, on a
         # simulated radio; a simulated node's SRP service must resolve from the Matter profile over
@@ -662,13 +675,13 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/gocache
-          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
+          key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}
 
   hostcheck:
     # The host-untouched check (HOST-1e; A1, HW-8) on a QEMU/OVMF/swtpm host
     # with a Windows-like second disk, booting the stand-in guest until P2-1's
     # image boots here. Each QEMU process also has the harness's own timeout.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
