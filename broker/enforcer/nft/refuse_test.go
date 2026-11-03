@@ -69,7 +69,7 @@ func TestLinesBound(t *testing.T) {
 	}
 	// Every device, isolated or not, counts its refusals and where.
 	var elems []string
-	for _, v := range []int{101, 102, 103, 104, 105, 106, 107, 108} {
+	for _, v := range []int{101, 102, 103, 104, 105, 106, 107, 108, 109} {
 		elems = append(elems, strconv.Quote(fixtureLayout().deviceIface(v))+" : jump "+trafficChain(v, "refused"))
 		want := []string{`counter name "` + TrafficRefused(v) + `"`, "update @" + RefusedSet(v, false) + " { ip daddr counter }", "update @" + RefusedSet(v, true) + " { ip6 daddr counter }"}
 		if got := cs[trafficChain(v, "refused")]; !slices.Equal(got, want) {
@@ -103,7 +103,8 @@ func TestLinesBound(t *testing.T) {
 // packets, the internet flooding the enforcer's WAN, and the edge opening
 // connection after connection to a device write at most their buckets'
 // lines, while the counters move by every packet and every connection is
-// accepted; another device's lines still log, from a bucket of their own.
+// accepted; another device's lines still log, from a bucket of their own,
+// for the flooding box too (#4842).
 // The kernel log is unreadable from a test namespace, so the lines are
 // read from log_lines, the counter of the rule that writes them. Catches a
 // line per packet or per connection (a box or a device fills the
@@ -194,6 +195,28 @@ func TestLinesFloodBound(t *testing.T) {
 	}
 	if n := moved(was, now, LogLines); n < 1 || n > most(start) {
 		t.Errorf("%d connections from the edge wrote %d lines, want 1 to %d", conns, n, most(start))
+	}
+	// The edge's connections to another device log from that device's
+	// bucket, not the one its flood to the TV spent: the edge's lines are
+	// bounded per device, so a rooted edge cannot hide its connections to
+	// every device by flooding one (#4842, ENF-log-bound-1).
+	was = now
+	within(t, h.hosts["edge"], func() {
+		for range LineBurst / 2 {
+			c, err := net.DialTimeout("tcp", net.JoinHostPort(devAddr(109), "80"), 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Close()
+		}
+	})
+	time.Sleep(200 * time.Millisecond)
+	now = read()
+	if n := moved(was, now, LogLines); n != LineBurst/2 {
+		t.Errorf("the edge's %d connections to the hub after its flood to the TV wrote %d lines", LineBurst/2, n)
+	}
+	if n := moved(was, now, EdgeDevice); n != LineBurst/2 {
+		t.Errorf("edge_device moved %d", n)
 	}
 	// The core's connections to another device log from their own bucket.
 	was = now
