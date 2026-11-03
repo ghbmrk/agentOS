@@ -113,15 +113,17 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 // Each run ends with one subject.erased per erase, one erase.confirmed per
 // store that held an item, no erased key in the table, no erased item
 // readable or stored, every kept item readable, and a rebuilt state equal
-// to the live one (RunErase). The crashes must fall on each kind of write.
+// to the live one, and no reader's plan from after its first read live
+// (RunErase). The crashes must fall on each kind of write.
 func TestSimEraseReachesEveryViewOnce(t *testing.T) {
-	hits := map[string]int{}
+	hits, erased := map[string]int{}, 0
 	for seed := 0; seed < seeds(); seed++ {
 		for at := 1; ; at++ {
 			r, err := RunErase(uint64(seed), at)
 			if err != nil {
 				t.Fatalf("seed %d crash at write %d: %v", seed, at, err)
 			}
+			erased += r.Erased
 			if !r.Crashed {
 				break
 			}
@@ -130,6 +132,9 @@ func TestSimEraseReachesEveryViewOnce(t *testing.T) {
 		if _, err := RunErase(uint64(seed), 0); err != nil {
 			t.Fatalf("seed %d, no crash: %v", seed, err)
 		}
+	}
+	if erased == 0 {
+		t.Error("no erase cancelled a reader's plan")
 	}
 	for _, kind := range []string{"log", "key", "store"} {
 		if hits[kind] == 0 {

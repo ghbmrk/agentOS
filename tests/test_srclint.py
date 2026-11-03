@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import srclint  # noqa: E402
 
-WORKFLOW = "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test {flags} ./...\n"
+WORKFLOW = "jobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: go test {flags} ./...\n"
 
 # Each shape the check must refuse: (path under broker/, bytes, words its finding must carry).
 SHAPES = [

@@ -92,7 +92,7 @@ func TestStartTakesTheSeedOnlyUnderItsKey(t *testing.T) {
 		t.Fatalf("no seed file: held %v, %v", chk != nil && chk.Held(), err)
 	}
 	sealer, _ := k.Sealer()
-	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: []byte("synthetic-seed-0123"), Step: 3})
+	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: handoff.Hide([]byte("synthetic-seed-0123")), Step: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

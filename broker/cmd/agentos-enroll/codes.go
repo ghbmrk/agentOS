@@ -193,7 +193,7 @@ func codes(c config, in io.Reader, now time.Time) (string, error) {
 		return enrolCodes(c.setupDir)
 	}
 	defer s.seed.Wipe()
-	step, ok := totp.Match(s.seed.Seed, r.Code, now, 0)
+	step, ok := totp.Match(s.seed.Seed.Get(), r.Code, now, 0)
 	if !ok {
 		s.wrong++
 		if s.wrong >= maxConfirmWrong {
@@ -218,7 +218,7 @@ func enrolCodes(dir string) (string, error) {
 	if _, err := rand.Read(seed); err != nil {
 		return "", err
 	}
-	if err := writeStagedSeed(dir, stagedSeed{seed: handoff.CodeSeed{Seed: seed}}); err != nil {
+	if err := writeStagedSeed(dir, stagedSeed{seed: handoff.CodeSeed{Seed: handoff.Hide(seed)}}); err != nil {
 		return "", err
 	}
 	return otpauthURI(seed), nil

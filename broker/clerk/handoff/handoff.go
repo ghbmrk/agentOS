@@ -188,23 +188,52 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // the recovery key the unlock step made at this boot on the lost-card
 // route, none on every other boot (REC-4, MIG-4-recovery-r3).
 type KernelKeys struct {
-	Log  [32]byte
-	Head ed25519.PrivateKey
+	Log  Secret[[32]byte]
+	Head Secret[ed25519.PrivateKey]
 	// ClerkRoot is the root of every clerk's key (MAIL-keys): the kernel
 	// derives one clerk's key from it (clerkkey.Derive) and hands it to that
 	// clerk's unit at each start. The store derives it; zero hands none.
-	ClerkRoot [32]byte
+	ClerkRoot Secret[[32]byte]
 	Counter   Counter
 	Anchors   []key.PublicKey
-	Recipient []byte             // RecipientLen bytes or none (RecipientEntry)
-	PageCA    []byte             // pageca.Marshal's form or none (PageCAEntry)
-	LinkKey   ed25519.PrivateKey // none or a whole key (LinkKeyEntry)
-	FirstEdge ed25519.PublicKey  // none or PublicKeySize bytes (FirstEdgeEntry)
-	Slot      string             // SlotTPM, or another slot's kind
+	Recipient []byte                     // RecipientLen bytes or none (RecipientEntry)
+	PageCA    Secret[[]byte]             // pageca.Marshal's form or none (PageCAEntry)
+	LinkKey   Secret[ed25519.PrivateKey] // none or a whole key (LinkKeyEntry)
+	FirstEdge ed25519.PublicKey          // none or PublicKeySize bytes (FirstEdgeEntry)
+	Slot      string                     // SlotTPM, or another slot's kind
 	// NewRecovery is the card the unlock step put in the store at this
 	// boot (D-201 route B), MadeCardLen bytes: its recovery key's bits and
 	// its passphrase's seed; or none. The kernel holds it only until the owner confirms the new card.
-	NewRecovery []byte
+	NewRecovery Secret[[]byte]
+}
+
+// Secret holds a key behind a pointer to a pointer, which fmt prints as an
+// address in every verb and at any depth, while reflect.DeepEqual compares
+// through it, so a line that formats a holder shows no key (CLK-1,
+// DECOY-b-8, #4759). A copy shares the key; the zero Secret holds none.
+type Secret[T any] struct{ p **T }
+
+// Hide holds v.
+func Hide[T any](v T) Secret[T] { return Secret[T]{new(&v)} }
+
+// Get is the key held, or T's zero value.
+func (s Secret[T]) Get() T { return *s.Ref() }
+
+// Ref points at the key held, or, for the zero Secret, at a zero value
+// that nothing else holds.
+func (s Secret[T]) Ref() *T {
+	if s.p == nil || *s.p == nil {
+		return new(T)
+	}
+	return *s.p
+}
+
+// drop clears s's bytes and empties every copy of it.
+func drop[T ~[]byte](s Secret[T]) {
+	clear(*s.Ref())
+	if s.p != nil {
+		*s.p = nil
+	}
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -215,11 +244,11 @@ type Counter struct {
 	SRK    []byte
 	Handle uint32
 	Name   []byte
-	Auth   []byte
+	Auth   Secret[[]byte]
 }
 
 func (c Counter) valid() bool {
-	for _, f := range [][]byte{c.SRK, c.Name, c.Auth} {
+	for _, f := range [][]byte{c.SRK, c.Name, c.Auth.Get()} {
 		if len(f) == 0 || len(f) > maxName {
 			return false
 		}
@@ -405,32 +434,33 @@ func parseAnchors(b []byte, n int) ([]key.PublicKey, error) {
 
 // Marshal encodes k for the pipe. The caller wipes the result.
 func (k KernelKeys) Marshal() ([]byte, error) {
-	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors ||
-		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(k.PageCA) != 0 && !validPageCA(k.PageCA) ||
-		len(k.LinkKey) != 0 && len(k.LinkKey) != ed25519.PrivateKeySize ||
+	head, ca, link, rec := k.Head.Get(), k.PageCA.Get(), k.LinkKey.Get(), k.NewRecovery.Get()
+	if len(head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors ||
+		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(ca) != 0 && !validPageCA(ca) ||
+		len(link) != 0 && len(link) != ed25519.PrivateKeySize ||
 		len(k.FirstEdge) != 0 && len(k.FirstEdge) != ed25519.PublicKeySize || !validSlot(k.Slot) ||
-		len(k.NewRecovery) != 0 && len(k.NewRecovery) != MadeCardLen {
+		len(rec) != 0 && len(rec) != MadeCardLen {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
 	b = append(b, handoffTag...)
-	b = append(b, k.Log[:]...)
-	b = append(b, k.Head.Seed()...)
-	b = append(b, k.ClerkRoot[:]...)
+	b = append(b, k.Log.Ref()[:]...)
+	b = append(b, head.Seed()...)
+	b = append(b, k.ClerkRoot.Ref()[:]...)
 	b = append(b, byte(len(k.Counter.SRK)))
 	b = append(b, k.Counter.SRK...)
 	b = binary.BigEndian.AppendUint32(b, k.Counter.Handle)
 	b = append(b, byte(len(k.Counter.Name)))
 	b = append(b, k.Counter.Name...)
-	b = append(b, byte(len(k.Counter.Auth)))
-	b = append(b, k.Counter.Auth...)
+	b = append(b, byte(len(k.Counter.Auth.Get())))
+	b = append(b, k.Counter.Auth.Get()...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(k.Recipient)))
 	b = append(b, k.Recipient...)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(k.PageCA)))
-	b = append(b, k.PageCA...)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(ca)))
+	b = append(b, ca...)
 	var seed []byte
-	if len(k.LinkKey) != 0 {
-		seed = k.LinkKey.Seed()
+	if len(link) != 0 {
+		seed = link.Seed()
 	}
 	b = append(b, byte(len(seed)))
 	b = append(b, seed...)
@@ -439,8 +469,8 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.FirstEdge...)
 	b = append(b, byte(len(k.Slot)))
 	b = append(b, k.Slot...)
-	b = append(b, byte(len(k.NewRecovery)))
-	b = append(b, k.NewRecovery...)
+	b = append(b, byte(len(rec)))
+	b = append(b, rec...)
 	out, err := appendAnchors(b, k.Anchors)
 	if err != nil {
 		clear(b)
@@ -448,21 +478,16 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	return out, err
 }
 
-// Wipe clears the keys. Copies already taken, such as the kernel's own, are
+// Wipe clears the keys in every copy of k. Copies already taken, such as the kernel's own, are
 // the holder's (STO-2a-e: the wipe is best-effort).
 func (k *KernelKeys) Wipe() {
-	clear(k.Log[:])
-	clear(k.ClerkRoot[:])
-	clear(k.Head)
-	k.Head = nil
-	clear(k.Counter.Auth)
-	k.Counter.Auth = nil
-	clear(k.PageCA)
-	k.PageCA = nil
-	clear(k.LinkKey)
-	k.LinkKey = nil
-	clear(k.NewRecovery)
-	k.NewRecovery = nil
+	clear(k.Log.Ref()[:])
+	clear(k.ClerkRoot.Ref()[:])
+	drop(k.Head)
+	drop(k.Counter.Auth)
+	drop(k.PageCA)
+	drop(k.LinkKey)
+	drop(k.NewRecovery)
 }
 
 // ReadKeys reads the hand-off from f and closes it. f must be a pipe, so a
@@ -511,6 +536,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 		return KernelKeys{}, ErrHandoff
 	}
 	var c Counter
+	var auth []byte
 	rest := b[o:]
 	var ok bool
 	if c.SRK, rest, ok = field(rest); !ok || len(rest) < 4 {
@@ -520,7 +546,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if c.Name, rest, ok = field(rest); !ok {
 		return KernelKeys{}, ErrHandoff
 	}
-	if c.Auth, rest, ok = field(rest); !ok || len(rest) < 2 || !c.valid() {
+	if auth, rest, ok = field(rest); !ok || len(rest) < 10 || c.Handle == 0 { // the least tail: two lengths, two empty keys, a 1-byte slot, no card, no anchors
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: the store has no recipient, so the kernel takes no backup.
@@ -564,15 +590,14 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if err != nil {
 		return KernelKeys{}, err
 	}
-	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: bytes.Clone(ca), FirstEdge: bytes.Clone(edge), Slot: slot, NewRecovery: bytes.Clone(rec)}
+	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: Hide(bytes.Clone(ca)), FirstEdge: bytes.Clone(edge), Slot: slot, NewRecovery: Hide(bytes.Clone(rec))}
 	if seed != nil {
-		k.LinkKey = ed25519.NewKeyFromSeed(seed)
+		k.LinkKey = Hide(ed25519.NewKeyFromSeed(seed))
 	}
 	o = len(handoffTag)
-	copy(k.Log[:], b[o:o+32])
-	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])
-	copy(k.ClerkRoot[:], b[o+32+ed25519.SeedSize:])
+	k.Log, k.ClerkRoot = Hide([32]byte(b[o:o+32])), Hide([32]byte(b[o+32+ed25519.SeedSize:]))
+	k.Head = Hide(ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize]))
 	// Copies, so clearing the read buffer leaves the kernel its counter.
-	k.Counter = Counter{SRK: bytes.Clone(c.SRK), Handle: c.Handle, Name: bytes.Clone(c.Name), Auth: bytes.Clone(c.Auth)}
+	k.Counter = Counter{SRK: bytes.Clone(c.SRK), Handle: c.Handle, Name: bytes.Clone(c.Name), Auth: Hide(bytes.Clone(auth))}
 	return k, nil
 }

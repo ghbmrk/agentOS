@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import git_env, setUpModule, tearDownModule  # noqa: E402,F401
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 IMG = ROOT / "image"
@@ -103,12 +105,12 @@ class TestInferImage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             t = pathlib.Path(t)
             up = t / "up/owner/llama.cpp"
-            env = {"PATH": "/usr/bin:/bin", "HOME": str(t), "GIT_CONFIG_NOSYSTEM": "1",
+            env = git_env({"PATH": "/usr/bin:/bin", "HOME": str(t), "GIT_CONFIG_NOSYSTEM": "1",
                    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "1",
                    "GIT_CONFIG_KEY_0": "url.file://%s/up/.insteadOf" % t,
                    "GIT_CONFIG_VALUE_0": "https://github.com/", "RUNNER_TEMP": str(t / "rt"),
                    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"})
 
             def git(*a):
                 return subprocess.run(["git", "-C", str(up), *a], env=env, check=True,

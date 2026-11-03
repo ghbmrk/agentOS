@@ -2,7 +2,6 @@ package nft
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 )
 
@@ -44,18 +43,22 @@ import (
 // (two guests, two people on Household) share their pair, so the mark
 // cannot tell one's connection from the other's. On those shared segments
 // (Guests, Owner, Household) a connection is bound to its host as well
-// (#4324): the accept of its first packet, and of no later one, records
-// the connection's conntrack ID and original source with the packet's
-// source address and hardware address, in a set (learn, HostSet; a
-// conntrack label marks it recorded), and a related packet that
-// enters from a shared segment passes only when its connection and its
-// own source and hardware addresses give that same record (bound). So a
-// guest's forged ICMP error about another guest's connection is dropped
-// unless it copies both that guest's address and its hardware address,
-// and the host's own error about its own connection passes. The host is
-// always the side that starts the connection: no accept leads into a
-// shared segment (bindAll), so no connection has a shared end its first
-// packet did not come from.
+// (#4324, #4480): the accept of its first packet, and of no later one,
+// records the connection's conntrack ID and original source with the
+// packet's source address and hardware address, in its segment's set
+// (learn, HostSet; a conntrack label marks it recorded), and every later
+// packet that enters from the segment in the connection's original
+// direction passes only when its connection and its own source and
+// hardware addresses give that same record (bound). Every packet from a
+// shared segment also passes only from the hardware address that holds
+// its source address (claim, ClaimSet). So another host on the segment
+// cannot send into a host's connection, an ICMP error or a datagram from
+// the host's address and port, unless it copies both that host's address
+// and its hardware address, nor open a connection first on an address
+// another host holds; the host's own packets pass. The host is always the
+// side that starts the connection: no accept leads into a shared segment
+// (bindAll), so no connection has a shared end its first packet did not
+// come from.
 
 // bind is the mark of a connection that enters on in and leaves on out,
 // each a quoted interface name the ruleset uses; ok is false when either
@@ -73,10 +76,10 @@ func bind(idx map[string]uint32, in, out string) (string, bool) {
 type rule struct {
 	in, out string  // iifname and oifname operands; "" matches any
 	m       []match // further matches
-	tail    string  // the log and counter part, on the first form only
 	verdict string  // accept, drop, or jump <chain>
 	mark    string  // an accept's connection mark (bind); "" otherwise
-	learn   bool    // an accept from a shared segment: it records its host
+	learn   string  // an accept from a shared segment: the chain that records its host
+	logged  string  // a logged rule: the chain that counts, logs and gives the verdict of its first packet (loggedDecls)
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -116,12 +119,12 @@ func (r rule) first() string {
 	if r.mark != "" {
 		p = append(p, "ct mark set "+r.mark)
 	}
-	if r.tail != "" {
-		p = append(p, r.tail)
-	}
 	verdict := r.verdict
-	if r.learn {
-		verdict = "goto " + learnChain
+	if r.learn != "" {
+		verdict = "goto " + r.learn
+	}
+	if r.logged != "" {
+		verdict = "goto " + r.logged
 	}
 	return strings.Join(append(p, verdict), " ")
 }
@@ -171,11 +174,11 @@ func ifaces(in, out string) string {
 // bindAll sets the mark of every accept in rs, and refuses an accept that
 // does not name one interface of idx each way: its connection could not be
 // bound, so a related packet forged into it would pass on any interface
-// its rule allows. An accept from one of the shared segments records its
-// host (learn); one into a shared segment is refused, since its host there
-// would not be the one that sent the first packet, so no record could
-// bind it.
-func bindAll(idx map[string]uint32, shared []string, rs []rule) error {
+// its rule allows. An accept from a shared segment (shared maps each one's
+// interface to its name) records its host (learn); one into a shared
+// segment is refused, since its host there would not be the one that sent
+// the first packet, so no record could bind it.
+func bindAll(idx map[string]uint32, shared map[string]string, rs []rule) error {
 	for i, r := range rs {
 		if r.verdict != "accept" {
 			continue
@@ -184,11 +187,13 @@ func bindAll(idx map[string]uint32, shared []string, rs []rule) error {
 		if !ok {
 			return fmt.Errorf("nft: an accept from %s to %s is not one interface each way", r.in, r.out)
 		}
-		if slices.Contains(shared, r.out) {
+		if _, ok := shared[r.out]; ok {
 			return fmt.Errorf("nft: an accept from %s leads into the shared segment %s", r.in, r.out)
 		}
 		rs[i].mark = m
-		rs[i].learn = slices.Contains(shared, r.in)
+		if seg, ok := shared[r.in]; ok {
+			rs[i].learn = learn(seg)
+		}
 	}
 	return nil
 }

@@ -56,11 +56,11 @@ const LogCap = "enf cap "
 
 // The cap chains. capChain counts the core's sends to its allow set, and
 // edgeChain the edge's to the internet; each then goes to its drop chain,
-// whose rules Drops writes. dropChain is a packet past its cap.
+// whose rules Drops writes. A packet past its cap goes to LogCap's logged
+// chain: counted on CapDrop, logged within the cap's lines, dropped.
 const (
 	edgeChain     = "cap_edge"
 	dropEdgeChain = "capd_edge"
-	dropChain     = "cap_over"
 )
 
 func capChain(v6 bool) string     { return "cap" + fam(v6) }
@@ -84,6 +84,14 @@ type Drop struct {
 	// a kernel that matches past N, the drop lets one byte more through
 	// than the cap, which the next reading still trips on.
 	Past bool
+	// Read is the listing the counter's last reading was taken from
+	// (traffic.ReadingOf's), when the text is applied on its own after
+	// that reading; nil otherwise. A quota the text starts in place of
+	// running ones (a merge, a new cap, a new day) is loaded with the
+	// group's count plus what the running quotas it replaces charged
+	// between Read and the running listing, so bytes sent between the
+	// reading and the update are not let past its cap uncharged.
+	Read []byte
 }
 
 // DropGroup is one cap group: its destinations by their names on the
@@ -111,11 +119,15 @@ var ErrDrop = errors.New("nft: byte-cap drop state malformed")
 // is the cap, or the cap plus one on a kernel whose quota matches at N;
 // Drop.Past), agreeing with wire.PastCap to the byte.
 //
-// running is the running table's listing (load.Loader.List) when the text
-// is applied on its own (load.Loader.Update), so the quotas of groups p no
-// longer has are deleted and those it keeps go on counting in the kernel;
-// nil when the text is appended to a full load (Compile or Reload), which
-// starts with none.
+// running is the running table's listing (load.Loader.List), taken after
+// p.Read, when the text is applied on its own (load.Loader.Update), so the
+// quotas of groups p no longer has are deleted and those it keeps go on
+// counting in the kernel; nil when the text is appended to a full load
+// (Compile or Reload), which starts with none. A quota the text starts
+// while running ones are deleted carries what they charged since p.Read
+// (gap): the edge's every deleted edge quota's, and a group's every
+// deleted group quota's whose chain the running drop sent one of the
+// group's destinations or addresses to.
 func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) {
 	if _, _, err := compiled(d, l); err != nil {
 		return "", err
@@ -123,14 +135,22 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 	if err := p.check(); err != nil {
 		return "", err
 	}
+	core := allowSets(d, nil)[0]
 	have := map[string]bool{}
+	var gaps map[string]uint64
+	var fed map[string]feed
 	if running != nil {
 		var err error
 		if have, err = capObjects(running); err != nil {
 			return "", err
 		}
+		if gaps, err = gap(p.Read, running); err != nil {
+			return "", err
+		}
+		if fed, err = feeds(core, running); err != nil {
+			return "", err
+		}
 	}
-	core := allowSets(d, nil)[0]
 	w := &writer{}
 	w.line(DropHeader)
 	w.line("flush chain inet " + Table + " " + capDropChain(true))
@@ -143,24 +163,43 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 	if p.Past {
 		edge = 0
 	}
-	quota := func(name string, limit, count uint64) {
-		want[name] = true
+	for _, g := range p.Groups {
+		_, q := groupNames(p.Day, g)
+		want[q] = true
+	}
+	qe := edgeQuota(p.Day, p.EdgeCap)
+	want[qe] = true
+	// carried is what the running quotas this text deletes charged since
+	// the reading, of those pick takes.
+	carried := func(pick func(old string) bool) uint64 {
+		var n uint64
+		for old, b := range gaps {
+			if have[old] && !want[old] && pick(old) {
+				n = sat(n, b)
+			}
+		}
+		return n
+	}
+	quota := func(name string, limit, count uint64, pick func(old string) bool) {
 		if !have[name] && limit <= MaxDropCap {
 			n := limit + edge
-			adds = append(adds, fmt.Sprintf("add quota inet %s %s { over %d bytes used %d bytes; }", Table, name, n, min(count, n)))
+			used := min(sat(count, carried(pick)), n)
+			adds = append(adds, fmt.Sprintf("add quota inet %s %s { over %d bytes used %d bytes; }", Table, name, n, used))
 		}
 	}
 	chains := map[string]string{} // group chain -> its quota
 	for _, g := range p.Groups {
 		c, q := groupNames(p.Day, g)
-		quota(q, g.Cap, g.Count)
+		quota(q, g.Cap, g.Count, func(old string) bool {
+			f := fed["g_"+strings.TrimPrefix(old, "q_")]
+			return strings.HasPrefix(old, "q_") && (slices.ContainsFunc(g.Dests, f.dest) || slices.ContainsFunc(g.Addrs, f.addr))
+		})
 		want[c], chains[c] = true, q
 		for _, dest := range g.Dests {
 			byDest[dest] = c
 		}
 	}
-	qe := edgeQuota(p.Day, p.EdgeCap)
-	quota(qe, p.EdgeCap, p.EdgeCount)
+	quota(qe, p.EdgeCap, p.EdgeCount, func(old string) bool { return strings.HasPrefix(old, "qe_") })
 	// An address the counter gives several groups (one their sets hold,
 	// carrying nothing today, so the counter keeps them apart) is charged
 	// to every one of their quotas, in a chain of its own per set of
@@ -248,7 +287,7 @@ func capped(q string, limit uint64) []string {
 	if limit > MaxDropCap {
 		return nil
 	}
-	return []string{"quota name " + strconv.Quote(q) + " goto " + dropChain}
+	return []string{"quota name " + strconv.Quote(q) + " goto " + logged(LogCap)}
 }
 
 // sharedName is the chain that charges an address to each of the groups
@@ -322,6 +361,142 @@ func (p Drop) check() error {
 	return nil
 }
 
+// sat is a + b, at most the largest uint64.
+func sat(a, b uint64) uint64 {
+	if a+b < a {
+		return ^uint64(0)
+	}
+	return a + b
+}
+
+// gap is, per quota in both listings, what it charged from read to
+// running: nothing when read is nil.
+func gap(read, running []byte) (map[string]uint64, error) {
+	if read == nil {
+		return nil, nil
+	}
+	before, err := quotasUsed(read)
+	if err != nil {
+		return nil, err
+	}
+	after, err := quotasUsed(running)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]uint64{}
+	for q, n := range after {
+		if b, ok := before[q]; ok && n > b {
+			out[q] = n - b
+		}
+	}
+	return out, nil
+}
+
+// quotasUsed is each quota's charged bytes in a listing.
+func quotasUsed(listing []byte) (map[string]uint64, error) {
+	var doc struct {
+		Nftables []struct {
+			Quota *struct {
+				Family, Table, Name string
+				Used                uint64
+			} `json:"quota"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(listing, &doc); err != nil {
+		return nil, fmt.Errorf("nft: table listing: %v", err)
+	}
+	out := map[string]uint64{}
+	for _, o := range doc.Nftables {
+		if o.Quota != nil && o.Quota.Family == "inet" && o.Quota.Table == Table {
+			out[o.Quota.Name] = o.Quota.Used
+		}
+	}
+	return out, nil
+}
+
+// feed is what the running drop sends to one group chain: destinations by
+// their resolver sets, and addresses by the verdict maps.
+type feed struct {
+	dests map[string]bool
+	addrs map[netip.Addr]bool
+}
+
+func (f feed) dest(d string) bool     { return f.dests[d] }
+func (f feed) addr(a netip.Addr) bool { return f.addrs[a] }
+
+// feeds is, per group chain, what the running listing's drop chains send
+// it.
+func feeds(core AllowSet, listing []byte) (map[string]feed, error) {
+	byset := map[string]string{}
+	for _, n := range core.names() {
+		byset[core.Named(n, false)], byset[core.Named(n, true)] = n, n
+	}
+	type target struct {
+		Goto *struct{ Target string } `json:"goto"`
+	}
+	var doc struct {
+		Nftables []struct {
+			Rule *struct {
+				Family, Table, Chain string
+				Expr                 []struct {
+					Match *struct{ Right json.RawMessage } `json:"match"`
+					Vmap  *struct{ Data json.RawMessage }  `json:"vmap"`
+					target
+				}
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(listing, &doc); err != nil {
+		return nil, fmt.Errorf("nft: running table listing: %v", err)
+	}
+	out := map[string]feed{}
+	at := func(chain string) feed {
+		f, ok := out[chain]
+		if !ok {
+			f = feed{dests: map[string]bool{}, addrs: map[netip.Addr]bool{}}
+			out[chain] = f
+		}
+		return f
+	}
+	for _, o := range doc.Nftables {
+		r := o.Rule
+		if r == nil || r.Family != "inet" || r.Table != Table || (r.Chain != capDropChain(false) && r.Chain != capDropChain(true)) {
+			continue
+		}
+		var set string
+		for _, e := range r.Expr {
+			switch {
+			case e.Match != nil:
+				var right string
+				if json.Unmarshal(e.Match.Right, &right) == nil {
+					set = strings.TrimPrefix(right, "@")
+				}
+			case e.Vmap != nil:
+				var data struct{ Set []json.RawMessage }
+				if err := json.Unmarshal(e.Vmap.Data, &data); err != nil {
+					return nil, fmt.Errorf("%w: running verdict map %s", ErrDrop, e.Vmap.Data)
+				}
+				for _, raw := range data.Set {
+					var pair []json.RawMessage
+					var addr string
+					var v target
+					if json.Unmarshal(raw, &pair) != nil || len(pair) != 2 || json.Unmarshal(pair[0], &addr) != nil || json.Unmarshal(pair[1], &v) != nil || v.Goto == nil {
+						return nil, fmt.Errorf("%w: running verdict map element %s", ErrDrop, raw)
+					}
+					a, err := netip.ParseAddr(addr)
+					if err != nil {
+						return nil, fmt.Errorf("%w: running verdict map address %q", ErrDrop, addr)
+					}
+					at(v.Goto.Target).addrs[a] = true
+				}
+			case e.Goto != nil && byset[set] != "":
+				at(e.Goto.Target).dests[byset[set]] = true
+			}
+		}
+	}
+	return out, nil
+}
+
 // capObjects is the drop's chains and quotas in a running table's listing.
 func capObjects(listing []byte) (map[string]bool, error) {
 	var doc struct {
@@ -391,11 +566,6 @@ func capChains(w *writer) {
 	w.close()
 	w.open("chain " + dropEdgeChain)
 	w.line("drop")
-	w.close()
-	// Past a cap: logged at a bounded rate, counted, and dropped.
-	w.open("chain " + dropChain)
-	w.line("limit rate 10/minute log prefix " + q(LogCap) + " counter name " + q(CapDrop) + " drop")
-	w.line("counter name " + q(CapDrop) + " drop")
 	w.close()
 }
 

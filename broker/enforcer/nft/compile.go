@@ -52,23 +52,73 @@ func TrafficSet(vlan int, v6 bool) string { return "t" + strconv.Itoa(vlan) + fa
 func TrafficOut(vlan int) string          { return "t" + strconv.Itoa(vlan) + "_out" }
 func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_in" }
 
-const TrafficSize = 64
+// TrafficRefused counts every packet refused from the device on vlan, by
+// any rule that logs its refusals, and RefusedSet counts them per
+// destination address: at most RefusedSize addresses per family, each
+// dropped a day after its last refused packet. Both count every packet,
+// however few are logged (#4432), so a device cannot choose which of its
+// refusals its summary shows (#4765); only more than RefusedSize addresses
+// in a day leave some out, which a full set shows.
+func TrafficRefused(vlan int) string      { return "t" + strconv.Itoa(vlan) + "_refused" }
+func RefusedSet(vlan int, v6 bool) string { return "t" + strconv.Itoa(vlan) + "_refused" + fam(v6) }
 
-// HostSet is the set that records, for each connection a host on a shared
-// segment (Guests, Owner, Household) started, the connection's conntrack
-// ID and original source, and the source address and hardware address its
-// first packet came from (live.go, learn, hostKey). A related packet from a shared segment passes only
-// with its connection's record. Each record lasts HostTimeout from that
-// first packet and the set holds at most HostSize per family, which bounds
-// what the shared segments can make the enforcer keep; a connection
-// without a record (it outlived its record, the set was full, or it was
-// open before the last load, under this ruleset or one without labels) has
-// its host's own ICMP errors dropped, never anyone else's passed.
-func HostSet(v6 bool) string { return "host" + fam(v6) }
+// TrafficSize bounds a device's TrafficSet, the internet addresses its
+// allow list reached. RefusedSize bounds its RefusedSet, which holds any
+// address the device chooses, so it is larger: a device refused at
+// RefusedSize addresses in a day has made itself conspicuous.
+const (
+	TrafficSize = 64
+	RefusedSize = 1024
+)
+
+// The shared segments are the ones several hosts share (Guests, Owner,
+// Household): each is one interface pair to the enforcer, so the
+// connection mark cannot tell one host's connection from another's, and
+// the reverse-path filter passes any source address on the segment. Each
+// has its own sets and chains, named by its name, so what one segment's
+// hosts make the enforcer keep never takes another's room.
+type segment struct{ name, iface string }
+
+// segments are the shared segments by name: "guests", "owner", "household".
+func segments(l Layout) []segment {
+	return []segment{{"guests", l.Guests}, {"owner", l.Owner}, {"household", l.Household}}
+}
+
+// HeldSet and ClaimSet bind each address a host on segment seg sends from
+// to the hardware address it first sent from (claim): HeldSet holds the
+// addresses, ClaimSet each address with its hardware address. A packet
+// from a shared segment passes only from the hardware address that holds
+// its source address, or from a free address, which its hardware address
+// then holds. Each hold lasts ClaimTimeout from the address's last
+// forwarded packet, which is at most half the DHCP lease (12 h, dns.go), so
+// an address the DHCP server gives again after its lease ran out is free
+// by then; each set holds at most HostSize addresses.
+func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }
+func ClaimSet(seg string, v6 bool) string { return "claim_" + seg + fam(v6) }
+
+const ClaimTimeout = 6 * 3600 // seconds
+
+// HostSet is the set that records, for each connection a host on shared
+// segment seg started, the connection's conntrack ID and original source,
+// and the source address and hardware address its first packet came from
+// (live.go, learn, hostKey). Every later packet of the connection from the
+// segment, in its original direction (an established one, a related one
+// such as an ICMP error, or a new one before any reply), passes only with
+// that record, which it refreshes (bound): for HostTCPTimeout on a TCP
+// connection both ends have answered, which is how long conntrack keeps
+// one idle by default, and for HostTimeout otherwise, longer than conntrack
+// keeps any other idle connection. The set holds at most HostSize records
+// per family. A load carries every record, hold and claim to the new sets
+// (Reload). A connection without a record (its record expired or could not
+// be written, the set was full, or it opened while the ruleset was being
+// replaced) fails closed: its later packets from the segment are dropped,
+// never another host's passed.
+func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 const (
-	HostTimeout = "1h"
-	HostSize    = 65535
+	HostTimeout    = 3600      // seconds
+	HostTCPTimeout = 5 * 86400 // seconds
+	HostSize       = 65535
 )
 
 // hostLabel is the conntrack label bit learn sets on a connection it has
@@ -76,13 +126,13 @@ const (
 // on the enforcer sets or reads a label.
 const hostLabel = "0"
 
-// learnChain records the host of a connection from a shared segment and
-// accepts it; boundChain passes a related packet from a shared segment
-// only with its connection's record.
-const (
-	learnChain = "learn"
-	boundChain = "bound"
-)
+// learn records the host of a connection from shared segment seg and
+// accepts it; bound passes a later packet of a connection from seg only
+// with its record; claim passes a packet from seg only from the hardware
+// address that holds its source address.
+func learn(seg string) string { return "learn_" + seg }
+func bound(seg string) string { return "bound_" + seg }
+func claim(seg string) string { return "claim_" + seg }
 
 // hostKey is a HostSet element as nft reads it from a packet: its
 // connection's ID and original source address, then the packet's own
@@ -95,6 +145,15 @@ func hostKey(v6 bool) string {
 	f := family(v6)
 	return "ct id . ct original " + f + " saddr . " + f + " saddr . ether saddr"
 }
+
+// claimKey is a ClaimSet element as nft reads it from a packet.
+func claimKey(v6 bool) string {
+	f := family(v6)
+	return f + " saddr . ether saddr"
+}
+
+// secs is a timeout of n seconds as nft reads it.
+func secs(n int) string { return strconv.Itoa(n) + "s" }
 
 func nfproto(v6 bool) string {
 	if v6 {
@@ -135,31 +194,72 @@ const (
 	RADropped   = "ra_dropped"   // router advertisements from any segment
 	DNSOutside  = "dns_outside"  // a device's outside or encrypted DNS
 	DNSRedirect = "dns_redirect" // a device's port-53 traffic answered by the enforcer
-	Spoofed     = "spoofed"      // a source address not routed back out of its interface
+	Spoofed     = "spoofed"      // a source not routed back out of its interface, or an IPv4 broadcast, multicast or 0.0.0.0 one outside DHCP (rpf)
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
+	LogLines    = "log_lines"    // lines written to the kernel log (logged)
 )
 
-// Log prefixes. Each names a refusal: every rule that logs with one of
-// them drops, and the forward chain logs nothing else from a device but
-// the accepted core and edge connections, which carry the device's VLAN
-// in their own prefixes. Slice i's summaries count a device's blocked
-// traffic from these lines (broker/enforcer/traffic).
+// Log prefixes. Each names a refusal or a box's connection to a device,
+// and each rule that logs with one ends in that prefix's chain (logged),
+// so no other rule writes a line. A refusal's line comes in on the
+// interface that sent it, a box's connection's goes out on the device's
+// VLAN (OUT=). The lines are for the journal only: a device's summary
+// counts its refusals from TrafficRefused and RefusedSet, not from lines.
 const (
-	LogInbound   = "enf inbound "
-	LogAPAdmin   = "enf ap-admin "
-	LogISP       = "enf isp "
-	LogNonGlobal = "enf nonglobal "
-	LogCoreEdge  = "enf core-edge "
-	LogDNS       = "enf dns "
-	LogDrop      = "enf drop "
+	LogInbound    = "enf inbound "
+	LogAPAdmin    = "enf ap-admin "
+	LogISP        = "enf isp "
+	LogNonGlobal  = "enf nonglobal "
+	LogCoreEdge   = "enf core-edge "
+	LogDNS        = "enf dns "
+	LogDrop       = "enf drop "
+	LogEdgeDevice = "enf edge-dev "
+	LogCoreDevice = "enf core-dev "
+	LogCoreStream = "enf core-stream "
 )
 
-// BlockedPrefixes is every log prefix that names a refusal.
-var BlockedPrefixes = []string{LogInbound, LogAPAdmin, LogISP, LogNonGlobal, LogCoreEdge, LogDNS, LogDrop, LogCap}
+// prefix is one log prefix, the counter that counts every packet its
+// rules log, and the verdict its chain ends in.
+type prefix struct{ prefix, counter, verdict string }
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop}
+// refusals are the prefixes of the packets the enforcer refuses; accepts
+// those of the connections a box starts to a device (ENF-e-2).
+var (
+	refusals = []prefix{
+		{LogInbound, Inbound, "drop"}, {LogAPAdmin, APAdminDrop, "drop"}, {LogISP, ISPDrop, "drop"}, {LogNonGlobal, Blocked, "drop"},
+		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogCap, CapDrop, "drop"},
+	}
+	accepts = []prefix{{LogEdgeDevice, EdgeDevice, "accept"}, {LogCoreDevice, CoreDevice, "accept"}, {LogCoreStream, CoreStream, "accept"}}
+)
+
+// Lines are the enforcer's to rate, not a sender's: each prefix logs at
+// most LineRate packets a minute, after a burst of LineBurst, per
+// interface (a refusal's incoming one: a device's VLAN, the WAN, a
+// segment; a box's connection's outgoing one, the device's VLAN), so
+// neither a flood of refused packets nor a box opening connection after
+// connection can fill the journal (#4432, #4762, P4). The count and the
+// verdict never wait on a bucket. Lines sets hold one bucket per interface
+// for at most LineSize interfaces (more than the 4094 VLANs and the named
+// networks); an interface idle for LineIdle seconds has a full bucket
+// again, so its entry goes.
+const (
+	LineRate  = 10
+	LineBurst = 10
+	LineSize  = 8192
+	LineIdle  = 60
+)
+
+// logged is the chain a packet logged with prefix p ends in: it is
+// counted on p's counter (and a refused one on its device's, loggedDecls),
+// logged within its interface's bucket of p's lines set, and given p's
+// verdict.
+func logged(p string) string { return "log_" + slug(p) }
+func lines(p string) string  { return "lines_" + slug(p) }
+func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
+
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, LogLines}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -449,6 +549,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.line("counter " + TrafficOut(v.vlan) + " { }")
 		w.line("counter " + TrafficIn(v.vlan) + " { }")
 	}
+	for _, v := range devs {
+		w.line("counter " + TrafficRefused(v.vlan) + " { }")
+	}
 	w.set("isp_4", "ipv4_addr", "interval", isp4)
 	w.set("isp_6", "ipv6_addr", "interval", isp6)
 	w.set("nonglobal_4", "ipv4_addr", "interval", nonGlobal4)
@@ -468,13 +571,25 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	}
 
 	capDecls(w)
-	for _, v6 := range []bool{false, true} {
-		w.open("set " + HostSet(v6))
-		w.line("typeof " + hostKey(v6) + ";")
-		w.line("size " + strconv.Itoa(HostSize) + ";")
-		w.line("flags dynamic,timeout;")
-		w.line("timeout " + HostTimeout + ";")
-		w.close()
+	loggedDecls(w, devs)
+	for _, sg := range segments(l) {
+		for _, v6 := range []bool{false, true} {
+			for _, s := range []struct {
+				name, key string
+				timeout   int
+			}{
+				{HostSet(sg.name, v6), hostKey(v6), HostTimeout},
+				{HeldSet(sg.name, v6), family(v6) + " saddr", ClaimTimeout},
+				{ClaimSet(sg.name, v6), claimKey(v6), ClaimTimeout},
+			} {
+				w.open("set " + s.name)
+				w.line("typeof " + s.key + ";")
+				w.line("size " + strconv.Itoa(HostSize) + ";")
+				w.line("flags dynamic,timeout;")
+				w.line("timeout " + secs(s.timeout) + ";")
+				w.close()
+			}
+		}
 	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
@@ -495,13 +610,41 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// conntrack or any service sees it, so no segment can pose as the
 	// upstream resolver, the internet or another segment, and a forged
 	// answer never reaches the resolver that fills the allow sets (NET-2
-	// The core's list). The unspecified sources of a DHCP request and of
-	// IPv6 address setup have no route and pass to the rules below.
+	// The core's list). The unspecified sources of a DHCP request (UDP 68
+	// to 67) and of IPv6 address setup have no route and pass to the rules
+	// below. Then an IPv4 broadcast or multicast source (the limited
+	// broadcast, a subnet's broadcast, a group) is dropped and counted on
+	// every interface: the fib routes the WAN subnet's own broadcast back
+	// out of the WAN, so the general check below would pass it, and with
+	// rp_filter off the kernel would deliver it (#4841). The fib types
+	// 0.0.0.0 as broadcast, so any other unspecified source is dropped and
+	// counted here too, by intent: nothing can answer it, though the general
+	// check passes one to the limited broadcast or a link-local group
+	// (#4855). IPv6 has no broadcast, and its stack drops a
+	// multicast source before this hook. A DHCP or DHCPv6 answer to the
+	// enforcer's own client on the WAN passes: until the WAN has its lease,
+	// no route leads back to the server (NET-2 Fails safe, #4078). Only an
+	// answer addressed to the enforcer itself, from a source no interface
+	// routes and none of the enforcer's own addresses, passes: once leased
+	// the server is routed out of the WAN and passes the check below, and a
+	// source another interface routes (the core, a person's network, a
+	// device) or the enforcer holds (its address on any segment) is the
+	// internet posing as a segment or as the enforcer and is dropped (#4764,
+	// #4771); the fib reports a local source as missing too, so the second
+	// test is needed. A DHCPv6 server
+	// answering from such an address first resolves the client's link-local
+	// address, so its neighbour discovery, on the link (hop limit 255) and
+	// to the enforcer, passes on the same terms. An answer to be forwarded
+	// is checked like any other packet.
 	w.open("chain rpf")
 	w.line("type filter hook prerouting priority raw; policy accept;")
 	w.line(`iif "lo" accept`)
 	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
+	w.line("meta nfproto ipv4 fib saddr type { broadcast, multicast } counter name " + q(Spoofed) + " drop")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
+	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
 	w.close()
 
@@ -517,7 +660,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("iifname " + wan + " udp sport 67 udp dport 68 accept")
 	w.line("iifname " + wan + " udp sport 547 udp dport 546 accept")
 	w.line("iifname " + wan + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept")
-	w.line("iifname " + wan + ` log prefix ` + q(LogInbound) + ` counter name ` + q(Inbound) + " drop")
+	w.line("iifname " + wan + " goto " + logged(LogInbound))
 	w.line("icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept")
 	w.line("iifname " + served + " udp dport { 53, 67, 547 } accept")
 	w.line("iifname " + served + " tcp dport 53 accept")
@@ -555,62 +698,64 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// ways (NET-3, NET-7).
 	g := q(l.Guests)
 	var fwd []rule
-	add := func(in, out, tail, verdict string, m ...match) {
-		fwd = append(fwd, rule{in: in, out: out, m: m, tail: tail, verdict: verdict})
+	add := func(in, out, verdict string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: verdict})
 	}
-	logged := func(prefix, counter string) string {
-		return "log prefix " + q(prefix) + " counter name " + q(counter)
+	refused := func(in, out, prefix string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: "drop", logged: logged(prefix)})
 	}
-	add(wan, "", logged(LogInbound, Inbound), "drop")
-	add(g, wan, "", "accept", daddr(false, "!= @isp_4"), daddr(false, "!= @nonglobal_4"))
-	add(g, wan, "", "accept", daddr(true, "!= @isp_6"), daddr(true, "!= @nonglobal_6"))
-	add(g, "", "", "drop")
-	add("{ "+q(l.Owner)+", "+q(l.Household)+" }", "", "", "jump people")
-	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(false, "@ap_4"))
-	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(true, "@ap_6"))
-	add("", "", logged(LogAPAdmin, APAdminDrop), "drop", daddr(false, "@ap_4"))
-	add("", "", logged(LogAPAdmin, APAdminDrop), "drop", daddr(true, "@ap_6"))
-	add("", "", logged(LogISP, ISPDrop), "drop", daddr(false, "@isp_4"))
-	add("", "", logged(LogISP, ISPDrop), "drop", daddr(true, "@isp_6"))
-	add("", wan, logged(LogNonGlobal, Blocked), "drop", daddr(false, "@nonglobal_4"))
-	add("", wan, logged(LogNonGlobal, Blocked), "drop", daddr(true, "@nonglobal_6"))
-	add(edge, core, logged(LogCoreEdge, CoreEdge), "drop")
-	add(core, edge, logged(LogCoreEdge, CoreEdge), "drop")
+	admitted := func(in, out, prefix string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, verdict: "accept", logged: logged(prefix)})
+	}
+	refused(wan, "", LogInbound)
+	add(g, wan, "accept", daddr(false, "!= @isp_4"), daddr(false, "!= @nonglobal_4"))
+	add(g, wan, "accept", daddr(true, "!= @isp_6"), daddr(true, "!= @nonglobal_6"))
+	add(g, "", "drop")
+	add("{ "+q(l.Owner)+", "+q(l.Household)+" }", "", "jump people")
+	add(q(l.Admin), q(l.APMgmt), "accept", daddr(false, "@ap_4"))
+	add(q(l.Admin), q(l.APMgmt), "accept", daddr(true, "@ap_6"))
+	refused("", "", LogAPAdmin, daddr(false, "@ap_4"))
+	refused("", "", LogAPAdmin, daddr(true, "@ap_6"))
+	refused("", "", LogISP, daddr(false, "@isp_4"))
+	refused("", "", LogISP, daddr(true, "@isp_6"))
+	refused("", wan, LogNonGlobal, daddr(false, "@nonglobal_4"))
+	refused("", wan, LogNonGlobal, daddr(true, "@nonglobal_6"))
+	refused(edge, core, LogCoreEdge)
+	refused(core, edge, LogCoreEdge)
 	// From here on, oifname WAN is the internet.
-	add(q(l.Admin), core, "", "accept", l4Ports("tcp", port(l.CorePagePort)))
-	add(edge, wan, "", "accept")
-	add(core, wan, "", "accept", daddr(false, "@"+CoreSet(false)))
-	add(core, wan, "", "accept", daddr(true, "@"+CoreSet(true)))
+	add(q(l.Admin), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
+	add(edge, wan, "accept")
+	add(core, wan, "accept", daddr(false, "@"+CoreSet(false)))
+	add(core, wan, "accept", daddr(true, "@"+CoreSet(true)))
 	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
 	// before any allow set is consulted (NET-3).
-	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(false, "@doh_4"))
-	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(true, "@doh_6"))
-	add(T, wan, logged(LogDNS, DNSOutside), "drop", match{"meta l4proto { tcp, udp } th dport { 53, 853 }", "ct protocol { tcp, udp } ct original proto-dst { 53, 853 }"})
+	refused(T, wan, LogDNS, daddr(false, "@doh_4"))
+	refused(T, wan, LogDNS, daddr(true, "@doh_6"))
+	refused(T, wan, LogDNS, match{"meta l4proto { tcp, udp } th dport { 53, 853 }", "ct protocol { tcp, udp } ct original proto-dst { 53, 853 }"})
 	for _, v := range devs {
 		i := q(v.iface)
-		vl := strconv.Itoa(v.vlan)
 		if v.internet() {
-			add(i, wan, "", "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
-			add(i, wan, "", "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
+			add(i, wan, "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
+			add(i, wan, "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
 		}
 		for _, m := range dports(v.d.Control) {
 			if v.online() {
-				add(edge, i, `log prefix "enf edge-dev `+vl+` " counter name `+q(EdgeDevice), "accept", m)
+				admitted(edge, i, LogEdgeDevice, m)
 			}
 			if v.offline() {
-				add(core, i, `log prefix "enf core-dev `+vl+` " counter name `+q(CoreDevice), "accept", m)
+				admitted(core, i, LogCoreDevice, m)
 			}
 		}
 		for _, m := range dports(v.d.Stream) {
 			if v.stream() {
-				add(core, i, `log prefix "enf core-stream `+vl+` " counter name `+q(CoreStream), "accept", m)
+				admitted(core, i, LogCoreStream, m)
 			}
 		}
 	}
 	for _, p := range paths {
 		if p.Both {
-			add(q(p.From), q(p.To), "", "accept")
-			add(q(p.To), q(p.From), "", "accept")
+			add(q(p.From), q(p.To), "accept")
+			add(q(p.To), q(p.From), "accept")
 		}
 	}
 
@@ -645,7 +790,17 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, v := range devs {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
-	shared := []string{g, q(l.Owner), q(l.Household)}
+	shared := map[string]string{} // a shared segment's quoted interface -> its name
+	for _, sg := range segments(l) {
+		shared[q(sg.iface)] = sg.name
+	}
+	vmap := func(chain func(string) string) string {
+		var es []string
+		for _, sg := range segments(l) {
+			es = append(es, q(sg.iface)+" : jump "+chain(sg.name))
+		}
+		return "iifname vmap { " + strings.Join(es, ", ") + " }"
+	}
 	for _, rs := range [][]rule{fwd, people} {
 		if err := bindAll(idx, shared, rs); err != nil {
 			return "", nil, err
@@ -671,7 +826,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		highs = append(highs, fmt.Sprintf("0x%08x", idx[q(n)]<<16))
 	}
 	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " ct mark != 0x00000000 ct mark and 0x0000ffff != { " + strings.Join(lows, ", ") + " }" +
-		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } " + logged(LogDrop, Blocked) + " drop"
+		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } goto " + logged(LogDrop)
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
@@ -687,11 +842,17 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, r := range capJumps(l) {
 		w.line(r)
 	}
-	// A related packet from a shared segment in its connection's original
-	// direction must come from the host that started the connection
-	// (live.go, #4324). In the reply direction one from a shared segment
-	// already matches no live accept, since no accept leads into one.
-	w.line("ct state related ct direction original iifname { " + strings.Join(shared, ", ") + " } jump " + boundChain)
+	// A packet from a shared segment must come from the hardware address
+	// that holds its source address (claim), and every one after its
+	// connection's first, in the connection's original direction, from the
+	// host that started the connection (bound; live.go, #4324, #4480): an
+	// established or related one, or a new one on a connection already
+	// recorded (conntrack calls original-direction packets new until a
+	// reply). In the reply direction none comes from a shared segment,
+	// since no accept leads into one.
+	w.line(vmap(claim))
+	w.line("ct state established,related ct direction original " + vmap(bound))
+	w.line("ct state new ct label " + hostLabel + " " + vmap(bound))
 	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
@@ -710,7 +871,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, r := range fwd {
 		w.line(r.first())
 	}
-	w.line(logged(LogDrop, Blocked) + " drop")
+	w.line("goto " + logged(LogDrop))
 	w.close()
 
 	w.open("chain people")
@@ -728,22 +889,48 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// labels has no room for one, so setting it does nothing, and such a
 	// connection (open across the first load of a ruleset with labels) is
 	// never recorded; one whose record could not be written has none.
-	w.open("chain " + learnChain)
-	w.line("ct label " + hostLabel + " accept")
-	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
-	}
-	w.line("accept")
-	w.close()
+	//
+	// Shared segments are never observed (NET-1, NET-3): what their chains
+	// refuse is dropped without a log line or a count.
+	for _, sg := range segments(l) {
+		w.open("chain " + learn(sg.name))
+		w.line("ct label " + hostLabel + " accept")
+		for _, v6 := range []bool{false, true} {
+			w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(sg.name, v6) + " { " + hostKey(v6) + " }")
+		}
+		w.line("accept")
+		w.close()
 
-	// Shared segments are never observed (NET-1, NET-3): a forged error from
-	// one is dropped without a log line or a count.
-	w.open("chain " + boundChain)
-	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
+		// The record is refreshed by every packet it passes, for as long
+		// as conntrack keeps the connection idle: a TCP connection both
+		// ends answered for HostTCPTimeout (ct status reads the
+		// connection's, also for a related packet), any other for the
+		// set's HostTimeout.
+		w.open("chain " + bound(sg.name))
+		for _, v6 := range []bool{false, true} {
+			k, set := hostKey(v6), HostSet(sg.name, v6)
+			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " ct protocol tcp ct status assured update @" + set + " { " + k + " timeout " + secs(HostTCPTimeout) + " } return")
+			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " update @" + set + " { " + k + " } return")
+		}
+		w.line("drop")
+		w.close()
+
+		// An address is held by the hardware address it was first sent
+		// from: a packet from its holder refreshes the hold, one from any
+		// other hardware address is dropped, and a free address is taken
+		// by the packet's hardware address (its claim first, so a held set
+		// with no room leaves no hold without its claim).
+		w.open("chain " + claim(sg.name))
+		for _, v6 := range []bool{false, true} {
+			pre := "meta nfproto " + nfproto(v6) + " "
+			k, cs, hs, a := claimKey(v6), ClaimSet(sg.name, v6), HeldSet(sg.name, v6), family(v6)+" saddr"
+			w.line(pre + k + " @" + cs + " update @" + cs + " { " + k + " } update @" + hs + " { " + a + " } return")
+			w.line(pre + a + " @" + hs + " drop")
+			w.line(pre + "add @" + cs + " { " + k + " } add @" + hs + " { " + a + " } return")
+		}
+		w.line("drop")
+		w.close()
 	}
-	w.line("drop")
-	w.close()
 
 	w.open("chain " + live("forward"))
 	for _, r := range fwd {
@@ -805,6 +992,63 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.close()
 	w.close()
 	return w.b.String(), devs, nil
+}
+
+// loggedDecls declares each prefix's lines set and chain, and for each
+// device its RefusedSet and the chain that counts its refusals, which the
+// refused map reaches from the device's VLAN interface. A logged packet is
+// counted first, on its prefix's counter and, refused from a device's
+// VLAN, on the device's counter and its destination's, so all stay exact;
+// the lines rule then logs it only while its interface's bucket holds a
+// token, and the last rule gives the prefix's verdict whether or not it
+// did. A failed map lookup, a full set or an empty bucket ends only its
+// own rule.
+func loggedDecls(w *writer, devs []device) {
+	q := strconv.Quote
+	var byDev []string
+	for _, v := range devs {
+		byDev = append(byDev, q(v.iface)+" : jump "+trafficChain(v.vlan, "refused"))
+		for _, v6 := range []bool{false, true} {
+			w.open("set " + RefusedSet(v.vlan, v6))
+			w.line("type " + map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6] + ";")
+			w.line("size " + strconv.Itoa(RefusedSize) + ";")
+			w.line("flags dynamic,timeout;")
+			w.line("timeout 1d;")
+			w.close()
+		}
+		w.open("chain " + trafficChain(v.vlan, "refused"))
+		w.line("counter name " + q(TrafficRefused(v.vlan)))
+		w.line("update @" + RefusedSet(v.vlan, false) + " { ip daddr counter }")
+		w.line("update @" + RefusedSet(v.vlan, true) + " { ip6 daddr counter }")
+		w.close()
+	}
+	w.open("map refused")
+	w.line("type ifname : verdict;")
+	if len(byDev) > 0 {
+		w.line("elements = { " + strings.Join(byDev, ", ") + " }")
+	}
+	w.close()
+	limit := "limit rate " + strconv.Itoa(LineRate) + "/minute burst " + strconv.Itoa(LineBurst) + " packets"
+	for _, r := range slices.Concat(refusals, accepts) {
+		key, refusal := "iif", r.verdict == "drop"
+		if !refusal {
+			key = "oif"
+		}
+		w.open("set " + lines(r.prefix))
+		w.line("typeof " + key + ";")
+		w.line("size " + strconv.Itoa(LineSize) + ";")
+		w.line("flags dynamic,timeout;")
+		w.line("timeout " + secs(LineIdle) + ";")
+		w.close()
+		w.open("chain " + logged(r.prefix))
+		w.line("counter name " + q(r.counter))
+		if refusal {
+			w.line("iifname vmap @refused")
+		}
+		w.line("update @" + lines(r.prefix) + " { " + key + " " + limit + " } counter name " + q(LogLines) + " log prefix " + q(r.prefix))
+		w.line(r.verdict)
+		w.close()
+	}
 }
 
 func trafficChain(vlan int, dir string) string {

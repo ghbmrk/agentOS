@@ -32,8 +32,9 @@ type Kernel interface {
 type Keys func(machine string) (k key.Key, holder ed25519.PrivateKey, ok bool)
 
 // planState is what a guest learns about its plan: the kernel's status, a
-// rejected plan's failing check (PLN-4) and each step's typed result (PLN-5
-// (b)), never a clerk's evidence.
+// rejected plan's failing check (PLN-4) or a cancelled plan's cancel code
+// (owner, trip, erased, a key's refusal), and each step's typed result (PLN-5
+// (b)), never a clerk's evidence or a cancel's detail.
 type planState struct {
 	RequestID string       `json:"request_id"`
 	State     string       `json:"state"`
@@ -224,7 +225,11 @@ func (p *Plane) read(ctx context.Context, id string) (planState, bool, error) {
 	if err != nil || v.Status == "" {
 		return planState{}, false, err
 	}
-	st := planState{State: v.Status, Code: code(v.Reject)}
+	c := v.Reject // a rejection's failing check, or why a cancelled plan ended
+	if v.Status == kernel.SCancelled {
+		c = v.Cancel
+	}
+	st := planState{State: v.Status, Code: code(c)}
 	for _, s := range v.Steps {
 		st.Steps = append(st.Steps, stepResult{s.Phase, code(s.Result), s.Undone})
 	}

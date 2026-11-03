@@ -42,6 +42,7 @@ func fixturePolicy() policy.Document {
 			{ID: "old-tv", Network: policy.NetDevices, WiFi: "vlan108", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true, Isolated: true},
 			{ID: "lock", Network: policy.NetDevices, Class: policy.ClassLock, Secure: "lock"},
 			{ID: "laptop", Network: policy.NetHousehold, Everyday: true},
+			{ID: "hub", Network: policy.NetDevices, WiFi: "vlan109", Allow: []string{"hub.example"}, VendorCloud: true, Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}}},
 		},
 		Pairs: []policy.Pair{{A: "laptop", B: "printer"}, {A: "sensor-a", B: "sensor-b"}, {A: "old-tv", B: "laptop"}},
 	}

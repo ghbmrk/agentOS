@@ -25,6 +25,8 @@ and mount unit is noexec. The keeper (STO-2c, D-154): only its units reach the T
 its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897). A device driver
 (DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
 DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
+Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
+this script can fetch a package outside mkosi's checked apt run.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
@@ -1594,13 +1596,18 @@ def ini_all(files, section, key):
     """Every non-empty value of SECTION.KEY across FILES, whatever comes after it: for a rule that must not
     rest on how systemd treats an empty or an invalid later assignment (some settings keep the earlier
     value, #4264 Security 6543535789). ValueError as ini_words."""
+    return [v for _, v in ini_all_in(files, section, key)]
+
+
+def ini_all_in(files, section, key):
+    """ini_all's values, each as (the file that sets it, the value), so a refusal can name the file."""
     val = []
     for f in files:
         try:
             lines = config_lines(f.content())
         except (OSError, Unparsable) as e:
             raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
-        val += [v for s, k, v in lines if (s, k) == (section, key) and v]
+        val += [(f, v) for s, k, v in lines if (s, k) == (section, key) and v]
     return val
 
 
@@ -1930,6 +1937,11 @@ def driver_root(name, files):
             and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
+def unlock_allowed(key, allowed):
+    """What an unlock unit may assign to KEY, for a refusal (#4667)."""
+    return " or ".join("%s=%s" % (key, a) for a in allowed) or "no %s= at all" % key
+
+
 def keeper_unit_violations(name, files):
     """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins)."""
     out = []
@@ -2005,9 +2017,9 @@ def keeper_unit_violations(name, files):
                     out.append("%s: %s=%s can open the TPM (#2889)" % (name, key, g))
     if name in UNLOCK_UNITS:
         for section, key, allowed, why in UNLOCK_ASSIGNMENTS:
-            for v in ini_all(files, section, key):
+            for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
-                    out.append("%s: %s=%s; %s" % (name, key, v, why))
+                    out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
         if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
@@ -3333,6 +3345,33 @@ def has_key(root, rel):
     return any(m in data for m in KEY_MARKERS)
 
 
+def script_net_dev():
+    """The text of this process's /proc/self/net/dev: the script sandbox's network devices, not the tree's."""
+    try:
+        with open("/proc/self/net/dev") as f:
+            return f.read()
+    except OSError as e:
+        return "unreadable (%s)" % e.strerror
+
+
+def script_network_violations(with_network, net_dev):
+    """#4647: mkosi v24.3 runs mkosi.postinst and this script with the same network setting, off unless
+    WithNetwork= is set (the key is not on tests/test_image.py's allow-list), so neither can fetch a
+    package outside mkosi's signature-checked apt run. This checks it held for this run, whatever flags
+    the build passed: mkosi says WITH_NETWORK=0, and the sandbox's network namespace (NET_DEV, the text
+    of /proc/self/net/dev) holds only the loopback device."""
+    out = []
+    if with_network != "0":
+        out.append("WITH_NETWORK is %s; mkosi.postinst and mkosi.finalize run with no network, so they fetch "
+                   "no package outside mkosi's checked apt run (#4647)" % with_network)
+    devs = [l.split(":", 1)[0].strip() for l in net_dev.split("\n")[2:] if l.strip()]
+    if devs != ["lo"]:
+        out.append("the script sandbox's network devices are %s, not lo alone; mkosi.postinst and mkosi.finalize "
+                   "run with no network, so they fetch no package outside mkosi's checked apt run (#4647)"
+                   % (", ".join(devs) or "unknown: " + net_dev.split("\n")[0][:80]))
+    return out
+
+
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
@@ -3344,6 +3383,8 @@ def main():
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
     v = violations(root)
+    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
+        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
     for line in v:
         print("image check: " + line)
     if v:

@@ -21,6 +21,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import trusted_base as tb  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWN = "github.com/ghbmrk/agentos/broker"
 
@@ -443,7 +445,7 @@ PIN = [
     "jobs:",
     "  trusted-base:",
     "    name: trusted-base",
-    "    runs-on: ubuntu-latest",
+    "    runs-on: ubuntu-24.04",
     "    timeout-minutes: 10",
     "    permissions:",
     "      contents: read",
@@ -511,7 +513,7 @@ class Workflow(unittest.TestCase):
                          (" --pr \"$PR_NUMBER\"", ""),
                          ("--detach \"$RUNNER_TEMP/head\" \"$MERGE\"", "--detach \"$RUNNER_TEMP/head\" \"$HEAD_SHA\""),
                          ("--detach \"$RUNNER_TEMP/base\" HEAD", "--detach \"$RUNNER_TEMP/base\" \"$(git merge-base HEAD \"$HEAD_SHA\")\""),
-                         ("    runs-on: ubuntu-latest", "    continue-on-error: true\n    runs-on: ubuntu-latest")]:
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
 

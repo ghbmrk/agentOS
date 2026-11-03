@@ -59,7 +59,7 @@ func TestDropQuotaEdge(t *testing.T) {
 		for _, want := range []string{
 			fmt.Sprintf("add quota inet enforcer %s { over %d bytes used 40 bytes; }", qab, n),
 			fmt.Sprintf("add quota inet enforcer %s { over %d bytes used %d bytes; }", edgeQuota(1, 50), e, e),
-			"add rule inet enforcer " + ab + ` quota name "` + qab + `" goto cap_over`,
+			"add rule inet enforcer " + ab + ` quota name "` + qab + `" goto log_cap`,
 			"add chain inet enforcer " + cc,
 			"add rule inet enforcer capd_4 ip daddr vmap { 203.0.113.30 : goto " + ab + " }\n" +
 				"add rule inet enforcer capd_4 ip daddr @" + core.Named("a.example", false) + " goto " + ab + "\n" +
@@ -108,6 +108,85 @@ func TestDropsKeepsUnchangedQuotas(t *testing.T) {
 	}
 	if strings.Index(text, "delete chain") < strings.Index(text, "flush chain inet enforcer "+dropEdgeChain) {
 		t.Errorf("a chain deleted before the rules that jump to it are flushed:\n%s", text)
+	}
+}
+
+// TestDropsCarriesTheGap (NET-2 Byte caps, #4614, L3 R2 on #4611): a
+// quota an update starts in place of running ones is loaded with the
+// counter's count plus what the replaced quotas charged between the
+// reading's listing and the running one: a merged group's from each old
+// group the running drop sent one of its destinations (by resolver set)
+// or addresses (by verdict map) to, a recapped group's from its own old
+// quota, the edge's from the old edge quota. A kept quota is neither
+// carried nor re-added, and without the reading's listing nothing is
+// carried. Mutants: no carry, carrying a kept quota's or an unrelated
+// group's bytes, carrying the old quota's whole count, mapping by
+// destination only.
+func TestDropsCarriesTheGap(t *testing.T) {
+	d := twoCaps()
+	core := allowSets(d, nil)[0]
+	retired, moved := netip.MustParseAddr("203.0.113.31"), netip.MustParseAddr("203.0.113.32")
+	old := map[string]DropGroup{
+		"a": {Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100},
+		"b": {Dests: []string{"b.example"}, Caps: []uint64{200}, Cap: 200},
+		"c": {Dests: []string{"c.example"}, Caps: []uint64{300}, Cap: 300},
+		"r": {Dests: []string{"r.example"}, Caps: []uint64{50}, Cap: 50}, // off the list: no resolver set
+		"k": {Dests: []string{"k.example"}, Caps: []uint64{10}, Cap: 10}, // kept, though an address the running drop sent it is ab's now
+	}
+	ab := DropGroup{Dests: []string{"a.example", "b.example", "r.example"}, Caps: []uint64{100, 200, 50}, Cap: 350, Count: 40, Addrs: []netip.Addr{retired, moved}}
+	c := DropGroup{Dests: []string{"c.example"}, Caps: []uint64{250}, Cap: 250, Count: 1}
+	p := Drop{Day: 1, EdgeCap: 60, EdgeCount: 5, Past: true, Groups: []DropGroup{ab, c, old["k"]}}
+	listing := func(used map[string]uint64) []byte {
+		var objs []string
+		quota := func(name string, n uint64) {
+			objs = append(objs, fmt.Sprintf(`{"quota": {"family": "inet", "table": "enforcer", "name": %q, "used": %d}}`, name, n))
+		}
+		rule := func(set, chain string) {
+			objs = append(objs, fmt.Sprintf(`{"rule": {"family": "inet", "table": "enforcer", "chain": "capd_4", "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "@%s"}}, {"goto": {"target": %q}}]}}`, set, chain))
+		}
+		for k, g := range old {
+			ch, q := groupNames(1, g)
+			objs = append(objs, fmt.Sprintf(`{"chain": {"family": "inet", "table": "enforcer", "name": %q}}`, ch))
+			quota(q, used[k])
+			if k != "r" {
+				rule(core.Named(g.Dests[0], false), ch)
+			}
+		}
+		quota(edgeQuota(1, 50), used["edge"])
+		cr, _ := groupNames(1, old["r"])
+		ck, _ := groupNames(1, old["k"])
+		objs = append(objs, fmt.Sprintf(`{"rule": {"family": "inet", "table": "enforcer", "chain": "capd_4", "expr": [{"vmap": {"key": {"payload": {"protocol": "ip", "field": "daddr"}}, "data": {"set": [[%q, {"goto": {"target": %q}}], [%q, {"goto": {"target": %q}}]]}}}]}}`, retired, cr, moved, ck),
+			`{"rule": {"family": "inet", "table": "enforcer", "chain": "forward", "expr": [{"vmap": {"key": {"meta": {"key": "iifname"}}, "data": "@named"}}]}}`)
+		return []byte(`{"nftables": [` + strings.Join(objs, ", ") + `]}`)
+	}
+	d.Destinations = append(d.Destinations, "k.example")
+	d.Caps["k.example"] = 10
+	read := listing(map[string]uint64{"a": 50, "b": 10, "c": 5, "r": 3, "k": 4, "edge": 15})
+	running := listing(map[string]uint64{"a": 70, "b": 30, "c": 10, "r": 10, "k": 9, "edge": 20})
+	_, qab := groupNames(1, ab)
+	_, qc := groupNames(1, c)
+	_, qk := groupNames(1, old["k"])
+	for _, tc := range []struct {
+		read       []byte
+		ab, c, edg uint64
+	}{
+		{read, 40 + 20 + 20 + 7, 1 + 5, 5 + 5},
+		{nil, 40, 1, 5},
+	} {
+		p.Read = tc.read
+		text := mustDrops(t, d, running, p)
+		for _, want := range []string{
+			fmt.Sprintf("add quota inet enforcer %s { over 350 bytes used %d bytes; }", qab, tc.ab),
+			fmt.Sprintf("add quota inet enforcer %s { over 250 bytes used %d bytes; }", qc, tc.c),
+			fmt.Sprintf("add quota inet enforcer %s { over 60 bytes used %d bytes; }", edgeQuota(1, 60), tc.edg),
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("read listing %v: update lacks %q:\n%s", tc.read != nil, want, text)
+			}
+		}
+		if strings.Contains(text, "quota inet enforcer "+qk) {
+			t.Errorf("a kept quota is touched:\n%s", text)
+		}
 	}
 }
 
@@ -164,8 +243,8 @@ func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ip daddr vmap { 203.0.113.10 : goto " + m + ", 203.0.113.30 : goto " + ga + " }",
-		"add rule inet enforcer " + m + ` quota name "` + qa + `" goto cap_over`,
-		"add rule inet enforcer " + m + ` quota name "` + qb + `" goto cap_over`,
+		"add rule inet enforcer " + m + ` quota name "` + qa + `" goto log_cap`,
+		"add rule inet enforcer " + m + ` quota name "` + qb + `" goto log_cap`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("drop text lacks %q:\n%s", want, text)
@@ -209,7 +288,7 @@ func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
 	slices.Sort(elems)
 	for _, want := range []string{
 		fmt.Sprintf("add quota inet enforcer %s { over %d bytes used 0 bytes; }", q, uint64(MaxDropCap)+1),
-		"add rule inet enforcer " + c + ` quota name "` + q + `" goto cap_over`,
+		"add rule inet enforcer " + c + ` quota name "` + q + `" goto log_cap`,
 		"ip daddr vmap { " + strings.Join(elems, ", ") + " }",
 	} {
 		if !strings.Contains(text, want) {
