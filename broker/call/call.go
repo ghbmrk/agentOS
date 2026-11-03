@@ -92,6 +92,9 @@ type Clips struct {
 	OneMoment []byte
 	// Held replaces an answer whose sentence the check held.
 	Held []byte
+	// Failed tells the owner a turn failed (the answerer or synthesizer
+	// erred, or the recognizer stopped), so a failure is never silence.
+	Failed []byte
 }
 
 // Config wires one call loop.
@@ -165,7 +168,11 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 		return Report{}, err
 	}
 	cfg = cfg.withDefaults()
-	return Run(ctx, cfg, c, cfg.token(ctx, c))
+	tctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	token := make(chan Rung, 1)
+	go func() { token <- cfg.token(tctx, c) }()
+	return cfg.run(ctx, c, P0, token)
 }
 
 // token reads the speed-dial token: the handset's contact holds the box's
@@ -196,9 +203,7 @@ func (cfg Config) token(ctx context.Context, l Line) Rung {
 			b.WriteByte(k)
 		case <-window:
 			return cfg.check(b.String())
-		case <-l.Ended(): // Run returns at once
-			return P0
-		case <-ctx.Done():
+		case <-ctx.Done(): // Serve's, ended when the call ends
 			return P0
 		}
 	}
@@ -212,11 +217,18 @@ func (cfg Config) check(token string) Rung {
 	return P0
 }
 
-// Run holds one call until it ends or ctx is done. Turns are answered one
-// at a time: a new final turn, any speech from the owner, or the 0 key
-// stops the answer being spoken first.
+// Run holds one call at rung until it ends or ctx is done. Turns are
+// answered one at a time: a new final turn, any speech from the owner, or
+// the 0 key stops the answer being spoken first.
 func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
-	cfg = cfg.withDefaults()
+	return cfg.withDefaults().run(ctx, l, rung, nil)
+}
+
+// run is Run, with the rung still to come on token when token is not nil.
+// It listens from the start, so the owner's first words are heard while
+// the token is read; keys are the token's until it is read, and the first
+// answer waits for the rung.
+func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung) (Report, error) {
 	rep := Report{Rung: rung}
 	select {
 	case <-l.Active():
@@ -228,7 +240,12 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
-	keys := l.Keys()
+	var keys <-chan byte
+	if token == nil {
+		keys = l.Keys()
+	}
+	// held is what the owner asked while the token was read.
+	var held *Heard
 
 	type running struct {
 		cancel context.CancelFunc
@@ -252,6 +269,21 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 		finish()
 	}
 	n := 0
+	start := func(h Heard) {
+		n++
+		tctx, tcancel := context.WithCancel(ctx)
+		r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}}
+		cur = r
+		end := h.End
+		if end.IsZero() {
+			end = cfg.Now()
+		}
+		a := Ask{Text: h.Text, Rung: rep.Rung, Turn: n}
+		go func() {
+			defer close(r.done)
+			cfg.answer(tctx, l, a, end, r.turn)
+		}()
+	}
 	for {
 		var done chan struct{}
 		if cur != nil {
@@ -266,6 +298,11 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 			return rep, nil
 		case <-done:
 			finish()
+		case r := <-token:
+			rep.Rung, token, keys = r, nil, l.Keys()
+			if held != nil {
+				start(*held)
+			}
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop()
@@ -279,6 +316,7 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 		case h, ok := <-heard:
 			if !ok {
 				stop()
+				l.Say(ctx, cfg.Clips.Failed)
 				return rep, ErrDeaf
 			}
 			if !h.Final {
@@ -289,21 +327,17 @@ func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 			}
 			stop()
 			if stopWord(h.Text) || strings.TrimSpace(h.Text) == "" {
+				held = nil
 				continue
 			}
-			n++
-			tctx, tcancel := context.WithCancel(ctx)
-			r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}}
-			cur = r
-			end := h.End
-			if end.IsZero() {
-				end = cfg.Now()
+			if token != nil { // the rung is not known yet
+				if held != nil {
+					h.Text = held.Text + " " + h.Text
+				}
+				held = &h
+				continue
 			}
-			go func() {
-				defer close(r.done)
-				defer tcancel()
-				cfg.answer(tctx, l, Ask{Text: h.Text, Rung: rung, Turn: n}, end, r.turn)
-			}()
+			start(h)
 		}
 	}
 }
@@ -327,16 +361,29 @@ func (cfg Config) withDefaults() Config {
 	return cfg
 }
 
-// answer speaks one answer, sentence by sentence, into t.
+// sound is one thing an answer has ready to play, or why it ends.
+type sound struct {
+	pcm  []byte
+	held bool
+	err  error
+}
+
+// answer plays one answer into t. A producer writes, checks and
+// synthesizes the sentences while the one before plays; this loop plays
+// them one at a time and, while nothing has played, the one-moment clip
+// once the owner has waited OneMomentAfter since the end of their speech,
+// whether the answerer or the synthesizer is the slow one (rule 5).
 func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *Turn) {
-	chunks, err := cfg.Answerer.Answer(ctx, a)
-	if err != nil {
-		t.Err = err
-		t.Stopped = ctx.Err() != nil
-		return
-	}
-	// spoken is everything this answer has said so far.
-	var spoken string
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		if ctx.Err() != nil {
+			t.Stopped = true
+		}
+	}()
+	sounds := make(chan sound)
+	go cfg.produce(pctx, a, sounds)
+	moment := cfg.After(cfg.OneMomentAfter - cfg.Now().Sub(end))
 	play := func(pcm []byte, content bool) bool {
 		if len(pcm) == 0 {
 			return true
@@ -353,66 +400,116 @@ func (cfg Config) answer(ctx context.Context, l Line, a Ask, end time.Time, t *T
 		}
 		return true
 	}
-	speak := func(s string) bool {
+	// take plays s and reports whether the answer goes on.
+	take := func(s sound, ok bool) bool {
+		switch {
+		case !ok:
+			return false
+		case s.err != nil:
+			if ctx.Err() != nil { // stopped, not failed
+				return false
+			}
+			t.Err = s.err
+			play(cfg.Clips.Failed, false)
+			return false
+		case s.held:
+			t.Held = true
+			play(cfg.Clips.Held, false)
+			return false
+		case !play(s.pcm, true):
+			return false
+		}
+		t.Sentences++
+		return true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-moment:
+			moment = nil
+			if t.FirstAudio != 0 {
+				continue
+			}
+			select { // a sentence ready now goes before the clip
+			case s, ok := <-sounds:
+				if !take(s, ok) {
+					return
+				}
+			default:
+				if !play(cfg.Clips.OneMoment, false) {
+					return
+				}
+			}
+		case s, ok := <-sounds:
+			if !take(s, ok) {
+				return
+			}
+		}
+	}
+}
+
+// produce writes the answer's sentences to out, each checked and
+// synthesized, and closes out at the end of the answer. It stops at the
+// first hold or error, which it sends.
+func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
+	defer close(out)
+	send := func(s sound) bool {
+		select {
+		case out <- s:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	chunks, err := cfg.Answerer.Answer(ctx, a)
+	if err != nil {
+		send(sound{err: err})
+		return
+	}
+	// said is everything this answer has sent to be spoken.
+	var said string
+	sentence := func(s string) bool {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			return true
 		}
 		// The check runs on the sentence alone and joined with all the
-		// answer has spoken, so nothing straddles a cut, however many
+		// answer has said, so nothing straddles a cut, however many
 		// sentences it spans (rule 1; Security on #4944).
-		if cfg.held(s) || (spoken != "" && cfg.held(spoken+" "+s)) {
-			t.Held = true
-			play(cfg.Clips.Held, false)
+		if cfg.held(s) || (said != "" && cfg.held(said+" "+s)) {
+			send(sound{held: true})
 			return false
 		}
 		pcm, err := cfg.Synthesizer.Speak(ctx, s)
 		if err != nil {
-			if ctx.Err() != nil {
-				t.Stopped = true
-			} else {
-				t.Err = err
-			}
+			send(sound{err: err})
 			return false
 		}
-		if !play(pcm, true) {
-			return false
-		}
-		t.Sentences++
-		spoken = strings.TrimSpace(spoken + " " + s)
-		return true
+		said = strings.TrimSpace(said + " " + s)
+		return send(sound{pcm: pcm})
 	}
-	moment := cfg.After(cfg.OneMomentAfter)
-	var buf strings.Builder
+	var buf string
 	for {
 		select {
 		case <-ctx.Done():
-			t.Stopped = true
 			return
-		case <-moment:
-			moment = nil
-			if t.FirstAudio == 0 && !play(cfg.Clips.OneMoment, false) {
-				return
-			}
 		case c, ok := <-chunks:
 			if !ok {
-				speak(buf.String())
+				sentence(buf)
 				return
 			}
-			buf.WriteString(c)
-			rest := buf.String()
+			buf += c
 			for {
-				s, r, cut := Cut(rest)
+				s, rest, cut := Cut(buf)
 				if !cut {
 					break
 				}
-				if !speak(s) {
+				if !sentence(s) {
 					return
 				}
-				rest = r
+				buf = rest
 			}
-			buf.Reset()
-			buf.WriteString(rest)
 		}
 	}
 }

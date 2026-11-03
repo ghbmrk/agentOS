@@ -102,6 +102,11 @@ func TestClosedChannelsEndTheLoop(t *testing.T) {
 		r.next()
 		c.close(r)
 		r.l.wasCut(t)
+		if c.want != nil {
+			if got := r.next(); got != "CLIP:failed" {
+				t.Fatalf("%s closed: played %q", c.name, got)
+			}
+		}
 		rep, err := r.end()
 		if !errors.Is(err, c.want) {
 			t.Fatalf("%s closed: %v", c.name, err)
@@ -203,6 +208,9 @@ func TestFailuresEndTheTurn(t *testing.T) {
 	r.cfg.Done = func(tu call.Turn) { got <- tu }
 	r.run(call.P2)
 	r.say("q")
+	if got := r.next(); got != "CLIP:failed" {
+		t.Fatalf("answerer error played %q", got)
+	}
 	select {
 	case tu := <-got: // at once, not at hang-up
 		if !errors.Is(tu.Err, boom) || tu.Stopped {
@@ -240,6 +248,9 @@ func TestFailuresEndTheTurn(t *testing.T) {
 	})
 	r.run(call.P2)
 	r.say("q")
+	if got := r.next(); got != "CLIP:failed" {
+		t.Fatalf("synthesizer error played %q", got)
+	}
 	r.quiet()
 	rep := r.hangup()
 	if len(rep.Turns) != 1 || !errors.Is(rep.Turns[0].Err, boom) || rep.Turns[0].Sentences != 0 || calls != 1 {
@@ -285,6 +296,8 @@ func TestOneMomentDefaults(t *testing.T) {
 	var mu sync.Mutex
 	var asked []time.Duration
 	r := newRig(t, fixed("Hi."))
+	now := time.Unix(1_800_000_000, 0)
+	r.cfg.Now = func() time.Time { return now }
 	r.cfg.After = func(d time.Duration) <-chan time.Time {
 		mu.Lock()
 		asked = append(asked, d)
@@ -364,6 +377,8 @@ func TestSpeedDialTokenRaisesTheCallToP2(t *testing.T) {
 	r.cfg.Token = func(k string) bool { tried = append(tried, k); return k == "4071" }
 	var mu sync.Mutex
 	var waits []time.Duration
+	now := time.Unix(1_800_000_000, 0)
+	r.cfg.Now = func() time.Time { return now }
 	r.cfg.After = func(d time.Duration) <-chan time.Time {
 		mu.Lock()
 		waits = append(waits, d)
@@ -374,7 +389,6 @@ func TestSpeedDialTokenRaisesTheCallToP2(t *testing.T) {
 	for _, k := range []byte("4071#") {
 		r.l.keys <- k
 	}
-	<-r.rec.ctx // listening starts only after the token
 	r.say("what's in my mail")
 	r.next()
 	rep := r.hangup()
@@ -384,8 +398,8 @@ func TestSpeedDialTokenRaisesTheCallToP2(t *testing.T) {
 	if len(tried) != 1 || tried[0] != "4071" {
 		t.Fatalf("tried %q", tried)
 	}
-	// One token window of 6 s by default, then the turn's one-moment wait.
-	if len(waits) != 2 || waits[0] != 6*time.Second || waits[1] != time.Second {
+	// The turn's one-moment wait counts from the end of speech: 1 s.
+	if len(waits) == 0 || waits[len(waits)-1] != time.Second {
 		t.Fatalf("waits %v", waits)
 	}
 }
@@ -429,7 +443,8 @@ func TestTokenWindowAndLimit(t *testing.T) {
 	r.l.keys <- '5'
 	r.l.keys <- '5'
 	window <- time.Time{}
-	<-r.rec.ctx
+	r.say("q")
+	r.next()
 	if rep := r.hangup(); rep.Rung != call.P2 || len(tried) != 1 {
 		t.Fatalf("rung %v, tried %q", rep.Rung, tried)
 	}
@@ -442,21 +457,40 @@ func TestTokenWindowAndLimit(t *testing.T) {
 		r.l.keys <- '7'
 	}
 	r.serve()
-	<-r.rec.ctx
+	r.say("q")
+	r.next()
 	r.hangup()
 	if len(tried) != 1 || len(tried[0]) != call.MaxToken {
 		t.Fatalf("tried %d keys", len(tried[0]))
 	}
 
 	r = newRig(t, fixed("Hi."))
-	r.cfg.After = func(time.Duration) <-chan time.Time { return window }
+	var mu sync.Mutex
+	var waits []time.Duration
+	opened := make(chan struct{}, 1)
+	r.cfg.After = func(d time.Duration) <-chan time.Time {
+		mu.Lock()
+		waits = append(waits, d)
+		mu.Unlock()
+		select {
+		case opened <- struct{}{}:
+		default:
+		}
+		return window
+	}
 	checked := false
 	r.cfg.Token = func(string) bool { checked = true; return true }
 	r.serve()
+	<-opened
+	time.Sleep(20 * time.Millisecond) // a window opened again would show here
 	window <- time.Time{}
-	<-r.rec.ctx
+	r.say("q")
+	r.next()
 	if rep := r.hangup(); rep.Rung != call.P0 || checked {
 		t.Fatalf("no keys: rung %v, checked %v", rep.Rung, checked)
+	}
+	if len(waits) == 0 || waits[0] != 6*time.Second || count(waits, 6*time.Second) != 1 { // one default window
+		t.Fatalf("waits %v", waits)
 	}
 }
 
@@ -493,4 +527,14 @@ func TestTokenWaitEnds(t *testing.T) {
 		}
 		cancel()
 	}
+}
+
+func count(ds []time.Duration, d time.Duration) int {
+	n := 0
+	for _, x := range ds {
+		if x == d {
+			n++
+		}
+	}
+	return n
 }

@@ -5,6 +5,7 @@ package call_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +60,7 @@ func (l *line) Say(ctx context.Context, pcm []byte) error {
 	if err != nil {
 		return err
 	}
-	if gate {
+	if gate && strings.HasPrefix(string(pcm), "S:") { // clips always play
 		<-ctx.Done()
 		l.cut <- struct{}{}
 		return ctx.Err()
@@ -132,7 +133,7 @@ func (s synth) Speak(_ context.Context, t string) ([]byte, error) {
 	return []byte("S:" + t), nil
 }
 
-var clips = call.Clips{OneMoment: []byte("CLIP:moment"), Held: []byte("CLIP:held")}
+var clips = call.Clips{OneMoment: []byte("CLIP:moment"), Held: []byte("CLIP:held"), Failed: []byte("CLIP:failed")}
 
 type rig struct {
 	t   *testing.T
@@ -142,10 +143,13 @@ type rig struct {
 	cfg call.Config
 	rep chan call.Report
 	err chan error
+	// base is the goroutine count before the call: every goroutine the
+	// call starts must be gone after it ends.
+	base int
 }
 
 func newRig(t *testing.T, script func(call.Ask) []string) *rig {
-	r := &rig{t: t, l: newLine(), rec: recognizer{make(chan call.Heard), make(chan context.Context, 1)}, ans: &answerer{script: script}, rep: make(chan call.Report, 1), err: make(chan error, 1)}
+	r := &rig{t: t, l: newLine(), rec: recognizer{make(chan call.Heard), make(chan context.Context, 1)}, ans: &answerer{script: script}, rep: make(chan call.Report, 1), err: make(chan error, 1), base: runtime.NumGoroutine()}
 	r.cfg = call.Config{Recognizer: r.rec, Answerer: r.ans, Synthesizer: synth{}, Clips: clips,
 		After: func(time.Duration) <-chan time.Time { return nil }}
 	return r
@@ -161,12 +165,25 @@ func (r *rig) runCtx(ctx context.Context, rung call.Rung) {
 	}()
 }
 
+// settle fails the test if goroutines the call started outlive it.
+func (r *rig) settle() {
+	r.t.Helper()
+	for i := 0; i < 200 && runtime.NumGoroutine() > r.base; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := runtime.NumGoroutine(); n > r.base {
+		buf := make([]byte, 1<<16)
+		r.t.Errorf("%d goroutines outlive the call:\n%s", n-r.base, buf[:runtime.Stack(buf, true)])
+	}
+}
+
 // end waits for the loop to return, without hanging up.
 func (r *rig) end() (call.Report, error) {
 	r.t.Helper()
 	select {
 	case err := <-r.err:
 		rep := <-r.rep
+		r.settle()
 		r.l.mu.Lock()
 		defer r.l.mu.Unlock()
 		if r.l.overlap {
