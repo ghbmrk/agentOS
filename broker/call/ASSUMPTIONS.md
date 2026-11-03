@@ -1,0 +1,14 @@
+# Call loop: assumptions
+
+Built for VOICE-ro-a (briefs/VOICE-ro.md, #4934) against SPEC CH-5, CH-17 and CH-21 and the flip-phone note §2.2 to §2.4. Covers `broker/call`.
+
+| # | Assumption | Basis | If it changes |
+|---|---|---|---|
+| VOICE-ro-a-C1 | **Read-only means no window.** The loop opens no kernel window, so no key means yes; 0 stops speech and every other key is ignored. Approvals by voice wait on S2 and the token (Decisions 8, items 5 and 6). | flip-phone note §2.2 rules 2 and 4 | A later slice adds windows here, with the earcon. |
+| VOICE-ro-a-C2 | **The rung is the call's.** `Serve` answers only the owner's number and runs at P0. The answerer gets the rung and must disclose only what P0 allows (status, no mail or calendar) until the token makes it P2. The disclosure rule lives in the answerer (VOICE-ro-c), not here. | Decisions 8 card on #4934; rearchitecture note §2.1 | The token slice passes P2. |
+| VOICE-ro-a-C3 | **The check.** Each sentence passes `owner.AgentVoice` (CH-21, with its folds) and `KeyPrompt`, alone and joined with the sentence spoken before it. A hold ends that answer and plays the box's held clip. `KeyPrompt` holds some ordinary sentences ("dial in at nine"); those are false holds, the safe direction. | CH-21; flip-phone note §2.2 rule 1 | Tune `keyVerb` on the false holds the errand diary shows. |
+| VOICE-ro-a-C4 | **Sentences.** A sentence ends at `.`, `!` or `?` followed by space, at a line break, or at 300 runes cut at a space. An abbreviation ("Dr. Lee") splits a sentence in two, which the joined check covers. | flip-phone note §2.2 rule 1 | — |
+| VOICE-ro-a-C5 | **Barge-in and stop words.** Any partial transcript with text stops the box speaking; a final transcript that is only "stop" (or "stop it", "be quiet" and the like) stops it and asks nothing. Stopping speech narrows nothing else: STOP as a pause of the agent stays CH-3's word by text and its key. | rearchitecture note §2.3 | — |
+| VOICE-ro-a-C6 | **End of turn is the recognizer's proposal.** The loop takes `Heard.End` as the end of the owner's speech and does not cap it with its own silence limit yet; VOICE-ro-b measures silence detection as the baseline (flip-phone note §2.4). A zero `End` counts from when the transcript arrived. | D-153, flip-phone note §2.4 | VOICE-ro-b adds the fixed cap. |
+| VOICE-ro-a-C7 | **Timing.** Per turn, from the end of the owner's speech to the first audio (clip or sentence) and to the first sentence, as nearest-rank median, 95th and 99th percentiles. Targets 300 ms and 1.5 s are checked on hardware, not here. The one-moment clip plays once, after 1 s with nothing played. | flip-phone note §2.4 | — |
+| VOICE-ro-a-C8 | **One sentence at a time.** The next sentence is synthesized after the one before is played, so a long answer has a gap between sentences. | — | Pipeline synthesis if the timing shows the gap. |
