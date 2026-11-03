@@ -301,6 +301,57 @@ NOT_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
 SP = " "
 
 
+BLOCK_SCALAR = re.compile(r"(?:^|: |- )[|>][1-9]?[+-]?[1-9]?(?: +#.*)?$")
+
+
+def _quote_end(s, i):
+    """Return the index after the quoted scalar opening at s[i], or None if it runs past the line."""
+    q, i = s[i], i + 1
+    while i < len(s):
+        if q == '"' and s[i] == "\\":
+            i += 2
+        elif s[i] == q and q == "'" and s[i + 1:i + 2] == "'":
+            i += 2
+        elif s[i] == q:
+            return i + 1
+        else:
+            i += 1
+    return None
+
+
+def open_flow(s):
+    """Return why one line leaves a quoted scalar or flow collection open past its end, or None.
+
+    A scalar or collection that spans lines can make what reads here as a key be text inside
+    it (Security on #4820), so the reader refuses every one: each must close on its own line.
+    """
+    depth, i, start = 0, 0, True  # start: a quote or bracket here opens a node
+    while i < len(s):
+        c = s[i]
+        if c == SP:
+            i += 1
+        elif c == "#" and (i == 0 or s[i - 1] == SP):
+            break
+        elif start and c in "'\"":
+            i = _quote_end(s, i)
+            if i is None:
+                return "a quoted scalar runs past its line"
+            start = False
+        elif (start or depth) and c in "[{":
+            depth, i, start = depth + 1, i + 1, True
+        elif depth and c in "]}":
+            depth, i, start = depth - 1, i + 1, False
+        elif depth and c == ",":
+            i, start = i + 1, True
+        elif start and c == "-" and s[i + 1:i + 2] in ("", SP):
+            i += 1
+        elif c == ":" and (s[i + 1:i + 2] in ("", SP) or depth and s[i + 1:i + 2] in (",", "]", "}")):
+            i, start = i + 1, True
+        else:
+            i, start = i + 1, False
+    return "a flow collection runs past its line" if depth else None
+
+
 def workflow_runners(text):
     """Return ({job: runs-on}, problems) for a workflow, reading the YAML fail-closed.
 
@@ -316,7 +367,20 @@ def workflow_runners(text):
     for n, l in enumerate(text.split("\n"), 1):
         if NOT_TEXT.search(l):
             problems.append("line %d: a control character, tab or YAML line break other than \\n" % n)
-    lines = [l for l in text.split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
+    lines, block = [], None
+    for l in text.split("\n"):
+        if not l.strip(SP) or l.lstrip(SP).startswith("#"):
+            continue
+        indent = len(l) - len(l.lstrip(SP))
+        if block is not None and indent > block:
+            continue  # a block scalar's text (run: |), never structure
+        block = None
+        why = open_flow(l.lstrip(SP))
+        if why:
+            problems.append("line %r: %s" % (l, why))
+        if BLOCK_SCALAR.search(l.lstrip(SP)):
+            block = indent
+        lines.append(l)
     top = {}
     for i, l in enumerate(lines):
         m = None if l[0] == SP else PLAIN_KEY.match(l)
@@ -333,7 +397,10 @@ def workflow_runners(text):
         indent = len(l) - len(l.lstrip(SP))
         body = re.split(r" +#", l.strip(SP), maxsplit=1)[0]
         if indent == 0:
-            break
+            # No workflow has a top-level key after jobs:, so any column-0 line here is refused
+            # rather than read as the end of jobs: (it could be text inside a scalar).
+            problems.append("line %r: column 0 after jobs:" % l)
+            continue
         if indent == 2:
             m = re.fullmatch(r"([A-Za-z0-9_-]+):", body)
             if not m:
@@ -341,6 +408,8 @@ def workflow_runners(text):
                 job = None
                 continue
             job, key = m.group(1), None
+            if job in jobs:
+                problems.append("job %r appears twice" % job)
             jobs[job] = []
         elif indent == 4 and job:
             m = re.fullmatch(r"([A-Za-z0-9_-]+):(?: +(.*))?", body)
@@ -480,6 +549,10 @@ class WorkflowTest(unittest.TestCase):
             "ideographic space after the value": (job, "    runs-on: ubuntu-24.04\u3000\n"),
             "ideographic space before a job key": (job, job + "\u3000   runs-on: self-hosted\n"),
             "no-break space separator": (job, "    runs-on:\u00a0ubuntu-24.04\n"),
+            "no-break space before a comment": (job, "    runs-on: ubuntu-24.04\u00a0# pinned\n"),
+            "duplicate job id": (head, head + "  checks:\n" + job),
+            "top-level key after jobs": (head, head + "zz: y\n"),
+            "flow collection across lines": (job, job + "    env: {A: 1,\n      B: 2}\n"),
             "second jobs": ("\njobs:\n", "\njobs: {}\njobs:\n"),
             "document marker": ("\njobs:\n", "\n---\njobs:\n"),
         }
@@ -495,6 +568,17 @@ class WorkflowTest(unittest.TestCase):
                 self.assertEqual(jobs["checks"], [RUNNER])
                 self.assertTrue(problems)
                 self.assertTrue(all("YAML line break" in p for p in problems), problems)
+        # Security on #4820: a quoted scalar spanning lines hid a column-0 line and a second
+        # runs-on; the job keeps a pinned runs-on the reader sees, so only the open scalar fails.
+        for name, q in (("single-quoted", "'"), ("double-quoted", '"')):
+            with self.subTest(name):
+                hidden = "    name: " + q + "abc\n" + job + "zz: y" + q + "\n    runs-on: self-hosted\n"
+                _, problems = workflow_runners(text.replace(job, hidden, 1))
+                self.assertTrue(any("quoted scalar runs past its line" in p for p in problems), problems)
+        for line in ("    if: ${{ github.event_name == 'push' }}", "    name: \"a \\\" b\" # c", "    name: 'it''s'",
+                     "    env: {A: '1', B: [x, \"y\"]}", "    if: x == 'a' || y"):
+            with self.subTest(line):
+                self.assertIsNone(open_flow(line.lstrip()), line)
         jobs, problems = workflow_runners(text.replace(job, "    runs-on: ubuntu-24.04  # pinned\n", 1))
         self.assertEqual((problems, jobs["checks"]), ([], [RUNNER]))
 
