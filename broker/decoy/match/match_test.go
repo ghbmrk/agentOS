@@ -631,33 +631,29 @@ func TestSplitRunLongestForm(t *testing.T) {
 	}
 }
 
-// KRN-12, outside DECOY-a-5's claims: a value that holds break text itself
-// (here a `\n`) trips as written, raw and in its JSON form, but not with a
-// %0a put inside it raw anywhere but in that break, or after the JSON form's
-// first byte, as the joined text removes the value's own break too (#4743,
-// Security on #4742).
-// The built-in kinds hold none. A change that covers it also changes
-// DECOY-a-5's exclusion line.
-func TestBreakTextValueExcluded(t *testing.T) {
-	v := `Z\/\n1YZ%n"`
+// KRN-12: a value that holds break text itself (here a `\n`) trips raw and
+// in its JSON form with a %0a put in anywhere but inside that break (a break
+// split by another is not removed), as its joined form is matched too
+// (#4743, Security on #4742 and #4845), whole and in two writes; one whose
+// joined form is under 10 bytes only as written.
+func TestBreakTextValueMatched(t *testing.T) {
+	v := `Z\/\n1YZ%n"q7`
 	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
 	j, _ := json.Marshal(v)
-	f := string(j[1 : len(j)-1])
-	for _, s := range []string{v, f} {
-		if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{1}) {
-			t.Fatalf("%q tripped %v, want [1]", s, got)
+	for _, f := range []string{v, string(j[1 : len(j)-1])} {
+		k := strings.Index(f, "n1") // the value's own break ends at k
+		for i := range len(f) + 1 {
+			if b := len(strings.TrimRight(f[:k], `\`)); i <= b || i > k { // not splitting it
+				wrappedTrips(t, m, f[:i]+"%0a"+f[i:], i, 1)
+			}
 		}
 	}
-	missed := []string{f[:1] + "%0a" + f[1:]}
-	for i := 1; i < len(v); i++ {
-		if v[i-1:i+1] != `\n` { // a %0a in it reads back as the '\' run it splits
-			missed = append(missed, v[:i]+"%0a"+v[i:])
-		}
+	short := match.New([]match.Value{{ID: 2, Bytes: []byte(v[:11])}}, nil)
+	if got := short.Scan([]byte(v[:11])).Trips; !slices.Equal(got, []int{2}) {
+		t.Fatalf("%q tripped %v, want [2]", v[:11], got)
 	}
-	for _, s := range missed {
-		if got := m.Scan([]byte(s)).Trips; len(got) != 0 {
-			t.Fatalf("%q tripped %v: DECOY-a-5 names it as not matched", s, got)
-		}
+	if got := short.Scan([]byte("Z%0a" + v[1:11])).Trips; len(got) != 0 {
+		t.Fatalf("%q's 9-byte joined form tripped %v", v[:11], got)
 	}
 }
 

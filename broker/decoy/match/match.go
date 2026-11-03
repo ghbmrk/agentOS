@@ -55,7 +55,6 @@ var (
 	lower       = regexp.MustCompile(`[a-z]`)
 	upper       = regexp.MustCompile(`[A-Z]`)
 	digit       = regexp.MustCompile(`[0-9]`)
-	slashRun    = regexp.MustCompile(`\\+`)
 )
 
 // Detect returns text with known token formats, secret-named URL parameters
@@ -259,9 +258,12 @@ func encodings(v []byte) [][]byte {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	for _, f := range out[:2] { // joined text counts a run of '\'s as one
-		if c := slashRun.ReplaceAll(f, []byte(`\`)); !bytes.Equal(c, f) {
-			out = append(out, c)
+	// Each form is also matched as joined text holds it, '\' runs as one and
+	// breaks (a PEM's LFs) removed, unless under decoy.MinValue (#4743).
+	for _, f := range out[:3] {
+		s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}}).Stream()
+		if s.join(f); len(s.joined) >= 10 && !bytes.Equal(s.joined, f) {
+			out = append(out, s.joined)
 		}
 	}
 	return out
@@ -485,8 +487,7 @@ func (s *Stream) matchBreak(br cut) {
 	for _, k := range [2]int{beside(before, after), 0} {
 		for _, h := range s.m.slash[k] {
 			f, i := s.m.forms[h[0]], h[1]
-			// its first byte first: a prefix not there costs one byte (#4743)
-			if i <= len(before) && (i == 0 || before[len(before)-i] == f.b[0]) &&
+			if i <= len(before) /* a prefix not there costs one byte */ && (i == 0 || before[len(before)-i] == f.b[0]) &&
 				bytes.HasSuffix(before, f.b[:i]) && s.follows(br.at, f.b[i+1:]) {
 				s.res.add(f.id)
 			}

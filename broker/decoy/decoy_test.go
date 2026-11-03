@@ -18,6 +18,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,7 @@ import (
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/decoy/match"
 )
 
 // rangeAddrs stands in for the enforcer's decoy range (decision 4, DECOY-d).
@@ -626,6 +628,41 @@ func TestDuplicateValuesRefused(t *testing.T) {
 		dup := Table{entries: append(tab.Entries(), tab.Entries()[i])}
 		if _, err := FromEvent(1, Event(dup)); err != ErrBadTable {
 			t.Fatalf("a %s value twice, read back: %v", e.Kind, err)
+		}
+	}
+}
+
+// KRN-12, DECOY-a-5: the built-in SSH decoy, a PEM with LFs, trips with its
+// breaks changed, dropped or added to, raw and in its JSON form (Security
+// on #4845): CRLF, JSON \r\n, the trailing LF trimmed, every LF dropped, one
+// written as %0a, an extra %0a inside a line, rewrapped at 64 columns, and
+// URL-escaped with CRLF.
+func TestSSHDecoyBreaksChanged(t *testing.T) {
+	v, err := sshKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	lines := strings.Split(strings.TrimSuffix(v, "\n"), "\n")
+	body := strings.Join(lines[1:len(lines)-1], "")
+	var wrap64 []string
+	for i := 0; i < len(body); i += 64 {
+		wrap64 = append(wrap64, body[i:min(i+64, len(body))])
+	}
+	j, _ := json.Marshal(strings.ReplaceAll(v, "\n", "\r\n"))
+	for _, s := range []string{
+		v,
+		strings.ReplaceAll(v, "\n", "\r\n"),
+		string(j[1 : len(j)-1]),
+		url.QueryEscape(strings.ReplaceAll(v, "\n", "\r\n")),
+		strings.TrimSuffix(v, "\n"),
+		strings.ReplaceAll(v, "\n", ""),
+		strings.Replace(v, "\n", "%0a", 1),
+		lines[0] + "\n" + lines[1][:20] + "%0a" + lines[1][20:] + "\n" + strings.Join(lines[2:], "\n"),
+		lines[0] + "\n" + strings.Join(wrap64, "\n") + "\n" + lines[len(lines)-1] + "\n",
+	} {
+		if got := m.Scan([]byte(`{"a":"` + s + `"}`)).Trips; !slices.Equal(got, []int{1}) {
+			t.Fatalf("%.80q tripped %v, want [1]", s, got)
 		}
 	}
 }
