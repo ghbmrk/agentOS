@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: STO-2
@@ -91,7 +92,7 @@ func (m *mainBox) boot(slot string, first ed25519.PublicKey) (Owner, func()) {
 	t := m.t
 	t.Helper()
 	os.Remove(m.cfg.Up)
-	keys := handoff.KernelKeys{Log: handoff.Hide([32]byte{7}), Head: handoff.Hide(headPriv), Slot: slot, FirstEdge: first}
+	keys := handoff.KernelKeys{Log: secret.Hide([32]byte{7}), Head: secret.Hide(headPriv), Slot: slot, FirstEdge: first}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- RunKernel(ctx, m.cfg, keys, anchor(t, m.cfg.Log)) }()
@@ -145,7 +146,7 @@ func (m *mainBox) bootFails(slot string, first ed25519.PublicKey) error {
 	t := m.t
 	t.Helper()
 	os.Remove(m.cfg.Up)
-	keys := handoff.KernelKeys{Log: handoff.Hide([32]byte{7}), Head: handoff.Hide(headPriv), Slot: slot, FirstEdge: first}
+	keys := handoff.KernelKeys{Log: secret.Hide([32]byte{7}), Head: secret.Hide(headPriv), Slot: slot, FirstEdge: first}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := RunKernel(ctx, m.cfg, keys, anchor(t, m.cfg.Log))
@@ -369,7 +370,7 @@ func TestRunKernelPinsTheCheckerItHandsAKey(t *testing.T) {
 				Socket: filepath.Join(m.dir, "kc.sock"), Cgroup: "/agentos.slice/agentos-checker.service"}}
 		}
 		os.Remove(m.cfg.Up)
-		keys := handoff.KernelKeys{Log: handoff.Hide([32]byte{7}), Head: handoff.Hide(headPriv), Slot: handoff.SlotTPM, ClerkRoot: handoff.Hide(root)}
+		keys := handoff.KernelKeys{Log: secret.Hide([32]byte{7}), Head: secret.Hide(headPriv), Slot: handoff.SlotTPM, ClerkRoot: secret.Hide(root)}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- RunKernel(ctx, m.cfg, keys, anchor(t, m.cfg.Log)) }()

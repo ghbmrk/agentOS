@@ -245,9 +245,9 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 
 func encodings(v []byte) [][]byte {
 	var out [][]byte
-	// The text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query
-	// with spaces as '+' and as %20, and URL path, each also as joined text holds it when the byte after it
-	// begins no break: '\' runs as one, a run a %0a split joined, breaks (a PEM's LFs) removed (#4853).
+	// Text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query with spaces as
+	// '+' and as %20, URL path; each also as joined text holds it before a byte that begins no break: '\' runs as one,
+	// a %0a-split run joined, PEM LFs removed (#4853); carry spans f, as a stream's does, so a split '\' joins (#4871).
 	for _, t := range append([][]byte{v}, pemBody(v)...) {
 		j, _ := json.Marshal(string(t))
 		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))

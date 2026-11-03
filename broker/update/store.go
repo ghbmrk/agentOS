@@ -23,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/trustedmetadata"
+	"golang.org/x/sys/unix"
 )
 
 // Source is where a box reads a repository: a mirror, or a drive (DEP-4).
@@ -34,12 +35,35 @@ type Source interface {
 // DirSource reads a repository laid out in a directory, such as a drive.
 type DirSource string
 
-// Open opens a repository-relative path.
+// Open opens a repository-relative path beneath the source directory:
+// openat2 with RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS refuses a link at any
+// component, a parent directory such as metadata/ or targets/ included, so a
+// drive cannot point a read outside its own tree (#3989). The directory
+// itself is opened with O_NOFOLLOW; its path is the caller's.
 func (d DirSource) Open(name string) (io.ReadCloser, error) {
 	if !validTargetPath(name) {
 		return nil, fmt.Errorf("bad repository path %q", name)
 	}
-	return os.OpenFile(filepath.Join(string(d), filepath.FromSlash(name)), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	dir, err := os.OpenFile(string(d), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	how := unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	}
+	for tries := 0; ; tries++ {
+		fd, err := unix.Openat2(int(dir.Fd()), name, &how)
+		if err == nil {
+			return os.NewFile(uintptr(fd), filepath.Join(string(d), filepath.FromSlash(name))), nil
+		}
+		// EAGAIN: a rename raced the walk; openat2 asks for a retry.
+		if (err == unix.EAGAIN || err == unix.EINTR) && tries < 8 {
+			continue
+		}
+		return nil, &os.PathError{Op: "openat2", Path: filepath.Join(string(d), filepath.FromSlash(name)), Err: err}
+	}
 }
 
 // Size limits for what a box reads before checking it.

@@ -22,3 +22,27 @@ func TestCheckReadsOnlyAMapAsAMap(t *testing.T) {
 		}
 	}
 }
+
+// A drop shape is valid only as an object's field and only bare: at the
+// top, as a map entry or a JSON text's value it would have nothing to
+// delete from, and a cap or list on it would claim a check it never makes
+// (#4632).
+func TestDropIsOnlyABareField(t *testing.T) {
+	drop := Value{Kind: KindDrop}
+	if !(Value{Kind: KindObject, Fields: map[string]Value{"w": drop}}).valid(0) {
+		t.Fatal("an object refused a bare drop field")
+	}
+	for name, v := range map[string]Value{
+		"top":        drop,
+		"map entry":  {Kind: KindMap, Max: 8, Each: &drop},
+		"JSON value": {Kind: KindJSON, Max: 8, Each: &drop},
+		"capped":     {Kind: KindObject, Fields: map[string]Value{"w": {Kind: KindDrop, Max: 8}}},
+		"listed":     {Kind: KindObject, Fields: map[string]Value{"w": {Kind: KindDrop, Only: []string{"a"}}}},
+		"nullable":   {Kind: KindObject, Fields: map[string]Value{"w": {Kind: KindDrop, Null: true}}},
+		"shaped":     {Kind: KindObject, Fields: map[string]Value{"w": {Kind: KindDrop, Each: &drop}}},
+	} {
+		if v.valid(0) {
+			t.Errorf("%s: a drop shape was valid", name)
+		}
+	}
+}

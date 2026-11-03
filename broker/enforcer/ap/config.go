@@ -106,12 +106,13 @@ const (
 	PathWireless = "/etc/config/wireless"
 	PathFirewall = "/etc/config/firewall"
 	PathDHCP     = "/etc/config/dhcp"
+	PathUHTTPd   = "/etc/config/uhttpd"
 	PathDropbear = "/etc/config/dropbear"
 	PathAuthKeys = "/etc/dropbear/authorized_keys"
 )
 
 // Paths is every path Config writes.
-var Paths = []string{PathNetwork, PathWireless, PathFirewall, PathDHCP, PathDropbear, PathAuthKeys}
+var Paths = []string{PathNetwork, PathWireless, PathFirewall, PathDHCP, PathUHTTPd, PathDropbear, PathAuthKeys}
 
 // Config renders the access point's whole configuration for policy d.
 // Devices appear only by VLAN number and their passwords only from k, so
@@ -133,6 +134,7 @@ func Config(d policy.Document, l Layout, k Keys) ([]File, error) {
 		{PathWireless, wireless(l, k, devs)},
 		{PathFirewall, []byte(firewall)},
 		{PathDHCP, []byte(dhcp)},
+		{PathUHTTPd, []byte(uhttpd)},
 		{PathDropbear, []byte(dropbear)},
 		{PathAuthKeys, []byte(authPrefix + l.EnforcerKey + "\n")},
 	}, nil
@@ -275,6 +277,18 @@ const dhcp = `config dnsmasq
 
 config odhcpd 'odhcpd'
 	option maindhcp '0'
+`
+
+// The web admin is off (#4087): stock OpenWrt's root has no password,
+// so LuCI and ubus over HTTP would be a root login that skips the
+// key-only SSH. uhttpd, if installed, listens on loopback alone, so no
+// network reaches it, and the config names no ucode, Lua or ubus
+// handler or HTTPS listener (TestGoldenConfig).
+const uhttpd = `config uhttpd 'main'
+	list listen_http '127.0.0.1:80'
+	option home '/www'
+	option rfc1918_filter '1'
+	option no_dirlists '1'
 `
 
 // SSH only on the admin VLAN, by key only.

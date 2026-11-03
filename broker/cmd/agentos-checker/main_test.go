@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: CH-4, CLK-1, STO-2
@@ -92,7 +93,7 @@ func TestStartTakesTheSeedOnlyUnderItsKey(t *testing.T) {
 		t.Fatalf("no seed file: held %v, %v", chk != nil && chk.Held(), err)
 	}
 	sealer, _ := k.Sealer()
-	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: handoff.Hide([]byte("synthetic-seed-0123")), Step: 3})
+	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: secret.Hide([]byte("synthetic-seed-0123")), Step: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

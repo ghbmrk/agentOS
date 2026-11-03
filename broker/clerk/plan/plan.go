@@ -1663,7 +1663,8 @@ func partial(b, secret []byte) int {
 // servers), and every function entry must carry one, since the CLI always
 // serializes it and a missing source leaves the provider to read its
 // default. A config-supplied extra key is not declared, since the image sets
-// none.
+// none. The workspaces map is dropped from what the clerk sends: the
+// provider needs none of the guest's paths, remotes or commits (#4632).
 func codexMeta() map[string]Value {
 	id := Value{Kind: KindText, Max: 128}
 	n := Value{Kind: KindInt}
@@ -1677,11 +1678,8 @@ func codexMeta() map[string]Value {
 		"parent_thread_id": id, "parent_turn_id": id, "root_turn_id": id,
 		"subagent_kind": id, "thread_source": id, "turn_trigger": id, "sandbox": id, "sandbox_mode": id,
 		"auto_review_enabled": flag, "node_repl_auto_review_required": flag, "node_repl_disabled": flag,
-		"workspaces": {Kind: KindMap, Max: 4096, Each: &Value{Kind: KindObject, Fields: map[string]Value{
-			"associated_remote_urls": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindText, Max: 2048}},
-			"latest_git_commit_hash": {Kind: KindText, Max: 64},
-			"has_changes":            flag,
-		}}},
+		// The guest's paths, git remotes and commit: dropped, never sent (#4632).
+		"workspaces": {Kind: KindDrop},
 		"tool_namespaces_info": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindObject, Fields: map[string]Value{
 			"name": id,
 			"functions": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindObject, Fields: map[string]Value{

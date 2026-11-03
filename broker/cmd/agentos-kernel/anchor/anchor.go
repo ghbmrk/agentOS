@@ -36,7 +36,7 @@ func Open(dir string, keys handoff.KernelKeys, f *os.File) (kernel.Anchor, error
 		return nil, err
 	}
 	c := tpmseal.Counter{
-		TPM: t, SRK: keys.Counter.SRK, Auth: keys.Counter.Auth.Get(),
+		TPM: t, SRK: keys.Counter.SRK, Auth: keys.Counter.Auth,
 		Ref: tpmseal.CounterRef{Handle: keys.Counter.Handle, Name: keys.Counter.Name},
 	}
 	a, err := proc.OpenCounterAnchor(dir, c, keys.Head.Get())

@@ -196,12 +196,14 @@ type Policy interface {
 
 // Book is the enforcer's enrolment state.
 type Book struct {
-	cfg   Config
-	mu    sync.Mutex
-	st    state
-	pol   Policy
-	fails []int64
-	tix   map[string]*ticket
+	cfg Config
+	mu  sync.Mutex
+	st  state
+	pol Policy
+	// Misses on the case code and on the recovery code count apart, so
+	// guessing at one never locks the owner out of the other.
+	caseFails, recFails []int64
+	tix                 map[string]*ticket
 }
 
 // ticket is one Begin waiting for its Finish. It is good only for the
@@ -407,15 +409,16 @@ func (b *Book) Recovery() (due time.Time, pending bool) {
 
 func (b *Book) nowMS() int64 { return b.cfg.Now().UnixMilli() }
 
-// guess checks code against v, counting a miss against MaxFailures.
-func (b *Book) guess(v *verifier, code string) error {
+// guess checks code against v, counting a miss in fails against
+// MaxFailures.
+func (b *Book) guess(fails *[]int64, v *verifier, code string) error {
 	now := b.nowMS()
-	b.fails = slices.DeleteFunc(b.fails, func(t int64) bool { return t <= now-FailWindow.Milliseconds() })
-	if len(b.fails) >= MaxFailures {
+	*fails = slices.DeleteFunc(*fails, func(t int64) bool { return t <= now-FailWindow.Milliseconds() })
+	if len(*fails) >= MaxFailures {
 		return ErrLimited
 	}
 	if !v.matches(code) {
-		b.fails = append(b.fails, now)
+		*fails = append(*fails, now)
 		return ErrCode
 	}
 	return nil
@@ -433,7 +436,7 @@ func (b *Book) Begin(code string, pk key.PublicKey) (id string, msg []byte, err 
 	}
 	switch b.st.Phase {
 	case Factory, Reset:
-		err = b.guess(&b.st.Case, code)
+		err = b.guess(&b.caseFails, &b.st.Case, code)
 	case Enrolled:
 		if b.st.Pending != nil {
 			return "", nil, ErrPhase
@@ -441,7 +444,7 @@ func (b *Book) Begin(code string, pk key.PublicKey) (id string, msg []byte, err 
 		if bytes.Equal(pk.Encode(), b.st.Owner) {
 			return "", nil, ErrPhase // the recovery code replaces the passkey, never re-enrols it
 		}
-		err = b.guess(b.st.Recovery, code)
+		err = b.guess(&b.recFails, b.st.Recovery, code)
 	}
 	if err != nil {
 		return "", nil, err
@@ -467,11 +470,16 @@ func (b *Book) Begin(code string, pk key.PublicKey) (id string, msg []byte, err 
 
 // Result is what an enrolment shows the owner once: the new recovery code,
 // and either the Owner network's card (a passkey now in force) or when the
-// replacement applies (a recovery).
+// replacement applies (a recovery). A Finish that failed after the setup
+// network was replaced still returns the card, with no recovery code, so
+// the owner can join it and enrol again.
 type Result struct {
 	Recovery string
 	Card     Card
 	Due      time.Time // zero unless a recovery is waiting
+	// SetupReplaced is true when this enrolment replaced the setup network:
+	// the first one. After a factory reset the Owner network was already up.
+	SetupReplaced bool
 }
 
 // Finish takes the new passkey's tap over its ticket's message. Each
@@ -502,19 +510,30 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		if err != nil {
 			return Result{}, fmt.Errorf("enrol: the setup network was not replaced, so nothing was enrolled: %w", err)
 		}
+		res := Result{Card: card, SetupReplaced: st.Phase == Factory}
 		st.Phase, st.Owner, st.Recovery = Enrolled, t.pk.Encode(), &rec
-		if err := b.take(&st); err != nil {
-			return Result{}, err
+		if err := b.take(&st); err != nil && !bytes.Equal(b.st.Owner, st.Owner) {
+			// Nothing enrolled, but the setup network is gone: the card
+			// goes back with the error, so the owner can join the Owner
+			// network and enrol again there (Replace returns the same card).
+			return res, err
 		}
+		// From here the passkey is in force, saved: a later failure inside
+		// take leaves the policy to the Keep the page asks for, so the
+		// owner still gets the recovery code.
 		b.cfg.Alerts.Raise(alert.Enrolment, "")
-		return Result{Recovery: code, Card: card}, nil
+		res.Recovery = code
+		return res, nil
 	case Enrolled:
 		due := b.nowMS() + Wait.Milliseconds()
 		st.Pending = &replacement{Key: t.pk.Encode(), Recovery: rec, DueMS: due}
+		// The owner is texted before the replacement is saved, so a stop
+		// between the two never leaves one waiting unannounced; a failed
+		// save leaves only a false alarm the owner clears on the page.
+		b.cfg.Alerts.Raise(alert.RecoveryCodeUsed, "")
 		if err := b.save(st); err != nil {
 			return Result{}, err
 		}
-		b.cfg.Alerts.Raise(alert.RecoveryCodeUsed, "")
 		b.cfg.Alerts.Recovery(true)
 		return Result{Recovery: code, Due: time.UnixMilli(due)}, nil
 	}
@@ -612,12 +631,16 @@ func (b *Book) FactoryReset(caseCode string) error {
 	if b.st.Phase == Factory {
 		return ErrPhase
 	}
-	if err := b.guess(&b.st.Case, caseCode); err != nil {
+	if err := b.guess(&b.caseFails, &b.st.Case, caseCode); err != nil {
 		return err
 	}
 	if b.pol == nil {
 		return ErrConfig
 	}
+	// The owner is texted before anything is dropped, so a reset cut short
+	// still shows on the page, and one whose text the core refuses is
+	// offered again (alert.Raise logs first).
+	b.cfg.Alerts.Raise(alert.FactoryReset, "")
 	b.cfg.Lock.Lock()
 	defer b.cfg.Lock.Unlock()
 	for _, p := range b.pol.Pending() {
