@@ -359,12 +359,21 @@ func TestLiteralEdges(t *testing.T) {
 	for _, c := range []struct {
 		age  time.Duration
 		want int
-	}{{90 * day, 1}, {91 * day, 0}} {
+	}{{90 * day, 1}, {91 * day, 0}, {92 * day, 0}} {
 		o := newOpt(t, &memStore{}, nil)
 		recordAll(t, o, Outcome{Clerk: "pay", Step: "e", Ran: t0, At: t0.Add(-8 * day), Corrected: true},
 			Outcome{Clerk: "pay", Step: "e", Ran: t0.Add(-c.age), At: t0})
 		if m := o.st.Clerks["pay"].Days[t0.Add(-c.age).UTC().Format(dayFmt)]; (m != nil && m.Effects == 1 && m.Silent == 1) != (c.want == 1) {
 			t.Errorf("correction first, effect %v old: %+v", c.age, m)
+		}
+		// Either way the silent failure is held, as in effects-first order
+		// (Potency delta on #4945, 0bb59a96).
+		held := 0
+		for _, d := range o.st.Clerks["pay"].Days {
+			held += d.Silent
+		}
+		if held != 1 || o.Measure("pay").Silent != 1 {
+			t.Errorf("correction first, effect %v old: %d silent held, Measure %+v", c.age, held, o.Measure("pay"))
 		}
 	}
 	o := newOpt(t, &memStore{}, nil)
