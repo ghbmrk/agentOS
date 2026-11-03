@@ -76,10 +76,10 @@ func bind(idx map[string]uint32, in, out string) (string, bool) {
 type rule struct {
 	in, out string  // iifname and oifname operands; "" matches any
 	m       []match // further matches
-	tail    string  // the log and counter part, on the first form only
 	verdict string  // accept, drop, or jump <chain>
 	mark    string  // an accept's connection mark (bind); "" otherwise
 	learn   string  // an accept from a shared segment: the chain that records its host
+	logged  string  // a logged rule: the chain that counts, logs and gives the verdict of its first packet (loggedDecls)
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -119,12 +119,12 @@ func (r rule) first() string {
 	if r.mark != "" {
 		p = append(p, "ct mark set "+r.mark)
 	}
-	if r.tail != "" {
-		p = append(p, r.tail)
-	}
 	verdict := r.verdict
 	if r.learn != "" {
 		verdict = "goto " + r.learn
+	}
+	if r.logged != "" {
+		verdict = "goto " + r.logged
 	}
 	return strings.Join(append(p, verdict), " ")
 }

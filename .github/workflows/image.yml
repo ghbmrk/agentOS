@@ -231,6 +231,14 @@ jobs:
           cd broker/kernel/privfile
           AGENTOS_UNIT_RECORDS="$RUNNER_TEMP/units" "$RUNNER_TEMP/privfile-built.test" -test.run '^TestBuiltUnits$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-rules.log"
           grep -q -- '^--- PASS: TestBuiltUnits ' "$RUNNER_TEMP/unit-rules.log"
+      # #4667: what starting the unlock unit can start, from the built image's own systemd in test mode
+      # (generators run, the boot entry's command line) rather than a model of how it reads units. The
+      # control first: each path a #4696 review found must add a refusal, or a pass means nothing.
+      - name: What the unlock step can start (image/unlock_graph.py)
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
+          sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e
@@ -353,7 +361,7 @@ jobs:
     # vulncheck.yml rescans main's latest image daily, for advisories published after a build.
     needs: build
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read

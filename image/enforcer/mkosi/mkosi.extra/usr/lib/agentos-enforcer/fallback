@@ -1,0 +1,21 @@
+#!/bin/sh
+# Boot-counted fallback (ENF-m; the core's image/mkosi/mkosi.extra/usr/lib/agentos/fallback with the
+# enforcer's entry names). enforcer-health.service runs this on failure, and emergency and rescue
+# mode before their shell (mkosi.conf's credentials). Reboot while this entry has tries left; at
+# zero, reboot if the drive has another enforcer release (systemd-boot sorts the +0 entry last, so
+# the previous one boots). A single-entry drive at zero, or a blessed entry, stays up.
+# ENFORCER_HEALTH_ROOT exists for image/enforcer/test_scripts.py.
+R=${ENFORCER_HEALTH_ROOT:-}
+efivar() {
+    v=$R/sys/firmware/efi/efivars/$1-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+    [ -r "$v" ] && cat "$v" | od -An -v -c -j4 | tr -s ' ' '\n' | grep -vx '\\0' | tr -d '\n'
+}
+path=$(efivar LoaderBootCountPath)
+left=$(printf '%s\n' "$path" | sed -n 's/.*+\([0-9][0-9]*\)\(-[0-9][0-9]*\)\{0,1\}\.conf$/\1/p')
+releases=$(efivar LoaderEntries | grep -o 'enforcer_' | wc -l)
+if [ -z "$left" ]; then echo "enforcer-fallback: this boot entry is not counted; staying up"
+elif [ "$left" -gt 0 ]; then
+    echo "enforcer-fallback: self-check failed, $left tries left on this boot entry; rebooting"; exec systemctl reboot
+elif [ "$releases" -ge 2 ]; then
+    echo "enforcer-fallback: no tries left on this boot entry; rebooting into the previous release"; exec systemctl reboot
+else echo "enforcer-fallback: no tries left on this boot entry and no other release; staying up"; fi

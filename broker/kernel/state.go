@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -373,6 +374,20 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 	}
 }
 
+// cancel ends plan p, pending or active, for code and detail: a pending plan is never
+// decided, and an active plan's next step, if nothing has sent it, comes off
+// the ledger (cancelUnsent). A step already sent still reconciles (KRN-8).
+func (s *State) cancel(p *PlanState, code, detail string) {
+	if p.Status == SActive {
+		if st := &p.Steps[p.Next]; sendable(st.Phase) {
+			s.cancelUnsent(p, st)
+		}
+	} else if p.Status != SPending {
+		return
+	}
+	p.Status, p.Cancel, p.CancelDetail = SCancelled, code, detail
+}
+
 // State is the log folded: the only input to Decide besides the event.
 type State struct {
 	// The owner's passkeys (D-146): the anchors, the hardware keys; each
@@ -736,11 +751,12 @@ func (s *State) Status() []Unsettled {
 }
 
 // PlanView is what the owner seam's plan read tells of a plan (PLN-4, PLN-5
-// (b)): its status, a rejected plan's failing check, and each step's phase,
-// its clerk's last answer and whether it was undone.
+// (b)): its status, a rejected plan's failing check or a cancelled plan's
+// code (never its detail), and each step's phase, clerk's last answer and undo.
 type PlanView struct {
 	Status string     `json:"status"` // "": no such plan
 	Reject string     `json:"reject,omitempty"`
+	Cancel string     `json:"cancel,omitempty"`
 	Steps  []StepView `json:"steps,omitempty"`
 }
 
@@ -750,13 +766,21 @@ type StepView struct {
 	Undone bool   `json:"undone,omitempty"`
 }
 
+// Held is SpendHeld less ended plans, whose holds no Extend releases (CNotHeld);
+// SpendHeld keeps them, so a honey-key Extend naming one still pauses its scope.
+func (s *State) Held() map[string]SpendHold {
+	out := maps.Clone(s.SpendHeld)
+	maps.DeleteFunc(out, func(id string, _ SpendHold) bool { return s.Plans[id].Status != SActive })
+	return out
+}
+
 // PlanView is plan id's view; its Status is empty when the log has no such plan.
 func (s *State) PlanView(id string) PlanView {
 	p := s.Plans[id]
 	if p == nil {
 		return PlanView{}
 	}
-	v := PlanView{Status: p.Status, Reject: p.Reject}
+	v := PlanView{Status: p.Status, Reject: p.Reject, Cancel: p.Cancel}
 	for _, st := range p.Steps {
 		v.Steps = append(v.Steps, StepView{st.Phase, st.Detail, st.Undone})
 	}
@@ -1003,10 +1027,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
-			p.Status, p.Cancel, p.CancelDetail = SCancelled, b.Code, b.Detail
-			if st := &p.Steps[p.Next]; sendable(st.Phase) {
-				s.cancelUnsent(p, st)
-			}
+			s.cancel(p, b.Code, b.Detail)
 		}
 	case TStepHeld:
 		b, err := body[stepHeld](e)

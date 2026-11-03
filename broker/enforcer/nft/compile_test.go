@@ -129,8 +129,9 @@ func TestPathsFollowTheDocument(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The connection marks are TestEveryAcceptBound's.
-		return strings.Contains(markSet.ReplaceAllString(got, ""), s)
+		// The connection marks are TestEveryAcceptBound's, and every
+		// device's refusal chain, isolated or not, TestLinesBound's.
+		return strings.Contains(refusedMap.ReplaceAllString(markSet.ReplaceAllString(got, ""), ""), s)
 	}
 	d := fixturePolicy()
 	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept`
@@ -143,7 +144,7 @@ func TestPathsFollowTheDocument(t *testing.T) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`, `iifname "ap0.105" oifname "hh0" goto`} {
+	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" goto log_`, `oifname "ap0.104" udp`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`, `iifname "ap0.105" oifname "hh0" goto`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}
@@ -168,16 +169,16 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	// the core a camera only on its stream ports while it is offline
 	// (NET-2 Device paths, Cameras and microphones; ENF-e-2).
 	for _, s := range []string{
-		`iifname "edge0" oifname "ap0.101" tcp dport { 80 } log`,
-		`iifname "core0" oifname "ap0.102" tcp dport { 80 } log`,
-		`iifname "core0" oifname "ap0.102" udp dport { 123 } log`,
-		`iifname "core0" oifname "ap0.104" tcp dport { 554 } log prefix "enf core-stream 104 " counter name "core_stream" accept`,
+		`iifname "edge0" oifname "ap0.101" tcp dport { 80 } goto log_edge_dev`,
+		`iifname "core0" oifname "ap0.102" tcp dport { 80 } goto log_core_dev`,
+		`iifname "core0" oifname "ap0.102" udp dport { 123 } goto log_core_dev`,
+		`iifname "core0" oifname "ap0.104" tcp dport { 554 } goto log_core_stream`,
 	} {
 		if !has(d, s) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`oifname "ap0.105" log`, `oifname "ap0.105" tcp`, `oifname "ap0.104" tcp dport { 80 }`, `oifname "ap0.103" tcp`} {
+	for _, s := range []string{`oifname "ap0.105" goto log_`, `oifname "ap0.105" tcp`, `oifname "ap0.104" tcp dport { 80 }`, `oifname "ap0.103" tcp`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}

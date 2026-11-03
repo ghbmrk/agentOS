@@ -19,6 +19,7 @@ table inet enforcer {
 	counter core_edge { }
 	counter edge_out { }
 	counter cap_drop { }
+	counter log_lines { }
 	counter t101_out { }
 	counter t101_in { }
 	counter t102_out { }
@@ -33,6 +34,17 @@ table inet enforcer {
 	counter t106_in { }
 	counter t107_out { }
 	counter t107_in { }
+	counter t109_out { }
+	counter t109_in { }
+	counter t101_refused { }
+	counter t102_refused { }
+	counter t103_refused { }
+	counter t104_refused { }
+	counter t105_refused { }
+	counter t106_refused { }
+	counter t107_refused { }
+	counter t108_refused { }
+	counter t109_refused { }
 	set isp_4 {
 		type ipv4_addr;
 		flags interval;
@@ -118,6 +130,22 @@ table inet enforcer {
 		type ipv6_addr;
 		flags timeout;
 	}
+	set d109_4 {
+		type ipv4_addr;
+		flags timeout;
+	}
+	set d109_4_147ed8104f403ede {
+		type ipv4_addr;
+		flags timeout;
+	}
+	set d109_6 {
+		type ipv6_addr;
+		flags timeout;
+	}
+	set d109_6_147ed8104f403ede {
+		type ipv6_addr;
+		flags timeout;
+	}
 	set capc_4 {
 		type ipv4_addr;
 		size 65535;
@@ -127,6 +155,292 @@ table inet enforcer {
 		type ipv6_addr;
 		size 65535;
 		flags dynamic;
+	}
+	set t101_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t101_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t101_refused_count {
+		counter name "t101_refused"
+		update @t101_refused_4 { ip daddr counter }
+		update @t101_refused_6 { ip6 daddr counter }
+	}
+	set t102_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t102_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t102_refused_count {
+		counter name "t102_refused"
+		update @t102_refused_4 { ip daddr counter }
+		update @t102_refused_6 { ip6 daddr counter }
+	}
+	set t103_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t103_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t103_refused_count {
+		counter name "t103_refused"
+		update @t103_refused_4 { ip daddr counter }
+		update @t103_refused_6 { ip6 daddr counter }
+	}
+	set t104_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t104_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t104_refused_count {
+		counter name "t104_refused"
+		update @t104_refused_4 { ip daddr counter }
+		update @t104_refused_6 { ip6 daddr counter }
+	}
+	set t105_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t105_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t105_refused_count {
+		counter name "t105_refused"
+		update @t105_refused_4 { ip daddr counter }
+		update @t105_refused_6 { ip6 daddr counter }
+	}
+	set t106_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t106_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t106_refused_count {
+		counter name "t106_refused"
+		update @t106_refused_4 { ip daddr counter }
+		update @t106_refused_6 { ip6 daddr counter }
+	}
+	set t107_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t107_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t107_refused_count {
+		counter name "t107_refused"
+		update @t107_refused_4 { ip daddr counter }
+		update @t107_refused_6 { ip6 daddr counter }
+	}
+	set t108_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t108_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t108_refused_count {
+		counter name "t108_refused"
+		update @t108_refused_4 { ip daddr counter }
+		update @t108_refused_6 { ip6 daddr counter }
+	}
+	set t109_refused_4 {
+		type ipv4_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t109_refused_6 {
+		type ipv6_addr;
+		size 1024;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	chain t109_refused_count {
+		counter name "t109_refused"
+		update @t109_refused_4 { ip daddr counter }
+		update @t109_refused_6 { ip6 daddr counter }
+	}
+	map refused {
+		type ifname : verdict;
+		elements = { "ap0.101" : jump t101_refused_count, "ap0.102" : jump t102_refused_count, "ap0.103" : jump t103_refused_count, "ap0.104" : jump t104_refused_count, "ap0.105" : jump t105_refused_count, "ap0.106" : jump t106_refused_count, "ap0.107" : jump t107_refused_count, "ap0.108" : jump t108_refused_count, "ap0.109" : jump t109_refused_count }
+	}
+	set lines_inbound {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_inbound {
+		counter name "inbound"
+		iifname vmap @refused
+		update @lines_inbound { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf inbound "
+		drop
+	}
+	set lines_ap_admin {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_ap_admin {
+		counter name "ap_admin"
+		iifname vmap @refused
+		update @lines_ap_admin { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf ap-admin "
+		drop
+	}
+	set lines_isp {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_isp {
+		counter name "isp"
+		iifname vmap @refused
+		update @lines_isp { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf isp "
+		drop
+	}
+	set lines_nonglobal {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_nonglobal {
+		counter name "blocked"
+		iifname vmap @refused
+		update @lines_nonglobal { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf nonglobal "
+		drop
+	}
+	set lines_core_edge {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_core_edge {
+		counter name "core_edge"
+		iifname vmap @refused
+		update @lines_core_edge { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf core-edge "
+		drop
+	}
+	set lines_dns {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_dns {
+		counter name "dns_outside"
+		iifname vmap @refused
+		update @lines_dns { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf dns "
+		drop
+	}
+	set lines_drop {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_drop {
+		counter name "blocked"
+		iifname vmap @refused
+		update @lines_drop { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf drop "
+		drop
+	}
+	set lines_cap {
+		typeof iif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_cap {
+		counter name "cap_drop"
+		iifname vmap @refused
+		update @lines_cap { iif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf cap "
+		drop
+	}
+	set lines_edge_dev {
+		typeof oif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_edge_dev {
+		counter name "edge_device"
+		update @lines_edge_dev { oif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf edge-dev "
+		accept
+	}
+	set lines_core_dev {
+		typeof oif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_core_dev {
+		counter name "core_device"
+		update @lines_core_dev { oif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf core-dev "
+		accept
+	}
+	set lines_core_stream {
+		typeof oif;
+		size 8192;
+		flags dynamic,timeout;
+		timeout 60s;
+	}
+	chain log_core_stream {
+		counter name "core_stream"
+		update @lines_core_stream { oif limit rate 10/minute burst 10 packets } counter name "log_lines" log prefix "enf core-stream "
+		accept
 	}
 	set host_guests_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
@@ -320,11 +634,27 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 1d;
 	}
+	set t109_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t109_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
 	chain rpf {
 		type filter hook prerouting priority raw; policy accept;
 		iif "lo" accept
 		ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
 		ip6 saddr :: meta l4proto ipv6-icmp accept
+		meta nfproto ipv4 fib saddr type { broadcast, multicast } counter name "spoofed" drop
+		iifname "wan0" meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept
+		iifname "wan0" meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept
+		iifname "wan0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept
 		fib saddr . iif oif missing counter name "spoofed" drop
 	}
 	chain input {
@@ -337,15 +667,15 @@ table inet enforcer {
 		iifname "wan0" udp sport 67 udp dport 68 accept
 		iifname "wan0" udp sport 547 udp dport 546 accept
 		iifname "wan0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept
-		iifname "wan0" log prefix "enf inbound " counter name "inbound" drop
+		iifname "wan0" goto log_inbound
 		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
 		iifname { "own0", "hh0", "gst0", "adm0", "core0", "ap0.*" } udp dport { 53, 67, 547 } accept
 		iifname { "own0", "hh0", "gst0", "adm0", "core0", "ap0.*" } tcp dport 53 accept
 		iifname { "own0", "adm0" } tcp dport 8443 accept
 		iifname "core0" tcp dport 7443 accept
 		iifname "core0" udp dport 9 accept
-		iifname { "ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "hh0", "own0" } ip daddr 224.0.0.251 udp dport 5353 accept
-		iifname { "ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "hh0", "own0" } ip6 daddr ff02::fb udp dport 5353 accept
+		iifname { "ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "ap0.109", "hh0", "own0" } ip daddr 224.0.0.251 udp dport 5353 accept
+		iifname { "ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "ap0.109", "hh0", "own0" } ip6 daddr ff02::fb udp dport 5353 accept
 	}
 	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
@@ -364,42 +694,45 @@ table inet enforcer {
 		ct state established,related ct direction original iifname vmap { "gst0" : jump bound_guests, "own0" : jump bound_owner, "hh0" : jump bound_household }
 		ct state new ct label 0 iifname vmap { "gst0" : jump bound_guests, "own0" : jump bound_owner, "hh0" : jump bound_household }
 		ct state established,related jump forward_live
-		ct state established iifname vmap { "ap0.101" : jump t101_out_count, "ap0.102" : jump t102_out_count, "ap0.103" : jump t103_out_count, "ap0.104" : jump t104_out_count, "ap0.105" : jump t105_out_count, "ap0.106" : jump t106_out_count, "ap0.107" : jump t107_out_count }
-		ct state established oifname vmap { "ap0.101" : jump t101_in_count, "ap0.102" : jump t102_in_count, "ap0.103" : jump t103_in_count, "ap0.104" : jump t104_in_count, "ap0.105" : jump t105_in_count, "ap0.106" : jump t106_in_count, "ap0.107" : jump t107_in_count }
+		ct state established iifname vmap { "ap0.101" : jump t101_out_count, "ap0.102" : jump t102_out_count, "ap0.103" : jump t103_out_count, "ap0.104" : jump t104_out_count, "ap0.105" : jump t105_out_count, "ap0.106" : jump t106_out_count, "ap0.107" : jump t107_out_count, "ap0.109" : jump t109_out_count }
+		ct state established oifname vmap { "ap0.101" : jump t101_in_count, "ap0.102" : jump t102_in_count, "ap0.103" : jump t103_in_count, "ap0.104" : jump t104_in_count, "ap0.105" : jump t105_in_count, "ap0.106" : jump t106_in_count, "ap0.107" : jump t107_in_count, "ap0.109" : jump t109_in_count }
 		ct state established,related accept
-		iifname "wan0" log prefix "enf inbound " counter name "inbound" drop
+		iifname "wan0" goto log_inbound
 		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 ct mark set 0x10011004 goto learn_guests
 		iifname "gst0" oifname "wan0" ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 ct mark set 0x10011004 goto learn_guests
 		iifname "gst0" drop
 		iifname { "own0", "hh0" } jump people
 		iifname "adm0" oifname "apm0" ip daddr @ap_4 ct mark set 0x10081005 accept
 		iifname "adm0" oifname "apm0" ip6 daddr @ap_6 ct mark set 0x10081005 accept
-		ip daddr @ap_4 log prefix "enf ap-admin " counter name "ap_admin" drop
-		ip6 daddr @ap_6 log prefix "enf ap-admin " counter name "ap_admin" drop
-		ip daddr @isp_4 log prefix "enf isp " counter name "isp" drop
-		ip6 daddr @isp_6 log prefix "enf isp " counter name "isp" drop
-		oifname "wan0" ip daddr @nonglobal_4 log prefix "enf nonglobal " counter name "blocked" drop
-		oifname "wan0" ip6 daddr @nonglobal_6 log prefix "enf nonglobal " counter name "blocked" drop
-		iifname "edge0" oifname "core0" log prefix "enf core-edge " counter name "core_edge" drop
-		iifname "core0" oifname "edge0" log prefix "enf core-edge " counter name "core_edge" drop
+		ip daddr @ap_4 goto log_ap_admin
+		ip6 daddr @ap_6 goto log_ap_admin
+		ip daddr @isp_4 goto log_isp
+		ip6 daddr @isp_6 goto log_isp
+		oifname "wan0" ip daddr @nonglobal_4 goto log_nonglobal
+		oifname "wan0" ip6 daddr @nonglobal_6 goto log_nonglobal
+		iifname "edge0" oifname "core0" goto log_core_edge
+		iifname "core0" oifname "edge0" goto log_core_edge
 		iifname "adm0" oifname "core0" tcp dport 443 ct mark set 0x10061005 accept
 		iifname "edge0" oifname "wan0" ct mark set 0x10011007 accept
 		iifname "core0" oifname "wan0" ip daddr @core_4 ct mark set 0x10011006 accept
 		iifname "core0" oifname "wan0" ip6 daddr @core_6 ct mark set 0x10011006 accept
-		iifname "ap0.*" oifname "wan0" ip daddr @doh_4 log prefix "enf dns " counter name "dns_outside" drop
-		iifname "ap0.*" oifname "wan0" ip6 daddr @doh_6 log prefix "enf dns " counter name "dns_outside" drop
-		iifname "ap0.*" oifname "wan0" meta l4proto { tcp, udp } th dport { 53, 853 } log prefix "enf dns " counter name "dns_outside" drop
+		iifname "ap0.*" oifname "wan0" ip daddr @doh_4 goto log_dns
+		iifname "ap0.*" oifname "wan0" ip6 daddr @doh_6 goto log_dns
+		iifname "ap0.*" oifname "wan0" meta l4proto { tcp, udp } th dport { 53, 853 } goto log_dns
 		iifname "ap0.101" oifname "wan0" ip daddr @d101_4 ct mark set 0x10010065 accept
 		iifname "ap0.101" oifname "wan0" ip6 daddr @d101_6 ct mark set 0x10010065 accept
-		iifname "edge0" oifname "ap0.101" tcp dport { 80 } ct mark set 0x00651007 log prefix "enf edge-dev 101 " counter name "edge_device" accept
-		iifname "core0" oifname "ap0.102" tcp dport { 80 } ct mark set 0x00661006 log prefix "enf core-dev 102 " counter name "core_device" accept
-		iifname "core0" oifname "ap0.102" udp dport { 123 } ct mark set 0x00661006 log prefix "enf core-dev 102 " counter name "core_device" accept
+		iifname "edge0" oifname "ap0.101" tcp dport { 80 } ct mark set 0x00651007 goto log_edge_dev
+		iifname "core0" oifname "ap0.102" tcp dport { 80 } ct mark set 0x00661006 goto log_core_dev
+		iifname "core0" oifname "ap0.102" udp dport { 123 } ct mark set 0x00661006 goto log_core_dev
 		iifname "ap0.103" oifname "wan0" ip daddr @d103_4 ct mark set 0x10010067 accept
 		iifname "ap0.103" oifname "wan0" ip6 daddr @d103_6 ct mark set 0x10010067 accept
-		iifname "core0" oifname "ap0.104" tcp dport { 554 } ct mark set 0x00681006 log prefix "enf core-stream 104 " counter name "core_stream" accept
+		iifname "core0" oifname "ap0.104" tcp dport { 554 } ct mark set 0x00681006 goto log_core_stream
+		iifname "ap0.109" oifname "wan0" ip daddr @d109_4 ct mark set 0x1001006d accept
+		iifname "ap0.109" oifname "wan0" ip6 daddr @d109_6 ct mark set 0x1001006d accept
+		iifname "edge0" oifname "ap0.109" tcp dport { 80 } ct mark set 0x006d1007 goto log_edge_dev
 		iifname "ap0.106" oifname "ap0.107" ct mark set 0x006b006a accept
 		iifname "ap0.107" oifname "ap0.106" ct mark set 0x006a006b accept
-		log prefix "enf drop " counter name "blocked" drop
+		goto log_drop
 	}
 	chain people {
 		ip daddr @ap_4 drop
@@ -537,11 +870,17 @@ table inet enforcer {
 		ct direction reply iifname "wan0" oifname "ap0.103" ct original ip6 daddr @d103_6 ct mark 0x10010067 return
 		ct direction original iifname "core0" oifname "ap0.104" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
 		ct direction reply iifname "ap0.104" oifname "core0" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
+		ct direction original iifname "ap0.109" oifname "wan0" ct original ip daddr @d109_4 ct mark 0x1001006d return
+		ct direction reply iifname "wan0" oifname "ap0.109" ct original ip daddr @d109_4 ct mark 0x1001006d return
+		ct direction original iifname "ap0.109" oifname "wan0" ct original ip6 daddr @d109_6 ct mark 0x1001006d return
+		ct direction reply iifname "wan0" oifname "ap0.109" ct original ip6 daddr @d109_6 ct mark 0x1001006d return
+		ct direction original iifname "edge0" oifname "ap0.109" ct protocol tcp ct original proto-dst { 80 } ct mark 0x006d1007 return
+		ct direction reply iifname "ap0.109" oifname "edge0" ct protocol tcp ct original proto-dst { 80 } ct mark 0x006d1007 return
 		ct direction original iifname "ap0.106" oifname "ap0.107" ct mark 0x006b006a return
 		ct direction reply iifname "ap0.107" oifname "ap0.106" ct mark 0x006b006a return
 		ct direction original iifname "ap0.107" oifname "ap0.106" ct mark 0x006a006b return
 		ct direction reply iifname "ap0.106" oifname "ap0.107" ct mark 0x006a006b return
-		ct state related iifname != { "gst0", "own0", "hh0" } oifname != { "gst0", "own0", "hh0" } ct mark != 0x00000000 ct mark and 0x0000ffff != { 0x00001004, 0x00001002, 0x00001003 } ct mark and 0xffff0000 != { 0x10040000, 0x10020000, 0x10030000 } log prefix "enf drop " counter name "blocked" drop
+		ct state related iifname != { "gst0", "own0", "hh0" } oifname != { "gst0", "own0", "hh0" } ct mark != 0x00000000 ct mark and 0x0000ffff != { 0x00001004, 0x00001002, 0x00001003 } ct mark and 0xffff0000 != { 0x10040000, 0x10020000, 0x10030000 } goto log_drop
 		drop
 	}
 	chain people_live {
@@ -633,6 +972,16 @@ table inet enforcer {
 		iifname "wan0" update @t107_4 { ip saddr counter }
 		iifname "wan0" update @t107_6 { ip6 saddr counter }
 	}
+	chain t109_out_count {
+		counter name "t109_out"
+		oifname "wan0" update @t109_4 { ip daddr counter }
+		oifname "wan0" update @t109_6 { ip6 daddr counter }
+	}
+	chain t109_in_count {
+		counter name "t109_in"
+		iifname "wan0" update @t109_4 { ip saddr counter }
+		iifname "wan0" update @t109_6 { ip6 saddr counter }
+	}
 	chain cap_4 {
 		ip daddr @ap_4 return
 		ip daddr @isp_4 return
@@ -667,10 +1016,6 @@ table inet enforcer {
 	}
 	chain capd_edge {
 		drop
-	}
-	chain cap_over {
-		limit rate 10/minute log prefix "enf cap " counter name "cap_drop" drop
-		counter name "cap_drop" drop
 	}
 	chain output {
 		type filter hook output priority filter; policy accept;

@@ -3,7 +3,7 @@ package guest
 // SR2-3j: what the kernel's seam answers reaches the guest only as fixed
 // text; its detail goes to a broker-log line (PLN-4).
 //
-// REQ: RES-4, CAP-8, OP-2, PLN-4
+// REQ: RES-4, CAP-8, OP-2, PLN-4, PLN-1
 
 import (
 	"context"
@@ -135,5 +135,27 @@ func TestPlanResultsPassOnlyCodes(t *testing.T) {
 		{Phase: kernel.PFailed}, {Phase: kernel.PQueued}, {Phase: kernel.PFailed}}
 	if e != "" || st.State != kernel.SFailed || st.Code != "" || !slices.Equal(st.Steps, want) {
 		t.Fatalf("%+v %q", st, e)
+	}
+}
+
+// A cancelled plan's code reaches the guest when it is a listed one, the
+// owner's, a trip's or an erase's, so a planner can say why its plan ended;
+// anything else in the cancel is dropped, and a cancelled view's rejection
+// field is never read for it (PLN-1, LOG-4, #4812). Catches the plane
+// dropping the cancel code or passing it unfiltered.
+func TestACancelledPlanGivesOnlyItsCode(t *testing.T) {
+	snapshot := `{"snapshot":"` + denialCanary + `"}`
+	for _, c := range []struct{ cancel, reject, want string }{
+		{kernel.CErased, "", kernel.CErased}, {"owner", "", "owner"}, {kernel.CTrip, "", kernel.CTrip},
+		{snapshot, "", ""}, {"", key.RVerb, ""},
+	} {
+		r := newRig(t, func(cf *Config) {
+			cf.Kernel = viewKernel{kernel.PlanView{Status: kernel.SCancelled, Cancel: c.cancel, Reject: c.reject,
+				Steps: []kernel.StepView{{Phase: kernel.PCancelled}}}}
+		})
+		st, e := r.tool("m1", "plan", map[string]any{"request_id": "r1"})
+		if e != "" || st.State != kernel.SCancelled || st.Code != c.want || st.Reason != "" {
+			t.Errorf("cancel %q: %+v %q", c.cancel, st, e)
+		}
 	}
 }

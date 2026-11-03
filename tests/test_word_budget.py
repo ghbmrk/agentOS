@@ -11,6 +11,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import word_budget  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 DECISIONS = "| ID | Date | Status | Decision | Source |\n|---|---|---|---|---|\n" \
             "| D-7 | 2026-10-23 | active | more words for #42 | Mark |\n| D-8 | 2026-10-23 | superseded | x #42 | Mark |\n" \

@@ -329,9 +329,9 @@ func TestLoadFailureKeepsPrevious(t *testing.T) {
 	good, _ := Compile(fixturePolicy(), fixtureLayout())
 	open := strings.Replace(good, "policy drop;", "policy accept;", -1)
 	bad := []string{
-		open + "table inet broken {\n\tchain c {\n\t\tbogus\n\t}\n}\n",                            // fails at the end
-		strings.Replace(open, "counter name \"blocked\" drop", "counter name \"nosuch\" drop", 1), // a reference that does not resolve
-		strings.Replace(good, "flush ruleset\n", "", 1),                                           // would merge, not replace
+		open + "table inet broken {\n\tchain c {\n\t\tbogus\n\t}\n}\n",                  // fails at the end
+		strings.Replace(open, "counter name \"blocked\"", "counter name \"nosuch\"", 1), // a reference that does not resolve
+		strings.Replace(good, "flush ruleset\n", "", 1),                                 // would merge, not replace
 	}
 	l := load.Loader{Bin: nftBin}
 	for i, b := range bad {

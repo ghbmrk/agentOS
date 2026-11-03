@@ -2,7 +2,10 @@ package inbox
 
 import (
 	"context"
+	"errors"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/clerk/readerwire"
 )
 
 // Ask is the quarantined read (PLN-2): one model call with no tools, keys or
@@ -29,24 +32,60 @@ Email:
 // MaxPrompt bounds what Read sends one Ask: the question and the cut mail.
 const MaxPrompt = len(question) + readBytes
 
+// failures is each error the reader's frame names, and the word an
+// unclassified read records for it (RES-5-readerwire-reason, #4846).
+var failures = []struct {
+	err  error
+	word string
+}{
+	{readerwire.ErrBusy, "busy"},
+	{readerwire.ErrPaused, "paused"},
+	{readerwire.ErrUnavailable, "unavailable"},
+	{readerwire.ErrRefused, "refused"},
+	{readerwire.ErrTooLarge, "too-large"},
+	{readerwire.ErrMalformed, "malformed"},
+}
+
+// readFailed is the closed list of words a failed read records: one per
+// error of the frame, and "failed" for any other. The error's own text is
+// never recorded.
+var readFailed = map[string]bool{"failed": true}
+
+func init() {
+	for _, f := range failures {
+		readFailed[f.word] = true
+	}
+}
+
+// failure is the word for a failed call's err.
+func failure(err error) string {
+	for _, f := range failures {
+		if errors.Is(err, f.err) {
+			return f.word
+		}
+	}
+	return "failed"
+}
+
 // Read classes each mail through ask (MIG-3-9). The reply sets the class only
 // when it is one of the closed list, up to case and surrounding space;
 // anything else, or a failed call, leaves the mail unclassified, which the
-// clerk records and never acts on. Injected text in a mail can at most choose
+// clerk records and never acts on; a failed call also sets Why to its word
+// from readFailed. Injected text in a mail can at most choose
 // among the classes, and the clerk's own rules (VRB-2, the alert guard,
 // trash only spam and phishing) hold whatever class it chose.
 func Read(ctx context.Context, ask Ask, mails []Mail) []Mail {
 	out := make([]Mail, len(mails))
 	for i, m := range mails {
-		m.Class = ""
+		m.Class, m.Why = "", ""
 		raw := m.Raw
 		if len(raw) > readBytes {
 			raw = raw[:readBytes]
 		}
-		if reply, err := ask(ctx, question+string(raw)); err == nil {
-			if c := strings.ToLower(strings.TrimSpace(reply)); classes[c] {
-				m.Class = c
-			}
+		if reply, err := ask(ctx, question+string(raw)); err != nil {
+			m.Why = failure(err)
+		} else if c := strings.ToLower(strings.TrimSpace(reply)); classes[c] {
+			m.Class = c
 		}
 		out[i] = m
 	}

@@ -12,8 +12,11 @@ import (
 )
 
 var (
-	markSet  = regexp.MustCompile(` ct mark set 0x[0-9a-f]{8}`)
-	markLine = regexp.MustCompile(`^(?:ct direction (original|reply) )?iifname ("[^"]+") oifname ("[^"]+") .*ct mark (?:set )?(0x[0-9a-f]{8}) `)
+	markSet = regexp.MustCompile(` ct mark set 0x[0-9a-f]{8}`)
+	// refusedMap is the refused map's elements, every device's
+	// refusal chain, isolated or not.
+	refusedMap = regexp.MustCompile(`(?m)^\s*elements = \{ "[^\n]*_refused_count \}$`)
+	markLine   = regexp.MustCompile(`^(?:ct direction (original|reply) )?iifname ("[^"]+") oifname ("[^"]+") .*ct mark (?:set )?(0x[0-9a-f]{8}) `)
 )
 
 // chains splits a compiled ruleset into its chains' rule lines.
@@ -69,6 +72,13 @@ func TestEveryAcceptBound(t *testing.T) {
 			for _, l := range cs[chain] {
 				live := strings.HasSuffix(chain, "_live")
 				learns := strings.Contains(l, " goto learn_")
+				// An accept a box starts to a device ends in its logged
+				// chain, whose last rule accepts (#4762, TestLinesBound).
+				for _, a := range accepts {
+					if !live && strings.HasSuffix(l, " goto "+logged(a.prefix)) {
+						l = strings.TrimSuffix(l, " goto "+logged(a.prefix)) + " accept"
+					}
+				}
 				accepts := (!live && (strings.HasSuffix(l, " accept") || learns) && !strings.HasPrefix(l, "ct state ")) || (live && strings.HasSuffix(l, " return"))
 				if !accepts {
 					// Only the logged related drop reads the mark, to keep

@@ -322,7 +322,7 @@ func TestALooseContentStoreStopsTheStart(t *testing.T) {
 
 // The real process never starts without its content directory.
 func TestRunKernelNeedsAContentDir(t *testing.T) {
-	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir(), BackupDir: t.TempDir()}, handoff.KernelKeys{Head: headPriv}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir(), BackupDir: t.TempDir()}, handoff.KernelKeys{Head: handoff.Hide(headPriv)}, &kernel.MemAnchor{})
 	if !errors.Is(err, ErrNoContentDir) {
 		t.Fatalf("got %v, want ErrNoContentDir", err)
 	}

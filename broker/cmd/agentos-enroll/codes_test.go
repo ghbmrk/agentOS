@@ -94,7 +94,7 @@ func TestCodesStepStagesConfirmsAndCloses(t *testing.T) {
 		t.Fatalf("the right code: %+v", a)
 	}
 	s, err := confirmedSeed(path)
-	if err != nil || !bytes.Equal(s.Seed, seed) || s.Step != now.Unix()/30 {
+	if err != nil || !bytes.Equal(s.Seed.Get(), seed) || s.Step != now.Unix()/30 {
 		t.Fatalf("confirmed: %+v %v", s, err)
 	}
 	for _, req := range []string{`{"op":"enrol"}`, `{"op":"confirm","code":"` + totp.At(seed, now) + `"}`} {
@@ -170,7 +170,7 @@ func TestCodeSeedLandsInTheStoreAndIsShownOnce(t *testing.T) {
 		t.Fatalf("no code seed in the store: %v", err)
 	}
 	s, err := handoff.ParseCodeSeed(v)
-	if err != nil || !bytes.Equal(s.Seed, seed) || s.Step != now.Unix()/30 {
+	if err != nil || !bytes.Equal(s.Seed.Get(), seed) || s.Step != now.Unix()/30 {
 		t.Fatalf("the store's seed: %+v %v", s, err)
 	}
 	gone(t, b.c.codeSeed)

@@ -63,7 +63,6 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 
 - `tools/risk_tier.py`: slice a adds `"enforcer"` to `TIER_A_BROKER` with a comment citing STO-4; slice l adds `cmd/agentos-enforcer` if `risk_tier` does not already class it A through the core list. Tier A and a gate file, so the PR needs the separate Security accept (OPERATING §7).
 - `broker/daemon/arc2_test.go`: slice a adds an `enforcer` rule map and `TestEnforcerImportsNothingFromAgentOS` (decision 1); slices that add an import extend it (f, k and q are expected to, and list it in their Scope so the D-111 guard serializes them; any other slice that finds it needs one adds the file to its claim comment); slices o and r add the core-side lines.
-- `tools/g1_scope_g2.txt`: the G2 freeze holds and does not name these paths, so each build PR gets a one-line `exempt-pr N` companion PR with its own Security accept (D-198).
 - `image/` and `.github/workflows/`: slice m only.
 
 ## Lifecycle matrix (integration owner: slice l)
@@ -211,7 +210,9 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 **Scope:** `broker/cmd/agentos-enforcer/` (new), `tools/risk_tier.py` if needed.
 **Builds:** wires a to k, r and s into one daemon and its services (page, channel, nft loader, dnsmasq, AP push, radios, alerts) with their users and state paths; owns the lifecycle matrix test above.
-**Acceptance tests:** 1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
+**Acceptance tests:**
+1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
+2. NET-2, A18 (#4709): `agentos-enforcer::TestChannelLogKeepsEveryField`: the daemon's channel-log sink passes `channel.CheckSink`, storing each line and reading it back from its own storage. Catches a sink that loses `Event.Dropped` or a field added later.
 **Size:** about 130k. **Depends on:** ENF-a to ENF-i, ENF-k, ENF-r, ENF-s.
 
 ### ENF-m (#3671): the signed image (NET-2 Hardening, decision 7)

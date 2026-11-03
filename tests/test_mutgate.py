@@ -19,6 +19,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "mutgate.yml"
 sys.path.insert(0, str(ROOT / "tools"))
 import mutgate  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
+
 DIFF = """\
 diff --git a/broker/hint/hint.go b/broker/hint/hint.go
 --- a/broker/hint/hint.go
