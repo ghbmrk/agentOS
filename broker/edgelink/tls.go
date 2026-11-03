@@ -12,8 +12,6 @@ import (
 	"io"
 	"math/big"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 )
 
 // The link's TLS (decision 5 of briefs/EDGE-link-core.md): TLS 1.3 only,
@@ -65,7 +63,7 @@ func ServerConfig(signer crypto.Signer) (*tls.Config, error) {
 		return nil, err
 	}
 	c := base()
-	c.Certificates = []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: guard{handoff.Hide(signer), serverContext}}}
+	c.Certificates = []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: newGuard(signer, serverContext)}}
 	c.ClientAuth = tls.RequireAnyClientCert
 	c.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
 		_, err := selfSignedEd25519(raw)
@@ -87,7 +85,7 @@ func ClientConfig(signer crypto.Signer, pin ed25519.PublicKey) (*tls.Config, err
 		return nil, err
 	}
 	c := base()
-	c.Certificates = []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: guard{handoff.Hide(signer), clientContext}}}
+	c.Certificates = []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: newGuard(signer, clientContext)}}
 	// No chain to verify: the core's key is pinned below.
 	c.InsecureSkipVerify = true
 	pin = bytes.Clone(pin)
@@ -162,21 +160,25 @@ func template() *x509.Certificate {
 // guard is the signer TLS sees: it passes a TLS 1.3 CertificateVerify
 // input for its context and refuses everything else, so a TLS stack that
 // asked for any other signature would fail here as linksign fails it. Its
-// signer sits in a handoff.Secret, so no print of a guard, or of the
-// tls.Config that holds one, shows a key the signer holds (CLK-1,
-// DECOY-b-8, #4837).
+// signer sits behind a pointer to a pointer, which fmt prints as an
+// address in every verb and at any depth, so no print of a guard, or of
+// the tls.Config that holds one, shows a key the signer holds (CLK-1,
+// DECOY-b-8, #4837). It is handoff.Secret's shape, kept local because the
+// edge link imports no broker package (ARC-2).
 type guard struct {
-	s       handoff.Secret[crypto.Signer]
+	s       **crypto.Signer
 	context string
 }
 
-func (g guard) Public() crypto.PublicKey { return g.s.Get().Public() }
+func newGuard(s crypto.Signer, context string) guard { return guard{new(&s), context} }
+
+func (g guard) Public() crypto.PublicKey { return (**g.s).Public() }
 
 func (g guard) Sign(r io.Reader, msg []byte, opts crypto.SignerOpts) ([]byte, error) {
 	if opts.HashFunc() != 0 || !certificateVerifyInput(msg, g.context) {
 		return nil, ErrNotCertificateVerify
 	}
-	return g.s.Get().Sign(r, msg, opts)
+	return (**g.s).Sign(r, msg, opts)
 }
 
 // certificateVerifyInput reports whether msg is RFC 8446 §4.4.3's signed
