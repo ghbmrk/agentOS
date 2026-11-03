@@ -7,13 +7,17 @@ package secret
 // Secret holds a key behind a pointer to a pointer, which fmt prints as an
 // address in every verb and at any depth, while reflect.DeepEqual compares
 // through it, so a line that formats a holder shows no key (the #4719
-// rule). A copy shares the key; the zero Secret holds none. Drop it only
-// after every reader is done: Drop while another goroutine reads a shared
-// copy is a data race.
-type Secret[T any] struct{ p **T }
+// rule). A copy shares the key; the zero Secret holds none. A Secret is not
+// comparable, so == cannot compare two holders' addresses where their keys
+// were meant. Drop it only after every reader is done: Drop while another
+// goroutine reads a shared copy is a data race.
+type Secret[T any] struct {
+	_ [0]func()
+	p **T
+}
 
 // Hide holds v.
-func Hide[T any](v T) Secret[T] { return Secret[T]{new(&v)} }
+func Hide[T any](v T) Secret[T] { return Secret[T]{p: new(&v)} }
 
 // Get is the key held, or T's zero value.
 func (s Secret[T]) Get() T { return *s.Ref() }

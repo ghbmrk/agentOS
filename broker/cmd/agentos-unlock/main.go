@@ -107,8 +107,9 @@ type config struct {
 	// of this PC's tpm slot, and the hand-off names that slot, so the
 	// kernel cuts the edge (§12.2, HW-15 "move"). Only tests set it: no
 	// flag takes it until the unknown-host unlock is built (ASSUMPTIONS
-	// EDGE-link-core-b-3).
-	passphrase []byte
+	// EDGE-link-core-b-3). A Secret, so a line that formats the config
+	// shows no passphrase (CLK-1, #4833).
+	passphrase secret.Secret[[]byte]
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -174,9 +175,9 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	defer t.Close()
 	var k handoff.KernelKeys
 	defer k.Wipe()
-	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase}
+	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase.Get()}
 	k.Slot = handoff.SlotPassphrase
-	if c.passphrase == nil {
+	if c.passphrase.Get() == nil {
 		pk, anchor, err := pins(t)
 		if err != nil {
 			return nil, err
@@ -203,8 +204,12 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if err := tpmseal.Cap(t, tpmSelections(st)); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
 	}
+	// The log key and the clerk root come back as arrays: each local copy
+	// is cleared once its Secret holds it, so k.Wipe leaves neither behind
+	// (STO-2a-e: best-effort, the #4835 review).
 	logKey, err := st.LogKey()
-	if k.Log = secret.Hide(logKey); err != nil {
+	k.Log = secret.Hide(logKey)
+	if clear(logKey[:]); err != nil {
 		return nil, err
 	}
 	head, err := st.HeadKey()
@@ -264,7 +269,8 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	root, err := st.ClerkRoot()
-	if k.ClerkRoot = secret.Hide(root); err != nil {
+	k.ClerkRoot = secret.Hide(root)
+	if clear(root[:]); err != nil {
 		return nil, err
 	}
 	if c.checkerSeed != "" {
@@ -692,10 +698,12 @@ func tpmSelections(st *seal.Store) [][]uint {
 	return out
 }
 
-// counterRec is handoff.CounterEntry's value, as enrollment writes it.
+// counterRec is handoff.CounterEntry's value, as enrollment writes it. Its
+// auth sits behind a pointer to a pointer, which fmt prints as an address
+// and JSON reads through (CLK-1, #4833).
 type counterRec struct {
 	Ref  json.RawMessage `json:"ref"`
-	Auth []byte          `json:"auth"`
+	Auth **[]byte        `json:"auth"`
 }
 
 // counter reads the log anchor's counter from the store. A store without
@@ -713,12 +721,16 @@ func counter(st *seal.Store) (handoff.Counter, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store: %w", err)
 	}
+	var auth []byte
+	if r.Auth != nil && *r.Auth != nil {
+		auth = **r.Auth
+	}
 	ref, err := tpmseal.ParseCounterRef(r.Ref)
-	if err != nil || len(r.Auth) == 0 {
-		clear(r.Auth)
+	if err != nil || len(auth) == 0 {
+		clear(auth)
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store does not read")
 	}
-	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(r.Auth)}, nil
+	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)}, nil
 }
 
 // kernelTPM opens the kernel's own connection to the TPM at path: the

@@ -41,7 +41,7 @@ func newBox(t *testing.T) *box {
 		Head:    secret.Hide(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))),
 		Counter: handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)},
 	}
-	c := tpmseal.Counter{TPM: b.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	c := tpmseal.Counter{TPM: b.sw.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
 	must(t, proc.InitCounterAnchor(b.dir, filepath.Join(t.TempDir(), "log"), c, b.keys.Head.Get()))
 	return b
 }

@@ -399,7 +399,7 @@ func (r *rig) enrollCounter(st *seal.Store) handoff.Counter {
 	must(t, st.Put(handoff.CounterEntry, b))
 	dir := r.anchorDir()
 	must(t, os.Mkdir(dir, 0o700))
-	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
 	must(t, proc.InitCounterAnchor(dir, r.mainConfig().Log, c, r.keys.Head.Get()))
 	for _, p := range []string{filepath.Join(dir, "anchor"), dir} {
 		must(t, os.Lchown(p, r.kernelUID, r.kernelG))
@@ -1150,7 +1150,7 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		r.reboot() // each unlock caps the tpm slot (#2977)
 		role := r.role(&r.policy.PublicKey, r.anchor)
 		c := role.Config()
-		c.passphrase = pass
+		c.passphrase = secret.Hide(pass)
 		b, err := unlock(c, role.pins)
 		if err != nil {
 			return handoff.KernelKeys{}, err
@@ -1423,7 +1423,7 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 	r.reboot()
 	role := r.role(&r.policy.PublicKey, r.anchor)
 	c := role.Config()
-	c.passphrase = pass
+	c.passphrase = secret.Hide(pass)
 	pr, pw, err := os.Pipe()
 	must(r.t, err)
 	saved := os.Stderr

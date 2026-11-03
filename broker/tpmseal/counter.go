@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // Rollback counters (V6, P2-4d). Each vault gets one TPM NV counter on
@@ -324,13 +326,14 @@ func increment(t transport.TPM, srkName []byte, handle uint32, name, auth []byte
 
 // Counter is one rollback counter as a value that reads and advances
 // itself, for a holder that numbers its own writes with it: the log anchor
-// on a trusted host (run.CounterAnchor, LOG-2, STO-1).
+// on a trusted host (run.CounterAnchor, LOG-2, STO-1). Its auth value is a
+// Secret, so a line that formats the counter shows no auth (CLK-1, #4833).
 type Counter struct {
 	TPM  transport.TPM
 	SRK  []byte // the storage root key's pinned name
 	Ref  CounterRef
-	Auth []byte
+	Auth secret.Secret[[]byte]
 }
 
-func (c Counter) Read() (uint64, error) { return ReadCounter(c.TPM, c.SRK, c.Ref, c.Auth) }
-func (c Counter) Increment() error      { return IncrementCounter(c.TPM, c.SRK, c.Ref, c.Auth) }
+func (c Counter) Read() (uint64, error) { return ReadCounter(c.TPM, c.SRK, c.Ref, c.Auth.Get()) }
+func (c Counter) Increment() error      { return IncrementCounter(c.TPM, c.SRK, c.Ref, c.Auth.Get()) }

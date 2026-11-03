@@ -25,14 +25,16 @@ func TestSealedFormRoundTrips(t *testing.T) {
 	}
 	other := newAuthority(t)
 	ok, _ := x509.MarshalPKCS8PrivateKey(other.key)
-	swapped, _ := json.Marshal(sealed{Cert: a.cert.Raw, Key: ok})
+	swapped, _ := json.Marshal(sealed{Cert: a.cert.Raw, Key: new(&ok)})
 	reordered := []byte(`{"key":` + string(mustJSON(t, ok)) + `,"cert":` + string(mustJSON(t, a.cert.Raw)) + `}`)
 	resigned := bytes.Clone(a.cert.Raw)
 	resigned[len(resigned)-1] ^= 1
-	unsigned, _ := json.Marshal(sealed{Cert: resigned, Key: get(x509.MarshalPKCS8PrivateKey(a.key))})
+	own := get(x509.MarshalPKCS8PrivateKey(a.key))
+	unsigned, _ := json.Marshal(sealed{Cert: resigned, Key: new(&own)})
+	keyless := []byte(`{"cert":` + string(mustJSON(t, a.cert.Raw)) + `,"key":null}`)
 	for name, v := range map[string][]byte{
 		"another key": swapped, "reordered": reordered, "padded": append(bytes.Clone(b), '\n'),
-		"not self-signed": unsigned, "oversized": append(bytes.Clone(b), bytes.Repeat([]byte{' '}, MaxSealed)...),
+		"not self-signed": unsigned, "no key": keyless, "oversized": append(bytes.Clone(b), bytes.Repeat([]byte{' '}, MaxSealed)...),
 		"extra field": []byte(`{"cert":null,"key":null,"x":1}`), "empty": nil,
 	} {
 		if _, err := Unmarshal(v); err == nil {

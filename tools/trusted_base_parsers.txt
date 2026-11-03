@@ -53,6 +53,7 @@ inert  github.com/ghbmrk/agentos/broker/owner/kernelsock -- socket between trust
 inert  github.com/ghbmrk/agentos/broker/owner/notice -- notice codes as data; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/owner/notice/noticesock -- socket between trusted processes (agentosd and agentos-egress)
 inert  github.com/ghbmrk/agentos/broker/kernel/privfile -- checks and replaces a process's own files; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/kernel/secret -- holds a key behind a pointer to a pointer; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/procguard -- process hardening; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/provagent -- declares plan routes as values
 inert  github.com/ghbmrk/agentos/broker/quota -- sets disk quotas; decodes nothing

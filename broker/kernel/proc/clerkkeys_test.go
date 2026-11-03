@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -97,7 +98,7 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 		w.Write(b)
 		w.Close()
 		got, err := clerkkey.Read(r, "mail")
-		if err != nil || got != want {
+		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("start %d: the clerk read %+v, %v; want its derived key", start, got, err)
 		}
 	}
@@ -180,7 +181,7 @@ func TestTheKeyGoesToATemplatesInstances(t *testing.T) {
 	r, w, _ := os.Pipe()
 	w.Write(handed(t, p))
 	w.Close()
-	if got, err := clerkkey.Read(r, "driver-scale"); err != nil || got != want {
+	if got, err := clerkkey.Read(r, "driver-scale"); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("the driver's instance read %+v, %v; want its derived key", got, err)
 	}
 	mu.Lock()

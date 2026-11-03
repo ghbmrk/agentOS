@@ -8,10 +8,11 @@ import (
 	"errors"
 )
 
-// sealed is Marshal's form.
+// sealed is Marshal's form. Its key sits behind a pointer to a pointer,
+// which fmt prints as an address and JSON reads through (CLK-1, #4833).
 type sealed struct {
-	Cert []byte `json:"cert"`
-	Key  []byte `json:"key"` // PKCS#8
+	Cert []byte   `json:"cert"`
+	Key  **[]byte `json:"key"` // PKCS#8
 }
 
 // MaxSealed bounds Marshal's form: a P-256 certificate and its PKCS#8 key,
@@ -27,7 +28,7 @@ func Marshal(a *Authority) ([]byte, error) {
 		return nil, err
 	}
 	defer clear(k)
-	return json.Marshal(sealed{Cert: a.cert.Raw, Key: k})
+	return json.Marshal(sealed{Cert: a.cert.Raw, Key: new(&k)})
 }
 
 // Unmarshal reads Marshal's form, at most MaxSealed bytes, into the
@@ -44,8 +45,12 @@ func Unmarshal(b []byte) (*Authority, error) {
 	if err := dec.Decode(&v); err != nil || dec.More() {
 		return nil, errors.New("pageca: the sealed authority does not read")
 	}
-	defer clear(v.Key)
-	pk, err := x509.ParsePKCS8PrivateKey(v.Key)
+	var k []byte
+	if v.Key != nil && *v.Key != nil {
+		k = **v.Key
+	}
+	defer clear(k)
+	pk, err := x509.ParsePKCS8PrivateKey(k)
 	if err != nil {
 		return nil, err
 	}

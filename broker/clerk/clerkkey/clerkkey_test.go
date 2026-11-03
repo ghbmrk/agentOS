@@ -8,7 +8,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 func keyPipe(t *testing.T, b []byte) *os.File {
@@ -25,11 +28,11 @@ func keyPipe(t *testing.T, b []byte) *os.File {
 }
 
 func testKey(name string) Key {
-	k := Key{Name: name}
-	for i := range k.Key {
-		k.Key[i] = byte(i + 1)
+	var b [Len]byte
+	for i := range b {
+		b[i] = byte(i + 1)
 	}
-	return k
+	return Key{Name: name, Key: secret.Hide(b)}
 }
 
 func TestClerkKeyRoundTrip(t *testing.T) {
@@ -39,7 +42,7 @@ func TestClerkKeyRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := Read(keyPipe(t, b), "mail")
-	if err != nil || got != k {
+	if err != nil || !reflect.DeepEqual(got, k) {
 		t.Fatalf("Read = %+v, %v; want the key handed", got, err)
 	}
 	if _, err := Read(keyPipe(t, b), "model"); !errors.Is(err, ErrKey) {
@@ -131,7 +134,7 @@ func TestClerkKeysDeriveApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range [][2][]byte{{s, h}, {s, k.Key[:]}, {h, k.Key[:]}, {s, o}} {
+	for _, p := range [][2][]byte{{s, h}, {s, k.Key.Ref()[:]}, {h, k.Key.Ref()[:]}, {s, o}} {
 		if bytes.Equal(p[0], p[1]) {
 			t.Fatal("two of a clerk's keys, or two clerks' sealer keys, are the same")
 		}
@@ -140,7 +143,7 @@ func TestClerkKeysDeriveApart(t *testing.T) {
 		t.Fatalf("derived keys of %d and %d bytes", len(s), len(h))
 	}
 	k.Wipe()
-	if k.Key != ([Len]byte{}) {
+	if k.Key.Get() != ([Len]byte{}) {
 		t.Fatal("Wipe left the key")
 	}
 }
@@ -161,15 +164,15 @@ func TestDeriveGivesEachClerkItsOwnStableKey(t *testing.T) {
 	}
 	again, _ := Derive(&root, "mail")
 	model, _ := Derive(&root, "model")
-	if again != mail {
+	if again.Key.Get() != mail.Key.Get() {
 		t.Fatal("the same root and name gave two keys: a restart would open nothing")
 	}
-	if model.Key == mail.Key || mail.Key == root {
+	if model.Key.Get() == mail.Key.Get() || mail.Key.Get() == root {
 		t.Fatal("two clerks share a key, or a clerk holds the root")
 	}
 	other := root
 	other[0] ^= 1
-	if o, _ := Derive(&other, "mail"); o.Key == mail.Key {
+	if o, _ := Derive(&other, "mail"); o.Key.Get() == mail.Key.Get() {
 		t.Fatal("another root gave the same clerk key")
 	}
 	for _, name := range []string{"", "Mail", "mail/x"} {

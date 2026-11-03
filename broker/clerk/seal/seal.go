@@ -52,6 +52,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"golang.org/x/crypto/argon2"
 
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -244,13 +245,15 @@ func parse(b []byte) (*file, error) {
 	return &f, nil
 }
 
-// Store is an unlocked store. Its methods are safe for concurrent use.
+// Store is an unlocked store. Its methods are safe for concurrent use. Its
+// key and entries are Secrets, so a line that formats a Store shows neither
+// (CLK-1, DECOY-b-8, #4833).
 type Store struct {
 	mu      sync.Mutex
 	path    string
-	key     []byte // nil once closed
+	key     secret.Secret[[]byte] // none once closed
 	f       file
-	entries map[string][]byte
+	entries secret.Secret[map[string][]byte]
 }
 
 func derive(key, id []byte, purpose string, n int) []byte {
@@ -432,7 +435,7 @@ func Create(path string, f Factor) (*Store, error) {
 		wipe(key)
 		return nil, err
 	}
-	s := &Store{path: path, key: key, f: file{V: version, ID: id}, entries: map[string][]byte{}}
+	s := &Store{path: path, key: secret.Hide(key), f: file{V: version, ID: id}, entries: secret.Hide(map[string][]byte{})}
 	sl, err := makeSlot(id, key, f)
 	if err != nil {
 		wipe(key)
@@ -440,7 +443,7 @@ func Create(path string, f Factor) (*Store, error) {
 	}
 	nf := s.f
 	nf.Slots = []slot{sl}
-	b, err := s.encode(nf, s.entries)
+	b, err := s.encode(nf, s.entries.Get())
 	if err != nil {
 		wipe(key)
 		return nil, err
@@ -530,7 +533,7 @@ func Unlock(path string, f Factor) (*Store, error) {
 			wipe(key)
 			return nil, ErrCorrupt
 		}
-		return &Store{path: path, key: key, f: *fl, entries: entries}, nil
+		return &Store{path: path, key: secret.Hide(key), f: *fl, entries: secret.Hide(entries)}, nil
 	}
 	if !tried {
 		return nil, ErrNoSlot
@@ -603,7 +606,7 @@ func (s *Store) Anchor() ([]byte, error) {
 	if err := s.live(); err != nil {
 		return nil, err
 	}
-	return anchor(s.key, s.f.ID), nil
+	return anchor(s.key.Get(), s.f.ID), nil
 }
 
 func readFile(path string) ([]byte, error) {
@@ -625,14 +628,14 @@ func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ek := derive(s.key, nf.ID, "entries", keyLen)
+	ek := derive(s.key.Get(), nf.ID, "entries", keyLen)
 	nf.Entries, err = seal(ek, plain, entriesAAD(nf.ID))
 	wipe(ek)
 	wipe(plain)
 	if err != nil {
 		return nil, err
 	}
-	nf.MAC = mac(s.key, nf)
+	nf.MAC = mac(s.key.Get(), nf)
 	b, err := json.Marshal(nf)
 	if err != nil {
 		return nil, err
@@ -658,13 +661,13 @@ func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	}
 	renamed, err := writeAtomic(s.path, b)
 	if renamed {
-		s.f, s.entries = nf, e
+		s.f, s.entries = nf, secret.Hide(e)
 	}
 	return err
 }
 
 func (s *Store) live() error {
-	if s.key == nil {
+	if s.key.Get() == nil {
 		return ErrClosed
 	}
 	return nil
@@ -714,11 +717,11 @@ func (s *Store) AddSlot(f Factor) (string, error) {
 	if len(s.f.Slots) >= MaxSlots {
 		return "", fmt.Errorf("seal: a store holds at most %d slots", MaxSlots)
 	}
-	sl, err := makeSlot(s.f.ID, s.key, f)
+	sl, err := makeSlot(s.f.ID, s.key.Get(), f)
 	if err != nil {
 		return "", err
 	}
-	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries))
+	return s.committed(sl.ID, s.commit(append(slices.Clone(s.f.Slots), sl), s.entries.Get()))
 }
 
 // committed returns the new slot's id with err when the slot is in place, which
@@ -749,7 +752,7 @@ func (s *Store) RemoveSlot(id string) error {
 	if len(s.f.Slots) == 1 {
 		return ErrLastSlot
 	}
-	return s.commit(slices.Delete(slices.Clone(s.f.Slots), i, i+1), s.entries)
+	return s.commit(slices.Delete(slices.Clone(s.f.Slots), i, i+1), s.entries.Get())
 }
 
 // Replace puts a new slot for f in place of slot id in one write: a new
@@ -765,13 +768,13 @@ func (s *Store) Replace(id string, f Factor) (string, error) {
 	if i < 0 {
 		return "", ErrNoSlot
 	}
-	sl, err := makeSlot(s.f.ID, s.key, f)
+	sl, err := makeSlot(s.f.ID, s.key.Get(), f)
 	if err != nil {
 		return "", err
 	}
 	slots := slices.Clone(s.f.Slots)
 	slots[i] = sl
-	return s.committed(sl.ID, s.commit(slots, s.entries))
+	return s.committed(sl.ID, s.commit(slots, s.entries.Get()))
 }
 
 // SetPolicies replaces a tpm slot's signed boot paths: an update adds the
@@ -801,7 +804,7 @@ func (s *Store) SetPolicies(id string, ps []tpmseal.Policy) error {
 	}
 	slots := slices.Clone(s.f.Slots)
 	slots[i].Policies = slices.Clone(ps)
-	return s.commit(slots, s.entries)
+	return s.commit(slots, s.entries.Get())
 }
 
 var entryName = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,63}$`)
@@ -868,7 +871,7 @@ func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]strin
 			return nil, ErrNoSlot
 		}
 		done[i] = true
-		sl, err := makeSlot(s.f.ID, s.key, sw.F)
+		sl, err := makeSlot(s.f.ID, s.key.Get(), sw.F)
 		if err != nil {
 			return nil, err
 		}
@@ -886,8 +889,8 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
 		return nil, errors.New("seal: bad entry name or value too long")
 	}
-	e := make(map[string][]byte, len(s.entries)+1)
-	for k, v := range s.entries {
+	e := make(map[string][]byte, len(s.entries.Get())+1)
+	for k, v := range s.entries.Get() {
 		e[k] = v
 	}
 	e[name] = slices.Clone(value)
@@ -904,7 +907,7 @@ func (s *Store) Get(name string) ([]byte, bool, error) {
 	if err := s.live(); err != nil {
 		return nil, false, err
 	}
-	v, ok := s.entries[name]
+	v, ok := s.entries.Get()[name]
 	return slices.Clone(v), ok, nil
 }
 
@@ -915,11 +918,11 @@ func (s *Store) Delete(name string) error {
 	if err := s.live(); err != nil {
 		return err
 	}
-	if _, ok := s.entries[name]; !ok {
+	if _, ok := s.entries.Get()[name]; !ok {
 		return nil
 	}
-	e := make(map[string][]byte, len(s.entries))
-	for k, v := range s.entries {
+	e := make(map[string][]byte, len(s.entries.Get()))
+	for k, v := range s.entries.Get() {
 		if k != name {
 			e[k] = v
 		}
@@ -931,8 +934,8 @@ func (s *Store) Delete(name string) error {
 func (s *Store) Entries() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.entries))
-	for k := range s.entries {
+	out := make([]string, 0, len(s.entries.Get()))
+	for k := range s.entries.Get() {
 		out = append(out, k)
 	}
 	sort.Strings(out)
@@ -945,7 +948,7 @@ func (s *Store) derived(purpose string) ([]byte, error) {
 	if err := s.live(); err != nil {
 		return nil, err
 	}
-	return derive(s.key, s.f.ID, purpose, keyLen), nil
+	return derive(s.key.Get(), s.f.ID, purpose, keyLen), nil
 }
 
 // LogKey is the log's AES-256-GCM key (STO-1, run.KernelConfig.Key).
@@ -989,12 +992,11 @@ func (s *Store) ClerkRoot() ([32]byte, error) {
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	wipe(s.key)
-	s.key = nil
-	for _, v := range s.entries {
+	secret.Drop(s.key)
+	for _, v := range s.entries.Get() {
 		wipe(v)
 	}
-	s.entries = nil
+	s.entries = secret.Secret[map[string][]byte]{}
 }
 
 // writeAtomic replaces path with b: a temporary file in the same
