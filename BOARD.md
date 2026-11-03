@@ -493,11 +493,9 @@ issue #4018: needs exactly one state label of queued, building, in review, merge
 issue #4020: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4338: body has no board-row block
 issue #4339: body has no board-row block
 issue #4382: no section 'Tooling and CI' in BOARD.md
 issue #4422: no section 'Tooling and CI' in BOARD.md
-issue #4436: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has ['review']
 issue #4450: no section 'Tooling and CI' in BOARD.md
 issue #4795: body has no board-row block
 issue #4876: no section 'Tooling and CI' in BOARD.md
