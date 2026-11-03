@@ -5,6 +5,7 @@ package privfile
 import (
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -213,4 +214,54 @@ func TestWriteAtomicLeaksNoDescriptor(t *testing.T) {
 	if after := open(); after != before {
 		t.Errorf("%d descriptors open after 16 writes, %d before", after, before)
 	}
+}
+
+// A write that fails or is stopped before its rename closes name.tmp too:
+// the write step fails here with EFBIG, under a one-byte file size limit
+// whose SIGXFSZ is ignored, and the stop hook stops after each step that
+// leaves the file open.
+func TestWriteAtomicClosesTheTmpOnAFailedOrStoppedStep(t *testing.T) {
+	dir := t.TempDir()
+	before := openFDs(t)
+	for i := 0; i < 3; i++ {
+		stopAt := i
+		if err := WriteAtomic(dir, "f", []byte("canary"), func(i int) bool { return i == stopAt }); !errors.Is(err, ErrStopped) {
+			t.Fatalf("stop after step %d: %v", stopAt, err)
+		}
+	}
+	signal.Ignore(syscall.SIGXFSZ)
+	defer signal.Reset(syscall.SIGXFSZ)
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	low := lim
+	low.Cur = 1
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &low); err != nil {
+		t.Skip(err)
+	}
+	var failed []error
+	for i := 0; i < 4; i++ {
+		failed = append(failed, WriteAtomic(dir, "g", []byte("canary"), nil))
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range failed {
+		if !errors.Is(err, syscall.EFBIG) {
+			t.Fatalf("WriteAtomic under a 1-byte limit = %v, want EFBIG", err)
+		}
+	}
+	if after := openFDs(t); after != before {
+		t.Errorf("%d descriptors open after 7 failed or stopped writes, %d before", after, before)
+	}
+}
+
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	return len(ents)
 }
