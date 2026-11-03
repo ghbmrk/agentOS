@@ -9,7 +9,9 @@
 //
 // The sources are the firewall's own: its per-device counters and
 // counting sets (broker/enforcer/nft, read through load.Loader.List) and
-// its refusal log lines (Log). A summary is served only as the channel's
+// its refusal log lines (Log), which the firewall rate-bounds per prefix
+// and VLAN (nft.LineRate), so they say where a device was refused and the
+// counters say how often. A summary is served only as the channel's
 // traffic read (broker/enforcer/channel, Config.Traffic = Reader.Read).
 // What it holds is untrusted input to whoever reads it, since devices
 // choose the addresses and amounts it describes; it carries only numbers,
@@ -26,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -52,8 +55,10 @@ var (
 // Summary is one Devices-network device's traffic. BytesOut and BytesIn
 // count the connections the firewall accepted since the ruleset was last
 // loaded; Destinations are the internet addresses it exchanged traffic
-// with in the last day, by bytes; Blocked counts the packets it was refused in Log's
-// window, and BlockedTo where, by packets.
+// with in the last day, by bytes; Blocked counts the packets it was refused
+// since the ruleset was last loaded (nft.TrafficRefused), exactly however
+// many it sent, and BlockedTo where, by the refusals logged in Log's window,
+// at most nft.LineRate a minute per refusal prefix.
 type Summary struct {
 	Device           string `json:"device"`
 	BytesOut         uint64 `json:"bytes_out"`
@@ -111,7 +116,7 @@ func (r *Reader) Read(device string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(Guests{Network: policy.NetGuests, BytesOut: c[nft.GuestsOut], BytesIn: c[nft.GuestsIn], Connections: c[nft.GuestsConns]})
+		return json.Marshal(Guests{Network: policy.NetGuests, BytesOut: c[nft.GuestsOut].Bytes, BytesIn: c[nft.GuestsIn].Bytes, Connections: c[nft.GuestsConns].Packets})
 	case policy.NetDevices:
 	default:
 		return nil, ErrNotInspected
@@ -125,7 +130,7 @@ func (r *Reader) Read(device string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.BytesOut, s.BytesIn = c[nft.TrafficOut(vlan)], c[nft.TrafficIn(vlan)]
+	s.BytesOut, s.BytesIn, s.Blocked = c[nft.TrafficOut(vlan)].Bytes, c[nft.TrafficIn(vlan)].Bytes, c[nft.TrafficRefused(vlan)].Packets
 	dests := map[netip.Addr]uint64{}
 	for _, v6 := range []bool{false, true} {
 		set := sets[nft.TrafficSet(vlan, v6)]
@@ -136,8 +141,7 @@ func (r *Reader) Read(device string) ([]byte, error) {
 	}
 	s.Destinations, s.MoreDestinations = top(dests)
 	if r.Log != nil {
-		var refused map[netip.Addr]uint64
-		s.Blocked, refused = r.Log.of(vlan)
+		refused := r.Log.of(vlan)
 		s.Truncated = s.Truncated || len(refused) >= nft.TrafficSize
 		s.BlockedTo, s.MoreBlocked = top(refused)
 	}
@@ -164,11 +168,13 @@ func top(m map[netip.Addr]uint64) ([]Dest, int) {
 	return out, len(addrs) - len(out)
 }
 
-// listing reads the firewall table: its named counters' bytes (packets
-// for the Guests connection counter, which counts new connections), and
+// count is one named counter's reading.
+type count struct{ Packets, Bytes uint64 }
+
+// listing reads the firewall table: its named counters, and
 // each counting set's bytes by address. Anything outside the enforcer's
 // table, and any element that is not an address, is skipped.
-func (r *Reader) listing() (map[string]uint64, map[string]map[netip.Addr]uint64, error) {
+func (r *Reader) listing() (map[string]count, map[string]map[netip.Addr]uint64, error) {
 	b, err := r.List()
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrListing, err)
@@ -177,7 +183,7 @@ func (r *Reader) listing() (map[string]uint64, map[string]map[netip.Addr]uint64,
 		Nftables []struct {
 			Counter *struct {
 				Family, Table, Name string
-				Packets, Bytes      uint64
+				count
 			} `json:"counter"`
 			Set *struct {
 				Family, Table, Name string
@@ -188,16 +194,12 @@ func (r *Reader) listing() (map[string]uint64, map[string]map[netip.Addr]uint64,
 	if err := json.NewDecoder(bytes.NewReader(b)).Decode(&doc); err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrListing, err)
 	}
-	counters := map[string]uint64{}
+	counters := map[string]count{}
 	sets := map[string]map[netip.Addr]uint64{}
 	for _, o := range doc.Nftables {
 		switch {
 		case o.Counter != nil && o.Counter.Family == "inet" && o.Counter.Table == nft.Table:
-			if o.Counter.Name == nft.GuestsConns {
-				counters[o.Counter.Name] = o.Counter.Packets
-			} else {
-				counters[o.Counter.Name] = o.Counter.Bytes
-			}
+			counters[o.Counter.Name] = o.Counter.count
 		case o.Set != nil && o.Set.Family == "inet" && o.Set.Table == nft.Table:
 			m := map[netip.Addr]uint64{}
 			for _, raw := range o.Set.Elem {
@@ -223,23 +225,18 @@ func (r *Reader) listing() (map[string]uint64, map[string]map[netip.Addr]uint64,
 }
 
 // Log keeps the refusals the firewall logs for each device, by VLAN: a
-// total and a count per refused address, for at most nft.TrafficSize
-// addresses (the rest only add to the total), over Window. It is fed the
-// kernel's log messages; it is safe for concurrent use.
+// count per refused address, for at most nft.TrafficSize addresses (the
+// rest are not kept), over Window. It is fed the kernel's log messages; it
+// is safe for concurrent use.
 type Log struct {
 	trunk string
 	mu    sync.Mutex
 	start int64
-	vlans map[int]*refusals
-}
-
-type refusals struct {
-	total uint64
-	by    map[netip.Addr]uint64
+	vlans map[int]map[netip.Addr]uint64
 }
 
 // NewLog is a Log for the devices on trunk (nft.Layout.Trunk).
-func NewLog(trunk string) *Log { return &Log{trunk: trunk, vlans: map[int]*refusals{}} }
+func NewLog(trunk string) *Log { return &Log{trunk: trunk, vlans: map[int]map[netip.Addr]uint64{}} }
 
 // Line takes one kernel log message, such as
 // "enf drop IN=ap0.101 OUT=wan0 ... SRC=10.101.0.2 DST=203.0.113.20 ...",
@@ -282,31 +279,21 @@ func (l *Log) Line(msg string, nowMS int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if nowMS-l.start >= Window || nowMS < l.start {
-		l.start, l.vlans = nowMS, map[int]*refusals{}
+		l.start, l.vlans = nowMS, map[int]map[netip.Addr]uint64{}
 	}
-	r := l.vlans[vlan]
-	if r == nil {
-		r = &refusals{by: map[netip.Addr]uint64{}}
-		l.vlans[vlan] = r
+	by := l.vlans[vlan]
+	if by == nil {
+		by = map[netip.Addr]uint64{}
+		l.vlans[vlan] = by
 	}
-	r.total++
-	if _, seen := r.by[addr]; seen || len(r.by) < nft.TrafficSize {
-		r.by[addr]++
+	if _, seen := by[addr]; seen || len(by) < nft.TrafficSize {
+		by[addr]++
 	}
 }
 
-// of is the device on vlan's refusals: the total and a copy of the counts
-// by address.
-func (l *Log) of(vlan int) (uint64, map[netip.Addr]uint64) {
+// of is a copy of the device on vlan's refusals by address.
+func (l *Log) of(vlan int) map[netip.Addr]uint64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r := l.vlans[vlan]
-	if r == nil {
-		return 0, nil
-	}
-	m := make(map[netip.Addr]uint64, len(r.by))
-	for a, n := range r.by {
-		m[a] = n
-	}
-	return r.total, m
+	return maps.Clone(l.vlans[vlan])
 }

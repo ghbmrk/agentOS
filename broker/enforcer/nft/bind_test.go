@@ -12,8 +12,11 @@ import (
 )
 
 var (
-	markSet  = regexp.MustCompile(` ct mark set 0x[0-9a-f]{8}`)
-	markLine = regexp.MustCompile(`^(?:ct direction (original|reply) )?iifname ("[^"]+") oifname ("[^"]+") .*ct mark (?:set )?(0x[0-9a-f]{8}) `)
+	markSet = regexp.MustCompile(` ct mark set 0x[0-9a-f]{8}`)
+	// refusedMap is the refused map's elements, every device's
+	// TrafficRefused, isolated or not.
+	refusedMap = regexp.MustCompile(`(?m)^\s*elements = \{ "[^\n]*_refused" \}$`)
+	markLine   = regexp.MustCompile(`^(?:ct direction (original|reply) )?iifname ("[^"]+") oifname ("[^"]+") .*ct mark (?:set )?(0x[0-9a-f]{8}) `)
 )
 
 // chains splits a compiled ruleset into its chains' rule lines.

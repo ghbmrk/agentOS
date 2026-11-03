@@ -80,6 +80,7 @@ type rule struct {
 	verdict string  // accept, drop, or jump <chain>
 	mark    string  // an accept's connection mark (bind); "" otherwise
 	learn   string  // an accept from a shared segment: the chain that records its host
+	refuse  string  // a logged drop: the refuse chain that counts, logs and drops its first packet
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -125,6 +126,9 @@ func (r rule) first() string {
 	verdict := r.verdict
 	if r.learn != "" {
 		verdict = "goto " + r.learn
+	}
+	if r.refuse != "" {
+		verdict = "goto " + r.refuse
 	}
 	return strings.Join(append(p, verdict), " ")
 }
