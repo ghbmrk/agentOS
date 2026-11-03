@@ -11,10 +11,13 @@ values cannot hold a newline (unit names, enums, paths), so no unit's text can p
 An earlier version parsed `systemd --test`'s dump, and an Environment= value could write a fake unit
 header into that (#4779 Security round 1).
 
-Two limits come from container mode, which keeps PID 1 from acting on the runner. fstab-generator
-skips fstab entries that name a device (callers refuse those in the tree themselves). gpt-auto-generator
-finds no disk. It needs real root on the runner. A runner booted by systemd gives the manager a
-delegated scope of its own.
+The container has its own mount, UTS, IPC, PID, network and cgroup namespaces, a read-only /proc/sys
+and a nodev /dev, so PID 1 cannot set the runner's hostname or a global sysctl. It is still real root
+on the runner, as are the generators it runs; the tree is the build's own. Container mode means some
+generators see a different machine than the box: fstab-generator skips fstab entries that name a device
+(callers refuse those in the tree themselves), and gpt-auto-generator finds no disk. A runner booted by
+systemd gives the manager a delegated scope of its own. The console is a pty, read for the lines PID 1
+logs (failed generators).
 """
 import os
 import pathlib
@@ -24,15 +27,17 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import tty
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import finish_image  # noqa: E402
 
 # The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
-# a mount over it), its own /usr, a private /proc, a /sys with only a cgroup2 tree in its own cgroup
-# namespace, five character devices and a console file, an empty /run, no network. It starts only
+# a mount over it), its own /usr, a private /proc with /proc/sys read-only, a /sys with only a cgroup2
+# tree in its own cgroup namespace, five character devices and a pty as console, an empty /run, no network. It starts only
 # -.slice, which every manager has and which starts nothing. Its argv after --unit= is the boot entry's
 # command line, which systemd in a container reads as the kernel's.
 MANAGER = r'''set -eu
@@ -47,10 +52,11 @@ N=$W/root
 mkdir -p "$N/usr" "$N/proc" "$N/sys" "$N/dev" "$N/run" "$N/tmp"  # the built root partition leaves out /usr
 mount --rbind "$USR" "$N/usr"
 mount -t proc -o nosuid,nodev,noexec proc "$N/proc"
+mount --bind "$N/proc/sys" "$N/proc/sys"; mount -o remount,bind,ro "$N/proc/sys"  # no global sysctl from here
 mount -t tmpfs -o mode=755 tmpfs "$N/sys"
 mkdir -p "$N/sys/fs/cgroup"
 mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
-mount -t tmpfs -o mode=755 tmpfs "$N/dev"
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$N/dev"
 for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
@@ -74,14 +80,23 @@ class Manager:
     kernel command line) under its own running systemd. As root. view_root is the tree as it sees it."""
 
     def __init__(self, root, usr, cmdline, plant=""):
+        # The manager's console is a pty whose other end is drained into self.log. systemd in a container
+        # logs to the console only when it is a terminal (open_terminal refuses a regular file), and that
+        # log is where it says a generator failed.
         self.log = tempfile.NamedTemporaryFile(prefix="offline-systemd-console-")
+        self.err = tempfile.NamedTemporaryFile(prefix="offline-systemd-stderr-")
+        self.master, self.slave = os.openpty()
+        tty.setraw(self.slave)
+        self.drain = threading.Thread(target=self._drain, daemon=True)
+        self.drain.start()
         wrap = []
         if os.path.isdir("/run/systemd/system"):  # a runner booted by systemd: a delegated scope of our own
             wrap = ["systemd-run", "--scope", "--quiet", "-p", "Delegate=yes", "--"]
-        self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-p", "-f", "-n", "-C", "--propagation", "private",
+        self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation",
+                                             "private",
                                              "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant),
-                                             self.log.name] + cmdline.split(),
-                                     stdout=subprocess.DEVNULL, stderr=self.log)
+                                             os.ttyname(self.slave), "--log-target=console"] + cmdline.split(),
+                                     stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
         try:
             self.wait()
@@ -89,6 +104,17 @@ class Manager:
             self.stop()
             raise
         self.view_root = "/proc/%d/root" % self.pid
+
+    def _drain(self):
+        while True:
+            try:
+                data = os.read(self.master, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            self.log.write(data)
+            self.log.flush()
 
     def wait(self, timeout=120):
         end = time.monotonic() + timeout
@@ -109,10 +135,13 @@ class Manager:
         raise SystemExit("offline systemd: the tree's systemd did not start: %s" % self.console())
 
     def console(self):
-        try:
-            return pathlib.Path(self.log.name).read_text(errors="replace")[-3000:]
-        except OSError:
-            return ""
+        out = ""
+        for f in (self.err, self.log):
+            try:
+                out += pathlib.Path(f.name).read_text(errors="replace")[-3000:]
+            except OSError:
+                pass
+        return out
 
     def failed_generators(self):
         """The generators the manager's console says failed, by file name."""
@@ -162,7 +191,14 @@ class Manager:
                 pass
         self.proc.kill()
         self.proc.wait()
+        for fd in (self.slave, self.master):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.drain.join(5)
         self.log.close()
+        self.err.close()
 
 
 def shell_words(value, name):

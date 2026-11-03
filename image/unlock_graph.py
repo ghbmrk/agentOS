@@ -22,8 +22,8 @@ skips in the manager's container mode.
 
 Not modelled here, each a release row: what a reached unit's commands do (a reboot word in an Exec=
 line, #4766), units udev adds from SYSTEMD_WANTS (#4739), and units gpt-auto-generator writes from the
-disk it boots on (#4738). In the build's tree that generator finds no disk and fails, and the allowlist
-names it.
+disk it boots on (#4738). A generator that fails in the check's container is named on the allowlist; the
+manager's console, a pty, is where systemd says so.
 
 Usage (as root): unlock_graph.py OUT VERSION checks build OUT; --allowlist OUT VERSION prints the
 list; --control OUT VERSION requires that each planted path (CONTROLS) is refused."""
@@ -43,9 +43,12 @@ ALLOW = HERE / "mkosi" / "unlock.allow"
 # property systemctl shows for each: those that start it and those that stop it. The rest only order,
 # reference or mirror these. SYSTEMD_MAJOR pins the version they were read from.
 START_KINDS = ("Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure", "Triggers")
-STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "ConsistsOf")
+STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf")
 ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
-PROPS = START_KINDS + STOP_KINDS + ACTIONS + ("LoadState",)
+PROPS = START_KINDS + STOP_KINDS + ACTIONS + ("LoadState", "OnFailureJobMode")
+# A reached unit must load as it would on the box: a not-found unit may be a name whose specifier took the
+# runner's value here (%H, %v, %m). Masked units load nowhere.
+LOADED = ("loaded", "masked")
 SYSTEMD_MAJOR = "257"
 # Starting one of these ends the boot. Stopping one ends nothing, so stop edges to them are not listed
 # (every unit with default dependencies conflicts with shutdown.target and umount.target).
@@ -56,7 +59,8 @@ SHUTDOWN = {"halt.target", "poweroff.target", "reboot.target", "kexec.target", "
 WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)"
 
 def graph(manager, start=UNIT):
-    """{unit: {"edges": [(kind, target)], "actions": [(name, value)]}} for START and every unit it reaches,
+    """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "on_failure_mode":
+    OnFailureJobMode}} for START and every unit it reaches,
     as MANAGER's systemd shows them. A shutdown unit is shown but not walked past."""
     units, todo = {}, [start]
     while todo:
@@ -64,7 +68,8 @@ def graph(manager, start=UNIT):
         todo = []
         for name, p in manager.show(batch, PROPS).items():
             units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS for t in unit_names(name, k, p[k])],
-                           "actions": [(k, p[k]) for k in ACTIONS]}
+                           "actions": [(k, p[k]) for k in ACTIONS], "load": p["LoadState"],
+                           "on_failure_mode": p["OnFailureJobMode"]}
             if name not in SHUTDOWN:
                 todo += [t for k, t in units[name]["edges"] if k in START_KINDS]
     return units
@@ -137,9 +142,17 @@ def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYS
         if u in SHUTDOWN:
             out.append("%s starts %s; %s" % (start, u, WHY))
             continue
-        for name, value in units.get(u, {}).get("actions", ()):
+        if u not in units:
+            continue
+        for name, value in units[u]["actions"]:
             if value != "none":
                 out.append("%s, which %s starts, has %s=%s; %s" % (u, start, name, value, WHY))
+        if units[u]["load"] not in LOADED:
+            out.append("%s, which %s starts, is %s in the check's container, so what it does on the box is unread; "
+                       "%s" % (u, start, units[u]["load"], WHY))
+        if units[u]["on_failure_mode"] == "isolate":
+            out.append("%s, which %s starts, has OnFailureJobMode=isolate, which stops every unit outside its "
+                       "OnFailure= target; %s" % (u, start, WHY))
     have = facts(units, generators, start)
     out += ["%s: not on %s; review it and add the line there" % (f, ALLOW.name) for f in sorted(have - allowed)]
     out += ["%s: on %s but no longer in the graph; remove the line" % (f, ALLOW.name) for f in sorted(allowed - have)]
@@ -183,6 +196,9 @@ CONTROLS = {
     "an alias's drop-in on the unlock unit (Security 6586674844)": {
         "etc/systemd/system/agentos-keeper-.service.d/99-plant.conf": "[Unit]\nBindTo=agentos-plant.service\n",
         "etc/systemd/system/agentos-plant.service": "[Service]\nExecStart=/bin/true\n"},
+    "a generator that writes a unit and fails (L3 6593296481 1)": {
+        "etc/systemd/system-generators/agentos-plant-generator":
+            "#!/bin/sh\necho '[Unit]' >\"$1/agentos-plant.target\"\nexit 3\n"},
 }
 
 
@@ -200,6 +216,8 @@ def plant_tree(root, plant, dst):
         p = pathlib.Path(dst) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
+        if p.parent.name.endswith("-generators"):
+            p.chmod(0o755)
 
 
 def main(argv):

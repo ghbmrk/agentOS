@@ -21,7 +21,8 @@ NONE = [(a, "none") for a in g.ACTIONS]
 
 def graph(spec):
     """graph()'s shape from {unit: ["Kind: target", ...]}."""
-    return {name: {"edges": [tuple(e.split(": ")) for e in edges], "actions": list(NONE)} for name, edges in spec.items()}
+    return {name: {"edges": [tuple(e.split(": ")) for e in edges], "actions": list(NONE), "load": "loaded",
+                   "on_failure_mode": "replace"} for name, edges in spec.items()}
 
 
 SHIPPED = {U: ["Wants: agentos-link.service", "Requires: agentos-keeper.slice"],
@@ -50,7 +51,7 @@ class FakeManager:
         out = {}
         for u in units:
             p = {k: "" for k in props}
-            p.update({a: "none" for a in g.ACTIONS})
+            p.update({a: "none" for a in g.ACTIONS}, LoadState="loaded", OnFailureJobMode="replace")
             for e in self.spec.get(u, ()):
                 k, t = e.split(": ")
                 p[k] = (p[k] + " " + ('"%s"' % t.replace("\\", "\\\\") if "\\" in t else t)).strip()
@@ -87,9 +88,9 @@ class ReachTest(unittest.TestCase):
         acting = set(g.START_KINDS) | set(g.STOP_KINDS)
         self.assertEqual(acting, {"Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure",
                                   "Triggers", "Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy",
-                                  "ConsistsOf"})
+                                  "RequiredBy", "RequisiteOf", "ConsistsOf"})
         self.assertEqual(g.SYSTEMD_MAJOR, "257")
-        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState"})
+        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState", "OnFailureJobMode"})
 
     def test_facts_are_the_units_reached_their_stops_and_failed_generators(self):
         units = graph(SHIPPED)
@@ -135,6 +136,24 @@ class ViolationsTest(unittest.TestCase):
                                                             for a in g.ACTIONS]
                 self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB),
                                  ["agentos-link.service, which %s starts, has %s=reboot-force; %s" % (U, name, g.WHY)])
+
+    def test_a_reached_unit_that_does_not_load_or_isolates_on_failure_is_refused(self):
+        for load in ("not-found", "bad-setting", "error"):
+            with self.subTest(load=load):
+                units = graph(SHIPPED)
+                units["agentos-inbound.service"]["load"] = load
+                self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [
+                    "agentos-inbound.service, which %s starts, is %s in the check's container, so what it does on "
+                    "the box is unread; %s" % (U, load, g.WHY)])
+        units = graph(SHIPPED)
+        units["agentos-inbound.service"]["load"] = "masked"
+        units["agentosd.service"] = dict(units["agentos-inbound.service"], load="not-found")  # not reached
+        self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [])
+        units = graph(SHIPPED)
+        units["agentos-link.service"]["on_failure_mode"] = "isolate"
+        self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [
+            "agentos-link.service, which %s starts, has OnFailureJobMode=isolate, which stops every unit outside "
+            "its OnFailure= target; %s" % (U, g.WHY)])
 
     def test_a_unit_outside_the_list_is_refused_and_a_stale_line_too(self):
         spec = copy(SHIPPED)
@@ -215,7 +234,7 @@ class AllowFileTest(unittest.TestCase):
             self.assertRegex(line, r"^(start \S+|stop \S+ (%s) \S+|generator \S+ failed)$" % "|".join(g.STOP_KINDS))
 
     def test_each_control_is_a_path_a_review_found(self):
-        self.assertEqual(len(g.CONTROLS), 3)
+        self.assertEqual(len(g.CONTROLS), 4)
         first = g.CONTROLS[next(iter(g.CONTROLS))]
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as dst:
             os.makedirs(os.path.join(root, "etc"))
@@ -245,6 +264,8 @@ class HostSystemdTest(unittest.TestCase):
                             symlinks=True)
             shutil.copy(ROOT / "image/mkosi/mkosi.extra/etc/fstab", root / "etc/fstab")
             (root / "etc/machine-id").write_text("0123456789abcdef0123456789abcdef\n")
+            if not pathlib.Path("/usr/lib/systemd/system/tmp.mount").exists():  # Ubuntu drops it; Debian ships it
+                (root / "etc/systemd/system/tmp.mount").write_text("[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n")
             wants = root / "etc/systemd/system" / (U + ".wants")
             wants.mkdir()
             (wants / "agentos-link.service").symlink_to("../agentos-link.service")
@@ -261,6 +282,11 @@ class HostSystemdTest(unittest.TestCase):
                 with self.subTest(name=name), tempfile.TemporaryDirectory() as p:
                     g.plant_tree(root, plant, p)
                     self.assertTrue(g.run(root, "/usr", "ro quiet", base, p, major=major)[2])
+            with tempfile.TemporaryDirectory() as p:
+                g.plant_tree(root, g.CONTROLS["a generator that writes a unit and fails (L3 6593296481 1)"], p)
+                _, generators, v = g.run(root, "/usr", "ro quiet", base, p, major=major)
+                self.assertIn("agentos-plant-generator", generators)
+                self.assertTrue([l for l in v if l.startswith("generator agentos-plant-generator failed")], v)
 
 
 if __name__ == "__main__":
