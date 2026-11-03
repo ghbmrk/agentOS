@@ -51,10 +51,13 @@ var exempt = map[string]string{
 }
 
 // within names the exempt packages, by the same key, that are cut only
-// from the paths of importers under one directory; any other importer
-// reaches os/exec through them and fails the gate (#3754 Security 1).
+// from the paths of importers under the directories it lists (separated
+// by spaces); any other importer reaches os/exec through them and fails
+// the gate (#3754 Security 1). The enforcer's daemon (ENF-l, #3670) is
+// enforcer code outside broker/enforcer, held to the enforcer's imports
+// by arc2_test.go (enforcerMain), so it may run the firewall loader.
 var within = map[string]string{
-	"enforcer/nft/load":      "enforcer",
+	"enforcer/nft/load":      "enforcer cmd/agentos-enforcer",
 	"enforcer/radio/confine": "enforcer",
 }
 
@@ -216,12 +219,17 @@ func gate(t *testing.T, dir, mod string, exempt, within, inPlace map[string]stri
 	cut := func(p string) bool { return p == mod+"/childproc" || exempt[key(p)] != "" }
 	// cutFrom: whether the edge from importer to p is cut.
 	cutFrom := func(importer, p string) bool {
-		d, ok := within[key(p)]
+		ds, ok := within[key(p)]
 		if !ok || !cut(p) {
 			return cut(p)
 		}
 		k := key(importer)
-		return k == d || strings.HasPrefix(k, d+"/")
+		for _, d := range strings.Fields(ds) {
+			if k == d || strings.HasPrefix(k, d+"/") {
+				return true
+			}
+		}
+		return false
 	}
 	imports := map[string][]string{}
 	for _, n := range nodes {
@@ -618,6 +626,8 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"childproc/c.go": childprocFixture,
 		"enf/load/l.go":  "package load\nimport \"os/exec\"\nfunc Load() error { return exec.Command(\"/nft\").Run() }\n",
 		"enf/main/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enf/m.go":   "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"cmd/enfx/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
 		"kernel/k.go":    "package kernel\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
 		"enfx/x.go":      "package enfx\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
 		"enf/via/v.go":   "package via\nimport \"example.com/m/kernel\"\n",
@@ -626,10 +636,11 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"enf/wrap/w.go":  "//go:build sometag\n\npackage wrap\nimport \"example.com/m/enf/load\"\nvar L = load.Load\n",
 		"kernel/zz.go":   "//go:build sometag\n\npackage kernel\nimport _ \"example.com/m/enf/wrap\"\n",
 	})
-	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf"}, nil)
+	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf cmd/enf"}, nil)
 	want := []string{
 		"example.com/m/kernel: reaches os/exec (example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
 		"example.com/m/enfx: reaches os/exec",
+		"example.com/m/cmd/enfx: reaches os/exec",
 		"example.com/m/enf/via: reaches os/exec (example.com/m/enf/via -> example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
 		"example.com/m/tag/u.go (not built): imports example.com/m/enf/load, which reaches os/exec",
 		"example.com/m/enf/wrap/w.go (not built): imports example.com/m/enf/load, which reaches os/exec",
@@ -640,7 +651,7 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		}
 	}
 	for _, g := range got {
-		for _, ok := range []string{"/enf/load", "/enf/main"} {
+		for _, ok := range []string{"/enf/load", "/enf/main", "/cmd/enf"} {
 			if strings.HasPrefix(g, "example.com/m"+ok+":") || strings.HasPrefix(g, "example.com/m"+ok+"/") {
 				t.Errorf("reported, but passes: %s", g)
 			}
