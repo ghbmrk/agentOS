@@ -546,7 +546,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if c.Name, rest, ok = field(rest); !ok {
 		return KernelKeys{}, ErrHandoff
 	}
-	if auth, rest, ok = field(rest); !ok || len(rest) < 2 || c.Handle == 0 {
+	if auth, rest, ok = field(rest); !ok || len(rest) < 10 || c.Handle == 0 { // the least tail: two lengths, two empty keys, a 1-byte slot, no card, no anchors
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: the store has no recipient, so the kernel takes no backup.

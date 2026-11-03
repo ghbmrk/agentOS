@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -107,4 +108,26 @@ func keyShown(secrets [][]byte, vs ...any) bool {
 		}
 	}
 	return shown
+}
+
+// The least hand-off reads: no recipient, authority, link key, first edge
+// key, card or anchors, and a 1-byte slot, so ten bytes follow the counter.
+// One byte fewer, or a zero counter handle, is refused (STO-2a-e).
+func TestTheLeastHandoffReads(t *testing.T) {
+	b, err := KernelKeys{Head: Hide(headPriv), Counter: testCounter(), Slot: "x"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, err := parseKeys(b); err != nil || k.Slot != "x" || len(k.Anchors) != 0 {
+		t.Fatalf("the least hand-off: %v", err)
+	}
+	if _, err := parseKeys(b[:len(b)-1]); !errors.Is(err, ErrHandoff) {
+		t.Errorf("a byte short: %v", err)
+	}
+	h := len(handoffTag) + 32 + ed25519.SeedSize + 32 + 1 + len(testCounter().SRK)
+	zero := bytes.Clone(b)
+	clear(zero[h : h+4])
+	if _, err := parseKeys(zero); !errors.Is(err, ErrHandoff) {
+		t.Errorf("a zero handle: %v", err)
+	}
 }
