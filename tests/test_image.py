@@ -1658,7 +1658,7 @@ class ConfigTest(unittest.TestCase):
             "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
             "mkosi.repart"], why)
         self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
-                         ["mkosi.conf", "mkosi.finalize"], why)
+                         ["mkosi.conf", "mkosi.finalize", "mkosi.postinst"], why)
         # The two configs are held to one strict form, so this test never models mkosi's parser:
         # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
         # (no "@", no space before "="), or an indented continuation while a setting is open (a
