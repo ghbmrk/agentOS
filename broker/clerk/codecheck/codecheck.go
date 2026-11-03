@@ -130,7 +130,7 @@ func (c *Checker) Open(sealer []byte, sign ed25519.PrivateKey, blob []byte) erro
 	defer c.mu.Unlock()
 	clear(c.seed)
 	clear(c.sign)
-	c.seed, c.sign = s.Seed, append(ed25519.PrivateKey(nil), sign...)
+	c.seed, c.sign = s.Seed.Get(), append(ed25519.PrivateKey(nil), sign...)
 	c.last = max(c.last, s.Step)
 	return nil
 }

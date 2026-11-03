@@ -119,7 +119,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	)
 	b.h.With(func(k *kernel.Kernel) error {
 		s := k.State()
-		status, lines, held, pools = s.Status(), s.LineChanges(), s.SpendHeld, s.Pools
+		status, lines, held, pools = s.Status(), s.LineChanges(), s.Held(), s.Pools
 		if s.Changes.Paused[id] || s.Changes.Stopped || s.Plans["o1"].Status != kernel.SCancelled {
 			t.Fatal("unpause, resume or cancel did not land")
 		}
@@ -360,6 +360,8 @@ func TestAWrappedErrorCrossesAsWhatItWraps(t *testing.T) {
 		{fmt.Errorf("%w: %s: %s", kernel.ErrRetryRefused, kernel.CBroken, "detail"), kernel.ErrRetryRefused},
 		{fmt.Errorf("submit: %w", kernel.ErrDuplicatePlan), kernel.ErrDuplicatePlan},
 		{kernel.ErrNotParked, kernel.ErrNotParked},
+		{kernel.ErrNotText, kernel.ErrNotText}, // as the log returns it
+		{fmt.Errorf("append: %w", kernel.ErrNotText), kernel.ErrNotText},
 		{errors.New("kernel: something else"), nil},
 	} {
 		sock := filepath.Join(shortDir(t), "w.sock")
@@ -563,7 +565,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
 		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", win(300, at+1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", win(300, at+1000)) }},
 		{name: "hold", op: "hold", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
-		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().SpendHeld, nil }},
+		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Held(), nil }},
 		{name: "extend", op: "extend", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Extend(ext, "m") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(now(), ext, "m") }},
 		{name: "pause", op: "pause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Pause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Pause(now(), ver.ID()) }},
 		{name: "unpause", op: "unpause", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Unpause(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Unpause(now(), ver.ID()) }},

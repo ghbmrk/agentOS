@@ -299,7 +299,7 @@ func build(t *testing.T) *home {
 	} else {
 		t.Log("no 802.1Q support here: each device VLAN is a veth named as its VLAN interface")
 	}
-	for _, vlan := range []int{101, 102, 103, 104, 105, 106, 107, 108} {
+	for _, vlan := range []int{101, 102, 103, 104, 105, 106, 107, 108, 109} {
 		h.device(ap, vlan)
 	}
 	h.loadFixture()

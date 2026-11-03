@@ -490,7 +490,7 @@ var (
 	gates    = []string{"openRaw", "reopen", "inDir", "fdPath", "checkFD", "rootOpen", "symlink"}
 	gateOnly = map[string]bool{
 		"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Openat": true, "golang.org/x/sys/unix.Fstat": true,
-		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Fstatfs": true,
+		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Fstatfs": true, "golang.org/x/sys/unix.Statx": true,
 		"os.Readlink": true, "(*os.Root).OpenFile": true,
 	}
 )
