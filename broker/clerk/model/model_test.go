@@ -774,3 +774,33 @@ func TestCountRoundsUp(t *testing.T) {
 		}
 	}
 }
+
+// Text the log refuses never shuts the clerk (KRN-1, #4760). A route or pool
+// whose name is not UTF-8 is refused before the provider is called, so no
+// spend is owed under a name the log cannot hold. A reading whose windows the
+// provider named in other text is logged under the text form, two the rewrite
+// merges as one at the higher figure and the later reset. Either way the next
+// call is made. Catches an owed Meter or ReadPool that the log refuses on
+// every retry (ErrNotText), which shut the clerk for good.
+func TestTextTheLogRefusesNeverShutsTheClerk(t *testing.T) {
+	f := &fake{u: model.Usage{Reported: true, In: 1, Out: 1, Pool: &model.PoolReading{Windows: []model.PoolWindow{
+		{Window: "5h\xff", Used: 300, ResetAt: 10_000}, {Window: "5h\xfe", Used: 600, ResetAt: 9_000}}}}}
+	c, k, _ := rig(t, f)
+	c.Routes["api\xff"] = model.Price{InPerM: 1, OutPerM: 1}
+	c.Routes["pooled"] = model.Price{Pool: "codex\xff"}
+	n := len(k.Log().Entries())
+	for _, route := range []string{"api\xff", "pooled"} {
+		if _, err := c.Call(1, "t", route, "hi", 10); !errors.Is(err, kernel.ErrNotText) || f.calls != 0 || len(k.Log().Entries()) != n {
+			t.Fatalf("route %q: %v, %d provider calls, %d entries", route, err, f.calls, len(k.Log().Entries())-n)
+		}
+	}
+	if reply, err := c.Call(2, "t", "plan", "hi", 10); err != nil || reply == "" {
+		t.Fatalf("a reading in other text: %q, %v", reply, err)
+	}
+	if w := k.State().Pools["codex-5h"].Windows["5h�"]; w.Used != 600 || w.ResetAt != 10_000 {
+		t.Fatalf("the merged window: %+v", k.State().Pools["codex-5h"].Windows)
+	}
+	if reply, err := c.Call(3, "t", "api", "hi", 10); err != nil || reply == "" {
+		t.Fatalf("the next call: %q, %v", reply, err)
+	}
+}

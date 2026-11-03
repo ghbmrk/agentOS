@@ -373,6 +373,20 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 	}
 }
 
+// cancel ends plan p, pending or active, for code and detail: a pending plan is never
+// decided, and an active plan's next step, if nothing has sent it, comes off
+// the ledger (cancelUnsent). A step already sent still reconciles (KRN-8).
+func (s *State) cancel(p *PlanState, code, detail string) {
+	if p.Status == SActive {
+		if st := &p.Steps[p.Next]; sendable(st.Phase) {
+			s.cancelUnsent(p, st)
+		}
+	} else if p.Status != SPending {
+		return
+	}
+	p.Status, p.Cancel, p.CancelDetail = SCancelled, code, detail
+}
+
 // State is the log folded: the only input to Decide besides the event.
 type State struct {
 	// The owner's passkeys (D-146): the anchors, the hardware keys; each
@@ -1003,10 +1017,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
-			p.Status, p.Cancel, p.CancelDetail = SCancelled, b.Code, b.Detail
-			if st := &p.Steps[p.Next]; sendable(st.Phase) {
-				s.cancelUnsent(p, st)
-			}
+			s.cancel(p, b.Code, b.Detail)
 		}
 	case TStepHeld:
 		b, err := body[stepHeld](e)

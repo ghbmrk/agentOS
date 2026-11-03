@@ -15,6 +15,22 @@ import (
 	"unicode/utf8"
 )
 
+// asLogged is v as the log holds it: a JSON round trip, which writes text
+// that is not UTF-8 as U+FFFD. A value JSON cannot round-trip is refused with
+// the encoding's own error, so the caller is told why (#4760); text the log
+// rewrites is not an error here, and Append refuses an entry that holds it.
+func asLogged[T any](v T) (T, error) {
+	var out T
+	b, err := json.Marshal(v)
+	if err == nil {
+		err = json.Unmarshal(b, &out)
+	}
+	if err != nil {
+		return out, fmt.Errorf("kernel: the log cannot hold this %T: %w", v, err)
+	}
+	return out, nil
+}
+
 // Signing domains. A log head and a key never verify as one another (KEY-3).
 const (
 	DomainHead  = "agentos.head.v1\x00"
