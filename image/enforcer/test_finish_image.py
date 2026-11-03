@@ -12,6 +12,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("enforcer_finish", HERE / "finish_image.py")
@@ -188,6 +189,71 @@ class Entry(unittest.TestCase):
         self.assertTrue(fi.core.cmdline_violations(ok.rstrip() + " usbcore.authorized_default=1\n", fi.MKOSI_CONF))
         self.assertEqual(fi.core.noexec_violations(ok), [])
         self.assertEqual(fi.core.swap_violations([], ok), [])
+
+
+class Stop(Exception):
+    """Raised where main() would read /usr: every disk-wide check has run by then."""
+
+
+class MainFlow(unittest.TestCase):
+    """main() itself, with mtools and sfdisk stubbed: each check it runs on the disk is wired in,
+    so deleting one (the image-wide key scan, the root check) fails here."""
+
+    def setUp(self):
+        self.d = pathlib.Path(tempfile.mkdtemp())
+        self.core = [key() for _ in range(6)]
+        self.enf = [key() for _ in range(6)]
+        (self.d / "core-root.json").write_text(json.dumps(root_doc(all_roles(self.core))))
+        (self.d / "root.json").write_text(json.dumps(root_doc(all_roles(self.enf))))
+        words = " ".join(fi.core.config_cmdline(fi.MKOSI_CONF))
+        self.entry = "title Debian\nlinux /x/linux\noptions usrhash=%s %s\n" % ("c" * 64, words)
+
+    def disk(self, payload=b""):
+        with open(self.d / "enforcer_1.raw", "wb") as f:
+            f.truncate(32 << 20)
+            f.seek(9 << 20)
+            f.write(os.urandom(512) + payload + os.urandom(512))
+
+    def check_output(self, args, text=False, **_):
+        if args[0] == "mdir" and "-/" in args:
+            out = "::/x/linux\n::/loader/loader.conf\n::/loader/entries/enforcer_1+3.conf\n"
+        elif args[0] == "mdir":
+            out = "::/loader/entries/debian.conf\n"
+        elif args[-1].endswith(".conf"):
+            out = self.entry
+        else:
+            out = "kernel"
+        return out if text else out.encode()
+
+    def main(self, root="root.json"):
+        sub = mock.Mock(check_output=self.check_output, run=mock.Mock())
+        with mock.patch.object(fi, "subprocess", sub), \
+                mock.patch.object(fi.core, "esp_offset", return_value=0), \
+                mock.patch.object(fi.core, "partition_table", return_value={"partitions": []}), \
+                mock.patch.object(fi.core, "secret_violations", return_value=[]), \
+                mock.patch.object(fi.core, "verify_usr", side_effect=Stop):
+            fi.main(str(self.d), "1", str(self.d / root), [str(self.d / "core-root.json")])
+
+    def test_clean_disk_reaches_usr(self):
+        self.disk()
+        with self.assertRaises(Stop):
+            self.main()
+
+    def test_disk_carrying_an_agentos_key_refused(self):
+        for form in (self.core[3], self.core[3].hex().encode(), pem(self.core[3]).encode()):
+            self.disk(form)
+            with self.assertRaises(SystemExit) as e:
+                self.main()
+            self.assertIn("disk carries an agentOS release key", str(e.exception.code))
+
+    def test_root_holding_an_agentos_key_refused(self):
+        self.disk()
+        roles = all_roles(self.enf)
+        roles["targets"] = [self.enf[2], self.core[2]]
+        (self.d / "shared.json").write_text(json.dumps(root_doc(roles)))
+        with self.assertRaises(SystemExit) as e:
+            self.main("shared.json")
+        self.assertIn("is not the enforcer's own", str(e.exception.code))
 
 
 if __name__ == "__main__":
