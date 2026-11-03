@@ -37,6 +37,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,6 +157,21 @@ type Config struct {
 	// nil is Go's monotonic reading since New, which never steps back but
 	// stops while the box is suspended (ENF-d-10).
 	Elapsed func() time.Duration
+	// SendTimeout bounds each write to the core; zero is
+	// DefaultSendTimeout. A core that stops reading fails its connection
+	// instead of holding a caller of Alert or Challenge (#4307).
+	SendTimeout time.Duration
+}
+
+// DefaultSendTimeout is a write's bound when Config.SendTimeout is zero:
+// radio.Host's link timeout (ENF-k-8), a checkpoint, not a measurement.
+const DefaultSendTimeout = 10 * time.Second
+
+// Conn is a connection from the core: a stream the channel can put a
+// write deadline on. The daemon's *tls.Conn and any net.Conn are.
+type Conn interface {
+	io.ReadWriter
+	SetWriteDeadline(time.Time) error
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
@@ -258,8 +274,14 @@ type Channel struct {
 }
 
 type session struct {
-	mu sync.Mutex
-	w  io.Writer
+	mu      sync.Mutex
+	w       Conn
+	timeout time.Duration
+	// stalled is the write error that ended this session's writes: a
+	// write past its deadline may have left part of a frame, so nothing
+	// more is written and every later send returns it at once (#4307).
+	// It is read without mu, so the read loop never waits on a write.
+	stalled atomic.Pointer[error]
 }
 
 // challenge is one device challenge sent to the core.
@@ -280,6 +302,9 @@ func New(cfg Config) (*Channel, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.SendTimeout <= 0 {
+		cfg.SendTimeout = DefaultSendTimeout
 	}
 	if cfg.Elapsed == nil {
 		t0 := time.Now()
@@ -302,7 +327,7 @@ func New(cfg Config) (*Channel, error) {
 // accepted and exporter its wire.ExporterLen bytes under
 // wire.ExporterLabel. It returns when the stream ends or a frame is
 // refused; the daemon then closes the connection.
-func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
+func (c *Channel) Serve(rw Conn, exporter []byte) error {
 	f, err := wire.ReadFrame(rw, wire.ToEnforcer)
 	if err == nil && f.Type != wire.THello {
 		err = wire.ErrType
@@ -329,7 +354,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	// written, and s.mu is held until it is, so no challenge or alert
 	// goes ahead of it. A kernel that has read the enforcer's hello knows
 	// no frame of an earlier connection counts after it (ENF-d-9).
-	s := &session{w: rw}
+	s := &session{w: rw, timeout: c.cfg.SendTimeout}
 	s.mu.Lock()
 	c.mu.Lock()
 	c.session = s
@@ -370,6 +395,11 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 		}
 		if c.cfg.Revoked(c.cfg.Core) {
 			return c.refuse(KindFrame, 0, "the core's channel key is revoked", ErrRevoked)
+		}
+		// A core that stopped reading gets no request acted on whose
+		// answer it could not read; the connection ends.
+		if err := s.failed(); err != nil {
+			return err
 		}
 		out, err := c.handle(s, m)
 		if err != nil {
@@ -584,13 +614,34 @@ func (s *session) send(m wire.Msg) error {
 	return s.write(m)
 }
 
-// write sends m; the caller holds s.mu.
+// failed is the error that stopped s's writes, if any.
+func (s *session) failed() error {
+	if p := s.stalled.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// write sends m within s.timeout; the caller holds s.mu. A write past its
+// deadline stops the session's writes, so a caller queued behind it
+// waits for at most that one write (#4307).
 func (s *session) write(m wire.Msg) error {
+	if err := s.failed(); err != nil {
+		return err
+	}
 	f, err := wire.Encode(wire.ToCore, m)
 	if err != nil {
 		return err
 	}
-	return wire.WriteFrame(s.w, wire.ToCore, f)
+	if err := s.w.SetWriteDeadline(time.Now().Add(s.timeout)); err != nil {
+		s.stalled.Store(&err)
+		return err
+	}
+	err = wire.WriteFrame(s.w, wire.ToCore, f)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		s.stalled.Store(&err)
+	}
+	return err
 }
 
 // Challenge sends a device's challenge to the core and waits for its
