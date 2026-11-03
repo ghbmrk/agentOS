@@ -43,21 +43,32 @@ class Closes(unittest.TestCase):
     def test_every_keyword_form(self):
         for kw in ("Closes #", "closed #", "close #", "Fixes #", "fix #", "fixed #", "Resolves #", "resolve #",
                    "resolved #", "Closes: #", "closes ghbmrk/agentOS#"):
-            body = f"{kw}12\n\n- #12 retry half: later\n"
+            body = f"{kw}12\n\n- #12 retry half: deferred\n"
             self.assertEqual(len(claims.closes(body)), 1, kw)
 
     def test_every_deferral_word(self):
-        for word in ("deferred", "defers", "later", "follow-up", "followup", "follow up", "remaining",
-                     "out of scope", "left for", "postponed", "not in this PR", "TODO"):
+        for word in ("deferred", "defers", "out of scope", "left for", "postponed", "not in this PR", "TODO",
+                     "in a later PR", "for a later package", "until the later round", "later PRs"):
             self.assertEqual(len(claims.closes(f"Closes #12\n\n#12's cap is {word}.\n")), 1, word)
+
+    def test_ordinary_english_passes(self):
+        # L3 on #4913: five of the 100 latest bodies used "later" as plain English; #4536 and #4107
+        # call the closed issues themselves "follow-ups".
+        for line in ("G1-e2e-later-fu8 (#12) runs the boot test.", "#12: a later header is refused.",
+                     "#12 meant a timer could log later.", "Under #12 any later one are refused.",
+                     "#12 stops a later failure.", "#12 has two remaining steps, both here.",
+                     "ENF-d follow-ups (#12) and the cap follow-up, one package.", "x-deferred-y #12", "G1-e2e-deferred (#12) runs."):
+            self.assertEqual(claims.closes(f"Closes #12\n\n{line}\n"), [], line)
 
     def test_same_line_close_and_deferral(self):
         self.assertEqual(len(claims.closes("Closes #12 (its cap is deferred)\n")), 1)
         self.assertEqual(claims.closes("Closes #12 (its cap is deferred to #13)\n"), [])
 
     def test_negated_deferral_passes(self):
-        for text in ("nothing deferred", "no follow-up", "none remaining", "not later"):
+        for text in ("nothing deferred", "no TODO", "none deferred", "not deferred"):
             self.assertEqual(claims.closes(f"Closes #12; {text} for #12.\n"), [], text)
+        # The negation must sit just before the word, not anywhere earlier on the line.
+        self.assertEqual(len(claims.closes("Closes #12\n\nNo API change; the #12 cap is deferred.\n")), 1)
 
     def test_another_closed_issue_is_not_a_follow_up_for_itself(self):
         problems = claims.closes("Closes #12\nCloses #13\n\nDeferred: the #12 cap and the #13 cap.\n")
@@ -72,6 +83,11 @@ class Closes(unittest.TestCase):
     def test_code_and_comments_are_not_read(self):
         self.assertEqual(claims.closes("Closes #12\n\n```\n#12 deferred\n```\n<!-- #12 later -->\n"), [])
         self.assertEqual(claims.closes("<!-- Closes #12 -->\n#12 deferred\n"), [])
+        # A fence closes: a deferral after a code block is read.
+        self.assertEqual(len(claims.closes("Closes #12\n\n```\ncode\n```\n#12 deferred\n")), 1)
+
+    def test_word_before_hash_is_not_an_issue(self):
+        self.assertEqual(claims.closes("Closes #12\n\nx#12 deferred\n"), [])
 
     def test_line_numbers_survive_comments(self):
         problems = claims.closes("<!--\nx\n-->\nCloses #12\n#12 deferred\n")
@@ -89,6 +105,11 @@ class Closes(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(claims.main(["closes", "--body", str(body)]), rc, out.getvalue())
                 self.assertIn("claims: ", out.getvalue())
+            summary = pathlib.Path(tmp, "summary.md")
+            body.write_text(INCIDENT)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(claims.main(["closes", "--body", str(body), "--markdown", str(summary)]), 1)
+            self.assertIn("## Closing keywords (REV-PROOF-claims)\n\n**Fail:**\n- body line 6:", summary.read_text())
 
 
 if __name__ == "__main__":

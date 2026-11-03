@@ -2,16 +2,21 @@
 """Claims in a PR body that a tool can check, checked (REV-PROOF-claims, #4909).
 
   closes   a body that says `Closes #N` (or Fixes, Resolves, in any of GitHub's forms) and,
-           on another line or the same one, defers part of #N (a line with a deferral word, such
-           as deferred, later, follow-up, remaining, out of scope, that names #N) fails, unless
-           that line also names a follow-up issue (an `#M` the body does not close). Merging would close #N with
-           its deferred part on no open issue (#2623 closed #2619 so).
+           on another line or the same one, defers part of #N (a line with deferral phrasing,
+           such as deferred, left for, out of scope, not in this PR, or "later" only as "in a later
+           PR", that names #N) fails, unless that line also names a follow-up issue
+           (an `#M` the body does not close). Merging would close #N with its deferred part on no
+           open issue (#2623 closed #2619 so).
 
 Fenced code blocks and HTML comments are not read. A deferral word just after "no", "not",
-"nothing" or "none" ("nothing deferred") does not count.
+"nothing" or "none" ("nothing deferred") does not count; nor does one inside an identifier
+("G1-e2e-later-fu8"). Plain "later" ("a later header") and "remaining" are ordinary English, and "follow-ups" often
+names the closed issues themselves ("ENF-d follow-ups (#3759)", #4536), so none of them count.
 
 Usage:
-  tools/claims.py closes --body FILE    exit 0 pass, 1 a deferred part of a closed issue with no follow-up
+  tools/claims.py closes --body FILE [--markdown FILE]
+      exit 0 pass, 1 a deferred part of a closed issue with no follow-up; --markdown also appends
+      the result to FILE (the job summary)
 """
 import argparse
 import pathlib
@@ -20,8 +25,9 @@ import sys
 
 CLOSE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:[\w.-]+/[\w.-]+)?#(\d+)(?!\d)")
 ISSUE = re.compile(r"(?<![\w&/])(?:[\w.-]+/[\w.-]+)?#(\d+)(?!\d)")
-DEFER = re.compile(r"(?i)\b(?:defer(?:s|red|ring)?|later|follow[- ]?ups?|remaining|out of scope|left for|"
-                   r"postponed?|not in this pr|todo)\b")
+LATER_ITEM = r"(?:prs?|pull requests?|packages?|rows?|changes?|rounds?|builds?)"
+DEFER = re.compile(r"(?i)(?<![\w-])(?:defer(?:s|red|ring)?|out of scope|left for|postponed?|"
+                   rf"not in this pr|todo|(?:in|to|for|until) (?:a |the )?later {LATER_ITEM}|later {LATER_ITEM})(?![\w-])")
 NEGATION = re.compile(r"(?i)\b(?:no|not|nothing|none)\s+$")
 FENCE = re.compile(r"^\s*(```|~~~)")
 
@@ -62,14 +68,17 @@ def closes(body):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("closes")
+    c = sub.add_parser("closes", help="a closed issue's deferred part names a follow-up issue")
     c.add_argument("--body", required=True, help="file holding the PR body")
+    c.add_argument("--markdown", help="also append the result to this file")
     a = ap.parse_args(argv)
     problems = closes(pathlib.Path(a.body).read_text())
-    for p in problems:
-        print(f"claims: {p}")
-    if not problems:
-        print("claims: pass")
+    text = "".join(f"claims: {p}\n" for p in problems) or "claims: pass\n"
+    print(text, end="")
+    if a.markdown:
+        with open(a.markdown, "a") as f:
+            f.write("\n## Closing keywords (REV-PROOF-claims)\n\n" + ("**Fail:**\n" if problems else "**Pass.**\n")
+                    + "".join(f"- {p}\n" for p in problems))
     return 1 if problems else 0
 
 

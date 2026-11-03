@@ -42,13 +42,17 @@ it (REV-PROOF-claims, #4909): `measure --sentence BASE HEAD --pr N` prints the o
 `claims` fails a PR that adds such a decision (a DECISIONS.md row or a decisions/D-*.md file whose
 ID the base lacks, citing D-159 and saying "trusted-core growth") unless every sentence in it is
 this tool's output for the PR it names, measured from that PR head's merge base with the base
-tree's commit to the head. A decision naming `PR #N` first needs a sentence for #N. Rows #4862
+tree's commit to the head. Every `PR #N` a decision names needs a sentence for #N, and a PR
+already merged into the base fails (its measure would read +0). BASE is the merge base:
+  git fetch origin pull/N/head && tools/trusted_base.py measure --sentence \\
+      "$(git merge-base origin/main FETCH_HEAD)" FETCH_HEAD --pr N Rows #4862
 hand-wrote "no new linked packages" over a measured +1; text the tool computes is not typed.
 
 Usage:
   tools/trusted_base.py measure [--tree DIR]       print one tree's measure; exit 1 if a package is unclassified
   tools/trusted_base.py measure --sentence BASE HEAD --pr N [--tree REPO]
-      print the canonical measure sentence for the commits BASE and HEAD of the repository at REPO
+      print the canonical measure sentence for the commits BASE (the PR head's merge base with
+      origin/main) and HEAD (the PR head) of the repository at REPO
   tools/trusted_base.py claims --base-tree DIR --head-tree DIR --repo REPO [--onto REV] [--fetch REMOTE] [--markdown FILE]
       check the measure sentences of the D-159 decisions the head adds; each named PR's head is
       refs/remotes/pr/<N> in REPO (fetched from REMOTE's refs/pull/<N>/head with --fetch). Exit 0
@@ -451,23 +455,38 @@ def growth_claims(base_tree, head_tree):
     return out
 
 
+class Merged(Exception):
+    """The PR a sentence names has already merged into the base, so it has no growth left to measure."""
+
+
+COMMAND = "tools/trusted_base.py measure --sentence {base} {head} --pr {pr}"
+FETCH_COMMAND = ('git fetch origin pull/{pr}/head && tools/trusted_base.py measure --sentence'
+                 ' "$(git merge-base origin/main FETCH_HEAD)" FETCH_HEAD --pr {pr}')
+
+
 def check_claims(claims, expected):
-    """Problems with the claims' measure sentences; `expected(pr)` gives the tool's sentence."""
+    """Problems with the claims' measure sentences. `expected(pr)` gives the tool's sentence and the
+    command that prints it, or raises Merged. Every `PR #N` a decision names needs a sentence."""
     problems = []
     for where, ident, text in claims:
-        prs = [int(m.group(1)) for m in SENTENCE_PR.finditer(text)]
-        first = NAMED_PR.search(text)
+        prs = {int(m.group(1)) for m in SENTENCE_PR.finditer(text)}
         if not prs:
             problems.append(f"{where} ({ident}): records trusted-core growth under D-159 but has no measure sentence;"
-                            " paste `tools/trusted_base.py measure --sentence BASE HEAD --pr N`")
-        elif first and int(first.group(1)) not in prs:
-            problems.append(f"{where} ({ident}): names PR #{first.group(1)} but has no measure sentence for it")
+                            " paste the output of `" + FETCH_COMMAND.format(pr="<N>") + "`")
+        for named in sorted({int(m.group(1)) for m in NAMED_PR.finditer(text)} - prs):
+            problems.append(f"{where} ({ident}): names PR #{named} but has no measure sentence for it;"
+                            " paste the output of `" + FETCH_COMMAND.format(pr=named) + "`")
         for m in SENTENCE_PR.finditer(text):
-            want = expected(int(m.group(1)))
+            pr = int(m.group(1))
+            try:
+                want, command = expected(pr)
+            except Merged as e:
+                problems.append(f"{where} ({ident}): {e}")
+                continue
             if not (text.startswith(want, m.start()) and SENTENCE_END.match(text, m.start() + len(want))):
                 got = text[m.start():].split("\n", 1)[0][:len(want) + 40]
                 problems.append(f"{where} ({ident}): the measure sentence is not the tool's output;"
-                                f" want `{want}`, got `{got}`")
+                                f" want `{want}` (from `{command}`), got `{got}`")
     return problems
 
 
@@ -480,8 +499,16 @@ def run_claims(base_tree, head_tree, repo, onto="HEAD", fetch=None):
             ref = f"refs/remotes/pr/{pr}"
             if fetch:
                 git(repo, "fetch", "-q", "--no-tags", fetch, f"+refs/pull/{pr}/head:{ref}")
-            head = commit_of(repo, ref)
-            cache[pr] = sentence(repo, git(repo, "merge-base", commit_of(repo, onto), head), head, pr)
+            head, base_tip = commit_of(repo, ref), commit_of(repo, onto)
+            base = git(repo, "merge-base", base_tip, head)
+            if base == head:
+                # Merged (or never ahead): the measure would read +0 and "none", the #4862 claim.
+                cache[pr] = Merged(f"PR #{pr}'s head {head[:7]} is already in the base; record its measure"
+                                   " before it merges")
+            else:
+                cache[pr] = (sentence(repo, base, head, pr), COMMAND.format(base=base[:12], head=head[:12], pr=pr))
+        if isinstance(cache[pr], Merged):
+            raise cache[pr]
         return cache[pr]
 
     problems = check_claims(claims, expected)
@@ -563,6 +590,9 @@ def main(argv=None):
             problems, text = run_check(a.base_tree, a.head_tree, body, pr=a.pr)
     except (MeasureError, OSError, ValueError) as e:
         print(f"trusted_base: {e}", file=sys.stderr)
+        if a.cmd in ("check", "claims") and a.markdown:
+            with open(a.markdown, "a") as f:
+                f.write(f"\n**Error ({a.cmd}):** {e}\n")
         return 2
     print(text, end="")
     if a.cmd in ("check", "claims") and a.markdown:

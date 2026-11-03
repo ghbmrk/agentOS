@@ -66,4 +66,4 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/claims-body.txt"
-          python3 -I tools/claims.py closes --body "$RUNNER_TEMP/claims-body.txt"
+          python3 -I tools/claims.py closes --body "$RUNNER_TEMP/claims-body.txt" --markdown "$GITHUB_STEP_SUMMARY"
