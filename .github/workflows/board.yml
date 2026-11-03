@@ -29,7 +29,7 @@ concurrency:
 jobs:
   render:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -72,7 +72,7 @@ jobs:
   commit:
     needs: render
     if: needs.render.outputs.rendered == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
     # only, so branch workflows cannot read it (decision #1769).
