@@ -295,7 +295,10 @@ def lane_gate_problems(text, pinned=LANE_GATE_LINES):
 RUNNER = "ubuntu-24.04"
 PLAIN_KEY = re.compile(r"([A-Za-z0-9_-]+):")
 # YAML breaks lines at \r, NEL, LS and PS too; a tab or other control character has no place here.
-NOT_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f  ﻿]")
+NOT_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+# Only the ASCII space separates or indents: Python's strip() and \s also take U+00A0, U+3000
+# and the like, which YAML reads as part of a scalar (Security and L3 on #4820).
+SP = " "
 
 
 def workflow_runners(text):
@@ -304,29 +307,31 @@ def workflow_runners(text):
     No YAML library is in CI's Python, and one that reads YAML 1.1 differs from GitHub's reader,
     so a library would add a parser GitHub does not share. This reads only the subset the
     workflows use: a top-level `jobs:` block mapping whose jobs are block mappings of plain keys
-    at two and four spaces. Any other form there (flow mapping, quoted or escaped key, `?` key,
-    anchor, alias, tag, merge key, odd indent, a value continued on the next line) is a problem,
-    so a key GitHub reads as runs-on cannot hide from this reader.
+    at two and four spaces. Any other form at those two levels (flow mapping, quoted or escaped
+    key, `?` key, anchor, alias, tag or merge key on a job or job key, odd indent), a runs-on
+    value continued on the next line, and any runs-on value but RUNNER are problems, so a key
+    GitHub reads as runs-on cannot hide from this reader.
     """
     problems = []
-    if NOT_TEXT.search(text):
-        problems.append("a control character, tab or YAML line break other than \\n")
-    lines = [l for l in text.split("\n") if l.strip() and not l.lstrip().startswith("#")]
+    for n, l in enumerate(text.split("\n"), 1):
+        if NOT_TEXT.search(l):
+            problems.append("line %d: a control character, tab or YAML line break other than \\n" % n)
+    lines = [l for l in text.split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
     top = {}
     for i, l in enumerate(lines):
-        m = None if l[0].isspace() else PLAIN_KEY.match(l)
+        m = None if l[0] == SP else PLAIN_KEY.match(l)
         if m:
             top.setdefault(m.group(1), []).append(i)
-        elif not l[0].isspace():
+        elif l[0] != SP:
             problems.append("top-level line %r is not a plain key" % l)
     problems += ["top-level key %r appears %d times" % (k, len(v)) for k, v in top.items() if len(v) > 1]
     starts = top.get("jobs", [])
-    if len(starts) != 1 or lines[starts[0]].rstrip() != "jobs:":
+    if len(starts) != 1 or lines[starts[0]].rstrip(SP) != "jobs:":
         return {}, problems + ["needs one block `jobs:`"]
     jobs, job, key = {}, None, None
     for l in lines[starts[0] + 1:]:
-        indent = len(l) - len(l.lstrip(" "))
-        body = re.split(r"\s+#", l.strip(), maxsplit=1)[0]
+        indent = len(l) - len(l.lstrip(SP))
+        body = re.split(r" +#", l.strip(SP), maxsplit=1)[0]
         if indent == 0:
             break
         if indent == 2:
@@ -338,7 +343,7 @@ def workflow_runners(text):
             job, key = m.group(1), None
             jobs[job] = []
         elif indent == 4 and job:
-            m = re.fullmatch(r"([A-Za-z0-9_-]+):(?:\s+(.*))?", body)
+            m = re.fullmatch(r"([A-Za-z0-9_-]+):(?: +(.*))?", body)
             if not m:
                 problems.append("%s: line %r is not a plain key" % (job, l))
                 key = None
@@ -450,7 +455,7 @@ class WorkflowTest(unittest.TestCase):
             "ubuntu-latest": (job, "    runs-on: ubuntu-latest\n"),
             "another release": (job, "    runs-on: ubuntu-26.04\n"),
             "arm": (job, "    runs-on: ubuntu-24.04-arm\n"),
-            "non-ASCII digit": (job, "    runs-on: ubuntu-2٤.04\n"),
+            "non-ASCII digit": (job, "    runs-on: ubuntu-2\u0664.04\n"),
             "quoted value": (job, "    runs-on: 'ubuntu-24.04'\n"),
             "matrix": (job, "    runs-on: ${{ matrix.os }}\n"),
             "list": (job, "    runs-on: [self-hosted, linux]\n"),
@@ -470,15 +475,26 @@ class WorkflowTest(unittest.TestCase):
             "keys at six": (head, "\n  checks:\n      runs-on: self-hosted\n"),
             "keys at three": (head, "\n  checks:\n   runs-on: self-hosted\n"),
             "reusable workflow": (head, "\n  checks:\n    uses: other/repo/.github/workflows/x.yml@v1\n"),
-            "carriage return": (job, "    # pinned\r    runs-on: self-hosted\n"),
-            "line separator": (job, "    # pinned     runs-on: self-hosted\n"),
             "tab": (job, "    runs-on:\tubuntu-24.04\n"),
+            "no-break space after the value": (job, "    runs-on: ubuntu-24.04\u00a0\n"),
+            "ideographic space after the value": (job, "    runs-on: ubuntu-24.04\u3000\n"),
+            "ideographic space before a job key": (job, job + "\u3000   runs-on: self-hosted\n"),
+            "no-break space separator": (job, "    runs-on:\u00a0ubuntu-24.04\n"),
             "second jobs": ("\njobs:\n", "\njobs: {}\njobs:\n"),
             "document marker": ("\njobs:\n", "\n---\njobs:\n"),
         }
         for name, (old, new) in edits.items():
             with self.subTest(name):
                 self.assertTrue(workflow_runners(text.replace(old, new, 1))[1], name)
+        # A line break YAML honours hides a second runs-on in what reads here as a comment; the job
+        # keeps its pinned runs-on, so only the break character can fail it.
+        for name, brk in (("carriage return", "\r"), ("next line", "\x85"), ("line separator", "\u2028"),
+                          ("paragraph separator", "\u2029")):
+            with self.subTest(name):
+                jobs, problems = workflow_runners(text.replace(job, job + "    # pinned" + brk + "    runs-on: self-hosted\n", 1))
+                self.assertEqual(jobs["checks"], [RUNNER])
+                self.assertTrue(problems)
+                self.assertTrue(all("YAML line break" in p for p in problems), problems)
         jobs, problems = workflow_runners(text.replace(job, "    runs-on: ubuntu-24.04  # pinned\n", 1))
         self.assertEqual((problems, jobs["checks"]), ([], [RUNNER]))
 
