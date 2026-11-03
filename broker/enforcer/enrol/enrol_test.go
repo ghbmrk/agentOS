@@ -798,6 +798,35 @@ func TestStoreFailureKeepsCard(t *testing.T) {
 	}
 }
 
+// TestFailureAfterPasskeySaved (NET-4, HW-10; #4388 item 2, L3 on
+// #4893): once the passkey is saved, a later failure inside the policy
+// hand-over (here the second save) is not an enrolment failure: the owner
+// gets the recovery code and the card, the passkey is in force and the
+// enrolment is texted, and after a restart the policy waits for its Keep.
+// Catches an answer of "not enrolled" with the only recovery code unshown.
+func TestFailureAfterPasskeySaved(t *testing.T) {
+	g := newRig(t)
+	a := newAuthenticator(t)
+	g.bs.failAt = g.bs.n + 2 // the passkey's save lands, the policy pointer's fails
+	res, err := g.enrol(a, caseCode)
+	if err != nil || len(res.Recovery) != CodeLen || res.Card.SSID != "Home" || g.b.Owner() != a.Public() {
+		t.Fatalf("passkey saved but: %+v %v owner %v", res, err, g.b.Owner())
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.Enrolment}) {
+		t.Fatalf("alerts %v", g.alerts.raised)
+	}
+	g.reopen()
+	if g.b.Owner() != a.Public() {
+		t.Fatal("passkey lost on restart")
+	}
+	if err := g.keep(a, 1); err != nil && !errors.Is(err, ErrKept) {
+		t.Fatalf("keep after restart: %v", err)
+	}
+	if !g.b.Kept() {
+		t.Fatal("policy not the passkey's after its Keep")
+	}
+}
+
 // TestCardFollowsState (HW-10; #4388 item 3): only the first enrolment
 // replaces the setup network; an enrolment after a factory reset finds
 // the Owner network already in place, and says so.

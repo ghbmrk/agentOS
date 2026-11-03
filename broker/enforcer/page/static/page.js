@@ -96,9 +96,13 @@ document.addEventListener("DOMContentLoaded", () => {
     try { shown(await enrol(ef.elements.code.value, ef.dataset.rp)); say(""); }
     catch (err) {
       if (err.body && err.body.network) {
-        // Nothing enrolled, but the setup Wi-Fi is already gone.
+        // Nothing enrolled; the card shows, with its words, whether the
+        // setup Wi-Fi is already gone (a first enrolment) or not (after a
+        // reset).
         shown({ network: err.body.network });
-        say("Not enrolled: " + err.message + ". Save the network below, join it, open this page again and enrol with the same code.");
+        say("Not enrolled: " + err.message + (err.body.network.setup_replaced
+          ? ". Save the network below, join it, open this page again and enrol with the same code."
+          : ". Try again with the same code."));
         return;
       }
       say("Not enrolled: " + err.message); btn.disabled = false;
