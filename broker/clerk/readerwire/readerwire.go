@@ -263,10 +263,12 @@ func Listen(path string, mailUID int) (net.Listener, error) {
 // ErrRefused) and a reply over MaxReply too-large: never with the model's
 // text.
 func Serve(ln net.Listener, model Ask) error {
-	return serve(ln, model, serveTimeout)
+	return serve(ln, model, serveTimeout, time.Sleep)
 }
 
-func serve(ln net.Listener, model Ask, timeout time.Duration) error {
+// serve is Serve with the connection deadline and the accept loop's sleep
+// given, so a test can see the backoff.
+func serve(ln net.Listener, model Ask, timeout time.Duration, sleep func(time.Duration)) error {
 	slots := make(chan struct{}, maxConns)
 	wait := acceptBackoffMin
 	for {
@@ -275,7 +277,7 @@ func serve(ln net.Listener, model Ask, timeout time.Duration) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			time.Sleep(wait)
+			sleep(wait)
 			wait = min(wait+wait, acceptBackoffMax)
 			continue
 		}

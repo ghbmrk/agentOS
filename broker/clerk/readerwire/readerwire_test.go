@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,7 +69,7 @@ func reader(t *testing.T, model Ask, timeout time.Duration) string {
 	path := sock(t)
 	ln, err := Listen(path, os.Getuid())
 	must(t, err)
-	go serve(ln, model, timeout)
+	go serve(ln, model, timeout, time.Sleep)
 	t.Cleanup(func() { ln.Close() })
 	return path
 }
@@ -625,8 +626,11 @@ var timeUnits = map[string]bool{"Nanosecond": true, "Microsecond": true,
 // the package's non-test files) that lacks a record in rec's bounds rows: a
 // constant not named in backticks in one of those rows (a mention in any
 // other row or in prose does not count), and any number other than 0 or 1,
-// or any time unit, written outside a const declaration, since such a bound
-// has no name to record.
+// any rune but the frame's newline, or any time unit, written outside a
+// const declaration, since such a bound has no name to record. The time
+// package must be imported by its own name, so its units are seen. Only the
+// frame's own names, readerwire.go's package-level version and opRead, are
+// exempt.
 func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	t.Helper()
 	var rows strings.Builder
@@ -644,6 +648,17 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	for name, src := range srcs {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		must(t, err)
+		for _, im := range f.Imports {
+			if im.Path.Value == `"time"` && im.Name != nil {
+				out = append(out, fmt.Sprintf("%s: time imported as %s: import it by its own name", fset.Position(im.Pos()), im.Name.Name))
+			}
+		}
+		frame := map[ast.Decl]bool{}
+		if name == "readerwire.go" {
+			for _, d := range f.Decls {
+				frame[d] = true
+			}
+		}
 		ast.Inspect(f, func(node ast.Node) bool {
 			switch x := node.(type) {
 			case *ast.GenDecl:
@@ -652,7 +667,7 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 				}
 				for _, sp := range x.Specs {
 					for _, id := range sp.(*ast.ValueSpec).Names {
-						if id.Name == "version" || id.Name == "opRead" {
+						if frame[x] && (id.Name == "version" || id.Name == "opRead") {
 							continue // the frame's own names, not bounds
 						}
 						n++
@@ -663,7 +678,8 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 				}
 				return false // a const's own literals are what it names
 			case *ast.BasicLit:
-				if (x.Kind == token.INT || x.Kind == token.FLOAT || x.Kind == token.IMAG) && x.Value != "0" && x.Value != "1" {
+				num := x.Kind == token.INT || x.Kind == token.FLOAT || x.Kind == token.IMAG
+				if num && x.Value != "0" && x.Value != "1" || x.Kind == token.CHAR && x.Value != `'\n'` {
 					out = append(out, fmt.Sprintf("%s: the literal %s is a bound with no name: make it a recorded constant", fset.Position(x.Pos()), x.Value))
 				}
 			case *ast.SelectorExpr:
@@ -683,12 +699,18 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 // packageSources reads every non-test Go file in the package.
 func packageSources(t *testing.T) map[string]string {
 	t.Helper()
-	ents, err := os.ReadDir(".")
+	return goSources(t, ".")
+}
+
+// goSources reads every non-test Go file in dir.
+func goSources(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
 	must(t, err)
 	srcs := map[string]string{}
 	for _, e := range ents {
 		if name := e.Name(); strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
-			b, err := os.ReadFile(name)
+			b, err := os.ReadFile(filepath.Join(dir, name))
 			must(t, err)
 			srcs[name] = string(b)
 		}
@@ -712,6 +734,56 @@ func TestEveryBoundIsRecorded(t *testing.T) {
 		t.Error(p)
 	}
 }
+
+// TestEveryNonTestFileIsRead: the check reads each non-test Go file in the
+// directory, and no test file or other file.
+func TestEveryNonTestFileIsRead(t *testing.T) {
+	d := t.TempDir()
+	for _, n := range []string{"a.go", "b.go", "c_test.go", "notes.md"} {
+		must(t, os.WriteFile(filepath.Join(d, n), []byte("package readerwire\n"), 0o600))
+	}
+	var got []string
+	for n := range goSources(t, d) {
+		got = append(got, n)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"a.go", "b.go"}) {
+		t.Fatalf("read %q, want a.go and b.go", got)
+	}
+}
+
+// TestAcceptBackoff: a failed accept sleeps acceptBackoffMin, then twice the
+// last sleep up to acceptBackoffMax, and a successful accept starts it over.
+// REQ: RES-5
+func TestAcceptBackoff(t *testing.T) {
+	fail := errors.New("accept: too many open files")
+	ms := time.Millisecond
+	ln := &scriptedListener{steps: []error{fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, nil, fail, fail, net.ErrClosed}}
+	var slept []time.Duration
+	model := func(context.Context, string) (string, error) { return "", nil }
+	must(t, serve(ln, model, time.Second, func(d time.Duration) { slept = append(slept, d) }))
+	want := []time.Duration{5 * ms, 10 * ms, 20 * ms, 40 * ms, 80 * ms, 160 * ms, 320 * ms, 640 * ms, time.Second, time.Second, 5 * ms, 10 * ms}
+	if !slices.Equal(slept, want) {
+		t.Fatalf("slept %v, want %v", slept, want)
+	}
+}
+
+// scriptedListener answers each Accept with its next step: that error, or
+// for nil a connection whose peer has already hung up.
+type scriptedListener struct{ steps []error }
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	err := l.steps[0]
+	l.steps = l.steps[1:]
+	if err != nil {
+		return nil, err
+	}
+	c, peer := net.Pipe()
+	peer.Close()
+	return c, nil
+}
+func (l *scriptedListener) Close() error   { return nil }
+func (l *scriptedListener) Addr() net.Addr { return nil }
 
 // TestTheBoundsRecordCatchesEachGap: each gap #4849 names fails the check,
 // starting from the package as it stands.
@@ -759,6 +831,20 @@ func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
 			[]string{"extra.go:6:13: the literal 5", "extra.go:6:17: time.Millisecond", "extra.go:7:22: the literal 4096"}},
 		{"a time unit alone", withFile("extra.go", "package readerwire\n\nimport \"time\"\n\nvar wait = time.Second\n"), rec,
 			[]string{"extra.go:5:12: time.Second"}},
+		{"time under another name", withFile("extra.go", "package readerwire\n\nimport tm \"time\"\n\nvar wait = tm.Second\n"), rec,
+			[]string{"extra.go:3:8: time imported as tm"}},
+		{"time dot-imported", withFile("extra.go", "package readerwire\n\nimport . \"time\"\n\nvar wait = Second\n"), rec,
+			[]string{"extra.go:3:8: time imported as ."}},
+		{"a bound written as a rune", withFile("extra.go", "package readerwire\n\nvar buf = make([]byte, 'A')\n"), rec,
+			[]string{"extra.go:3:24: the literal 'A'"}},
+		{"a bound written as a float", withFile("extra.go", "package readerwire\n\nvar f = 1.5\n"), rec,
+			[]string{"extra.go:3:9: the literal 1.5"}},
+		{"a doubling written as 2", withFile("extra.go", "package readerwire\n\nfunc f(d int) int { return 2 * d }\n"), rec,
+			[]string{"extra.go:3:28: the literal 2"}},
+		{"a cap named version inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst version = 4096\n\treturn version\n}\n"), rec,
+			[]string{"the bound version has no record"}},
+		{"no constants at all", map[string]string{"readerwire.go": "package readerwire\n"}, rec,
+			[]string{"no bounds found"}},
 		{"no bounds rows", packageSources(t), strings.ReplaceAll(rec, boundsRow, "| RES-5-other-"),
 			[]string{"ASSUMPTIONS.md has no RES-5-readerwire-maxconns- row"}},
 	}
