@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"errors"
 	"math"
 	"time"
 )
@@ -19,8 +20,8 @@ import (
 // clerk, never from a planner.
 type Outcome struct {
 	Clerk string
-	// Step is the effect's log ID; a second correction of one step
-	// counts once.
+	// Step is the effect's log ID, required: each step's effect and its
+	// correction count once.
 	Step string
 	// Ran is when the effect ran; it places the effect in the window.
 	Ran time.Time
@@ -28,7 +29,8 @@ type Outcome struct {
 	// effect failed or unconfirmed (OWN-13).
 	Flagged bool
 	// Corrected: this record is the owner's correction of the effect (an
-	// UNDO, a wrong verdict, OP-7, or a redo), not the effect itself.
+	// UNDO, a wrong verdict, OP-7, or a redo), not the effect itself. A
+	// correction's Flagged is ignored: the effect's own flag decides.
 	Corrected bool
 	// At is when this record was logged.
 	At time.Time
@@ -43,12 +45,12 @@ const (
 	Settle = 7 * 24 * time.Hour
 )
 
-// record is one clerk's effects, by the UTC day each ran.
+// record is one clerk's effects, by the UTC day each ran, and each step
+// it has seen, so a step counts once however often its outcome is
+// delivered, and a correction is judged by the flag its effect carried.
 type record struct {
-	Days map[string]*tally `json:"days"`
-	// Corrected names each corrected step, with its day, so a second
-	// correction of one step counts once.
-	Corrected map[string]string `json:"corrected,omitempty"`
+	Days  map[string]*tally    `json:"days"`
+	Steps map[string]*stepSeen `json:"steps,omitempty"`
 }
 
 type tally struct {
@@ -57,48 +59,85 @@ type tally struct {
 	Silent  int `json:"silent,omitempty"`
 }
 
+// stepSeen is one step: the day its effect ran, whether that effect was
+// logged and flagged, and whether a correction of it was counted.
+type stepSeen struct {
+	Day       string `json:"day"`
+	Effect    bool   `json:"effect,omitempty"`
+	Flagged   bool   `json:"flagged,omitempty"`
+	Corrected bool   `json:"corrected,omitempty"`
+}
+
 const dayFmt = "2006-01-02"
 
-// Record logs one outcome. An effect counts once, as it ran; a correction
-// of an effect its clerk did not flag counts as a silent failure, once
-// per step. A flagged effect is already a failure the clerk caught, so its
-// correction adds nothing. Outcomes older than Window are dropped.
-func (o *Optimizer) Record(x Outcome) error {
+// ErrOutcome: an outcome names no clerk or no step, so it cannot be
+// counted once.
+var ErrOutcome = errors.New("attention: an outcome needs its clerk and step")
+
+// Record logs one outcome. A step's effect counts once, as it ran, with
+// the flag the clerk's check gave it; a repeat is ignored. A step's first
+// correction counts as a silent failure unless the effect the record
+// holds for that step was flagged; a correction's own Flagged is never
+// read, and a correction of a step the record never saw counts as silent,
+// so the bound only rises. Outcomes older than Window are dropped.
+//
+// Outcomes are applied in order and saved once; one without its clerk or
+// step refuses the whole call before anything is applied.
+func (o *Optimizer) Record(xs ...Outcome) error {
+	for _, x := range xs {
+		if x.Clerk == "" || x.Step == "" {
+			return ErrOutcome
+		}
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	for _, x := range xs {
+		o.recordLocked(x)
+	}
+	return o.save()
+}
+
+func (o *Optimizer) recordLocked(x Outcome) {
 	o.tick(x.At)
 	o.tick(x.Ran)
 	r := o.st.Clerks[x.Clerk]
 	if r == nil {
-		r = &record{Days: map[string]*tally{}}
+		r = &record{}
 		o.st.Clerks[x.Clerk] = r
 	}
-	o.prune()
-	day := x.Ran.UTC().Format(dayFmt)
-	if x.Ran.Before(o.st.Now.Add(-Window)) {
-		return o.save()
+	if r.Days == nil {
+		r.Days = map[string]*tally{}
 	}
-	t := r.Days[day]
+	if r.Steps == nil {
+		r.Steps = map[string]*stepSeen{}
+	}
+	o.prune()
+	if x.Ran.Before(o.st.Now.Add(-Window)) {
+		return
+	}
+	st := r.Steps[x.Step]
+	if st == nil {
+		st = &stepSeen{Day: x.Ran.UTC().Format(dayFmt)}
+		r.Steps[x.Step] = st
+	}
+	t := r.Days[st.Day]
 	if t == nil {
 		t = &tally{}
-		r.Days[day] = t
+		r.Days[st.Day] = t
 	}
 	switch {
-	case !x.Corrected:
+	case !x.Corrected && !st.Effect:
+		st.Effect, st.Flagged = true, x.Flagged
 		t.Effects++
 		if x.Flagged {
 			t.Flagged++
 		}
-	case !x.Flagged:
-		if _, seen := r.Corrected[x.Step]; !seen {
-			if r.Corrected == nil {
-				r.Corrected = map[string]string{}
-			}
-			r.Corrected[x.Step] = day
+	case x.Corrected && !st.Corrected:
+		st.Corrected = true
+		if !(st.Effect && st.Flagged) {
 			t.Silent++
 		}
 	}
-	return o.save()
 }
 
 // tick advances the measure's clock.
@@ -117,9 +156,9 @@ func (o *Optimizer) prune() {
 				delete(r.Days, d)
 			}
 		}
-		for s, d := range r.Corrected {
-			if d < cut {
-				delete(r.Corrected, s)
+		for s, st := range r.Steps {
+			if st.Day < cut {
+				delete(r.Steps, s)
 			}
 		}
 	}

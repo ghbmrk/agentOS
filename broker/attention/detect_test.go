@@ -18,10 +18,8 @@ func pay(i int, at time.Time) Decision {
 
 func recordAll(t *testing.T, o *Optimizer, xs ...Outcome) {
 	t.Helper()
-	for _, x := range xs {
-		if err := o.Record(x); err != nil {
-			t.Fatal(err)
-		}
+	if err := o.Record(xs...); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -168,5 +166,88 @@ func TestMeasurePersists(t *testing.T) {
 	}
 	if after := o2.Measure("pay"); after != before || !after.Ready {
 		t.Fatalf("reloaded %+v, before %+v", after, before)
+	}
+}
+
+// D-309 (L3 and Security on #4945, 4d8ee5f): each step counts once, by
+// the record's own view of it. A repeated effect is ignored; an outcome
+// without its clerk or step is refused; a correction is judged by its
+// effect's stored flag, never its own; a correction of a step never seen
+// counts as silent.
+func TestStepIdentity(t *testing.T) {
+	at := t0.Add(-30 * 24 * time.Hour)
+	tick := Outcome{Clerk: "other", Step: "tick", Ran: t0, At: t0}
+
+	o := newOpt(t, &memStore{}, nil)
+	for i := range 134 {
+		x := Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: at, At: at}
+		recordAll(t, o, x, x)
+	}
+	recordAll(t, o, tick)
+	if m := o.Measure("pay"); m.Effects != 134 || m.Ready {
+		t.Fatalf("a repeated effect counted twice: %+v", m)
+	}
+
+	for _, x := range []Outcome{{Clerk: "pay", Ran: at, At: at, Corrected: true}, {Step: "1", Ran: at, At: at}} {
+		if err := o.Record(Outcome{Clerk: "pay", Step: "ok", Ran: at, At: at}, x); err != ErrOutcome {
+			t.Fatalf("%+v: err %v, want ErrOutcome", x, err)
+		}
+	}
+	if m := o.Measure("pay"); m.Effects != 134 {
+		t.Fatalf("a refused call applied part of itself: %+v", m)
+	}
+
+	o = newOpt(t, &memStore{}, nil)
+	clean(t, o, "pay", at, 300)
+	for i := range 10 { // the clerk never flagged these; the corrections claim it did
+		recordAll(t, o, Outcome{Clerk: "pay", Step: "pay-" + strconv.Itoa(i), Ran: at, At: at, Flagged: true, Corrected: true})
+	}
+	recordAll(t, o, tick)
+	if m := o.Measure("pay"); m.Silent != 10 || m.Ready {
+		t.Fatalf("a correction's own flag hid a silent failure: %+v", m)
+	}
+
+	o = newOpt(t, &memStore{}, nil)
+	clean(t, o, "pay", at.Add(-24*time.Hour), 300)
+	recordAll(t, o, Outcome{Clerk: "pay", Step: "f", Ran: at, At: at, Flagged: true},
+		Outcome{Clerk: "pay", Step: "f", Ran: at, At: at, Corrected: true},
+		Outcome{Clerk: "pay", Step: "never-seen", Ran: at, At: at, Corrected: true}, tick)
+	if m := o.Measure("pay"); m.Effects != 301 || m.Flagged != 1 || m.Silent != 1 {
+		t.Fatalf("flagged effect or unseen step misjudged: %+v", m)
+	}
+}
+
+// D-309 (Security on #4945): the bound can only be made stricter; a looser
+// setting reads as 1%.
+func TestBoundOnlyTightens(t *testing.T) {
+	at := t0.Add(-30 * 24 * time.Hour)
+	for _, cap := range []int{1000, 11, -1} {
+		o := newOpt(t, &memStore{}, func(c *Config) { c.MaxSilentPerMille = cap })
+		for i := range 10 {
+			s := strconv.Itoa(i)
+			recordAll(t, o, Outcome{Clerk: "pay", Step: s, Ran: at, At: at}, Outcome{Clerk: "pay", Step: s, Ran: at, At: at, Corrected: true})
+		}
+		recordAll(t, o, Outcome{Clerk: "other", Step: "tick", Ran: t0, At: t0})
+		if m := o.Measure("pay"); m.Ready || o.cfg.MaxSilentPerMille != MaxSilentPerMille {
+			t.Fatalf("cap %d: %+v, bound %d", cap, m, o.cfg.MaxSilentPerMille)
+		}
+	}
+	if o := newOpt(t, &memStore{}, func(c *Config) { c.MaxSilentPerMille = 5 }); o.cfg.MaxSilentPerMille != 5 {
+		t.Fatal("a stricter bound must hold")
+	}
+}
+
+// D-309 (L3 R1 on #4945): Due reads the record on its own clock, so a
+// record that aged out during a quiet spell no longer counts.
+func TestDueAdvancesTheClock(t *testing.T) {
+	o := newOpt(t, &memStore{}, nil)
+	clean(t, o, "pay", t0.Add(-80*24*time.Hour), 300)
+	earnOn(t, o, t0.Add(-10*24*time.Hour))
+	if len(suggestions(t, o)) != 1 {
+		t.Fatalf("gate should be open: %+v", o.Measure("pay"))
+	}
+	due, err := o.Due(t0.Add(30 * 24 * time.Hour))
+	if err != nil || len(due) != 0 {
+		t.Fatalf("offered on an aged-out record: %+v %v", due, err)
 	}
 }

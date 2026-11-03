@@ -47,11 +47,13 @@ var testClerks = []string{"books", "mail", "paste"}
 // flagged or corrected.
 func clean(t *testing.T, o *Optimizer, clerk string, start time.Time, n int) {
 	t.Helper()
+	xs := make([]Outcome, n)
 	for i := range n {
 		at := start.Add(time.Duration(i) * time.Hour)
-		if err := o.Record(Outcome{Clerk: clerk, Step: clerk + "-" + strconv.Itoa(i), Ran: at, At: at}); err != nil {
-			t.Fatal(err)
-		}
+		xs[i] = Outcome{Clerk: clerk, Step: clerk + "-" + strconv.Itoa(i), Ran: at, At: at}
+	}
+	if err := o.Record(xs...); err != nil {
+		t.Fatal(err)
 	}
 }
 

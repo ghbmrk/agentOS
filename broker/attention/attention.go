@@ -105,10 +105,16 @@ type Config struct {
 	ShortID func(taken func(string) bool) (string, error)
 	// MaxSilentPerMille is the highest silent-failure rate, per mille, at
 	// which a clerk's classes may be proposed (D-309), read as the
-	// one-sided 95% upper bound (Measure.Bound). Default 10 (1%). There is
-	// no off switch: the gate is a rule, not a candidate (HLD-3).
+	// one-sided 95% upper bound (Measure.Bound). It may only be stricter
+	// than KEY-5's 1%: zero, negative or above MaxSilentPerMille reads as
+	// MaxSilentPerMille. There is no off switch: the gate is a rule, not a
+	// candidate (HLD-3).
 	MaxSilentPerMille int
 }
+
+// MaxSilentPerMille is KEY-5's bound on a clerk's silent-failure rate, 1%
+// (D-309), and the loosest Config.MaxSilentPerMille may set.
+const MaxSilentPerMille = 10
 
 // class is one shape of request: a clerk, a verb, and whether it is a
 // thread reply. The fixed content and arguments of its run are its
@@ -193,8 +199,8 @@ func New(cfg Config) (*Optimizer, error) {
 	if o.st.Clerks == nil {
 		o.st.Clerks = map[string]*record{}
 	}
-	if cfg.MaxSilentPerMille < 1 {
-		o.cfg.MaxSilentPerMille = 10
+	if cfg.MaxSilentPerMille < 1 || cfg.MaxSilentPerMille > MaxSilentPerMille {
+		o.cfg.MaxSilentPerMille = MaxSilentPerMille
 	}
 	return o, nil
 }
@@ -633,6 +639,9 @@ const (
 // Reoffer ago. After MaxOffers unanswered offers the next due one counts
 // as a NO (Decline) instead, so an ignored suggestion stops repeating.
 func (o *Optimizer) Due(now time.Time) ([]Suggestion, error) {
+	o.mu.Lock()
+	o.tick(now) // the gate reads the record on the offer's clock
+	o.mu.Unlock()
 	all, err := o.Suggestions()
 	if err != nil {
 		return nil, err
