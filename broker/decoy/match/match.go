@@ -245,15 +245,13 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 
 func encodings(v []byte) [][]byte {
 	var out [][]byte
-	// The text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query
-	// with spaces as '+' and as %20, and URL path, each also as joined text holds it when the byte after it
-	// begins no break: '\' runs as one, a run a %0a split joined, breaks (a PEM's LFs) removed (#4853).
+	// Text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query with spaces as
+	// '+' and as %20, URL path; each also as joined text holds it before a byte that begins no break: '\' runs as one,
+	// a %0a-split run joined, PEM LFs removed (#4853); carry spans f, as a stream's does, so a split '\' joins (#4871).
 	for _, t := range append([][]byte{v}, pemBody(v)...) {
 		j, _ := json.Marshal(string(t))
 		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))
 		for _, f := range []string{string(t), js, strings.ReplaceAll(js, "/", `\/`), q, strings.ReplaceAll(q, "+", "%20"), url.PathEscape(string(t))} {
-			// carry holds every break to f's end, as a stream's does, so a '\' a %0a split off a run joins it here
-			// as there; at 0 a break is let go early and the joined form is one a stream never makes (#4871).
 			s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
 			if s.join([]byte(f + "\x00")); len(s.joined) > MinJoined {
 				out = append(out, s.joined[:len(s.joined)-1])
