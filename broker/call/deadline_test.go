@@ -189,3 +189,58 @@ func TestTokenWaitTurnCarriesAcrossBargeIn(t *testing.T) {
 		t.Fatalf("asks %+v", r.ans.asks)
 	}
 }
+
+// Words carried into a turn are asked once: the next turn asks only its
+// own words (UX/Potency on #4944).
+func TestCarryIsAskedOnce(t *testing.T) {
+	clk := newClock()
+	r := newRig(t, fixed("Here it is."))
+	r.cfg.Now, r.cfg.After = clk.Now, clk.After
+	r.cfg.Token = func(k string) bool { return k == "4071" }
+	r.l.keys = make(chan byte)
+	r.serve()
+	<-r.rec.ctx
+	r.rec.out <- call.Heard{Text: "what's in", Final: true, End: clk.Now()}
+	r.rec.out <- call.Heard{Text: "my"}
+	r.rec.out <- call.Heard{Text: "my mail", Final: true, End: clk.Now()}
+	for _, k := range []byte("4071#") {
+		r.l.keys <- k
+	}
+	if got := r.next(); got != "S:Here it is." {
+		t.Fatalf("first answer %q", got)
+	}
+	r.rec.out <- call.Heard{Text: "who called", Final: true, End: clk.Now()}
+	if got := r.next(); got != "S:Here it is." {
+		t.Fatalf("second answer %q", got)
+	}
+	r.hangup()
+	if len(r.ans.asks) != 2 || r.ans.asks[1].Text != "who called" {
+		t.Fatalf("asks %+v", r.ans.asks)
+	}
+}
+
+// 0 drops words carried from a turn stopped before it was asked: they
+// are not asked with the owner's next words (UX/Potency on #4944).
+func TestZeroDropsTheCarry(t *testing.T) {
+	clk := newClock()
+	r := newRig(t, fixed("Here it is."))
+	r.cfg.Now, r.cfg.After = clk.Now, clk.After
+	r.cfg.Token = func(k string) bool { return k == "4071" }
+	r.l.keys = make(chan byte)
+	r.serve()
+	<-r.rec.ctx
+	r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: clk.Now()}
+	r.rec.out <- call.Heard{Text: "um"} // barge-in while the token is read: carried
+	for _, k := range []byte("4071#0") {
+		r.l.keys <- k
+	}
+	time.Sleep(20 * time.Millisecond)
+	r.rec.out <- call.Heard{Text: "who called", Final: true, End: clk.Now()}
+	if got := r.next(); got != "S:Here it is." {
+		t.Fatalf("answer %q", got)
+	}
+	r.hangup()
+	if len(r.ans.asks) != 1 || r.ans.asks[0].Text != "who called" {
+		t.Fatalf("asks %+v", r.ans.asks)
+	}
+}
