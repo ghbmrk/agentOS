@@ -47,6 +47,10 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          status file must list exactly the packages of the mkosi manifest in DIR. Any
          vulnerability fails. Only records whose where is "image" apply here (`run` ignores
          them); each names its source package, and accepts only an advisory with no Debian fix.
+reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
+         closing a cited issue withdraws its records' acceptance and fails every scan that
+         applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
+         `acceptance` workflow runs it on each issue close; an uncited issue is left closed.
 control  The same scans against tests/fixtures/vulncheck with planted synthetic databases,
          offline: every planted vulnerability must fail, the unreachable standard-library one
          must not, and the fixture's acceptance records must clear the rest. The workflows run
@@ -63,6 +67,7 @@ be hidden by one.
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
   vulncheck.py image DIR [--config F] [--report F] [--check-issues]
+  vulncheck.py reopen ISSUE [--config F]
   vulncheck.py control
 Exit 0 pass, 1 unaccepted findings or a failed check, 2 a scanner or usage error.
 """
@@ -379,6 +384,29 @@ def issue_problems(records, repo, token, opener=urllib.request.urlopen):
                 if r["issue"] == num and r["id"] not in text:
                     problems.append(f"issue #{num} does not name {r['id']}, which a record accepts with it")
     return problems
+
+
+REOPEN_NOTE = ("Reopened by `tools/vulncheck.py reopen`: `assurance/vulncheck.json` cites this issue for "
+               "{n} accepted record(s), and a closed issue withdraws their acceptance, which fails "
+               "every vulncheck scan that applies them. Close it only after its last record is "
+               "removed or moved to another open issue. The state label is unchanged: a "
+               "`state:merged` issue stays off BOARD.md and the build queue while open.")
+
+
+def reopen_cited(records, num, repo, token, opener=urllib.request.urlopen):
+    """Reopen issue num with a comment when a record cites it; return the cited count."""
+    cited = sum(1 for r in records if r.get("issue") == num)
+    if not cited:
+        return 0
+    base = f"https://api.github.com/repos/{repo}/issues/{num}"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+               "Content-Type": "application/json"}
+    for url, method, body in ((base, "PATCH", {"state": "open"}),
+                              (f"{base}/comments", "POST", {"body": REOPEN_NOTE.format(n=cited)})):
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method=method)
+        with opener(req, timeout=30) as resp:
+            resp.read()
+    return cited
 
 
 def run_govulncheck(target_dir, db=None):
@@ -1321,8 +1349,20 @@ def main(argv=None):
     i.add_argument("--config", default=str(CONFIG))
     i.add_argument("--report")
     i.add_argument("--check-issues", action="store_true")
+    o = sub.add_parser("reopen")
+    o.add_argument("issue", type=int)
+    o.add_argument("--config", default=str(CONFIG))
     sub.add_parser("control")
     a = ap.parse_args(argv)
+    if a.cmd == "reopen":
+        repo, token = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
+        if not repo or not token:
+            print("vulncheck: reopen needs GITHUB_REPOSITORY and GITHUB_TOKEN", file=sys.stderr)
+            return 2
+        config = json.loads(pathlib.Path(a.config).read_text())
+        n = reopen_cited(config.get("accepted", []), a.issue, repo, token)
+        print(f"issue #{a.issue}: " + (f"cited by {n} record(s); reopened" if n else "not cited; left closed"))
+        return 0
     try:
         if a.cmd == "control":
             problems = control()
