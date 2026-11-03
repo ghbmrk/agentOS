@@ -176,9 +176,12 @@ func screen(t *testing.T, k *Tokens, site, cookie string, markup string) (set, t
 	if cookie != "" {
 		r.AddCookie(&http.Cookie{Name: Cookie, Value: cookie})
 	}
-	w := httptest.NewRecorder()
+	w := &typed{ResponseRecorder: httptest.NewRecorder()}
 	if !k.Screen(w, r, []byte(markup)) {
 		t.Fatal("Screen refused")
+	}
+	if w.ct != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type at the first write %q", w.ct)
 	}
 	for _, c := range w.Result().Cookies() {
 		if c.Name == Cookie {
@@ -195,6 +198,21 @@ func screen(t *testing.T, k *Tokens, site, cookie string, markup string) (set, t
 		t.Fatalf("screen is not prefix, token, markup:\n%s", body)
 	}
 	return set, tok, body
+}
+
+// typed records the Content-Type set before the first write, before the
+// recorder (or net/http) would sniff one.
+type typed struct {
+	*httptest.ResponseRecorder
+	ct    string
+	wrote bool
+}
+
+func (w *typed) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.ct, w.wrote = w.Header().Get("Content-Type"), true
+	}
+	return w.ResponseRecorder.Write(b)
 }
 
 func check(k *Tokens, cookie, tok string) bool {
@@ -267,6 +285,7 @@ func TestKeepRefusesCookiesItCannotVouchFor(t *testing.T) {
 	mints("time changed", "same-origin", flip(nonceLen+7))
 	mints("tag changed", "same-origin", flip(cookieLen-1))
 	mints("old 32-byte cookie", "same-origin", enc(raw[:32]))
+	mints("trailing non-base64", "same-origin", first+"!")
 	other := newTokens(t, &now)
 	o, _, _ := screen(t, other, "cross-site", "", "")
 	mints("another key's cookie", "same-origin", o)
@@ -299,6 +318,7 @@ func TestCheck(t *testing.T) {
 		"token of another cookie": {c, tok2},
 		"cookie as token":         {c, c},
 		"bad cookie":              {"AAAA", tok},
+		"cookie with a tail":      {c + "!", tok},
 		"not base64":              {c, "!!!!"},
 	}
 	for name, p := range refused {
@@ -376,13 +396,19 @@ func TestFmtPrintsNoSecret(t *testing.T) {
 }
 
 // #4781: New refuses a nil clock, and a Tokens New did not make passes
-// nothing and writes nothing.
+// nothing and writes nothing, even for a request carrying a valid pair
+// (without the guard it would panic on the nil mac).
 func TestZeroTokensRefuse(t *testing.T) {
 	if k, ok := New(nil); ok || k != nil {
 		t.Error("New took a nil clock")
 	}
+	now := epoch
+	c, tok, _ := screen(t, newTokens(t, &now), "cross-site", "", "")
 	for _, k := range []*Tokens{nil, {}} {
 		r := httptest.NewRequest(http.MethodPost, "https://enforcer.home.arpa/approve", nil)
+		r.AddCookie(&http.Cookie{Name: Cookie, Value: c})
+		r.Header.Set(Header, tok)
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
 		if k.Check(r) {
 			t.Errorf("%#v passes a request", k)
 		}

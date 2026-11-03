@@ -118,10 +118,7 @@ func (t *Tokens) Check(r *http.Request) bool {
 	if t == nil || t.mac == nil || t.now == nil {
 		return false
 	}
-	c, ok := t.cookie(r)
-	if !ok {
-		return false
-	}
+	c := t.cookie(r)
 	if a, ok := t.age(c); !ok || a > PairLife {
 		return false
 	}
@@ -140,24 +137,23 @@ func (t *Tokens) keep(r *http.Request) ([]byte, bool) {
 	default:
 		return nil, false
 	}
-	c, ok := t.cookie(r)
-	if !ok {
-		return nil, false
-	}
+	c := t.cookie(r)
 	if a, ok := t.age(c); !ok || a > ReuseFor {
 		return nil, false
 	}
 	return c[:bodyLen], true
 }
 
-// cookie returns the raw cookie r sent.
-func (t *Tokens) cookie(r *http.Request) ([]byte, bool) {
+// cookie returns the raw cookie r sent, nil when it sent none. A value
+// that is not base64 decodes only up to its first bad quantum, a multiple
+// of 3 bytes and so never cookieLen, which age refuses.
+func (t *Tokens) cookie(r *http.Request) []byte {
 	ck, err := r.Cookie(Cookie)
 	if err != nil {
-		return nil, false
+		return nil
 	}
-	c, err := base64.RawURLEncoding.DecodeString(ck.Value)
-	return c, err == nil
+	c, _ := base64.RawURLEncoding.DecodeString(ck.Value)
+	return c
 }
 
 // age is how long ago this page drew cookie c. It is false when the page
