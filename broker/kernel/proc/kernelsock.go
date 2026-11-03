@@ -275,7 +275,7 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 
 	"status":      read(func(s *kernel.State, _ int64, _ none) []kernel.Unsettled { return s.Status() }),
 	"linechanges": read(func(s *kernel.State, _ int64, _ none) int { return s.LineChanges() }),
-	"spendheld":   read(func(s *kernel.State, _ int64, _ none) map[string]kernel.SpendHold { return s.SpendHeld }),
+	"spendheld":   read(func(s *kernel.State, _ int64, _ none) map[string]kernel.SpendHold { return s.Held() }),
 	"pools":       read(func(s *kernel.State, now int64, _ none) map[string]kernel.Pool { return s.PoolsAt(now) }),
 	"spent":       read(func(s *kernel.State, _ int64, a spentArgs) map[string]int64 { return s.Spent(a.Since) }),
 	"anchors":     read(func(s *kernel.State, _ int64, _ none) []key.PublicKey { return s.Anchors }),
