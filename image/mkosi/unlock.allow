@@ -1,7 +1,8 @@
 # What starting agentos-keeper-kernel.service can start or stop, as the built image's own systemd
-# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start U" is a unit the unlock
-# step can start, "stop U KIND T" a unit one of those stops, "generator G failed" a generator that
-# found nothing to read in the build's tree. Regenerate with, as root, after an image build:
+# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start T KIND from U" is an edge
+# by which a unit the unlock step starts or stops starts T, "stop U KIND T" one by which it stops T
+# (#4822, #4823), "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator
+# that found nothing to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
 start -.slice
 start agentos-inbound.service
