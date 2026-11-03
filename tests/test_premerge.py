@@ -12,6 +12,8 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import premerge  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 
 def git(cwd, *args):

@@ -21,6 +21,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import trusted_base as tb  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWN = "github.com/ghbmrk/agentos/broker"
 
