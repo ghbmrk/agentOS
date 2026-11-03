@@ -288,7 +288,7 @@ func New(cfg Config) (*Channel, error) {
 	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, challenges: map[uint64]*challenge{}, byWire: map[uint64]uint64{}}
 	now := c.rateNow()
 	c.refused, c.preAuthB, c.pausedB = wire.NewBucket(refusedLimit, now), wire.NewBucket(preAuthLimit, now), wire.NewBucket(pausedLimit, now)
-	for _, k := range wire.RateKinds {
+	for _, k := range wire.RateKinds() {
 		if k == wire.RateHello {
 			c.hello = wire.NewBucket(wire.Rate(k), now)
 		} else {

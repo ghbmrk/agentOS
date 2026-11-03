@@ -43,8 +43,12 @@ func RateKindOf(t Type) RateKind {
 	return 0
 }
 
-// RateKinds are every kind, in order.
-var RateKinds = [...]RateKind{RateHello, RateCommand, RateTighten, RateRead, RateAnnounce, RateHead, RateAnswer}
+// RateKinds is every kind, in order, as a fresh slice each call: a
+// function, like Rate, so no importer can change the list the other end
+// reads, and a caller that changes its copy changes nothing else.
+func RateKinds() []RateKind {
+	return []RateKind{RateHello, RateCommand, RateTighten, RateRead, RateAnnounce, RateHead, RateAnswer}
+}
 
 // Limit is a token bucket: Burst at once, then one more every Every.
 // Every is positive.
