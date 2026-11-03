@@ -93,6 +93,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
@@ -788,7 +789,7 @@ type counterRec struct {
 }
 
 func (r counterRec) Counter(t transport.TPM, srk []byte) tpmseal.Counter {
-	return tpmseal.Counter{TPM: t, SRK: srk, Ref: r.Ref, Auth: r.Auth}
+	return tpmseal.Counter{TPM: t, SRK: srk, Ref: r.Ref, Auth: secret.Hide(r.Auth)}
 }
 
 // newCounter defines store id's counter. A define that reports an error

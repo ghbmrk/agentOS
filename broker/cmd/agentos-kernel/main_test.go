@@ -17,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: CLK-1, LOG-2, KRN-2, BAK-1
@@ -163,8 +164,8 @@ func TestNoTPMNoKernel(t *testing.T) {
 func handoffPipe(t *testing.T) *os.File {
 	t.Helper()
 	k := handoff.KernelKeys{
-		Head:    handoff.Hide(ed25519.NewKeyFromSeed(make([]byte, 32))),
-		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: handoff.Hide([]byte("a"))},
+		Head:    secret.Hide(ed25519.NewKeyFromSeed(make([]byte, 32))),
+		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: secret.Hide([]byte("a"))},
 		Anchors: []key.PublicKey{key.Ed25519(make([]byte, 32))},
 		Slot:    handoff.SlotTPM,
 	}
