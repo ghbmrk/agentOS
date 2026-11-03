@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -29,13 +28,19 @@ func doc() policy.Document {
 }
 
 // listing is nft's JSON for the enforcer table, in the shape nft 1.0.9
-// prints: the TV reached n addresses over IPv4 and one over IPv6 and was
-// refused 900 packets, more than were logged; another
-// table's set and counter, and a set element with no counter, are noise.
-func listing(n int) []byte {
+// prints: the TV reached n addresses over IPv4 and one over IPv6, and was
+// refused 900 packets, at 11.0.0.200 twice, at 1.1.1.1 and at
+// 2001:db8::bad once each (by packets, not bytes), and at refused more
+// IPv4 addresses once each; another table's set and counter, and a set
+// element with no counter, are noise.
+func listing(n, refused int) []byte {
 	var elems []string
 	for i := 1; i <= n; i++ {
 		elems = append(elems, fmt.Sprintf(`{"elem":{"val":"11.0.0.%d","expires":86000,"counter":{"packets":%d,"bytes":%d}}}`, i, i, 100*i))
+	}
+	ref := []string{`{"elem":{"val":"11.0.0.200","expires":86000,"counter":{"packets":2,"bytes":120}}}`, `{"elem":{"val":"1.1.1.1","expires":86000,"counter":{"packets":1,"bytes":9999}}}`}
+	for i := range refused {
+		ref = append(ref, fmt.Sprintf(`{"elem":{"val":"11.2.%d.%d","expires":86000,"counter":{"packets":1,"bytes":60}}}`, i/250, i%250))
 	}
 	return []byte(`{"nftables":[{"metainfo":{"version":"1.0.9","json_schema_version":1}},
 {"table":{"family":"inet","name":"enforcer","handle":1}},
@@ -48,13 +53,14 @@ func listing(n int) []byte {
 {"counter":{"family":"inet","name":"t101_out","table":"other","handle":2,"packets":1,"bytes":999999}},
 {"set":{"family":"inet","name":"t101_4","table":"enforcer","type":"ipv4_addr","handle":7,"size":64,"flags":["timeout","dynamic"],"timeout":86400,"elem":[` + strings.Join(elems, ",") + `]}},
 {"set":{"family":"inet","name":"t101_6","table":"enforcer","type":"ipv6_addr","handle":8,"size":64,"flags":["timeout","dynamic"],"timeout":86400,"elem":[{"elem":{"val":"2001:db8::1","expires":86000,"counter":{"packets":1,"bytes":77}}},"2001:db8::2"]}},
+{"set":{"family":"inet","name":"t101_refused_4","table":"enforcer","type":"ipv4_addr","handle":11,"size":1024,"flags":["timeout","dynamic"],"timeout":86400,"elem":[` + strings.Join(ref, ",") + `]}},
+{"set":{"family":"inet","name":"t101_refused_6","table":"enforcer","type":"ipv6_addr","handle":12,"size":1024,"flags":["timeout","dynamic"],"timeout":86400,"elem":[{"elem":{"val":"2001:db8::bad","expires":86000,"counter":{"packets":1,"bytes":80}}}]}},
 {"set":{"family":"inet","name":"t104_4","table":"other","type":"ipv4_addr","handle":9,"elem":[{"elem":{"val":"11.9.9.9","counter":{"packets":1,"bytes":5}}}]}}
 ]}`)
 }
 
-func reader(n int) (*Reader, *Log) {
-	log := NewLog("ap0")
-	return &Reader{Policy: doc, List: func() ([]byte, error) { return listing(n), nil }, Log: log}, log
+func reader(n, refused int) *Reader {
+	return &Reader{Policy: doc, List: func() ([]byte, error) { return listing(n, refused), nil }}
 }
 
 // keys is every JSON object key in b, at any depth.
@@ -91,23 +97,7 @@ func keys(t *testing.T, b []byte) []string {
 // the whole network's counters; Owner and Household are not inspected.
 // Catches surveillance of guests.
 func TestSummaryShape(t *testing.T) {
-	r, log := reader(11)
-	// Refusals: the TV's, a Guests line and an accepted core connection
-	// (neither counts), and lines that only look like refusals.
-	for i, l := range []string{
-		"enf drop IN=ap0.101 OUT=wan0 MAC=aa:bb SRC=10.101.0.2 DST=11.0.0.200 LEN=60 PROTO=TCP SPT=40000 DPT=443",
-		"enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.200 LEN=60 PROTO=TCP SPT=40001 DPT=443",
-		"enf dns IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=1.1.1.1 LEN=60 PROTO=UDP SPT=5000 DPT=53",
-		"enf drop IN=gst0 OUT=wan0 SRC=10.30.0.2 DST=11.0.0.9 LEN=60",
-		"enf core-dev 101 IN=core0 OUT=ap0.101 SRC=10.50.0.2 DST=10.101.0.2 LEN=60",
-		"kernel: enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.66",
-		"enf drop IN=ap0.1010 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.66",
-		"enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=not-an-address",
-		"enf drop IN=ap1.101 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.66",
-	} {
-		log.Line(l, int64(1000+i))
-	}
-
+	r := reader(11, 0)
 	b, err := r.Read("tv")
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +118,7 @@ func TestSummaryShape(t *testing.T) {
 	if s.Truncated {
 		t.Error("a device with room left is marked truncated")
 	}
-	if s.Blocked != 900 || !slices.Equal(s.BlockedTo, []Dest{{"11.0.0.200", 2}, {"1.1.1.1", 1}}) || s.MoreBlocked != 0 {
+	if s.Blocked != 900 || !slices.Equal(s.BlockedTo, []Dest{{"11.0.0.200", 2}, {"1.1.1.1", 1}, {"2001:db8::bad", 1}}) || s.MoreBlocked != 0 {
 		t.Errorf("blocked: %d %+v", s.Blocked, s.BlockedTo)
 	}
 	for _, perPacket := range []string{"40000", "443", "PROTO", "10.101.0.2", "port", "time"} {
@@ -139,31 +129,19 @@ func TestSummaryShape(t *testing.T) {
 
 	// Short however busy the device: a summary is bounded by Top, not by
 	// how many addresses the device reached or was refused.
-	busy, blog := reader(64)
-	for i := range 500 {
-		blog.Line(fmt.Sprintf("enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.1.%d.%d LEN=60", i/250, i%250), 2000)
-	}
-	b, _ = busy.Read("tv")
+	b, _ = reader(64, 500).Read("tv")
 	if len(b) > 1024 {
 		t.Errorf("a busy device's summary is %d bytes", len(b))
 	}
-	// Truncated marks a full counting set, or a full refusal log, alone.
+	// Truncated marks a full counting set, or a full refusal set, alone.
 	for name, c := range map[string]struct {
-		dests   int
-		refused int
-		want    bool
-	}{"room": {nft.TrafficSize - 1, nft.TrafficSize - 1, false}, "set full": {nft.TrafficSize, 0, true}, "log full": {3, nft.TrafficSize, true}} {
-		r, log := reader(c.dests)
-		for i := range c.refused {
-			log.Line(fmt.Sprintf("enf drop IN=ap0.101 OUT=wan0 DST=11.2.0.%d", i), 1)
-		}
+		dests, refused int
+		want           bool
+	}{"room": {nft.TrafficSize - 1, nft.RefusedSize - 3, false}, "set full": {nft.TrafficSize, 0, true}, "refused full": {3, nft.RefusedSize - 2, true}} {
 		var got Summary
-		if b, err := r.Read("tv"); err != nil || json.Unmarshal(b, &got) != nil || got.Truncated != c.want {
+		if b, err := reader(c.dests, c.refused).Read("tv"); err != nil || json.Unmarshal(b, &got) != nil || got.Truncated != c.want {
 			t.Errorf("%s: truncated %v, want %v (%v)", name, got.Truncated, c.want, err)
 		}
-	}
-	if by := blog.of(101); len(by) != nft.TrafficSize {
-		t.Errorf("the refusal log keeps %d addresses for 500 refused", len(by))
 	}
 
 	// Guests: only the whole network's counters, whichever guest asks.
@@ -197,76 +175,5 @@ func TestSummaryShape(t *testing.T) {
 	r.List = func() ([]byte, error) { return []byte("{"), nil }
 	if _, err := r.Read("tv"); !errors.Is(err, ErrListing) {
 		t.Errorf("a broken listing: %v", err)
-	}
-}
-
-// The refusal log keeps one Window: a day after it started, it starts
-// again, so where a device was refused is a day's, not forever's.
-func TestRefusalWindow(t *testing.T) {
-	log := NewLog("ap0")
-	line := "enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=::ffff:11.0.0.1 LEN=60"
-	a := netip.MustParseAddr("11.0.0.1")
-	n := func() uint64 { return log.of(101)[a] }
-	log.Line(line, 0)
-	log.Line(line, Window-1)
-	if n() != 2 || len(log.of(101)) != 1 {
-		t.Fatalf("within the window: %v", log.of(101))
-	}
-	log.Line(line, Window)
-	if n() != 1 {
-		t.Errorf("after the window: %d", n())
-	}
-	log.Line(line, Window)   // the new window's start
-	log.Line(line, Window+1) // and just after it
-	if n() != 3 {
-		t.Errorf("inside the new window: %d", n())
-	}
-	log.Line(line, 5) // the clock went back
-	if n() != 1 {
-		t.Errorf("after the clock went back: %d", n())
-	}
-}
-
-// Each refusal prefix counts when the line came in on a device's VLAN.
-func TestEveryRefusalPrefixCounts(t *testing.T) {
-	log := NewLog("ap0")
-	for _, p := range nft.BlockedPrefixes {
-		log.Line(p+"IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.1 LEN=60", 1)
-	}
-	if n := log.of(101)[netip.MustParseAddr("11.0.0.1")]; n != uint64(len(nft.BlockedPrefixes)) {
-		t.Errorf("%d of %d refusal prefixes counted", n, len(nft.BlockedPrefixes))
-	}
-}
-
-// Every prefix the summaries count is a refusal in the compiled ruleset,
-// and every rule there that logs and drops uses one of them, so a device's
-// blocked count is exactly what the firewall refused it.
-func TestPrefixesAreRefusals(t *testing.T) {
-	text, err := nft.Compile(doc(), nft.Layout{
-		WAN: "wan0", Owner: "own0", Household: "hh0", Guests: "gst0", Admin: "adm0",
-		Core: "core0", Edge: "edge0", Trunk: "ap0", APMgmt: "apm0",
-		APAdmin: []netip.Addr{netip.MustParseAddr("10.70.0.2")}, ISP: []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-		EdgeGateway: netip.MustParseAddr("10.60.0.1"), PagePort: 8443, ChannelPort: 7443, CorePagePort: 443,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	for _, l := range strings.Split(text, "\n") {
-		_, after, ok := strings.Cut(l, `log prefix "`)
-		if !ok {
-			continue
-		}
-		prefix, _, _ := strings.Cut(after, `"`)
-		blocked := slices.Contains(nft.BlockedPrefixes, prefix)
-		if drops := strings.HasSuffix(l, " drop"); drops != blocked {
-			t.Errorf("prefix %q counted %v, rule drops %v: %s", prefix, blocked, drops, strings.TrimSpace(l))
-		}
-		seen[prefix] = true
-	}
-	for _, p := range nft.BlockedPrefixes {
-		if !seen[p] {
-			t.Errorf("prefix %q is in no rule", p)
-		}
 	}
 }
