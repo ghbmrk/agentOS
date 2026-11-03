@@ -148,10 +148,10 @@ var certificateVerify = []byte(strings.Repeat(" ", 64) + "TLS 1.3, server Certif
 // LinkKey is the public half of the core's link key, which agentos-link's
 // TLS certificate names.
 func (h *Kernel) LinkKey() (ed25519.PublicKey, error) {
-	if len(h.link) != ed25519.PrivateKeySize {
+	if len((**h.link)) != ed25519.PrivateKeySize {
 		return nil, ErrNoLinkKey
 	}
-	return h.link.Public().(ed25519.PublicKey), nil
+	return (**h.link).Public().(ed25519.PublicKey), nil
 }
 
 // LinkSign signs msg with the link key when it is a TLS 1.3 server
@@ -160,14 +160,14 @@ func (h *Kernel) LinkKey() (ed25519.PublicKey, error) {
 // handshakes while it runs but can neither copy the key nor have it sign
 // another message (EDGE-link-core decision 4).
 func (h *Kernel) LinkSign(msg []byte) ([]byte, error) {
-	if len(h.link) != ed25519.PrivateKeySize {
+	if len((**h.link)) != ed25519.PrivateKeySize {
 		return nil, ErrNoLinkKey
 	}
 	n := len(msg) - len(certificateVerify)
 	if !bytes.HasPrefix(msg, certificateVerify) || n != 32 && n != 48 {
 		return nil, ErrLinkSign
 	}
-	return ed25519.Sign(h.link, msg), nil
+	return ed25519.Sign((**h.link), msg), nil
 }
 
 // Setup is the setup step (kernel.Setup) on this box: it logs the owner's
@@ -200,12 +200,12 @@ type recoveryCard struct {
 // HoldRecoveryCard takes key, the hand-off's NewRecovery, to hold until
 // RecoveryCardDone; none holds nothing. The kernel owns key from then on.
 func (h *Kernel) HoldRecoveryCard(key []byte) {
-	h.card.mu.Lock()
-	defer h.card.mu.Unlock()
-	clear(h.card.key)
-	h.card.key, h.card.id = nil, ""
+	(*h.card).mu.Lock()
+	defer (*h.card).mu.Unlock()
+	clear((*h.card).key)
+	(*h.card).key, (*h.card).id = nil, ""
 	if id, err := cardID(key); err == nil {
-		h.card.key, h.card.id = key, id
+		(*h.card).key, (*h.card).id = key, id
 	} else {
 		clear(key)
 	}
@@ -229,12 +229,12 @@ func cardID(card []byte) (string, error) {
 
 // RecoveryCardID is the held card's recipient ID, or ErrNoRecoveryCard.
 func (h *Kernel) RecoveryCardID() (string, error) {
-	h.card.mu.Lock()
-	defer h.card.mu.Unlock()
-	if h.card.key == nil {
+	(*h.card).mu.Lock()
+	defer (*h.card).mu.Unlock()
+	if (*h.card).key == nil {
 		return "", ErrNoRecoveryCard
 	}
-	return h.card.id, nil
+	return (*h.card).id, nil
 }
 
 // RecoveryCard is a copy of the new recovery key, on an anchor's signature
@@ -248,21 +248,21 @@ func (h *Kernel) RecoveryCard(c key.Cosign) ([]byte, error) {
 	if err := h.With(func(k *kernel.Kernel) error { return k.RecoveryCardTap(id, c) }); err != nil {
 		return nil, err
 	}
-	h.card.mu.Lock()
-	defer h.card.mu.Unlock()
-	if h.card.key == nil || h.card.id != id {
+	(*h.card).mu.Lock()
+	defer (*h.card).mu.Unlock()
+	if (*h.card).key == nil || (*h.card).id != id {
 		return nil, ErrNoRecoveryCard
 	}
-	return bytes.Clone(h.card.key), nil
+	return bytes.Clone((*h.card).key), nil
 }
 
 // RecoveryCardDone wipes the new recovery key once the owner has confirmed
 // the card. Done twice is not an error.
 func (h *Kernel) RecoveryCardDone() {
-	h.card.mu.Lock()
-	defer h.card.mu.Unlock()
-	clear(h.card.key)
-	h.card.key = nil
+	(*h.card).mu.Lock()
+	defer (*h.card).mu.Unlock()
+	clear((*h.card).key)
+	(*h.card).key = nil
 }
 
 // ErrNoKeyTable: the kernel process never starts with its content closed.

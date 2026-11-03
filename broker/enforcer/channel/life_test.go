@@ -3,9 +3,14 @@ package channel
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -886,8 +891,10 @@ func TestEveryEventFieldRendered(t *testing.T) {
 // a cut core (paused requests, reconnects, refused, replaced and malformed
 // frames, a Reflashed re-trip, refills between), the core's lines logged
 // plus the sum of Dropped equal every line the core caused, once a last
-// line carries what is pending. Revert mutants: any one kind of line
-// dropped uncounted or counted when logged.
+// line carries what is pending; a failed hello in each round, not the
+// core's, neither takes the count nor adds to it (#4723). Revert mutants:
+// any one kind of line dropped uncounted or counted when logged; a failed
+// hello's line carrying the count.
 func TestDropCountInvariant(t *testing.T) {
 	r := newRig(t, nil)
 	r.cut.set(Tripped)
@@ -920,6 +927,7 @@ func TestDropCountInvariant(t *testing.T) {
 			t.Fatal("a malformed frame did not end the connection")
 		}
 		sent += 2
+		failHello(t, r) // not the core's: neither counted nor carrying the count (#4723)
 		r.advance(time.Duration(round) * l.Every)
 	}
 	r.advance(time.Duration(l.Burst) * l.Every)
@@ -927,12 +935,20 @@ func TestDropCountInvariant(t *testing.T) {
 	last := r.dial() // carries what is pending
 	waitLines(t, r, n+1)
 	sent++
-	logged, dropped := 0, 0
+	logged, dropped, failed := 0, 0, 0
 	for _, e := range r.events() {
-		if e.Kind != KindPaused {
+		if coreLine(e) {
 			logged++
+		} else if e.Kind != KindPaused {
+			failed++
+			if e.Dropped != 0 {
+				t.Errorf("a failed hello's line %+v carried the cut core's count", e)
+			}
 		}
 		dropped += e.Dropped
+	}
+	if failed != 6 {
+		t.Errorf("%d failed hellos logged, want the 6 sent", failed)
 	}
 	if logged+dropped != sent {
 		t.Errorf("%d lines logged plus %d dropped, want the %d the core caused", logged, dropped, sent)
@@ -961,6 +977,13 @@ func TestHelloTripCarriesCount(t *testing.T) {
 	r.advance(wire.Rate(wire.RateHello).Every * time.Duration(wire.Rate(wire.RateHello).Burst))
 	h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
 	for r.cut.trips() == 0 {
+		// Each hello is counted as it is read, and the pipe is closed
+		// before the enforcer's hello is read back, so that write fails
+		// and Serve returns before it logs "core connected". No reconnect
+		// before the trip logs a line of its own, so none takes the count:
+		// the first line the count can land on is the trip's (#4722).
+		// Read the enforcer's hello here and the count lands on the first
+		// reconnect's line instead.
 		b := r.connect()
 		b.send(h)
 		b.conn.Close()
@@ -980,11 +1003,16 @@ func TestHelloTripCarriesCount(t *testing.T) {
 	}
 }
 
-// TestSilentCoreCountWaits (#4706, ENF-d-4): the channel has no timer, so
-// a cut core that goes silent after a burst leaves its count pending with
-// no line, however long it stays silent, and its next line, such as the
-// next hello a live kernel sends, carries the whole count. Revert mutants:
-// the count dropped once the bucket refills; the count reset by time.
+// TestSilentCoreCountWaits (#4706, #4725, ENF-d-4): the channel has no
+// timer, so a cut core that goes silent after a burst leaves its count
+// pending with no line, however long it stays silent, and its next line,
+// such as the next hello a live kernel sends, carries the whole count.
+// Nothing here waits on the wall clock: the failed hello after the day is a
+// sync point through the channel's lock and log, so any line the channel
+// queued for the day lands before it, and TestNoTimer rules out a line
+// queued later by a timer or goroutine of the channel's own. Revert
+// mutants: the count dropped once the bucket refills; the count reset by
+// time; a line flushed on the first lock after the day.
 func TestSilentCoreCountWaits(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
@@ -996,14 +1024,161 @@ func TestSilentCoreCountWaits(t *testing.T) {
 	}
 	n := len(r.events())
 	r.advance(24 * time.Hour)
-	time.Sleep(10 * time.Millisecond)
-	if got := len(r.events()); got != n {
-		t.Fatalf("a silent core's day logged %d lines, want none", got-n)
+	failHello(t, r)
+	if ev := r.events()[n:]; len(ev) != 1 || ev[0].Code != wire.Refused || ev[0].Dropped != 0 {
+		t.Fatalf("a silent core's day then a failed hello logged %+v, want the failed hello's line alone, with no count", ev)
+	}
+	r.ch.mu.Lock()
+	pending := r.ch.dropped
+	r.ch.mu.Unlock()
+	if pending != l.Burst {
+		t.Fatalf("%d dropped lines pending after the day, want %d", pending, l.Burst)
 	}
 	cl = r.dial()
-	waitLines(t, r, n+1)
-	if e := r.events()[n]; e.Dropped != l.Burst {
-		t.Errorf("the next hello's line carried %d dropped lines, want %d", e.Dropped, l.Burst)
+	waitLines(t, r, n+2)
+	if e := r.events()[n+1]; e.Kind != KindHello || e.Dropped != l.Burst {
+		t.Errorf("the next hello's line %+v, want it to carry %d dropped lines", e, l.Burst)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+	if got := len(r.events()); got != n+2 {
+		t.Errorf("%d lines after the day, want 2", got-n)
+	}
+}
+
+// failHello drops a connection whose first frame is not a hello, and
+// returns once the channel has logged it: a failed hello's line goes
+// through the channel's lock and log and is not the core's (#4683).
+func failHello(t *testing.T, r *rig) {
+	t.Helper()
+	f, err := wire.Encode(wire.ToEnforcer, wire.Announce{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.connect().closed(frameBytes(f.Type, f.Payload)) {
+		t.Fatal("a frame before the hello was not dropped")
+	}
+}
+
+// coreLine reports whether e is a line the core caused: not the quiet
+// line or the restore's (KindPaused), nor a failed hello's (#4683).
+func coreLine(e Event) bool {
+	return e.Kind != KindPaused && e.Kind != KindPreAuth && !(e.Kind == KindHello && e.Code == wire.Refused)
+}
+
+// TestNoTimer (#4725, ENF-d-4): the channel's code starts no goroutine and
+// arms no timer, so every line it logs is queued while it handles a call:
+// nothing logs while the core is silent, and a test's sync point through
+// the channel orders every line before it. Each file's import names are
+// resolved, so a renamed import is caught, and a dot or blank import of a
+// package that can call back later fails. Revert mutants: a goroutine; a
+// timer under a renamed import; context.AfterFunc or a context deadline;
+// runtime.SetFinalizer (#4735 L3).
+func TestNoTimer(t *testing.T) {
+	banned := map[string]map[string]bool{
+		"time":    {"AfterFunc": true, "After": true, "NewTimer": true, "NewTicker": true, "Tick": true, "Sleep": true},
+		"context": {"AfterFunc": true, "WithTimeout": true, "WithDeadline": true, "WithTimeoutCause": true, "WithDeadlineCause": true},
+		"runtime": {"SetFinalizer": true, "AddCleanup": true},
+	}
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset, files := token.NewFileSet(), 0
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files++
+		local := map[string]string{} // import name in this file -> path
+		for _, im := range f.Imports {
+			path, err := strconv.Unquote(im.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if banned[path] == nil {
+				continue
+			}
+			n := path
+			if im.Name != nil {
+				n = im.Name.Name
+			}
+			if n == "." || n == "_" {
+				t.Errorf("%s imports %q as %s, which this test cannot follow", fset.Position(im.Pos()), path, n)
+				continue
+			}
+			local[n] = path
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.GoStmt:
+				t.Errorf("%s starts a goroutine", fset.Position(n.Pos()))
+			case *ast.SelectorExpr:
+				if x, ok := n.X.(*ast.Ident); ok && banned[local[x.Name]][n.Sel.Name] {
+					t.Errorf("%s calls %s.%s", fset.Position(n.Pos()), local[x.Name], n.Sel.Name)
+				}
+			}
+			return true
+		})
+	}
+	if files == 0 {
+		t.Fatal("no source files parsed")
+	}
+}
+
+// TestFlushAtRestore (#4726, ENF-d-4): the owner's restore calls Flush,
+// whose one line carries the count pending, so the record has it at the
+// restore, not at the core's next line; the core's next line then carries
+// none, a Flush with nothing pending logs nothing, and a later cut's drops
+// get their own quiet line. Revert mutants: Flush's line not carrying the
+// count; Flush logging with nothing pending; the quiet not ended.
+func TestFlushAtRestore(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	id := uint64(0)
+	burst := func() {
+		for range 2 * l.Burst {
+			id++
+			cl.code(wire.Announce{ID: id})
+		}
+	}
+	burst()
+	r.cut.set(Open)
+	n := len(r.events())
+	r.ch.Flush()
+	ev := r.events()[n:]
+	if len(ev) != 1 || ev[0].Kind != KindPaused || ev[0].Dropped != l.Burst {
+		t.Fatalf("Flush at the restore logged %+v, want one line carrying %d dropped lines", ev, l.Burst)
+	}
+	r.ch.Flush()
+	if got := len(r.events()); got != n+1 {
+		t.Errorf("a Flush with nothing pending logged %d lines", got-n-1)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+	cl = r.dial()
+	waitLines(t, r, n+2)
+	if e := r.events()[n+1]; e.Dropped != 0 {
+		t.Errorf("the core's next line after the restore carried %d dropped lines", e.Dropped)
+	}
+	r.cut.set(Tripped)
+	n = len(r.events())
+	burst()
+	quiet := 0
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindPaused {
+			quiet++
+		}
+	}
+	if quiet != 1 {
+		t.Errorf("the next cut's drops logged %d quiet lines, want 1", quiet)
 	}
 	cl.conn.Close()
 	waitDone(t, cl, "the connection closed")
