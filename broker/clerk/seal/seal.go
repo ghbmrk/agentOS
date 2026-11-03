@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -889,10 +890,8 @@ func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) 
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
 		return nil, errors.New("seal: bad entry name or value too long")
 	}
-	e := make(map[string][]byte, len(s.entries.Get())+1)
-	for k, v := range s.entries.Get() {
-		e[k] = v
-	}
+	e := make(map[string][]byte)
+	maps.Copy(e, s.entries.Get())
 	e[name] = slices.Clone(value)
 	if len(e) > MaxEntries {
 		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)

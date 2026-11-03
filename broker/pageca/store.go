@@ -15,6 +15,7 @@ type sealed struct {
 	Key  **[]byte `json:"key"` // PKCS#8
 }
 
+var parseKey = x509.ParsePKCS8PrivateKey // a test swaps it to see Unmarshal wipe the key
 // MaxSealed bounds Marshal's form: a P-256 certificate and its PKCS#8 key,
 // base64 in JSON, are under 2 KiB.
 const MaxSealed = 4 << 10
@@ -50,7 +51,7 @@ func Unmarshal(b []byte) (*Authority, error) {
 		k = **v.Key
 	}
 	defer clear(k)
-	pk, err := x509.ParsePKCS8PrivateKey(k)
+	pk, err := parseKey(k)
 	if err != nil {
 		return nil, err
 	}

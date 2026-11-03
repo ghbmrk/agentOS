@@ -58,3 +58,24 @@ func get[T any](v T, err error) T {
 	}
 	return v
 }
+
+// Unmarshal wipes the PKCS#8 key it decoded once the authority holds it
+// (STO-2a-e): the bytes handed to the key parser read as zeros afterwards.
+func TestUnmarshalWipesTheKey(t *testing.T) {
+	b, err := Marshal(newAuthority(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []byte
+	t.Cleanup(func() { parseKey = x509.ParsePKCS8PrivateKey })
+	parseKey = func(k []byte) (any, error) {
+		seen = k
+		return x509.ParsePKCS8PrivateKey(k)
+	}
+	if _, err := Unmarshal(b); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) == 0 || !bytes.Equal(seen, make([]byte, len(seen))) {
+		t.Fatalf("Unmarshal left the key's %d bytes unwiped", len(seen))
+	}
+}

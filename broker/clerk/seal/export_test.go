@@ -18,3 +18,7 @@ func FailWrite(err error) (restore func()) {
 	writeTemp = func(string, []byte) (string, error) { return "", err }
 	return func() { writeTemp = old }
 }
+
+// Entries is the store's own entry map, not a copy, so a test can see
+// Close wipe the values it held.
+func Entries(s *Store) map[string][]byte { return s.entries.Get() }
