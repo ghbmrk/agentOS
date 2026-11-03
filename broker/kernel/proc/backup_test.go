@@ -520,7 +520,7 @@ func TestADirTargetInTheKernelsDataRefuses(t *testing.T) {
 
 // The kernel process never starts without its backups' records.
 func TestRunKernelNeedsABackupDir(t *testing.T) {
-	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir()}, handoff.KernelKeys{Head: headPriv}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log"), KeyDir: t.TempDir()}, handoff.KernelKeys{Head: handoff.Hide(headPriv)}, &kernel.MemAnchor{})
 	if !errors.Is(err, ErrNoBackupDir) {
 		t.Fatalf("RunKernel with no backup dir: %v", err)
 	}

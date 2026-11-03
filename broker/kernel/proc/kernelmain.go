@@ -308,7 +308,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if cfg.ContentDir == "" {
 		return ErrNoContentDir
 	}
-	if len(cfg.ClerkKeys) > 0 && keys.ClerkRoot == ([32]byte{}) {
+	if len(cfg.ClerkKeys) > 0 && keys.ClerkRoot.Get() == ([32]byte{}) {
 		return errors.New("run: I hand clerks their keys, but the unlock step handed me no clerk root key")
 	}
 	if os.Geteuid() == 0 {
@@ -317,10 +317,10 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err := procguard.Isolate(cfg.Peers...); err != nil {
 		return err
 	}
-	if anchor == nil || len(keys.Head) != ed25519.PrivateKeySize {
+	if anchor == nil || len(keys.Head.Get()) != ed25519.PrivateKeySize {
 		return errors.New("run: a kernel needs an anchor and the unlock step's keys")
 	}
-	if err := checkLogKey(cfg.Log, keys.Log); err != nil {
+	if err := checkLogKey(cfg.Log, keys.Log.Get()); err != nil {
 		return err
 	}
 	// A store enrolled before the backup recipient holds none, and the
@@ -330,7 +330,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	// One enrolled before the page authority holds none, and certify
 	// refuses (MIG-4-recovery-f1).
-	if len(keys.PageCA) == 0 {
+	if len(keys.PageCA.Get()) == 0 {
 		fmt.Fprintln(os.Stderr, ErrNoAuthority)
 	}
 	// A start not by this PC's tpm slot trusts no edge (§12.2, HW-15
@@ -341,24 +341,24 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if moved {
 		first = nil
 	}
-	checker, err := CheckerPin(cfg.ClerkKeys, &keys.ClerkRoot)
+	checker, err := CheckerPin(cfg.ClerkKeys, keys.ClerkRoot.Ref())
 	if err != nil {
 		return err
 	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
-		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
-		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
+		Log: cfg.Log, Anchor: anchor, Key: keys.Log.Get(),
+		Pub: keys.Head.Get().Public().(ed25519.PublicKey), Sign: keys.Head.Get(),
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
-		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
-		FirstEdge: first, LinkKey: keys.LinkKey, Checker: checker, Clock: clock,
+		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: clock,
 	}, clock())
 	if err != nil {
 		return err
 	}
 	defer h.Close()
-	h.HoldRecoveryCard(keys.NewRecovery)
+	h.HoldRecoveryCard(keys.NewRecovery.Get())
 	if moved {
 		if err := h.With(func(k *kernel.Kernel) error { return k.EdgeCut(clock(), keys.Slot) }); err != nil {
 			return fmt.Errorf("run: cut the edge at a start by my %s slot: %w", keys.Slot, err)
@@ -380,7 +380,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	errs := make(chan error, len(sides)+len(cfg.ClerkKeys))
 	if len(cfg.ClerkKeys) > 0 {
-		root := keys.ClerkRoot // the kernel's copy, for its whole life
+		root := keys.ClerkRoot.Get() // the kernel's copy, for its whole life
 		// Cleared only once every key socket's server, and so every
 		// hand-off, has returned; the listeners close first (defers run
 		// last-in, first-out).

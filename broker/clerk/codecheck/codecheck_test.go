@@ -70,7 +70,7 @@ func newChecker(t *testing.T, clk *clock) (*Checker, string) {
 func open(t *testing.T, c *Checker, seed []byte, step int64) ed25519.PublicKey {
 	t.Helper()
 	sealer, sign := checkerKey(t)
-	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: seed, Step: step})
+	blob, err := handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: handoff.Hide(seed), Step: step})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestSeedComesOnlyFromTheUnlockStep(t *testing.T) {
 	}
 	sealer, sign := checkerKey(t)
 	other := bytes.Repeat([]byte{9}, 32)
-	blob, _ := handoff.SealCodeSeed(other, handoff.CodeSeed{Seed: seed})
+	blob, _ := handoff.SealCodeSeed(other, handoff.CodeSeed{Seed: handoff.Hide(seed)})
 	if err := c.Open(sealer, sign, blob); err == nil {
 		t.Fatal("a hand-off sealed under another key opened")
 	}
-	blob, _ = handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: seed})
+	blob, _ = handoff.SealCodeSeed(sealer, handoff.CodeSeed{Seed: handoff.Hide(seed)})
 	cut := bytes.Clone(blob)
 	cut[len(cut)-1] ^= 1
 	if err := c.Open(sealer, sign, cut); err == nil {
