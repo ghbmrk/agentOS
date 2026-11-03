@@ -1,6 +1,6 @@
 # agentOS owner's guide
 
-This guide answers common questions about your box. This part covers your PC and the daily digest.
+This guide answers common questions about your box. This part covers your PC, the daily digest and the enforcer's access point.
 
 ## Starting agentOS on your PC
 
@@ -49,3 +49,12 @@ After you type the key once, Windows starts normally again.
 ## Your daily digest
 
 Each morning at 8:00 the box texts you one short digest, even on a quiet day, when it says there is nothing else to report. If your phone was off or out of signal, the box keeps trying for the rest of that day and the next. If the box cannot tell whether a digest reached you, it never sends it twice; the next digest says so instead. If the box cannot read its own digest records, it sends you one short line saying so that day, and STATUS shows it until it is fixed. Reply STATUS any time for more.
+
+## If the enforcer was compromised
+
+The enforcer's key can change anything on its access point, the Wi-Fi box beside it. So whenever the enforcer may have been compromised, also reset the access point once the enforcer is trusted again:
+
+1. **Factory-reset the access point.** With it powered on, hold its reset button for about 10 seconds, then let go. It restarts with its factory settings and a new key of its own, and its Wi-Fi networks are gone for now.
+2. **Re-pin its key.** Keep its cable in the enforcer's access-point port, and on the enforcer's page choose to set up the access point again. The enforcer takes the access point's new key, then puts back its networks and Wi-Fi passwords.
+
+Until you re-pin it, the enforcer refuses to talk to the reset access point, because its key changed.
