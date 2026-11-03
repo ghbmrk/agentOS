@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -592,5 +593,142 @@ func TestFdPathNamesOnlyTheFileItself(t *testing.T) {
 	}
 	if real, err := fdPath(-1); !errors.Is(err, errWrite) {
 		t.Errorf("fdPath(no descriptor) = %q, %v, want errWrite", real, err)
+	}
+}
+
+// REQ: HW-10, ONB-3. tmpfs's code also backs mounts no namespace names
+// (#4877): a memfd, reached through /proc/<pid>/fd, is a process's memory
+// and not a file, so the gate refuses it however its descriptor is
+// named, as it does a tmpfs file whose name is gone, while a tmpfs file
+// this namespace names still opens.
+func TestFileGateRefusesMemfd(t *testing.T) {
+	fd, err := unix.MemfdCreate("fu8-canary", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create: %v", err)
+	}
+	defer unix.Close(fd)
+	if _, err := unix.Write(fd, []byte("memfd-canary-77c1")); err != nil {
+		t.Fatal(err)
+	}
+	var fs unix.Statfs_t
+	if err := unix.Fstatfs(fd, &fs); err != nil || fs.Type != unix.TMPFS_MAGIC {
+		t.Fatalf("a memfd's filesystem = %#x, %v, want tmpfs, the case the gate must refuse", fs.Type, err)
+	}
+	for _, p := range []string{
+		"/proc/self/fd/" + strconv.Itoa(fd),
+		fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), fd),
+		fmt.Sprintf("/proc/%d/task/%d/fd/%d", os.Getpid(), unix.Gettid(), fd),
+	} {
+		refusedAsShmem(t, p)
+	}
+	refusedAsShmem(t, "/proc/self/fd/"+strconv.Itoa(fd), unix.O_RDWR)
+
+	// A named tmpfs file opens; once its name is gone, the same
+	// descriptor's /proc link is refused like a memfd's.
+	shm := "/dev/shm"
+	if err := unix.Statfs(shm, &fs); err != nil || fs.Type != unix.TMPFS_MAGIC {
+		t.Skipf("%s is not tmpfs here (%v), so the named-file half has no tmpfs to use", shm, err)
+	}
+	dir, err := os.MkdirTemp(shm, "fu8-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	p := filepath.Join(dir, "named")
+	if err := os.WriteFile(p, []byte("named"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := readNoFollow(p); err != nil || string(b) != "named" {
+		t.Errorf("readNoFollow(a named tmpfs file) = %q, %v", b, err)
+	}
+	held, err := unix.Open(p, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(held)
+	if fd, err := openRaw("/proc/self/fd/"+strconv.Itoa(held), unix.O_RDONLY, 0); err != nil {
+		t.Errorf("openRaw(the /proc link of a named tmpfs file) = %v", err)
+	} else {
+		unix.Close(fd)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	refusedAsShmem(t, "/proc/self/fd/"+strconv.Itoa(held))
+}
+
+// REQ: HW-10, ONB-3. A SysV shm segment, and a shared anonymous mapping,
+// are memory on the same unnamed shmem mount as a memfd (#4877). No
+// descriptor holds them, so /proc/<pid>/map_files reaches them, which
+// only a run with CAP_SYS_ADMIN (or CAP_CHECKPOINT_RESTORE) may open,
+// such as the box's harness or a reviewer's run as root; a run without
+// it skips, as CI does.
+func TestFileGateRefusesSysVShm(t *testing.T) {
+	id, err := unix.SysvShmGet(unix.IPC_PRIVATE, 4096, unix.IPC_CREAT|0o600)
+	if err != nil {
+		t.Fatalf("shmget: %v", err)
+	}
+	defer unix.SysvShmCtl(id, unix.IPC_RMID, nil)
+	seg, err := unix.SysvShmAttach(id, 0, 0)
+	if err != nil {
+		t.Fatalf("shmat: %v", err)
+	}
+	defer unix.SysvShmDetach(seg)
+	copy(seg, "sysv-canary-2be9")
+	anon, err := unix.Mmap(-1, 0, 4096, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Munmap(anon)
+
+	// A SysV segment's inode number is its shmid; a shared anonymous
+	// mapping reads /dev/zero (deleted), and any one of them will do.
+	b, err := os.ReadFile("/proc/self/maps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sysv, zero string
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 6 {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(f[5], "/SYSV") && f[4] == strconv.Itoa(id):
+			sysv = f[0]
+		case f[5] == "/dev/zero" && strings.HasPrefix(f[1], "rw-s"):
+			zero = f[0]
+		}
+	}
+	if sysv == "" || zero == "" {
+		t.Fatalf("/proc/self/maps lists the segment at %q and the shared mapping at %q, want both", sysv, zero)
+	}
+	probe, err := unix.Open("/proc/self/map_files/"+sysv, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENOENT) {
+		t.Skipf("opening /proc/self/map_files needs CAP_SYS_ADMIN or CAP_CHECKPOINT_RESTORE, which this run lacks: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.Close(probe)
+	refusedAsShmem(t, "/proc/self/map_files/"+sysv)
+	refusedAsShmem(t, fmt.Sprintf("/proc/%d/map_files/%s", os.Getpid(), sysv), unix.O_RDWR)
+	refusedAsShmem(t, "/proc/self/map_files/"+zero)
+}
+
+// refusedAsShmem fails t unless openRaw refuses p, opened with flag
+// (read-only if none), as kernel-held memory.
+func refusedAsShmem(t *testing.T, p string, flag ...int) {
+	t.Helper()
+	f := unix.O_RDONLY
+	if len(flag) > 0 {
+		f = flag[0]
+	}
+	fd, err := openRaw(p, f, 0)
+	if err == nil {
+		unix.Close(fd)
+	}
+	if !errors.Is(err, errShmem) {
+		t.Errorf("openRaw(%q, %#x) = %v, want it refused as kernel-held memory", p, f, err)
 	}
 }

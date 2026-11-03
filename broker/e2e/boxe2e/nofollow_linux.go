@@ -39,6 +39,7 @@ var (
 	errJournal = errors.New("refused: a journal file is read only through readJournal")
 	errWrite   = errors.New("refused: the driver writes only under writeDirs and to writeFiles")
 	errKind    = errors.New("refused: the driver opens only directories, /dev/ptmx and regular files on disk, tmpfs or nsfs")
+	errShmem   = errors.New("refused: a tmpfs file opens only by a name this mount namespace gives it, so no memfd, SysV segment or other kernel-held memory")
 )
 
 // writeDirs are the directories the driver writes in and writeFiles the
@@ -121,7 +122,7 @@ var fileFS = map[int64]bool{
 
 // checkFD refuses what an open reached unless it is /dev/ptmx, a
 // directory, or a regular file on one of fileFS that is not a
-// journal, and if open for writing is where the driver writes and has no
+// journal (on tmpfs, also one this namespace names), and if open for writing is where the driver writes and has no
 // other name (a hard link's other name may be anywhere on its
 // filesystem). A link reached is refused as ELOOP: only an O_NOFOLLOW
 // open reaches one.
@@ -150,6 +151,18 @@ func checkFD(fd int, write bool) error {
 	}
 	if !fileFS[int64(fs.Type)] {
 		return errKind
+	}
+	// tmpfs's code also backs the kernel's own mounts, which no namespace
+	// names: shmem's, holding every memfd, SysV shm segment and shared
+	// anonymous mapping, and any a driver makes. Such a file, reached
+	// through /proc/<pid>/fd or map_files, is a box process's memory, not
+	// a file, and its /proc text (/memfd:x (deleted), /SYSV0000002a
+	// (deleted)) names nothing here, so a tmpfs file opens only when this
+	// namespace's name for it reaches the same inode on the same mount.
+	if int64(fs.Type) == unix.TMPFS_MAGIC {
+		if _, err := fdPath(fd); err != nil {
+			return errShmem
+		}
 	}
 	if write {
 		if st.Nlink > 1 {
