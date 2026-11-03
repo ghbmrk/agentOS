@@ -65,7 +65,7 @@ func TestHears(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "hh0", "own0"}
+	want := []string{"ap0.101", "ap0.102", "ap0.103", "ap0.104", "ap0.105", "ap0.106", "ap0.107", "ap0.109", "hh0", "own0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("hears %q, want %q", got, want)
 	}
