@@ -36,7 +36,12 @@ with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the re
 no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
 every test, so the set is at most the package's covered lines. Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a test-only package `run` points HEAD for
-that one call at a commit whose parent differs from the tree on exactly those lines.
+that one call at a commit whose parent differs from the tree on exactly those lines. There each
+mutant runs first with only the changed tests (`-run`), and each target line where one of its
+mutants is not KILLED then runs with every test, whose verdicts replace the first run's (#4961): a
+mutant the changed tests kill, the suite, which runs them too, detects; every other verdict is the
+suite's. `delete` judges its deletions in the same order. Without it a test that covers a thousand
+lines of a package whose suite takes 15 s could not finish in an hour (#4945).
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
 code) but do not check, and fails the gate, unless the PR body holds the line
 `Mutant-equivalent: broker/<pkg>/<file>.go:<line> <reason>` for its site: one site, one reason
@@ -390,7 +395,7 @@ def covered_by(pkg, names, tmp):
     profile.unlink(missing_ok=True)
     cmd = ["go", "test", "-count=1", "-covermode=set", f"-coverprofile={profile}"]
     if names is not None:
-        cmd += ["-run", "^(" + "|".join(names) + ")$"]
+        cmd += ["-run", run_filter(names)]
     if subprocess.run([*cmd, "."], cwd=BROKER / pkg).returncode or not profile.exists():
         return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     out = {}
@@ -435,6 +440,81 @@ def marked_base(targets, tmp):
             git("update-ref", "--no-deref", "HEAD", head)
 
 
+def unleash(pkg, targets, cfg, dest, env, tmp):
+    """Gremlins on pkg's target lines, writing dest; its exit status (1 when dest is missing)."""
+    dest.unlink(missing_ok=True)
+    with marked_base(targets, tmp) as base:
+        r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                            *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+    return r.returncode or (0 if dest.exists() else 1)
+
+
+def mutant_key(f, m):
+    return f["file_name"], m["line"], m.get("column"), m.get("type")
+
+
+def unkilled_lines(data, pkg, targets):
+    """{path: lines} of the target lines holding a mutant that is not KILLED."""
+    out = {}
+    for f in data["files"]:
+        path = f"broker/{pkg}/{f['file_name']}"
+        for m in f.get("mutations") or []:
+            if m["line"] in targets.get(path, ()) and m["status"] != "KILLED":
+                out.setdefault(path, set()).add(m["line"])
+    return out
+
+
+def merged(first, full, pkg, lines):
+    """(gremlins' JSON, None): first with each mutant on lines (a {path: lines}) replaced by the
+    whole suite's verdict on it from full, and the totals recounted as gremlins counts them; or
+    (None, problem) when the two runs do not list the same mutants on those lines."""
+    on = lambda data: collections.Counter(
+        mutant_key(f, m) for f in data["files"] for m in f.get("mutations") or []
+        if m["line"] in lines.get(f"broker/{pkg}/{f['file_name']}", ()))
+    if (a := on(first)) != (b := on(full)):
+        return None, (f"gremlins listed other mutants on the same lines with every test than with the changed "
+                      f"tests alone: {sorted((a - b).elements())[:5]} against {sorted((b - a).elements())[:5]}")
+    again = {mutant_key(f, m): m for f in full["files"] for m in f.get("mutations") or []}
+    out = {**first, "files": [
+        {**f, "mutations": [again[mutant_key(f, m)] if m["line"] in lines.get(f"broker/{pkg}/{f['file_name']}", ())
+                            else m for m in f.get("mutations") or []]} for f in first["files"]]}
+    count = collections.Counter(m["status"] for f in out["files"] for m in f.get("mutations") or [])
+    for status, key in COUNTERS.items():
+        out[key] = count[status]
+    out["mutants_total"] = count["LIVED"] + count["KILLED"] + count["NOT VIABLE"]
+    if count["LIVED"] + count["KILLED"]:
+        out["test_efficacy"] = 100 * count["KILLED"] / (count["LIVED"] + count["KILLED"])
+    return out, None
+
+
+def two_pass(pkg, targets, names, cfg, dest, env, tmp):
+    """Gremlins on a test-only diff's target lines (#4961), writing dest; a problem, or None. Each
+    mutant runs first with only the changed tests, named by `-run` in GOFLAGS, which gremlins' go
+    test reads; then every target line holding a mutant those tests did not kill runs again with
+    every test, and its verdicts replace the first run's. A KILLED verdict stands: the whole suite
+    runs the same tests on the same mutant. Every other verdict, LIVED above all, is the whole suite's.
+    The cost is the target lines' mutants at the changed tests' time, plus the mutants on lines
+    they leave unkilled at the whole suite's, not every mutant at the whole suite's."""
+    first, full = pathlib.Path(tmp) / "first.json", pathlib.Path(tmp) / "full.json"
+    flags = " ".join([*env.get("GOFLAGS", "").split(), f"-run={run_filter(names)}"])
+    if rc := unleash(pkg, targets, cfg, first, {**env, "GOFLAGS": flags}, tmp):
+        return f"gremlins failed on {pkg} with the changed tests {names} (exit {rc})"
+    data = json.loads(first.read_text())
+    if problem := result_problem(data, pkg, BROKER / pkg, targets):
+        return f"gremlins' run of {pkg} with the changed tests {names} {problem}"
+    if lines := unkilled_lines(data, pkg, targets):
+        if rc := unleash(pkg, lines, cfg, full, env, tmp):
+            return f"gremlins failed on {pkg} with every test (exit {rc})"
+        again = json.loads(full.read_text())
+        if problem := result_problem(again, pkg, BROKER / pkg, lines):
+            return f"gremlins' run of {pkg} with every test {problem}"
+        data, problem = merged(data, again, pkg, lines)
+        if problem:
+            return problem
+    dest.write_text(json.dumps(data))
+    return None
+
+
 def cmd_run(args):
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
@@ -465,15 +545,21 @@ def cmd_run(args):
                 # Gremlins' -D mutates every line when its diff is empty; none is a target here.
                 dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0, "targets": record}))
                 continue
-        if args.git:
+        if record and record["tests"] is not None:
+            if problem := two_pass(pkg, targets, record["tests"], cfg, dest, env, cfgdir.name):
+                print(f"mutgate: {problem}", file=sys.stderr)
+                bad += 1
+                continue
+            rc = 0
+        elif args.git:
             with marked_base(targets, cfgdir.name) if record else contextlib.nullcontext(args.git) as base:
-                r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
-                                    *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+                rc = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                                     *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG}).returncode
         else:
-            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
-                               cwd=BROKER, env=env)
-        if r.returncode != 0 or not dest.exists():
-            print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
+            rc = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
+                                cwd=BROKER, env=env).returncode
+        if rc != 0 or not dest.exists():
+            print(f"mutgate: gremlins failed on {pkg} (exit {rc})", file=sys.stderr)
             bad += 1
         elif problem := result_problem(data := json.loads(dest.read_text()), pkg, BROKER / pkg, targets):
             print(f"mutgate: {dest} {problem}", file=sys.stderr)
@@ -600,12 +686,18 @@ def build_mutant(src, site, build, mutant, pkg_dir):
     return False
 
 
-def run_tests(binary, cwd, timeout):
-    """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
-    is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
-    BINARY.out, where failed_test reads which test failed."""
+def run_filter(names):
+    """The `-run` pattern that selects exactly the named test functions (TEST_FUNC names: no spaces)."""
+    return "^(" + "|".join(names) + ")$"
+
+
+def run_tests(binary, cwd, timeout, names=None):
+    """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary (only the named test
+    functions, when names is given); its process group is killed at the timeout, so a test's child
+    cannot outlive the verdict. Its output goes to BINARY.out, where failed_test reads which test failed."""
+    only = [f"-test.run={run_filter(names)}"] if names else []
     with open(pathlib.Path(binary).with_suffix(".out"), "wb") as log:
-        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s"], cwd=cwd,
+        p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s", *only], cwd=cwd,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             return "LIVED" if p.wait(timeout=timeout) == 0 else "KILLED"
@@ -666,13 +758,16 @@ def site_keys(sites):
     return collections.Counter((s["file"], s["at"], s["col"]) for s in sites)
 
 
-def deletion_mutants(pkg, added, tmp, lister, jobs=1):
+def deletion_mutants(pkg, added, tmp, lister, jobs=1, names=None):
     """([mutation dict], None) for each site deletion_sites lists, or (None, problem). The sites run
     on `jobs` parallel workers (#4633), each in its own directory, a batch at a time. A site a worker
     reads as detected (KILLED or TIMED OUT) runs its binary again alone once the batch is done, and
     that verdict stands: a loaded runner can fail a wall-clock bound or slow a run past its timeout,
     and other binaries can collide on a fixed path or port, which would pass a deletion that lives
-    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker."""
+    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker.
+    With names (a test-only diff's changed tests, #4961), each mutant runs only those tests first:
+    KILLED there stands, as it would in the whole suite, which runs the same tests; any other
+    verdict is judged again by the whole suite, as without names."""
     pkg_dir = BROKER / pkg
     sites, problem = deletion_sites(pkg, added, lister)
     if not sites:
@@ -693,6 +788,19 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
     timeout = 3 * (time.monotonic() - began) + 10
     blocks = covered_blocks(profile.read_text())
+    if names:
+        began = time.monotonic()
+        if run_tests(base, pkg_dir, timeout, names) != "LIVED":
+            return None, f"broker/{pkg}/'s tests {names} fail alone before any statement is deleted"
+        first = 3 * (time.monotonic() - began) + 10
+
+    def judge(binary, alone):
+        """(status, whether it still needs confirming alone): the changed tests' KILLED, else the
+        whole suite's verdict. Judged again alone, the verdict stands."""
+        if names and run_tests(binary, pkg_dir, first, names) == "KILLED":
+            return "KILLED", not alone
+        status = run_tests(binary, pkg_dir, timeout)
+        return status, not alone and status in DETECTED
 
     def verdict(i, alone):
         """The site's status, its binary when a detected verdict still needs confirming alone, and
@@ -710,8 +818,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
-            status = run_tests(binary, pkg_dir, timeout)
-            keep = not alone and status in DETECTED
+            status, keep = judge(binary, alone)
             return status, binary if keep else None, failed_test(binary)
         finally:
             if not keep:
@@ -724,7 +831,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
             results = [verdict(i, True) for i in batch] if jobs <= 1 else list(pool.map(lambda i: verdict(i, False), batch))
             for i, (status, binary, killer) in zip(batch, results):
                 if binary is not None:
-                    status, killer = run_tests(binary, pkg_dir, timeout), failed_test(binary)
+                    status, killer = judge(binary, True)[0], failed_test(binary)
                     shutil.rmtree(binary.parent)
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
@@ -769,7 +876,9 @@ def cmd_delete(args):
                 bad += 1
                 continue
             targets, problem = targets_for(pkg, added, tests, data)
-            mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs)
+            # A test-only diff's changed tests judge each deletion first (#4961); None is every test.
+            names = None if diff_targets(added, pkg) else changed_tests(tests, pkg)
+            mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs, names)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1

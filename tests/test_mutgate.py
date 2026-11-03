@@ -3,6 +3,7 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import collections
 import json
 import os
 import pathlib
@@ -1173,6 +1174,65 @@ func set(n, m int) {
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
 
+    def test_changed_tests_judge_each_deletion_first_with_the_whole_suites_verdicts(self):
+        # #4961: for a test-only diff each deletion runs the changed tests first; their KILLED
+        # stands, and any other verdict is the whole suite's. Each covered site gets a model: the
+        # changed tests' verdict and the whole suite's, which is KILLED or TIMED OUT where the
+        # changed tests kill it (the suite runs them too). The verdicts equal the whole-suite pass's
+        # but for a KILLED that stands for the suite's TIMED OUT; the suite runs only the rest.
+        import random
+        rng = random.Random(4961)
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            model, calls = {}, []
+            def fake(binary, cwd, timeout, names=None):
+                site = pathlib.Path(binary).parent.name
+                if pathlib.Path(binary).name == "base.test":
+                    self.assertEqual(names, ["TestKeep"])
+                    return "LIVED"
+                calls.append((site, names))
+                return model[site][0 if names else 1]
+            saved = mutgate.BROKER, mutgate.run_tests, mutgate.build_mutant
+            mutgate.BROKER, mutgate.run_tests, mutgate.build_mutant = pkg.parent, fake, lambda *a: True
+            try:
+                for case in range(8):
+                    for site in (f"site-{i}" for i in range(5)):
+                        alone = rng.choice(["KILLED", "LIVED", "TIMED OUT"])
+                        model[site] = (alone, rng.choice(["KILLED", "TIMED OUT"] if alone == "KILLED"
+                                                         else ["KILLED", "LIVED", "TIMED OUT"]))
+                    got = {}
+                    for jobs, names in ((1, None), (1, ["TestKeep"]), (3, ["TestKeep"])):
+                        calls.clear()
+                        tmp = pathlib.Path(d) / "tmp"
+                        tmp.mkdir()
+                        mutants, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), jobs, names)
+                        shutil.rmtree(tmp)
+                        self.assertIsNone(problem)
+                        got[jobs, bool(names)] = {m["line"]: m["status"] for m in mutants}, list(calls)
+                    (want, whole), (two, calls1), (par, calls3) = got[1, False], got[1, True], got[3, True]
+                    with self.subTest(case=case, model=dict(model)):
+                        self.assertEqual(two, par)
+                        for line in want:
+                            self.assertTrue(two[line] == want[line] or (two[line], want[line]) == ("KILLED", "TIMED OUT"))
+                        self.assertEqual([l for l, st in two.items() if st == "LIVED"],
+                                         [l for l, st in want.items() if st == "LIVED"])
+                        # Serially: each covered site runs the changed tests once, and the whole
+                        # suite only where they did not kill it.
+                        ran = sorted({site for site, _ in whole})
+                        self.assertEqual(sorted(s for s, n in calls1 if n), ran)
+                        self.assertEqual(sorted(s for s, n in calls1 if not n),
+                                         [s for s in ran if model[s][0] != "KILLED"])
+                        # On workers, a detected verdict (the changed tests' KILLED or the whole
+                        # suite's) is judged again alone, from the changed tests (#4633).
+                        for site in ran:
+                            self.assertEqual(calls3.count((site, ["TestKeep"])),
+                                             1 + (model[site][0] == "KILLED" or model[site][1] in mutgate.DETECTED))
+            finally:
+                mutgate.BROKER, mutgate.run_tests, mutgate.build_mutant = saved
+
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
         # worker would, so after such a batch the rest runs alone, once each.
@@ -1316,13 +1376,15 @@ class TestOnly(unittest.TestCase):
                               env={**os.environ, "GOFLAGS": "", "GOWORK": "off", **(env or {})})
 
     def stub(self, d, mutations):
-        """A gremlins on PATH that records `git diff --merge-base` of its -D ref and writes mutations."""
+        """A gremlins on PATH that records `git diff --merge-base` of its -D ref and GOFLAGS in seen-N,
+        N counting its runs from 0, and writes mutations."""
         stub = pathlib.Path(d) / "bin"
         stub.mkdir()
         out = json.dumps({"files": [{"file_name": "hint.go", "mutations": mutations}],
                           "mutants_lived": sum(m["status"] == "LIVED" for m in mutations)})
         (stub / "gremlins").write_text(
-            f"#!/bin/sh\ngit diff --merge-base \"$4\" > \"{d}/seen\"\n"
+            f"#!/bin/sh\nn=$(ls \"{d}\" | grep -c ^seen-)\n"
+            f"{{ echo \"GOFLAGS=$GOFLAGS\"; git diff --merge-base \"$4\"; }} > \"{d}/seen-$n\"\n"
             f"while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{out}' > \"$2\"\n")
         (stub / "gremlins").chmod(0o755)
         return {"PATH": f"{stub}:{os.environ['PATH']}"}
@@ -1349,9 +1411,15 @@ class TestOnly(unittest.TestCase):
             self.assertEqual(data["targets"]["tests"], ["TestUp"])
             self.assertTrue({3, 4, 5, 7} <= set(covered), covered)
             self.assertFalse({10, 11} & set(covered), covered)  # Down: only TestDown runs it
-            # Gremlins' own diff marks exactly those lines, relative to the package.
-            seen = mutgate.added_lines((pathlib.Path(d) / "seen").read_text())[0]
-            self.assertEqual(seen, {"hint.go": set(covered)})
+            # Gremlins' own diff marks exactly those lines, relative to the package, and runs only
+            # the changed test on them; then only line 4, whose mutant TestUp left alive, with every
+            # test (#4961). Line 7's mutant, which TestUp kills, runs once.
+            seen = [(pathlib.Path(d) / f"seen-{n}").read_text().split("\n", 1) for n in range(2)]
+            self.assertFalse((pathlib.Path(d) / "seen-2").exists())
+            self.assertEqual(seen[0][0], "GOFLAGS=-run=^(TestUp)$")
+            self.assertEqual(mutgate.added_lines(seen[0][1])[0], {"hint.go": set(covered)})
+            self.assertEqual(seen[1][0], "GOFLAGS=")
+            self.assertEqual(mutgate.added_lines(seen[1][1])[0], {"hint.go": {4}})
             r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             summary = pathlib.Path(d) / "summary.md"
@@ -1406,6 +1474,9 @@ class TestOnly(unittest.TestCase):
             data = json.loads((out / "hint.json").read_text())
             self.assertIsNone(data["targets"]["tests"])
             self.assertTrue({4, 5, 7, 11} <= set(data["targets"]["lines"]["hint.go"]))
+            # Every test is the changed set: one run, with every test, as before #4961.
+            self.assertTrue((pathlib.Path(d) / "seen-0").read_text().startswith("GOFLAGS=\n"))
+            self.assertFalse((pathlib.Path(d) / "seen-1").exists())
 
     def test_test_functions_name_the_changed_tests(self):
         text = TWO_TEST + "\nfunc TestMain(m *testing.M) {\n\tm.Run()\n}\n\nfunc Testhelper() {}\n\nfunc FuzzUp(f *testing.F) {}\n"
@@ -1437,10 +1508,171 @@ class TestOnly(unittest.TestCase):
             r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), env={"PATH": "/usr/bin:/bin:" + str(pathlib.Path(sys.executable).parent) + ":" + os.path.dirname(shutil.which("go"))})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads((out / "hint.json").read_text())["targets"], {"tests": ["TestDown"], "lines": {}})
-            self.assertFalse((pathlib.Path(d) / "seen").exists())
+            self.assertFalse((pathlib.Path(d) / "seen-0").exists())
             self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+# MUT-test-only-cost (#4961): a stand-in for gremlins whose mutants each have the tests that cover,
+# kill or hang them, judged as gremlins v0.6.0 judges them: a line outside -D's diff is SKIPPED, a
+# mutant no running test covers NOT COVERED, one that does not build NOT VIABLE, and otherwise `go
+# test -failfast` runs the tests in order, so the first that fails (KILLED) or hangs (TIMED OUT)
+# decides, and none is LIVED. The running tests are those GOFLAGS' -run selects. Every mutant it
+# runs is logged with the tests it ran, so the cost is counted.
+MODEL_TESTS = ["TestDown", "TestUp", "TestZ"]  # go test's order: the source order
+MODEL_GREMLINS = """\
+import json, os, re, subprocess, sys
+a = sys.argv
+base, dest = a[a.index("-D") + 1], a[a.index("-o") + 1]
+run = [f[5:] for f in os.environ.get("GOFLAGS", "").split() if f.startswith("-run=")]
+tests = [t for t in TESTS if not run or re.search(run[-1], t)]
+diff, line = set(), None
+for row in subprocess.run(["git", "diff", "--merge-base", base], capture_output=True, text=True,
+                          check=True).stdout.split("\\n"):
+    m = re.match(r"^@@ -\\S+ \\+(\\d+)(?:,(\\d+))? @@", row)
+    if m:
+        diff |= set(range(int(m.group(1)), int(m.group(1)) + int(m.group(2) or 1)))
+out = []
+for m in json.load(open(os.environ["MODEL"])):
+    if m["line"] not in diff:
+        status = "SKIPPED"
+    elif not set(m["cover"]) & set(tests):
+        status = "NOT COVERED"
+    elif not m["viable"]:
+        status = "NOT VIABLE"
+    else:
+        status = next(("KILLED" if t in m["kills"] else "TIMED OUT" for t in tests
+                       if t in m["kills"] or t in m["hangs"]), "LIVED")
+        with open(os.environ["MODEL"] + ".log", "a") as log:
+            log.write(json.dumps([m["line"], m["column"], m["type"], tests]) + "\\n")
+    out.append({"type": m["type"], "status": status, "line": m["line"], "column": m["column"]})
+json.dump({"files": [{"file_name": "hint.go", "mutations": out}],
+           "mutants_lived": sum(m["status"] == "LIVED" for m in out)}, open(dest, "w"))
+"""
+
+
+class TwoPass(unittest.TestCase):
+    """`run` on a test-only diff: the changed tests judge each mutant first, and every test judges
+    the lines they leave a mutant alive on (#4961). Its verdicts are the single whole-suite run's."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = pathlib.Path(cls.dir.name)
+        TestOnly.repo(None, cls.dir.name, TWO_TEST.replace("Up(20) != 10", "Up(20) < 0"))
+        stub = d / "bin"
+        stub.mkdir()
+        (stub / "gremlins").write_text(f"#!{sys.executable}\nTESTS = {MODEL_TESTS!r}\n" + MODEL_GREMLINS)
+        (stub / "gremlins").chmod(0o755)
+        cls.env = {**os.environ, "PATH": f"{stub}:{os.environ['PATH']}", "GOFLAGS": ""}
+        cls.model = d / "model.json"
+        cls.saved = mutgate.ROOT, mutgate.BROKER
+        mutgate.ROOT, mutgate.BROKER = d, d / "broker"
+        cls.targets = {"broker/hint/hint.go": {3, 4, 5, 6, 7}}  # the lines TestUp covers
+
+    @classmethod
+    def tearDownClass(cls):
+        mutgate.ROOT, mutgate.BROKER = cls.saved
+        cls.dir.cleanup()
+
+    def judge(self, mutants, two):
+        """(gremlins' JSON, [(line, column, type, tests run)]) of one `run` of the package, two-pass
+        with TestUp as the changed test, or else (the behaviour before #4961) once with every test."""
+        self.model.write_text(json.dumps(mutants))
+        pathlib.Path(f"{self.model}.log").unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, dest = pathlib.Path(tmp) / "g.yaml", pathlib.Path(tmp) / "out.json"
+            cfg.write_text("{}\n")
+            env = {**self.env, "MODEL": str(self.model)}
+            if two:
+                self.assertIsNone(mutgate.two_pass("hint", self.targets, ["TestUp"], cfg, dest, env, tmp))
+            else:
+                self.assertEqual(mutgate.unleash("hint", self.targets, cfg, dest, env, tmp), 0)
+            data = json.loads(dest.read_text())
+        log = pathlib.Path(f"{self.model}.log")
+        return data, [tuple(json.loads(row)[:3]) + (tuple(json.loads(row)[3]),)
+                      for row in (log.read_text().splitlines() if log.exists() else [])]
+
+    @staticmethod
+    def statuses(data):
+        return {(m["line"], m["column"], m["type"]): m["status"] for f in data["files"] for m in f["mutations"]}
+
+    def random_mutants(self, rng):
+        sub = lambda: sorted(t for t in MODEL_TESTS if rng.random() < 0.4)
+        return [{"line": rng.choice([3, 4, 5, 7, 7, 11]), "column": c, "type": rng.choice(["A", "B"]),
+                 "cover": sub() + ["TestUp"] * (rng.random() < 0.8), "kills": sub(), "hangs": sub(),
+                 "viable": rng.random() < 0.9} for c in range(1, rng.randint(2, 9))]
+
+    def test_verdicts_equal_the_whole_suite_run(self):
+        import random
+        rng = random.Random(4961)
+        for case in range(60):
+            mutants = self.random_mutants(rng)
+            with self.subTest(case=case, mutants=mutants):
+                (one, one_log), (two, two_log) = self.judge(mutants, False), self.judge(mutants, True)
+                want, got = self.statuses(one), self.statuses(two)
+                self.assertEqual(set(got), set(want))
+                for key in want:
+                    # The changed tests' KILLED stands where every test, run in order, would first hit
+                    # another test that hangs: both are detected. Every other verdict is equal.
+                    self.assertTrue(got[key] == want[key] or (got[key], want[key]) == ("KILLED", "TIMED OUT"),
+                                    (key, got[key], want[key]))
+                self.assertEqual(mutgate.survivors_of(two), mutgate.survivors_of(one))
+                self.assertEqual(mutgate.shape_ok(two), True)
+                counted = collections.Counter(st for st in got.values())
+                if "mutants_killed" in two:  # recounted only when the passes merged (the stub writes no other)
+                    self.assertEqual((two["mutants_killed"], two["mutants_not_viable"], two["mutants_not_covered"]),
+                                     (counted["KILLED"], counted["NOT VIABLE"], counted["NOT COVERED"]))
+                # Cost: each mutant the first pass runs, runs with TestUp alone; with every test, only
+                # the mutants on a target line where the first pass left one not KILLED.
+                lines = self.targets["broker/hint/hint.go"]
+                key = lambda m: (m["line"], m["column"], m["type"])
+                alone = sorted(r[:3] for r in two_log if r[3] == ("TestUp",))
+                every = sorted(r[:3] for r in two_log if r[3] == tuple(MODEL_TESTS))
+                self.assertEqual(len(alone) + len(every), len(two_log))
+                self.assertEqual(alone, sorted(key(m) for m in mutants
+                                               if m["line"] in lines and m["viable"] and "TestUp" in m["cover"]))
+                left = {m["line"] for m in mutants if m["line"] in lines
+                        and not (m["viable"] and "TestUp" in m["cover"] and "TestUp" in m["kills"])}
+                self.assertEqual(every, sorted(r[:3] for r in one_log if r[0] in left))
+
+    def test_lines_the_changed_tests_kill_never_run_the_whole_suite(self):
+        # The #4945 shape: one changed test covers many lines and kills nearly every mutant on them,
+        # so the whole suite runs only on the one line where a mutant lives.
+        mutants = [{"line": line, "column": c, "type": "A", "cover": ["TestUp"], "kills": ["TestUp"],
+                    "hangs": [], "viable": True} for line in (3, 5, 7) for c in (1, 2, 3)]
+        mutants.append({"line": 4, "column": 9, "type": "B", "cover": MODEL_TESTS, "kills": [], "hangs": [], "viable": True})
+        (one, one_log), (two, two_log) = self.judge(mutants, False), self.judge(mutants, True)
+        self.assertEqual(self.statuses(two), self.statuses(one))
+        self.assertEqual(len(one_log), 10)
+        self.assertEqual(sorted(r[:3] for r in two_log if r[3] == tuple(MODEL_TESTS)), [(4, 9, "B")])
+        self.assertEqual(len([r for r in two_log if r[3] == ("TestUp",)]), 10)
+
+    def test_a_mutant_only_another_test_kills_is_judged_by_every_test(self):
+        # TestUp covers the line but checks nothing there; TestZ fails. LIVED with TestUp alone would
+        # fail the gate wrongly; NOT COVERED with TestUp alone would hide a survivor. Both rerun.
+        mutants = [{"line": 4, "column": 1, "type": "A", "cover": MODEL_TESTS, "kills": ["TestZ"], "hangs": [], "viable": True},
+                   {"line": 5, "column": 1, "type": "A", "cover": ["TestZ"], "kills": [], "hangs": [], "viable": True},
+                   {"line": 7, "column": 1, "type": "A", "cover": MODEL_TESTS, "kills": [], "hangs": ["TestUp"], "viable": True}]
+        two, log = self.judge(mutants, True)
+        self.assertEqual(self.statuses(two), {(4, 1, "A"): "KILLED", (5, 1, "A"): "LIVED", (7, 1, "A"): "TIMED OUT"})
+        self.assertEqual(two["mutants_lived"], 1)
+
+    def test_runs_that_list_other_mutants_are_refused(self):
+        # The merge pairs each mutant with its whole-suite verdict by file, line, column and type;
+        # a second run listing other mutants there cannot be merged, so `run` fails.
+        first = {"files": [{"file_name": "hint.go", "mutations": [
+            {"type": "A", "status": "LIVED", "line": 4, "column": 1}]}], "mutants_lived": 1}
+        full = {"files": [{"file_name": "hint.go", "mutations": [
+            {"type": "A", "status": "KILLED", "line": 4, "column": 2}]}], "mutants_lived": 0}
+        data, problem = mutgate.merged(first, full, "hint", {"broker/hint/hint.go": {4}})
+        self.assertIsNone(data)
+        self.assertIn("other mutants on the same lines", problem)
+        full["files"][0]["mutations"][0]["column"] = 1
+        data, problem = mutgate.merged(first, full, "hint", {"broker/hint/hint.go": {4}})
+        self.assertIsNone(problem)
+        self.assertEqual((data["mutants_lived"], data["mutants_killed"], data["mutants_total"]), (0, 1, 1))
 
 
 class Summary(unittest.TestCase):
