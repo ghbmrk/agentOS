@@ -1,0 +1,15 @@
+[Unit]
+Description=agentOS enforcer boot report
+After=systemd-bless-boot.service boot-complete.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos-enforcer/boot-report
+StandardOutput=journal+console
+NoExecPaths=/
+ExecPaths=/usr
+DevicePolicy=closed
+DeviceAllow=block-* r
+
+[Install]
+WantedBy=multi-user.target
