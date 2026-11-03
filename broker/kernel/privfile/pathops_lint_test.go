@@ -798,7 +798,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// read by the instances of every template whose name it prefixes, so a
 		// shared directory's drop-ins of ours are read alone whatever loaded.
 		"a prefix template's drop-in a longer template reads": {map[string]string{lib + "x-@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", lib + "x-y@.service": "[Service]\nExecStart=%I\n", etc + "x-@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
-		"a prefix instance's drop-in a longer template reads":  {map[string]string{lib + "x-@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", lib + "x-y@.service": root, etc + "x-@tty1.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a prefix instance's drop-in a longer template reads": {map[string]string{lib + "x-@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", lib + "x-y@.service": root, etc + "x-@tty1.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
 		"a prefix drop-in a unit of its own name loads":       {map[string]string{lib + "x-.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", etc + "x-.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
 		// Every template loads as each instance name the tree holds, so a
 		// package's prefix-instance drop-in is read with our template.
@@ -810,7 +810,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// A unit that did not finish loading may have stopped before its
 		// drop-ins: each file of ours is read alone too.
 		"a fragment of ours in a bad-setting template": {map[string]string{etc + "x@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nWorkingDirectory=%I\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `may not set the user`},
-		"a mode of ours on a package's directory":               {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
+		"a mode of ours on a package's directory":      {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
