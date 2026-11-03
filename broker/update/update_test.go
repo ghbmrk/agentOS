@@ -770,20 +770,34 @@ func TestDirSourceRefusesLinkedParent(t *testing.T) {
 		t.Fatal("Open followed a linked metadata/ directory out of the source")
 	}
 
-	// A link inside the tree to a file inside the tree is refused too.
+	// A relative link that stays inside the tree is refused too, at the
+	// file and at a parent: RESOLVE_NO_SYMLINKS, not only RESOLVE_BENEATH.
 	if err := os.Mkdir(filepath.Join(root, "targets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	real := filepath.Join(root, "targets", "real")
-	if err := os.WriteFile(real, []byte("x"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "targets", "real"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(real, filepath.Join(root, "targets", "link")); err != nil {
+	if err := os.Symlink("real", filepath.Join(root, "targets", "link")); err != nil {
 		t.Fatal(err)
 	}
-	if rc, err := DirSource(root).Open("targets/link"); err == nil {
+	if err := os.Symlink("targets", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"targets/link", "alias/real"} {
+		if _, err := DirSource(root).Open(name); !errors.Is(err, syscall.ELOOP) {
+			t.Fatalf("Open(%q) through an in-tree link: %v, want ELOOP", name, err)
+		}
+	}
+
+	// The source directory itself as a link is refused.
+	linked := filepath.Join(t.TempDir(), "drive")
+	if err := os.Symlink(root, linked); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := DirSource(linked).Open("targets/real"); err == nil {
 		rc.Close()
-		t.Fatal("Open followed a link at the file")
+		t.Fatal("Open followed a linked source directory")
 	}
 
 	// A plain file beneath the root still opens.
