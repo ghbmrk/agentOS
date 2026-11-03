@@ -32,5 +32,5 @@ The owner calls the box's number and asks, in plain speech, what is in the mail 
 - `TestZeroStopsSpeech`, `TestBargeInStopsAndStartsANewTurn`, `TestHangupEndsTheLoop` (rule 3)
 - `TestSpeedDialTokenRaisesTheCallToP2`, `TestWrongTokenStaysP0AndIsTriedOnce`, `TestTokenWindowAndLimit`, `TestTokenWaitEnds`, `TestOwnerCallRunsAtP0`, `TestOtherCallerIsNotAnswered` (rule 4)
 - `TestOneMomentCoversASlowAnswer`, `TestOneMomentCoversEverySlowPart`, `TestClipWaitCountsFromTheEndOfSpeech`, `TestClipIsNotContent`, `TestTurnTimesArePercentiles` (rule 5)
-- `TestSpeechDuringTheTokenIsAnswered`, `TestTokenWaitTurnCarriesAcrossBargeIn` (rule 4)
+- `TestSpeechDuringTheTokenIsAnswered`, `TestTokenWaitTurnCarriesAcrossBargeIn`, `TestCarryIsAskedOnce`, `TestZeroDropsTheCarry`, `TestStopWordDropsTheCarry`, `TestEmptyFinalAsksNothing` (rule 4)
 - `TestOneClipDeadlineCoversEveryWait` (rule 5, on a moving clock)

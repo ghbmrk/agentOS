@@ -244,3 +244,53 @@ func TestZeroDropsTheCarry(t *testing.T) {
 		t.Fatalf("asks %+v", r.ans.asks)
 	}
 }
+
+// A final transcript with no words asks nothing and plays nothing; the
+// owner's next words are asked alone.
+func TestEmptyFinalAsksNothing(t *testing.T) {
+	r := newRig(t, fixed("Here it is."))
+	r.run(call.P2)
+	<-r.rec.ctx
+	r.rec.out <- call.Heard{Text: "  ", Final: true}
+	r.quiet()
+	r.say("who called")
+	if got := r.next(); got != "S:Here it is." {
+		t.Fatalf("first audio %q", got)
+	}
+	r.hangup()
+	if len(r.ans.asks) != 1 || r.ans.asks[0].Text != "who called" {
+		t.Fatalf("asks %+v", r.ans.asks)
+	}
+}
+
+// "Stop" after the clip, while the token is read, drops the carried words:
+// nothing more plays and the answerer never sees them.
+func TestStopWordDropsTheCarry(t *testing.T) {
+	clk := newClock()
+	r := newRig(t, fixed("Here it is."))
+	r.cfg.Now, r.cfg.After = clk.Now, clk.After
+	r.cfg.Token = func(k string) bool { return k == "4071" }
+	r.l.keys = make(chan byte)
+	r.serve()
+	<-r.rec.ctx
+	r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: clk.Now()}
+	clk.Advance(time.Second)
+	if got := r.next(); got != "CLIP:moment" {
+		t.Fatalf("first audio %q", got)
+	}
+	r.rec.out <- call.Heard{Text: "stop"}
+	r.rec.out <- call.Heard{Text: "stop", Final: true, End: clk.Now()}
+	for _, k := range []byte("4071#") {
+		r.l.keys <- k
+	}
+	clk.Advance(time.Minute)
+	r.quiet()
+	r.say("who called")
+	if got := r.next(); got != "S:Here it is." {
+		t.Fatalf("then %q", got)
+	}
+	r.hangup()
+	if len(r.ans.asks) != 1 || r.ans.asks[0].Text != "who called" || r.ans.asks[0].Rung != call.P2 {
+		t.Fatalf("asks %+v", r.ans.asks)
+	}
+}
