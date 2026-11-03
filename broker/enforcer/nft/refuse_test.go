@@ -40,6 +40,26 @@ func TestRefusalLinesBound(t *testing.T) {
 			t.Errorf("no %q", decl)
 		}
 	}
+	// Every refuse chain's line carries a prefix the traffic reader
+	// counts as a refusal (BlockedPrefixes), and each prefix has a chain.
+	var logged []string
+	for name, rs := range cs {
+		if !strings.HasPrefix(name, "refuse_") {
+			continue
+		}
+		for _, r := range rs {
+			if _, p, ok := strings.Cut(r, `log prefix "`); ok {
+				p, _, _ = strings.Cut(p, `"`)
+				logged = append(logged, p)
+				if !slices.Contains(BlockedPrefixes, p) {
+					t.Errorf("chain %s logs %q, which BlockedPrefixes does not name", name, p)
+				}
+			}
+		}
+	}
+	if slices.Sort(logged); !slices.Equal(logged, slices.Sorted(slices.Values(BlockedPrefixes))) {
+		t.Errorf("refuse chains log %q, BlockedPrefixes is %q", logged, BlockedPrefixes)
+	}
 	for name, rs := range cs {
 		if strings.HasPrefix(name, "refuse_") {
 			continue
