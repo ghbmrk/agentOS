@@ -397,7 +397,7 @@ func TestTemplatesLeaveTheOpeningToCSRF(t *testing.T) {
 			t.Fatal(err)
 		}
 		low := strings.ToLower(string(b))
-		for _, bad := range []string{"<!doctype", "<html", "<head", "charset", "enforcer-token"} {
+		for _, bad := range []string{"<!doctype", "<html", "<head>", "<head ", "charset", "enforcer-token"} {
 			if strings.Contains(low, bad) {
 				t.Errorf("%s writes %q, which csrf.Screen's opening owns", n, bad)
 			}

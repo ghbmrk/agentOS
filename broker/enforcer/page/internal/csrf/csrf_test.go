@@ -71,50 +71,67 @@ func TestAPI(t *testing.T) {
 }
 
 // compares is the constant-time rule (#4427 item 3), resolved through
-// go/types: Check and age each call crypto/hmac.Equal, and nothing in the
-// package compares strings or arrays with == or != or calls another
-// package's Equal, Compare or DeepEqual. It catches an honest regression;
-// the body is read whole in review.
+// go/types over every declaration of the package: Check and age each call
+// crypto/hmac.Equal; no ==, != or switch compares a string or an array
+// with anything but a constant; and no other package's Equal, Compare or
+// DeepEqual is named, called or held in a variable. It catches an honest
+// regression, not a deliberate rewrite such as a byte loop: the body is
+// read whole in review (ASSUMPTIONS ENF-page-csrf-1).
 func compares(files []*ast.File, info *types.Info) []string {
 	var problems []string
 	equalIn := map[string]bool{}
+	variable := func(es ...ast.Expr) bool {
+		for _, e := range es {
+			switch u := info.TypeOf(e).Underlying().(type) {
+			case *types.Basic:
+				if u.Info()&types.IsString == 0 {
+					return false
+				}
+			case *types.Array:
+			default:
+				return false
+			}
+		}
+		for _, e := range es {
+			if info.Types[e].Value != nil {
+				return false
+			}
+		}
+		return true
+	}
 	for _, f := range files {
 		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
+			where := "a package-level declaration"
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				where = fd.Name.Name
 			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
+			ast.Inspect(d, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.BinaryExpr:
-					if n.Op != token.EQL && n.Op != token.NEQ {
+					if (n.Op == token.EQL || n.Op == token.NEQ) && variable(n.X, n.Y) {
+						problems = append(problems, fmt.Sprintf("%s: %s compares strings or arrays", where, types.ExprString(n)))
+					}
+				case *ast.SwitchStmt:
+					if n.Tag == nil {
 						break
 					}
-					switch u := info.TypeOf(n.X).Underlying().(type) {
-					case *types.Basic:
-						if u.Info()&types.IsString != 0 {
-							problems = append(problems, fmt.Sprintf("%s: %s compares strings", fd.Name.Name, types.ExprString(n)))
+					for _, c := range n.Body.List {
+						for _, e := range c.(*ast.CaseClause).List {
+							if variable(n.Tag, e) {
+								problems = append(problems, fmt.Sprintf("%s: switch %s compares with %s", where, types.ExprString(n.Tag), types.ExprString(e)))
+							}
 						}
-					case *types.Array:
-						problems = append(problems, fmt.Sprintf("%s: %s compares arrays", fd.Name.Name, types.ExprString(n)))
 					}
-				case *ast.CallExpr:
-					var id *ast.Ident
-					switch fn := n.Fun.(type) {
-					case *ast.Ident:
-						id = fn
-					case *ast.SelectorExpr:
-						id = fn.Sel
-					}
-					o, ok := info.Uses[id].(*types.Func)
+				case *ast.Ident:
+					o, ok := info.Uses[n].(*types.Func)
 					if !ok || o.Pkg() == nil {
 						break
 					}
 					switch {
 					case o.Pkg().Path() == "crypto/hmac" && o.Name() == "Equal":
-						equalIn[fd.Name.Name] = true
-					case o.Pkg() != info.Defs[fd.Name].Pkg() && slices.Contains([]string{"Equal", "Compare", "DeepEqual"}, o.Name()):
-						problems = append(problems, fmt.Sprintf("%s: calls %s.%s", fd.Name.Name, o.Pkg().Path(), o.Name()))
+						equalIn[where] = true
+					case o.Pkg().Path() != "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf" && slices.Contains([]string{"Equal", "Compare", "DeepEqual"}, o.Name()):
+						problems = append(problems, fmt.Sprintf("%s: names %s.%s", where, o.Pkg().Path(), o.Name()))
 					}
 				}
 				return true
@@ -122,7 +139,7 @@ func compares(files []*ast.File, info *types.Info) []string {
 		}
 	}
 	if !equalIn["Check"] || !equalIn["age"] {
-		problems = append(problems, fmt.Sprintf("hmac.Equal is called in %v, want Check and age", equalIn))
+		problems = append(problems, fmt.Sprintf("hmac.Equal is named in %v, want Check and age", equalIn))
 	}
 	return problems
 }
