@@ -147,8 +147,13 @@ func (g PlanGuest) gate() string {
 }
 
 // meter admits one model call of g's at the most its usage can be, and
-// settles it when it ends. An unrecorded settlement is the clerk's to retry:
-// it makes no further call until the log has it.
+// settles it when it ends. Settle's error is not returned: the call has
+// ended and its answer has passed to the guest, so there is no answer left
+// to withhold, and the clerk itself keeps what the error says. Owed spend or
+// an owed reading refuses g's next call (DPlanMeter) until the log has it; a
+// reading the log refused as text closes the pool, so the next call on it is
+// refused with the pool's code (DPlanRefused); refused spend stays reserved
+// at the call's worst case against the plan's caps (MIG-4-spend-e, #4831).
 func (g PlanGuest) meter(body []byte) (func(plan.Used), string) {
 	if g.Context <= 0 {
 		return nil, DPlanMeter
@@ -165,7 +170,7 @@ func (g PlanGuest) meter(body []byte) (func(plan.Used), string) {
 		// The clerk's own count of a whole answer is its bytes at four a
 		// token, which its event framing inflates; the provider returns
 		// no more than MaxOut.
-		_ = adm.Settle(g.Clock(), usage(u), min(model.Count(u.Bytes), g.MaxOut), ended(u))
+		_ = adm.Settle(g.Clock(), usage(u), min(model.Count(u.Bytes), g.MaxOut), ended(u)) // kept by the clerk, above
 	}, ""
 }
 

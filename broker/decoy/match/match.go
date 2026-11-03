@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -54,7 +55,6 @@ var (
 	lower       = regexp.MustCompile(`[a-z]`)
 	upper       = regexp.MustCompile(`[A-Z]`)
 	digit       = regexp.MustCompile(`[0-9]`)
-	slashRun    = regexp.MustCompile(`\\+`)
 )
 
 // Detect returns text with known token formats, secret-named URL parameters
@@ -179,8 +179,9 @@ func Pattern(text string) bool {
 	return n > 0
 }
 
-// MaxValue bounds one table value, so a stream's carried tail stays small.
-const MaxValue = 1 << 10
+// MaxValue bounds one table value, so a stream's carried tail stays small;
+// MinJoined is decoy.MinValue, the shortest joined form matched (#4743).
+const MaxValue, MinJoined = 1 << 10, 10
 
 // carryPattern is how much of a stream's past bytes a write is scanned with
 // for CLK-4's patterns, so a token split across two writes still matches.
@@ -200,8 +201,8 @@ type Value struct {
 // its destinations. It is immutable, so one serves many streams.
 type Matcher struct {
 	forms []form
-	first map[byte][]int // forms by their first byte
-	slash [][2]int       // each '\' of a form: the form and where
+	first map[byte][]int   // forms by their first byte
+	slash map[int][][2]int // each '\' of a form, the form and where, by the bytes beside it
 	dests map[netip.Addr]int
 	carry int
 }
@@ -217,7 +218,7 @@ type form struct {
 // empty value is skipped: a destination-only entry. dests maps an address to
 // the ID a trip names it by.
 func New(values []Value, dests map[netip.Addr]int) *Matcher {
-	m := &Matcher{first: map[byte][]int{}, dests: map[netip.Addr]int{}}
+	m := &Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, dests: map[netip.Addr]int{}}
 	for _, v := range values {
 		if len(v.Bytes) == 0 || len(v.Bytes) > MaxValue {
 			continue
@@ -228,7 +229,8 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 			}
 			for k, c := range f {
 				if c == '\\' {
-					m.slash = append(m.slash, [2]int{len(m.forms), k})
+					key := beside(f[:k], f[k+1:])
+					m.slash[key] = append(m.slash[key], [2]int{len(m.forms), k})
 				}
 			}
 			m.forms = append(m.forms, form{v.ID, f})
@@ -242,9 +244,23 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 }
 
 func encodings(v []byte) [][]byte {
-	j, _ := json.Marshal(string(v))
+	var out [][]byte
+	// The text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query
+	// with spaces as '+' and as %20, and URL path, each also as joined text holds it when the byte after it
+	// begins no break: '\' runs as one, a run a %0a split joined, breaks (a PEM's LFs) removed (#4853).
+	for _, t := range append([][]byte{v}, pemBody(v)...) {
+		j, _ := json.Marshal(string(t))
+		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))
+		for _, f := range []string{string(t), js, strings.ReplaceAll(js, "/", `\/`), q, strings.ReplaceAll(q, "+", "%20"), url.PathEscape(string(t))} {
+			s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
+			if s.join([]byte(f + "\x00")); len(s.joined) > MinJoined {
+				out = append(out, s.joined[:len(s.joined)-1])
+			}
+			out = append(out, []byte(f))
+		}
+	}
 	h := hex.EncodeToString(v)
-	out := [][]byte{v, j[1 : len(j)-1], []byte(url.QueryEscape(string(v))), []byte(h), []byte(strings.ToUpper(h))}
+	out = append(out, []byte(h), []byte(strings.ToUpper(h)))
 	// In base64 a value starts at one of three byte offsets in a 3-byte
 	// group, whatever precedes it. At each, the characters whose six bits
 	// all come from the value are the same wherever the run starts or ends,
@@ -257,12 +273,15 @@ func encodings(v []byte) [][]byte {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	for _, f := range out[:2] { // joined text counts a run of '\'s as one
-		if c := slashRun.ReplaceAll(f, []byte(`\`)); !bytes.Equal(c, f) {
-			out = append(out, c)
-		}
+	return slices.CompactFunc(slices.SortedFunc(slices.Values(out), bytes.Compare), bytes.Equal) // each form once
+}
+
+// pemBody returns a PEM's lines but its first and last, if they are MinJoined bytes or more.
+func pemBody(v []byte) [][]byte {
+	if i, k := bytes.IndexByte(v, '\n'), bytes.LastIndex(v, []byte("\n-----END ")); bytes.HasPrefix(v, []byte("-----BEGIN ")) && k-i > MinJoined {
+		return [][]byte{v[i+1 : k]}
 	}
-	return out
+	return nil
 }
 
 // Dest returns the ID of the table destination a is, in plain, IPv4-mapped
@@ -309,6 +328,7 @@ type Stream struct {
 	joined  []byte // buf with line breaks removed, kept the same way
 	breaks  []cut  // the breaks removed from joined whose rest may be still to come
 	floor   int    // where the last break was removed
+	split   bool   // joined[floor] is a '\' of the run a %0a or %0d split, still part of a break's head
 	pending int
 	res     Result
 }
@@ -352,13 +372,22 @@ func (s *Stream) join(p []byte) {
 			s.floor = len(s.joined) - n
 			s.joined = append(s.joined, c)
 			s.addBreak(s.floor, s.joined[s.floor+1:])
-			s.joined = s.joined[:s.floor]
+			s.joined, s.split = s.joined[:s.floor], false
 			continue
 		}
 		if c == '\\' && bytes.HasSuffix(s.joined[s.floor:], []byte(`\`)) {
 			continue // a run of '\'s ends one break or none, whatever its length
 		}
+		if c == '\\' && len(s.joined) == s.floor && s.floor > 0 && s.joined[s.floor-1] == '\\' {
+			for i := len(s.breaks) - 1; i >= 0 && s.breaks[i].at == s.floor; i-- { // at most one per kind
+				s.split = s.split || s.breaks[i].b[0] == '0'
+			}
+		}
 		s.joined = append(s.joined, c)
+		if s.split && len(s.joined)-open(s.joined[s.floor:]) > s.floor {
+			// It ends no JSON break, so it is the same run as the '\' before (#4681).
+			s.joined, s.split = append(s.joined[:s.floor], s.joined[s.floor+1:]...), false
+		}
 		end := len(s.joined) - open(s.joined[s.floor:])
 		for len(s.breaks) > 0 && end-s.breaks[0].at >= s.m.carry {
 			s.matchBreak(s.breaks[0])
@@ -433,16 +462,13 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
-	for _, br := range s.breaks {
-		s.matchBreak(br)
-	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
 	keep := max(s.m.carry, carryPattern)
 	drop := max(0, len(s.joined)-keep)
-	if len(s.breaks) > 0 { // a held break is never cut away, whatever the forms' length
-		drop = min(drop, s.breaks[0].at)
+	if len(s.breaks) > 0 { // a held break and the longest form before it are never cut away
+		drop = min(drop, max(0, s.breaks[0].at-s.m.carry))
 	}
 	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, len(s.joined)-drop), 0
 	for i := range s.breaks {
@@ -451,35 +477,78 @@ func (s *Stream) scan() {
 	s.floor = max(0, s.floor-drop)
 }
 
-// matchBreak matches the forms that begin inside a removed break, the rest
-// joined after it, and those whose own '\' ends the '\' run a JSON break
-// removed: the run read back as one '\' (#4622).
+// matchBreak matches the forms that begin inside a removed break and those
+// whose own '\' ends the '\' run a JSON break removed (the run read back as
+// one '\', #4622), each with its rest read back the same way at later
+// JSON breaks (#4681).
 func (s *Stream) matchBreak(br cut) {
 	b, before, after := br.b, s.joined[:br.at], s.joined[br.at:]
 	for k := 1; k <= len(b); k++ {
 		for _, i := range s.m.first[b[len(b)-k]] {
 			f := s.m.forms[i]
-			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && bytes.HasPrefix(after, f.b[k:]) {
+			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && s.follows(br.at, f.b[k:]) {
 				s.res.add(f.id)
 			}
 		}
 	}
-	for _, h := range s.m.slash {
-		f := s.m.forms[h[0]]
-		if b[0] != '0' && bytes.HasSuffix(before, f.b[:h[1]]) && bytes.HasPrefix(after, f.b[h[1]+1:]) {
-			s.res.add(f.id)
+	if b[0] == '0' {
+		return
+	}
+	// Only the '\'s with the break's bytes beside them, or none, are read
+	// back, so the table bounds what a break costs, not the stream (#4681).
+	for _, k := range [2]int{beside(before, after), 0} {
+		for _, h := range s.m.slash[k] {
+			f, i := s.m.forms[h[0]], h[1]
+			if i <= len(before) /* a prefix not there costs one byte */ && (i == 0 || before[len(before)-i] == f.b[0]) &&
+				bytes.HasSuffix(before, f.b[:i]) && s.follows(br.at, f.b[i+1:]) {
+				s.res.add(f.id)
+			}
 		}
 	}
+}
+
+// follows reports whether f comes at joined[j:], where a held JSON break may stand for
+// one of f's '\'s, comparing f whole between them and walking held breaks in order (#4743).
+func (s *Stream) follows(j int, f []byte) bool {
+	t := s.joined
+	b, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })
+	for {
+		k := bytes.IndexByte(f, '\\')
+		if k < 0 || !bytes.HasPrefix(t[j:], f[:k]) {
+			return k < 0 && bytes.HasPrefix(t[j:], f)
+		}
+		if j, f = j+k, f[k+1:]; j < len(t) && t[j] == '\\' {
+			j++
+			continue
+		}
+		for b < len(s.breaks) && (s.breaks[b].at < j || s.breaks[b].at == j && s.breaks[b].b[0] == '0') {
+			b++ // a URL break stands for no '\'
+		}
+		if b == len(s.breaks) || s.breaks[b].at != j {
+			return false
+		}
+	}
+}
+
+// beside keys a '\' by the bytes before and after it, 0 at either end.
+func beside(before, after []byte) int {
+	if len(before) == 0 || len(after) == 0 {
+		return 0
+	}
+	return (int(before[len(before)-1])<<8 | int(after[0])) + 1
 }
 
 func tail(w []byte, keep int) []byte {
 	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
-// Result scans what is pending and returns what the stream has found.
+// Result scans what is pending and the breaks still held, and returns what the stream has found.
 func (s *Stream) Result() Result {
 	if s.pending != 0 {
 		s.scan()
+	}
+	for _, br := range s.breaks {
+		s.matchBreak(br)
 	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
 }

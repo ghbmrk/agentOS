@@ -16,6 +16,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import doclint  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 GOOD = {
     "README.md": "# X\n\n## Documents\n\n| File |\n|---|\n| [BOARD.md](BOARD.md) |\n| [CLAUDE.md](CLAUDE.md) |\n"

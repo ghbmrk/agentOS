@@ -25,7 +25,7 @@ jobs:
   # CI-docs: a records-only change adds no dependency, so its steps after .github/actions/scope
   # skip (CI-par-4); the daily schedule always scans.
   vulncheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read

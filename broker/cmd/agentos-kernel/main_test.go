@@ -163,8 +163,8 @@ func TestNoTPMNoKernel(t *testing.T) {
 func handoffPipe(t *testing.T) *os.File {
 	t.Helper()
 	k := handoff.KernelKeys{
-		Head:    ed25519.NewKeyFromSeed(make([]byte, 32)),
-		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: []byte("a")},
+		Head:    handoff.Hide(ed25519.NewKeyFromSeed(make([]byte, 32))),
+		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: handoff.Hide([]byte("a"))},
 		Anchors: []key.PublicKey{key.Ed25519(make([]byte, 32))},
 		Slot:    handoff.SlotTPM,
 	}

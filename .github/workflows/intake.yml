@@ -20,7 +20,7 @@ jobs:
     if: >-
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
       && (contains(github.event.issue.labels.*.name, 'work-item') || github.event.label.name == 'work-item')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read

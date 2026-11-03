@@ -19,6 +19,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "mutgate.yml"
 sys.path.insert(0, str(ROOT / "tools"))
 import mutgate  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
+
 DIFF = """\
 diff --git a/broker/hint/hint.go b/broker/hint/hint.go
 --- a/broker/hint/hint.go
@@ -789,8 +792,15 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 1), "TIMED OUT")
             # The test binary's own child is gone too (dead, or a zombie awaiting its reaper).
             state = pathlib.Path(f"/proc/{int(pid.read_text())}/stat")
+
+            def gone():
+                # One read, no exists() check first: the reaper can remove the entry between the two (#4712).
+                try:
+                    return state.read_text().split(")")[-1].split()[0] in "ZX"
+                except (FileNotFoundError, ProcessLookupError):
+                    return True
             for _ in range(50):
-                if not state.exists() or state.read_text().split(")")[-1].split()[0] in "ZX":
+                if gone():
                     break
                 time.sleep(0.1)
             else:

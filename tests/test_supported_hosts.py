@@ -161,7 +161,7 @@ class ImageTest(unittest.TestCase):
 
     def test_image_built_on_x86_64_catches_mutants(self):
         for old, new in (("runs-on: ubuntu-24.04", "runs-on: ubuntu-24.04-arm"),
-                         ("runs-on: ubuntu-latest", "runs-on: ${{ matrix.runner }}"),
+                         ("runs-on: ubuntu-24.04", "runs-on: ${{ matrix.runner }}"),
                          ("runs-on: ubuntu-24.04", "runs-on: [self-hosted, ARM64]")):
             with self.subTest(mutant=new):
                 self.assertNotEqual(runner_problems(mutant(WORKFLOW, old, new)), [])

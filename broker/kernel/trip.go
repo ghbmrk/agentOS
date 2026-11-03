@@ -384,8 +384,9 @@ type ownerTrip struct {
 func (k *Kernel) ownerKeys(now int64, op, plan string, given ...key.Key) ([]key.Key, error) {
 	keys := make([]key.Key, len(given))
 	for i, g := range given {
-		if b, err := json.Marshal(g); err != nil || json.Unmarshal(b, &keys[i]) != nil {
-			return nil, errors.New("kernel: a key the log cannot hold")
+		var err error
+		if keys[i], err = asLogged(g); err != nil {
+			return nil, err
 		}
 		if t := k.s.ownerTripOf(op, plan, keys[i]); t != nil {
 			if _, err := k.emit(now, TTripOwner, ownerTrip{op, keys[i], *t}); err != nil {
@@ -587,9 +588,6 @@ func (s *State) stopSession(task string) {
 		if p.Status != SActive || p.Plan.Task() != task {
 			continue
 		}
-		p.Status, p.Cancel, p.CancelDetail = SCancelled, CTrip, ""
-		if st := &p.Steps[p.Next]; sendable(st.Phase) {
-			s.cancelUnsent(p, st)
-		}
+		s.cancel(p, CTrip, "")
 	}
 }

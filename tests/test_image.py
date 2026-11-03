@@ -658,6 +658,41 @@ class TreeCheckTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("random-seed", r.stdout + r.stderr)
 
+    # #4647: no build script fetches a package outside mkosi's checked apt run. mkosi v24.3 gives
+    # mkosi.postinst and mkosi.finalize the network only with WithNetwork= (not on the config allow-list
+    # in ConfigTest), and the check confirms it held in the run itself, whatever flags the build passed.
+    LO_ONLY = ("Inter-|   Receive                            |  Transmit\n"
+               " face |bytes    packets errs drop fifo frame|bytes    packets\n"
+               "    lo:       0       0    0    0    0     0        0       0\n")
+
+    def test_scripts_run_with_no_network(self):
+        self.assertEqual(check.script_network_violations("0", self.LO_ONLY), [])
+        eth = self.LO_ONLY + "  eth0: 1 1 0 0 0 0 1 1\n"
+        why = "mkosi.postinst and mkosi.finalize run with no network, so they fetch no package outside mkosi's " \
+              "checked apt run (#4647)"
+        for flag, dev, want in (
+                ("1", self.LO_ONLY, ["WITH_NETWORK is 1; " + why]),
+                (None, self.LO_ONLY, ["WITH_NETWORK is None; " + why]),
+                ("0", eth, ["the script sandbox's network devices are lo, eth0, not lo alone; " + why]),
+                ("0", "unreadable (Permission denied)",
+                 ["the script sandbox's network devices are unknown: unreadable (Permission denied), not lo alone; " + why]),
+                ("0", "", ["the script sandbox's network devices are unknown: , not lo alone; " + why])):
+            with self.subTest(flag=flag, dev=dev):
+                self.assertEqual(check.script_network_violations(flag, dev), want)
+
+    def test_main_checks_the_network_only_when_mkosi_runs_it(self):
+        # Run as mkosi runs it (BUILDROOT, no argument) on a clean tree, from a session that has a
+        # network: the run fails on WITH_NETWORK alone when this host's sandbox has only lo.
+        r = subprocess.run([str(MK / "mkosi.finalize")], env=dict(os.environ, BUILDROOT=str(self.root), WITH_NETWORK="1"),
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("image check: WITH_NETWORK is 1; ", r.stdout)
+        # Given the tree as an argument (tests, tools), it checks the tree alone: no network line.
+        r = subprocess.run([str(MK / "mkosi.finalize"), str(self.root)], env=dict(os.environ, WITH_NETWORK="1"),
+                           capture_output=True, text=True)
+        self.assertIn("image check: ", r.stdout, r.stderr)
+        self.assertNotIn("(#4647)", r.stdout)
+
 
 ENTRY = """title Debian GNU/Linux 13 (trixie)
 version 6.12.48+deb13-amd64
@@ -1532,21 +1567,35 @@ class ConfigTest(unittest.TestCase):
     def test_snapshot_sources_outlive_their_valid_until(self):
         # The pinned snapshot's Release files expire a week after the timestamp; apt must still read
         # them (signatures checked), while live security.debian.org keeps the expiry check.
-        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"].rstrip("/")
-        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
-        stanzas = [dict(l.split(": ", 1) for l in s.splitlines() if l and not l.startswith("#"))
-                   for s in text.split("\n\n")]
-        stanzas = [s for s in stanzas if s]
-        snap = [s for s in stanzas if s["URIs"].rstrip("/") == mirror]
-        live = [s for s in stanzas if s["URIs"].rstrip("/") != mirror]
-        self.assertEqual(len(snap), 1)
-        self.assertEqual(snap[0]["Suites"].split(), ["trixie", "trixie-updates"])
-        self.assertEqual(snap[0]["Check-Valid-Until"], "no")
-        self.assertEqual([s["Suites"] for s in live], ["trixie-security"])
-        self.assertNotIn("Check-Valid-Until", live[0])
-        for s in stanzas:
-            self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
-            self.assertNotIn("Trusted", s)
+        # #4651: apt reads deb822 field names in any case, and Allow-Insecure:, Allow-Weak: or
+        # trusted: in a stanza weaken its signature checks. So the file is held to one strict form
+        # (printable ASCII; each line empty, a column-0 "#" comment, or a column-0 "Field: value"
+        # with no continuation) and every stanza to exactly these fields and values, in this case
+        # and order: any other field, spelling or value fails. Only the snapshot's timestamp follows
+        # Mirror= in mkosi.conf.
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"]
+        text = (MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_bytes().decode("ascii")
+        why = "#4651 holds the build's apt sources to these fields; change this test deliberately"
+        self.assertRegex(text, r"\A[\x20-\x7e\n]*\Z", why)
+        stanzas, cur = [], []
+        for n, line in enumerate(text.split("\n"), 1):
+            if line == "":
+                if cur:
+                    stanzas.append(cur)
+                cur = []
+            elif not line.startswith("#"):
+                m = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*): (\S(?:.*\S)?)", line)
+                self.assertTrue(m, "mkosi.sources:%d: %r is not a column-0 'Field: value' line; %s" % (n, line, why))
+                cur.append((m[1], m[2]))
+        if cur:
+            stanzas.append(cur)
+        keyring = ("Signed-By", "/usr/share/keyrings/debian-archive-keyring.gpg")
+        self.assertEqual(stanzas, [
+            [("Types", "deb"), ("URIs", mirror), ("Suites", "trixie trixie-updates"), ("Components", "main"),
+             keyring, ("Check-Valid-Until", "no")],
+            [("Types", "deb"), ("URIs", "http://security.debian.org/debian-security"), ("Suites", "trixie-security"),
+             ("Components", "main"), keyring],
+        ], why)
 
     def test_snapshot_fetch_retries_a_mirror_outage(self):
         # #4518: one "503 No healthy backends" from the snapshot mirror outlasted apt's default
@@ -1649,8 +1698,12 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
                 if k == "InitrdInclude":
                     self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+                # #4647: mkosi hands Environment= to apt-get and to mkosi.postinst and mkosi.finalize, so
+                # its value is pinned whole: repart's mkfs options for project quotas, nothing else.
+                if k == "Environment":
+                    self.assertEqual(v, ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"], "%s: %s" % (where, why))
         # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
-        # runs mkosi (its config dir, flags and tree) is #4647's row: a line pin of shell cannot hold.
+        # runs mkosi (its config dir, flags and tree) is #4690's row (from #4647): a line pin of shell cannot hold.
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
         self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
             'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
@@ -4092,7 +4145,7 @@ class SystemdDiffTest(MustRun, unittest.TestCase):
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
     masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
     skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
-    MustRun fails any skip of it; GitHub's ubuntu-latest runners have it (systemd 255,
+    MustRun fails any skip of it; GitHub's ubuntu-24.04 runners have it (systemd 255,
     whose conf-files.c listing is the same as 257.13's)."""
     # REQ: DEV-2, CH-9, C13
 
@@ -4935,13 +4988,13 @@ class TreeAccessTest(unittest.TestCase):
     tree that skipped the link rule (a dangling link in sysctl.d, then tmpfiles.d, then etc/fstab
     through pathlib). mkosi.finalize may touch the file system only in the five tree primitives
     (tree_lstat, tree_listdir, tree_readlink, tree_read, and tree_xattrs, #1803), none of which follows
-    a link on the build host, and in the two functions that read the repository's allowlists (tmpfiles.allow,
-    exec.allow), not the tree. Only
+    a link on the build host, in the two functions that read the repository's allowlists (tmpfiles.allow,
+    exec.allow), not the tree, and in script_net_dev, which reads the script sandbox's /proc (#4647). Only
     Conf.content (through conf_chase) and the key scan may read a file's bytes. Any other function that
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries"))
+                         "allow_path", "allow_entries", "script_net_dev"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -5027,7 +5080,7 @@ class TreeAccessTest(unittest.TestCase):
 
 class KmodDiffTest(MustRun, unittest.TestCase):
     """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
-    install line kmod took, in order. GitHub's ubuntu-latest runners have kmod 31, whose config
+    install line kmod took, in order. GitHub's ubuntu-24.04 runners have kmod 31, whose config
     reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
     # REQ: CH-7, HW-10
     WORDS = (b"install", b"install", b"btusb", b"bt-usb", b"bt[_-]sb", b"b]t", b"[x", b"/bin/false", b"#",

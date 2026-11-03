@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -23,6 +24,7 @@ const (
 	CExtension = "extension"  // the key cannot extend this hold
 	CHeld      = "held"       // the task is held until the owner extends it (LOG-7)
 	CBroken    = "log-broken" // a write failed: no spend until the log is reopened (KRN-5)
+	CErased    = "erased"     // the owner erased a subject the plan's lineage read before submitting it (LOG-4)
 )
 
 // Refusal is Admit's: the check, its step and a verified key's task (PLN-4).
@@ -580,7 +582,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	}
 	ext = logged[0]
 	h, ok := k.s.SpendHeld[plan]
-	if !ok {
+	if !ok || k.s.Plans[plan].Status != SActive { // an ended plan's hold releases nothing
 		return &key.Refusal{Code: CNotHeld, Detail: plan}
 	}
 	if r := k.citedLive(now, k.s.Plans[plan]); r != nil {
@@ -699,6 +701,10 @@ func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 
 // Submit logs a plan and decides it at once.
 func (k *Kernel) Submit(now int64, p Plan) error {
+	p, err := asLogged(p) // decided as the log holds it, as Issue and Extend decide on keys
+	if err != nil {
+		return err
+	}
 	if k.s.Plans[p.ID] != nil {
 		return ErrDuplicatePlan
 	}
@@ -770,6 +776,9 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 // its finding in Outcome (done, notdone, unknown or OUnreached).
 func (k *Kernel) Answer(now int64, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
+	// A clerk's text is logged as JSON would write it (Log.Append refuses
+	// other text): nothing looks it up, so no answer is lost over it.
+	res.Outcome, res.Detail = strings.ToValidUTF8(res.Outcome, "\uFFFD"), strings.ToValidUTF8(res.Detail, "\uFFFD")
 	if c.Kind == ActProbe {
 		// Only a done step is listed: no other finding's line is logged.
 		if res.Outcome != "done" || !shown(res.Covered) {

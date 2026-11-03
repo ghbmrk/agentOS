@@ -54,11 +54,11 @@ var (
 )
 
 func testKeys() KernelKeys {
-	return KernelKeys{Log: [32]byte{9}, Head: headPriv, Counter: testCounter(), Anchors: anchors, Slot: SlotTPM}
+	return KernelKeys{Log: Hide([32]byte{9}), Head: Hide(headPriv), Counter: testCounter(), Anchors: anchors, Slot: SlotTPM}
 }
 
 func testCounter() Counter {
-	return Counter{SRK: bytes.Repeat([]byte{5}, 34), Handle: 0x01801234, Name: bytes.Repeat([]byte{6}, 34), Auth: []byte("0123456789abcdef0123456789abcdef")}
+	return Counter{SRK: bytes.Repeat([]byte{5}, 34), Handle: 0x01801234, Name: bytes.Repeat([]byte{6}, 34), Auth: Hide([]byte("0123456789abcdef0123456789abcdef"))}
 }
 
 // pipeWith is a pipe's read end holding b, its writer closed.
@@ -81,7 +81,7 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 	hw := es256(t, "box.example")
 	keys := testKeys()
 	keys.Anchors = []key.PublicKey{anchors[0], hw, anchors[1]}
-	keys.ClerkRoot = [32]byte{7, 7, 7}
+	keys.ClerkRoot = Hide([32]byte{7, 7, 7})
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -91,13 +91,13 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := testCounter()
-	if k.Log != [32]byte{9} || k.ClerkRoot != [32]byte{7, 7, 7} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
-		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth, want.Auth) {
+	if k.Log.Get() != [32]byte{9} || k.ClerkRoot.Get() != [32]byte{7, 7, 7} || !k.Head.Get().Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
+		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth.Get(), want.Auth.Get()) {
 		t.Fatalf("keys did not survive the hand-off: %+v", k)
 	}
-	auth := k.Counter.Auth
+	auth := k.Counter.Auth.Get()
 	k.Wipe()
-	if k.Head != nil || k.Log != ([32]byte{}) || k.ClerkRoot != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
+	if k.Head.Get() != nil || k.Log.Get() != ([32]byte{}) || k.ClerkRoot.Get() != ([32]byte{}) || k.Counter.Auth.Get() != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
 		t.Fatal("Wipe left keys")
 	}
 }
@@ -282,12 +282,12 @@ func TestEncodeAnchorsRoundTrips(t *testing.T) {
 // #2905 open point 2: a store with no anchors yet hands over none, and the
 // kernel starts setup-only. A count of none with keys after it is refused.
 func TestNoAnchorsStartsSetupOnly(t *testing.T) {
-	b, err := (KernelKeys{Head: headPriv, Counter: testCounter(), Slot: SlotTPM}).Marshal()
+	b, err := (KernelKeys{Head: Hide(headPriv), Counter: testCounter(), Slot: SlotTPM}).Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	k, err := parseKeys(b)
-	if err != nil || len(k.Anchors) != 0 || !k.Head.Equal(headPriv) {
+	if err != nil || len(k.Anchors) != 0 || !k.Head.Get().Equal(headPriv) {
 		t.Fatalf("no anchors: %v %v", k.Anchors, err)
 	}
 	if _, err := parseKeys(append(append(b, 0, 32), ownerPub...)); !errors.Is(err, ErrHandoff) {
@@ -300,7 +300,7 @@ func TestNoAnchorsStartsSetupOnly(t *testing.T) {
 func TestTheCounterIsWhole(t *testing.T) {
 	for name, mut := range map[string]func(*Counter){
 		"no srk": func(c *Counter) { c.SRK = nil }, "no handle": func(c *Counter) { c.Handle = 0 },
-		"no name": func(c *Counter) { c.Name = nil }, "no auth": func(c *Counter) { c.Auth = nil },
+		"no name": func(c *Counter) { c.Name = nil }, "no auth": func(c *Counter) { c.Auth = Secret[[]byte]{} },
 		"long name": func(c *Counter) { c.Name = make([]byte, maxName+1) },
 	} {
 		k := testKeys()
@@ -462,24 +462,24 @@ func testPageCA(t *testing.T) []byte {
 func TestKernelKeysCarryThePageCA(t *testing.T) {
 	ca := testPageCA(t)
 	keys := testKeys()
-	keys.Recipient, keys.PageCA = testRecipient(t), ca
+	keys.Recipient, keys.PageCA = testRecipient(t), Hide(ca)
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	k, err := ReadKeys(pipeWith(t, b))
-	if err != nil || !bytes.Equal(k.PageCA, ca) || !bytes.Equal(k.Recipient, keys.Recipient) || len(k.Anchors) != len(anchors) {
+	if err != nil || !bytes.Equal(k.PageCA.Get(), ca) || !bytes.Equal(k.Recipient, keys.Recipient) || len(k.Anchors) != len(anchors) {
 		t.Fatalf("the page authority did not survive the hand-off: %v", err)
 	}
-	if a, err := pageca.Unmarshal(k.PageCA); err != nil || a.Name() != pageca.DefaultName {
+	if a, err := pageca.Unmarshal(k.PageCA.Get()); err != nil || a.Name() != pageca.DefaultName {
 		t.Fatalf("the handed authority does not open: %v", err)
 	}
 	k.Wipe()
-	if k.PageCA != nil {
+	if k.PageCA.Get() != nil {
 		t.Fatal("Wipe left the page authority")
 	}
-	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.PageCA != nil {
-		t.Fatalf("no authority: %x %v", k.PageCA, err)
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.PageCA.Get() != nil {
+		t.Fatalf("no authority: %x %v", k.PageCA.Get(), err)
 	}
 
 	// The authority's length sits after the recipient.
@@ -516,7 +516,7 @@ func TestKernelKeysCarryThePageCA(t *testing.T) {
 	}
 	for name, v := range map[string][]byte{"garbage": bad, "oversized": big, "not json": []byte("cert"), "no key": []byte(`{"cert":null,"key":null}`)} {
 		k := testKeys()
-		k.PageCA = v
+		k.PageCA = Hide(v)
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
 		}
@@ -554,25 +554,25 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 	_, link := gen(7)
 	edge, _ := gen(8)
 	keys := testKeys()
-	keys.PageCA, keys.LinkKey, keys.FirstEdge, keys.Slot = testPageCA(t), link, edge, SlotPassphrase
+	keys.PageCA, keys.LinkKey, keys.FirstEdge, keys.Slot = Hide(testPageCA(t)), Hide(link), edge, SlotPassphrase
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	k, err := ReadKeys(pipeWith(t, b))
-	if err != nil || !k.LinkKey.Equal(link) || !k.FirstEdge.Equal(edge) || k.Slot != SlotPassphrase || !bytes.Equal(k.PageCA, keys.PageCA) || len(k.Anchors) != len(anchors) {
+	if err != nil || !k.LinkKey.Get().Equal(link) || !k.FirstEdge.Equal(edge) || k.Slot != SlotPassphrase || !bytes.Equal(k.PageCA.Get(), keys.PageCA.Get()) || len(k.Anchors) != len(anchors) {
 		t.Fatalf("the link keys did not survive the hand-off: %v", err)
 	}
 	k.Wipe()
-	if k.LinkKey != nil {
+	if k.LinkKey.Get() != nil {
 		t.Fatal("Wipe left the link key")
 	}
-	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.LinkKey != nil || k.FirstEdge != nil || k.Slot != SlotTPM {
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.LinkKey.Get() != nil || k.FirstEdge != nil || k.Slot != SlotTPM {
 		t.Fatalf("no link keys: %v", err)
 	}
 
 	// The link key's length sits after the page authority.
-	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA.Get())
 	if b[o] != ed25519.SeedSize || !bytes.Equal(b[o+1:o+33], link.Seed()) {
 		t.Fatalf("link key not at %d", o)
 	}
@@ -601,7 +601,7 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 		}
 	}
 	for name, mod := range map[string]func(*KernelKeys){
-		"short link key": func(k *KernelKeys) { k.LinkKey = link[:32] },
+		"short link key": func(k *KernelKeys) { k.LinkKey = Hide(link[:32]) },
 		"short edge":     func(k *KernelKeys) { k.FirstEdge = edge[:31] },
 		"empty slot":     func(k *KernelKeys) { k.Slot = "" },
 		"long slot":      func(k *KernelKeys) { k.Slot = strings.Repeat("a", MaxSlot+1) },
@@ -729,21 +729,21 @@ func (a Approval) bodyUnchecked() []byte {
 func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	rec := bytes.Repeat([]byte{0x5a}, MadeCardLen)
 	keys := testKeys()
-	keys.NewRecovery = rec
+	keys.NewRecovery = Hide(rec)
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	k, err := ReadKeys(pipeWith(t, b))
-	if err != nil || !bytes.Equal(k.NewRecovery, rec) || len(k.Anchors) != len(anchors) || k.Slot != SlotTPM {
+	if err != nil || !bytes.Equal(k.NewRecovery.Get(), rec) || len(k.Anchors) != len(anchors) || k.Slot != SlotTPM {
 		t.Fatalf("the new recovery key did not survive the hand-off: %v", err)
 	}
-	held := k.NewRecovery
+	held := k.NewRecovery.Get()
 	k.Wipe()
-	if k.NewRecovery != nil || !bytes.Equal(held, make([]byte, MadeCardLen)) {
+	if k.NewRecovery.Get() != nil || !bytes.Equal(held, make([]byte, MadeCardLen)) {
 		t.Fatal("Wipe left the new recovery key")
 	}
-	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.NewRecovery != nil {
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.NewRecovery.Get() != nil {
 		t.Fatalf("no new recovery key: %v", err)
 	}
 	// Its length sits right after the slot.
@@ -767,7 +767,7 @@ func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	}
 	for _, n := range []int{1, MadeCardLen - 1, MadeCardLen + 1} {
 		k := testKeys()
-		k.NewRecovery = make([]byte, n)
+		k.NewRecovery = Hide(make([]byte, n))
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("marshal %d bytes: got %v, want ErrHandoff", n, err)
 		}
