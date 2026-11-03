@@ -23,7 +23,8 @@ type Outcome struct {
 	// Step is the effect's log ID, required: each step's effect and its
 	// correction count once.
 	Step string
-	// Ran is when the effect ran; it places the effect in the window.
+	// Ran is when the effect ran, required; it places an effect in the
+	// window. A correction's own Ran is never read (D-309 invariant 3).
 	Ran time.Time
 	// Flagged: the clerk's own check of the resulting state reported the
 	// effect failed or unconfirmed (OWN-13).
@@ -32,7 +33,8 @@ type Outcome struct {
 	// UNDO, a wrong verdict, OP-7, or a redo), not the effect itself. A
 	// correction's Flagged is ignored: the effect's own flag decides.
 	Corrected bool
-	// At is when this record was logged.
+	// At is when this record was logged, required; it is the measure's
+	// clock, and it places a correction that arrives before its effect.
 	At time.Time
 }
 
@@ -70,9 +72,9 @@ type stepSeen struct {
 
 const dayFmt = "2006-01-02"
 
-// ErrOutcome: an outcome names no clerk or no step, so it cannot be
-// counted once.
-var ErrOutcome = errors.New("attention: an outcome needs its clerk and step")
+// ErrOutcome: an outcome lacks its clerk, step, Ran or At, so it cannot
+// be counted once and placed.
+var ErrOutcome = errors.New("attention: an outcome needs its clerk, step, Ran and At")
 
 // Record logs one outcome. A step's effect counts once, as it ran, with
 // the flag the clerk's check gave it; a repeat is ignored. A step's first
@@ -81,11 +83,25 @@ var ErrOutcome = errors.New("attention: an outcome needs its clerk and step")
 // read, and a correction of a step the record never saw counts as silent,
 // so the bound only rises. Outcomes older than Window are dropped.
 //
-// Outcomes are applied in order and saved once; one without its clerk or
-// step refuses the whole call before anything is applied.
+// The invariants (D-309; re-derived on #4945's step back):
+//  1. Every outcome names its clerk and step and carries both times, or
+//     the whole call is refused before anything applies: a missing field
+//     is an error, never a silent zero.
+//  2. A step's effect counts at most once, and its correction at most once.
+//  3. Of a correction, only Clerk, Step and At are read. It is judged by
+//     the effect the record holds for its step and placed by that step's
+//     day; a correction that arrives first is placed by its own At (log
+//     time, never before the effect), and the effect that follows counts
+//     on that same day, so arrival order cannot drop it.
+//  4. The window is enforced by pruning alone, after every clock move and
+//     every record, so Measure counts exactly what the record holds.
+//  5. Every input the record cannot judge moves the bound up or leaves
+//     it, never down.
+//
+// Outcomes are applied in order and saved once.
 func (o *Optimizer) Record(xs ...Outcome) error {
 	for _, x := range xs {
-		if x.Clerk == "" || x.Step == "" {
+		if x.Clerk == "" || x.Step == "" || x.Ran.IsZero() || x.At.IsZero() {
 			return ErrOutcome
 		}
 	}
@@ -111,13 +127,17 @@ func (o *Optimizer) recordLocked(x Outcome) {
 		r.Steps = map[string]*stepSeen{}
 	}
 	// Days that have left the window, with their steps, go at the end of
-	// every record, the outcome's own included.
+	// every record, the outcome's own included (invariant 4).
 	defer o.prune()
-	// A known step is placed by the day its record holds, never by this
-	// outcome's own Ran; only a new step is placed by Ran.
+	// A known step is placed by the day its record holds; a new step by
+	// its effect's Ran, or by a correction's At (invariant 3).
 	st := r.Steps[x.Step]
 	if st == nil {
-		st = &stepSeen{Day: x.Ran.UTC().Format(dayFmt)}
+		place := x.Ran
+		if x.Corrected {
+			place = x.At
+		}
+		st = &stepSeen{Day: place.UTC().Format(dayFmt)}
 		r.Steps[x.Step] = st
 	}
 	t := r.Days[st.Day]
@@ -140,10 +160,12 @@ func (o *Optimizer) recordLocked(x Outcome) {
 	}
 }
 
-// tick advances the measure's clock.
+// tick advances the measure's clock and drops what has left the window,
+// so the window is enforced in one place, at every clock move.
 func (o *Optimizer) tick(at time.Time) {
 	if at.After(o.st.Now) {
 		o.st.Now = at
+		o.prune()
 	}
 }
 
@@ -197,11 +219,11 @@ func (o *Optimizer) Measure(clerk string) Measure {
 func (o *Optimizer) measureLocked(clerk string) Measure {
 	var m Measure
 	if r := o.st.Clerks[clerk]; r != nil {
-		lo := o.st.Now.Add(-Window).UTC().Format(dayFmt)
-		// A day counts once all of it is Settle old.
+		// A day counts once all of it is Settle old. Days older than
+		// Window are already gone: every clock move and record prunes.
 		hi := o.st.Now.Add(-Settle).UTC().Add(-24 * time.Hour).Format(dayFmt)
 		for d, t := range r.Days {
-			if d >= lo && d <= hi {
+			if d <= hi {
 				m.Effects += t.Effects
 				m.Flagged += t.Flagged
 				m.Silent += t.Silent

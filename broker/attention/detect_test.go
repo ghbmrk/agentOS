@@ -253,19 +253,106 @@ func TestDueAdvancesTheClock(t *testing.T) {
 }
 
 // D-309 (L3 delta on #4945, cc272c34): a correction of a known step is
-// placed by the step's own day, so a zero or stale Ran on the correction
-// cannot drop it.
+// placed by the step's own day, so a stale Ran on the correction cannot
+// drop it.
 func TestCorrectionUsesItsStepsDay(t *testing.T) {
 	at := t0.Add(-30 * 24 * time.Hour)
-	for _, ran := range []time.Time{{}, t0.Add(-200 * 24 * time.Hour)} {
+	o := newOpt(t, &memStore{}, nil)
+	clean(t, o, "pay", at, 300)
+	for i := range 10 {
+		recordAll(t, o, Outcome{Clerk: "pay", Step: "pay-" + strconv.Itoa(i), Ran: t0.Add(-200 * 24 * time.Hour), At: t0, Corrected: true})
+	}
+	if m := o.Measure("pay"); m.Silent != 10 || m.Ready {
+		t.Fatalf("corrections dropped: %+v", m)
+	}
+}
+
+// D-309 invariant 1 (Security on #4945, 6612158899 and 6612913895): an
+// outcome with no Ran or no At, effect or correction, refuses the whole
+// call before anything applies.
+func TestOutcomeNeedsBothTimes(t *testing.T) {
+	at := t0.Add(-30 * 24 * time.Hour)
+	o := newOpt(t, &memStore{}, nil)
+	ok := Outcome{Clerk: "pay", Step: "ok", Ran: at, At: at}
+	for _, bad := range []Outcome{
+		{Clerk: "pay", Step: "1", At: at}, {Clerk: "pay", Step: "1", Ran: at},
+		{Clerk: "pay", Step: "1", At: at, Corrected: true}, {Clerk: "pay", Step: "1", Ran: at, Corrected: true},
+	} {
+		if err := o.Record(ok, bad); err != ErrOutcome {
+			t.Fatalf("%+v: err %v, want ErrOutcome", bad, err)
+		}
+	}
+	if r := o.st.Clerks["pay"]; r != nil && len(r.Steps) != 0 {
+		t.Fatalf("a refused call applied part of itself: %+v", r.Steps)
+	}
+}
+
+// D-309 invariant 3 (Security on #4945): arrival order cannot drop a
+// correction. Corrections first, carrying any Ran, then their effects 50
+// days old, count the same silent failures as effects first.
+func TestCorrectionEitherOrder(t *testing.T) {
+	ran := t0.Add(-50 * 24 * time.Hour)
+	for _, first := range []string{"correction", "effect"} {
+		for _, cran := range []time.Time{ran, t0.Add(-500 * 24 * time.Hour), t0.Add(500 * 24 * time.Hour)} {
+			o := newOpt(t, &memStore{}, nil)
+			var effects, corrections []Outcome
+			for i := range 300 {
+				effects = append(effects, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: ran.Add(time.Duration(i) * time.Minute), At: ran})
+			}
+			for i := range 10 {
+				corrections = append(corrections, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: cran, At: ran.Add(24 * time.Hour), Corrected: true})
+			}
+			if first == "correction" {
+				recordAll(t, o, corrections...)
+				recordAll(t, o, effects...)
+			} else {
+				recordAll(t, o, effects...)
+				recordAll(t, o, corrections...)
+			}
+			recordAll(t, o, Outcome{Clerk: "other", Step: "tick", Ran: t0, At: t0})
+			if m := o.Measure("pay"); m.Effects != 300 || m.Silent != 10 || m.Ready {
+				t.Fatalf("%s first, correction Ran %v: %+v", first, cran, m)
+			}
+		}
+	}
+}
+
+// D-309 (Potency on #4945, 602e06ee): KEY-5's literal edges. With the
+// clock at t0, an effect 90 days old counts and one 91 days old is gone;
+// one 8 days old has settled and one 7 days old has not. A future Ran
+// does not move the clock.
+func TestLiteralEdges(t *testing.T) {
+	if Window != 90*24*time.Hour || Settle != 7*24*time.Hour {
+		t.Fatalf("Window %v, Settle %v: KEY-5 names 90 and 7 days", Window, Settle)
+	}
+	day := 24 * time.Hour
+	for _, c := range []struct {
+		age  time.Duration
+		want int
+	}{{90 * day, 1}, {91 * day, 0}, {8 * day, 1}, {7 * day, 0}} {
 		o := newOpt(t, &memStore{}, nil)
-		clean(t, o, "pay", at, 300)
-		for i := range 10 {
-			recordAll(t, o, Outcome{Clerk: "pay", Step: "pay-" + strconv.Itoa(i), Ran: ran, At: t0, Corrected: true})
+		recordAll(t, o, Outcome{Clerk: "pay", Step: "e", Ran: t0.Add(-c.age), At: t0})
+		if m := o.Measure("pay"); m.Effects != c.want {
+			t.Errorf("effect %v old: %d counted, want %d", c.age, m.Effects, c.want)
 		}
-		if m := o.Measure("pay"); m.Silent != 10 || m.Ready {
-			t.Fatalf("Ran %v: corrections dropped: %+v", ran, m)
-		}
+	}
+	o := newOpt(t, &memStore{}, nil)
+	recordAll(t, o, Outcome{Clerk: "pay", Step: "f", Ran: t0.Add(400 * day), At: t0})
+	if !o.st.Now.Equal(t0) {
+		t.Fatalf("a future Ran moved the clock to %v", o.st.Now)
+	}
+}
+
+// D-309 (Potency release on #4945, 602e06ee): an offer-time tick prunes,
+// so Measure right after Due never reads a day outside the window.
+func TestDueTickPrunes(t *testing.T) {
+	o := newOpt(t, &memStore{}, nil)
+	recordAll(t, o, Outcome{Clerk: "pay", Step: "e", Ran: t0.Add(-80 * 24 * time.Hour), At: t0})
+	if _, err := o.Due(t0.Add(11 * 24 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if m := o.Measure("pay"); m.Effects != 0 || len(o.st.Clerks["pay"].Days) != 0 {
+		t.Fatalf("a day outside the window survived the offer's tick: %+v", m)
 	}
 }
 
