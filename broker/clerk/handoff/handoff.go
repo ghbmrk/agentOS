@@ -22,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
@@ -188,52 +189,23 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // the recovery key the unlock step made at this boot on the lost-card
 // route, none on every other boot (REC-4, MIG-4-recovery-r3).
 type KernelKeys struct {
-	Log  Secret[[32]byte]
-	Head Secret[ed25519.PrivateKey]
+	Log  secret.Secret[[32]byte]
+	Head secret.Secret[ed25519.PrivateKey]
 	// ClerkRoot is the root of every clerk's key (MAIL-keys): the kernel
 	// derives one clerk's key from it (clerkkey.Derive) and hands it to that
 	// clerk's unit at each start. The store derives it; zero hands none.
-	ClerkRoot Secret[[32]byte]
+	ClerkRoot secret.Secret[[32]byte]
 	Counter   Counter
 	Anchors   []key.PublicKey
-	Recipient []byte                     // RecipientLen bytes or none (RecipientEntry)
-	PageCA    Secret[[]byte]             // pageca.Marshal's form or none (PageCAEntry)
-	LinkKey   Secret[ed25519.PrivateKey] // none or a whole key (LinkKeyEntry)
-	FirstEdge ed25519.PublicKey          // none or PublicKeySize bytes (FirstEdgeEntry)
-	Slot      string                     // SlotTPM, or another slot's kind
+	Recipient []byte                            // RecipientLen bytes or none (RecipientEntry)
+	PageCA    secret.Secret[[]byte]             // pageca.Marshal's form or none (PageCAEntry)
+	LinkKey   secret.Secret[ed25519.PrivateKey] // none or a whole key (LinkKeyEntry)
+	FirstEdge ed25519.PublicKey                 // none or PublicKeySize bytes (FirstEdgeEntry)
+	Slot      string                            // SlotTPM, or another slot's kind
 	// NewRecovery is the card the unlock step put in the store at this
 	// boot (D-201 route B), MadeCardLen bytes: its recovery key's bits and
 	// its passphrase's seed; or none. The kernel holds it only until the owner confirms the new card.
-	NewRecovery Secret[[]byte]
-}
-
-// Secret holds a key behind a pointer to a pointer, which fmt prints as an
-// address in every verb and at any depth, while reflect.DeepEqual compares
-// through it, so a line that formats a holder shows no key (CLK-1,
-// DECOY-b-8, #4759). A copy shares the key; the zero Secret holds none.
-type Secret[T any] struct{ p **T }
-
-// Hide holds v.
-func Hide[T any](v T) Secret[T] { return Secret[T]{new(&v)} }
-
-// Get is the key held, or T's zero value.
-func (s Secret[T]) Get() T { return *s.Ref() }
-
-// Ref points at the key held, or, for the zero Secret, at a zero value
-// that nothing else holds.
-func (s Secret[T]) Ref() *T {
-	if s.p == nil || *s.p == nil {
-		return new(T)
-	}
-	return *s.p
-}
-
-// drop clears s's bytes and empties every copy of it.
-func drop[T ~[]byte](s Secret[T]) {
-	clear(*s.Ref())
-	if s.p != nil {
-		*s.p = nil
-	}
+	NewRecovery secret.Secret[[]byte]
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -244,7 +216,7 @@ type Counter struct {
 	SRK    []byte
 	Handle uint32
 	Name   []byte
-	Auth   Secret[[]byte]
+	Auth   secret.Secret[[]byte]
 }
 
 func (c Counter) valid() bool {
@@ -483,11 +455,11 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 func (k *KernelKeys) Wipe() {
 	clear(k.Log.Ref()[:])
 	clear(k.ClerkRoot.Ref()[:])
-	drop(k.Head)
-	drop(k.Counter.Auth)
-	drop(k.PageCA)
-	drop(k.LinkKey)
-	drop(k.NewRecovery)
+	secret.Drop(k.Head)
+	secret.Drop(k.Counter.Auth)
+	secret.Drop(k.PageCA)
+	secret.Drop(k.LinkKey)
+	secret.Drop(k.NewRecovery)
 }
 
 // ReadKeys reads the hand-off from f and closes it. f must be a pipe, so a
@@ -590,14 +562,14 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if err != nil {
 		return KernelKeys{}, err
 	}
-	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: Hide(bytes.Clone(ca)), FirstEdge: bytes.Clone(edge), Slot: slot, NewRecovery: Hide(bytes.Clone(rec))}
+	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: secret.Hide(bytes.Clone(ca)), FirstEdge: bytes.Clone(edge), Slot: slot, NewRecovery: secret.Hide(bytes.Clone(rec))}
 	if seed != nil {
-		k.LinkKey = Hide(ed25519.NewKeyFromSeed(seed))
+		k.LinkKey = secret.Hide(ed25519.NewKeyFromSeed(seed))
 	}
 	o = len(handoffTag)
-	k.Log, k.ClerkRoot = Hide([32]byte(b[o:o+32])), Hide([32]byte(b[o+32+ed25519.SeedSize:]))
-	k.Head = Hide(ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize]))
+	k.Log, k.ClerkRoot = secret.Hide([32]byte(b[o:o+32])), secret.Hide([32]byte(b[o+32+ed25519.SeedSize:]))
+	k.Head = secret.Hide(ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize]))
 	// Copies, so clearing the read buffer leaves the kernel its counter.
-	k.Counter = Counter{SRK: bytes.Clone(c.SRK), Handle: c.Handle, Name: bytes.Clone(c.Name), Auth: Hide(bytes.Clone(auth))}
+	k.Counter = Counter{SRK: bytes.Clone(c.SRK), Handle: c.Handle, Name: bytes.Clone(c.Name), Auth: secret.Hide(bytes.Clone(auth))}
 	return k, nil
 }

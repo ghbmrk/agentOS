@@ -1,0 +1,11 @@
+[Unit]
+Description=Reboot into the next boot try after a failed enforcer self-check
+Documentation=file:/usr/lib/agentos-enforcer/fallback
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos-enforcer/fallback
+StandardOutput=journal+console
+NoExecPaths=/
+ExecPaths=/usr
+DevicePolicy=closed

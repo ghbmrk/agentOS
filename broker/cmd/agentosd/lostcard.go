@@ -57,6 +57,17 @@ type recoveryOps struct {
 	*lostCard
 }
 
+// Rotate is route A's replacement; once the keeper wrote the new key, the
+// shown file's card is superseded by a card the owner made here, so the
+// record goes and the page drops its lost-card note (MIG-4-recovery-r4i).
+func (o recoveryOps) Rotate(ctx context.Context, factor string, secret, next, authData, clientData, sig []byte) (localapi.RecoveryDone, error) {
+	d, err := o.recoveryFlow.Rotate(ctx, factor, secret, next, authData, clientData, sig)
+	if err == nil {
+		o.lostCard.clearShown()
+	}
+	return d, err
+}
+
 // lostKernel is the owner seam the lost-card ops call (kernelsock.Owner).
 type lostKernel interface {
 	keyReader
@@ -106,6 +117,14 @@ func (l *lostCard) writeShown(r shown) {
 	b, _ := json.Marshal(r)
 	if err := privfile.WriteAtomic(filepath.Dir(l.Shown), filepath.Base(l.Shown), b, nil); err != nil {
 		log.Printf("recovery key: record the card shown: %v", err)
+	}
+}
+
+// clearShown removes the shown file's record; a failure is logged only,
+// as it costs the page no more than a stale note.
+func (l *lostCard) clearShown() {
+	if err := os.Remove(l.Shown); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("recovery key: clear the card shown: %v", err)
 	}
 }
 
@@ -186,7 +205,9 @@ func (l *lostCard) Lost(ctx context.Context, authData, clientData, sig []byte) e
 
 // LostState reports a filed request, one the last restart left (the unlock
 // step removes each it carries out), a card the kernel holds, and the last
-// card a page showed: whether it was confirmed and is in effect.
+// card a page showed: whether it was confirmed and is in effect. A failed
+// read of the recipient in effect leaves the shown card out and reports
+// the rest (MIG-4-recovery-r4g).
 func (l *lostCard) LostState(ctx context.Context) (localapi.RecoveryLostState, error) {
 	var st localapi.RecoveryLostState
 	fi, err := os.Lstat(l.Request)
@@ -205,11 +226,9 @@ func (l *lostCard) LostState(ctx context.Context) (localapi.RecoveryLostState, e
 		return st, recoveryCode(err)
 	}
 	if r := l.readShown(); r.ID != "" {
-		old, err := l.old(ctx)
-		if err != nil {
-			return st, err
+		if old, err := l.old(ctx); err == nil {
+			st.Shown, st.Confirmed, st.InEffect = r.ID, r.Confirmed, r.ID == old
 		}
-		st.Shown, st.Confirmed, st.InEffect = r.ID, r.Confirmed, r.ID == old
 	}
 	return st, nil
 }
@@ -293,12 +312,15 @@ func (l *lostCard) LostCard(ctx context.Context, authData, clientData, sig []byt
 	return localapi.RecoveryLostCard{Card: b, ID: id}, nil
 }
 
-// LostDone has the kernel wipe the card once the owner confirmed it.
+// LostDone has the kernel wipe the card once the owner confirmed it. The
+// shown record is marked confirmed only when it names the card wiped
+// (MIG-4-recovery-r4f).
 func (l *lostCard) LostDone(ctx context.Context) error {
+	id, idErr := l.K.RecoveryCardID(ctx)
 	if err := l.K.RecoveryCardDone(ctx); err != nil {
 		return recoveryCode(err)
 	}
-	if r := l.readShown(); r.ID != "" && !r.Confirmed {
+	if r := l.readShown(); idErr == nil && r.ID == id && !r.Confirmed {
 		r.Confirmed = true
 		l.writeShown(r)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"io"
@@ -50,6 +51,7 @@ type fakeAP struct {
 	readFails  map[string]bool // reads of these paths print the file, then exit 1
 	failReload int             // the next this many reloads fail
 	failClaim  bool            // claims fail, as on an access point without flock
+	noTimeout  bool            // claims exit noTimeoutExit, as on an access point without timeout
 	supersede  bool            // a late claim lands right after each claim
 	drop       map[string]bool // a write of these paths drops the connection
 	silent     bool            // answers no session open, keeping the connection
@@ -108,6 +110,13 @@ func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newFakeAPWithHostKey(t, client, signer)
+}
+
+// newFakeAPWithHostKey is a fake access point that signs with signer,
+// offering only the algorithms signer offers.
+func newFakeAPWithHostKey(t *testing.T, client ssh.PublicKey, signer ssh.Signer) *fakeAP {
+	t.Helper()
 	f := &fakeAP{t: t, hostKey: signer.PublicKey(), files: map[string][]byte{}}
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
@@ -232,6 +241,9 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		defer f.mu.Unlock()
 		if f.failClaim {
 			return 1
+		}
+		if f.noTimeout {
+			return noTimeoutExit
 		}
 		f.token = tok
 		f.events = append(f.events, fmt.Sprint("claim ", login))
@@ -847,6 +859,77 @@ func TestFailedClaimWritesNothing(t *testing.T) {
 	}
 }
 
+// TestNoTimeoutWritesNothing: an access point with no timeout command,
+// on which every reload would fail, refuses the claim, and the Sync
+// writes and reloads nothing and returns ErrNoTimeout. Catches written
+// files, a revocation among them, left on the access point unapplied
+// (#4429).
+func TestNoTimeoutWritesNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.noTimeout = true
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrNoTimeout) || errors.Is(err, ErrSuperseded) {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, writes, applies, files := f.n(); writes != 0 || applies != 0 || files != 0 {
+		t.Fatalf("writes=%d applies=%d files=%d", writes, applies, files)
+	}
+	if !strings.Contains(claimCmd(token()), "{ command -v timeout >/dev/null || exit 69; } && ") {
+		t.Errorf("claim does not check for timeout first: %q", claimCmd(token()))
+	}
+}
+
+// TestRSAHostKeyOnlySHA2: a pinned RSA host key is accepted only with a
+// SHA-2 signature: an access point offering rsa-sha2-512 is reached, one
+// offering only ssh-rsa (SHA-1) is refused before any login, and a DSA
+// or other key type is refused before any dial. Catches an RSA pin that
+// turns on SHA-1 host signatures (#4087).
+func TestRSAHostKeyOnlySHA2(t *testing.T) {
+	me := enforcerKey(t)
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := ssh.NewSignerFromKey(rk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		algo string
+		ok   bool
+	}{{ssh.KeyAlgoRSASHA512, true}, {ssh.KeyAlgoRSASHA256, true}, {ssh.KeyAlgoRSA, false}} {
+		as, err := ssh.NewSignerWithAlgorithms(rs.(ssh.AlgorithmSigner), []string{c.algo})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := newFakeAPWithHostKey(t, me.PublicKey(), as)
+		p := &Pusher{Addr: f.addr, HostKey: rs.PublicKey(), Signer: me, Dial: dial, Timeout: 5 * time.Second}
+		_, err = p.Sync(context.Background(), config())
+		if logins, _, _, _ := f.n(); (err == nil) != c.ok || (logins > 0) != c.ok {
+			t.Errorf("access point signing %s: err %v, logins %d", c.algo, err, logins)
+		}
+	}
+	for _, typ := range []string{ssh.KeyAlgoDSA, ssh.CertAlgoED25519v01, ssh.KeyAlgoSKED25519} {
+		dialed := false
+		d := func(ctx context.Context, n, a string) (net.Conn, error) { dialed = true; return dial(ctx, n, a) }
+		p := &Pusher{Addr: "127.0.0.1:1", HostKey: typedKey{rs.PublicKey(), typ}, Signer: me, Dial: d, Timeout: time.Second}
+		if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrHostKey) || dialed {
+			t.Errorf("%s pin: err %v, dialed %v", typ, err, dialed)
+		}
+	}
+}
+
+// typedKey is a public key reporting another type.
+type typedKey struct {
+	ssh.PublicKey
+	typ string
+}
+
+func (k typedKey) Type() string { return k.typ }
+
 // TestCommandsTakeTheLock: the claim, every write's move and the reload
 // run under the access point's lock, the move and the reload only while
 // their Sync's token is the newest; a write reads stdin with no lock
@@ -876,7 +959,7 @@ func TestCommandsTakeTheLock(t *testing.T) {
 			t.Errorf("write does not read unlocked and move under the lock with the token checked: %q", c)
 		}
 	}
-	if !strings.HasSuffix(applyCmd(tok), " && timeout 20 reload_config 9>&- </dev/null >/dev/null 2>&1; } 9>"+lockPath) {
+	if !strings.HasSuffix(applyCmd(tok), " && { timeout 20 reload_config 9>&- </dev/null >/dev/null 2>&1 || { s=$?; [ $s = 75 ] && s=1; exit $s; }; }; } 9>"+lockPath) {
 		t.Errorf("reload is unbounded or keeps the lock's descriptor or the session's output: %q", applyCmd(tok))
 	}
 	if reloadBound != 20*time.Second {

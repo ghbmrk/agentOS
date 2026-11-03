@@ -47,7 +47,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "infer: fd 3 is not a listener")
 		os.Exit(1)
 	}
-	s := newService(cfg, newRuntime(runtime), os.Stderr)
+	s := newService(cfg, newRuntime(runtime, cfg.CallTimeout), os.Stderr)
 	s.ready() // load at start, so hello answers at once
 	err = s.Serve(ln)
 	fmt.Fprintf(os.Stderr, "infer: listener failed: %v\n", err)

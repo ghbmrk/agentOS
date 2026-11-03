@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
@@ -54,11 +55,11 @@ var (
 )
 
 func testKeys() KernelKeys {
-	return KernelKeys{Log: Hide([32]byte{9}), Head: Hide(headPriv), Counter: testCounter(), Anchors: anchors, Slot: SlotTPM}
+	return KernelKeys{Log: secret.Hide([32]byte{9}), Head: secret.Hide(headPriv), Counter: testCounter(), Anchors: anchors, Slot: SlotTPM}
 }
 
 func testCounter() Counter {
-	return Counter{SRK: bytes.Repeat([]byte{5}, 34), Handle: 0x01801234, Name: bytes.Repeat([]byte{6}, 34), Auth: Hide([]byte("0123456789abcdef0123456789abcdef"))}
+	return Counter{SRK: bytes.Repeat([]byte{5}, 34), Handle: 0x01801234, Name: bytes.Repeat([]byte{6}, 34), Auth: secret.Hide([]byte("0123456789abcdef0123456789abcdef"))}
 }
 
 // pipeWith is a pipe's read end holding b, its writer closed.
@@ -81,7 +82,7 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 	hw := es256(t, "box.example")
 	keys := testKeys()
 	keys.Anchors = []key.PublicKey{anchors[0], hw, anchors[1]}
-	keys.ClerkRoot = Hide([32]byte{7, 7, 7})
+	keys.ClerkRoot = secret.Hide([32]byte{7, 7, 7})
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +283,7 @@ func TestEncodeAnchorsRoundTrips(t *testing.T) {
 // #2905 open point 2: a store with no anchors yet hands over none, and the
 // kernel starts setup-only. A count of none with keys after it is refused.
 func TestNoAnchorsStartsSetupOnly(t *testing.T) {
-	b, err := (KernelKeys{Head: Hide(headPriv), Counter: testCounter(), Slot: SlotTPM}).Marshal()
+	b, err := (KernelKeys{Head: secret.Hide(headPriv), Counter: testCounter(), Slot: SlotTPM}).Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +301,7 @@ func TestNoAnchorsStartsSetupOnly(t *testing.T) {
 func TestTheCounterIsWhole(t *testing.T) {
 	for name, mut := range map[string]func(*Counter){
 		"no srk": func(c *Counter) { c.SRK = nil }, "no handle": func(c *Counter) { c.Handle = 0 },
-		"no name": func(c *Counter) { c.Name = nil }, "no auth": func(c *Counter) { c.Auth = Secret[[]byte]{} },
+		"no name": func(c *Counter) { c.Name = nil }, "no auth": func(c *Counter) { c.Auth = secret.Secret[[]byte]{} },
 		"long name": func(c *Counter) { c.Name = make([]byte, maxName+1) },
 	} {
 		k := testKeys()
@@ -462,7 +463,7 @@ func testPageCA(t *testing.T) []byte {
 func TestKernelKeysCarryThePageCA(t *testing.T) {
 	ca := testPageCA(t)
 	keys := testKeys()
-	keys.Recipient, keys.PageCA = testRecipient(t), Hide(ca)
+	keys.Recipient, keys.PageCA = testRecipient(t), secret.Hide(ca)
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -516,7 +517,7 @@ func TestKernelKeysCarryThePageCA(t *testing.T) {
 	}
 	for name, v := range map[string][]byte{"garbage": bad, "oversized": big, "not json": []byte("cert"), "no key": []byte(`{"cert":null,"key":null}`)} {
 		k := testKeys()
-		k.PageCA = Hide(v)
+		k.PageCA = secret.Hide(v)
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
 		}
@@ -554,7 +555,7 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 	_, link := gen(7)
 	edge, _ := gen(8)
 	keys := testKeys()
-	keys.PageCA, keys.LinkKey, keys.FirstEdge, keys.Slot = Hide(testPageCA(t)), Hide(link), edge, SlotPassphrase
+	keys.PageCA, keys.LinkKey, keys.FirstEdge, keys.Slot = secret.Hide(testPageCA(t)), secret.Hide(link), edge, SlotPassphrase
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -601,7 +602,7 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 		}
 	}
 	for name, mod := range map[string]func(*KernelKeys){
-		"short link key": func(k *KernelKeys) { k.LinkKey = Hide(link[:32]) },
+		"short link key": func(k *KernelKeys) { k.LinkKey = secret.Hide(link[:32]) },
 		"short edge":     func(k *KernelKeys) { k.FirstEdge = edge[:31] },
 		"empty slot":     func(k *KernelKeys) { k.Slot = "" },
 		"long slot":      func(k *KernelKeys) { k.Slot = strings.Repeat("a", MaxSlot+1) },
@@ -729,7 +730,7 @@ func (a Approval) bodyUnchecked() []byte {
 func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	rec := bytes.Repeat([]byte{0x5a}, MadeCardLen)
 	keys := testKeys()
-	keys.NewRecovery = Hide(rec)
+	keys.NewRecovery = secret.Hide(rec)
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -767,7 +768,7 @@ func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	}
 	for _, n := range []int{1, MadeCardLen - 1, MadeCardLen + 1} {
 		k := testKeys()
-		k.NewRecovery = Hide(make([]byte, n))
+		k.NewRecovery = secret.Hide(make([]byte, n))
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("marshal %d bytes: got %v, want ErrHandoff", n, err)
 		}

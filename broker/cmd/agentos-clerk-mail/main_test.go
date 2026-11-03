@@ -33,6 +33,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 const roleEnv = "AGENTOS_CLERK_MAIL_TEST_ROLE"
@@ -129,7 +130,7 @@ func anchorsFile(t *testing.T, b []byte) string {
 
 func keyPipe(t *testing.T, name string, k [clerkkey.Len]byte) *os.File {
 	t.Helper()
-	b, err := clerkkey.Marshal(clerkkey.Key{Name: name, Key: k})
+	b, err := clerkkey.Marshal(clerkkey.Key{Name: name, Key: secret.Hide(k)})
 	must(t, err)
 	r, w, err := os.Pipe()
 	must(t, err)

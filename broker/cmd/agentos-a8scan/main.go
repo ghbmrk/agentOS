@@ -324,7 +324,7 @@ func clerkNeedles(root []byte, c string) ([]Needle, error) {
 		return nil, err
 	}
 	return []Needle{
-		{Name: "key of clerk " + c, Value: bytes.Clone(k.Key[:])},
+		{Name: "key of clerk " + c, Value: bytes.Clone(k.Key.Ref()[:])},
 		{Name: "sealer key of clerk " + c, Value: sl},
 		{Name: "handle secret of clerk " + c, Value: hs},
 		{Name: "signing key of clerk " + c, Value: sg.Seed()},

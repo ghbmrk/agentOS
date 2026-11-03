@@ -12,13 +12,17 @@ names or an enum, so no unit's text can pose as systemd's answer. Three rounds o
 found another way into a hand-written model. This one has no model to keep in step.
 
 The walk starts at the unlock unit and follows every dependency that starts another unit
-(START_KINDS). The units it reaches, every dependency from them that stops another unit (STOP_KINDS),
-and the generators that failed must be exactly the lines of image/mkosi/unlock.allow, which
-`unlock_graph.py --allowlist` prints for a built image. Whatever that list says, none of these may
-happen: a unit reached is a shutdown unit (SHUTDOWN); a unit reached carries a failure, success, start
-limit or timeout action; the manager is not the systemd major the kinds were read from (SYSTEMD_MAJOR,
-so a new dependency kind cannot go unread); the tree's etc/fstab names a device, which fstab-generator
-skips in the manager's container mode.
+(START_KINDS); it lists every dependency from those that stops another unit (STOP_KINDS). Starting a
+unit stops what it conflicts with (STOP_ON_START), so from each of those it follows the kinds that carry
+the stop on (PROPAGATE_STOP) and the units a stop can start (STOP_STARTS: OnFailure= when ExecStop
+fails, OnSuccess= on a clean stop), to a fixed point (closure()). Each edge it takes, the
+unlock unit as the root and the generators that failed must be exactly the lines of
+image/mkosi/unlock.allow, which `unlock_graph.py --allowlist` prints for a built image, so a new path
+onto a unit already listed is a new line for review (#4822). Whatever that list says, none of these may
+happen: a unit started is a shutdown unit (SHUTDOWN); a unit started or stopped carries a failure,
+success, start limit or timeout action, or isolates on failure or success (#4823); the manager is not
+the systemd major the kinds were read from (SYSTEMD_MAJOR, so a new dependency kind cannot go unread);
+the tree's etc/fstab names a device, which fstab-generator skips in the manager's container mode.
 
 Not modelled here, each a release row: what a reached unit's commands do (a reboot word in an Exec=
 line, #4766), units udev adds from SYSTEMD_WANTS (#4739), and units gpt-auto-generator writes from the
@@ -26,7 +30,7 @@ disk it boots on (#4738). A generator that fails in the check's container is nam
 manager's console, a pty, is where systemd says so.
 
 Usage (as root): unlock_graph.py OUT VERSION checks build OUT; --allowlist OUT VERSION prints the
-list; --control OUT VERSION requires that each planted path (CONTROLS) is refused."""
+list; --control OUT VERSION requires that each planted path (CONTROLS) adds its own refusal."""
 import os
 import pathlib
 import re
@@ -44,6 +48,16 @@ ALLOW = HERE / "mkosi" / "unlock.allow"
 # reference or mirror these. SYSTEMD_MAJOR pins the version they were read from.
 START_KINDS = ("Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure", "Triggers")
 STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf")
+# When a unit stops, these of its kinds stop the other unit too (UNIT_ATOM_PROPAGATE_STOP and
+# PROPAGATE_STOP_GRACEFUL in systemd 257); Conflicts= acts only when a unit starts. STOP_STARTS start the
+# other unit when this one stops: OnSuccess= on a clean stop, OnFailure= when it stops failed (#4823).
+# STOP_ON_START are the kinds by which starting a unit stops another. The other STOP_KINDS act when the
+# started unit itself stops, and every unit it requires is required by most of the system (system.slice,
+# sysinit.target), so they are listed one hop out but not walked: walking them reaches every unit on the
+# box, active or not, and none of them is stopped by the unlock step starting.
+PROPAGATE_STOP = ("PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf")
+STOP_ON_START = ("Conflicts", "ConflictedBy")
+STOP_STARTS = ("OnSuccess", "OnFailure")
 ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
 JOB_MODES = ("OnFailureJobMode", "OnSuccessJobMode")  # isolate stops every unit outside the target
 PROPS = START_KINDS + STOP_KINDS + ACTIONS + JOB_MODES + ("LoadState",)
@@ -61,19 +75,17 @@ WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)
 
 def graph(manager, start=UNIT):
     """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "job_modes":
-    [(name, value)]}} for START and every unit it reaches,
-    as MANAGER's systemd shows them. A shutdown unit is shown but not walked past."""
-    units, todo = {}, [start]
-    while todo:
-        batch = sorted(set(todo) - set(units))
-        todo = []
+    [(name, value)]}} for START and every unit closure() reaches from it, as MANAGER's systemd shows them."""
+    units = {}
+    while True:
+        started, stopped, _ = closure(units, start)
+        batch = sorted((started | stopped) - set(units))
+        if not batch:
+            return units
         for name, p in manager.show(batch, PROPS).items():
             units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS for t in unit_names(name, k, p[k])],
                            "actions": [(k, p[k]) for k in ACTIONS], "load": p["LoadState"],
                            "job_modes": [(k, p[k]) for k in JOB_MODES]}
-            if name not in SHUTDOWN:
-                todo += [t for k, t in units[name]["edges"] if k in START_KINDS]
-    return units
 
 
 UNIT_NAME = re.compile(r"[A-Za-z0-9:_.\\@-]+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)\Z")
@@ -100,30 +112,42 @@ def fstab_devices(text):
     return out
 
 
-def reached(units, start=UNIT):
-    """The units START reaches through START_KINDS, START included, in UNITS (graph()). A
-    shutdown unit is reached but not walked past."""
-    seen, todo = set(), [start]
+def closure(units, start=UNIT):
+    """(started, stopped, edges) for START in UNITS (graph()): the units starting START can start, START
+    included; the units it can stop; and each edge taken, as an allowlist line. A started unit's START_KINDS
+    start the other unit ("start T KIND from U"); its STOP_KINDS are listed ("stop U KIND T") and its
+    STOP_ON_START stop the other unit; a stopped unit's PROPAGATE_STOP stop the other unit and its
+    STOP_STARTS start it. A shutdown unit is started but
+    not walked past (it is refused where it is started), and stopping one is not followed or listed: every
+    unit with default dependencies conflicts with shutdown.target and umount.target, and none is active."""
+    started, stopped, edges, todo = set(), set(), {"start " + start}, [(True, start)]
     while todo:
-        u = todo.pop()
-        if u in seen:
+        up, u = todo.pop()
+        if u in (started if up else stopped):
             continue
-        seen.add(u)
-        if u not in SHUTDOWN:  # refused where it is reached; what it starts after that adds nothing
-            todo += [t for k, t in units.get(u, {}).get("edges", ()) if k in START_KINDS]
-    return seen
+        (started if up else stopped).add(u)
+        if u in SHUTDOWN:
+            continue
+        for k, t in units.get(u, {}).get("edges", ()):
+            if k in (START_KINDS if up else STOP_STARTS):
+                edges.add("start %s %s from %s" % (t, k, u))
+                todo.append((True, t))
+            elif k in (STOP_KINDS if up else PROPAGATE_STOP) and t not in SHUTDOWN:
+                edges.add("stop %s %s %s" % (u, k, t))
+                if k in (STOP_ON_START if up else PROPAGATE_STOP):
+                    todo.append((False, t))
+    return started, stopped, edges
+
+
+def reached(units, start=UNIT):
+    """The units starting START can start, START included, in UNITS (graph())."""
+    return closure(units, start)[0]
 
 
 def facts(units, generators, start=UNIT):
-    """The allowlist's lines for one run: "start U" for each unit reached, "stop U KIND T" for each stop
-    dependency from one of them to a unit outside SHUTDOWN, and "generator G failed" for each of
-    GENERATORS."""
-    got = reached(units, start)
-    out = {"start " + u for u in got}
-    for u in got - SHUTDOWN:
-        out |= {"stop %s %s %s" % (u, k, t) for k, t in units.get(u, {}).get("edges", ())
-                if k in STOP_KINDS and t not in SHUTDOWN}
-    return out | {"generator %s failed" % g for g in generators}
+    """The allowlist's lines for one run: "start START" as the root, each edge closure() takes ("start T
+    KIND from U", "stop U KIND T") and "generator G failed" for each of GENERATORS."""
+    return closure(units, start)[2] | {"generator %s failed" % g for g in generators}
 
 
 def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYSTEMD_MAJOR):
@@ -139,22 +163,26 @@ def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYS
             "unread; %s" % (l, WHY) for l in fstab_devices(fstab or "")]
     if start not in units:
         out.append("%s is not among the units systemd loaded; %s" % (start, WHY))
-    for u in sorted(reached(units, start)):
+    started, stopped, _ = closure(units, start)
+    for u in sorted(started | stopped):
+        verb = "starts" if u in started else "stops"
         if u in SHUTDOWN:
-            out.append("%s starts %s; %s" % (start, u, WHY))
+            if u in started:
+                out.append("%s starts %s; %s" % (start, u, WHY))
             continue
         if u not in units:
             continue
         for name, value in units[u]["actions"]:
             if value != "none":
-                out.append("%s, which %s starts, has %s=%s; %s" % (u, start, name, value, WHY))
-        if units[u]["load"] not in LOADED:
+                out.append("%s, which %s %s, has %s=%s; %s" % (u, start, verb, name, value, WHY))
+        # A unit only stopped need not load: one not found on the box is not running there either.
+        if u in started and units[u]["load"] not in LOADED:
             out.append("%s, which %s starts, is %s in the check's container, so what it does on the box is unread; "
                        "%s" % (u, start, units[u]["load"], WHY))
         for name, value in units[u]["job_modes"]:
             if value == "isolate":
-                out.append("%s, which %s starts, has %s=isolate, which stops every unit outside its %s= target; %s"
-                           % (u, start, name, name[:-len("JobMode")], WHY))
+                out.append("%s, which %s %s, has %s=isolate, which stops every unit outside its %s= target; %s"
+                           % (u, start, verb, name, name[:-len("JobMode")], WHY))
     have = facts(units, generators, start)
     out += ["%s: not on %s; review it and add the line there" % (f, ALLOW.name) for f in sorted(have - allowed)]
     out += ["%s: on %s but no longer in the graph; remove the line" % (f, ALLOW.name) for f in sorted(allowed - have)]
@@ -187,23 +215,56 @@ def read_allow(path=ALLOW):
 
 
 # Each plant opens a path a reviewer found into the hand-written model on #4696; the check must refuse
-# every one on the built image. Paths are relative to the tree; FSTAB is appended to its etc/fstab.
+# every one on the built image with the refusal named first (#4824). Paths are relative to the tree;
+# FSTAB is appended to its etc/fstab.
 FSTAB = "FSTAB"
+NOT_LISTED = ": not on %s; review it and add the line there" % ALLOW.name
 CONTROLS = {
-    "fstab x-systemd.requires= on a mount the unlock step pulls (Security 6587814928)": {
-        FSTAB: "tmpfs /var/tmp tmpfs nosuid,nodev,noexec,x-systemd.requires=reboot.target 0 0\n"},
-    "[Service] Sockets= on a unit the unlock step starts (Security 6587168736)": {
-        "etc/systemd/system/agentos-link.service.d/99-plant.conf": "[Service]\nSockets=agentos-plant.socket\n",
-        "etc/systemd/system/agentos-plant.socket": "[Unit]\nWants=reboot.target\n[Socket]\nListenStream=/run/agentos-plant\n"},
-    "an alias's drop-in on the unlock unit (Security 6586674844)": {
-        "etc/systemd/system/agentos-keeper-.service.d/99-plant.conf": "[Unit]\nBindTo=agentos-plant.service\n",
-        "etc/systemd/system/agentos-plant.service": "[Service]\nExecStart=/bin/true\n"},
-    "a generator that writes a unit and fails (L3 6593296481 1)": {
-        "etc/systemd/system-generators/agentos-plant-generator":
-            "#!/bin/sh\necho '[Unit]' >\"$1/agentos-plant.target\"\nexit 3\n"},
-    "a generator killed by a signal (L3 6595128762 1)": {
-        "etc/systemd/system-generators/agentos-plant-generator": "#!/bin/sh\nkill -SEGV $$\n"},
+    "fstab x-systemd.requires= on a mount the unlock step pulls (Security 6587814928)": (
+        "%s starts reboot.target; %s" % (UNIT, WHY),
+        {FSTAB: "tmpfs /var/tmp tmpfs nosuid,nodev,noexec,x-systemd.requires=reboot.target 0 0\n"}),
+    "[Service] Sockets= on a unit the unlock step starts (Security 6587168736)": (
+        "start agentos-plant.socket Wants from agentos-link.service" + NOT_LISTED,
+        {"etc/systemd/system/agentos-link.service.d/99-plant.conf": "[Service]\nSockets=agentos-plant.socket\n",
+         "etc/systemd/system/agentos-plant.socket":
+             "[Unit]\nWants=reboot.target\n[Socket]\nListenStream=/run/agentos-plant\n"}),
+    "an alias's drop-in on the unlock unit (Security 6586674844)": (
+        "start agentos-plant.service BindsTo from %s%s" % (UNIT, NOT_LISTED),
+        {"etc/systemd/system/agentos-keeper-.service.d/99-plant.conf": "[Unit]\nBindTo=agentos-plant.service\n",
+         "etc/systemd/system/agentos-plant.service": "[Service]\nExecStart=/bin/true\n"}),
+    "a generator that writes a unit and fails (L3 6593296481 1)": (
+        "generator agentos-plant-generator failed" + NOT_LISTED,
+        {"etc/systemd/system-generators/agentos-plant-generator":
+             "#!/bin/sh\necho '[Unit]' >\"$1/agentos-plant.target\"\nexit 3\n"}),
+    "a generator killed by a signal (L3 6595128762 1)": (
+        "generator agentos-plant-generator failed" + NOT_LISTED,
+        {"etc/systemd/system-generators/agentos-plant-generator": "#!/bin/sh\nkill -SEGV $$\n"}),
 }
+
+
+def control(base, planted, expect):
+    """(added, seen) for one control: the refusals PLANTED adds to the unplanted run's BASE, and whether
+    EXPECT, the refusal the plant exists to raise, is among them. Only added lines count, so a stale
+    allowlist cannot make a blind check look sighted; and only the expected one, so a plant refused for
+    another reason does not stand in for its own (#4824)."""
+    base = set(base)
+    added = [l for l in planted if l not in base]
+    return added, expect in added
+
+
+def controls(base, refusals, cases=None):
+    """(report, blind) for --control: REFUSALS(plant) is the check's refusals with PLANT over the tree, BASE
+    the unplanted run's; REPORT is the lines to print and BLIND the names of the CASES (CONTROLS) whose own
+    refusal was not added. A non-empty BLIND fails the build."""
+    report, blind = [], []
+    for name, (expect, plant) in (CONTROLS if cases is None else cases).items():
+        added, seen = control(base, refusals(plant), expect)
+        report.append("unlock graph control: %s: %d refusal(s) added" % (name, len(added)))
+        report += ["  " + l for l in added]
+        if not seen:
+            report.append("  missing: " + expect)
+            blind.append(name)
+    return report, blind
 
 
 def plant_tree(root, plant, dst):
@@ -236,16 +297,12 @@ def main(argv):
         if mode == "--control":
             # A plant counts only by the refusals it adds to the unplanted tree's, so a stale allowlist
             # cannot make a blind check look sighted.
-            base, blind = set(v), []
-            for name, plant in CONTROLS.items():
+            def refusals(plant):
                 with tempfile.TemporaryDirectory() as p:
                     plant_tree(root, plant, p)
-                    added = [l for l in run(root, usr, cmdline, allowed, p)[2] if l not in base]
-                print("unlock graph control: %s: %d refusal(s) added" % (name, len(added)))
-                for line in added:
-                    print("  " + line)
-                if not added:
-                    blind.append(name)
+                    return run(root, usr, cmdline, allowed, p)[2]
+            report, blind = controls(v, refusals)
+            print("\n".join(report))
             if blind:
                 sys.exit("unlock graph: the check passed planted paths, so a pass means nothing: %s" % "; ".join(blind))
             return
@@ -262,9 +319,10 @@ def main(argv):
 
 
 ALLOW_HEADER = """# What starting agentos-keeper-kernel.service can start or stop, as the built image's own systemd
-# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start U" is a unit the unlock
-# step can start, "stop U KIND T" a unit one of those stops, "generator G failed" a generator that
-# found nothing to read in the build's tree. Regenerate with, as root, after an image build:
+# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start T KIND from U" is an edge
+# by which a unit the unlock step starts or stops starts T, "stop U KIND T" one by which it stops T
+# (#4822, #4823), "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator
+# that found nothing to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
 """
 

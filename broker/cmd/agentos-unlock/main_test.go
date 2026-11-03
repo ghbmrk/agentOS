@@ -44,6 +44,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -379,7 +380,7 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	root, err := st.ClerkRoot()
 	must(t, err)
-	r.keys.Log, r.keys.Head, r.keys.ClerkRoot = handoff.Hide(logKey), handoff.Hide(head), handoff.Hide(root)
+	r.keys.Log, r.keys.Head, r.keys.ClerkRoot = secret.Hide(logKey), secret.Hide(head), secret.Hide(root)
 	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
@@ -398,12 +399,12 @@ func (r *rig) enrollCounter(st *seal.Store) handoff.Counter {
 	must(t, st.Put(handoff.CounterEntry, b))
 	dir := r.anchorDir()
 	must(t, os.Mkdir(dir, 0o700))
-	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	c := tpmseal.Counter{TPM: r.sw.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
 	must(t, proc.InitCounterAnchor(dir, r.mainConfig().Log, c, r.keys.Head.Get()))
 	for _, p := range []string{filepath.Join(dir, "anchor"), dir} {
 		must(t, os.Lchown(p, r.kernelUID, r.kernelG))
 	}
-	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: handoff.Hide(auth)}
+	return handoff.Counter{SRK: srk, Handle: ref.Handle, Name: ref.Name, Auth: secret.Hide(auth)}
 }
 
 func (r *rig) anchorDir() string { return filepath.Join(r.dir, "k", "anchor") }
@@ -799,7 +800,8 @@ func TestTheUnlockStepFailsClosed(t *testing.T) {
 
 	// LOG-2: a store with no counter, or one that does not read, hands
 	// the kernel nothing, so no kernel starts without its anchor.
-	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal()) + `}`)} {
+	ref := string(tpmseal.CounterRef{Handle: r.keys.Counter.Handle, Name: r.keys.Counter.Name}.Marshal())
+	for name, v := range map[string][]byte{"none": nil, "garbled": []byte(`{"ref":{"handle":1},"auth":"YQ=="}`), "no auth": []byte(`{"ref":` + ref + `}`), "null auth": []byte(`{"ref":` + ref + `,"auth":null}`)} {
 		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
 		must(t, err)
 		if v == nil {
@@ -1149,7 +1151,7 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		r.reboot() // each unlock caps the tpm slot (#2977)
 		role := r.role(&r.policy.PublicKey, r.anchor)
 		c := role.Config()
-		c.passphrase = pass
+		c.passphrase = secret.Hide(pass)
 		b, err := unlock(c, role.pins)
 		if err != nil {
 			return handoff.KernelKeys{}, err
@@ -1422,7 +1424,7 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 	r.reboot()
 	role := r.role(&r.policy.PublicKey, r.anchor)
 	c := role.Config()
-	c.passphrase = pass
+	c.passphrase = secret.Hide(pass)
 	pr, pw, err := os.Pipe()
 	must(r.t, err)
 	saved := os.Stderr
@@ -1789,7 +1791,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	var root [32]byte
 	edit(func(st *seal.Store) {
-		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: handoff.Hide(seed), Step: 42})
+		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed), Step: 42})
 		must(t, err)
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 		root, err = st.ClerkRoot()
@@ -1853,7 +1855,7 @@ func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
 	}
 	// A directory others can reach gets none, and the kernel still starts.
 	edit(func(st *seal.Store) {
-		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: handoff.Hide(seed)})
+		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: secret.Hide(seed)})
 		must(t, st.Put(handoff.CheckerSeedEntry, v))
 	})
 	must(t, os.Chmod(filepath.Dir(path), 0o755))

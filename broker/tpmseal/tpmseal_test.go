@@ -40,7 +40,7 @@ func predict(b bootPath) [][]byte {
 	return [][]byte{swtpm.Predict(b.initrd), swtpm.Predict(b.cmdline)}
 }
 
-func secret(t *testing.T) []byte {
+func randKey(t *testing.T) []byte {
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 // enroll seals a secret on the running boot path and approves that path.
 func enroll(t *testing.T, s *swtpm.TPM, key *ecdsa.PrivateKey, pin string) ([]byte, *tpmseal.Sealed, []tpmseal.Policy) {
 	t.Helper()
-	sec := secret(t)
+	sec := randKey(t)
 	sealed, err := tpmseal.Seal(s.TPM(), sec, &key.PublicKey, pin, "Test PC")
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +281,7 @@ func TestSwappedObjectRefused(t *testing.T) {
 	// The attacker's own object, sealed under the attacker's policy key,
 	// presented with the box's policy key in the record.
 	attacker := newKey(t)
-	theirs, err := tpmseal.Seal(s.TPM(), secret(t), &attacker.PublicKey, "", "")
+	theirs, err := tpmseal.Seal(s.TPM(), randKey(t), &attacker.PublicKey, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestSubstitutedSRKPublicRefused(t *testing.T) {
 	evil := newKey(t)
 	bus := &interposer{t: s.TPM(), pub: &evil.PublicKey}
 
-	if _, err := tpmseal.Seal(bus, secret(t), &key.PublicKey, "", "Test PC"); err == nil {
+	if _, err := tpmseal.Seal(bus, randKey(t), &key.PublicKey, "", "Test PC"); err == nil {
 		t.Fatal("sealed through the interposer")
 	}
 	if _, err := tpmseal.Unseal(bus, sealed, pols, ""); err == nil {

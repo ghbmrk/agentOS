@@ -1,0 +1,15 @@
+#!/bin/sh
+# One console line per boot for CI and a technician (image/enforcer/ci_boot.sh reads it): the entry's
+# blessing, the state partition's size and mount, and the watchdog systemd is petting.
+st=$(/usr/lib/systemd/systemd-bless-boot status 2>&1)
+root=$(findmnt -bno SIZE / 2>/dev/null)
+opts=$(findmnt -no OPTIONS / 2>/dev/null)
+case ,$opts, in *,noexec,*) x=noexec ;; *) x=exec ;; esac
+wd=$(systemctl show -P RuntimeWatchdogUSec 2>/dev/null)
+# USB devices other than root hubs, and how many the kernel left unauthorised.
+n=0 off=0
+for d in /sys/bus/usb/devices/*; do
+	[ -r "$d/authorized" ] && [ -r "$d/idVendor" ] && [ "$(cat "$d/bDeviceClass" 2>/dev/null)" != 09 ] || continue
+	n=$((n + 1)); [ "$(cat "$d/authorized")" = 0 ] && off=$((off + 1))
+done
+echo "enforcer-boot: bless=$st root_bytes=$root root=$x watchdog_runtime=$wd usb_devices=$n usb_unauthorised=$off"
