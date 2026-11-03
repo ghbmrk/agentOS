@@ -784,6 +784,126 @@ class InlinedTest(unittest.TestCase):
 
 
 
+class PrunedTest(unittest.TestCase):
+    # REQ: EVL-5. D-308 (#4436): a file the guest image build deletes is not in the shipped image,
+    # so the inlined scan does not read it; the build reads the same "pruned" list (prune.js).
+    mirror = InlinedTest.mirror
+    UI = {"where": "guest/openclaw/package-lock.json", "holder": "oc@1", "path": "dist/ui/", "why": "x"}
+
+    def tarballs(self):
+        mark = lambda n, v: f'"node_modules/.pnpm/{n}@{v}/node_modules/{n}/i.js"(e){{}}\n'
+        return self.mirror(oc_1={"dist/ui/a.mjs": mark("dompurify", "3.4.16"), "dist/ui/LICENSE": "- katex@0.16.47\n",
+                                 "dist/uix/b.mjs": mark("yaml", "2.9.1"), "dist/keep.mjs": mark("minimatch", "10.2.6"),
+                                 "dist/one.mjs": mark("ws", "8.0.0"), "dist/one.mjs.map": ""})
+
+    def test_a_pruned_directory_or_file_is_not_scanned(self):
+        tbs, mirror = self.tarballs()
+        one = {**self.UI, "path": "dist/one.mjs"}
+        copies, probs, held = vulncheck.inlined_copies("l", tbs, [], mirror, NO_ADVISORIES, [self.UI, one])
+        self.assertEqual(probs, [])
+        # dist/uix/ only shares a prefix with dist/ui/, and dist/one.mjs.map is another file.
+        self.assertEqual(copies, {("yaml", "2.9.1"): {"oc@1:dist/uix/b.mjs"},
+                                  ("minimatch", "10.2.6"): {"oc@1:dist/keep.mjs"}})
+        self.assertEqual(held, {"oc@1"})
+        copies, _, _ = vulncheck.inlined_copies("l", tbs, [], mirror, NO_ADVISORIES)
+        self.assertIn(("dompurify", "3.4.16"), copies)
+        self.assertIn(("katex", "0.16.47"), copies)
+
+    def test_a_pruned_path_that_matches_nothing_fails(self):
+        tbs, mirror = self.tarballs()
+        for e in ({**self.UI, "path": "dist/gone/"}, {**self.UI, "path": "dist/ui"}, {**self.UI, "holder": "oc@2"}):
+            _, probs, _ = vulncheck.inlined_copies("l", tbs, [], mirror, NO_ADVISORIES, [e])
+            self.assertEqual(len(probs), 1, (e, probs))
+            self.assertIn("prunes nothing", probs[0])
+
+    def test_an_inlined_entry_naming_a_pruned_file_must_retire(self):
+        tbs, mirror = self.tarballs()
+        entry = {"holder": "oc@1", "copy": "mermaid@12.1.0", "files": ["dist/ui/a.mjs"], "why": "x"}
+        _, probs, _ = vulncheck.inlined_copies("l", tbs, [entry], mirror, NO_ADVISORIES, [self.UI])
+        self.assertEqual(probs, ["l: oc@1 has no dist/ui/a.mjs, which the inlined entry for mermaid@12.1.0 names; "
+                                 "requalify it"])
+
+    def test_pruned_entry_shape(self):
+        self.assertEqual(vulncheck.pruned_problems([self.UI, {**self.UI, "path": "dist/a.js"}]), [])
+        for bad in ({**self.UI, "holder": "oc"}, {**self.UI, "path": ""}, {**self.UI, "path": "/dist/ui/"},
+                    {**self.UI, "path": "dist/../x/"}, {**self.UI, "path": "./dist/"}, {**self.UI, "path": "dist//ui/"},
+                    {**self.UI, "path": "node_modules/x/"}, {**self.UI, "path": "dist/node_modules/x/"},
+                    {**self.UI, "why": " "}, {**self.UI, "extra": 1}, {k: v for k, v in self.UI.items() if k != "why"},
+                    "oc@1", {**self.UI, "path": 1},
+                    # CLK-7: a plan CLI guest (Codex) runs unmodified, so only OpenClaw's build prunes.
+                    {**self.UI, "where": "guest/codex/package-lock.json"}):
+            self.assertEqual(len(vulncheck.pruned_problems([bad])), 1, bad)
+
+    def test_bad_pruned_entries_stop_the_scan(self):
+        fs, probs, _ = vulncheck.scan({"go_targets": ["broker"], "osv_sources": ["a"], "pruned": [{}]}, ROOT)
+        self.assertEqual((fs, len(probs)), ([], 1))
+
+    def test_a_pruned_entry_for_a_lockfile_the_scan_did_not_read_fails(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (pathlib.Path(tmp.name) / "package-lock.json").write_text(json.dumps({"packages": {"": {}}}))
+        fs, probs = vulncheck.run_inlined(tmp.name, ["package-lock.json"], [], pruned=[self.UI])
+        self.assertEqual(fs, [])
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("prunes nothing", probs[0])
+
+
+class PruneBuildTest(unittest.TestCase):
+    # REQ: EVL-5. D-308: guest/openclaw/prune.js deletes exactly the config's pruned paths from the
+    # installed packages, or fails the build, so the scan's list and the image agree.
+    PRUNE = ROOT / "guest" / "openclaw" / "prune.js"
+    WHERE = "guest/openclaw/package-lock.json"
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if not self.node:
+            self.fail("node is not on PATH; the prune step cannot be checked")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.d = pathlib.Path(tmp.name)
+        pkg = self.d / "node_modules" / "oc"
+        (pkg / "dist" / "ui" / "deep").mkdir(parents=True)
+        (pkg / "dist" / "ui" / "deep" / "a.js").write_text("x")
+        (pkg / "dist" / "uix").mkdir()
+        (pkg / "dist" / "one.js").write_text("x")
+        (pkg / "dist" / "keep.js").write_text("x")
+        (pkg / "package.json").write_text(json.dumps({"name": "oc", "version": "1.0.0"}))
+
+    def prune(self, *entries):
+        cfg = self.d / "vulncheck.json"
+        cfg.write_text(json.dumps({"pruned": [{"where": self.WHERE, "holder": "oc@1.0.0", "why": "x", **e} for e in entries]
+                                   + [{"where": "other/package-lock.json", "holder": "oc@1.0.0", "path": "dist/keep.js", "why": "x"}]}))
+        return subprocess.run([self.node, str(self.PRUNE), str(cfg), self.WHERE, str(self.d / "node_modules")],
+                              capture_output=True, text=True)
+
+    def test_it_deletes_each_listed_path_of_its_lockfile_only(self):
+        r = self.prune({"path": "dist/ui/"}, {"path": "dist/one.js"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        dist = self.d / "node_modules" / "oc" / "dist"
+        self.assertEqual(sorted(p.name for p in dist.iterdir()), ["keep.js", "uix"])
+
+    def test_it_fails_on_a_missing_path_a_wrong_version_or_a_path_outside_the_package(self):
+        for e in ({"path": "dist/gone/"}, {"path": "dist/ui"}, {"path": "dist/one.js/"}, {"path": "dist/ui/", "holder": "oc@2.0.0"},
+                  {"path": "dist/ui/", "holder": "nope@1.0.0"}, {"path": "../oc/dist/ui/"}, {"path": "/tmp/"}):
+            r = self.prune(e)
+            self.assertNotEqual(r.returncode, 0, e)
+        self.assertTrue((self.d / "node_modules" / "oc" / "dist" / "ui").exists())
+
+    def test_the_guest_build_runs_it_after_the_integrity_check(self):
+        build = (ROOT / "guest" / "openclaw" / "build-rootfs.sh").read_text()
+        check = build.index('[ "$got" = "$OPENCLAW_INTEGRITY" ]')
+        run = build.index('"$here/prune.js" "$repo/assurance/vulncheck.json" guest/openclaw/package-lock.json')
+        self.assertLess(check, run)
+
+    def test_the_control_ui_is_pruned_only_while_it_is_off(self):
+        # #4436 point 3: nothing serves dist/control-ui/ while the gateway's Control UI is off (#4419).
+        cfg = json.loads(vulncheck.CONFIG.read_text())
+        paths = {e["path"] for e in cfg.get("pruned", [])}
+        self.assertIn("dist/control-ui/", paths)
+        profile = (ROOT / "guest" / "openclaw" / "openclaw.json5").read_text()
+        self.assertRegex(profile, r"controlUi:\s*\{\s*enabled:\s*false\s*\}")
+        self.assertTrue(all(p.endswith("/control-ui/") for p in paths), paths)
+
 def lits(tag, n=6):
     """N string literals of FP_LEN characters that read as text, unique to TAG."""
     return [f"{tag} fingerprint literal number {i:02d}" for i in range(n)]
@@ -978,6 +1098,7 @@ class ConfigTest(unittest.TestCase):
         cfg = json.loads(vulncheck.CONFIG.read_text())
         self.assertEqual(vulncheck.record_problems(cfg["accepted"]), [])
         self.assertEqual(vulncheck.inlined_problems(cfg["inlined"]), [])
+        self.assertEqual(vulncheck.pruned_problems(cfg.get("pruned", [])), [])
         self.assertIn("broker", cfg["go_targets"])
         for t in cfg["go_targets"]:
             self.assertTrue((ROOT / t / "go.mod").exists(), t)
