@@ -56,7 +56,7 @@ const LogCap = "enf cap "
 
 // The cap chains. capChain counts the core's sends to its allow set, and
 // edgeChain the edge's to the internet; each then goes to its drop chain,
-// whose rules Drops writes. A packet past its cap goes to LogCap's refuse
+// whose rules Drops writes. A packet past its cap goes to LogCap's logged
 // chain: counted on CapDrop, logged within the cap's lines, dropped.
 const (
 	edgeChain     = "cap_edge"
@@ -248,7 +248,7 @@ func capped(q string, limit uint64) []string {
 	if limit > MaxDropCap {
 		return nil
 	}
-	return []string{"quota name " + strconv.Quote(q) + " goto " + refuse(LogCap)}
+	return []string{"quota name " + strconv.Quote(q) + " goto " + logged(LogCap)}
 }
 
 // sharedName is the chain that charges an address to each of the groups
