@@ -1,0 +1,15 @@
+# Ceilings that only Mark raises (D-310, Mark "3 do it" in Decisions 8, 2026-11-03). Read by
+# tools/trusted_base.py check on every PR, from the base branch.
+#
+#   trusted-lines   the trusted core's lines (tools/trusted_core.txt, as measured there) plus the
+#                   old core's: every Go file under a tools/old_core.txt directory that is not a
+#                   test or under testdata
+#   spec-words      SPEC.md's words, counted as tools/word_budget.py counts them
+#
+# A PR fails when a measure ends above its ceiling and above main's measure, so while main is over
+# a ceiling a PR may not grow it, and adding means deleting as much elsewhere. Any PR may lower a
+# number. Raising one or deleting this file needs a `Ceiling: <decision ID>` line naming Mark's
+# active DECISIONS.md row on main that names the PR.
+
+trusted-lines 58895
+spec-words 65725
