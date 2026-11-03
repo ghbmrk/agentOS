@@ -472,9 +472,14 @@ func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
 // and a write through /proc/<pid>/task/<tid>/root to that writeDir is
 // refused and lands nowhere.
 func TestFileGateWritesOnlyWhereThisNamespaceSays(t *testing.T) {
-	wd, outside := t.TempDir(), t.TempDir()
+	wd, self, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	writeHere(t, wd)
+	writeHere(t, self)
 	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realSelf, err := filepath.EvalSymlinks(self)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +499,11 @@ func TestFileGateWritesOnlyWhereThisNamespaceSays(t *testing.T) {
 		}
 		if err == nil {
 			err = unix.Mount(outside, real, "", unix.MS_BIND, "")
+		}
+		// self bound onto itself: the same inode on another mount, so
+		// only the mount ID tells the two apart.
+		if err == nil {
+			err = unix.Mount(realSelf, realSelf, "", unix.MS_BIND, "")
 		}
 		ready <- ns{unix.Gettid(), err}
 		<-done
@@ -531,6 +541,15 @@ func TestFileGateWritesOnlyWhereThisNamespaceSays(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(outside, "there")); string(got) != "ORIGINAL" {
 		t.Errorf("a refused write changed the file outside: %q", got)
 	}
+	// A directory bound onto itself there has the inode it has here, and
+	// is still another mount.
+	viaSelf := fmt.Sprintf("/proc/%d/task/%d/root%s", os.Getpid(), n.tid, realSelf)
+	if err := writeNoFollow(filepath.Join(viaSelf, "evil"), []byte("PLANTED"), 0o600); !errors.Is(err, errWrite) {
+		t.Errorf("a write through another namespace's mount of the same directory = %v, want the write refused", err)
+	}
+	if _, err := os.Lstat(filepath.Join(self, "evil")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused write through another mount made a file: %v", err)
+	}
 	// The same writeDir, named in this namespace, is still written.
 	if err := writeNoFollow(filepath.Join(wd, "ok"), []byte("ok"), 0o600); err != nil {
 		t.Errorf("a write in this namespace: %v", err)
@@ -562,6 +581,14 @@ func TestFdPathNamesOnlyTheFileItself(t *testing.T) {
 	}
 	if real, err := fdPath(fd); !errors.Is(err, errWrite) {
 		t.Errorf("fdPath(a file whose name is gone) = %q, %v, want errWrite", real, err)
+	}
+	// A file named as the /proc text reads is another inode on the same
+	// mount, so the inode, not the lookup, refuses it.
+	if err := os.WriteFile(p+" (deleted)", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if real, err := fdPath(fd); !errors.Is(err, errWrite) {
+		t.Errorf("fdPath(a gone file beside one named %q) = %q, %v, want errWrite", "f (deleted)", real, err)
 	}
 	if real, err := fdPath(-1); !errors.Is(err, errWrite) {
 		t.Errorf("fdPath(no descriptor) = %q, %v, want errWrite", real, err)
