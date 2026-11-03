@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -386,6 +387,8 @@ func TestPairLifetime(t *testing.T) {
 // head, charset and the token's meta), so no template writes any of it:
 // a second opening could carry another enforcer-token meta, or one the
 // script reads first. Revert mutant: home.html reopening the document.
+var headTag = regexp.MustCompile(`<head[\s>/]`)
+
 func TestTemplatesLeaveTheOpeningToCSRF(t *testing.T) {
 	names, err := fs.Glob(files, "templates/*.html")
 	if err != nil || len(names) == 0 {
@@ -397,10 +400,15 @@ func TestTemplatesLeaveTheOpeningToCSRF(t *testing.T) {
 			t.Fatal(err)
 		}
 		low := strings.ToLower(string(b))
-		for _, bad := range []string{"<!doctype", "<html", "<head>", "<head ", "charset", "enforcer-token"} {
+		for _, bad := range []string{"<!doctype", "<html", "charset", "enforcer-token"} {
 			if strings.Contains(low, bad) {
 				t.Errorf("%s writes %q, which csrf.Screen's opening owns", n, bad)
 			}
+		}
+		// <head followed by space, tab, newline, > or / opens a head
+		// element; <header does not (#4819).
+		if headTag.MatchString(low) {
+			t.Errorf("%s writes a <head> tag, which csrf.Screen's opening owns", n)
 		}
 	}
 }
