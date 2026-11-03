@@ -13,6 +13,7 @@ import configparser
 import io
 import importlib.machinery
 import importlib.util
+import inspect
 import os
 import re
 import pathlib
@@ -646,7 +647,7 @@ class TreeCheckTest(unittest.TestCase):
 
     def test_kmod_reader(self):
         # REQ: CH-7, HW-10
-        self.assertEqual(check.kmod_lines(b"a \\\nb\\c\\\\\nd\0e\nf\\"), [b"a bc\\", b"d", b"f\xff"])
+        self.assertEqual(check.kmod_lines(b"a \\\nb\\c\\\\\nd\0e\nf\\"), [b"a bc\\", b"d", b"f"])
         self.assertEqual(check.kmod_installs(b"install x-y[a-b] cmd\n  install z c\ninstall q\ninstall q \n"
                                              b"install ]x c\ninstall [x c\n#install c c\ninstall  w\t \tc d \n"),
                          [(b"x_y[a-b]", b"cmd"), (b"z", b"c"), (b"w", b" \tc d ")])
@@ -3281,6 +3282,53 @@ def reference_tool(case, name):
     return path
 
 
+# #4776: the tools a differential test compares the image's rules with, as the image's own Debian
+# packages hold them (merged /usr). Each is the binary itself, never a link: a link's target would be
+# read on the runner, outside the root.
+IMAGE_TOOLS = {"systemd-analyze": ("systemd", "usr/bin/systemd-analyze"),
+               "systemd-tmpfiles": ("systemd", "usr/bin/systemd-tmpfiles"),
+               "modprobe": ("kmod", "usr/bin/kmod")}
+IMAGE_LOADER = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+IMAGE_LIBS = ("usr/lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu/systemd")
+
+
+def image_tool(case, name):
+    """argv that runs reference tool NAME from AGENTOS_REFERENCE_ROOT, a root installed from the image's
+    own apt sources (CI's checks job builds it with mmdebstrap from mkosi.pkgmngr's mkosi.sources),
+    never the runner's copy (#4776): a runner-image update then cannot change what the differential
+    tests compare against. The root's own loader runs the binary on the root's own libraries
+    (--inhibit-cache: not the runner's ld.so.cache), so no root or namespace is needed and paths the
+    tool is given stay the runner's. --argv0 gives kmod the name it dispatches on. Missing, it skips
+    or fails as reference_tool does."""
+    root = os.environ.get("AGENTOS_REFERENCE_ROOT", "")
+    rel = IMAGE_TOOLS[name][1]
+    why = None
+    if not root:
+        why = "AGENTOS_REFERENCE_ROOT is not set"
+    else:
+        for p in (IMAGE_LOADER, rel):
+            if os.path.islink(os.path.join(root, p)) or not os.path.isfile(os.path.join(root, p)):
+                why = "%s is not a file in AGENTOS_REFERENCE_ROOT %s" % (p, root)
+                break
+    if why:
+        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+            case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s (%s)" % (why, name))
+        case.skipTest("%s; this test is skipped without the image's %s" % (why, name))
+    return [os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
+            "--library-path", ":".join(os.path.join(root, d) for d in IMAGE_LIBS),
+            "--argv0", name, os.path.join(root, rel)]
+
+
+def dpkg_version(root, package):
+    """The installed VERSION of PACKAGE in ROOT's dpkg status, or None."""
+    status = pathlib.Path(root, "var/lib/dpkg/status").read_text(errors="replace")
+    for stanza in status.split("\n\n"):
+        fields = dict(re.findall(r"^([A-Za-z-]+): (.*)$", stanza, re.M))
+        if fields.get("Package") == package and fields.get("Status", "").endswith(" installed"):
+            return fields.get("Version")
+    return None
+
+
 class TreeLinkTmpfilesTest(unittest.TestCase):
     """#1803: the link rules hold for links tmpfiles.d makes on the box, for tree links through steps
     tmpfiles.d makes, for '..' past a box mount in tmpfiles' own resolution, and for steps of the tree
@@ -4110,11 +4158,43 @@ class ReferenceToolTest(unittest.TestCase):
             with self.assertRaises(unittest.SkipTest):
                 reference_tool(self, "systemd-analyze")
 
+    def test_required_image_tool_missing_fails(self):
+        # #4776: no root, or a root without the tool, fails where CI requires it and skips elsewhere;
+        # the runner's own copy on PATH is never taken in its place.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "usr/bin"))
+            os.symlink("/usr/bin/true", os.path.join(tmp, "usr/bin/systemd-analyze"))
+            for env in ({"AGENTOS_REFERENCE_ROOT": ""}, {"AGENTOS_REFERENCE_ROOT": tmp}):
+                with self.subTest(env=env), unittest.mock.patch.object(shutil, "which", return_value="/usr/bin/x"):
+                    with unittest.mock.patch.dict(os.environ, dict(env, AGENTOS_REQUIRE_REFERENCE_TOOLS="1")):
+                        with self.assertRaises(AssertionError):
+                            image_tool(self, "systemd-analyze")
+                    with unittest.mock.patch.dict(os.environ, dict(env, AGENTOS_REQUIRE_REFERENCE_TOOLS="")):
+                        with self.assertRaises(unittest.SkipTest):
+                            image_tool(self, "systemd-analyze")
+
+    def test_diff_classes_take_no_runner_tool(self):
+        # #4776: the classes that compare the image's rules with systemd's or kmod's reading of them
+        # name their tools only through image_tool.
+        for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest, ImageToolTest):
+            src = inspect.getsource(c)
+            with self.subTest(c.__name__):
+                self.assertIn("image_tool(self, ", src)
+                self.assertNotIn("reference_tool(", src)
+                self.assertNotIn("shutil.which", src)
+
     def test_ci_checks_step_requires_them(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         step = ci[ci.index("- name: Unit tests"):]
         step = step[:step.index("\n      - ")]
         self.assertIn('AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"', step)
+        self.assertIn('AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools', step)
+        # The root comes from the image's own apt sources, the file mkosi's apt reads.
+        build = ci[ci.index("- name: The image's systemd and kmod"):]
+        build = build[:build.index("\n      - ")]
+        self.assertIn("image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", build)
+        self.assertIn('"$RUNNER_TEMP/image-tools"', build)
+        self.assertLess(ci.index("- name: The image's systemd and kmod"), ci.index("- name: Unit tests"))
         self.assertIn("python tools/unit_tests.py", step)
         self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 
@@ -4143,10 +4223,10 @@ class MustRun:
 class SystemdDiffTest(MustRun, unittest.TestCase):
     """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
-    masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
-    skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
-    MustRun fails any skip of it; GitHub's ubuntu-24.04 runners have it (systemd 255,
-    whose conf-files.c listing is the same as 257.13's)."""
+    masking across directories, linked directories, a split-/usr /lib). systemd-analyze is the
+    image's own (image_tool, #4776), never the runner's. Without it it skips, unless
+    AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and MustRun fails any
+    skip of it."""
     # REQ: DEV-2, CH-9, C13
 
     FAMILIES = (("sysctl.d", check.sysctl_files),
@@ -4156,7 +4236,7 @@ class SystemdDiffTest(MustRun, unittest.TestCase):
                 ("systemd/system.conf", lambda r: check.main_conf(r, "system.conf")))
 
     def systemd_list(self, root, name):
-        p = subprocess.run(["systemd-analyze", "cat-config", "--no-pager", "--root=" + str(root), name],
+        p = subprocess.run(self.tool + ["cat-config", "--no-pager", "--root=" + str(root), name],
                            capture_output=True, timeout=60)
         prefix = os.fsencode(str(root)) + b"/"
         out = [ln[2 + len(prefix):] for ln in p.stdout.split(b"\n") if ln.startswith(b"# " + prefix)]
@@ -4166,7 +4246,7 @@ class SystemdDiffTest(MustRun, unittest.TestCase):
         return out
 
     def setUp(self):
-        reference_tool(self, "systemd-analyze")
+        self.tool = image_tool(self, "systemd-analyze")
 
     def test_file_lists_match_systemd(self):
         for i, tree in enumerate(DIFF_TREES):
@@ -4192,8 +4272,8 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
     """#1530: the guarded-path check against systemd-tmpfiles itself. Each case (Debian's lines,
     the image's, every review probe; a probe may be several lines, so a chain of lines is one case;
     and every file on tmpfiles.allow with all its listed lines, #1543 P/UX P1) is one tmpfiles.d
-    file run through the real `systemd-tmpfiles --root=TREE --create --remove --boot` on a scratch
-    tree that passes the tree check, never the host. A file the check passes must leave every path
+    file run through the image's own `systemd-tmpfiles --root=TREE --create --remove --boot`
+    (image_tool, #4776) on a scratch tree that passes the tree check, never the host. A file the check passes must leave every path
     the box reads configuration from (GUARDED) as it was, and the tree must still pass the whole
     check after it. The allowlist (TmpfilesAllowTest) is the main guard; this is its backstop."""
     # REQ: DEV-2, CH-9
@@ -4250,7 +4330,7 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
         return out
 
     def test_passed_lines_change_nothing_guarded(self):
-        tool = reference_tool(self, "systemd-tmpfiles")
+        tool = image_tool(self, "systemd-tmpfiles")
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
                                       if ln and not ln.startswith("#")) + TMPFILES_PROBES
         # Every allowlisted file whole, under its own path, so that an entry added to tmpfiles.allow
@@ -4258,16 +4338,24 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
         cases = [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
             (rel, "\n".join(group)) for rel, group in sorted(allow_groups().items())]
         changed = set()
+        # #4694: every case starts from a copy of one clean tree, checked once, rather than building
+        # and whole-checking the same tree again for each case (0.3 s each, over 250 cases).
+        clean = tempfile.TemporaryDirectory()
+        self.addCleanup(clean.cleanup)
+        template = os.path.join(clean.name, "t")
+        os.mkdir(template)
+        self.assertEqual(check.violations(self.tree(template)), [])
         for rel, ln in cases:
-            with self.subTest(file=rel, line=ln), tempfile.TemporaryDirectory() as tmp:
-                root = self.tree(tmp)
-                self.assertEqual(check.violations(root), [])
+            with self.subTest(file=rel, line=ln), tempfile.TemporaryDirectory() as scratch:
+                tmp = os.path.join(scratch, "t")
+                shutil.copytree(template, tmp, symlinks=True)
+                root = pathlib.Path(tmp)
                 f = write(root, rel, ln + "\n")
                 passed = not check.tmpfiles_violations(root)
                 before = self.snapshot(tmp)
                 # --root keeps every path inside the scratch tree; the exit code is the line's own
                 # business (a missing user or credential), what it did to the tree is the test.
-                subprocess.run([tool, "--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
+                subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
                 if self.snapshot(tmp) != before:
                     changed.add(ln)
                 self.assertEqual(passed, ln not in TMPFILES_PROBES)
@@ -4804,7 +4892,7 @@ class ReferenceDiffsRanTest(unittest.TestCase):
     # REQ: DEV-2, CH-9
 
     def test_every_reference_diff_class_fails_on_a_skip(self):
-        for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest):
+        for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest, ImageToolTest):
             with self.subTest(c.__name__):
                 self.assertTrue(issubclass(c, MustRun))
                 self.assertTrue(unittest.TestLoader().getTestCaseNames(c))
@@ -4820,7 +4908,7 @@ class ReferenceDiffsRanTest(unittest.TestCase):
         return found + [n for n in ("setUpModule",) if n in namespace]
 
     def test_no_reference_diff_class_or_the_module_has_a_class_level_fixture(self):
-        classes = (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest)
+        classes = (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest, ImageToolTest)
         self.assertEqual(self.class_level_fixtures(classes, vars(sys.modules[__name__])), [])
 
         class Bad(MustRun, unittest.TestCase):
@@ -4877,7 +4965,7 @@ class DiffOracleTest(unittest.TestCase):
                                    ("writes /proc/sys for every line", proc_sys, "unexpectedly found")):
             with self.subTest(name):
                 result = unittest.TestResult()
-                with unittest.mock.patch.object(here, "reference_tool", lambda case, tool: tool), \
+                with unittest.mock.patch.object(here, "image_tool", lambda case, tool: [tool]), \
                         unittest.mock.patch.object(subprocess, "run", fake):
                     unittest.TestLoader().loadTestsFromTestCase(TmpfilesDiffTest).run(result)
                 self.assertFalse(result.wasSuccessful())
@@ -4914,7 +5002,7 @@ class DiffOracleTest(unittest.TestCase):
         tests = ("test_passed_lines_change_nothing_guarded", "test_every_entry_passes_the_guard_under_its_own_file")
         for harmful in (False, True):
             with self.subTest(harmful=harmful), contextlib.ExitStack() as stack:
-                stack.enter_context(unittest.mock.patch.object(here, "reference_tool", lambda case, tool: tool))
+                stack.enter_context(unittest.mock.patch.object(here, "image_tool", lambda case, tool: [tool]))
                 stack.enter_context(unittest.mock.patch.object(subprocess, "run", writes))
                 if harmful:
                     stack.enter_context(unittest.mock.patch.object(here, "allow_groups", lambda: groups))
@@ -5080,15 +5168,16 @@ class TreeAccessTest(unittest.TestCase):
 
 class KmodDiffTest(MustRun, unittest.TestCase):
     """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
-    install line kmod took, in order. GitHub's ubuntu-24.04 runners have kmod 31, whose config
-    reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
+    install line kmod took, in order. modprobe is the image's own kmod (image_tool, #4776), never the
+    runner's: the runner's kmod 31 read a backslash at the end of a file as 0xff, the image's 34 drops
+    it (#4795)."""
     # REQ: CH-7, HW-10
     WORDS = (b"install", b"install", b"btusb", b"bt-usb", b"bt[_-]sb", b"b]t", b"[x", b"/bin/false", b"#",
              b"blacklist", b" ", b" ", b"\t", b"\\", b"\\\n", b"\n", b"\n", b"\x0c", b"\x0b", b"\xc2\xa0", b"\r",
              b"\0", b"\xff", b"-")
 
     def test_reader_matches_kmod(self):
-        modprobe = reference_tool(self, "modprobe")
+        modprobe = image_tool(self, "modprobe")
         import random
         rng = random.Random(1528)
         block = (MK / "mkosi.extra" / BT_BLOCK).read_bytes()
@@ -5107,10 +5196,32 @@ class KmodDiffTest(MustRun, unittest.TestCase):
             with self.subTest(i, data=data), tempfile.TemporaryDirectory() as tmp:
                 with open(os.path.join(tmp, "a.conf"), "wb") as f:
                     f.write(data)
-                out = subprocess.run([modprobe, "-C", tmp, "-c"], capture_output=True, timeout=60).stdout
+                out = subprocess.run(modprobe + ["-C", tmp, "-c"], capture_output=True, timeout=60).stdout
                 theirs = [tuple(ln[len(b"install "):].split(b" ", 1)) for ln in out.split(b"\n")
                           if ln.startswith(b"install ")]
                 self.assertEqual(check.kmod_installs(data), theirs)
+
+
+class ImageToolTest(MustRun, unittest.TestCase):
+    """#4776: what image_tool runs is the reference root's own binary on the root's own libraries,
+    not the runner's: each tool reports the version the root's dpkg installed (the runner's
+    ubuntu-24.04 has systemd 255 and kmod 31, the image systemd 257 and kmod 34)."""
+    # REQ: DEV-2, CH-9, CH-7
+
+    def test_each_tool_is_the_roots_own(self):
+        for name, (package, _) in sorted(IMAGE_TOOLS.items()):
+            with self.subTest(name):
+                tool = image_tool(self, name)
+                want = dpkg_version(os.environ["AGENTOS_REFERENCE_ROOT"], package)
+                self.assertTrue(want, package)
+                out = subprocess.run(tool + ["--version"], capture_output=True, text=True, timeout=60).stdout
+                first = out.split("\n", 1)[0]
+                if package == "systemd":
+                    # "systemd 257 (257.9-1~deb13u1)": the Debian version itself.
+                    self.assertEqual(first.split(" (", 1)[-1].rstrip(")"), want, out)
+                else:
+                    # "kmod version 34.2": the upstream part of the Debian version.
+                    self.assertEqual(first, "kmod version " + want.split(":")[-1].rsplit("-", 1)[0], out)
 
 
 class UplinkTest(unittest.TestCase):

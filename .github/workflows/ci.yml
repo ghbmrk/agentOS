@@ -69,6 +69,17 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      # #4776: the differential tests run the image's own systemd and kmod, never the runner's, so a
+      # runner-image update cannot change what they compare against. The root is installed from the
+      # apt sources the image build reads (the pinned snapshot and trixie-security); the tests run
+      # its binaries through its own loader (tests/test_image.py image_tool).
+      - name: The image's systemd and kmod, from the image's apt sources
+        if: steps.scope.outputs.records != 'true'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo mmdebstrap --mode=root --variant=essential --include=systemd,kmod trixie \
+            "$RUNNER_TEMP/image-tools" image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources
+          sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: Unit tests
         if: steps.scope.outputs.records != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
@@ -78,6 +89,7 @@ jobs:
         # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
+          AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools
           GOFLAGS: -buildvcs=false
         run: |
           # erofs-utils: the /usr list tests build erofs images (#4470).
