@@ -32,8 +32,10 @@ capped by the ceilings below, not waived per PR (D-310 ends D-159's rule 2).
 
 The ceilings (D-310) are tools/ceilings.txt: trusted lines (core lines plus the old core's Go
 lines, tools/old_core.txt) and SPEC.md's words. A measure fails when it ends above the base's
-ceiling and above the base's measure; raising a ceiling or deleting the file needs a line
-`Ceiling: <decision ID>` naming an active base-tree row that names the PR. In CI the base tree is the base branch tip
+ceiling and above the base's measure, and names the cut that passes; raising a ceiling or deleting
+the file needs a line `Ceiling: <decision ID>` naming an active base-tree row that names the PR.
+Each PR is measured against main at its last push, so two PRs can land together above a ceiling;
+main is then over it and may not grow. In CI the base tree is the base branch tip
 and the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
 gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
@@ -455,9 +457,15 @@ def spec_words(tree):
     return len(path.read_text(encoding="utf-8").split()) if path.exists() else 0
 
 
+UNITS = {"trusted-lines": "lines", "spec-words": "words"}
+# The parts of trusted-lines, shown under it in the table: a PR that grows only the old core
+# fails with core lines unchanged, and the table says where the lines went (#4946 UX).
+PARTS = (("core", "core"), ("old-core", "old core"))
+
+
 def ceiling_measures(tree, core_measure, dirs):
-    return {"trusted-lines": (core_measure["lines"] if core_measure else 0) + old_core_lines(tree, dirs),
-            "spec-words": spec_words(tree)}
+    core, old = (core_measure["lines"] if core_measure else 0), old_core_lines(tree, dirs)
+    return {"trusted-lines": core + old, "core": core, "old-core": old, "spec-words": spec_words(tree)}
 
 
 def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
@@ -478,17 +486,23 @@ def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
         w = RAISE.search(body or "")
         waived = bool(w and active_decision(decisions, w.group(1), pr))
         if not waived:
-            why = (f"`Ceiling: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
-                   if w else "no `Ceiling: <decision ID>` line")
-            problems += [f"{r}, and the PR body has {why}: only Mark raises a ceiling (D-310)" for r in raised]
+            if not w:
+                why = "the PR body has no `Ceiling: <decision ID>` line"
+            elif pr is None:
+                why = f"`Ceiling: {w.group(1)}` cannot be checked without the PR number (--pr)"
+            else:
+                why = f"`Ceiling: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
+            problems += [f"{r}: only Mark raises a ceiling (D-310), and {why}" for r in raised]
     for k in CEILING_NAMES:
         if head_c is None:
             caps[k] = None if waived else base_c[k]
         else:
             caps[k] = head_c[k] if waived else min(base_c[k], head_c[k])
         if caps[k] is not None and head[k] > caps[k] and head[k] > base[k]:
+            # The PR passes once it ends at or under the higher of its ceiling and main's measure.
+            cut = head[k] - max(caps[k], base[k])
             problems.append(f"{k} {base[k]} -> {head[k]} ends above its ceiling {caps[k]} ({CEILINGS}):"
-                            " delete as much elsewhere in the same PR (D-310)")
+                            f" cut {cut} {UNITS[k]} elsewhere in this PR (D-310)")
     return problems, caps
 
 
@@ -497,8 +511,11 @@ def ceilings_table(base, head, caps, problems):
     if not caps:
         out.append(f"No {CEILINGS} at the base.")
     else:
-        out += ["| Measure | Base | Head | Ceiling |", "|---|---:|---:|---:|"]
-        out += [f"| {k} | {base[k]} | {head[k]} | {'-' if caps[k] is None else caps[k]} |" for k in CEILING_NAMES]
+        out += ["| Measure | Base | Head | Change | Ceiling |", "|---|---:|---:|---:|---:|"]
+        for k in CEILING_NAMES:
+            out.append(f"| {k} | {base[k]} | {head[k]} | {head[k] - base[k]:+d} | {'-' if caps[k] is None else caps[k]} |")
+            if k == "trusted-lines":
+                out += [f"| &nbsp;&nbsp;{label} | {base[p]} | {head[p]} | {head[p] - base[p]:+d} | |" for p, label in PARTS]
         out += ["", "**Fail:**" if problems else "**Pass.**"]
         out += [f"- {p}" for p in problems]
     return "\n".join(out) + "\n"

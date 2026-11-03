@@ -343,15 +343,21 @@ class CoreTree(unittest.TestCase):
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         rc, out = self.check(extra_own=4)
         self.assertEqual(rc, 1, out)
-        self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n}", out)
+        # #4946 UX: the message names the cut that makes the PR pass.
+        self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n} ({tb.CEILINGS}):"
+                      " cut 4 lines elsewhere in this PR (D-310)", out)
         self.assertEqual(self.check("Trusted-core: D-7\n", extra_own=4)[0], 1)
         rc, out = self.check(extra_own=4, head_ceil=ceilings(n + 4))
         self.assertEqual(rc, 1, out)
-        self.assertIn(f"trusted-lines ceiling {n} -> {n + 4}, and the PR body has no `Ceiling: <decision ID>` line", out)
+        self.assertIn(f"trusted-lines ceiling {n} -> {n + 4}: only Mark raises a ceiling (D-310),"
+                      " and the PR body has no `Ceiling: <decision ID>` line", out)
+        # #4946 Potency: an unwaived raise leaves the base's ceiling in force, not the head's.
+        self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n} ({tb.CEILINGS}): cut 4 lines", out)
+        self.assertIn(f"| trusted-lines | {n} | {n + 4} | +4 | {n} |", out)
         self.assertEqual(self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 3))[0], 1)
         rc, out = self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 4))
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"| trusted-lines | {n} | {n + 4} | {n + 4} |", out)
+        self.assertIn(f"| trusted-lines | {n} | {n + 4} | +4 | {n + 4} |", out)
 
     def test_growth_under_the_ceiling_passes(self):
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
@@ -366,7 +372,24 @@ class CoreTree(unittest.TestCase):
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         write(self.base, tb.CEILINGS, ceilings(n - 2))
         self.assertEqual(self.check(head_ceil=ceilings(n - 2))[0], 0)
-        self.assertEqual(self.check(extra_own=1, head_ceil=ceilings(n - 2))[0], 1)
+        rc, out = self.check(extra_own=1, head_ceil=ceilings(n - 2))
+        self.assertEqual(rc, 1, out)
+        # The cut is the growth, not the gap to the ceiling: ending at main's measure passes.
+        self.assertIn("cut 1 lines elsewhere in this PR", out)
+
+    def test_two_prs_from_one_main_overshoot_once_then_the_ceiling_holds(self):
+        # #4946 L3 7: each PR is checked against main at its last push, so two PRs that each fit
+        # the headroom can land together above the ceiling. Main then sits over it, and no later PR
+        # may grow the measure until cuts bring main back under (the same rule as main today).
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        write(self.base, tb.CEILINGS, ceilings(n + 3))
+        self.assertEqual(self.check(extra_own=2, head_ceil=ceilings(n + 3))[0], 0)
+        tree(self.base, extra_own=4)  # both PRs merged: 1 line over
+        self.assertEqual(self.check(extra_own=4, head_ceil=ceilings(n + 3))[0], 0)
+        rc, out = self.check(extra_own=5, head_ceil=ceilings(n + 3))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"trusted-lines {n + 4} -> {n + 5} ends above its ceiling {n + 3}", out)
+        self.assertIn("cut 1 lines", out)
 
     def test_old_core_lines_count_and_move_into_the_core_at_par(self):
         # A migration step: the core grows by the lines the old core loses, in one PR.
@@ -395,6 +418,17 @@ class CoreTree(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         self.assertIn(f"trusted-lines {n} -> {n + 50} ends above its ceiling {n}", out)
+        # #4946 UX: the table shows the growth is the old core's, with core lines unchanged.
+        self.assertIn(f"| &nbsp;&nbsp;core | {n} | {n} | +0 | |", out)
+        self.assertIn("| &nbsp;&nbsp;old core | 0 | 50 | +50 | |", out)
+
+    def test_old_core_dirs_stay_inside_the_repository(self):
+        # #4946 Potency: a listed `..` or absolute path would count files outside the tree.
+        outside = os.path.join(self.tmp, "outside")
+        write(outside, "o.go", "package o\n")
+        for d in ("../outside", "broker/../../outside", outside):
+            with self.assertRaises(tb.MeasureError, msg=d):
+                tb.old_core_lines(self.base, {d})
 
     def test_spec_words_are_capped(self):
         write(self.base, "SPEC.md", "a b c")
@@ -422,6 +456,13 @@ class CoreTree(unittest.TestCase):
         self.assertEqual(self.check("Ceiling: D-5\n", **up)[0], 1)
         self.assertEqual(self.check("Ceiling: D-6\n", **up)[0], 1)
         self.assertEqual(self.check("Trusted-core: D-7\n", **up)[0], 1)
+        # #4946 Potency: the line must start the line, so prose that quotes it waives nothing.
+        self.assertEqual(self.check("Ceiling: D-7\n", **up)[0], 0)
+        self.assertEqual(self.check("Not a Ceiling: D-7\n", **up)[0], 1)
+        # #4946 UX: with no PR number the message says so instead of naming #None.
+        rc, out = self.check("Ceiling: D-7\n", pr=None, **up)
+        self.assertIn("`Ceiling: D-7` cannot be checked without the PR number (--pr)", out)
+        self.assertNotIn("#None", out)
 
     def test_deleting_the_ceilings_file_needs_a_decision(self):
         self.check()
