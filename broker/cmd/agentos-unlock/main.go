@@ -202,15 +202,17 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if err := tpmseal.Cap(t, tpmSelections(st)); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
 	}
-	if k.Log, err = st.LogKey(); err != nil {
+	logKey, err := st.LogKey()
+	if k.Log = handoff.Hide(logKey); err != nil {
 		return nil, err
 	}
-	if k.Head, err = st.HeadKey(); err != nil {
+	head, err := st.HeadKey()
+	if k.Head = handoff.Hide(head); err != nil {
 		return nil, err
 	}
 	if request != nil {
-		k.NewRecovery, err = lostCard(st, request, k.Head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
-		if err != nil {
+		rec, err := lostCard(st, request, head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
+		if k.NewRecovery = handoff.Hide(rec); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the card you hold: your lost-card request: %v\n", err)
 		} else if err := os.Remove(c.request); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove the lost-card request I carried out: %v\n", err)
@@ -249,20 +251,23 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	if ok {
-		k.PageCA, err = handoff.ParsePageCA(raw)
+		ca, err := handoff.ParsePageCA(raw)
+		k.PageCA = handoff.Hide(ca)
 		clear(raw)
 		if err != nil {
 			return nil, fmt.Errorf("agentos-unlock: the page authority in my store: %w", err)
 		}
 	}
-	if k.LinkKey, k.FirstEdge, err = linkKeys(st); err != nil {
+	link, edge, err := linkKeys(st)
+	if k.LinkKey, k.FirstEdge = handoff.Hide(link), edge; err != nil {
 		return nil, err
 	}
-	if k.ClerkRoot, err = st.ClerkRoot(); err != nil {
+	root, err := st.ClerkRoot()
+	if k.ClerkRoot = handoff.Hide(root); err != nil {
 		return nil, err
 	}
 	if c.checkerSeed != "" {
-		writeCheckerSeed(c.checkerSeed, st, &k.ClerkRoot)
+		writeCheckerSeed(c.checkerSeed, st, k.ClerkRoot.Ref())
 	}
 	if c.clerkAnchors != "" {
 		ca, err := clerkAnchors(st, k, c.log)
@@ -504,7 +509,7 @@ func clerkAnchors(st *seal.Store, k handoff.KernelKeys, logPath string) ([]key.P
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log: %v\n", err)
 		return nil, nil
 	}
-	a, ok, err := kernel.LoggedAnchors(first, k.Log, k.Head.Public().(ed25519.PublicKey))
+	a, ok, err := kernel.LoggedAnchors(first, k.Log.Get(), k.Head.Get().Public().(ed25519.PublicKey))
 	if err != nil || !ok {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log's first entry: %v\n", err)
@@ -712,7 +717,7 @@ func counter(st *seal.Store) (handoff.Counter, error) {
 		clear(r.Auth)
 		return handoff.Counter{}, fmt.Errorf("agentos-unlock: my log's counter in my store does not read")
 	}
-	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: r.Auth}, nil
+	return handoff.Counter{Handle: ref.Handle, Name: ref.Name, Auth: handoff.Hide(r.Auth)}, nil
 }
 
 // kernelTPM opens the kernel's own connection to the TPM at path: the
