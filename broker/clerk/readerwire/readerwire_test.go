@@ -438,48 +438,59 @@ func TestServeBoundsConcurrency(t *testing.T) {
 
 // TestBusyIsReadHoweverTheConnectionEnds: a busy answer sent before the
 // call is read is ErrBusy whether the reader closed before the call was
-// written (the write fails) or after (the answer ends in a reset); any other
-// answer on such a connection is the reader's failure, and busy with bytes
-// after it is malformed.
+// written (the write fails with EPIPE) or after (the call lands unread and
+// the answer ends in a reset); any other answer on such a connection is the
+// reader's failure, and busy with bytes after it is malformed. Each order is
+// forced, not raced: the dialer's write waits for the reader's close, or the
+// reader waits, without reading, for the call to land.
 func TestBusyIsReadHoweverTheConnectionEnds(t *testing.T) {
-	early := func(t *testing.T, ans string, before bool) string {
-		t.Helper()
-		path := sock(t)
-		ln, err := net.Listen("unix", path)
-		must(t, err)
-		t.Cleanup(func() { ln.Close() })
-		go func() {
-			for {
-				c, err := ln.Accept()
-				if err != nil {
-					return
-				}
-				if !before {
-					// Let the call land unread, so the close resets.
-					time.Sleep(50 * time.Millisecond)
-				}
-				c.Write([]byte(ans))
-				c.Close()
-			}
-		}()
-		return path
-	}
-	big := strings.Repeat("a", MaxPrompt)
 	for _, before := range []bool{true, false} {
-		name := map[bool]string{true: "answered at accept", false: "answered once the call landed"}[before]
+		name := map[bool]string{true: "closed before the call is written", false: "closed on the call unread"}[before]
 		t.Run(name, func(t *testing.T) {
-			for range 20 {
-				a := Dial(early(t, `{"err":"busy"}`+"\n", before), me(), 5*time.Second)
-				if got, err := a(context.Background(), big); got != "" || !errors.Is(err, ErrBusy) {
-					t.Fatalf("busy: %q, %v", got, err)
+			for _, ans := range []string{`{"err":"busy"}`, `{"reply":"spam"}`} {
+				path := sock(t)
+				ln, err := net.Listen("unix", path)
+				must(t, err)
+				t.Cleanup(func() { ln.Close() })
+				closed := make(chan struct{})
+				go func() {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					if !before {
+						landed(t, c)
+					}
+					c.Write([]byte(ans + "\n"))
+					c.Close()
+					close(closed)
+				}()
+				var werr error
+				d := newDialer(path, me(), 5*time.Second, time.Now)
+				d.send = func(c net.Conn, b []byte) error {
+					if before {
+						<-closed
+					}
+					_, werr = c.Write(b)
+					return werr
 				}
-				if !paused(a) {
-					t.Fatal("busy did not pause")
+				got, err := d.ask(context.Background(), strings.Repeat("a", MaxPrompt))
+				switch {
+				case before && !errors.Is(werr, syscall.EPIPE):
+					t.Fatalf("%s: the call's write did not fail: %v", ans, werr)
+				case !before && werr != nil:
+					t.Fatalf("%s: the call's write failed: %v", ans, werr)
 				}
-			}
-			a := Dial(early(t, `{"reply":"spam"}`+"\n", before), me(), 5*time.Second)
-			if got, err := a(context.Background(), big); got != "" || !errors.Is(err, ErrUnavailable) {
-				t.Fatalf("a reply on a call never read: %q, %v", got, err)
+				want := ErrUnavailable
+				if ans == `{"err":"busy"}` {
+					want = ErrBusy
+				}
+				if got != "" || !errors.Is(err, want) {
+					t.Fatalf("%s: %q, %v, want %v", ans, got, err, want)
+				}
+				if !paused(d.ask) {
+					t.Fatalf("%s did not pause", ans)
+				}
 			}
 		})
 	}
@@ -487,6 +498,21 @@ func TestBusyIsReadHoweverTheConnectionEnds(t *testing.T) {
 	if got, err := Dial(r.path, me(), 5*time.Second)(context.Background(), "x"); got != "" || !errors.Is(err, ErrMalformed) {
 		t.Fatalf("busy with trailing data: %q, %v", got, err)
 	}
+}
+
+// landed blocks until c holds unread bytes, reading none (MSG_PEEK), so
+// closing c then resets its peer.
+func landed(t *testing.T, c net.Conn) {
+	rc, err := c.(*net.UnixConn).SyscallConn()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	var b [1]byte
+	rc.Read(func(fd uintptr) bool {
+		n, _, err := syscall.Recvfrom(int(fd), b[:], syscall.MSG_PEEK)
+		return n > 0 || (err != syscall.EAGAIN && err != syscall.EINTR)
+	})
 }
 
 // TestADownReaderFailsFast: after the reader fails, calls fail at once with

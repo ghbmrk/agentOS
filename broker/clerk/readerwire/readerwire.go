@@ -148,6 +148,10 @@ type dialer struct {
 
 	mu    sync.Mutex
 	until time.Time
+
+	// send writes the call; nil is conn.Write. Tests set it to fix the
+	// order of the call's write and the reader's close.
+	send func(conn net.Conn, b []byte) error
 }
 
 func newDialer(sock string, uid int, timeout time.Duration, now func() time.Time) *dialer {
@@ -202,7 +206,12 @@ func (d *dialer) call(ctx context.Context, prompt string) (reply string, down bo
 	conn.SetDeadline(own)
 	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
-	_, werr := conn.Write(append(b, '\n'))
+	var werr error
+	if d.send != nil {
+		werr = d.send(conn, append(b, '\n'))
+	} else {
+		_, werr = conn.Write(append(b, '\n'))
+	}
 	if uc, ok := conn.(*net.UnixConn); ok && werr == nil {
 		uc.CloseWrite()
 	}
