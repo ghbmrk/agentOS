@@ -186,22 +186,28 @@ class RecordsTest(unittest.TestCase):
                 "t@agentos-unit-lint.service": ("loaded", LIB + "t@.service", [ETC + "t@.service.d/t.conf"]),
                 "lone@agentos-unit-lint.service": ("not-found", "", []),
                 "lone@m.service": ("masked", "/dev/null", []),  # #4779 L3 2: masked stands for no template dir
-                "lone@n.service": ("loaded", LIB + "t@.service", []),  # round 3: only the lint's own instance does
+                "lone@n.service": ("loaded", LIB + "t@.service", []),  # an instance is judged as itself
+                "lone@b.service": ("bad-setting", LIB + "t@.service", []),  # as at boot: judged as itself
+                "t@agentos-unit-lint.socket": ("bad-setting", LIB + "t@.service", []),  # the lint's: alone too
                 "gone.service": ("not-found", "", []),
                 "gen.service": ("loaded", "/run/systemd/generator/gen.service", []),
                 "m.service": ("masked", "/etc/systemd/system/m.service", [])})
             units = [(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]]
             self.assertEqual(units, [
                 ("gen.service", False, [("/run/systemd/generator/gen.service", True)]),  # a generated unit is read
-                ("lone@n.service", False, [(LIB + "t@.service", True)]),  # judged as itself, standing for nothing
+                ("lone@b.service", False, [(LIB + "t@.service", True)]),
+                ("lone@n.service", False, [(LIB + "t@.service", True)]),  # judged as itself
                 ("t@agentos-unit-lint.service", False, [(LIB + "t@.service", True), (ETC + "t@.service.d/t.conf", True)]),
+                ("t@agentos-unit-lint.socket", False, [(LIB + "t@.service", True)]),
+                ("t@agentos-unit-lint.socket", True, [(LIB + "t@.service", True)]),
                 ("x.service", False, [(LIB + "x.service", False), (ETC + "x.service.d/a.conf", True),
                                       (ETC + "service.d/w.conf", True), (ETC + "y.service.d/y.conf", True)]),
                 ("gone.service", True, [(ETC + "gone.service.d/g.conf", True)]),  # names no loaded unit
-                # #4779 L3 2: a template whose planted instance did not load
+                # a shared directory (template, type-wide, prefix) is read alone too, whatever loaded
                 ("lone@.service", True, [(ETC + "lone@.service.d/l.conf", True)]),
-                (".service", True, [(ETC + "service.d/w.conf", True)]),  # type-wide: also alone
-                ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])  # prefix: also alone
+                (".service", True, [(ETC + "service.d/w.conf", True)]),
+                ("t@.service", True, [(ETC + "t@.service.d/t.conf", True)]),
+                ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])
             self.assertIsNone(got["fstab"])
 
     def test_a_quoted_list_entry_is_one_name(self):
@@ -279,7 +285,8 @@ class NamesTest(unittest.TestCase):
     def test_no_file_may_be_the_lint_instance_s_own(self):
         # #4779 round 3: the lint's instance stands for every instance a boot may start
         for files in ({ETC + "t@agentos-unit-lint.service.d/u.conf": "u"}, {ETC + "t@agentos-unit-lint.service": "u"},
-                      {ETC + "a.target.wants/t@agentos-unit-lint.service": "-> /dev/null"}):
+                      {ETC + "a.target.wants/t@agentos-unit-lint.service": "-> /dev/null"},
+                      {ETC + "t@agentos-unit-lint.socket.d/u.conf": "u"}):  # #4779 L3 R1: any type
             with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
                 v = tree(d, dict(files, **{LIB + "t@.service": "t"}))
                 with self.assertRaisesRegex(SystemExit, "lint's own instance"):
@@ -292,7 +299,15 @@ class NamesTest(unittest.TestCase):
                          ETC + "service.d/z.conf": "", LIB + "README": ""})
             self.assertEqual(r.names(v, r.unit_dirs(v)),
                              ["a.service", "getty@tty1.service", "t@agentos-unit-lint.service",
-                              "t@b.service"])
+                              "t@b.service", "t@tty1.service"])  # each template as every instance name
+
+    def test_shared_directories(self):
+        # dropin.c unit_file_find_dirs reaches another name only through a template or a name whose part
+        # before the @ or the type ends in -
+        for n in (".service", "x-.service", "x@.service", "x-@.service", "x-@i.service", "-.slice", "x.device"):
+            self.assertTrue(r.shared(n), n)
+        for n in ("x.service", "x-y.service", "x@i.service", "x@i-.service", "x-y@i.service"):
+            self.assertFalse(r.shared(n), n)
 
     def test_a_name_systemctl_could_not_carry_is_refused(self):
         for p in (ETC + "a b.service", ETC + "x.service.d/z\n.conf", ETC + "x.wants/a\tb.service"):

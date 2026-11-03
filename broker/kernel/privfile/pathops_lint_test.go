@@ -794,6 +794,22 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a template drop-in beside an instance's own fragment":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
 		"a template drop-in beside a non-root instance":         {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
 		"a file of the lint's own instance":                     {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
+		// #4779 re-plan (L3 6592951044 P1): a template's drop-in directory is
+		// read by the instances of every template whose name it prefixes, so a
+		// shared directory's drop-ins of ours are read alone whatever loaded.
+		"a prefix template's drop-in a longer template reads": {map[string]string{lib + "x-@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", lib + "x-y@.service": "[Service]\nExecStart=%I\n", etc + "x-@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a prefix instance's drop-in a longer template reads":  {map[string]string{lib + "x-@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", lib + "x-y@.service": root, etc + "x-@tty1.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		"a prefix drop-in a unit of its own name loads":       {map[string]string{lib + "x-.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n", etc + "x-.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
+		// Every template loads as each instance name the tree holds, so a
+		// package's prefix-instance drop-in is read with our template.
+		"a template of ours a package's prefix-instance drop-in makes root": {map[string]string{etc + "x-y@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "x-@tty1.service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		// Alone is the worst context only with no line that changes how
+		// unseen lines read.
+		"a user line in a shared drop-in":      {map[string]string{etc + "agentos-.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `may not set the user`},
+		"a directory mode in a shared drop-in": {map[string]string{etc + "service.d/m.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `may not set the user or a directory mode`},
+		// A unit that did not finish loading may have stopped before its
+		// drop-ins: each file of ours is read alone too.
+		"a fragment of ours in a bad-setting template": {map[string]string{etc + "x@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nWorkingDirectory=%I\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `may not set the user`},
 		"a mode of ours on a package's directory":               {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
@@ -2298,6 +2314,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
 	userOurs := false             // a User= or DynamicUser= not trusted
 	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
+	reread := ""                  // the first such line, which changes how a package's lines read
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -2312,8 +2329,13 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			k, v := line.key, line.value
 			if line.section == section && !trusted[f] {
 				userOurs = userOurs || k == "User" || k == "DynamicUser"
-				if key, ok := strings.CutSuffix(k, "Mode"); ok && dirBases[key] != "" {
+				key, mode := strings.CutSuffix(k, "Mode")
+				if mode && dirBases[key] != "" {
 					modeOurs[key] = true
+				}
+				if reread == "" && (k == "User" || k == "DynamicUser" || mode && dirBases[key] != "") {
+					rel, _ := filepath.Rel(c.root, f)
+					reread = filepath.ToSlash(rel) + ": " + k + "=" + v
 				}
 			}
 			switch {
@@ -2342,6 +2364,13 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 				lines = append(lines, execLine{f, k, v, trusted[f]})
 			}
 		}
+	}
+	// A file read alone may apply to units the tree does not list, whose
+	// lines are not in view; a User=, DynamicUser= or directory mode of
+	// ours would change how those read (a package's grant becomes ours), so
+	// alone is the worst context only without one (#4779 re-plan).
+	if alone && reread != "" {
+		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set the user or a directory mode", reread)
 	}
 	rootCmd := false
 	for _, l := range lines {

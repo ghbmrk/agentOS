@@ -24,9 +24,15 @@ an entry of a unit directory is an alias, and keeps that entry's provenance. The
 and what a package's lines may do, are broker/kernel/privfile's (unitCheck.unit, builtUnits): this
 prints records, it judges nothing.
 
-A drop-in of ours that a transient or later unit may read is also printed alone, to be read as a
-root unit's: one in a type-wide (service.d) or prefix (a-.service.d) directory, and one in a
-directory whose name no unit or alias has (a template's: unless the lint's own instance, READS, loaded). /etc/fstab is printed
+A drop-in of ours is also printed alone, to be read in the worst context (unitCheck.unit: as a root
+unit's, with no line that changes how unseen lines read), wherever a unit the tree does not list may
+read it. systemd (dropin.c unit_file_find_dirs) reads a directory for other names only through a
+template or a name whose part before the @ or the type ends in -, so every drop-in of ours in a
+shared directory (type-wide, a-.service.d, x@.service.d, a-@i.service.d) is printed alone,
+whatever loaded. One in any other directory is read only by the unit of that name, so it is
+printed alone only when no unit loads under that name. So is each file of ours in a unit that did
+not finish loading as the lint's instance (bad-setting, error), which may stop before its drop-ins
+while an instance under another name does not (a unit under any other name loads as it would at boot). /etc/fstab is printed
 whole when it is ours; the units its generator writes are read like any other.
 
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
@@ -65,15 +71,11 @@ SAFE = re.compile(r"[A-Za-z0-9:_.@\\+-]+\Z")
 PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths")
 # systemd will not start a bad-setting or error unit, but its files are held as a loaded one's: stricter.
 STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
-# A template's drop-ins apply to every instance, and an instance a boot starts (a generated
-# systemd-cryptsetup@dev, logind's getty@ttyN, an Accept= socket's) can have any name. So they are judged
-# only as such an instance sees them: the lint's own instance (INSTANCE), which no file in the tree may
-# name (safe()), so systemd loads it from the template's fragment and drop-ins alone. It stands for the
-# template's directory only when it loaded and so read them; no other instance ever does (its own
-# fragment or drop-ins are not what the rest run: #4779 Security round 3). A masked, not-found,
-# bad-setting or error lint instance (which may stop loading before its drop-ins: L3 rounds 2 and 3)
-# leaves the directory to be read alone, as root.
-READS = ("loaded",)
+# Every template is loaded as one instance of each instance name the tree holds (so a-@i.service.d is
+# read with every a-x@i that reads it), and as the lint's own instance (INSTANCE), which no file in the
+# tree may name (safe()), so it loads from the template's files alone, as an instance a boot starts
+# under any other name does. Its drop-ins are printed alone besides (shared()), so whether it loads
+# decides nothing.
 # The top links of a merged /usr: the only links a dpkg path may be resolved through.
 MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
 # A drop-in of ours on a packaged root unit: the lint must refuse it, or a pass of the built tree
@@ -165,16 +167,14 @@ def safe(name, where):
 
 
 def names(view, dirs):
-    """Every unit name the tree's unit directories hold: each unit file's (an instance for a template),
-    each instance a drop-in directory names, and each unit a .wants, .requires or .upholds link names.
-    Every name met is held to SAFE."""
+    """Every unit name the tree's unit directories hold: each unit file's, each instance a drop-in
+    directory names, and each unit a .wants, .requires or .upholds link names; and each template as an
+    instance of INSTANCE and of every instance name met with its type. Every name met is held to SAFE."""
     out = set()
 
     def add(n):
-        if not n.endswith(TYPES):
-            return
-        base, ext = os.path.splitext(n)
-        out.add(base + INSTANCE + ext if base.endswith("@") else n)
+        if n.endswith(TYPES):
+            out.add(n)
     for d in dirs:
         for e in view.entries(d):
             safe(e, d)
@@ -187,14 +187,22 @@ def names(view, dirs):
                 add(e[:-2] if e.endswith(".d") else "")
             else:
                 add(e)
+    # n = pre@inst.type; a template has an empty inst
+    split = [(b[:b.index("@") + 1], b[b.index("@") + 1:], e) for b, e in map(os.path.splitext, out) if "@" in b]
+    for pre, inst, ext in split:
+        if not inst:
+            out.discard(pre + ext)
+            out |= {pre + i + ext for _, i, e in split if e == ext and i} | {pre + INSTANCE + ext}
     return sorted(out)
 
 
-def template_of(name):
-    """x@.service for an instance x@a.service, else None."""
-    base, ext = os.path.splitext(name)
-    at = base.find("@")
-    return base[:at + 1] + ext if 0 < at < len(base) - 1 else None
+def shared(n):
+    """Whether a drop-in directory n.d may be read by a unit of another name (see the docstring): any
+    name but a unit name whose part before the @ or the type does not end in -, with a nonempty
+    instance after an @."""
+    base, ext = os.path.splitext(n)
+    pre, at, inst = base.partition("@")
+    return ext not in TYPES or not pre or pre.endswith("-") or (at and not inst)
 
 
 class Provenance:
@@ -259,7 +267,7 @@ def words(s, prop):
 def records(view, shown, dirs, prov):
     """The records of one run: {"units": [{"unit", "alone", "files": [{"path", "ours", "text"}]}],
     "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names() found."""
-    recs, own, done, instances = [], set(), set(), set()
+    recs, own, done = [], set(), set()
     for name in sorted(shown):
         s = shown[name]
         if s["LoadState"] not in STATES:
@@ -268,9 +276,6 @@ def records(view, shown, dirs, prov):
             continue  # a name no unit loads under: its drop-ins are read alone below
         # A masked or error name stands for its own directory: no other unit loads under that name.
         own |= {n + ".d" for n in words(s, "Names")}
-        if s["LoadState"] in READS:
-            instances |= {template_of(n) for n in words(s, "Names")
-                          if os.path.splitext(n)[0].endswith("@" + INSTANCE)}
         if s["LoadState"] == "masked" or s["Id"] in done:
             continue
         done.add(s["Id"])
@@ -282,7 +287,9 @@ def records(view, shown, dirs, prov):
                 files.append({"path": p, "ours": prov.ours(p), "text": view.text(final)})
         if frag:
             recs.append({"unit": s["Id"], "alone": False, "files": files})
-        else:  # loaded with no fragment: each drop-in of ours, as root
+        if not frag or s["LoadState"] != "loaded" and "@" + INSTANCE + "." in s["Id"]:
+            # no fragment, or the lint's instance did not finish loading (it may have stopped before the
+            # drop-ins, and an instance under another name may not): each file of ours alone too
             recs += [{"unit": s["Id"], "alone": True, "files": [f]} for f in files if f["ours"]]
     for d in dirs:
         for e in view.entries(d):
@@ -291,8 +298,8 @@ def records(view, shown, dirs, prov):
             n = e[:-2]
             if "." not in n:  # a type-wide directory, service.d: no unit has its name
                 n = "." + n
-            if e in own or n in instances:
-                continue  # systemd gave what of it applies to the unit, alias or instance of that name
+            if e in own and not shared(n):
+                continue  # read only under that name, and systemd gave it to the unit of that name
             for c in view.entries(view.resolve(d + "/" + e)[0]):
                 p = d + "/" + e + "/" + c
                 final, _ = view.resolve(p)
