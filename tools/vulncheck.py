@@ -797,7 +797,9 @@ def pruned_problems(entries):
     from an installed package, each {where: the guest's lockfile, holder: name@version, path: a
     directory ending in / or one file, relative to the package, why: what shows the guest never
     loads it}. A path under node_modules/ would remove a package the lockfile scan still reads, so
-    it is refused; only a lockfile in PRUNABLE may prune."""
+    it is refused; only a lockfile in PRUNABLE may prune. The entry applies to every tarball the
+    lockfile installs at holder's name@version, nested copies included, and prune.js deletes the
+    path under each of those lockfile paths."""
     problems = []
     for n, e in enumerate(entries):
         tag = f"pruned[{n}]"
@@ -808,8 +810,9 @@ def pruned_problems(entries):
         if e["where"] not in PRUNABLE:
             problems.append(f"{tag}: {e['where']!r} is not a guest whose build may prune ({sorted(PRUNABLE)}; "
                             "a plan CLI runs unmodified, CLK-7)")
-        elif not isinstance(e["holder"], str) or not all(at(e["holder"])):
-            problems.append(f"{tag}: holder must be name@version")
+        elif (not isinstance(e["holder"], str) or not all(at(e["holder"]))
+              or any(seg in ("", ".", "..") for seg in at(e["holder"])[0].split("/"))):
+            problems.append(f"{tag}: holder must be name@version, its name with no empty, . or .. step")
         elif (not isinstance(path, str) or not path or path.startswith("/")
               or any(seg in ("", ".", "..", "node_modules") for seg in path.removesuffix("/").split("/"))):
             problems.append(f"{tag}: path must be a relative path in the package, outside node_modules/, "

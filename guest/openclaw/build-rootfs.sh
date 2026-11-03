@@ -42,7 +42,7 @@ got=$(PATH="$out/usr/local/bin:$PATH" node -e \
 # gate's config for this lockfile, which tools/vulncheck.py then does not read. Any entry that
 # does not match the installed tree fails the build.
 PATH="$out/usr/local/bin:$PATH" node "$here/prune.js" "$repo/assurance/vulncheck.json" guest/openclaw/package-lock.json \
-	"$out/opt/openclaw/node_modules"
+	"$out/opt/openclaw"
 ln -sf /opt/openclaw/node_modules/.bin/openclaw usr/local/bin/openclaw
 
 # The host's shell and a few tools, with every library they and node load.

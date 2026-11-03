@@ -824,12 +824,13 @@ class PrunedTest(unittest.TestCase):
                                  "requalify it"])
 
     def test_pruned_entry_shape(self):
-        self.assertEqual(vulncheck.pruned_problems([self.UI, {**self.UI, "path": "dist/a.js"}]), [])
+        self.assertEqual(vulncheck.pruned_problems([self.UI, {**self.UI, "path": "dist/a.js"},
+                                                    {**self.UI, "holder": "@s/n@1"}]), [])
         for bad in ({**self.UI, "holder": "oc"}, {**self.UI, "path": ""}, {**self.UI, "path": "/dist/ui/"},
                     {**self.UI, "path": "dist/../x/"}, {**self.UI, "path": "./dist/"}, {**self.UI, "path": "dist//ui/"},
                     {**self.UI, "path": "node_modules/x/"}, {**self.UI, "path": "dist/node_modules/x/"},
                     {**self.UI, "why": " "}, {**self.UI, "extra": 1}, {k: v for k, v in self.UI.items() if k != "why"},
-                    "oc@1", {**self.UI, "path": 1},
+                    "oc@1", {**self.UI, "path": 1}, {**self.UI, "holder": "../x@1"}, {**self.UI, "holder": "@s//n@1"},
                     # CLK-7: a plan CLI guest (Codex) runs unmodified, so only OpenClaw's build prunes.
                     {**self.UI, "where": "guest/codex/package-lock.json"}):
             self.assertEqual(len(vulncheck.pruned_problems([bad])), 1, bad)
@@ -861,38 +862,71 @@ class PruneBuildTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.d = pathlib.Path(tmp.name)
-        pkg = self.d / "node_modules" / "oc"
-        (pkg / "dist" / "ui" / "deep").mkdir(parents=True)
-        (pkg / "dist" / "ui" / "deep" / "a.js").write_text("x")
-        (pkg / "dist" / "uix").mkdir()
-        (pkg / "dist" / "one.js").write_text("x")
-        (pkg / "dist" / "keep.js").write_text("x")
-        (pkg / "package.json").write_text(json.dumps({"name": "oc", "version": "1.0.0"}))
+        # oc@1.0.0 at the top and nested under b (#4952 Security 1), and oc@2.0.0 nested under c;
+        # a bundled copy has no tarball of its own, so neither the scan nor the prune reads it.
+        self.copies = {"node_modules/oc": "1.0.0", "node_modules/b/node_modules/oc": "1.0.0",
+                       "node_modules/c/node_modules/oc": "2.0.0", "node_modules/d/node_modules/oc": "1.0.0"}
+        for key, version in self.copies.items():
+            pkg = self.d / key
+            (pkg / "dist" / "ui" / "deep").mkdir(parents=True)
+            (pkg / "dist" / "ui" / "deep" / "a.js").write_text("x")
+            (pkg / "dist" / "uix").mkdir()
+            (pkg / "dist" / "one.js").write_text("x")
+            (pkg / "dist" / "keep.js").write_text("x")
+            (pkg / "package.json").write_text(json.dumps({"name": "oc", "version": version}))
+        self.lock = {"lockfileVersion": 3, "packages": {
+            "": {"name": "root"},
+            **{k: {"version": v, "resolved": f"https://r/oc-{v}.tgz", "integrity": "sha512-A"}
+               for k, v in self.copies.items() if not k.startswith("node_modules/d/")},
+            "node_modules/d/node_modules/oc": {"version": "1.0.0", "inBundle": True}}}
+        (self.d / "package-lock.json").write_text(json.dumps(self.lock))
 
-    def prune(self, *entries):
+    def prune(self, *entries, where=None):
         cfg = self.d / "vulncheck.json"
         cfg.write_text(json.dumps({"pruned": [{"where": self.WHERE, "holder": "oc@1.0.0", "why": "x", **e} for e in entries]
                                    + [{"where": "other/package-lock.json", "holder": "oc@1.0.0", "path": "dist/keep.js", "why": "x"}]}))
-        return subprocess.run([self.node, str(self.PRUNE), str(cfg), self.WHERE, str(self.d / "node_modules")],
+        return subprocess.run([self.node, str(self.PRUNE), str(cfg), where or self.WHERE, str(self.d)],
                               capture_output=True, text=True)
+
+    def dist(self, key):
+        return sorted(p.name for p in (self.d / key / "dist").iterdir())
 
     def test_it_deletes_each_listed_path_of_its_lockfile_only(self):
         r = self.prune({"path": "dist/ui/"}, {"path": "dist/one.js"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        dist = self.d / "node_modules" / "oc" / "dist"
-        self.assertEqual(sorted(p.name for p in dist.iterdir()), ["keep.js", "uix"])
+        everything = ["keep.js", "one.js", "ui", "uix"]
+        self.assertEqual({k: self.dist(k) for k in self.copies}, {
+            "node_modules/oc": ["keep.js", "uix"], "node_modules/b/node_modules/oc": ["keep.js", "uix"],
+            "node_modules/c/node_modules/oc": everything, "node_modules/d/node_modules/oc": everything})
+
+    def test_it_prunes_exactly_the_tarballs_the_scan_skips(self):
+        # #4952 Security 1: the scan skips the path in every tarball lock_tarballs gives for the
+        # holder's name@version; prune.js must delete it under each of those lockfile paths.
+        tarballs, _ = vulncheck.lock_tarballs(self.lock, "l")
+        scanned = sorted(k for k in self.lock["packages"] if k and not self.lock["packages"][k].get("inBundle")
+                         and self.lock["packages"][k]["version"] == "1.0.0")
+        self.assertEqual(sum((n, v) == ("oc", "1.0.0") for n, v, _, _ in tarballs), len(scanned))
+        r = self.prune({"path": "dist/one.js"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(k for k in self.copies if "one.js" not in self.dist(k)), scanned)
 
     def test_it_fails_on_a_missing_path_a_wrong_version_or_a_path_outside_the_package(self):
-        for e in ({"path": "dist/gone/"}, {"path": "dist/ui"}, {"path": "dist/one.js/"}, {"path": "dist/ui/", "holder": "oc@2.0.0"},
-                  {"path": "dist/ui/", "holder": "nope@1.0.0"}, {"path": "../oc/dist/ui/"}, {"path": "/tmp/"}):
+        for e in ({"path": "dist/gone/"}, {"path": "dist/ui"}, {"path": "dist/one.js/"}, {"path": "dist/ui/", "holder": "oc@3.0.0"},
+                  {"path": "dist/ui/", "holder": "nope@1.0.0"}, {"path": "../oc/dist/ui/"}, {"path": "/tmp/"},
+                  {"path": "dist/ui/", "holder": "../oc@1.0.0"}, {"path": "dist/ui/", "holder": "b/../oc@1.0.0"}):
             r = self.prune(e)
             self.assertNotEqual(r.returncode, 0, e)
+        # A nested copy whose installed version differs from the lockfile's fails too.
+        (self.d / "node_modules/b/node_modules/oc/package.json").write_text(json.dumps({"name": "oc", "version": "9"}))
+        self.assertNotEqual(self.prune({"path": "dist/ui/"}).returncode, 0)
+        # Only OpenClaw's build prunes (CLK-7).
+        self.assertNotEqual(self.prune({"path": "dist/ui/"}, where="guest/codex/package-lock.json").returncode, 0)
         self.assertTrue((self.d / "node_modules" / "oc" / "dist" / "ui").exists())
 
     def test_the_guest_build_runs_it_after_the_integrity_check(self):
         build = (ROOT / "guest" / "openclaw" / "build-rootfs.sh").read_text()
         check = build.index('[ "$got" = "$OPENCLAW_INTEGRITY" ]')
-        run = build.index('"$here/prune.js" "$repo/assurance/vulncheck.json" guest/openclaw/package-lock.json')
+        run = build.index('"$here/prune.js" "$repo/assurance/vulncheck.json" guest/openclaw/package-lock.json \\\n\t"$out/opt/openclaw"\n')
         self.assertLess(check, run)
 
     def test_the_control_ui_is_pruned_only_while_it_is_off(self):
