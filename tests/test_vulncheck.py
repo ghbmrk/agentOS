@@ -254,6 +254,34 @@ class RecordsTest(unittest.TestCase):
             vulncheck.os.environ.clear()
             vulncheck.os.environ.update(env)
 
+    def test_reopen_cited(self):
+        # #2919 was closed while 71 records cited it: a cited issue is reopened with a
+        # comment; an uncited one is left alone (no request at all).
+        seen = []
+
+        def opener(req, timeout):
+            seen.append((req.get_method(), req.full_url, json.loads(req.data)))
+            return io.BytesIO(b"{}")
+
+        recs = [{"id": "V1", "issue": 7}, {"id": "V2", "issue": 7}, {"id": "V3", "issue": 8}]
+        self.assertEqual(vulncheck.reopen_cited(recs, 9, "o/r", "tok", opener), 0)
+        self.assertEqual(seen, [])
+        self.assertEqual(vulncheck.reopen_cited(recs, 7, "o/r", "tok", opener), 2)
+        self.assertEqual(seen[0], ("PATCH", "https://api.github.com/repos/o/r/issues/7", {"state": "open"}))
+        self.assertEqual(seen[1][:2], ("POST", "https://api.github.com/repos/o/r/issues/7/comments"))
+        self.assertIn("cites this issue for 2 accepted record(s)", seen[1][2]["body"])
+
+    def test_reopen_without_a_token_fails(self):
+        env = dict(vulncheck.os.environ)
+        try:
+            vulncheck.os.environ.pop("GITHUB_TOKEN", None)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(vulncheck.main(["reopen", "7"]), 2)
+            self.assertIn("needs GITHUB_REPOSITORY and GITHUB_TOKEN", err.getvalue())
+        finally:
+            vulncheck.os.environ.clear()
+            vulncheck.os.environ.update(env)
+
 
 def osv_pkg(name, version, eco, *vulns, binary=None):
     meta = {"name": name, "version": version, "ecosystem": eco}

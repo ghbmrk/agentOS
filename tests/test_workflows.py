@@ -272,6 +272,36 @@ INTAKE_LINES = [
     '        run: python3 -I tools/board.py intake --repo "$GITHUB_REPOSITORY" --issue "$ISSUE"',
 ]
 
+
+# ACCEPT-reopen (#2919): acceptance.yml holds `issues: write` on every issue close, so it is
+# pinned line by line like intake.yml: one trigger, main's code, a credential-free checkout and a
+# run line whose only event value is the issue number, passed through env.
+ACCEPTANCE_LINES = [
+    'name: acceptance',
+    'on:',
+    '  issues:',
+    '    types: [closed]',
+    'permissions:',
+    '  contents: read',
+    'jobs:',
+    '  reopen:',
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      contents: read',
+    '      issues: write # reopen a cited issue and comment on it',
+    '    steps:',
+    '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
+    '        with:',
+    '          persist-credentials: false',
+    '      - name: Reopen the issue if a vulncheck record cites it (tools/vulncheck.py reopen)',
+    '        env:',
+    '          GITHUB_TOKEN: ${{ github.token }}',
+    '          ISSUE: ${{ github.event.issue.number }}',
+    '        run: python3 -I tools/vulncheck.py reopen "$ISSUE"',
+]
+
+
 def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     """Return why lane-gate.yml (or another `pinned` gate) differs from its pin; empty when it matches."""
     problems = []
@@ -807,6 +837,14 @@ class WorkflowTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(old, text)
                 self.assertTrue(lane_gate_problems(text.replace(old, new, 1)), name)
+
+    def test_acceptance_is_pinned(self):
+        # ACCEPT-reopen (#2919): the shipped workflow equals its pin, and no other workflow
+        # runs the reopen command.
+        self.assertEqual(lane_gate_problems((WORKFLOWS / "acceptance.yml").read_text(), ACCEPTANCE_LINES), [])
+        for f in self.files():
+            if f.name != "acceptance.yml":
+                self.assertNotIn("vulncheck.py reopen", f.read_text(), f.name)
 
     def test_intake_is_pinned(self):
         # BOARD-INTAKE-wf (#2668, INTAKE-3): the shipped workflow equals its pin, and no other
