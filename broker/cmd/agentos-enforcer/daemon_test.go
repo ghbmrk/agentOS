@@ -1,9 +1,8 @@
 package main
 
-// REQ: NET-2, KRN-12
-
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/netip"
 	"os"
@@ -120,7 +119,15 @@ func TestConfigRefused(t *testing.T) {
 			t.Errorf("%s: taken", name)
 		}
 	}
-	if _, err := parseConfig([]byte(`{"name":"x","zone":"UTC","extra":1}`)); err == nil {
+	b, err := json.Marshal(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseConfig(b); err != nil {
+		t.Fatalf("the good configuration was refused: %v", err)
+	}
+	// A good configuration plus one unknown key: only the key can refuse it.
+	if _, err := parseConfig(append(b[:len(b)-1], `,"extra":1}`...)); err == nil {
 		t.Error("an unknown key was taken")
 	}
 }

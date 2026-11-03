@@ -1,7 +1,5 @@
 package main
 
-// REQ: NET-2, NET-4, NET-6, STO-1, STO-4, STO-5, KEY-7, KRN-12
-
 import (
 	"bytes"
 	"context"
