@@ -604,20 +604,15 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 // with its basis (RES-5-readerwire-maxconns-1 and -2).
 const boundsRow = "| RES-5-readerwire-maxconns-"
 
-// timeUnits are the time package's units: a duration built from one outside
-// a const declaration is a bound with no name.
-var timeUnits = map[string]bool{"Nanosecond": true, "Microsecond": true,
-	"Millisecond": true, "Second": true, "Minute": true, "Hour": true}
-
-// boundProblems lists every fixed bound in srcs (file name to Go source,
-// the package's non-test files) that lacks a record in rec's bounds rows: a
-// constant not named in backticks in one of those rows (a mention in any
-// other row or in prose does not count), and any number other than 0 or 1,
-// any rune but the frame's newline, or any time unit, written outside a
-// const declaration, since such a bound has no name to record. The time
-// package must be imported by its own name, so its units are seen. Only the
-// frame's own names, readerwire.go's package-level version and opRead, are
-// exempt.
+// boundProblems lists every constant in srcs (file name to Go source, the
+// package's non-test files) that lacks a record in rec's bounds rows: a
+// package-level constant not named in backticks in one of those rows (a
+// mention in any other row or in prose does not count), and a constant
+// declared inside a function, which is refused when it reuses a recorded
+// name (it would shadow the bound) and otherwise needs a record like any
+// other. Only the frame's own names, readerwire.go's package-level version
+// and opRead, are exempt. A number written outside a const is
+// constProblems' check (bounds_test.go).
 func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	t.Helper()
 	var rows strings.Builder
@@ -629,52 +624,37 @@ func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
 	if rows.Len() == 0 {
 		return []string{"ASSUMPTIONS.md has no " + strings.TrimPrefix(boundsRow, "| ") + " row"}
 	}
+	recorded := func(name string) bool { return strings.Contains(rows.String(), "`"+name+"`") }
 	var out []string
 	var n int
 	fset := token.NewFileSet()
 	for name, src := range srcs {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		must(t, err)
-		for _, im := range f.Imports {
-			if im.Path.Value == `"time"` && im.Name != nil {
-				out = append(out, fmt.Sprintf("%s: time imported as %s: import it by its own name", fset.Position(im.Pos()), im.Name.Name))
-			}
-		}
-		frame := map[ast.Decl]bool{}
-		if name == "readerwire.go" {
-			for _, d := range f.Decls {
-				frame[d] = true
-			}
+		top := map[ast.Decl]bool{}
+		for _, d := range f.Decls {
+			top[d] = true
 		}
 		ast.Inspect(f, func(node ast.Node) bool {
-			switch x := node.(type) {
-			case *ast.GenDecl:
-				if x.Tok != token.CONST {
-					return true
-				}
-				for _, sp := range x.Specs {
-					for _, id := range sp.(*ast.ValueSpec).Names {
-						if frame[x] && (id.Name == "version" || id.Name == "opRead") {
-							continue // the frame's own names, not bounds
-						}
-						n++
-						if !strings.Contains(rows.String(), "`"+id.Name+"`") {
-							out = append(out, fmt.Sprintf("the bound %s has no record in a %s row", id.Name, boundsRow))
-						}
+			x, ok := node.(*ast.GenDecl)
+			if !ok || x.Tok != token.CONST {
+				return true
+			}
+			for _, sp := range x.Specs {
+				for _, id := range sp.(*ast.ValueSpec).Names {
+					if top[x] && name == "readerwire.go" && (id.Name == "version" || id.Name == "opRead") {
+						continue // the frame's own names, not bounds
+					}
+					n++
+					switch {
+					case !top[x] && recorded(id.Name):
+						out = append(out, fmt.Sprintf("%s: the local const %s shadows the recorded bound %s: use the package's own", fset.Position(id.Pos()), id.Name, id.Name))
+					case !recorded(id.Name):
+						out = append(out, fmt.Sprintf("the bound %s has no record in a %s row", id.Name, boundsRow))
 					}
 				}
-				return false // a const's own literals are what it names
-			case *ast.BasicLit:
-				num := x.Kind == token.INT || x.Kind == token.FLOAT || x.Kind == token.IMAG
-				if num && x.Value != "0" && x.Value != "1" || x.Kind == token.CHAR && x.Value != `'\n'` {
-					out = append(out, fmt.Sprintf("%s: the literal %s is a bound with no name: make it a recorded constant", fset.Position(x.Pos()), x.Value))
-				}
-			case *ast.SelectorExpr:
-				if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "time" && timeUnits[x.Sel.Name] {
-					out = append(out, fmt.Sprintf("%s: time.%s outside a const is a bound with no name: make it a recorded constant", fset.Position(x.Pos()), x.Sel.Name))
-				}
 			}
-			return true
+			return false
 		})
 	}
 	if n == 0 {
@@ -772,8 +752,9 @@ func (l *scriptedListener) Accept() (net.Conn, error) {
 func (l *scriptedListener) Close() error   { return nil }
 func (l *scriptedListener) Addr() net.Addr { return nil }
 
-// TestTheBoundsRecordCatchesEachGap: each gap #4849 names fails the check,
-// starting from the package as it stands.
+// TestTheBoundsRecordCatchesEachGap: each record gap #4849 and #4874 name
+// fails the check, starting from the package as it stands; the gaps written
+// as numbers are TestEachConstantFormFails' cases.
 func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
 	b, err := os.ReadFile("ASSUMPTIONS.md")
 	must(t, err)
@@ -814,20 +795,8 @@ func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
 			[]string{"the bound maxLocal has no record"}},
 		{"the backoff constants lose their record", packageSources(t), unrecord("acceptBackoffMin", "acceptBackoffMax"),
 			[]string{"the bound acceptBackoffMin has no record", "the bound acceptBackoffMax has no record"}},
-		{"a bound written as a literal", withFile("extra.go", "package readerwire\n\nimport \"time\"\n\nfunc f() []byte {\n\ttime.Sleep(5 * time.Millisecond)\n\treturn make([]byte, 4096)\n}\n"), rec,
-			[]string{"extra.go:6:13: the literal 5", "extra.go:6:17: time.Millisecond", "extra.go:7:22: the literal 4096"}},
-		{"a time unit alone", withFile("extra.go", "package readerwire\n\nimport \"time\"\n\nvar wait = time.Second\n"), rec,
-			[]string{"extra.go:5:12: time.Second"}},
-		{"time under another name", withFile("extra.go", "package readerwire\n\nimport tm \"time\"\n\nvar wait = tm.Second\n"), rec,
-			[]string{"extra.go:3:8: time imported as tm"}},
-		{"time dot-imported", withFile("extra.go", "package readerwire\n\nimport . \"time\"\n\nvar wait = Second\n"), rec,
-			[]string{"extra.go:3:8: time imported as ."}},
-		{"a bound written as a rune", withFile("extra.go", "package readerwire\n\nvar buf = make([]byte, 'A')\n"), rec,
-			[]string{"extra.go:3:24: the literal 'A'"}},
-		{"a bound written as a float", withFile("extra.go", "package readerwire\n\nvar f = 1.5\n"), rec,
-			[]string{"extra.go:3:9: the literal 1.5"}},
-		{"a doubling written as 2", withFile("extra.go", "package readerwire\n\nfunc f(d int) int { return 2 * d }\n"), rec,
-			[]string{"extra.go:3:28: the literal 2"}},
+		{"a local const shadowing a recorded name", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxConns = 4096\n\treturn maxConns\n}\n"), rec,
+			[]string{"extra.go:4:8: the local const maxConns shadows the recorded bound maxConns"}},
 		{"a cap named version inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst version = 4096\n\treturn version\n}\n"), rec,
 			[]string{"the bound version has no record"}},
 		{"no constants at all", map[string]string{"readerwire.go": "package readerwire\n"}, rec,
