@@ -562,24 +562,32 @@ func TestJSONFormRawWrapped(t *testing.T) {
 // does, whatever '\'s the table's forms hold: here MaxValue values of '<'s,
 // a '\' in every sixth byte of the JSON form, and of 'a's. Each break looks
 // up only the '\'s with its own bytes beside them, and a run split by %0a
-// joins as it comes (#4681, Security on #4742). Timed against plain text in
+// joins as it comes (#4681, Security on #4742). The near-copy stream, the
+// '<'s' JSON form with a JSON break for every '\' but one '<' short of the
+// whole, makes each break walk the form's rest and try its other '\'s: the
+// rest is compared whole between '\'s with the held breaks walked in order,
+// and a '\' whose prefix is not there costs one byte, so it stays within 7
+// times plain text, about 15 without (#4743). Timed against plain text in
 // the same run, so a slow runner or -race moves both.
 func TestBreakStreamCost(t *testing.T) {
 	m := match.New([]match.Value{{ID: 1, Bytes: []byte(strings.Repeat("<", match.MaxValue))},
 		{ID: 2, Bytes: []byte(strings.Repeat("a", match.MaxValue))}, {ID: 3, Bytes: []byte(`q7Xz\2pL9<mW4vR8tY3nB6kJ5h`)}}, nil)
 	run := func(unit string) time.Duration {
-		w := []byte(strings.Repeat(unit, 512/len(unit))) // 512-byte writes
+		b := []byte(strings.Repeat(unit, 64<<10/len(unit)+1)[:64<<10])
 		start := time.Now()
 		s := m.Stream()
-		for range 128 {
-			s.Write(w)
+		for i := 0; i < len(b); i += 512 { // 512-byte writes
+			s.Write(b[i : i+512])
 		}
 		if r := s.Result(); len(r.Trips) != 0 {
-			t.Fatalf("a stream of %q tripped %v", unit, r.Trips)
+			t.Fatalf("a stream of %.20q tripped %v", unit, r.Trips)
 		}
 		return time.Since(start)
 	}
-	units := []string{`x\n`, `\%0a`, `\%0a\%0D`}
+	units := []struct {
+		s     string
+		ratio time.Duration
+	}{{`x\n`, 3}, {`\%0a`, 3}, {`\%0a\%0D`, 3}, {strings.Repeat(`\nu003c`, match.MaxValue-1) + "x", 7}}
 	plain, took := time.Duration(math.MaxInt64), make([]time.Duration, len(units))
 	for i := range took {
 		took[i] = time.Duration(math.MaxInt64)
@@ -587,12 +595,12 @@ func TestBreakStreamCost(t *testing.T) {
 	for range 2 {
 		plain = min(plain, run("xy"))
 		for i, u := range units {
-			took[i] = min(took[i], run(u))
+			took[i] = min(took[i], run(u.s))
 		}
 	}
 	for i, u := range units {
-		if took[i] > 3*plain {
-			t.Fatalf("64 KiB of %s took %v, plain text %v: over 3 times as long", u, took[i], plain)
+		if took[i] > u.ratio*plain {
+			t.Fatalf("64 KiB of %.20q took %v, plain text %v: over %d times as long", u.s, took[i], plain, u.ratio)
 		}
 	}
 }
@@ -619,6 +627,36 @@ func TestSplitRunLongestForm(t *testing.T) {
 					t.Fatalf("%q a byte at a time tripped %v, want [4]", s, got)
 				}
 			}
+		}
+	}
+}
+
+// KRN-12, outside DECOY-a-5's claims: a value that holds break text itself
+// (here a `\n`) trips as written, raw and in its JSON form, but not with a
+// %0a put inside it raw anywhere but in that break, or after the JSON form's
+// first byte, as the joined text removes the value's own break too (#4743,
+// Security on #4742).
+// The built-in kinds hold none. A change that covers it also changes
+// DECOY-a-5's exclusion line.
+func TestBreakTextValueExcluded(t *testing.T) {
+	v := `Z\/\n1YZ%n"`
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	j, _ := json.Marshal(v)
+	f := string(j[1 : len(j)-1])
+	for _, s := range []string{v, f} {
+		if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{1}) {
+			t.Fatalf("%q tripped %v, want [1]", s, got)
+		}
+	}
+	missed := []string{f[:1] + "%0a" + f[1:]}
+	for i := 1; i < len(v); i++ {
+		if v[i-1:i+1] != `\n` { // a %0a in it reads back as the '\' run it splits
+			missed = append(missed, v[:i]+"%0a"+v[i:])
+		}
+	}
+	for _, s := range missed {
+		if got := m.Scan([]byte(s)).Trips; len(got) != 0 {
+			t.Fatalf("%q tripped %v: DECOY-a-5 names it as not matched", s, got)
 		}
 	}
 }
