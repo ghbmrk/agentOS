@@ -252,7 +252,7 @@ const (
 )
 
 // logged is the chain a packet logged with prefix p ends in: it is
-// counted on p's counter (and a refused one on its device's, refusedDecls),
+// counted on p's counter (and a refused one on its device's, loggedDecls),
 // logged within its interface's bucket of p's lines set, and given p's
 // verdict.
 func logged(p string) string { return "log_" + slug(p) }
@@ -611,17 +611,23 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// upstream resolver, the internet or another segment, and a forged
 	// answer never reaches the resolver that fills the allow sets (NET-2
 	// The core's list). The unspecified sources of a DHCP request and of
-	// IPv6 address setup have no route and pass to the rules below, and so
-	// does a DHCP or DHCPv6 answer to the enforcer's own client on the WAN:
-	// until the WAN has its lease, no route leads back to the server (NET-2
-	// Fails safe, #4078). Only an answer addressed to the enforcer itself,
-	// from a source no interface routes and none of the enforcer's own
-	// addresses, passes: once leased the server is routed out of the WAN and
-	// passes the check below, and a source another interface routes (the
-	// core, a person's network, a device) or the enforcer holds (its address
-	// on any segment, a broadcast) is the internet posing as a segment or as
-	// the enforcer and is dropped (#4764, #4771); the fib reports a local
-	// source as missing too, so the second test is needed. A DHCPv6 server
+	// IPv6 address setup have no route and pass to the rules below. Then an
+	// IPv4 broadcast or multicast source (the limited broadcast, a subnet's
+	// broadcast, a group) is dropped and counted on every interface: the fib
+	// routes the WAN subnet's own broadcast back out of the WAN, so the
+	// general check below would pass it, and with rp_filter off the kernel
+	// would deliver it (#4841). IPv6 has no broadcast, and its stack drops a
+	// multicast source before this hook. A DHCP or DHCPv6 answer to the
+	// enforcer's own client on the WAN passes: until the WAN has its lease,
+	// no route leads back to the server (NET-2 Fails safe, #4078). Only an
+	// answer addressed to the enforcer itself, from a source no interface
+	// routes and none of the enforcer's own addresses, passes: once leased
+	// the server is routed out of the WAN and passes the check below, and a
+	// source another interface routes (the core, a person's network, a
+	// device) or the enforcer holds (its address on any segment) is the
+	// internet posing as a segment or as the enforcer and is dropped (#4764,
+	// #4771); the fib reports a local source as missing too, so the second
+	// test is needed. A DHCPv6 server
 	// answering from such an address first resolves the client's link-local
 	// address, so its neighbour discovery, on the link (hop limit 255) and
 	// to the enforcer, passes on the same terms. An answer to be forwarded
@@ -631,6 +637,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line(`iif "lo" accept`)
 	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
+	w.line("meta nfproto ipv4 fib saddr type { broadcast, multicast } counter name " + q(Spoofed) + " drop")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")

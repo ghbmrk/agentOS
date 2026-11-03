@@ -304,9 +304,11 @@ func TestWANLeases(t *testing.T) {
 // the core's, the Owner network's or a device's name (#4764) or in the
 // enforcer's own (#4771), one from the internet to a device, and one from a
 // device to the enforcer, each with a source address routed out of another
-// interface or local, are still dropped as spoofed. Catches an exemption
-// that lets the internet pose as a segment or as the enforcer, or a
-// segment as another, on the DHCP client ports.
+// interface or local, are still dropped as spoofed, and so is one from the
+// WAN in a broadcast or multicast name (#4841). Catches an exemption that
+// lets the internet pose as a segment or as the enforcer, or a segment as
+// another, on the DHCP client ports, and a martian source the reverse-path
+// check passes uncounted.
 func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -374,7 +376,18 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	spoof(h.hosts["isp"], "udp4", devAddr(102), devAddr(101), 67, 68)
 	// From a device, in another's name, to the enforcer's address on its own VLAN.
 	spoof(h.hosts["101"], "udp4", devAddr(103), "10.101.0.1", 67, 68)
-	want := 27
+	// From the WAN, in the WAN subnet's own broadcast, the limited
+	// broadcast and a multicast name, to the enforcer's WAN address, as a
+	// DHCP answer and from another port: dropped and counted before the
+	// exemptions or the input hook (#4841). The fib routes the subnet's
+	// broadcast back out of the WAN, so the general check alone passes it,
+	// and with rp_filter off the kernel would deliver it.
+	for _, src := range []string{"192.168.1.255", "255.255.255.255", "224.0.0.1"} {
+		for _, sport := range []int{67, 1234} {
+			martian(t, h.hosts["isp"], src, enfWAN, sport, 68)
+		}
+	}
+	want := 27 + 3*2*3
 	if h.v6 {
 		h.seg6("core")
 		h.seg6("owner")
@@ -419,4 +432,35 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	if n = h.counter(Spoofed) - before; n != want {
 		t.Errorf("spoofed moved %d, want %d", n, want)
 	}
+}
+
+// martian writes from x three UDP datagrams src:sport → dst:dport out of
+// x's own link, the IPv4 header written whole: the kernel routes no
+// datagram of its own from a broadcast or multicast source.
+func martian(t *testing.T, x *host, src, dst string, sport, dport int) {
+	t.Helper()
+	payload := []byte("answer")
+	n := 20 + 8 + len(payload)
+	pkt := []byte{0x45, 0, byte(n >> 8), byte(n), 0, 0, 0, 0, 64, unix.IPPROTO_UDP, 0, 0}
+	pkt = append(append(pkt, net.ParseIP(src).To4()...), net.ParseIP(dst).To4()...)
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(sport))
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(dport))
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(8+len(payload)))
+	pkt = append(binary.BigEndian.AppendUint16(pkt, 0), payload...) // no UDP checksum
+	within(t, x, func() {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW) // header included
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "eth0"); err != nil {
+			t.Fatal(err)
+		}
+		to := &unix.SockaddrInet4{Addr: [4]byte(net.ParseIP(dst).To4())}
+		for range 3 {
+			if err := unix.Sendto(fd, pkt, 0, to); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
 }
