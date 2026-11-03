@@ -805,11 +805,15 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a template of ours a package's prefix-instance drop-in makes root": {map[string]string{etc + "x-y@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "x-@tty1.service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `variable "LD_PRELOAD"`},
 		// Alone is the worst context only with no line that changes how
 		// unseen lines read.
-		"a user line in a shared drop-in":      {map[string]string{etc + "agentos-.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `may not set the user`},
-		"a directory mode in a shared drop-in": {map[string]string{etc + "service.d/m.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `may not set the user or a directory mode`},
+		"a user line in a shared drop-in":      {map[string]string{etc + "agentos-.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `may not set a directory's owner`},
+		"a directory mode in a shared drop-in": {map[string]string{etc + "service.d/m.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `may not set a directory's owner or mode`},
 		// A unit that did not finish loading may have stopped before its
 		// drop-ins: each file of ours is read alone too.
-		"a fragment of ours in a bad-setting template": {map[string]string{etc + "x@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nWorkingDirectory=%I\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `may not set the user`},
+		"a fragment of ours in a bad-setting template": {map[string]string{etc + "x@.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nWorkingDirectory=%I\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "service.d/p.conf": "[Service]\nUser=root\n"}, ourEtc, `may not set a directory's owner`},
+		// #4821 Security 1: Group= sets the directories' gid as User= sets their uid.
+		"a group of ours on a package's directory":     {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "foo.service.d/g.conf": "[Service]\nGroup=agentos-x\n"}, ourEtc, `in or above /var/lib/foo/run`},
+		"a group line in a shared drop-in":             {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "service.d/g.conf": "[Service]\nGroup=agentos-x\n"}, ourEtc, `may not set a directory's owner`},
+		"a mode of ours on a package's 0770 directory": {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "foo.service.d/g.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `in or above /var/lib/foo/run`},
 		"a mode of ours on a package's directory":      {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
@@ -2281,6 +2285,11 @@ type unitCheck struct {
 	pkgGrants []grant
 }
 
+// owners are the keys that set the owner systemd gives a unit's *Directory=
+// trees (setup_exec_directory chowns them to the unit's uid and gid): with
+// *DirectoryMode=, the whole input of that chown and chmod (#4821 Security 1).
+var owners = map[string]bool{"User": true, "Group": true, "DynamicUser": true}
+
 // unit reads the unit name from paths: its unit file and the drop-ins
 // systemd reads for it, or, alone, one drop-in read with no unit file, as a
 // unit that runs as root and whose user owns its directories. A file in
@@ -2312,7 +2321,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	var env []envLine
 	var settings []envLine // rootPathKeys and dirBases lines
 	section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
-	userOurs := false             // a User= or DynamicUser= not trusted
+	userOurs := false             // an owner line (owners) not trusted
 	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
 	reread := ""                  // the first such line, which changes how a package's lines read
 	for _, f := range paths {
@@ -2328,12 +2337,12 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		for _, line := range ul {
 			k, v := line.key, line.value
 			if line.section == section && !trusted[f] {
-				userOurs = userOurs || k == "User" || k == "DynamicUser"
+				userOurs = userOurs || owners[k]
 				key, mode := strings.CutSuffix(k, "Mode")
 				if mode && dirBases[key] != "" {
 					modeOurs[key] = true
 				}
-				if reread == "" && (k == "User" || k == "DynamicUser" || mode && dirBases[key] != "") {
+				if reread == "" && (owners[k] || mode && dirBases[key] != "") {
 					rel, _ := filepath.Rel(c.root, f)
 					reread = filepath.ToSlash(rel) + ": " + k + "=" + v
 				}
@@ -2366,11 +2375,11 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 	}
 	// A file read alone may apply to units the tree does not list, whose
-	// lines are not in view; a User=, DynamicUser= or directory mode of
+	// lines are not in view; an owner line (owners) or directory mode of
 	// ours would change how those read (a package's grant becomes ours), so
 	// alone is the worst context only without one (#4779 re-plan).
 	if alone && reread != "" {
-		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set the user or a directory mode", reread)
+		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread)
 	}
 	rootCmd := false
 	for _, l := range lines {
