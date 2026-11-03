@@ -880,9 +880,18 @@ func TestAnOwedWriteRefusedAsTextOnItsRetryIsDropped(t *testing.T) {
 // reading's latest window reset, whether the drop is the first attempt or a
 // retry, and other routes run meanwhile (#4831, RES-5, KRN-1).
 func TestAPoolWhoseReadingIsDroppedIsClosedUntilItResets(t *testing.T) {
-	for name, retry := range map[string]bool{"first attempt": false, "retry": true} {
-		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Windows: []model.PoolWindow{
-			{Window: "5h", Used: 300, ResetAt: 10_000}, {Window: "7d", Used: 100, ResetAt: 50_000}}}}}
+	short, long := model.PoolWindow{Window: "5h", Used: 300, ResetAt: 10_000}, model.PoolWindow{Window: "7d", Used: 100, ResetAt: 50_000}
+	for name, tc := range map[string]struct {
+		retry bool
+		ws    []model.PoolWindow // the latest reset first and last, so it is the latest, not the last, that counts
+	}{
+		"first attempt":               {false, []model.PoolWindow{short, long}},
+		"first attempt, latest first": {false, []model.PoolWindow{long, short}},
+		"retry":                       {true, []model.PoolWindow{short, long}},
+		"retry, latest first":         {true, []model.PoolWindow{long, short}},
+	} {
+		retry := tc.retry
+		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Windows: tc.ws}}}
 		c, k, lg := rig(t, f)
 		if err := k.ReadPool(0, "codex-5h", []kernel.WindowReading{{Window: "5h", Used: 100, ResetAt: 10_000}}); err != nil {
 			t.Fatal(err)
