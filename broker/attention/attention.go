@@ -199,9 +199,10 @@ func New(cfg Config) (*Optimizer, error) {
 	if o.st.Clerks == nil {
 		o.st.Clerks = map[string]*record{}
 	}
-	if cfg.MaxSilentPerMille < 1 || cfg.MaxSilentPerMille > MaxSilentPerMille {
+	if cfg.MaxSilentPerMille < 1 {
 		o.cfg.MaxSilentPerMille = MaxSilentPerMille
 	}
+	o.cfg.MaxSilentPerMille = min(o.cfg.MaxSilentPerMille, MaxSilentPerMille)
 	return o, nil
 }
 

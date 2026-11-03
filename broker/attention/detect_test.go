@@ -232,8 +232,10 @@ func TestBoundOnlyTightens(t *testing.T) {
 			t.Fatalf("cap %d: %+v, bound %d", cap, m, o.cfg.MaxSilentPerMille)
 		}
 	}
-	if o := newOpt(t, &memStore{}, func(c *Config) { c.MaxSilentPerMille = 5 }); o.cfg.MaxSilentPerMille != 5 {
-		t.Fatal("a stricter bound must hold")
+	for _, strict := range []int{1, 5} {
+		if o := newOpt(t, &memStore{}, func(c *Config) { c.MaxSilentPerMille = strict }); o.cfg.MaxSilentPerMille != strict {
+			t.Fatalf("a stricter bound %d must hold", strict)
+		}
 	}
 }
 
@@ -411,5 +413,40 @@ func TestRecordKeepsOnlyTheWindow(t *testing.T) {
 	}
 	if m := o.Measure("pay"); m.Effects != 1 {
 		t.Fatalf("an effect on the window's first day did not count: %+v", m)
+	}
+}
+
+// D-309 (Potency on #4945, 333787b6): Record saves on its own, so
+// outcomes recorded with no later Observe, corrections included, survive
+// a restart.
+func TestRecordSaves(t *testing.T) {
+	st := &memStore{}
+	o := newOpt(t, st, nil)
+	at := t0.Add(-30 * 24 * time.Hour)
+	clean(t, o, "pay", at, 300)
+	for i := range 10 {
+		recordAll(t, o, Outcome{Clerk: "pay", Step: "pay-" + strconv.Itoa(i), Ran: at, At: t0, Corrected: true})
+	}
+	before := o.Measure("pay")
+	o2, err := New(Config{Store: st, UserContent: func(string) bool { return false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := o2.Measure("pay"); after != before || after.Silent != 10 {
+		t.Fatalf("reloaded %+v, before %+v", after, before)
+	}
+}
+
+// D-309 (Potency on #4945, 333787b6): an outcome logged before the clock
+// never winds it back, so effects 95 days old by the clock never count.
+func TestClockNeverRewinds(t *testing.T) {
+	o := newOpt(t, &memStore{}, nil)
+	recordAll(t, o, Outcome{Clerk: "other", Step: "tick", Ran: t0, At: t0})
+	for i := range 300 {
+		ran := t0.Add(-95*24*time.Hour + time.Duration(i)*time.Minute)
+		recordAll(t, o, Outcome{Clerk: "pay", Step: strconv.Itoa(i), Ran: ran, At: t0.Add(-10 * 24 * time.Hour)})
+	}
+	if m := o.Measure("pay"); m.Effects != 0 || m.Ready || !o.st.Now.Equal(t0) {
+		t.Fatalf("clock %v, measure %+v", o.st.Now, m)
 	}
 }

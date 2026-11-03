@@ -165,7 +165,7 @@ func (o *Optimizer) recordLocked(x Outcome) {
 		}
 	case x.Corrected && !st.Corrected:
 		st.Corrected = true
-		if !(st.Effect && st.Flagged) {
+		if !st.Flagged { // set only with its effect
 			o.day(r, st.Day).Silent++
 		}
 	}
