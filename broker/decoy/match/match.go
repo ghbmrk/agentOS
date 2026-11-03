@@ -245,21 +245,18 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 
 func encodings(v []byte) [][]byte {
 	var out [][]byte
-	// The text forms, of the value and of a PEM's body without its first
-	// and last lines: raw, JSON string with '/' as written and as `\/`, URL
-	// query with spaces as '+' and as %20, and URL path, each also as
-	// joined text holds it: '\' runs as one, breaks (a PEM's LFs) removed.
-	for _, t := range [][]byte{v, pemBody(v)} {
-		if t == nil {
-			continue
-		}
+	// The text forms of the value and of a PEM's body: raw, JSON with '/' as written and as `\/`, URL query
+	// with spaces as '+' and as %20, and URL path, each also as joined text holds it when the byte after it
+	// begins no break: '\' runs as one, a run a %0a split joined, breaks (a PEM's LFs) removed (#4853).
+	for _, t := range append([][]byte{v}, pemBody(v)...) {
 		j, _ := json.Marshal(string(t))
 		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))
 		for _, f := range []string{string(t), js, strings.ReplaceAll(js, "/", `\/`), q, strings.ReplaceAll(q, "+", "%20"), url.PathEscape(string(t))} {
-			out = append(out, []byte(f))
-			if jf := joined([]byte(f)); len(jf) >= MinJoined {
-				out = append(out, jf)
+			s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
+			if s.join([]byte(f + "\x00")); len(s.joined) > MinJoined {
+				out = append(out, s.joined[:len(s.joined)-1])
 			}
+			out = append(out, []byte(f))
 		}
 	}
 	h := hex.EncodeToString(v)
@@ -279,23 +276,12 @@ func encodings(v []byte) [][]byte {
 	return slices.CompactFunc(slices.SortedFunc(slices.Values(out), bytes.Compare), bytes.Equal) // each form once
 }
 
-// joined returns f as a stream's joined text holds it when the byte after f
-// begins no break, so a '\' that a %0a or %0d split off a run joins it (#4853).
-func joined(f []byte) []byte {
-	s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
-	s.join(f)
-	s.join([]byte{0})
-	return s.joined[:len(s.joined)-1]
-}
-
-// pemBody returns the lines between a PEM's first and last, or nil if v is
-// not one or they are under MinJoined bytes.
-func pemBody(v []byte) []byte {
-	i, k := bytes.IndexByte(v, '\n'), bytes.LastIndex(v, []byte("\n-----END "))
-	if !bytes.HasPrefix(v, []byte("-----BEGIN ")) || i < 0 || k-i-1 < MinJoined {
-		return nil
+// pemBody returns a PEM's lines but its first and last, if they are MinJoined bytes or more.
+func pemBody(v []byte) [][]byte {
+	if i, k := bytes.IndexByte(v, '\n'), bytes.LastIndex(v, []byte("\n-----END ")); bytes.HasPrefix(v, []byte("-----BEGIN ")) && k-i > MinJoined {
+		return [][]byte{v[i+1 : k]}
 	}
-	return v[i+1 : k]
+	return nil
 }
 
 // Dest returns the ID of the table destination a is, in plain, IPv4-mapped
@@ -556,8 +542,7 @@ func tail(w []byte, keep int) []byte {
 	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
-// Result scans what is pending, matches the breaks still held, and returns
-// what the stream has found.
+// Result scans what is pending and the breaks still held, and returns what the stream has found.
 func (s *Stream) Result() Result {
 	if s.pending != 0 {
 		s.scan()
