@@ -251,3 +251,20 @@ func TestDueAdvancesTheClock(t *testing.T) {
 		t.Fatalf("offered on an aged-out record: %+v %v", due, err)
 	}
 }
+
+// D-309 (L3 delta on #4945, cc272c34): a correction of a known step is
+// placed by the step's own day, so a zero or stale Ran on the correction
+// cannot drop it.
+func TestCorrectionUsesItsStepsDay(t *testing.T) {
+	at := t0.Add(-30 * 24 * time.Hour)
+	for _, ran := range []time.Time{{}, t0.Add(-200 * 24 * time.Hour)} {
+		o := newOpt(t, &memStore{}, nil)
+		clean(t, o, "pay", at, 300)
+		for i := range 10 {
+			recordAll(t, o, Outcome{Clerk: "pay", Step: "pay-" + strconv.Itoa(i), Ran: ran, At: t0, Corrected: true})
+		}
+		if m := o.Measure("pay"); m.Silent != 10 || m.Ready {
+			t.Fatalf("Ran %v: corrections dropped: %+v", ran, m)
+		}
+	}
+}

@@ -112,11 +112,13 @@ func (o *Optimizer) recordLocked(x Outcome) {
 		r.Steps = map[string]*stepSeen{}
 	}
 	o.prune()
-	if x.Ran.Before(o.st.Now.Add(-Window)) {
-		return
-	}
+	// A known step is placed by the day its record holds, never by this
+	// outcome's own Ran; only a new step is placed, and windowed, by Ran.
 	st := r.Steps[x.Step]
 	if st == nil {
+		if x.Ran.Before(o.st.Now.Add(-Window)) {
+			return
+		}
 		st = &stepSeen{Day: x.Ran.UTC().Format(dayFmt)}
 		r.Steps[x.Step] = st
 	}
