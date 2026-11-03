@@ -244,9 +244,26 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 }
 
 func encodings(v []byte) [][]byte {
-	j, _ := json.Marshal(string(v))
+	var out [][]byte
+	// The text forms, of the value and of a PEM's body without its first
+	// and last lines: raw, JSON string with '/' as written and as `\/`, URL
+	// query with spaces as '+' and as %20, and URL path, each also as
+	// joined text holds it: '\' runs as one, breaks (a PEM's LFs) removed.
+	for _, t := range [][]byte{v, pemBody(v)} {
+		if t == nil {
+			continue
+		}
+		j, _ := json.Marshal(string(t))
+		js, q := string(j[1:len(j)-1]), url.QueryEscape(string(t))
+		for _, f := range []string{string(t), js, strings.ReplaceAll(js, "/", `\/`), q, strings.ReplaceAll(q, "+", "%20"), url.PathEscape(string(t))} {
+			out = append(out, []byte(f))
+			if jf := joined([]byte(f)); len(jf) >= MinJoined {
+				out = append(out, jf)
+			}
+		}
+	}
 	h := hex.EncodeToString(v)
-	out := [][]byte{v, j[1 : len(j)-1], []byte(url.QueryEscape(string(v))), []byte(h), []byte(strings.ToUpper(h))}
+	out = append(out, []byte(h), []byte(strings.ToUpper(h)))
 	// In base64 a value starts at one of three byte offsets in a 3-byte
 	// group, whatever precedes it. At each, the characters whose six bits
 	// all come from the value are the same wherever the run starts or ends,
@@ -259,14 +276,26 @@ func encodings(v []byte) [][]byte {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	// Each form is also matched as joined text holds it: '\' runs as one, breaks (a PEM's LFs) removed.
-	for _, f := range out[:3] {
-		s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}}).Stream()
-		if s.join(f); len(s.joined) >= MinJoined && !bytes.Equal(s.joined, f) {
-			out = append(out, s.joined)
-		}
+	return slices.CompactFunc(slices.SortedFunc(slices.Values(out), bytes.Compare), bytes.Equal) // each form once
+}
+
+// joined returns f as a stream's joined text holds it when the byte after f
+// begins no break, so a '\' that a %0a or %0d split off a run joins it (#4853).
+func joined(f []byte) []byte {
+	s := (&Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, carry: len(f)}).Stream()
+	s.join(f)
+	s.join([]byte{0})
+	return s.joined[:len(s.joined)-1]
+}
+
+// pemBody returns the lines between a PEM's first and last, or nil if v is
+// not one or they are under MinJoined bytes.
+func pemBody(v []byte) []byte {
+	i, k := bytes.IndexByte(v, '\n'), bytes.LastIndex(v, []byte("\n-----END "))
+	if !bytes.HasPrefix(v, []byte("-----BEGIN ")) || i < 0 || k-i-1 < MinJoined {
+		return nil
 	}
-	return out
+	return v[i+1 : k]
 }
 
 // Dest returns the ID of the table destination a is, in plain, IPv4-mapped
@@ -447,16 +476,13 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
-	for _, br := range s.breaks {
-		s.matchBreak(br)
-	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
 	keep := max(s.m.carry, carryPattern)
 	drop := max(0, len(s.joined)-keep)
-	if len(s.breaks) > 0 { // a held break is never cut away, whatever the forms' length
-		drop = min(drop, s.breaks[0].at)
+	if len(s.breaks) > 0 { // a held break and the longest form before it are never cut away
+		drop = min(drop, max(0, s.breaks[0].at-s.m.carry))
 	}
 	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, len(s.joined)-drop), 0
 	for i := range s.breaks {
@@ -530,10 +556,14 @@ func tail(w []byte, keep int) []byte {
 	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
-// Result scans what is pending and returns what the stream has found.
+// Result scans what is pending, matches the breaks still held, and returns
+// what the stream has found.
 func (s *Stream) Result() Result {
 	if s.pending != 0 {
 		s.scan()
+	}
+	for _, br := range s.breaks {
+		s.matchBreak(br)
 	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
 }
