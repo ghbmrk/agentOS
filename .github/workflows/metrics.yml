@@ -19,7 +19,7 @@ concurrency:
 jobs:
   collect:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read # L3 verdicts and Defect lines
@@ -44,7 +44,7 @@ jobs:
           if-no-files-found: error
   commit:
     needs: collect
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # BOT_PR_TOKEN lives in this environment, whose deployment-branch policy admits main
     # only, so branch workflows cannot read it (decision #1769).
     environment: bot
