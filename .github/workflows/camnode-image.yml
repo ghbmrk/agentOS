@@ -63,14 +63,18 @@ jobs:
         run: |
           h=$(cat image/camnode/build.sh image/camnode/external/configs/*.config image/camnode/external/board/*/linux.fragment | sha256sum | cut -c1-32)
           echo "key=camnode-br-${{ matrix.board }}-$h" >> "$GITHUB_OUTPUT"
+      - name: Runner image (cache keys, #4785)
+        # Built outputs link the runner's libraries, so every cache key names the runner image.
+        id: image
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Restore downloads and compiler cache
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: |
             ~/camnode-dl
             ~/camnode-ccache
-          key: ${{ steps.key.outputs.key }}
-          restore-keys: camnode-br-${{ matrix.board }}-
+          key: ${{ steps.image.outputs.os }}-${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.image.outputs.os }}-camnode-br-${{ matrix.board }}-
       - name: Throwaway release key (cm4)
         if: matrix.board == 'cm4'
         run: |
@@ -91,7 +95,7 @@ jobs:
           path: |
             ~/camnode-dl
             ~/camnode-ccache
-          key: ${{ steps.key.outputs.key }}-${{ github.run_id }}
+          key: ${{ steps.image.outputs.os }}-${{ steps.key.outputs.key }}-${{ github.run_id }}
       - name: End-to-end test (QEMU aarch64)
         if: matrix.board == 'qemu'
         run: |
