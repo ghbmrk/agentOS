@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,15 +30,22 @@ type apShell struct {
 	t   *testing.T
 	dir string
 	sub *strings.Replacer
+	// path, if set, is the commands' whole PATH.
+	path string
 }
 
 // stub is reload_config: it records whether it can write to descriptor
-// 9 (the lock's), then, while the hang file exists, leaves a process in
-// a session of its own behind (as a ubus call that busybox timeout,
-// which ends reload_config alone, does not end) and hangs.
+// 9 (the lock's) and whether it can read a line of the session's stdin;
+// it exits 75 while the exit75 file exists; and while the hang file
+// exists it leaves a process in a session of its own behind (as a ubus
+// call that busybox timeout, which ends reload_config alone, does not
+// end), recording its pid for the test's cleanup to end, and hangs.
 const stub = `#!/bin/sh
 if (true >&9) 2>/dev/null; then echo fd9 >>"$D/reloads"; else echo ok >>"$D/reloads"; fi
-if [ -e "$D/hang" ]; then setsid sleep 6 & sleep 6; fi
+if read -r _; then echo stdin >>"$D/reloads"; fi
+[ -e "$D/exit75" ] && exit 75
+if [ -e "$D/hang" ]; then setsid sleep 6 & echo $! >>"$D/pids"; exec sleep 6; fi
+exit 0
 `
 
 func newShell(t *testing.T) *apShell {
@@ -58,6 +67,15 @@ func newShell(t *testing.T) *apShell {
 	if err := os.WriteFile(filepath.Join(dir, "bin", "reload_config"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// What a hung reload left behind ends with the test.
+	t.Cleanup(func() {
+		b, _ := os.ReadFile(filepath.Join(dir, "pids"))
+		for _, f := range strings.Fields(string(b)) {
+			if pid, err := strconv.Atoi(f); err == nil {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
 	return &apShell{t: t, dir: dir, sub: strings.NewReplacer(
 		"/etc/", dir+"/etc/",
 		"/tmp/agentos-ap", dir+"/tmp/agentos-ap",
@@ -85,7 +103,11 @@ func (s *apShell) run(cmd string, stdin []byte) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c := exec.CommandContext(ctx, "sh", "-c", sub)
-	c.Env = append(os.Environ(), "PATH="+filepath.Join(s.dir, "bin")+":"+os.Getenv("PATH"), "D="+s.dir)
+	path := filepath.Join(s.dir, "bin") + ":" + os.Getenv("PATH")
+	if s.path != "" {
+		path = s.path
+	}
+	c.Env = append(os.Environ(), "PATH="+path, "D="+s.dir)
 	c.Stdin = bytes.NewReader(stdin)
 	// Pipes, as an SSH session's are: the run ends only when every
 	// process holding them has closed them.
@@ -167,8 +189,19 @@ func TestCommandsUnderShell(t *testing.T) {
 	if st := s.run(applyCmd(t1), nil); st != refusedExit || s.read("reloads") != "" {
 		t.Fatalf("superseded reload: status %d reloads %q", st, s.read("reloads"))
 	}
-	if st := s.run(applyCmd(t2), nil); st != 0 || s.read("reloads") != "ok\n" {
-		t.Fatalf("reload: status %d reloads %q (fd9 means it got the lock's descriptor)", st, s.read("reloads"))
+	if st := s.run(applyCmd(t2), []byte("session stdin\n")); st != 0 || s.read("reloads") != "ok\n" {
+		t.Fatalf("reload: status %d reloads %q (fd9 means it got the lock's descriptor, stdin the session's)", st, s.read("reloads"))
+	}
+	// A reload_config that itself exits 75 must not read as a newer
+	// claim (#4429).
+	if err := os.WriteFile(s.at("exit75"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.run(applyCmd(t2), nil); st != 1 {
+		t.Fatalf("reload exiting 75: status %d, want 1", st)
+	}
+	if err := os.Remove(s.at("exit75")); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := os.WriteFile(s.at("hang"), nil, 0o600); err != nil {
@@ -184,6 +217,37 @@ func TestCommandsUnderShell(t *testing.T) {
 	start = time.Now()
 	if st := s.run(claimCmd(token()), nil); st != 0 || time.Since(start) > time.Second {
 		t.Fatalf("claim after a hung reload: status %d after %v", st, time.Since(start))
+	}
+}
+
+// TestClaimRefusedWithoutTimeout: on an access point with no timeout
+// command the claim exits noTimeoutExit and writes no token, so no write
+// of the Sync can move its file (#4429). Catches a claim that lets a
+// Sync write files no reload can apply.
+func TestClaimRefusedWithoutTimeout(t *testing.T) {
+	s := newShell(t)
+	// A PATH holding only what the claim needs besides timeout.
+	only := s.at("only")
+	if err := os.MkdirAll(only, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"flock", "rm", "cat"} {
+		p, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(p, filepath.Join(only, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.path = only
+	tok := token()
+	if st := s.run(claimCmd(tok), nil); st != noTimeoutExit || s.read(tokenPath) != "" {
+		t.Fatalf("claim without timeout: status %d token %q", st, s.read(tokenPath))
+	}
+	s.path = ""
+	if st := s.run(claimCmd(tok), nil); st != 0 || s.read(tokenPath) != tok+"\n" {
+		t.Fatalf("claim with timeout: status %d token %q", st, s.read(tokenPath))
 	}
 }
 
