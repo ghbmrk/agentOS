@@ -154,9 +154,10 @@ func SignPlan(p Plan, holder ed25519.PrivateKey) Plan {
 	return p
 }
 
-// ErrNotText refuses a plan with a string that is not valid UTF-8: JSON
-// would encode it as U+FFFD, so two different plans could share a signature.
-var ErrNotText = errors.New("kernel: plan text is not valid UTF-8")
+// ErrNotText refuses a string that is not valid UTF-8: JSON would encode it
+// as U+FFFD, so two different plans could share a signature, and a log entry
+// would name what its caller did not (Log.Append).
+var ErrNotText = errors.New("kernel: text is not valid UTF-8")
 
 // VerifyPlan is the key check for a plan, in the kernel, the clerk and the sim.
 func VerifyPlan(p Plan, owners []key.PublicKey) (*key.Verified, error) {
@@ -370,6 +371,20 @@ func (s *State) cancelUnsent(p *PlanState, st *StepState) {
 	for _, id := range p.Scopes {
 		s.uses[id] = slices.DeleteFunc(s.uses[id], func(u usedRec) bool { return u.Seq == st.DispatchSeq })
 	}
+}
+
+// cancel ends plan p, pending or active, for code and detail: a pending plan is never
+// decided, and an active plan's next step, if nothing has sent it, comes off
+// the ledger (cancelUnsent). A step already sent still reconciles (KRN-8).
+func (s *State) cancel(p *PlanState, code, detail string) {
+	if p.Status == SActive {
+		if st := &p.Steps[p.Next]; sendable(st.Phase) {
+			s.cancelUnsent(p, st)
+		}
+	} else if p.Status != SPending {
+		return
+	}
+	p.Status, p.Cancel, p.CancelDetail = SCancelled, code, detail
 }
 
 // State is the log folded: the only input to Decide besides the event.
@@ -1002,10 +1017,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive {
-			p.Status, p.Cancel, p.CancelDetail = SCancelled, b.Code, b.Detail
-			if st := &p.Steps[p.Next]; sendable(st.Phase) {
-				s.cancelUnsent(p, st)
-			}
+			s.cancel(p, b.Code, b.Detail)
 		}
 	case TStepHeld:
 		b, err := body[stepHeld](e)

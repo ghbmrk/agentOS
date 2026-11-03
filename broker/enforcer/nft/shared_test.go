@@ -74,11 +74,10 @@ func (h *home) share(seg string) {
 // first host's connection runs on, which is all the connection mark binds
 // (ENF-ct-bind-1). The first host's own error about its own connection
 // arrives, and so does the second host's about its own, which shows the
-// forger's channel works and the drop is the host binding. A load empties
-// the host records, so after it the forgery is still dropped and the
-// first host's own error on a connection opened before the load is dropped
-// too (it fails closed), while one on a connection opened after the load
-// arrives. When the second host also copies the first host's hardware
+// forger's channel works and the drop is the host binding. A load carries
+// the host records (#4480), so after it the open connections go on, the
+// forgery is still dropped, and each host's own error passes, on a
+// connection opened before the load and on one opened after it. When the second host also copies the first host's hardware
 // address, its forgery from its own address is still dropped, and one
 // from the first host's address too passes: copying both makes it that
 // host to the enforcer. A packet the second host injects into the first
@@ -86,7 +85,8 @@ func (h *home) share(seg string) {
 // an error forged after it is dropped, and the first host's own passes.
 // Catches a connection recorded more than once, a binding by interface
 // alone, by address alone (the spoofed forgery), by hardware address alone
-// (the copied one), and a learn or bound chain that is never reached.
+// (the copied one), a learn or bound chain that is never reached, and a
+// load that drops the records (every held connection would be cut).
 func TestSharedSegmentRelatedBound(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -297,11 +297,11 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 		h.expectOpen(true, c.a, c.b)
 	}
 
-	// A load empties the records: the open connections go on, but their
-	// hosts' own errors now fail closed; new connections are recorded.
+	// A load carries the records: the open connections go on, and their
+	// hosts' own errors still pass; new connections are recorded.
 	h.reload(d)
 	h.fillSets()
-	round(map[string]bool{}, conns, false)
+	round(map[string]bool{"own": true, "other own": true}, conns, false)
 	var fresh []conn
 	for _, c := range conns {
 		h.expectOpen(true, c.a, c.b)

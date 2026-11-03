@@ -59,7 +59,7 @@ func TestDropQuotaEdge(t *testing.T) {
 		for _, want := range []string{
 			fmt.Sprintf("add quota inet enforcer %s { over %d bytes used 40 bytes; }", qab, n),
 			fmt.Sprintf("add quota inet enforcer %s { over %d bytes used %d bytes; }", edgeQuota(1, 50), e, e),
-			"add rule inet enforcer " + ab + ` quota name "` + qab + `" goto cap_over`,
+			"add rule inet enforcer " + ab + ` quota name "` + qab + `" goto log_cap`,
 			"add chain inet enforcer " + cc,
 			"add rule inet enforcer capd_4 ip daddr vmap { 203.0.113.30 : goto " + ab + " }\n" +
 				"add rule inet enforcer capd_4 ip daddr @" + core.Named("a.example", false) + " goto " + ab + "\n" +
@@ -164,8 +164,8 @@ func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ip daddr vmap { 203.0.113.10 : goto " + m + ", 203.0.113.30 : goto " + ga + " }",
-		"add rule inet enforcer " + m + ` quota name "` + qa + `" goto cap_over`,
-		"add rule inet enforcer " + m + ` quota name "` + qb + `" goto cap_over`,
+		"add rule inet enforcer " + m + ` quota name "` + qa + `" goto log_cap`,
+		"add rule inet enforcer " + m + ` quota name "` + qb + `" goto log_cap`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("drop text lacks %q:\n%s", want, text)
@@ -209,7 +209,7 @@ func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
 	slices.Sort(elems)
 	for _, want := range []string{
 		fmt.Sprintf("add quota inet enforcer %s { over %d bytes used 0 bytes; }", q, uint64(MaxDropCap)+1),
-		"add rule inet enforcer " + c + ` quota name "` + q + `" goto cap_over`,
+		"add rule inet enforcer " + c + ` quota name "` + q + `" goto log_cap`,
 		"ip daddr vmap { " + strings.Join(elems, ", ") + " }",
 	} {
 		if !strings.Contains(text, want) {

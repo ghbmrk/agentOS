@@ -12,7 +12,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
+
+// asLogged is v as the log holds it: a JSON round trip, which writes text
+// that is not UTF-8 as U+FFFD. A value JSON cannot round-trip is refused with
+// the encoding's own error, so the caller is told why (#4760); text the log
+// rewrites is not an error here, and Append refuses an entry that holds it.
+func asLogged[T any](v T) (T, error) {
+	var out T
+	b, err := json.Marshal(v)
+	if err == nil {
+		err = json.Unmarshal(b, &out)
+	}
+	if err != nil {
+		return out, fmt.Errorf("kernel: the log cannot hold this %T: %w", v, err)
+	}
+	return out, nil
+}
 
 // Signing domains. A log head and a key never verify as one another (KEY-3).
 const (
@@ -300,6 +317,12 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 	bb, err := json.Marshal(body)
 	if err != nil {
 		return Entry{}, err
+	}
+	// json.Marshal writes text that is not UTF-8 as the escape \ufffd (and a
+	// valid U+FFFD as is): such an entry would name what its caller did not,
+	// and a lookup by the caller's text would miss it (KRN-1, #4719).
+	if bytes.Contains(bytes.ReplaceAll(bb, []byte(`\\`), nil), []byte(`\ufffd`)) || !utf8.Valid(bb) {
+		return Entry{}, ErrNotText
 	}
 	e := Entry{Seq: uint64(len(f.entries) + 1), At: at, Type: typ, V: v, Body: bb}
 	if len(f.entries) > 0 {

@@ -13,6 +13,8 @@ import ci_scope  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_workflows import lane_gate_problems  # noqa: E402
 import records_audit  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -256,7 +258,7 @@ CI_PREAMBLE_LINES = [
 # change to this list.
 MACHINES_LINES = [
     '  machines:',
-    '    runs-on: ubuntu-latest',
+    '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 60',
     '    steps:',
     '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
@@ -271,12 +273,15 @@ MACHINES_LINES = [
     '          want=$(awk \'$1 == "toolchain" {print $2}\' "$GITHUB_WORKSPACE/broker/go.mod")',
     "          got=$(go version | awk '{print $3}')",
     '          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }',
+    '      - name: Runner image (cache keys, #4785)',
+    '        id: image',
+    '        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"',
     '      - name: Go build cache (CI-PATHS)',
     '        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2',
     '        with:',
     '          path: /tmp/gocache',
-    "          key: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}",
-    "          restore-keys: go-build-machines-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-",
+    "          key: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-${{ github.sha }}",
+    "          restore-keys: go-build-machines-${{ steps.image.outputs.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-",
     '      - name: Install gVisor release-20260928.0 (checksum pinned)',
     '        run: |',
     '          B=https://storage.googleapis.com/gvisor/releases/release/20260928.0/x86_64',
@@ -692,8 +697,8 @@ class WiringTest(unittest.TestCase):
             "top-level defaults after NEL": (ci, ci.rstrip("\n") + "\x85" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "top-level defaults after LS": (ci, ci.rstrip("\n") + "\u2028" + "defaults:\n  run:\n    shell: bash {0}\n"),
             "top-level defaults after PS": (ci, ci.rstrip("\n") + "\u2029" + "defaults:\n  run:\n    shell: bash {0}\n"),
-            "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-latest\n  hostcheck:"),
-            "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-latest\n  hostcheck:"),
+            "quoted duplicate machines key": ("\n  hostcheck:", "\n  'machines':\n    runs-on: ubuntu-24.04\n  hostcheck:"),
+            "a second machines job": ("\n  hostcheck:", "\n  machines:\n    runs-on: ubuntu-24.04\n  hostcheck:"),
             "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
             "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
