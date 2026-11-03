@@ -22,6 +22,7 @@ logs (failed generators).
 import os
 import pathlib
 import re
+import select
 import shlex
 import signal
 import subprocess
@@ -72,7 +73,29 @@ mkdir -p /run/systemd/system
 ln -s "$S" /run/systemd/private
 exec systemctl "$@"
 '''
-GENERATOR_RE = re.compile(r"(/\S+-generators/[^\s/]+) failed with exit status \d+")
+# How PID 1 says a generator failed (systemd 257 exec-util.c do_execute, process-util.c
+# wait_for_terminate_and_check): one console line, the generator's path, then an exit status, a signal or
+# no reason. Any other console line that names a generator directory (a world-writable warning, a stat
+# that failed) counts as a failure too, named by the line itself.
+GENERATOR_FAILED = re.compile(r"(/\S*-generators/.+?) (failed with exit status \d+|terminated by signal \S+|"
+                              r"failed due to unknown reason)(, ignoring)?\.")
+# A generator still running at systemd's 90 s generator timeout is killed with no line (the executor
+# dies of SIGALRM, unlogged), so a run that came within GENERATOR_SLACK_S of it counts as a failure.
+GENERATOR_TIMEOUT_S, GENERATOR_SLACK_S = 90, 10
+GENERATOR_TIMEOUT = "(generators ran into systemd's 90 s timeout)"
+
+
+def generator_failures(text):
+    """The failures the console TEXT shows, by generator file name, or by the whole line where it names
+    a generator directory in another form."""
+    out = set()
+    for line in text.split("\n"):
+        line = line.strip()
+        if "-generators/" not in line:
+            continue
+        m = GENERATOR_FAILED.fullmatch(line)
+        out.add(m.group(1).rsplit("/", 1)[1] if m else line[:300])
+    return out
 
 
 class Manager:
@@ -87,6 +110,7 @@ class Manager:
         self.err = tempfile.NamedTemporaryFile(prefix="offline-systemd-stderr-")
         self.master, self.slave = os.openpty()
         tty.setraw(self.slave)
+        self.lock = threading.Lock()
         self.drain = threading.Thread(target=self._drain, daemon=True)
         self.drain.start()
         wrap = []
@@ -106,15 +130,23 @@ class Manager:
         self.view_root = "/proc/%d/root" % self.pid
 
     def _drain(self):
-        while True:
+        while self._pump(0.2) is not None:
+            pass
+
+    def _pump(self, wait):
+        """Copy what the pty holds to self.log, waiting up to WAIT seconds for some. None once it is closed."""
+        with self.lock:
             try:
+                if not select.select([self.master], [], [], wait)[0]:
+                    return 0
                 data = os.read(self.master, 65536)
-            except OSError:
-                return
+            except (OSError, ValueError):
+                return None
             if not data:
-                return
+                return None
             self.log.write(data)
             self.log.flush()
+            return len(data)
 
     def wait(self, timeout=120):
         end = time.monotonic() + timeout
@@ -144,12 +176,16 @@ class Manager:
         return out
 
     def failed_generators(self):
-        """The generators the manager's console says failed, by file name."""
-        try:
-            text = pathlib.Path(self.log.name).read_text(errors="replace")
-        except OSError:
-            return set()
-        return {m.group(1).rsplit("/", 1)[1] for m in GENERATOR_RE.finditer(text)}
+        """The generators that failed in this run (generator_failures() of the whole console, after the pty
+        is drained), plus GENERATOR_TIMEOUT when the generators ran close to systemd's timeout."""
+        while self._pump(0):
+            pass
+        out = generator_failures(pathlib.Path(self.log.name).read_text(errors="replace"))
+        t = self.manager(("GeneratorsStartTimestampMonotonic", "GeneratorsFinishTimestampMonotonic"))
+        start, finish = int(t["GeneratorsStartTimestampMonotonic"]), int(t["GeneratorsFinishTimestampMonotonic"])
+        if not finish or finish - start >= (GENERATOR_TIMEOUT_S - GENERATOR_SLACK_S) * 1000000:
+            out.add(GENERATOR_TIMEOUT)
+        return out
 
     def ctl(self, args, check=True):
         r = subprocess.run(["nsenter", "-t", str(self.pid), "-p", "--", "unshare", "-m", "--propagation", "private",
@@ -191,11 +227,10 @@ class Manager:
                 pass
         self.proc.kill()
         self.proc.wait()
-        for fd in (self.slave, self.master):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        os.close(self.slave)
+        with self.lock:
+            os.close(self.master)
+            self.master = -1
         self.drain.join(5)
         self.log.close()
         self.err.close()

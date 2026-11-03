@@ -22,7 +22,7 @@ NONE = [(a, "none") for a in g.ACTIONS]
 def graph(spec):
     """graph()'s shape from {unit: ["Kind: target", ...]}."""
     return {name: {"edges": [tuple(e.split(": ")) for e in edges], "actions": list(NONE), "load": "loaded",
-                   "on_failure_mode": "replace"} for name, edges in spec.items()}
+                   "job_modes": [(m, "replace") for m in g.JOB_MODES]} for name, edges in spec.items()}
 
 
 SHIPPED = {U: ["Wants: agentos-link.service", "Requires: agentos-keeper.slice"],
@@ -51,7 +51,8 @@ class FakeManager:
         out = {}
         for u in units:
             p = {k: "" for k in props}
-            p.update({a: "none" for a in g.ACTIONS}, LoadState="loaded", OnFailureJobMode="replace")
+            p.update({a: "none" for a in g.ACTIONS}, LoadState="loaded", OnFailureJobMode="replace",
+                     OnSuccessJobMode="fail")
             for e in self.spec.get(u, ()):
                 k, t = e.split(": ")
                 p[k] = (p[k] + " " + ('"%s"' % t.replace("\\", "\\\\") if "\\" in t else t)).strip()
@@ -90,7 +91,7 @@ class ReachTest(unittest.TestCase):
                                   "Triggers", "Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy",
                                   "RequiredBy", "RequisiteOf", "ConsistsOf"})
         self.assertEqual(g.SYSTEMD_MAJOR, "257")
-        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState", "OnFailureJobMode"})
+        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState", "OnFailureJobMode", "OnSuccessJobMode"})
 
     def test_facts_are_the_units_reached_their_stops_and_failed_generators(self):
         units = graph(SHIPPED)
@@ -149,11 +150,14 @@ class ViolationsTest(unittest.TestCase):
         units["agentos-inbound.service"]["load"] = "masked"
         units["agentosd.service"] = dict(units["agentos-inbound.service"], load="not-found")  # not reached
         self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [])
-        units = graph(SHIPPED)
-        units["agentos-link.service"]["on_failure_mode"] = "isolate"
-        self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [
-            "agentos-link.service, which %s starts, has OnFailureJobMode=isolate, which stops every unit outside "
-            "its OnFailure= target; %s" % (U, g.WHY)])
+        for mode in g.JOB_MODES:
+            with self.subTest(mode=mode):
+                units = graph(SHIPPED)
+                units["agentos-link.service"]["job_modes"] = [(m, "isolate" if m == mode else "replace")
+                                                              for m in g.JOB_MODES]
+                self.assertEqual(g.violations(units, set(), g.facts(graph(SHIPPED), ()), "257.13", FSTAB), [
+                    "agentos-link.service, which %s starts, has %s=isolate, which stops every unit outside its "
+                    "%s= target; %s" % (U, mode, mode[:-len("JobMode")], g.WHY)])
 
     def test_a_unit_outside_the_list_is_refused_and_a_stale_line_too(self):
         spec = copy(SHIPPED)
@@ -214,14 +218,40 @@ class OfflineSystemdTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             offline_systemd.shell_words('"open', "a")
 
-    def test_failed_generators_are_read_from_the_console(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".log") as f:
-            f.write("/usr/lib/systemd/system-generators/systemd-gpt-auto-generator failed with exit status 1.\n"
-                    "Reached target sockets.target.\n")
-            f.flush()
+    def test_every_form_of_a_generator_failure_is_read(self):
+        # systemd 257: exec-util.c do_execute and process-util.c wait_for_terminate_and_check.
+        d = "/usr/lib/systemd/system-generators/"
+        for line, name in ((d + "systemd-gpt-auto-generator failed with exit status 1.", "systemd-gpt-auto-generator"),
+                           (d + "a-generator failed with exit status 3, ignoring.", "a-generator"),
+                           (d + "a-generator terminated by signal SEGV.", "a-generator"),
+                           (d + "a-generator failed due to unknown reason.", "a-generator"),
+                           ("/etc/systemd/system-generators/agentos plant-generator failed with exit status 3.",
+                            "agentos plant-generator"),
+                           ("'/etc/systemd/system-generators/x' is marked world-writable, which is a security risk",
+                            "'/etc/systemd/system-generators/x' is marked world-writable, which is a security risk")):
+            with self.subTest(line=line):
+                self.assertEqual(offline_systemd.generator_failures("Detected architecture x86-64.\n%s\r\n"
+                                                                    "Reached target sockets.target.\n" % line),
+                                 {name})
+        self.assertEqual(offline_systemd.generator_failures("Startup finished in 128ms.\n"), set())
+
+    def test_failed_generators_drains_the_console_and_counts_a_timeout(self):
+        master, slave = os.openpty()
+        with tempfile.NamedTemporaryFile() as log:
             m = offline_systemd.Manager.__new__(offline_systemd.Manager)
-            m.log = f
-            self.assertEqual(m.failed_generators(), {"systemd-gpt-auto-generator"})
+            m.log, m.master, m.lock = log, master, __import__("threading").Lock()
+            times = {}
+            m.manager = lambda props: dict(times)
+            os.write(slave, b"/etc/systemd/system-generators/g terminated by signal KILL.\n")
+            for start, finish, want in ((5, 6, set()), (5, 5 + 79, set()),
+                                        (5, 5 + 80, {offline_systemd.GENERATOR_TIMEOUT}),
+                                        (5, 0, {offline_systemd.GENERATOR_TIMEOUT})):
+                with self.subTest(start=start, finish=finish):
+                    times.update(GeneratorsStartTimestampMonotonic=str(start * 1000000),
+                                 GeneratorsFinishTimestampMonotonic=str(finish * 1000000))
+                    self.assertEqual(m.failed_generators(), {"g"} | want)
+        os.close(master)
+        os.close(slave)
 
 
 class AllowFileTest(unittest.TestCase):
@@ -234,7 +264,7 @@ class AllowFileTest(unittest.TestCase):
             self.assertRegex(line, r"^(start \S+|stop \S+ (%s) \S+|generator \S+ failed)$" % "|".join(g.STOP_KINDS))
 
     def test_each_control_is_a_path_a_review_found(self):
-        self.assertEqual(len(g.CONTROLS), 4)
+        self.assertEqual(len(g.CONTROLS), 5)
         first = g.CONTROLS[next(iter(g.CONTROLS))]
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as dst:
             os.makedirs(os.path.join(root, "etc"))
@@ -282,12 +312,23 @@ class HostSystemdTest(unittest.TestCase):
                 with self.subTest(name=name), tempfile.TemporaryDirectory() as p:
                     g.plant_tree(root, plant, p)
                     self.assertTrue(g.run(root, "/usr", "ro quiet", base, p, major=major)[2])
-            with tempfile.TemporaryDirectory() as p:
-                g.plant_tree(root, g.CONTROLS["a generator that writes a unit and fails (L3 6593296481 1)"], p)
-                _, generators, v = g.run(root, "/usr", "ro quiet", base, p, major=major)
-                self.assertIn("agentos-plant-generator", generators)
-                self.assertTrue([l for l in v if l.startswith("generator agentos-plant-generator failed")], v)
-
+            for script, name in (("exit 3", "agentos-plant-generator"), ("kill -SEGV $$", "agentos-plant-generator"),
+                                 ("exit 3", "agentos plant-generator")):
+                with self.subTest(script=script, name=name), tempfile.TemporaryDirectory() as p:
+                    g.plant_tree(root, {"etc/systemd/system-generators/" + name: "#!/bin/sh\n%s\n" % script}, p)
+                    _, generators, v = g.run(root, "/usr", "ro quiet", base, p, major=major)
+                    self.assertEqual(generators, {name})
+                    self.assertIn("generator %s failed: not on unlock.allow; review it and add the line there" % name, v)
+            # The manager cannot reach the runner's hostname or global sysctls (Security 6593364293 1).
+            m = offline_systemd.Manager(root, "/usr", "ro quiet")
+            try:
+                for ns in ("uts", "ipc", "net", "pid", "mnt", "cgroup"):
+                    self.assertNotEqual(os.readlink("/proc/%d/ns/%s" % (m.pid, ns)), os.readlink("/proc/self/ns/" + ns))
+                mounts = pathlib.Path("/proc/%d/mountinfo" % m.pid).read_text().split("\n")
+                self.assertIn("ro", [l for l in mounts if l.split()[4:5] == ["/proc/sys"]][-1].split()[5].split(","))
+                self.assertIn("nodev", [l for l in mounts if l.split()[4:5] == ["/dev"]][-1].split()[5].split(","))
+            finally:
+                m.stop()
 
 if __name__ == "__main__":
     unittest.main()

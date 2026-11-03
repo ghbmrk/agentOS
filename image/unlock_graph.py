@@ -45,7 +45,8 @@ ALLOW = HERE / "mkosi" / "unlock.allow"
 START_KINDS = ("Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure", "Triggers")
 STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf")
 ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
-PROPS = START_KINDS + STOP_KINDS + ACTIONS + ("LoadState", "OnFailureJobMode")
+JOB_MODES = ("OnFailureJobMode", "OnSuccessJobMode")  # isolate stops every unit outside the target
+PROPS = START_KINDS + STOP_KINDS + ACTIONS + JOB_MODES + ("LoadState",)
 # A reached unit must load as it would on the box: a not-found unit may be a name whose specifier took the
 # runner's value here (%H, %v, %m). Masked units load nowhere.
 LOADED = ("loaded", "masked")
@@ -59,8 +60,8 @@ SHUTDOWN = {"halt.target", "poweroff.target", "reboot.target", "kexec.target", "
 WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)"
 
 def graph(manager, start=UNIT):
-    """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "on_failure_mode":
-    OnFailureJobMode}} for START and every unit it reaches,
+    """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "job_modes":
+    [(name, value)]}} for START and every unit it reaches,
     as MANAGER's systemd shows them. A shutdown unit is shown but not walked past."""
     units, todo = {}, [start]
     while todo:
@@ -69,7 +70,7 @@ def graph(manager, start=UNIT):
         for name, p in manager.show(batch, PROPS).items():
             units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS for t in unit_names(name, k, p[k])],
                            "actions": [(k, p[k]) for k in ACTIONS], "load": p["LoadState"],
-                           "on_failure_mode": p["OnFailureJobMode"]}
+                           "job_modes": [(k, p[k]) for k in JOB_MODES]}
             if name not in SHUTDOWN:
                 todo += [t for k, t in units[name]["edges"] if k in START_KINDS]
     return units
@@ -150,9 +151,10 @@ def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYS
         if units[u]["load"] not in LOADED:
             out.append("%s, which %s starts, is %s in the check's container, so what it does on the box is unread; "
                        "%s" % (u, start, units[u]["load"], WHY))
-        if units[u]["on_failure_mode"] == "isolate":
-            out.append("%s, which %s starts, has OnFailureJobMode=isolate, which stops every unit outside its "
-                       "OnFailure= target; %s" % (u, start, WHY))
+        for name, value in units[u]["job_modes"]:
+            if value == "isolate":
+                out.append("%s, which %s starts, has %s=isolate, which stops every unit outside its %s= target; %s"
+                           % (u, start, name, name[:-len("JobMode")], WHY))
     have = facts(units, generators, start)
     out += ["%s: not on %s; review it and add the line there" % (f, ALLOW.name) for f in sorted(have - allowed)]
     out += ["%s: on %s but no longer in the graph; remove the line" % (f, ALLOW.name) for f in sorted(allowed - have)]
@@ -199,6 +201,8 @@ CONTROLS = {
     "a generator that writes a unit and fails (L3 6593296481 1)": {
         "etc/systemd/system-generators/agentos-plant-generator":
             "#!/bin/sh\necho '[Unit]' >\"$1/agentos-plant.target\"\nexit 3\n"},
+    "a generator killed by a signal (L3 6595128762 1)": {
+        "etc/systemd/system-generators/agentos-plant-generator": "#!/bin/sh\nkill -SEGV $$\n"},
 }
 
 
