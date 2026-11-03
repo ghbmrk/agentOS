@@ -3,8 +3,10 @@ package channel
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +133,81 @@ func TestStalledCoreKeepsAlertLog(t *testing.T) {
 		if rec.Sent {
 			t.Errorf("alert %d marked sent to a core that never read it", rec.ID)
 		}
+	}
+}
+
+// TestSendTimeoutDefault (#4307, ENF-d-12): a zero or negative
+// SendTimeout is DefaultSendTimeout, and that default is ENF-d-12's 10 s.
+// Revert mutants: the default changed; only zero defaulted.
+func TestSendTimeoutDefault(t *testing.T) {
+	if DefaultSendTimeout != 10*time.Second {
+		t.Errorf("DefaultSendTimeout is %v, want ENF-d-12's 10 s", DefaultSendTimeout)
+	}
+	for _, d := range []time.Duration{0, -time.Second} {
+		r := newRig(t, func(c *Config) { c.SendTimeout = d })
+		if got := r.ch.cfg.SendTimeout; got != DefaultSendTimeout {
+			t.Errorf("SendTimeout %v became %v, want %v", d, got, DefaultSendTimeout)
+		}
+	}
+}
+
+// errNoDeadline is the error a connection gives when it cannot take a
+// write deadline.
+var errNoDeadline = errors.New("no deadline")
+
+// noDeadlineConn is a connection whose SetWriteDeadline fails once armed,
+// counting the writes made after that.
+type noDeadlineConn struct {
+	net.Conn
+	armed  atomic.Bool
+	writes atomic.Int32
+}
+
+func (c *noDeadlineConn) SetWriteDeadline(t time.Time) error {
+	if c.armed.Load() {
+		return errNoDeadline
+	}
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *noDeadlineConn) Write(b []byte) (int, error) {
+	if c.armed.Load() {
+		c.writes.Add(1)
+	}
+	return c.Conn.Write(b)
+}
+
+// TestFailedDeadlineStopsWrites (#4307, ENF-d-12): a write whose deadline
+// cannot be set is not made unbounded: it fails, writes nothing, and every
+// later send on that connection returns the same error, even once the
+// connection would take a deadline again. Revert mutants: the error
+// ignored (the alert is written with no deadline and blocks); the session
+// not stopped (the next alert is written).
+func TestFailedDeadlineStopsWrites(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.SendTimeout = stallTimeout })
+	a, b := net.Pipe()
+	w := &noDeadlineConn{Conn: b}
+	cl := &client{t: t, conn: a, done: make(chan error, 1)}
+	go func() { cl.done <- r.ch.Serve(w, exporter); b.Close() }()
+	h, err := wire.SignHello(wire.RoleCore, r.core, exporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl.send(h)
+	if _, ok := cl.recv().(wire.Hello); !ok {
+		t.Fatal("no enforcer hello")
+	}
+	al := wire.Alert{Kind: wire.AlertText, Text: "a text"}
+	w.armed.Store(true)
+	if err := inTime(t, "an alert with no deadline", func() error { return r.ch.Alert(al) }); !errors.Is(err, errNoDeadline) {
+		t.Fatalf("an alert whose deadline failed: %v, want %v", err, errNoDeadline)
+	}
+	w.armed.Store(false)
+	if err := inTime(t, "a later alert", func() error { return r.ch.Alert(al) }); !errors.Is(err, errNoDeadline) {
+		t.Errorf("a later alert: %v, want the failed deadline's error", err)
+	}
+	if n := w.writes.Load(); n != 0 {
+		t.Errorf("%d writes made without a deadline", n)
 	}
 }
 
