@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import metrics  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from _nogit_bg import setUpModule, tearDownModule  # noqa: E402,F401
+from _nogit_bg import git_env, setUpModule, tearDownModule  # noqa: E402,F401
 
 TZ = dt.timezone(dt.timedelta(hours=-4))
 
@@ -396,8 +396,9 @@ class GitHistoryTest(unittest.TestCase):
     def test_reads_trace_and_board_from_first_parent_history(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+            env = git_env({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                           "PATH": "/usr/bin:/bin"})
             git = lambda *a, date="2026-10-05T12:00:00-04:00": subprocess.run(
                 ["git", "-C", d, *a], check=True, capture_output=True,
                 env={**env, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
@@ -735,8 +736,9 @@ class GitFlagsTest(unittest.TestCase):
     def test_history_snapshots_carry_flags(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid", "PATH": "/usr/bin:/bin"}
+            env = git_env({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                           "PATH": "/usr/bin:/bin"})
             subprocess.run(["git", "-C", d, "init", "-q", "-b", "main"], check=True, capture_output=True, env=env)
             (root / "BOARD.md").write_text("| ID | Package | Needs | State |\n|---|---|---|---|\n| P-1-r1 | J | x | queued |\n")
             subprocess.run(["git", "-C", d, "add", "."], check=True, capture_output=True, env=env)
