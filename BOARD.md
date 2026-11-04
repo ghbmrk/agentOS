@@ -450,7 +450,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-plan-labels | MIG-4-plan-labels: close the Codex turn-metadata labels to the CLI's word lists | #3133 live Codex capture; #4595 (#4630) | queued (release; tier A; waits on the live Codex capture, #3133) |
 | REV-CHK-links-localui | REV-CHK-links-localui: agentos-localui's root -admit-port1 step goes through privfile | #4493 package build | queued(tier A; sub B directories) |
 | KRN-2-std-files | a manager-opened StandardOutput/StandardError file on a non-root unit cannot sit in a world tree (KRN-2), found by D-271's review | D-271 (#4493) | queued (release; tier A; found by D-271's review) |
-| REV-CHK-links-ns2 | REV-CHK-links-ns2: packaged units' drop-ins, the rest of a root unit's load settings, and the #4656 lint nits | #4656 Security and L3 reviews | escalated (release; tier A; kernel lane) |
 | IMG-mkosi-run-bound | IMG-mkosi-run-bound: CI runs the pinned mkosi on the committed config in its own job, out of build.sh's reach; finalize checks installed packages against the signed apt lists. Release; split from #4647. | #4647 | queued (release; tier A) |
 | REV-CHK-links-ns3 | REV-CHK-links-ns3: what a root unit's EnvironmentFile= holds | #4677 build | queued (release; tier A; kernel lane) |
 | REV-CHK-links-ns4 | REV-CHK-links-ns4: the rest of the root-side lint's reach (mount/swap, manager env, symlinked drop-ins, credstore, socket paths, TTYPath) | #4698 reviews | queued (release; tier A; kernel lane) |
@@ -513,4 +512,5 @@ issue #4948: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4949: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
 issue #4954: body has no board-row block
+issue #4961: body has no board-row block
 ```
