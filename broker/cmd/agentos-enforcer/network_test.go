@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -877,4 +878,31 @@ func TestReadingStepsFail(t *testing.T) {
 	x.fire.mu.Lock()
 	x.fire.listAt = nil
 	x.fire.mu.Unlock()
+}
+
+// TestDropRefusedRefusesLoad (Security 6667888036 point 1): a saved day
+// that restores but whose drop nft refuses (a zoned address) refuses the
+// load, so no ruleset loads without its byte-cap drop.
+func TestDropRefusedRefusesLoad(t *testing.T) {
+	x, _, _ := capped(t)
+	x.d.Close()
+	x.mu.Lock()
+	day := traffic.Day(x.now)
+	x.mu.Unlock()
+	b := []byte(`{"day":` + strconv.Itoa(int(day)) + `,"dests":{"fe80::1%eth0":["updates.example"]}}`)
+	if err := os.WriteFile(filepath.Join(x.dir, fileTraffic), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := x.fire.last()
+	if d, err := x.open(); err == nil {
+		d.Close()
+		t.Fatal("a load whose drop is refused went ahead")
+	}
+	if x.fire.last() != before {
+		t.Fatal("a ruleset loaded without its byte-cap drop")
+	}
+	if err := os.Remove(filepath.Join(x.dir, fileTraffic)); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
 }
