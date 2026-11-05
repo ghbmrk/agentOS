@@ -731,6 +731,47 @@ func TestJoinedFormCarry(t *testing.T) {
 	}
 }
 
+// KRN-12, DECOY-a-5: only a break is removed from the joined text. A
+// `u000a` with no '\' before it is plain text, so a value it splits does not
+// trip; a %0a stands for no '\', so a value whose '\'s a JSON break reads
+// back at one place is not read back at a %0a in the other; and a value
+// holding a %0d in a '\' run and ending in a break's head (`\u000`) trips
+// with a JSON break inside that head (#4900).
+func TestJoinedOnlyBreaks(t *testing.T) {
+	for _, c := range []struct {
+		v, s  string
+		trips bool
+	}{{`abcdefghijklmnop`, `abcdefghu000aijklmnop`, false}, {`ab\cdefghij\klmnop`, `ab\ncdefghij%0aklmnop`, false},
+		{`ab\cdefghij\klmnop`, `ab\ncdefghij\nklmnop`, true}, {`abcdefgh\%0d\u000`, `abcdefgh\%0d\u00\n0`, true}} {
+		m := match.New([]match.Value{{ID: 1, Bytes: []byte(c.v)}}, nil)
+		if c.trips {
+			wrappedTrips(t, m, "lead "+c.s, 5, 1)
+			continue
+		}
+		st := m.Stream()
+		st.Write([]byte("lead " + c.s + " tail"))
+		if got := st.Result().Trips; len(got) != 0 {
+			t.Fatalf("%q tripped %v on %q", c.s, got, c.v)
+		}
+	}
+}
+
+// CLK-4: Detect replaces every labelled value, not only the first, and a
+// high-entropy run of two character classes, but not a run of one: the
+// entropy rule wants mixed classes, so a long word stays (#4900).
+func TestDetectEachLabelled(t *testing.T) {
+	r := match.Redacted
+	for _, c := range []struct {
+		in, out string
+		n       int
+	}{{"token: aaaaaaaaaaaaaaa1 and secret=bbbbbbbbbbbbbbb2", "token: " + r + " and secret=" + r, 2},
+		{"id abcdefghijklmnop12345678 end", "id " + r + " end", 1}, {"id abcdefghijklmnopqrstuvwx end", "id abcdefghijklmnopqrstuvwx end", 0}} {
+		if out, n := match.Detect(c.in); out != c.out || n != c.n {
+			t.Errorf("Detect(%q) = %q, %d; want %q, %d", c.in, out, n, c.out, c.n)
+		}
+	}
+}
+
 // KRN-12, DECOY-a-5: a value trips URL-path-escaped, URL-query-escaped with
 // spaces as %20, and in JSON with '/' as `\/`; a PEM also as its body alone,
 // without its first and last lines, if that is MinJoined bytes or more
