@@ -623,10 +623,10 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
 	if err := putCheckerSeed(path, st, root); err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
-		if errors.Is(err, errNotMine) {
-			return // a remove there could act through a planted link (#4966)
-		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
+		if !errors.Is(err, errNotMine) { // a remove there could act through a planted link (#4966)
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
+			}
 		}
 	}
 }
