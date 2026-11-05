@@ -39,8 +39,8 @@ import finish_image  # noqa: E402
 # The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
 # a mount over it), its own /usr, a private /proc with /proc/sys read-only, a /sys with only a cgroup2
 # tree in its own cgroup namespace, five character devices and a pty as console, an empty /run, no network. It starts only
-# -.slice, which every manager has and which starts nothing. Its argv after --unit= is the boot entry's
-# command line, which systemd in a container reads as the kernel's.
+# -.slice, which every manager has and which starts nothing. Its argv is the boot entry's command line,
+# which systemd in a container reads as the kernel's, then the pinned options (manager_argv).
 MANAGER = r'''set -eu
 R=$1 USR=$2 PLANT=$3 CONSOLE=$4
 shift 4
@@ -62,7 +62,7 @@ for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
 chmod 1777 "$N/tmp"
-exec env -i container=agentos-offline "$(command -v chroot)" "$N" /usr/lib/systemd/systemd --unit=-.slice "$@"
+exec env -i container=agentos-offline "$(command -v chroot)" "$N" /usr/lib/systemd/systemd "$@"
 '''
 # The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
 # reaching its private bus through /proc/PID/root.
@@ -116,11 +116,7 @@ class Manager:
         wrap = []
         if os.path.isdir("/run/systemd/system"):  # a runner booted by systemd: a delegated scope of our own
             wrap = ["systemd-run", "--scope", "--quiet", "-p", "Delegate=yes", "--"]
-        self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation",
-                                             "private",
-                                             "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant),
-                                             os.ttyname(self.slave), "--log-target=console", "--log-level=info"]
-                                     + cmdline.split(),
+        self.proc = subprocess.Popen(wrap + manager_argv(root, usr, cmdline, plant, os.ttyname(self.slave)),
                                      stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
         try:
@@ -189,6 +185,8 @@ class Manager:
         is drained), plus GENERATOR_TIMEOUT when the generators ran close to systemd's timeout."""
         while self._pump(0):
             pass
+        with self.lock:  # the drain thread may hold a chunk it read but has not yet written (#4876)
+            pass
         out = generator_failures(pathlib.Path(self.log.name).read_text(errors="replace"))
         t = self.manager(("GeneratorsStartTimestampMonotonic", "GeneratorsFinishTimestampMonotonic"))
         start, finish = int(t["GeneratorsStartTimestampMonotonic"]), int(t["GeneratorsFinishTimestampMonotonic"])
@@ -243,6 +241,26 @@ class Manager:
         self.drain.join(5)
         self.log.close()
         self.err.close()
+
+
+# systemd's own options, after the boot entry's words: its getopt_long permutes argv and the last value
+# of an option wins, so no entry word can change these (#4767 Security release 2, #4876). The console
+# target and info level keep the generator-failure lines (LOG_ERR, LOG_WARNING) on the console;
+# parse_argv runs after system.conf and the command line, so LogLevel= and systemd.log_level= lose too.
+PINNED = ("--unit=-.slice", "--log-target=console", "--log-level=info")
+
+
+def manager_argv(root, usr, cmdline, plant, console):
+    """unshare's argv for MANAGER over the tree: the boot entry's CMDLINE words, then PINNED. A word that
+    starts with "-" is refused: "--" would end systemd's option parsing before PINNED, and a short option
+    that takes an argument ("-z") would swallow the first of them."""
+    words = cmdline.split()
+    bad = [w for w in words if w.startswith("-")]
+    if bad:
+        raise SystemExit("offline systemd: the boot entry's command line holds options %r" % bad)
+    return (["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation", "private",
+             "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant), console]
+            + words + list(PINNED))
 
 
 def shell_words(value, name):

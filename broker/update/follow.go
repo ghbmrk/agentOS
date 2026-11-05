@@ -664,7 +664,7 @@ func (s *Store) finishFollow(src Followed) error {
 	if err := remove(s.p(followFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return durable.SyncDir(s.Dir)
+	return s.syncStore()
 }
 
 // settle completes or forgets a switch a crash interrupted. The caller
@@ -695,5 +695,5 @@ func (s *Store) settle() error {
 	if err := remove(s.p(followFile)); err != nil {
 		return err
 	}
-	return durable.SyncDir(s.Dir)
+	return s.syncStore()
 }

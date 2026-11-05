@@ -1686,7 +1686,8 @@ def keeper_violations(root):
     """STO-2c (#2905, D-154): the keeper's units and the main side's.
     - Keeper: every agentos-keeper-* service is in KEEPER_UNITS and in KEEPER_SLICE; no other unit is
       in that slice (tests/test_image_keeper.py checks the image ships them). Every other agentos service but NOEXEC_EXEMPT ends with every KEEPER_PATHS entry
-      in InaccessiblePaths=, none with a "-", and mounts nothing over, under or from one of them, nor
+      in InaccessiblePaths=, none with a "-" (MOR_UNIT: all but MOR_LISTED, which it must not mask, and
+      "-" allowed), and mounts nothing over, under or from one of them, nor
       binds one from above it. The service manager opens no file and makes no directory for it at,
       under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981).
     - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
@@ -1926,6 +1927,13 @@ def specifier_reaches(v, clerk_users):
 # The other parsers that run with an empty root, as a driver does: the mail clerk's IMAP connection
 # process, one per session (#3015).
 EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
+# HW-8 (#4794): the unit whose stop clears MOR. It lists MOR_LISTED (agentos-mor's holdDirs) and leaves
+# MOR set while either holds an entry, so it must see them: masked, they read as empty. It starts
+# before sysinit.target and tmp.mount, so it cannot be ordered after systemd-tmpfiles-setup.service
+# (after local-fs.target: an ordering cycle, L3 on #5009), and masks the rest of the keeper's state
+# with "-": its stop, at shutdown, is a command of its own, when every path exists.
+MOR_UNIT = "agentos-mor.service"
+MOR_LISTED = ("/run/agentos-setup", "/run/agentos-link-capture")
 
 
 def driver_root(name, files):
@@ -1958,11 +1966,16 @@ def keeper_unit_violations(name, files):
         words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
         # #3473: a driver's root is an empty read-only tmpfs, so it holds no keeper path to mask, and
         # systemd refuses a mask whose path is missing (226/NAMESPACE); the template lifts it.
+        mor = name == MOR_UNIT
         for p in () if driver_root(name, files) else KEEPER_PATHS:
-            if p not in hidden:
+            if mor and p in MOR_LISTED:
+                if "/" in hidden or under(p, tuple(hidden)):
+                    out.append("%s: InaccessiblePaths holds %s, which the MOR clear lists; masked, it reads as "
+                               "empty (HW-8)" % (name, p))
+            elif p not in hidden:
                 out.append("%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
                            % (name, p))
-            elif p not in words:
+            elif p not in words and not mor:
                 # #2981: systemd skips a "-" path missing when the unit starts, and the path may come later.
                 out.append("%s: InaccessiblePaths=-%s gives no mask while the path is missing; the image makes it "
                            "at boot (D-154)" % (name, p))
@@ -2237,8 +2250,9 @@ def wifi_violations(root):
 def kmod_lines(data):
     """The lines kmod 34's freadline_wrapped (shared/util.c) reads from DATA. A backslash before a
     newline joins the next line, even in a comment; any other backslash is dropped and the byte
-    after it kept (a backslash at the end of the file reads as byte 0xff, getc's EOF). kmod then
-    reads each line as a C string, so it ends at its first NUL."""
+    after it kept, and a backslash at the end of the file is dropped (kmod 31 stored getc's EOF as
+    byte 0xff there; 34 does not, #4795). kmod then reads each line as a C string, so it ends at
+    its first NUL."""
     lines, buf, i = [], bytearray(), 0
     while i < len(data):
         c, i = data[i], i + 1
@@ -2248,7 +2262,7 @@ def kmod_lines(data):
         elif c != 0x5C:
             buf.append(c)
         elif i == len(data):
-            buf.append(0xFF)
+            pass
         elif data[i] == 0x0A:
             i += 1
         else:

@@ -9,32 +9,42 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              the listed packages where the diff BASE...HEAD adds or
                                              changes a line of a .go file: the only ones the gate
                                              can fail, so the only ones CI runs gremlins on
-  tools/mutgate.py run [PKG...] [--out DIR] [--git BASE]
+  tools/mutgate.py plan --git BASE [--targets-out FILE]
+                                             the `mutants` matrix as JSON: K shards for each claimed
+                                             package, K from its target lines and deletion sites (#4961);
+                                             FILE gets each test-only package's target lines
+  tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K] [--targets FILE]]
                                              run gremlins per package (default: all listed),
                                              one JSON file per package in DIR (default mutants/);
-                                             with --git, only on the package's target lines (below)
+                                             with --git, only on the package's target lines (below),
+                                             and with --shard, only on shard I of K of them; with
+                                             --targets, a test-only package's lines are plan's FILE's
   tools/mutgate.py delete PKG... [--out DIR] --git BASE [--jobs N]
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
                                              detected verdict is confirmed alone), run its tests, and
-                                             add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633)
+                                             add the verdicts to `run`'s JSON in DIR (#4573, #4603, #4633);
+                                             only the sites of the result's own shard
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
                                              `Mutant-equivalent:` line in FILE (the PR body) names
   tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
                                              `gate`, after checking that DIR/*/ holds exactly
-                                             one readable result for every package `claimed`
-                                             names, as `run` and `delete` check it, with one deletion
-                                             verdict for each site it lists itself: CI's trusted
-                                             job (#4106, #4602)
+                                             one readable result for each shard of every package
+                                             `claimed` names, as `run` and `delete` check it, with
+                                             one deletion verdict for each site it lists itself,
+                                             then joining the shards: CI's trusted job (#4106,
+                                             #4602, #4961)
 
 Target lines. A package's target lines are the lines the diff adds or changes in its non-test .go
 files (no `REQ:` marker is needed, #4908). When the diff changes only the package's _test.go files,
 they are the lines of its non-test files that the changed test functions run: `run` names them
 with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
 no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
-every test, so the set is at most the package's covered lines. Gremlins mutates a package's target
+every test, so the set is at most the package's covered lines. Coverage can differ from run to run
+(a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
+(`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a test-only package `run` points HEAD for
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
@@ -53,6 +63,14 @@ joins gremlins' JSON as a STATEMENT_DELETION mutant on the first such line, with
 failed first, which the gate reads as it reads gremlins' own (#4573). The sites run on parallel
 workers (#4633). `verify --summary` writes one table of every mutant on a target line and its
 verdict, so a reviewer reads it rather than re-running mutants.
+Shards (#4961). A package's mutants can take longer than one CI job may run, so its target lines
+and deletion sites are split round-robin into K shards (`shard_lines`, `deletion_sites`' order), one
+`mutants` job each. Gremlins tests every mutant alone with the whole package suite, and `delete`
+deletes every statement alone and runs the whole suite, so a mutant's verdict does not depend on
+which other mutants share its job: the joined shards give the verdicts one job would. K is only a
+schedule, so it may come from the untrusted `plan` job: `verify` refuses a package unless its
+results agree on K and hold each shard 0..K-1 exactly once, each with only its own lines' and
+sites' mutants, so a missing or overlapping shard fails and the join covers every target.
 CI runs the PR's tests in the `mutants` jobs, and a test can write anything there, so those jobs
 only hand their JSON on as data; the `mutgate` job, which runs no PR code, takes this file from the
 base commit and decides with `verify` (#4106), which lists the deletion sites itself (#4602) and
@@ -328,6 +346,41 @@ def violations(targets, live, waived=None):
     return found
 
 
+# Shards (#4961). The budgets size K so one shard's gremlins and deletion runs fit a job's 60 minutes:
+# localui's 1048 target lines (about 0.35 deletion sites a line) ran gremlins in 10 minutes and
+# deletion past 48 on #4945. GitHub runs at most 256 jobs from one matrix.
+LINES_PER_SHARD = 250
+SITES_PER_SHARD = 100
+MATRIX_MAX = 256
+
+
+def shard_count(targets, sites):
+    """K for a package with these target lines ({path: lines}) and deletion sites: at least one."""
+    lines = sum(len(v) for v in targets.values())
+    return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD))
+
+
+def shard_lines(targets, index, of):
+    """{path: lines} of shard index of `of`: every of-th target line in (path, line) order, from the
+    index-th. The of shards are disjoint and their union is targets."""
+    out = {}
+    for path, line in sorted((p, n) for p, ls in targets.items() for n in ls)[index::of]:
+        out.setdefault(path, set()).add(line)
+    return out
+
+
+def shard_of(data):
+    """(index, of) a result records, (0, 1) when it records none (an unsharded run), or None when
+    the record is not two ints with 0 <= index < of <= MATRIX_MAX."""
+    rec = data.get("shard", {"index": 0, "of": 1}) if isinstance(data, dict) else None
+    if not isinstance(rec, dict) or set(rec) != {"index", "of"}:
+        return None
+    i, k = rec["index"], rec["of"]
+    if type(i) is not int or type(k) is not int or not 0 <= i < k <= MATRIX_MAX:
+        return None
+    return i, k
+
+
 # gremlins -D runs `git diff --merge-base BASE` in its own cwd and matches the file names to
 # mutant paths relative to the package directory, one range per hunk from its first added line.
 # Run from the package directory, relative names and no context lines make both exact.
@@ -391,7 +444,8 @@ def covered_by(pkg, names, tmp):
     cmd = ["go", "test", "-count=1", "-covermode=set", f"-coverprofile={profile}"]
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
-    if subprocess.run([*cmd, "."], cwd=BROKER / pkg).returncode or not profile.exists():
+    # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
+    if subprocess.run([*cmd, "."], cwd=BROKER / pkg, stdout=sys.stderr).returncode or not profile.exists():
         return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     out = {}
     for name, blocks in covered_blocks(profile.read_text()).items():
@@ -435,12 +489,36 @@ def marked_base(targets, tmp):
             git("update-ref", "--no-deref", "HEAD", head)
 
 
+def coverage_record(names, targets):
+    """The record of a test-only package's target lines that `run` writes and targets_for reads."""
+    return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
+
+
+def planned_targets(planned, pkg, added, tests):
+    """({path: lines}, None) of a test-only package's target lines from plan's --targets-out file, or
+    (None, problem). The record is checked as verify checks the one a result carries (targets_for).
+    A package the plan does not name is a problem, never a coverage run here: that run could name
+    other lines than the other shards' (#4970)."""
+    rec = planned.get(pkg) if isinstance(planned, dict) else None
+    if rec is None:
+        return None, f"the plan names no target lines for broker/{pkg}/; rerun the mutgate workflow"
+    targets, problem = targets_for(pkg, added, tests, {"targets": rec})
+    return (None, f"the plan {problem}") if problem else (targets, None)
+
+
 def cmd_run(args):
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     added, tests = added_lines(broker_diff(args.git, "HEAD")) if args.git else (None, None)
+    planned = None
+    if args.targets is not None:
+        try:
+            planned = json.loads(pathlib.Path(args.targets).read_text())
+        except (OSError, ValueError) as e:
+            print(f"mutgate: no readable plan of target lines ({args.targets}: {e})", file=sys.stderr)
+            return 1
     bad = 0
     # Gremlins reads .gremlins.yaml from broker/ and the package directory, and GREMLINS_* from the
     # environment: a PR-added file with `dry-run: true` would leave no LIVED mutant. An explicit
@@ -453,20 +531,30 @@ def cmd_run(args):
         dest = out / result_name(pkg)
         targets, record = (diff_targets(added, pkg) if args.git else None), None
         if args.git and not targets:
-            # A test-only diff (#4908): the lines its changed test functions run are the targets.
+            # A test-only diff (#4908): the lines its changed test functions run are the targets,
+            # from plan's one coverage run when given, so every shard names the same lines (#4970).
             names = changed_tests(tests, pkg)
-            targets, problem = covered_by(pkg, names, cfgdir.name)
+            if planned is not None:
+                targets, problem = planned_targets(planned, pkg, added, tests)
+            else:
+                targets, problem = covered_by(pkg, names, cfgdir.name)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
                 continue
-            record = {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
-            if not targets:
-                # Gremlins' -D mutates every line when its diff is empty; none is a target here.
-                dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0, "targets": record}))
-                continue
+            record = coverage_record(names, targets)
         if args.git:
-            with marked_base(targets, cfgdir.name) if record else contextlib.nullcontext(args.git) as base:
+            # #4961: this job's share of the target lines; the record keeps them all.
+            mine = shard_lines(targets, args.shard, args.of)
+            extra = {"shard": {"index": args.shard, "of": args.of}, **({"targets": record} if record else {})}
+            if not mine:
+                # Gremlins' -D mutates every line when its diff is empty; none is a target here.
+                dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0, **extra}))
+                continue
+            # The base's own diff marks exactly the target lines, so one unsharded run of a
+            # non-test diff keeps it; a share or a test-only diff marks its lines on a commit.
+            marked = record or args.of > 1
+            with marked_base(mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
                 r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
                                     *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
         else:
@@ -475,11 +563,13 @@ def cmd_run(args):
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
-        elif problem := result_problem(data := json.loads(dest.read_text()), pkg, BROKER / pkg, targets):
+        # A share's own lines only: gremlins marks the other shards' lines SKIPPED (#4961).
+        elif problem := result_problem(data := json.loads(dest.read_text()), pkg, BROKER / pkg,
+                                       mine if args.git else None):
             print(f"mutgate: {dest} {problem}", file=sys.stderr)
             bad += 1
-        elif record:
-            dest.write_text(json.dumps({**data, "targets": record}))
+        elif args.git:
+            dest.write_text(json.dumps({**data, **extra}))
     cfgdir.cleanup()
     return 1 if bad else 0
 
@@ -600,19 +690,73 @@ def build_mutant(src, site, build, mutant, pkg_dir):
     return False
 
 
-def run_tests(binary, cwd, timeout):
+def run_tests(binary, cwd, timeout, mem=None):
     """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
     is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
-    BINARY.out, where failed_test reads which test failed."""
-    with open(pathlib.Path(binary).with_suffix(".out"), "wb") as log:
+    BINARY.out, where failed_test reads which test failed. With mem, the run is also killed, and
+    KILLED by `memory_cap`, once its session's resident memory passes mem bytes, as the Go runtime's
+    own out of memory crash would end it: a deletion that drops a bound can grow a test by gigabytes
+    in seconds, and on a CI runner that takes the runner down with the job (egress on #5011). That
+    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it."""
+    out = pathlib.Path(binary).with_suffix(".out")
+    with open(out, "wb") as log:
         p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s"], cwd=cwd,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        end, _ = watch(p, timeout, mem)
+        if end == "over":
+            log.write(b"\n--- FAIL: memory_cap\n")  # failed_test's name for it, so the table says why
+        return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
+
+
+def watch(p, timeout=None, mem=None):
+    """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
+    "over" (resident memory past mem bytes), after which its session is killed; peak is the most
+    resident memory read across the session, every MEM_POLL seconds."""
+    deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
+    while True:
+        wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
         try:
-            return "LIVED" if p.wait(timeout=timeout) == 0 else "KILLED"
+            return p.wait(timeout=wait), peak
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
-            p.wait()
-            return "TIMED OUT"
+            peak = max(peak, session_rss(p.pid))
+            end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
+            if end:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                return end, peak
+
+
+MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
+
+
+def session_rss(sid):
+    """Resident bytes of every process in session sid (a test binary and its children), from
+    /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
+    total = 0
+    try:
+        pids = [n for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return 0
+    for pid in pids:
+        try:
+            fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue  # gone between the listing and the read
+        if len(fields) > 21 and fields[3] == str(sid):
+            total += int(fields[21]) * PAGE
+    return total
+
+
+PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def available_memory():
+    """MemAvailable in bytes, or None where /proc/meminfo does not say (macOS): no cap there."""
+    try:
+        m = re.search(r"^MemAvailable:\s+(\d+) kB$", pathlib.Path("/proc/meminfo").read_text(), re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) * 1024 if m else None
 
 
 FAILED = re.compile(rb"^\s*--- FAIL: ([A-Za-z_]\w{0,199})", re.M)
@@ -666,17 +810,23 @@ def site_keys(sites):
     return collections.Counter((s["file"], s["at"], s["col"]) for s in sites)
 
 
-def deletion_mutants(pkg, added, tmp, lister, jobs=1):
-    """([mutation dict], None) for each site deletion_sites lists, or (None, problem). The sites run
+def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
+    """([mutation dict], None) for each site deletion_sites lists in shard (index, of): every of-th
+    site from the index-th (#4961); or (None, problem). The sites run
     on `jobs` parallel workers (#4633), each in its own directory, a batch at a time. A site a worker
     reads as detected (KILLED or TIMED OUT) runs its binary again alone once the batch is done, and
     that verdict stands: a loaded runner can fail a wall-clock bound or slow a run past its timeout,
     and other binaries can collide on a fixed path or port, which would pass a deletion that lives
-    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker."""
+    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker.
+    Each run has a memory cap, smaller in parallel, so one mutant cannot exhaust the runner."""
     pkg_dir = BROKER / pkg
     sites, problem = deletion_sites(pkg, added, lister)
     if not sites:
         return sites, problem
+    sites = sites[shard[0]::shard[1]]
+    if not sites:
+        return sites, None
+
     def mutation(site, status, killer=None):
         m = {"file": site["file"], "type": DELETION, "status": status, "line": site["at"], "column": site["col"]}
         return {**m, "killed_by": killer} if status == "KILLED" and killer else m
@@ -687,12 +837,29 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
         return None, f"broker/{pkg}/ does not build its tests"
     if not base.exists():  # `go test -c` writes nothing for a package with no test files: none covered
         return [mutation(s, "NOT COVERED") for s in sites], None
+    # Memory caps (egress on #5011): a run alone may hold half the memory free now, and each of
+    # `jobs` parallel runs its share of that half, leaving the rest to the builds beside it. A run
+    # past its cap is KILLED; a parallel one is then confirmed alone, under the larger cap. A cap
+    # kill counts as detection only if the unmutated tests stay under half of it (L3 on #5026: else
+    # a deletion that lives reads KILLED), so the base run is measured under the same cap, and
+    # fewer workers run when their share would leave a run less than that headroom.
+    free = available_memory()
+    alone_mem = free // 2 if free else None
     began = time.monotonic()
-    r = subprocess.run([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir)
-    if r.returncode != 0 or not profile.exists():
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       start_new_session=True), mem=alone_mem)
+    if alone_mem and (end == "over" or 2 * peak > alone_mem):
+        return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
+                      f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
+    if end != 0 or not profile.exists():
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
+    if alone_mem and peak:
+        jobs = max(1, min(jobs, alone_mem // (2 * peak)))
     timeout = 3 * (time.monotonic() - began) + 10
     blocks = covered_blocks(profile.read_text())
+
+    def cap(alone):
+        return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
 
     def verdict(i, alone):
         """The site's status, its binary when a detected verdict still needs confirming alone, and
@@ -710,7 +877,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
-            status = run_tests(binary, pkg_dir, timeout)
+            status = run_tests(binary, pkg_dir, timeout, mem=cap(alone))
             keep = not alone and status in DETECTED
             return status, binary if keep else None, failed_test(binary)
         finally:
@@ -724,7 +891,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
             results = [verdict(i, True) for i in batch] if jobs <= 1 else list(pool.map(lambda i: verdict(i, False), batch))
             for i, (status, binary, killer) in zip(batch, results):
                 if binary is not None:
-                    status, killer = run_tests(binary, pkg_dir, timeout), failed_test(binary)
+                    status, killer = run_tests(binary, pkg_dir, timeout, mem=alone_mem), failed_test(binary)
                     shutil.rmtree(binary.parent)
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
@@ -769,7 +936,9 @@ def cmd_delete(args):
                 bad += 1
                 continue
             targets, problem = targets_for(pkg, added, tests, data)
-            mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs)
+            if not problem and (shard := shard_of(data)) is None:
+                problem = f"{dest} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
+            mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs, shard)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
@@ -779,31 +948,97 @@ def cmd_delete(args):
 
 
 def read_results(pkgs, root, added, tests, lister):
-    """({pkg: (data, targets)}, problems) for each package's one result under root/*/, rechecked as
-    `run` and `delete` check it, with the deletion sites listed here (#4106, #4602)."""
+    """({pkg: (data, targets)}, problems) for each package's shards under root/*/, each rechecked as
+    `run` and `delete` check it, with the deletion sites listed here (#4106, #4602), then joined (#4961)."""
     out, problems = {}, []
     for pkg in pkgs:
-        # Each mutants job's artifact is its own directory, so a result named twice (a job writing
-        # another package's) is refused rather than one copy picked.
+        # Each mutants job's artifact is its own directory, so a shard named twice (a job writing
+        # another's) is refused rather than one copy picked.
         found = sorted(pathlib.Path(root).glob(f"*/{glob.escape(result_name(pkg))}"))
-        if len(found) != 1:
-            problems.append(f"{len(found)} results for {pkg} in {root}, not one: {found}")
+        if not found:
+            problems.append(f"0 results for {pkg} in {root}, not one for each shard")
             continue
-        f = found[0]
-        try:
-            data = json.loads(f.read_text())
-        except (OSError, ValueError) as e:
-            problems.append(f"no readable result for {pkg} ({f}: {e})")
+        shards, problem = [], None
+        for f in found:
+            try:
+                shards.append((f, json.loads(f.read_text())))
+            except (OSError, ValueError) as e:
+                problem = f"no readable result for {pkg} ({f}: {e})"
+                break
+        joined, problem = (None, problem) if problem else join_shards(pkg, shards, added, tests, lister)
+        if problem:
+            problems.append(problem)
             continue
-        targets, problem = targets_for(pkg, added, tests, data) if shape_ok(data) else (None, None)
-        sites = None
-        if targets is not None and not problem:
-            sites, problem = deletion_sites(pkg, targets, lister)
-        if problem or (problem := result_problem(data, pkg, BROKER / pkg, targets, sites if sites is not None else [])):
-            problems.append(f"{f} {problem}")
-            continue
-        out[pkg] = (data, targets)
+        out[pkg] = joined
     return out, problems
+
+
+TOTALS = ("mutants_total", "mutants_killed", "mutants_lived", "mutants_not_viable", "mutants_not_covered",
+          "statement_deletions")
+
+
+def join_shards(pkg, shards, added, tests, lister):
+    """((data, targets), None) of one package's shards [(file, data)] joined, or (None, problem).
+    The shards must agree on K and on the target lines, number 0..K-1 once each, and each must pass
+    `run`'s and `delete`'s checks on its own lines and sites with no mutant on another shard's line."""
+    seen, targets, sites = {}, None, None
+    for f, data in shards:
+        if not shape_ok(data):
+            return None, f"{f} is not gremlins' files[].mutations[] shape"
+        if (shard := shard_of(data)) is None:
+            return None, f"{f} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
+        if shard in seen:
+            if shard == (0, 1):
+                return None, f"{f} and {seen[shard]} are both results for {pkg}: one run gives one result"
+            return None, f"{f} and {seen[shard]} are both shard {shard[0]} of {shard[1]} for {pkg}: shards overlap"
+        seen[shard] = f
+        mine, problem = targets_for(pkg, added, tests, data)
+        if problem:
+            return None, f"{f} {problem}"
+        if targets is None:
+            targets = mine
+            sites, problem = deletion_sites(pkg, targets, lister)
+            if problem:
+                return None, f"{f} {problem}"
+        elif mine != targets:
+            return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree; rerun the mutgate workflow"
+    counts = {of for _, of in seen}
+    if len(counts) != 1:
+        return None, f"the results for {pkg} disagree on the number of shards: {sorted(counts)}"
+    of = counts.pop()
+    if missing := sorted(set(range(of)) - {i for i, _ in seen}):
+        return None, f"{pkg} is missing shard(s) {missing} of {of}"
+    joined = {"files": [], **{k: 0 for k in TOTALS}}
+    files = {}
+    for (i, _), f in sorted(seen.items()):
+        data = dict(shards)[f]
+        mine = shard_lines(targets, i, of)
+        if problem := result_problem(data, pkg, BROKER / pkg, mine, sites[i::of]):
+            return None, f"{f} {problem}"
+        # Gremlins writes every mutant outside its -D diff as SKIPPED (v0.6.0 engine.go:195), so a
+        # shard reports the other shards' lines so: no verdict, dropped here. The owner's own lines
+        # hold no SKIPPED (result_problem above). Any other mutant on a target line of another shard
+        # is one that shard owns: an overlap.
+        kept = [(m_file["file_name"], [m for m in m_file.get("mutations") or [] if m.get("type") == DELETION
+                 or m.get("status") != "SKIPPED" or m["line"] in mine.get(f"broker/{pkg}/{m_file['file_name']}", ())])
+                for m_file in data["files"]]
+        if other := sorted({(name, m["line"]) for name, muts in kept for m in muts if m.get("type") != DELETION
+                            and m["line"] in targets.get(f"broker/{pkg}/{name}", ())
+                            and m["line"] not in mine.get(f"broker/{pkg}/{name}", ())}):
+            return None, f"{f} holds mutants on lines of another shard of {pkg}: {other[:20]}: shards overlap"
+        for name, muts in kept:
+            g = files.get(name)
+            if g is None:
+                g = files[name] = {"file_name": name, "mutations": []}
+                joined["files"].append(g)
+            g["mutations"] += muts
+        for k in TOTALS:
+            joined[k] += data.get(k) if type(data.get(k)) is int else 0
+    if "targets" in shards[0][1]:
+        joined["targets"] = shards[0][1]["targets"]
+    if problem := result_problem(joined, pkg, BROKER / pkg, targets, sites):
+        return None, f"the joined shards of {pkg} {problem}"
+    return (joined, targets), None
 
 
 def cmd_verify(args):
@@ -941,6 +1176,46 @@ def broker_diff(base, head):
     ).stdout.decode("utf-8", errors="replace")
 
 
+def cmd_plan(args):
+    """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
+    target lines and deletion sites. It runs the PR's tests (a test-only diff's coverage), so only in
+    an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
+    diff = broker_diff(args.git, "HEAD")
+    added, tests = added_lines(diff)
+    include, planned = [], {}
+    with tempfile.TemporaryDirectory() as tmp:
+        if (lister := build_lister(tmp)) is None:
+            return 1
+        for pkg in claimed(diff):
+            targets = diff_targets(added, pkg)
+            if not targets:
+                names = changed_tests(tests, pkg)
+                targets, problem = covered_by(pkg, names, tmp)
+                if problem:
+                    print(f"mutgate: {problem}", file=sys.stderr)
+                    return 1
+                # The one coverage run every shard reads (#4970): a run of their own could differ.
+                planned[pkg] = coverage_record(names, targets)
+            sites, problem = deletion_sites(pkg, targets, lister)
+            if problem:
+                print(f"mutgate: {problem}", file=sys.stderr)
+                return 1
+            of = shard_count(targets, sites)
+            print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
+                  f"sites, {of} shard(s)", file=sys.stderr)
+            include += [{"pkg": pkg, "shard": i, "of": of} for i in range(of)]
+    if not include or len(include) > MATRIX_MAX:
+        fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if include
+               else "rerun the mutgate workflow")
+        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit): {fix}",
+              file=sys.stderr)
+        return 1
+    if args.targets_out:
+        pathlib.Path(args.targets_out).write_text(json.dumps(planned))
+    print(json.dumps(include))
+    return 0
+
+
 def cmd_claimed(args):
     pkgs = claimed(broker_diff(args.git, args.head))
     print(json.dumps(pkgs) if args.json else "\n".join(pkgs))
@@ -993,10 +1268,16 @@ def main(argv=None):
     p.add_argument("--git", required=True, metavar="BASE")
     p.add_argument("head", nargs="?", default="HEAD")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("plan")
+    p.add_argument("--git", required=True, metavar="BASE")
+    p.add_argument("--targets-out", metavar="FILE", help="write each test-only package's target lines here")
     p = sub.add_parser("run")
     p.add_argument("pkg", nargs="*")
     p.add_argument("--out", default="mutants")
     p.add_argument("--git", metavar="BASE")
+    p.add_argument("--shard", type=int, default=0, metavar="I")
+    p.add_argument("--of", type=int, default=1, metavar="K")
+    p.add_argument("--targets", metavar="FILE", help="plan's --targets-out file: a test-only package's lines")
     p = sub.add_parser("delete")
     p.add_argument("pkg", nargs="+")
     p.add_argument("--out", default="mutants")
@@ -1012,10 +1293,12 @@ def main(argv=None):
         p.add_argument("--body", metavar="FILE", help="the PR body, read as text for Mutant-equivalent lines")
         p.add_argument("--summary", metavar="FILE", help="append the table of verdicts here")
     args = ap.parse_args(argv)
+    if args.cmd == "run" and (not 0 <= args.shard < args.of <= MATRIX_MAX or (args.of > 1 and not args.git)):
+        ap.error(f"--shard I --of K needs 0 <= I < K <= {MATRIX_MAX}, and --git when K > 1")
     if args.cmd == "packages":
         print("\n".join(gated_packages()))
         return 0
-    return {"claimed": cmd_claimed, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
+    return {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
             "verify": cmd_verify}[args.cmd](args)
 
 

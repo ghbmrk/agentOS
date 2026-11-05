@@ -3,6 +3,7 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import fnmatch
 import json
 import os
 import pathlib
@@ -630,7 +631,10 @@ class Verify(unittest.TestCase):
         r = self.verify({"mutants-0/netguard.json": self.result("LIVED"),
                          "mutants-1/netguard.json": self.result("KILLED")})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("2 results for netguard", r.stderr)
+        self.assertIn("are both results for netguard: one run gives one result", r.stderr)  # #4983: not "shard 0 of 1"
+        for f in ("mutants-0/netguard.json", "mutants-1/netguard.json"):
+            self.assertIn(f, r.stderr)
+        self.assertNotIn("shard", r.stderr)
 
     def test_twin_packages_each_need_their_own_result(self):
         # The repro on #4154: broker/netguard/sub and broker/netguard__sub both claimed; the LIVED
@@ -709,6 +713,83 @@ class Verify(unittest.TestCase):
         r = self.verify({"netguard.json": result({**deletion, "status": "LIVED"}) | {"mutants_lived": 1}}, src=src)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("broker/netguard/a.go:2 deleting the whole statement holding line 2 survives", r.stdout)
+
+    # MUT-test-only-cost (#4961): a package's target lines and deletion sites split into K shards,
+    # one mutants job each; verify joins them and refuses a missing or overlapping shard.
+    SHARD_SRC = "package netguard\nfunc F() {\n\tg(1)\n\tg(2)\n\tg(3)\n}\nfunc g(int) {}\n"
+
+    def sharded(self, of, lived=4):
+        """{artifact path: result} of the K=of shards of one run over SHARD_SRC's targets: lines 2-7,
+        a gremlins mutant on each call line and a deletion site at each call, LIVED on line lived."""
+        targets = {"broker/netguard/a.go": set(range(2, 8))}
+        sites = [3, 4, 5]  # deletion_sites' order: the lister's, by file then position
+        out = {}
+        for i in range(of):
+            mine = mutgate.shard_lines(targets, i, of).get("broker/netguard/a.go", set()) if of > 1 else targets["broker/netguard/a.go"]
+            # Gremlins v0.6.0 writes the mutants outside its -D diff too, as SKIPPED (Security on #4978).
+            muts = [{"type": "INCREMENT_DECREMENT", "status": ("LIVED" if n == lived else "KILLED") if n in mine
+                     else "SKIPPED", "line": n, "column": 4} for n in (3, 4, 5)]
+            dels = [{"type": mutgate.DELETION, "status": "LIVED" if n == lived else "KILLED", "line": n, "column": 2}
+                    for n in sites[i::of]]
+            data = {"files": [{"file_name": "a.go", "mutations": muts + dels}],
+                    "mutants_total": len(muts) + len(dels), "statement_deletions": len(dels),
+                    "mutants_lived": sum(m["status"] == "LIVED" for m in muts + dels)}
+            if of > 1:
+                data["shard"] = {"index": i, "of": of}
+            out[f"mutants-{i}/netguard.json"] = data
+        return out
+
+    def test_shards_join_to_the_unsharded_verdicts(self):
+        one = self.verify(self.sharded(1), src=self.SHARD_SRC, summary=True)
+        self.assertEqual(one.returncode, 1, one.stdout + one.stderr)
+        self.assertIn("broker/netguard/a.go:4 INCREMENT_DECREMENT survives", one.stdout)
+        self.assertIn("broker/netguard/a.go:4 deleting the whole statement holding line 4 survives", one.stdout)
+        for of in (2, 3, 6, 7):  # 7: more shards than target lines, so one shard holds none
+            with self.subTest(of):
+                r = self.verify(self.sharded(of), src=self.SHARD_SRC, summary=True)
+                self.assertEqual((r.returncode, r.stdout, r.summary), (one.returncode, one.stdout, one.summary), r.stderr)
+        r = self.verify(self.sharded(3, lived=None), src=self.SHARD_SRC)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_missing_or_overlapping_shard_is_refused(self):
+        good = self.sharded(2, lived=None)
+        moved = json.loads(json.dumps(good))
+        # Shard 0 (lines 2, 4, 6) reporting a KILLED gremlins mutant on shard 1's line 3.
+        moved["mutants-0/netguard.json"]["files"][0]["mutations"].append(
+            {"type": "INCREMENT_DECREMENT", "status": "KILLED", "line": 3, "column": 4})
+        moved["mutants-0/netguard.json"]["mutants_total"] += 1
+        # Shard 1 carrying shard 0's deletion site too.
+        stolen = json.loads(json.dumps(good))
+        stolen["mutants-1/netguard.json"]["files"][0]["mutations"].append(
+            {"type": mutgate.DELETION, "status": "KILLED", "line": 3, "column": 2})
+        stolen["mutants-1/netguard.json"]["statement_deletions"] += 1
+        # Shard 1 (lines 3, 5, 7) leaving its own line 3 SKIPPED: no verdict there, refused.
+        own_skip = json.loads(json.dumps(good))
+        for m in own_skip["mutants-1/netguard.json"]["files"][0]["mutations"]:
+            if m["line"] == 3 and m["type"] != mutgate.DELETION:
+                m["status"] = "SKIPPED"
+        unsharded = {k: {**v} for k, v in good.items()}
+        unsharded["mutants-1/netguard.json"].pop("shard")
+        for name, results, want in (
+            ("missing", {"mutants-0/netguard.json": good["mutants-0/netguard.json"]}, "missing shard(s) [1] of 2"),
+            ("twice", {**good, "mutants-2/netguard.json": good["mutants-0/netguard.json"]}, "shards overlap"),
+            ("other line", moved, "holds mutants on lines of another shard of netguard"),
+            ("other site", stolen, "not one for each site this diff touches"),
+            ("skipped on its own line", own_skip, "gremlins skipped mutants on target lines"),
+            ("counts", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": 1, "of": 3}}},
+             "disagree on the number of shards"),
+            ("unsharded twin", unsharded, "disagree on the number of shards"),
+            ("index", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": 2, "of": 2}}},
+             "records a shard that is not"),
+            ("bool", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": True, "of": 2}}},
+             "records a shard that is not"),
+            ("over the matrix", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 257}}},
+             "records a shard that is not"),
+        ):
+            with self.subTest(name):
+                r = self.verify(results, src=self.SHARD_SRC)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(want, r.stderr)
 
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, test=None, src="package netguard\n", summary=True)
@@ -853,6 +934,30 @@ class Deletion(unittest.TestCase):
             (stub).write_text("#!/bin/sh\nexit 1\n")
             self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
 
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_test_run_past_its_memory_cap_is_killed_with_its_children(self):
+        # egress on #5011: a deletion that drops a bound grew one test by gigabytes and took the
+        # runner down. A child's memory counts too, and the run ends well before its timeout.
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "t.test"
+            stub.write_text("#!/bin/sh\npython3 -c 'import time; b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertEqual(mutgate.failed_test(stub), "memory_cap")  # the table says why (L3 on #5026)
+            stub.write_text("#!/bin/sh\nexec python3 -c 'b = bytearray(1 << 20)'\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
+            stub.write_text("#!/bin/sh\nsleep 60\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
+
+    def test_available_memory_reads_meminfo(self):
+        got = mutgate.available_memory()
+        if os.path.isfile("/proc/meminfo"):
+            self.assertGreater(got, 0)
+        else:
+            self.assertIsNone(got)
+
     def repo(self, d, base_src=BASE_SRC, pr_src=PR_SRC, test_src=TEST_SRC):
         git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
         shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
@@ -923,6 +1028,29 @@ class Deletion(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             data = json.loads((out / "hint.json").read_text())
         return {m["line"]: m["status"] for f in data["files"] for m in f["mutations"]}
+
+    def test_shards_of_the_deletion_pass_join_to_the_unsharded_verdicts(self):
+        # #4961: each shard deletes every K-th site, alone, with the whole suite; the union of the
+        # shards' mutants is the unsharded pass's, verdicts and killers included.
+        def mutants(d, shard):
+            out = pathlib.Path(d) / f"out-{shard}"
+            out.mkdir()
+            rec = {} if shard is None else {"shard": {"index": shard[0], "of": shard[1]}}
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0, **rec}))
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1", "--jobs", "1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+            return sorted(json.dumps({**m, "file": f["file_name"]}, sort_keys=True)
+                          for f in data["files"] for m in f["mutations"])
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d)
+            whole = mutants(d, None)
+            self.assertEqual(len(whole), 5)
+            for of in (2, 3, 6):
+                with self.subTest(of):
+                    parts = [mutants(d, (i, of)) for i in range(of)]
+                    self.assertEqual(sorted(sum(parts, [])), whole)
+                    self.assertTrue(all(len(p) <= -(-5 // of) for p in parts), parts)
 
     def test_a_guard_that_is_its_variables_only_use_is_deleted_and_tested(self):
         # Security on #4597: deleting `if err != nil { ... }` leaves err unused and does not build,
@@ -1153,9 +1281,11 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls, first = [], ["TIMED OUT"]
-            def fake(binary, cwd, timeout):
+            mems = []
+            def fake(binary, cwd, timeout, mem=None):
                 self.assertTrue(pathlib.Path(binary).is_file())  # the worker's own binary, kept for the rerun
                 calls.append(pathlib.Path(binary).parent.name)
+                mems.append(mem)
                 return "LIVED" if calls.count(calls[-1]) > 1 else first[0]
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
             mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
@@ -1170,8 +1300,47 @@ func set(n, m int) {
                     self.assertIsNone(problem)
                     self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: want, 7: want})
                     self.assertEqual(len(calls), 2 * (jobs > 1) + 2)
+                    # A parallel run gets 1/jobs of the cap a run alone gets (egress on #5011).
+                    alone = mems[-1]
+                    self.assertTrue(alone is None or alone > 0)
+                    if alone and jobs > 1:
+                        self.assertEqual(mems[:2], [alone // jobs] * 2)
+                    mems.clear()
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_package_whose_unmutated_tests_near_the_memory_cap_is_a_problem(self):
+        # L3 on #5026: were the base run unmeasured, a suite that already holds more than the cap
+        # would read every covered deletion KILLED, the one that lives (line 7) too.
+        heavy = TEST_SRC.replace('import "testing"', 'import (\n\t"testing"\n\t"time"\n)') + (
+            "\nvar Sink []byte\n\nfunc TestHeavy(t *testing.T) {\n\tSink = make([]byte, 96<<20)\n"
+            "\tfor i := range Sink {\n\t\tSink[i] = 1\n\t}\n\ttime.Sleep(time.Second)\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, test_src=heavy)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            broker, avail = mutgate.BROKER, mutgate.available_memory
+            mutgate.BROKER = pkg.parent
+            try:
+                for free in (128 << 20, 320 << 20):  # cap 64 MB: over it; cap 160 MB: under it, without the headroom
+                    mutgate.available_memory = lambda: free
+                    tmp = pathlib.Path(d) / "tmp"
+                    tmp.mkdir()
+                    got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+                    shutil.rmtree(tmp)
+                    self.assertIsNone(got)
+                    self.assertIn("before any statement is deleted", problem)
+                    self.assertIn("memory cap", problem)
+                mutgate.available_memory = lambda: 8 << 30  # ample: the gate runs and line 7 lives
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            finally:
+                mutgate.BROKER, mutgate.available_memory = broker, avail
+            self.assertIsNone(problem)
+            self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: "KILLED", 7: "LIVED"})
 
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
@@ -1185,7 +1354,7 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls = []
-            def fake(binary, cwd, timeout):
+            def fake(binary, cwd, timeout, mem=None):
                 calls.append(pathlib.Path(binary).parent.name)
                 return "TIMED OUT"
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
@@ -1382,6 +1551,194 @@ class TestOnly(unittest.TestCase):
                     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                     self.assertRegex(r.stderr, "holds no record of the lines|records covered lines")
 
+    def line_stub(self, d):
+        """A gremlins on PATH that writes one mutant on each line its `git diff --merge-base` adds,
+        LIVED on line 4 and KILLED elsewhere, and appends the lines to d/seen-lines."""
+        stub = pathlib.Path(d) / "bin"
+        stub.mkdir(exist_ok=True)
+        (stub / "gremlins").write_text(f"""#!{sys.executable}
+import json, re, subprocess, sys
+a = sys.argv
+diff = subprocess.run(["git", "diff", "--merge-base", a[a.index("-D") + 1]], capture_output=True, text=True, check=True).stdout
+muts, name = {{}}, None
+for row in diff.split("\\n"):
+    if row.startswith("+++ b/"):
+        name = row[6:]
+    m = re.match(r"@@ -\\S+ \\+(\\d+)(?:,(\\d+))? @@", row)
+    if m:
+        first = int(m.group(1))
+        muts.setdefault(name, []).extend(range(first, first + int(m.group(2) or 1)))
+open("{d}/seen-lines", "a").write(json.dumps(muts) + "\\n")
+# Like gremlins v0.6.0, every other line's mutant is written too, SKIPPED (Security on #4978).
+files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": ("LIVED" if n == 4 else "KILLED")
+          if n in ns else "SKIPPED", "line": n, "column": 1}} for n in range(1, len(open(f).read().split("\\n")))]}}
+         for f, ns in muts.items()]
+count = lambda s: sum(m["status"] == s for f in files for m in f["mutations"])
+lived, killed = count("LIVED"), count("KILLED")
+# gremlins' total is lived + killed + not viable (v0.6.0 report.go:178); SKIPPED is not counted.
+open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived + killed,
+                                                  "mutants_killed": killed, "mutants_lived": lived}}))
+""")
+        (stub / "gremlins").chmod(0o755)
+        return {"PATH": f"{stub}:{os.environ['PATH']}"}
+
+    def test_shards_of_a_run_join_to_the_unsharded_verdicts(self):
+        # MUT-test-only-cost (#4961): K shards of `run` and `delete`, each a mutants job, give verify
+        # the verdicts and summary table one job gives, and each shard mutates only its own lines.
+        weak = TWO_TEST.replace("Up(20) != 10", "Up(20) < 0")
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, weak)
+            env = self.line_stub(d)
+            # The plan runs the changed test's coverage: a few lines, one shard. Its record names the
+            # changed test, as each shard's changed_tests does, so the shards accept it (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}})
+            got = {}
+            for of in (1, 2, 3):
+                res = pathlib.Path(d) / f"res-{of}"
+                (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                for i in range(of):
+                    out = res / f"mutants-{i}"
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out),
+                                     "--shard", str(i), "--of", str(of), "--targets", str(plan), env=env)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    data = json.loads((out / "hint.json").read_text())
+                    self.assertEqual(data["shard"], {"index": i, "of": of})
+                    covered = {"broker/hint/hint.go": set(data["targets"]["lines"]["hint.go"])}
+                # Gremlins saw exactly each shard's lines: disjoint, and together every target line.
+                seen = [json.loads(row).get("hint.go", []) for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
+                self.assertEqual(seen, [sorted(mutgate.shard_lines(covered, i, of).get("broker/hint/hint.go", ()))
+                                        for i in range(of) if mutgate.shard_lines(covered, i, of)])
+                self.assertEqual(sorted(sum(seen, [])), sorted(covered["broker/hint/hint.go"]))
+                summary = pathlib.Path(d) / f"summary-{of}.md"
+                r = self.mutgate(d, "verify", str(res), "--git", "HEAD~1", "--summary", str(summary))
+                got[of] = (r.returncode, r.stdout, summary.read_text())
+            self.assertEqual(got[1][0], 1)
+            self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", got[1][1])
+            self.assertIn("broker/hint/hint.go:5 deleting the whole statement holding line 5 survives", got[1][1])
+            self.assertEqual(got[2], got[1])
+            self.assertEqual(got[3], got[1])
+            # Shards whose coverage runs recorded other target lines are refused, not joined.
+            forged = pathlib.Path(d) / "res-2" / "mutants-1" / "hint.json"
+            data = json.loads(forged.read_text())
+            data["targets"]["lines"]["hint.go"] = data["targets"]["lines"]["hint.go"][:-1]
+            forged.write_text(json.dumps(data))
+            r = self.mutgate(d, "verify", str(pathlib.Path(d) / "res-2"), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("records other target lines than", r.stderr)
+            self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+            # A shard asked for outside 0 <= I < K is refused before anything runs.
+            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
+                r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_a_shard_of_a_source_diff_mutates_only_its_own_lines(self):
+        # #4961: one unsharded job keeps gremlins on the base's own diff; a shard marks its lines.
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, TWO_TEST + "\n")  # the PR commit needs a change; this one is a blank line
+            pkg = pathlib.Path(d) / "broker" / "hint"
+            (pkg / "hint.go").write_text(TWO_SRC.replace("n > 10", "n >= 10").replace("n + 1", "n + 2")
+                                         .replace("n - 1", "n - 2"))
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qam", "src")
+            env = self.line_stub(d)
+            target = {"broker/hint/hint.go": {4, 7, 11}}
+            # A source diff's targets are its own lines, so the plan records none, and still writes the
+            # file the plan job uploads with if-no-files-found: error (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(plan.read_text(), "{}")
+            for of in (1, 2, 3):
+                (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                for i in range(of):
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / f"o{of}-{i}"),
+                                     "--shard", str(i), "--of", str(of), env=env)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertNotIn("targets", json.loads((pathlib.Path(d) / f"o{of}-{i}" / "hint.json").read_text()))
+                seen = [json.loads(row)["hint.go"] for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
+                self.assertEqual(seen, [sorted(mutgate.shard_lines(target, i, of)["broker/hint/hint.go"]) for i in range(of)])
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+
+    def test_shards_read_the_plans_one_coverage_run_so_they_agree(self):
+        # #4970: each shard of a test-only package measured its own coverage, a run could cover other
+        # lines (a timing branch), and verify refused the package: "the shards of clerk/inbox disagree".
+        # The plan measures it once and every shard reads that record (--targets), so they agree.
+        # Here the import change runs every test, and TestDown calls Up only while FLIP names a file.
+        flaky = (TWO_TEST.replace('import "testing"', 'import (\n\t"os"\n\t"testing"\n)')
+                 .replace('\tif Down(3) != 2 {', '\tif _, err := os.Stat(os.Getenv("FLIP")); err == nil {\n\t\tUp(20)\n\t}\n\tif Down(3) != 2 {')
+                 .replace("Up(1) != 2 || Up(20) != 10", "Down(3) != 2"))
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, flaky)
+            env = self.line_stub(d)
+            on, off = {"FLIP": str(pathlib.Path(d) / "tools")}, {"FLIP": str(pathlib.Path(d) / "absent")}
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan), env=off)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {"tests": None, "lines": {"hint.go": [10, 11, 12]}}})
+
+            def shards(res, flips, *extra):
+                for i, flip in enumerate(flips):
+                    out = pathlib.Path(d) / res / f"mutants-{i}"
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--shard", str(i),
+                                     "--of", str(len(flips)), *extra, env={**env, **flip})
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1",
+                                     env=flip)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return self.mutgate(d, "verify", str(pathlib.Path(d) / res), "--git", "HEAD~1")
+            # Each shard measuring its own coverage: the shards disagree, as on #4970.
+            r = shards("own", (off, on))
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("the shards of hint disagree", r.stderr)
+            # Reading the plan's record: the same flip, and the shards agree on the plan's lines.
+            r = shards("planned", (off, on), "--targets", str(plan))
+            self.assertNotIn("disagree", r.stderr)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            for i in (0, 1):
+                data = json.loads((pathlib.Path(d) / "planned" / f"mutants-{i}" / "hint.json").read_text())
+                self.assertEqual(data["targets"], {"tests": None, "lines": {"hint.go": [10, 11, 12]}})
+            # A plan that names no record for the package, or one verify would refuse, is refused before
+            # gremlins runs; the shard never falls back to a coverage run of its own.
+            for bad, want in (({}, "the plan names no target lines for broker/hint/"),
+                              ({"hint": {"tests": ["TestUp"], "lines": {"hint.go": [9]}}}, "the plan holds no record"),
+                              ({"hint": {"tests": None, "lines": {"../x.go": [1]}}}, "the plan records covered lines")):
+                with self.subTest(bad):
+                    forged = pathlib.Path(d) / "forged.json"
+                    forged.write_text(json.dumps(bad))
+                    (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"),
+                                     "--targets", str(forged), env=env)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(want, r.stderr)
+                    self.assertFalse((pathlib.Path(d) / "seen-lines").exists())
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"),
+                             "--targets", str(pathlib.Path(d) / "absent.json"), env=env)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no readable plan of target lines", r.stderr)
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+
+    def test_shard_count_follows_the_targets_not_a_constant(self):
+        lines = lambda n: {"broker/p/a.go": set(range(1, n + 1))}
+        self.assertEqual(mutgate.shard_count({}, []), 1)
+        self.assertEqual(mutgate.shard_count(lines(mutgate.LINES_PER_SHARD), [0] * mutgate.SITES_PER_SHARD), 1)
+        self.assertEqual(mutgate.shard_count(lines(mutgate.LINES_PER_SHARD + 1), []), 2)
+        self.assertEqual(mutgate.shard_count(lines(1), [0] * (2 * mutgate.SITES_PER_SHARD + 1)), 3)
+        # #4945's localui: 1048 target lines and about 0.35 deletion sites a line.
+        self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367), 5)
+        # The shards are disjoint and together are the targets, for any K.
+        t = {"broker/p/a.go": {1, 2, 5, 9}, "broker/p/b.go": {3, 4}}
+        for of in range(1, 9):
+            parts = [mutgate.shard_lines(t, i, of) for i in range(of)]
+            flat = [(p, n) for part in parts for p, ns in part.items() for n in ns]
+            self.assertEqual(sorted(flat), sorted((p, n) for p, ns in t.items() for n in ns))
+            self.assertEqual(len(flat), len(set(flat)))
+
     def test_a_change_outside_one_test_runs_every_test(self):
         # A helper, TestMain, an import or a deleted test is not one test's change: every test's
         # covered lines are the targets, which caps the set at the package's covered lines.
@@ -1441,6 +1798,26 @@ class TestOnly(unittest.TestCase):
             self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class Plan(unittest.TestCase):
+    def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
+        # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
+        from unittest import mock
+        import contextlib, io, types
+        for pkgs, fix in ((["a", "b", "c"], "split the PR so each part changes fewer tier-A or tier-B packages"),
+                          ([], "rerun the mutgate workflow")):
+            with self.subTest(pkgs), contextlib.ExitStack() as st:
+                for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
+                                    ("deletion_sites", lambda *a: ([], None)), ("shard_count", lambda t, s: 100)):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
+                self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
+                              err.getvalue())
 
 
 class Summary(unittest.TestCase):
@@ -1612,7 +1989,7 @@ class Workflow(unittest.TestCase):
         self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
         # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
         self.assertNotIn("base.sha", self.text)
-        for body in (claimed, job(self.text, "mutants")):
+        for body in (claimed, job(self.text, "plan"), job(self.text, "mutants")):
             self.assertIn('          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || '
                           '{ echo "::error::HEAD is not the merge of this PR\'s head"; exit 1; }\n', body)
             self.assertIn('echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"', body)
@@ -1620,11 +1997,28 @@ class Workflow(unittest.TestCase):
             self.assertLess(body.index("HEAD^1"), body.index('--git "$BASE"'))
         self.assertIn("fetch-depth: 0", claimed)
         mutants = job(self.text, "mutants")
-        # The package list comes from the claim, and an empty claim (a docs-only PR) runs no gremlins.
-        self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", mutants)
-        self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
-        self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"', mutants)
+        # An empty claim (a docs-only PR) runs no plan and no gremlins; otherwise the plan's shards
+        # are the matrix, one job for each shard of each package (#4961).
+        plan = job(self.text, "plan")
+        for body in (plan, mutants):
+            self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", body)
+        self.assertIn("    needs: claimed\n", plan)
+        self.assertIn("    needs: [claimed, plan]\n", mutants)
+        self.assertIn('shards=$(python3 -I tools/mutgate.py plan --git "$BASE" --targets-out "$RUNNER_TEMP/targets.json")',
+                      plan)
+        self.assertIn('echo "shards=$shards" >> "$GITHUB_OUTPUT"', plan)
+        self.assertIn("shards: ${{ steps.plan.outputs.shards }}", plan)
+        self.assertIn("include: ${{ fromJSON(needs.plan.outputs.shards) }}", mutants)
+        self.assertIn("fail-fast: false", mutants)
+        for env in ("PKG: ${{ matrix.pkg }}", "SHARD: ${{ matrix.shard }}", "OF: ${{ matrix.of }}"):
+            self.assertIn(env, mutants)
+        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"\n'
+                      '          --targets "$RUNNER_TEMP/plan/targets.json"\n', mutants)
+        # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
+        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
+        self.assertIn(name, mutants)
+        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
+                         .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
         self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
         self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
@@ -1639,25 +2033,45 @@ class Workflow(unittest.TestCase):
         script = re.split(r"\n      [-#] ", script, maxsplit=1)[0]
         script = "\n".join(l[10:] for l in script.split("\n"))
         cases = [
-            ("success", "[]", "skipped", 0),
-            ("success", '["kernel"]', "success", 0),
-            ("success", '["kernel"]', "failure", 1),
-            ("success", '["kernel"]', "skipped", 1),
-            ("success", "[]", "failure", 1),
-            ("failure", "", "skipped", 1),
+            ("success", "[]", "skipped", "skipped", 0),
+            ("success", '["kernel"]', "success", "success", 0),
+            ("success", '["kernel"]', "success", "failure", 1),
+            ("success", '["kernel"]', "success", "skipped", 1),
+            ("success", '["kernel"]', "failure", "skipped", 1),  # #4961: no plan, no shards
+            ("success", '["kernel"]', "skipped", "success", 1),
+            ("success", "[]", "skipped", "failure", 1),
+            ("success", "[]", "success", "skipped", 1),
+            ("failure", "", "skipped", "skipped", 1),
         ]
-        for claimed, pkgs, mutants, want in cases:
-            env = {"CLAIMED": claimed, "PACKAGES": pkgs, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
+        for claimed, pkgs, plan, mutants, want in cases:
+            env = {"CLAIMED": claimed, "PACKAGES": pkgs, "PLAN": plan, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
             r = subprocess.run(["sh", "-ec", script], env=env, capture_output=True, text=True)
-            self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, mutants, r.stdout, r.stderr))
+            self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, plan, mutants, r.stdout, r.stderr))
         self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
-        self.assertIn("needs: [claimed, mutants]", job(self.text, "mutgate"))
+        self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
 
-    def test_only_the_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
+    def test_only_the_plan_and_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
         # REV-CHK-mut-selftest (#4106): the PR's tests run in `mutants` and can write anything there,
-        # so that job ends in an upload and decides nothing.
+        # so that job ends in an upload and decides nothing. #4961: `plan` runs them too (a test-only
+        # diff's coverage) and ends in the matrix it outputs and the one record of a test-only package's
+        # covered lines that every shard reads (#4970); verify checks the shards whatever they say.
+        plan = job(self.text, "plan")
+        steps = plan.split("\n      - ")
+        self.assertTrue(steps[-2].startswith("name: Shards for each package"), plan)
+        self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
+        self.assertIn("name: mutgate-plan\n", steps[-1])
+        self.assertIn("path: ${{ runner.temp }}/targets.json\n", steps[-1])
+        self.assertIn("if-no-files-found: error", steps[-1])
+        self.assertNotIn("verify", plan)
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
+        # The shard reads the plan's record from outside the workspace, just before gremlins.
+        self.assertTrue(steps[-5].startswith("uses: actions/download-artifact@"), steps[-5])
+        self.assertIn("name: mutgate-plan\n", steps[-5])
+        self.assertTrue(steps[-5].endswith("path: ${{ runner.temp }}/plan"), steps[-5])
+        # The deciding job's download takes the shards' results only, never the plan's record.
+        self.assertIn("pattern: mutants-*\n", job(self.text, "mutgate"))
+        self.assertFalse(fnmatch.fnmatch("mutgate-plan", "mutants-*"))
         self.assertIn("Gremlins on the package", steps[-4])
         self.assertIn("Statement deletions on the package", steps[-3])
         self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])

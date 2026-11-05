@@ -119,10 +119,79 @@ allow broker/vm/overlay/overlay.go Put os.Mkdir a path in an unmounted layer who
 allow broker/vm/overlay/overlay.go copyObj os.Mkdir a name under directories this copy made itself (Copy refuses an existing dst; a Put path has checked parents)
 allow broker/vm/overlay/overlay.go copyObj os.Link prev is a file this copy just made and dst a new name under directories it made
 
-pending broker/kernel/proc #3940 the kernel side
-pending broker/cmd/agentos-unlock #3940 the kernel side
-pending broker/cmd/agentos-enroll #3940 the kernel side
-pending broker/clerk/seal #3940 the kernel side
+# The kernel side (#3940): kernel/proc, agentos-unlock, agentos-enroll and
+# clerk/seal. agentos-kernel runs as the kernel's uid, and every path it
+# names on the box is under /var/lib/agentos-kernel (tmpfiles.d and the
+# enroll unit: 0700, owned by that uid), so only that uid and root can write
+# there; its other paths are procfs and a backup target (below).
+# agentos-unlock and agentos-enroll run as root before any drop, on
+# root-only directories: /var/lib/agentos-store, /var/lib/agentos and
+# /run/agentos-setup (tmpfiles.d: 0700 root), /run/agentos-link-capture
+# (0700 root), /run/agentos-keeper (made here and checked as root's alone),
+# and /dev, which only root writes. clerk/seal's files are always the
+# store's: on the box only those two open or write one, in root's 0700
+# /var/lib/agentos-store; agentos-a8scan opens the store the owner names.
+# unlink(2), rename(2), link(2) and mkdir(2) follow no link at the final
+# name, and os.RemoveAll descends with O_NOFOLLOW. What these lines rest on,
+# and when to re-check them, is broker/kernel/proc/ASSUMPTIONS.md
+# REV-CHK-links-kernel-1.
+allow broker/kernel/proc/backup.go openBackups os.Mkdir the backup directory, -backup-dir /var/lib/agentos-kernel/backups, in the kernel uid's 0700 directory; privfile.Check refuses it next unless it is a directory of that uid's alone
+allow broker/kernel/proc/backup.go openBackups os.Link names os.Link as the snapshot's link function (no call here); see backups.snapItems
+allow broker/kernel/proc/backup.go backups.checkDir os.Stat a dir target's locator after EvalSymlinks resolved it, to refuse one in the kernel's own folders; a target is owner-chosen and may be written by other uids, and a swap after this check can only land fresh <id>.table.<n> or <id>.content names (ASSUMPTIONS MIG-4-recovery-e3-c)
+allow broker/kernel/proc/backup.go backups.dropSnaps os.ReadDir lists the backup directory, the kernel uid's 0700 /var/lib/agentos-kernel/backups
+allow broker/kernel/proc/backup.go backups.dropSnaps os.RemoveAll a snap-* directory a stop left in that backup directory, which only the kernel uid and root write
+allow broker/kernel/proc/backup.go Kernel.snap os.RemoveAll the snap-* directory snapItems just made in the kernel uid's 0700 backup directory
+allow broker/kernel/proc/backup.go backups.snapItems os.MkdirTemp a fresh snap-* directory in the kernel uid's 0700 backup directory; mkdir(2) at a fresh random name refuses a link there
+allow broker/kernel/proc/backup.go backups.snapItems os.Mkdir a store directory in that fresh snap-* directory, which only this process made
+allow broker/kernel/proc/backup.go Kernel.Backup os.RemoveAll the snapshot's snap-* directory in the kernel uid's 0700 backup directory
+allow broker/kernel/proc/backup.go Kernel.writeOne os.CreateTemp the content object's temporary in a dir target just resolved and checked (dirTarget.dir); O_CREAT|O_EXCL at a fresh random name refuses a link there, and a swap of the target after the check only lands a fresh name (ASSUMPTIONS MIG-4-recovery-e3-c)
+allow broker/kernel/proc/backup.go Kernel.writeOne os.Remove unlink(2) of the temporary CreateTemp just made; it removes a link at the name, never follows it
+allow broker/kernel/proc/backup.go Kernel.writeOne os.Link links that temporary to <id>.content in the same target; link(2) follows no link at its new path and refuses an existing name
+allow broker/kernel/proc/clerkkeys.go procCgroup os.Open /proc/<pid>/cgroup, served by the kernel; no uid plants a link in procfs
+allow broker/kernel/proc/content.go dropTemps os.ReadDir lists a store or key-table directory under the kernel uid's 0700 /var/lib/agentos-kernel, already checked by privfile.Check
+allow broker/kernel/proc/content.go dropTemps os.Remove unlink(2) of a torn write's temporary in that directory; it removes a link at the name, never follows it
+allow broker/kernel/proc/content.go FileContent.Delete os.Remove unlink(2) of an item in a store under the kernel uid's 0700 -content-dir; it removes a link at the name, never follows it
+allow broker/kernel/proc/content.go OpenContentStores os.Mkdir -content-dir /var/lib/agentos-kernel/content, in the kernel uid's 0700 directory; privfile.Check refuses it next unless it is a directory of that uid's alone
+allow broker/kernel/proc/content.go OpenContentStores os.ReadDir lists that content directory, just checked by privfile.Check
+allow broker/kernel/proc/content.go openFileContent os.Mkdir a store directory in that checked content directory; privfile.Check refuses it next unless it is the uid's alone
+allow broker/kernel/proc/keytable.go FileKeys.Delete os.Remove unlink(2) of a subject's key file in -keys-dir, the kernel uid's 0700 /var/lib/agentos-kernel/keys; it removes a link at the name, never follows it
+allow broker/kernel/proc/keytable.go FileKeys.List os.ReadDir lists that key directory, checked at open by privfile.Check
+allow broker/kernel/proc/keytable.go OpenFileKeys os.Mkdir -keys-dir in the kernel uid's 0700 /var/lib/agentos-kernel; privfile.Check refuses it next unless it is a directory of that uid's alone
+allow broker/kernel/proc/restore.go restoreSections os.ReadDir lists the content folder and its parent; no caller outside tests yet, and the restore row (#3186) must pass a content folder whose parent no other uid writes, as -content-dir's /var/lib/agentos-kernel is
+allow broker/kernel/proc/restore.go restoreSections os.RemoveAll an old .content-restore-* staging in that parent, under the O_NOFOLLOW flock privfile.CheckFile took
+allow broker/kernel/proc/restore.go restoreSections os.MkdirTemp a fresh staging in that parent; mkdir(2) at a fresh random name refuses a link there
+allow broker/kernel/proc/restore.go restoreSections os.Mkdir a store directory in that fresh staging, which only this call made
+allow broker/kernel/proc/restore.go restoreSections os.Remove rmdir(2) of the empty content folder; it removes a link at the name, never follows it
+allow broker/kernel/proc/restore.go restoreSections os.Rename the staging over the content folder, both in that parent; rename(2) replaces a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go unlock os.Remove unlink(2) of -recovery-request, /var/lib/agentos/recovery-request, in root's 0700 /var/lib/agentos
+allow broker/cmd/agentos-unlock/main.go writeClerkAnchors os.Remove unlink(2) of -clerk-anchors, /run/agentos-keeper/anchors, under root-owned /run, which only root writes; it removes a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go ownDir os.Mkdir the clerk anchors' /run/agentos-keeper in root-owned /run, or -checker-seed's directory; mkdir(2) follows no link, and the Lstat next refuses a link, another uid's directory or one open to others (errNotMine)
+allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Remove unlink(2) of the anchors file, or of the temporary CreateTemp made, in that checked directory of root's alone
+allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.CreateTemp in that checked directory of root's alone; O_CREAT|O_EXCL at a fresh random name refuses a link there
+allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Rename the temporary over the anchors file in that checked directory; rename(2) replaces a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go writeCheckerSeed os.Remove unlink(2) of -checker-seed, only after putCheckerSeed's Lstat showed its directory is root's alone (a failure before that, errNotMine, removes nothing; no unit passes the flag today); it removes a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go putCheckerSeed os.Remove unlink(2) of the seed file in that checked 0700 directory of root's alone
+allow broker/cmd/agentos-unlock/main.go kernelTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes (a software TPM's socket only in tests)
+allow broker/cmd/agentos-unlock/main.go kernelTPM os.OpenFile that TPM character device in devtmpfs, which only root writes
+allow broker/cmd/agentos-unlock/main.go openTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes
+allow broker/cmd/agentos-unlock/main.go noCaps os.ReadFile /proc/self/status, served by the kernel; /proc/self is procfs's own link and no uid plants one in procfs
+allow broker/cmd/agentos-enroll/codes.go codes os.Remove unlink(2) of the staged code seed in -setup-dir, /run/agentos-setup (tmpfiles.d: 0700 root); it removes a link at the name, never follows it
+allow broker/cmd/agentos-enroll/main.go deleteStore os.Remove unlink(2) of the store in -state, root's 0700 /var/lib/agentos-store
+allow broker/cmd/agentos-enroll/main.go openTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes
+allow broker/cmd/agentos-enroll/main.go enroll os.Remove unlink(2) of the staged store in root's 0700 /var/lib/agentos-store
+allow broker/cmd/agentos-enroll/main.go config.commitAndDrop os.Remove unlink(2) of -first-edge in root's 0700 /run/agentos-link-capture, and of -code-seed-file, which no unit passes today (its staging is /run/agentos-setup, root's 0700); it removes a link at the name, never follows it
+allow broker/cmd/agentos-enroll/main.go buildTime os.Stat this binary's own path, os.Executable, in the read-only verity-checked /usr; it only reads a modification time
+allow broker/cmd/agentos-enroll/main.go commit os.Rename the staged store over the store, both in root's 0700 /var/lib/agentos-store; rename(2) replaces a link at the name, never follows it
+allow broker/cmd/agentos-enroll/main.go commit os.Open root's 0700 /var/lib/agentos-store, to sync it
+allow broker/clerk/seal/seal.go readFile os.Open the store file, in root's 0700 /var/lib/agentos-store on the box (agentos-unlock, agentos-enroll), or the store the owner names to agentos-a8scan
+allow broker/clerk/seal/seal.go writeAtomic os.Rename the temporary over the store, both in root's 0700 /var/lib/agentos-store; rename(2) replaces a link at the name, never follows it
+allow broker/clerk/seal/seal.go writeAtomic os.Remove unlink(2) of the temporary writeTemp made in that directory
+allow broker/clerk/seal/seal.go writeNew os.Remove unlink(2) of the temporary writeTemp made in root's 0700 /var/lib/agentos-store
+allow broker/clerk/seal/seal.go writeNew os.Link links the temporary to the new store's name; link(2) follows no link at its new path and refuses an existing name
+allow broker/clerk/seal/seal.go writeTemp os.CreateTemp beside the store in root's 0700 /var/lib/agentos-store; O_CREAT|O_EXCL at a fresh random name refuses a link there
+allow broker/clerk/seal/seal.go writeTemp os.Remove unlink(2) of the temporary this call made
+allow broker/clerk/seal/seal.go syncDir os.Open the store's directory, root's 0700 /var/lib/agentos-store, to sync it
+
 pending broker/cmd/agentosd #3941 agentosd
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
