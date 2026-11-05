@@ -437,13 +437,13 @@ func TestTheApprovalsHandlerGuardsItsOwnPathOwnerAndBody(t *testing.T) {
 	if w := a.post("/approvals/", url.Values{"pad": {strings.Repeat("p", 17<<10)}}); w.Code != 400 || w.Body.String() != "Bad request\n" {
 		t.Fatalf("an oversized answer: %d %q", w.Code, w.Body.String())
 	}
-	// An approval code too long for agentosd's answer is refused here.
+	// A code too long for agentosd's answer is refused here, even on a deny.
 	id, _ := a.ch.RequestLocal(pageItem("big"), 0)
-	if w := a.post("/approvals/", answer(a.form(id), "approve", strings.Repeat("7", localapi.MaxCode+1))); !strings.Contains(html.UnescapeString(w.Body.String()), stalePage) {
-		t.Fatalf("an overlong approval code: %s", w.Body.String())
+	if w := a.post("/approvals/", answer(a.form(id), "deny", strings.Repeat("7", localapi.MaxCode+1))); !strings.Contains(html.UnescapeString(w.Body.String()), stalePage) {
+		t.Fatalf("an overlong code: %s", w.Body.String())
 	}
 	if d := a.decided(); len(d) != 0 {
-		t.Fatalf("an overlong approval code reached the channel: %+v", d)
+		t.Fatalf("an overlong code reached the channel: %+v", d)
 	}
 	redirect := func(req *http.Request, to string) string {
 		w := httptest.NewRecorder()
