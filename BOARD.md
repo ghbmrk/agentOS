@@ -322,7 +322,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-sizing | NET-2-cap-sizing: each destination's byte cap is sized at signing from its declaration (CLK-14), shown on the confirm screen (D-248) | #4376, #4557 | queued (release; tier A) |
 | ENF-cap-gro | ENF-cap-gro: the core's and the edge's ports count every segment's header (GRO off) (NET-2 Byte caps) | #4557 | queued (release; tier A) |
 | ENF-shared-nd | ENF-shared-nd: the enforcer's neighbour entries on a shared segment follow the address's hold | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
-| IMG-diff-oracle-time | IMG-diff-oracle-time: DiffOracleTest runs in under 60 seconds as a whole class. | — | building (release; tier C; size S; from #4674 reviews) |
 | ENF-shared-quota | ENF-shared-quota: one host cannot fill its shared segment's holds or records | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
 | ENF-shared-dos | ENF-shared-dos: one host cannot deny its shared segment's others through address holds or host records | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
 | ENF-shared-refresh | ENF-shared-refresh: a shared host's record lasts as long as conntrack keeps its connection | #4480 (ENF-shared-src) | queued(tier A; lane primary) |
@@ -427,11 +426,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-graph-brake | TN-graph `bounded` accepts a held brake only when turning it off is itself delayed or the witness watches the brake (KRN-11; #3193 Security 4, Potency 2). | TN-graph (#2857) | queued (later; tier A) |
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
 | EDGE-link-core-c2c later findings | EDGE-link-core-c2c later findings: a .link allowlist in the tree checks, the edge image's own link naming and address, ARP on the link, a stale link-set element, a long comment (later findings from the #3834 reviews). | EDGE-link-core-c2c #3459 | queued (later; tier A; one session) |
-| REV-CHK-links-kernel | REV-CHK-links-kernel: root-side path operations in the kernel side go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
+| REV-CHK-links-kernel | REV-CHK-links-kernel: root-side path operations in the kernel side go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
 | REV-CHK-links-agentosd | REV-CHK-links-agentosd: root-side path operations in `agentosd` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
-| REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | queued |
-| REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | queued |
-| VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | queued |
+| REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | building |
+| REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | building |
+| VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | building |
 | VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | building |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
@@ -439,9 +438,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b3s | security suite over the kernel socket: seed, read, drop, keep, notice (brief briefs/UPD-5r-b.md, b3) | UPD-5r-b3 (#4045), #4108 | queued (A; trusted core: kernel/proc) |
 | MIG-4-recovery-r4h | MIG-4-recovery-r4h: the localui r4b-3 assumption row says what r4c changed | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
 | REV-CHK-save-hosts | The host binaries' saves pass a test-set stop to `privfile.WriteAtomic` (broker/cmd/agentos-camera, broker/cmd/agentos-clerk-model, broker/cmd/agentos-enroll, broker/cmd/agentos-homekit, broker/cmd/agentos-unlock, broker/update); removes their REV-CHK-save pending lines. | #3903 | queued |
-| REV-CHK-save-owner | The owner side's saves (sub B lane) pass a test-set stop to `privfile.WriteAtomic` (broker/owner, broker/question, broker/localsrv, broker/cmd/agentosd); removes their REV-CHK-save pending lines. | #3903 | queued |
-| REV-CHK-links-e2e-fifo | REV-CHK-links-e2e-fifo: the e2e harness's no-follow reads refuse a FIFO instead of blocking | #4194 | queued |
-| REV-CHK-links-update-l2 | REV-CHK-links-update-l2: safeDir test separates link and write refusals; non-root owner case; release verify temp dir | #4199 | queued |
+| REV-CHK-save-owner | The owner side's saves (sub B lane) pass a test-set stop to `privfile.WriteAtomic` (broker/owner, broker/question, broker/localsrv, broker/cmd/agentosd); removes their REV-CHK-save pending lines. | #3903 | building |
+| REV-CHK-links-e2e-fifo | REV-CHK-links-e2e-fifo: the e2e harness's no-follow reads refuse a FIFO instead of blocking | #4194 | building |
+| REV-CHK-links-update-l2 | REV-CHK-links-update-l2: safeDir test separates link and write refusals; non-root owner case; release verify temp dir | #4199 | building |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
 | GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
@@ -454,19 +453,25 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-ns3 | REV-CHK-links-ns3: what a root unit's EnvironmentFile= holds | #4677 build | queued (release; tier A; kernel lane) |
 | REV-CHK-links-ns4 | REV-CHK-links-ns4: the rest of the root-side lint's reach (mount/swap, manager env, symlinked drop-ins, credstore, socket paths, TTYPath) | #4698 reviews | queued (release; tier A; kernel lane) |
 | UPD-5r-b7f-step-session-d | UPD-5r-b7f-step-session-d: pin the ASSUMPTIONS row's kernel step-check list to the code (PLN-4, EVL-3) | #4734 | queued (release; tier A; from #4734 Security review) |
-| CI-diff-tests-built-image | CI-diff-tests-built-image: SystemdDiffTest and KmodDiffTest diff against the built image's own systemd and kmod, not the runner's. Release; from #4727. | #4727, #4767 | building (release) |
 | UNIT-RULES-release-2 | UNIT-RULES-release-2: offline_systemd unshare -u -i; MERGED links must resolve to /usr/<name>; the test gaps from #4779 round-2 surviving mutants; a no-fragment mount drop-in's Environment=. Release; from #4779. | #4779, #4767 | queued (release) |
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | LOCALUI-named-port-watch | LOCALUI-named-port-watch: a page whose port 1 is named by -iface also runs a port-1 watcher. From #4881. | #4881 | queued (tier A; sub B directories) |
 | DECOY-match-wrap-8 | DECOY-match-wrap-8: TestBreakStreamCost times the \/ x512 near-copy, and a test pins the encodings carry | #4871 | queued (release; tier A; size S; from #4871 build) |
 | CI-hostcheck-image-tools | CI-hostcheck-image-tools: hostcheck runs qemu, swtpm and OVMF from pinned sources, not the runner's packages. Release; from #4776. | #4776 | queued (release) |
-| REV-CHK-links-update-r2 | REV-CHK-links-update-r2: drive source refuses non-regular files, names a link refusal, keeps agentos-release portable | #4889 | queued |
+| REV-CHK-links-update-r2 | REV-CHK-links-update-r2: drive source refuses non-regular files, names a link refusal, keeps agentos-release portable | #4889 | building |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
 | CH21-split-narrow-doc | CH21-split-narrow-doc: record Security's space-seam ruling and the accepted split misses (CH-21, HLD-5) | CH21-split-narrow (#4896) | queued (release; tier A; from #4896 Security) |
 | VULN-initrd-drop | VULN-initrd-drop: the initrd purges the packages the main tree purges (dash, tar, perl-base, sqlite3 and the rest), and their `image/initrd` records go | #4000 | queued |
-| ENF-c-f1-log | ENF-c-f1-log: a failure inside take after the passkey is saved leaves a trace | #4893 | queued |
-| ENF-c-f2-ux | ENF-c-f2-ux: cut-short reset and failed-save wording, page.js test harness | #4893 | queued |
+| ENF-c-f1-log | ENF-c-f1-log: a failure inside take after the passkey is saved leaves a trace | #4893 | building |
+| ENF-c-f2-ux | ENF-c-f2-ux: cut-short reset and failed-save wording, page.js test harness | #4893 | building |
+| REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
+| REV-CHK-save-owner-f1 | Owner-side saves (owner commit, question persist, localsrv setup record) keep memory equal to the file when only the directory sync failed (privfile.ErrUnsynced). | #4193 | queued |
+| ENF-c-f3 | ENF-c-f3: recovery-code wording after the wait, rotating an unspent code, restart-proof retry card | #4967 | queued |
+| REV-CHK-links-vm-r2 | REV-CHK-links-vm-r2: pin vm.Open's second state-path check with a race seam | #4968 | queued |
+| REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
+| REV-CHK-update-2 | REV-CHK-update-2: store refusals all wrap ErrUnsafeStore; MkdirAll and checkChain errors carry store context; verify names a bad -root | #4972 | queued |
+| REV-CHK-links-kernel-f1 | REV-CHK-links-kernel-f1: agentos-unlock `ownDir` names its real cause and tests its uid and dir-type branches | #4966 | queued |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -513,4 +518,8 @@ issue #4949: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4961: body has no board-row block
+issue #4980: board-row block: Expecting value: line 1 column 1 (char 0)
+issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4983: body has no board-row block
+issue #4984: board-row block: Expecting value: line 1 column 1 (char 0)
 ```
