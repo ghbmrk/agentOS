@@ -241,6 +241,7 @@ func simulate(t *testing.T, seed uint64, span time.Duration, bypass bool) (*rig,
 	rng := rand.New(rand.NewPCG(seed, 0x4373))
 	k := &simKernel{t: t, r: r, rng: rng, base: r.now, drift: (rng.Float64() - 0.5) / 100, sent: map[wire.RateKind]int{}, bypass: bypass}
 	k.gate = chancheck.New(k.kclock(0))
+	kinds := wire.RateKinds()[1:] // every kind but the hello
 	var now time.Duration
 	for now < span {
 		stall := rng.IntN(200) == 0
@@ -257,7 +258,7 @@ func simulate(t *testing.T, seed uint64, span time.Duration, bypass bool) (*rig,
 			k.try(wire.RateHello, now, stall)
 		}
 		for range 4 {
-			k.try(wire.RateKinds[1+rng.IntN(len(wire.RateKinds)-1)], now, stall)
+			k.try(kinds[rng.IntN(len(kinds))], now, stall)
 		}
 		k.deliver(now, stall)
 		if r.cut.trips() > 0 {
@@ -274,8 +275,9 @@ func simulate(t *testing.T, seed uint64, span time.Duration, bypass bool) (*rig,
 // TestHonestKernelNeverTrips (D-255): every message the gate passes, sent
 // as soon as it passes, under delays, stalls, dropped connections whose
 // frames arrive late, restarts and clock drift, never trips the real
-// channel. The kernel still reaches every kind's rate, so the check is not
-// passing by sending nothing. Revert mutant: chancheck's Lost spending a
+// channel. The kernel still sends every kind, so the check is not passing
+// by refusing a kind: at least one message of each, and for a kind whose
+// rate refills often enough in the span, a share of its sustained pace. Revert mutant: chancheck's Lost spending a
 // lost request at the loss instead of at the next hello's answer (trips at
 // seed 0, #4509).
 func TestHonestKernelNeverTrips(t *testing.T) {
@@ -289,11 +291,13 @@ func TestHonestKernelNeverTrips(t *testing.T) {
 		if n := r.cut.trips(); n != 0 {
 			t.Fatalf("seed %d: the honest kernel tripped the enforcer %d times: %v", seed, n, r.cut.reasons)
 		}
-		for _, kind := range wire.RateKinds[1:] {
+		for _, kind := range wire.RateKinds()[1:] {
 			l := wire.Rate(kind)
 			// A share of the rate's sustained pace: each attempt waits a
-			// round trip and a step, and connections keep dropping.
-			if want := int(span/l.Every) / 32; sent[kind] < want {
+			// round trip and a step, and connections keep dropping. At
+			// least one, so a gate that refuses a slow kind (an announce
+			// refills once in ten minutes) still fails here.
+			if want := max(1, int(span/l.Every)/32); sent[kind] < want {
 				t.Errorf("seed %d: kind %d sent %d, want at least %d", seed, kind, sent[kind], want)
 			}
 		}

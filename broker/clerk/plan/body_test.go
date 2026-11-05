@@ -696,6 +696,10 @@ func variants(v plan.Value) (any, []variant) {
 		}
 		alts = append(alts, variant{"not JSON", "{", false}, variant{"trailing data", text(in) + " {}", false},
 			variant{"over its cap", text(in) + strings.Repeat(" ", v.Max), false}, variant{"not text", in, false})
+	case plan.KindDrop:
+		// Taken in any shape, and dropped (TestPlanTurnMetadataSendsNoWorkspaces).
+		good = map[string]any{"k": "v"}
+		return good, []variant{{"text", "v", true}, {"a number", 1, true}, {"null", nil, true}}
 	}
 	if v.Null {
 		alts = append(alts, variant{"null", nil, true})
@@ -752,9 +756,14 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 	signIn(t, p, "signin")
 	g, _ := p.Guest("g")
 	ph := g.Tokens["access_token"]
-	// Each key is 1365 raw U+2028, 4095 bytes, within the 4096-byte key cap.
-	k := strings.Repeat("\u2028", 1365)
-	blob := `{"workspaces":{"a` + k + `":{},"b` + k + `":{},"c` + k + `":{}}}`
+	// Each key is 42 raw U+2028, 126 bytes, within the 128-byte key cap;
+	// 100 of them fit the cap raw and pass it escaped.
+	k := strings.Repeat("\u2028", 42)
+	var ns []string
+	for i := 0; i < 100; i++ {
+		ns = append(ns, `"`+string(rune('0'+i/10))+string(rune('0'+i%10))+k+`":{}`)
+	}
+	blob := `{"tool_namespaces_info":{` + strings.Join(ns, ",") + `}}`
 	if len(blob) > 16<<10 {
 		t.Fatalf("blob of %d bytes", len(blob))
 	}
@@ -766,6 +775,49 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 	}
 	if f.hits() != before {
 		t.Fatal("sent")
+	}
+}
+
+// The provider never sees the guest's workspaces: their paths, git remote
+// URLs and latest commit can name a private project, and a turn needs none
+// of them (#4632). The clerk drops the key from the blob it sends, whatever
+// the key holds, and keeps the rest. CLI 0.162.1 itself omits the key when
+// it finds no git repository (responses_metadata.rs non_empty_workspaces),
+// so the provider already takes a blob without it.
+func TestPlanTurnMetadataSendsNoWorkspaces(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	ws := `{"/home/guest/secret-project":{"associated_remote_urls":{"origin":"https://git.example/secret-project.git"},` +
+		`"latest_git_commit_hash":"0123456789abcdef0123456789abcdef01234567","has_changes":true}}`
+	for _, blob := range []string{
+		`{"request_kind":"turn","workspaces":` + ws + `}`,
+		`{"request_kind":"turn","workspaces":{}}`,
+		`{"request_kind":"turn","workspaces":"/home/guest/secret-project"}`,
+		`{"request_kind":"turn","workspaces":null}`,
+	} {
+		m := capture(t)
+		m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if d != "" {
+			t.Fatalf("%s: %s", blob, d)
+		}
+		read(t, resp)
+		_, sent := f.last()
+		if strings.Contains(sent, "secret-project") || strings.Contains(sent, "0123456789abcdef") || strings.Contains(sent, "workspaces") {
+			t.Errorf("%s: sent %s", blob, sent)
+		}
+		var got struct {
+			Meta map[string]string `json:"client_metadata"`
+		}
+		if err := json.Unmarshal([]byte(sent), &got); err != nil {
+			t.Fatal(err)
+		}
+		if b := got.Meta["x-codex-turn-metadata"]; b != `{"request_kind":"turn"}` {
+			t.Errorf("%s: sent blob %s", blob, b)
+		}
 	}
 }
 

@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening), or that
+enables a unit outside the enforcer's preset (only the services it needs). mkosi runs this with the
+tree in $BUILDROOT; each refusal is a line of the build log. The running box checks the same
+(agentos-enforcer/health); this catches it before an image exists."""
+import os
+import pathlib
+import re
+import sys
+
+# Packages that bring a Wi-Fi client, access point, regulatory database or radio firmware.
+WIFI_PACKAGES = re.compile(r"(wpasupplicant|hostapd|iw|iwd|wireless-regdb|wireless-tools|network-manager|firmware-.*)")
+# modprobe.d must carry these exact lines: the modules then never load, whatever asks.
+BLOCKS = ("install cfg80211 /bin/false", "install mac80211 /bin/false",
+          "install usb-storage /bin/false", "install uas /bin/false")
+# Units the preset enables (usr/lib/systemd/system-preset/50-enforcer.preset), and the .wants links
+# systemd and udev ship statically. Anything else in a .wants or .requires directory is refused.
+WANTS_DIRS = ("etc/systemd/system",)
+
+
+def installed(root):
+    st = (root / "var/lib/dpkg/status").read_text()
+    return [m.group(1) for m in re.finditer(r"^Package: (\S+)\n(?:.+\n)*?Status: install ok installed$", st, re.M)]
+
+
+def preset_enabled(root):
+    out = set()
+    for ln in (root / "usr/lib/systemd/system-preset/50-enforcer.preset").read_text().splitlines():
+        w = ln.split()
+        if len(w) >= 2 and w[0] == "enable":
+            out.add(w[1])
+    return out
+
+
+def inert(root, f):
+    """True when f, inside root, holds only blank lines and comments."""
+    try:
+        real = f.resolve(strict=True)
+        real.relative_to(root.resolve())
+        text = real.read_text()
+    except (OSError, ValueError):
+        return False
+    return all(not ln.strip() or ln.lstrip().startswith(("#", ";")) for ln in text.splitlines())
+
+
+def violations(root):
+    root = pathlib.Path(root)
+    out = ["package %s could turn Wi-Fi on" % p for p in installed(root) if WIFI_PACKAGES.fullmatch(p)]
+    lines = set()
+    for f in sorted((root / "usr/lib/modprobe.d").glob("*.conf")):
+        lines |= {ln.strip() for ln in f.read_text().splitlines()}
+    out += ["modprobe.d lacks '%s'" % b for b in BLOCKS if b not in lines]
+    # No other module configuration. Debian ships etc/modules-load.d/modules.conf as a link to a
+    # comment-only etc/modules, so a file counts only by its lines that are not blank or comments;
+    # a link that leaves the tree or dangles is refused.
+    for d in (root / "etc/modprobe.d", root / "etc/modules-load.d", root / "usr/lib/modules-load.d"):
+        if d.is_dir():
+            out += ["%s holds %s" % (d.relative_to(root), f.name) for f in sorted(d.iterdir())
+                    if f.name.endswith(".conf") and not inert(root, f)]
+    enabled = preset_enabled(root)
+    for base in WANTS_DIRS:
+        for w in sorted((root / base).glob("*.wants")) + sorted((root / base).glob("*.requires")):
+            for u in sorted(w.iterdir()):
+                if u.name not in enabled:
+                    out.append("%s/%s is enabled but not in the enforcer preset" % (w.relative_to(root), u.name))
+    return out
+
+
+if __name__ == "__main__":
+    bad = violations(os.environ["BUILDROOT"])
+    for b in bad:
+        print("mkosi.finalize: %s" % b)
+    sys.exit(1 if bad else 0)

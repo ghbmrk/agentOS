@@ -1,0 +1,7 @@
+# Only the services the enforcer needs (NET-2 Hardening). Everything else Debian's packages would
+# enable is disabled; mkosi.finalize refuses any other enabled unit. Later slices add the firewall,
+# page, radios, DNS and DHCP here (ENF-m-b, ENF-t).
+enable enforcer-health.service
+enable enforcer-boot-report.service
+enable agentos-enforcer.service
+disable *

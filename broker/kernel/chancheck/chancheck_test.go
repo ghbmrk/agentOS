@@ -103,7 +103,7 @@ func TestBytesAreTheEnforcersFrame(t *testing.T) {
 // more passes, and not before. Revert mutants: the Has check; Answered's
 // Spend.
 func TestOverRateNeverPasses(t *testing.T) {
-	for _, k := range wire.RateKinds[1:] {
+	for _, k := range wire.RateKinds()[1:] {
 		g, now := opened(t)
 		l := wire.Rate(k)
 		m := func(id uint64) wire.Msg {

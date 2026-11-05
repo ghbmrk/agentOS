@@ -1524,8 +1524,8 @@ FULL_PRIVILEGE_EXEMPT = ("agentos-egress.service",)
 # closes its ports in the inbound firewall as root, and so does the edge link's for its port
 # (EDGE-link-core c2c). None opens a device or reads the keeper's state.
 FULL_PRIVILEGE_COMMANDS = (
-    ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-localui -admit-port1 -iface "
-     "${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1"),
+    ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-localui -admit-port1 "
+     "-port1-file /run/agentos-localui/port1"),
     ("agentos-localui.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound page"),
     ("agentos-link.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet "
      "agentos_inbound link { \"agentos-link\" }'"),

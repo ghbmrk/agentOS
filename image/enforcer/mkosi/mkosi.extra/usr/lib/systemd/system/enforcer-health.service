@@ -1,0 +1,25 @@
+[Unit]
+Description=agentOS enforcer boot self-check
+Documentation=file:/usr/lib/agentos-enforcer/health
+Before=boot-complete.target
+After=agentos-enforcer.service
+# A failure (or a hang past the timeout) reboots into the next try, then the previous release.
+OnFailure=enforcer-fallback.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=5min
+ExecStart=/usr/lib/agentos-enforcer/health
+StandardOutput=journal+console
+NoExecPaths=/
+ExecPaths=/usr
+DevicePolicy=closed
+DeviceAllow=block-* r
+DeviceAllow=/dev/mapper/control rw
+
+[Install]
+RequiredBy=boot-complete.target
+# Also on a boot of an entry that is not counted (a blessed release), where the boot-counting
+# generator does not pull boot-complete.target in: the self-check runs and reports on every boot.
+WantedBy=multi-user.target

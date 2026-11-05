@@ -174,6 +174,46 @@ func TestDroppedTextStillOnPage(t *testing.T) {
 	}
 }
 
+// TestFactoryResetTexts (NET-2 Texts and calls, NET-2 Hardening, NET-4;
+// #4292): a factory reset is a text that sends the owner to the page with
+// no "if it was not you", since either answer needs the owner there; a
+// text the core refuses still leaves it open on the page and in the log
+// across a restart, offered again when the core is back; and it never
+// lights the bulb (D-254). Its number follows Trip's, so journalled kinds
+// keep their meaning. Catches a reset by whoever opened the case going
+// unseen until the next enrolment.
+func TestFactoryResetTexts(t *testing.T) {
+	if FactoryReset != Trip+1 {
+		t.Fatalf("FactoryReset is %d, want %d: journalled kinds would change meaning", FactoryReset, Trip+1)
+	}
+	if d, ok := FactoryReset.Delivery(); !ok || d != Text {
+		t.Fatalf("delivery %d %v", d, ok)
+	}
+	w, err := Words(FactoryReset, "")
+	if err != nil || !strings.Contains(w, "enforcer's page at home") || !strings.Contains(w, "factory reset") ||
+		strings.Contains(strings.ToLower(w), "not you") {
+		t.Fatalf("words %q %v", w, err)
+	}
+	j := &journal{}
+	r := newRig(t, j)
+	r.core.refuse = true
+	rec, err := r.a.Raise(FactoryReset, "")
+	if err != nil || !rec.Open || rec.Sent {
+		t.Fatalf("raised %+v %v", rec, err)
+	}
+	if r.bulb.now() != Off {
+		t.Fatal("a factory reset lit the bulb")
+	}
+	r2 := newRigCore(t, j, &core{})
+	st := r2.a.Status()
+	if len(st.Open) != 1 || st.Open[0].Kind != FactoryReset || st.Colour != Off {
+		t.Fatalf("after a restart: %+v", st)
+	}
+	if got := r2.core.got; len(got) != 1 || got[0].Kind != wire.AlertText || got[0].Text != w {
+		t.Fatalf("not offered again when the core came back: %+v", got)
+	}
+}
+
 // TestRoutineUnlockLoggedNotTexted (NET-2 Texts and calls): a routine
 // unlock or lock is logged and nothing else: no text, no call, no open
 // alert, no change of light; and a burst of one kind on one device costs
@@ -261,7 +301,7 @@ func TestWordsFixed(t *testing.T) {
 }
 
 // TestOnlyTripsLight (NET-2 Texts and calls, KRN-12, D-254): an
-// unusual-time unlock, a recovery-code use, an enrolment, a paused
+// unusual-time unlock, a recovery-code use, an enrolment, a factory reset, a paused
 // channel, a pending recovery and a silent core each leave the light off
 // and show on the page; a trip at the enforcer, from any box or device,
 // turns it red until its cut lifts or the owner resolves it on the page.
@@ -278,7 +318,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	for _, e := range []struct {
 		k   Kind
 		dev string
-	}{{UnusualUnlock, "front-door"}, {UnusualDisarm, "hall"}, {RecoveryCodeUsed, ""}, {Enrolment, ""},
+	}{{UnusualUnlock, "front-door"}, {UnusualDisarm, "hall"}, {RecoveryCodeUsed, ""}, {Enrolment, ""}, {FactoryReset, ""},
 		{SafetyOff, "boiler"}, {SafetyShut, "main-valve"}, {HeadFork, ""},
 		{AlarmTriggered, "hall"}, {DoorForced, "back-door"}, {FailedUnlocks, "front-door"}} {
 		if _, err := r.a.Raise(e.k, e.dev); err != nil {
@@ -293,7 +333,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	r.a.Core(false)
 	off("core silent")
 	st := r.a.Status()
-	if len(st.Open) != 11 || !st.Recovery || !st.CoreDown {
+	if len(st.Open) != 12 || !st.Recovery || !st.CoreDown {
 		t.Fatalf("not on the page: %d open, recovery %v, core down %v", len(st.Open), st.Recovery, st.CoreDown)
 	}
 	r.a.Core(true)
@@ -362,7 +402,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	if err := r.a.Resolve(p[i].ID); !errors.Is(err, ErrResolved) {
 		t.Fatalf("resolving a pause without resuming: %v", err)
 	}
-	if err := r.a.Resumed(); err != nil || len(r.a.Status().Open) != 10 {
+	if err := r.a.Resumed(); err != nil || len(r.a.Status().Open) != 11 {
 		t.Fatalf("resumed: %v %d", err, len(r.a.Status().Open))
 	}
 }

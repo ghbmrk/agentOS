@@ -1498,12 +1498,13 @@ class ConfigTest(unittest.TestCase):
                 d = configparser.ConfigParser(interpolation=None)
                 d.read_string(base64.b64decode(creds["systemd.unit-dropin." + unit]).decode())
                 cmd = d["Service"]["ExecStartPre"]
-                self.assertTrue(cmd.startswith("-bash -c '") and cmd.endswith("'"), cmd)
+                # #4821: an absolute program, as the built-tree unit lint requires of every line of ours.
+                self.assertTrue(cmd.startswith("-/usr/bin/bash -c '") and cmd.endswith("'"), cmd)
                 with tempfile.TemporaryDirectory() as t:
                     t = pathlib.Path(t)
                     log, fallback = t / "log", t / "fallback"
                     stub(t, "systemctl", 'echo "systemctl $*" >>"%s"' % log)
-                    script = cmd[len("-bash -c '"):-1].replace("/usr/lib/agentos/fallback", str(fallback))
+                    script = cmd[len("-/usr/bin/bash -c '"):-1].replace("/usr/lib/agentos/fallback", str(fallback))
                     env = dict(os.environ, PATH="%s:%s" % (t, os.environ["PATH"]))
                     subprocess.run(["bash", "-c", script], env=env, check=True)  # initrd: no fallback
                     self.assertEqual(log.read_text(), "systemctl reboot\n")

@@ -33,6 +33,10 @@ run      govulncheck on each Go target of assurance/vulncheck.json, an OSV scan 
              any mark the bundle lacks), or a lookalike: a file whose matching literals are
              another package's code (failing once they match nothing); an entry fails once no
              lockfile installs its holder at the version it names.
+           - Pruned: files the guest image build deletes (the config's "pruned", D-308) are
+             not in the shipped image, so the inlined scan does not read them; the build
+             (guest/openclaw/prune.js) deletes exactly that list or fails, and an entry that
+             matches no file in its holder's tarball fails the scan.
          A record names the vulnerability (its ID or any alias), the package and version it
          accepts (a Debian image record names only its source package), the issue that records
          why it is accepted, and the reason; a record accepts no other package or version. With --check-issues each cited issue must be an open
@@ -47,6 +51,10 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          status file must list exactly the packages of the mkosi manifest in DIR. Any
          vulnerability fails. Only records whose where is "image" apply here (`run` ignores
          them); each names its source package, and accepts only an advisory with no Debian fix.
+reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
+         closing a cited issue withdraws its records' acceptance and fails every scan that
+         applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
+         `acceptance` workflow runs it on each issue close; an uncited issue is left closed.
 control  The same scans against tests/fixtures/vulncheck with planted synthetic databases,
          offline: every planted vulnerability must fail, the unreachable standard-library one
          must not, and the fixture's acceptance records must clear the rest. The workflows run
@@ -63,6 +71,7 @@ be hidden by one.
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
   vulncheck.py image DIR [--config F] [--report F] [--check-issues]
+  vulncheck.py reopen ISSUE [--config F]
   vulncheck.py control
 Exit 0 pass, 1 unaccepted findings or a failed check, 2 a scanner or usage error.
 """
@@ -94,6 +103,10 @@ OSV_OK = (0, 1)
 RECORD_KEYS = {"id", "issue", "why", "where", "package", "version"}
 INLINED_KEYS = {"holder", "copy", "files", "why"}
 INLINED_BUNDLE_KEYS = {"holder", "bundle", "files", "why"}
+PRUNED_KEYS = {"where", "holder", "path", "why"}
+# The lockfiles whose guest build may prune installed files (D-308). OpenClaw only: a plan CLI
+# guest (Codex) runs as its provider ships it (CLK-7).
+PRUNABLE = {"guest/openclaw/package-lock.json"}
 # The `where` of every image finding, and of every record that accepts one.
 IMAGE = "image"
 # What mkosi.postinst writes to the image build's output directory.
@@ -381,6 +394,29 @@ def issue_problems(records, repo, token, opener=urllib.request.urlopen):
     return problems
 
 
+REOPEN_NOTE = ("Reopened by `tools/vulncheck.py reopen`: `assurance/vulncheck.json` cites this issue for "
+               "{n} accepted record(s), and a closed issue withdraws their acceptance, which fails "
+               "every vulncheck scan that applies them. Close it only after its last record is "
+               "removed or moved to another open issue. The state label is unchanged: a "
+               "`state:merged` issue stays off BOARD.md and the build queue while open.")
+
+
+def reopen_cited(records, num, repo, token, opener=urllib.request.urlopen):
+    """Reopen issue num with a comment when a record cites it; return the cited count."""
+    cited = sum(1 for r in records if r.get("issue") == num)
+    if not cited:
+        return 0
+    base = f"https://api.github.com/repos/{repo}/issues/{num}"
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+               "Content-Type": "application/json"}
+    for url, method, body in ((base, "PATCH", {"state": "open"}),
+                              (f"{base}/comments", "POST", {"body": REOPEN_NOTE.format(n=cited)})):
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method=method)
+        with opener(req, timeout=30) as resp:
+            resp.read()
+    return cited
+
+
 def run_govulncheck(target_dir, db=None):
     exe = shutil.which("govulncheck")
     if not exe:
@@ -664,19 +700,26 @@ def fetch_tarball(resolved, integrity, mirror=None):
     return data
 
 
-def tarball_marks(data, own, prints=None):
+def tarball_marks(data, own, prints=None, drop=(), dropped=None):
     """What a package tarball's marks say about its inlined copies: its files (without the
     leading package/); (name, version) -> the files whose marks name that copy; and for each
     script with unversioned marks (#4197), {package: (its mark paths, the versions its sidecar
     or notices give)}. OWN, (name, version) of the package itself, is not a copy. PRINTS, when
     given, gets for each script (its string literals, the packages its marks, sidecar or notices
-    name, whether it is minified), for the unmarked-copy check (#4234)."""
+    name, whether it is minified), for the unmarked-copy check (#4234). DROP lists paths the guest
+    image build deletes (D-308), each a directory ending in / or one file: their files are not
+    read, as the shipped image does not hold them, and each path that matched is added to DROPPED."""
     files, marks, by_file, bare, lits = set(), {}, {}, {}, {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
         for m in t:
             if not m.isfile():
                 continue
             rel = m.name.partition("/")[2]
+            hit = [d for d in drop if (rel.startswith(d) if d.endswith("/") else rel == d)]
+            if hit:
+                if dropped is not None:
+                    dropped.update(hit)
+                continue
             files.add(rel)
             base = rel.rpartition("/")[2]
             script, notice = base.endswith(SCRIPTS), bool(NOTICE.search(base))
@@ -749,17 +792,50 @@ def inlined_problems(entries):
     return problems
 
 
-def inlined_copies(where, tarballs, entries, mirror, advised):
+def pruned_problems(entries):
+    """Shape problems in the config's "pruned" list (D-308): paths a guest image build deletes
+    from an installed package, each {where: the guest's lockfile, holder: name@version, path: a
+    directory ending in / or one file, relative to the package, why: what shows the guest never
+    loads it}. A path under node_modules/ would remove a package the lockfile scan still reads, so
+    it is refused; only a lockfile in PRUNABLE may prune. The entry applies to every tarball the
+    lockfile installs at holder's name@version, nested copies included, and prune.js deletes the
+    path under each of those lockfile paths."""
+    problems = []
+    for n, e in enumerate(entries):
+        tag = f"pruned[{n}]"
+        if not isinstance(e, dict) or set(e) != PRUNED_KEYS:
+            problems.append(f"{tag}: needs exactly the keys {sorted(PRUNED_KEYS)}")
+            continue
+        path = e["path"]
+        if e["where"] not in PRUNABLE:
+            problems.append(f"{tag}: {e['where']!r} is not a guest whose build may prune ({sorted(PRUNABLE)}; "
+                            "a plan CLI runs unmodified, CLK-7)")
+        elif (not isinstance(e["holder"], str) or not all(at(e["holder"]))
+              or any(seg in ("", ".", "..") for seg in at(e["holder"])[0].split("/"))):
+            problems.append(f"{tag}: holder must be name@version, its name with no empty, . or .. step")
+        elif (not isinstance(path, str) or not path or path.startswith("/")
+              or any(seg in ("", ".", "..", "node_modules") for seg in path.removesuffix("/").split("/"))):
+            problems.append(f"{tag}: path must be a relative path in the package, outside node_modules/, "
+                            "with no empty, . or .. step")
+        elif not isinstance(e["why"], str) or not e["why"].strip():
+            problems.append(f"{tag}: no reason (what shows the guest never loads it)")
+    return problems
+
+
+def inlined_copies(where, tarballs, entries, mirror, advised, pruned=()):
     """(name, version) -> the holders' files that hold it, for one lockfile's tarballs, with
     the entries of the config's "inlined" that one of them holds; and the problems. ADVISED maps
     a set of package names to those with an OSV advisory (advised_names): only those have a
-    fingerprint (#4234)."""
-    copies, problems, held, bare, prints = {}, [], {}, {}, {}
+    fingerprint (#4234). PRUNED, this lockfile's entries of the config's "pruned" (D-308), names
+    files the guest build deletes: they are not read, and an entry that matches no file fails."""
+    copies, problems, held, bare, prints, dropped = {}, [], {}, {}, {}, {}
 
     def read(t):
         name, version, resolved, integrity = t
-        p = {}
-        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version), p), p
+        p, spec, hit = {}, f"{name}@{version}", set()
+        drop = tuple(e["path"] for e in pruned if e["holder"] == spec)
+        dropped[spec] = hit
+        return spec, tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version), p, drop, hit), p
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         for holder, (files, marks, unversioned), p in pool.map(read, tarballs):
@@ -768,6 +844,10 @@ def inlined_copies(where, tarballs, entries, mirror, advised):
             prints[holder] = p
             for k, fs in marks.items():
                 copies.setdefault(k, set()).update(f"{holder}:{f}" for f in fs)
+    for e in pruned:
+        if e["path"] not in dropped.get(e["holder"], ()):
+            problems.append(f"{where}: the pruned entry {e['holder']}:{e['path']} prunes nothing (no such "
+                            "file in a tarball this lockfile installs); requalify it")
     # Entries naming a copy first: a bundle entry takes the versions its bundle ends up with.
     named = {}  # (holder, file) -> the packages an entry names there
     for e in sorted(entries, key=lambda e: "bundle" in e):
@@ -1006,10 +1086,13 @@ def inlined_lockfile(copies, path):
                                                            "packages": pkgs}]}))
 
 
-def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
+def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None, pruned=()):
     """Findings and problems for the inlined copies in the tarballs of each npm lockfile, and
-    an entry of the config's "inlined" whose holder no lockfile installs."""
+    an entry of the config's "inlined" whose holder no lockfile installs, or of its "pruned"
+    whose lockfile the scan did not read."""
     findings, problems, holders = [], [], set()
+    problems += [f"{e['where']}: the pruned entry {e['holder']}:{e['path']} prunes nothing (the scan read "
+                 "no such npm lockfile); requalify it" for e in pruned if e["where"] not in lockfiles]
     for where in lockfiles:
         try:
             lock = json.loads((pathlib.Path(root) / where).read_text())
@@ -1020,7 +1103,8 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
         if not tarballs:
             continue
         copies, probs, held = inlined_copies(where, tarballs, entries, mirror,
-                                             lambda names: advised_names(names, env, offline))
+                                             lambda names: advised_names(names, env, offline),
+                                             [e for e in pruned if e["where"] == where])
         problems += probs
         holders |= held
         if not copies:
@@ -1160,7 +1244,8 @@ def run_image(src, env=None, offline=False):
 def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
     """Findings and problems for one tree; records applied, issues not checked. MIRROR holds
     the control's offline copies of the tarballs its lockfiles name."""
-    problems = record_problems(config.get("accepted", [])) + inlined_problems(config.get("inlined", []))
+    problems = (record_problems(config.get("accepted", [])) + inlined_problems(config.get("inlined", []))
+                + pruned_problems(config.get("pruned", [])))
     records = [r for r in config.get("accepted", []) if r.get("where") != IMAGE]
     for key in ("go_targets", "osv_sources"):
         if not config.get(key):
@@ -1180,7 +1265,7 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
     findings += osv
     problems += osv_problems
     inlined, inlined_probs = run_inlined(root, npm_lockfiles(doc, root, skip), config.get("inlined", []),
-                                         osv_env, offline, mirror)
+                                         osv_env, offline, mirror, config.get("pruned", []))
     findings += inlined
     problems += inlined_probs
     unused = apply_records([f for f in findings if f["fails"]], records)
@@ -1321,8 +1406,20 @@ def main(argv=None):
     i.add_argument("--config", default=str(CONFIG))
     i.add_argument("--report")
     i.add_argument("--check-issues", action="store_true")
+    o = sub.add_parser("reopen")
+    o.add_argument("issue", type=int)
+    o.add_argument("--config", default=str(CONFIG))
     sub.add_parser("control")
     a = ap.parse_args(argv)
+    if a.cmd == "reopen":
+        repo, token = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
+        if not repo or not token:
+            print("vulncheck: reopen needs GITHUB_REPOSITORY and GITHUB_TOKEN", file=sys.stderr)
+            return 2
+        config = json.loads(pathlib.Path(a.config).read_text())
+        n = reopen_cited(config.get("accepted", []), a.issue, repo, token)
+        print(f"issue #{a.issue}: " + (f"cited by {n} record(s); reopened" if n else "not cited; left closed"))
+        return 0
     try:
         if a.cmd == "control":
             problems = control()

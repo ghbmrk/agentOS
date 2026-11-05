@@ -22,8 +22,8 @@ Usage: compare_manifests.py DIR_A DIR_B
                                              differing initrd member by member; exit 0 only when
                                              all match)
 Every line it prints goes through say(), and every name or value read from a build through
-shown(), so a build's output can never forge a log line (#4612, #4648) and no value prints longer
-than SHOWN_CAP characters (#4693)."""
+shown(), so a build's output can never forge a log line (#4612, #4648), no value prints longer
+than SHOWN_CAP characters (#4693) and no line longer than LINE_CAP (#4728)."""
 import hashlib
 import json
 import pathlib
@@ -35,25 +35,42 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import finish_image  # noqa: E402  the initrd reader the build's Bluetooth check uses
 
 SHOWN_CAP = 1024
+# The longest line say() prints: room for the widest line a caller builds, a /usr diff line naming
+# a path and every field's two values, each at SHOWN_CAP (#4728).
+LINE_CAP = 32 * SHOWN_CAP
+
+
+def cut(s, cap):
+    """S when it is at most CAP characters; otherwise its head, its full length and the first 16 hex
+    digits of its sha256, exactly CAP characters in all, so two long values that share a head still
+    print differently (#4728). The marker ends in ")", which no whole JSON value does."""
+    if len(s) <= cap:
+        return s
+    mark = "... (%d chars, sha256 %s)" % (len(s), hashlib.sha256(s.encode()).hexdigest()[:16])
+    return s[:cap - len(mark)] + mark
 
 
 def shown(v):
     """V as one JSON token: a name or value read from a build prints quoted, with every control
     and non-ASCII character escaped, so it can never end a log line, start a forged one or an
     Actions workflow command (::...), or move the terminal (#4612). A token longer than SHOWN_CAP
-    prints its first SHOWN_CAP characters and its full length, so one huge value cannot make a
-    huge log line (#4693); a cut token never ends the way a whole JSON value does."""
-    s = json.dumps(v)
-    return s if len(s) <= SHOWN_CAP else "%s... (%d chars)" % (s[:SHOWN_CAP], len(s))
+    is cut() to exactly SHOWN_CAP characters, so one huge value cannot make a huge log line
+    (#4693). The only json.dumps in this file is here (#4729)."""
+    return cut(json.dumps(v), SHOWN_CAP)
 
 
 def say(line):
     """Print LINE: the only way this script writes to the log. Callers build each line from fixed
     text and shown() values, so it is printable ASCII and starts with no ::. A line that is not (a
     value that missed shown()) still prints as one quoted line, never as two or as a workflow
-    command (#4648, #4661)."""
+    command (#4648, #4661). Every line prints at most LINE_CAP characters, cut() past that (#4728)."""
     plain = line.isascii() and line.isprintable() and not line.lstrip().startswith("::")
-    print(line if plain else shown(line))
+    print(cut(line, LINE_CAP) if plain else shown(line))
+
+
+def capped(lines, limit=200):
+    """The first LIMIT of LINES, then one line counting the rest."""
+    return lines if len(lines) <= limit else lines[:limit] + ["... and %d more" % (len(lines) - limit)]
 
 
 def why(e):
@@ -157,9 +174,7 @@ def initrd_diff(a, b, limit=200):
             lines.append("%s: %s" % (shown(k), ", ".join(what)))
     if not lines and [k for k, _, _ in ma] != [k for k, _, _ in mb]:
         lines.append("same members in a different order")
-    if len(lines) > limit:
-        lines = lines[:limit] + ["... and %d more" % (len(lines) - limit)]
-    return lines
+    return capped(lines, limit)
 
 
 def compare_initrds(fa, fb):
@@ -222,10 +237,7 @@ def usr_diff(a, b, limit=200):
             line = "%s: %s" % (shown(k), ", ".join("%s %s/%s" % (f, shown(a[k][f]), shown(b[k][f]))
                                                     for f in fs))
             (meta if all(f in USR_META_FIELDS for f in fs) else lines).append(line)
-    lines += meta
-    if len(lines) > limit:
-        lines = lines[:limit] + ["... and %d more" % (len(lines) - limit)]
-    return lines
+    return capped(lines + meta, limit)
 
 
 def compare_usr(fa, fb):
@@ -255,10 +267,13 @@ def main(a, b):
     say("packages a=%d b=%d" % (len(pa), len(pb)))
     if pa == pb:
         say("same packages")
-    else:
-        sa, sb = set(pa), set(pb)
-        say("package manifests differ: only in a %s; only in b %s"
-            % (shown(sorted(sa - sb)), shown(sorted(sb - sa))))
+        return 0
+    # One line per package, each capped by shown(), so a long name never hides the names after it
+    # (#4729).
+    oa, ob = sorted(set(pa) - set(pb)), sorted(set(pb) - set(pa))
+    say("package manifests differ: %d only in a, %d only in b" % (len(oa), len(ob)))
+    for ln in capped(["only in a: %s" % shown(list(p)) for p in oa] + ["only in b: %s" % shown(list(p)) for p in ob]):
+        say("  " + ln)
     return 0
 
 
