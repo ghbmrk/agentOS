@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/theupdateframework/go-tuf/v2/metadata"
+	"golang.org/x/sys/unix"
 )
 
 // t0 is years before the real clock, so a check that read the real clock
@@ -807,6 +808,20 @@ func TestDirSourceRefusesLinkedParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plain file: %v", err)
 	}
+	// The non-blocking open is undone before the file is handed back
+	// (read through SyscallConn: Fd would itself reset the flag).
+	raw, err := rc.(*os.File).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fl int
+	var ferr error
+	if err := raw.Control(func(fd uintptr) { fl, ferr = unix.FcntlInt(fd, unix.F_GETFL, 0) }); err != nil || ferr != nil {
+		t.Fatal(err, ferr)
+	}
+	if fl&unix.O_NONBLOCK != 0 {
+		t.Error("DirSource.Open returned a file still in non-blocking mode")
+	}
 	rc.Close()
 }
 
@@ -876,6 +891,25 @@ func TestInitStoreRefusesBeforeCreating(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(open, "a")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused parent got a directory made in it: %v", err)
+	}
+
+	// A sticky parent writable by all, as /tmp is, may hold a new store;
+	// the sticky directory itself may not be the store.
+	sticky := filepath.Join(base, "sticky")
+	f.must(os.Mkdir(sticky, 0o700))
+	f.must(os.Chmod(sticky, os.ModeSticky|0o777))
+	if _, err := InitStore(filepath.Join(sticky, "a", "box"), root, 1); err != nil {
+		t.Fatalf("InitStore under a sticky parent: %v", err)
+	}
+	if _, err := InitStore(sticky, root, 1); !errors.Is(err, ErrUnsafeStore) {
+		t.Fatalf("InitStore at a sticky dir writable by all: %v, want refused", err)
+	}
+
+	// A path through a file fails the pre-check as a store refusal.
+	file := filepath.Join(base, "file")
+	f.must(os.WriteFile(file, nil, 0o600))
+	if _, err := InitStore(filepath.Join(file, "box"), root, 1); !errors.Is(err, ErrUnsafeStore) || !strings.HasPrefix(err.Error(), "update store:") {
+		t.Fatalf("InitStore through a file: %v, want an update store refusal", err)
 	}
 }
 

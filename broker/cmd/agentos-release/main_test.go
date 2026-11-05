@@ -97,6 +97,15 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	if err := do("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "6"); err == nil || !strings.Contains(err.Error(), "TMPDIR") {
 		t.Fatalf("verify under a group-writable TMPDIR: %v, want refused naming TMPDIR", err)
 	}
+	// A malformed root is not a scratch-store refusal: its error does not
+	// send the maintainer to TMPDIR.
+	bad := filepath.Join(d, "bad.root.json")
+	if err := os.WriteFile(bad, []byte(`{"signed":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := do("verify", "-repo", repo, "-root", bad, "-installed", "6"); err == nil || strings.Contains(err.Error(), "TMPDIR") {
+		t.Fatalf("verify with a malformed root: %v, want an error that does not name TMPDIR", err)
+	}
 }
 
 // agentos-release builds for macOS, where a maintainer may sign (#4918

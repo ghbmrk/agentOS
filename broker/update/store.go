@@ -299,7 +299,7 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	// nearest part of it that exists already passes as a parent (or as the
 	// store, if it is the whole path).
 	if !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("update store: %s is not an absolute path", dir)
+		return nil, fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeStore, dir)
 	}
 	dir = filepath.Clean(dir)
 	have := dir
@@ -309,7 +309,7 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(have) == have {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrUnsafeStore, err)
 		}
 		have = filepath.Dir(have)
 	}
@@ -357,6 +357,10 @@ func readSaved(p string) ([]byte, error) {
 	return b, err
 }
 
+// ErrUnsafeStore is wrapped by every refusal of the store directory's
+// path: one another uid could replace or relink, or one that is relative.
+var ErrUnsafeStore = errors.New("update store")
+
 // safeDir refuses a store directory that a uid other than root or this
 // process's could replace or relink (REV-CHK-links-update-l, #3990):
 // readFile refuses a link only as the last component, so the directory and
@@ -372,7 +376,7 @@ func safeDir(dir string) error { return safeDirAs(dir, uint32(os.Geteuid())) }
 // uid to reach the owner case without root (#4225 item 2).
 func safeDirAs(dir string, euid uint32) error {
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("update store: %s is not an absolute path", dir)
+		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeStore, dir)
 	}
 	return checkChain(filepath.Clean(dir), euid, true)
 }
@@ -389,11 +393,11 @@ func checkChain(abs string, euid uint32, store bool) error {
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		switch {
 		case !fi.IsDir():
-			return fmt.Errorf("update store: %s is not a directory", p)
+			return fmt.Errorf("%w: %s is not a directory", ErrUnsafeStore, p)
 		case !ok || st.Uid != 0 && st.Uid != euid:
-			return fmt.Errorf("update store: %s is not owned by root or uid %d", p, euid)
+			return fmt.Errorf("%w: %s is not owned by root or uid %d", ErrUnsafeStore, p, euid)
 		case fi.Mode().Perm()&0o022 != 0 && (store && p == abs || fi.Mode()&os.ModeSticky == 0):
-			return fmt.Errorf("update store: %s is writable by other uids", p)
+			return fmt.Errorf("%w: %s is writable by other uids", ErrUnsafeStore, p)
 		}
 		if filepath.Dir(p) == p {
 			return nil

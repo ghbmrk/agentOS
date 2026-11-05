@@ -278,8 +278,11 @@ func run(args []string, out io.Writer) error {
 			tmp = real
 		}
 		st, err := update.InitStore(filepath.Join(tmp, "s"), b, installed)
-		if err != nil {
+		if errors.Is(err, update.ErrUnsafeStore) {
 			return fmt.Errorf("verify: scratch store in %s refused (set TMPDIR to a directory only this user writes): %w", tmp, err)
+		}
+		if err != nil {
+			return err
 		}
 		res, err := st.Check(update.DirSource(*repo), update.Options{Offline: offline, Channel: channel})
 		if err != nil {
