@@ -43,6 +43,20 @@ func TestOpenRefusesStateDirOthersCanSwap(t *testing.T) {
 			}
 			return top // StateDir is top/state, below
 		},
+		// The check and the mkdirs must act on one path: "l/.." is
+		// l's target's parent to the kernel, not l's (Security on #4968).
+		"dot-dot through a link": func(t *testing.T, top string) string {
+			held := mode(t, filepath.Join(top, "held"), 0o700)
+			pub := mode(t, filepath.Join(top, "pub"), 0o777)
+			if err := os.Symlink(mode(t, filepath.Join(pub, "real"), 0o700), filepath.Join(held, "l")); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(held, "l") + "/.."
+		},
+		"relative": func(t *testing.T, top string) string {
+			t.Chdir(top)
+			return "."
+		},
 		"StateDir a file": func(t *testing.T, top string) string {
 			if err := os.WriteFile(filepath.Join(top, "state"), nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -52,7 +66,7 @@ func TestOpenRefusesStateDirOthersCanSwap(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
-			dir := filepath.Join(setup(t, top), "state")
+			dir := setup(t, top) + "/state"
 			before := snapshotTree(t, top)
 			cfg := newCfg(t)
 			cfg.StateDir = dir

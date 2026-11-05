@@ -488,10 +488,14 @@ func checkStateDirs(dirs []string, all bool) error {
 	euid := os.Geteuid()
 	seen := map[string]bool{}
 	for _, d := range dirs {
-		abs, err := filepath.Abs(d)
-		if err != nil {
-			return err
+		// The check walks d as written and mkdir and chmod act on that
+		// same text, so it must hold no "..", ".", doubled slash or
+		// relative start: the kernel takes "a/link/../b" through the
+		// link, while a cleaned path would not (Security on #4968).
+		if !filepath.IsAbs(d) || filepath.Clean(d) != d {
+			return fmt.Errorf("%w: %q is not an absolute, clean path", ErrStateDirExposed, d)
 		}
+		abs := d
 		// Each prefix of abs, "/" first.
 		path := "/"
 		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
