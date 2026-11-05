@@ -561,16 +561,24 @@ func TestAgentosdSetupEndsItsCallsAndANewCodeKeepsToItsPage(t *testing.T) {
 	if held == nil || held.Err() != context.Canceled {
 		t.Fatalf("a setup call's context after it returned: %v", held)
 	}
+	odd := func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		return localapi.SetupProgress{Phase: "rebooting", Updated: true, Online: true}, nil
+	}
+	if p := (AgentosdSetup{Owner: InProcess{localapi.OpSetupProgress: odd}}).Progress(); p != (Progress{Phase: "booting"}) {
+		t.Fatalf("a phase setup does not know: %+v", p)
+	}
 
 	var s *Server
 	starts := 0
+	var started context.Context
 	a := AgentosdSetup{Owner: InProcess{
 		localapi.OpSetupProgress: ready,
 		localapi.OpSetupProviders: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
 			return localapi.SetupProviders{Providers: []localapi.SetupProvider{{ID: "anthropic", Name: "Anthropic", DeviceCode: true}}}, nil
 		},
-		localapi.OpSetupDeviceCode: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+		localapi.OpSetupDeviceCode: func(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
 			starts++
+			started = ctx
 			u := s.setup
 			u.mu.Lock()
 			delete(u.device, "anthropic") // a restart, while the provider answers
@@ -607,5 +615,8 @@ func TestAgentosdSetupEndsItsCallsAndANewCodeKeepsToItsPage(t *testing.T) {
 	}
 	if _, shown := u.device["anthropic"]; shown {
 		t.Fatal("the new code is shown after a restart took the old one")
+	}
+	if started == nil || started.Err() != context.Canceled {
+		t.Fatalf("the sign-in start's context after it returned: %v", started)
 	}
 }

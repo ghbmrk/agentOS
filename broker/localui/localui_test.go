@@ -1553,3 +1553,25 @@ func TestAFailedCardRerunSendsSetupBackToTheCardStepAtOnce(t *testing.T) {
 		t.Fatalf("after a failed rerun: %q, recovery %v", msg, recovery)
 	}
 }
+
+func TestTheCardPageShowsTheCardOnceAndAWrongAnswersRetry(t *testing.T) {
+	// #5018: a GET of the card page is the display's page alone, and
+	// leaves a voided code generator for the confirm to take; a confirm
+	// that does not match shows the display's retry page.
+	cr := newCardRig(t)
+	cr.toCard()
+	cr.srv.cfg.CodesVoid = &CodesVoid{}
+	cr.srv.cfg.CodesVoid.Set()
+	page := cr.get("/setup/card")
+	if n := strings.Count(page, "<!doctype html>"); n != 1 || !cr.cardText(page) {
+		t.Fatalf("the card page holds %d pages, card shown %v", n, cr.cardText(page))
+	}
+	if !cr.srv.setup.st.Codes || cr.srv.setup.st.ReplaceCodes {
+		t.Fatal("a GET of the card page took the voided code generator")
+	}
+	cr.srv.cfg.CodesVoid = nil
+	rec := cr.do("POST", "/setup/card", url.Values{"word": {"wrong"}, "group": {"0000"}})
+	if rec.Code != 422 || !strings.Contains(html.UnescapeString(rec.Body.String()), "That did not match your card.") {
+		t.Fatalf("a wrong confirm: %d %q", rec.Code, rec.Body.String())
+	}
+}
