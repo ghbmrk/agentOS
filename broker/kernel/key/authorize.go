@@ -2,7 +2,6 @@ package key
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 )
 
@@ -95,6 +94,15 @@ func refuse(code, f string, a ...any) *Refusal {
 	return &Refusal{Code: code, Detail: fmt.Sprintf(f, a...)}
 }
 
+func in(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Live is the part of a check every use shares: no stop, no revocation or
 // pause anywhere in the chain, not expired.
 func (v *Verified) Live(c Context) *Refusal {
@@ -137,18 +145,18 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	if s.Rung < l.Rung {
 		return refuse(RRung, "P%d, the key asks P%d", s.Rung, l.Rung)
 	}
-	if !slices.Contains(l.Verbs, string(s.Verb)) {
+	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)
 	}
 	if !ArgsDeclared(s) {
 		return refuse(RArg, "%s takes exactly %v", s.Verb, argNames[s.Verb])
 	}
-	if l.Content != nil && !slices.Contains(l.Content, s.Content) {
+	if l.Content != nil && !in(l.Content, s.Content) {
 		return refuse(RContent, "%q", s.Content)
 	}
 	if l.Labels != nil {
 		for _, x := range s.Labels {
-			if !slices.Contains(l.Labels, x) {
+			if !in(l.Labels, x) {
 				return refuse(RLabels, "%q", x)
 			}
 		}
@@ -158,7 +166,7 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 		if !ok || a.Source == SrcPlanner || (a.Source != SrcOwner && a.Source != SrcClerk) {
 			return refuse(RArg, "%s missing or not from owner or clerk", name)
 		}
-		if b.OneOf != nil && !slices.Contains(b.OneOf, a.Value) {
+		if b.OneOf != nil && !in(b.OneOf, a.Value) {
 			return refuse(RArg, "%s outside set", name)
 		}
 		if b.Min != nil || b.Max != nil {
@@ -221,13 +229,23 @@ func (v *Verified) caps(s Step, c Context, spendOnly bool) *Refusal {
 		if ok {
 			sum, ok = add(sum, s.Amount)
 		}
-		spend := cp.Kind == KSpendTask || cp.Kind == KSpendDay
-		if spend && (!ok || sum > cp.N) || !spend && n+1 > cp.N {
-			code := map[string]string{KSpendTask: RSpendTask, KSpendDay: RSpendDay, KUses: RUses}[cp.Kind]
-			if code == "" {
+		switch cp.Kind {
+		case KSpendTask:
+			if !ok || sum > cp.N {
+				return refuse(RSpendTask, "cap %d", cp.N)
+			}
+		case KSpendDay:
+			if !ok || sum > cp.N {
+				return refuse(RSpendDay, "cap %d", cp.N)
+			}
+		case KRateDay, KRateRecipient:
+			if n+1 > cp.N {
 				return refuse(RRate, "%s cap %d", cp.Kind, cp.N)
 			}
-			return refuse(code, "cap %d", cp.N)
+		case KUses:
+			if n+1 > cp.N {
+				return refuse(RUses, "cap %d", cp.N)
+			}
 		}
 	}
 	return nil
@@ -256,7 +274,11 @@ func (v *Verified) Spend(task string, amount int64, c Context) *Refusal {
 	if amount < 0 {
 		return refuse(RMalformed, "negative amount")
 	}
-	if !slices.ContainsFunc(v.Limits.Caps, func(cp Cap) bool { return cp.Kind == KSpendTask || cp.Kind == KSpendDay }) {
+	capped := false
+	for _, cp := range v.Limits.Caps {
+		capped = capped || cp.Kind == KSpendTask || cp.Kind == KSpendDay
+	}
+	if !capped {
 		return refuse(RMalformed, "no spend cap")
 	}
 	return v.caps(Step{Task: task, Amount: amount}, c, true)

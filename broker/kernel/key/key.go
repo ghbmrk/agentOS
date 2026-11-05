@@ -742,8 +742,12 @@ func (v *Verified) Root() ID { return v.IDs[0] }
 
 // bounded reports whether a first link sets an expiry and a daily spend cap.
 func bounded(cs []Caveat) bool {
-	has := func(k string) bool { return slices.ContainsFunc(cs, func(c Caveat) bool { return c.Kind == k }) }
-	return has(KExpires) && has(KSpendDay)
+	var exp, spend bool
+	for _, c := range cs {
+		exp = exp || c.Kind == KExpires
+		spend = spend || c.Kind == KSpendDay
+	}
+	return exp && spend
 }
 
 // Enrollment is an anchor's signature adding a passkey, such as a new phone,
