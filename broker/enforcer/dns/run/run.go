@@ -91,15 +91,22 @@ func New(bin, dir string, logf func(string)) (*Set, error) {
 	return &Set{bin: bin, dir: dir, logf: logf, procs: map[string]*proc{}, want: map[string]string{}}, nil
 }
 
-// Names is each instance's name and file, in a fixed order: the listed
-// instances by interface, then people, then dhcp.
+// Names is each instance's name and file: the listed instances by
+// interface, then people, then dhcp. An instance with an empty file is
+// left out, so it never runs: dnsmasq on an empty file is an open
+// resolver on every interface (dns.Files{} stops every instance).
 func Names(f dns.Files) map[string]string {
 	m := make(map[string]string, len(f.Listed)+2)
-	for _, l := range f.Listed {
-		m["listed-"+l.Iface] = l.Conf
+	add := func(name, conf string) {
+		if conf != "" {
+			m[name] = conf
+		}
 	}
-	m["people"] = f.People
-	m["dhcp"] = f.DHCP
+	for _, l := range f.Listed {
+		add("listed-"+l.Iface, l.Conf)
+	}
+	add("people", f.People)
+	add("dhcp", f.DHCP)
 	return m
 }
 
@@ -108,7 +115,10 @@ func Names(f dns.Files) map[string]string {
 // longer has, and waits for each to exit; it calls load; then it starts
 // every instance of f not running. If load fails, the previous ruleset
 // stays (nft's transaction), and the instances stopped are started again
-// on their previous files, which match it; Apply returns load's error.
+// on their previous files, which match it. Apply returns load's error
+// alone: an instance that fails to start is logged and started again
+// with the backoff an exited one gets, so a start failure never reads as
+// a refused load.
 // An instance whose file is unchanged keeps running: it fills the sets of
 // the same names, which the load keeps (nft.Reload).
 func (s *Set) Apply(f dns.Files, load func() error) error {
@@ -134,9 +144,7 @@ func (s *Set) Apply(f dns.Files, load func() error) error {
 		}
 	}
 	s.mu.Unlock()
-	for _, p := range stop {
-		halt(p)
-	}
+	haltAll(stop)
 	in := next
 	err := load()
 	if err != nil {
@@ -145,9 +153,7 @@ func (s *Set) Apply(f dns.Files, load func() error) error {
 	s.mu.Lock()
 	s.want = in
 	s.mu.Unlock()
-	if serr := s.startAll(in); err == nil {
-		err = serr
-	}
+	s.startAll(in)
 	s.prune(in)
 	return err
 }
@@ -173,19 +179,31 @@ func confPath(dir, name, conf string) string {
 	return filepath.Join(dir, name+"-"+hex.EncodeToString(sum[:8])+".conf")
 }
 
-// startAll starts each named instance on its file, logging and returning
-// the first failure; the others still start.
-func (s *Set) startAll(m map[string]string) error {
-	var first error
+// startAll starts each named instance on its file. One that fails is
+// logged and tried again (retry); the others still start.
+func (s *Set) startAll(m map[string]string) {
 	for _, name := range slices.Sorted(maps.Keys(m)) {
 		if err := s.start(name, m[name], RestartMin); err != nil {
 			s.logf("dns: " + name + ": " + err.Error())
-			if first == nil {
-				first = err
-			}
+			go s.retry(name, m[name], RestartMin)
 		}
 	}
-	return first
+}
+
+// retry starts name on conf after backoff, doubling it up to RestartMax
+// after each failure, until it runs or conf is no longer its file in
+// force (start then does nothing).
+func (s *Set) retry(name, conf string, backoff time.Duration) {
+	for {
+		s.logf(fmt.Sprintf("dns: %s: starting it again in %s", name, backoff))
+		time.Sleep(backoff)
+		backoff = min(2*backoff, RestartMax)
+		err := s.start(name, conf, backoff)
+		if err == nil {
+			return
+		}
+		s.logf("dns: " + name + ": " + err.Error())
+	}
 }
 
 // start starts name on conf if that is its file in force and it is not
@@ -205,6 +223,12 @@ func (s *Set) start(name, conf string, backoff time.Duration) error {
 	cmd := exec.Command(s.bin, "--keep-in-foreground", "--pid-file=", "--conf-file="+path)
 	cmd.Env = []string{}
 	cmd.Dir = s.dir
+	// A process the instance left holding its standard error cannot hold
+	// Wait, and so a stop, past this.
+	cmd.WaitDelay = time.Second
+	// Its own process group, so a stop reaches its TCP children too, and
+	// killed if the daemon dies before the service manager stops it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Stderr = &lineLog{logf: s.logf, prefix: "dns: " + name + ": "}
 	if err := cmd.Start(); err != nil {
 		s.mu.Unlock()
@@ -233,35 +257,45 @@ func (s *Set) watch(name string, p *proc, backoff time.Duration) {
 	if !again {
 		return
 	}
-	s.logf(fmt.Sprintf("dns: %s exited (%v); starting it again in %s", name, err, backoff))
-	time.Sleep(backoff)
-	next := min(2*backoff, RestartMax)
-	if err := s.start(name, p.conf, next); err != nil {
-		s.logf("dns: " + name + ": " + err.Error())
-	}
+	s.logf(fmt.Sprintf("dns: %s exited (%v)", name, err))
+	s.retry(name, p.conf, backoff)
 }
 
-// halt stops p and waits for it to exit: SIGTERM, then SIGKILL after
-// StopWait.
+// halt stops p's process group and waits for p to exit: SIGTERM, then
+// SIGKILL after StopWait, then SIGKILL for anything left in the group.
 func halt(p *proc) {
-	_ = p.cmd.Process.Signal(syscall.SIGTERM)
+	pg := -p.cmd.Process.Pid // the instance's process group (Setpgid)
+	_ = syscall.Kill(pg, syscall.SIGTERM)
 	select {
 	case <-p.done:
 	case <-time.After(stopWait):
-		_ = p.cmd.Process.Kill()
+		_ = syscall.Kill(pg, syscall.SIGKILL)
 		<-p.done
 	}
+	// dnsmasq forks a child per TCP query, which holds the same nftset
+	// lines: none may outlive its parent into the next load (Security
+	// 6655916292 release point).
+	_ = syscall.Kill(pg, syscall.SIGKILL)
 }
 
 // Close stops every instance and waits for each to exit.
 func (s *Set) Close() {
 	s.mu.Lock()
 	s.closed = true
-	procs := maps.Clone(s.procs)
+	procs := slices.Collect(maps.Values(s.procs))
 	s.mu.Unlock()
-	for _, p := range procs {
-		halt(p)
+	haltAll(procs)
+}
+
+// haltAll halts ps at once, so instances that ignore SIGTERM cost one
+// stop wait together, not one each.
+func haltAll(ps []*proc) {
+	var wg sync.WaitGroup
+	for _, p := range ps {
+		wg.Add(1)
+		go func() { defer wg.Done(); halt(p) }()
 	}
+	wg.Wait()
 }
 
 // writeFile replaces path with b, readable by its owner only.

@@ -5,9 +5,11 @@ package run
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,6 +47,13 @@ func fakeDnsmasq(path string) {
 		signal.Notify(sig, syscall.SIGTERM)
 	}
 	os.Stderr.WriteString("said " + conf + "\n")
+	if strings.Contains(conf, "forks") {
+		// A TCP child of its own, which ignores SIGTERM.
+		c := exec.Command("/bin/sh", "-c", "trap '' TERM; sleep 60")
+		if c.Start() == nil {
+			event("child_" + strconv.Itoa(c.Process.Pid) + " " + conf)
+		}
+	}
 	event("start " + conf)
 	if strings.Contains(conf, "crash") {
 		os.Exit(1)
@@ -176,15 +185,49 @@ func TestApplyStopsBeforeLoad(t *testing.T) {
 // TestWriteFailure: a file that cannot be written fails the start, and
 // the set stays usable.
 func TestWriteFailure(t *testing.T) {
-	s, dir := newSet(t)
-	if err := os.Mkdir(confPath(dir, "listed-core0", "core-a")+".tmp", 0o700); err != nil {
+	s, dir, logs := newLoggedSet(t, os.Args[0])
+	blocker := confPath(dir, "listed-core0", "core-a") + ".tmp"
+	if err := os.Mkdir(blocker, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err == nil {
-		t.Fatal("Apply hid a file it could not write")
+	// A start failure is not the load's: Apply returns nil, logs it and
+	// tries again with the backoff (L3 6655898360 point 2).
+	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatalf("Apply = %v: a failed start read as a refused load", err)
 	}
+	waitLog(t, logs, "dns: listed-core0: starting it again in 1s")
+	if slices.Contains(events(t, dir), "start_core-a") {
+		t.Fatal("started on a file that was not written")
+	}
+	os.Remove(blocker)
+	waitEvents(t, dir, "start_core-a")
 	if err := s.Apply(files("core-b", "tv-a"), func() error { return nil }); err != nil {
 		t.Fatalf("the set after a failed write: %v", err)
+	}
+	waitEvents(t, dir, "start_core-b")
+}
+
+// TestEmptyFilesRunNothing (L3 6655898360 point 1): dns.Files{} stops
+// every instance and starts none, since dnsmasq on an empty file is an
+// open resolver on every interface.
+func TestEmptyFilesRunNothing(t *testing.T) {
+	s, dir := newSet(t)
+	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	waitEvents(t, dir, "start_core-a", "start_tv-a", "start_people", "start_dhcp")
+	if err := s.Apply(dns.Files{}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	n := len(s.procs)
+	s.mu.Unlock()
+	got := waitEvents(t, dir, "stop_core-a", "stop_tv-a", "stop_people", "stop_dhcp")
+	if n != 0 || slices.Contains(got, "start_") {
+		t.Fatalf("instances running on empty files: %d, events %v", n, got)
+	}
+	if m := Names(dns.Files{Listed: []dns.Listed{{Iface: "x", Conf: ""}}}); len(m) != 0 {
+		t.Fatalf("Names keeps empty files: %v", m)
 	}
 }
 
@@ -302,14 +345,12 @@ func TestStartFailureLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); !errors.Is(err, ErrRun) {
-		t.Fatalf("Apply = %v, want ErrRun", err)
+	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatalf("Apply = %v: a failed start read as a refused load", err)
 	}
 	s2, _, logs := newLoggedSet(t, filepath.Join(dir, "no-dnsmasq"))
 	s2.Apply(files("core-a", "tv-a"), func() error { return nil })
-	if !strings.Contains(logs(), "dns: listed-core0: ") {
-		t.Errorf("a failed start was not logged: %q", logs())
-	}
+	waitLog(t, logs, "dns: listed-core0: dns/run: refused")
 }
 
 // TestStderrLogged: an instance's standard error reaches the log, by
@@ -374,6 +415,54 @@ func TestRestartFailureLogged(t *testing.T) {
 	waitEvents(t, dir, "start_core-crash")
 	os.Remove(bin)
 	waitLog(t, logs, "dns: listed-core0: dns/run: refused")
+}
+
+// TestChildrenStopped (Security 6655916292 release point): a stop reaches
+// the instance's own children, so no TCP child of an old list outlives it.
+func TestChildrenStopped(t *testing.T) {
+	stopWait = 200 * time.Millisecond
+	defer func() { stopWait = StopWait }()
+	s, dir := newSet(t)
+	if err := s.Apply(files("core-forks", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	got := waitEvents(t, dir, "start_core-forks")
+	deadline := time.Now().Add(5 * time.Second)
+	var pid int
+	for pid == 0 {
+		for _, e := range events(t, dir) {
+			if rest, ok := strings.CutPrefix(e, "child_"); ok {
+				pid, _ = strconv.Atoi(strings.SplitN(rest, "_", 2)[0])
+			}
+		}
+		if pid == 0 && time.Now().After(deadline) {
+			t.Fatalf("no child started: %v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := s.Apply(files("core-b", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	waitUntilDead(t, pid)
+}
+
+// waitUntilDead waits until pid is gone or a zombie.
+func waitUntilDead(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if err != nil {
+			return
+		}
+		if f := strings.Fields(string(b)); len(f) > 2 && f[2] == "Z" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance's child %d outlived its stop", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestStubbornKilled: an instance that ignores SIGTERM is killed after
