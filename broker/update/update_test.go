@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -806,4 +808,335 @@ func TestDirSourceRefusesLinkedParent(t *testing.T) {
 		t.Fatalf("plain file: %v", err)
 	}
 	rc.Close()
+}
+
+// Each safeDir refusal is told apart (#4225 items 1 and 2). A linked
+// component is refused as not a directory: a link's mode reads 0777, so the
+// write-bit case would refuse it too and hide a lost !IsDir case. The owner
+// case runs as any uid through safeDirAs, which names the uid to trust.
+func TestSafeDirNamesEachRefusal(t *testing.T) {
+	base := t.TempDir()
+	box := filepath.Join(base, "box")
+	if err := os.Mkdir(box, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := safeDir(box); err != nil {
+		t.Fatalf("own 0700 chain: %v", err)
+	}
+	linked := filepath.Join(base, "linked")
+	if err := os.Symlink(base, linked); err != nil {
+		t.Fatal(err)
+	}
+	want := func(what string, err error, msg string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), msg) {
+			t.Errorf("%s: %v, want %q", what, err, msg)
+		}
+	}
+	want("a linked parent", safeDir(filepath.Join(linked, "box")), linked+" is not a directory")
+	want("a linked store", safeDir(linked), linked+" is not a directory")
+
+	if err := os.Chmod(box, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	want("a store writable by its group", safeDir(box), box+" is writable by other uids")
+	if err := os.Chmod(box, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if os.Geteuid() == 0 {
+		// Root's chain is root-owned, which safeDirAs always trusts; the
+		// root-gated case in TestStoreParentChainIsOwnOnly chowns instead.
+		t.Log("owner case: covered by the root-only chown case")
+		return
+	}
+	other := uint32(os.Geteuid()) + 1
+	want("a chain owned by another uid", safeDirAs(box, other), fmt.Sprintf("is not owned by root or uid %d", other))
+}
+
+// InitStore refuses before it creates anything: a relative path or a parent
+// other uids can write leaves no directory behind (#4225 item 6).
+func TestInitStoreRefusesBeforeCreating(t *testing.T) {
+	f := newFixture(t)
+	root, err := readFile(f.store.p("root.json"))
+	f.must(err)
+	base := t.TempDir()
+	t.Chdir(base)
+	if _, err := InitStore("rel/box", root, 1); err == nil {
+		t.Fatal("InitStore took a relative path")
+	}
+	if _, err := os.Lstat(filepath.Join(base, "rel")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused relative path left a directory: %v", err)
+	}
+	open := filepath.Join(base, "open")
+	f.must(os.Mkdir(open, 0o700))
+	f.must(os.Chmod(open, 0o777))
+	if _, err := InitStore(filepath.Join(open, "a", "box"), root, 1); err == nil || !strings.Contains(err.Error(), "update store:") {
+		t.Fatalf("InitStore under a parent writable by all: %v, want refused", err)
+	}
+	if _, err := os.Lstat(filepath.Join(open, "a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused parent got a directory made in it: %v", err)
+	}
+}
+
+// Every store fsync names the cleaned store path, the one safeDir checked
+// and filepath.Join wrote under (#4225 item 5): "/x/link/../box" would
+// otherwise sync wherever the kernel resolves it.
+func TestStoreSyncsCleanedDir(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	var synced []string
+	old := syncDir
+	syncDir = func(d string) error { synced = append(synced, d); return old(d) }
+	t.Cleanup(func() { syncDir = old })
+	box := f.store.Dir
+	f.store.Dir = box + "/../" + filepath.Base(box)
+	f.must(f.store.removeStaged())
+	f.must(os.WriteFile(f.store.p(followFile), []byte(`{"root_sha256":"x"}`), 0o600))
+	f.must(f.store.settle())
+	if len(synced) < 2 {
+		t.Fatalf("synced %q, want the staged removal and the settle", synced)
+	}
+	for _, d := range synced {
+		if d != box {
+			t.Errorf("synced %q, want %q", d, box)
+		}
+	}
+}
+
+// A non-regular file at a repository path is refused at once (#4918 item 1):
+// a FIFO planted on a drive would block a plain open forever, and a
+// directory is no metadata file.
+func TestDirSourceRefusesNonRegular(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "metadata"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(root, "metadata", "timestamp.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "metadata", "snapshot.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"metadata/timestamp.json", "metadata/snapshot.json"} {
+		done := make(chan error, 1)
+		go func() {
+			rc, err := DirSource(root).Open(name)
+			if err == nil {
+				rc.Close()
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Errorf("Open(%q): %v, want refused as not a regular file", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			// Unblock the open so the goroutine ends.
+			if w, err := os.OpenFile(filepath.Join(root, name), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				w.Close()
+			}
+			t.Fatalf("Open(%q) blocked on a FIFO", name)
+		}
+	}
+}
+
+// A linked repository path names its cause (#4918 item 4), and still
+// unwraps to the kernel's errno for callers that test it.
+func TestDirSourceNamesALink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "targets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "targets", "real"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(root, "targets", "link")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := DirSource(root).Open("targets/link")
+	if !errors.Is(err, syscall.ELOOP) || !strings.Contains(err.Error(), "repository path is a link") {
+		t.Fatalf("Open through a link: %v, want ELOOP named as a link", err)
+	}
+}
+
+// A unit whose binary reads a drive through DirSource and has a
+// SystemCallFilter must allow openat2, or the filter's default action kills
+// it on the first read (#4918 item 3). openat2 is in @file-system, which
+// @system-service includes. No shipped unit's binary reads through
+// DirSource today; this holds the rule for the one that will.
+func TestDirSourceUnitsAllowOpenat2(t *testing.T) {
+	const module = "github.com/ghbmrk/agentos/broker"
+	// Packages outside update itself whose code names DirSource.
+	readers := map[string]bool{}
+	f := func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "vendor" || d.Name() == "testdata") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if rel := filepath.ToSlash(filepath.Dir(p)); rel != "update" && strings.Contains(string(b), "DirSource") {
+			readers[module+"/"+rel] = true
+		}
+		return nil
+	}
+	t.Chdir("..")
+	if err := filepath.WalkDir(".", f); err != nil {
+		t.Fatal(err)
+	}
+	if !readers[module+"/update/updatetest"] {
+		t.Fatalf("scan found no DirSource readers (%v); the scan is broken", readers)
+	}
+
+	checked := 0
+	for _, unit := range shippedServiceUnits(t) {
+		b, err := os.ReadFile(unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allow, deny := syscallFilters(string(b))
+		if allow == nil && deny == nil {
+			continue
+		}
+		for _, bin := range unitBrokerBinaries(string(b)) {
+			out, err := exec.Command("go", "list", "-deps", "./cmd/"+bin).Output()
+			if err != nil {
+				t.Fatalf("go list %s: %v", bin, err)
+			}
+			checked++
+			for _, dep := range strings.Fields(string(out)) {
+				if readers[dep] && !filterAllowsOpenat2(allow, deny) {
+					t.Errorf("%s: %s reads through DirSource (%s) but its SystemCallFilter refuses openat2", unit, bin, dep)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("found no filtered unit starting a broker binary; the unit scan is broken")
+	}
+}
+
+func TestFilterAllowsOpenat2(t *testing.T) {
+	for _, c := range []struct {
+		allow, deny []string
+		ok          bool
+	}{
+		{[]string{"@system-service"}, []string{"@privileged", "@resources"}, true},
+		{[]string{"@file-system"}, nil, true},
+		{[]string{"openat2", "read"}, nil, true},
+		{nil, []string{"@privileged"}, true},
+		{[]string{"@basic-io"}, nil, false},
+		{[]string{"@system-service"}, []string{"openat2"}, false},
+		{[]string{"@system-service"}, []string{"@file-system"}, false},
+		{nil, []string{"@system-service"}, false},
+	} {
+		if got := filterAllowsOpenat2(c.allow, c.deny); got != c.ok {
+			t.Errorf("allow %v deny %v: %v, want %v", c.allow, c.deny, got, c.ok)
+		}
+	}
+	allow, deny := syscallFilters("[Service]\nSystemCallFilter=@system-service\nSystemCallFilter=~@privileged \\\n  @resources\n")
+	if !reflect.DeepEqual(allow, []string{"@system-service"}) || !reflect.DeepEqual(deny, []string{"@privileged", "@resources"}) {
+		t.Errorf("parsed allow %v deny %v", allow, deny)
+	}
+	t.Chdir("..") // unitBrokerBinaries names a binary by its broker/cmd directory.
+	if got := unitBrokerBinaries("ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-egress serve \\\n -x 1\n"); !reflect.DeepEqual(got, []string{"agentos-egress"}) {
+		t.Errorf("binaries %v", got)
+	}
+}
+
+// filterAllowsOpenat2 reports whether systemd's SystemCallFilter allow and
+// deny lists let openat2 through: an allow list, if any, names openat2 or a
+// group holding it, and the deny list names neither.
+func filterAllowsOpenat2(allow, deny []string) bool {
+	holds := func(n string) bool { return n == "openat2" || n == "@file-system" || n == "@system-service" }
+	for _, n := range deny {
+		if holds(n) {
+			return false
+		}
+	}
+	if len(allow) == 0 {
+		return true
+	}
+	for _, n := range allow {
+		if holds(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// unitLines joins a unit's continued lines.
+func unitLines(unit string) []string {
+	return strings.Split(strings.ReplaceAll(unit, "\\\n", " "), "\n")
+}
+
+func syscallFilters(unit string) (allow, deny []string) {
+	for _, l := range unitLines(unit) {
+		v, ok := strings.CutPrefix(strings.TrimSpace(l), "SystemCallFilter=")
+		if !ok {
+			continue
+		}
+		if d, ok := strings.CutPrefix(v, "~"); ok {
+			deny = append(deny, strings.Fields(d)...)
+		} else {
+			allow = append(allow, strings.Fields(v)...)
+		}
+	}
+	return allow, deny
+}
+
+// unitBrokerBinaries names the broker/cmd binaries a unit's Exec lines run.
+func unitBrokerBinaries(unit string) []string {
+	var bins []string
+	for _, l := range unitLines(unit) {
+		l = strings.TrimSpace(l)
+		if !strings.HasPrefix(l, "Exec") {
+			continue
+		}
+		_, v, _ := strings.Cut(l, "=")
+		for _, tok := range strings.Fields(v) {
+			tok = strings.TrimLeft(tok, "+!-@:")
+			if !strings.HasPrefix(tok, "/") {
+				continue
+			}
+			if fi, err := os.Stat(filepath.Join("cmd", filepath.Base(tok))); err == nil && fi.IsDir() {
+				bins = append(bins, filepath.Base(tok))
+			}
+		}
+	}
+	return bins
+}
+
+// shippedServiceUnits lists the .service files under image/ and broker/,
+// from the broker directory.
+func shippedServiceUnits(t *testing.T) []string {
+	var units []string
+	for _, root := range []string{"../image", "."} {
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && (d.Name() == "vendor" || d.Name() == "testdata") {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() && strings.HasSuffix(p, ".service") {
+				units = append(units, p)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return units
 }

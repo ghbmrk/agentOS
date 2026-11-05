@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,5 +79,33 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	must("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "7", "-offline")
 	if !strings.Contains(out.String(), "no release newer than 7") {
 		t.Fatalf("verify said %q", out.String())
+	}
+
+	// verify's scratch store opens under a TMPDIR reached through a link,
+	// as macOS's /var is (#4225 item 4); a TMPDIR other uids can write is
+	// still refused, and the error names TMPDIR as the remedy.
+	tmp := t.TempDir()
+	tmpLink := filepath.Join(d, "tmplink")
+	if err := os.Symlink(tmp, tmpLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmpLink)
+	must("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "6")
+	if err := os.Chmod(tmp, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := do("verify", "-repo", repo, "-root", filepath.Join(repo, "metadata", "1.root.json"), "-installed", "6"); err == nil || !strings.Contains(err.Error(), "TMPDIR") {
+		t.Fatalf("verify under a group-writable TMPDIR: %v, want refused naming TMPDIR", err)
+	}
+}
+
+// agentos-release builds for macOS, where a maintainer may sign (#4918
+// item 2): broker/update keeps its Linux-only openat2 path in a _linux.go
+// file with a portable fallback.
+func TestReleaseToolBuildsOnDarwin(t *testing.T) {
+	cmd := exec.Command("go", "build", "-o", os.DevNull, ".")
+	cmd.Env = append(os.Environ(), "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("GOOS=darwin build: %v\n%s", err, out)
 	}
 }
