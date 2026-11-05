@@ -113,6 +113,8 @@ jobs:
           echo "$shards"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
   mutants:
+    # Names the failed shard in the checks list (#4983), counted from 0 as the gate's messages count shards.
+    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}
     needs: [claimed, plan]
     if: ${{ needs.claimed.outputs.packages != '[]' }}
     runs-on: ubuntu-24.04
