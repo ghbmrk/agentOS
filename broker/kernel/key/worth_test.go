@@ -10,7 +10,7 @@ import (
 // REQ: KEY-9
 
 // ch3 is CH-3's table, typed here from SPEC.md by hand and not read from
-// worth.json, so a table edit that lowers a row fails against the spec's own
+// the table in worth.go, so a table edit that lowers a row fails against the spec's own
 // words (D-307: CH-3 stays the floor and the audit cases).
 var ch3 = []struct {
 	act   Act
@@ -211,5 +211,48 @@ func TestTableHoldsItsRules(t *testing.T) {
 		if c == IrreversibleHigh && v != Share && WorthOf(AssetsOf(v), false) != MaxRank {
 			t.Errorf("%s is high risk but worth %d", v, WorthOf(AssetsOf(v), false))
 		}
+	}
+}
+
+// Every verb's reach and worth, typed by hand from CLK-14's effect classes
+// (KEY-9-reach-a-1), so a table edit that lowers one fails here.
+func TestEveryVerbsReachIsPinned(t *testing.T) {
+	d, m, id, s := AssetData, AssetMoney, AssetIdentity, AssetSafety
+	want := map[Verb]struct {
+		reach            []Asset
+		capped, uncapped Rank
+	}{
+		Read: {[]Asset{d}, 1, 1}, Fetch: {[]Asset{d}, 1, 1}, Draft: {[]Asset{AssetNone}, 0, 0},
+		Organize: {[]Asset{AssetNone}, 0, 0}, Trash: {[]Asset{d}, 1, 1}, Present: {[]Asset{d, s}, 3, 3},
+		Unsubscribe: {[]Asset{d}, 1, 1}, Send: {[]Asset{d}, 1, 1}, Post: {[]Asset{d}, 1, 1},
+		Actuate: {[]Asset{s}, 3, 3}, Buy: {[]Asset{m}, 2, 3}, Share: {[]Asset{d}, 1, 1},
+		DeleteRemote: {[]Asset{d, id}, 3, 3}, ChangeAccount: {[]Asset{id, d, m}, 3, 3},
+		RevealOrCreateSecret: {[]Asset{id, d}, 3, 3}, ActuatePhysical: {[]Asset{s}, 3, 3},
+	}
+	if len(want) != len(classes) {
+		t.Fatalf("pinned %d verbs, the list has %d", len(want), len(classes))
+	}
+	for v, w := range want {
+		got := AssetsOf(v)
+		if !slices.Equal(got, w.reach) {
+			t.Errorf("%s reaches %v, want %v", v, got, w.reach)
+		}
+		if c, u := WorthOf(got, true), WorthOf(got, false); c != w.capped || u != w.uncapped {
+			t.Errorf("%s worth %d capped, %d uncapped; want %d, %d", v, c, u, w.capped, w.uncapped)
+		}
+	}
+}
+
+// The hold lengthens with worth (KEY-9): pinned per rank, and strictly
+// longer at the top than at the bottom.
+func TestHoldGrowsWithWorth(t *testing.T) {
+	want := [MaxRank + 1]int64{0, 0, 3600_000, 4 * 3600_000}
+	for r := Rank(0); r <= MaxRank; r++ {
+		if HoldExtra(r) != want[r] {
+			t.Errorf("worth %d: hold extra %d, want %d", r, HoldExtra(r), want[r])
+		}
+	}
+	if HoldExtra(MaxRank) <= HoldExtra(0) {
+		t.Fatal("the hold does not lengthen with worth")
 	}
 }
