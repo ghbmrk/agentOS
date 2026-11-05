@@ -592,7 +592,7 @@ class PremergeTest(unittest.TestCase):
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
                   "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
-                  "tools/trusted_base.py", "tools/trusted_core.txt",
+                  "tools/trusted_base.py", "tools/trusted_core.txt", "tools/ceilings.txt",
                   # #3955: the mutation gate's script, which .github/workflows/mutgate.yml runs from the PR's head.
                   "tools/mutgate.py",
                   # #2438: this gate's own tests and the lens rules need the Security accept too.

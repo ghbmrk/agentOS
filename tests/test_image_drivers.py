@@ -19,7 +19,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, IMG, check, clean_tree, finish, reference_tool  # noqa: E402
+from test_image import ENTRY, H, IMG, check, clean_tree, finish, image_tool  # noqa: E402
 
 DECL = {"Device": "scale", "Link": "tcp", "Channels": [{"Name": "stream", "Port": 8080}],
         "Shapes": [{"Name": "get", "Channel": "stream", "Kind": "tcp-frame", "Prefix": "AQ==", "Min": 1, "Max": 1}],
@@ -247,15 +247,16 @@ class DriversTest(unittest.TestCase):
     def test_template_parses_as_systemd_reads_it(self):
         # systemd-analyze verify names every key systemd ignores (MaxConnections= in [Service] was one,
         # #3466 delta L3): the rendered units must draw no such warning. The binary's path is the one
-        # host-specific word, pointed at a file that exists here.
-        tool = reference_tool(self, "systemd-analyze")
+        # host-specific word, pointed at a file that exists here. systemd-analyze is the image's own
+        # (image_tool, #4776).
+        tool = image_tool(self, "systemd-analyze")
         units = check.driver_units("scale")
         exe = shutil.which("true")
         for rel in (SOCKET, SERVICE):
             body = units[rel].replace("/usr/lib/agentos/drivers/scale/driver", exe)
             name = pathlib.PurePosixPath(rel).name.replace("@.service", "@op.service")
             (self.d / name).write_text(body)
-        r = subprocess.run([tool, "verify", "--man=no", str(self.d / "agentos-driver-scale.socket"),
+        r = subprocess.run(tool + ["verify", "--man=no", str(self.d / "agentos-driver-scale.socket"),
                             str(self.d / "agentos-driver-scale@op.service")], capture_output=True, text=True)
         self.assertNotIn("Unknown key", r.stderr + r.stdout)
         self.assertNotIn("ignoring", r.stderr + r.stdout)

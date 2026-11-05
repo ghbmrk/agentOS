@@ -955,14 +955,16 @@ class WorkflowTest(unittest.TestCase):
         # ASSUMPTIONS.md D13). The mutants job sets them up with broker-race's own step, first.
         want = "Subordinate ids for the canary sandbox"
         race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
-        mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), "mutants")
-        names = [n for n, _ in mut]
-        self.assertIn(want, names)
-        self.assertLess(names.index(want), names.index("Gremlins on the package"))
-        # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
         guard = "        if: steps.scope.outputs.records != 'true'\n"
         self.assertIn(guard, race[want])
-        self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
+        # #4961: `plan` runs a test-only diff's changed tests for their coverage, so it needs it too.
+        for job, first in (("mutants", "Gremlins on the package"), ("plan", "Shards for each package (#4961)")):
+            mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), job)
+            names = [n for n, _ in mut]
+            self.assertIn(want, names)
+            self.assertLess(names.index(want), names.index(first))
+            # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
+            self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
