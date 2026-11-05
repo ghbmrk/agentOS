@@ -4,6 +4,7 @@
 package check
 
 import (
+	"slices"
 	"strconv"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -80,6 +81,7 @@ func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 		return ver, &key.Refusal{Code: RDispatch, Detail: "the log has no such step in flight"}
 	}
 	ctx := key.Context{Now: now, Changes: v.ChangesView(), Ledger: v.LedgerBefore(d.Seq)}
+	st.Rung = d.Rung // the log's, never the request's (CH-3)
 	if rf := ver.Authorize(st, ctx); rf != nil {
 		return ver, rf
 	}
@@ -109,20 +111,8 @@ func Amount(s key.Step) int64 {
 }
 
 func sameSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	m := map[string]int{}
-	for _, x := range a {
-		m[x]++
-	}
-	for _, x := range b {
-		m[x]--
-	}
-	for _, n := range m {
-		if n != 0 {
-			return false
-		}
-	}
-	return true
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }

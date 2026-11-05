@@ -71,10 +71,12 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
 		if !key.Valid(st.Verb) {
 			return key.ID{}, nil, on(&key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}, &i)
 		}
+		c, _ := key.ClassOf(st.Verb)
+		st.Rung = s.Rung(v.Limits.Task, c.Irreversible() && max(v.Limits.Window(false), v.Limits.Window(true)) > 0)
 		if r := v.Authorize(st, ctx); r != nil {
 			return key.ID{}, nil, on(r, &i)
 		}
-		if c, _ := key.ClassOf(st.Verb); c.Irreversible() {
+		if c.Irreversible() {
 			fp := Fingerprint(st)
 			if fresh[fp] || repeats(s, v.Root(), st, p.ID, now) {
 				return key.ID{}, nil, on(&key.Refusal{Code: CDuplicate, Detail: string(st.Verb)}, &i)
@@ -183,6 +185,10 @@ func Next(s *State, id string, now int64) Act {
 	if st.Attempt > 0 {
 		led = s.LedgerBefore(st.DispatchSeq) // a redo is not charged twice
 	}
+	class, _ := key.ClassOf(sp.Verb)
+	holds := class.Irreversible() && max(v.Limits.Window(false), v.Limits.Window(true)) > 0
+	due := v.Limits.Due(st.HeldAt, st.Novel)
+	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now < due))
 	if r := v.Authorize(sp, key.Context{Now: now, Changes: &s.Changes, Ledger: led}); r != nil {
 		if r.Code == key.RPaused {
 			return a // waits for key.resumed
@@ -190,20 +196,17 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Refusal = ActCancel, r
 		return a
 	}
-	class, _ := key.ClassOf(sp.Verb)
 	if class.Irreversible() && st.Attempt == 0 && repeats(s, p.Root, sp, id, now) {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CDuplicate, Detail: string(sp.Verb)}
 		return a
 	}
-	if class.Irreversible() && st.Phase == PQueued && max(v.Limits.Window(false), v.Limits.Window(true)) > 0 {
+	if holds && st.Phase == PQueued {
 		a.Kind, a.Novel = ActHold, s.seen[p.Root][Shape(sp)] <= 0
 		return a
 	}
-	if st.Phase == PHeld && !st.Approved {
-		if due := v.Limits.Due(st.HeldAt, st.Novel); now < due {
-			a.WakeAt = due
-			return a
-		}
+	if st.Phase == PHeld && !st.Approved && now < due {
+		a.WakeAt = due
+		return a
 	}
 	a.Kind, a.Attempt = ActDispatch, st.Attempt+1
 	return a
@@ -248,6 +251,7 @@ type Dispatch struct {
 	Novel  bool
 	// Approved is a code approval of the step, which ends its hold (codeapproval.go).
 	Approved bool
+	Rung     key.Rung // the step's owner events' (State.Rung)
 }
 
 // View is the read-only part of the state a clerk checks against (CLK-2).
@@ -832,7 +836,9 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Ref
 	if err != nil {
 		return &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
+	sp := p.Plan.Step(i)
+	sp.Rung = s.Rung(v.Limits.Task, st.Approved)
+	return v.Authorize(sp, key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
 }
 
 // Tick retries the erases not yet confirmed and the backup re-seals due

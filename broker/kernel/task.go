@@ -66,6 +66,7 @@ type Task struct {
 	Until     int64                   `json:"until"`
 	Approvals map[string]TaskApproval `json:"approvals,omitempty"`
 	Taps      int                     `json:"taps"`
+	Rung      key.Rung                `json:"rung,omitempty"` // of the owner event that opened it (CH-3)
 }
 
 type (
@@ -95,9 +96,10 @@ var (
 	ErrTaskApproval = errors.New("kernel: a task's approval is an enrolled passkey's, over TaskHash")
 )
 
-// OpenTask opens task id, for TaskTimeout.
-func (k *Kernel) OpenTask(now int64, id string) error {
-	t := Task{ID: id}
+// OpenTask opens task id, for TaskTimeout, stamped with the rung the owner
+// event that started it reached (CH-3).
+func (k *Kernel) OpenTask(now int64, id string, rung key.Rung) error {
+	t := Task{ID: id, Rung: rung}
 	if err := k.s.openOK(t); err != nil {
 		return err
 	}
@@ -124,6 +126,20 @@ func (k *Kernel) EndTask(now int64, id string) error {
 	}
 	_, err := k.emit(now, TTaskEnded, taskEnded{id})
 	return err
+}
+
+// Rung is the highest rung the owner events behind a step of task reached
+// (CH-3, D-311): the event that opened the task, P0 for none, raised to P3 by
+// a code approval of the step, which approve counts while the step waits.
+func (s *State) Rung(task string, approve bool) key.Rung {
+	r := key.P0
+	if t := s.tasks[task]; t != nil {
+		r = t.Rung
+	}
+	if approve {
+		r = max(r, key.P3)
+	}
+	return r
 }
 
 // Task is task id while it is live at now: not ended and before its timeout.
@@ -156,7 +172,8 @@ func TaskApproved(v View, anchors []key.PublicKey, ver *key.Verified, site strin
 }
 
 func (s *State) openOK(t Task) error {
-	if t.ID == "" || !utf8.ValidString(t.ID) || strings.HasPrefix(t.ID, key.PlanPrefix) || s.tasks[t.ID] != nil || s.Stopped || s.decoys.stopped {
+	if t.ID == "" || !utf8.ValidString(t.ID) || strings.HasPrefix(t.ID, key.PlanPrefix) || s.tasks[t.ID] != nil || s.Stopped || s.decoys.stopped ||
+		t.Rung < key.P0 || t.Rung > key.P4 {
 		return ErrTaskOpen
 	}
 	return nil

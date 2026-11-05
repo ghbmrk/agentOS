@@ -240,7 +240,7 @@ func run(in wire.SecurityInput, m Models) (*session, error) {
 	s.keys[revoke.Tip()] = []key.Verb{key.Unsubscribe}
 	// Two narrower bulk keys that each serve a task, so the log's
 	// rejections must name a session: one live, one never opened.
-	if err := s.k.OpenTask(runAt, taskOpen); err != nil {
+	if err := s.k.OpenTask(runAt, taskOpen, 0); err != nil {
 		return nil, err
 	}
 	s.opened[taskOpen] = true

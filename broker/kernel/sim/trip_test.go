@@ -69,7 +69,7 @@ func tripRun(t *testing.T, seed uint64) ([]kernel.Entry, []key.PublicKey, *kerne
 	for i := 0; i < 60; i++ {
 		now += int64(rng.IntN(5000))
 		task := fmt.Sprintf("t%d", i)
-		if err := k.OpenTask(now, task); err != nil && !k.State().Tripped() {
+		if err := k.OpenTask(now, task, 0); err != nil && !k.State().Tripped() {
 			t.Fatal(err) // refused only while a full trip stops planning
 		}
 		ky, err := key.Derive(ck, holder, holder.Public().(ed25519.PublicKey), key.LimitTask(task))
