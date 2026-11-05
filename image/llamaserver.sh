@@ -14,6 +14,12 @@
 #
 # The instruction set is fixed, never the build machine's (GGML_NATIVE off): x86-64 with SSE4.2, AVX,
 # AVX2, FMA, F16C and BMI2, which the N95 floor (HW-4) has; no AVX-512 (INFER-A15).
+#
+# The build fetches nothing (#4454): llama.cpp's default (LLAMA_USE_PREBUILT_UI on) downloads its web
+# UI from a Hugging Face bucket at build time, unpinned ("latest" for a source archive, which has no git
+# build number) and silently skipped when the fetch fails, so two builds of one commit embedded
+# different UIs and the image's reproduce check failed. agentos-infer runs the server with --no-webui,
+# so the UI is off here, and the build fails if the generated ui.h still embeds one.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 PINS=$REPO/broker/cmd/agentos-infer/llama.pins
@@ -42,8 +48,11 @@ cmake -S "$WORK/src" -B "$WORK/build" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Rel
 	-DGGML_NATIVE=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
 	-DGGML_BMI2=ON -DGGML_AVX512=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF \
 	-DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-	-DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON >/dev/null
+	-DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF >/dev/null
 cmake --build "$WORK/build" --target llama-server -j"$(nproc)" >/dev/null
+UI_H=$WORK/build/tools/ui/ui.h
+[ -f "$UI_H" ] || { echo "llama-server: $UI_H was not generated; the web UI check cannot run" >&2; exit 1; }
+! grep -q '^#define LLAMA_UI_HAS_ASSETS' "$UI_H" || { echo "llama-server embeds a web UI (#4454)" >&2; exit 1; }
 BIN=$WORK/build/bin/llama-server
 ! readelf -l "$BIN" | grep -q INTERP || { echo "llama-server is not static" >&2; exit 1; }
 ! readelf -d "$BIN" 2>/dev/null | grep -q NEEDED || { echo "llama-server needs shared libraries" >&2; exit 1; }

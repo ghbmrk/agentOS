@@ -152,7 +152,10 @@ func copyState(s State) State {
 }
 
 // FileStore keeps State in one JSON file, replaced atomically.
-type FileStore struct{ Path string }
+type FileStore struct {
+	Path string
+	stop func(i int) bool // tests: crash Save's file write after step i
+}
 
 func (f FileStore) Load() (State, error) {
 	var s State
@@ -171,5 +174,5 @@ func (f FileStore) Save(s State) error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, nil)
+	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, f.stop)
 }
