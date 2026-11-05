@@ -54,8 +54,11 @@ const (
 	RoutineLock
 	// A trip at the enforcer (KRN-12): traffic to a decoy address, a byte
 	// cap passed, a malformed or excessive channel message. The only kind
-	// that lights the bulb. Last, so journalled kinds keep their numbers.
+	// that lights the bulb. Appended, so journalled kinds keep their numbers.
 	Trip
+	// A factory reset by the case code dropped the passkey (NET-2
+	// Hardening): a text, never the light (D-254). Appended last.
+	FactoryReset
 )
 
 // Delivery is how a kind reaches the owner.
@@ -88,6 +91,7 @@ var kinds = map[Kind]spec{
 	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
 	RoutineLock:      {LogOnly, true, "%s locked."},
 	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
+	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window

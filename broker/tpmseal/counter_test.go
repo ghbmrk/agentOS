@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/go-tpm/tpm2"
 
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -235,7 +236,7 @@ func TestCounterValueReadsAndAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: auth}
+	c := tpmseal.Counter{TPM: s.TPM(), SRK: srk, Ref: ref, Auth: secret.Hide(auth)}
 	n, err := c.Read()
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +248,7 @@ func TestCounterValueReadsAndAdvances(t *testing.T) {
 		t.Fatalf("after Increment: %d, want %d", got, n+1)
 	}
 	bad := c
-	bad.Auth = counterAuth(t)
+	bad.Auth = secret.Hide(counterAuth(t))
 	if _, err := bad.Read(); err == nil {
 		t.Fatal("read with the wrong auth")
 	}

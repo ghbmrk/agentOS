@@ -2,6 +2,7 @@ package wire
 
 import (
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 )
@@ -10,7 +11,8 @@ import (
 
 // TestEveryCoreTypeHasARate: each type the core sends has a kind with a
 // positive rate, a head and an entry share one, and nothing the enforcer
-// sends has one. Revert mutant: any case of RateKindOf or Rate.
+// sends has one; a caller cannot change the kind list. Revert mutant: any
+// case of RateKindOf or Rate.
 func TestEveryCoreTypeHasARate(t *testing.T) {
 	seen := map[RateKind]bool{}
 	for typ := range types[ToEnforcer] {
@@ -23,8 +25,8 @@ func TestEveryCoreTypeHasARate(t *testing.T) {
 		}
 		seen[k] = true
 	}
-	if len(seen) != len(RateKinds) {
-		t.Errorf("%d kinds reached from the core's types, %d listed", len(seen), len(RateKinds))
+	if len(seen) != len(RateKinds()) {
+		t.Errorf("%d kinds reached from the core's types, %d listed", len(seen), len(RateKinds()))
 	}
 	if RateKindOf(THead) != RateHead || RateKindOf(TEntry) != RateHead {
 		t.Error("a head and an entry do not share a rate")
@@ -33,6 +35,15 @@ func TestEveryCoreTypeHasARate(t *testing.T) {
 		if typ != THello && RateKindOf(typ) != 0 {
 			t.Errorf("enforcer type %d has a rate", typ)
 		}
+	}
+	// The list is the other end's too: a caller changing its copy leaves
+	// the next caller's whole (the channel keeps a bucket per kind).
+	mine := RateKinds()
+	for i := range mine {
+		mine[i] = 0
+	}
+	if got := RateKinds(); len(got) != len(seen) || slices.Contains(got, 0) {
+		t.Errorf("a caller's change reached the list: %v", got)
 	}
 	want := map[Type]RateKind{THello: RateHello, TCommand: RateCommand, TTighten: RateTighten, TRead: RateRead,
 		TAnnounce: RateAnnounce, THead: RateHead, TEntry: RateHead, TAnswer: RateAnswer}

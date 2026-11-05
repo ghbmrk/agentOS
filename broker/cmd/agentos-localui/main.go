@@ -232,7 +232,7 @@ func servedPort1(sys, iface, file string) (string, error) {
 		}
 	}
 	if p != admitted {
-		return "", errors.New("the inbound firewall admits the page on " + admitted + " but port 1 is " + p + "; the page serves nothing until its unit picks again")
+		return "", errors.New("the inbound firewall admits the page on " + admitted + " but port 1 is " + p + "; the page serves nothing until its unit names the same port for both steps (a drop-in with an empty ExecStartPre= line, the root step with -iface, and AGENTOS_PAGE_IFACE)")
 	}
 	return p, nil
 }

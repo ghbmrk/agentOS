@@ -3,10 +3,11 @@ package e2e
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -458,33 +459,25 @@ func TestControlUIProbePin(t *testing.T) {
 	}
 }
 
-// noControlUI checks that the guest's gateway does not serve OpenClaw's
-// Control UI (#4417, PLN-5): agentOS never uses it, and its assets inline
-// the DOMPurify and KaTeX copies accepted under #4302. OpenClaw serves it by
-// default whenever dist/control-ui is present, so only the profile's
-// gateway.controlUi.enabled false keeps it off. The probe asks for the UI's
-// root and for the two assets that hold those copies, and fails if any
-// comes back as the file in the image or carries the UI's build marker. A
-// gateway the probe cannot reach fails the test, so a dead gateway is no pass.
-// The probe runs through the machine's own runtime, with its runsc flags
-// and fixed environment.
+// noControlUI checks that the guest ships and serves no OpenClaw Control UI
+// (#4417, #4436, PLN-5): agentOS never uses it, and its assets inlined the
+// DOMPurify and KaTeX copies that #4302 accepted. The image build deletes the
+// UI's assets (guest/openclaw/prune.js, D-308), and the profile also sets
+// gateway.controlUi.enabled false. The test fails if any pruned directory is
+// in the rootfs. Then the probe asks for the UI's root and for the two assets
+// that held those copies, at their names on controlUIProbePin, and fails if
+// any answer carries the UI's build marker. A gateway the probe cannot reach
+// fails the test, so a dead gateway is no pass. The probe runs through the
+// machine's own runtime, with its runsc flags and fixed environment.
 func noControlUI(t *testing.T, rt *gvisor.Runtime, rootfs string) {
 	t.Helper()
-	ui := filepath.Join(rootfs, "opt/openclaw/node_modules/openclaw/dist/control-ui")
-	paths, want := []string{"/"}, map[string]string{}
-	for _, g := range []string{"markdown-runtime-*.js", "mermaid.min-*.js"} {
-		files, _ := filepath.Glob(filepath.Join(ui, "assets", g))
-		if len(files) != 1 {
-			t.Fatalf("control-ui assets %s: %v, want one file (has the OpenClaw pin moved?)", g, files)
+	pkg := filepath.Join(rootfs, "opt/openclaw/node_modules/openclaw")
+	for _, d := range []string{"dist/control-ui", "dist/extensions/workboard/dist/control-ui", "dist/extensions/x/dist/control-ui"} {
+		if _, err := os.Lstat(filepath.Join(pkg, d)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("rootfs holds openclaw's %s (err %v): the build should prune it (D-308, #4436)", d, err)
 		}
-		b, err := os.ReadFile(files[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		p := "/assets/" + filepath.Base(files[0])
-		paths = append(paths, p)
-		want[p] = fmt.Sprintf("%x", sha256.Sum256(b))
 	}
+	paths := []string{"/", "/assets/markdown-runtime-ORQpioyT.js", "/assets/mermaid.min-RZ6v1efX.js"}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	res, err := rt.Exec(ctx, "agent", vm.Command{
@@ -518,7 +511,7 @@ func noControlUI(t *testing.T, rt *gvisor.Runtime, rootfs string) {
 		switch {
 		case !ok || r.Status == 0:
 			t.Errorf("control UI probe: no answer for %s", p)
-		case r.Marker || (want[p] != "" && r.Sha256 == want[p]):
+		case r.Marker:
 			t.Errorf("gateway serves the Control UI at %s (status %d): want gateway.controlUi.enabled false (#4417)", p, r.Status)
 		}
 	}

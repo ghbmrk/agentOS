@@ -17,6 +17,8 @@ import (
 	"os"
 	"regexp"
 	"syscall"
+
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // FD is the descriptor a clerk main reads its key from: a pipe or a
@@ -44,9 +46,11 @@ const maxClerkKey = len(clerkKeyTag) + 1 + maxClerkName + Len
 var ErrKey = errors.New("handoff: the clerk's key hand-off is damaged, missing or another clerk's")
 
 // Key is what the kernel hands one clerk's process at each start of it.
+// The key is a Secret, so a line that formats a Key shows no key bytes
+// (CLK-1, DECOY-b-8, #4833).
 type Key struct {
 	Name string
-	Key  [Len]byte
+	Key  secret.Secret[[Len]byte]
 }
 
 // Marshal encodes k for the clerk's descriptor. The caller wipes the
@@ -59,7 +63,7 @@ func Marshal(k Key) ([]byte, error) {
 	b = append(b, clerkKeyTag...)
 	b = append(b, byte(len(k.Name)))
 	b = append(b, k.Name...)
-	return append(b, k.Key[:]...), nil
+	return append(b, k.Key.Ref()[:]...), nil
 }
 
 // Read reads name's key from f and closes it. f must be a pipe or a
@@ -95,8 +99,8 @@ func parse(b []byte, name string) (Key, error) {
 	if len(rest) != 1+n+Len || string(rest[1:1+n]) != name || !clerkName.MatchString(name) {
 		return Key{}, ErrKey
 	}
-	k := Key{Name: name}
-	copy(k.Key[:], rest[1+n:])
+	k := Key{Name: name, Key: secret.Hide([Len]byte{})}
+	copy(k.Key.Ref()[:], rest[1+n:])
 	return k, nil
 }
 
@@ -128,8 +132,8 @@ func Derive(root *[Len]byte, name string) (Key, error) {
 		return Key{}, err
 	}
 	defer clear(b)
-	k := Key{Name: name}
-	copy(k.Key[:], b)
+	k := Key{Name: name, Key: secret.Hide([Len]byte{})}
+	copy(k.Key.Ref()[:], b)
 	return k, nil
 }
 
@@ -160,8 +164,9 @@ func (k Key) derive(label string) ([]byte, error) {
 	if !clerkName.MatchString(k.Name) {
 		return nil, ErrKey
 	}
-	return hkdf.Key(sha256.New, k.Key[:], nil, label+"\x00"+k.Name, 32)
+	return hkdf.Key(sha256.New, k.Key.Ref()[:], nil, label+"\x00"+k.Name, 32)
 }
 
-// Wipe clears the key. Keys already derived are the holder's.
-func (k *Key) Wipe() { clear(k.Key[:]) }
+// Wipe clears the key in every copy of k. Keys already derived are the
+// holder's.
+func (k *Key) Wipe() { clear(k.Key.Ref()[:]) }

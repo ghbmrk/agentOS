@@ -55,9 +55,12 @@ const (
 	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
-	// pageDropIn names the page's interface (agentos-localui.service's
-	// AGENTOS_PAGE_IFACE).
+	// pageDropIn names the page's interface: the page's through
+	// AGENTOS_PAGE_IFACE, and the root step's by replacing its ExecStartPre,
+	// which on the image passes no -iface (#4816).
 	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
+	pageConf   = "[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\nExecStartPre=\n" +
+		"ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -iface enowner0 -port1-file /run/agentos-localui/port1\n"
 )
 
 // publishedAuthority is the first-boot page certificate
@@ -187,7 +190,7 @@ func (d *driver) harness() error {
 	if err := os.MkdirAll(filepath.Dir(pageDropIn), 0o755); err != nil {
 		return err
 	}
-	if err := writeNoFollow(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
+	if err := writeNoFollow(pageDropIn, []byte(pageConf), 0o644); err != nil {
 		return err
 	}
 	if err := run("systemctl", "daemon-reload"); err != nil {

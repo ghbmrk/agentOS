@@ -350,3 +350,77 @@ func TestLostCardLogsNoSecret(t *testing.T) {
 		t.Fatalf("a secret in the log: %q", out)
 	}
 }
+
+// MIG-4-recovery-r4f (#4178): the confirm marks the shown record only
+// when it names the card the kernel wipes.
+func TestLostCardDoneMarksOnlyTheCardItWipes(t *testing.T) {
+	shownID, held := strings.Repeat("ab", 16), strings.Repeat("cd", 16)
+	r := newLostRig(t, "")
+	ctx := context.Background()
+	r.l.writeShown(shown{ID: shownID})
+	r.hold(held, 0x3c)
+	must(t, r.l.LostDone(ctx))
+	if r.count("recoverycarddone") != 1 {
+		t.Fatalf("calls %v", r.log)
+	}
+	if got := r.l.readShown(); got != (shown{ID: shownID}) {
+		t.Fatalf("a record naming another card was marked: %+v", got)
+	}
+	r.ck.card = nil // the card ID read fails; the wipe still answers
+	must(t, r.l.LostDone(ctx))
+	if got := r.l.readShown(); got != (shown{ID: shownID}) {
+		t.Fatalf("a record was marked with no card ID read: %+v", got)
+	}
+}
+
+// MIG-4-recovery-r4g (#4179): a failed read of the recipient in effect
+// leaves the shown card out and still reports a filed request and a
+// ready card.
+func TestLostCardStateKeepsFiledAndReadyWhenTheRecipientReadFails(t *testing.T) {
+	id := strings.Repeat("ab", 16)
+	r := newLostRig(t, "")
+	ctx := context.Background()
+	r.l.writeShown(shown{ID: id})
+	if err := os.WriteFile(r.l.Request, []byte("approval"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.hold(id, 0x3c)
+	r.k.err = errors.New("backups read fails")
+	st, err := r.l.LostState(ctx)
+	if err != nil || st != (localapi.RecoveryLostState{Filed: true, Ready: true}) {
+		t.Fatalf("state %+v %v", st, err)
+	}
+}
+
+// MIG-4-recovery-r4i (#4181): a route-A replacement the keeper wrote
+// removes the shown record, so the first step carries no lost-card note;
+// a refused one keeps it.
+func TestRouteAReplacementClearsTheShownCard(t *testing.T) {
+	id := strings.Repeat("ab", 16)
+	r := newLostRig(t, id)
+	ctx := context.Background()
+	r.l.writeShown(shown{ID: id, Confirmed: true})
+	ops := recoveryOps{r.f, r.l}
+	rotate := func() error {
+		b, err := ops.Begin(ctx, testNewKey)
+		if err != nil {
+			return err
+		}
+		ad, cd, sig := r.anchors[0].get(t, b.Challenge)
+		_, err = ops.Rotate(ctx, localapi.RecoveryFactorPassphrase, []byte("synthetic words only"), testNewKey, ad, cd, sig)
+		return err
+	}
+	r.keeper.word = "factor"
+	if err := rotate(); code(err) != localapi.ErrRecoveryFactor {
+		t.Fatalf("refused rotate: %v", err)
+	}
+	if got := r.l.readShown(); got.ID != id {
+		t.Fatalf("a refused replacement cleared the record: %+v", got)
+	}
+	r.keeper.word = "ok"
+	must(t, rotate())
+	st, err := r.l.LostState(ctx)
+	if err != nil || st != (localapi.RecoveryLostState{}) {
+		t.Fatalf("after route A: %+v %v", st, err)
+	}
+}

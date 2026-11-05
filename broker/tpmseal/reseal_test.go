@@ -26,7 +26,7 @@ func TestSealToAnotherPC(t *testing.T) {
 	}
 
 	newKeyB := newKey(t)
-	sec := secret(t)
+	sec := randKey(t)
 	moved, err := tpmseal.SealTo(sealed.SRKPublic, sec, &newKeyB.PublicKey, "Test PC")
 	if err != nil {
 		t.Fatal(err)

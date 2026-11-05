@@ -98,7 +98,7 @@ type slot struct{ k wire.RateKind }
 func New(now time.Time) *Gate {
 	g := &Gate{epoch: now, kinds: map[wire.RateKind]*kind{}}
 	t := g.clock(now)
-	for _, k := range wire.RateKinds {
+	for _, k := range wire.RateKinds() {
 		l := wire.Rate(k)
 		st := &kind{b: wire.NewBucket(l, t)}
 		if k == wire.RateHello {

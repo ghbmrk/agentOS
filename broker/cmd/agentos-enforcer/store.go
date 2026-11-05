@@ -45,7 +45,12 @@ func checkStateDir(dir string) error {
 // replaces the whole file atomically (write, sync, rename, sync the
 // directory), so a power loss leaves either the old state or the new one,
 // never a torn one.
-type fileStore struct{ path string }
+type fileStore struct {
+	path string
+	// fault is the lifecycle test's seam: a non-nil error from it fails
+	// Save before any write. Nil in production.
+	fault func(path string) error
+}
 
 func (f fileStore) Load() ([]byte, error) {
 	b, err := os.ReadFile(f.path)
@@ -56,6 +61,11 @@ func (f fileStore) Load() ([]byte, error) {
 }
 
 func (f fileStore) Save(b []byte) error {
+	if f.fault != nil {
+		if err := f.fault(f.path); err != nil {
+			return err
+		}
+	}
 	return writeAtomic(f.path, b)
 }
 

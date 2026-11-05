@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
@@ -83,10 +84,10 @@ func FuzzParse(f *testing.F) {
 		w.eng = r.eng
 		stream := append(helloFrame(t, r), data...)
 		var out bytes.Buffer
-		err := r.ch.Serve(struct {
+		err := r.ch.Serve(noDeadline{struct {
 			io.Reader
 			io.Writer
-		}{bytes.NewReader(stream), &out}, exporter)
+		}{bytes.NewReader(stream), &out}}, exporter)
 
 		// Walk the same bytes with the codec alone.
 		rd := bytes.NewReader(data)
@@ -123,3 +124,9 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+// noDeadline is a stream whose writes never block, so a deadline on them
+// is moot.
+type noDeadline struct{ io.ReadWriter }
+
+func (noDeadline) SetWriteDeadline(time.Time) error { return nil }

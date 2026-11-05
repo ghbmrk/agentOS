@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -90,7 +91,7 @@ func TestFlags(t *testing.T) {
 
 func keyPipe(t *testing.T, name string, k [clerkkey.Len]byte) *os.File {
 	t.Helper()
-	b, err := clerkkey.Marshal(clerkkey.Key{Name: name, Key: k})
+	b, err := clerkkey.Marshal(clerkkey.Key{Name: name, Key: secret.Hide(k)})
 	must(t, err)
 	r, w, err := os.Pipe()
 	must(t, err)
@@ -167,7 +168,7 @@ func sealedSlot(t *testing.T, dir string, k [32]byte) {
 // sealedSlotAs is sealedSlot into slot, sealed for plan sealedFor.
 func sealedSlotAs(t *testing.T, dir, slot, sealedFor string, k [32]byte) {
 	t.Helper()
-	ck := clerkkey.Key{Name: clerkName, Key: k}
+	ck := clerkkey.Key{Name: clerkName, Key: secret.Hide(k)}
 	sk, err := ck.Sealer()
 	must(t, err)
 	s, err := clerk.NewAESSealer(sk)
