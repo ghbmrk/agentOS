@@ -44,9 +44,20 @@ func TestOwnerEventRungMeetsTheKeysRung(t *testing.T) {
 			t.Fatalf("%s: %s, want held for an approval", id, ph)
 		}
 	}
+	// The send-time check (Send, Retry, Rederive) reads the same rung: a
+	// step only an approval lifts is refused there until the approval comes.
+	for _, id := range []string{"approved", "lapsed"} {
+		p := r.k.State().Plans[id]
+		if rf := kernel.SendCheck(r.k.State(), p, &p.Steps[0], 0, 2); rf == nil || rf.Code != key.RRung {
+			t.Fatalf("%s sent before its approval: %v", id, rf)
+		}
+	}
 	checker := gen(40)
 	r.k.PinChecker(checker.pub)
 	must(t, r.k.ApproveCode(3, kernel.SignCode(checker.priv, r.codeSteps("approved"))))
+	if p := r.k.State().Plans["approved"]; kernel.SendCheck(r.k.State(), p, &p.Steps[0], 0, 3) != nil {
+		t.Fatal("the code-approved step is refused at send")
+	}
 	must(t, r.tick(4))
 	if r.status("approved") != kernel.SDone {
 		t.Fatalf("the code-approved step: %s", r.status("approved"))
