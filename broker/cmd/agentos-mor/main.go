@@ -67,6 +67,8 @@ type sys struct {
 	getFlags func(fd int) (uint32, error)
 	setFlags func(fd int, flags uint32) error
 	sync     func()
+	put      func(path string, b []byte) error // the MOR write (write on the box)
+	mount    func() error                      // mounts efivarfs before a clear; nil in a scratch tree
 }
 
 func newSys(root string) *sys {
@@ -75,6 +77,7 @@ func newSys(root string) *sys {
 		getFlags: func(fd int) (uint32, error) { return unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS) },
 		setFlags: func(fd int, f uint32) error { return unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(f)) },
 		sync:     unix.Sync,
+		put:      write,
 	}
 }
 
@@ -181,16 +184,16 @@ func (s *sys) held() (string, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if err != nil {
-			return "", fmt.Errorf("reading /%s: %w; MOR left set", d, err)
-		}
-		names, err := f.Readdirnames(1)
-		f.Close()
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("reading /%s: %w; MOR left set", d, err)
+		var names []string
+		if err == nil {
+			names, err = f.Readdirnames(1)
+			f.Close()
 		}
 		if len(names) > 0 {
 			return "/" + d, nil
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("reading /%s: %w; MOR left set", d, err)
 		}
 	}
 	return "", nil
@@ -249,16 +252,12 @@ func (s *sys) clear() (string, error) {
 	if err := s.clearImmutable(path); err != nil {
 		return "", fmt.Errorf("MOR: %w; left set", err)
 	}
-	b := binary.LittleEndian.AppendUint32(nil, attrs)
-	if err := write(path, append(b, data&^clearMemory)); err != nil {
+	want := append(binary.LittleEndian.AppendUint32(nil, attrs), data&^clearMemory)
+	if err := s.put(path, want); err != nil {
 		return "", fmt.Errorf("writing MOR: %w; left set", err)
 	}
-	got, err := read(path, 64)
-	if err != nil {
-		return "", err
-	}
-	if want := append(b, data&^clearMemory); !bytes.Equal(got, want) {
-		return "", fmt.Errorf("MOR reads %x after the write, not %x", got, want)
+	if got, err := read(path, 64); err != nil || !bytes.Equal(got, want) {
+		return "", fmt.Errorf("MOR reads %x (%v) after the write, not %x", got, err, want)
 	}
 	return "mor=cleared", nil
 }
@@ -293,7 +292,9 @@ func mountEFIVars() error {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], newSys("/"), os.Stdout, os.Stderr))
+	s := newSys("/")
+	s.mount = mountEFIVars
+	os.Exit(run(os.Args[1:], s, os.Stdout, os.Stderr))
 }
 
 func run(args []string, s *sys, stdout, stderr io.Writer) int {
@@ -303,8 +304,8 @@ func run(args []string, s *sys, stdout, stderr io.Writer) int {
 	case len(args) == 1 && args[0] == "status":
 		out, err = s.status()
 	case len(args) == 1 && args[0] == "clear":
-		if s.root == "/" {
-			if err = mountEFIVars(); err != nil {
+		if s.mount != nil {
+			if err = s.mount(); err != nil {
 				err = fmt.Errorf("mounting efivarfs: %w", err)
 				break
 			}

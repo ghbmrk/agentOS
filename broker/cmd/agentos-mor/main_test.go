@@ -322,3 +322,203 @@ func TestWipeOnReadsAsTheKernel(t *testing.T) {
 		}
 	}
 }
+
+// openFDs counts this process's open descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ents)
+}
+
+// A clear closes every descriptor it opens: the variable, each held
+// directory and the immutable-flag handle.
+func TestClearLeaksNoDescriptor(t *testing.T) {
+	clearOnce := func() {
+		h := newHost(t, wipe, morSet)
+		for _, d := range holdDirs {
+			if err := os.MkdirAll(filepath.Join(h.s.root, d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if rc, _, errOut := h.run("clear"); rc != 0 {
+			t.Fatal(errOut)
+		}
+	}
+	clearOnce()
+	before := openFDs(t)
+	for i := 0; i < 5; i++ {
+		clearOnce()
+	}
+	if after := openFDs(t); after != before {
+		t.Fatalf("%d descriptors open after five clears, %d before", after, before)
+	}
+}
+
+// Each failure is reported as itself, not as a later step's.
+func TestFailuresNameTheirCause(t *testing.T) {
+	const loop = "too many levels of symbolic links"
+	t.Run("MOR a link", func(t *testing.T) {
+		for _, cmd := range []string{"clear", "status"} {
+			h := newHost(t, wipe, nil)
+			if err := os.Symlink(filepath.Join(h.s.root, "elsewhere"), h.s.morPath()); err != nil {
+				t.Fatal(err)
+			}
+			if rc, _, errOut := h.run(cmd); rc != 1 || !strings.Contains(errOut, loop) {
+				t.Fatalf("%s: rc %d, %q", cmd, rc, errOut)
+			}
+		}
+	})
+	t.Run("no command line", func(t *testing.T) {
+		for _, cmd := range []string{"clear", "status"} {
+			h := newHost(t, wipe, morSet)
+			if err := os.Remove(filepath.Join(h.s.root, "proc/cmdline")); err != nil {
+				t.Fatal(err)
+			}
+			if rc, _, errOut := h.run(cmd); rc != 1 || !strings.Contains(errOut, "no such file") {
+				t.Fatalf("%s: rc %d, %q", cmd, rc, errOut)
+			}
+			if got := h.file(morPath); !bytes.Equal(got, morSet) {
+				t.Fatalf("MOR %x", got)
+			}
+		}
+	})
+	t.Run("held directory a link", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		if err := os.MkdirAll(filepath.Join(h.s.root, "run"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(h.s.root, "run/agentos-setup")); err != nil {
+			t.Fatal(err)
+		}
+		if rc, _, errOut := h.run("clear"); rc != 1 || !strings.Contains(errOut, "not a directory") {
+			t.Fatalf("rc %d, %q", rc, errOut)
+		}
+	})
+	t.Run("usage", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		if rc, _, errOut := h.run("wipe"); rc != 2 || !strings.Contains(errOut, "usage: agentos-mor status|clear") {
+			t.Fatalf("rc %d, %q", rc, errOut)
+		}
+	})
+}
+
+// The immutable flag is dropped only when it is set, and only once it was
+// read: a failed read leaves MOR set.
+func TestUnlockReadsTheFlagFirst(t *testing.T) {
+	t.Run("read fails", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		h.s.getFlags = func(int) (uint32, error) { return 0, errors.New("ENOTTY") }
+		if rc, _, errOut := h.run("clear"); rc != 1 || !strings.Contains(errOut, "ENOTTY") {
+			t.Fatalf("rc %d, %q", rc, errOut)
+		}
+		if got := h.file(morPath); !bytes.Equal(got, morSet) || strings.Contains(strings.Join(h.events, ","), "unlock") {
+			t.Fatalf("MOR %x, events %v", got, h.events)
+		}
+	})
+	t.Run("not immutable", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		h.s.getFlags = func(int) (uint32, error) { return 0x80000, nil }
+		if rc, _, errOut := h.run("clear"); rc != 0 {
+			t.Fatal(errOut)
+		}
+		if strings.Join(h.events, ",") != "sync" {
+			t.Fatalf("events %v, want no unlock", h.events)
+		}
+	})
+	t.Run("no file", func(t *testing.T) {
+		h := newHost(t, wipe, nil)
+		if err := h.s.clearImmutable(h.s.morPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%v", err)
+		}
+		if len(h.events) != 0 {
+			t.Fatalf("events %v", h.events)
+		}
+	})
+}
+
+// The write is read back: a variable the firmware did not take as written,
+// or that cannot be read back, is a failure.
+func TestClearReadsTheWriteBack(t *testing.T) {
+	for name, put := range map[string]func(string, []byte) error{
+		"firmware kept the bit": func(p string, b []byte) error { return write(p, morSet) },
+		"gone after the write": func(p string, b []byte) error {
+			return errors.Join(write(p, b), os.Remove(p))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t, wipe, morSet)
+			h.s.put = put
+			if rc, out, errOut := h.run("clear"); rc != 1 || !strings.Contains(errOut, "after the write") {
+				t.Fatalf("rc %d, %q, %q", rc, out, errOut)
+			}
+		})
+	}
+	t.Run("write fails", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		h.s.put = func(string, []byte) error { return errors.New("EIO") }
+		if rc, _, errOut := h.run("clear"); rc != 1 || !strings.Contains(errOut, "writing MOR: EIO") {
+			t.Fatalf("rc %d, %q", rc, errOut)
+		}
+	})
+}
+
+// clear mounts efivarfs first when it has a mount to make, and stops if
+// that fails.
+func TestClearMountsEFIVarsFirst(t *testing.T) {
+	h := newHost(t, wipe, morSet)
+	h.s.mount = func() error { h.events = append(h.events, "mount"); return errors.New("EPERM") }
+	if rc, _, errOut := h.run("clear"); rc != 1 || !strings.Contains(errOut, "mounting efivarfs: EPERM") {
+		t.Fatalf("rc %d, %q", rc, errOut)
+	}
+	if got := h.file(morPath); !bytes.Equal(got, morSet) || strings.Join(h.events, ",") != "mount" {
+		t.Fatalf("MOR %x, events %v", got, h.events)
+	}
+	h = newHost(t, wipe, morSet)
+	h.s.mount = func() error { h.events = append(h.events, "mount"); return nil }
+	if rc, _, errOut := h.run("clear"); rc != 0 || strings.Join(h.events, ",") != "mount,sync,unlock" {
+		t.Fatalf("rc %d, %q, events %v", rc, errOut, h.events)
+	}
+	h = newHost(t, wipe, morSet)
+	h.s.mount = func() error { t.Error("status mounted efivarfs"); return nil }
+	h.run("status")
+}
+
+// read refuses a file over its bound; write never creates one.
+func TestReadAndWriteBounds(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v")
+	if err := write(p, morSet); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write to a missing file: %v", err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("write created the file")
+	}
+	if err := os.WriteFile(p, morSet, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := read(p, 5); err != nil || !bytes.Equal(b, morSet) {
+		t.Fatalf("%x, %v", b, err)
+	}
+	if _, err := read(p, 4); err == nil || !strings.Contains(err.Error(), "over 4 bytes") {
+		t.Fatalf("read past its bound: %v", err)
+	}
+}
+
+// Words split as the kernel's next_arg: runs of blanks give no empty word,
+// and the last word needs no blank after it.
+func TestCmdlineWords(t *testing.T) {
+	for line, want := range map[string]string{
+		"a  b\n":         "a|b",
+		"a b":            "a|b",
+		` x="1 2"  y `:   `x="1 2"|y`,
+		"":               "",
+		"\t\n":           "",
+		"init_on_free=1": "init_on_free=1",
+	} {
+		if got := strings.Join(cmdlineWords(line), "|"); got != want {
+			t.Errorf("%q: %q, want %q", line, got, want)
+		}
+	}
+}
