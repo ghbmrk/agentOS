@@ -52,7 +52,7 @@ func TestUnlockReadsNoMoreThanItsCap(t *testing.T) {
 	}
 	// An oversized urlencoded form is refused even with a valid code.
 	m := &bodyMeter{limit: 32 << 20}
-	form := url.Values{"code": {r.code()}, "next": {"/home"}}.Encode() + "&pad="
+	form := url.Values{"code": {r.code()}, "next": {"/approvals/"}}.Encode() + "&pad="
 	w := r.do("POST", "/unlock", nil, func(q *http.Request) {
 		q.Body, q.ContentLength = io.NopCloser(io.MultiReader(strings.NewReader(form), m)), -1
 		q.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -60,11 +60,14 @@ func TestUnlockReadsNoMoreThanItsCap(t *testing.T) {
 	if m.n > unlockCap {
 		t.Errorf("urlencoded: read %d bytes, cap %d", m.n, unlockCap)
 	}
-	if w.Code == http.StatusSeeOther || len(w.Result().Cookies()) != 0 {
-		t.Fatalf("oversized sign-in accepted: %d %v", w.Code, w.Result().Cookies())
+	if w.Code != http.StatusBadRequest || w.Body.String() != "Bad request\n" || len(w.Result().Cookies()) != 0 {
+		t.Fatalf("oversized sign-in not refused: %d %q %v", w.Code, w.Body.String(), w.Result().Cookies())
 	}
-	// Under the cap, sign-in still keeps next from the form.
-	if w := r.post("/unlock", url.Values{"code": {r.code()}, "next": {"/home"}}); w.Header().Get("Location") != "/home" {
+	// next still comes from the URL on GET and from the form on POST.
+	if !strings.Contains(r.get("/unlock?next=/approvals/"), `name="next" value="/approvals/"`) {
+		t.Fatal("GET lost next")
+	}
+	if w := r.post("/unlock", url.Values{"code": {r.code()}, "next": {"/approvals/"}}); w.Header().Get("Location") != "/approvals/" {
 		t.Fatalf("sign-in under the cap: %d %s", w.Code, w.Header().Get("Location"))
 	}
 }
