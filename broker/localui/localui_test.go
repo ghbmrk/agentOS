@@ -1207,15 +1207,15 @@ func TestSetupHelpersRefuseWhatTheyCannotShow(t *testing.T) {
 		t.Errorf("smsLink to a non-number: %q", got)
 	}
 	secret := strings.Repeat("A", 16)
-	if s, ok := otpSecret("otpauth://totp/AgentOS?secret=" + secret); !ok || s != secret {
+	if s, ok := otpSecret("otpauth://totp/agentOS?secret=" + secret); !ok || s != secret {
 		t.Fatalf("a good link: %q %v", s, ok)
 	}
 	for _, link := range []string{
-		"otpauth://hotp/AgentOS?secret=" + secret,
+		"otpauth://hotp/agentOS?secret=" + secret,
 		"javascript:alert(1)//otpauth://totp/?secret=" + secret,
-		"otpauth://totp/AgentOS?secret=" + secret + "&pad=" + strings.Repeat("x", 512),
+		"otpauth://totp/agentOS?secret=" + secret + "&pad=" + strings.Repeat("x", 512),
 		"otpauth://totp/%zz?secret=" + secret,
-		"otpauth://totp/AgentOS?secret=abc",
+		"otpauth://totp/agentOS?secret=abc",
 	} {
 		if s, ok := otpSecret(link); ok || s != "" {
 			t.Errorf("otpSecret(%q) = %q, %v", link, s, ok)

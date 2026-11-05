@@ -299,7 +299,10 @@ func TestACallToAgentosdEndsItsContext(t *testing.T) {
 	if err := s.call(context.Background(), localapi.OpStatus, struct{}{}, &st); err != nil {
 		t.Fatal(err)
 	}
-	if held == nil || held.Err() != context.Canceled {
+	if held == nil {
+		t.Fatal("the call never reached agentosd")
+	}
+	if held.Err() != context.Canceled {
 		t.Fatalf("context after the call: %v", held.Err())
 	}
 	if d, ok := held.Deadline(); !ok || time.Until(d) > callTimeout {
