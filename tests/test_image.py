@@ -94,9 +94,11 @@ def noexec(root):
 
 
 # The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
-# every agentos unit carries; the tree check refuses the units nodump() writes without them.
+# every agentos unit carries, and the MOR unit's replacement of it (HW-8); the tree check refuses the
+# units nodump() writes without them.
 MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
-                   "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf")
+                   "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf",
+                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"

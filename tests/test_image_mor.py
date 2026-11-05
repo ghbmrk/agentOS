@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from test_image import ENTRY, H, MK, ROOT, finish, ini, settings  # noqa: E402
+from test_image import ENTRY, H, MK, ROOT, check, finish, ini, settings  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 UNIT = UNITS / "agentos-mor.service"
@@ -49,6 +49,28 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual(ini(UNIT)["Install"]["WantedBy"], "sysinit.target")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text()
         self.assertIn("\nenable agentos-mor.service\n", preset)
+
+    def test_no_ordering_cycle_with_tmp_mount(self):
+        # L3 on #5009: agentos-.service.d/50-main-side.conf orders every agentos unit after
+        # systemd-tmpfiles-setup.service, which is after local-fs.target and so after tmp.mount; with
+        # this unit before tmp.mount, systemd broke the cycle by skipping this unit or tmp.mount. This
+        # unit's own file of the same name replaces that drop-in and adds no ordering.
+        shared, own = UNITS / "agentos-.service.d/50-main-side.conf", UNITS / "agentos-mor.service.d/50-main-side.conf"
+        self.assertIn("systemd-tmpfiles-setup.service", words(settings(shared), "After"))
+        self.assertEqual(sorted(UNITS.glob("agentos-mor.service.d/*")), [own])
+        self.assertEqual({k for k in settings(own)}, {"InaccessiblePaths"})
+        self.assertEqual(words(settings(UNIT), "After"), ["sys-firmware-efi-efivars.mount"])
+        for key in ("Requires", "Wants", "BindsTo", "Requisite", "Upholds"):
+            self.assertNotIn(key, settings(UNIT))
+
+    def test_the_clear_sees_the_dirs_it_lists(self):
+        # agentos-mor's holdDirs on /run are what the unit leaves unmasked (mkosi.finalize MOR_LISTED).
+        src = (ROOT / "broker/cmd/agentos-mor/main.go").read_text()
+        held = re.findall(r'"([^"]+)"', re.search(r"var holdDirs = \[\]string\{([^}]*)\}", src).group(1))
+        self.assertEqual(tuple("/" + d for d in held if d.startswith("run/")), check.MOR_LISTED)
+        hidden = [w.lstrip("-") for w in settings(UNITS / "agentos-mor.service.d/50-main-side.conf")["InaccessiblePaths"][0].split()]
+        for d in check.MOR_LISTED:
+            self.assertNotIn(d, hidden)
 
     def test_every_other_unit_stops_first(self):
         # A unit with DefaultDependencies=no is not ordered after sysinit.target, so it could still

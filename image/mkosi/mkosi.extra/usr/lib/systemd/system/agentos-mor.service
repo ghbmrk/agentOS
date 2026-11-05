@@ -8,7 +8,8 @@ Documentation=file:/usr/lib/agentos/agentos-mor
 # ordered after sysinit.target (every unit with default dependencies, which is every unit holding a
 # secret) has stopped, and after /tmp is unmounted: their memory is then free, and init_on_free=1
 # has zeroed it. agentos-mor refuses to clear MOR without init_on_free=1, and drops the page cache
-# first. tests/test_image_mor.py holds this ordering.
+# first. tests/test_image_mor.py holds this ordering. agentos-mor.service.d/50-main-side.conf replaces
+# the shared main-side drop-in, whose After=systemd-tmpfiles-setup.service would close a cycle here.
 DefaultDependencies=no
 After=sys-firmware-efi-efivars.mount
 Before=sysinit.target shutdown.target tmp.mount
