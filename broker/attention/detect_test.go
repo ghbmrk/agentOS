@@ -459,3 +459,26 @@ func TestClockNeverRewinds(t *testing.T) {
 		t.Fatalf("clock %v, measure %+v", o.st.Now, m)
 	}
 }
+
+// D-309: Detection is Flagged over all known failures, and upper is the
+// Wilson score bound itself. Reference values come from an independent
+// evaluation of the Wilson formula (z = 1.6448536269514722).
+func TestDetectionAndWilsonValues(t *testing.T) {
+	for _, c := range []struct {
+		flagged, silent int
+		want            float64
+	}{{1, 1, 0.5}, {3, 1, 0.75}, {1, 3, 0.25}} {
+		m := Measure{Flagged: c.flagged, Silent: c.silent}
+		if got := m.Detection(); math.Abs(got-c.want) > 1e-12 {
+			t.Fatalf("Detection(%d flagged, %d silent) = %v, want %v", c.flagged, c.silent, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		s, n int
+		want float64
+	}{{0, 268, 0.009994414667589555}, {1, 100, 0.04358177353405608}, {3, 10, 0.5583002041301649}} {
+		if got := upper(c.s, c.n); math.Abs(got-c.want) > 1e-12 {
+			t.Fatalf("upper(%d,%d) = %v, want %v", c.s, c.n, got, c.want)
+		}
+	}
+}
