@@ -1024,6 +1024,27 @@ func TestNamedPort1StopsThePageWhenItsLinkChanges(t *testing.T) {
 		link(t, sys, "enp1s0", nic, 2)
 		watched(t, sys, "", "enp1s0", func() { link(t, sys, "enp2s0", other, 3) })
 	})
+	// Unnamed, port 1 needs no ifindex (that is the named link's id), and a
+	// port 1 the root step did not admit refuses before any watcher starts.
+	t.Run("unnamed, start", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		if err := os.Remove(filepath.Join(dir, "ifindex")); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(t.TempDir(), "port1")
+		for admitted, ok := range map[string]bool{"enp1s0": true, "enp2s0": false} {
+			if err := os.WriteFile(file, []byte(admitted+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			p, err := watchedPort1(ctx, cancel, sys, "", file, time.Hour)
+			cancel()
+			if ok != (err == nil) || ok && p != "enp1s0" {
+				t.Errorf("admitted %s: port 1 %q, %v", admitted, p, err)
+			}
+		}
+	})
 	// A named port 1 that is not a wired link with an ifindex is refused
 	// before the page listens.
 	sys := t.TempDir()
