@@ -409,12 +409,14 @@ func TestWrongTokenStaysP0AndIsTriedOnce(t *testing.T) {
 	r := newRig(t, fixed("All quiet."))
 	tries := 0
 	r.cfg.Token = func(string) bool { tries++; return false }
+	ends := r.records()
 	r.serve()
 	for _, k := range []byte("1000#") {
 		r.l.keys <- k
 	}
 	r.say("how are things")
 	r.next()
+	r.turnEnds(ends, 1)
 	rep := r.hangup()
 	if rep.Rung != call.P0 || r.ans.asks[0].Rung != call.P0 || tries != 1 {
 		t.Fatalf("rung %v, asks %+v, tries %d", rep.Rung, r.ans.asks, tries)

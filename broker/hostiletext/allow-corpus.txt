@@ -6,7 +6,6 @@
 clerk/model forbiddenHeader a denylist that accepts reshaping and credential names (X-Http-Method-Override, X-Signature); #4914
 clerk/plan forbiddenHeader a denylist that accepts reshaping and credential names (X-Original-Url, X-Api-Key); #4914
 clerk/plan Login.answerHeader passes a response header forbiddenHeader allows; #4914
-kernel Kernel.CallTrip reads only mapped and well-known NAT64 forms; no production caller yet; #4915
 #
 # Reached through a check that runs the corpus.
 netguard Policy.check called only by Policy.Check, which runs the address corpus

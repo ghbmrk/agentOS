@@ -883,6 +883,8 @@ def join_shards(pkg, shards, added, tests, lister):
         if (shard := shard_of(data)) is None:
             return None, f"{f} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
         if shard in seen:
+            if shard == (0, 1):
+                return None, f"{f} and {seen[shard]} are both results for {pkg}: one run gives one result"
             return None, f"{f} and {seen[shard]} are both shard {shard[0]} of {shard[1]} for {pkg}: shards overlap"
         seen[shard] = f
         mine, problem = targets_for(pkg, added, tests, data)
@@ -894,7 +896,7 @@ def join_shards(pkg, shards, added, tests, lister):
             if problem:
                 return None, f"{f} {problem}"
         elif mine != targets:
-            return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree"
+            return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree; rerun the mutgate workflow"
     counts = {of for _, of in seen}
     if len(counts) != 1:
         return None, f"the results for {pkg} disagree on the number of shards: {sorted(counts)}"
@@ -1095,7 +1097,10 @@ def cmd_plan(args):
                   f"sites, {of} shard(s)", file=sys.stderr)
             include += [{"pkg": pkg, "shard": i, "of": of} for i in range(of)]
     if not include or len(include) > MATRIX_MAX:
-        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit)", file=sys.stderr)
+        fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if include
+               else "rerun the mutgate workflow")
+        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit): {fix}",
+              file=sys.stderr)
         return 1
     print(json.dumps(include))
     return 0
