@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -919,6 +920,114 @@ func TestPageStopsWhenPort1Changes(t *testing.T) {
 	}
 	if ctx.Err() == nil {
 		t.Fatal("the watcher returned without stopping the page")
+	}
+}
+
+// #4882 (CH-9, HW-12; #4881 L3 6602775102, Security 6602754292): a page
+// whose port 1 is named (-iface) is stopped when that link changes: the
+// name goes away, is taken by another device or ifindex (a rename, or a
+// driver reload), or stops being wired, so the unit's restart re-runs the
+// root admit instead of the page serving on a name that no longer is the
+// link the firewall admitted.
+// REQ: CH-9, HW-12
+func TestNamedPort1StopsThePageWhenItsLinkChanges(t *testing.T) {
+	watched := func(t *testing.T, sys, name string, change func()) {
+		t.Helper()
+		id, err := namedLink(sys, name)
+		if err != nil {
+			t.Fatalf("named port 1 %s: %v", name, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { watchNamedPort1(ctx, cancel, sys, name, id, 5*time.Millisecond); close(done) }()
+		time.Sleep(30 * time.Millisecond)
+		if ctx.Err() != nil {
+			t.Fatal("the page stopped while its named port 1 was unchanged")
+		}
+		change()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a changed named port 1 did not stop the page")
+		}
+		if ctx.Err() == nil {
+			t.Fatal("the watcher returned without stopping the page")
+		}
+	}
+	link := func(t *testing.T, sys, name, dev string, index int) string {
+		t.Helper()
+		dir := filepath.Join(sys, "devices", dev, "net", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f, v := range map[string]string{"type": "1\n", "ifindex": strconv.Itoa(index) + "\n"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(sys, "class", "net"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cl := filepath.Join(sys, "class", "net", name)
+		os.Remove(cl)
+		if err := os.Symlink(filepath.Join("..", "..", "devices", dev, "net", name), cl); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	const nic, other = "pci0000:00/0000:00:1c.0/0000:01:00.0", "pci0000:00/0000:00:1c.1/0000:02:00.0"
+	t.Run("renamed away", func(t *testing.T) {
+		sys := t.TempDir()
+		link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", func() {
+			if err := os.Remove(filepath.Join(sys, "class", "net", "enp1s0")); err != nil {
+				t.Fatal(err)
+			}
+			link(t, sys, "eth9", nic, 2)
+		})
+	})
+	t.Run("name taken by another device", func(t *testing.T) {
+		sys := t.TempDir()
+		link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", func() { link(t, sys, "enp1s0", other, 2) })
+	})
+	t.Run("driver reload, new ifindex", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", func() {
+			if err := os.WriteFile(filepath.Join(dir, "ifindex"), []byte("7\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	t.Run("no longer wired", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", func() {
+			if err := os.Mkdir(filepath.Join(dir, "phy80211"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	// A named port 1 that is not a wired link with an ifindex is refused
+	// before the page listens.
+	sys := t.TempDir()
+	link(t, sys, "wlan0", nic, 3)
+	if err := os.Mkdir(filepath.Join(sys, "devices", nic, "net", "wlan0", "phy80211"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"wlan0", "enp9s0"} {
+		if _, err := namedLink(sys, name); err == nil {
+			t.Errorf("named port 1 %s was accepted", name)
+		}
+	}
+	dir := link(t, sys, "enp1s0", nic, 2)
+	if err := os.Remove(filepath.Join(dir, "ifindex")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := namedLink(sys, "enp1s0"); err == nil {
+		t.Error("a named port 1 with no ifindex was accepted")
 	}
 }
 
