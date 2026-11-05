@@ -930,6 +930,29 @@ class Deletion(unittest.TestCase):
             (stub).write_text("#!/bin/sh\nexit 1\n")
             self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
 
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_test_run_past_its_memory_cap_is_killed_with_its_children(self):
+        # egress on #5011: a deletion that drops a bound grew one test by gigabytes and took the
+        # runner down. A child's memory counts too, and the run ends well before its timeout.
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "t.test"
+            stub.write_text("#!/bin/sh\npython3 -c 'import time; b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            stub.write_text("#!/bin/sh\nexec python3 -c 'b = bytearray(1 << 20)'\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
+            stub.write_text("#!/bin/sh\nsleep 60\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
+
+    def test_available_memory_reads_meminfo(self):
+        got = mutgate.available_memory()
+        if os.path.isfile("/proc/meminfo"):
+            self.assertGreater(got, 0)
+        else:
+            self.assertIsNone(got)
+
     def repo(self, d, base_src=BASE_SRC, pr_src=PR_SRC, test_src=TEST_SRC):
         git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
         shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
@@ -1253,9 +1276,11 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls, first = [], ["TIMED OUT"]
-            def fake(binary, cwd, timeout):
+            mems = []
+            def fake(binary, cwd, timeout, mem=None):
                 self.assertTrue(pathlib.Path(binary).is_file())  # the worker's own binary, kept for the rerun
                 calls.append(pathlib.Path(binary).parent.name)
+                mems.append(mem)
                 return "LIVED" if calls.count(calls[-1]) > 1 else first[0]
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
             mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
@@ -1270,6 +1295,12 @@ func set(n, m int) {
                     self.assertIsNone(problem)
                     self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: want, 7: want})
                     self.assertEqual(len(calls), 2 * (jobs > 1) + 2)
+                    # A parallel run gets 1/jobs of the cap a run alone gets (egress on #5011).
+                    alone = mems[-1]
+                    self.assertTrue(alone is None or alone > 0)
+                    if alone and jobs > 1:
+                        self.assertEqual(mems[:2], [alone // jobs] * 2)
+                    mems.clear()
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
 
@@ -1285,7 +1316,7 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls = []
-            def fake(binary, cwd, timeout):
+            def fake(binary, cwd, timeout, mem=None):
                 calls.append(pathlib.Path(binary).parent.name)
                 return "TIMED OUT"
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
