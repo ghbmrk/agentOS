@@ -5,7 +5,9 @@
 # The unit tests run everywhere. The QEMU tests boot the stand-in guest and
 # need qemu, OVMF, swtpm, tpm2-tools and virt-fw-vars; they run when
 # HOSTCHECK_QEMU=1 (the `hostcheck` CI job) and fail rather than skip there if
-# a tool is missing. HOSTCHECK_KERNEL names the guest kernel.
+# a tool is missing. HOSTCHECK_KERNEL names the guest kernel; HOSTCHECK_TOOLS_ROOT, if set,
+# a root holding qemu, swtpm and OVMF (CI: the image's Debian snapshot, #4906).
+import argparse
 import json
 import os
 import pathlib
@@ -19,6 +21,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import hostcheck  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
+from test_workflows import job_steps  # noqa: E402
 
 GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 SYSTEMD = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
@@ -211,6 +216,128 @@ class SourcesTest(unittest.TestCase):
             self.assertEqual(v[f"{GLOBAL}:BootOrder"]["attr"], 7)
 
 
+# CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from a
+# root installed from the image's pinned Debian snapshot, never the runner's archive, so a runner
+# package update cannot change a hostcheck result.
+PINNED = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
+
+
+def fake_root(d, versions=None, skip=()):
+    """A tools root with the loader, the three binaries and OVMF as regular files."""
+    for rel in (hostcheck.TOOLS_LOADER, *hostcheck.TOOLS.values(), *hostcheck.TOOLS_OVMF):
+        if rel in skip:
+            continue
+        f = pathlib.Path(d, rel)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    status = pathlib.Path(d, "var/lib/dpkg/status")
+    status.parent.mkdir(parents=True, exist_ok=True)
+    versions = {p: "1:1.0-1" for p in PINNED} if versions is None else versions
+    status.write_text("\n\n".join(f"Package: {p}\nStatus: install ok installed\nVersion: {v}"
+                                  for p, v in versions.items()) + "\n")
+    return d
+
+
+class ToolsRootTest(unittest.TestCase):
+    def test_no_root_runs_the_path_tools(self):
+        self.assertEqual(hostcheck.tool_argv(None, "swtpm"), ["swtpm"])
+        self.assertEqual(hostcheck.qemu_data_args(None), ([], None))
+
+    def test_root_tools_run_on_the_roots_loader_and_libraries(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake_root(d)
+            for name, rel in hostcheck.TOOLS.items():
+                argv = hostcheck.tool_argv(d, name)
+                self.assertEqual(argv[:2], [os.path.join(d, hostcheck.TOOLS_LOADER), "--inhibit-cache"])
+                self.assertEqual(argv[-3:], ["--argv0", name, os.path.join(d, rel)])
+                libs = argv[argv.index("--library-path") + 1].split(":")
+                self.assertTrue(libs and all(lib.startswith(d + os.sep) for lib in libs), libs)
+            args, env = hostcheck.qemu_data_args(d)
+            self.assertEqual(args, ["-L", os.path.join(d, "usr/share/qemu")])
+            self.assertEqual(env["QEMU_MODULE_DIR"], os.path.join(d, "usr/lib/x86_64-linux-gnu/qemu"))
+
+    def test_missing_or_linked_tool_is_an_error_not_the_runners(self):
+        for rel in (hostcheck.TOOLS_LOADER, hostcheck.TOOLS["swtpm"]):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as d:
+                fake_root(d, skip=(rel,))
+                with self.assertRaises(hostcheck.HostcheckError):
+                    hostcheck.tool_argv(d, "swtpm")
+                os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+                os.symlink("/usr/bin/true", os.path.join(d, rel))  # an absolute link reads the runner's
+                with self.assertRaises(hostcheck.HostcheckError):
+                    hostcheck.tool_argv(d, "swtpm")
+
+    def test_ovmf_defaults_follow_the_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake_root(d)
+            a = argparse.Namespace(tools_root=d, ovmf_code=None, ovmf_vars=None)
+            hostcheck.resolve_tools(a)
+            self.assertEqual((a.ovmf_code, a.ovmf_vars), tuple(os.path.join(d, r) for r in hostcheck.TOOLS_OVMF))
+            a = argparse.Namespace(tools_root=d, ovmf_code="/x/code.fd", ovmf_vars=None)
+            hostcheck.resolve_tools(a)
+            self.assertEqual(a.ovmf_code, "/x/code.fd")
+        a = argparse.Namespace(tools_root=None, ovmf_code=None, ovmf_vars=None)
+        hostcheck.resolve_tools(a)
+        self.assertEqual((a.ovmf_code, a.ovmf_vars), ("/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+                                                      "/usr/share/OVMF/OVMF_VARS_4M.fd"))
+
+    def test_report_names_the_stack_it_booted(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake_root(d, versions={"qemu-system-x86": "1:10.0.2+ds-2", "ovmf": "2025.02-8",
+                                   "swtpm": "0.7.3-1", "swtpm-tools": "0.7.3-1"})
+            self.assertEqual(hostcheck.stack_versions(d)["ovmf"], "2025.02-8")
+        with tempfile.TemporaryDirectory() as d:
+            fake_root(d, versions={"qemu-system-x86": "1", "ovmf": "1", "swtpm": "1"})
+            with self.assertRaises(hostcheck.HostcheckError):  # swtpm-tools not installed
+                hostcheck.stack_versions(d)
+        self.assertEqual(hostcheck.stack_versions(None), "runner")
+
+
+class HostcheckJobTest(unittest.TestCase):
+    """ci.yml's hostcheck job installs the VM stack from the image's snapshot, not the runner's archive."""
+
+    def setUp(self):
+        self.ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    def problems(self, text):
+        out = []
+        steps = job_steps(text, "hostcheck")
+        # Every runner apt-get install or download command, its continuation lines joined.
+        runner_apt = "\n".join(line for _, b in steps for line in b.replace("\\\n", " ").splitlines()
+                               if re.search(r"apt-get\s.*\b(install|download)\b", line))
+        for pkg in PINNED:
+            if re.search(rf"(?<![\w.+-]){re.escape(pkg)}(?![\w.+-])", runner_apt):
+                out.append(f"{pkg} installed from the runner's archive")
+        root = [b for _, b in steps if "sudo mmdebstrap" in b]
+        if len(root) != 1:
+            out.append("no single mmdebstrap step builds the tools root")
+        else:
+            inc = re.search(r"--include=(\S+)", root[0])
+            if not inc or set(inc.group(1).split(",")) != set(PINNED):
+                out.append("the tools root does not include exactly the pinned stack")
+            if "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" not in root[0] or "security" in root[0]:
+                out.append("the tools root is not read from the image's snapshot alone")
+        run = [b for _, b in steps if "tests.test_hostcheck" in b]
+        if len(run) != 1 or not re.search(r"HOSTCHECK_TOOLS_ROOT: \$\{\{ runner\.temp \}\}/hostcheck-tools", run[0]):
+            out.append("the hostcheck run does not name the tools root")
+        return out
+
+    def test_vm_stack_comes_from_the_snapshot(self):
+        self.assertEqual(self.problems(self.ci), [])
+
+    def test_check_catches_mutants(self):
+        for name, (old, new) in {
+            "runner qemu": ("qemu-utils ", "qemu-utils qemu-system-x86 "),
+            "runner ovmf": ("qemu-utils ", "qemu-utils ovmf "),
+            "runner swtpm": ("qemu-utils ", "qemu-utils swtpm "),
+            "root without ovmf": ("--include=qemu-system-x86,ovmf,", "--include=qemu-system-x86,"),
+            "no root env": ("HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools", "HOSTCHECK_X: x"),
+        }.items():
+            with self.subTest(name):
+                self.assertIn(old, self.ci)
+                self.assertNotEqual(self.problems(self.ci.replace(old, new, 1)), [])
+
+
 QEMU = os.environ.get("HOSTCHECK_QEMU") == "1"
 
 
@@ -220,8 +347,13 @@ class QemuTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        for tool in ("qemu-system-x86_64", "swtpm", "swtpm_ioctl", "tpm2_getcap", "virt-fw-vars",
-                     "busybox", "mkntfs", "sfdisk"):
+        cls.tools_root = os.environ.get("HOSTCHECK_TOOLS_ROOT") or None
+        for tool in ("qemu-system-x86_64", "swtpm", "swtpm_ioctl"):
+            if cls.tools_root:
+                hostcheck.tool_argv(cls.tools_root, tool)  # raises if the root lacks it
+            elif not shutil.which(tool):
+                raise AssertionError(f"{tool} missing")
+        for tool in ("tpm2_getcap", "virt-fw-vars", "busybox", "mkntfs", "sfdisk"):
             if not shutil.which(tool):
                 raise AssertionError(f"{tool} missing")
         kernel = os.environ.get("HOSTCHECK_KERNEL")
@@ -245,6 +377,8 @@ class QemuTest(unittest.TestCase):
                "--phases", phases]
         if plant:
             cmd += ["--plant", plant]
+        if self.tools_root:
+            cmd += ["--tools-root", self.tools_root]
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
         report = work / "report.json"
         if not report.exists():
@@ -263,6 +397,7 @@ class QemuTest(unittest.TestCase):
             self.assertTrue(p["pass"], p)
             self.assertEqual(p["rtc_writes"], [])
         self.assertTrue(report["baseline"]["tpm-nv"], "the stand-in host has an NV index to keep")
+        self.assertEqual(report["stack"], hostcheck.stack_versions(self.tools_root))
         self.assertEqual(before, hostcheck.hash_disk(disk))
 
     def test_planted_writes_flagged(self):

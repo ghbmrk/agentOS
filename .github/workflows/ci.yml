@@ -688,11 +688,26 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
-      - name: QEMU, OVMF, swtpm, tpm2-tools, virt-firmware (all from Ubuntu's archive)
+      - name: tpm2-tools, virt-firmware and the stand-in's tools (from Ubuntu's archive)
+        # They read the host's state and build the stand-in guest; the stack the check boots is not here.
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq qemu-system-x86 qemu-utils ovmf swtpm swtpm-tools tpm2-tools \
-            busybox-static ntfs-3g dosfstools cpio fdisk python3-virt-firmware
+          sudo apt-get install -yq qemu-utils tpm2-tools busybox-static ntfs-3g dosfstools cpio fdisk \
+            python3-virt-firmware mmdebstrap debian-archive-keyring
+      # CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from
+      # the image's pinned Debian snapshot, the snapshot entry of the image's own apt sources, never
+      # the runner's archive, which updates within the release about weekly. Live trixie-security is
+      # left out: it would move the stack too. tools/hostcheck.py runs the root's binaries through
+      # the root's own loader (--tools-root) and records the versions in its report.
+      - name: QEMU, OVMF and swtpm, from the image's Debian snapshot
+        run: |
+          uri=$(awk '$1 == "URIs:" && $2 ~ /^https:\/\/snapshot\.debian\.org\// {print $2}' \
+            image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources)
+          [ "$(echo "$uri" | wc -w)" = 1 ] || { echo "want one snapshot URI, got: $uri" >&2; exit 1; }
+          sudo mmdebstrap --mode=root --variant=essential --include=qemu-system-x86,ovmf,swtpm,swtpm-tools trixie \
+            "$RUNNER_TEMP/hostcheck-tools" "deb [check-valid-until=no] $uri trixie main" \
+            "deb [check-valid-until=no] $uri trixie-updates main"
+          sudo chroot "$RUNNER_TEMP/hostcheck-tools" dpkg-query -W qemu-system-x86 ovmf swtpm swtpm-tools
       - name: KVM for the runner user, if the runner has it
         run: |
           if [ -e /dev/kvm ]; then
@@ -707,4 +722,5 @@ jobs:
       - name: Host-untouched check, clean and with planted writes
         env:
           HOSTCHECK_QEMU: "1"
+          HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools
         run: python -m unittest tests.test_hostcheck -v
