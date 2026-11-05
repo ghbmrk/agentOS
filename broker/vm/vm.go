@@ -46,7 +46,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -514,14 +513,14 @@ func checkStateDirs(dirs []string, all bool) error {
 				continue
 			}
 			seen[path] = true
-			st, ok := fi.Sys().(*syscall.Stat_t)
+			uid, ok := overlay.Owner(fi)
 			switch {
 			case !ok:
 				return fmt.Errorf("%w: %s has no owner", ErrStateDirExposed, path)
 			case !fi.IsDir(): // Lstat: a link is not one
 				return fmt.Errorf("%w: %s is not a directory (a link, or a file)", ErrStateDirExposed, path)
-			case st.Uid != 0 && int(st.Uid) != euid:
-				return fmt.Errorf("%w: %s is owned by uid %d", ErrStateDirExposed, path, st.Uid)
+			case uid != 0 && int(uid) != euid:
+				return fmt.Errorf("%w: %s is owned by uid %d", ErrStateDirExposed, path, uid)
 			case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
 				return fmt.Errorf("%w: %s is writable by group or other (mode %04o)", ErrStateDirExposed, path, fi.Mode().Perm())
 			}
