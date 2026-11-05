@@ -17,7 +17,7 @@ import (
 // stopAt is a write stop that ends the write after step.
 func stopAt(step int) func(int) bool { return func(i int) bool { return i == step } }
 
-// REQ: CAP-10, CH-15
+// REQ: HLD-1, CH-15
 // A guest's question whose save is stopped is refused, kept nowhere in
 // memory and never texted. After a restart it is absent (stopped before
 // the rename) or held whole (after it); either way the guest's retry under
@@ -56,7 +56,7 @@ func TestAskCrashDuringTheFileWrite(t *testing.T) {
 	}
 }
 
-// REQ: CAP-10, CH-15
+// REQ: HLD-1, CH-15
 // The owner's answer whose save is stopped is refused with "send it again"
 // and the question stays waiting in memory, so the guest is not told an
 // answer the disk may not hold. After a restart the question is waiting
