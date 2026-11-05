@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -33,18 +34,39 @@ func init() {
 	unixDialers[inferService] = true
 }
 
-// inferTags are the builds of the service: the default (no runtime) and
-// image/infer.sh's llama.cpp build.
-var inferTags = []string{"", "infer_llamacpp"}
+// inferBuilds are the builds of the service: the default (no runtime) and
+// the one image/infer.sh ships, with the tag read from that script so the two
+// cannot drift. Each names the runtime file it must compile and the one it
+// must not, so a renamed tag fails here rather than checking only the default
+// runtime (#5001 Potency 1).
+func inferBuilds(t *testing.T) []struct{ tags, want, not string } {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "image", "infer.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`go build -tags (\S+)[^\n]*\\\n[^\n]*\./cmd/agentos-infer\b`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("image/infer.sh has no go build -tags line for ./cmd/agentos-infer")
+	}
+	return []struct{ tags, want, not string }{
+		{"", "runtime_none.go", "runtime_llamacpp.go"},
+		{string(m[1]), "runtime_llamacpp.go", "runtime_none.go"},
+	}
+}
 
 // REQ: ARC-2, INF-6
 func TestInferServiceDialsOnlyUnix(t *testing.T) {
-	for _, tags := range inferTags {
-		t.Run("tags="+tags, func(t *testing.T) {
-			t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -tags="+tags))
+	for _, b := range inferBuilds(t) {
+		t.Run("tags="+b.tags, func(t *testing.T) {
+			t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -tags="+b.tags))
 			ps := listDeps(t, "..", []string{module + inferService})
-			if !slices.ContainsFunc(ps, func(p listed) bool { return p.path == module+inferService }) {
+			i := slices.IndexFunc(ps, func(p listed) bool { return p.path == module+inferService })
+			if i < 0 {
 				t.Fatal("the service is not in its own graph")
+			}
+			if f := ps[i].files; !slices.Contains(f, b.want) || slices.Contains(f, b.not) {
+				t.Fatalf("the service compiles %v, want %s and not %s", f, b.want, b.not)
 			}
 			if bad := inferServiceUse(t, ps); len(bad) > 0 {
 				t.Fatalf("the inference service breaks the import rules:\n%s", strings.Join(bad, "\n"))
