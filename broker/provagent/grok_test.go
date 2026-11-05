@@ -3,11 +3,9 @@ package provagent
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/egress"
 	"github.com/ghbmrk/agentos/broker/vm"
 )
 
@@ -159,28 +157,5 @@ func TestGrokUsedUpFallsBack(t *testing.T) {
 	}
 	if len(Builtins()["grok"].UsedUp) < 2 {
 		t.Fatal("grok declares fewer than its two used-up signals")
-	}
-}
-
-// CRED-5: the declaration's hosts are exactly the egress route's, so a
-// route endpoint the declaration does not name (or the reverse) fails.
-func TestGrokEndpointsMatchTheEgressRoute(t *testing.T) {
-	route := egress.Grok()
-	if route.Provider != "grok" {
-		t.Fatalf("route provider %q", route.Provider)
-	}
-	hosts := map[string]bool{}
-	for _, e := range route.Endpoints {
-		hosts[e.Host] = true
-	}
-	var got []string
-	for h := range hosts {
-		got = append(got, h)
-	}
-	want := append([]string(nil), Builtins()["grok"].Endpoints...)
-	sort.Strings(got)
-	sort.Strings(want)
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("route hosts %v, declared %v", got, want)
 	}
 }

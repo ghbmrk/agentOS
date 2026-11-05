@@ -17,7 +17,6 @@ package holder
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,13 +168,6 @@ func (h *Holder) Held() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.secret) > 0
-}
-
-// holds reports whether the holder's secret is b (tests).
-func (h *Holder) holds(b []byte) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.secret) > 0 && subtle.ConstantTimeCompare(h.secret, b) == 1
 }
 
 // current is a copy of the secret for one request, so a hand or drop that

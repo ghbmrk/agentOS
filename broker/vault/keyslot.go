@@ -220,13 +220,6 @@ func parseKeys(raw []byte) (*keyFile, error) {
 	return &kf, nil
 }
 
-// unwrap returns the data key from the first slot of f's kind that opens,
-// among the slots for key ID want.
-func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
-	key, _, err := kf.unwrapSlot(f, want)
-	return key, err
-}
-
 // unwrapSlot is unwrap also returning the slot that opened.
 func (kf *keyFile) unwrapSlot(f Factor, want []byte) ([]byte, Slot, error) {
 	for _, s := range kf.Slots {

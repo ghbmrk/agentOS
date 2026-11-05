@@ -291,3 +291,13 @@ func TestCommitsHoldTheProviderLockFromLoadToPut(t *testing.T) {
 		t.Fatal("a commit wrote back the token set it loaded before another commit")
 	}
 }
+
+// joined reports how many refreshes joined provider's flight in progress.
+func (f *refreshFlights) joined(provider string) int {
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	if fl := f.flights[provider]; fl != nil {
+		return fl.joined
+	}
+	return 0
+}
