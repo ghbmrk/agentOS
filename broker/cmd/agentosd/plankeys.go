@@ -30,14 +30,18 @@ const maxPlanGrant = 64 << 10
 // one. A file that is there but open to another uid, not a plain file, or
 // not one seed is an error and is never replaced: a new key would orphan
 // the owner's grant without a word.
-func loadPlanHolder(path string) (ed25519.PrivateKey, error) {
+func loadPlanHolder(path string) (ed25519.PrivateKey, error) { return loadPlanHolderStop(path, nil) }
+
+// loadPlanHolderStop is loadPlanHolder with a test's stop on the first
+// start's write.
+func loadPlanHolderStop(path string, stop func(i int) bool) (ed25519.PrivateKey, error) {
 	seed, err := readPrivate(path, ed25519.SeedSize)
 	if errors.Is(err, os.ErrNotExist) {
 		seed = make([]byte, ed25519.SeedSize)
 		if _, err := rand.Read(seed); err != nil {
 			return nil, err
 		}
-		if err := privfile.WriteAtomic(filepath.Dir(path), filepath.Base(path), seed, nil); err != nil {
+		if err := privfile.WriteAtomic(filepath.Dir(path), filepath.Base(path), seed, stop); err != nil {
 			return nil, err
 		}
 		return ed25519.NewKeyFromSeed(seed), nil
