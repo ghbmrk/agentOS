@@ -9,10 +9,10 @@
 #                               golang.org/x/sys. The standard library is always allowed.
 #   known <path> -- <reason>    a package outside the roots, the standard library and the allow
 #                               lines that the core links today. Shrink only: adding one, adding
-#                               an allow line, dropping a root, or growing the core's lines over
-#                               the merge base needs a `Trusted-core: <decision ID>` line in the
-#                               PR body naming Mark's decision. A known line the core no longer
-#                               links fails until it is deleted.
+#                               an allow line or dropping a root needs a `Trusted-core: <decision
+#                               ID>` line in the PR body naming Mark's decision. The core's lines
+#                               are capped by tools/ceilings.txt (D-310). A known line the core
+#                               no longer links fails until it is deleted.
 
 root kernel
 root kernel/key

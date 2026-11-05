@@ -2237,8 +2237,9 @@ def wifi_violations(root):
 def kmod_lines(data):
     """The lines kmod 34's freadline_wrapped (shared/util.c) reads from DATA. A backslash before a
     newline joins the next line, even in a comment; any other backslash is dropped and the byte
-    after it kept (a backslash at the end of the file reads as byte 0xff, getc's EOF). kmod then
-    reads each line as a C string, so it ends at its first NUL."""
+    after it kept, and a backslash at the end of the file is dropped (kmod 31 stored getc's EOF as
+    byte 0xff there; 34 does not, #4795). kmod then reads each line as a C string, so it ends at
+    its first NUL."""
     lines, buf, i = [], bytearray(), 0
     while i < len(data):
         c, i = data[i], i + 1
@@ -2248,7 +2249,7 @@ def kmod_lines(data):
         elif c != 0x5C:
             buf.append(c)
         elif i == len(data):
-            buf.append(0xFF)
+            pass
         elif data[i] == 0x0A:
             i += 1
         else:

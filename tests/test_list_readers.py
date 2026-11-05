@@ -50,8 +50,9 @@ CASES = {
         "trusted_base.trusted_mains": trusted_base.trusted_mains,
     },
     "tools/trusted_core.txt": {"trusted_base.read_core": trusted_base.read_core},
+    "tools/ceilings.txt": {"trusted_base.read_ceilings": trusted_base.read_ceilings},
     "tools/trusted_base_parsers.txt": {"trusted_base.read_rules": lambda t: trusted_base.read_rules(t, True)},
-    "tools/old_core.txt": {"trace.old_core_dirs": _old_core_dirs},
+    "tools/old_core.txt": {"trace.old_core_dirs": _old_core_dirs, "trusted_base.old_core_dirs": trusted_base.old_core_dirs},
     "tools/assumptions_legacy_ids.txt": {
         "assumptions_ids.legacy": assumptions_ids.legacy,
         "assumptions_ids.growth": _legacy_growth,

@@ -578,16 +578,8 @@ func writeClerkAnchors(path string, anchors []key.PublicKey) {
 
 func putClerkAnchors(path string, anchors []key.PublicKey) error {
 	dir := filepath.Dir(path)
-	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := ownDir(dir, 0o755, 0o022); err != nil {
 		return err
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 || int(st.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s is not a directory of mine alone", dir)
 	}
 	if len(anchors) == 0 {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -627,28 +619,35 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 // checker the key, so neither the kernel, which cannot read the file, nor
 // a reader of the file holds the seed. A store with no seed removes it, so
 // a checker never starts on an earlier boot's. A failure is said, the file
-// is removed, and the kernel still starts: only the codes go without.
+// removed if its directory is mine alone, and the kernel still starts.
 func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
 	if err := putCheckerSeed(path, st, root); err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
+		if errors.Is(err, errNotMine) {
+			return // a remove there could act through a planted link (#4966)
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
 		}
 	}
 }
 
+var errNotMine = errors.New("is not a directory of mine alone")
+
+// ownDir makes dir if missing; errNotMine unless it is this uid's, no link, without mask's bits.
+func ownDir(dir string, mode, mask os.FileMode) error {
+	_ = os.Mkdir(dir, mode) // the Lstat decides
+	var st syscall.Stat_t
+	if err := syscall.Lstat(dir, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFDIR || st.Mode&uint32(mask) != 0 || int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s %w", dir, errNotMine)
+	}
+	return nil
+}
+
 func putCheckerSeed(path string, st *seal.Store, root *[32]byte) error {
 	dir := filepath.Dir(path)
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := ownDir(dir, 0o700, 0o077); err != nil {
 		return err
-	}
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	ds, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 || int(ds.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s is not a directory of mine alone", dir)
 	}
 	raw, ok, err := st.Get(handoff.CheckerSeedEntry)
 	if err != nil {
