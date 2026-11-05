@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 )
 
 // Config is the enforcer's own wiring, from its image and set-up, never
@@ -36,8 +40,23 @@ type Config struct {
 	CoreAllow []netip.Prefix `json:"core_allow"`
 	// Nft is the absolute path of the image's nft binary.
 	Nft string `json:"nft"`
+	// Dnsmasq is the absolute path of the image's dnsmasq binary, and DNS
+	// the resolver's upstreams, served networks and lease file (dns.Setup;
+	// dns ASSUMPTIONS ENF-f-5).
+	Dnsmasq string    `json:"dnsmasq"`
+	DNS     dns.Setup `json:"dns"`
+	// Wake is the paired helper machines the core may wake (HW-11): each
+	// one's hardware address and the interface of its network. Empty
+	// runs no Wake-on-LAN relay.
+	Wake []WakeMachine `json:"wake"`
 
 	zone *time.Location
+}
+
+// WakeMachine is one paired machine in the configuration file.
+type WakeMachine struct {
+	MAC   string `json:"mac"`
+	Iface string `json:"iface"`
 }
 
 var errConfig = errors.New("config")
@@ -92,5 +111,34 @@ func (c *Config) check() error {
 	if !filepath.IsAbs(c.Nft) {
 		return fail("nft must be an absolute path")
 	}
+	if !filepath.IsAbs(c.Dnsmasq) {
+		return fail("dnsmasq must be an absolute path")
+	}
+	// The setup is checked against the empty policy now, so a bad one
+	// fails the start rather than every load.
+	if _, err := dns.Generate(policy.Document{}, c.Layout, c.DNS); err != nil {
+		return fail("dns: " + err.Error())
+	}
+	if _, err := c.machines(); err != nil {
+		return fail("wake: " + err.Error())
+	}
 	return nil
+}
+
+// machines is the Wake-on-LAN relay's list; nil for none.
+func (c *Config) machines() ([]wol.Machine, error) {
+	var ms []wol.Machine
+	for _, w := range c.Wake {
+		mac, err := net.ParseMAC(w.MAC)
+		if err != nil || len(mac) != 6 {
+			return nil, fmt.Errorf("hardware address %q", w.MAC)
+		}
+		ms = append(ms, wol.Machine{MAC: mac, Iface: w.Iface})
+	}
+	if len(ms) > 0 {
+		if _, err := wol.New(c.Layout, ms); err != nil {
+			return nil, err
+		}
+	}
+	return ms, nil
 }

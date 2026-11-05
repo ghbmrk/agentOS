@@ -29,11 +29,15 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
+	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
+	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
+	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -66,11 +70,27 @@ func testConfig(t *testing.T) Config {
 		Channel:   netip.AddrPortFrom(netip.MustParseAddr("10.50.0.1"), 7443),
 		CoreAllow: []netip.Prefix{netip.PrefixFrom(coreAddr, 32)},
 		Nft:       "/usr/sbin/nft",
+		Dnsmasq:   "/usr/sbin/dnsmasq",
+		DNS:       testDNS(),
 	}
 	if err := c.check(); err != nil {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// testDNS serves the people's networks, the core's segment and the test
+// policies' device VLANs (vlan101, vlan102).
+func testDNS() dns.Setup {
+	net := func(iface, p string) dns.Net {
+		return dns.Net{Iface: iface, Prefix4: netip.MustParsePrefix(p), DHCP: true}
+	}
+	return dns.Setup{
+		Upstream: []netip.AddrPort{netip.MustParseAddrPort("198.51.100.53:53")},
+		Nets: []dns.Net{net("own0", "10.10.0.0/24"), net("hh0", "10.20.0.0/24"), net("gst0", "10.30.0.0/24"),
+			net("adm0", "10.40.0.0/24"), net("core0", "10.50.0.0/24"), net("ap0.101", "10.101.0.0/24"), net("ap0.102", "10.102.0.0/24")},
+		LeaseFile: "/var/lib/agentos-enforcer/dhcp.leases",
+	}
 }
 
 // authenticator is a fake ES256 passkey on rp with user verification.
@@ -142,11 +162,17 @@ func (a *authenticator) signed(cd []byte) ([]byte, []byte) {
 // set refuses the next load as nft refuses a bad text, and with stall set
 // hangs each load until its context ends, as a hung nft would.
 type fakeFire struct {
-	mu     sync.Mutex
-	loads  []string
-	fail   bool
-	stall  bool
-	listed int
+	mu      sync.Mutex
+	loads   []string
+	updates []string
+	fail    bool
+	stall   bool
+	listed  int
+	// listing is what List returns: the running table as nft's JSON;
+	// quotaErr fails QuotaPast.
+	listing  []byte
+	quotaErr error
+	listErr  error
 	// Each load's context, and the time it had left when the load began.
 	ctxs []context.Context
 	left []time.Duration
@@ -177,9 +203,96 @@ func (f *fakeFire) Load(ctx context.Context, s string) error {
 
 func (f *fakeFire) List(context.Context, string) ([]byte, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.listed++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listing, nil
+}
+
+func (f *fakeFire) Update(_ context.Context, s string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updates = append(f.updates, s)
+	return nil
+}
+
+func (f *fakeFire) QuotaPast(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.quotaErr == nil, f.quotaErr
+}
+
+// fakeDNS is the resolver's instances: it records each Apply's files,
+// and whether the load ran inside it, after the instances whose files
+// change were stopped (dns/run's own tests check the processes).
+type fakeDNS struct {
+	mu      sync.Mutex
+	applied []dns.Files
+	inside  bool // a load ran inside Apply
+	closed  int
+}
+
+func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
+	f.mu.Lock()
+	f.inside = true
 	f.mu.Unlock()
-	return nil, nil
+	err := load()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inside = false
+	if err == nil {
+		f.applied = append(f.applied, files)
+	}
+	return err
+}
+
+func (f *fakeDNS) Close() { f.mu.Lock(); f.closed++; f.mu.Unlock() }
+
+func (f *fakeDNS) last() dns.Files {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.applied) == 0 {
+		return dns.Files{}
+	}
+	return f.applied[len(f.applied)-1]
+}
+
+// fakeMDNS is the pair relay: it records each plan it runs on and the
+// filter it was given, and runs until stopped.
+type fakeMDNS struct {
+	mu      sync.Mutex
+	plans   []mdns.Plan
+	filters []*mdns.Filter
+	active  int  // relays running
+	fail    bool // the next relay ends at once
+}
+
+func (f *fakeMDNS) serve(ctx context.Context, p mdns.Plan, fl *mdns.Filter) error {
+	f.mu.Lock()
+	f.plans, f.filters = append(f.plans, p), append(f.filters, fl)
+	if f.fail {
+		f.fail = false
+		f.mu.Unlock()
+		return errors.New("mdns: socket refused")
+	}
+	f.active++
+	f.mu.Unlock()
+	<-ctx.Done()
+	f.mu.Lock()
+	f.active--
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeMDNS) last() (mdns.Plan, *mdns.Filter) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.plans) == 0 {
+		return mdns.Plan{}, nil
+	}
+	return f.plans[len(f.plans)-1], f.filters[len(f.filters)-1]
 }
 
 func (f *fakeFire) last() string {
@@ -220,6 +333,8 @@ type box struct {
 	dir   string
 	cfg   Config
 	fire  *fakeFire
+	dns   *fakeDNS
+	mdns  *fakeMDNS
 	net   *fakeNetwork
 	light *fakeLight
 	core  ed25519.PrivateKey
@@ -241,7 +356,7 @@ type box struct {
 // and, with a core, pinned the kernel's channel sub-key.
 func newBox(t *testing.T, withCore bool) *box {
 	t.Helper()
-	x := &box{t: t, dir: t.TempDir(), cfg: testConfig(t), fire: &fakeFire{}, net: &fakeNetwork{setup: true},
+	x := &box{t: t, dir: t.TempDir(), cfg: testConfig(t), fire: &fakeFire{}, dns: &fakeDNS{}, mdns: &fakeMDNS{}, net: &fakeNetwork{setup: true},
 		light: &fakeLight{}, now: time.UnixMilli(1_800_000_000_000), el: time.Hour}
 	if err := os.Chmod(x.dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -272,21 +387,30 @@ func (x *box) start() {
 
 // open boots the daemon on this box's disk.
 func (x *box) open() (*Enforcer, error) {
-	return open(x.cfg, x.dir, deps{
+	dp := x.deps()
+	dp.Logf = func(s string) { x.mu.Lock(); x.log = append(x.log, s); x.mu.Unlock() }
+	dp.SaveFault = func(path string) error {
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		if x.failing[filepath.Base(path)] {
+			return errors.New("disk: no space left")
+		}
+		return nil
+	}
+	dp.HelloWait, dp.IdleWait, dp.FireWait = x.waits.HelloWait, x.waits.IdleWait, x.waits.FireWait
+	return open(x.cfg, x.dir, dp)
+}
+
+// deps is the box's pieces with its clocks and a silent log.
+func (x *box) deps() deps {
+	return deps{
 		Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
 		Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
 		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
-		Logf: func(s string) { x.mu.Lock(); x.log = append(x.log, s); x.mu.Unlock() },
-		SaveFault: func(path string) error {
-			x.mu.Lock()
-			defer x.mu.Unlock()
-			if x.failing[filepath.Base(path)] {
-				return errors.New("disk: no space left")
-			}
-			return nil
-		},
-		HelloWait: x.waits.HelloWait, IdleWait: x.waits.IdleWait, FireWait: x.waits.FireWait,
-	})
+		Logf: func(string) {},
+		DNS:  x.dns, MDNS: x.mdns.serve, Boot: func() (string, error) { return "boot-1", nil },
+		Wake: func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
+	}
 }
 
 // fail makes Save of the state file name fail (on) or work again.
@@ -329,15 +453,32 @@ func (x *box) pending() []policy.Pending {
 // policy in force's.
 func (x *box) enforced() string {
 	x.t.Helper()
-	want, err := nft.Reload(x.current(), x.cfg.Layout, nil)
-	if err != nil {
-		x.t.Fatal(err)
-	}
+	want := x.fullLoad(x.current())
 	got := x.fire.last()
 	if got != want {
 		x.t.Fatalf("the firewall holds a ruleset other than the policy in force's (version %d)", x.current().Version)
 	}
 	return got
+}
+
+// fullLoad is doc's full load on an empty running table: its ruleset and,
+// in the same transaction, the byte caps' drop at no bytes sent.
+func (x *box) fullLoad(doc policy.Document) string {
+	x.t.Helper()
+	text, err := nft.Reload(doc, x.cfg.Layout, nil)
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	x.mu.Lock()
+	now := x.now
+	x.mu.Unlock()
+	p := traffic.NewCounter(func() time.Time { return now }, traffic.CapsOf(doc)).Drop()
+	p.Past = true
+	drops, err := nft.Drops(doc, x.cfg.Layout, nil, p)
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	return joinRules(text, drops)
 }
 
 func (x *box) opened(k alert.Kind) bool {
@@ -599,11 +740,7 @@ func TestLifecycle(t *testing.T) {
 		if x.d.book.Phase() != enrol.Factory {
 			t.Fatalf("phase %s", x.d.book.Phase())
 		}
-		want, err := nft.Compile(policy.Document{}, x.cfg.Layout)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if x.fire.last() != want {
+		if x.fire.last() != x.fullLoad(policy.Document{}) {
 			t.Fatal("first boot did not load the empty policy's ruleset (default deny)")
 		}
 		if !x.net.setup {
