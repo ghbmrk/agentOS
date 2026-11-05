@@ -470,6 +470,14 @@ type Manager struct {
 // ErrStateDirExposed refuses a StateDir another uid could swap for a link.
 var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
 
+// stateDirOwner and stateDirMkdirAll are seams: tests give a directory a
+// foreign owner without root, and change a directory between Open's two
+// checks.
+var (
+	stateDirOwner    = overlay.Owner
+	stateDirMkdirAll = os.MkdirAll
+)
+
 // checkStateDirs checks the premise the vm allow lines rest on
 // (broker/kernel/privfile/pathops_allow.txt, "root-held"): no other uid
 // can replace any directory on the path to StateDir, or StateDir and the
@@ -483,9 +491,10 @@ var ErrStateDirExposed = errors.New("vm: the state directory's path is open to a
 // With all set, every one must exist; otherwise the walk stops at the
 // first missing name, which MkdirAll makes as this uid in a checked
 // parent, and the check after it covers what was made.
+// The three dirs share StateDir's prefixes, so those are checked three
+// times; rechecking changes nothing and keeps the walk plain.
 func checkStateDirs(dirs []string, all bool) error {
 	euid := os.Geteuid()
-	seen := map[string]bool{}
 	for _, d := range dirs {
 		// The check walks d as written and mkdir and chmod act on that
 		// same text, so it must hold no "..", ".", doubled slash or
@@ -509,11 +518,7 @@ func checkStateDirs(dirs []string, all bool) error {
 			if err != nil {
 				return err
 			}
-			if seen[path] {
-				continue
-			}
-			seen[path] = true
-			uid, ok := overlay.Owner(fi)
+			uid, ok := stateDirOwner(fi)
 			switch {
 			case !ok:
 				return fmt.Errorf("%w: %s has no owner", ErrStateDirExposed, path)
@@ -567,7 +572,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 		return nil, err
 	}
 	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+		if err := stateDirMkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}

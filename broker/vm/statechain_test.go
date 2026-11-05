@@ -5,8 +5,11 @@ package vm
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -127,6 +130,95 @@ func TestOpenRefusesStateDirAnotherUidOwns(t *testing.T) {
 				t.Errorf("Open = %v, want ErrStateDirExposed", err)
 			}
 		})
+	}
+}
+
+// The owner check without root: stateDirOwner reports a foreign uid (or
+// none) for the directory named "theirs", so the refusal is pinned in
+// every CI job, not only one that runs as root.
+func TestOpenRefusesStateDirAForeignOwnerReports(t *testing.T) {
+	foreign := uint32(65534)
+	if os.Geteuid() == int(foreign) {
+		foreign--
+	}
+	for name, tc := range map[string]struct {
+		uid  uint32
+		ok   bool
+		path func(top string) string
+	}{
+		"parent another uid owns":   {foreign, true, func(top string) string { return filepath.Join(top, "theirs", "state") }},
+		"StateDir another uid owns": {foreign, true, func(top string) string { return filepath.Join(top, "x", "theirs") }},
+		"parent with no owner":      {0, false, func(top string) string { return filepath.Join(top, "theirs", "state") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+			dir := tc.path(top)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := newCfg(t)
+			cfg.StateDir = dir
+			real := stateDirOwner
+			t.Cleanup(func() { stateDirOwner = real })
+			stateDirOwner = func(fi fs.FileInfo) (uint32, bool) {
+				if fi.Name() == "theirs" {
+					return tc.uid, tc.ok
+				}
+				return real(fi)
+			}
+			before := snapshotTree(t, top)
+			if _, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirExposed) {
+				t.Errorf("Open = %v, want ErrStateDirExposed", err)
+			}
+			if after := snapshotTree(t, top); after != before {
+				t.Errorf("Open changed the tree before refusing:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+}
+
+// An Lstat error other than a missing name is returned, not read past:
+// a name longer than NAME_MAX fails Lstat with ENAMETOOLONG, as root too.
+func TestOpenReturnsAStateDirLstatError(t *testing.T) {
+	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+	cfg := newCfg(t)
+	cfg.StateDir = filepath.Join(top, strings.Repeat("n", 300), "state")
+	before := snapshotTree(t, top)
+	if m, err := Open(context.Background(), cfg); !errors.Is(err, syscall.ENAMETOOLONG) || m != nil {
+		t.Errorf("Open = %v, %v; want ENAMETOOLONG and no manager", m, err)
+	}
+	if after := snapshotTree(t, top); after != before {
+		t.Errorf("Open changed the tree:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// Open checks again once all three directories exist, before its chmods
+// follow their names: a snapshots swapped for a link after MkdirAll is
+// refused, and the link's target keeps its mode.
+func TestOpenRechecksStateDirsAfterMaking(t *testing.T) {
+	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+	elsewhere := mode(t, filepath.Join(top, "elsewhere"), 0o755)
+	cfg := newCfg(t)
+	cfg.StateDir = filepath.Join(top, "state")
+	real := stateDirMkdirAll
+	t.Cleanup(func() { stateDirMkdirAll = real })
+	stateDirMkdirAll = func(p string, perm os.FileMode) error {
+		if err := real(p, perm); err != nil {
+			return err
+		}
+		if filepath.Base(p) != "snapshots" {
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			return err
+		}
+		return os.Symlink(elsewhere, p)
+	}
+	if _, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirExposed) {
+		t.Errorf("Open = %v, want ErrStateDirExposed", err)
+	}
+	if fi, err := os.Stat(elsewhere); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("link target after Open: %v, %v; want mode 0755 unchanged", fi, err)
 	}
 }
 
