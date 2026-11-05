@@ -46,6 +46,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -467,6 +468,64 @@ type Manager struct {
 	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
 }
 
+// ErrStateDirExposed refuses a StateDir another uid could swap for a link.
+var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
+
+// checkStateDirs checks the premise the vm allow lines rest on
+// (broker/kernel/privfile/pathops_allow.txt, "root-held"): no other uid
+// can replace any directory on the path to StateDir, or StateDir and the
+// two made in it, so root's mkdir, chmod and removals there land where
+// they were meant, wherever agentosd's -machines points (#3995). Every
+// existing component, from / down, must be a directory, not a link,
+// owned by root or this uid, and writable by no group or other unless it
+// is sticky: in a sticky directory (/tmp) another uid may add a name but
+// not rename or remove one it does not own, and the next component's
+// owner is checked in turn.
+// With all set, every one must exist; otherwise the walk stops at the
+// first missing name, which MkdirAll makes as this uid in a checked
+// parent, and the check after it covers what was made.
+func checkStateDirs(dirs []string, all bool) error {
+	euid := os.Geteuid()
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return err
+		}
+		// Each prefix of abs, "/" first.
+		path := "/"
+		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+		for i := -1; i < len(parts); i++ {
+			if i >= 0 {
+				path = filepath.Join(path, parts[i])
+			}
+			fi, err := os.Lstat(path)
+			if errors.Is(err, fs.ErrNotExist) && !all {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			st, ok := fi.Sys().(*syscall.Stat_t)
+			switch {
+			case !ok:
+				return fmt.Errorf("%w: %s has no owner", ErrStateDirExposed, path)
+			case !fi.IsDir(): // Lstat: a link is not one
+				return fmt.Errorf("%w: %s is not a directory (a link, or a file)", ErrStateDirExposed, path)
+			case st.Uid != 0 && int(st.Uid) != euid:
+				return fmt.Errorf("%w: %s is owned by uid %d", ErrStateDirExposed, path, st.Uid)
+			case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
+				return fmt.Errorf("%w: %s is writable by group or other (%v)", ErrStateDirExposed, path, fi.Mode().Perm())
+			}
+		}
+	}
+	return nil
+}
+
 // Open opens (or creates) the state directory. Machines recorded by an
 // earlier run come back Stopped with their layers and snapshots intact; any
 // runtime state they left is killed.
@@ -498,10 +557,21 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.MaxLayerInodes == 0 {
 		cfg.MaxLayerInodes = 200_000
 	}
-	for _, d := range []string{cfg.StateDir, filepath.Join(cfg.StateDir, "machines"), filepath.Join(cfg.StateDir, "snapshots")} {
+	dirs := []string{cfg.StateDir, filepath.Join(cfg.StateDir, "machines"), filepath.Join(cfg.StateDir, "snapshots")}
+	// Checked before anything is made, so a refusal changes nothing, and
+	// again once all three exist, before the chmods follow their names.
+	if err := checkStateDirs(dirs, false); err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	if err := checkStateDirs(dirs, true); err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
 		if err := os.Chmod(d, 0o700); err != nil {
 			return nil, err
 		}

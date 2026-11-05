@@ -211,7 +211,7 @@ func TestFileGateWritesOnlyItsOwnPlaces(t *testing.T) {
 	}
 }
 
-// REQ: HW-10, ONB-3. The gate decides before an open acts (#4634): a
+// REQ: HW-10, ONB-3. The gate decides before an open acts (#4634, #4213): a
 // FIFO opened to block is refused at once, a write to a file with another
 // name (a hard link, whose other name may be outside writeDirs) is refused
 // before it truncates, a trailing slash names the directory itself and
@@ -239,6 +239,10 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 			return err
 		},
 		"writeNoFollow": func() error { return writeNoFollow(fifo, nil, 0o600) },
+		// readNoFollow is the read #4213 found blocking (agentos-localui
+		// could leave a FIFO at its card latch); rootOpen is
+		// workerOutFile's open, which a guest could race to a FIFO.
+		"readNoFollow": func() error { _, err := readNoFollow(fifo); return err },
 		"rootOpen": func() error {
 			f, err := rootOpen(r, "fifo")
 			if err == nil {
