@@ -286,11 +286,11 @@ var enforcer = map[string]struct {
 	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
-	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid},                  // slice f: dnsmasq configuration
-	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the pair relay
-	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the Wake-on-LAN relay
+	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid},                                                              // slice f: dnsmasq configuration
+	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the pair relay
+	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the Wake-on-LAN relay
 	"enforcer/dns/run":  {[]string{"enforcer/dns"}, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })}, // slice l: runs dnsmasq in step with the firewall (#4464)
-	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid}, // slice i: traffic summaries; byte-cap counts (#4174)
+	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid},                                             // slice i: traffic summaries; byte-cap counts (#4174)
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
