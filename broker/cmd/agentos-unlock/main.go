@@ -625,8 +625,7 @@ func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
 		if errors.Is(err, errNotMine) {
 			return // a remove there could act through a planted link (#4966)
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
 		}
 	}
@@ -634,12 +633,13 @@ func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
 
 var errNotMine = errors.New("is not a directory of mine alone")
 
-// ownDir makes dir if missing; errNotMine unless it is this uid's, no link, without mask's bits.
+// ownDir makes dir if missing; errNotMine, naming its cause, unless it is this uid's, no link, without mask's bits.
 func ownDir(dir string, mode, mask os.FileMode) error {
-	_ = os.Mkdir(dir, mode) // the Lstat decides
 	var st syscall.Stat_t
-	if err := syscall.Lstat(dir, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFDIR || st.Mode&uint32(mask) != 0 || int(st.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s %w", dir, errNotMine)
+	if _, err := os.Mkdir(dir, mode), syscall.Lstat(dir, &st); err != nil { // the Lstat decides; its error is the cause (#4985)
+		return fmt.Errorf("%s %w: %v", dir, errNotMine, err)
+	} else if st.Mode&syscall.S_IFMT != syscall.S_IFDIR || st.Mode&uint32(mask) != 0 || int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s %w: uid %d, mode %#o", dir, errNotMine, st.Uid, st.Mode)
 	}
 	return nil
 }
