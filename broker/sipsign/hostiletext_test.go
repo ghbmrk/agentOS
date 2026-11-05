@@ -1,7 +1,5 @@
 package sipsign
 
-// REQ: CRED-1
-
 import (
 	"testing"
 
