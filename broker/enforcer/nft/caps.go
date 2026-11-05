@@ -86,11 +86,13 @@ type Drop struct {
 	Past bool
 	// Read is the listing the counter's last reading was taken from
 	// (traffic.ReadingOf's), when the text is applied on its own after
-	// that reading; nil otherwise. A quota the text starts in place of
-	// running ones (a merge, a new cap, a new day) is loaded with the
-	// group's count plus what the running quotas it replaces charged
-	// between Read and the running listing, so bytes sent between the
-	// reading and the update are not let past its cap uncharged.
+	// that reading; nil otherwise. traffic.Counter.Drop fills it from the
+	// reading it added last, so no caller sets it. A quota the text
+	// starts in place of running ones (a merge, a new cap, a new day) is
+	// loaded with the group's count plus what the running quotas it
+	// replaces charged between Read and the running listing, so bytes
+	// sent between the reading and the update are not let past its cap
+	// uncharged.
 	Read []byte
 }
 
