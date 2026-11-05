@@ -630,7 +630,7 @@ class Verify(unittest.TestCase):
         r = self.verify({"mutants-0/netguard.json": self.result("LIVED"),
                          "mutants-1/netguard.json": self.result("KILLED")})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("2 results for netguard", r.stderr)
+        self.assertIn("are both shard 0 of 1 for netguard: shards overlap", r.stderr)
 
     def test_twin_packages_each_need_their_own_result(self):
         # The repro on #4154: broker/netguard/sub and broker/netguard__sub both claimed; the LIVED
@@ -709,6 +709,76 @@ class Verify(unittest.TestCase):
         r = self.verify({"netguard.json": result({**deletion, "status": "LIVED"}) | {"mutants_lived": 1}}, src=src)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("broker/netguard/a.go:2 deleting the whole statement holding line 2 survives", r.stdout)
+
+    # MUT-test-only-cost (#4961): a package's target lines and deletion sites split into K shards,
+    # one mutants job each; verify joins them and refuses a missing or overlapping shard.
+    SHARD_SRC = "package netguard\nfunc F() {\n\tg(1)\n\tg(2)\n\tg(3)\n}\nfunc g(int) {}\n"
+
+    def sharded(self, of, lived=4):
+        """{artifact path: result} of the K=of shards of one run over SHARD_SRC's targets: lines 2-7,
+        a gremlins mutant on each call line and a deletion site at each call, LIVED on line lived."""
+        targets = {"broker/netguard/a.go": set(range(2, 8))}
+        sites = [3, 4, 5]  # deletion_sites' order: the lister's, by file then position
+        out = {}
+        for i in range(of):
+            mine = mutgate.shard_lines(targets, i, of).get("broker/netguard/a.go", set()) if of > 1 else targets["broker/netguard/a.go"]
+            muts = [{"type": "INCREMENT_DECREMENT", "status": "LIVED" if n == lived else "KILLED", "line": n, "column": 4}
+                    for n in (3, 4, 5) if n in mine]
+            dels = [{"type": mutgate.DELETION, "status": "LIVED" if n == lived else "KILLED", "line": n, "column": 2}
+                    for n in sites[i::of]]
+            data = {"files": [{"file_name": "a.go", "mutations": muts + dels}] if muts or dels else [],
+                    "mutants_total": len(muts) + len(dels), "statement_deletions": len(dels),
+                    "mutants_lived": sum(m["status"] == "LIVED" for m in muts + dels)}
+            if of > 1:
+                data["shard"] = {"index": i, "of": of}
+            out[f"mutants-{i}/netguard.json"] = data
+        return out
+
+    def test_shards_join_to_the_unsharded_verdicts(self):
+        one = self.verify(self.sharded(1), src=self.SHARD_SRC, summary=True)
+        self.assertEqual(one.returncode, 1, one.stdout + one.stderr)
+        self.assertIn("broker/netguard/a.go:4 INCREMENT_DECREMENT survives", one.stdout)
+        self.assertIn("broker/netguard/a.go:4 deleting the whole statement holding line 4 survives", one.stdout)
+        for of in (2, 3, 6, 7):  # 7: more shards than target lines, so one shard holds none
+            with self.subTest(of):
+                r = self.verify(self.sharded(of), src=self.SHARD_SRC, summary=True)
+                self.assertEqual((r.returncode, r.stdout, r.summary), (one.returncode, one.stdout, one.summary), r.stderr)
+        r = self.verify(self.sharded(3, lived=None), src=self.SHARD_SRC)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_missing_or_overlapping_shard_is_refused(self):
+        good = self.sharded(2, lived=None)
+        moved = json.loads(json.dumps(good))
+        # Shard 0 (lines 2, 4, 6) reporting a KILLED gremlins mutant on shard 1's line 3.
+        moved["mutants-0/netguard.json"]["files"][0]["mutations"].append(
+            {"type": "INCREMENT_DECREMENT", "status": "KILLED", "line": 3, "column": 4})
+        moved["mutants-0/netguard.json"]["mutants_total"] += 1
+        # Shard 1 carrying shard 0's deletion site too.
+        stolen = json.loads(json.dumps(good))
+        stolen["mutants-1/netguard.json"]["files"][0]["mutations"].append(
+            {"type": mutgate.DELETION, "status": "KILLED", "line": 3, "column": 2})
+        stolen["mutants-1/netguard.json"]["statement_deletions"] += 1
+        unsharded = {k: {**v} for k, v in good.items()}
+        unsharded["mutants-1/netguard.json"].pop("shard")
+        for name, results, want in (
+            ("missing", {"mutants-0/netguard.json": good["mutants-0/netguard.json"]}, "missing shard(s) [1] of 2"),
+            ("twice", {**good, "mutants-2/netguard.json": good["mutants-0/netguard.json"]}, "shards overlap"),
+            ("other line", moved, "holds mutants on lines of another shard of netguard"),
+            ("other site", stolen, "not one for each site this diff touches"),
+            ("counts", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": 1, "of": 3}}},
+             "disagree on the number of shards"),
+            ("unsharded twin", unsharded, "disagree on the number of shards"),
+            ("index", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": 2, "of": 2}}},
+             "records a shard that is not"),
+            ("bool", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": True, "of": 2}}},
+             "records a shard that is not"),
+            ("over the matrix", {"mutants-0/netguard.json": {**good["mutants-0/netguard.json"], "shard": {"index": 0, "of": 257}}},
+             "records a shard that is not"),
+        ):
+            with self.subTest(name):
+                r = self.verify(results, src=self.SHARD_SRC)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(want, r.stderr)
 
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, test=None, src="package netguard\n", summary=True)
@@ -923,6 +993,29 @@ class Deletion(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             data = json.loads((out / "hint.json").read_text())
         return {m["line"]: m["status"] for f in data["files"] for m in f["mutations"]}
+
+    def test_shards_of_the_deletion_pass_join_to_the_unsharded_verdicts(self):
+        # #4961: each shard deletes every K-th site, alone, with the whole suite; the union of the
+        # shards' mutants is the unsharded pass's, verdicts and killers included.
+        def mutants(d, shard):
+            out = pathlib.Path(d) / f"out-{shard}"
+            out.mkdir()
+            rec = {} if shard is None else {"shard": {"index": shard[0], "of": shard[1]}}
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0, **rec}))
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1", "--jobs", "1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+            return sorted(json.dumps({**m, "file": f["file_name"]}, sort_keys=True)
+                          for f in data["files"] for m in f["mutations"])
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d)
+            whole = mutants(d, None)
+            self.assertEqual(len(whole), 5)
+            for of in (2, 3, 6):
+                with self.subTest(of):
+                    parts = [mutants(d, (i, of)) for i in range(of)]
+                    self.assertEqual(sorted(sum(parts, [])), whole)
+                    self.assertTrue(all(len(p) <= -(-5 // of) for p in parts), parts)
 
     def test_a_guard_that_is_its_variables_only_use_is_deleted_and_tested(self):
         # Security on #4597: deleting `if err != nil { ... }` leaves err unused and does not build,
@@ -1382,6 +1475,121 @@ class TestOnly(unittest.TestCase):
                     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                     self.assertRegex(r.stderr, "holds no record of the lines|records covered lines")
 
+    def line_stub(self, d):
+        """A gremlins on PATH that writes one mutant on each line its `git diff --merge-base` adds,
+        LIVED on line 4 and KILLED elsewhere, and appends the lines to d/seen-lines."""
+        stub = pathlib.Path(d) / "bin"
+        stub.mkdir(exist_ok=True)
+        (stub / "gremlins").write_text(f"""#!{sys.executable}
+import json, re, subprocess, sys
+a = sys.argv
+diff = subprocess.run(["git", "diff", "--merge-base", a[a.index("-D") + 1]], capture_output=True, text=True, check=True).stdout
+muts, name = {{}}, None
+for row in diff.split("\\n"):
+    if row.startswith("+++ b/"):
+        name = row[6:]
+    m = re.match(r"@@ -\\S+ \\+(\\d+)(?:,(\\d+))? @@", row)
+    if m:
+        first = int(m.group(1))
+        muts.setdefault(name, []).extend(range(first, first + int(m.group(2) or 1)))
+open("{d}/seen-lines", "a").write(json.dumps(muts) + "\\n")
+files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": "LIVED" if n == 4 else "KILLED",
+          "line": n, "column": 1}} for n in ns]}} for f, ns in muts.items()]
+lived = sum(m["status"] == "LIVED" for f in files for m in f["mutations"])
+open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived, "mutants_lived": lived}}))
+""")
+        (stub / "gremlins").chmod(0o755)
+        return {"PATH": f"{stub}:{os.environ['PATH']}"}
+
+    def test_shards_of_a_run_join_to_the_unsharded_verdicts(self):
+        # MUT-test-only-cost (#4961): K shards of `run` and `delete`, each a mutants job, give verify
+        # the verdicts and summary table one job gives, and each shard mutates only its own lines.
+        weak = TWO_TEST.replace("Up(20) != 10", "Up(20) < 0")
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, weak)
+            env = self.line_stub(d)
+            # The plan runs the changed test's coverage: a few lines, one shard.
+            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            got = {}
+            for of in (1, 2, 3):
+                res = pathlib.Path(d) / f"res-{of}"
+                (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                for i in range(of):
+                    out = res / f"mutants-{i}"
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out),
+                                     "--shard", str(i), "--of", str(of), env=env)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    data = json.loads((out / "hint.json").read_text())
+                    self.assertEqual(data["shard"], {"index": i, "of": of})
+                    covered = {"broker/hint/hint.go": set(data["targets"]["lines"]["hint.go"])}
+                # Gremlins saw exactly each shard's lines: disjoint, and together every target line.
+                seen = [json.loads(row).get("hint.go", []) for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
+                self.assertEqual(seen, [sorted(mutgate.shard_lines(covered, i, of).get("broker/hint/hint.go", ()))
+                                        for i in range(of) if mutgate.shard_lines(covered, i, of)])
+                self.assertEqual(sorted(sum(seen, [])), sorted(covered["broker/hint/hint.go"]))
+                summary = pathlib.Path(d) / f"summary-{of}.md"
+                r = self.mutgate(d, "verify", str(res), "--git", "HEAD~1", "--summary", str(summary))
+                got[of] = (r.returncode, r.stdout, summary.read_text())
+            self.assertEqual(got[1][0], 1)
+            self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", got[1][1])
+            self.assertIn("broker/hint/hint.go:5 deleting the whole statement holding line 5 survives", got[1][1])
+            self.assertEqual(got[2], got[1])
+            self.assertEqual(got[3], got[1])
+            # Shards whose coverage runs recorded other target lines are refused, not joined.
+            forged = pathlib.Path(d) / "res-2" / "mutants-1" / "hint.json"
+            data = json.loads(forged.read_text())
+            data["targets"]["lines"]["hint.go"] = data["targets"]["lines"]["hint.go"][:-1]
+            forged.write_text(json.dumps(data))
+            r = self.mutgate(d, "verify", str(pathlib.Path(d) / "res-2"), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("records other target lines than", r.stderr)
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+            # A shard asked for outside 0 <= I < K is refused before anything runs.
+            for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
+                r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_a_shard_of_a_source_diff_mutates_only_its_own_lines(self):
+        # #4961: one unsharded job keeps gremlins on the base's own diff; a shard marks its lines.
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, TWO_TEST + "\n")  # the PR commit needs a change; this one is a blank line
+            pkg = pathlib.Path(d) / "broker" / "hint"
+            (pkg / "hint.go").write_text(TWO_SRC.replace("n > 10", "n >= 10").replace("n + 1", "n + 2")
+                                         .replace("n - 1", "n - 2"))
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qam", "src")
+            env = self.line_stub(d)
+            target = {"broker/hint/hint.go": {4, 7, 11}}
+            for of in (1, 2, 3):
+                (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                for i in range(of):
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / f"o{of}-{i}"),
+                                     "--shard", str(i), "--of", str(of), env=env)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertNotIn("targets", json.loads((pathlib.Path(d) / f"o{of}-{i}" / "hint.json").read_text()))
+                seen = [json.loads(row)["hint.go"] for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
+                self.assertEqual(seen, [sorted(mutgate.shard_lines(target, i, of)["broker/hint/hint.go"]) for i in range(of)])
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+
+    def test_shard_count_follows_the_targets_not_a_constant(self):
+        lines = lambda n: {"broker/p/a.go": set(range(1, n + 1))}
+        self.assertEqual(mutgate.shard_count({}, []), 1)
+        self.assertEqual(mutgate.shard_count(lines(mutgate.LINES_PER_SHARD), [0] * mutgate.SITES_PER_SHARD), 1)
+        self.assertEqual(mutgate.shard_count(lines(mutgate.LINES_PER_SHARD + 1), []), 2)
+        self.assertEqual(mutgate.shard_count(lines(1), [0] * (2 * mutgate.SITES_PER_SHARD + 1)), 3)
+        # #4945's localui: 1048 target lines and about 0.35 deletion sites a line.
+        self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367), 5)
+        # The shards are disjoint and together are the targets, for any K.
+        t = {"broker/p/a.go": {1, 2, 5, 9}, "broker/p/b.go": {3, 4}}
+        for of in range(1, 9):
+            parts = [mutgate.shard_lines(t, i, of) for i in range(of)]
+            flat = [(p, n) for part in parts for p, ns in part.items() for n in ns]
+            self.assertEqual(sorted(flat), sorted((p, n) for p, ns in t.items() for n in ns))
+            self.assertEqual(len(flat), len(set(flat)))
+
     def test_a_change_outside_one_test_runs_every_test(self):
         # A helper, TestMain, an import or a deleted test is not one test's change: every test's
         # covered lines are the targets, which caps the set at the package's covered lines.
@@ -1612,7 +1820,7 @@ class Workflow(unittest.TestCase):
         self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
         # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
         self.assertNotIn("base.sha", self.text)
-        for body in (claimed, job(self.text, "mutants")):
+        for body in (claimed, job(self.text, "plan"), job(self.text, "mutants")):
             self.assertIn('          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || '
                           '{ echo "::error::HEAD is not the merge of this PR\'s head"; exit 1; }\n', body)
             self.assertIn('echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"', body)
@@ -1620,11 +1828,24 @@ class Workflow(unittest.TestCase):
             self.assertLess(body.index("HEAD^1"), body.index('--git "$BASE"'))
         self.assertIn("fetch-depth: 0", claimed)
         mutants = job(self.text, "mutants")
-        # The package list comes from the claim, and an empty claim (a docs-only PR) runs no gremlins.
-        self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", mutants)
-        self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
-        self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"', mutants)
+        # An empty claim (a docs-only PR) runs no plan and no gremlins; otherwise the plan's shards
+        # are the matrix, one job for each shard of each package (#4961).
+        plan = job(self.text, "plan")
+        for body in (plan, mutants):
+            self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", body)
+        self.assertIn("    needs: claimed\n", plan)
+        self.assertIn("    needs: [claimed, plan]\n", mutants)
+        self.assertIn('shards=$(python3 -I tools/mutgate.py plan --git "$BASE")', plan)
+        self.assertIn('echo "shards=$shards" >> "$GITHUB_OUTPUT"', plan)
+        self.assertIn("shards: ${{ steps.plan.outputs.shards }}", plan)
+        self.assertIn("include: ${{ fromJSON(needs.plan.outputs.shards) }}", mutants)
+        self.assertIn("fail-fast: false", mutants)
+        for env in ("PKG: ${{ matrix.pkg }}", "SHARD: ${{ matrix.shard }}", "OF: ${{ matrix.of }}"):
+            self.assertIn(env, mutants)
+        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"',
+                      mutants)
+        self.assertNotIn("matrix.", mutants.replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
+                         .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
         self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
         self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
@@ -1639,23 +1860,31 @@ class Workflow(unittest.TestCase):
         script = re.split(r"\n      [-#] ", script, maxsplit=1)[0]
         script = "\n".join(l[10:] for l in script.split("\n"))
         cases = [
-            ("success", "[]", "skipped", 0),
-            ("success", '["kernel"]', "success", 0),
-            ("success", '["kernel"]', "failure", 1),
-            ("success", '["kernel"]', "skipped", 1),
-            ("success", "[]", "failure", 1),
-            ("failure", "", "skipped", 1),
+            ("success", "[]", "skipped", "skipped", 0),
+            ("success", '["kernel"]', "success", "success", 0),
+            ("success", '["kernel"]', "success", "failure", 1),
+            ("success", '["kernel"]', "success", "skipped", 1),
+            ("success", '["kernel"]', "failure", "skipped", 1),  # #4961: no plan, no shards
+            ("success", '["kernel"]', "skipped", "success", 1),
+            ("success", "[]", "skipped", "failure", 1),
+            ("success", "[]", "success", "skipped", 1),
+            ("failure", "", "skipped", "skipped", 1),
         ]
-        for claimed, pkgs, mutants, want in cases:
-            env = {"CLAIMED": claimed, "PACKAGES": pkgs, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
+        for claimed, pkgs, plan, mutants, want in cases:
+            env = {"CLAIMED": claimed, "PACKAGES": pkgs, "PLAN": plan, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
             r = subprocess.run(["sh", "-ec", script], env=env, capture_output=True, text=True)
-            self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, mutants, r.stdout, r.stderr))
+            self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, plan, mutants, r.stdout, r.stderr))
         self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
-        self.assertIn("needs: [claimed, mutants]", job(self.text, "mutgate"))
+        self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
 
-    def test_only_the_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
+    def test_only_the_plan_and_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
         # REV-CHK-mut-selftest (#4106): the PR's tests run in `mutants` and can write anything there,
-        # so that job ends in an upload and decides nothing.
+        # so that job ends in an upload and decides nothing. #4961: `plan` runs them too (a test-only
+        # diff's coverage) and ends in the matrix it outputs; verify checks the shards whatever it says.
+        plan = job(self.text, "plan")
+        self.assertTrue(plan.split("\n      - ")[-1].startswith("name: Shards for each package"), plan)
+        self.assertNotIn("verify", plan)
+        self.assertNotIn("upload-artifact", plan)
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
         self.assertIn("Gremlins on the package", steps[-4])
