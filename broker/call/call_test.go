@@ -389,6 +389,44 @@ func TestZeroStopsSpeech(t *testing.T) {
 	}
 }
 
+// Run's rung is known before its first turn starts, so every turn asks the
+// answerer at once and a barge-in carries nothing: carry is only for a
+// question stopped while a speed-dial token is still read. The owner's
+// words are already waiting when the loop starts, the case where a loop
+// that read the rung as one more event could start the turn first (one
+// time in four here; 64 calls make a miss about 1e-8).
+func TestRunKnowsItsRungBeforeTheFirstTurn(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		r := newRig(t, func(a call.Ask) []string { return []string{"Answer to " + a.Text + "."} })
+		r.rec.out = make(chan call.Heard, 3)
+		r.cfg.Recognizer = r.rec
+		r.rec.out <- call.Heard{Text: "first", Final: true}
+		r.rec.out <- call.Heard{Text: "sec"} // barge-in
+		r.rec.out <- call.Heard{Text: "second", Final: true}
+		ends := r.records()
+		r.run(call.P2)
+		for {
+			got := r.next()
+			if strings.HasSuffix(got, "second.") {
+				if got != "S:Answer to second." {
+					t.Fatalf("call %d: %q, the stopped question was carried", i, got)
+				}
+				break
+			}
+		}
+		r.turnEnds(ends, 2)
+		r.hangup()
+		r.ans.mu.Lock()
+		asks := append([]call.Ask(nil), r.ans.asks...)
+		r.ans.mu.Unlock()
+		for _, a := range asks {
+			if a.Rung != call.P2 || (a.Text != "first" && a.Text != "second") {
+				t.Fatalf("call %d: asks %+v", i, asks)
+			}
+		}
+	}
+}
+
 func TestBargeInStopsAndStartsANewTurn(t *testing.T) {
 	r := newRig(t, func(a call.Ask) []string { return []string{"Answer to " + a.Text + "."} })
 	r.l.gate = true
