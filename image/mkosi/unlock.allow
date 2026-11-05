@@ -24,6 +24,7 @@ start agentos-keeper.slice Requires from agentos-keeper-kernel.service
 start agentos-keeper.slice Requires from agentos-keeper-link-capture.service
 start agentos-link.service Wants from agentos-keeper-kernel.service
 start agentos-link.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
+start agentos-mor.service Wants from sysinit.target
 start agentos.slice Requires from agentos-keeper.slice
 start dev-hugepages.mount Wants from sysinit.target
 start dev-mqueue.mount Wants from sysinit.target
@@ -71,6 +72,7 @@ start system-modprobe.slice Requires from modprobe@loop.service
 start system.slice Requires from agentos-fallback.service
 start system.slice Requires from agentos-inbound.service
 start system.slice Requires from agentos-link.service
+start system.slice Requires from agentos-mor.service
 start system.slice Requires from emergency.service
 start system.slice Requires from kmod-static-nodes.service
 start system.slice Requires from ldconfig.service
@@ -316,6 +318,7 @@ stop system.slice RequiredBy agentos-localui-claim.service
 stop system.slice RequiredBy agentos-localui.service
 stop system.slice RequiredBy agentos-modem-env.service
 stop system.slice RequiredBy agentos-modem.service
+stop system.slice RequiredBy agentos-mor.service
 stop system.slice RequiredBy agentos-reboot.service
 stop system.slice RequiredBy console-getty.service
 stop system.slice RequiredBy dbus.service

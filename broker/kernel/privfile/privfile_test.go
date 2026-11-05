@@ -3,8 +3,11 @@ package privfile
 // REQ: KRN-2
 
 import (
+	"bytes"
 	"errors"
+	"flag"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -220,8 +223,26 @@ func TestWriteAtomicLeaksNoDescriptor(t *testing.T) {
 // the write step fails here with EFBIG, under a one-byte file size limit
 // whose SIGXFSZ is ignored, and the stop hook stops after each step that
 // leaves the file open.
+//
+// RLIMIT_FSIZE binds the whole process, so the failing writes run in a
+// child: this test binary run again for this test alone. In-process, any
+// other write that grew a file past one byte inside the window failed too:
+// go test's buffered testlog.txt flushed there whenever its buffer filled,
+// and the run failed with "file too large" after every test passed (the
+// mutants job on #4970 and #4997). The child gets no -test.testlogfile and
+// no -test.coverprofile; it gets the parent's -test.gocoverdir, so its
+// coverage lands in the profile the parent writes.
 func TestWriteAtomicClosesTheTmpOnAFailedOrStoppedStep(t *testing.T) {
+	if os.Getenv(fsizeChild) == "" {
+		runFsizeChild(t)
+		return
+	}
 	dir := t.TempDir()
+	// The child's first file operation opens the runtime's poller; open it
+	// before counting.
+	if err := WriteAtomic(dir, "w", []byte("canary"), nil); err != nil {
+		t.Fatal(err)
+	}
 	before := openFDs(t)
 	for i := 0; i < 3; i++ {
 		stopAt := i
@@ -254,6 +275,46 @@ func TestWriteAtomicClosesTheTmpOnAFailedOrStoppedStep(t *testing.T) {
 	}
 	if after := openFDs(t); after != before {
 		t.Errorf("%d descriptors open after 7 failed or stopped writes, %d before", after, before)
+	}
+}
+
+const fsizeChild = "AGENTOS_PRIVFILE_FSIZE_CHILD"
+
+// runFsizeChild runs t's test alone in a child of this test binary and
+// fails t unless the child ran it and passed; a skip in the child is a skip
+// here. A binary built with coverage that was given no -test.gocoverdir
+// (run directly, as tools/mutgate.py's deletion run does) gets one here,
+// since the testing package's teardown reads the flag only after the tests
+// and merges every counter file in that directory into -test.coverprofile.
+func runFsizeChild(t *testing.T) {
+	args := []string{"-test.run=^" + t.Name() + "$", "-test.count=1", "-test.v"}
+	if testing.CoverMode() != "" {
+		f := flag.Lookup("test.gocoverdir")
+		if f == nil {
+			t.Fatal("a coverage build has no -test.gocoverdir flag")
+		}
+		if f.Value.String() == "" {
+			d, err := os.MkdirTemp("", "privfile-cover-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Value.Set(d); err != nil {
+				t.Fatal(err)
+			}
+		}
+		args = append(args, "-test.gocoverdir="+f.Value.String())
+	}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), fsizeChild+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("in the child:\n%s", out)
+	switch {
+	case err != nil:
+		t.Fatalf("child: %v", err)
+	case bytes.Contains(out, []byte("--- SKIP: "+t.Name())):
+		t.Skip("skipped in the child")
+	case !bytes.Contains(out, []byte("--- PASS: "+t.Name())):
+		t.Fatal("the child did not run the test")
 	}
 }
 

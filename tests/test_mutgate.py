@@ -630,7 +630,10 @@ class Verify(unittest.TestCase):
         r = self.verify({"mutants-0/netguard.json": self.result("LIVED"),
                          "mutants-1/netguard.json": self.result("KILLED")})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("are both shard 0 of 1 for netguard: shards overlap", r.stderr)
+        self.assertIn("are both results for netguard: one run gives one result", r.stderr)  # #4983: not "shard 0 of 1"
+        for f in ("mutants-0/netguard.json", "mutants-1/netguard.json"):
+            self.assertIn(f, r.stderr)
+        self.assertNotIn("shard", r.stderr)
 
     def test_twin_packages_each_need_their_own_result(self):
         # The repro on #4154: broker/netguard/sub and broker/netguard__sub both claimed; the LIVED
@@ -929,6 +932,30 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 5), "LIVED")
             (stub).write_text("#!/bin/sh\nexit 1\n")
             self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_test_run_past_its_memory_cap_is_killed_with_its_children(self):
+        # egress on #5011: a deletion that drops a bound grew one test by gigabytes and took the
+        # runner down. A child's memory counts too, and the run ends well before its timeout.
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "t.test"
+            stub.write_text("#!/bin/sh\npython3 -c 'import time; b = bytearray(64 << 20); time.sleep(60)' &\nwait\n")
+            stub.chmod(0o755)
+            began = time.monotonic()
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
+            self.assertLess(time.monotonic() - began, 20)
+            self.assertEqual(mutgate.failed_test(stub), "memory_cap")  # the table says why (L3 on #5026)
+            stub.write_text("#!/bin/sh\nexec python3 -c 'b = bytearray(1 << 20)'\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
+            stub.write_text("#!/bin/sh\nsleep 60\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 1, mem=1 << 30), "TIMED OUT")
+
+    def test_available_memory_reads_meminfo(self):
+        got = mutgate.available_memory()
+        if os.path.isfile("/proc/meminfo"):
+            self.assertGreater(got, 0)
+        else:
+            self.assertIsNone(got)
 
     def repo(self, d, base_src=BASE_SRC, pr_src=PR_SRC, test_src=TEST_SRC):
         git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
@@ -1253,9 +1280,11 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls, first = [], ["TIMED OUT"]
-            def fake(binary, cwd, timeout):
+            mems = []
+            def fake(binary, cwd, timeout, mem=None):
                 self.assertTrue(pathlib.Path(binary).is_file())  # the worker's own binary, kept for the rerun
                 calls.append(pathlib.Path(binary).parent.name)
+                mems.append(mem)
                 return "LIVED" if calls.count(calls[-1]) > 1 else first[0]
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
             mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
@@ -1270,8 +1299,47 @@ func set(n, m int) {
                     self.assertIsNone(problem)
                     self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: want, 7: want})
                     self.assertEqual(len(calls), 2 * (jobs > 1) + 2)
+                    # A parallel run gets 1/jobs of the cap a run alone gets (egress on #5011).
+                    alone = mems[-1]
+                    self.assertTrue(alone is None or alone > 0)
+                    if alone and jobs > 1:
+                        self.assertEqual(mems[:2], [alone // jobs] * 2)
+                    mems.clear()
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_package_whose_unmutated_tests_near_the_memory_cap_is_a_problem(self):
+        # L3 on #5026: were the base run unmeasured, a suite that already holds more than the cap
+        # would read every covered deletion KILLED, the one that lives (line 7) too.
+        heavy = TEST_SRC.replace('import "testing"', 'import (\n\t"testing"\n\t"time"\n)') + (
+            "\nvar Sink []byte\n\nfunc TestHeavy(t *testing.T) {\n\tSink = make([]byte, 96<<20)\n"
+            "\tfor i := range Sink {\n\t\tSink[i] = 1\n\t}\n\ttime.Sleep(time.Second)\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, test_src=heavy)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            broker, avail = mutgate.BROKER, mutgate.available_memory
+            mutgate.BROKER = pkg.parent
+            try:
+                for free in (128 << 20, 320 << 20):  # cap 64 MB: over it; cap 160 MB: under it, without the headroom
+                    mutgate.available_memory = lambda: free
+                    tmp = pathlib.Path(d) / "tmp"
+                    tmp.mkdir()
+                    got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+                    shutil.rmtree(tmp)
+                    self.assertIsNone(got)
+                    self.assertIn("before any statement is deleted", problem)
+                    self.assertIn("memory cap", problem)
+                mutgate.available_memory = lambda: 8 << 30  # ample: the gate runs and line 7 lives
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            finally:
+                mutgate.BROKER, mutgate.available_memory = broker, avail
+            self.assertIsNone(problem)
+            self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: "KILLED", 7: "LIVED"})
 
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
@@ -1285,7 +1353,7 @@ func set(n, m int) {
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
             calls = []
-            def fake(binary, cwd, timeout):
+            def fake(binary, cwd, timeout, mem=None):
                 calls.append(pathlib.Path(binary).parent.name)
                 return "TIMED OUT"
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
@@ -1504,8 +1572,11 @@ open("{d}/seen-lines", "a").write(json.dumps(muts) + "\\n")
 files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": ("LIVED" if n == 4 else "KILLED")
           if n in ns else "SKIPPED", "line": n, "column": 1}} for n in range(1, len(open(f).read().split("\\n")))]}}
          for f, ns in muts.items()]
-lived = sum(m["status"] == "LIVED" for f in files for m in f["mutations"])
-open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived, "mutants_lived": lived}}))
+count = lambda s: sum(m["status"] == s for f in files for m in f["mutations"])
+lived, killed = count("LIVED"), count("KILLED")
+# gremlins' total is lived + killed + not viable (v0.6.0 report.go:178); SKIPPED is not counted.
+open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived + killed,
+                                                  "mutants_killed": killed, "mutants_lived": lived}}))
 """)
         (stub / "gremlins").chmod(0o755)
         return {"PATH": f"{stub}:{os.environ['PATH']}"}
@@ -1556,6 +1627,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "verify", str(pathlib.Path(d) / "res-2"), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("records other target lines than", r.stderr)
+            self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
             # A shard asked for outside 0 <= I < K is refused before anything runs.
             for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
@@ -1658,6 +1730,26 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class Plan(unittest.TestCase):
+    def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
+        # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
+        from unittest import mock
+        import contextlib, io, types
+        for pkgs, fix in ((["a", "b", "c"], "split the PR so each part changes fewer tier-A or tier-B packages"),
+                          ([], "rerun the mutgate workflow")):
+            with self.subTest(pkgs), contextlib.ExitStack() as st:
+                for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
+                                    ("deletion_sites", lambda *a: ([], None)), ("shard_count", lambda t, s: 100)):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
+                self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
+                              err.getvalue())
 
 
 class Summary(unittest.TestCase):
@@ -1853,7 +1945,10 @@ class Workflow(unittest.TestCase):
             self.assertIn(env, mutants)
         self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"',
                       mutants)
-        self.assertNotIn("matrix.", mutants.replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
+        # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
+        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
+        self.assertIn(name, mutants)
+        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
                          .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
         self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)

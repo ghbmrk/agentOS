@@ -100,6 +100,10 @@ func fakeLlamaServer(args []string) {
 				os.Stderr.WriteString(t) // the child's log must never reach the service's
 			case "count": // one vector fewer than texts
 				continue
+			case "extra": // a thousand vectors more than texts
+				for range 1000 {
+					data = append(data, item{i, make([]float32, fakeDim)})
+				}
 			case "short":
 				data = append(data, item{i, make([]float32, fakeDim-1)})
 				continue

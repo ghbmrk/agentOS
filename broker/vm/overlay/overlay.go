@@ -125,6 +125,17 @@ func Stat(root, rel string) (Entry, error) {
 	return Entry{}, nil
 }
 
+// Owner is the uid that owns the file fi describes, and false when fi
+// carries no owner. vm.Open reads it to check its state directory's path
+// (#3995) without importing syscall itself.
+func Owner(fi fs.FileInfo) (uint32, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return st.Uid, true
+}
+
 func describe(p string, fi fs.FileInfo) (Entry, error) {
 	e := Entry{Mode: fi.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
