@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
+	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 )
 
 // TestResolverInStep (ENF-l-dns-step, #4464): every firewall load runs
@@ -458,9 +461,10 @@ func TestUnresolvedBytesTrip(t *testing.T) {
 	}
 }
 
-// TestEdgeOverrun (ENF-l-15): the edge past its cap raises a trip for the
-// edge and is logged, and leaves the core's channel open; an alert that
-// cannot be journalled is logged too.
+// TestEdgeOverrun (ENF-l-15; UX 6656586767): the edge past its cap is
+// held by the drop and logged once a day; it raises no alert, whose text
+// would name steps the edge does not have and which nothing would clear,
+// and it leaves the core's channel open and the light as it was.
 func TestEdgeOverrun(t *testing.T) {
 	x, doc, _ := capped(t)
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
@@ -468,21 +472,89 @@ func TestEdgeOverrun(t *testing.T) {
 	if x.d.cut.Stage() != channel.Open {
 		t.Fatal("an edge overrun cut the core")
 	}
-	edge := slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool { return r.Kind == alert.Trip && r.Device == edgeDevice })
-	if !edge || !strings.Contains(x.logText(), "byte caps: edge: byte cap passed: 6000 of 5000") {
-		t.Fatal("the edge's overrun was not raised and logged")
+	if slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool { return r.Kind == alert.Trip }) {
+		t.Fatal("an edge overrun raised a trip nothing can clear")
 	}
-	j := filepath.Join(x.dir, fileAlerts)
-	if err := os.Remove(j); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(j, 0o700); err != nil {
-		t.Fatal(err)
+	const line = "byte caps: edge: byte cap passed: 6000 of 5000"
+	if !strings.Contains(x.logText(), line) {
+		t.Fatal("the edge's overrun was not logged")
 	}
 	x.setListing(listingOf(t, x, doc, 7, 10, 7000, true))
 	x.advance(readEvery)
-	if !strings.Contains(x.logText(), "byte caps: edge alert:") {
-		t.Fatal("an edge alert that failed was not logged")
+	if n := strings.Count(x.logText(), "byte caps: edge:"); n != 1 {
+		t.Fatalf("the edge's overrun logged %d times in one day", n)
+	}
+	x.advance(24 * time.Hour)
+	x.setListing(listingOf(t, x, doc, 7, 10, 13000, true)) // 6000 more on the new day
+	x.advance(readEvery)
+	if n := strings.Count(x.logText(), "byte caps: edge:"); n != 2 {
+		t.Fatalf("the edge's overrun on a new day logged %d lines in all, want 2", n)
+	}
+}
+
+// TestReadingBeforeLoad (Potency 6656589394): a full load starts new
+// counters, so the bytes since the last reading are read from the table
+// it replaces first; 600 + 300 + 200 bytes against a cap of 1000 trip,
+// although a load came between the readings.
+func TestReadingBeforeLoad(t *testing.T) {
+	x, doc, a := capped(t)
+	x.setListing(listing(t, x, doc, 7, 600))
+	x.advance(readEvery)
+	next := x.current()
+	next.EdgeCap = 6000
+	if w := x.b.approve(a, next); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	x.advance(time.Duration(policy.Wait)*time.Millisecond - 5*time.Second)
+	x.setListing(listing(t, x, doc, 7, 900))
+	x.advance(5 * time.Second) // the load, with no reading due
+	if x.current().EdgeCap != 6000 {
+		t.Fatal("fixture: the change did not land")
+	}
+	x.setListing(listing(t, x, next, 8, 200))
+	x.advance(readEvery)
+	waitUntil(t, "the core tripped at 1100 of 1000 bytes", func() bool { return x.d.cut.Stage() == channel.Tripped })
+}
+
+// TestReadingAtClose (Potency 6656589394): a clean stop takes a last
+// reading, so a restart loses none of the day's bytes.
+func TestReadingAtClose(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.setListing(listing(t, x, doc, 7, 600))
+	x.advance(readEvery)
+	x.setListing(listing(t, x, doc, 7, 900))
+	x.restart()
+	x.setListing(listing(t, x, doc, 8, 200))
+	x.advance(readEvery)
+	if x.d.cut.Stage() != channel.Tripped {
+		t.Fatal("bytes sent before a clean restart were lost: 1100 of 1000 did not trip")
+	}
+}
+
+// TestWakeRestarts (Potency 6656589394 release): a Wake-on-LAN relay
+// that stops on its own is started again.
+func TestWakeRestarts(t *testing.T) {
+	x, _ := enrolled(t, false)
+	r, err := wol.New(x.cfg.Layout, []wol.Machine{{MAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, Iface: "hh0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.d.net.relay = r
+	var mu sync.Mutex
+	runs := 0
+	x.d.dp.Wake = func(context.Context, *wol.Relay) error {
+		mu.Lock()
+		runs++
+		mu.Unlock()
+		return errors.New("socket closed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- x.d.ServeWake(ctx) }()
+	waitUntil(t, "the relay started again", func() bool { mu.Lock(); defer mu.Unlock(); return runs >= 2 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -513,5 +585,26 @@ func TestServeWake(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadingFailuresLogged: a reading that fails before a load or at a
+// clean stop is logged, and neither the load nor the stop waits on it.
+func TestReadingFailuresLogged(t *testing.T) {
+	x, _, a := capped(t)
+	x.setListing([]byte("{}"))
+	next := x.current()
+	next.EdgeCap = 6000
+	if w := x.b.approve(a, next); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if x.current().EdgeCap != 6000 || !strings.Contains(x.logText(), "byte caps: before the load: reading") {
+		t.Fatal("a failed reading before a load was not logged, or held the load back")
+	}
+	x.enforced()
+	x.restart()
+	if !strings.Contains(x.logText(), "byte caps: at close: reading") {
+		t.Fatal("a failed reading at close was not logged")
 	}
 }

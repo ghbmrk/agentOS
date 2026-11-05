@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
@@ -28,8 +27,7 @@ const (
 	// readEvery is the byte caps' reading interval: what a power cut can
 	// lose of the day's count (traffic ASSUMPTIONS ENF-cap-6).
 	readEvery = 10 * time.Second
-	// edgeDevice is the name the alerts give the edge's segment.
-	edgeDevice = "edge"
+	wakeRetry = time.Second
 )
 
 type network struct {
@@ -46,6 +44,9 @@ type network struct {
 	mdnsDown bool // the relay ended on its own: started again at the tick
 
 	relay *wol.Relay // nil with no machine to wake
+
+	edgeMu  sync.Mutex
+	edgeDay uint32 // the day the edge's overrun was last logged
 
 	// The byte caps: counter is nil when the saved state did not read
 	// back (spent), and then every capped send is dropped until the
@@ -103,12 +104,24 @@ func (d *Enforcer) openNetwork() error {
 
 // ServeWake runs the Wake-on-LAN relay until ctx ends; with no machine
 // to wake it waits.
+// A relay that stops on its own is started again after wakeRetry.
 func (d *Enforcer) ServeWake(ctx context.Context) error {
 	if d.net.relay == nil {
 		<-ctx.Done()
 		return nil
 	}
-	return d.dp.Wake(ctx, d.net.relay)
+	for {
+		err := d.dp.Wake(ctx, d.net.relay)
+		if ctx.Err() != nil {
+			return nil
+		}
+		d.dp.Logf(fmt.Sprintf("wake: relay stopped, started again in %s: %v", wakeRetry, err))
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wakeRetry):
+		}
+	}
 }
 
 // loadNetwork loads doc's ruleset in step with the resolver and moves the
@@ -147,6 +160,19 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		if err != nil {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
 			running = nil
+		}
+		// A full load starts new counters (a new Gen), so the bytes since
+		// the last reading are read from the table it replaces first, or
+		// they would count nowhere (nft ENF-cap-trip-c-2; Potency
+		// 6656589394). A cap they pass trips once the load is done.
+		if d.net.counter != nil && d.loaded != "" && running != nil {
+			over, err := d.addReading(running)
+			if err != nil {
+				d.dp.Logf("byte caps: before the load: " + err.Error())
+			}
+			for _, o := range over {
+				go d.overrun(o)
+			}
 		}
 		text, err := nft.Reload(doc, l, running)
 		if err != nil {
@@ -273,15 +299,9 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	if err != nil {
 		return nil, fmt.Errorf("reading: %w", err)
 	}
-	r, err := traffic.ReadingOf(d.loadedDoc, d.cfg.Layout, d.net.boot, listing)
+	over, err := d.addReading(listing)
 	if err != nil {
-		return nil, fmt.Errorf("reading: %w", err)
-	}
-	over := c.Add(r)
-	// The day is saved before the drop moves: a power cut after this
-	// line loses no counted byte.
-	if err := d.store(fileTraffic).Save(c.Save()); err != nil {
-		d.dp.Logf("byte caps: day not saved: " + err.Error())
+		return nil, err
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
@@ -295,6 +315,23 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	}
 	if err := d.dp.Fire.Update(lctx, text); err != nil {
 		return over, fmt.Errorf("drop: %w", err)
+	}
+	return over, nil
+}
+
+// addReading adds the reading in listing, the running table, to the
+// day's counts and saves the day; d.fwMu is held and the counter is not
+// nil. The day is saved before the drop moves: a power cut after it
+// loses no counted byte.
+func (d *Enforcer) addReading(listing []byte) ([]traffic.Overrun, error) {
+	r, err := traffic.ReadingOf(d.loadedDoc, d.cfg.Layout, d.net.boot, listing)
+	if err != nil {
+		return nil, fmt.Errorf("reading: %w", err)
+	}
+	c := d.net.counter
+	over := c.Add(r)
+	if err := d.store(fileTraffic).Save(c.Save()); err != nil {
+		d.dp.Logf("byte caps: day not saved: " + err.Error())
 	}
 	return over, nil
 }
@@ -313,9 +350,17 @@ func (d *Enforcer) overrun(o traffic.Overrun) {
 	case traffic.BoxCore:
 		d.cut.Trip(why)
 	default:
-		d.dp.Logf("byte caps: edge: " + why)
-		if _, err := d.alerts.Raise(alert.Trip, edgeDevice); err != nil {
-			d.dp.Logf("byte caps: edge alert: " + err.Error())
+		// No edge cut exists yet (#5014), so no alert: its text would
+		// name steps the edge does not have, and nothing would clear it
+		// (UX 6656586767). The drop holds the edge at its cap; the log
+		// says so once a day.
+		day := traffic.Day(d.dp.Now())
+		d.net.edgeMu.Lock()
+		first := d.net.edgeDay != day
+		d.net.edgeDay = day
+		d.net.edgeMu.Unlock()
+		if first {
+			d.dp.Logf("byte caps: edge: " + why + "; held at its cap by the drop until the day ends")
 		}
 	}
 }
@@ -361,8 +406,15 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	return d.net.counter.Counts(), nil
 }
 
-// closeNetwork stops the pair relay and the resolver's instances.
+// closeNetwork takes a last reading of the byte caps, so a clean stop
+// loses none of the day's bytes, and stops the pair relay and the
+// resolver's instances.
 func (d *Enforcer) closeNetwork() {
+	if d.net.counter != nil {
+		if err := d.readCaps(context.Background()); err != nil {
+			d.dp.Logf("byte caps: at close: " + err.Error())
+		}
+	}
 	d.net.mdnsMu.Lock()
 	d.stopMDNSLocked()
 	d.net.mdnsMu.Unlock()
