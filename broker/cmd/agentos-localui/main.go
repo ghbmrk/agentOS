@@ -103,20 +103,9 @@ func main() {
 		return
 	}
 	if port1File != "" {
-		p, err := servedPort1("/sys", iface, port1File)
+		p, err := watchedPort1(ctx, stop, "/sys", iface, port1File, port1Recheck)
 		if err != nil {
 			log.Fatal(err)
-		}
-		if iface == "" {
-			go watchPort1(ctx, stop, "/sys", p, port1Recheck)
-		} else {
-			// A named port 1 is watched too: the link the root step
-			// admitted must stay the one this name is (#4882).
-			id, err := namedLink("/sys", p)
-			if err != nil {
-				log.Fatal(err)
-			}
-			go watchNamedPort1(ctx, stop, "/sys", p, id, port1Recheck)
 		}
 		iface = p
 	} else if iface == "" {
@@ -242,6 +231,27 @@ func servedPort1(sys, iface, file string) (string, error) {
 	if p != admitted {
 		return "", errors.New("the inbound firewall admits the page on " + admitted + " but port 1 is " + p + "; the page serves nothing until its unit names the same port for both steps (a drop-in with an empty ExecStartPre= line, the root step with -iface, and AGENTOS_PAGE_IFACE)")
 	}
+	return p, nil
+}
+
+// watchedPort1 is the port 1 the page serves on (servedPort1), with the
+// watcher that stops the page once it changes already running: Port1's
+// choice when iface is empty, otherwise the named link as it was when the
+// page started (namedLink; the admit step does not record it, #4882).
+func watchedPort1(ctx context.Context, stop func(), sys, iface, file string, every time.Duration) (string, error) {
+	p, err := servedPort1(sys, iface, file)
+	if err != nil {
+		return "", err
+	}
+	if iface == "" {
+		go watchPort1(ctx, stop, sys, p, every)
+		return p, nil
+	}
+	id, err := namedLink(sys, p)
+	if err != nil {
+		return "", err
+	}
+	go watchNamedPort1(ctx, stop, sys, p, id, every)
 	return p, nil
 }
 
