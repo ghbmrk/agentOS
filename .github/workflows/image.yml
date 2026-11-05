@@ -135,6 +135,19 @@ jobs:
           sudo modprobe dm-verity
           sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1 | tee "$RUNNER_TEMP/bootab.log"
           grep -q -- '^--- PASS: TestLinuxSlotsOnALoopDevice ' "$RUNNER_TEMP/bootab.log"
+      # #4677: the unit rules' fixtures, each a loading rule a #4737 review found, run through the reader
+      # CI runs on the built tree (image/unit_rules.py), with the runner's systemd deciding each unit's
+      # files, and every refusal row of the unit rules again through it. They need root and systemd,
+      # and AGENTOS_REQUIRE_SYSTEMD=1 makes a skip fail.
+      - name: Unit-rule fixtures under systemd (image/unit_rules.py)
+        if: matrix.run == 'a'
+        shell: bash  # with pipefail, so tee keeps the test's exit status
+        run: |
+          (cd broker && go test -c -o "$RUNNER_TEMP/privfile.test" ./kernel/privfile)
+          cd broker/kernel/privfile
+          sudo env "PATH=$PATH" AGENTOS_REQUIRE_SYSTEMD=1 "$RUNNER_TEMP/privfile.test" -test.run '^(TestUnitRulesUnderSystemd|TestRootSideUnitPathsAndGrants)$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-fixtures.log"
+          grep -q -- '^--- PASS: TestUnitRulesUnderSystemd ' "$RUNNER_TEMP/unit-fixtures.log"
+          grep -q -- '^--- PASS: TestRootSideUnitPathsAndGrants ' "$RUNNER_TEMP/unit-fixtures.log"
       # IMG-disk (#4317, #4366): each file system the job writes to (output and boot copies in
       # RUNNER_TEMP, mkosi's workspace in /var/tmp, GOCACHE in /tmp, mkosi's cache under /root) must
       # have DISK_NEED_GB free, or the job stops here with both numbers and the runner's cloud (from
@@ -203,6 +216,21 @@ jobs:
               msg = c.rstrip("\n").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
               print("::%s title=image check %d/%d::%s" % (level, i + 1, len(chunks), msg))
           PY
+      # #4677: every unit the built image's own systemd loads, with the files it applies in its order
+      # after every mask, held to the root-side unit rules (broker/kernel/privfile TestBuiltUnits). A
+      # file counts as a package's only when byte-identical to the one dpkg installed. The control
+      # plants a drop-in of ours on a packaged root unit, which must be refused, or a pass means nothing.
+      - name: Unit rules on the built tree (image/unit_rules.py)
+        shell: bash  # with pipefail, so tee keeps the test's exit status
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          mkdir -p "$RUNNER_TEMP/units"
+          sudo python3 -I image/unit_rules.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/units/tree.json"
+          sudo python3 -I image/unit_rules.py --control "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/units/control.json"
+          (cd broker && go test -c -o "$RUNNER_TEMP/privfile-built.test" ./kernel/privfile)
+          cd broker/kernel/privfile
+          AGENTOS_UNIT_RECORDS="$RUNNER_TEMP/units" "$RUNNER_TEMP/privfile-built.test" -test.run '^TestBuiltUnits$' -test.v -test.count=1 | tee "$RUNNER_TEMP/unit-rules.log"
+          grep -q -- '^--- PASS: TestBuiltUnits ' "$RUNNER_TEMP/unit-rules.log"
       # #4667: what starting the unlock unit can start, from the built image's own systemd in test mode
       # (generators run, the boot entry's command line) rather than a model of how it reads units. The
       # control first: each path a #4696 review found must add a refusal, or a pass means nothing.
