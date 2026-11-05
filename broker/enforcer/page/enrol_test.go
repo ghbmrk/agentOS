@@ -310,12 +310,30 @@ func TestEnrolAnswerFollowsState(t *testing.T) {
 	if w := g.do(http.MethodPost, "/enrol/reset", map[string]string{"code": caseCode}); w.Code != http.StatusOK {
 		t.Fatalf("reset: %d %s", w.Code, w.Body)
 	}
+	// The reset's text tells a cut-short reset by this line, so the reset
+	// screen shows it and no screen with a passkey enrolled does (#4929
+	// R-UX1).
+	const resetLine = "This enforcer was factory reset."
+	w, err := alert.Words(alert.FactoryReset, "")
+	if err != nil || !strings.Contains(w, `"`+resetLine+`"`) {
+		t.Errorf("the reset text does not quote %q: %q %v", resetLine, w, err)
+	}
+	if !strings.Contains(g.do(http.MethodGet, "/enrol", nil).Body.String(), resetLine) {
+		t.Errorf("the reset screen lacks %q", resetLine)
+	}
 	code, out = g.enrolAs(newAuthenticator(t), caseCode)
 	net, _ = out["network"].(map[string]any)
 	if code != http.StatusOK || net == nil || net["setup_replaced"] != false {
 		t.Fatalf("enrolment after a reset: %d %v", code, out)
 	}
 	page := g.do(http.MethodGet, "/enrol", nil).Body.String()
+	g.build()
+	for _, path := range []string{"/", "/enrol"} {
+		if w := g.do(http.MethodGet, path, nil); w.Code != http.StatusOK || strings.Contains(w.Body.String(), resetLine) ||
+			!strings.Contains(w.Body.String(), "passkey") {
+			t.Errorf("%s with a passkey enrolled: %d, shows %q: %v", path, w.Code, resetLine, strings.Contains(w.Body.String(), resetLine))
+		}
+	}
 	for _, id := range []string{`id="net-new"`, `id="net-kept"`, `id="net-once"`} {
 		if !strings.Contains(page, id) {
 			t.Errorf("enrolment screen lacks %s", id)

@@ -37,7 +37,8 @@ function dom(html) {
 }
 
 // run loads page.js on html with fetch answering answers[path] as
-// [status, body], and returns the stub elements.
+// [status, body], or as a list of them taken in turn, and returns the stub
+// elements.
 function run(html, answers) {
   const { byId, forms } = dom(html);
   let ready = null;
@@ -50,14 +51,15 @@ function run(html, answers) {
       querySelectorAll: s => s === "form" ? forms : [],
       querySelector: () => ({ content: "token" }),
       addEventListener: (t, f) => { ready = f; },
-      createElementNS: () => ({ setAttribute() {} }),
+      createElementNS: () => ({ tag: "rect", setAttribute() {} }),
     },
     navigator: { credentials: { create: async () => cred, get: async () => cred } },
     crypto: { getRandomValues: a => a },
     atob: s => Buffer.from(s, "base64").toString("binary"),
     btoa: s => Buffer.from(s, "binary").toString("base64"),
     fetch: async path => {
-      const [status, body] = answers[path];
+      const a = answers[path];
+      const [status, body] = Array.isArray(a[0]) ? a.shift() : a;
       return { ok: status === 200, status, statusText: "", json: async () => body };
     },
     confirm: () => true,
@@ -90,6 +92,7 @@ const cases = {
     shownOnly(el, ["net-new", "net-once", "rejoin"]);
     assert.equal(el.ssid.textContent, "Home");
     assert.equal(el.password.textContent, "ABCD EFGH");
+    assert.equal(el.qr.children.length, 1);
     el.last4.listeners.input({ target: { value: "xxxx" } });
     assert.equal(el.joined.hidden, true);
     el.last4.listeners.input({ target: { value: "e fgh" } });
@@ -116,12 +119,22 @@ const cases = {
     assert.equal(el.enrol.button.disabled, false);
     assert.equal(el.shown.hidden, true);
   },
+  // A retry that works after one that failed: the failure's words go.
+  async failedThenEnrolled() {
+    const { el } = run(factoryHTML, { "/enrol/begin": begin,
+      "/enrol/finish": [[500, { error: "Disk full" }], [200, { recovery: "ABCD-EFGH", network: card(true) }]] });
+    await submit(el, "enrol");
+    assert.equal(el.result.textContent, "Not enrolled: Disk full");
+    await submit(el, "enrol");
+    assert.equal(el.result.textContent, "");
+    assert.equal(el.recovery.textContent, "ABCD-EFGH");
+  },
   // A recovery: the code and when the replacement applies, no card.
   async recovery() {
     const { el } = run(factoryHTML, { "/enrol/begin": begin, "/enrol/finish": [200, { recovery: "ABCD-EFGH", due: "10:10" }] });
     await submit(el, "enrol");
     assert.equal(el.result.textContent, "");
-    assert.match(el.due.textContent, /at 10:10\./);
+    assert.equal(el.due.textContent, "Your new passkey replaces the old one at 10:10. Come back to this page after that to finish.");
     assert.equal(el.network.hidden, true);
   },
   // After a factory reset the owner is on the Owner network already.
@@ -153,8 +166,18 @@ const cases = {
   },
 };
 
+// A case whose page.js promise never settles leaves Node nothing to wait
+// on, so it exits early with the rest unrun: count the cases that ended.
+let ended = 0;
+process.on("exit", () => {
+  if (ended !== Object.keys(cases).length) {
+    console.error(`${ended} of ${Object.keys(cases).length} cases ended`);
+    process.exitCode = 1;
+  }
+});
 (async () => {
   for (const [name, f] of Object.entries(cases)) {
     try { await f(); } catch (e) { console.error(name + ": " + e.message); process.exitCode = 1; }
+    ended++;
   }
 })();

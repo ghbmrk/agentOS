@@ -181,9 +181,11 @@ func TestDroppedTextStillOnPage(t *testing.T) {
 // across a restart, offered again when the core is back; and it never
 // lights the bulb (D-254). Its number follows Trip's, so journalled kinds
 // keep their meaning. Its text is raised before anything is dropped, so
-// it also tells the owner how to see a reset cut short, whose passkey
-// still shows on the page and where "enrol one" cannot be done (#4929
-// R-UX1). Catches a reset by whoever opened the case going unseen until
+// it also tells the owner how to tell a reset cut short, where "enrol
+// one" cannot be done, by the reset screen's own line, which no enrolled
+// page shows, so a reset followed by an enrolment does not read as cut
+// short (#4929 R-UX1; the page's TestEnrolAnswerFollowsState pins the
+// line in the screen). Catches a reset by whoever opened the case going unseen until
 // the next enrolment.
 func TestFactoryResetTexts(t *testing.T) {
 	if FactoryReset != Trip+1 {
@@ -194,7 +196,8 @@ func TestFactoryResetTexts(t *testing.T) {
 	}
 	w, err := Words(FactoryReset, "")
 	if err != nil || !strings.Contains(w, "enforcer's page at home") || !strings.Contains(w, "factory reset") ||
-		!strings.Contains(w, "still shows your passkey, the reset did not finish") ||
+		!strings.Contains(w, `the page says "This enforcer was factory reset."`) ||
+		!strings.Contains(w, "not enrolled a passkey since, the reset did not finish") ||
 		strings.Contains(strings.ToLower(w), "not you") {
 		t.Fatalf("words %q %v", w, err)
 	}
