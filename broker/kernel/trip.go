@@ -166,10 +166,9 @@ func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
 	return err
 }
 
-// CallTrip logs a trip an exit reports: a connection it refused because its
-// address at connect time, after any redirect, was a table destination in
-// any form ipform.Forms reads, as the plan check reads it (KRN-12 Trips). Only that call stopped. It is an input, so it neither
-// waits on nor moves a pause's resume.
+// CallTrip logs an exit's trip, a connection it refused because its address
+// at connect time, after any redirect, was a table destination in any form
+// ipform.Forms reads (KRN-12 Trips). Only that call stopped; an input, it neither waits on nor moves a resume.
 func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
 		return errors.New("kernel: a call trip names its exit")
