@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/check"
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -128,10 +128,10 @@ type Config struct {
 	// signing threshold, not the owner's: Do activates only a release that
 	// passed the TUF threshold and is newer than the installed one (UPD-2,
 	// UPD-8), so the key adds no power beyond that check. Holder is behind
-	// a handoff.Secret, so a line that formats a Config or an Applier shows
+	// a secret.Secret, so a line that formats a Config or an Applier shows
 	// no key (CLK-1, DECOY-b-8, #4837).
 	Key    key.Key
-	Holder handoff.Secret[ed25519.PrivateKey]
+	Holder secret.Secret[ed25519.PrivateKey]
 	Pinned key.PublicKey
 	// Paused reports the pinned channel (UPD-4): no plan is submitted, a
 	// release handed over in this boot is withdrawn instead of restarted

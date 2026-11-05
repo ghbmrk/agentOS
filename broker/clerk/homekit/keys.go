@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // KeyHolder holds the box's controller long-term key (iOSDeviceLTSK,
@@ -19,12 +19,12 @@ type KeyHolder interface {
 }
 
 // MemoryKeyHolder keeps the key in memory. It is for tests and for a holder
-// part b wraps; it marshals no field, and its key sits in a handoff.Secret,
+// part b wraps; it marshals no field, and its key sits in a secret.Secret,
 // so no print of it or of a struct that holds it shows the key (CLK-1,
 // DECOY-b-8, #4837).
 type MemoryKeyHolder struct {
 	id   string
-	priv handoff.Secret[ed25519.PrivateKey]
+	priv secret.Secret[ed25519.PrivateKey]
 }
 
 // NewMemoryKeyHolder builds a holder from a 32-byte seed.
@@ -35,7 +35,7 @@ func NewMemoryKeyHolder(id string, seed []byte) (*MemoryKeyHolder, error) {
 	if err := checkPairingID(id); err != nil {
 		return nil, err
 	}
-	return &MemoryKeyHolder{id: id, priv: handoff.Hide(ed25519.NewKeyFromSeed(seed))}, nil
+	return &MemoryKeyHolder{id: id, priv: secret.Hide(ed25519.NewKeyFromSeed(seed))}, nil
 }
 
 func (k *MemoryKeyHolder) PairingID() string { return k.id }

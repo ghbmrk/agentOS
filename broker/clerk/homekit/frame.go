@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/crypto/chacha20poly1305"
 
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // The encrypted session (HAP R2 6.5.2): each frame is a 2-byte little-endian
@@ -19,10 +19,10 @@ import (
 const maxFrame = 1024
 
 // frameCipher holds one direction's session key inside its AEAD, behind a
-// handoff.Secret, so no print of a session's frames shows it (CLK-1,
+// secret.Secret, so no print of a session's frames shows it (CLK-1,
 // DECOY-b-8, #4837).
 type frameCipher struct {
-	aead handoff.Secret[cipher.AEAD]
+	aead secret.Secret[cipher.AEAD]
 	n    uint64
 }
 
@@ -31,7 +31,7 @@ func newFrameCipher(key []byte) (*frameCipher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &frameCipher{aead: handoff.Hide(a)}, nil
+	return &frameCipher{aead: secret.Hide(a)}, nil
 }
 
 func (c *frameCipher) nonce() ([]byte, error) {

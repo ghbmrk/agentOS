@@ -11,10 +11,10 @@ import (
 	"math/rand/v2"
 	"strings"
 
-	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/vm/requal/wire"
 )
 
@@ -92,9 +92,9 @@ type session struct {
 	posts     []inbox.Post          // the clerk's one-click posts at the session's end
 	origin    func(handle string) string
 
-	// planner is the planner's key, behind a handoff.Secret so no print of
+	// planner is the planner's key, behind a secret.Secret so no print of
 	// a session shows it (CLK-1, DECOY-b-8, #4837).
-	planner handoff.Secret[ed25519.PrivateKey]
+	planner secret.Secret[ed25519.PrivateKey]
 }
 
 // clerk records every request that reaches the mail clerk, before the clerk
@@ -186,7 +186,7 @@ func run(in wire.SecurityInput, m Models) (*session, error) {
 	headPub, headPriv := pair(3)
 	plannerPub, plannerPriv := pair(4)
 	sparePub, sparePriv := pair(5)
-	s.planner = handoff.Hide(plannerPriv)
+	s.planner = secret.Hide(plannerPriv)
 	anchors := []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 	s.anchors = anchors
 	owner, spare := key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)

@@ -163,7 +163,7 @@ func template() *x509.Certificate {
 // signer sits behind a pointer to a pointer, which fmt prints as an
 // address in every verb and at any depth, so no print of a guard, or of
 // the tls.Config that holds one, shows a key the signer holds (CLK-1,
-// DECOY-b-8, #4837). It is handoff.Secret's shape, kept local because the
+// DECOY-b-8, #4837). It is secret.Secret's shape, kept local because the
 // edge link imports no broker package (ARC-2).
 type guard struct {
 	s       **crypto.Signer
