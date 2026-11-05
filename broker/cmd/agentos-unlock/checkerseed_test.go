@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
@@ -138,5 +139,37 @@ func TestClerkAnchorsRefuseAGroupWritableDirectory(t *testing.T) {
 	}
 	if _, err := os.Lstat(victim); err != nil {
 		t.Errorf("putClerkAnchors removed a name in a refused directory: %v", err)
+	}
+}
+
+// A seed that cannot be written in a directory of this uid's alone (here a
+// store entry that is not a code seed) removes the earlier boot's file, so
+// a checker never starts on a stale seed (mutgate: the fallback remove is
+// not dead code).
+// REQ: CH-4
+func TestCheckerSeedFailureRemovesTheStaleSeed(t *testing.T) {
+	d := t.TempDir()
+	st, err := seal.Create(filepath.Join(d, "store"), seal.Recovery{Key: make([]byte, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Put(handoff.CheckerSeedEntry, []byte("not a seed")); err != nil {
+		t.Fatal(err)
+	}
+	mine := filepath.Join(d, "mine")
+	if err := os.Mkdir(mine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(mine, "seed")
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := putCheckerSeed(stale, st, new([32]byte)); err == nil || errors.Is(err, errNotMine) {
+		t.Fatalf("putCheckerSeed = %v, want a failure past the directory check", err)
+	}
+	writeCheckerSeed(stale, st, new([32]byte))
+	if _, err := os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stale seed was kept after a failed write: %v", err)
 	}
 }
