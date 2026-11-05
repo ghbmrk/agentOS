@@ -23,14 +23,17 @@ link. Its lines are every linked package's outside the standard library and the 
 each one exact package from golang.org/x/crypto or golang.org/x/sys (a subtree would let a new
 package or a vendored file under it in at +0). Every such package other than a root must have a
 `known` line, so a new import fails whatever the body, and a `known` line the core no longer
-links must be deleted. Against the base tree's file and measure, a head that grows core lines,
-adds a `known` or `allow` line, drops a root or deletes the file fails unless the body has a
-line `Trusted-core: <decision ID>` naming an active DECISIONS.md row of the base tree whose
-text names the PR (`#<number>`, from --pr), so neither a row added by the PR itself nor an
-unrelated standing row can waive it; the reviewer checks that the row records Mark approving
-the growth (the D-152 word budget, for code; #2945). Growth that implements a design Mark
-already approved needs no card: a one-row DECISIONS.md PR names the PR and cites that approval
-under D-159, and merges first (decisions/D-159.md). In CI the base tree is the base branch tip
+links must be deleted. Against the base tree's file, a head that adds a `known` or `allow` line,
+drops a root or deletes the file fails unless the body has a line `Trusted-core: <decision ID>`
+naming an active DECISIONS.md row of the base tree whose text names the PR (`#<number>`, from
+--pr), so neither a row added by the PR itself nor an unrelated standing row can waive it; the
+reviewer checks that the row records Mark approving it (#2945). Core lines are reported here and
+capped by the ceilings below, not waived per PR (D-310 ends D-159's rule 2).
+
+The ceilings (D-310) are tools/ceilings.txt: trusted lines (core lines plus the old core's Go
+lines, tools/old_core.txt) and SPEC.md's words. A measure fails when it ends above the base's
+ceiling and above the base's measure; raising a ceiling or deleting the file needs a line
+`Ceiling: <decision ID>` naming an active base-tree row that names the PR. In CI the base tree is the base branch tip
 and the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
 gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
@@ -82,6 +85,11 @@ GO_ENV = {
 }
 REASON = re.compile(r"^\s*Trusted-base:\s*(\S+)\s+--\s+(.*?)\s*$")
 WAIVER = re.compile(r"^\s*Trusted-core:\s*(\S+)\s*$", re.M)
+CEILINGS = "tools/ceilings.txt"
+OLD_CORE = "tools/old_core.txt"
+SPEC = "SPEC.md"
+CEILING_NAMES = ("trusted-lines", "spec-words")
+RAISE = re.compile(r"^\s*Ceiling:\s*(\S+)\s*$", re.M)
 PLACEHOLDER = re.compile(r"(?i)^(todo|tbd|n/?a|none|reason|-+|\.+)$")
 
 
@@ -367,8 +375,6 @@ def compare_core(base_core, head_core, base, head, body, decisions, pr=None):
         if head_core is None:
             owed["file"] = f"{CORE} is deleted"
         else:
-            if head["lines"] > base["lines"]:
-                owed["lines"] = f"core lines {base['lines']} -> {head['lines']}"
             for kind, change, verb in (("root", base_core["root"] - head_core["root"], "dropped"),
                                        ("allow", head_core["allow"] - base_core["allow"], "added"),
                                        ("known", head_core["known"] - base_core["known"], "added")):
@@ -394,6 +400,107 @@ def core_table(base, head, owed, problems):
             out.append(f"| {label} | {'-' if b is None else b} | {h} | {'-' if b is None else f'{h - b:+d}'} |")
     out += ["", "**Fail:**" if problems else "**Pass.**" + (" Growth names a decision that names this PR (reviewer: confirm Mark approved it)." if owed else "")]
     out += [f"- {p}" for p in problems]
+    return "\n".join(out) + "\n"
+
+
+def parse_ceilings(text, where=CEILINGS):
+    """{name: int} from the ceilings file: `<name> <whole number>` lines, every name once."""
+    out = {}
+    for n, line in list_lines(text, where):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        m = re.fullmatch(r"(\S+)\s+(0|[1-9][0-9]*)", s)
+        if not m or m.group(1) not in CEILING_NAMES:
+            raise MeasureError(f"{where}:{n}: want `<{'|'.join(CEILING_NAMES)}> <whole number>`: {s}")
+        if m.group(1) in out:
+            raise MeasureError(f"{where}:{n}: {m.group(1)} is listed twice")
+        out[m.group(1)] = int(m.group(2))
+    missing = [k for k in CEILING_NAMES if k not in out]
+    if missing:
+        raise MeasureError(f"{where} names no {', '.join(missing)}")
+    return out
+
+
+def read_ceilings(tree):
+    path = pathlib.Path(tree) / CEILINGS
+    return parse_ceilings(read_list(path), str(path)) if path.exists() else None
+
+
+def old_core_dirs(tree):
+    path = pathlib.Path(tree) / OLD_CORE
+    if not path.exists():
+        return set()
+    return {s.strip() for _, s in list_lines(read_list(path), str(path)) if s.strip() and not s.lstrip().startswith("#")}
+
+
+def old_core_lines(tree, dirs):
+    """Lines of every Go file under the old-core directories that is not a test or under testdata.
+    A file is counted whatever its build tags: the old core is measured as it sits, not as linked."""
+    total = 0
+    for d in sorted(dirs):
+        root = pathlib.Path(tree) / d
+        if ".." in pathlib.PurePosixPath(d).parts or d.startswith("/"):
+            raise MeasureError(f"{OLD_CORE}: {d} is not a directory of the repository")
+        for f in sorted(root.rglob("*.go")) if root.is_dir() else ():
+            rel = f.relative_to(root).parts
+            if f.is_file() and not f.name.endswith("_test.go") and "testdata" not in rel:
+                total += count_lines(f)
+    return total
+
+
+def spec_words(tree):
+    """SPEC.md's words as tools/word_budget.py counts them: runs of non-whitespace."""
+    path = pathlib.Path(tree) / SPEC
+    return len(path.read_text(encoding="utf-8").split()) if path.exists() else 0
+
+
+def ceiling_measures(tree, core_measure, dirs):
+    return {"trusted-lines": (core_measure["lines"] if core_measure else 0) + old_core_lines(tree, dirs),
+            "spec-words": spec_words(tree)}
+
+
+def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
+    """(problems, caps) for the ceilings (D-310). A measure fails when it ends above its ceiling
+    and above the base's measure: while main is over a ceiling a PR may not grow it, and no PR
+    crosses one upward. The ceiling is the base's; a head that raises or deletes one needs a
+    `Ceiling: <decision ID>` line naming an active base-tree DECISIONS.md row that names the PR,
+    and then the head's number holds. A head that lowers one is held to the lower number."""
+    if base_c is None:
+        return [], {}
+    problems, caps, raised = [], {}, []
+    if head_c is None:
+        raised.append(f"{CEILINGS} is deleted")
+    else:
+        raised += [f"{k} ceiling {base_c[k]} -> {head_c[k]}" for k in CEILING_NAMES if head_c[k] > base_c[k]]
+    waived = False
+    if raised:
+        w = RAISE.search(body or "")
+        waived = bool(w and active_decision(decisions, w.group(1), pr))
+        if not waived:
+            why = (f"`Ceiling: {w.group(1)}` names no active DECISIONS.md row on the base branch that names #{pr}"
+                   if w else "no `Ceiling: <decision ID>` line")
+            problems += [f"{r}, and the PR body has {why}: only Mark raises a ceiling (D-310)" for r in raised]
+    for k in CEILING_NAMES:
+        if head_c is None:
+            caps[k] = None if waived else base_c[k]
+        else:
+            caps[k] = head_c[k] if waived else min(base_c[k], head_c[k])
+        if caps[k] is not None and head[k] > caps[k] and head[k] > base[k]:
+            problems.append(f"{k} {base[k]} -> {head[k]} ends above its ceiling {caps[k]} ({CEILINGS}):"
+                            " delete as much elsewhere in the same PR (D-310)")
+    return problems, caps
+
+
+def ceilings_table(base, head, caps, problems):
+    out = ["", "## Ceilings (D-310)", ""]
+    if not caps:
+        out.append(f"No {CEILINGS} at the base.")
+    else:
+        out += ["| Measure | Base | Head | Ceiling |", "|---|---:|---:|---:|"]
+        out += [f"| {k} | {base[k]} | {head[k]} | {'-' if caps[k] is None else caps[k]} |" for k in CEILING_NAMES]
+        out += ["", "**Fail:**" if problems else "**Pass.**"]
+        out += [f"- {p}" for p in problems]
     return "\n".join(out) + "\n"
 
 
@@ -539,9 +646,18 @@ def run_check(base_tree, head_tree, body, fallback_tree=None, pr=None):
     chead = head_core and measure_core(head_tree, head_core)
     # The base tree's decisions: a row the PR adds itself is not yet Mark's record (#2945).
     decisions = pathlib.Path(base_tree, "DECISIONS.md")
-    cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body,
-                                    decisions.read_text() if decisions.exists() else "", pr)
-    return problems + cproblems, text + core_table(cbase, chead, cowed, cproblems)
+    decisions = decisions.read_text() if decisions.exists() else ""
+    cproblems, cowed = compare_core(base_core, head_core, cbase, chead, body, decisions, pr)
+    # The ceilings (D-310): old-core directories listed on either side count on both, so dropping
+    # a line of tools/old_core.txt cannot shed lines whose files stay.
+    dirs = old_core_dirs(base_tree) | old_core_dirs(head_tree)
+    # A head without the core file is measured by the base's, so deleting it sheds no lines.
+    hcore = chead if head_core is not None else (base_core and measure_core(head_tree, base_core))
+    ebase, ehead = ceiling_measures(base_tree, cbase, dirs), ceiling_measures(head_tree, hcore, dirs)
+    eproblems, caps = compare_ceilings(read_ceilings(base_tree), read_ceilings(head_tree), ebase, ehead,
+                                       body, decisions, pr)
+    return (problems + cproblems + eproblems,
+            text + core_table(cbase, chead, cowed, cproblems) + ceilings_table(ebase, ehead, caps, eproblems))
 
 
 def main(argv=None):
@@ -584,6 +700,9 @@ def main(argv=None):
                 c = measure_core(a.tree, core)
                 text += f"core lines {c['lines']}, linked packages outside std and allow {len(c['imports'])}\n"
                 problems += compare_core(None, core, None, c, "", "")[0]
+                e = ceiling_measures(a.tree, c, old_core_dirs(a.tree))
+                caps = read_ceilings(a.tree) or {}
+                text += "".join(f"{k} {e[k]}" + (f" (ceiling {caps[k]})" if k in caps else "") + "\n" for k in CEILING_NAMES)
             text += "".join(f"- {p}\n" for p in problems)
         else:
             body = pathlib.Path(a.body).read_text()

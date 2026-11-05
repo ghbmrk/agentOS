@@ -216,6 +216,10 @@ class SyntheticTree(unittest.TestCase):
 CORE = "root calc\nallow golang.org/x/crypto/argon2\n"
 # D-7 names the test PR (#42, as --pr 42); D-5 is active but names another PR (#2945).
 PR = 42
+
+
+def ceilings(lines, words=0):
+    return f"# synthetic\ntrusted-lines {lines}\nspec-words {words}\n"
 DECISIONS = ("| ID | Date | Status | Decision |\n|---|---|---|---|\n| D-7 | 2026-10-23 | active | grow calc for #42 |\n"
              "| D-6 | 2026-10-01 | superseded | old #42 |\n| D-5 | 2026-10-01 | active | the trusted core, #420 |\n")
 
@@ -245,8 +249,7 @@ class CorePure(unittest.TestCase):
         self.assertEqual(tb.compare_core(self.c(), self.c(root=("k", "j")), self.m(), self.m(), "", "")[0], [])
 
     def test_each_loosening_needs_a_decision(self):
-        cases = [("lines", self.c(), self.m(lines=11)),
-                 ("root", self.c(root=()), self.m()),
+        cases = [("root", self.c(root=()), self.m()),
                  ("allow", self.c(allow=("x/...",)), self.m()),
                  ("known", self.c(known=("a/b", "c/d")), self.m(imports=("a/b", "c/d"))),
                  ("file", None, None)]
@@ -273,6 +276,31 @@ class CorePure(unittest.TestCase):
         self.assertEqual(tb.compare_core(None, None, None, None, "", ""), ([], {}))
 
 
+class CeilingsPure(unittest.TestCase):
+    """D-310: the ceilings file's grammar, and SPEC words counted as tools/word_budget.py counts them."""
+
+    def test_parse(self):
+        self.assertEqual(tb.parse_ceilings("# x\n\ntrusted-lines 5\nspec-words 0\n"), {"trusted-lines": 5, "spec-words": 0})
+
+    def test_parse_rejects(self):
+        for text in ("trusted-lines 5\n", "trusted-lines 5\nspec-words 1\nspec-words 2\n", "trusted-lines -5\nspec-words 1\n",
+                     "trusted-lines 05\nspec-words 1\n", "trusted-lines 5.0\nspec-words 1\n", "trusted-lines 5\nspec-words 1\nother 3\n",
+                     "trusted-lines 5 6\nspec-words 1\n", "trusted-lines 5\r\nspec-words 1\n"):
+            with self.assertRaises(tb.MeasureError, msg=text):
+                tb.parse_ceilings(text)
+
+    def test_spec_words_match_the_word_budget(self):
+        import word_budget
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "SPEC.md", "a  b\n\u2014 `c d`\t| \u00a0e\u2028f")
+            self.assertEqual(tb.spec_words(d), word_budget.tree_counts(d)["spec"])
+            self.assertEqual(tb.spec_words(d), 8)
+
+    def test_repository_file_parses(self):
+        c = tb.parse_ceilings((ROOT / tb.CEILINGS).read_text())
+        self.assertEqual(set(c), set(tb.CEILING_NAMES))
+
+
 @unittest.skipUnless(shutil.which("go"), "go is not installed")
 class CoreTree(unittest.TestCase):
     def setUp(self):
@@ -286,12 +314,16 @@ class CoreTree(unittest.TestCase):
         tree(self.base)
         write(self.base, tb.CORE, CORE)
         write(self.base, "DECISIONS.md", DECISIONS)
+        # D-310: trusted lines capped at the base's measure, so any core growth ends above it.
+        self.ceil = ceilings(tb.measure_core(self.base, tb.parse_core(CORE))["lines"])
+        write(self.base, tb.CEILINGS, self.ceil)
 
-    def check(self, body="", head_core=CORE, pr=PR, head_decisions="", **kw):
+    def check(self, body="", head_core=CORE, pr=PR, head_decisions="", head_ceil=None, **kw):
         tree(self.head, **kw)
         write(self.head, "DECISIONS.md", DECISIONS + head_decisions)
         if head_core is not None:
             write(self.head, tb.CORE, head_core)
+        write(self.head, tb.CEILINGS, self.ceil if head_ceil is None else head_ceil)
         pathlib.Path(self.body).write_text(body)
         return run(["check", "--base-tree", self.base, "--head-tree", self.head, "--body", self.body]
                    + ([] if pr is None else ["--pr", str(pr)]))
@@ -306,28 +338,111 @@ class CoreTree(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("| Core lines |", out)
 
-    def test_growth_fails_then_passes_with_a_decision(self):
+    def test_growth_over_the_ceiling_fails_until_mark_raises_it(self):
+        # D-310: core lines no longer take a per-PR Trusted-core waiver; the ceiling holds them.
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
         rc, out = self.check(extra_own=4)
         self.assertEqual(rc, 1, out)
-        self.assertIn("core lines", out)
-        # The KRN-2m reason covers the process measure but not the core.
-        self.assertEqual(self.check("Trusted-base: lines -- calc grows here", extra_own=4)[0], 1)
-        rc, out = self.check("Trusted-base: lines -- calc grows here\nTrusted-core: D-7\n", extra_own=4)
+        self.assertIn(f"trusted-lines {n} -> {n + 4} ends above its ceiling {n}", out)
+        self.assertEqual(self.check("Trusted-core: D-7\n", extra_own=4)[0], 1)
+        rc, out = self.check(extra_own=4, head_ceil=ceilings(n + 4))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"trusted-lines ceiling {n} -> {n + 4}, and the PR body has no `Ceiling: <decision ID>` line", out)
+        self.assertEqual(self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 3))[0], 1)
+        rc, out = self.check("Ceiling: D-7\n", extra_own=4, head_ceil=ceilings(n + 4))
         self.assertEqual(rc, 0, out)
+        self.assertIn(f"| trusted-lines | {n} | {n + 4} | {n + 4} |", out)
 
-    def test_the_decision_is_the_base_trees_and_names_the_pr(self):
+    def test_growth_under_the_ceiling_passes(self):
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        write(self.base, tb.CEILINGS, ceilings(n + 10))
+        self.assertEqual(self.check(extra_own=4, head_ceil=ceilings(n + 10))[0], 0)
+        # A head may lower a ceiling, and is then held to it.
+        rc, out = self.check(extra_own=4, head_ceil=ceilings(n + 3))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ends above its ceiling", out)
+
+    def test_over_the_ceiling_a_pr_may_not_grow_but_may_stay(self):
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        write(self.base, tb.CEILINGS, ceilings(n - 2))
+        self.assertEqual(self.check(head_ceil=ceilings(n - 2))[0], 0)
+        self.assertEqual(self.check(extra_own=1, head_ceil=ceilings(n - 2))[0], 1)
+
+    def test_old_core_lines_count_and_move_into_the_core_at_par(self):
+        # A migration step: the core grows by the lines the old core loses, in one PR.
+        write(self.base, tb.OLD_CORE, "broker/old\n")
+        write(self.base, "broker/old/old.go", "package old\n" + "// o\n" * 9)
+        write(self.base, "broker/old/old_test.go", "package old\n" + "// t\n" * 99)
+        write(self.base, "broker/old/testdata/x.go", "package x\n" * 99)
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        write(self.base, tb.CEILINGS, ceilings(n + 10))
+        write(self.head, tb.OLD_CORE, "broker/old\n")
+        write(self.head, "broker/old/old.go", "package old\n" + "// o\n" * 5)
+        self.assertEqual(self.check(extra_own=4, head_ceil=ceilings(n + 10))[0], 0)
+        self.assertEqual(self.check(extra_own=5, head_ceil=ceilings(n + 10))[0], 1)
+        # Dropping the directory's line while its file stays sheds nothing.
+        write(self.head, tb.OLD_CORE, "")
+        self.assertEqual(self.check(extra_own=5, head_ceil=ceilings(n + 10))[0], 1)
+        os.remove(os.path.join(self.head, "broker/old/old.go"))
+        self.assertEqual(self.check(extra_own=5, head_ceil=ceilings(n + 10))[0], 0)
+
+    def test_an_old_core_dir_only_the_head_lists_counts(self):
+        # L3 finding 1 on #4946: the head side of the directory union. A head that adds broker/new
+        # to tools/old_core.txt with new Go lines grows trusted lines like any other code.
+        write(self.head, tb.OLD_CORE, "broker/new\n")
+        write(self.head, "broker/new/n.go", "package n\n" + "// n\n" * 49)
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        self.assertIn(f"trusted-lines {n} -> {n + 50} ends above its ceiling {n}", out)
+
+    def test_spec_words_are_capped(self):
+        write(self.base, "SPEC.md", "a b c")
+        write(self.base, tb.CEILINGS, ceilings(10**6, 4))
+        write(self.head, "SPEC.md", "a b c d")
+        self.assertEqual(self.check(head_ceil=ceilings(10**6, 4))[0], 0)
+        write(self.head, "SPEC.md", "a b c d e")
+        rc, out = self.check(head_ceil=ceilings(10**6, 4))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("spec-words 3 -> 5 ends above its ceiling 4", out)
+        # The D-152 waiver does not reach the ceiling.
+        self.assertEqual(self.check("Word-budget: D-7\n", head_ceil=ceilings(10**6, 4))[0], 1)
+
+    def test_the_raise_is_the_base_trees_decision_and_names_the_pr(self):
         # #2945 (L3 3 and Security R2 on #2941): a row the PR adds itself, a row for another PR,
-        # and a waiver checked with no PR number all fail.
-        body = "Trusted-base: lines -- calc grows here\n"
-        own_row = "| D-9 | 2026-10-24 | active | grow calc for #42 |\n"
-        rc, out = self.check(body + "Trusted-core: D-9\n", head_decisions=own_row, extra_own=4)
+        # an inactive row and a waiver checked with no PR number all fail.
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        up = dict(extra_own=4, head_ceil=ceilings(n + 4))
+        own_row = "| D-9 | 2026-10-24 | active | raise for #42 |\n"
+        rc, out = self.check("Ceiling: D-9\n", head_decisions=own_row, **up)
         self.assertEqual(rc, 1, out)
         self.assertIn("names no active DECISIONS.md row on the base branch that names #42", out)
-        self.assertEqual(self.check(body + "Trusted-core: D-7\n", pr=43, extra_own=4)[0], 1)
-        self.assertEqual(self.check(body + "Trusted-core: D-7\n", pr=None, extra_own=4)[0], 1)
-        self.assertEqual(self.check(body + "Trusted-core: D-5\n", extra_own=4)[0], 1)
+        self.assertEqual(self.check("Ceiling: D-7\n", pr=43, **up)[0], 1)
+        self.assertEqual(self.check("Ceiling: D-7\n", pr=None, **up)[0], 1)
+        self.assertEqual(self.check("Ceiling: D-5\n", **up)[0], 1)
+        self.assertEqual(self.check("Ceiling: D-6\n", **up)[0], 1)
+        self.assertEqual(self.check("Trusted-core: D-7\n", **up)[0], 1)
+
+    def test_deleting_the_ceilings_file_needs_a_decision(self):
+        self.check()
+        os.remove(os.path.join(self.head, tb.CEILINGS))
+        pathlib.Path(self.body).write_text("")
+        problems = tb.run_check(self.base, self.head, "", pr=PR)[0]
+        self.assertTrue(any(f"{tb.CEILINGS} is deleted" in p for p in problems), problems)
+        self.assertEqual(tb.run_check(self.base, self.head, "Ceiling: D-7", pr=PR)[0], [])
+        # Without its file the base ceiling still holds.
+        tree(self.head, extra_own=4)
+        problems = tb.run_check(self.base, self.head, "", pr=PR)[0]
+        self.assertTrue(any("ends above its ceiling" in p for p in problems), problems)
+
+    def test_deleting_the_core_file_sheds_no_lines(self):
+        problems = self.check("Trusted-core: D-7", head_core=None, extra_own=4)
+        self.assertEqual(problems[0], 1, problems[1])
+        self.assertIn("trusted-lines", problems[1])
 
     def test_new_import_fails_until_listed_with_a_decision(self):
+        self.ceil = ceilings(10**6)  # room under the ceiling: only the import is owed
+        write(self.base, tb.CEILINGS, self.ceil)
         body = "Trusted-base: lines -- calc links dec now\n"
         rc, out = self.check(body + "Trusted-core: D-7\n", calc_dec=True)
         self.assertEqual(rc, 1, out)
@@ -349,7 +464,9 @@ class CoreTree(unittest.TestCase):
     def test_allowed_import_passes(self):
         allow = CORE + "allow example.com/dec\n"
         write(self.base, tb.CORE, allow)
-        # calc's own lines grow, so the decision is owed; dec itself needs no known line.
+        self.ceil = ceilings(10**6)
+        write(self.base, tb.CEILINGS, self.ceil)
+        # calc's own lines grow under the ceiling; dec itself needs no known line.
         rc, out = self.check("Trusted-base: lines -- calc links dec now\nTrusted-core: D-7\n", head_core=allow, calc_dec=True)
         self.assertEqual(rc, 0, out)
         self.assertIn("| Linked packages outside std and allow | 0 | 0 | +0 |", out)
@@ -362,6 +479,7 @@ class CoreTree(unittest.TestCase):
 
     def test_first_file_owes_nothing(self):
         os.remove(os.path.join(self.base, tb.CORE))
+        os.remove(os.path.join(self.base, tb.CEILINGS))
         rc, out = self.check(extra_own=4, body="Trusted-base: lines -- calc grows here")
         self.assertEqual(rc, 0, out)
 
@@ -374,10 +492,10 @@ class CoreTree(unittest.TestCase):
         os.remove(os.path.join(self.base, tb.CORE))
         tip = os.path.join(self.tmp, "tip")
         write(tip, tb.CORE, CORE)
+        os.remove(os.path.join(self.base, tb.CEILINGS))
         body = "Trusted-base: lines -- calc grows here\n"
-        problems = self.checked(body, tip, extra_own=4)
-        self.assertTrue(any("core lines" in p for p in problems), problems)
-        self.assertEqual(self.checked(body + "Trusted-core: D-7\n", tip, extra_own=4), [])
+        problems = self.checked(body, tip, calc_dec=True)
+        self.assertTrue(any("example.com/dec is linked into the trusted core" in p for p in problems), problems)
         problems = self.checked(body + "Trusted-core: D-7\n", tip, calc_dec=True)
         self.assertTrue(any("example.com/dec is linked into the trusted core" in p for p in problems), problems)
         # No copy anywhere (this PR's own run): nothing to check.
@@ -558,6 +676,8 @@ class MergeMeasure(unittest.TestCase):
         tree(self.repo, extra_own=20)
         write(self.repo, tb.CORE, CORE)
         write(self.repo, "DECISIONS.md", DECISIONS)
+        self.lines = tb.measure_core(self.repo, tb.parse_core(CORE))["lines"]
+        write(self.repo, tb.CEILINGS, ceilings(self.lines))
         self.commit("fork point")
 
     def git(self, *a):
@@ -583,10 +703,12 @@ class MergeMeasure(unittest.TestCase):
                     "--head-tree", os.path.join(env["RUNNER_TEMP"], "head"), "--body", body, "--pr", str(PR)])
 
     def test_cherry_picked_cut_does_not_keep_the_old_budget(self):
-        # main cuts 20 lines; the branch copies the cut instead of merging main and adds 10.
+        # main cuts 20 lines and lowers the ceiling with them; the branch copies the cut instead
+        # of merging main and adds 10.
         self.git("checkout", "-qb", "branch")
         self.git("checkout", "-q", "main")
         tree(self.repo)
+        write(self.repo, tb.CEILINGS, ceilings(self.lines - 20))
         self.commit("main cuts calc")
         self.git("checkout", "-q", "branch")
         tree(self.repo)
@@ -602,7 +724,7 @@ class MergeMeasure(unittest.TestCase):
         self.assertEqual(run(["check", "--base-tree", old + "/b", "--head-tree", old + "/h", "--body", body])[0], 0)
         rc, out = self.measure(head)
         self.assertEqual(rc, 1, out)
-        self.assertIn("core lines", out)
+        self.assertIn("ends above its ceiling", out)
 
     def test_conflict_fails_closed(self):
         self.git("checkout", "-qb", "branch")
