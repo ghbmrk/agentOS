@@ -9,13 +9,16 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              the listed packages where the diff BASE...HEAD adds or
                                              changes a line of a .go file: the only ones the gate
                                              can fail, so the only ones CI runs gremlins on
-  tools/mutgate.py plan --git BASE           the `mutants` matrix as JSON: K shards for each claimed
-                                             package, K from its target lines and deletion sites (#4961)
-  tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K]]
+  tools/mutgate.py plan --git BASE [--targets-out FILE]
+                                             the `mutants` matrix as JSON: K shards for each claimed
+                                             package, K from its target lines and deletion sites (#4961);
+                                             FILE gets each test-only package's target lines
+  tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K] [--targets FILE]]
                                              run gremlins per package (default: all listed),
                                              one JSON file per package in DIR (default mutants/);
                                              with --git, only on the package's target lines (below),
-                                             and with --shard, only on shard I of K of them
+                                             and with --shard, only on shard I of K of them; with
+                                             --targets, a test-only package's lines are plan's FILE's
   tools/mutgate.py delete PKG... [--out DIR] --git BASE [--jobs N]
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
@@ -39,7 +42,9 @@ files (no `REQ:` marker is needed, #4908). When the diff changes only the packag
 they are the lines of its non-test files that the changed test functions run: `run` names them
 with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
 no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
-every test, so the set is at most the package's covered lines. Gremlins mutates a package's target
+every test, so the set is at most the package's covered lines. Coverage can differ from run to run
+(a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
+(`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a test-only package `run` points HEAD for
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
@@ -484,12 +489,36 @@ def marked_base(targets, tmp):
             git("update-ref", "--no-deref", "HEAD", head)
 
 
+def coverage_record(names, targets):
+    """The record of a test-only package's target lines that `run` writes and targets_for reads."""
+    return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
+
+
+def planned_targets(planned, pkg, added, tests):
+    """({path: lines}, None) of a test-only package's target lines from plan's --targets-out file, or
+    (None, problem). The record is checked as verify checks the one a result carries (targets_for).
+    A package the plan does not name is a problem, never a coverage run here: that run could name
+    other lines than the other shards' (#4970)."""
+    rec = planned.get(pkg) if isinstance(planned, dict) else None
+    if rec is None:
+        return None, f"the plan names no target lines for broker/{pkg}/; rerun the mutgate workflow"
+    targets, problem = targets_for(pkg, added, tests, {"targets": rec})
+    return (None, f"the plan {problem}") if problem else (targets, None)
+
+
 def cmd_run(args):
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     added, tests = added_lines(broker_diff(args.git, "HEAD")) if args.git else (None, None)
+    planned = None
+    if args.targets is not None:
+        try:
+            planned = json.loads(pathlib.Path(args.targets).read_text())
+        except (OSError, ValueError) as e:
+            print(f"mutgate: no readable plan of target lines ({args.targets}: {e})", file=sys.stderr)
+            return 1
     bad = 0
     # Gremlins reads .gremlins.yaml from broker/ and the package directory, and GREMLINS_* from the
     # environment: a PR-added file with `dry-run: true` would leave no LIVED mutant. An explicit
@@ -502,14 +531,18 @@ def cmd_run(args):
         dest = out / result_name(pkg)
         targets, record = (diff_targets(added, pkg) if args.git else None), None
         if args.git and not targets:
-            # A test-only diff (#4908): the lines its changed test functions run are the targets.
+            # A test-only diff (#4908): the lines its changed test functions run are the targets,
+            # from plan's one coverage run when given, so every shard names the same lines (#4970).
             names = changed_tests(tests, pkg)
-            targets, problem = covered_by(pkg, names, cfgdir.name)
+            if planned is not None:
+                targets, problem = planned_targets(planned, pkg, added, tests)
+            else:
+                targets, problem = covered_by(pkg, names, cfgdir.name)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
                 continue
-            record = {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
+            record = coverage_record(names, targets)
         if args.git:
             # #4961: this job's share of the target lines; the record keeps them all.
             mine = shard_lines(targets, args.shard, args.of)
@@ -1125,17 +1158,20 @@ def cmd_plan(args):
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
     diff = broker_diff(args.git, "HEAD")
     added, tests = added_lines(diff)
-    include = []
+    include, planned = [], {}
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
         for pkg in claimed(diff):
             targets = diff_targets(added, pkg)
             if not targets:
-                targets, problem = covered_by(pkg, changed_tests(tests, pkg), tmp)
+                names = changed_tests(tests, pkg)
+                targets, problem = covered_by(pkg, names, tmp)
                 if problem:
                     print(f"mutgate: {problem}", file=sys.stderr)
                     return 1
+                # The one coverage run every shard reads (#4970): a run of their own could differ.
+                planned[pkg] = coverage_record(names, targets)
             sites, problem = deletion_sites(pkg, targets, lister)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -1147,6 +1183,8 @@ def cmd_plan(args):
     if not include or len(include) > MATRIX_MAX:
         print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit)", file=sys.stderr)
         return 1
+    if args.targets_out:
+        pathlib.Path(args.targets_out).write_text(json.dumps(planned))
     print(json.dumps(include))
     return 0
 
@@ -1205,12 +1243,14 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("plan")
     p.add_argument("--git", required=True, metavar="BASE")
+    p.add_argument("--targets-out", metavar="FILE", help="write each test-only package's target lines here")
     p = sub.add_parser("run")
     p.add_argument("pkg", nargs="*")
     p.add_argument("--out", default="mutants")
     p.add_argument("--git", metavar="BASE")
     p.add_argument("--shard", type=int, default=0, metavar="I")
     p.add_argument("--of", type=int, default=1, metavar="K")
+    p.add_argument("--targets", metavar="FILE", help="plan's --targets-out file: a test-only package's lines")
     p = sub.add_parser("delete")
     p.add_argument("pkg", nargs="+")
     p.add_argument("--out", default="mutants")

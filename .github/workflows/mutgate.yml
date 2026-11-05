@@ -7,7 +7,8 @@ name: mutgate
 # in the PR body for that site, which the reviewer checks; the body reaches the gate through env as
 # text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
 # only on their target lines (`run --git`), split into K shards a package, one job each (#4961): the
-# `plan` job counts each package's targets and picks K, so no job runs past its timeout. Every mutant
+# `plan` job counts each package's targets and picks K, so no job runs past its timeout, and measures a
+# test-only package's covered lines once for every shard to read (#4970). Every mutant
 # runs alone with the whole suite, so a shard gives each of its mutants the verdict one job would. Gremlins has no mutator that deletes a
 # statement, so `delete` deletes each statement holding one of those lines alone, on parallel
 # workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A PR that changes no such
@@ -109,9 +110,18 @@ jobs:
       - name: Shards for each package (#4961)
         id: plan
         run: |
-          shards=$(python3 -I tools/mutgate.py plan --git "$BASE")
+          shards=$(python3 -I tools/mutgate.py plan --git "$BASE" --targets-out "$RUNNER_TEMP/targets.json")
           echo "$shards"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
+      # A test-only package's target lines, from the plan's one coverage run, for every shard to read:
+      # coverage can differ from run to run, and shards that each measured it disagreed on #4970.
+      # Data like the shards' JSON: the deciding job still refuses shards whose records differ.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: mutgate-plan
+          path: ${{ runner.temp }}/targets.json
+          if-no-files-found: error
+          retention-days: 7
   mutants:
     needs: [claimed, plan]
     if: ${{ needs.claimed.outputs.packages != '[]' }}
@@ -168,12 +178,19 @@ jobs:
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
         run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
+      # Outside the workspace, so the result directory and the PR tree hold no copy (#4970).
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: mutgate-plan
+          path: ${{ runner.temp }}/plan
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}
           SHARD: ${{ matrix.shard }}
           OF: ${{ matrix.of }}
-        run: python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"
+        run: >-
+          python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"
+          --targets "$RUNNER_TEMP/plan/targets.json"
       - name: Statement deletions on the package (#4573)
         env:
           PKG: ${{ matrix.pkg }}
