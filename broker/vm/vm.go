@@ -470,12 +470,12 @@ type Manager struct {
 // ErrStateDirExposed refuses a StateDir another uid could swap for a link.
 var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
 
-// stateDirOwner and stateDirMkdirAll are seams: tests give a directory a
+// stateDirOwner and stateDirsMade are seams: tests give a directory a
 // foreign owner without root, and change a directory between Open's two
 // checks.
 var (
-	stateDirOwner    = overlay.Owner
-	stateDirMkdirAll = os.MkdirAll
+	stateDirOwner = overlay.Owner
+	stateDirsMade = func() {}
 )
 
 // checkStateDirs checks the premise the vm allow lines rest on
@@ -572,10 +572,11 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 		return nil, err
 	}
 	for _, d := range dirs {
-		if err := stateDirMkdirAll(d, 0o700); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
+	stateDirsMade()
 	if err := checkStateDirs(dirs, true); err != nil {
 		return nil, err
 	}

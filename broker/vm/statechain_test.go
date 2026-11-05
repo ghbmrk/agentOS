@@ -193,26 +193,22 @@ func TestOpenReturnsAStateDirLstatError(t *testing.T) {
 }
 
 // Open checks again once all three directories exist, before its chmods
-// follow their names: a snapshots swapped for a link after MkdirAll is
+// follow their names: a snapshots swapped for a link after the mkdirs is
 // refused, and the link's target keeps its mode.
 func TestOpenRechecksStateDirsAfterMaking(t *testing.T) {
 	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
 	elsewhere := mode(t, filepath.Join(top, "elsewhere"), 0o755)
 	cfg := newCfg(t)
 	cfg.StateDir = filepath.Join(top, "state")
-	real := stateDirMkdirAll
-	t.Cleanup(func() { stateDirMkdirAll = real })
-	stateDirMkdirAll = func(p string, perm os.FileMode) error {
-		if err := real(p, perm); err != nil {
-			return err
+	t.Cleanup(func() { stateDirsMade = func() {} })
+	stateDirsMade = func() {
+		snaps := filepath.Join(cfg.StateDir, "snapshots")
+		if err := os.Remove(snaps); err != nil {
+			t.Fatal(err)
 		}
-		if filepath.Base(p) != "snapshots" {
-			return nil
+		if err := os.Symlink(elsewhere, snaps); err != nil {
+			t.Fatal(err)
 		}
-		if err := os.Remove(p); err != nil {
-			return err
-		}
-		return os.Symlink(elsewhere, p)
 	}
 	if _, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirExposed) {
 		t.Errorf("Open = %v, want ErrStateDirExposed", err)
