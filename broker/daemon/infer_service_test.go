@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// REQ: ARC-2
+// REQ: PLN-3, PLN-7
 
 // The inference service (cmd/agentos-infer) is forbidden in agentosd, so
 // TestAgentosdLinksNoInference never reads its source. Its llama.cpp build
@@ -55,7 +55,7 @@ func inferBuilds(t *testing.T) []struct{ tags, want, not string } {
 	}
 }
 
-// REQ: ARC-2
+// REQ: PLN-3, PLN-7
 func TestInferServiceDialsOnlyUnix(t *testing.T) {
 	for _, b := range inferBuilds(t) {
 		t.Run("tags="+b.tags, func(t *testing.T) {
