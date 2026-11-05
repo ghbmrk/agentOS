@@ -168,6 +168,7 @@ type rig struct {
 	ap     *accessPoint
 	alerts *fakeAlerts
 	now    time.Time
+	logged []string
 }
 
 func newRig(t *testing.T) *rig {
@@ -189,7 +190,8 @@ func newRig(t *testing.T) *rig {
 // reopen is a restart: the book and the engine from their stores.
 func (g *rig) reopen() {
 	g.t.Helper()
-	b, err := Open(Config{Name: rp, Store: g.bs, Network: g.ap, Alerts: g.alerts, Now: func() time.Time { return g.now }})
+	b, err := Open(Config{Name: rp, Store: g.bs, Network: g.ap, Alerts: g.alerts, Now: func() time.Time { return g.now },
+		Log: func(s string) { g.logged = append(g.logged, s) }})
 	if err != nil {
 		g.t.Fatal(err)
 	}
@@ -744,6 +746,15 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeUsed}) {
 		t.Errorf("text not raised before the save: %v", g.alerts.raised)
 	}
+	// The page then shows nothing to cancel, so the text's words must not
+	// promise something there (#4929 R-UX2).
+	if _, ok := g.b.Recovery(); ok {
+		t.Error("a replacement waits after its save failed")
+	}
+	w, err := alert.Words(alert.RecoveryCodeUsed, "")
+	if err != nil || !strings.Contains(w, "if one is waiting") {
+		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
+	}
 	g.reopen()
 	if _, ok := g.b.Recovery(); ok || g.alerts.recovery {
 		t.Error("a replacement waits after a stop before its save")
@@ -789,6 +800,15 @@ func TestStoreFailureKeepsCard(t *testing.T) {
 	if g.b.Phase() != Factory || g.b.Owner().Valid() || len(g.alerts.raised) != 0 {
 		t.Fatalf("enrolled on a failed save: phase %s alerts %v", g.b.Phase(), g.alerts.raised)
 	}
+	// A retry that fails again comes from the Owner network, so it carries
+	// no card and no instruction to join it (#4929 R-UX4).
+	g.bs.failAt = g.bs.n + 1
+	if failed, err := g.enrol(a, caseCode); !errors.Is(err, errStopped) || failed != (Result{}) {
+		t.Fatalf("failed retry: %+v %v", failed, err)
+	}
+	if g.b.Phase() != Factory {
+		t.Fatalf("enrolled on a failed retry: %s", g.b.Phase())
+	}
 	again, err := g.enrol(a, caseCode)
 	if err != nil {
 		t.Fatal(err)
@@ -802,8 +822,10 @@ func TestStoreFailureKeepsCard(t *testing.T) {
 // #4893): once the passkey is saved, a later failure inside the policy
 // hand-over (here the second save) is not an enrolment failure: the owner
 // gets the recovery code and the card, the passkey is in force and the
-// enrolment is texted, and after a restart the policy waits for its Keep.
-// Catches an answer of "not enrolled" with the only recovery code unshown.
+// enrolment is texted, the failure is logged (#4928), and after a restart
+// the policy waits for its Keep. Catches an answer of "not enrolled" with
+// the only recovery code unshown, and a half-finished hand-over that
+// leaves no trace.
 func TestFailureAfterPasskeySaved(t *testing.T) {
 	g := newRig(t)
 	a := newAuthenticator(t)
@@ -811,6 +833,9 @@ func TestFailureAfterPasskeySaved(t *testing.T) {
 	res, err := g.enrol(a, caseCode)
 	if err != nil || len(res.Recovery) != CodeLen || res.Card.SSID != "Home" || g.b.Owner() != a.Public() {
 		t.Fatalf("passkey saved but: %+v %v owner %v", res, err, g.b.Owner())
+	}
+	if len(g.logged) != 1 || !strings.Contains(g.logged[0], "policy hand-over failed") || !strings.Contains(g.logged[0], errStopped.Error()) {
+		t.Fatalf("log %q", g.logged)
 	}
 	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.Enrolment}) {
 		t.Fatalf("alerts %v", g.alerts.raised)

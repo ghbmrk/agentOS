@@ -294,6 +294,13 @@ func TestEnrolAnswerFollowsState(t *testing.T) {
 	if net["setup_replaced"] != true {
 		t.Errorf("failed first enrolment: %v", net)
 	}
+	// The retry comes from the Owner network: one that fails again
+	// carries no card, so the screen does not ask the owner to join the
+	// network it is on (#4929 R-UX4).
+	code, out = g.enrolAs(a, caseCode)
+	if code == http.StatusOK || out["error"] == "" || out["network"] != nil {
+		t.Fatalf("failed retry: %d %v", code, out)
+	}
 	g.bs.fail = false
 	code, out = g.enrolAs(a, caseCode)
 	net, _ = out["network"].(map[string]any)
@@ -309,7 +316,7 @@ func TestEnrolAnswerFollowsState(t *testing.T) {
 		t.Fatalf("enrolment after a reset: %d %v", code, out)
 	}
 	page := g.do(http.MethodGet, "/enrol", nil).Body.String()
-	for _, id := range []string{`id="net-new"`, `id="net-kept"`} {
+	for _, id := range []string{`id="net-new"`, `id="net-kept"`, `id="net-once"`} {
 		if !strings.Contains(page, id) {
 			t.Errorf("enrolment screen lacks %s", id)
 		}
