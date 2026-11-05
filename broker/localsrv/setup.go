@@ -144,7 +144,10 @@ type RecordStore interface {
 
 // FileRecord keeps SetupRecord in one JSON file, mode 0600, replaced
 // atomically. A missing file is an empty record.
-type FileRecord struct{ Path string }
+type FileRecord struct {
+	Path string
+	stop func(i int) bool // tests: crash Save's file write after step i
+}
 
 func (f FileRecord) Load() (SetupRecord, error) {
 	var r SetupRecord
@@ -171,7 +174,7 @@ func (f FileRecord) Save(r SetupRecord) error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, nil)
+	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, f.stop)
 }
 
 var phoneRe = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)

@@ -17,6 +17,10 @@ type clock struct {
 	mu     sync.Mutex
 	now    time.Time
 	timers []timer
+	// armed is every deadline After has set; set is closed and replaced
+	// at each After, so waitFor can wait for one.
+	armed []time.Time
+	set   chan struct{}
 }
 
 type timer struct {
@@ -24,7 +28,32 @@ type timer struct {
 	c  chan time.Time
 }
 
-func newClock() *clock { return &clock{now: time.Unix(1_800_000_000, 0)} }
+func newClock() *clock { return &clock{now: time.Unix(1_800_000_000, 0), set: make(chan struct{})} }
+
+// waitFor waits until After has set a timer due at at. A turn reads Now
+// and then calls After with the time left to its deadline; an Advance
+// between the two would move that deadline. A test waits for the timer it
+// is about to fire before it advances the clock.
+func (c *clock) waitFor(t *testing.T, at time.Time) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		c.mu.Lock()
+		for _, a := range c.armed {
+			if a.Equal(at) {
+				c.mu.Unlock()
+				return
+			}
+		}
+		set := c.set
+		c.mu.Unlock()
+		select {
+		case <-set:
+		case <-timeout:
+			t.Fatalf("no timer set for %v", at)
+		}
+	}
+}
 
 func (c *clock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 
@@ -32,6 +61,9 @@ func (c *clock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	t := timer{c.now.Add(d), make(chan time.Time, 1)}
+	c.armed = append(c.armed, t.at)
+	close(c.set)
+	c.set = make(chan struct{})
 	if !t.at.After(c.now) {
 		t.c <- c.now
 		return t.c
@@ -110,8 +142,13 @@ func TestOneClipDeadlineCoversEveryWait(t *testing.T) {
 			r.serve()
 		}
 		<-r.rec.ctx
-		end := clk.Now().Add(-c.ago)
+		start := clk.Now()
+		end := start.Add(-c.ago)
 		r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: end}
+		clk.waitFor(t, end.Add(time.Second)) // the turn's clip deadline
+		if r.cfg.Token != nil {
+			clk.waitFor(t, start.Add(6*time.Second)) // the token window
+		}
 		due := time.Second - c.ago
 		if c.keys != "-" && c.keys != "" && c.at < due {
 			clk.Advance(c.at)
@@ -166,12 +203,14 @@ func TestTokenWaitTurnCarriesAcrossBargeIn(t *testing.T) {
 	r.serve()
 	<-r.rec.ctx
 	r.rec.out <- call.Heard{Text: "what's in", Final: true, End: clk.Now()}
+	clk.waitFor(t, clk.Now().Add(time.Second))
 	clk.Advance(time.Second)
 	if got := r.next(); got != "CLIP:moment" {
 		t.Fatalf("first audio %q", got)
 	}
 	r.rec.out <- call.Heard{Text: "my"}                                   // barge-in
 	r.rec.out <- call.Heard{Text: "my mail", Final: true, End: clk.Now()} // a new turn
+	clk.waitFor(t, clk.Now().Add(time.Second))
 	clk.Advance(999 * time.Millisecond)
 	r.quiet()
 	clk.Advance(time.Millisecond)
@@ -274,6 +313,7 @@ func TestStopWordDropsTheCarry(t *testing.T) {
 	r.serve()
 	<-r.rec.ctx
 	r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: clk.Now()}
+	clk.waitFor(t, clk.Now().Add(time.Second))
 	clk.Advance(time.Second)
 	if got := r.next(); got != "CLIP:moment" {
 		t.Fatalf("first audio %q", got)
