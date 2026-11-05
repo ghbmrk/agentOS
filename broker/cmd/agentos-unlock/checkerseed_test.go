@@ -46,3 +46,17 @@ func TestCheckerSeedRefusedDirectoryIsNotRemovedIn(t *testing.T) {
 		}
 	}
 }
+
+// ownDir makes a missing directory with its mode and takes it as this
+// uid's alone (mutgate: the Mkdir is not dead code).
+// REQ: CH-4
+func TestOwnDirMakesAMissingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "made")
+	if err := ownDir(dir, 0o700, 0o077); err != nil {
+		t.Fatalf("ownDir on a missing directory: %v", err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("ownDir made %v (%v), want a 0700 directory", fi, err)
+	}
+}
