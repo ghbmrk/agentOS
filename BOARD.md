@@ -342,7 +342,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-rpf | ENF-m-rpf: the enforcer image holds the WAN's effective rp_filter at 0, checked at boot | #4763 (ENF-wan-dhcp), #3671 (ENF-m) | queued(tier A; lane primary) |
 | ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | queued (release; tier A; lane primary; brief briefs/ENF.md) |
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
-| ENF-cap-merge-carry-fu | ENF-cap-merge-carry-fu: Counter fills Drop.Read itself so no caller can skip the merge carry, and a group split's closed-erring carry is stated (NET-2 Byte caps) | #4866, #4614 | building (release; tier A; from #4866 Potency review) |
 | ENF-l-sec-b | ENF-l-sec-b: alert offer single-flight and re-offer on a cut core's reconnect (#4755 items 6, 7) | ENF-l-sec | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
@@ -475,7 +474,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-kernel-f1 | REV-CHK-links-kernel-f1: agentos-unlock `ownDir` names its real cause and tests its uid and dir-type branches | #4966 | building |
 | CI-hostcheck-guest-kernel | CI-hostcheck-guest-kernel: the stand-in guest's kernel comes from a pinned source, not the runner's archive. Release; from #4906. | #4906 | queued (release) |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
-| LOCALUI-unlock-cap | LOCALUI-unlock-cap: the /unlock form's 16 KiB body cap is set after the body was read | #5016 | building (release) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -510,7 +508,6 @@ issue #4902: needs exactly one state label of queued, building, in review, merge
 issue #4911: body has no board-row block
 issue #4912: body has no board-row block
 issue #4914: body has no board-row block
-issue #4915: body has no board-row block
 issue #4916: body has no board-row block
 issue #4921: body has no board-row block
 issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
