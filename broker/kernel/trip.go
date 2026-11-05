@@ -167,8 +167,8 @@ func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
 }
 
 // CallTrip logs a trip an exit reports: a connection it refused because its
-// address at connect time, after any redirect, was a table destination
-// (KRN-12 Trips). Only that call stopped. It is an input, so it neither
+// address at connect time, after any redirect, was a table destination in
+// any form ipform.Forms reads, as the plan check reads it (KRN-12 Trips). Only that call stopped. It is an input, so it neither
 // waits on nor moves a pause's resume.
 func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
@@ -177,12 +177,13 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if k.s.decoys.table == nil {
 		return ErrNoDecoy
 	}
-	id, ok := (*k.s.decoys.table).m.Dest(a)
-	if !ok {
-		return ErrNoDecoy
+	for _, f := range ipform.Forms(a) {
+		if id, ok := (*k.s.decoys.table).m.Dest(f); ok {
+			_, err := k.emit(now, TTrip, Trip{Cause: CauseDest, Exit: exit, Entry: id, Response: RespCall})
+			return err
+		}
 	}
-	_, err := k.emit(now, TTrip, Trip{Cause: CauseDest, Exit: exit, Entry: id, Response: RespCall})
-	return err
+	return ErrNoDecoy
 }
 
 // TripResumeHash names the n-th trip resume, lifting every pause up to the

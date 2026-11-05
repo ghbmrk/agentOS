@@ -23,11 +23,12 @@ type Addr struct {
 // Addrs is the corpus for target, an IPv4 address: every form that
 // carries it (plain; IPv4-mapped, written four ways and zoned;
 // IPv4-compatible; NAT64 at the well-known prefix and at the local-use
-// /48's /96 and /48 positions, RFC 6052 and 8215; SIIT IPv4-translated
+// /48's /96, /48, /56 and /64 positions, RFC 6052 and 8215; SIIT IPv4-translated
 // ::ffff:0:0:0/96, RFC 6145; 6to4; ISATAP, link-local, global and inside
 // 6to4; Teredo server and inverted client, RFC 4380), then near misses that
 // carry no target: a neighbouring IPv4 address, each wrong prefix, a
-// Teredo client not inverted, and a marker one bit off. Every IPv6 form is
+// Teredo client not inverted, a local-use NAT64 address one octet past
+// its /56 or /64 position, and a marker one bit off. Every IPv6 form is
 // also fed zoned. It panics if target is not IPv4.
 func Addrs(target netip.Addr) []Addr {
 	if !target.Is4() {
@@ -39,6 +40,9 @@ func Addrs(target netip.Addr) []Addr {
 	ihi, ilo := fmt.Sprintf("%x", ^(uint16(b[0])<<8|uint16(b[1]))), fmt.Sprintf("%x", ^(uint16(b[2])<<8|uint16(b[3])))
 	// local-use NAT64 at /48: octets 1-2 in bits 48-63, u-octet zero, 3-4 after it.
 	l48 := fmt.Sprintf("64:ff9b:1:%s:%x:%x00::", hi, b[2], b[3])
+	// at /56: octet 1 in bits 56-63, u-octet zero, 2-4 after it; at /64: u-octet, then 1-4.
+	l56 := fmt.Sprintf("64:ff9b:1:%x:%x:%s::", b[0], b[1], lo)
+	l64 := fmt.Sprintf("64:ff9b:1:0:%x:%x:%x00:0", b[0], uint16(b[1])<<8|uint16(b[2]), b[3])
 	n := b
 	n[0] ^= 0x80 // a neighbour no decoy, range or special registry shares
 	other := netip.AddrFrom4(n).String()
@@ -56,6 +60,8 @@ func Addrs(target netip.Addr) []Addr {
 		{"NAT64 well-known hex", "64:ff9b::" + hi + ":" + lo, true},
 		{"NAT64 local-use /96", "64:ff9b:1::" + q, true},
 		{"NAT64 local-use /48", l48, true},
+		{"NAT64 local-use /56", l56, true},
+		{"NAT64 local-use /64", l64, true},
 		{"SIIT IPv4-translated", "::ffff:0:" + q, true},
 		{"SIIT IPv4-translated hex", "::ffff:0:" + hi + ":" + lo, true},
 		{"6to4", "2002:" + hi + ":" + lo + "::1", true},
@@ -76,6 +82,8 @@ func Addrs(target netip.Addr) []Addr {
 		{"ISATAP marker 5eff", "fe80::5eff:" + hi + ":" + lo, false},
 		{"not 6to4 (2003::/16)", "2003:" + hi + ":" + lo + "::1", false},
 		{"NAT64 outside the local-use /48", "64:ff9b:2::" + q, false},
+		{"NAT64 local-use /56 one octet late", "64:ff9b:1:0:" + hi + ":" + lo + "::", false},
+		{"NAT64 local-use /64 one octet late", "64:ff9b:1:0:0:" + hi + ":" + lo + ":0", false},
 		{"NAT64 well-known prefix plus one", "64:ff9b::1:" + hi + ":" + lo, false},
 		{"not Teredo (2001:1::/32)", "2001:1:" + hi + ":" + lo + "::", false},
 		{"Teredo client not inverted", "2001:0:4136:e378:8000:63bf:" + hi + ":" + lo, false},
