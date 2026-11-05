@@ -630,7 +630,10 @@ class Verify(unittest.TestCase):
         r = self.verify({"mutants-0/netguard.json": self.result("LIVED"),
                          "mutants-1/netguard.json": self.result("KILLED")})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("are both shard 0 of 1 for netguard: shards overlap", r.stderr)
+        self.assertIn("are both results for netguard: one run gives one result", r.stderr)  # #4983: not "shard 0 of 1"
+        for f in ("mutants-0/netguard.json", "mutants-1/netguard.json"):
+            self.assertIn(f, r.stderr)
+        self.assertNotIn("shard", r.stderr)
 
     def test_twin_packages_each_need_their_own_result(self):
         # The repro on #4154: broker/netguard/sub and broker/netguard__sub both claimed; the LIVED
@@ -1504,8 +1507,11 @@ open("{d}/seen-lines", "a").write(json.dumps(muts) + "\\n")
 files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": ("LIVED" if n == 4 else "KILLED")
           if n in ns else "SKIPPED", "line": n, "column": 1}} for n in range(1, len(open(f).read().split("\\n")))]}}
          for f, ns in muts.items()]
-lived = sum(m["status"] == "LIVED" for f in files for m in f["mutations"])
-open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived, "mutants_lived": lived}}))
+count = lambda s: sum(m["status"] == s for f in files for m in f["mutations"])
+lived, killed = count("LIVED"), count("KILLED")
+# gremlins' total is lived + killed + not viable (v0.6.0 report.go:178); SKIPPED is not counted.
+open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived + killed,
+                                                  "mutants_killed": killed, "mutants_lived": lived}}))
 """)
         (stub / "gremlins").chmod(0o755)
         return {"PATH": f"{stub}:{os.environ['PATH']}"}
@@ -1556,6 +1562,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             r = self.mutgate(d, "verify", str(pathlib.Path(d) / "res-2"), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("records other target lines than", r.stderr)
+            self.assertIn("the shards of hint disagree; rerun the mutgate workflow", r.stderr)  # #4983: the remedy
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
             # A shard asked for outside 0 <= I < K is refused before anything runs.
             for bad in (("--shard", "2", "--of", "2"), ("--shard", "-1", "--of", "2"), ("--of", "257", "--shard", "0")):
@@ -1658,6 +1665,26 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out)).returncode, 0)
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class Plan(unittest.TestCase):
+    def test_a_plan_past_the_matrix_limit_names_a_remedy(self):
+        # #4983: a refused plan says what to do next. Each claimed package plans 100 shards here.
+        from unittest import mock
+        import contextlib, io, types
+        for pkgs, fix in ((["a", "b", "c"], "split the PR so each part changes fewer tier-A or tier-B packages"),
+                          ([], "rerun the mutgate workflow")):
+            with self.subTest(pkgs), contextlib.ExitStack() as st:
+                for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                    ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
+                                    ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
+                                    ("deletion_sites", lambda *a: ([], None)), ("shard_count", lambda t, s: 100)):
+                    st.enter_context(mock.patch.object(mutgate, name, value))
+                err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
+                self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
+                              err.getvalue())
 
 
 class Summary(unittest.TestCase):
@@ -1853,7 +1880,10 @@ class Workflow(unittest.TestCase):
             self.assertIn(env, mutants)
         self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"',
                       mutants)
-        self.assertNotIn("matrix.", mutants.replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
+        # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
+        name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
+        self.assertIn(name, mutants)
+        self.assertNotIn("matrix.", mutants.replace(name, "").replace("${{ matrix.pkg }}\n", "").replace("${{ matrix.shard }}\n", "")
                          .replace("${{ matrix.of }}\n", ""))  # matrix values reach scripts through env only
         # #4573: the deletion pass adds to the same result, after gremlins wrote it.
         self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
