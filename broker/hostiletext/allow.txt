@@ -2,23 +2,6 @@
 # per line: directory (under broker/), check, reason. A line whose check now
 # runs the corpus, or no longer exists, fails the lint: delete it.
 #
-# Accept hostile text today; fixing is #3953.
-boxname Shape accepts Hangul fillers (letters to unicode.IsLetter); #3953
-recovery validName accepts Hangul fillers; #3953
-kernel name store and class names from the box's own code; tightening changes the content.stored fold; #3953
-#
-# Refuse every shape today; the test that keeps it so is #3953.
-clerk/clerkkey ValidName ASCII regex; #3953
-clerk/inbox dnsName ASCII DNS labels; #3953
-cmd/agentos-link ifaceName ASCII interface names; #3953
-enforcer/page dnsName ASCII DNS labels; #3953
-enforcer/radio name printable ASCII, no space; #3953
-kernel/proc ValidStoreName ASCII regex; #3953
-pageca ValidName DNS name, needs a dotted wrapper; #3953
-sipsign hostName ASCII host or IP; #3953
-vision validName ASCII enrolled ID; #3953
-vision ValidModelName ASCII model name; #3953
-#
 # Not a check of text a person or another party names.
 attest Shape checks a hardware record's fields, not a name
 clerk shape builds a request declaration from an op; its values are checked by regexes inside

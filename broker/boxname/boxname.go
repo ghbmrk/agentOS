@@ -41,8 +41,8 @@ func normal(name string) string {
 }
 
 // Shape reports whether name, trimmed, is 1 to MaxLen letters, spaces,
-// hyphens and apostrophes with at least one letter. It is the syntactic
-// part of Check.
+// hyphens and apostrophes with at least one letter, none of them a letter
+// that shows nothing (a Hangul filler). It is the syntactic part of Check.
 func Shape(name string) bool {
 	n := normal(name)
 	if n == "" || len([]rune(n)) > MaxLen {
@@ -51,6 +51,8 @@ func Shape(name string) bool {
 	letter := false
 	for _, r := range n {
 		switch {
+		case unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r):
+			return false // a Hangul filler is a letter that shows nothing (#3953)
 		case unicode.IsLetter(r):
 			letter = true
 		case r == ' ', r == '-', r == '\'', r == '’':

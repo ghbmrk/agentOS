@@ -133,7 +133,7 @@ func validName(d string) error {
 		return ErrBadBackupChoice
 	}
 	for _, r := range d {
-		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&", r)) {
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&", r)) {
 			return ErrBadBackupChoice
 		}
 	}
