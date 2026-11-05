@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -383,5 +384,70 @@ func TestReadingOfRefuses(t *testing.T) {
 		if _, err := ReadingOf(capPolicy(), capLayout(), "boot-1", []byte(l)); !errors.Is(err, ErrListing) {
 			t.Errorf("element %q: %v, want ErrListing", val, err)
 		}
+	}
+}
+
+// TestDropCarriesItsReadingsListing (#4867 item 1, Potency release 1 on
+// #4866): Counter.Drop fills Drop.Read with the listing of the reading it
+// last added (ReadingOf keeps it on the Reading), so a caller that never
+// sets Read still gets the merge carry. Read at the listing with the old
+// edge quota charged 5, recapped from 50 to 60, and updated against a
+// running listing where it has charged 12, the new edge quota starts at
+// the counter's 7 plus the 7 sent since the reading. The listing is the
+// counter's own copy: the caller reusing its buffer changes nothing.
+// Mutants: Drop not filling Read (the quota starts at 7), Add keeping the
+// caller's buffer.
+func TestDropCarriesItsReadingsListing(t *testing.T) {
+	c := NewCounter((&clock{noon}).now, twoCap)
+	named := map[string][]netip.Addr{"a.example": {addrA}}
+	base := capListing(t, 4, map[netip.Addr]uint64{addrA: 40}, 7, named)
+	r0, err := ReadingOf(capPolicy(), capLayout(), "boot-1", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Add(r0)
+	text0, err := nft.Drops(capPolicy(), capLayout(), nil, c.Drop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`add quota inet enforcer (qe_[0-9a-f]+) \{ over 51 `).FindStringSubmatch(text0)
+	if m == nil {
+		t.Fatalf("no edge quota of 50 in:\n%s", text0)
+	}
+	withQuota := func(used uint64) []byte {
+		var doc struct {
+			Nftables []json.RawMessage `json:"nftables"`
+		}
+		if err := json.Unmarshal(base, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc.Nftables = append(doc.Nftables, json.RawMessage(fmt.Sprintf(`{"quota": {"family": "inet", "table": %q, "name": %q, "used": %d}}`, nft.Table, m[1], used)))
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	read := withQuota(5)
+	want := slices.Clone(read)
+	r, err := ReadingOf(capPolicy(), capLayout(), "boot-1", read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Add(r)
+	for i := range read {
+		read[i] = ' '
+	}
+	c.SetCaps(Caps{Core: twoCap.Core, Edge: 60})
+	p := c.Drop()
+	if string(p.Read) != string(want) {
+		t.Fatalf("Drop.Read %q, want the last reading's listing", p.Read)
+	}
+	text, err := nft.Drops(capPolicy(), capLayout(), withQuota(12), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "{ over 61 bytes used 14 bytes; }") {
+		t.Fatalf("update: want the new edge quota at 7 counted plus 7 since the reading:\n%s", text)
 	}
 }

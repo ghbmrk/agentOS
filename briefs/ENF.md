@@ -213,6 +213,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Acceptance tests:**
 1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
 2. NET-2, A18 (#4709): `agentos-enforcer::TestChannelLogKeepsEveryField`: the daemon's channel-log sink passes `channel.CheckSink`, storing each line and reading it back from its own storage. Catches a sink that loses `Event.Dropped` or a field added later.
+**Byte-cap drop updates (#4614, #4867):** each update is `nft.Drops(d, l, running, counter.Drop())` after `counter.Add(traffic.ReadingOf(..., listing))`, with `running` listed (`load.Loader.List`) right before the `Update` and no other update since that reading. `Counter.Drop` fills `Drop.Read` with the reading's listing itself, so a merged, recapped or new-day quota carries every byte its replaced quotas charged since the reading; only the bytes between `running` and the commit pass uncharged once, and the counting set trips on them (nft ASSUMPTIONS ENF-cap-trip-c-2).
 **Size:** about 130k. **Depends on:** ENF-a to ENF-i, ENF-k, ENF-r, ENF-s.
 
 ### ENF-m (#3671): the signed image (NET-2 Hardening, decision 7)

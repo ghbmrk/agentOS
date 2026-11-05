@@ -50,12 +50,15 @@ func CapsOf(d policy.Document) Caps {
 // numbered Gen, and the addresses each core destination's resolver set
 // (nft.AllowSet.Named) holds. Within one Gen a counter only rises. The
 // core's allow set is the union of its destinations' resolver sets, so
-// Named holds every address the core can reach.
+// Named holds every address the core can reach. Listing is the running
+// table's listing the reading was taken from (ReadingOf keeps it); the
+// counter gives the latest one to the drop update as nft.Drop.Read.
 type Reading struct {
-	Gen   uint64
-	Core  map[netip.Addr]uint64
-	Edge  uint64
-	Named map[string][]netip.Addr
+	Gen     uint64
+	Core    map[netip.Addr]uint64
+	Edge    uint64
+	Named   map[string][]netip.Addr
+	Listing []byte
 }
 
 // Box is the box an overrun cuts.
@@ -119,6 +122,10 @@ type Counter struct {
 	lastEdge uint64
 	bytes    map[netip.Addr]uint64 // today's bytes, per address
 	edge     uint64                // today's edge bytes
+	// read is the latest reading's listing, the counter's own copy:
+	// Drop's Read, so every drop update carries the bytes its replaced
+	// quotas charged since the reading (#4614 R2, #4867).
+	read []byte
 }
 
 // NewCounter is a counter on the clock now (time.Now in production) with
@@ -210,6 +217,7 @@ func (c *Counter) Add(r Reading) []Overrun {
 		c.last, c.lastEdge = map[netip.Addr]uint64{}, 0
 	}
 	c.gen, c.seen = r.Gen, true
+	c.read = slices.Clone(r.Listing)
 	// Every address a resolver set holds is one the allow set may pass, so
 	// it carries its destinations from the firewall itself: an address
 	// the counter had forgotten, or never heard resolved, is never stray
@@ -299,12 +307,22 @@ func (c *Counter) live(a netip.Addr) bool { return c.resolved[a] == c.day || c.b
 // them, an honest core sending there near a cap may see drops but no trip
 // (ASSUMPTIONS ENF-cap-trip-c-2). The caller adds a reading first, and
 // applies it after every reading and with every ruleset load.
+//
+// Read is the listing of the reading added last (Reading.Listing), filled
+// here so no caller can leave it out: a quota the update starts in place
+// of running ones (a merge, a new cap, a new day) then carries what they
+// charged between that listing and the running one, so bytes sent between
+// the reading and the update count against the new quota. A full load
+// (Compile or Reload) ignores it. The caller lists the table right before
+// each update (load.Loader.List), with no other update since the reading,
+// so only the bytes between that listing and the commit pass uncharged
+// once, and the counting set still trips on them (ENF-cap-trip-c-2).
 func (c *Counter) Drop() nft.Drop {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.roll()
 	groups, _ := c.groups()
-	out := nft.Drop{Day: c.day, Groups: make([]nft.DropGroup, len(groups)), EdgeCap: c.caps.Edge, EdgeCount: c.edge}
+	out := nft.Drop{Day: c.day, Groups: make([]nft.DropGroup, len(groups)), EdgeCap: c.caps.Edge, EdgeCount: c.edge, Read: c.read}
 	at := map[string]int{}
 	for i, g := range groups {
 		for _, d := range g.dests {
