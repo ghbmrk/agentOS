@@ -1549,10 +1549,13 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, weak)
             env = self.line_stub(d)
-            # The plan runs the changed test's coverage: a few lines, one shard.
-            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            # The plan runs the changed test's coverage: a few lines, one shard. Its record names the
+            # changed test, as each shard's changed_tests does, so the shards accept it (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}})
             got = {}
             for of in (1, 2, 3):
                 res = pathlib.Path(d) / f"res-{of}"
@@ -1560,7 +1563,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 for i in range(of):
                     out = res / f"mutants-{i}"
                     r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out),
-                                     "--shard", str(i), "--of", str(of), env=env)
+                                     "--shard", str(i), "--of", str(of), "--targets", str(plan), env=env)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                     r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1604,6 +1607,12 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qam", "src")
             env = self.line_stub(d)
             target = {"broker/hint/hint.go": {4, 7, 11}}
+            # A source diff's targets are its own lines, so the plan records none, and still writes the
+            # file the plan job uploads with if-no-files-found: error (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(plan.read_text(), "{}")
             for of in (1, 2, 3):
                 (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
                 for i in range(of):
