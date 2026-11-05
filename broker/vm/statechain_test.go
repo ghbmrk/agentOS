@@ -239,6 +239,12 @@ func TestOpenAcceptsAHeldStateDir(t *testing.T) {
 				t.Fatalf("Open(%s) = %v", dir, err)
 			}
 		}
+		// Open narrows all three to 0700, mine's 0755 included.
+		for _, d := range []string{dir, filepath.Join(dir, "machines"), filepath.Join(dir, "snapshots")} {
+			if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o700 {
+				t.Errorf("%s after Open: %v, %v; want mode 0700", d, fi, err)
+			}
+		}
 	}
 }
 
