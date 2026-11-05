@@ -530,7 +530,9 @@ def cmd_run(args):
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
-        elif problem := result_problem(data := json.loads(dest.read_text()), pkg, BROKER / pkg, targets):
+        # A share's own lines only: gremlins marks the other shards' lines SKIPPED (#4961).
+        elif problem := result_problem(data := json.loads(dest.read_text()), pkg, BROKER / pkg,
+                                       mine if args.git else None):
             print(f"mutgate: {dest} {problem}", file=sys.stderr)
             bad += 1
         elif args.git:
@@ -906,18 +908,23 @@ def join_shards(pkg, shards, added, tests, lister):
         mine = shard_lines(targets, i, of)
         if problem := result_problem(data, pkg, BROKER / pkg, mine, sites[i::of]):
             return None, f"{f} {problem}"
-        # A gremlins mutant on a target line of another shard is one that shard owns: an overlap.
-        if other := sorted({(m_file["file_name"], m["line"]) for m_file in data["files"]
-                            for m in m_file.get("mutations") or [] if m.get("type") != DELETION
-                            and m["line"] in targets.get(f"broker/{pkg}/{m_file['file_name']}", ())
-                            and m["line"] not in mine.get(f"broker/{pkg}/{m_file['file_name']}", ())}):
+        # Gremlins writes every mutant outside its -D diff as SKIPPED (v0.6.0 engine.go:195), so a
+        # shard reports the other shards' lines so: no verdict, dropped here. The owner's own lines
+        # hold no SKIPPED (result_problem above). Any other mutant on a target line of another shard
+        # is one that shard owns: an overlap.
+        kept = [(m_file["file_name"], [m for m in m_file.get("mutations") or [] if m.get("type") == DELETION
+                 or m.get("status") != "SKIPPED" or m["line"] in mine.get(f"broker/{pkg}/{m_file['file_name']}", ())])
+                for m_file in data["files"]]
+        if other := sorted({(name, m["line"]) for name, muts in kept for m in muts if m.get("type") != DELETION
+                            and m["line"] in targets.get(f"broker/{pkg}/{name}", ())
+                            and m["line"] not in mine.get(f"broker/{pkg}/{name}", ())}):
             return None, f"{f} holds mutants on lines of another shard of {pkg}: {other[:20]}: shards overlap"
-        for m_file in data["files"]:
-            g = files.get(m_file["file_name"])
+        for name, muts in kept:
+            g = files.get(name)
             if g is None:
-                g = files[m_file["file_name"]] = {"file_name": m_file["file_name"], "mutations": []}
+                g = files[name] = {"file_name": name, "mutations": []}
                 joined["files"].append(g)
-            g["mutations"] += m_file.get("mutations") or []
+            g["mutations"] += muts
         for k in TOTALS:
             joined[k] += data.get(k) if type(data.get(k)) is int else 0
     if "targets" in shards[0][1]:

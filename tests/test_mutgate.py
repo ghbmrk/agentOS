@@ -722,11 +722,12 @@ class Verify(unittest.TestCase):
         out = {}
         for i in range(of):
             mine = mutgate.shard_lines(targets, i, of).get("broker/netguard/a.go", set()) if of > 1 else targets["broker/netguard/a.go"]
-            muts = [{"type": "INCREMENT_DECREMENT", "status": "LIVED" if n == lived else "KILLED", "line": n, "column": 4}
-                    for n in (3, 4, 5) if n in mine]
+            # Gremlins v0.6.0 writes the mutants outside its -D diff too, as SKIPPED (Security on #4978).
+            muts = [{"type": "INCREMENT_DECREMENT", "status": ("LIVED" if n == lived else "KILLED") if n in mine
+                     else "SKIPPED", "line": n, "column": 4} for n in (3, 4, 5)]
             dels = [{"type": mutgate.DELETION, "status": "LIVED" if n == lived else "KILLED", "line": n, "column": 2}
                     for n in sites[i::of]]
-            data = {"files": [{"file_name": "a.go", "mutations": muts + dels}] if muts or dels else [],
+            data = {"files": [{"file_name": "a.go", "mutations": muts + dels}],
                     "mutants_total": len(muts) + len(dels), "statement_deletions": len(dels),
                     "mutants_lived": sum(m["status"] == "LIVED" for m in muts + dels)}
             if of > 1:
@@ -758,6 +759,11 @@ class Verify(unittest.TestCase):
         stolen["mutants-1/netguard.json"]["files"][0]["mutations"].append(
             {"type": mutgate.DELETION, "status": "KILLED", "line": 3, "column": 2})
         stolen["mutants-1/netguard.json"]["statement_deletions"] += 1
+        # Shard 1 (lines 3, 5, 7) leaving its own line 3 SKIPPED: no verdict there, refused.
+        own_skip = json.loads(json.dumps(good))
+        for m in own_skip["mutants-1/netguard.json"]["files"][0]["mutations"]:
+            if m["line"] == 3 and m["type"] != mutgate.DELETION:
+                m["status"] = "SKIPPED"
         unsharded = {k: {**v} for k, v in good.items()}
         unsharded["mutants-1/netguard.json"].pop("shard")
         for name, results, want in (
@@ -765,6 +771,7 @@ class Verify(unittest.TestCase):
             ("twice", {**good, "mutants-2/netguard.json": good["mutants-0/netguard.json"]}, "shards overlap"),
             ("other line", moved, "holds mutants on lines of another shard of netguard"),
             ("other site", stolen, "not one for each site this diff touches"),
+            ("skipped on its own line", own_skip, "gremlins skipped mutants on target lines"),
             ("counts", {**good, "mutants-1/netguard.json": {**good["mutants-1/netguard.json"], "shard": {"index": 1, "of": 3}}},
              "disagree on the number of shards"),
             ("unsharded twin", unsharded, "disagree on the number of shards"),
@@ -1493,8 +1500,10 @@ for row in diff.split("\\n"):
         first = int(m.group(1))
         muts.setdefault(name, []).extend(range(first, first + int(m.group(2) or 1)))
 open("{d}/seen-lines", "a").write(json.dumps(muts) + "\\n")
-files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": "LIVED" if n == 4 else "KILLED",
-          "line": n, "column": 1}} for n in ns]}} for f, ns in muts.items()]
+# Like gremlins v0.6.0, every other line's mutant is written too, SKIPPED (Security on #4978).
+files = [{{"file_name": f, "mutations": [{{"type": "CONDITIONALS_NEGATION", "status": ("LIVED" if n == 4 else "KILLED")
+          if n in ns else "SKIPPED", "line": n, "column": 1}} for n in range(1, len(open(f).read().split("\\n")))]}}
+         for f, ns in muts.items()]
 lived = sum(m["status"] == "LIVED" for f in files for m in f["mutations"])
 open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_total": lived, "mutants_lived": lived}}))
 """)
