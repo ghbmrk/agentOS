@@ -155,6 +155,9 @@ class RiskTierTest(unittest.TestCase):
             "LEDGER.md": "C",
             "METRICS.md": "C",
             "TRACE.md": "C",
+            # Counts-only weekly owner records, schema-checked by tests/test_metrics.py (#4951).
+            "records/owner/2026-11-01.json": "C",
+            "records/other/x.json": "B",
             "SPEC.md": "B",
             # A .md below the top level of image/ is not documentation-only.
             "image/mkosi/x.md": "A",

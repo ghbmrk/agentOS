@@ -870,6 +870,25 @@ class OwnerOutcomesTest(unittest.TestCase):
         self.assertLess(read_s, 20)  # a few numbers, not a table
         self.assertIn(f"- Owner seconds per errand: {format(round((300 + read_s) / 12, 1), 'g')} (12 errands", section)
 
+    def test_a_stale_record_says_how_many_weeks_old_in_a_few_words(self):
+        # MET-owner-f1 (#4951): the week 2026-11-01 ends 2026-11-08 06:00 local (10:00Z).
+        fresh = "\n".join(metrics.owner_section([self.rec()], now="2026-11-15T09:59:00Z"))
+        self.assertIn("Week of 2026-11-01 on the real box. Reading", fresh)
+        self.assertNotIn("old", fresh)
+        one = "\n".join(metrics.owner_section([self.rec()], now="2026-11-15T10:00:00Z"))
+        self.assertIn("Week of 2026-11-01 on the real box (1 week old). Reading", one)
+        three = "\n".join(metrics.owner_section([self.rec()], now="2026-11-29T10:00:00Z"))
+        self.assertIn("(3 weeks old)", three)
+        # The note's words are counted in the reading time like the rest.
+        secs = lambda t: int(t.split("Reading to here takes ")[1].split(" s")[0])
+        words = len(three.replace("- ", " ").replace("#", " ").split())
+        self.assertEqual(secs(three), -(-words * 60 // metrics.READ_WPM))
+
+    def test_render_passes_now_so_a_stale_record_is_flagged(self):
+        raw = dict(raw_fixture(), owner=[self.rec(week="2026-09-20")])
+        md = metrics.render(metrics.compute(raw), raw)
+        self.assertIn("Week of 2026-09-20 on the real box (2 weeks old).", md)
+
     def test_the_ledger_banner_stays_first_and_its_reading_is_counted(self):
         banner = ["**LEDGER.md has no reading; take one (D-086).**", ""]
         plain = "\n".join(metrics.owner_section([]))

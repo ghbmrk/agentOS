@@ -261,26 +261,66 @@ func (l *llama) embed(ctx context.Context, texts []string) ([][]float32, error) 
 		return nil, err
 	}
 	var r struct {
-		Data []struct {
-			Index     *int      `json:"index"`
-			Embedding []float32 `json:"embedding"`
-		} `json:"data"`
+		Data embedData `json:"data"`
 	}
+	r.Data.max = len(texts)
 	err = p.post(ctx, "/v1/embeddings", map[string]any{"input": texts, "encoding_format": "float"}, &r, maxEmbeddingBody)
 	if err != nil {
 		return nil, err
 	}
-	if len(r.Data) != len(texts) {
+	if len(r.Data.list) != len(texts) {
 		return nil, errBadReply
 	}
 	out := make([][]float32, len(texts))
-	for _, d := range r.Data {
+	for _, d := range r.Data.list {
 		if d.Index == nil || *d.Index < 0 || *d.Index >= len(out) || out[*d.Index] != nil {
 			return nil, errBadReply
 		}
 		out[*d.Index] = d.Embedding
 	}
 	return out, nil
+}
+
+// embedEntry is one vector of the server's reply.
+type embedEntry struct {
+	Index     *int      `json:"index"`
+	Embedding []float32 `json:"embedding"`
+}
+
+// embedData decodes the reply's data array one entry at a time and refuses
+// it at entry max+1, so a reply with more vectors than texts is refused
+// before its excess entries are decoded: 32 MiB of {} would otherwise be
+// about ten million entries held before the count check (#3771 item 7).
+type embedData struct {
+	max  int
+	list []embedEntry
+}
+
+func (d *embedData) UnmarshalJSON(b []byte) error {
+	d.list = nil
+	dec := json.NewDecoder(bytes.NewReader(b))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok == nil {
+		return nil // null: no vectors, which the count check refuses
+	}
+	if tok != json.Delim('[') {
+		return errBadReply
+	}
+	for dec.More() {
+		if len(d.list) >= d.max {
+			return errBadReply
+		}
+		var e embedEntry
+		if err := dec.Decode(&e); err != nil {
+			return err
+		}
+		d.list = append(d.list, e)
+	}
+	_, err = dec.Token() // the closing ]
+	return err
 }
 
 // sweepDeadDirs removes the socket directories under tmp that a process of

@@ -626,13 +626,23 @@ type unlockView struct {
 }
 
 func (s *Server) unlock(w http.ResponseWriter, r *http.Request) {
-	v := unlockView{Next: safeNext(r.FormValue("next")), Vault: s.cfg.Vault != nil}
+	// The cap comes before any form parse, whatever the method: a
+	// FormValue would read a multipart body in full first (#5017). A GET
+	// takes next from the URL only and never reads the body.
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	v := unlockView{Next: safeNext(r.URL.Query().Get("next")), Vault: s.cfg.Vault != nil}
 	if r.Method == http.MethodPost {
 		if !s.sameOrigin(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		// ParseForm reads only a urlencoded body, under the cap; a
+		// multipart body is left unread, so its code is empty.
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		v.Next = safeNext(r.FormValue("next"))
 		if s.getOwner() != nil {
 			if _, err := s.signIn(w, r, r.PostFormValue("code")); err != nil {
 				v.Err = err.Error()

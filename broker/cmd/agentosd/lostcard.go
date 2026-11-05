@@ -87,6 +87,7 @@ type lostCard struct {
 	Shown   string
 	Reboot  func(context.Context) error
 	Booted  func() time.Time
+	stop    func(i int) bool // tests: crash the shown and request files' writes after step i
 }
 
 func newLostCard(k lostKernel, s *backupSchedule) *lostCard {
@@ -115,7 +116,7 @@ func (l *lostCard) readShown() shown {
 // no more than naming the card in effect later.
 func (l *lostCard) writeShown(r shown) {
 	b, _ := json.Marshal(r)
-	if err := privfile.WriteAtomic(filepath.Dir(l.Shown), filepath.Base(l.Shown), b, nil); err != nil {
+	if err := privfile.WriteAtomic(filepath.Dir(l.Shown), filepath.Base(l.Shown), b, l.stop); err != nil {
 		log.Printf("recovery key: record the card shown: %v", err)
 	}
 }
@@ -133,8 +134,11 @@ func (l *lostCard) clearShown() {
 const restartTrigger = "/run/agentos-recovery-restart"
 
 // startReboot writes the restart's trigger; agentosd starts no process.
-func startReboot(context.Context) error {
-	return privfile.WriteAtomic(filepath.Dir(restartTrigger), filepath.Base(restartTrigger), nil, nil)
+func startReboot(context.Context) error { return writeTrigger(restartTrigger, nil) }
+
+// writeTrigger writes the empty trigger file at path; stop is a test's.
+func writeTrigger(path string, stop func(i int) bool) error {
+	return privfile.WriteAtomic(filepath.Dir(path), filepath.Base(path), nil, stop)
 }
 
 // bootedAt is when this boot began, by the wall clock now; the zero time
@@ -195,7 +199,7 @@ func (l *lostCard) Lost(ctx context.Context, authData, clientData, sig []byte) e
 	if err != nil {
 		return recoveryCode(err)
 	}
-	if err := privfile.WriteAtomic(filepath.Dir(l.Request), filepath.Base(l.Request), approval, nil); err != nil {
+	if err := privfile.WriteAtomic(filepath.Dir(l.Request), filepath.Base(l.Request), approval, l.stop); err != nil {
 		log.Printf("recovery key: file the lost-card request: %v", err)
 		return sockets.Code(localapi.ErrRecoveryUnavailable)
 	}

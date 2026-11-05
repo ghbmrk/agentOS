@@ -171,7 +171,10 @@ TIER_B_FILES = {"SPEC.md"}
 TIER_B_PREFIXES = ("guest/",)
 # Explicit tier C. Top-level *.md other than SPEC.md and image/*.md are C by
 # rule in tier_of; everything here is checked after the tier-A rules.
-TIER_C_PREFIXES = ("docs/", "briefs/", "reviews/", "decisions/", "spikes/", "tests/", "tools/")
+# records/owner/: counts-only weekly owner records that tools/metrics.py schema-checks
+# (tests/test_metrics.py fails a malformed one); other records/ paths stay unmatched (B).
+TIER_C_PREFIXES = ("docs/", "briefs/", "reviews/", "decisions/", "spikes/", "tests/", "tools/",
+                   "records/owner/")
 
 # Lane gate (CTRL-lane-gate, D-110): a lane that is not one of the peer Claude
 # subscriptions is held to a tier limit in docs/LANES.md. A PR is in the lane when
