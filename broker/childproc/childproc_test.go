@@ -619,7 +619,7 @@ func TestShellStateNeverReachesAChild(t *testing.T) {
 	// Names that only share a stem are not shell state.
 	allowedKeys["BASH_FUNCTIONAL"] = "test"
 	allowedKeys["XSHELLOPTS"] = "test"
-	if err := NewEnv("BASH_FUNCTIONAL=1", "XSHELLOPTS=1").check(); err != nil {
+	if err := NewEnv("BASH_FUNCTIONAL=lookalike", "XSHELLOPTS=lookalike").check(); err != nil {
 		t.Fatalf("a look-alike name is refused: %v", err)
 	}
 }
