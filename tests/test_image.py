@@ -6275,6 +6275,7 @@ UNIT_DEVICES = {
     "agentos-keeper-link-capture.service": ("root", "private"),
     "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
+    "agentos-mor.service": ("root", "closed"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),
     "agentos-localui-claim.service": ("root", "closed"),

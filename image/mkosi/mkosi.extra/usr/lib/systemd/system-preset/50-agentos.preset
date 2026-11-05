@@ -11,6 +11,8 @@ enable agentos-localui.service
 enable agentos-modem.service
 enable agentos-modem-env.path
 enable agentos-drive-id.service
+# Clears the memory-overwrite request on an orderly shutdown, after the secrets are wiped (HW-8, #4794).
+enable agentos-mor.service
 # The weekly reboot (UPD-10), and its restart for a lost-card request (REC-4).
 enable agentos-reboot.timer
 enable agentos-recovery-restart.path
