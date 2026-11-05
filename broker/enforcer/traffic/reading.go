@@ -43,6 +43,9 @@ func BootID() (string, error) {
 // a saved Gen, and a counter of a new load is never taken for a later value
 // of an old one (ENF-cap-6). A drop update (load.Loader.Update) keeps the
 // table, its counters and so its Gen.
+//
+// Listing is listing itself, which the counter keeps for the next drop
+// update's Drop.Read (Counter.Drop).
 func ReadingOf(d policy.Document, l nft.Layout, boot string, listing []byte) (Reading, error) {
 	if boot == "" {
 		return Reading{}, fmt.Errorf("%w: no boot id", ErrListing)
@@ -72,7 +75,7 @@ func ReadingOf(d policy.Document, l nft.Layout, boot string, listing []byte) (Re
 	}
 	var handle *uint64
 	edge := false
-	r := Reading{Core: map[netip.Addr]uint64{}, Named: map[string][]netip.Addr{}}
+	r := Reading{Core: map[netip.Addr]uint64{}, Named: map[string][]netip.Addr{}, Listing: listing}
 	elems := map[string][]json.RawMessage{}
 	for _, o := range doc.Nftables {
 		switch {

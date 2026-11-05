@@ -253,6 +253,16 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
 	cr := &callRung{ready: make(chan struct{})}
 	var keys <-chan byte // nil while the token is read
+	known := func(r Rung) {
+		cr.r = r
+		close(cr.ready)
+		rep.Rung, token, keys = r, nil, l.Keys()
+	}
+	select { // Run's rung is known before the first turn can start
+	case r := <-token:
+		known(r)
+	default:
+	}
 
 	type running struct {
 		cancel context.CancelFunc
@@ -317,9 +327,7 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 		case <-done:
 			finish()
 		case r := <-token:
-			cr.r = r
-			close(cr.ready)
-			rep.Rung, token, keys = r, nil, l.Keys()
+			known(r)
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop(false)

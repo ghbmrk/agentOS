@@ -187,7 +187,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		return nil, fmt.Errorf("alerts: %w", err)
 	}
 	if d.book, err = enrol.Open(enrol.Config{Name: cfg.Name, Store: d.store(fileEnrol), Network: dp.Network,
-		Alerts: d.alerts, Lock: &d.mu, Now: dp.Now, Rand: dp.Rand}); err != nil {
+		Alerts: d.alerts, Lock: &d.mu, Now: dp.Now, Rand: dp.Rand, Log: dp.Logf}); err != nil {
 		return nil, fmt.Errorf("enrolment: %w", err)
 	}
 	if d.engine, err = d.book.OpenPolicy(d.store(filePolicy)); err != nil {

@@ -657,19 +657,73 @@ def build_mutant(src, site, build, mutant, pkg_dir):
     return False
 
 
-def run_tests(binary, cwd, timeout):
+def run_tests(binary, cwd, timeout, mem=None):
     """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
     is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
-    BINARY.out, where failed_test reads which test failed."""
-    with open(pathlib.Path(binary).with_suffix(".out"), "wb") as log:
+    BINARY.out, where failed_test reads which test failed. With mem, the run is also killed, and
+    KILLED by `memory_cap`, once its session's resident memory passes mem bytes, as the Go runtime's
+    own out of memory crash would end it: a deletion that drops a bound can grow a test by gigabytes
+    in seconds, and on a CI runner that takes the runner down with the job (egress on #5011). That
+    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it."""
+    out = pathlib.Path(binary).with_suffix(".out")
+    with open(out, "wb") as log:
         p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s"], cwd=cwd,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        end, _ = watch(p, timeout, mem)
+        if end == "over":
+            log.write(b"\n--- FAIL: memory_cap\n")  # failed_test's name for it, so the table says why
+        return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
+
+
+def watch(p, timeout=None, mem=None):
+    """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
+    "over" (resident memory past mem bytes), after which its session is killed; peak is the most
+    resident memory read across the session, every MEM_POLL seconds."""
+    deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
+    while True:
+        wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
         try:
-            return "LIVED" if p.wait(timeout=timeout) == 0 else "KILLED"
+            return p.wait(timeout=wait), peak
         except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
-            p.wait()
-            return "TIMED OUT"
+            peak = max(peak, session_rss(p.pid))
+            end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
+            if end:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                return end, peak
+
+
+MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
+
+
+def session_rss(sid):
+    """Resident bytes of every process in session sid (a test binary and its children), from
+    /proc; 0 where there is no /proc (macOS), so the cap there is the timeout alone."""
+    total = 0
+    try:
+        pids = [n for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return 0
+    for pid in pids:
+        try:
+            fields = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue  # gone between the listing and the read
+        if len(fields) > 21 and fields[3] == str(sid):
+            total += int(fields[21]) * PAGE
+    return total
+
+
+PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def available_memory():
+    """MemAvailable in bytes, or None where /proc/meminfo does not say (macOS): no cap there."""
+    try:
+        m = re.search(r"^MemAvailable:\s+(\d+) kB$", pathlib.Path("/proc/meminfo").read_text(), re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) * 1024 if m else None
 
 
 FAILED = re.compile(rb"^\s*--- FAIL: ([A-Za-z_]\w{0,199})", re.M)
@@ -730,7 +784,8 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
     reads as detected (KILLED or TIMED OUT) runs its binary again alone once the batch is done, and
     that verdict stands: a loaded runner can fail a wall-clock bound or slow a run past its timeout,
     and other binaries can collide on a fixed path or port, which would pass a deletion that lives
-    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker."""
+    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker.
+    Each run has a memory cap, smaller in parallel, so one mutant cannot exhaust the runner."""
     pkg_dir = BROKER / pkg
     sites, problem = deletion_sites(pkg, added, lister)
     if not sites:
@@ -749,12 +804,29 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
         return None, f"broker/{pkg}/ does not build its tests"
     if not base.exists():  # `go test -c` writes nothing for a package with no test files: none covered
         return [mutation(s, "NOT COVERED") for s in sites], None
+    # Memory caps (egress on #5011): a run alone may hold half the memory free now, and each of
+    # `jobs` parallel runs its share of that half, leaving the rest to the builds beside it. A run
+    # past its cap is KILLED; a parallel one is then confirmed alone, under the larger cap. A cap
+    # kill counts as detection only if the unmutated tests stay under half of it (L3 on #5026: else
+    # a deletion that lives reads KILLED), so the base run is measured under the same cap, and
+    # fewer workers run when their share would leave a run less than that headroom.
+    free = available_memory()
+    alone_mem = free // 2 if free else None
     began = time.monotonic()
-    r = subprocess.run([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir)
-    if r.returncode != 0 or not profile.exists():
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       start_new_session=True), mem=alone_mem)
+    if alone_mem and (end == "over" or 2 * peak > alone_mem):
+        return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
+                      f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
+    if end != 0 or not profile.exists():
         return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
+    if alone_mem and peak:
+        jobs = max(1, min(jobs, alone_mem // (2 * peak)))
     timeout = 3 * (time.monotonic() - began) + 10
     blocks = covered_blocks(profile.read_text())
+
+    def cap(alone):
+        return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
 
     def verdict(i, alone):
         """The site's status, its binary when a detected verdict still needs confirming alone, and
@@ -772,7 +844,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
             if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
                 return "NOT VIABLE", None, None
-            status = run_tests(binary, pkg_dir, timeout)
+            status = run_tests(binary, pkg_dir, timeout, mem=cap(alone))
             keep = not alone and status in DETECTED
             return status, binary if keep else None, failed_test(binary)
         finally:
@@ -786,7 +858,7 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
             results = [verdict(i, True) for i in batch] if jobs <= 1 else list(pool.map(lambda i: verdict(i, False), batch))
             for i, (status, binary, killer) in zip(batch, results):
                 if binary is not None:
-                    status, killer = run_tests(binary, pkg_dir, timeout), failed_test(binary)
+                    status, killer = run_tests(binary, pkg_dir, timeout, mem=alone_mem), failed_test(binary)
                     shutil.rmtree(binary.parent)
                 statuses.append((status, killer))
             if sum(st == "TIMED OUT" for st, _, _ in results) * 2 > len(batch):
@@ -883,6 +955,8 @@ def join_shards(pkg, shards, added, tests, lister):
         if (shard := shard_of(data)) is None:
             return None, f"{f} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
         if shard in seen:
+            if shard == (0, 1):
+                return None, f"{f} and {seen[shard]} are both results for {pkg}: one run gives one result"
             return None, f"{f} and {seen[shard]} are both shard {shard[0]} of {shard[1]} for {pkg}: shards overlap"
         seen[shard] = f
         mine, problem = targets_for(pkg, added, tests, data)
@@ -894,7 +968,7 @@ def join_shards(pkg, shards, added, tests, lister):
             if problem:
                 return None, f"{f} {problem}"
         elif mine != targets:
-            return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree"
+            return None, f"{f} records other target lines than {shards[0][0]}: the shards of {pkg} disagree; rerun the mutgate workflow"
     counts = {of for _, of in seen}
     if len(counts) != 1:
         return None, f"the results for {pkg} disagree on the number of shards: {sorted(counts)}"
@@ -1095,7 +1169,10 @@ def cmd_plan(args):
                   f"sites, {of} shard(s)", file=sys.stderr)
             include += [{"pkg": pkg, "shard": i, "of": of} for i in range(of)]
     if not include or len(include) > MATRIX_MAX:
-        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit)", file=sys.stderr)
+        fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if include
+               else "rerun the mutgate workflow")
+        print(f"mutgate: {len(include)} shards, not 1 to {MATRIX_MAX} (GitHub's matrix limit): {fix}",
+              file=sys.stderr)
         return 1
     print(json.dumps(include))
     return 0

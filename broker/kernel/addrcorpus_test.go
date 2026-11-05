@@ -22,10 +22,10 @@ import (
 
 // The address corpus, differentially (#4910, #4037): for each decoy
 // destination of one logged table, ipform.Forms, netguard's connect-time
-// check given that table's matcher, and the kernel's plan check (destOf,
-// on a bare address, an address and port, and a URL) each find the decoy
-// in every form that carries it and in no near miss, and all of them agree
-// on every entry. Catches one of the three checks reading an address form
+// check given that table's matcher, the kernel's plan check (destOf, on a
+// bare address, an address and port, and a URL) and an exit's CallTrip
+// each find the decoy in every form that carries it and in no near miss,
+// and all of them agree on every entry. Catches one of the checks reading an address form
 // the others read differently, which is how #4037's zoned NAT64, 6to4 and
 // ISATAP forms got through.
 func TestDecoyChecksAgreeOnTheAddressCorpus(t *testing.T) {
@@ -86,6 +86,22 @@ func TestDecoyChecksAgreeOnTheAddressCorpus(t *testing.T) {
 				return got[v][text]
 			})
 		}
+		// An exit's CallTrip, given the address as netguard reports a refused
+		// one (DenyEvent.Addr): a call trip logged for every form that carries
+		// the decoy, and none for a near miss (#4915).
+		const callTrip = "kernel CallTrip"
+		got[callTrip] = map[string]bool{}
+		hostiletext.RunAddrs(t, target, func(text string) bool {
+			n++
+			before := len(r.k.State().Trips())
+			err := (*kernel.Kernel).CallTrip(r.k, int64(n), kernel.ExitEgress, netip.MustParseAddr(text))
+			if err != nil && !errors.Is(err, kernel.ErrNoDecoy) {
+				t.Fatalf("CallTrip %q: %v", text, err)
+			}
+			got[callTrip][text] = err == nil && len(r.k.State().Trips()) == before+1
+			return got[callTrip][text]
+		})
+		names = append(names, callTrip)
 		for _, a := range hostiletext.Addrs(target) {
 			var say []string
 			for _, v := range names {

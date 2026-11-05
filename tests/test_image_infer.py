@@ -176,8 +176,12 @@ class TestInferImage(unittest.TestCase):
     def test_the_server_is_static_cpu_only_and_fetches_nothing(self):
         s = (IMG / "llamaserver.sh").read_text()
         for f in ("-DGGML_NATIVE=OFF", "-DCMAKE_EXE_LINKER_FLAGS=-static", "-DBUILD_SHARED_LIBS=OFF",
-                  "-DGGML_BACKEND_DL=OFF", "-DLLAMA_CURL=OFF", "-DLLAMA_OPENSSL=OFF", "-DGGML_AVX2=ON"):
+                  "-DGGML_BACKEND_DL=OFF", "-DLLAMA_CURL=OFF", "-DLLAMA_OPENSSL=OFF", "-DGGML_AVX2=ON",
+                  # #4454: no web UI, so no build-time download from Hugging Face.
+                  "-DLLAMA_BUILD_UI=OFF", "-DLLAMA_USE_PREBUILT_UI=OFF"):
             self.assertIn(f, s)
+        self.assertIn("""! grep -q '^#define LLAMA_UI_HAS_ASSETS' "$UI_H" ||""", s)
+        self.assertNotRegex(s, r"-DLLAMA_(BUILD|USE_PREBUILT)_UI=ON")
         for gpu in ("CUDA", "VULKAN", "METAL", "HIP", "SYCL", "OPENCL"):
             self.assertNotIn("-DGGML_%s=ON" % gpu, s)
         self.assertIn('! readelf -l "$BIN" | grep -q INTERP ||', s)
