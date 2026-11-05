@@ -46,8 +46,9 @@ func TestUnlockReadsNoMoreThanItsCap(t *testing.T) {
 			q.Body, q.ContentLength = io.NopCloser(body), -1
 			q.Header.Set("Content-Type", "multipart/form-data; boundary=B")
 		})
-		if m.n > unlockCap {
-			t.Errorf("%s multipart: read %d bytes, cap %d", method, m.n, unlockCap)
+		// Neither method parses a multipart body, so none of it is read.
+		if m.n != 0 {
+			t.Errorf("%s multipart: read %d bytes", method, m.n)
 		}
 	}
 	// An oversized urlencoded form is refused even with a valid code.
