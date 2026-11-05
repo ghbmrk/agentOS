@@ -25,8 +25,9 @@ var (
 
 // TestBrokerPackagesAreListed is the CI check that every broker package that
 // persists is in stores.txt with its OP-11 kind, and that no listed package
-// has stopped persisting. A package that keeps a lifecycle of its own must
-// be listed, and so seen, as debt.
+// has stopped persisting. A new lifecycle belongs on the journal
+// (journal.Lifecycle); a package that keeps one of its own must be listed,
+// and so seen, as debt.
 func TestBrokerPackagesAreListed(t *testing.T) {
 	manifest, err := os.ReadFile("stores.txt")
 	if err != nil {
@@ -131,7 +132,7 @@ func storeProblems(t *testing.T, root, manifest string) []string {
 	sort.Strings(dirs)
 	for _, d := range dirs {
 		if !listed[d] {
-			problems = append(problems, d+": persists ("+found[d]+") but is not in broker/durable/stores.txt; list the package with its OP-11 kind")
+			problems = append(problems, d+": persists ("+found[d]+") but is not in broker/durable/stores.txt; build a lifecycle as journal intents (journal.Lifecycle), or list the package with its OP-11 kind")
 		}
 	}
 	var stale []string

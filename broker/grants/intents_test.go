@@ -16,16 +16,6 @@ func ForgetID(nonce, goal string) string { return "forget/" + nonce + "/" + goal
 // item 1's nonce.
 func ForgetAgentID(nonce, goal string) string { return "forget-agent/" + nonce + "/" + goal }
 
-// EvidenceIntent is the intent that sets the evidence destination to
-// address on account, or clears it when address is empty (CH-20).
-func EvidenceIntent(id, origin, address, account string) journal.Intent {
-	if address == "" {
-		account = ""
-	}
-	return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount, Action: journal.ActionEvidence,
-		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
-}
-
 // FollowID is the ID of a follow intent: nonce is unique per ask and is 1
 // to MaxFollowNonce lower-case hex characters; the digest comes before the
 // name, which may hold anything the gate's name check allows. An empty

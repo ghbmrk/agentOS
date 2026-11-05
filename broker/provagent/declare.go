@@ -380,7 +380,8 @@ func Builtins() map[string]Declaration {
 		},
 		// Grok Build, xAI's official CLI (#1378), read from the pinned
 		// CLI's own strings and not yet measured (ASSUMPTIONS.md): headless
-		// with the brief on stdin, its login in GROK_HOME's auth.json.
+		// with the brief on stdin, its login in GROK_HOME's auth.json, and
+		// egress.Grok() the route its endpoints name.
 		"grok": {
 			ID: "grok", CLI: "grok", Version: "1.0.62", Image: "grok",
 			Argv:        []string{"grok", "-p", "-", "--output-format", "streaming-json", "--no-auto-update"},
@@ -395,7 +396,8 @@ func Builtins() map[string]Declaration {
 			Unmetered:   true,
 			TaskClasses: []string{"code", "research"},
 			// The one known switch, read from the CLI's strings; the rest
-			// of its cloud features are [Open] (ASSUMPTIONS.md).
+			// of its cloud features are [Open] (ASSUMPTIONS.md), their
+			// endpoints absent from egress.Grok().
 			CloudOff:    []string{"--no-auto-update"},
 			ErrorEvents: []string{"error"},
 			UsedUp:      []string{"usage_limit_reached", "usage_pool_exhausted"},

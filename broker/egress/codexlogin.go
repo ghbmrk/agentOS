@@ -146,6 +146,16 @@ func (f *refreshFlights) ShareRefresh(ctx context.Context, provider string, exch
 	}
 }
 
+// joined reports how many refreshes joined provider's flight in progress.
+func (f *refreshFlights) joined(provider string) int {
+	f.fmu.Lock()
+	defer f.fmu.Unlock()
+	if fl := f.flights[provider]; fl != nil {
+		return fl.joined
+	}
+	return 0
+}
+
 type workerPH struct {
 	account string            // the account ID the id_token placeholder carries
 	field   map[string]string // placeholder -> login field

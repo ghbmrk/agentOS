@@ -140,6 +140,16 @@ const (
 	ParamEvidenceAccount = "account"
 )
 
+// EvidenceIntent is the intent that sets the evidence destination to
+// address on account, or clears it when address is empty (CH-20).
+func EvidenceIntent(id, origin, address, account string) journal.Intent {
+	if address == "" {
+		account = ""
+	}
+	return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount, Action: journal.ActionEvidence,
+		Params: map[string]any{ParamEvidenceAddress: address, ParamEvidenceAccount: account}, Executor: ExecutorName}
+}
+
 // A journal.ActionUpdateFollow intent carries no params: the journal
 // redacts params (journal.Redactor) and keeps identifiers as they are, so
 // the name the owner gave the source and the digest of the root summary

@@ -377,10 +377,3 @@ func TestOtherSlotKindsAreKeptAndUnknownKindsRefused(t *testing.T) {
 		t.Fatal("unknown keys version accepted")
 	}
 }
-
-// unwrap returns the data key from the first slot of f's kind that opens,
-// among the slots for key ID want.
-func (kf *keyFile) unwrap(f Factor, want []byte) ([]byte, error) {
-	key, _, err := kf.unwrapSlot(f, want)
-	return key, err
-}

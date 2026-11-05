@@ -30,9 +30,7 @@ func startLocalUI(t *testing.T, dir string, ui *PageSocket) {
 // private replies, which needs the box's Wi-Fi page (CH-20).
 func evidenceReason(t *testing.T, d *Daemon) string {
 	t.Helper()
-	st, err := d.Gate().Submit(journal.Intent{ID: "owner/evidence/t", Origin: grants.OriginOwner, Account: journal.BrokerAccount,
-		Action: journal.ActionEvidence, Executor: grants.ExecutorName,
-		Params: map[string]any{grants.ParamEvidenceAddress: "owner@example.test", grants.ParamEvidenceAccount: "mail"}})
+	st, err := d.Gate().Submit(grants.EvidenceIntent("owner/evidence/t", grants.OriginOwner, "owner@example.test", "mail"))
 	if err == nil && st.State == journal.Pending {
 		st, err = d.Gate().Authorize(t.Context(), st.Intent.ID)
 	}
