@@ -459,9 +459,9 @@ func (d *Enforcer) Page() *page.Server {
 	return d.page
 }
 
-// Close stops the page's listeners. The state is on disk after every
-// change, so a close is the same as a power loss; a trip not yet saved is
-// tried once more.
+// Close stops the page's listeners, the relays and the resolver. The state
+// is on disk after every change; a close also takes a last byte-cap
+// reading, and a trip not yet saved is tried once more.
 func (d *Enforcer) Close() {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip not saved at close: " + err.Error())

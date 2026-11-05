@@ -24,6 +24,7 @@ import (
 
 const (
 	fileTraffic = "traffic.json" // traffic.Counter's saved day
+	fileLoaded  = "loaded.json"  // the document the running ruleset was compiled from
 	// readEvery is the byte caps' reading interval: what a power cut can
 	// lose of the day's count (traffic ASSUMPTIONS ENF-cap-6).
 	readEvery = 10 * time.Second
@@ -44,6 +45,12 @@ type network struct {
 	mdnsDown bool // the relay ended on its own: started again at the tick
 
 	relay *wol.Relay // nil with no machine to wake
+
+	// prevDoc is the document the previous process last loaded
+	// (fileLoaded), which the running table was compiled from: the first
+	// load after a crash reads that table against it, so its bytes since
+	// the last reading count (Potency 6656993166). nil when none.
+	prevDoc *policy.Document
 
 	edgeMu  sync.Mutex
 	edgeDay uint32 // the day the edge's overrun was last logged
@@ -84,6 +91,17 @@ func (d *Enforcer) openNetwork() error {
 	d.mu.Lock()
 	caps := traffic.CapsOf(d.engine.Current())
 	d.mu.Unlock()
+	if b, err := d.store(fileLoaded).Load(); err != nil || b != nil {
+		var doc policy.Document
+		if err == nil {
+			doc, err = policy.Decode(b)
+		}
+		if err != nil {
+			d.dp.Logf("byte caps: the last loaded document is unreadable, the running table's bytes since the last reading are not counted: " + err.Error())
+		} else {
+			d.net.prevDoc = &doc
+		}
+	}
 	b, err := d.store(fileTraffic).Load()
 	switch {
 	case err != nil:
@@ -165,11 +183,22 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		// the last reading are read from the table it replaces first, or
 		// they would count nowhere (nft ENF-cap-trip-c-2; Potency
 		// 6656589394). A cap they pass trips once the load is done.
-		if d.net.counter != nil && d.loaded != "" && running != nil {
-			over, err := d.addReading(running)
+		// The first load after a restart reads it against the document
+		// the previous process loaded; after a clean stop that reading
+		// counts nothing new, after a crash it counts the bytes since its
+		// last one (same boot, same Gen: traffic ENF-cap-6).
+		was := d.loadedDoc
+		if d.loaded == "" && d.net.prevDoc != nil {
+			was = *d.net.prevDoc
+		}
+		if d.net.counter != nil && (d.loaded != "" || d.net.prevDoc != nil) && running != nil {
+			over, err := d.addReading(was, running)
 			if err != nil {
 				d.dp.Logf("byte caps: before the load: " + err.Error())
 			}
+			// Tripped off this goroutine: the load holds fwMu, and a trip
+			// must never wait on it (cut.Trip takes no firewall lock; an
+			// edge cut that does must keep it so).
 			for _, o := range over {
 				go d.overrun(o)
 			}
@@ -191,6 +220,13 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 			d.net.counter.SetCaps(traffic.CapsOf(d.loadedDoc)) // the ruleset still in force
 		}
 		return err
+	}
+	b, err := policy.Encode(doc)
+	if err == nil {
+		err = d.store(fileLoaded).Save(b)
+	}
+	if err != nil {
+		d.dp.Logf("byte caps: loaded document not saved: " + err.Error())
 	}
 	d.startMDNS(mdns.NewPlan(paths, ann).Hearing(hears))
 	return nil
@@ -299,7 +335,7 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	if err != nil {
 		return nil, fmt.Errorf("reading: %w", err)
 	}
-	over, err := d.addReading(listing)
+	over, err := d.addReading(d.loadedDoc, listing)
 	if err != nil {
 		return nil, err
 	}
@@ -319,12 +355,12 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	return over, nil
 }
 
-// addReading adds the reading in listing, the running table, to the
-// day's counts and saves the day; d.fwMu is held and the counter is not
-// nil. The day is saved before the drop moves: a power cut after it
+// addReading adds the reading in listing, the running table compiled
+// from doc, to the day's counts and saves the day; d.fwMu is held and the
+// counter is not nil. The day is saved before the drop moves: a power cut after it
 // loses no counted byte.
-func (d *Enforcer) addReading(listing []byte) ([]traffic.Overrun, error) {
-	r, err := traffic.ReadingOf(d.loadedDoc, d.cfg.Layout, d.net.boot, listing)
+func (d *Enforcer) addReading(doc policy.Document, listing []byte) ([]traffic.Overrun, error) {
+	r, err := traffic.ReadingOf(doc, d.cfg.Layout, d.net.boot, listing)
 	if err != nil {
 		return nil, fmt.Errorf("reading: %w", err)
 	}

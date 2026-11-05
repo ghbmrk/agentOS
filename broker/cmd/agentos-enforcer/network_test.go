@@ -3,6 +3,7 @@ package main
 // REQ: NET-2, NET-3, NET-5
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -606,5 +607,86 @@ func TestReadingFailuresLogged(t *testing.T) {
 	x.restart()
 	if !strings.Contains(x.logText(), "byte caps: at close: reading") {
 		t.Fatal("a failed reading at close was not logged")
+	}
+}
+
+// crash is a daemon that dies without Close (a panic, SIGKILL or OOM
+// kill) and starts again on the same boot: the running table survives.
+func (x *box) crash() {
+	x.t.Helper()
+	old := x.d
+	x.start()
+	x.t.Cleanup(func() {
+		old.net.mdnsMu.Lock()
+		old.stopMDNSLocked()
+		old.net.mdnsMu.Unlock()
+	})
+}
+
+// TestReadingAfterCrash (Potency 6656993166): the first load after a crash
+// reads the table the dead process loaded, against the document it
+// loaded (fileLoaded), so its bytes since the last reading count: 600 +
+// 300 + 200 against a cap of 1000 trip across a crash.
+func TestReadingAfterCrash(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.setListing(listing(t, x, doc, 7, 600))
+	x.advance(readEvery)
+	x.setListing(listing(t, x, doc, 7, 900))
+	x.crash()
+	x.setListing(listing(t, x, doc, 8, 200))
+	x.advance(readEvery)
+	waitUntil(t, "the core tripped at 1100 of 1000 bytes across a crash", func() bool { return x.d.cut.Stage() == channel.Tripped })
+}
+
+// TestNoDoubleCountAfterStop: after a clean stop, the first load reads the
+// same counters again and counts nothing twice.
+func TestNoDoubleCountAfterStop(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.setListing(listing(t, x, doc, 7, 900))
+	x.advance(readEvery)
+	x.restart()
+	x.restart()
+	if x.d.cut.Stage() != channel.Open {
+		t.Fatal("900 bytes counted twice across clean restarts")
+	}
+	if g := x.d.net.counter.Drop().Groups; len(g) != 1 || g[0].Count != 900 {
+		t.Fatalf("day's count %+v, want 900", g)
+	}
+}
+
+// TestLoadedDocumentUnreadable: a saved loaded document that does not
+// read back is logged, and the first load then reads nothing against it.
+func TestLoadedDocumentUnreadable(t *testing.T) {
+	x, _, _ := capped(t)
+	if err := os.WriteFile(filepath.Join(x.dir, fileLoaded), []byte("not a document"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if x.d.net.prevDoc != nil || !strings.Contains(x.logText(), "last loaded document is unreadable") {
+		t.Fatal("an unreadable loaded document was used or not logged")
+	}
+}
+
+// TestCrashReadUsesLoadedDocument: the dead process's table is read
+// against the document it loaded, so an address only its resolver sets
+// held counts to its destination, not as bytes no listed name resolved
+// to; and a loaded document that cannot be saved is logged.
+func TestCrashReadUsesLoadedDocument(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.setListing(listing(t, x, doc, 7, 600))
+	x.advance(readEvery)
+	x.setListing(bytes.ReplaceAll(listing(t, x, doc, 7, 500), []byte("203.0.113.5"), []byte("203.0.113.9")))
+	x.crash()
+	waitUntil(t, "the core tripped across a crash", func() bool { return x.d.cut.Stage() == channel.Tripped })
+	x.d.cut.mu.Lock()
+	why := x.d.cut.reason
+	x.d.cut.mu.Unlock()
+	if !strings.Contains(why, "updates.example") {
+		t.Fatalf("the crashed table was read against another document: %q", why)
+	}
+	x.fail(fileLoaded, true)
+	x.restart()
+	if !strings.Contains(x.logText(), "loaded document not saved") {
+		t.Fatal("a loaded document that was not saved was not logged")
 	}
 }
