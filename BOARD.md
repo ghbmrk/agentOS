@@ -115,7 +115,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-unmarked-gaps | VULN-unmarked-gaps: unmarked copies the string-fingerprint check cannot see (small packages, minified-only packages, copies inside the holder's own unminified scripts, a second copy in a file that already names the package) | VULN-inlined-minified (#4234) | queued (later; tier A) |
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | MET-owner-export | MET-owner-export: the box writes its weekly owner-outcome counts to records/owner/ (needs brief; after G1) | #4935; G1 | queued (release; needs brief; after G1) |
-| MET-owner-f1 | MET-owner-f1: records/ classed tier C in risk_tier.py; a stale-record note decided with the exporter; metrics.py import order (#4935 L3 release items). | #4935 | building (release; tier A for the risk_tier edit) |
 | VULN-prune-requalify | VULN-prune-requalify: requalify the pruned OpenClaw image (PLN-5, HLD-3) | VULN-controlui-drop (#4436) | queued (release) |
 
 ## Owner channel and approvals (SPEC §10)
@@ -431,7 +430,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-agentosd | REV-CHK-links-agentosd: root-side path operations in `agentosd` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | building |
 | REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | building |
-| VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | building |
 | VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | building |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
@@ -462,8 +460,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
 | VULN-initrd-drop | VULN-initrd-drop: the initrd purges the packages the main tree purges (dash, tar, perl-base, sqlite3 and the rest), and their `image/initrd` records go | #4000 | queued |
-| ENF-c-f1-log | ENF-c-f1-log: a failure inside take after the passkey is saved leaves a trace | #4893 | building |
-| ENF-c-f2-ux | ENF-c-f2-ux: cut-short reset and failed-save wording, page.js test harness | #4893 | building |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
 | REV-CHK-save-owner-f1 | Owner-side saves (owner commit, question persist, localsrv setup record) keep memory equal to the file when only the directory sync failed (privfile.ErrUnsynced). | #4193 | queued |
 | ENF-c-f3 | ENF-c-f3: recovery-code wording after the wait, rotating an unspent code, restart-proof retry card | #4967 | queued |
@@ -474,6 +470,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-kernel-f1 | REV-CHK-links-kernel-f1: agentos-unlock `ownDir` names its real cause and tests its uid and dir-type branches | #4966 | building |
 | CI-hostcheck-guest-kernel | CI-hostcheck-guest-kernel: the stand-in guest's kernel comes from a pinned source, not the runner's archive. Release; from #4906. | #4906 | queued (release) |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
+| MUT-shard-targets | MUT-shard-targets: shards of a test-only package read the plan's one coverage record, so they agree (#4970) | — | in review |
+| VULN-debian-zlib-r3 | VULN-debian-zlib-r3: accept (or upgrade past) DEBIAN-CVE-2026-76844 in zlib 1:1.3.dfsg+really1.3.1-1+b1 | #2919 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
