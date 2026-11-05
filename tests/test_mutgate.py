@@ -941,6 +941,7 @@ class Deletion(unittest.TestCase):
             began = time.monotonic()
             self.assertEqual(mutgate.run_tests(stub, d, 30, mem=32 << 20), "KILLED")
             self.assertLess(time.monotonic() - began, 20)
+            self.assertEqual(mutgate.failed_test(stub), "memory_cap")  # the table says why (L3 on #5026)
             stub.write_text("#!/bin/sh\nexec python3 -c 'b = bytearray(1 << 20)'\n")
             self.assertEqual(mutgate.run_tests(stub, d, 30, mem=1 << 30), "LIVED")
             stub.write_text("#!/bin/sh\nsleep 60\n")
@@ -1303,6 +1304,39 @@ func set(n, m int) {
                     mems.clear()
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "the memory cap reads /proc")
+    def test_a_package_whose_unmutated_tests_near_the_memory_cap_is_a_problem(self):
+        # L3 on #5026: were the base run unmeasured, a suite that already holds more than the cap
+        # would read every covered deletion KILLED, the one that lives (line 7) too.
+        heavy = TEST_SRC.replace('import "testing"', 'import (\n\t"testing"\n\t"time"\n)') + (
+            "\nvar Sink []byte\n\nfunc TestHeavy(t *testing.T) {\n\tSink = make([]byte, 96<<20)\n"
+            "\tfor i := range Sink {\n\t\tSink[i] = 1\n\t}\n\ttime.Sleep(time.Second)\n}\n")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, test_src=heavy)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            broker, avail = mutgate.BROKER, mutgate.available_memory
+            mutgate.BROKER = pkg.parent
+            try:
+                for free in (128 << 20, 320 << 20):  # cap 64 MB: over it; cap 160 MB: under it, without the headroom
+                    mutgate.available_memory = lambda: free
+                    tmp = pathlib.Path(d) / "tmp"
+                    tmp.mkdir()
+                    got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+                    shutil.rmtree(tmp)
+                    self.assertIsNone(got)
+                    self.assertIn("before any statement is deleted", problem)
+                    self.assertIn("memory cap", problem)
+                mutgate.available_memory = lambda: 8 << 30  # ample: the gate runs and line 7 lives
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 1)
+            finally:
+                mutgate.BROKER, mutgate.available_memory = broker, avail
+            self.assertIsNone(problem)
+            self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: "KILLED", 7: "LIVED"})
 
     def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
         # L3 on #4643: when every worker's run times out, retrying each alone costs more than one

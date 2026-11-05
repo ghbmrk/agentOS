@@ -661,23 +661,36 @@ def run_tests(binary, cwd, timeout, mem=None):
     """'KILLED', 'LIVED' or 'TIMED OUT' for one run of a compiled test binary; its process group
     is killed at the timeout, so a test's child cannot outlive the verdict. Its output goes to
     BINARY.out, where failed_test reads which test failed. With mem, the run is also killed, and
-    KILLED, once its session's resident memory passes mem bytes, as the Go runtime's own out of
-    memory crash would end it: a deletion that drops a bound can grow a test by gigabytes in seconds,
-    and on a CI runner that takes the runner down with the job (egress on #5011)."""
-    with open(pathlib.Path(binary).with_suffix(".out"), "wb") as log:
+    KILLED by `memory_cap`, once its session's resident memory passes mem bytes, as the Go runtime's
+    own out of memory crash would end it: a deletion that drops a bound can grow a test by gigabytes
+    in seconds, and on a CI runner that takes the runner down with the job (egress on #5011). That
+    counts as detection only because deletion_mutants first shows the unmutated tests stay well under it."""
+    out = pathlib.Path(binary).with_suffix(".out")
+    with open(out, "wb") as log:
         p = subprocess.Popen([str(binary), "-test.failfast", f"-test.timeout={timeout + 2}s"], cwd=cwd,
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                code = p.wait(timeout=max(0, min(MEM_POLL, deadline - time.monotonic())) if mem else timeout)
-                return "LIVED" if code == 0 else "KILLED"
-            except subprocess.TimeoutExpired:
-                over = mem is not None and session_rss(p.pid) > mem
-                if over or time.monotonic() >= deadline:
-                    os.killpg(p.pid, signal.SIGKILL)
-                    p.wait()
-                    return "KILLED" if over else "TIMED OUT"
+        end, _ = watch(p, timeout, mem)
+        if end == "over":
+            log.write(b"\n--- FAIL: memory_cap\n")  # failed_test's name for it, so the table says why
+        return {"over": "KILLED", "timeout": "TIMED OUT"}.get(end) or ("LIVED" if end == 0 else "KILLED")
+
+
+def watch(p, timeout=None, mem=None):
+    """(end, peak) for Popen p started in its own session: end is its exit code, or "timeout" or
+    "over" (resident memory past mem bytes), after which its session is killed; peak is the most
+    resident memory read across the session, every MEM_POLL seconds."""
+    deadline, peak = None if timeout is None else time.monotonic() + timeout, 0
+    while True:
+        wait = MEM_POLL if deadline is None else max(0, min(MEM_POLL, deadline - time.monotonic()))
+        try:
+            return p.wait(timeout=wait), peak
+        except subprocess.TimeoutExpired:
+            peak = max(peak, session_rss(p.pid))
+            end = "over" if mem is not None and peak > mem else "timeout" if deadline and time.monotonic() >= deadline else None
+            if end:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                return end, peak
 
 
 MEM_POLL = 0.25  # seconds between memory reads: about 50 MB of growth at the 200 MB/s seen on #5011
@@ -791,17 +804,26 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1, shard=(0, 1)):
         return None, f"broker/{pkg}/ does not build its tests"
     if not base.exists():  # `go test -c` writes nothing for a package with no test files: none covered
         return [mutation(s, "NOT COVERED") for s in sites], None
-    began = time.monotonic()
-    r = subprocess.run([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir)
-    if r.returncode != 0 or not profile.exists():
-        return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
-    timeout = 3 * (time.monotonic() - began) + 10
-    blocks = covered_blocks(profile.read_text())
     # Memory caps (egress on #5011): a run alone may hold half the memory free now, and each of
     # `jobs` parallel runs its share of that half, leaving the rest to the builds beside it. A run
-    # past its cap is KILLED; a parallel one is then confirmed alone, under the larger cap.
+    # past its cap is KILLED; a parallel one is then confirmed alone, under the larger cap. A cap
+    # kill counts as detection only if the unmutated tests stay under half of it (L3 on #5026: else
+    # a deletion that lives reads KILLED), so the base run is measured under the same cap, and
+    # fewer workers run when their share would leave a run less than that headroom.
     free = available_memory()
     alone_mem = free // 2 if free else None
+    began = time.monotonic()
+    end, peak = watch(subprocess.Popen([str(base), "-test.failfast", f"-test.coverprofile={profile}"], cwd=pkg_dir,
+                                       start_new_session=True), mem=alone_mem)
+    if alone_mem and (end == "over" or 2 * peak > alone_mem):
+        return None, (f"broker/{pkg}/'s tests hold {peak >> 20} MB before any statement is deleted, more than "
+                      f"half the {alone_mem >> 20} MB memory cap of a run, so a cap kill would not show a test failed")
+    if end != 0 or not profile.exists():
+        return None, f"broker/{pkg}/'s tests fail before any statement is deleted"
+    if alone_mem and peak:
+        jobs = max(1, min(jobs, alone_mem // (2 * peak)))
+    timeout = 3 * (time.monotonic() - began) + 10
+    blocks = covered_blocks(profile.read_text())
 
     def cap(alone):
         return alone_mem if alone or not alone_mem else alone_mem // max(1, jobs)
