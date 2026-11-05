@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// openat2 is unix.Openat2; a test swaps it to return EAGAIN and EINTR,
+// which only a racing rename or signal gives the real call.
+var openat2 = unix.Openat2
+
 // openBeneath opens name beneath dir with openat2: RESOLVE_BENEATH and
 // RESOLVE_NO_SYMLINKS refuse a link at any component (#3989).
 func openBeneath(dir, name string) (*os.File, error) {
@@ -22,7 +26,7 @@ func openBeneath(dir, name string) (*os.File, error) {
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	}
 	for tries := 0; ; tries++ {
-		fd, err := unix.Openat2(int(d.Fd()), name, &how)
+		fd, err := openat2(int(d.Fd()), name, &how)
 		if err == nil {
 			return regularFile(fd, path)
 		}
