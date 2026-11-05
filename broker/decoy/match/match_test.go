@@ -756,16 +756,20 @@ func TestJoinedOnlyBreaks(t *testing.T) {
 	}
 }
 
-// CLK-4: Detect replaces every labelled value, not only the first, and a
-// high-entropy run of two character classes, but not a run of one: the
-// entropy rule wants mixed classes, so a long word stays (#4900).
+// CLK-4: Detect replaces every labelled value that holds a digit, not only
+// the first, and a run of two character classes with 4 bits a character or
+// more, but not a run of one class or of less entropy, so a long word or a
+// repeated letter stays (#4900).
 func TestDetectEachLabelled(t *testing.T) {
 	r := match.Redacted
 	for _, c := range []struct {
 		in, out string
 		n       int
 	}{{"token: aaaaaaaaaaaaaaa1 and secret=bbbbbbbbbbbbbbb2", "token: " + r + " and secret=" + r, 2},
-		{"id abcdefghijklmnop12345678 end", "id " + r + " end", 1}, {"id abcdefghijklmnopqrstuvwx end", "id abcdefghijklmnopqrstuvwx end", 0}} {
+		{"token: aaaaaaaaaaaaaaaaaaaa", "token: aaaaaaaaaaaaaaaaaaaa", 0}, // a labelled value holds a digit
+		{"id abcdefghijklmnop12345678 end", "id " + r + " end", 1}, {"id abcdefghijklmnopqrstuvwx end", "id abcdefghijklmnopqrstuvwx end", 0},
+		{"id aaaaaaaaaaaaaaaaaaaaaaa1 end", "id aaaaaaaaaaaaaaaaaaaaaaa1 end", 0}, // two classes, little entropy
+		{"id abcdefgh12345678abcdefgh12345678 end", "id " + r + " end", 1}} {      // exactly 4 bits a character
 		if out, n := match.Detect(c.in); out != c.out || n != c.n {
 			t.Errorf("Detect(%q) = %q, %d; want %q, %d", c.in, out, n, c.out, c.n)
 		}
