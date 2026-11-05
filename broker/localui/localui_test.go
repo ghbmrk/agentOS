@@ -1357,8 +1357,8 @@ func TestPairingVoidsOtherCodesAndKeepsAtMostEightPhones(t *testing.T) {
 	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+first[1]); !ok || reply != "" || r.srv.setup.st.Owner != "" {
 		t.Fatalf("the oldest phone's code still pairs: %q %v", reply, ok)
 	}
-	if n := len(r.srv.setup.pair); n != maxPairDevices {
-		t.Fatalf("%d pairing codes held", n)
+	if n, m := len(r.srv.setup.pair), len(r.srv.setup.pairOrder); n != maxPairDevices || m != maxPairDevices {
+		t.Fatalf("%d pairing codes held, %d in their order", n, m)
 	}
 	r.post("/setup/number", url.Values{"number": {"+1 555 000 0002"}})
 	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || !strings.HasPrefix(reply, "agentOS is running on") {
@@ -1390,5 +1390,166 @@ func TestTheAIStepRefreshesOnlyWhileTheUpdateRuns(t *testing.T) {
 	r.hooks.mu.Unlock()
 	if p := r.get("/setup"); strings.Contains(p, `http-equiv="refresh"`) {
 		t.Fatalf("a refresh after the update: %s", p)
+	}
+}
+
+func TestTheNumberStepTextsAtMostThreeCodesAnHourAndNoneItCannotMake(t *testing.T) {
+	// #5018: the typed-number step's hourly text bound counts each code
+	// sent, frees itself after an hour, and a code it cannot make is
+	// not texted.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	r.get("/setup")
+	num := url.Values{"number": {"+1 555 000 0001"}}
+	for i := 0; i < NumberTextsPerHour; i++ {
+		r.post("/setup/number", num)
+	}
+	if n := len(r.hooks.sent); n != NumberTextsPerHour {
+		t.Fatalf("%d codes texted, want %d", n, NumberTextsPerHour)
+	}
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); !strings.HasPrefix(e, "Too many codes sent.") || n != NumberTextsPerHour {
+		t.Fatalf("over the bound: %q, %d texts", e, n)
+	}
+	r.advance(time.Hour + time.Minute)
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); e != "" || n != NumberTextsPerHour+1 {
+		t.Fatalf("an hour later: %q, %d texts", e, n)
+	}
+	r.advance(time.Hour + time.Minute)
+	r.srv.cfg.Rand = strings.NewReader("")
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); e == "" || n != NumberTextsPerHour+1 {
+		t.Fatalf("no randomness for the code: %q, %d texts", e, n)
+	}
+}
+
+func TestRestartRefusesOnceDoneWaitsForPairingAndClearsEveryCode(t *testing.T) {
+	// #5018: restart before pairing does nothing; once setup is done it
+	// changes nothing, not even the wrong-secret count; wrong secrets
+	// count for an hour only; and a restart drops every code and sign-in
+	// the page held.
+	post := func(secret string) *http.Request {
+		req := httptest.NewRequest("POST", "/setup/restart", strings.NewReader("secret="+url.QueryEscape(secret)))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req
+	}
+	r := newRig(t)
+	u := r.srv.setup
+	gen := u.gen
+	if err := u.restart(post(""), "other"); err != nil || u.gen != gen || len(u.resets) != 0 {
+		t.Fatalf("a restart before pairing: %v, gen %d, resets %d", err, u.gen, len(u.resets))
+	}
+
+	r.runSetupToHost()
+	for i := 0; i < ResetTriesPerHour; i++ {
+		u.restart(post("wrong"), "other")
+	}
+	if err := u.restart(post("wrong"), "other"); err == nil || !strings.HasPrefix(err.Error(), "Too many tries.") {
+		t.Fatalf("over the bound: %v", err)
+	}
+	r.advance(time.Hour + time.Minute)
+	if err := u.restart(post("wrong"), "other"); err == nil || !strings.HasPrefix(err.Error(), "That reset secret did not match.") {
+		t.Fatalf("an hour later: %v", err)
+	}
+	u.mu.Lock()
+	u.pair["x"], u.pairOrder = "ABCDEFGH", append(u.pairOrder, "x")
+	u.claimCode, u.numCode, u.numTo, u.numDevice = "claim", "123456", "+15550000002", "x"
+	d := [3]string{"https://example.invalid/device", "WXYZ-1234", "Example"}
+	u.device["anthropic"], u.parked["openai"], u.lapsed["codex"], u.answer["ai-key openai"] = d, d, d, true
+	dev := u.st.Device
+	u.mu.Unlock()
+	if err := u.restart(post(""), dev); err != nil {
+		t.Fatal(err)
+	}
+	if len(u.pair)+len(u.pairOrder)+len(u.device)+len(u.parked)+len(u.lapsed)+len(u.answer) != 0 ||
+		u.claimCode+u.numCode+u.numTo+u.numDevice != "" || u.st.Owner != "" {
+		t.Fatalf("left after a restart: pair %v %v, codes %q %q %q %q, device %v %v %v, answers %v",
+			u.pair, u.pairOrder, u.claimCode, u.numCode, u.numTo, u.numDevice, u.device, u.parked, u.lapsed, u.answer)
+	}
+
+	r = newRig(t)
+	u = r.srv.setup
+	r.runSetupToHost()
+	u.mu.Lock()
+	u.st.Done = true
+	u.mu.Unlock()
+	if err := u.restart(post("wrong"), "other"); err != errSetupDone || len(u.resets) != 0 {
+		t.Fatalf("a restart once done: %v, resets %d", err, len(u.resets))
+	}
+}
+
+func TestClearingOneHeldAnswerKeepsTheOthers(t *testing.T) {
+	// #5018: holdLocked copies every other provider's hold.
+	r := newRig(t)
+	u := r.srv.setup
+	yes := true
+	u.mu.Lock()
+	u.holdLocked("anthropic", &yes)
+	u.holdLocked("openai", &yes)
+	u.holdLocked("openai", nil)
+	held := u.st.Unsaved
+	u.mu.Unlock()
+	if len(held) != 1 || !held["anthropic"] {
+		t.Fatalf("held after clearing one: %v", held)
+	}
+}
+
+func TestABusySignInKeepsTheOwnersUntickedAnswer(t *testing.T) {
+	// #5018: a sign-in the provider says still waits, and this page did
+	// not start, keeps the owner's answer on the form.
+	r := newRig(t)
+	r.runSetupToAI()
+	r.hooks.mu.Lock()
+	r.hooks.deviceErr = ErrSignInBusy
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+	page := r.get("/setup")
+	if !strings.Contains(page, "still waiting") {
+		t.Fatalf("no busy message: %s", page)
+	}
+	if f := setupForms(t, page)["ai-device anthropic"]; !strings.Contains(f, `name="private" value="1">`) || strings.Contains(f, "checked") {
+		t.Fatalf("the owner's unticked box came back ticked:\n%s", f)
+	}
+}
+
+func TestAFinishWhoseDoneSaveFailsClosesSetupAtOnce(t *testing.T) {
+	// #5018: setup is closed in memory as soon as Finish ran, even when
+	// the store refuses Done.
+	r := newRig(t)
+	r.srv = r.open(&failDone{})
+	r.runSetup()
+	if !r.srv.setup.done() || r.hooks.finishes != 1 {
+		t.Fatalf("done %v after %d finishes", r.srv.setup.done(), r.hooks.finishes)
+	}
+}
+
+func TestAFailedCardRerunSendsSetupBackToTheCardStepAtOnce(t *testing.T) {
+	// #5018: the finish whose card rerun failed says the card was not
+	// made and reopens the recovery step itself, before any page load
+	// retries it.
+	cr := newCardRig(t)
+	cr.toCard()
+	cr.get("/setup/card")
+	w, g := cr.answers()
+	cr.post("/setup/card", url.Values{"word": {w}, "group": {g}})
+	cr.hooks.mu.Lock()
+	cr.hooks.refuseFinish = func() error {
+		if err := cr.step.Again(func() error { return errors.New("vault busy") }); err != nil {
+			return err
+		}
+		return ErrCardAgain
+	}
+	cr.hooks.connected = true
+	cr.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	cr.hooks.mu.Unlock()
+	cr.post("/setup/recovery", url.Values{"stored": {"1"}})
+	cr.post("/setup/host", url.Values{})
+	u := cr.srv.setup
+	u.mu.Lock()
+	msg, recovery := u.err[u.st.Device], u.st.Recovery
+	u.mu.Unlock()
+	if msg != cardNotMade || recovery {
+		t.Fatalf("after a failed rerun: %q, recovery %v", msg, recovery)
 	}
 }

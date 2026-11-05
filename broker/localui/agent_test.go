@@ -324,6 +324,12 @@ func TestNewRefusesAnIncompleteConfigAndFillsItsDefaults(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	// The store's own read error, not a parse of nothing.
+	if _, err := (FileStore{Path: dir}).Load(); err == nil {
+		t.Fatal("a directory loaded as a setup record")
+	} else if _, ok := err.(*os.PathError); !ok {
+		t.Fatalf("a directory: %T %v", err, err)
+	}
 	s, err := New(Config{Page: testPage(), Rand: strings.NewReader(strings.Repeat("k", 32))})
 	if err != nil {
 		t.Fatal(err)
@@ -422,29 +428,54 @@ func TestTheApprovalsHandlerGuardsItsOwnPathOwnerAndBody(t *testing.T) {
 	// #5016: approvals.go's path, owner and body-cap
 	// checks, and unlock's own same-origin check, which hold even where
 	// ServeHTTP's checks are not in front of them.
+	// Each refusal is the whole answer: the handler stops there, so
+	// nothing is appended to it and nothing after it runs.
 	a := newApprovalRig(t)
-	if w := a.do("GET", "/approvals/x", nil); w.Code != 404 {
-		t.Fatalf("/approvals/x: %d", w.Code)
+	if w := a.do("GET", "/approvals/x", nil); w.Code != 404 || w.Body.String() != "404 page not found\n" {
+		t.Fatalf("/approvals/x: %d %q", w.Code, w.Body.String())
 	}
-	if w := a.post("/approvals/", url.Values{"pad": {strings.Repeat("p", 17<<10)}}); w.Code != 400 {
-		t.Fatalf("an oversized answer: %d", w.Code)
+	if w := a.post("/approvals/", url.Values{"pad": {strings.Repeat("p", 17<<10)}}); w.Code != 400 || w.Body.String() != "Bad request\n" {
+		t.Fatalf("an oversized answer: %d %q", w.Code, w.Body.String())
+	}
+	// An approval code too long for agentosd's answer is refused here.
+	id, _ := a.ch.RequestLocal(pageItem("big"), 0)
+	if w := a.post("/approvals/", answer(a.form(id), "approve", strings.Repeat("7", localapi.MaxCode+1))); !strings.Contains(html.UnescapeString(w.Body.String()), stalePage) {
+		t.Fatalf("an overlong approval code: %s", w.Body.String())
+	}
+	if d := a.decided(); len(d) != 0 {
+		t.Fatalf("an overlong approval code reached the channel: %+v", d)
+	}
+	redirect := func(req *http.Request, to string) string {
+		w := httptest.NewRecorder()
+		http.Redirect(w, req, to, http.StatusSeeOther)
+		return w.Body.String()
 	}
 	s, err := New(Config{Page: testPage()})
 	if err != nil {
 		t.Fatal(err)
 	}
+	req := httptest.NewRequest("GET", "http://10.42.0.1/", nil)
 	w := httptest.NewRecorder()
-	s.approvals(w, httptest.NewRequest("GET", "http://10.42.0.1/", nil))
-	if w.Code != 303 || w.Header().Get("Location") != "/status" {
-		t.Fatalf("no owner: %d %q", w.Code, w.Header().Get("Location"))
+	s.approvals(w, req)
+	if w.Code != 303 || w.Header().Get("Location") != "/status" || w.Body.String() != redirect(req, "/status") {
+		t.Fatalf("no owner: %d %q %q", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
-	req := httptest.NewRequest("POST", "http://10.42.0.1/unlock", strings.NewReader("code=123456"))
+	// A phone agentosd does not know is sent to sign in, and shown nothing else.
+	req = httptest.NewRequest("GET", "http://10.42.0.1/", nil)
+	w = httptest.NewRecorder()
+	a.srv.approvals(w, req)
+	if loc := "/unlock?next=/approvals/"; w.Code != 303 || w.Header().Get("Location") != loc || w.Body.String() != redirect(req, loc) {
+		t.Fatalf("no session: %d %q %q", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	req = httptest.NewRequest("POST", "http://10.42.0.1/unlock", strings.NewReader("code="+a.code()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	w = httptest.NewRecorder()
 	a.srv.unlock(w, reaching(req))
-	if w.Code != 403 {
-		t.Fatalf("a cross-site sign-in: %d", w.Code)
+	// Nothing after the refusal runs: no session is made, even one the
+	// phone would never be sent.
+	if w.Code != 403 || w.Body.String() != "Forbidden\n" || len(w.Header().Values("Set-Cookie")) != 0 {
+		t.Fatalf("a cross-site sign-in: %d %q %v", w.Code, w.Body.String(), w.Header().Values("Set-Cookie"))
 	}
 }
 
@@ -468,5 +499,42 @@ func TestTheCardShowsEachOpenItemItsTermsAndItsUndo(t *testing.T) {
 		if !strings.HasPrefix(v.Items[i].Undo, want) {
 			t.Errorf("item %d undo %q, want %q", i, v.Items[i].Undo, want)
 		}
+	}
+}
+
+func TestTheStatusPageRefreshesUntilTheBoxIsReadyAndSignInNamesTheGridCell(t *testing.T) {
+	// #5018: progress is ready once agentosd answers, the status page
+	// reloads itself only until then, and the sign-in page asks for the
+	// grid cell agentosd names.
+	s, err := New(Config{Page: testPage()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(path string) string {
+		req := httptest.NewRequest("GET", "http://10.42.0.1"+path, nil)
+		req.RemoteAddr = "10.42.0.20:5000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, reaching(req))
+		if w.Code != 200 {
+			t.Fatalf("GET %s: %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+	if p := get("/status"); !strings.Contains(p, `<meta http-equiv="refresh" content="10">`) {
+		t.Fatalf("no refresh before agentosd answers: %s", p)
+	}
+	s.SetOwner(InProcess{
+		localapi.OpStatus: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Status{}, nil
+		},
+		localapi.OpGridCell: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.Text{Text: "C4"}, nil
+		},
+	})
+	if p := get("/status"); strings.Contains(p, `http-equiv="refresh"`) {
+		t.Fatalf("a refresh once agentosd answers: %s", p)
+	}
+	if p := get("/unlock"); !strings.Contains(p, "grid cell <b>C4</b>") {
+		t.Fatalf("the sign-in page does not name the grid cell: %s", p)
 	}
 }

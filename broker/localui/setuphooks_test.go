@@ -545,3 +545,67 @@ func TestAPrivateAnswerThatSavedLeavesNothingKeptOrParked(t *testing.T) {
 		t.Fatalf("a no with nothing held wrote the store: %q", r.setupErr())
 	}
 }
+
+func TestAgentosdSetupEndsItsCallsAndANewCodeKeepsToItsPage(t *testing.T) {
+	// #5018: AgentosdSetup's calls release their context; Get a new code
+	// refuses before the AI step, while the provider is busy, and when a
+	// restart took the shown code meanwhile.
+	var held context.Context
+	ready := func(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
+		held = ctx
+		return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}, nil
+	}
+	if p := (AgentosdSetup{Owner: InProcess{localapi.OpSetupProgress: ready}}).Progress(); p.Phase != "ready" {
+		t.Fatalf("progress %+v", p)
+	}
+	if held == nil || held.Err() != context.Canceled {
+		t.Fatalf("a setup call's context after it returned: %v", held)
+	}
+
+	var s *Server
+	starts := 0
+	a := AgentosdSetup{Owner: InProcess{
+		localapi.OpSetupProgress: ready,
+		localapi.OpSetupProviders: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.SetupProviders{Providers: []localapi.SetupProvider{{ID: "anthropic", Name: "Anthropic", DeviceCode: true}}}, nil
+		},
+		localapi.OpSetupDeviceCode: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			starts++
+			u := s.setup
+			u.mu.Lock()
+			delete(u.device, "anthropic") // a restart, while the provider answers
+			u.mu.Unlock()
+			return localapi.DeviceCode{Link: "https://example.invalid/device", Code: "NEW-1234", From: "Example"}, nil
+		},
+	}}
+	s, err := New(Config{Page: testPage(), Hooks: a, Store: &MemStore{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := s.setup
+	retry := func() error {
+		req := httptest.NewRequest("POST", "/setup/ai-retry", strings.NewReader("provider=anthropic"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return u.aiRetry(req, "")
+	}
+	u.mu.Lock()
+	u.device["anthropic"] = [3]string{"https://example.invalid/device", "OLD-1234", "Example"}
+	u.mu.Unlock()
+	if err := retry(); err == nil || err.Error() != "Finish the earlier steps first." || starts != 0 {
+		t.Fatalf("before the AI step: %v, %d starts", err, starts)
+	}
+	u.mu.Lock()
+	u.st.Host = true
+	u.busy["anthropic"] = true
+	u.mu.Unlock()
+	if err := retry(); err == nil || !strings.HasPrefix(err.Error(), "I am still saving") || starts != 0 {
+		t.Fatalf("while busy: %v, %d starts", err, starts)
+	}
+	u.end("anthropic")
+	if err := retry(); err == nil || err.Error() != "Choose a provider." || starts != 1 {
+		t.Fatalf("a code a restart took: %v, %d starts", err, starts)
+	}
+	if _, shown := u.device["anthropic"]; shown {
+		t.Fatal("the new code is shown after a restart took the old one")
+	}
+}
