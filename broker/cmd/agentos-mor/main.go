@@ -17,8 +17,11 @@
 // init_on_free=1 (mkosi.conf), which zeroes each page and slab object as it
 // is freed: clear refuses to touch MOR without it, and before clearing it
 // syncs and drops the page cache, so cached file pages are freed and
-// zeroed too. Every refusal leaves MOR set, which errs safe: the firmware
-// then wipes memory at the next start, which HW-8 discloses.
+// zeroed too. Files on the /run and /dev/shm tmpfs mounts are never freed
+// (systemd-shutdown never unmounts them), so clear also refuses while a
+// secret-holding directory there (holdDirs) or /dev/shm holds anything.
+// Every refusal leaves MOR set, which errs safe: the firmware then wipes
+// memory at the next start, which HW-8 discloses.
 //
 // It never creates the variable, writes only when the bit is set, keeps
 // every other bit and the variable's attributes, and checks the result.
@@ -48,6 +51,15 @@ const (
 	fsImmutable   = 0x10       // FS_IMMUTABLE_FL, which efivarfs sets on the file
 	efivarfsMagic = 0xde5e81e4 // EFIVARFS_MAGIC
 )
+
+// holdDirs are the tmpfs directories that can hold a secret past its unit's
+// stop: the Owner Card's passphrase, recovery key and staged page authority
+// between the confirm and a successful enrollment (agentos-keeper-enroll
+// keeps them for a retry on failure), the first edge's capture, and any
+// POSIX shared memory. Each is on a mount systemd never unmounts, so its
+// pages are never freed and never zeroed. image/ASSUMPTIONS.md P2-1-mor-1
+// lists the audit of /run.
+var holdDirs = []string{"run/agentos-setup", "run/agentos-link-capture", "dev/shm"}
 
 // sys is the host, rooted at root ("/" on the box; a scratch tree in tests).
 type sys struct {
@@ -112,20 +124,76 @@ func (s *sys) mor() (attrs uint32, data byte, ok bool, err error) {
 }
 
 // wipeOn reports whether the running kernel zeroes memory as it is freed:
-// the last init_on_free= on its command line, as the kernel reads it, is 1.
-// Any other spelling counts as off, which errs safe.
+// the last init_on_free= on its command line is 1. Words split as the
+// kernel's next_arg splits them: blanks inside double quotes do not split,
+// and the kernel takes nothing after a bare "--" (init gets it). Only the
+// exact word init_on_free=1 counts as on; a quoted or other spelling
+// counts as off, which errs safe.
 func (s *sys) wipeOn() (bool, error) {
 	b, err := read(s.path("proc/cmdline"), 4096)
 	if err != nil {
 		return false, err
 	}
 	on := false
-	for _, w := range strings.Fields(string(b)) {
+	for _, w := range cmdlineWords(string(b)) {
+		if w == "--" {
+			break
+		}
 		if v, ok := strings.CutPrefix(w, "init_on_free="); ok {
 			on = v == "1"
 		}
 	}
 	return on, nil
+}
+
+// cmdlineWords splits a kernel command line at blanks outside double
+// quotes, keeping the quotes in each word.
+func cmdlineWords(line string) []string {
+	var out []string
+	var w strings.Builder
+	quoted, in := false, false
+	for _, r := range line {
+		if r == '"' {
+			quoted = !quoted
+		}
+		if !quoted && (r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f') {
+			if in {
+				out = append(out, w.String())
+				w.Reset()
+				in = false
+			}
+			continue
+		}
+		w.WriteRune(r)
+		in = true
+	}
+	if in {
+		out = append(out, w.String())
+	}
+	return out
+}
+
+// held names the first holdDirs entry that is not empty; a directory that
+// is absent is empty, and one that cannot be read counts as held.
+func (s *sys) held() (string, error) {
+	for _, d := range holdDirs {
+		f, err := os.OpenFile(s.path(d), os.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading /%s: %w; MOR left set", d, err)
+		}
+		names, err := f.Readdirnames(1)
+		f.Close()
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("reading /%s: %w; MOR left set", d, err)
+		}
+		if len(names) > 0 {
+			return "/" + d, nil
+		}
+	}
+	return "", nil
 }
 
 // clearImmutable drops efivarfs's immutable flag, as bootctl does before a
@@ -164,6 +232,11 @@ func (s *sys) clear() (string, error) {
 	}
 	if !on {
 		return "", errors.New("the kernel does not zero freed memory (no init_on_free=1); MOR left set, so the firmware wipes memory at the next start")
+	}
+	if d, err := s.held(); err != nil {
+		return "", err
+	} else if d != "" {
+		return "", fmt.Errorf("%s still holds files, which are never freed or zeroed; MOR left set, so the firmware wipes memory at the next start", d)
 	}
 	// The wipe: every secret-holding process has exited, so its pages are
 	// free and zeroed; the page cache's clean pages are freed (and zeroed)

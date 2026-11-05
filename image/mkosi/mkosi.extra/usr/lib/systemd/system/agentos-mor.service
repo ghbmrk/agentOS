@@ -14,6 +14,8 @@ After=sys-firmware-efi-efivars.mount
 Before=sysinit.target shutdown.target tmp.mount
 Conflicts=shutdown.target
 ConditionPathExists=/sys/firmware/efi
+# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run.
+RefuseManualStop=yes
 
 [Service]
 Type=oneshot

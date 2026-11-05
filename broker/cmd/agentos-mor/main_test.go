@@ -247,3 +247,78 @@ func TestStatusReadsOnly(t *testing.T) {
 		t.Fatal("no usage error")
 	}
 }
+
+// Files on /run and /dev/shm are never freed, so init_on_free never zeroes
+// them: while a secret-holding directory there holds anything (the Owner
+// Card's factors after a failed or pending enrollment, the first edge's
+// capture, shared memory), MOR stays set (Security on #5009, 1).
+func TestHeldTmpfsLeavesMORSet(t *testing.T) {
+	for _, rel := range []string{"run/agentos-setup/passphrase", "run/agentos-setup/.x",
+		"run/agentos-link-capture/first-edge", "dev/shm/seg", "run/agentos-setup/sub/"} {
+		t.Run(rel, func(t *testing.T) {
+			h := newHost(t, wipe, morSet)
+			p := filepath.Join(h.s.root, rel)
+			if strings.HasSuffix(rel, "/") {
+				if err := os.MkdirAll(p, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("synthetic-canary"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rc, _, errOut := h.run("clear")
+			if rc != 1 || !strings.Contains(errOut, "MOR left set") {
+				t.Fatalf("rc %d, %q", rc, errOut)
+			}
+			if got := h.file(morPath); !bytes.Equal(got, morSet) || len(h.events) != 0 {
+				t.Fatalf("MOR %x, events %v", got, h.events)
+			}
+		})
+	}
+	t.Run("empty directories", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		for _, d := range holdDirs {
+			if err := os.MkdirAll(filepath.Join(h.s.root, d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if rc, out, errOut := h.run("clear"); rc != 0 || out != "agentos-mor: mor=cleared\n" {
+			t.Fatalf("rc %d, %q, %q", rc, out, errOut)
+		}
+	})
+	t.Run("a link in place of the directory", func(t *testing.T) {
+		h := newHost(t, wipe, morSet)
+		if err := os.MkdirAll(filepath.Join(h.s.root, "run"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(h.s.root, "run/agentos-setup")); err != nil {
+			t.Fatal(err)
+		}
+		if rc, _, _ := h.run("clear"); rc != 1 {
+			t.Fatal("cleared through a link it could not read")
+		}
+	})
+}
+
+// The kernel splits its command line at blanks outside double quotes and
+// takes nothing after "--" (Security on #5009, 2).
+func TestWipeOnReadsAsTheKernel(t *testing.T) {
+	for cmdline, want := range map[string]bool{
+		"quiet -- init_on_free=1":          false,
+		`quiet x="a init_on_free=1 b"`:     false,
+		`quiet init_on_free="1"`:           false,
+		"quiet\tinit_on_free=1\n":          true,
+		`x="a b" init_on_free=1 -- y`:      true,
+		"init_on_free=1 -- init_on_free=0": true,
+		`x="unterminated init_on_free=1`:   false,
+	} {
+		h := newHost(t, cmdline, morSet)
+		if on, err := h.s.wipeOn(); err != nil || on != want {
+			t.Errorf("%q: on %v (%v), want %v", cmdline, on, err, want)
+		}
+	}
+}

@@ -40,6 +40,8 @@ class MorUnitTest(unittest.TestCase):
         self.assertEqual(words(s, "Conflicts"), ["shutdown.target"])
         self.assertNotIn("sysinit.target", words(s, "After"))
         self.assertNotIn("local-fs.target", words(s, "After"))
+        # A manual stop would run the clear while the secret holders still run (Security on #5009, 3).
+        self.assertEqual(s["RefuseManualStop"], ["yes"])
         self.assertEqual(s["Type"], ["oneshot"])
         self.assertEqual(s["RemainAfterExit"], ["yes"])
         self.assertEqual(s["ExecStop"], ["/usr/lib/agentos/agentos-mor clear"])
