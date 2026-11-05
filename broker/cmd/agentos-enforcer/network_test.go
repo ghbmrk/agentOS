@@ -863,10 +863,12 @@ func TestReadingStepsFail(t *testing.T) {
 		x.fire.mu.Lock()
 		x.fire.listing, x.fire.listed, x.fire.listAt = listing(t, x, doc, 7, 10), 0, at
 		x.fire.mu.Unlock()
-		n := updates()
+		n, logged := updates(), len(x.logText())
 		x.advance(readEvery)
-		if !strings.Contains(x.logText(), want) {
-			t.Fatalf("log %q, want %q", x.logText(), want)
+		// Only the log this try added: an earlier try's line must not
+		// stand in for this one's.
+		if added := x.logText()[logged:]; !strings.Contains(added, want) {
+			t.Fatalf("log added %q, want %q", added, want)
 		}
 		if updates() != n {
 			t.Fatalf("a drop update followed %q", want)
