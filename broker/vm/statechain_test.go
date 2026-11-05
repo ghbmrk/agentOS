@@ -116,7 +116,9 @@ func TestOpenRefusesStateDirAnotherUidOwns(t *testing.T) {
 			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
 			theirs := mode(t, filepath.Join(top, "theirs"), 0o700)
 			mode(t, filepath.Join(theirs, "state"), 0o700)
-			if err := os.Lchown(chown(top), 65534, 65534); err != nil {
+			// uid 65534, gid 0: they differ, so an owner check that read the gid
+			// would pass this path and fail the test.
+			if err := os.Lchown(chown(top), 65534, 0); err != nil {
 				t.Fatal(err)
 			}
 			cfg := newCfg(t)
