@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -290,25 +291,13 @@ func TestHeardCanonical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := next.Device("tv").MDNS, canon.Device("tv").MDNS; len(got) != 2 || !equalNames(got, want) {
+	if got, want := next.Device("tv").MDNS, canon.Device("tv").MDNS; len(got) != 2 || !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard's tv pins %q, canonical %q", got, want)
 	}
 	g.heard["vlan104"] = [][]string{{"_bad", "local"}}
 	if _, _, err := g.s.heard(home(1), pairedTV(2)); err == nil || !strings.Contains(err.Error(), "mDNS name") {
 		t.Errorf("a malformed heard name: %v", err)
 	}
-}
-
-func equalNames(a, b [][]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if strings.Join(a[i], ".") != strings.Join(b[i], ".") {
-			return false
-		}
-	}
-	return true
 }
 
 // NET-4: an approve answer is one JSON value: a refused tap, an unknown
