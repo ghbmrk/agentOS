@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/types"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -582,4 +583,43 @@ func seenEnv(t *testing.T, env Env) []string {
 	got := strings.Fields(string(out))
 	sort.Strings(got)
 	return got
+}
+
+// REQ: CRED-1
+// bash run as /bin/sh (VULN-debian) imports exported functions
+// (BASH_FUNC_<name>%%), SHELLOPTS and BASHOPTS from its environment, and
+// bash by name also reads BASH_ENV (ENV when interactive): an inherited
+// one changes what a child shell runs (#3999). No child is given one,
+// even when the key is on the allowlist, so widening the allowlist
+// cannot let one through.
+func TestShellStateNeverReachesAChild(t *testing.T) {
+	names := []string{"BASH_FUNC_id%%", "BASH_FUNC_id()", "BASH_FUNC_x", "SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV"}
+	for _, k := range names {
+		if allowedKeys[k] != "" {
+			t.Errorf("%s is on the allowlist", k)
+		}
+	}
+	saved := maps.Clone(allowedKeys)
+	t.Cleanup(func() { allowedKeys = saved })
+	for _, k := range names {
+		allowedKeys[k] = "a future widening"
+	}
+	for _, k := range names {
+		t.Run(k, func(t *testing.T) {
+			c := Command(context.Background(), NewEnv("PATH=/usr/bin:/bin", k+"=() { echo FUNC-IMPORTED; }"), Options{}, "/bin/sh", "-c", "id")
+			err := c.Run()
+			if err == nil || !strings.Contains(err.Error(), "shell state") {
+				t.Fatalf("not refused as shell state: %v", err)
+			}
+			if c.Pid() > 0 {
+				t.Fatalf("a process started: pid %d", c.Pid())
+			}
+		})
+	}
+	// Names that only share a stem are not shell state.
+	allowedKeys["BASH_FUNCTIONAL"] = "test"
+	allowedKeys["XSHELLOPTS"] = "test"
+	if err := NewEnv("BASH_FUNCTIONAL=1", "XSHELLOPTS=1").check(); err != nil {
+		t.Fatalf("a look-alike name is refused: %v", err)
+	}
 }
