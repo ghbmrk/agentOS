@@ -111,6 +111,7 @@ TIER_A_BROKER = {
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check
+    "call",                       # the owner's call: transcripts, keys, and the CH-21 check before speech (VOICE-ro-a, #4934)
     "modem", "modemlink", "owner",
     "photo",                      # owner photos; also (b): runs their decoder in a one-shot sandbox
     "question",                   # the owner's texted answers

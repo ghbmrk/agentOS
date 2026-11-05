@@ -103,7 +103,7 @@ func TestGoldenConfig(t *testing.T) {
 			t.Errorf("%s differs from %s (run with -update and review the diff):\n%s", p, golden, got[p])
 		}
 	}
-	all := strings.Join([]string{got[PathNetwork], got[PathWireless], got[PathFirewall], got[PathDHCP], got[PathDropbear], got[PathAuthKeys]}, "\n")
+	all := strings.Join([]string{got[PathNetwork], got[PathWireless], got[PathFirewall], got[PathDHCP], got[PathUHTTPd], got[PathDropbear], got[PathAuthKeys]}, "\n")
 	if strings.Contains(all, "core-held") {
 		t.Error("a core-proposed id, host or destination reached the access point")
 	}
@@ -130,6 +130,14 @@ func TestGoldenConfig(t *testing.T) {
 	}
 	if !strings.Contains(got[PathDropbear], "option Interface 'admin'") || !strings.Contains(got[PathDropbear], "PasswordAuth 'off'") {
 		t.Error("SSH is not admin-VLAN and key only")
+	}
+	if strings.Count(got[PathUHTTPd], "list listen_") != 1 || !strings.Contains(got[PathUHTTPd], "\tlist listen_http '127.0.0.1:80'\n") {
+		t.Error("the web admin listens beyond loopback")
+	}
+	for _, s := range []string{"prefix", "listen_https"} {
+		if strings.Contains(got[PathUHTTPd], s) {
+			t.Errorf("the web admin serves %q", s)
+		}
 	}
 	if strings.Contains(got[PathWireless], "CANARYSETUP") {
 		t.Error("the setup network outlived enrolment")

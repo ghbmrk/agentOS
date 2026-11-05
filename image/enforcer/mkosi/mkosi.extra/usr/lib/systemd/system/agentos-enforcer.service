@@ -1,0 +1,20 @@
+# Placeholder for the enforcer daemon (broker/cmd/agentos-enforcer, ENF-l): ENF-m-b replaces
+# ExecStart with the daemon and its confinement. Until then it holds the unit's name and order, so
+# the self-check and boot counting are exercised with a unit in the daemon's place. No network, no
+# privileges, nothing written.
+[Unit]
+Description=agentOS enforcer (placeholder until ENF-m-b)
+
+[Service]
+ExecStart=/usr/bin/sleep infinity
+DynamicUser=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoExecPaths=/
+ExecPaths=/usr
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

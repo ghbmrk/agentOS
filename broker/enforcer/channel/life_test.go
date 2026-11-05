@@ -7,7 +7,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	"math"
 	"net"
 	"path/filepath"
@@ -447,7 +446,7 @@ func waitDone(t *testing.T, cl *client, what string) {
 // writer that breaks io.Writer's contract, or a deadline that fires after
 // the flush (#4607).
 type writeThenFail struct {
-	io.ReadWriter
+	net.Conn
 	armed   atomic.Bool
 	wrote   chan struct{}
 	release chan struct{}
@@ -455,9 +454,9 @@ type writeThenFail struct {
 
 func (w *writeThenFail) Write(b []byte) (int, error) {
 	if !w.armed.CompareAndSwap(true, false) {
-		return w.ReadWriter.Write(b)
+		return w.Conn.Write(b)
 	}
-	n, err := w.ReadWriter.Write(b)
+	n, err := w.Conn.Write(b)
 	if err != nil {
 		return n, err
 	}
@@ -477,7 +476,7 @@ func TestFailedSendKeepsAnAnsweredChallenge(t *testing.T) {
 		c.Answer = func(uint64, []byte) { inAnswer <- struct{}{}; <-hold }
 	})
 	a, b := net.Pipe()
-	w := &writeThenFail{ReadWriter: b, wrote: make(chan struct{}), release: make(chan struct{})}
+	w := &writeThenFail{Conn: b, wrote: make(chan struct{}), release: make(chan struct{})}
 	cl := &client{t: t, conn: a, done: make(chan error, 1)}
 	go func() { cl.done <- r.ch.Serve(w, exporter); b.Close() }()
 	h, err := wire.SignHello(wire.RoleCore, r.core, exporter)
@@ -618,7 +617,7 @@ func TestLinesBucketedWhileATripIsInFlight(t *testing.T) {
 // failFirstWrite is a connection's writer whose next write, once armed,
 // fails with nothing written.
 type failFirstWrite struct {
-	io.ReadWriter
+	net.Conn
 	armed atomic.Bool
 }
 
@@ -626,7 +625,7 @@ func (w *failFirstWrite) Write(b []byte) (int, error) {
 	if w.armed.CompareAndSwap(true, false) {
 		return 0, errors.New("write failed")
 	}
-	return w.ReadWriter.Write(b)
+	return w.Conn.Write(b)
 }
 
 // TestFailedSendFreesAnUnansweredChallenge (#4607, ENF-d-11): a challenge
@@ -636,7 +635,7 @@ func (w *failFirstWrite) Write(b []byte) (int, error) {
 func TestFailedSendFreesAnUnansweredChallenge(t *testing.T) {
 	r := newRig(t, nil)
 	a, b := net.Pipe()
-	w := &failFirstWrite{ReadWriter: b}
+	w := &failFirstWrite{Conn: b}
 	cl := &client{t: t, conn: a, done: make(chan error, 1)}
 	go func() { cl.done <- r.ch.Serve(w, exporter); b.Close() }()
 	h, err := wire.SignHello(wire.RoleCore, r.core, exporter)

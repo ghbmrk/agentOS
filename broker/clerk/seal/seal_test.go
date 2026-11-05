@@ -604,3 +604,44 @@ func TestReplaceAndPutSwapsBothSlots(t *testing.T) {
 		st.Close()
 	}
 }
+
+// A Put keeps every other entry: the new entry set is the old one plus the
+// new name, in memory and on the drive.
+func TestPutKeepsTheOtherEntries(t *testing.T) {
+	rec := recovery(t)
+	path, s := create(t, rec)
+	want := map[string][]byte{"x/a": []byte("entry-a"), "x/b": []byte("entry-b")}
+	for _, name := range []string{"x/a", "x/b"} {
+		if err := s.Put(name, want[name]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, st := range []*seal.Store{s, unlock(t, path, rec)} {
+		for name, v := range want {
+			got, ok, err := st.Get(name)
+			if err != nil || !ok || !bytes.Equal(got, v) {
+				t.Fatalf("Get(%q) = %q, %v, %v after two Puts; want %q", name, got, ok, err, v)
+			}
+		}
+	}
+}
+
+// Close wipes every entry's value and drops the entries (STO-2a-e): the
+// bytes the store held read as zeros afterwards.
+func TestCloseWipesTheEntries(t *testing.T) {
+	_, s := create(t, recovery(t))
+	if err := s.Put("x/a", []byte("entry-canary-a")); err != nil {
+		t.Fatal(err)
+	}
+	held := seal.Entries(s)["x/a"]
+	if len(held) == 0 {
+		t.Fatal("the store holds no x/a entry")
+	}
+	s.Close()
+	if !bytes.Equal(held, make([]byte, len(held))) {
+		t.Fatalf("Close left the entry's bytes: %q", held)
+	}
+	if n := len(seal.Entries(s)); n != 0 {
+		t.Fatalf("Close left %d entries", n)
+	}
+}

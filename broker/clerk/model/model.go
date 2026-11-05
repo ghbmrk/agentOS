@@ -75,14 +75,16 @@ type Ledger interface {
 // Clerk is the model clerk. Once a log write it owes fails (spend that
 // happened, or a pool reading) it makes no further call until the log has
 // recorded it, so no spend goes unmetered and no pool stays open on a reading
-// the log missed.
+// the log missed. A pool whose reading the log refuses as text is closed in
+// its memory until that reading's latest window reset, for the same reason.
 type Clerk struct {
 	Routes   map[string]Price
 	Provider Provider
 	Ledger   Ledger
 
-	mu   sync.Mutex
-	owed []func(now int64) error
+	mu     sync.Mutex
+	owed   []func(now int64) error
+	closed map[string]int64 // pool: closed until (unix ms)
 }
 
 // tokens is the clerk's own count: four bytes a token, rounded up.
@@ -175,7 +177,8 @@ func (c *Clerk) flush(now int64) error {
 // when only its pool reading fails: a reading the log refuses is recorded as a
 // full pool instead, since a reading can only narrow, and one the log cannot
 // write is owed until its reset time. A write the log refuses as text is
-// dropped and the reply withheld (Settle).
+// dropped and the reply withheld; a dropped reading closes its pool until
+// the reading's latest reset (Settle).
 func (c *Clerk) Call(now int64, plan, route, prompt string, maxOut int64) (string, error) {
 	adm, err := c.Admit(now, plan, route, tokens(prompt), maxOut)
 	if err != nil {
@@ -221,11 +224,15 @@ func (c *Clerk) Admit(now int64, plan, route string, in, maxOut int64) (*Admissi
 // reported, nothing if callErr is ErrNotSent, the clerk's own count (the
 // admitted input and out output tokens) if callErr is nil, and else the
 // admitted worst case; and the pool reading, if any. A second Settle
-// records nothing and returns the first one's answer. An error is spend
-// the log has not recorded: no further call is made until it has. An error
-// that is kernel.ErrNotText is a write the log refused and the clerk
-// dropped, which shuts nothing: dropped spend leaves the admission charged
-// at its worst case, a dropped reading leaves the pool on its last one.
+// records nothing and returns the first one's answer. An error means the
+// log does not have the call. A write it could not make is owed, and no
+// further call is made until the log has it. A write it refused as text
+// (kernel.ErrNotText, which crosses the kernel socket as itself) is dropped,
+// and the drop shuts nothing: dropped spend leaves the admission charged at
+// its worst case, and a dropped reading closes its pool, in this clerk's
+// memory, until the reading's latest window reset. One error can carry both
+// (an owed meter and a dropped reading), so errors.Is(err, ErrNotText) does
+// not mean the clerk is open.
 func (s *Admission) Settle(now int64, u Usage, out int64, callErr error) error {
 	s.once.Do(func() { s.err = s.c.settle(now, s, u, out, callErr) })
 	return s.err
@@ -281,13 +288,32 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 			for i := range ws {
 				ws[i].Used = kernel.PoolFull
 			}
-			return c.Ledger.ReadPool(now, p.Pool, ws)
+			err := c.Ledger.ReadPool(now, p.Pool, ws)
+			if errors.Is(err, kernel.ErrNotText) {
+				// Dropped, here or on a retry (flush): the log keeps the
+				// pool on its last reading, which may be lower, so the
+				// clerk keeps it closed as the full reading would (#4831).
+				c.closePool(p.Pool, ws)
+			}
+			return err
 		})
 		if errors.Is(perr, kernel.ErrNotText) {
 			merr = errors.Join(merr, perr) // dropped, so the call says so
 		}
 	}
 	return merr
+}
+
+// closePool closes pool until the latest reset of ws, under the lock.
+func (c *Clerk) closePool(pool string, ws []kernel.WindowReading) {
+	until := c.closed[pool]
+	for _, w := range ws {
+		until = max(until, w.ResetAt)
+	}
+	if c.closed == nil {
+		c.closed = map[string]int64{}
+	}
+	c.closed[pool] = until
 }
 
 // admit checks the route and admits the call's worst case, under the lock.
@@ -314,6 +340,11 @@ func (c *Clerk) admit(now int64, plan, route string, in, maxOut int64) (Price, i
 		return Price{}, 0, none, err
 	}
 	if p.Pool != "" {
+		if until, ok := c.closed[p.Pool]; ok && now < until {
+			return Price{}, 0, none, &key.Refusal{Code: kernel.CPool, Detail: p.Pool + ": a reading the log refused"}
+		} else if ok {
+			delete(c.closed, p.Pool)
+		}
 		if r := c.Ledger.AdmitPool(now, p.Pool); r != nil {
 			return Price{}, 0, none, r
 		}

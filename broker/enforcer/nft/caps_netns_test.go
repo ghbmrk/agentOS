@@ -4,10 +4,13 @@ package nft_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"os/exec"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,13 +34,14 @@ type rig struct {
 	now  time.Time
 	c    *traffic.Counter
 	boot string
-	past bool // the kernel's quota edge (load.Loader.QuotaPast)
+	past bool   // the kernel's quota edge (load.Loader.QuotaPast)
+	last []byte // the listing of the last reading
 }
 
-// drop is the counter's drop state on this kernel.
+// drop is the counter's drop state on this kernel, after the last reading.
 func (r *rig) drop() nft.Drop {
 	p := r.c.Drop()
-	p.Past = r.past
+	p.Past, p.Read = r.past, r.last
 	return p
 }
 
@@ -92,13 +96,20 @@ func (r *rig) load() {
 // read takes one reading into the counter and writes its drop back.
 func (r *rig) read() []traffic.Overrun {
 	r.t.Helper()
-	got, err := traffic.ReadingOf(r.d, nft.FixtureLayout(), r.boot, r.h.List())
+	over := r.reading()
+	r.update()
+	return over
+}
+
+// reading takes one reading into the counter, and writes nothing back.
+func (r *rig) reading() []traffic.Overrun {
+	r.t.Helper()
+	r.last = r.h.List()
+	got, err := traffic.ReadingOf(r.d, nft.FixtureLayout(), r.boot, r.last)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	over := r.c.Add(got)
-	r.update()
-	return over
+	return r.c.Add(got)
 }
 
 // update writes the counter's drop to the running ruleset.
@@ -243,6 +254,36 @@ func TestCapGroupSharesOneDrop(t *testing.T) {
 	r.expectOver("past the group's cap", r.read(), traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"c.example", "d.example"}, Cap: 120, Count: 180})
 }
 
+// NET-2 Byte caps (#4614, L3 R2 on #4611): bytes the core sends between
+// a reading and the update after it count against the quota that update
+// starts. a's and b's groups merge at a reading (b's set now holds a's
+// address, which carried bytes), and before the update each old quota
+// still lets its own cap through: 50 more to a's address and 100 to b's
+// bring the merged group to its cap of 200 while the counter read 50. The
+// merged quota starts from the 50 plus what the old ones charged since,
+// so the next datagram is dropped and trips. Catches a merged quota that
+// starts from the reading's count alone, letting the bytes since then
+// past the merged cap once.
+func TestCapMergeCarriesBytesSinceTheReading(t *testing.T) {
+	if !nft.InNetns(t) {
+		return
+	}
+	r := newRig(t, capDoc(map[string]uint64{"a.example": 100, "b.example": 100}, 1<<20))
+	r.answer("a.example", nft.NetCore)
+	r.answer("b.example", nft.NetAllow)
+	r.expectOver("nothing sent", r.read())
+	// 22 payload bytes are 50 IP bytes, 72 are 100.
+	r.send("core", nft.NetCore, 22, true, "a: 50 of 100")
+	r.expectOver("a within its cap", r.read())
+	r.answer("b.example", nft.NetCore)
+	r.expectOver("the groups merge at 50 of 200", r.reading())
+	r.send("core", nft.NetCore, 22, true, "a's old quota: 100 of 100, before the update")
+	r.send("core", nft.NetAllow, 72, true, "b's old quota: 100 of 100, before the update")
+	r.update()
+	r.send("core", nft.NetAllow, 1, false, "the merged group past 200 after the update")
+	r.expectOver("the merged group past its cap", r.read(), traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"a.example", "b.example"}, Cap: 200, Count: 229})
+}
+
 // NET-2 Byte caps, ENF-cap-3 (L3 on #4611): an address two destinations'
 // sets hold, carrying nothing today, never raises either one's own cap in
 // the kernel. a's own address stops at a's cap, as the counter trips
@@ -336,9 +377,12 @@ func TestCapDropSurvivesRestart(t *testing.T) {
 // NET-2 Byte caps ("acknowledgements and retransmissions included"): a
 // fake core's TCP past its cap is dropped and trips. Uploading past the
 // cap, its segments past it never arrive however often it retransmits
-// them, and each retransmission counts. Downloading, its acknowledgements
-// alone pass the cap, so the download stalls. Catches counting payload
-// only, or counting only what was let through.
+// them, and each retransmission counts: the core's stack retransmits, and
+// the firewall's count for each destination is at least every IP byte
+// the core's own output hook sent there (#4614, L3 R4 on #4611).
+// Downloading, its acknowledgements alone pass the cap, so the download
+// stalls. Catches counting payload only, counting only what was let
+// through, or counting a retransmitted segment once.
 func TestCapDropsTCPWithAcksAndRetransmissions(t *testing.T) {
 	if !nft.InNetns(t) {
 		return
@@ -348,6 +392,30 @@ func TestCapDropsTCPWithAcksAndRetransmissions(t *testing.T) {
 	r.answer("up.example", nft.NetDoH)
 	r.answer("down.example", nft.NetCore)
 	r.read()
+	// The core counts what its own stack sends to each server.
+	r.h.In("core", "nft", "add table ip wire; add counter ip wire up; add counter ip wire down; "+
+		"add chain ip wire out { type filter hook output priority filter; }; "+
+		"add rule ip wire out ip daddr "+nft.NetDoH+" counter name up; add rule ip wire out ip daddr "+nft.NetCore+" counter name down")
+	retrans := func() int {
+		var head []string
+		for line := range strings.Lines(r.h.In("core", "cat", "/proc/net/snmp")) {
+			f := strings.Fields(line)
+			if len(f) == 0 || f[0] != "Tcp:" {
+				continue
+			}
+			if head == nil {
+				head = f
+				continue
+			}
+			if i := slices.Index(head, "RetransSegs"); i > 0 && i < len(f) {
+				n, _ := strconv.Atoi(f[i])
+				return n
+			}
+		}
+		t.Fatal("no RetransSegs in the core's /proc/net/snmp")
+		return 0
+	}
+	before := retrans()
 	got := make(chan int, 1)
 	r.h.Serve(nft.NetDoH, 9300, func(c net.Conn) {
 		c.SetDeadline(time.Now().Add(3 * time.Second))
@@ -368,6 +436,27 @@ func TestCapDropsTCPWithAcksAndRetransmissions(t *testing.T) {
 		return int(n)
 	})
 	up := <-got
+	resent := retrans() - before
+	wire := map[string]uint64{}
+	for _, c := range []string{"up", "down"} {
+		var doc struct {
+			Nftables []struct {
+				Counter *struct{ Bytes uint64 } `json:"counter"`
+			} `json:"nftables"`
+		}
+		if err := json.Unmarshal([]byte(r.h.In("core", "nft", "-j", "list", "counter", "ip", "wire", c)), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range doc.Nftables {
+			if o.Counter != nil {
+				wire[c+".example"] = o.Counter.Bytes
+			}
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // the last segments cross the enforcer
+	if resent == 0 {
+		t.Errorf("the core retransmitted nothing")
+	}
 	if up >= upCap {
 		t.Errorf("the server got %d bytes of an upload capped at %d IP bytes (core wrote %d)", up, upCap, sent)
 	}
@@ -375,10 +464,14 @@ func TestCapDropsTCPWithAcksAndRetransmissions(t *testing.T) {
 		t.Errorf("a download whose acknowledgements pass the cap finished (%d bytes)", down)
 	}
 	over := r.read()
-	t.Logf("uploaded %d of %d bytes written, downloaded %d bytes; overruns %+v", up, sent, down, over)
+	t.Logf("uploaded %d of %d bytes written, downloaded %d bytes, %d segments retransmitted, the core's stack sent %v IP bytes; overruns %+v", up, sent, down, resent, wire, over)
 	for _, dest := range []string{"up.example", "down.example"} {
-		if !slices.ContainsFunc(over, func(o traffic.Overrun) bool { return slices.Equal(o.Dests, []string{dest}) && o.Count > o.Cap }) {
+		i := slices.IndexFunc(over, func(o traffic.Overrun) bool { return slices.Equal(o.Dests, []string{dest}) })
+		switch {
+		case i < 0 || over[i].Count <= over[i].Cap:
 			t.Errorf("%s past its cap did not trip: %+v", dest, over)
+		case over[i].Count < wire[dest]:
+			t.Errorf("%s counted %d IP bytes, less than the %d the core's stack sent", dest, over[i].Count, wire[dest])
 		}
 	}
 	if r.h.Counter(nft.CapDrop) < 2 {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 )
 
 // REQ: LOG-4, KRN-erase
@@ -155,7 +156,7 @@ func TestALooseKeyTableStopsTheStart(t *testing.T) {
 // The real process never starts without a table: RunKernel refuses an
 // empty KeyDir before anything else.
 func TestRunKernelNeedsAKeyTable(t *testing.T) {
-	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log")}, handoff.KernelKeys{Head: handoff.Hide(headPriv)}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), MainConfig{Log: filepath.Join(t.TempDir(), "log")}, handoff.KernelKeys{Head: secret.Hide(headPriv)}, &kernel.MemAnchor{})
 	if err == nil || !errors.Is(err, ErrNoKeyTable) {
 		t.Fatalf("got %v, want ErrNoKeyTable", err)
 	}

@@ -1,0 +1,9 @@
+// Build-time apt only (mkosi.pkgmngr never reaches the image). snapshot.debian.org sometimes answers
+// "503 No healthy backends" for minutes (#4518: three CI builds on 2026-11-01). apt retries a 503 as
+// a transient failure, but its default 3 tries wait 1+2+4 s, so one outage killed the build. 20 tries
+// with the delay doubling from 1 s up to 60 s wait about 15 minutes (1+2+4+8+16+32+14*60 = 903 s)
+// before apt fails with its named error, as before. The bytes are pinned, so a retry fetches the
+// same signed, hashed packages. tests/test_image.py pins these values and allows no other key.
+Acquire::Retries "20";
+Acquire::Retries::Delay "true";
+Acquire::Retries::Delay::Maximum "60";

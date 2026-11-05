@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -304,9 +305,11 @@ func TestWANLeases(t *testing.T) {
 // the core's, the Owner network's or a device's name (#4764) or in the
 // enforcer's own (#4771), one from the internet to a device, and one from a
 // device to the enforcer, each with a source address routed out of another
-// interface or local, are still dropped as spoofed. Catches an exemption
-// that lets the internet pose as a segment or as the enforcer, or a
-// segment as another, on the DHCP client ports.
+// interface or local, are still dropped as spoofed, and so is one from the
+// WAN in a broadcast or multicast name (#4841). Catches an exemption that
+// lets the internet pose as a segment or as the enforcer, or a segment as
+// another, on the DHCP client ports, and a martian source the reverse-path
+// check passes uncounted.
 func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -374,7 +377,18 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	spoof(h.hosts["isp"], "udp4", devAddr(102), devAddr(101), 67, 68)
 	// From a device, in another's name, to the enforcer's address on its own VLAN.
 	spoof(h.hosts["101"], "udp4", devAddr(103), "10.101.0.1", 67, 68)
-	want := 27
+	// From the WAN, in the WAN subnet's own broadcast, the limited
+	// broadcast and a multicast name, to the enforcer's WAN address, as a
+	// DHCP answer and from another port: dropped and counted before the
+	// exemptions or the input hook (#4841). The fib routes the subnet's
+	// broadcast back out of the WAN, so the general check alone passes it,
+	// and with rp_filter off the kernel would deliver it.
+	for _, src := range []string{"192.168.1.255", "255.255.255.255", "224.0.0.1"} {
+		for _, sport := range []int{67, 1234} {
+			martian(t, h.hosts["isp"], src, enfWAN, sport, 68)
+		}
+	}
+	want := 27 + 3*2*3
 	if h.v6 {
 		h.seg6("core")
 		h.seg6("owner")
@@ -418,5 +432,137 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // nothing more arrives
 	if n = h.counter(Spoofed) - before; n != want {
 		t.Errorf("spoofed moved %d, want %d", n, want)
+	}
+}
+
+// martian writes from x three UDP datagrams src:sport → dst:dport out of
+// x's own link, the IPv4 header written whole: the kernel routes no
+// datagram of its own from a broadcast or multicast source.
+func martian(t *testing.T, x *host, src, dst string, sport, dport int) {
+	t.Helper()
+	pkt := udp4(src, dst, sport, dport, "answer")
+	within(t, x, func() {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW) // header included
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "eth0"); err != nil {
+			t.Fatal(err)
+		}
+		to := &unix.SockaddrInet4{Addr: [4]byte(net.ParseIP(dst).To4())}
+		for range 3 {
+			if err := unix.Sendto(fd, pkt, 0, to); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+// unspecified writes from x three UDP datagrams 0.0.0.0:sport → dst:dport
+// carrying payload, each as a link-layer broadcast out of x's own link:
+// the kernel fills an unspecified source in a header it is handed with
+// its route's, so the datagram is written as a whole frame, as a DHCP
+// client writes its first one.
+func unspecified(t *testing.T, x *host, dst string, sport, dport int, payload string) {
+	t.Helper()
+	pkt := udp4("0.0.0.0", dst, sport, dport, payload)
+	within(t, x, func() {
+		ifc, err := net.InterfaceByName("eth0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, 0) // sends only
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		to := &unix.SockaddrLinklayer{Protocol: 0x0008, // ETH_P_IP in network order
+			Ifindex: ifc.Index, Halen: 6, Addr: [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
+		for range 3 {
+			if err := unix.Sendto(fd, pkt, 0, to); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
+
+// udp4 is an IPv4 UDP datagram src:sport → dst:dport carrying payload,
+// with its header checksum and no UDP checksum.
+func udp4(src, dst string, sport, dport int, payload string) []byte {
+	n := 20 + 8 + len(payload)
+	pkt := []byte{0x45, 0, byte(n >> 8), byte(n), 0, 0, 0, 0, 64, unix.IPPROTO_UDP, 0, 0}
+	pkt = append(append(pkt, net.ParseIP(src).To4()...), net.ParseIP(dst).To4()...)
+	binary.BigEndian.PutUint16(pkt[10:], csum(pkt))
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(sport))
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(dport))
+	pkt = binary.BigEndian.AppendUint16(pkt, uint16(8+len(payload)))
+	return append(binary.BigEndian.AppendUint16(pkt, 0), payload...)
+}
+
+// NET-2 Segments, HW-16 (#4855, Security on #4848): the unspecified source
+// 0.0.0.0 passes the reverse-path chain only as a DHCP request (UDP 68 to
+// 67). A device's and the Owner network's requests to the limited
+// broadcast reach the enforcer's DHCP port and move no counter; the same
+// source from or to another port, to the mDNS group or to the enforcer's
+// own address, from a device, the Owner network or the WAN, is dropped and
+// counted as spoofed. The fib types 0.0.0.0 as broadcast, so the martian
+// rule takes it, where the fib's reverse-path check alone passed one to
+// the limited broadcast or a link-local group. Catches the martian rule
+// dropping a DHCP request, or a 0.0.0.0 exemption wider than DHCP.
+func TestUnspecifiedSourceOnlyAsDHCP(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	// A raw socket hears every UDP datagram the input chain accepts.
+	raw, err := net.ListenPacket("ip4:udp", "0.0.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var mu sync.Mutex
+	heard := map[string]bool{}
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := raw.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if from.(*net.IPAddr).IP.IsUnspecified() && n > 8 {
+				mu.Lock()
+				heard[string(buf[8:n])] = true
+				mu.Unlock()
+			}
+		}
+	}()
+	before := h.counter(Spoofed)
+	for _, x := range []string{"101", "owner"} {
+		unspecified(t, h.hosts[x], "255.255.255.255", 68, 67, "request "+x)
+	}
+	sent := 0
+	for x, self := range map[string]string{"101": "10.101.0.1", "owner": enfAddr("owner"), "isp": enfWAN} {
+		unspecified(t, h.hosts[x], "255.255.255.255", 1234, 67, "from another port "+x)
+		unspecified(t, h.hosts[x], "255.255.255.255", 68, 1234, "to another port "+x)
+		unspecified(t, h.hosts[x], MDNSGroup, MDNSPort, MDNSPort, "mdns "+x)
+		unspecified(t, h.hosts[x], self, 1234, 53, "dns "+x)
+		sent += 4 * 3
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := h.counter(Spoofed) - before; n != sent {
+		t.Errorf("spoofed moved %d, want %d", n, sent)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, x := range []string{"101", "owner"} {
+		if !heard["request "+x] {
+			t.Errorf("%s's DHCP request from 0.0.0.0 did not reach the enforcer", x)
+		}
+	}
+	for p := range heard {
+		if !strings.HasPrefix(p, "request ") {
+			t.Errorf("the enforcer heard %q from 0.0.0.0", p)
+		}
 	}
 }

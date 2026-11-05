@@ -36,6 +36,9 @@ func (h *home) V6() bool                                         { return h.v6 }
 func (h *home) Counter(n string) int                             { return h.counter(n) }
 func (h *home) Answer(d policy.Document, set, name, addr string) { h.answer(d, set, name, addr) }
 
+// In runs a command in the fixture host name's network namespace.
+func (h *home) In(name string, args ...string) string { return h.in(h.hosts[name], args...) }
+
 const (
 	NetCore   = netCore
 	NetOther  = netOther

@@ -8,6 +8,9 @@ import gzip
 import hashlib
 import importlib.machinery
 import importlib.util
+import ast
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -260,8 +263,33 @@ class ErrorLineEscapeTest(unittest.TestCase):
             b = self.manifest(pathlib.Path(t) / "b", [{"name": "systemd", "version": "257", "architecture": "amd64"}])
             rc, out = self.run_cli(a, b)
         self.assertEqual(rc, 0)
-        self.assertIn('package manifests differ: only in a [[%s, "1", ""]]; only in b [["systemd", "257", "amd64"]]'
-                      % EVIL_SHOWN, out.splitlines())
+        self.assertEqual(out.splitlines()[1:], ["package manifests differ: 1 only in a, 1 only in b",
+                                                '  only in a: [%s, "1", ""]' % EVIL_SHOWN,
+                                                '  only in b: ["systemd", "257", "amd64"]'])
+
+    def test_package_diff_keeps_each_name(self):
+        # #4729: each package prints on its own capped line, so a long name never hides the next.
+        names = [AT_CAP, PAST_CAP, "b" + PAST_CAP, "c" * 10 ** 5, "systemd"]
+        with tempfile.TemporaryDirectory() as t:
+            a = self.manifest(pathlib.Path(t) / "a", [{"name": n, "version": "1"} for n in names])
+            b = self.manifest(pathlib.Path(t) / "b", [{"name": "x", "version": "1"}])
+            rc, out = self.run_cli(a, b)
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[1], "package manifests differ: 5 only in a, 1 only in b")
+        self.assertEqual(lines[2:], ["  only in a: %s" % cm.shown([n, "1", ""]) for n in sorted(names)]
+                         + ['  only in b: ["x", "1", ""]'])
+        self.assertLessEqual(max(map(len, lines)), cm.SHOWN_CAP + len("  only in a: "))
+
+    def test_package_diff_counts_past_the_limit(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.manifest(pathlib.Path(t) / "a", [{"name": "p%03d" % i, "version": "1"} for i in range(250)])
+            b = self.manifest(pathlib.Path(t) / "b", [{"name": "x", "version": "1"}])
+            rc, out = self.run_cli(a, b)
+        lines = out.splitlines()
+        self.assertEqual(lines[2], '  only in a: ["p000", "1", ""]')
+        self.assertEqual(lines[2 + 199], '  only in a: ["p199", "1", ""]')
+        self.assertEqual(lines[2 + 200:], ["  ... and 51 more"])
 
     def test_usr_list_path_and_line(self):
         with tempfile.TemporaryDirectory() as t:
@@ -288,33 +316,87 @@ class ErrorLineEscapeTest(unittest.TestCase):
                          % json.dumps("MISMATCH " + EVIL))
 
 
+def printed(fn, *args):
+    """The lines FN(*ARGS) prints."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*args)
+    return buf.getvalue().splitlines()
+
+
+def mark(s):
+    """The marker cut() ends a cut S with: its full length and the head of its sha256."""
+    return "... (%d chars, sha256 %s)" % (len(s), hashlib.sha256(s.encode()).hexdigest()[:16])
+
+
+# The longest value shown() prints whole, and the shortest it cuts (#4729: each site at both).
+AT_CAP, PAST_CAP = "a" * (cm.SHOWN_CAP - 2), "a" * (cm.SHOWN_CAP - 1)
+
+
 class ShownCapTest(unittest.TestCase):
-    """#4693: no value read from a build prints longer than SHOWN_CAP characters."""
+    """#4693, #4728: no value read from a build prints longer than SHOWN_CAP characters, and no
+    line longer than LINE_CAP; a cut value carries a digest of the whole value."""
 
     def test_at_the_cap_prints_whole(self):
-        v = "a" * (cm.SHOWN_CAP - 2)
-        self.assertEqual(cm.shown(v), json.dumps(v))
-        self.assertEqual(len(cm.shown(v)), cm.SHOWN_CAP)
+        self.assertEqual(cm.shown(AT_CAP), json.dumps(AT_CAP))
+        self.assertEqual(len(cm.shown(AT_CAP)), cm.SHOWN_CAP)
 
-    def test_past_the_cap_is_cut_with_its_full_length(self):
-        v = "a" * (cm.SHOWN_CAP - 1)
-        self.assertEqual(cm.shown(v), '"%s... (%d chars)' % ("a" * (cm.SHOWN_CAP - 1), cm.SHOWN_CAP + 1))
-        lst = ["b"] * cm.SHOWN_CAP
-        self.assertEqual(cm.shown(lst), "%s... (%d chars)" % (json.dumps(lst)[:cm.SHOWN_CAP], len(json.dumps(lst))))
+    def test_past_the_cap_is_cut_to_exactly_the_cap(self):
+        for v in (PAST_CAP, ["b"] * cm.SHOWN_CAP, "c" * 10 ** 6):
+            with self.subTest(n=len(json.dumps(v))):
+                s = json.dumps(v)
+                out = cm.shown(v)
+                self.assertEqual(len(out), cm.SHOWN_CAP)
+                self.assertEqual(out, s[:cm.SHOWN_CAP - len(mark(s))] + mark(s))
+
+    def test_values_that_share_a_head_print_differently(self):
+        a, b = cm.shown("q" * 2000 + "A"), cm.shown("q" * 2000 + "B")
+        self.assertNotEqual(a, b)
+        self.assertEqual(a[:a.index("...")], b[:b.index("...")])
 
     def test_cut_escapes_stay_one_printable_line(self):
         out = cm.shown(EVIL * 1000)
         self.assertTrue(out.isascii() and out.isprintable(), out)
-        self.assertEqual(len(out), cm.SHOWN_CAP + len("... (%d chars)" % len(json.dumps(EVIL * 1000))))
+        self.assertEqual(len(out), cm.SHOWN_CAP)
 
     def test_say_caps_a_line_that_missed_shown(self):
-        import contextlib
-        import io
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cm.say("MISMATCH \n" + "x" * 10 ** 6)
-        self.assertEqual(buf.getvalue(), cm.shown("MISMATCH \n" + "x" * 10 ** 6) + "\n")
-        self.assertLess(len(buf.getvalue()), cm.SHOWN_CAP + 30)
+        line = "MISMATCH \n" + "x" * 10 ** 6
+        self.assertEqual(printed(cm.say, line), [cm.shown(line)])
+        self.assertEqual(len(cm.shown(line)), cm.SHOWN_CAP)
+
+    def test_say_caps_a_plain_line(self):
+        whole = "z" * cm.LINE_CAP
+        self.assertEqual(printed(cm.say, whole), [whole])
+        long = whole + "z"
+        self.assertEqual(printed(cm.say, long), [long[:cm.LINE_CAP - len(mark(long))] + mark(long)])
+        self.assertEqual(len(printed(cm.say, "z" * 10 ** 6)[0]), cm.LINE_CAP)
+
+    def test_the_widest_usr_line_prints_whole(self):
+        # A path and every field's two values each past the cap: say() never cuts the line.
+        fields = fin.USR_LIST_FIELDS[1:]
+        a = {"q" * 5000: {f: "A" * 5000 for f in fields}}
+        b = {"q" * 5000: {f: "B" * 5000 for f in fields}}
+        line = "  " + cm.usr_diff(a, b)[0]
+        self.assertLessEqual(len(line), cm.LINE_CAP)
+        self.assertEqual(printed(cm.say, line), [line])
+
+    def test_json_dumps_only_inside_shown(self):
+        # #4729: every value printed goes through shown(); a bare json.dumps elsewhere fails here.
+        tree = ast.parse((IMG / "compare_manifests.py").read_text())
+        inside = set()
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and fn.name == "shown":
+                inside = {id(n) for n in ast.walk(fn)}
+        uses = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "dumps"]
+        self.assertTrue(uses)
+        self.assertEqual([n.lineno for n in uses if id(n) not in inside], [])
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "json"])
+
+    def test_usr_field_values_go_through_shown(self):
+        for v in (AT_CAP, PAST_CAP):
+            with self.subTest(n=len(v)):
+                self.assertEqual(cm.usr_diff({"p": {"digest": v}}, {"p": {"digest": "x"}}),
+                                 ['"p": digest %s/"x"' % cm.shown(v)])
 
 
 class ShadowPinTest(unittest.TestCase):
@@ -715,9 +797,28 @@ class ReproduceJobTest(unittest.TestCase):
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn('MISMATCH "agentos/vmlinuz" a=%s b="%s"' % (cm.shown(big), "ef" * 32), r.stdout.splitlines())
-        self.assertIn("... (%d chars)" % (len(big) + 2), r.stdout)
+        self.assertIn(mark(json.dumps(big)), r.stdout)
         self.assertLess(max(len(ln) for ln in r.stdout.splitlines()), 2 * cm.SHOWN_CAP)
         assert_one_line_each(self, r.stdout)
+
+    def release_lines(self):
+        return printed(cm.compare_release, self.d / "rec/release-a", self.d / "rec/release-b")
+
+    def test_release_values_go_through_shown(self):
+        # #4729: the usrhash, SHA256SUMS and "same <name>" lines print each value through shown(),
+        # at the cap and one past it.
+        for v in (AT_CAP, PAST_CAP):
+            with self.subTest(n=len(v)):
+                self.tearDown()
+                self.setUp()
+                add = lambda rel: rel["boot"].update({v: "12" * 32})  # noqa: E731
+                self.side("release-a", self.initrd, usrhash=v, edit=add)
+                self.side("release-b", self.initrd, edit=add)
+                (self.d / "rec/release-a/SHA256SUMS").write_text(v + "\n")
+                lines = self.release_lines()
+                for want in ("usrhash a=%s" % cm.shown(v), "  only in a: %s" % cm.shown(v), "same %s" % cm.shown(v)):
+                    self.assertIn(want, lines)
+                self.assertLessEqual(max(map(len, lines)), cm.SHOWN_CAP + len("  only in a: "))
 
     def test_a_boot_file_only_one_side_names_fails(self):
         self.side("release-a", self.initrd)

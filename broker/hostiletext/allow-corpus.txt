@@ -1,0 +1,26 @@
+# Header and address checks that do not run their corpus (proof_lint_test.go),
+# one per line: directory (under broker/), check, reason. A line whose check
+# now runs its corpus, or no longer exists, fails the lint: delete it.
+#
+# Fail the corpus today; the fix is the named release item.
+clerk/model forbiddenHeader a denylist that accepts reshaping and credential names (X-Http-Method-Override, X-Signature); #4914
+clerk/plan forbiddenHeader a denylist that accepts reshaping and credential names (X-Original-Url, X-Api-Key); #4914
+clerk/plan Login.answerHeader passes a response header forbiddenHeader allows; #4914
+kernel Kernel.CallTrip reads only mapped and well-known NAT64 forms; no production caller yet; #4915
+#
+# Reached through a check that runs the corpus.
+netguard Policy.check called only by Policy.Check, which runs the address corpus
+netguard Policy.checkOnce called only through Policy.Check, which runs the address corpus
+netguard Policy.deny refuses a dial that has no address to check; reached through Policy.Check
+netguard Special decides each ipform.Forms form Policy.Check gives it; a near miss can be special for its own range (fe80::/10), so the carries oracle does not apply to it alone
+cmd/agentos-devices deviceGuard.Check an exact pin match, then netguard Policy.Check, which runs the address corpus
+decoy/match Matcher.Dest takes an address in plain form; its callers (the kernel plan check, netguard Config.Decoy) unwrap ipform.Forms first, and the kernel differential runs it so
+#
+# Not a destination check: the corpus's question does not apply.
+clerk/devslot homeAddr membership of a pinned device's address in the home network (DEV-1); every pinned connection still passes netguard Policy.Check
+cmd/agentos-enforcer inPrefixes an inbound peer's address against the core segment, unmapped first; no connection is made to it
+enforcer/page allowed an address the owner page binds to, against its allow prefixes, unmapped first; no connection is made to it
+enforcer/nft feed.addr a lookup in what the running drop chains send one group chain, read back from the firewall, not a decision
+enforcer/traffic Counter.live whether a counted address resolved or carried bytes today, not a decision
+netguard ExternalAddr the NAT-PMP request to the learned gateway, not a check
+clerk/inbox/imapsmtp session.longHeader handles a fetched message's oversized header, not a header name

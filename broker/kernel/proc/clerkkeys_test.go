@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -96,7 +98,7 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 		w.Write(b)
 		w.Close()
 		got, err := clerkkey.Read(r, "mail")
-		if err != nil || got != want {
+		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("start %d: the clerk read %+v, %v; want its derived key", start, got, err)
 		}
 	}
@@ -179,7 +181,7 @@ func TestTheKeyGoesToATemplatesInstances(t *testing.T) {
 	r, w, _ := os.Pipe()
 	w.Write(handed(t, p))
 	w.Close()
-	if got, err := clerkkey.Read(r, "driver-scale"); err != nil || got != want {
+	if got, err := clerkkey.Read(r, "driver-scale"); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("the driver's instance read %+v, %v; want its derived key", got, err)
 	}
 	mu.Lock()
@@ -308,7 +310,7 @@ func TestRunKernelNeedsTheClerkRootToHandKeys(t *testing.T) {
 	dir := t.TempDir()
 	cfg := MainConfig{Log: filepath.Join(dir, "log"), KeyDir: filepath.Join(dir, "keys"), ContentDir: filepath.Join(dir, "content"), BackupDir: filepath.Join(dir, "b"),
 		ClerkKeys: map[string]KeyClerk{"mail": {Socket: filepath.Join(dir, "k"), Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}}}
-	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: handoff.Hide(headPriv)}, &kernel.MemAnchor{})
+	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: secret.Hide(headPriv)}, &kernel.MemAnchor{})
 	if err == nil || !strings.Contains(err.Error(), "no clerk root key") {
 		t.Fatalf("got %v, want a refusal for the missing clerk root key", err)
 	}

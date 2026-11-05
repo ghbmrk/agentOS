@@ -43,9 +43,13 @@ func fakeLlamaServer(args []string) {
 	o, _ := os.Readlink("/proc/self/fd/1")
 	e, _ := os.Readlink("/proc/self/fd/2")
 	os.WriteFile(filepath.Join(dir, "fds"), []byte(o+"\n"+e), 0o600)
-	if strings.Contains(strings.Join(args, " "), "slowstart") {
+	argv := strings.Join(args, " ")
+	if strings.Contains(argv, "slowstart") {
 		time.Sleep(time.Hour)
 	}
+	// A model named hangprobe or badprobe answers health but fails the
+	// adapter's dimension probe: it hangs, or answers an empty vector.
+	hangProbe, badProbe := strings.Contains(argv, "hangprobe"), strings.Contains(argv, "badprobe")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		os.Exit(2)
@@ -65,6 +69,7 @@ func fakeLlamaServer(args []string) {
 			Embedding []float32 `json:"embedding"`
 		}
 		var data []item
+		status := http.StatusOK
 		for i := len(q.Input) - 1; i >= 0; i-- { // out of order: the adapter places by index
 			t := q.Input[i]
 			switch t {
@@ -75,6 +80,16 @@ func fakeLlamaServer(args []string) {
 			case "status":
 				http.Error(w, "boom", http.StatusInternalServerError)
 				return
+			case "dimension probe":
+				if hangProbe {
+					time.Sleep(time.Hour)
+				}
+				if badProbe {
+					data = append(data, item{i, nil})
+					continue
+				}
+			case "okbody": // a well-formed reply under an error status
+				status = http.StatusInternalServerError
 			case "malformed":
 				w.Write([]byte(`{"data":`))
 				return
@@ -98,6 +113,8 @@ func fakeLlamaServer(args []string) {
 			}
 			data = append(data, item{i, v})
 		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]any{"data": data})
 	})
 	srv := &http.Server{Handler: mux, BaseContext: func(net.Listener) context.Context { return context.Background() }}

@@ -90,9 +90,11 @@ func segments(l Layout) []segment {
 // from a shared segment passes only from the hardware address that holds
 // its source address, or from a free address, which its hardware address
 // then holds. Each hold lasts ClaimTimeout from the address's last
-// forwarded packet, which is at most half the DHCP lease (12 h, dns.go), so
-// an address the DHCP server gives again after its lease ran out is free
-// by then; each set holds at most HostSize addresses.
+// forwarded packet, which is at most half the configured DHCP lease
+// (dns.LeaseHours; dns fails to compile, and its TestLeaseCoversHold fails,
+// otherwise), so an address the DHCP server gives again after its lease ran
+// out is free by then, unless the client had requested a shorter lease
+// (ENF-shared-src-1); each set holds at most HostSize addresses.
 func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }
 func ClaimSet(seg string, v6 bool) string { return "claim_" + seg + fam(v6) }
 
@@ -194,7 +196,7 @@ const (
 	RADropped   = "ra_dropped"   // router advertisements from any segment
 	DNSOutside  = "dns_outside"  // a device's outside or encrypted DNS
 	DNSRedirect = "dns_redirect" // a device's port-53 traffic answered by the enforcer
-	Spoofed     = "spoofed"      // a source address not routed back out of its interface
+	Spoofed     = "spoofed"      // a source not routed back out of its interface, or an IPv4 broadcast, multicast or 0.0.0.0 one outside DHCP (rpf)
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
@@ -252,7 +254,7 @@ const (
 )
 
 // logged is the chain a packet logged with prefix p ends in: it is
-// counted on p's counter (and a refused one on its device's, refusedDecls),
+// counted on p's counter (and a refused one on its device's, loggedDecls),
 // logged within its interface's bucket of p's lines set, and given p's
 // verdict.
 func logged(p string) string { return "log_" + slug(p) }
@@ -610,18 +612,28 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// conntrack or any service sees it, so no segment can pose as the
 	// upstream resolver, the internet or another segment, and a forged
 	// answer never reaches the resolver that fills the allow sets (NET-2
-	// The core's list). The unspecified sources of a DHCP request and of
-	// IPv6 address setup have no route and pass to the rules below, and so
-	// does a DHCP or DHCPv6 answer to the enforcer's own client on the WAN:
-	// until the WAN has its lease, no route leads back to the server (NET-2
-	// Fails safe, #4078). Only an answer addressed to the enforcer itself,
-	// from a source no interface routes and none of the enforcer's own
-	// addresses, passes: once leased the server is routed out of the WAN and
-	// passes the check below, and a source another interface routes (the
-	// core, a person's network, a device) or the enforcer holds (its address
-	// on any segment, a broadcast) is the internet posing as a segment or as
-	// the enforcer and is dropped (#4764, #4771); the fib reports a local
-	// source as missing too, so the second test is needed. A DHCPv6 server
+	// The core's list). The unspecified sources of a DHCP request (UDP 68
+	// to 67) and of IPv6 address setup have no route and pass to the rules
+	// below. Then an IPv4 broadcast or multicast source (the limited
+	// broadcast, a subnet's broadcast, a group) is dropped and counted on
+	// every interface: the fib routes the WAN subnet's own broadcast back
+	// out of the WAN, so the general check below would pass it, and with
+	// rp_filter off the kernel would deliver it (#4841). The fib types
+	// 0.0.0.0 as broadcast, so any other unspecified source is dropped and
+	// counted here too, by intent: nothing can answer it, though the general
+	// check passes one to the limited broadcast or a link-local group
+	// (#4855). IPv6 has no broadcast, and its stack drops a
+	// multicast source before this hook. A DHCP or DHCPv6 answer to the
+	// enforcer's own client on the WAN passes: until the WAN has its lease,
+	// no route leads back to the server (NET-2 Fails safe, #4078). Only an
+	// answer addressed to the enforcer itself, from a source no interface
+	// routes and none of the enforcer's own addresses, passes: once leased
+	// the server is routed out of the WAN and passes the check below, and a
+	// source another interface routes (the core, a person's network, a
+	// device) or the enforcer holds (its address on any segment) is the
+	// internet posing as a segment or as the enforcer and is dropped (#4764,
+	// #4771); the fib reports a local source as missing too, so the second
+	// test is needed. A DHCPv6 server
 	// answering from such an address first resolves the client's link-local
 	// address, so its neighbour discovery, on the link (hop limit 255) and
 	// to the enforcer, passes on the same terms. An answer to be forwarded
@@ -631,6 +643,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line(`iif "lo" accept`)
 	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
+	w.line("meta nfproto ipv4 fib saddr type { broadcast, multicast } counter name " + q(Spoofed) + " drop")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")
 	w.line("iifname " + q(l.WAN) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 fib daddr . iif type { local, multicast } fib saddr oif missing fib saddr type != { local, broadcast, anycast, multicast } accept")

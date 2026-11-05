@@ -30,23 +30,33 @@ var (
 	voiceControls = []string{"STOP", "YES", "NO", "RUN", "UNDO", "MORE", "HELP", "STATUS", "RESUME", "UNLOCK", "NAME"}
 )
 
-// voiceSep is what may stand between the letters of a one-word term of
-// the vocabulary: up to three characters that are neither letters nor
-// digits, so "c.o.d.e", "pass-word" and "pass word" read as the word
-// (Security on #3916). The two phrases keep their own separator, so "one
-// time" alone is ordinary text.
-const voiceSep = `[^\pL\pN]{0,3}`
+// voiceSep is what may stand inside a split one-word term of the
+// vocabulary: one to three characters that are neither letters nor
+// digits. A split counts only (a) between every letter, a run of single
+// letters ("c.o.d.e", "p i n"), or (b) at a compound's own seam
+// (voiceSeams: "pass-word", "pass_word", "pass.code", and the space seam
+// "pass word"), so one gap anywhere else is ordinary text: "I dig it" is
+// not "digit" (#4019, narrowing Security on #3916). The two phrases keep
+// their own separator, so "one time" alone is ordinary text.
+const voiceSep = `[^\pL\pN]{1,3}`
 
-// spaced is words as one alternation, each one-word term with voiceSep
-// between its characters, each character written by char.
+// voiceSeams is where each compound term of the vocabulary may split.
+var voiceSeams = map[string]int{"password": 4, "passcode": 4}
+
+// spaced is words as one alternation, each one-word term as written, as
+// a run of single letters, and split at its seam, each character written
+// by char.
 func spaced(words []string, char func(rune) string) string {
-	ps := make([]string, len(words))
-	for i, w := range words {
+	var ps []string
+	for _, w := range words {
 		cs := make([]string, 0, len(w))
 		for _, c := range w {
 			cs = append(cs, char(c))
 		}
-		ps[i] = strings.Join(cs, voiceSep)
+		ps = append(ps, strings.Join(cs, ""), strings.Join(cs, voiceSep))
+		if at, ok := voiceSeams[w]; ok {
+			ps = append(ps, strings.Join(cs[:at], "")+voiceSep+strings.Join(cs[at:], ""))
+		}
 	}
 	return strings.Join(ps, "|")
 }

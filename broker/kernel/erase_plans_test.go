@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	crand "crypto/rand"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -106,6 +107,106 @@ func TestEraseCancelsByLogOrderNotClock(t *testing.T) {
 		t.Fatalf("early is %s, late is %s", r.status("a/early"), r.status("a/late"))
 	}
 	r.replays()
+}
+
+// The erase's Confirmation names the plans it cancelled, by lineage then in
+// log order: those a reader submitted after its first read and not yet
+// ended, never a plan from before the read, a lineage that read nothing, or
+// one already ended. It is read from the state, so a Confirm after a restart
+// names the same plans, and an erase of a subject nobody read names none
+// (LOG-4, D-169, #4858). Catches a Confirmation that drops the list, names a
+// plan the erase did not end, orders it by map iteration, or loses it at a
+// restart.
+func TestEraseConfirmationNamesTheCancelledPlans(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := r.k.OpenSubject(0)
+	must(t, err)
+	unread, err := r.k.OpenSubject(0)
+	must(t, err)
+	h, err := r.k.Seal(0, sub, "mail", "message", []byte("lunch on Tuesday"))
+	must(t, err)
+	_, err = r.k.Seal(0, unread, "mail", "message", []byte("x"))
+	must(t, err)
+	held := r.derive(key.LimitHold(hour, hour))
+	r.plan("agent/before", held, st(key.Unsubscribe, "m0"))
+	for _, l := range []string{"b", "agent"} {
+		if _, err := r.k.ReadFor(1, h, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.plan("b/1", held, st(key.Unsubscribe, "m5"))
+	r.plan("agent/z", held, st(key.Unsubscribe, "m1"))
+	r.plan("agent/private/a", held, st(key.Unsubscribe, "m2"))
+	r.plan("agent/done", r.ck, st(key.Unsubscribe, "m3"))
+	r.plan("agent.x/r", held, st(key.Unsubscribe, "m4"))
+	must(t, r.tick(2))
+	if got := r.status("agent/done"); got != kernel.SDone {
+		t.Fatalf("agent/done is %s before the erase, want done", got)
+	}
+	c, err := r.k.Erase(3, sub)
+	must(t, err)
+	want := []string{"agent/z", "agent/private/a", "b/1"}
+	if !slices.Equal(c.Cancelled, want) {
+		t.Fatalf("the erase names %q, want %q", c.Cancelled, want)
+	}
+	for _, id := range want {
+		if p := r.k.State().Plans[id]; p.Status != kernel.SCancelled || p.Cancel != kernel.CErased {
+			t.Errorf("%s is named but %s (%q)", id, p.Status, p.Cancel)
+		}
+	}
+	if c, err := r.k.Erase(4, unread); err != nil || c.Cancelled != nil {
+		t.Fatalf("an erase nobody read names %q: %v", c.Cancelled, err)
+	}
+	r.replays()
+	r.boot(5)
+	if got := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(got, want) {
+		t.Fatalf("after a restart the erase names %q, want %q", got, want)
+	}
+}
+
+// The cancelled plans a Confirmation names are the caller's own copy: a
+// caller that reverses the list Erase returned and overwrites an element of
+// the list Confirm returned changes neither the next Confirm nor what a
+// restart folds (LOG-4, #4870). Catches Confirm handing out the kernel's own
+// slice instead of a clone.
+func TestEraseConfirmationCancelledIsACopy(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := r.k.OpenSubject(0)
+	must(t, err)
+	h, err := r.k.Seal(0, sub, "mail", "message", []byte("lunch on Tuesday"))
+	must(t, err)
+	if _, err := r.k.ReadFor(1, h, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	held := r.derive(key.LimitHold(hour, hour))
+	r.plan("agent/a", held, st(key.Unsubscribe, "m1"))
+	r.plan("agent/b", held, st(key.Unsubscribe, "m2"))
+	c, err := r.k.Erase(2, sub)
+	must(t, err)
+	want := []string{"agent/a", "agent/b"}
+	if !slices.Equal(c.Cancelled, want) {
+		t.Fatalf("the erase names %q, want %q", c.Cancelled, want)
+	}
+	slices.Reverse(c.Cancelled)
+	got := r.k.Confirm(kernel.Confirmation{Subject: sub})
+	if !slices.Equal(got.Cancelled, want) {
+		t.Fatalf("after the caller reversed Erase's list Confirm names %q, want %q", got.Cancelled, want)
+	}
+	got.Cancelled[0] = "agent/forged"
+	if again := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(again, want) {
+		t.Fatalf("after the caller overwrote Confirm's list Confirm names %q, want %q", again, want)
+	}
+	r.replays()
+	r.boot(3)
+	if after := r.k.Confirm(kernel.Confirmation{Subject: sub}).Cancelled; !slices.Equal(after, want) {
+		t.Fatalf("after a restart the erase names %q, want %q", after, want)
+	}
 }
 
 // Submit refuses a plan JSON cannot round-trip with JSON's own error, not

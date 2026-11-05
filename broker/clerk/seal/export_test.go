@@ -2,7 +2,7 @@ package seal
 
 // StoreKey exposes the store key to the canary test, which must find no
 // trace of it on the drive.
-func StoreKey(s *Store) []byte { return append([]byte(nil), s.key...) }
+func StoreKey(s *Store) []byte { return append([]byte(nil), s.key.Get()...) }
 
 // FailDirSync makes every directory sync fail until the returned func runs.
 func FailDirSync(err error) (restore func()) {
@@ -18,3 +18,7 @@ func FailWrite(err error) (restore func()) {
 	writeTemp = func(string, []byte) (string, error) { return "", err }
 	return func() { writeTemp = old }
 }
+
+// Entries is the store's own entry map, not a copy, so a test can see
+// Close wipe the values it held.
+func Entries(s *Store) map[string][]byte { return s.entries.Get() }

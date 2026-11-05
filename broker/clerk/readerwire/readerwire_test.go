@@ -13,18 +13,18 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
 
 const roleEnv = "AGENTOS_READERWIRE_TEST_ROLE"
@@ -68,7 +68,7 @@ func reader(t *testing.T, model Ask, timeout time.Duration) string {
 	path := sock(t)
 	ln, err := Listen(path, os.Getuid())
 	must(t, err)
-	go serve(ln, model, timeout)
+	go serve(ln, model, timeout, time.Sleep)
 	t.Cleanup(func() { ln.Close() })
 	return path
 }
@@ -121,8 +121,8 @@ func fakeReader(t *testing.T, ans string, hang bool) *raw {
 
 func me() int { return os.Getuid() }
 
-// TestReadRoundTrip: a fake model's class word comes back as the reply, and
-// inbox.Read over it classes the mail.
+// TestReadRoundTrip: a fake model's class word comes back as the reply
+// (inbox.Read over the frame: inbox_test.go).
 func TestReadRoundTrip(t *testing.T) {
 	var got string
 	path := reader(t, func(_ context.Context, p string) (string, error) {
@@ -132,13 +132,6 @@ func TestReadRoundTrip(t *testing.T) {
 	ask := Dial(path, me(), 5*time.Second)
 	if r, err := ask(context.Background(), "a prompt"); err != nil || r != " Spam\n" || got != "a prompt" {
 		t.Fatalf("ask = %q, %v; the model saw %q", r, err, got)
-	}
-	mails := inbox.Read(context.Background(), inbox.Ask(ask), []inbox.Mail{{Raw: []byte("Subject: win\r\n\r\nbuy now")}})
-	if len(mails) != 1 || mails[0].Class != "spam" {
-		t.Fatalf("inbox.Read over the frame: %+v", mails)
-	}
-	if !strings.HasSuffix(got, "buy now") {
-		t.Fatalf("the reader did not get the mail: %q", got)
 	}
 }
 
@@ -338,10 +331,6 @@ func TestModelErrorsStayClosed(t *testing.T) {
 		got, err := ask(context.Background(), "Subject: hi")
 		if got != "" || !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "spam") || strings.Contains(err.Error(), "Subject") {
 			t.Errorf("model error %q reached the mail clerk as %q, %v", e, got, err)
-		}
-		mails := inbox.Read(context.Background(), inbox.Ask(Dial(path, me(), 5*time.Second)), []inbox.Mail{{Raw: []byte("Subject: hi\r\n\r\n")}})
-		if mails[0].Class != "" {
-			t.Errorf("model error %q classed the mail %q", e, mails[0].Class)
 		}
 	}
 	path := reader(t, func(context.Context, string) (string, error) { return "spam", fmt.Errorf("no route: %w", ErrRefused) }, 5*time.Second)
@@ -612,33 +601,245 @@ func TestReaderwireLinksNoKeeperCode(t *testing.T) {
 	}
 }
 
-// TestEveryBoundIsRecorded: every fixed bound the package declares is named
-// in ASSUMPTIONS.md's bounds row with its basis (RES-5-readerwire-maxconns),
-// so a new cap cannot land without one.
-func TestEveryBoundIsRecorded(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "readerwire.go", nil, 0)
-	must(t, err)
-	rec, err := os.ReadFile("ASSUMPTIONS.md")
-	must(t, err)
-	var n int
-	for _, d := range f.Decls {
-		g, ok := d.(*ast.GenDecl)
-		if !ok || g.Tok != token.CONST {
-			continue
+// boundsRow prefixes the ASSUMPTIONS.md rows that record each fixed bound
+// with its basis (RES-5-readerwire-maxconns-1 and -2).
+const boundsRow = "| RES-5-readerwire-maxconns-"
+
+// boundProblems lists every constant in srcs (file name to Go source, the
+// package's non-test files) that is not a recorded package-level bound: a
+// package-level constant not named in backticks in one of rec's bounds rows
+// (a mention in any other row or in prose does not count), and every
+// constant declared inside a function, which no record can clear: it is
+// reported as shadowing when a package-level constant has its name, and is
+// otherwise told to move to package level. Only the frame's own names,
+// readerwire.go's package-level version and opRead, are exempt. A number
+// written outside a const is constProblems' check (bounds_test.go).
+func boundProblems(t *testing.T, srcs map[string]string, rec string) []string {
+	t.Helper()
+	var rows strings.Builder
+	for _, line := range strings.Split(rec, "\n") {
+		if strings.HasPrefix(line, boundsRow) {
+			rows.WriteString(line)
 		}
-		for _, sp := range g.Specs {
-			for _, id := range sp.(*ast.ValueSpec).Names {
-				if id.Name == "version" || id.Name == "opRead" {
-					continue // the frame's own names, not bounds
-				}
-				n++
-				if !bytes.Contains(rec, []byte("`"+id.Name+"`")) {
-					t.Errorf("the bound %s has no record in ASSUMPTIONS.md", id.Name)
+	}
+	if rows.Len() == 0 {
+		return []string{"ASSUMPTIONS.md has no " + strings.TrimPrefix(boundsRow, "| ") + " row"}
+	}
+	recorded := func(name string) bool { return strings.Contains(rows.String(), "`"+name+"`") }
+	var out []string
+	var n int
+	fset := token.NewFileSet()
+	files := map[string]*ast.File{}
+	pkgConsts := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(srcs)) {
+		f, err := parser.ParseFile(fset, name, srcs[name], 0)
+		must(t, err)
+		files[name] = f
+		for _, d := range f.Decls {
+			if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.CONST {
+				for _, sp := range g.Specs {
+					for _, id := range sp.(*ast.ValueSpec).Names {
+						pkgConsts[id.Name] = true
+					}
 				}
 			}
 		}
 	}
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		f := files[name]
+		top := map[ast.Decl]bool{}
+		for _, d := range f.Decls {
+			top[d] = true
+		}
+		ast.Inspect(f, func(node ast.Node) bool {
+			x, ok := node.(*ast.GenDecl)
+			if !ok || x.Tok != token.CONST {
+				return true
+			}
+			for _, sp := range x.Specs {
+				for _, id := range sp.(*ast.ValueSpec).Names {
+					if top[x] && name == "readerwire.go" && (id.Name == "version" || id.Name == "opRead") {
+						continue // the frame's own names, not bounds
+					}
+					n++
+					switch {
+					case !top[x] && pkgConsts[id.Name]:
+						out = append(out, fmt.Sprintf("%s: the local const %s shadows the package's bound %s: use the package's own", fset.Position(id.Pos()), id.Name, id.Name))
+					case !top[x]:
+						out = append(out, fmt.Sprintf("%s: the local const %s is a bound no record can clear: move it to package level and name it in a %s row", fset.Position(id.Pos()), id.Name, boundsRow))
+					case !recorded(id.Name):
+						out = append(out, fmt.Sprintf("the bound %s has no record in a %s row", id.Name, boundsRow))
+					}
+				}
+			}
+			return false
+		})
+	}
 	if n == 0 {
-		t.Fatal("no bounds found")
+		out = append(out, "no bounds found")
+	}
+	return out
+}
+
+// packageSources reads every non-test Go file in the package.
+func packageSources(t *testing.T) map[string]string {
+	t.Helper()
+	return goSources(t, ".")
+}
+
+// goSources reads every non-test Go file in dir.
+func goSources(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	must(t, err)
+	srcs := map[string]string{}
+	for _, e := range ents {
+		if name := e.Name(); strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			must(t, err)
+			srcs[name] = string(b)
+		}
+	}
+	return srcs
+}
+
+// TestEveryBoundIsRecorded: every fixed bound in the package's non-test files
+// is a constant named in an ASSUMPTIONS.md bounds row with its basis
+// (RES-5-readerwire-maxconns-*), so a new cap cannot land without one: not
+// as a literal, not in a new file, and not recorded only in another row.
+// REQ: RES-5
+func TestEveryBoundIsRecorded(t *testing.T) {
+	rec, err := os.ReadFile("ASSUMPTIONS.md")
+	must(t, err)
+	srcs := packageSources(t)
+	if _, ok := srcs["readerwire.go"]; !ok {
+		t.Fatal("readerwire.go not read")
+	}
+	for _, p := range boundProblems(t, srcs, string(rec)) {
+		t.Error(p)
+	}
+}
+
+// TestEveryNonTestFileIsRead: the check reads each non-test Go file in the
+// directory, and no test file or other file.
+func TestEveryNonTestFileIsRead(t *testing.T) {
+	d := t.TempDir()
+	for _, n := range []string{"a.go", "b.go", "c_test.go", "notes.md"} {
+		must(t, os.WriteFile(filepath.Join(d, n), []byte("package readerwire\n"), 0o600))
+	}
+	var got []string
+	for n := range goSources(t, d) {
+		got = append(got, n)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"a.go", "b.go"}) {
+		t.Fatalf("read %q, want a.go and b.go", got)
+	}
+}
+
+// TestAcceptBackoff: a failed accept sleeps acceptBackoffMin, then twice the
+// last sleep up to acceptBackoffMax, and a successful accept starts it over.
+// REQ: RES-5
+func TestAcceptBackoff(t *testing.T) {
+	fail := errors.New("accept: too many open files")
+	ms := time.Millisecond
+	ln := &scriptedListener{steps: []error{fail, fail, fail, fail, fail, fail, fail, fail, fail, fail, nil, fail, fail, net.ErrClosed}}
+	var slept []time.Duration
+	model := func(context.Context, string) (string, error) { return "", nil }
+	must(t, serve(ln, model, time.Second, func(d time.Duration) { slept = append(slept, d) }))
+	want := []time.Duration{5 * ms, 10 * ms, 20 * ms, 40 * ms, 80 * ms, 160 * ms, 320 * ms, 640 * ms, time.Second, time.Second, 5 * ms, 10 * ms}
+	if !slices.Equal(slept, want) {
+		t.Fatalf("slept %v, want %v", slept, want)
+	}
+}
+
+// scriptedListener answers each Accept with its next step: that error, or
+// for nil a connection whose peer has already hung up.
+type scriptedListener struct{ steps []error }
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	err := l.steps[0]
+	l.steps = l.steps[1:]
+	if err != nil {
+		return nil, err
+	}
+	c, peer := net.Pipe()
+	peer.Close()
+	return c, nil
+}
+func (l *scriptedListener) Close() error   { return nil }
+func (l *scriptedListener) Addr() net.Addr { return nil }
+
+// TestTheBoundsRecordCatchesEachGap: each record gap #4849 and #4874 name
+// fails the check, starting from the package as it stands; the gaps written
+// as numbers are TestEachConstantFormFails' cases.
+func TestTheBoundsRecordCatchesEachGap(t *testing.T) {
+	b, err := os.ReadFile("ASSUMPTIONS.md")
+	must(t, err)
+	rec := string(b)
+	// unrecord drops the backticks around each name in the bounds rows only.
+	unrecord := func(names ...string) string {
+		lines := strings.Split(rec, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(line, boundsRow) {
+				for _, n := range names {
+					line = strings.ReplaceAll(line, "`"+n+"`", n)
+				}
+				lines[i] = line
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	withFile := func(name, src string) map[string]string {
+		srcs := packageSources(t)
+		srcs[name] = src
+		return srcs
+	}
+	cases := []struct {
+		name string
+		srcs map[string]string
+		rec  string
+		want []string
+	}{
+		{"named only in another row", packageSources(t),
+			unrecord("MaxReply") + "| OTHER-1 | `MaxReply` is named here only. | - | - |\n",
+			[]string{"the bound MaxReply has no record"}},
+		{"named only in prose", packageSources(t),
+			unrecord("maxConns") + "\nSee `maxConns`.\n",
+			[]string{"the bound maxConns has no record"}},
+		{"an unrecorded constant in a new file", withFile("extra.go", "package readerwire\n\nconst maxExtra = 3\n"), rec,
+			[]string{"the bound maxExtra has no record"}},
+		{"a constant inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"), rec,
+			[]string{"extra.go:4:8: the local const maxLocal is a bound no record can clear: move it to package level"}},
+		{"a constant inside a function, recorded", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxLocal = 3\n\treturn maxLocal\n}\n"),
+			strings.Replace(rec, boundsRow+"2 |", boundsRow+"2 | `maxLocal`", 1),
+			[]string{"extra.go:4:8: the local const maxLocal is a bound no record can clear: move it to package level"}},
+		{"the backoff constants lose their record", packageSources(t), unrecord("acceptBackoffMin", "acceptBackoffMax"),
+			[]string{"the bound acceptBackoffMin has no record", "the bound acceptBackoffMax has no record"}},
+		{"a local const shadowing a recorded name", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst maxConns = 4096\n\treturn maxConns\n}\n"), rec,
+			[]string{"extra.go:4:8: the local const maxConns shadows the package's bound maxConns"}},
+		{"a cap named version inside a function", withFile("extra.go", "package readerwire\n\nfunc f() int {\n\tconst version = 4096\n\treturn version\n}\n"), rec,
+			[]string{"extra.go:4:8: the local const version shadows the package's bound version"}},
+		{"no constants at all", map[string]string{"readerwire.go": "package readerwire\n"}, rec,
+			[]string{"no bounds found"}},
+		{"no bounds rows", packageSources(t), strings.ReplaceAll(rec, boundsRow, "| RES-5-other-"),
+			[]string{"ASSUMPTIONS.md has no RES-5-readerwire-maxconns- row"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := boundProblems(t, c.srcs, c.rec)
+			if len(got) != len(c.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(c.want), c.want)
+			}
+			for _, w := range c.want {
+				var hit bool
+				for _, g := range got {
+					hit = hit || strings.HasPrefix(g, w)
+				}
+				if !hit {
+					t.Errorf("problems = %q, want one starting %q", got, w)
+				}
+			}
+		})
 	}
 }
