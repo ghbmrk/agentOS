@@ -627,28 +627,39 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 // checker the key, so neither the kernel, which cannot read the file, nor
 // a reader of the file holds the seed. A store with no seed removes it, so
 // a checker never starts on an earlier boot's. A failure is said, the file
-// is removed, and the kernel still starts: only the codes go without.
+// is removed once its directory has been shown to be root's alone, and the
+// kernel still starts: only the codes go without.
 func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
 	if err := putCheckerSeed(path, st, root); err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
+		if errors.As(err, new(uncheckedDir)) {
+			return // a directory not shown to be root's alone: remove nothing in it
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
 		}
 	}
 }
 
+// uncheckedDir is putCheckerSeed's failure before its directory was shown
+// to be root's alone: writeCheckerSeed then removes nothing, since a
+// remove there could act through a planted link (#4966 L3 finding 1).
+type uncheckedDir struct{ error }
+
+func (e uncheckedDir) Unwrap() error { return e.error }
+
 func putCheckerSeed(path string, st *seal.Store, root *[32]byte) error {
 	dir := filepath.Dir(path)
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+		return uncheckedDir{err}
 	}
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		return err
+		return uncheckedDir{err}
 	}
 	ds, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 || int(ds.Uid) != os.Geteuid() {
-		return fmt.Errorf("%s is not a directory of mine alone", dir)
+		return uncheckedDir{fmt.Errorf("%s is not a directory of mine alone", dir)}
 	}
 	raw, ok, err := st.Get(handoff.CheckerSeedEntry)
 	if err != nil {

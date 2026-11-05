@@ -132,7 +132,9 @@ allow broker/vm/overlay/overlay.go copyObj os.Link prev is a file this copy just
 # store's: on the box only those two open or write one, in root's 0700
 # /var/lib/agentos-store; agentos-a8scan opens the store the owner names.
 # unlink(2), rename(2), link(2) and mkdir(2) follow no link at the final
-# name, and os.RemoveAll descends with O_NOFOLLOW.
+# name, and os.RemoveAll descends with O_NOFOLLOW. What these lines rest on,
+# and when to re-check them, is broker/kernel/proc/ASSUMPTIONS.md
+# REV-CHK-links-kernel-1.
 allow broker/kernel/proc/backup.go openBackups os.Mkdir the backup directory, -backup-dir /var/lib/agentos-kernel/backups, in the kernel uid's 0700 directory; privfile.Check refuses it next unless it is a directory of that uid's alone
 allow broker/kernel/proc/backup.go openBackups os.Link names os.Link as the snapshot's link function (no call here); see backups.snapItems
 allow broker/kernel/proc/backup.go backups.checkDir os.Stat a dir target's locator after EvalSymlinks resolved it, to refuse one in the kernel's own folders; a target is owner-chosen and may be written by other uids, and a swap after this check can only land fresh <id>.table.<n> or <id>.content names (ASSUMPTIONS MIG-4-recovery-e3-c)
@@ -167,7 +169,7 @@ allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Mkdir /run/agentos-ke
 allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Remove unlink(2) of the anchors file, or of the temporary CreateTemp made, in that checked directory of root's alone
 allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.CreateTemp in that checked directory of root's alone; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/cmd/agentos-unlock/main.go putClerkAnchors os.Rename the temporary over the anchors file in that checked directory; rename(2) replaces a link at the name, never follows it
-allow broker/cmd/agentos-unlock/main.go writeCheckerSeed os.Remove unlink(2) of -checker-seed, in a directory putCheckerSeed checks is root's alone (no unit passes it today); it removes a link at the name, never follows it
+allow broker/cmd/agentos-unlock/main.go writeCheckerSeed os.Remove unlink(2) of -checker-seed, only after putCheckerSeed's Lstat showed its directory is root's alone (a failure before that, uncheckedDir, removes nothing; no unit passes the flag today); it removes a link at the name, never follows it
 allow broker/cmd/agentos-unlock/main.go putCheckerSeed os.Mkdir -checker-seed's directory, 0700; mkdir(2) follows no link, and the Lstat next refuses a link, another uid's directory or one open to others
 allow broker/cmd/agentos-unlock/main.go putCheckerSeed os.Remove unlink(2) of the seed file in that checked 0700 directory of root's alone
 allow broker/cmd/agentos-unlock/main.go kernelTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes (a software TPM's socket only in tests)
@@ -178,7 +180,7 @@ allow broker/cmd/agentos-enroll/codes.go codes os.Remove unlink(2) of the staged
 allow broker/cmd/agentos-enroll/main.go deleteStore os.Remove unlink(2) of the store in -state, root's 0700 /var/lib/agentos-store
 allow broker/cmd/agentos-enroll/main.go openTPM os.Stat -tpm, /dev/tpmrm0 on the box, in devtmpfs, which only root writes
 allow broker/cmd/agentos-enroll/main.go enroll os.Remove unlink(2) of the staged store in root's 0700 /var/lib/agentos-store
-allow broker/cmd/agentos-enroll/main.go config.commitAndDrop os.Remove unlink(2) of -code-seed-file in root's 0700 /run/agentos-setup and -first-edge in root's 0700 /run/agentos-link-capture
+allow broker/cmd/agentos-enroll/main.go config.commitAndDrop os.Remove unlink(2) of -first-edge in root's 0700 /run/agentos-link-capture, and of -code-seed-file, which no unit passes today (its staging is /run/agentos-setup, root's 0700); it removes a link at the name, never follows it
 allow broker/cmd/agentos-enroll/main.go buildTime os.Stat this binary's own path, os.Executable, in the read-only verity-checked /usr; it only reads a modification time
 allow broker/cmd/agentos-enroll/main.go commit os.Rename the staged store over the store, both in root's 0700 /var/lib/agentos-store; rename(2) replaces a link at the name, never follows it
 allow broker/cmd/agentos-enroll/main.go commit os.Open root's 0700 /var/lib/agentos-store, to sync it
