@@ -458,3 +458,90 @@ func TestSetupHostJournalsTheHookError(t *testing.T) {
 		t.Fatalf("journal %q lacks %q", buf.String(), want)
 	}
 }
+
+func TestTheCodesStepRefusesAnEnrollmentLinkItCannotShow(t *testing.T) {
+	// #5016: a link from the vault process that is not
+	// an otpauth TOTP link never reaches the page's href.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	m := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(r.get("/setup"))
+	if m == nil {
+		t.Fatal("no pairing code")
+	}
+	if _, ok := r.srv.OfferText(ownerNum, "PAIR "+m[1]); !ok {
+		t.Fatal("not paired")
+	}
+	r.srv.cfg.Hooks = viaAgentosd{r.hooks, AgentosdSetup{Owner: InProcess{
+		localapi.OpSetupEnroll: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
+			return localapi.EnrollLink{URI: "javascript:alert(1)"}, nil
+		}}}}
+	if w := r.do("GET", "/setup", nil); w.Code != 500 || strings.Contains(w.Body.String(), "javascript:") {
+		t.Fatalf("a bad enrollment link: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPrivateAnswerThatSavedLeavesNothingKeptOrParked(t *testing.T) {
+	// #5016: once an answer saves, the page drops the
+	// answer it kept from a failed form, a parked or lapsed sign-in it
+	// showed, and writes nothing for a provider it held no answer for.
+	r := newRig(t)
+	r.runSetupToAI()
+	r.hooks.refuseFinish = func() error { return errors.New("held open for the test") }
+	r.hooks.keyErr = errors.New("refused")
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}, "private": {"1"}})
+	r.hooks.keyErr = nil
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
+	if r.hooks.keys["openai"] != apiCanary {
+		t.Fatal("key not saved")
+	}
+	if p := setupForms(t, r.get("/setup"))["ai-key openai"]; strings.Contains(p, "checked") {
+		t.Fatalf("a yes kept from a failed form outlives the no that saved: %s", p)
+	}
+
+	busy := func() string {
+		r.hooks.deviceErr = ErrSignInBusy
+		r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+		return r.setupErr()
+	}
+	r = newRig(t)
+	r.runSetupToAI()
+	r.hooks.privateErr = errors.New("vault busy")
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	if _, parked := r.srv.setup.parked["anthropic"]; !parked {
+		t.Fatal("sign-in not parked")
+	}
+	r.hooks.privateErr = nil
+	if e := busy(); e != "" || !strings.Contains(r.get("/setup"), "WXYZ-1234") {
+		t.Fatalf("the parked sign-in: %q", e)
+	}
+	if e := busy(); !strings.Contains(e, "still waiting") {
+		t.Fatalf("a shown sign-in was parked again: %q", e)
+	}
+
+	r = newRig(t)
+	r.runSetupToAI()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}, "private": {"1"}})
+	r.hooks.deviceErr = errors.New("provider down")
+	r.post("/setup/ai-retry", url.Values{"provider": {"anthropic"}})
+	if _, lapsed := r.srv.setup.lapsed["anthropic"]; !lapsed {
+		t.Fatal("sign-in not lapsed")
+	}
+	if e := busy(); e != "" {
+		t.Fatalf("the lapsed sign-in: %q", e)
+	}
+	if e := busy(); !strings.Contains(e, "still waiting") {
+		t.Fatalf("a shown sign-in lapsed again: %q", e)
+	}
+
+	r = newRig(t)
+	dir := t.TempDir()
+	r.srv = r.open(FileStore{Path: filepath.Join(dir, "setup.json")})
+	r.runSetupToAI()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	r.post("/setup/ai-key", url.Values{"provider": {"openai"}, "key": {apiCanary}})
+	if r.hooks.keys["openai"] != apiCanary {
+		t.Fatalf("a no with nothing held wrote the store: %q", r.setupErr())
+	}
+}

@@ -1194,3 +1194,201 @@ func TestRestartSetupNeedsTheResetSecretElsewhere(t *testing.T) {
 		t.Fatal("reset secret accepted past the bound")
 	}
 }
+
+func TestSetupHelpersRefuseWhatTheyCannotShow(t *testing.T) {
+	// #5016: mask, smsLink, otpSecret, printable
+	// and phaseText on the inputs each of their checks is there for.
+	for n, want := range map[string]string{"": "", "123": "123", "1234": "1234", "+15550000001": "ending 0001"} {
+		if got := mask(n); got != want {
+			t.Errorf("mask(%q) = %q, want %q", n, got, want)
+		}
+	}
+	if got := smsLink("not a number", "PAIR X"); got != "" {
+		t.Errorf("smsLink to a non-number: %q", got)
+	}
+	secret := strings.Repeat("A", 16)
+	if s, ok := otpSecret("otpauth://totp/AgentOS?secret=" + secret); !ok || s != secret {
+		t.Fatalf("a good link: %q %v", s, ok)
+	}
+	for _, link := range []string{
+		"otpauth://hotp/AgentOS?secret=" + secret,
+		"javascript:alert(1)//otpauth://totp/?secret=" + secret,
+		"otpauth://totp/AgentOS?secret=" + secret + "&pad=" + strings.Repeat("x", 512),
+		"otpauth://totp/%zz?secret=" + secret,
+		"otpauth://totp/AgentOS?secret=abc",
+	} {
+		if s, ok := otpSecret(link); ok || s != "" {
+			t.Errorf("otpSecret(%q) = %q, %v", link, s, ok)
+		}
+	}
+	for s, want := range map[string]bool{"sk-ok key~": true, "": true, "a\x00b": false, "tab\there": false, "café": false, "del\x7f": false} {
+		if printable(s) != want {
+			t.Errorf("printable(%q) != %v", s, want)
+		}
+	}
+	for p, want := range map[string]string{"ready": "ready", "updating": "updating (setup can continue)", "": "starting", "other": "starting"} {
+		if got := phaseText(p); got != want {
+			t.Errorf("phaseText(%q) = %q, want %q", p, got, want)
+		}
+	}
+}
+
+func TestTheHomeSourceAndReachedHostFailClosed(t *testing.T) {
+	// #5016: a box whose own addresses cannot be listed admits
+	// no source, and a request with no reached address has no host.
+	req := reaching(httptest.NewRequest("GET", "http://10.42.0.1/", nil))
+	req.RemoteAddr = phoneIP
+	if !homeSource(req) {
+		t.Fatal("the phone is not a home source")
+	}
+	saved := ownAddrs
+	ownAddrs = func() ([]netip.Addr, error) { return nil, errors.New("no addresses") }
+	ok := homeSource(req)
+	ownAddrs = saved
+	if ok {
+		t.Fatal("a source admitted while the box's own addresses are unknown")
+	}
+	if h := reachedHost(httptest.NewRequest("GET", "http://10.42.0.1/", nil)); h != "" {
+		t.Fatalf("no reached address: %q", h)
+	}
+	if h := reachedHost(req); h != "10.42.0.1" {
+		t.Fatalf("reached host %q", h)
+	}
+}
+
+func TestSetupStepsRefuseOutOfOrderAndKeepOnlyFreshErrors(t *testing.T) {
+	// #5016: a post from a phone with no setup
+	// cookie, or over the 16 KiB form cap, does nothing; each step refuses
+	// before the step it needs; a typed number's code is shown to that
+	// phone; a later success clears an earlier error; and a void code
+	// generator is taken on a post too.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	if w := r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}}); len(w.Result().Cookies()) != 0 || len(r.hooks.sent) != 0 {
+		t.Fatalf("a post with no setup cookie: cookies %v, texts %v", w.Result().Cookies(), r.hooks.sent)
+	}
+	r.get("/setup")
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}, "pad": {strings.Repeat("p", 17<<10)}})
+	if len(r.hooks.sent) != 0 {
+		t.Fatalf("a setup form over the 16 KiB cap was read: %v", r.hooks.sent)
+	}
+	r.post("/setup/codes", url.Values{"code": {"000000"}})
+	if e := r.setupErr(); e != "Start this step again." {
+		t.Fatalf("codes before pairing: %q", e)
+	}
+	r.post("/setup/recovery", url.Values{"stored": {"1"}})
+	if e := r.setupErr(); e != "Add approval codes first." || r.srv.setup.st.Recovery {
+		t.Fatalf("recovery before codes: %q", e)
+	}
+	r.post("/setup/host", url.Values{})
+	if e := r.setupErr(); e != "Finish the earlier steps first." || r.hooks.trusted != nil {
+		t.Fatalf("host before recovery: %q", e)
+	}
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
+	if p := html.UnescapeString(r.get("/setup")); !strings.Contains(p, "Code texted to "+ownerNum) {
+		t.Fatalf("the typed number's code form: %s", p)
+	}
+	r.asOther(func() {
+		if p := r.get("/setup"); strings.Contains(p, "Code texted to") {
+			t.Fatalf("another phone sees the typed number's code form: %s", p)
+		}
+	})
+
+	r = newRig(t)
+	r.runSetupToHost()
+	r.post("/setup/recovery", url.Values{})
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted == nil {
+		t.Fatal("host step did not run")
+	}
+	if e := r.setupErr(); e != "" {
+		t.Fatalf("an error a later success replaced is still shown: %q", e)
+	}
+
+	r = newRig(t)
+	r.runSetupToHost()
+	r.srv.cfg.CodesVoid = &CodesVoid{}
+	r.srv.cfg.CodesVoid.Set()
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted != nil || r.srv.setup.st.Codes {
+		t.Fatalf("a post passed a void code generator: trusted %v, codes %v", r.hooks.trusted, r.srv.setup.st.Codes)
+	}
+}
+
+func TestSetupStopsWhenItCannotMakeACookieOrACode(t *testing.T) {
+	// #5016: the setup page with too little
+	// randomness for its cookie, then for its pairing code, says so and
+	// shows no pairing code.
+	for n, want := range map[int]string{32: "Setup could not start. Reload the page.", 64: "Setup could not start this step. Reload the page."} {
+		s, err := New(Config{Page: testPage(), Hooks: &fakeHooks{progress: Progress{Online: true}}, Store: &MemStore{},
+			Rand: strings.NewReader(strings.Repeat("r", n))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("GET", "http://10.42.0.1/setup", nil)
+		req.RemoteAddr = phoneIP
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, reaching(req))
+		if w.Code != 500 || strings.TrimSpace(w.Body.String()) != want {
+			t.Errorf("%d random bytes: %d %q", n, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestPairingVoidsOtherCodesAndKeepsAtMostEightPhones(t *testing.T) {
+	// #5016: the oldest phone's pairing code goes once
+	// maxPairDevices phones hold one; a pairing voids every other pending
+	// code; a pairing the store cannot save is not claimed.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	codeRe := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`)
+	first := codeRe.FindStringSubmatch(r.get("/setup"))
+	jar := r.jar
+	for i := 0; i < maxPairDevices; i++ {
+		r.jar, _ = cookiejar.New(nil)
+		if codeRe.FindStringSubmatch(r.get("/setup")) == nil {
+			t.Fatal("no pairing code")
+		}
+	}
+	r.jar = jar
+	if first == nil {
+		t.Fatal("no pairing code")
+	}
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+first[1]); !ok || reply != "" || r.srv.setup.st.Owner != "" {
+		t.Fatalf("the oldest phone's code still pairs: %q %v", reply, ok)
+	}
+	if n := len(r.srv.setup.pair); n != maxPairDevices {
+		t.Fatalf("%d pairing codes held", n)
+	}
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0002"}})
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || !strings.HasPrefix(reply, "agentOS is running on") {
+		t.Fatalf("pairing: %q", reply)
+	}
+	if u := r.srv.setup; len(u.pair) != 0 || len(u.pairOrder) != 0 || u.numCode != "" || u.numTo != "" || u.numDevice != "" {
+		t.Fatalf("codes left after pairing: %d %d %q %q %q", len(u.pair), len(u.pairOrder), u.numCode, u.numTo, u.numDevice)
+	}
+
+	r = newRig(t)
+	r.hooks.progress.Online = true
+	r.srv = r.open(FileStore{Path: t.TempDir() + "/gone/setup.json"})
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || reply != "Could not save your number. Try again." {
+		t.Fatalf("a pairing the store refused: %q %v", reply, ok)
+	}
+}
+
+func TestTheAIStepRefreshesOnlyWhileTheUpdateRuns(t *testing.T) {
+	// #5016: the AI step reloads itself until the first-boot
+	// update is done.
+	r := newRig(t)
+	r.runSetupToHost()
+	r.post("/setup/host", url.Values{})
+	if p := r.get("/setup"); !strings.Contains(p, `<meta http-equiv="refresh" content="10">`) {
+		t.Fatalf("no refresh while updating: %s", p)
+	}
+	r.hooks.mu.Lock()
+	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	r.hooks.mu.Unlock()
+	if p := r.get("/setup"); strings.Contains(p, `http-equiv="refresh"`) {
+		t.Fatalf("a refresh after the update: %s", p)
+	}
+}

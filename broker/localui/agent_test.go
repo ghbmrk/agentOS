@@ -261,3 +261,209 @@ func TestAFailedListingAfterAnAnswerKeepsTheAnswersMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestTheInProcessSocketRefusesWhatJSONCannotCarry(t *testing.T) {
+	// An argument or a result JSON cannot encode is the
+	// marshal error itself, and a handler never runs on an argument that
+	// did not encode (#5016: agent.go's two error checks).
+	ran := false
+	p := InProcess{
+		"echo": func(context.Context, sockets.Peer, json.RawMessage) (any, error) { ran = true; return "ok", nil },
+		"bad":  func(context.Context, sockets.Peer, json.RawMessage) (any, error) { return make(chan int), nil },
+	}
+	var out string
+	if err := p.Call(context.Background(), "echo", make(chan int), &out); err == nil || ran {
+		t.Fatalf("an argument JSON cannot carry: err %v, handler ran %v", err, ran)
+	}
+	if _, ok := p.Call(context.Background(), "bad", nil, &out).(*json.UnsupportedTypeError); !ok {
+		t.Fatalf("a result JSON cannot carry: %v", p.Call(context.Background(), "bad", nil, &out))
+	}
+	if err := p.Call(context.Background(), "echo", 1, &out); err != nil || out != "ok" || !ran {
+		t.Fatalf("echo: %q %v", out, err)
+	}
+}
+
+func TestACallToAgentosdEndsItsContext(t *testing.T) {
+	// A page's call to agentosd is bounded by callTimeout and
+	// releases its context when it returns (#5016: agent.go's defer cancel).
+	s, err := New(Config{Page: testPage()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held context.Context
+	s.SetOwner(InProcess{localapi.OpStatus: func(ctx context.Context, _ sockets.Peer, _ json.RawMessage) (any, error) {
+		held = ctx
+		return localapi.Status{}, nil
+	}})
+	var st localapi.Status
+	if err := s.call(context.Background(), localapi.OpStatus, struct{}{}, &st); err != nil {
+		t.Fatal(err)
+	}
+	if held == nil || held.Err() != context.Canceled {
+		t.Fatalf("context after the call: %v", held.Err())
+	}
+	if d, ok := held.Deadline(); !ok || time.Until(d) > callTimeout {
+		t.Fatalf("deadline %v %v", d, ok)
+	}
+}
+
+func TestNewRefusesAnIncompleteConfigAndFillsItsDefaults(t *testing.T) {
+	// #5016: each of New's checks and defaults is pinned.
+	dir := t.TempDir()
+	for name, cfg := range map[string]Config{
+		"hooks without a store":    {Page: testPage(), Hooks: &fakeHooks{}},
+		"a store without hooks":    {Page: testPage(), Store: &MemStore{}},
+		"a card without hooks":     {Page: testPage(), Card: heldCard{}},
+		"a short random source":    {Page: testPage(), Rand: strings.NewReader("short")},
+		"a store that cannot load": {Page: testPage(), Hooks: &fakeHooks{}, Store: FileStore{Path: dir}},
+	} {
+		if s, err := New(cfg); err == nil || s != nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	s, err := New(Config{Page: testPage(), Rand: strings.NewReader(strings.Repeat("k", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.cfg.Port != UIPort || s.cfg.Now == nil || string(s.formKey) != strings.Repeat("k", 32) {
+		t.Fatalf("defaults: port %d, now set %v, form key %q", s.cfg.Port, s.cfg.Now != nil, s.formKey)
+	}
+	if s, err = New(Config{Page: testPage(), Port: 8080}); err != nil || s.cfg.Port != 8080 {
+		t.Fatalf("a set port: %v", err)
+	}
+}
+
+func TestEveryPageSaysItIsHTMLAndNotToSniffIt(t *testing.T) {
+	// The page declares its type rather than leaving it to a
+	// sniffer, which would read a body that does not start with markup as
+	// text (#5016: server.go's nosniff header, pages.go's Content-Type).
+	s, err := New(Config{Page: testPage()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pages.New("plain").Parse(`{"not": "markup"}`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "http://10.42.0.1/status", nil)
+	req.RemoteAddr = "10.42.0.20:5000"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, reaching(req))
+	if w.Code != 200 || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("status page: %d %v", w.Code, w.Header())
+	}
+	w = httptest.NewRecorder()
+	s.render(w, "plain", nil)
+	if got := w.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type %q", got)
+	}
+}
+
+func TestSignInChecksTheCodeBeforeAskingAgentosd(t *testing.T) {
+	// A phone with no session, an empty or overlong code, and a
+	// code with spaces round it: the page asks agentosd only what it must
+	// (#5016: server.go's isSignedIn, signIn and checkSignIn checks).
+	a := newApprovalRig(t)
+	inner := a.srv.getOwner().(InProcess)
+	var asked []string
+	spy := InProcess{}
+	for op, h := range inner {
+		op, h := op, h
+		spy[op] = func(ctx context.Context, p sockets.Peer, b json.RawMessage) (any, error) {
+			asked = append(asked, op+" "+string(b))
+			return h(ctx, p, b)
+		}
+	}
+	a.srv.SetOwner(spy)
+	signedOut := a.asOther
+	signedOut(func() {
+		if loc := a.do("GET", "/home", nil).Header().Get("Location"); !strings.HasPrefix(loc, "/unlock") {
+			t.Fatalf("home without a session: %q", loc)
+		}
+	})
+	for _, op := range asked {
+		if strings.HasPrefix(op, localapi.OpSession+" ") {
+			t.Fatalf("a phone with no session token was looked up: %q", asked)
+		}
+	}
+	signedOut(func() {
+		for _, code := range []string{"", "   ", strings.Repeat("7", localapi.MaxCode+1)} {
+			asked = nil
+			w := a.post("/unlock", url.Values{"code": {code}, "next": {"/home"}})
+			if w.Code != 200 || !strings.Contains(html.UnescapeString(w.Body.String()), wrongCodeText) {
+				t.Fatalf("code %q: %d", code, w.Code)
+			}
+			for _, op := range asked {
+				if strings.HasPrefix(op, localapi.OpSignIn+" ") {
+					t.Fatalf("code %q went to agentosd: %q", code, asked)
+				}
+			}
+		}
+		asked = nil
+		code := a.code()
+		w := a.post("/unlock", url.Values{"code": {" " + code + " "}, "next": {"/home"}})
+		if w.Header().Get("Location") != "/home" || strings.Contains(w.Body.String(), `name="code"`) {
+			t.Fatalf("a code with spaces round it: %d %s", w.Code, w.Body.String())
+		}
+		want, _ := json.Marshal(localapi.SignIn{Code: code})
+		found := false
+		for _, op := range asked {
+			found = found || op == localapi.OpSignIn+" "+string(want)
+		}
+		if !found {
+			t.Fatalf("agentosd was not asked the trimmed code: %q", asked)
+		}
+	})
+}
+
+func TestTheApprovalsHandlerGuardsItsOwnPathOwnerAndBody(t *testing.T) {
+	// #5016: approvals.go's path, owner and body-cap
+	// checks, and unlock's own same-origin check, which hold even where
+	// ServeHTTP's checks are not in front of them.
+	a := newApprovalRig(t)
+	if w := a.do("GET", "/approvals/x", nil); w.Code != 404 {
+		t.Fatalf("/approvals/x: %d", w.Code)
+	}
+	if w := a.post("/approvals/", url.Values{"pad": {strings.Repeat("p", 17<<10)}}); w.Code != 400 {
+		t.Fatalf("an oversized answer: %d", w.Code)
+	}
+	s, err := New(Config{Page: testPage()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.approvals(w, httptest.NewRequest("GET", "http://10.42.0.1/", nil))
+	if w.Code != 303 || w.Header().Get("Location") != "/status" {
+		t.Fatalf("no owner: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	req := httptest.NewRequest("POST", "http://10.42.0.1/unlock", strings.NewReader("code=123456"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	w = httptest.NewRecorder()
+	a.srv.unlock(w, reaching(req))
+	if w.Code != 403 {
+		t.Fatalf("a cross-site sign-in: %d", w.Code)
+	}
+}
+
+func TestTheCardShowsEachOpenItemItsTermsAndItsUndo(t *testing.T) {
+	// #5016: requestView skips a done item, says when
+	// an item's terms cannot be read, and states every item's undo.
+	s, err := New(Config{Page: testPage()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := s.requestView(owner.LocalRequest{ID: "Q1", Done: []bool{true, false, false, false},
+		Items: []owner.Item{{Object: "done one"}, {Object: "unreadable", Terms: owner.TermList("not a list")},
+			{Object: "by", UndoBy: "Reply UNDO"}, {Object: "window", UndoWindow: time.Hour}}}, "s")
+	if len(v.Items) != 3 || v.Items[0].Object != "unreadable" {
+		t.Fatalf("items: %+v", v.Items)
+	}
+	if ts := v.Items[0].Terms; len(ts) != 1 || !strings.Contains(ts[0].Value, "could not be read") {
+		t.Fatalf("unreadable terms: %+v", ts)
+	}
+	for i, want := range []string{"Cannot be undone.", "Reply UNDO", "Undo within"} {
+		if !strings.HasPrefix(v.Items[i].Undo, want) {
+			t.Errorf("item %d undo %q, want %q", i, v.Items[i].Undo, want)
+		}
+	}
+}
