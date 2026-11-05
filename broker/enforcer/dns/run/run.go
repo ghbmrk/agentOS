@@ -304,7 +304,7 @@ func writeFile(path, b string) error {
 	if err := os.WriteFile(tmp, []byte(b), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, path) // durable:exempt lifecycle:exempt the enforcer links nothing of agentOS (brief decision 1, arc2_test.go), so it cannot use durable; the file need not survive a crash, and it is no store, since every start writes it again from the document in force
 }
 
 // lineLog is an instance's standard error, one log line per line, each
