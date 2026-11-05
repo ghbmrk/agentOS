@@ -256,3 +256,22 @@ func TestHoldGrowsWithWorth(t *testing.T) {
 		t.Fatal("the hold does not lengthen with worth")
 	}
 }
+
+// Only a spend cap counts as capped: a rate cap bounds no money. A class just
+// past the table ranks highest rather than indexing past it.
+func TestCappedMeansSpendCap(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		want bool
+	}{{KSpendDay, true}, {KSpendTask, true}, {KRateDay, false}, {KRateRecipient, false}, {KUses, false}} {
+		if got := (Limits{Caps: []Cap{{Kind: c.kind, N: 1}}}).Capped(); got != c.want {
+			t.Errorf("%s: capped %v, want %v", c.kind, got, c.want)
+		}
+	}
+	if (Limits{}).Capped() {
+		t.Error("no caps is capped")
+	}
+	if WorthOf([]Asset{assets}, true) != MaxRank {
+		t.Error("the class just past the table is not priced highest")
+	}
+}
