@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -117,12 +118,26 @@ func TestConfigRefused(t *testing.T) {
 		"chan port mismatch": func(c *Config) { c.Channel = netip.MustParseAddrPort("10.50.0.1:7444") },
 		"page port mismatch": func(c *Config) { c.Page = []netip.AddrPort{netip.MustParseAddrPort("10.10.0.1:8443")} },
 		"relative nft":       func(c *Config) { c.Nft = "nft" },
+		"relative dnsmasq":   func(c *Config) { c.Dnsmasq = "dnsmasq" },
+		"dns misses a net":   func(c *Config) { c.DNS.Nets = slices.Clone(c.DNS.Nets[1:]) },
+		"wake on no network": func(c *Config) { c.Wake = []WakeMachine{{MAC: "02:00:00:00:00:01", Iface: "eth9"}} },
 	} {
 		c := good
 		f(&c)
 		if c.check() == nil {
 			t.Errorf("%s: taken", name)
 		}
+	}
+	// A hardware address that does not parse is named as it was written.
+	bad := good
+	bad.Wake = []WakeMachine{{MAC: "zz", Iface: "hh0"}}
+	if err := bad.check(); err == nil || !strings.Contains(err.Error(), `wake: hardware address "zz"`) {
+		t.Errorf("an unparsable wake address: %v", err)
+	}
+	ok := good
+	ok.Wake = []WakeMachine{{MAC: "02:00:00:00:00:01", Iface: "hh0"}}
+	if err := ok.check(); err != nil {
+		t.Errorf("a good wake machine was refused: %v", err)
 	}
 	b, err := json.Marshal(good)
 	if err != nil {

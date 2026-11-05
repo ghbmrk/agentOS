@@ -173,6 +173,12 @@ type fakeFire struct {
 	listing  []byte
 	quotaErr error
 	listErr  error
+	// listAt, when set, answers the nth List (from 1) instead, when its
+	// last result is true; quotaCtx and listCtx are the last contexts
+	// QuotaPast and List were given.
+	listAt   func(n int) ([]byte, error, bool)
+	quotaCtx context.Context
+	listCtx  context.Context
 	// Each load's context, and the time it had left when the load began.
 	ctxs []context.Context
 	left []time.Duration
@@ -201,10 +207,16 @@ func (f *fakeFire) Load(ctx context.Context, s string) error {
 	return nil
 }
 
-func (f *fakeFire) List(context.Context, string) ([]byte, error) {
+func (f *fakeFire) List(ctx context.Context, _ string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listed++
+	f.listCtx = ctx
+	if f.listAt != nil {
+		if b, err, ok := f.listAt(f.listed); ok {
+			return b, err
+		}
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -218,9 +230,10 @@ func (f *fakeFire) Update(_ context.Context, s string) error {
 	return nil
 }
 
-func (f *fakeFire) QuotaPast(context.Context) (bool, error) {
+func (f *fakeFire) QuotaPast(ctx context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.quotaCtx = ctx
 	return f.quotaErr == nil, f.quotaErr
 }
 

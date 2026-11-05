@@ -379,6 +379,9 @@ func TestPairRelayOneAtATime(t *testing.T) {
 		defer x.d.net.mdnsMu.Unlock()
 		return x.d.net.mdnsDown
 	})
+	if !strings.Contains(x.logText(), "mdns: relay stopped, started again at the next tick: mdns: socket refused") {
+		t.Fatalf("the relay's end was not logged: %q", x.logText())
+	}
 	x.advance(time.Second)
 	waitUntil(t, "the relay started again", func() bool { return active() == 1 })
 	x.d.Close()
@@ -552,10 +555,52 @@ func TestWakeRestarts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- x.d.ServeWake(ctx) }()
-	waitUntil(t, "the relay started again", func() bool { mu.Lock(); defer mu.Unlock(); return runs >= 2 })
+	count := func() int { mu.Lock(); defer mu.Unlock(); return runs }
+	waitUntil(t, "the relay ran", func() bool { return count() >= 1 })
+	time.Sleep(wakeRetry / 3)
+	if n := count(); n != 1 {
+		t.Fatalf("the relay ran %d times within a third of wakeRetry", n)
+	}
+	waitUntil(t, "the relay started again", func() bool { return count() >= 2 })
+	if !strings.Contains(x.logText(), "wake: relay stopped, started again in "+wakeRetry.String()+": socket closed") {
+		t.Fatalf("the relay's stop was not logged: %q", x.logText())
+	}
+	// Ended during the wait: it returns at once and runs no more.
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(wakeRetry / 2):
+		t.Fatal("ServeWake waited out its retry after its end")
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("the relay ran %d times, want 2", n)
+	}
+}
+
+// TestWakeEndQuiet: a relay that ends with ServeWake's end is not logged
+// as stopping on its own.
+func TestWakeEndQuiet(t *testing.T) {
+	x, _ := enrolled(t, false)
+	r, err := wol.New(x.cfg.Layout, []wol.Machine{{MAC: net.HardwareAddr{2, 0, 0, 0, 0, 1}, Iface: "hh0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.d.net.relay = r
+	started := make(chan struct{})
+	x.d.dp.Wake = func(ctx context.Context, _ *wol.Relay) error { close(started); <-ctx.Done(); return ctx.Err() }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- x.d.ServeWake(ctx) }()
+	<-started
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(x.logText(), "wake: relay stopped") {
+		t.Fatal("the relay's end with ServeWake's was logged as a stop")
 	}
 }
 
@@ -575,6 +620,22 @@ func TestTrafficRead(t *testing.T) {
 // TestServeWake: with no machine to wake the relay waits for the end.
 func TestServeWake(t *testing.T) {
 	x, _ := enrolled(t, false)
+	var mu sync.Mutex
+	runs := 0
+	x.d.dp.Wake = func(ctx context.Context, _ *wol.Relay) error {
+		mu.Lock()
+		runs++
+		mu.Unlock()
+		<-ctx.Done()
+		return nil
+	}
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if runs != 0 {
+			t.Errorf("with no machine the relay ran %d times", runs)
+		}
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- x.d.ServeWake(ctx) }()
@@ -689,4 +750,131 @@ func TestCrashReadUsesLoadedDocument(t *testing.T) {
 	if !strings.Contains(x.logText(), "loaded document not saved") {
 		t.Fatal("a loaded document that was not saved was not logged")
 	}
+}
+
+// TestWakeConfigured: a configured machine runs a relay, and a machine
+// list that does not read fails the start, the configuration's check
+// aside.
+func TestWakeConfigured(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.cfg.Wake = []WakeMachine{{MAC: "02:00:00:00:00:01", Iface: "hh0"}}
+	x.restart()
+	if x.d.net.relay == nil {
+		t.Fatal("a configured machine runs no Wake-on-LAN relay")
+	}
+	x.d.Close()
+	x.cfg.Wake = []WakeMachine{{MAC: "zz", Iface: "hh0"}}
+	if d, err := x.open(); err == nil || !strings.Contains(err.Error(), "wake:") {
+		if d != nil {
+			d.Close()
+		}
+		t.Fatalf("a bad machine list started: %v", err)
+	}
+	x.cfg.Wake = nil
+	x.start()
+}
+
+// TestTrafficStateUnreadableFailsStart: a byte-cap day that cannot be read
+// at all (not one that reads back wrong) fails the start.
+func TestTrafficStateUnreadableFailsStart(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.d.Close()
+	if err := os.Mkdir(filepath.Join(x.dir, fileTraffic), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := x.open(); err == nil || !strings.Contains(err.Error(), "byte caps:") {
+		if d != nil {
+			d.Close()
+		}
+		t.Fatalf("an unreadable day started: %v", err)
+	}
+	if err := os.Remove(filepath.Join(x.dir, fileTraffic)); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
+}
+
+// TestFirewallContextsEnd: the quota probe's and a reading's timeouts are
+// released when each is done.
+func TestFirewallContextsEnd(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.fire.mu.Lock()
+	qctx := x.fire.quotaCtx
+	x.fire.mu.Unlock()
+	if qctx == nil || qctx.Err() == nil {
+		t.Fatal("the quota probe's context outlived the start")
+	}
+	x.setListing(listing(t, x, doc, 7, 10))
+	x.advance(readEvery)
+	x.fire.mu.Lock()
+	lctx := x.fire.listCtx
+	x.fire.mu.Unlock()
+	if lctx == nil || lctx.Err() == nil {
+		t.Fatal("a reading's context outlived the reading")
+	}
+}
+
+// TestRefusedFirstLoadStopsResolver: a start whose first load is refused
+// stops the resolver it started.
+func TestRefusedFirstLoadStopsResolver(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.d.Close()
+	x.dns.mu.Lock()
+	closed := x.dns.closed
+	x.dns.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	if d, err := x.open(); err == nil {
+		d.Close()
+		t.Fatal("a refused first load started")
+	}
+	x.dns.mu.Lock()
+	again := x.dns.closed
+	x.dns.mu.Unlock()
+	if again == closed {
+		t.Fatal("a refused first load left the resolver running")
+	}
+	x.start()
+}
+
+// TestUnreadableTableRefusesLoad: a running table that lists but does not
+// parse refuses the load, rather than loading the drop alone.
+func TestUnreadableTableRefusesLoad(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.setListing([]byte("not a table"))
+	before := x.fire.last()
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), home())
+	x.d.fwMu.Unlock()
+	if err == nil || x.fire.last() != before {
+		t.Fatalf("a table that does not parse loaded: %v", err)
+	}
+}
+
+// TestReadingStepsFail: each step of a reading that fails is logged with
+// its cause, and no drop update follows a failed one.
+func TestReadingStepsFail(t *testing.T) {
+	x, doc, _ := capped(t)
+	updates := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.updates) }
+	try := func(at func(int) ([]byte, error, bool), want string) {
+		t.Helper()
+		x.fire.mu.Lock()
+		x.fire.listing, x.fire.listed, x.fire.listAt = listing(t, x, doc, 7, 10), 0, at
+		x.fire.mu.Unlock()
+		n := updates()
+		x.advance(readEvery)
+		if !strings.Contains(x.logText(), want) {
+			t.Fatalf("log %q, want %q", x.logText(), want)
+		}
+		if updates() != n {
+			t.Fatalf("a drop update followed %q", want)
+		}
+	}
+	try(func(n int) ([]byte, error, bool) { return nil, errors.New("nft: gone"), n == 1 }, "byte caps: reading: nft: gone")
+	try(func(n int) ([]byte, error, bool) { return nil, errors.New("nft: lost"), n == 2 }, "byte caps: drop: nft: lost")
+	try(func(n int) ([]byte, error, bool) { return []byte("not a table"), nil, n == 2 }, "byte caps: drop: ")
+	x.fire.mu.Lock()
+	x.fire.listAt = nil
+	x.fire.mu.Unlock()
 }

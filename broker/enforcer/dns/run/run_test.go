@@ -47,6 +47,17 @@ func fakeDnsmasq(path string) {
 		signal.Notify(sig, syscall.SIGTERM)
 	}
 	os.Stderr.WriteString("said " + conf + "\n")
+	if strings.Contains(conf, "holds") {
+		// A child in a group of its own that keeps the instance's standard
+		// error open after the instance exits, which a stop's kill of the
+		// instance's group does not reach.
+		c := exec.Command("/bin/sh", "-c", "sleep 20")
+		c.Stderr = os.Stderr
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if c.Start() == nil {
+			event("holder_" + strconv.Itoa(c.Process.Pid) + " " + conf)
+		}
+	}
 	if strings.Contains(conf, "forks") {
 		// A TCP child of its own, which ignores SIGTERM.
 		c := exec.Command("/bin/sh", "-c", "trap '' TERM; sleep 60")
@@ -328,6 +339,16 @@ func TestNewRefuses(t *testing.T) {
 	if _, err := New("dnsmasq", dir, nil); !errors.Is(err, ErrRun) {
 		t.Errorf("relative binary: %v", err)
 	}
+	good := t.TempDir()
+	if err := os.Chmod(good, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New("dnsmasq", good, nil); !errors.Is(err, ErrRun) {
+		t.Errorf("relative binary in a good directory: %v", err)
+	}
+	if _, err := New("/usr/sbin/dnsmasq", filepath.Join(good, "absent"), nil); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing directory: %v", err)
+	}
 	if _, err := New("/usr/sbin/dnsmasq", dir, nil); !errors.Is(err, ErrRun) {
 		t.Errorf("group-readable directory: %v", err)
 	}
@@ -350,7 +371,36 @@ func TestStartFailureLogged(t *testing.T) {
 	}
 	s2, _, logs := newLoggedSet(t, filepath.Join(dir, "no-dnsmasq"))
 	s2.Apply(files("core-a", "tv-a"), func() error { return nil })
-	waitLog(t, logs, "dns: listed-core0: dns/run: refused")
+	// Logged by the start itself, not only by the retry RestartMin later.
+	if !strings.Contains(logs(), "dns: listed-core0: dns/run: refused") {
+		t.Fatalf("a failed start was not logged when it failed: %q", logs())
+	}
+	// Each failed retry doubles the wait before the next.
+	waitLog(t, logs, "dns: listed-core0: starting it again in "+(2*RestartMin).String())
+}
+
+// TestStopNotHeldByAHeldStderr: a stop is not held past WaitDelay by a
+// process outside the instance's group that keeps its standard error.
+func TestStopNotHeldByAHeldStderr(t *testing.T) {
+	s, dir := newSet(t)
+	if err := s.Apply(files("core-holds", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	waitEvents(t, dir, "start_core-holds")
+	for _, e := range events(t, dir) {
+		if rest, ok := strings.CutPrefix(e, "holder_"); ok {
+			if pid, err := strconv.Atoi(strings.SplitN(rest, "_", 2)[0]); err == nil {
+				t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+			}
+		}
+	}
+	done := make(chan struct{})
+	go func() { s.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stop waited on a process holding the instance's standard error")
+	}
 }
 
 // TestStderrLogged: an instance's standard error reaches the log, by
@@ -503,5 +553,16 @@ func TestLineLogCuts(t *testing.T) {
 	want := []string{"p: one", "p: two", "p: " + strings.Repeat("x", 512), "p: y", "p: " + strings.Repeat("z", 512)}
 	if !slices.Equal(got, want) {
 		t.Errorf("lines %q", got)
+	}
+	// An empty line is a line, and a partial line of exactly 512 bytes
+	// waits for more.
+	got = nil
+	l.Write([]byte("\nafter\n" + strings.Repeat("w", 512)))
+	if want := []string{"p: ", "p: after"}; !slices.Equal(got, want) {
+		t.Errorf("lines %q, want %q", got, want)
+	}
+	l.Write([]byte("w"))
+	if want := []string{"p: ", "p: after", "p: " + strings.Repeat("w", 512)}; !slices.Equal(got, want) {
+		t.Errorf("lines %q, want %q", got, want)
 	}
 }
