@@ -222,6 +222,32 @@ func (r *rig) next() string {
 	}
 }
 
+// records hands each turn's record to the returned channel as the turn
+// ends (Config.Done). Set it before run or serve.
+func (r *rig) records() <-chan call.Turn {
+	ch := make(chan call.Turn, 8)
+	r.cfg.Done = func(tu call.Turn) { ch <- tu }
+	return ch
+}
+
+// turnEnds waits for turn n's record. next returns once a sentence starts
+// playing, while the turn may still be waiting for its answer to close; a
+// hang-up then cuts the turn short. A test that asserts a turn ran to its
+// end waits for its record before hanging up.
+func (r *rig) turnEnds(ch <-chan call.Turn, n int) {
+	r.t.Helper()
+	for {
+		select {
+		case tu := <-ch:
+			if tu.N == n {
+				return
+			}
+		case <-time.After(5 * time.Second):
+			r.t.Fatalf("turn %d did not end", n)
+		}
+	}
+}
+
 func (r *rig) quiet() {
 	select {
 	case s := <-r.l.saying:
@@ -366,6 +392,7 @@ func TestZeroStopsSpeech(t *testing.T) {
 func TestBargeInStopsAndStartsANewTurn(t *testing.T) {
 	r := newRig(t, func(a call.Ask) []string { return []string{"Answer to " + a.Text + "."} })
 	r.l.gate = true
+	ends := r.records()
 	r.run(call.P2)
 	r.say("first")
 	if got := r.next(); got != "S:Answer to first." {
@@ -384,6 +411,7 @@ func TestBargeInStopsAndStartsANewTurn(t *testing.T) {
 	if got := r.next(); got != "S:Answer to second." {
 		t.Fatal(got)
 	}
+	r.turnEnds(ends, 2)
 	rep := r.hangup()
 	if len(rep.Turns) != 2 || !rep.Turns[0].Stopped || rep.Turns[1].Stopped {
 		t.Fatalf("turns = %+v", rep.Turns)
