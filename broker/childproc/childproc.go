@@ -60,6 +60,20 @@ var allowedKeys = map[string]string{
 // (AGENTOS_OWNER) among it: never a child's, by key or by value.
 const deniedPrefix = "AGENTOS_"
 
+// shellState are the variables through which a shell takes code or
+// options from its environment: bash, which is /bin/sh on the image
+// (VULN-debian), imports exported functions (BASH_FUNC_<name>%% or
+// BASH_FUNC_<name>()), SHELLOPTS and BASHOPTS, and reads BASH_ENV (ENV
+// when interactive). No child is given one, allowlisted or not, so a
+// widened allowlist cannot pass one through (#3999).
+func shellState(k string) bool {
+	switch k {
+	case "SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV":
+		return true
+	}
+	return strings.HasPrefix(k, "BASH_FUNC_")
+}
+
 // credentialWords mark a variable's name as holding a credential; its
 // value, like an AGENTOS_* value, may not appear in a child's
 // environment under any key.
@@ -113,6 +127,8 @@ func (e Env) check() error {
 			return fmt.Errorf("childproc: environment key %s given twice", k)
 		case strings.HasPrefix(k, deniedPrefix):
 			return fmt.Errorf("childproc: environment key %s is agentosd's own", k)
+		case shellState(k):
+			return fmt.Errorf("childproc: environment key %s is shell state", k)
 		case allowedKeys[k] == "":
 			return fmt.Errorf("childproc: environment key %s is not allowlisted", k)
 		}
