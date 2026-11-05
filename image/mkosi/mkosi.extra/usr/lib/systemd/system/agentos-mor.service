@@ -1,0 +1,34 @@
+[Unit]
+Description=Clear the memory-overwrite request on an orderly shutdown
+Documentation=file:/usr/lib/agentos/agentos-mor
+# HW-8: the kernel's EFI stub sets MOR at boot, so a power cut or forced reset makes the host's
+# firmware wipe memory at its next start; an orderly shutdown wipes the image's secrets, then clears
+# it. The clear is this unit's ExecStop. Like systemd-random-seed.service, it starts before
+# sysinit.target and stops when shutdown.target starts, so systemd stops it only after every unit
+# ordered after sysinit.target (every unit with default dependencies, which is every unit holding a
+# secret) has stopped, and after /tmp is unmounted: their memory is then free, and init_on_free=1
+# has zeroed it. agentos-mor refuses to clear MOR without init_on_free=1, and drops the page cache
+# first. tests/test_image_mor.py holds this ordering. agentos-mor.service.d/50-main-side.conf replaces
+# the shared main-side drop-in, whose After=systemd-tmpfiles-setup.service would close a cycle here.
+DefaultDependencies=no
+After=sys-firmware-efi-efivars.mount
+Before=sysinit.target shutdown.target tmp.mount
+Conflicts=shutdown.target
+ConditionPathExists=/sys/firmware/efi
+# Only the shutdown transaction stops it: a manual stop would clear MOR while the secret holders run.
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/agentos/agentos-mor status
+ExecStop=/usr/lib/agentos/agentos-mor clear
+StandardOutput=journal+console
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+# No device: it writes only efivarfs and /proc/sys/vm/drop_caches.
+DevicePolicy=closed
+
+[Install]
+WantedBy=sysinit.target
