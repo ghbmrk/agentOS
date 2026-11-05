@@ -23,6 +23,24 @@ func TestOpenRefusesStateDirOthersCanSwap(t *testing.T) {
 		"world-writable parent": func(t *testing.T, top string) string {
 			return mode(t, filepath.Join(top, "pub"), 0o777)
 		},
+		"other-writable parent": func(t *testing.T, top string) string {
+			return mode(t, filepath.Join(top, "oth"), 0o757)
+		},
+		// machines and snapshots are checked too: a sticky world-writable
+		// StateDir passes, so another uid could plant either as a link.
+		"machines a link in a sticky StateDir": func(t *testing.T, top string) string {
+			state := mode(t, filepath.Join(top, "state"), 0o777|os.ModeSticky)
+			if err := os.Symlink(mode(t, filepath.Join(top, "elsewhere"), 0o700), filepath.Join(state, "machines")); err != nil {
+				t.Fatal(err)
+			}
+			return top
+		},
+		"snapshots other-writable": func(t *testing.T, top string) string {
+			state := mode(t, filepath.Join(top, "state"), 0o700)
+			mode(t, filepath.Join(state, "machines"), 0o700)
+			mode(t, filepath.Join(state, "snapshots"), 0o707)
+			return top
+		},
 		"group-writable parent": func(t *testing.T, top string) string {
 			return mode(t, filepath.Join(top, "grp"), 0o770)
 		},

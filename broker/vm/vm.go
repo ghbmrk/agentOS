@@ -523,7 +523,7 @@ func checkStateDirs(dirs []string, all bool) error {
 			case st.Uid != 0 && int(st.Uid) != euid:
 				return fmt.Errorf("%w: %s is owned by uid %d", ErrStateDirExposed, path, st.Uid)
 			case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
-				return fmt.Errorf("%w: %s is writable by group or other (%v)", ErrStateDirExposed, path, fi.Mode().Perm())
+				return fmt.Errorf("%w: %s is writable by group or other (mode %04o)", ErrStateDirExposed, path, fi.Mode().Perm())
 			}
 		}
 	}
