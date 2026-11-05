@@ -40,7 +40,8 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 45, not 30: a full run takes about 15 minutes, and the image-tools step may spend 18 retrying.
+    timeout-minutes: 45
     permissions:
       contents: read
       issues: read # board.py check --repo reads the work-item issues
@@ -77,8 +78,22 @@ jobs:
         if: steps.scope.outputs.records != 'true'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
-          sudo mmdebstrap --mode=root --variant=essential --include=systemd,kmod trixie \
-            "$RUNNER_TEMP/image-tools" image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources
+          # snapshot.debian.org answers 503/504 for minutes at a time (#4518; #5011's run 42120504082
+          # died on a 504 after the runner apt's 3 tries). Each attempt starts from an empty root and
+          # reads the same pinned, signed snapshot, so a retry fetches the same hashed packages. Four
+          # attempts, each capped at 4 minutes (a good one takes under 1), 15, 30 and 60 s apart:
+          # about 18 minutes before the step fails with mmdebstrap's own error and exit code.
+          # --one-file-system: a killed attempt may leave the root's /dev or /proc mounted.
+          for wait in 15 30 60 last; do
+            sudo rm -rf --one-file-system "$RUNNER_TEMP/image-tools"
+            err=0
+            sudo timeout 240 mmdebstrap --mode=root --variant=essential --include=systemd,kmod trixie \
+              "$RUNNER_TEMP/image-tools" image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources || err=$?
+            [ "$err" -ne 0 ] || break
+            [ "$wait" != last ] || exit "$err"
+            echo "::warning::mmdebstrap exited $err (snapshot.debian.org outage?); retrying in ${wait}s"
+            sleep "$wait"
+          done
           sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: Unit tests
         if: steps.scope.outputs.records != 'true'

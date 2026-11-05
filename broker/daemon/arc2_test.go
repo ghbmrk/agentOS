@@ -286,10 +286,11 @@ var enforcer = map[string]struct {
 	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
-	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid},                  // slice f: dnsmasq configuration
-	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the pair relay
-	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                     // slice f: the Wake-on-LAN relay
-	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid}, // slice i: traffic summaries; byte-cap counts (#4174)
+	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid},                                                              // slice f: dnsmasq configuration
+	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the pair relay
+	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the Wake-on-LAN relay
+	"enforcer/dns/run":  {[]string{"enforcer/dns"}, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })}, // slice l: runs dnsmasq in step with the firewall (#4464)
+	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid},                                             // slice i: traffic summaries; byte-cap counts (#4174)
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
@@ -360,8 +361,9 @@ var enforcerMainRule = struct {
 	allowed []string
 	forbid  []string
 }{
-	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/enrol", "enforcer/heads", "enforcer/nft",
-		"enforcer/nft/load", "enforcer/page", "enforcer/policy", "enforcer/wire", "golang.org/x/sys/unix"},
+	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/dns", "enforcer/dns/run", "enforcer/enrol", "enforcer/heads",
+		"enforcer/mdns", "enforcer/nft", "enforcer/nft/load", "enforcer/page", "enforcer/policy", "enforcer/traffic", "enforcer/wire",
+		"enforcer/wol", "golang.org/x/sys/unix"},
 	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
 }
 
@@ -375,10 +377,12 @@ var enforcerWebDeps = []string{"rsc.io/qr", "rsc.io/qr/coding", "rsc.io/qr/gf256
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
 // enforcerExec are the enforcer packages that start a process: the
-// firewall loader runs nft (ENF decision 4, slice e) and the radio launcher
-// starts the confined stacks (decision 6, slice k). Neither imports from the
-// enforcer, so no other enforcer package links os/exec through them.
-var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
+// firewall loader runs nft (ENF decision 4, slice e), the radio launcher
+// starts the confined stacks (decision 6, slice k) and the resolver's
+// runner keeps the dnsmasq instances in step with the firewall (slice l,
+// #4464; dns ASSUMPTIONS ENF-f-9). Only the daemon imports them, so no
+// other enforcer package links os/exec through them.
+var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine", "enforcer/dns/run"}
 
 // enforcerWeb is the one enforcer package that links net/http and
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
@@ -507,7 +511,7 @@ var enforcerLinks = []string{"kernel/key", "drone", "camwire"}
 // decision 1, STO-4), and no third-party package but the access point
 // pusher's SSH client (enforcerSSH, slice g); only the page
 // (enforcerWeb, slice b, with its anti-forgery package enforcerCSRF) speaks HTTP or TLS, and only the firewall loader
-// and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
+// the radio launcher and the resolver's runner (enforcerExec, slices e, k and l) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	list, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()

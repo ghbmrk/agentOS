@@ -3,6 +3,7 @@
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
+import fnmatch
 import json
 import os
 import pathlib
@@ -1588,10 +1589,13 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, weak)
             env = self.line_stub(d)
-            # The plan runs the changed test's coverage: a few lines, one shard.
-            r = self.mutgate(d, "plan", "--git", "HEAD~1")
+            # The plan runs the changed test's coverage: a few lines, one shard. Its record names the
+            # changed test, as each shard's changed_tests does, so the shards accept it (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual(json.loads(r.stdout), [{"pkg": "hint", "shard": 0, "of": 1}])
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {"tests": ["TestUp"], "lines": {"hint.go": [3, 4, 5, 6, 7]}}})
             got = {}
             for of in (1, 2, 3):
                 res = pathlib.Path(d) / f"res-{of}"
@@ -1599,7 +1603,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 for i in range(of):
                     out = res / f"mutants-{i}"
                     r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out),
-                                     "--shard", str(i), "--of", str(of), env=env)
+                                     "--shard", str(i), "--of", str(of), "--targets", str(plan), env=env)
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                     r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1644,6 +1648,12 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qam", "src")
             env = self.line_stub(d)
             target = {"broker/hint/hint.go": {4, 7, 11}}
+            # A source diff's targets are its own lines, so the plan records none, and still writes the
+            # file the plan job uploads with if-no-files-found: error (#4970).
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(plan.read_text(), "{}")
             for of in (1, 2, 3):
                 (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
                 for i in range(of):
@@ -1653,6 +1663,64 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                     self.assertNotIn("targets", json.loads((pathlib.Path(d) / f"o{of}-{i}" / "hint.json").read_text()))
                 seen = [json.loads(row)["hint.go"] for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
                 self.assertEqual(seen, [sorted(mutgate.shard_lines(target, i, of)["broker/hint/hint.go"]) for i in range(of)])
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+
+    def test_shards_read_the_plans_one_coverage_run_so_they_agree(self):
+        # #4970: each shard of a test-only package measured its own coverage, a run could cover other
+        # lines (a timing branch), and verify refused the package: "the shards of clerk/inbox disagree".
+        # The plan measures it once and every shard reads that record (--targets), so they agree.
+        # Here the import change runs every test, and TestDown calls Up only while FLIP names a file.
+        flaky = (TWO_TEST.replace('import "testing"', 'import (\n\t"os"\n\t"testing"\n)')
+                 .replace('\tif Down(3) != 2 {', '\tif _, err := os.Stat(os.Getenv("FLIP")); err == nil {\n\t\tUp(20)\n\t}\n\tif Down(3) != 2 {')
+                 .replace("Up(1) != 2 || Up(20) != 10", "Down(3) != 2"))
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, flaky)
+            env = self.line_stub(d)
+            on, off = {"FLIP": str(pathlib.Path(d) / "tools")}, {"FLIP": str(pathlib.Path(d) / "absent")}
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan), env=off)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(plan.read_text()), {"hint": {"tests": None, "lines": {"hint.go": [10, 11, 12]}}})
+
+            def shards(res, flips, *extra):
+                for i, flip in enumerate(flips):
+                    out = pathlib.Path(d) / res / f"mutants-{i}"
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out), "--shard", str(i),
+                                     "--of", str(len(flips)), *extra, env={**env, **flip})
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1",
+                                     env=flip)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return self.mutgate(d, "verify", str(pathlib.Path(d) / res), "--git", "HEAD~1")
+            # Each shard measuring its own coverage: the shards disagree, as on #4970.
+            r = shards("own", (off, on))
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("the shards of hint disagree", r.stderr)
+            # Reading the plan's record: the same flip, and the shards agree on the plan's lines.
+            r = shards("planned", (off, on), "--targets", str(plan))
+            self.assertNotIn("disagree", r.stderr)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            for i in (0, 1):
+                data = json.loads((pathlib.Path(d) / "planned" / f"mutants-{i}" / "hint.json").read_text())
+                self.assertEqual(data["targets"], {"tests": None, "lines": {"hint.go": [10, 11, 12]}})
+            # A plan that names no record for the package, or one verify would refuse, is refused before
+            # gremlins runs; the shard never falls back to a coverage run of its own.
+            for bad, want in (({}, "the plan names no target lines for broker/hint/"),
+                              ({"hint": {"tests": ["TestUp"], "lines": {"hint.go": [9]}}}, "the plan holds no record"),
+                              ({"hint": {"tests": None, "lines": {"../x.go": [1]}}}, "the plan records covered lines")):
+                with self.subTest(bad):
+                    forged = pathlib.Path(d) / "forged.json"
+                    forged.write_text(json.dumps(bad))
+                    (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"),
+                                     "--targets", str(forged), env=env)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn(want, r.stderr)
+                    self.assertFalse((pathlib.Path(d) / "seen-lines").exists())
+            r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"),
+                             "--targets", str(pathlib.Path(d) / "absent.json"), env=env)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no readable plan of target lines", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
     def test_shard_count_follows_the_targets_not_a_constant(self):
@@ -1936,15 +2004,16 @@ class Workflow(unittest.TestCase):
             self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", body)
         self.assertIn("    needs: claimed\n", plan)
         self.assertIn("    needs: [claimed, plan]\n", mutants)
-        self.assertIn('shards=$(python3 -I tools/mutgate.py plan --git "$BASE")', plan)
+        self.assertIn('shards=$(python3 -I tools/mutgate.py plan --git "$BASE" --targets-out "$RUNNER_TEMP/targets.json")',
+                      plan)
         self.assertIn('echo "shards=$shards" >> "$GITHUB_OUTPUT"', plan)
         self.assertIn("shards: ${{ steps.plan.outputs.shards }}", plan)
         self.assertIn("include: ${{ fromJSON(needs.plan.outputs.shards) }}", mutants)
         self.assertIn("fail-fast: false", mutants)
         for env in ("PKG: ${{ matrix.pkg }}", "SHARD: ${{ matrix.shard }}", "OF: ${{ matrix.of }}"):
             self.assertIn(env, mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"',
-                      mutants)
+        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE" --shard "$SHARD" --of "$OF"\n'
+                      '          --targets "$RUNNER_TEMP/plan/targets.json"\n', mutants)
         # The job's name shows the shard in the checks list (#4983); a name is display text, never run.
         name = "    name: mutants ${{ matrix.pkg }} shard ${{ matrix.shard }} of ${{ matrix.of }}\n"
         self.assertIn(name, mutants)
@@ -1984,13 +2053,25 @@ class Workflow(unittest.TestCase):
     def test_only_the_plan_and_mutants_jobs_run_pr_code_and_they_hand_on_data(self):
         # REV-CHK-mut-selftest (#4106): the PR's tests run in `mutants` and can write anything there,
         # so that job ends in an upload and decides nothing. #4961: `plan` runs them too (a test-only
-        # diff's coverage) and ends in the matrix it outputs; verify checks the shards whatever it says.
+        # diff's coverage) and ends in the matrix it outputs and the one record of a test-only package's
+        # covered lines that every shard reads (#4970); verify checks the shards whatever they say.
         plan = job(self.text, "plan")
-        self.assertTrue(plan.split("\n      - ")[-1].startswith("name: Shards for each package"), plan)
+        steps = plan.split("\n      - ")
+        self.assertTrue(steps[-2].startswith("name: Shards for each package"), plan)
+        self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
+        self.assertIn("name: mutgate-plan\n", steps[-1])
+        self.assertIn("path: ${{ runner.temp }}/targets.json\n", steps[-1])
+        self.assertIn("if-no-files-found: error", steps[-1])
         self.assertNotIn("verify", plan)
-        self.assertNotIn("upload-artifact", plan)
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
+        # The shard reads the plan's record from outside the workspace, just before gremlins.
+        self.assertTrue(steps[-5].startswith("uses: actions/download-artifact@"), steps[-5])
+        self.assertIn("name: mutgate-plan\n", steps[-5])
+        self.assertTrue(steps[-5].endswith("path: ${{ runner.temp }}/plan"), steps[-5])
+        # The deciding job's download takes the shards' results only, never the plan's record.
+        self.assertIn("pattern: mutants-*\n", job(self.text, "mutgate"))
+        self.assertFalse(fnmatch.fnmatch("mutgate-plan", "mutants-*"))
         self.assertIn("Gremlins on the package", steps[-4])
         self.assertIn("Statement deletions on the package", steps[-3])
         self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
