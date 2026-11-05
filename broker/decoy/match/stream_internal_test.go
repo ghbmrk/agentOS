@@ -113,3 +113,63 @@ func TestFloorCarried(t *testing.T) {
 		t.Fatalf("pending %d, joined ends %q", s.pending, s.joined[len(s.joined)-4:])
 	}
 }
+
+// KRN-12: a held break is matched and let go as soon as the longest form's
+// rest has come, carry bytes after it, and not before; carry is the longest
+// form but one byte (#5007).
+func TestBreakReleasedAtCarry(t *testing.T) {
+	v := []byte("q7Xz2pL9mW4vR8tY3nB6kJ5h")
+	want := 0
+	for _, f := range encodings(v) {
+		want = max(want, len(f)-1)
+	}
+	m := New([]Value{{ID: 4, Bytes: v}}, nil)
+	if m.carry != want {
+		t.Fatalf("carry %d, want the longest form but one, %d", m.carry, want)
+	}
+	for _, n := range []int{want - 1, want} {
+		s := m.Stream()
+		s.Write([]byte(`\n` + strings.Repeat("x", n)))
+		held := 0
+		if n < want {
+			held = 1 // its rest may be still to come
+		}
+		if len(s.breaks) != held {
+			t.Fatalf("%d bytes after a break of carry %d: %d held", n, want, len(s.breaks))
+		}
+	}
+}
+
+// KRN-12: open counts only a break head a later byte could still end: '\'s,
+// then at most one "u", "u0", "u00" or "u000", or "%" or "%0" (#5007).
+func TestOpenHeads(t *testing.T) {
+	for w, n := range map[string]int{
+		`x\`: 1, `x\\u00`: 5, `\u000`: 5, "%0": 2, "x%": 1,
+		`\uu000`: 0, "xu0": 0, "u000": 0, "x": 0, "": 0,
+	} {
+		if got := open([]byte(w)); got != n {
+			t.Errorf("open(%q) = %d, want %d", w, got, n)
+		}
+	}
+}
+
+// CLK-4: a run under 24 characters is no token, whatever its entropy, as
+// candidate requires (#5007).
+func TestHighEntropyFloor(t *testing.T) {
+	if s := "abcdefghijklmnopqrsTUVW"; highEntropy(s) || !highEntropy(s+"X") {
+		t.Fatal("highEntropy's 24-character floor moved")
+	}
+}
+
+// KRN-12: a form lying wholly inside a removed break is in neither the text
+// as written nor as joined, so it does not trip: here the hex "000a" of
+// NUL LF inside a CR-split JSON \u000a (#5007).
+func TestFormInsideBreak(t *testing.T) {
+	m := New([]Value{{ID: 4, Bytes: []byte{0, '\n'}}}, nil)
+	if r := m.Scan([]byte("\\u0\r00a")); len(r.Trips) != 0 {
+		t.Fatalf("a form inside a break tripped %v", r.Trips)
+	}
+	if r := m.Scan([]byte("x000ay")); len(r.Trips) != 1 {
+		t.Fatalf("the hex form as written did not trip: %v", r.Trips)
+	}
+}
