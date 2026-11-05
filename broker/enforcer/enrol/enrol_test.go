@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"slices"
 	"strings"
@@ -849,6 +850,31 @@ func TestFailureAfterPasskeySaved(t *testing.T) {
 	}
 	if !g.b.Kept() {
 		t.Fatal("policy not the passkey's after its Keep")
+	}
+}
+
+// TestFailureLoggedByDefault (#4928): with no Config.Log, the hand-over
+// failure after the passkey's save goes to the standard logger, never
+// nowhere. Catches a nil Log that panics or drops the line.
+func TestFailureLoggedByDefault(t *testing.T) {
+	var buf strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&buf)
+	g := newRig(t)
+	b, err := Open(Config{Name: rp, Store: g.bs, Network: g.ap, Alerts: g.alerts, Now: func() time.Time { return g.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.OpenPolicy(g.es); err != nil {
+		t.Fatal(err)
+	}
+	g.b = b
+	g.bs.failAt = g.bs.n + 2
+	if res, err := g.enrol(newAuthenticator(t), caseCode); err != nil || len(res.Recovery) != CodeLen {
+		t.Fatalf("passkey saved but: %+v %v", res, err)
+	}
+	if !strings.Contains(buf.String(), "policy hand-over failed") {
+		t.Fatalf("standard log %q", buf.String())
 	}
 }
 
