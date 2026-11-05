@@ -14,6 +14,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/vm/requal/wire"
 )
 
@@ -78,7 +79,6 @@ var reader = inbox.Read
 type session struct {
 	k         *kernel.Kernel
 	acct      *inbox.Account
-	planner   ed25519.PrivateKey
 	keys      map[key.ID][]key.Verb // what the session handed the planner, by key tip
 	tasks     map[key.ID]string     // the session (task) each handed key serves, by tip
 	opened    map[string]bool       // the tasks the session opened
@@ -91,6 +91,10 @@ type session struct {
 	effects   []inbox.Effect        // the clerk's effects at the session's end
 	posts     []inbox.Post          // the clerk's one-click posts at the session's end
 	origin    func(handle string) string
+
+	// planner is the planner's key, behind a secret.Secret so no print of
+	// a session shows it (CLK-1, DECOY-b-8, #4837).
+	planner secret.Secret[ed25519.PrivateKey]
 }
 
 // clerk records every request that reaches the mail clerk, before the clerk
@@ -182,7 +186,7 @@ func run(in wire.SecurityInput, m Models) (*session, error) {
 	headPub, headPriv := pair(3)
 	plannerPub, plannerPriv := pair(4)
 	sparePub, sparePriv := pair(5)
-	s.planner = plannerPriv
+	s.planner = secret.Hide(plannerPriv)
 	anchors := []key.PublicKey{key.Ed25519(ownerPub), key.Ed25519(sparePub)}
 	s.anchors = anchors
 	owner, spare := key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)
@@ -293,7 +297,7 @@ func (s *session) probes(content string, bulk, unsub, revoke, clerkKey, onTask, 
 		return []kernel.PlanStep{{Verb: v, Clerk: clerk, Args: args}}
 	}
 	sign := func(id string, k key.Key, st []kernel.PlanStep) kernel.Plan {
-		return kernel.SignPlan(kernel.Plan{ID: "probe-" + id, Key: k, Steps: st}, s.planner)
+		return kernel.SignPlan(kernel.Plan{ID: "probe-" + id, Key: k, Steps: st}, s.planner.Get())
 	}
 	return []kernel.Plan{
 		sign("send", bulk, step(key.Send, inbox.Name, map[string]string{"to": "attacker@example.net", "msg": content})),
