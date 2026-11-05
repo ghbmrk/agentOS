@@ -35,35 +35,43 @@ type Source interface {
 // DirSource reads a repository laid out in a directory, such as a drive.
 type DirSource string
 
-// Open opens a repository-relative path beneath the source directory:
-// openat2 with RESOLVE_BENEATH and RESOLVE_NO_SYMLINKS refuses a link at any
-// component, a parent directory such as metadata/ or targets/ included, so a
-// drive cannot point a read outside its own tree (#3989). The directory
-// itself is opened with O_NOFOLLOW; its path is the caller's.
+// Open opens a repository-relative path beneath the source directory,
+// refusing a link at any component, a parent directory such as metadata/ or
+// targets/ included, so a drive cannot point a read outside its own tree
+// (#3989); the directory itself is opened with O_NOFOLLOW, and its path is
+// the caller's. openBeneath is openat2 on Linux and a component walk
+// elsewhere (#4918 item 2). The open is non-blocking and only a regular file
+// is returned, so a FIFO planted at a repository path is refused at once
+// instead of hanging the check (#4918 item 1). A link refusal names its
+// cause and unwraps to the kernel's errno (#4918 item 4).
 func (d DirSource) Open(name string) (io.ReadCloser, error) {
 	if !validTargetPath(name) {
 		return nil, fmt.Errorf("bad repository path %q", name)
 	}
-	dir, err := os.OpenFile(string(d), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
+	f, err := openBeneath(string(d), name)
+	if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EXDEV) {
+		return nil, fmt.Errorf("repository path is a link: %w", err)
 	}
-	defer dir.Close()
-	how := unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_CLOEXEC,
-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	return f, err
+}
+
+// regularFile turns a descriptor opened O_NONBLOCK into a blocking file, or
+// closes it and refuses it if it is not a regular file.
+func regularFile(fd int, path string) (*os.File, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, &os.PathError{Op: "fstat", Path: path, Err: err}
 	}
-	for tries := 0; ; tries++ {
-		fd, err := unix.Openat2(int(dir.Fd()), name, &how)
-		if err == nil {
-			return os.NewFile(uintptr(fd), filepath.Join(string(d), filepath.FromSlash(name))), nil
-		}
-		// EAGAIN: a rename raced the walk; openat2 asks for a retry.
-		if (err == unix.EAGAIN || err == unix.EINTR) && tries < 8 {
-			continue
-		}
-		return nil, &os.PathError{Op: "openat2", Path: filepath.Join(string(d), filepath.FromSlash(name)), Err: err}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return nil, fmt.Errorf("repository path %s is not a regular file", path)
 	}
+	if err := unix.SetNonblock(fd, false); err != nil {
+		unix.Close(fd)
+		return nil, &os.PathError{Op: "fcntl", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 // Size limits for what a box reads before checking it.
@@ -286,6 +294,28 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	if err := m.VerifyDelegate(metadata.ROOT, m); err != nil {
 		return nil, classify(err)
 	}
+	// Check before creating anything, so a refused path leaves no
+	// directory behind (#4225 item 6): the path is absolute, and the
+	// nearest part of it that exists already passes as a parent (or as the
+	// store, if it is the whole path).
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeStore, dir)
+	}
+	dir = filepath.Clean(dir)
+	have := dir
+	for {
+		_, err := os.Lstat(have)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(have) == have {
+			return nil, fmt.Errorf("%w: %w", ErrUnsafeStore, err)
+		}
+		have = filepath.Dir(have)
+	}
+	if err := checkChain(have, uint32(os.Geteuid()), have == dir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -327,6 +357,10 @@ func readSaved(p string) ([]byte, error) {
 	return b, err
 }
 
+// ErrUnsafeStore is wrapped by every refusal of the store directory's
+// path: one another uid could replace or relink, or one that is relative.
+var ErrUnsafeStore = errors.New("update store")
+
 // safeDir refuses a store directory that a uid other than root or this
 // process's could replace or relink (REV-CHK-links-update-l, #3990):
 // readFile refuses a link only as the last component, so the directory and
@@ -336,12 +370,21 @@ func readSaved(p string) ([]byte, error) {
 // not own; the store directory itself may not. A relative directory is
 // refused: the kernel resolves it from the real working directory, which
 // $PWD may not name, so the path checked could differ from the one opened.
-func safeDir(dir string) error {
+func safeDir(dir string) error { return safeDirAs(dir, uint32(os.Geteuid())) }
+
+// safeDirAs is safeDir trusting uid euid besides root; tests name another
+// uid to reach the owner case without root (#4225 item 2).
+func safeDirAs(dir string, euid uint32) error {
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("update store: %s is not an absolute path", dir)
+		return fmt.Errorf("%w: %s is not an absolute path", ErrUnsafeStore, dir)
 	}
-	abs := filepath.Clean(dir)
-	euid := uint32(os.Geteuid())
+	return checkChain(filepath.Clean(dir), euid, true)
+}
+
+// checkChain checks the clean absolute path abs and every parent. With
+// store false, abs is only a parent of a store to be made, so a sticky abs
+// writable by all passes as any sticky parent does.
+func checkChain(abs string, euid uint32, store bool) error {
 	for p := abs; ; p = filepath.Dir(p) {
 		fi, err := os.Lstat(p)
 		if err != nil {
@@ -350,17 +393,24 @@ func safeDir(dir string) error {
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		switch {
 		case !fi.IsDir():
-			return fmt.Errorf("update store: %s is not a directory", p)
+			return fmt.Errorf("%w: %s is not a directory", ErrUnsafeStore, p)
 		case !ok || st.Uid != 0 && st.Uid != euid:
-			return fmt.Errorf("update store: %s is not owned by root or uid %d", p, euid)
-		case fi.Mode().Perm()&0o022 != 0 && (p == abs || fi.Mode()&os.ModeSticky == 0):
-			return fmt.Errorf("update store: %s is writable by other uids", p)
+			return fmt.Errorf("%w: %s is not owned by root or uid %d", ErrUnsafeStore, p, euid)
+		case fi.Mode().Perm()&0o022 != 0 && (store && p == abs || fi.Mode()&os.ModeSticky == 0):
+			return fmt.Errorf("%w: %s is writable by other uids", ErrUnsafeStore, p)
 		}
 		if filepath.Dir(p) == p {
 			return nil
 		}
 	}
 }
+
+// syncDir is durable.SyncDir; a test swaps it to see which path is synced.
+var syncDir = durable.SyncDir
+
+// syncStore fsyncs the store directory by its cleaned path, the one safeDir
+// checked and filepath.Join writes under (#4225 item 5).
+func (s *Store) syncStore() error { return syncDir(filepath.Clean(s.Dir)) }
 
 // remove is os.Remove, which unlinks a link at p itself and never follows
 // it; it is the package's only os.Remove, so pathops_allow.txt names it once.
@@ -1395,7 +1445,7 @@ func (s *Store) removeStaged() error {
 	if err := remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return durable.SyncDir(s.Dir)
+	return s.syncStore()
 }
 
 // DropStaged forgets the staged release after a fallback. Nothing else in
