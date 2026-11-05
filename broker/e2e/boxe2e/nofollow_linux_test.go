@@ -211,7 +211,7 @@ func TestFileGateWritesOnlyItsOwnPlaces(t *testing.T) {
 	}
 }
 
-// REQ: HW-10, ONB-3. The gate decides before an open acts (#4634, #4213): a
+// REQ: HW-10, ONB-3. The gate decides before an open acts (#4634): a
 // FIFO opened to block is refused at once, a write to a file with another
 // name (a hard link, whose other name may be outside writeDirs) is refused
 // before it truncates, a trailing slash names the directory itself and
@@ -239,10 +239,6 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 			return err
 		},
 		"writeNoFollow": func() error { return writeNoFollow(fifo, nil, 0o600) },
-		// readNoFollow is the read #4213 found blocking (agentos-localui
-		// could leave a FIFO at its card latch); rootOpen is
-		// workerOutFile's open, which a guest could race to a FIFO.
-		"readNoFollow": func() error { _, err := readNoFollow(fifo); return err },
 		"rootOpen": func() error {
 			f, err := rootOpen(r, "fifo")
 			if err == nil {
@@ -718,6 +714,32 @@ func TestFileGateRefusesSysVShm(t *testing.T) {
 	refusedAsShmem(t, "/proc/self/map_files/"+sysv)
 	refusedAsShmem(t, fmt.Sprintf("/proc/%d/map_files/%s", os.Getpid(), sysv), unix.O_RDWR)
 	refusedAsShmem(t, "/proc/self/map_files/"+zero)
+}
+
+func TestReadNoFollowRefusesAFIFOBeforeItBlocks(t *testing.T) {
+	// REQ: HW-10, ONB-3. readNoFollow is the read #4213 found blocking
+	// (agentos-localui could leave a FIFO at its card latch): a FIFO is
+	// refused as a kind before the open waits on it, as
+	// TestFileGateChecksBeforeTheOpenActs shows for the other opens. The
+	// comment sits in the body so a diff of this test names it alone.
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readNoFollow(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errKind) {
+			t.Errorf("readNoFollow(a FIFO) = %v, want it refused as a kind", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Open the other end so the blocked open returns.
+		if fd, err := unix.Open(fifo, unix.O_RDWR|unix.O_CLOEXEC, 0); err == nil {
+			defer unix.Close(fd)
+		}
+		t.Error("readNoFollow(a FIFO) waited on the FIFO before the check")
+	}
 }
 
 // refusedAsShmem fails t unless openRaw refuses p, opened with flag
