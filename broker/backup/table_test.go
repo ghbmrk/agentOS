@@ -544,3 +544,20 @@ func TestRewrapSortsAndDedupesTheRecordsSubjects(t *testing.T) {
 		t.Errorf("the table gives %q, want %q", got, want)
 	}
 }
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): a key table that fails to list or to give a
+// live subject's key fails the backup with its error, and nothing is put.
+func TestAFailingKeyTableFailsWrite(t *testing.T) {
+	r := newRig(t)
+	r.seal(r.open(), "hello")
+	rcp := recipient(t, rk1)
+	for name, set := range map[string]*bool{"list": &r.keys.failList, "get": &r.keys.failGet} {
+		*set = true
+		tg := &MemTarget{}
+		if _, err := Write(&bytes.Buffer{}, tg, r.input(rcp)); !errors.Is(err, errDown) || len(tg.m) != 0 {
+			t.Errorf("a failing %s: %v, %d tables, want the key table's error and none", name, err, len(tg.m))
+		}
+		*set = false
+	}
+}

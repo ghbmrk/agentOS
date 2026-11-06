@@ -24,10 +24,24 @@ var (
 
 var errDown = errors.New("down")
 
-// flakyKeys is a key table whose Delete can be made to fail.
+// flakyKeys is a key table whose Delete, Get or List can be made to fail.
 type flakyKeys struct {
 	*kernel.MemKeys
-	failDelete bool
+	failDelete, failGet, failList bool
+}
+
+func (f *flakyKeys) Get(s string) (kernel.SubjectKey, bool, error) {
+	if f.failGet {
+		return kernel.SubjectKey{}, false, errDown
+	}
+	return f.MemKeys.Get(s)
+}
+
+func (f *flakyKeys) List() ([]string, error) {
+	if f.failList {
+		return nil, errDown
+	}
+	return f.MemKeys.List()
 }
 
 func (f *flakyKeys) Delete(s string) error {
