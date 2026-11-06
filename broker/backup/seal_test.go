@@ -209,3 +209,93 @@ func TestTheHeaderNamesNoRecipient(t *testing.T) {
 		t.Fatalf("a version 1 header: %v, want ErrHeader", err)
 	}
 }
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): the recipient ID is the first 16 bytes of
+// SHA-256 over both public keys (vector from Python's hashlib), and a
+// recovery key of exactly 16 bytes is the shortest taken.
+func TestRecipientIDVectorAndShortestKey(t *testing.T) {
+	r := Recipient{X: bytes.Repeat([]byte{5}, 32), EK: bytes.Repeat([]byte{6}, mlkem.EncapsulationKeySize768)}
+	if got := r.ID(); got != "c9cbad6abd927cac4c3340fae7bed610" {
+		t.Errorf("recipient ID %s", got)
+	}
+	if _, err := RecipientFor(bytes.Repeat([]byte{1}, minRK)); err != nil {
+		t.Errorf("a 16-byte recovery key: %v", err)
+	}
+	if _, err := RecipientFor(bytes.Repeat([]byte{1}, minRK-1)); !errors.Is(err, ErrShortKey) {
+		t.Errorf("a 15-byte recovery key: %v, want ErrShortKey", err)
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): the combiner's key for fixed inputs, from
+// Python's hmac and hashlib as HKDF-SHA256 with the info laid out as
+// combine's comment says, so no field of the info can be dropped.
+func TestTheCombinerVector(t *testing.T) {
+	key, err := combine(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), KindContent,
+		bytes.Repeat([]byte{3}, mlkem.CiphertextSize768), bytes.Repeat([]byte{4}, 32),
+		bytes.Repeat([]byte{5}, 32), bytes.Repeat([]byte{6}, mlkem.EncapsulationKeySize768))
+	must(t, err)
+	// cf662d3e4b9d60a0669ddaa1c7286c3888e62a61b82fcf5203bd706163cf64d7
+	want := []byte{0xcf, 0x66, 0x2d, 0x3e, 0x4b, 0x9d, 0x60, 0xa0, 0x66, 0x9d, 0xda, 0xa1, 0xc7, 0x28, 0x6c, 0x38, 0x88, 0xe6, 0x2a, 0x61, 0xb8, 0x2f, 0xcf, 0x52, 0x03, 0xbd, 0x70, 0x61, 0x63, 0xcf, 0x64, 0xd7}
+	if !bytes.Equal(key, want) {
+		t.Errorf("combined key %x", key)
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): every seal and open failure is reported. A
+// recipient with a short key or a low-order X25519 point does not seal; a
+// sealer refuses a write after Close and a second Close writes nothing; a
+// header with an unknown kind, an object of the other kind, a short key
+// and another key are each refused where the object is opened; and an AES
+// key of the wrong size does not make a cipher.
+func TestEverySealAndOpenFailureIsReported(t *testing.T) {
+	rcp := recipient(t, rk1)
+	var id [idLen]byte
+	lowOrder := Recipient{X: make([]byte, 32), EK: rcp.EK}
+	for name, bad := range map[string]Recipient{"short X25519 key": {X: rcp.X[:31], EK: rcp.EK}, "low-order X25519 key": lowOrder} {
+		if _, err := sealTo(&bytes.Buffer{}, bad, header{kind: KindContent}); err == nil {
+			t.Errorf("sealTo, %s: no error", name)
+		}
+	}
+	if _, err := sealTable(lowOrder, id, 1, nil); err == nil {
+		t.Error("sealTable, low-order X25519 key: no error")
+	}
+
+	var buf bytes.Buffer
+	w, err := sealTo(&buf, rcp, header{kind: KindContent})
+	must(t, err)
+	_, err = w.Write([]byte("body"))
+	must(t, err)
+	must(t, w.Close())
+	sealed := bytes.Clone(buf.Bytes())
+	if _, err := w.Write([]byte("more")); err == nil {
+		t.Error("a write after Close was taken")
+	}
+	must(t, w.Close())
+	if !bytes.Equal(buf.Bytes(), sealed) {
+		t.Error("a second Close wrote")
+	}
+	if body, err := openBytes(sealed, rk1, KindContent); err != nil || string(body) != "body" {
+		t.Fatalf("control: %q, %v", body, err)
+	}
+
+	hb := bytes.Clone(sealed[:headerLen])
+	hb[len(magic)+1] = 3
+	if _, err := parseHeader(hb); !errors.Is(err, ErrHeader) {
+		t.Errorf("an unknown kind: %v, want ErrHeader", err)
+	}
+	if _, _, _, err := openFrom(bytes.NewReader(sealed), rk1, KindKeyTable); !errors.Is(err, ErrHeader) {
+		t.Errorf("a content object opened as a key table: %v, want ErrHeader", err)
+	}
+	if _, _, _, err := openFrom(bytes.NewReader(sealed), rk1[:minRK-1], KindContent); !errors.Is(err, ErrShortKey) {
+		t.Errorf("a short key: %v, want ErrShortKey", err)
+	}
+	if _, _, _, err := openFrom(bytes.NewReader(sealed), rk2, KindContent); !errors.Is(err, ErrOpen) {
+		t.Errorf("another key: %v, want ErrOpen from the open itself", err)
+	}
+	if _, err := newGCM(make([]byte, 7)); err == nil {
+		t.Error("a 7-byte AES key made a cipher")
+	}
+}

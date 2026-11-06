@@ -521,3 +521,26 @@ func TestUnwrapRefusesABadTable(t *testing.T) {
 		})
 	}
 }
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): a Rewrap of a record whose subjects are out of
+// order and repeated seals each live one once, in order.
+func TestRewrapSortsAndDedupesTheRecordsSubjects(t *testing.T) {
+	r, subs, _ := threeLive(t)
+	rcp := recipient(t, rk1)
+	tg := &MemTarget{}
+	rec, _ := r.backup(rcp, tg)
+	r.erase(subs[1])
+	rec.Subjects = []string{subs[2], subs[0], subs[2], subs[1]}
+	next, out := Rewrap(tg, rec, r.keys, r.k.State())
+	if out.Result != Rewrote {
+		t.Fatalf("rewrap: %v %v", out.Result, out.Err)
+	}
+	want := slices.Sorted(slices.Values([]string{subs[0], subs[2]}))
+	if !slices.Equal(next.Subjects, want) {
+		t.Errorf("subjects %q, want %q", next.Subjects, want)
+	}
+	if got := slices.Sorted(maps.Keys(unwrapped(t, tg, next, next.Generation, rk1).M)); !slices.Equal(got, want) {
+		t.Errorf("the table gives %q, want %q", got, want)
+	}
+}
