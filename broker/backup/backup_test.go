@@ -465,6 +465,14 @@ func TestOpenReportsEachBadObject(t *testing.T) {
 	if _, _, err := Open(bytes.NewReader(contentObject(t, rcp, 0, manifestFor(rcp, negative), nil, nil)), rk1); !errors.Is(err, ErrHeader) {
 		t.Errorf("a negative section length: %v, want ErrHeader", err)
 	}
+	mb, err := json.Marshal(manifestFor(rcp, section("log", nil)))
+	must(t, err)
+	mid, err := parseID(manifestFor(rcp).BackupID)
+	must(t, err)
+	trailing := append(binary.BigEndian.AppendUint32(nil, uint32(len(mb)+2)), append(mb, " x"...)...)
+	if _, _, err := Open(bytes.NewReader(sealBytes(t, rcp, KindContent, mid, 0, trailing)), rk1); err == nil {
+		t.Error("a manifest with a byte after its JSON value opened")
+	}
 	twice := manifestFor(rcp, section("log", nil), section("log", nil))
 	if _, _, err := Open(bytes.NewReader(contentObject(t, rcp, 0, twice, nil, nil)), rk1); !errors.Is(err, ErrSection) {
 		t.Errorf("a repeated section: %v, want ErrSection", err)
@@ -502,7 +510,7 @@ func TestASectionEndsWithItsLastRead(t *testing.T) {
 
 // REQ: BAK-1
 // MUT-backup-names (#5036): MemTarget refuses a second put of one
-// generation and keeps the first.
+// generation and keeps the first, and an append-only one refuses a delete.
 func TestMemTargetKeepsTheFirstPut(t *testing.T) {
 	tg := &MemTarget{}
 	must(t, tg.PutTable("id", 1, []byte("first")))
@@ -511,5 +519,12 @@ func TestMemTargetKeepsTheFirstPut(t *testing.T) {
 	}
 	if b, err := tg.GetTable("id", 1); err != nil || string(b) != "first" {
 		t.Errorf("after a refused put: %q, %v, want the first", b, err)
+	}
+	tg.Append = true
+	if err := tg.DeleteTable("id", 1); err == nil {
+		t.Error("an append-only target deleted")
+	}
+	if b, err := tg.GetTable("id", 1); err != nil || string(b) != "first" {
+		t.Errorf("after a refused delete: %q, %v, want the first", b, err)
 	}
 }
