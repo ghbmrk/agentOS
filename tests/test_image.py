@@ -4198,6 +4198,13 @@ class ReferenceToolTest(unittest.TestCase):
         self.assertIn("image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", build)
         self.assertIn('"$RUNNER_TEMP/image-tools"', build)
         self.assertLess(ci.index("- name: The image's systemd and kmod"), ci.index("- name: Unit tests"))
+        # A snapshot.debian.org outage retries the whole bounded build from an empty root, and the
+        # last failure still fails the step with mmdebstrap's exit code.
+        self.assertIn("for wait in 15 30 60 last; do", build)
+        self.assertIn('sudo rm -rf --one-file-system "$RUNNER_TEMP/image-tools"', build)
+        self.assertIn("sudo timeout 240 mmdebstrap ", build)
+        self.assertIn('[ "$wait" != last ] || exit "$err"', build)
+        self.assertEqual(build.count("mmdebstrap --mode="), 1)
         self.assertIn("python tools/unit_tests.py", step)
         self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 

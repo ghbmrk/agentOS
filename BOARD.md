@@ -438,7 +438,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4h | MIG-4-recovery-r4h: the localui r4b-3 assumption row says what r4c changed | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
 | REV-CHK-save-hosts | The host binaries' saves pass a test-set stop to `privfile.WriteAtomic` (broker/cmd/agentos-camera, broker/cmd/agentos-clerk-model, broker/cmd/agentos-enroll, broker/cmd/agentos-homekit, broker/cmd/agentos-unlock, broker/update); removes their REV-CHK-save pending lines. | #3903 | queued |
 | REV-CHK-links-e2e-fifo | REV-CHK-links-e2e-fifo: the e2e harness's no-follow reads refuse a FIFO instead of blocking | #4194 | building |
-| REV-CHK-links-update-l2 | REV-CHK-links-update-l2: safeDir test separates link and write refusals; non-root owner case; release verify temp dir | #4199 | building |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
 | GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
@@ -454,9 +453,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UNIT-RULES-release-2 | UNIT-RULES-release-2: offline_systemd unshare -u -i; MERGED links must resolve to /usr/<name>; the test gaps from #4779 round-2 surviving mutants; a no-fragment mount drop-in's Environment=. Release; from #4779. | #4779, #4767 | queued (release) |
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | LOCALUI-named-port-watch | LOCALUI-named-port-watch: a page whose port 1 is named by -iface also runs a port-1 watcher. From #4881. | #4881 | building (tier A; sub B directories) |
-| DECOY-match-wrap-8 | DECOY-match-wrap-8: TestBreakStreamCost times the \/ x512 near-copy, and a test pins the encodings carry | #4871 | building (release; tier A; size S; from #4871 build) |
 | CI-hostcheck-image-tools | CI-hostcheck-image-tools: hostcheck runs qemu, swtpm and OVMF from pinned sources, not the runner's packages. Release; from #4776. | #4776 | building (release) |
-| REV-CHK-links-update-r2 | REV-CHK-links-update-r2: drive source refuses non-regular files, names a link refusal, keeps agentos-release portable | #4889 | building |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
 | VULN-initrd-drop | VULN-initrd-drop: the initrd purges the packages the main tree purges (dash, tar, perl-base, sqlite3 and the rest), and their `image/initrd` records go | #4000 | queued |
@@ -467,11 +464,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
 | REV-CHK-update-2 | REV-CHK-update-2: store refusals all wrap ErrUnsafeStore; MkdirAll and checkChain errors carry store context; verify names a bad -root | #4972 | queued |
 | MUT-shard-polish | MUT-shard-polish: release items from #4978's review (mutgate shard messages, job names, stub totals, budget check) | #4978 | in review (release) |
-| REV-CHK-links-kernel-f1 | REV-CHK-links-kernel-f1: agentos-unlock `ownDir` names its real cause and tests its uid and dir-type branches | #4966 | building |
 | CI-hostcheck-guest-kernel | CI-hostcheck-guest-kernel: the stand-in guest's kernel comes from a pinned source, not the runner's archive. Release; from #4906. | #4906 | queued (release) |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
 | MUT-shard-targets | MUT-shard-targets: shards of a test-only package read the plan's one coverage record, so they agree (#4970) | — | in review |
-| VULN-debian-zlib-r3 | VULN-debian-zlib-r3: accept (or upgrade past) DEBIAN-CVE-2026-76844 in zlib 1:1.3.dfsg+really1.3.1-1+b1 | #2919 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 

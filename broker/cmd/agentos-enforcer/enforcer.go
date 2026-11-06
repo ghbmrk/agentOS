@@ -21,12 +21,14 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
+	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
-	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
+	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -63,6 +65,14 @@ const acceptBackoffMax = time.Second
 type firewall interface {
 	Load(ctx context.Context, ruleset string) error
 	List(ctx context.Context, table string) ([]byte, error)
+	Update(ctx context.Context, text string) error
+	QuotaPast(ctx context.Context) (bool, error)
+}
+
+// resolver is the dnsmasq instances (broker/enforcer/dns/run.Set).
+type resolver interface {
+	Apply(f dns.Files, load func() error) error
+	Close()
 }
 
 // deps is what the daemon takes from the box: production values in
@@ -76,6 +86,13 @@ type deps struct {
 	Light   alert.Light
 	Radio   channel.Radio
 	Logf    func(string)
+	// DNS runs the resolver's instances; MDNS is the pair relay
+	// (mdns.Serve) and Wake the Wake-on-LAN relay's loop (wol.Relay.Serve);
+	// Boot is this boot's id (traffic.BootID).
+	DNS  resolver
+	MDNS func(context.Context, mdns.Plan, *mdns.Filter) error
+	Wake func(context.Context, *wol.Relay) error
+	Boot func() (string, error)
 	// Listen binds the page's addresses; the lifecycle test drives the
 	// page's handler instead.
 	Listen bool
@@ -115,8 +132,12 @@ type Enforcer struct {
 	pageOwner key.PublicKey
 	pageLns   []net.Listener
 
-	fwMu   sync.Mutex
-	loaded string // hash of the document the firewall last loaded
+	// fwMu orders the firewall's loads and readings: a reading names the
+	// document the running table was compiled from (loadedDoc).
+	fwMu      sync.Mutex
+	loaded    string // hash of the document the firewall last loaded
+	loadedDoc policy.Document
+	net       network // network.go: resolver, relays, byte caps
 
 	coreSeen atomic.Int64 // Elapsed at the core's last authenticated line, +1; 0 never
 	conns    atomic.Int32
@@ -152,7 +173,8 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if dp.FireWait == 0 {
 		dp.FireWait = fireTimeout
 	}
-	if dp.Elapsed == nil || dp.Fire == nil || dp.Network == nil || dp.Light == nil || dp.Radio == nil || dp.Logf == nil {
+	if dp.Elapsed == nil || dp.Fire == nil || dp.Network == nil || dp.Light == nil || dp.Radio == nil || dp.Logf == nil ||
+		dp.DNS == nil || dp.MDNS == nil || dp.Wake == nil || dp.Boot == nil {
 		return nil, errors.New("daemon: deps incomplete")
 	}
 	if err := checkStateDir(dir); err != nil {
@@ -188,6 +210,9 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 			return nil, err
 		}
 	}
+	if err := d.openNetwork(); err != nil {
+		return nil, err
+	}
 	d.toldRecovery = d.recoveryPending()
 	d.alerts.Recovery(d.toldRecovery) // the alerts start with the core down (toldUp false)
 	// Nothing is served until the policy in force is loaded: the box may
@@ -195,6 +220,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	// start, and the service manager starts the daemon again (P4, P5,
 	// #4755 item 3).
 	if err := d.syncFirewall(context.Background()); err != nil {
+		d.closeNetwork()
 		return nil, fmt.Errorf("first firewall load: %w", err)
 	}
 	if err := d.rebuildPage(); err != nil {
@@ -221,6 +247,7 @@ func (d *Enforcer) openChannel(at func(string) string) error {
 		Core: d.core, Key: priv, Revoked: d.heads.Revoked,
 		Policy: lockedPolicy{d}, Radio: d.dp.Radio, Heads: d.heads, Alerts: d.alerts, Cut: d.cut,
 		Log: d.event, Now: d.dp.Now, Elapsed: d.dp.Elapsed,
+		Traffic: d.trafficRead, Counts: d.counts,
 	}
 	if d.ch, err = channel.New(d.chCfg); err != nil {
 		return fmt.Errorf("channel: %w", err)
@@ -285,8 +312,9 @@ func (d *Enforcer) kick() {
 }
 
 // syncFirewall loads the ruleset for the policy in force if it is not the
-// one loaded. A load that fails leaves the previous ruleset (nft's
-// transaction, P5) and is tried again at the next tick.
+// one loaded, in step with the resolver and the relays (network.go). A
+// load that fails leaves the previous ruleset (nft's transaction, P5) and
+// is tried again at the next tick.
 func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	d.mu.Lock()
 	doc := d.engine.Current()
@@ -300,23 +328,10 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	if h == d.loaded {
 		return nil
 	}
-	var running []byte
-	if d.loaded != "" {
-		if running, err = d.dp.Fire.List(ctx, nft.Table); err != nil {
-			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
-			running = nil
-		}
-	}
-	text, err := nft.Reload(doc, d.cfg.Layout, running)
-	if err != nil {
+	if err := d.loadNetwork(ctx, doc); err != nil {
 		return err
 	}
-	lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
-	defer cancel()
-	if err := d.dp.Fire.Load(lctx, text); err != nil {
-		return err
-	}
-	d.loaded = h
+	d.loaded, d.loadedDoc = h, doc
 	return nil
 }
 
@@ -345,6 +360,7 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
 	}
+	d.tickNetwork(ctx, now)
 	d.upMu.Lock()
 	if up := d.coreUp(); up != d.toldUp {
 		d.toldUp = up
@@ -402,6 +418,7 @@ func (d *Enforcer) rebuildPage() error {
 		Name: d.cfg.Name, Owner: owner, Enrol: d.book, CA: cert.Root, CoreCA: d.coreCA,
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
+		Heard: mdns.HeardBy(d.net.filter, d.cfg.Layout),
 	}
 	if d.ch != nil {
 		pc.Channel = d.cut
@@ -442,19 +459,20 @@ func (d *Enforcer) Page() *page.Server {
 	return d.page
 }
 
-// Close stops the page's listeners. The state is on disk after every
-// change, so a close is the same as a power loss; a trip not yet saved is
-// tried once more.
+// Close stops the page's listeners, the relays and the resolver. The state
+// is on disk after every change; a close also takes a last byte-cap
+// reading, and a trip not yet saved is tried once more.
 func (d *Enforcer) Close() {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip not saved at close: " + err.Error())
 	}
 	d.pageMu.Lock()
-	defer d.pageMu.Unlock()
 	for _, ln := range d.pageLns {
 		ln.Close()
 	}
 	d.pageLns = nil
+	d.pageMu.Unlock()
+	d.closeNetwork()
 }
 
 // RevokeCore revokes the kernel's channel sub-key on the owner's
