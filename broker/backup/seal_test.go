@@ -5,6 +5,7 @@ package backup
 import (
 	"bytes"
 	"crypto/mlkem"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -297,5 +298,44 @@ func TestEverySealAndOpenFailureIsReported(t *testing.T) {
 	}
 	if _, err := newGCM(make([]byte, 7)); err == nil {
 		t.Error("a 7-byte AES key made a cipher")
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036; Security on #5037): an object whose ephemeral
+// key is an X25519 low-order point is refused even when its chunk is sealed
+// under the key such a point would give. Sealing is public-key, so anyone
+// holding the Recipient can seal that chunk; without the refusal the
+// X25519 half would add nothing and only ML-KEM would stand.
+func TestALowOrderEphemeralKeyIsRefused(t *testing.T) {
+	rcp := recipient(t, rk1)
+	_, ek, err := rcp.keys()
+	must(t, err)
+	for _, p := range []string{
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+		"5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		h := header{kind: KindContent}
+		pt, err := hex.DecodeString(p)
+		must(t, err)
+		copy(h.eph[:], pt)
+		ssM, ctM := ek.Encapsulate()
+		copy(h.ctM[:], ctM)
+		// The X25519 secret of a low-order point is all zero, which ECDH
+		// refuses; nil stands for it here, as a deleted refusal would leave.
+		key, err := combine(ssM, nil, h.kind, ctM, h.eph[:], rcp.X, rcp.EK)
+		must(t, err)
+		a, err := newGCM(key)
+		must(t, err)
+		aad := h.encode()
+		obj := append(bytes.Clone(aad), a.Seal(nil, nonce(0, true), []byte("forged"), aad)...)
+		if _, _, _, err := openFrom(bytes.NewReader(obj), rk1, KindContent); !errors.Is(err, ErrOpen) {
+			t.Errorf("low-order ephemeral key %s: %v, want ErrOpen", p[:8], err)
+		}
 	}
 }
