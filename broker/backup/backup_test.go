@@ -101,7 +101,7 @@ func TestManifestCarriesPageCAOnly(t *testing.T) {
 func TestSectionNamesMatchTheKernelsStoreNames(t *testing.T) {
 	r := newRig(t)
 	rcp := recipient(t, rk1)
-	for _, store := range []string{"mail", "Mail", "post box", "a/b", "..", "Ünïcode", strings.Repeat("a", 64)} {
+	for _, store := range []string{"mail", "Mail", "a/b", "..", strings.Repeat("a", 64)} {
 		if !kernel.ValidStore(store) {
 			t.Fatalf("fixture: the kernel refuses %q", store)
 		}
@@ -116,7 +116,7 @@ func TestSectionNamesMatchTheKernelsStoreNames(t *testing.T) {
 			t.Errorf("store %q does not read back", store)
 		}
 	}
-	for _, store := range []string{"", kernel.KeyTable, strings.Repeat("a", 65), "a\nb", "a\u202eb"} {
+	for _, store := range []string{"", kernel.KeyTable, strings.Repeat("a", 65), "a\nb", "a\u202eb", "post box", "Ünïcode"} {
 		if validSection("content/"+store) != kernel.ValidStore(store) {
 			t.Errorf("store %q: section %v, kernel %v", store, validSection("content/"+store), kernel.ValidStore(store))
 		}
