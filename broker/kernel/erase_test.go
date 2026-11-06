@@ -713,10 +713,10 @@ func TestNamedRefusesBlankAndInvalidQuery(t *testing.T) {
 func TestSealRefusesAClassNameNoOneCanSee(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
-	for _, c := range []string{kernel.ClassLabel, "message", "wrap-key"} {
+	for _, c := range []string{kernel.ClassLabel, "message", "wrap-key", "!", "~", strings.Repeat("c", 64)} {
 		r.seal(s, "mail", c, "x"+c)
 	}
-	for _, c := range []string{"", " ", "ㅤ", "mailㅤ", "Mail Body", "mail‮", "mél"} {
+	for _, c := range []string{"", " ", "ㅤ", "mailㅤ", "Mail Body", "mail‮", "mél", "\x7f", strings.Repeat("c", 65)} {
 		if _, err := r.k.Seal(2, s, "mail", c, []byte("y")); !errors.Is(err, kernel.ErrStore) {
 			t.Errorf("seal class %q: %v, want ErrStore", c, err)
 		}

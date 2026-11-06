@@ -2,6 +2,18 @@
 # per line: directory (under broker/), check, reason. A line whose check now
 # runs the corpus, or no longer exists, fails the lint: delete it.
 #
+# Refuse every shape today; the test that keeps it so is #5035.
+clerk/clerkkey ValidName ASCII regex; #5035
+clerk/inbox dnsName ASCII DNS labels; #5035
+cmd/agentos-link ifaceName ASCII interface names; #5035
+enforcer/page dnsName ASCII DNS labels; #5035
+enforcer/radio name printable ASCII, no space; #5035
+kernel/proc ValidStoreName ASCII regex; #5035
+pageca ValidName DNS name, needs a dotted wrapper; #5035
+sipsign hostName ASCII host or IP; #5035
+vision validName ASCII enrolled ID; #5035
+vision ValidModelName ASCII model name; #5035
+#
 # Not a check of text a person or another party names.
 attest Shape checks a hardware record's fields, not a name
 clerk shape builds a request declaration from an op; its values are checked by regexes inside
