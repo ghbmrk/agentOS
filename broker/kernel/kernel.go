@@ -274,10 +274,8 @@ type View interface {
 // a passkey's stands only while that passkey is not cut off.
 func Live(v View, ver *key.Verified, now int64) *key.Refusal {
 	_, cut := v.Enrollments()
-	for _, p := range ver.Narrowers {
-		if key.In(cut, p) {
-			return &key.Refusal{Code: CCutOff, Detail: "narrowed by a cut-off passkey"}
-		}
+	if slices.ContainsFunc(ver.Narrowers, func(p key.PublicKey) bool { return key.In(cut, p) }) {
+		return &key.Refusal{Code: CCutOff, Detail: "narrowed by a cut-off passkey"}
 	}
 	for _, id := range ver.IDs[:min(2, len(ver.IDs))] {
 		from, ok := v.Granted(id)

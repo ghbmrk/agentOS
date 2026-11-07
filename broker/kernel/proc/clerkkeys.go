@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -54,15 +55,8 @@ var (
 // ValidCgroup reports whether c can be a clerk unit's cgroup: an absolute,
 // clean path whose last element is a service unit's name.
 func ValidCgroup(c string) bool {
-	if len(c) > 1024 || !strings.HasPrefix(c, "/") || path.Clean(c) != c || !unitName.MatchString(path.Base(c)) {
-		return false
-	}
-	for _, e := range strings.Split(c[1:], "/") {
-		if e == "." || e == ".." || !cgroupElem.MatchString(e) {
-			return false
-		}
-	}
-	return true
+	return len(c) <= 1024 && strings.HasPrefix(c, "/") && path.Clean(c) == c && unitName.MatchString(path.Base(c)) &&
+		!slices.ContainsFunc(strings.Split(c[1:], "/"), func(e string) bool { return e == "." || e == ".." || !cgroupElem.MatchString(e) })
 }
 
 // ErrKeyPeer: the connection is not the service manager starting the
