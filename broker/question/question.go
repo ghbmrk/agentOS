@@ -336,7 +336,8 @@ type send struct {
 // Book holds the box's questions.
 type Book struct {
 	cfg    Config
-	sendMu sync.Mutex // one sender at a time, so no question is texted twice
+	stop   func(i int) bool // tests: crash persist's file write after step i
+	sendMu sync.Mutex       // one sender at a time, so no question is texted twice
 	mu     sync.Mutex
 	qs     []*entry
 	next   int
@@ -441,7 +442,7 @@ func (b *Book) persist() error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(filepath.Dir(b.cfg.Path), filepath.Base(b.cfg.Path), raw, nil)
+	return privfile.WriteAtomic(filepath.Dir(b.cfg.Path), filepath.Base(b.cfg.Path), raw, b.stop)
 }
 
 // save persists after a change that has already taken effect (a text

@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/secret"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
@@ -420,7 +421,7 @@ func (r *rig) restart() {
 	if r.stager != nil {
 		stager = r.stager
 	}
-	a, err := New(Config{Kernel: kern{r}, Key: r.upkey, Holder: r.holder, Pinned: r.pinned, Activator: act, Store: r.store, Pipeline: stager, State: savedState{r},
+	a, err := New(Config{Kernel: kern{r}, Key: r.upkey, Holder: secret.Hide(r.holder), Pinned: r.pinned, Activator: act, Store: r.store, Pipeline: stager, State: savedState{r},
 		InCall: func() bool { return r.inCall }, Working: r.isWorking,
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },

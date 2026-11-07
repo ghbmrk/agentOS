@@ -27,6 +27,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/update"
@@ -269,7 +270,17 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		defer os.RemoveAll(tmp)
-		st, err := update.InitStore(tmp+"/s", b, installed)
+		// The scratch store's chain must pass the update store's checks:
+		// resolve a linked temp dir, as macOS's /var is, to the real
+		// directory (#4225 item 4). A temp dir other uids can write is
+		// still refused; TMPDIR names a private one.
+		if real, err := filepath.EvalSymlinks(tmp); err == nil {
+			tmp = real
+		}
+		st, err := update.InitStore(filepath.Join(tmp, "s"), b, installed)
+		if errors.Is(err, update.ErrUnsafeStore) {
+			return fmt.Errorf("verify: scratch store in %s refused (set TMPDIR to a directory only this user writes): %w", tmp, err)
+		}
 		if err != nil {
 			return err
 		}

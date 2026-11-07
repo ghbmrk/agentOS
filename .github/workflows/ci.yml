@@ -40,7 +40,8 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 45, not 30: a full run takes about 15 minutes, and the image-tools step may spend 18 retrying.
+    timeout-minutes: 45
     permissions:
       contents: read
       issues: read # board.py check --repo reads the work-item issues
@@ -69,6 +70,31 @@ jobs:
           want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      # #4776: the differential tests run the image's own systemd and kmod, never the runner's, so a
+      # runner-image update cannot change what they compare against. The root is installed from the
+      # apt sources the image build reads (the pinned snapshot and trixie-security); the tests run
+      # its binaries through its own loader (tests/test_image.py image_tool).
+      - name: The image's systemd and kmod, from the image's apt sources
+        if: steps.scope.outputs.records != 'true'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          # snapshot.debian.org answers 503/504 for minutes at a time (#4518; #5011's run 42120504082
+          # died on a 504 after the runner apt's 3 tries). Each attempt starts from an empty root and
+          # reads the same pinned, signed snapshot, so a retry fetches the same hashed packages. Four
+          # attempts, each capped at 4 minutes (a good one takes under 1), 15, 30 and 60 s apart:
+          # about 18 minutes before the step fails with mmdebstrap's own error and exit code.
+          # --one-file-system: a killed attempt may leave the root's /dev or /proc mounted.
+          for wait in 15 30 60 last; do
+            sudo rm -rf --one-file-system "$RUNNER_TEMP/image-tools"
+            err=0
+            sudo timeout 240 mmdebstrap --mode=root --variant=essential --include=systemd,kmod trixie \
+              "$RUNNER_TEMP/image-tools" image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources || err=$?
+            [ "$err" -ne 0 ] || break
+            [ "$wait" != last ] || exit "$err"
+            echo "::warning::mmdebstrap exited $err (snapshot.debian.org outage?); retrying in ${wait}s"
+            sleep "$wait"
+          done
+          sudo chroot "$RUNNER_TEMP/image-tools" dpkg-query -W systemd kmod
       - name: Unit tests
         if: steps.scope.outputs.records != 'true'
         # The differential tests (systemd-analyze, systemd-tmpfiles, modprobe) fail rather than skip
@@ -78,6 +104,7 @@ jobs:
         # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
+          AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools
           GOFLAGS: -buildvcs=false
         run: |
           # erofs-utils: the /usr list tests build erofs images (#4470).

@@ -121,6 +121,7 @@
   {"id": "DEBIAN-CVE-2026-6368", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-6791", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-76642", "issue": 2919, "where": "image", "package": "util-linux", "why": "Image package util-linux 1:2.41.5-0+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
+  {"id": "DEBIAN-CVE-2026-76844", "issue": 2919, "where": "image", "package": "zlib", "why": "Image package zlib 1:1.3.dfsg+really1.3.1-1+b1 (zlib1g). The flaw is a heap overflow in the gz* file API after a failed write(); Debian 13 has no fix (OSV, modified 2026-11-05). Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-77117", "issue": 2919, "where": "image", "package": "glibc", "why": "Image package glibc 2.41-12+deb13u4; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-78408", "issue": 2919, "where": "image", "package": "util-linux", "why": "Image package util-linux 1:2.41.5-0+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-78409", "issue": 2919, "where": "image", "package": "util-linux", "why": "Image package util-linux 1:2.41.5-0+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},

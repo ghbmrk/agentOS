@@ -86,7 +86,8 @@ def check(base, head, body, decisions, pr=None):
         return True, lines
     m = WAIVER.search(body or "")
     if m and active_decision(decisions, m.group(1), pr):
-        return True, lines + [f"grew {', '.join(grew)}: allowed by {m.group(1)} (reviewer: confirm Mark approved the addition)"]
+        note = " SPEC.md stays capped by tools/ceilings.txt (D-310), which the trusted-base check enforces." if "spec" in grew else ""
+        return True, lines + [f"grew {', '.join(grew)}: allowed by {m.group(1)} (reviewer: confirm Mark approved the addition).{note}"]
     why = f"`Word-budget: {m.group(1)}` names no active DECISIONS.md row at the base that names #{pr}" if m else "no `Word-budget: <decision ID>` line"
     return False, lines + [f"grew {', '.join(grew)} and {why}: retire as many words in the same set (D-152)"]
 
