@@ -49,6 +49,16 @@ type target struct {
 	// keepOnDelete makes DeleteTable report success and keep the table.
 	keepOnDelete bool
 	puts         int
+	// failTablesAt makes the n'th Tables call (from 1) fail.
+	failTablesAt, tablesCalls int
+}
+
+func (t *target) Tables(id string) ([]uint64, error) {
+	t.tablesCalls++
+	if t.tablesCalls == t.failTablesAt {
+		return nil, errDown
+	}
+	return t.MemTarget.Tables(id)
 }
 
 func (t *target) PutTable(id string, gen uint64, b []byte) error {
@@ -519,5 +529,177 @@ func TestUnwrapRefusesABadTable(t *testing.T) {
 				t.Fatalf("a refused table put %v", have)
 			}
 		})
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): a Rewrap of a record whose subjects are out of
+// order and repeated seals each live one once, in order.
+func TestRewrapSortsAndDedupesTheRecordsSubjects(t *testing.T) {
+	r, subs, _ := threeLive(t)
+	rcp := recipient(t, rk1)
+	tg := &MemTarget{}
+	rec, _ := r.backup(rcp, tg)
+	r.erase(subs[1])
+	rec.Subjects = []string{subs[2], subs[0], subs[2], subs[1]}
+	next, out := Rewrap(tg, rec, r.keys, r.k.State())
+	if out.Result != Rewrote {
+		t.Fatalf("rewrap: %v %v", out.Result, out.Err)
+	}
+	want := slices.Sorted(slices.Values([]string{subs[0], subs[2]}))
+	if !slices.Equal(next.Subjects, want) {
+		t.Errorf("subjects %q, want %q", next.Subjects, want)
+	}
+	if got := slices.Sorted(maps.Keys(unwrapped(t, tg, next, next.Generation, rk1).M)); !slices.Equal(got, want) {
+		t.Errorf("the table gives %q, want %q", got, want)
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): a key table that fails to list or to give a
+// live subject's key fails the backup with its error, and nothing is put.
+func TestAFailingKeyTableFailsWrite(t *testing.T) {
+	r := newRig(t)
+	r.seal(r.open(), "hello")
+	rcp := recipient(t, rk1)
+	for name, set := range map[string]*bool{"list": &r.keys.failList, "get": &r.keys.failGet} {
+		*set = true
+		tg := &MemTarget{}
+		if _, err := Write(&bytes.Buffer{}, tg, r.input(rcp)); !errors.Is(err, errDown) || len(tg.m) != 0 {
+			t.Errorf("a failing %s: %v, %d tables, want the key table's error and none", name, err, len(tg.m))
+		}
+		*set = false
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): each way a Rewrap fails is its own Outcome,
+// with the cause that made it.
+func TestRewrapReportsEachFailure(t *testing.T) {
+	lowOrder := recipient(t, rk1)
+	lowOrder.X = make([]byte, 32)
+	cases := []struct {
+		name    string
+		erase   bool
+		set     func(tg *target, rec *Record)
+		want    Result
+		errDown bool
+	}{
+		{"a backup id that is not one", true, func(_ *target, rec *Record) { rec.BackupID = "zz" }, Offline, false},
+		{"the first list fails", true, func(tg *target, _ *Record) { tg.failTablesAt = 1 }, Offline, true},
+		{"strays on an append-only target", false, func(tg *target, rec *Record) {
+			must(t, tg.MemTarget.PutTable(rec.BackupID, rec.Generation+1, []byte("stray")))
+			tg.Append = true
+		}, AppendOnly, false},
+		{"a recipient that does not seal", true, func(_ *target, rec *Record) { rec.Recipient = lowOrder }, Offline, false},
+		{"the put fails", true, func(tg *target, _ *Record) { tg.failPut = true }, Offline, true},
+		{"the old table's delete fails", true, func(tg *target, _ *Record) { tg.failDelete = true }, OldNotDeleted, true},
+		{"the list after the delete fails", true, func(tg *target, _ *Record) { tg.failTablesAt = 2 }, OldNotDeleted, true},
+	}
+	for _, c := range cases {
+		r, subs, _ := threeLive(t)
+		tg := &target{}
+		rec, _ := r.backup(recipient(t, rk1), tg)
+		if c.erase {
+			r.erase(subs[1])
+		}
+		puts := tg.puts
+		c.set(tg, &rec)
+		_, out := Rewrap(tg, rec, r.keys, r.k.State())
+		if out.Result != c.want || out.Err == nil && c.want != AppendOnly || c.errDown && !errors.Is(out.Err, errDown) {
+			t.Errorf("%s: %v %v, want %v", c.name, out.Result, out.Err, c.want)
+		}
+		if c.want == Offline && !c.errDown && tg.puts != puts {
+			t.Errorf("%s: a table was put", c.name)
+		}
+	}
+}
+
+// REQ: BAK-1
+// MUT-backup-names (#5036): UnwrapTable refuses a table whose header names
+// another backup than its body, a body with a field the format lacks, and
+// one over 64 MiB, takes one of exactly 64 MiB, reports a chunk that does
+// not open, and reports a destination that does not list.
+func TestUnwrapChecksTheHeaderTheBodyAndTheSize(t *testing.T) {
+	rcp := recipient(t, rk1)
+	id, other := strings.Repeat("cd", idLen), strings.Repeat("ef", idLen)
+	bid, err := parseID(id)
+	must(t, err)
+	oid, err := parseID(other)
+	must(t, err)
+	body := func(backupID string) []byte {
+		return []byte(`{"backup_id":"` + backupID + `","generation":1,"entries":[]}`)
+	}
+	unwrap := func(obj []byte, dst kernel.Keys) error {
+		_, err := UnwrapTable(bytes.NewReader(obj), rk1, id, dst)
+		return err
+	}
+	if err := unwrap(sealBytes(t, rcp, KindKeyTable, bid, 1, body(id)), kernel.NewMemKeys()); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	if err := unwrap(sealBytes(t, rcp, KindKeyTable, oid, 1, body(id)), kernel.NewMemKeys()); !errors.Is(err, ErrOtherBackup) {
+		t.Errorf("a header of another backup: %v, want ErrOtherBackup", err)
+	}
+	extra := []byte(`{"backup_id":"` + id + `","generation":1,"entries":[],"extra":1}`)
+	if err := unwrap(sealBytes(t, rcp, KindKeyTable, bid, 1, extra), kernel.NewMemKeys()); err == nil {
+		t.Error("a field the format lacks was taken")
+	}
+	dst := &flakyKeys{MemKeys: kernel.NewMemKeys(), failList: true}
+	if err := unwrap(sealBytes(t, rcp, KindKeyTable, bid, 1, body(id)), dst); !errors.Is(err, errDown) {
+		t.Errorf("a destination that does not list: %v, want its error", err)
+	}
+
+	// Leading spaces pad the body: one cut short ends inside the value.
+	padded := func(n int) []byte {
+		b := body(id)
+		return append(bytes.Repeat([]byte(" "), n-len(b)), b...)
+	}
+	exact := sealBytes(t, rcp, KindKeyTable, bid, 1, padded(maxTable))
+	if err := unwrap(exact, kernel.NewMemKeys()); err != nil {
+		t.Errorf("a table of exactly 64 MiB: %v", err)
+	}
+	if err := unwrap(sealBytes(t, rcp, KindKeyTable, bid, 1, padded(maxTable+1)), kernel.NewMemKeys()); err == nil {
+		t.Error("a table over 64 MiB was taken")
+	}
+	exact[headerLen+chunkSize+tagSize+1] ^= 1 // in the second chunk
+	if err := unwrap(exact, kernel.NewMemKeys()); !errors.Is(err, ErrOpen) {
+		t.Errorf("a second chunk that does not open: %v, want ErrOpen", err)
+	}
+}
+
+// REQ: BAK-1, LOG-4
+// MUT-backup-names (#5036): a re-seal's commit returns nil for Rewrote and
+// Unchanged, and otherwise the Result with its cause.
+func TestACommitReportsItsOutcome(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		erase bool
+		tg    func() Target
+		want  string // "" for nil
+		cause bool
+	}{
+		{"unchanged", false, func() Target { return &MemTarget{} }, "", false},
+		{"rewrote", true, func() Target { return &MemTarget{} }, "", false},
+		{"append-only", true, func() Target { return &MemTarget{Append: true} }, "append-only", false},
+		{"offline", true, func() Target { return &target{} }, "offline: down", true},
+	} {
+		r, subs, _ := threeLive(t)
+		tg := c.tg()
+		rec, _ := r.backup(recipient(t, rk1), tg)
+		if f, ok := tg.(*target); ok {
+			f.failPut = true
+		}
+		if c.erase {
+			r.erase(subs[0])
+		}
+		set := NewSet(newSaved().save)
+		must(t, set.Add(tg, rec))
+		io, err := set.Prepare(rec.BackupID, r.keys, r.k.State())
+		must(t, err)
+		err = io()()
+		switch {
+		case c.want == "" && err != nil, c.want != "" && (err == nil || err.Error() != c.want), c.cause && !errors.Is(err, errDown):
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
 	}
 }

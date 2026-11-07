@@ -12,8 +12,9 @@
 //	agentos-enforcer -state DIR -config FILE          run
 //
 // The case code is read from a file, never an argument or the
-// environment. ENF-l-b wires the access point, resolver, relays, radios and
-// device secrets; until then enrolment fails closed (unwiredNetwork) and
+// environment. ENF-l-b2 wires the access point, radios and
+// device secrets (the resolver, the pair relay, Wake-on-LAN and the byte
+// caps are wired, ENF-l-b1); until then enrolment fails closed (unwiredNetwork) and
 // every radio command is refused (noRadio). Its assumptions are in
 // ASSUMPTIONS.md.
 package main
@@ -36,9 +37,13 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
+	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
+	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 )
 
 func main() {
@@ -93,7 +98,19 @@ func run(args []string) error {
 	if bootTime() == 0 {
 		return errors.New("CLOCK_BOOTTIME unreadable")
 	}
+	dnsDir := filepath.Join(*state, "dns")
+	if err := os.Mkdir(dnsDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	resolvers, err := dnsrun.New(cfg.Dnsmasq, dnsDir, func(s string) { logger.Print(s) })
+	if err != nil {
+		return err
+	}
 	d, err := open(cfg, *state, deps{
+		DNS:     resolvers,
+		MDNS:    mdns.Serve,
+		Wake:    func(ctx context.Context, r *wol.Relay) error { return r.Serve(ctx) },
+		Boot:    traffic.BootID,
 		Elapsed: bootTime,
 		Fire:    load.Loader{Bin: cfg.Nft},
 		Network: unwiredNetwork{},
@@ -122,6 +139,11 @@ func run(args []string) error {
 	} else {
 		logger.Print("channel: " + errNoCore.Error())
 	}
+	go func() {
+		if err := d.ServeWake(ctx); err != nil && ctx.Err() == nil {
+			logger.Print("wake: relay stopped: " + err.Error())
+		}
+	}()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {

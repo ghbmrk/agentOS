@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"slices"
 	"strings"
 	"sync"
@@ -135,6 +136,10 @@ type Config struct {
 	Lock sync.Locker
 	Now  func() time.Time // nil means time.Now
 	Rand io.Reader        // nil means crypto/rand
+	// Log takes one line for each failure the owner is not shown: one
+	// inside the policy hand-over after the passkey was saved. Nil means
+	// the standard logger.
+	Log func(string)
 }
 
 // verifier is a code's salted SHA-256. The codes are long and random, so a
@@ -204,6 +209,10 @@ type Book struct {
 	// guessing at one never locks the owner out of the other.
 	caseFails, recFails []int64
 	tix                 map[string]*ticket
+	// replaced is whether Network.Replace has answered since the book
+	// opened: a later Finish comes from the Owner network. Kept in memory
+	// only, since it matters when the store is failing.
+	replaced bool
 }
 
 // ticket is one Begin waiting for its Finish. It is good only for the
@@ -267,6 +276,9 @@ func Open(cfg Config) (*Book, error) {
 	}
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
+	}
+	if cfg.Log == nil {
+		cfg.Log = func(s string) { log.Print(s) }
 	}
 	b := &Book{cfg: cfg, tix: map[string]*ticket{}}
 	raw, err := cfg.Store.Load()
@@ -470,9 +482,10 @@ func (b *Book) Begin(code string, pk key.PublicKey) (id string, msg []byte, err 
 
 // Result is what an enrolment shows the owner once: the new recovery code,
 // and either the Owner network's card (a passkey now in force) or when the
-// replacement applies (a recovery). A Finish that failed after the setup
-// network was replaced still returns the card, with no recovery code, so
-// the owner can join it and enrol again.
+// replacement applies (a recovery). A Finish that failed after it replaced
+// the setup network still returns the card, with no recovery code, so the
+// owner can join it and enrol again; a retry that fails again returns no
+// card, since the owner reached the page on that network and already has it.
 type Result struct {
 	Recovery string
 	Card     Card
@@ -511,16 +524,25 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 			return Result{}, fmt.Errorf("enrol: the setup network was not replaced, so nothing was enrolled: %w", err)
 		}
 		res := Result{Card: card, SetupReplaced: st.Phase == Factory}
+		retry := b.replaced
+		b.replaced = true
 		st.Phase, st.Owner, st.Recovery = Enrolled, t.pk.Encode(), &rec
-		if err := b.take(&st); err != nil && !bytes.Equal(b.st.Owner, st.Owner) {
-			// Nothing enrolled, but the setup network is gone: the card
-			// goes back with the error, so the owner can join the Owner
-			// network and enrol again there (Replace returns the same card).
-			return res, err
+		if err := b.take(&st); err != nil {
+			if !bytes.Equal(b.st.Owner, st.Owner) {
+				if retry {
+					return Result{}, err // the owner is on the Owner network already
+				}
+				// Nothing enrolled, but the setup network is gone: the
+				// card goes back with the error, so the owner can join the
+				// Owner network and enrol again there (Replace returns the
+				// same card).
+				return res, err
+			}
+			// From here the passkey is in force, saved: the failure leaves
+			// the policy to the Keep the page asks for, so the owner still
+			// gets the recovery code, and the log keeps the failure.
+			b.cfg.Log(fmt.Sprintf("enrol: the passkey enrolled, but the policy hand-over failed and waits for its Keep: %v", err))
 		}
-		// From here the passkey is in force, saved: a later failure inside
-		// take leaves the policy to the Keep the page asks for, so the
-		// owner still gets the recovery code.
 		b.cfg.Alerts.Raise(alert.Enrolment, "")
 		res.Recovery = code
 		return res, nil

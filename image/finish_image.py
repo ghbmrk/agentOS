@@ -98,6 +98,10 @@ def entry_args(entry, name):
 # fallback (I4). Any other credential could carry sysctl.extra or tmpfiles.extra (#1530).
 SHIPPED_CREDENTIALS = ("systemd.unit-dropin.emergency.service", "systemd.unit-dropin.rescue.service")
 MKOSI_CONF = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.conf"
+# Words that start like init= but name an early kernel parameter, which the kernel takes and never
+# hands to PID 1: init_on_free=1 zeroes memory as it is freed, the wipe agentos-mor rests on before it
+# clears the memory-overwrite request at shutdown (HW-8, #4794). Each must still be in mkosi.conf.
+KERNEL_INIT_PARAMS = ("init_on_free",)
 
 
 def config_cmdline(conf=MKOSI_CONF):
@@ -137,7 +141,7 @@ def cmdline_violations(entry, conf=MKOSI_CONF):
             k = k[3:]
         if k.startswith(("sysctl.", "sysctl/")):
             out.append("%s: the kernel sets sysctls from the command line" % key)
-        elif k.startswith(("systemd.run", "init", "rdinit")):
+        elif k.startswith(("systemd.run", "init", "rdinit")) and k not in KERNEL_INIT_PARAMS:
             out.append("%s: PID 1 would run it" % key)
         elif k in ("systemd.set_credential", "systemd.set_credential_binary") and \
                 val.split(":", 1)[0] not in SHIPPED_CREDENTIALS:
