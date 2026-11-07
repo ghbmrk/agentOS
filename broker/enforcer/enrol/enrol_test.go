@@ -118,6 +118,8 @@ type accessPoint struct {
 	replace int
 }
 
+func (a *accessPoint) Replaced() bool { return a.keys.Enrolled() }
+
 func (a *accessPoint) Replace() (Card, error) {
 	if a.fail {
 		return Card{}, errors.New("access point unreachable")
@@ -756,6 +758,14 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 	if err != nil || !strings.Contains(w, "if one is waiting") {
 		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
 	}
+	// After the wait the text must not read as all-clear: it names the
+	// deadline, which is Wait, and the factory reset as the way back
+	// (ENF-c-f3 item 1, NET-4, ENF-c-4).
+	if want := fmt.Sprintf("within %d minutes", int(Wait.Minutes())); !strings.Contains(w, want) ||
+		!strings.Contains(w, "After "+fmt.Sprintf("%d minutes", int(Wait.Minutes()))) ||
+		!strings.Contains(w, "only a factory reset with the code inside the enforcer's case takes it back") {
+		t.Errorf("the text names no deadline or way back: %q (want %q)", w, want)
+	}
 	g.reopen()
 	if _, ok := g.b.Recovery(); ok || g.alerts.recovery {
 		t.Error("a replacement waits after a stop before its save")
@@ -999,3 +1009,62 @@ func (t *teeAlerts) Raise(k alert.Kind, d string) (alert.Record, error) {
 	return t.real.Raise(k, d)
 }
 func (t *teeAlerts) Recovery(p bool) { t.fake.Recovery(p); t.real.Recovery(p) }
+
+// TestRetryCardSurvivesRestart (HW-10, ENF-c-7; ENF-c-f3 item 3): whether
+// a failed enrolment is a retry from the Owner network comes from the
+// access point, not from the book's memory, so a restart between two
+// failed enrolments does not show the card and "join it" again. Catches a
+// retry card that comes back after every restart.
+func TestRetryCardSurvivesRestart(t *testing.T) {
+	g := newRig(t)
+	a := newAuthenticator(t)
+	g.bs.failAt = g.bs.n + 1
+	if res, err := g.enrol(a, caseCode); !errors.Is(err, errStopped) || res.Card.SSID != "Home" {
+		t.Fatalf("first failure: %+v %v", res, err)
+	}
+	g.reopen() // the restart: the book forgets what it did
+	g.bs.failAt = g.bs.n + 1
+	if res, err := g.enrol(a, caseCode); !errors.Is(err, errStopped) || res != (Result{}) {
+		t.Fatalf("failure after a restart carries the card again: %+v %v", res, err)
+	}
+}
+
+// TestRotateRecoveryCode (NET-4; ENF-c-f3 item 2): after a recovery whose
+// save failed, the code stays unspent; Rotate, behind the page's passkey
+// tap, spends it and shows a new one once. The old code then starts no
+// replacement; the new one does. It refuses with no passkey in force and
+// with a replacement waiting (Cancel does that), and a failed save leaves
+// the old code valid.
+func TestRotateRecoveryCode(t *testing.T) {
+	g, _, code := enrolled(t)
+	g.bs.failAt = g.bs.n + 1
+	if _, err := g.enrol(newAuthenticator(t), code); !errors.Is(err, errStopped) {
+		t.Fatalf("stop at the save: %v", err)
+	}
+	g.bs.failAt = g.bs.n + 1
+	if fresh, err := g.b.Rotate(); !errors.Is(err, errStopped) || fresh != "" {
+		t.Fatalf("rotate over a failing save: %q %v", fresh, err)
+	}
+	g.bs.failAt = 0
+	fresh, err := g.b.Rotate()
+	if err != nil || len(fresh) != CodeLen || fresh == code {
+		t.Fatalf("rotate: %q %v", fresh, err)
+	}
+	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
+		t.Errorf("the spent code still starts a replacement: %v", err)
+	}
+	g.reopen() // the new code is the saved one
+	b := newAuthenticator(t)
+	if _, err := g.enrol(b, fresh); err != nil {
+		t.Fatalf("the new code: %v", err)
+	}
+	if _, ok := g.b.Recovery(); !ok {
+		t.Fatal("no replacement waiting")
+	}
+	if _, err := g.b.Rotate(); !errors.Is(err, ErrPhase) {
+		t.Errorf("rotate with a replacement waiting: %v", err)
+	}
+	if _, err := newRig(t).b.Rotate(); !errors.Is(err, ErrPhase) {
+		t.Errorf("rotate with no passkey: %v", err)
+	}
+}

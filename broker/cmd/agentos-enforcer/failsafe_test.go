@@ -474,3 +474,20 @@ func TestCoreCALoaded(t *testing.T) {
 		t.Fatalf("the started daemon holds core CA %q, want the one on disk", x.d.coreCA)
 	}
 }
+
+// TestHandoverFailureReachesLog (HW-10, NET-4; ENF-c-f3 item 5, #4928): a
+// policy hand-over that fails after the passkey is saved still enrols the
+// owner and reaches the daemon's own log (Config.Logf), not the standard
+// library's fallback that a nil Log would take. Catches a book wired with
+// no Log.
+func TestHandoverFailureReachesLog(t *testing.T) {
+	x := newBox(t, false)
+	x.failOn(fileEnrol, 2)                          // the passkey's save lands, the policy pointer's fails
+	out := x.b.enrol(newAuthenticator(t), caseCode) // 200: the passkey is in force
+	if out["recovery"] == nil {
+		t.Fatalf("no recovery code after a hand-over failure: %v", out)
+	}
+	if n := x.logs("enrol: the passkey enrolled, but the policy hand-over failed"); n != 1 {
+		t.Fatalf("hand-over failure reached the log %d times: %q", n, x.log)
+	}
+}

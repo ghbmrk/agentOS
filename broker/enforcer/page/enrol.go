@@ -27,6 +27,7 @@ import (
 const (
 	ActKeep           = "keep"            // sign the policy in force as this passkey's
 	ActCancelRecovery = "cancel-recovery" // stop a replacement passkey waiting
+	ActNewRecovery    = "new-recovery"    // spend the recovery code and show a new one
 )
 
 var errEnrolFirst = errors.New("no passkey is enrolled on this enforcer; enrol one first")
