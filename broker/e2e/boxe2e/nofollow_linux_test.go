@@ -716,6 +716,32 @@ func TestFileGateRefusesSysVShm(t *testing.T) {
 	refusedAsShmem(t, "/proc/self/map_files/"+zero)
 }
 
+func TestReadNoFollowRefusesAFIFOBeforeItBlocks(t *testing.T) {
+	// REQ: HW-10, ONB-3. readNoFollow is the read #4213 found blocking
+	// (agentos-localui could leave a FIFO at its card latch): a FIFO is
+	// refused as a kind before the open waits on it, as
+	// TestFileGateChecksBeforeTheOpenActs shows for the other opens. The
+	// comment sits in the body so a diff of this test names it alone.
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readNoFollow(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errKind) {
+			t.Errorf("readNoFollow(a FIFO) = %v, want it refused as a kind", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Open the other end so the blocked open returns.
+		if fd, err := unix.Open(fifo, unix.O_RDWR|unix.O_CLOEXEC, 0); err == nil {
+			defer unix.Close(fd)
+		}
+		t.Error("readNoFollow(a FIFO) waited on the FIFO before the check")
+	}
+}
+
 // refusedAsShmem fails t unless openRaw refuses p, opened with flag
 // (read-only if none), as kernel-held memory.
 func refusedAsShmem(t *testing.T, p string, flag ...int) {

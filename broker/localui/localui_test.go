@@ -1194,3 +1194,384 @@ func TestRestartSetupNeedsTheResetSecretElsewhere(t *testing.T) {
 		t.Fatal("reset secret accepted past the bound")
 	}
 }
+
+func TestSetupHelpersRefuseWhatTheyCannotShow(t *testing.T) {
+	// #5016: mask, smsLink, otpSecret, printable
+	// and phaseText on the inputs each of their checks is there for.
+	for n, want := range map[string]string{"": "", "123": "123", "1234": "1234", "+15550000001": "ending 0001"} {
+		if got := mask(n); got != want {
+			t.Errorf("mask(%q) = %q, want %q", n, got, want)
+		}
+	}
+	if got := smsLink("not a number", "PAIR X"); got != "" {
+		t.Errorf("smsLink to a non-number: %q", got)
+	}
+	secret := strings.Repeat("A", 16)
+	if s, ok := otpSecret("otpauth://totp/agentOS?secret=" + secret); !ok || s != secret {
+		t.Fatalf("a good link: %q %v", s, ok)
+	}
+	for _, link := range []string{
+		"otpauth://hotp/agentOS?secret=" + secret,
+		"javascript:alert(1)//otpauth://totp/?secret=" + secret,
+		"otpauth://totp/agentOS?secret=" + secret + "&pad=" + strings.Repeat("x", 512),
+		"otpauth://totp/%zz?secret=" + secret,
+		"otpauth://totp/agentOS?secret=abc",
+	} {
+		if s, ok := otpSecret(link); ok || s != "" {
+			t.Errorf("otpSecret(%q) = %q, %v", link, s, ok)
+		}
+	}
+	for s, want := range map[string]bool{"sk-ok key~": true, "": true, "a\x00b": false, "tab\there": false, "café": false, "del\x7f": false} {
+		if printable(s) != want {
+			t.Errorf("printable(%q) != %v", s, want)
+		}
+	}
+	for p, want := range map[string]string{"ready": "ready", "updating": "updating (setup can continue)", "": "starting", "other": "starting"} {
+		if got := phaseText(p); got != want {
+			t.Errorf("phaseText(%q) = %q, want %q", p, got, want)
+		}
+	}
+}
+
+func TestTheHomeSourceAndReachedHostFailClosed(t *testing.T) {
+	// #5016: a box whose own addresses cannot be listed admits
+	// no source, and a request with no reached address has no host.
+	req := reaching(httptest.NewRequest("GET", "http://10.42.0.1/", nil))
+	req.RemoteAddr = phoneIP
+	if !homeSource(req) {
+		t.Fatal("the phone is not a home source")
+	}
+	saved := ownAddrs
+	ownAddrs = func() ([]netip.Addr, error) { return nil, errors.New("no addresses") }
+	ok := homeSource(req)
+	ownAddrs = saved
+	if ok {
+		t.Fatal("a source admitted while the box's own addresses are unknown")
+	}
+	if h := reachedHost(httptest.NewRequest("GET", "http://10.42.0.1/", nil)); h != "" {
+		t.Fatalf("no reached address: %q", h)
+	}
+	if h := reachedHost(req); h != "10.42.0.1" {
+		t.Fatalf("reached host %q", h)
+	}
+}
+
+func TestSetupStepsRefuseOutOfOrderAndKeepOnlyFreshErrors(t *testing.T) {
+	// #5016: a post from a phone with no setup
+	// cookie, or over the 16 KiB form cap, does nothing; each step refuses
+	// before the step it needs; a typed number's code is shown to that
+	// phone; a later success clears an earlier error; and a void code
+	// generator is taken on a post too.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	if w := r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}}); len(w.Result().Cookies()) != 0 || len(r.hooks.sent) != 0 {
+		t.Fatalf("a post with no setup cookie: cookies %v, texts %v", w.Result().Cookies(), r.hooks.sent)
+	}
+	r.get("/setup")
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}, "pad": {strings.Repeat("p", 17<<10)}})
+	if len(r.hooks.sent) != 0 {
+		t.Fatalf("a setup form over the 16 KiB cap was read: %v", r.hooks.sent)
+	}
+	r.post("/setup/codes", url.Values{"code": {"000000"}})
+	if e := r.setupErr(); e != "Start this step again." {
+		t.Fatalf("codes before pairing: %q", e)
+	}
+	r.post("/setup/recovery", url.Values{"stored": {"1"}})
+	if e := r.setupErr(); e != "Add approval codes first." || r.srv.setup.st.Recovery {
+		t.Fatalf("recovery before codes: %q", e)
+	}
+	r.post("/setup/host", url.Values{})
+	if e := r.setupErr(); e != "Finish the earlier steps first." || r.hooks.trusted != nil {
+		t.Fatalf("host before recovery: %q", e)
+	}
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
+	if p := html.UnescapeString(r.get("/setup")); !strings.Contains(p, "Code texted to "+ownerNum) {
+		t.Fatalf("the typed number's code form: %s", p)
+	}
+	r.asOther(func() {
+		if p := r.get("/setup"); strings.Contains(p, "Code texted to") {
+			t.Fatalf("another phone sees the typed number's code form: %s", p)
+		}
+	})
+
+	r = newRig(t)
+	r.runSetupToHost()
+	r.post("/setup/recovery", url.Values{})
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted == nil {
+		t.Fatal("host step did not run")
+	}
+	if e := r.setupErr(); e != "" {
+		t.Fatalf("an error a later success replaced is still shown: %q", e)
+	}
+
+	r = newRig(t)
+	r.runSetupToHost()
+	r.srv.cfg.CodesVoid = &CodesVoid{}
+	r.srv.cfg.CodesVoid.Set()
+	r.post("/setup/host", url.Values{})
+	if r.hooks.trusted != nil || r.srv.setup.st.Codes {
+		t.Fatalf("a post passed a void code generator: trusted %v, codes %v", r.hooks.trusted, r.srv.setup.st.Codes)
+	}
+}
+
+func TestSetupStopsWhenItCannotMakeACookieOrACode(t *testing.T) {
+	// #5016: the setup page with too little
+	// randomness for its cookie, then for its pairing code, says so and
+	// shows no pairing code.
+	for n, want := range map[int]string{32: "Setup could not start. Reload the page.", 64: "Setup could not start this step. Reload the page."} {
+		s, err := New(Config{Page: testPage(), Hooks: &fakeHooks{progress: Progress{Online: true}}, Store: &MemStore{},
+			Rand: strings.NewReader(strings.Repeat("r", n))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("GET", "http://10.42.0.1/setup", nil)
+		req.RemoteAddr = phoneIP
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, reaching(req))
+		if w.Code != 500 || strings.TrimSpace(w.Body.String()) != want {
+			t.Errorf("%d random bytes: %d %q", n, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestPairingVoidsOtherCodesAndKeepsAtMostEightPhones(t *testing.T) {
+	// #5016: the oldest phone's pairing code goes once
+	// maxPairDevices phones hold one; a pairing voids every other pending
+	// code; a pairing the store cannot save is not claimed.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	codeRe := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`)
+	first := codeRe.FindStringSubmatch(r.get("/setup"))
+	jar := r.jar
+	for i := 0; i < maxPairDevices; i++ {
+		r.jar, _ = cookiejar.New(nil)
+		if codeRe.FindStringSubmatch(r.get("/setup")) == nil {
+			t.Fatal("no pairing code")
+		}
+	}
+	r.jar = jar
+	if first == nil {
+		t.Fatal("no pairing code")
+	}
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+first[1]); !ok || reply != "" || r.srv.setup.st.Owner != "" {
+		t.Fatalf("the oldest phone's code still pairs: %q %v", reply, ok)
+	}
+	if n, m := len(r.srv.setup.pair), len(r.srv.setup.pairOrder); n != maxPairDevices || m != maxPairDevices {
+		t.Fatalf("%d pairing codes held, %d in their order", n, m)
+	}
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0002"}})
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || !strings.HasPrefix(reply, "agentOS is running on") {
+		t.Fatalf("pairing: %q", reply)
+	}
+	if u := r.srv.setup; len(u.pair) != 0 || len(u.pairOrder) != 0 || u.numCode != "" || u.numTo != "" || u.numDevice != "" {
+		t.Fatalf("codes left after pairing: %d %d %q %q %q", len(u.pair), len(u.pairOrder), u.numCode, u.numTo, u.numDevice)
+	}
+
+	r = newRig(t)
+	r.hooks.progress.Online = true
+	r.srv = r.open(FileStore{Path: t.TempDir() + "/gone/setup.json"})
+	if reply, ok := r.srv.OfferText(ownerNum, "PAIR "+r.card.SetupCode); !ok || reply != "Could not save your number. Try again." {
+		t.Fatalf("a pairing the store refused: %q %v", reply, ok)
+	}
+}
+
+func TestTheAIStepRefreshesOnlyWhileTheUpdateRuns(t *testing.T) {
+	// #5016: the AI step reloads itself until the first-boot
+	// update is done.
+	r := newRig(t)
+	r.runSetupToHost()
+	r.post("/setup/host", url.Values{})
+	if p := r.get("/setup"); !strings.Contains(p, `<meta http-equiv="refresh" content="10">`) {
+		t.Fatalf("no refresh while updating: %s", p)
+	}
+	r.hooks.mu.Lock()
+	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	r.hooks.mu.Unlock()
+	if p := r.get("/setup"); strings.Contains(p, `http-equiv="refresh"`) {
+		t.Fatalf("a refresh after the update: %s", p)
+	}
+}
+
+func TestTheNumberStepTextsAtMostThreeCodesAnHourAndNoneItCannotMake(t *testing.T) {
+	// #5018: the typed-number step's hourly text bound counts each code
+	// sent, frees itself after an hour, and a code it cannot make is
+	// not texted.
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	r.get("/setup")
+	num := url.Values{"number": {"+1 555 000 0001"}}
+	for i := 0; i < NumberTextsPerHour; i++ {
+		r.post("/setup/number", num)
+	}
+	if n := len(r.hooks.sent); n != NumberTextsPerHour {
+		t.Fatalf("%d codes texted, want %d", n, NumberTextsPerHour)
+	}
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); !strings.HasPrefix(e, "Too many codes sent.") || n != NumberTextsPerHour {
+		t.Fatalf("over the bound: %q, %d texts", e, n)
+	}
+	r.advance(time.Hour + time.Minute)
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); e != "" || n != NumberTextsPerHour+1 {
+		t.Fatalf("an hour later: %q, %d texts", e, n)
+	}
+	r.advance(time.Hour + time.Minute)
+	r.srv.cfg.Rand = strings.NewReader("")
+	r.post("/setup/number", num)
+	if e, n := r.setupErr(), len(r.hooks.sent); e == "" || n != NumberTextsPerHour+1 {
+		t.Fatalf("no randomness for the code: %q, %d texts", e, n)
+	}
+}
+
+func TestRestartRefusesOnceDoneWaitsForPairingAndClearsEveryCode(t *testing.T) {
+	// #5018: restart before pairing does nothing; once setup is done it
+	// changes nothing, not even the wrong-secret count; wrong secrets
+	// count for an hour only; and a restart drops every code and sign-in
+	// the page held.
+	post := func(secret string) *http.Request {
+		req := httptest.NewRequest("POST", "/setup/restart", strings.NewReader("secret="+url.QueryEscape(secret)))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req
+	}
+	r := newRig(t)
+	u := r.srv.setup
+	gen := u.gen
+	if err := u.restart(post(""), "other"); err != nil || u.gen != gen || len(u.resets) != 0 {
+		t.Fatalf("a restart before pairing: %v, gen %d, resets %d", err, u.gen, len(u.resets))
+	}
+
+	r.runSetupToHost()
+	for i := 0; i < ResetTriesPerHour; i++ {
+		u.restart(post("wrong"), "other")
+	}
+	if err := u.restart(post("wrong"), "other"); err == nil || !strings.HasPrefix(err.Error(), "Too many tries.") {
+		t.Fatalf("over the bound: %v", err)
+	}
+	r.advance(time.Hour + time.Minute)
+	if err := u.restart(post("wrong"), "other"); err == nil || !strings.HasPrefix(err.Error(), "That reset secret did not match.") {
+		t.Fatalf("an hour later: %v", err)
+	}
+	u.mu.Lock()
+	u.pair["x"], u.pairOrder = "ABCDEFGH", append(u.pairOrder, "x")
+	u.claimCode, u.numCode, u.numTo, u.numDevice = "claim", "123456", "+15550000002", "x"
+	d := [3]string{"https://example.invalid/device", "WXYZ-1234", "Example"}
+	u.device["anthropic"], u.parked["openai"], u.lapsed["codex"], u.answer["ai-key openai"] = d, d, d, true
+	dev := u.st.Device
+	u.mu.Unlock()
+	if err := u.restart(post(""), dev); err != nil {
+		t.Fatal(err)
+	}
+	if len(u.pair)+len(u.pairOrder)+len(u.device)+len(u.parked)+len(u.lapsed)+len(u.answer) != 0 ||
+		u.claimCode+u.numCode+u.numTo+u.numDevice != "" || u.st.Owner != "" {
+		t.Fatalf("left after a restart: pair %v %v, codes %q %q %q %q, device %v %v %v, answers %v",
+			u.pair, u.pairOrder, u.claimCode, u.numCode, u.numTo, u.numDevice, u.device, u.parked, u.lapsed, u.answer)
+	}
+
+	r = newRig(t)
+	u = r.srv.setup
+	r.runSetupToHost()
+	u.mu.Lock()
+	u.st.Done = true
+	u.mu.Unlock()
+	if err := u.restart(post("wrong"), "other"); err != errSetupDone || len(u.resets) != 0 {
+		t.Fatalf("a restart once done: %v, resets %d", err, len(u.resets))
+	}
+}
+
+func TestClearingOneHeldAnswerKeepsTheOthers(t *testing.T) {
+	// #5018: holdLocked copies every other provider's hold.
+	r := newRig(t)
+	u := r.srv.setup
+	yes := true
+	u.mu.Lock()
+	u.holdLocked("anthropic", &yes)
+	u.holdLocked("openai", &yes)
+	u.holdLocked("openai", nil)
+	held := u.st.Unsaved
+	u.mu.Unlock()
+	if len(held) != 1 || !held["anthropic"] {
+		t.Fatalf("held after clearing one: %v", held)
+	}
+}
+
+func TestABusySignInKeepsTheOwnersUntickedAnswer(t *testing.T) {
+	// #5018: a sign-in the provider says still waits, and this page did
+	// not start, keeps the owner's answer on the form.
+	r := newRig(t)
+	r.runSetupToAI()
+	r.hooks.mu.Lock()
+	r.hooks.deviceErr = ErrSignInBusy
+	r.hooks.mu.Unlock()
+	r.post("/setup/ai-device", url.Values{"provider": {"anthropic"}})
+	page := r.get("/setup")
+	if !strings.Contains(page, "still waiting") {
+		t.Fatalf("no busy message: %s", page)
+	}
+	if f := setupForms(t, page)["ai-device anthropic"]; !strings.Contains(f, `name="private" value="1">`) || strings.Contains(f, "checked") {
+		t.Fatalf("the owner's unticked box came back ticked:\n%s", f)
+	}
+}
+
+func TestAFinishWhoseDoneSaveFailsClosesSetupAtOnce(t *testing.T) {
+	// #5018: setup is closed in memory as soon as Finish ran, even when
+	// the store refuses Done.
+	r := newRig(t)
+	r.srv = r.open(&failDone{})
+	r.runSetup()
+	if !r.srv.setup.done() || r.hooks.finishes != 1 {
+		t.Fatalf("done %v after %d finishes", r.srv.setup.done(), r.hooks.finishes)
+	}
+}
+
+func TestAFailedCardRerunSendsSetupBackToTheCardStepAtOnce(t *testing.T) {
+	// #5018: the finish whose card rerun failed says the card was not
+	// made and reopens the recovery step itself, before any page load
+	// retries it.
+	cr := newCardRig(t)
+	cr.toCard()
+	cr.get("/setup/card")
+	w, g := cr.answers()
+	cr.post("/setup/card", url.Values{"word": {w}, "group": {g}})
+	cr.hooks.mu.Lock()
+	cr.hooks.refuseFinish = func() error {
+		if err := cr.step.Again(func() error { return errors.New("vault busy") }); err != nil {
+			return err
+		}
+		return ErrCardAgain
+	}
+	cr.hooks.connected = true
+	cr.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
+	cr.hooks.mu.Unlock()
+	cr.post("/setup/recovery", url.Values{"stored": {"1"}})
+	cr.post("/setup/host", url.Values{})
+	u := cr.srv.setup
+	u.mu.Lock()
+	msg, recovery := u.err[u.st.Device], u.st.Recovery
+	u.mu.Unlock()
+	if msg != cardNotMade || recovery {
+		t.Fatalf("after a failed rerun: %q, recovery %v", msg, recovery)
+	}
+}
+
+func TestTheCardPageShowsTheCardOnceAndAWrongAnswersRetry(t *testing.T) {
+	// #5018: a GET of the card page is the display's page alone, and
+	// leaves a voided code generator for the confirm to take; a confirm
+	// that does not match shows the display's retry page.
+	cr := newCardRig(t)
+	cr.toCard()
+	cr.srv.cfg.CodesVoid = &CodesVoid{}
+	cr.srv.cfg.CodesVoid.Set()
+	page := cr.get("/setup/card")
+	if n := strings.Count(page, "<!doctype html>"); n != 1 || !cr.cardText(page) {
+		t.Fatalf("the card page holds %d pages, card shown %v", n, cr.cardText(page))
+	}
+	if !cr.srv.setup.st.Codes || cr.srv.setup.st.ReplaceCodes {
+		t.Fatal("a GET of the card page took the voided code generator")
+	}
+	cr.srv.cfg.CodesVoid = nil
+	rec := cr.do("POST", "/setup/card", url.Values{"word": {"wrong"}, "group": {"0000"}})
+	if rec.Code != 422 || !strings.Contains(html.UnescapeString(rec.Body.String()), "That did not match your card.") {
+		t.Fatalf("a wrong confirm: %d %q", rec.Code, rec.Body.String())
+	}
+}

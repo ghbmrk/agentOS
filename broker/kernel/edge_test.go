@@ -277,10 +277,13 @@ func TestCutHoldsUntilEnrol(t *testing.T) {
 	must(t, candidate(r, 1, edge, 1))
 	before := enrolSig(r, r.owner, edge)
 	must(t, r.k.EdgeEnroll(1, edge.pub, before))
-	if err := r.k.EdgeCut(2, ""); !errors.Is(err, kernel.ErrEdgeSlot) {
-		t.Fatalf("a cut naming no slot: %v", err)
+	for _, slot := range []string{"", "pass phrase", "pass\u3164", "pass\xff", "pass\x7f"} {
+		if err := r.k.EdgeCut(2, slot); !errors.Is(err, kernel.ErrEdgeSlot) {
+			t.Fatalf("a cut naming slot %q: %v", slot, err)
+		}
 	}
-	must(t, r.k.EdgeCut(2, "passphrase"))
+	// A slot of MaxSlot printable characters is a slot.
+	must(t, r.k.EdgeCut(2, "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"))
 	if live(r) != nil {
 		t.Fatal("an edge is live after an unknown-host start")
 	}

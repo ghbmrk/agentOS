@@ -421,6 +421,72 @@ class OfflineSystemdTest(unittest.TestCase):
             self.assertFalse(drain.is_alive())
 
 
+    def test_the_drain_barrier_waits_for_a_chunk_the_drain_thread_holds(self):
+        # #4876 (#4767 L3 6597321961 and Security 6597343026 release 1): the drain thread has read the last
+        # line under the lock but not yet written it; failed_generators() must not read the log before it.
+        # REQ: TEST-offline-systemd-drain
+        import threading
+        master, slave = os.openpty()
+        with tempfile.NamedTemporaryFile() as real:
+            holding = threading.Event()
+
+            class SlowLog:  # a planted slow writer: the chunk sits in the drain thread for 0.5 s
+                name = real.name
+
+                def write(self, data):
+                    holding.set()
+                    __import__("time").sleep(0.5)
+                    real.write(data)
+
+                def flush(self):
+                    real.flush()
+            m = offline_systemd.Manager.__new__(offline_systemd.Manager)
+            m.log, m.master, m.lock = SlowLog(), master, threading.Lock()
+            m.manager = lambda props: {"GeneratorsStartTimestampMonotonic": "1",
+                                       "GeneratorsFinishTimestampMonotonic": "2"}
+            drain = threading.Thread(target=m._drain, daemon=True)
+            drain.start()
+            os.write(slave, b"/etc/systemd/system-generators/g failed with exit status 1.\n")
+            self.assertTrue(holding.wait(5), "the drain thread never read the line")
+            self.assertEqual(m.failed_generators(), {"g"})
+            os.close(slave)
+            with m.lock:
+                os.close(master)
+                m.master = -1
+            drain.join(5)
+            self.assertFalse(drain.is_alive())
+
+    def test_a_boot_entry_word_cannot_change_a_pinned_option(self):
+        # #4876 (#4767 Security 6597343026 release 2): systemd's getopt_long ("hDbsz:", no leading "+")
+        # permutes argv and the last value of an option wins, so the pins go after the entry's words.
+        # gnu_getopt parses the same way.
+        # REQ: TEST-offline-systemd-drain
+        import getopt
+        longopts = ["unit=", "log-target=", "log-level="]
+
+        def systemd_options(cmdline):
+            argv = offline_systemd.manager_argv("/r", "/u", cmdline, "", "/dev/pts/9")
+            argv = argv[argv.index("/dev/pts/9") + 1:]  # what systemd gets after MANAGER's shift 4
+            return dict(getopt.gnu_getopt(argv, "hDbsz:", longopts)[0])
+        pinned = {"--unit": "-.slice", "--log-target": "console", "--log-level": "info"}
+        for cmdline in ("ro quiet", "ro systemd.log_level=crit systemd.log_target=null systemd.unit=x.target",
+                        "rw quiet panic=10 systemd.swap=0"):
+            with self.subTest(cmdline=cmdline):
+                self.assertEqual(systemd_options(cmdline), pinned)
+                # The pins come last too, so they hold even if a "-" word ever passes the refusal below.
+                self.assertEqual(offline_systemd.manager_argv("/r", "/u", cmdline, "", "/dev/pts/9")[-3:],
+                                 list(offline_systemd.PINNED))
+        # Words that would beat a pin through getopt are refused: a later value, "--" (ends parsing before
+        # the pins) and a short option that takes an argument (swallows the first pin).
+        for cmdline in ("ro --log-level=crit", "ro --log-target=null", "ro --unit=x.target", "ro --", "ro -z",
+                        "-b ro"):
+            with self.subTest(cmdline=cmdline), self.assertRaises(SystemExit):
+                offline_systemd.manager_argv("/r", "/u", cmdline, "", "/dev/pts/9")
+        # Without the refusal, the "-z" word alone would take --unit's place: the guard is not idle.
+        argv = ["ro", "-z"] + list(offline_systemd.PINNED)
+        self.assertNotIn("--unit", dict(getopt.gnu_getopt(argv, "hDbsz:", longopts)[0]))
+
+
 class AllowFileTest(unittest.TestCase):
     def test_the_shipped_list_reads_and_holds_the_unlock_unit(self):
         allowed = g.read_allow()

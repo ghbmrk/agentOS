@@ -303,7 +303,7 @@ func TestLlamaEmbedFailuresAreUnavailableThenRecover(t *testing.T) {
 	if err != nil || len(vs) != 2 {
 		t.Fatalf("first call: %v, %v", vs, err)
 	}
-	for _, p := range []string{"crash", "hang", "status", "malformed", "huge", "count", "short", "dup"} {
+	for _, p := range []string{"crash", "hang", "status", "malformed", "huge", "count", "extra", "short", "dup"} {
 		if vs, _, err := c.Embed(ctx(t), []string{"x", p}); !unavailable(err) || vs != nil {
 			t.Errorf("text %q: %v, %v; want unavailable and no vectors", p, vs, err)
 		}
@@ -347,6 +347,9 @@ func TestLlamaAdapterRefusesUnplaceableAndOversizeReplies(t *testing.T) {
 	}
 	if vs, err := l.Embed([]string{"x", "count"}); err == nil {
 		t.Errorf("one vector for two texts was accepted: %v", vs)
+	}
+	if vs, err := l.Embed([]string{"x", "extra"}); err == nil {
+		t.Errorf("a thousand extra vectors were accepted: %d vectors", len(vs))
 	}
 	if vs, err := l.Embed([]string{"huge"}); err == nil {
 		t.Errorf("a reply over its bound was read: %d vectors", len(vs))
@@ -484,6 +487,32 @@ func TestLlamaStartSweepsDeadServicesDirs(t *testing.T) {
 	for _, p := range []string{liveDir, oldDir, link, file, target} {
 		if _, err := os.Lstat(p); err != nil {
 			t.Errorf("%s was removed: %v", p, err)
+		}
+	}
+}
+
+// The reply's data array is refused at its first entry past the number of
+// texts, before the rest is decoded: a reply of millions of {} entries
+// holds at most max of them (#3771 item 7).
+func TestLlamaReplyDecodeStopsPastTheTextCount(t *testing.T) {
+	raw := []byte("[" + strings.Repeat(`{"index":0},`, 100000) + `{"index":0}]`)
+	d := embedData{max: 2}
+	if err := d.UnmarshalJSON(raw); err == nil {
+		t.Fatalf("%d entries for 2 texts were decoded without error", len(d.list))
+	}
+	if len(d.list) > 2 {
+		t.Fatalf("decoded %d entries before refusing; want at most 2", len(d.list))
+	}
+	for _, ok := range []string{`[]`, `null`, `[{"index":0,"embedding":[1]},{"index":1}]`} {
+		d := embedData{max: 2}
+		if err := d.UnmarshalJSON([]byte(ok)); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{`{}`, `"x"`, `[1]`} {
+		d := embedData{max: 2}
+		if err := d.UnmarshalJSON([]byte(bad)); err == nil {
+			t.Errorf("%s was decoded as data", bad)
 		}
 	}
 }
