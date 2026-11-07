@@ -103,12 +103,9 @@ func main() {
 		return
 	}
 	if port1File != "" {
-		p, err := servedPort1("/sys", iface, port1File)
+		p, err := watchedPort1(ctx, stop, "/sys", iface, port1File, port1Recheck)
 		if err != nil {
 			log.Fatal(err)
-		}
-		if iface == "" {
-			go watchPort1(ctx, stop, "/sys", p, port1Recheck)
 		}
 		iface = p
 	} else if iface == "" {
@@ -237,6 +234,27 @@ func servedPort1(sys, iface, file string) (string, error) {
 	return p, nil
 }
 
+// watchedPort1 is the port 1 the page serves on (servedPort1), with the
+// watcher that stops the page once it changes already running: Port1's
+// choice when iface is empty, otherwise the named link as it was when the
+// page started (namedLink; the admit step does not record it, #4882).
+func watchedPort1(ctx context.Context, stop func(), sys, iface, file string, every time.Duration) (string, error) {
+	p, err := servedPort1(sys, iface, file)
+	if err != nil {
+		return "", err
+	}
+	if iface == "" {
+		go watchPort1(ctx, stop, sys, p, every)
+		return p, nil
+	}
+	id, err := namedLink(sys, p)
+	if err != nil {
+		return "", err
+	}
+	go watchNamedPort1(ctx, stop, sys, p, id, every)
+	return p, nil
+}
+
 // pause waits d, false if ctx ends first.
 func pause(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
@@ -254,6 +272,45 @@ func pause(ctx context.Context, d time.Duration) bool {
 // later, makes Port1 refuse or name another, and the unit's restart then
 // serves nothing until one fixed port is left (Security 4 on 713fd31).
 func watchPort1(ctx context.Context, stop func(), sys, chosen string, every time.Duration) {
+	watchLink(ctx, stop, every, func() bool {
+		p, err := localui.Port1(sys)
+		return err == nil && p == chosen
+	})
+}
+
+// namedLink is what a port 1 named by -iface is: its device path and
+// ifindex in the sysfs tree at sys, once localui.Wired holds for it. A
+// rename, a driver reload or another device taking the name changes it
+// (#4882; CH-9, HW-12).
+func namedLink(sys, name string) (string, error) {
+	if err := localui.Wired(sys, name); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(sys, "class", "net", name)
+	dev, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", errors.New("localui: port 1 " + name + ": " + err.Error())
+	}
+	idx, err := os.ReadFile(filepath.Join(dir, "ifindex"))
+	if err != nil || strings.TrimSpace(string(idx)) == "" {
+		return "", errors.New("localui: port 1 " + name + " has no ifindex")
+	}
+	return dev + "#" + strings.TrimSpace(string(idx)), nil
+}
+
+// watchNamedPort1 stops the page once the port 1 named by -iface is no
+// longer the link id it was when the page started (namedLink), so the
+// unit's restart re-runs the root admit (#4882; CH-9, HW-12).
+func watchNamedPort1(ctx context.Context, stop func(), sys, name, id string, every time.Duration) {
+	watchLink(ctx, stop, every, func() bool {
+		got, err := namedLink(sys, name)
+		return err == nil && got == id
+	})
+}
+
+// watchLink checks same every tick and stops the page the first time it
+// reports false.
+func watchLink(ctx context.Context, stop func(), every time.Duration, same func() bool) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -262,7 +319,7 @@ func watchPort1(ctx context.Context, stop func(), sys, chosen string, every time
 			return
 		case <-t.C:
 		}
-		if p, err := localui.Port1(sys); err != nil || p != chosen {
+		if !same() {
 			log.Print("port 1 changed; stopping so the unit picks again")
 			stop()
 			return

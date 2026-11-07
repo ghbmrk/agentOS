@@ -34,3 +34,5 @@ that a reviewer may want to change.
 - **Not yet wired** (carried on BOARD): `TakeDigest` (no daily digest sender yet; lines persist until one takes them), and the guard's owner texts (`clock.Config.Notify`): its wording promises that pre-allowances, request expiry and updates play safe, which holds only once those move onto the guard (clock K7). Until then a restriction holds questions without a text.
 
 - **No label budget (#2189):** `MaxRendered` is `control.MaxText` (459), since Notify adds no label to agent text (CH-21).
+
+- **The book save takes a test stop (REV-CHK-save-owner, #4193):** `Book.stop` (unexported; production leaves it nil) ends `persist`'s `privfile.WriteAtomic` after a step. `savecrash_test.go` stops an ask and an answer after each step: memory keeps neither and the asker or owner is told to retry; a restart holds the old book or the whole new one, and a retry under the same request ID leaves one question, texted once. A save that fails only at the directory sync (`privfile.ErrUnsynced`) renamed the new book into place, so `persist` logs it and counts it as written (#4971): memory equals the file.

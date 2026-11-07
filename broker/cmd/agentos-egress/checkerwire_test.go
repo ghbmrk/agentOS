@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
 	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -20,36 +26,100 @@ import (
 // the vault is open, and the broker's code checks and the unlock's share
 // the checker's one last-spent step.
 
-// checkerAt serves a checker on r's clock in a fresh socket directory,
-// sets it as r's -checker, and returns the checker and its verify client.
-func checkerAt(t *testing.T, r *fastRig) (*checker.Checker, *checkersock.Client) {
+// fakeChecker serves the checker's hand socket in the protocol this
+// process's clients speak (holder.Keeper's GET /state, PUT and DELETE
+// /secret, and checkersock's POST /verify), and a broker verify socket on
+// the same seed and last spent step. Wrong codes on the broker socket are
+// counted toward a pause; the hand socket's are charged to nothing.
+type fakeChecker struct {
+	now   func() time.Time
+	mu    sync.Mutex
+	seed  []byte
+	last  int64
+	wrong int
+}
+
+// fakeMaxWrong is the broker's wrong codes the fake counts before it
+// pauses its checks.
+const fakeMaxWrong = 20
+
+func (f *fakeChecker) Held() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.seed) > 0 }
+
+func (f *fakeChecker) Hand(seed []byte) { f.mu.Lock(); f.seed = bytes.Clone(seed); f.mu.Unlock() }
+
+func (f *fakeChecker) verify(counted bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req checkersock.VerifyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case len(f.seed) == 0:
+			http.Error(w, checkersock.ErrNoSeed.Error(), http.StatusServiceUnavailable)
+			return
+		case counted && f.wrong >= fakeMaxWrong:
+			w.Header().Set(checkersock.PausedHeader, strconv.FormatInt(f.now().Add(time.Minute).Unix(), 10))
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		step, ok := owner.MatchTOTP(f.seed, req.Code, f.now(), max(req.After, f.last))
+		if ok {
+			f.last = step
+		} else if counted {
+			f.wrong++
+		}
+		json.NewEncoder(w).Encode(checkersock.VerifyResponse{Step: step, OK: ok})
+	}
+}
+
+func (f *fakeChecker) handMux() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]bool{"held": f.Held()})
+	})
+	mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		f.Hand(b)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.seed = nil
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /verify", f.verify(false))
+	return mux
+}
+
+// checkerAt serves a fake checker on r's clock in a fresh socket
+// directory, sets it as r's -checker, and returns the checker and a
+// verify client for its broker socket.
+func checkerAt(t *testing.T, r *fastRig) (*fakeChecker, *checkersock.Client) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "ck")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	ck, err := checker.New(checker.Config{StatePath: filepath.Join(t.TempDir(), "checker.json"), Now: r.clk.now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ls []net.Listener
-	for _, name := range []string{checker.HandSocket, checker.VerifySocket, checker.RedeemSocket} {
-		l, err := checker.Listen(filepath.Join(dir, name), os.Getuid())
+	ck := &fakeChecker{now: r.clk.now}
+	brokerMux := http.NewServeMux()
+	brokerMux.HandleFunc("POST /verify", ck.verify(true))
+	for name, h := range map[string]http.Handler{checker.HandSocket: ck.handMux(), "verify.sock": brokerMux} {
+		l, err := sockets.ListenPeers(filepath.Join(dir, name), os.Getuid())
 		if err != nil {
 			t.Fatal(err)
 		}
-		ls = append(ls, l)
+		srv := &http.Server{Handler: h}
+		go srv.Serve(l)
+		t.Cleanup(func() { srv.Close() })
 	}
-	go ck.Serve(ls[0], ls[1], ls[2])
-	t.Cleanup(func() {
-		for _, l := range ls {
-			l.Close()
-		}
-	})
 	r.c.checker = dir
 	r.c.keepEvery = 5 * time.Millisecond
-	return ck, checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket))
+	return ck, checkersock.VerifyClient(filepath.Join(dir, "verify.sock"))
 }
 
 // The unlock hands the checker the seed; the broker's code is checked
@@ -73,7 +143,7 @@ func TestCheckerHoldsTheSeedWhileOpen(t *testing.T) {
 	if ck.Held() {
 		t.Fatal("a keeper handed the seed after the lock")
 	}
-	if _, _, err := broker.VerifyTOTP(r.code(), 0, true); err != checker.ErrNoSeed {
+	if _, _, err := broker.VerifyTOTP(r.code(), 0, true); err != checkersock.ErrNoSeed {
 		t.Fatalf("checker verified with the vault locked: %v", err)
 	}
 }
@@ -116,7 +186,7 @@ func TestBrokerWrongCodesLeaveTheUnlockOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitUntil(t, "the checker's seed", ck.Held)
-	for range checker.MaxWrongCounted - 1 {
+	for range fakeMaxWrong - 1 {
 		if _, ok, err := broker.VerifyTOTP(wrongOf(r.code()), 0, true); ok || err != nil {
 			t.Fatalf("broker's wrong code: %t %v", ok, err)
 		}

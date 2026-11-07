@@ -2,48 +2,70 @@ package holder
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha1"
-	"encoding/binary"
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
-	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // REQ: CH-4, CH-10, CRED-1, ADP-10
 
-// totp is the owner's code-generator code at t (RFC 6238, SHA-1, 30 s).
-func totp(seed []byte, t time.Time) string {
-	var msg [8]byte
-	binary.BigEndian.PutUint64(msg[:], uint64(t.Unix()/30))
-	m := hmac.New(sha1.New, seed)
-	m.Write(msg[:])
-	sum := m.Sum(nil)
-	off := sum[len(sum)-1] & 0x0f
-	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[off:off+4])&0x7fffffff)%1_000_000)
+// approvals stands in for the checker's approval store, which a verified
+// owner code or the broker's allow fills: each approval is redeemed at
+// most once, and an allowed one never serves a secret act (CH-10, ADP-9).
+type approvals struct {
+	mu sync.Mutex
+	m  map[string]bool // act -> allowed rather than code-approved
 }
 
-func seededChecker(t *testing.T) (*checker.Checker, []byte) {
+func newApprovals() *approvals { return &approvals{m: map[string]bool{}} }
+
+func (a *approvals) approve(act string) { a.mu.Lock(); a.m[act] = false; a.mu.Unlock() }
+func (a *approvals) allow(act string)   { a.mu.Lock(); a.m[act] = true; a.mu.Unlock() }
+
+// redeem is a holder's Redeem, served in process.
+func (a *approvals) redeem(_ context.Context, act string, secret bool) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	allowed, ok := a.m[act]
+	if !ok || (secret && allowed) {
+		return false, nil
+	}
+	delete(a.m, act)
+	return true, nil
+}
+
+// serve serves the redeem socket's POST /redeem at path: 204 spends an
+// approval, 403 means none.
+func (a *approvals) serve(t *testing.T, path string) {
 	t.Helper()
-	c, err := checker.New(checker.Config{StatePath: filepath.Join(t.TempDir(), "checker.json")})
+	ln, err := sockets.ListenPeers(path, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed := make([]byte, 20)
-	if _, err := rand.Read(seed); err != nil {
-		t.Fatal(err)
-	}
-	c.Hand(seed)
-	return c, seed
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /redeem", func(w http.ResponseWriter, r *http.Request) {
+		var req checker.RedeemRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if ok, _ := a.redeem(r.Context(), req.Act, req.Secret); !ok {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
 }
 
 func approvingHolder(t *testing.T, up *upstream, redeem func(context.Context, string, bool) (bool, error)) *Holder {
@@ -67,50 +89,31 @@ func do(h *Holder, r *http.Request) *httptest.ResponseRecorder {
 }
 
 // A high-risk act reaches the provider only with the checker's approval for
-// that exact request, once: no code, a wrong code, or a code for another
-// body sends nothing (CH-4, CH-10). A compromised egress that holds no
-// owner code cannot spend the login on a send.
+// that exact request, once: no approval, or an approval for another body,
+// sends nothing (CH-4, CH-10). A compromised egress that holds no owner
+// code, and so gets no approval, cannot spend the login on a send.
 func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
-	c, seed := seededChecker(t)
+	c := newApprovals()
 	up := &upstream{reply: answer(200, nil, "{}")}
-	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil })
+	h := approvingHolder(t, up, c.redeem)
 	body := `{"to":"canary@example.invalid"}`
 	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
 
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
-		t.Fatalf("no code: %d %q", w.Code, w.Header().Get(ErrorHeader))
+		t.Fatalf("no approval: %d %q", w.Code, w.Header().Get(ErrorHeader))
 	}
-	wrong := "000000"
-	if wrong == totp(seed, time.Now()) {
-		wrong = "000001"
-	}
-	if _, ok, _ := c.Verify(wrong, 0, true, []checkersock.Act{{Act: act}}); ok {
-		t.Fatal("a wrong code verified")
-	}
+	c.approve(checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(`{"to":"other@example.invalid"}`)))
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden {
-		t.Fatalf("wrong code: %d", w.Code)
-	}
-	other := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(`{"to":"other@example.invalid"}`))
-	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []checkersock.Act{{Act: other}}); !ok || err != nil {
-		t.Fatalf("verify: %v %v", ok, err)
-	}
-	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden {
-		t.Fatalf("code for another body: %d", w.Code)
+		t.Fatalf("approval for another body: %d", w.Code)
 	}
 	if up.calls() != 0 {
 		t.Fatalf("provider reached %d times before an approval", up.calls())
 	}
-	// That code's step is spent, so the owner's code for this act is the
-	// next one; a second checker stands in for it rather than waiting a step.
-	c2, seed2 := seededChecker(t)
-	h2 := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c2.Redeem(act, secret), nil })
-	if _, ok, err := c2.Verify(totp(seed2, time.Now()), 0, true, []checkersock.Act{{Act: act}}); !ok || err != nil {
-		t.Fatalf("verify: %v %v", ok, err)
-	}
-	if w := do(h2, req("POST", "/v1/send", body)); w.Code != http.StatusOK {
+	c.approve(act)
+	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusOK {
 		t.Fatalf("approved act: %d %q", w.Code, w.Header().Get(ErrorHeader))
 	}
-	if w := do(h2, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
+	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
 		t.Fatalf("replayed act: %d", w.Code)
 	}
 	if up.calls() != 1 {
@@ -127,14 +130,13 @@ func TestHighRiskActNeedsACheckerVerifiedCode(t *testing.T) {
 // serves an irreversible act but never a secret one: a broker taken over
 // can let a send through but cannot reveal a secret.
 func TestAllowedApprovalServesNoSecretAct(t *testing.T) {
-	c, _ := seededChecker(t)
+	c := newApprovals()
 	up := &upstream{reply: answer(200, nil, "{}")}
-	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil })
+	h := approvingHolder(t, up, c.redeem)
 	send := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte("{}"))
 	reveal := checker.Act("plan-login", "plan.example", "POST", "/v1/keys", []byte("{}"))
-	if err := c.Allow([]checkersock.Act{{Act: send}, {Act: reveal}}); err != nil {
-		t.Fatal(err)
-	}
+	c.allow(send)
+	c.allow(reveal)
 	if w := do(h, req("POST", "/v1/keys", "{}")); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
 		t.Fatalf("allowed secret act: %d %q", w.Code, w.Header().Get(ErrorHeader))
 	}
@@ -149,12 +151,12 @@ func TestAllowedApprovalServesNoSecretAct(t *testing.T) {
 // Reads need no approval; draft and organize are still not the holder's to
 // serve, approval or not.
 func TestApprovalCoversHighRiskVerbsOnly(t *testing.T) {
-	c, _ := seededChecker(t)
+	c := newApprovals()
 	up := &upstream{reply: answer(200, nil, "{}")}
 	asked := 0
-	h := approvingHolder(t, up, func(_ context.Context, act string, secret bool) (bool, error) {
+	h := approvingHolder(t, up, func(ctx context.Context, act string, secret bool) (bool, error) {
 		asked++
-		return c.Redeem(act, secret), nil
+		return c.redeem(ctx, act, secret)
 	})
 	if w := do(h, req("POST", "/v1/messages", "{}")); w.Code != http.StatusOK {
 		t.Fatalf("read: %d", w.Code)
@@ -167,40 +169,23 @@ func TestApprovalCoversHighRiskVerbsOnly(t *testing.T) {
 	}
 }
 
-// Over the checker's real redeem socket: an approval made through the
-// verify socket is spent by the holder, and an unreachable checker sends
-// nothing.
+// Over a redeem socket, through the production client: an approval is
+// spent by the holder once, and an unreachable checker sends nothing.
 func TestHolderRedeemsOverTheCheckerSocket(t *testing.T) {
-	c, seed := seededChecker(t)
-	dir, err := os.MkdirTemp("", "hchk")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	me := os.Getuid()
-	hand, err := checker.Listen(filepath.Join(dir, checker.HandSocket), me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verify, err := checker.Listen(filepath.Join(dir, checker.VerifySocket), me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	redeem, err := checker.Listen(filepath.Join(dir, checker.RedeemSocket), me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go c.Serve(hand, verify, redeem)
+	c := newApprovals()
+	dir := socketDir(t)
+	path := filepath.Join(dir, "redeem.sock")
+	c.serve(t, path)
 
 	up := &upstream{reply: answer(200, nil, "{}")}
-	h := approvingHolder(t, up, checker.Redeemer(filepath.Join(dir, checker.RedeemSocket)))
+	h := approvingHolder(t, up, checker.Redeemer(path))
 	body := `{"to":"canary@example.invalid"}`
-	act := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
-	if _, ok, err := checkersock.VerifyClient(filepath.Join(dir, checker.VerifySocket)).VerifyTOTP(totp(seed, time.Now()), 0, true, checkersock.Act{Act: act}); !ok || err != nil {
-		t.Fatalf("verify: %v %v", ok, err)
-	}
+	c.approve(checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body)))
 	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusOK {
 		t.Fatalf("approved act: %d %q", w.Code, w.Header().Get(ErrorHeader))
+	}
+	if w := do(h, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
+		t.Fatalf("replayed act: %d %q", w.Code, w.Header().Get(ErrorHeader))
 	}
 
 	down := approvingHolder(t, up, checker.Redeemer(filepath.Join(dir, "absent.sock")))

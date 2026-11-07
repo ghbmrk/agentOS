@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -919,6 +920,156 @@ func TestPageStopsWhenPort1Changes(t *testing.T) {
 	}
 	if ctx.Err() == nil {
 		t.Fatal("the watcher returned without stopping the page")
+	}
+}
+
+// #4882 (CH-9, HW-12; #4881 L3 6602775102, Security 6602754292): a page
+// whose port 1 is named (-iface) is stopped when that link changes: the
+// name goes away, is taken by another device or ifindex (a rename, or a
+// driver reload), or stops being wired, so the unit's restart re-runs the
+// root admit instead of the page serving on a name that no longer is the
+// link the firewall admitted.
+// REQ: CH-9, HW-12
+func TestNamedPort1StopsThePageWhenItsLinkChanges(t *testing.T) {
+	// watched starts the page's port-1 watcher as main does (watchedPort1,
+	// the root step having admitted name) and fails unless change stops it.
+	watched := func(t *testing.T, sys, iface, name string, change func()) {
+		t.Helper()
+		file := filepath.Join(t.TempDir(), "port1")
+		if err := os.WriteFile(file, []byte(name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if p, err := watchedPort1(ctx, cancel, sys, iface, file, 5*time.Millisecond); err != nil || p != name {
+			t.Fatalf("port 1 %s: %q, %v", name, p, err)
+		}
+		time.Sleep(30 * time.Millisecond)
+		if ctx.Err() != nil {
+			t.Fatal("the page stopped while its port 1 was unchanged")
+		}
+		change()
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("a changed port 1 did not stop the page")
+		}
+	}
+	// replace swaps path for what put makes at a temporary name, in one
+	// rename, so the watcher never sees the path missing mid-change.
+	replace := func(t *testing.T, path string, put func(tmp string) error) {
+		t.Helper()
+		tmp := path + ".new"
+		if err := put(tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := func(t *testing.T, sys, name, dev string, index int) string {
+		t.Helper()
+		dir := filepath.Join(sys, "devices", dev, "net", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for f, v := range map[string]string{"type": "1\n", "ifindex": strconv.Itoa(index) + "\n"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(sys, "class", "net"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		replace(t, filepath.Join(sys, "class", "net", name), func(tmp string) error {
+			return os.Symlink(filepath.Join("..", "..", "devices", dev, "net", name), tmp)
+		})
+		return dir
+	}
+	const nic, other = "pci0000:00/0000:00:1c.0/0000:01:00.0", "pci0000:00/0000:00:1c.1/0000:02:00.0"
+	t.Run("renamed away", func(t *testing.T) {
+		sys := t.TempDir()
+		link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", "enp1s0", func() {
+			if err := os.Remove(filepath.Join(sys, "class", "net", "enp1s0")); err != nil {
+				t.Fatal(err)
+			}
+			link(t, sys, "eth9", nic, 2)
+		})
+	})
+	t.Run("name taken by another device", func(t *testing.T) {
+		sys := t.TempDir()
+		link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", "enp1s0", func() { link(t, sys, "enp1s0", other, 2) })
+	})
+	t.Run("driver reload, new ifindex", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", "enp1s0", func() {
+			replace(t, filepath.Join(dir, "ifindex"), func(tmp string) error { return os.WriteFile(tmp, []byte("7\n"), 0o644) })
+		})
+	})
+	t.Run("no longer wired", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "enp1s0", "enp1s0", func() {
+			if err := os.Mkdir(filepath.Join(dir, "phy80211"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+	// Unnamed, port 1 is Port1's choice, watched the same way.
+	t.Run("unnamed, a second fixed port", func(t *testing.T) {
+		sys := t.TempDir()
+		link(t, sys, "enp1s0", nic, 2)
+		watched(t, sys, "", "enp1s0", func() { link(t, sys, "enp2s0", other, 3) })
+	})
+	// Unnamed, port 1 needs no ifindex (that is the named link's id), and a
+	// port 1 the root step did not admit refuses before any watcher starts.
+	t.Run("unnamed, start", func(t *testing.T) {
+		sys := t.TempDir()
+		dir := link(t, sys, "enp1s0", nic, 2)
+		if err := os.Remove(filepath.Join(dir, "ifindex")); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(t.TempDir(), "port1")
+		for admitted, ok := range map[string]bool{"enp1s0": true, "enp2s0": false} {
+			if err := os.WriteFile(file, []byte(admitted+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			p, err := watchedPort1(ctx, cancel, sys, "", file, time.Hour)
+			cancel()
+			if ok != (err == nil) || ok && p != "enp1s0" {
+				t.Errorf("admitted %s: port 1 %q, %v", admitted, p, err)
+			}
+		}
+	})
+	// A named port 1 that is not a wired link with an ifindex is refused
+	// before the page listens.
+	sys := t.TempDir()
+	link(t, sys, "wlan0", nic, 3)
+	if err := os.Mkdir(filepath.Join(sys, "devices", nic, "net", "wlan0", "phy80211"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"wlan0", "enp9s0"} {
+		if _, err := namedLink(sys, name); err == nil {
+			t.Errorf("named port 1 %s was accepted", name)
+		}
+		file := filepath.Join(t.TempDir(), "port1")
+		if err := os.WriteFile(file, []byte(name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := watchedPort1(context.Background(), func() {}, sys, name, file, time.Hour); err == nil {
+			t.Errorf("the page started on named port 1 %s", name)
+		}
+	}
+	dir := link(t, sys, "enp1s0", nic, 2)
+	if err := os.Remove(filepath.Join(dir, "ifindex")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := namedLink(sys, "enp1s0"); err == nil {
+		t.Error("a named port 1 with no ifindex was accepted")
 	}
 }
 

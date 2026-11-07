@@ -467,6 +467,75 @@ type Manager struct {
 	now func() time.Time // nil: time.Now (tests age snapshots for Prune)
 }
 
+// ErrStateDirExposed refuses a StateDir another uid could swap for a link.
+var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
+
+// stateDirOwner and stateDirsMade are seams: tests give a directory a
+// foreign owner without root, and change a directory between Open's two
+// checks: stateDirsChecked runs after the first and before MkdirAll,
+// stateDirsMade after MkdirAll and before the second.
+var (
+	stateDirOwner    = overlay.Owner
+	stateDirsChecked = func() {}
+	stateDirsMade    = func() {}
+)
+
+// checkStateDirs checks the premise the vm allow lines rest on
+// (broker/kernel/privfile/pathops_allow.txt, "root-held"): no other uid
+// can replace any directory on the path to StateDir, or StateDir and the
+// two made in it, so root's mkdir, chmod and removals there land where
+// they were meant, wherever agentosd's -machines points (#3995). Every
+// existing component, from / down, must be a directory, not a link,
+// owned by root or this uid, and writable by no group or other unless it
+// is sticky: in a sticky directory (/tmp) another uid may add a name but
+// not rename or remove one it does not own, and the next component's
+// owner is checked in turn.
+// With all set, every one must exist; otherwise the walk stops at the
+// first missing name, which MkdirAll makes as this uid in a checked
+// parent, and the check after it covers what was made.
+// The three dirs share StateDir's prefixes, so those are checked three
+// times; rechecking changes nothing and keeps the walk plain.
+func checkStateDirs(dirs []string, all bool) error {
+	euid := os.Geteuid()
+	for _, d := range dirs {
+		// The check walks d as written and mkdir and chmod act on that
+		// same text, so it must hold no "..", ".", doubled slash or
+		// relative start: the kernel takes "a/link/../b" through the
+		// link, while a cleaned path would not (Security on #4968).
+		if !filepath.IsAbs(d) || filepath.Clean(d) != d {
+			return fmt.Errorf("%w: %q is not an absolute, clean path", ErrStateDirExposed, d)
+		}
+		abs := d
+		// Each prefix of abs, "/" first.
+		path := "/"
+		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+		for i := -1; i < len(parts); i++ {
+			if i >= 0 {
+				path = filepath.Join(path, parts[i])
+			}
+			fi, err := os.Lstat(path)
+			if errors.Is(err, fs.ErrNotExist) && !all {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			uid, ok := stateDirOwner(fi)
+			switch {
+			case !ok:
+				return fmt.Errorf("%w: %s has no owner", ErrStateDirExposed, path)
+			case !fi.IsDir(): // Lstat: a link is not one
+				return fmt.Errorf("%w: %s is not a directory (a link, or a file)", ErrStateDirExposed, path)
+			case uid != 0 && int(uid) != euid:
+				return fmt.Errorf("%w: %s is owned by uid %d", ErrStateDirExposed, path, uid)
+			case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
+				return fmt.Errorf("%w: %s is writable by group or other (mode %04o)", ErrStateDirExposed, path, fi.Mode().Perm())
+			}
+		}
+	}
+	return nil
+}
+
 // Open opens (or creates) the state directory. Machines recorded by an
 // earlier run come back Stopped with their layers and snapshots intact; any
 // runtime state they left is killed.
@@ -498,10 +567,23 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.MaxLayerInodes == 0 {
 		cfg.MaxLayerInodes = 200_000
 	}
-	for _, d := range []string{cfg.StateDir, filepath.Join(cfg.StateDir, "machines"), filepath.Join(cfg.StateDir, "snapshots")} {
+	dirs := []string{cfg.StateDir, filepath.Join(cfg.StateDir, "machines"), filepath.Join(cfg.StateDir, "snapshots")}
+	// Checked before anything is made, so a refusal changes nothing, and
+	// again once all three exist, before the chmods follow their names.
+	if err := checkStateDirs(dirs, false); err != nil {
+		return nil, err
+	}
+	stateDirsChecked()
+	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	stateDirsMade()
+	if err := checkStateDirs(dirs, true); err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
 		if err := os.Chmod(d, 0o700); err != nil {
 			return nil, err
 		}

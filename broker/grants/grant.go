@@ -50,11 +50,6 @@ const (
 	ForgetExecutor = "forget"
 )
 
-// ForgetID is the ID of a forget intent for goal; nonce is unique per ask
-// and holds no "/". The goal rides in the ID because the journal keeps
-// identifiers as they are while it redacts params (journal.Redactor).
-func ForgetID(nonce, goal string) string { return "forget/" + nonce + "/" + goal }
-
 // ForgetGoal is the goal a forget intent's ID names; "" if malformed.
 func ForgetGoal(id string) string {
 	rest, ok := strings.CutPrefix(id, "forget/")
@@ -67,11 +62,6 @@ func ForgetGoal(id string) string {
 	}
 	return goal
 }
-
-// ForgetAgentID is the ID of item 2 of the owner's forget request
-// (W3-forget-b2b): taking back the agent's work since the task. It shares
-// item 1's nonce, so each item can name the other (ForgetSibling).
-func ForgetAgentID(nonce, goal string) string { return "forget-agent/" + nonce + "/" + goal }
 
 // ForgetAgentGoal is the goal a take-back intent's ID names; "" if malformed.
 func ForgetAgentGoal(id string) string {
@@ -112,18 +102,6 @@ func ForgetAgentActions(params map[string]any) string {
 		return "1 action so far stays done"
 	}
 	return fmt.Sprintf("%d actions so far stay done", n)
-}
-
-// ForgetSibling is the other item of the request id belongs to: the
-// take-back for a forget, the forget for a take-back; "" if malformed.
-func ForgetSibling(id string) string {
-	if rest, ok := strings.CutPrefix(id, "forget/"); ok && ForgetGoal(id) != "" {
-		return "forget-agent/" + rest
-	}
-	if rest, ok := strings.CutPrefix(id, "forget-agent/"); ok && ForgetAgentGoal(id) != "" {
-		return "forget/" + rest
-	}
-	return ""
 }
 
 // OriginLoop2 marks Loop 2's containment (loops S8, K-S2): a pause of a
@@ -175,8 +153,8 @@ func EvidenceIntent(id, origin, address, account string) journal.Intent {
 // A journal.ActionUpdateFollow intent carries no params: the journal
 // redacts params (journal.Redactor) and keeps identifiers as they are, so
 // the name the owner gave the source and the digest of the root summary
-// the page showed (update.RootSummary.Digest) ride in its ID (FollowID),
-// as a forget's goal does. The updater follows that root and nothing else.
+// the page showed (update.RootSummary.Digest) ride in its ID,
+// follow/<nonce>/<digest>/<name>, as a forget's goal does. The updater follows that root and nothing else.
 const (
 	// FollowExecutor is the updater, which runs the switch.
 	FollowExecutor = "update"
@@ -188,19 +166,6 @@ const (
 	// MaxFollowNonce bounds a follow intent's nonce, in hex characters.
 	MaxFollowNonce = 64
 )
-
-// FollowID is the ID of a follow intent: nonce is unique per ask and is 1
-// to MaxFollowNonce lower-case hex characters; the digest comes before the
-// name, which may hold anything the gate's name check allows. An empty
-// name switches back to the project. Any other nonce (one holding "/"
-// would shift the parse, OSS-10w L3) gives an ID FollowOf refuses, so the
-// gate denies it as malformed.
-func FollowID(nonce, digest, name string) string {
-	if !followNonce(nonce) {
-		nonce = ""
-	}
-	return "follow/" + nonce + "/" + digest + "/" + name
-}
 
 func followNonce(s string) bool {
 	if len(s) == 0 || len(s) > MaxFollowNonce {
@@ -215,7 +180,7 @@ func followNonce(s string) bool {
 }
 
 // FollowOf is the digest and name a follow intent's ID names; ok is false
-// if the ID is not FollowID's shape. The gate checks the values.
+// if the ID is not that shape. The gate checks the values.
 func FollowOf(id string) (digest, name string, ok bool) {
 	rest, ok := strings.CutPrefix(id, "follow/")
 	if !ok {
@@ -230,14 +195,6 @@ func FollowOf(id string) (digest, name string, ok bool) {
 		return "", "", false
 	}
 	return digest, name, true
-}
-
-// FollowIntent is the local page's request to follow the root whose
-// summary has digest, under the owner's name for it ("" to switch back to
-// the project's own root).
-func FollowIntent(nonce, name, digest string) journal.Intent {
-	return journal.Intent{ID: FollowID(nonce, digest, name), Origin: originLocal, Account: journal.BrokerAccount,
-		Action: journal.ActionUpdateFollow, Executor: FollowExecutor}
 }
 
 // Params keys a pre-allowed intent may carry besides the rule's fixed

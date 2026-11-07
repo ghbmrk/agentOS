@@ -53,6 +53,70 @@ class HostcheckError(Exception):
     pass
 
 
+# ---- the VM stack (CI-hostcheck-image-tools, #4906) ----
+# With --tools-root, qemu, swtpm and OVMF come from a root installed from pinned apt sources (CI
+# builds it from the image's Debian snapshot with mmdebstrap), never the host's own packages, so a
+# runner package update cannot change what hostcheck boots. The root's own loader runs each
+# binary on the root's own libraries (--inhibit-cache: not the host's ld.so.cache), as
+# tests/test_image.py image_tool does for systemd and kmod (#4776); paths stay the host's.
+TOOLS_LOADER = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+TOOLS_LIBS = ("usr/lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu/swtpm")
+TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/swtpm",
+         "swtpm_ioctl": "usr/bin/swtpm_ioctl"}
+TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
+STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
+
+
+def _root_file(root, rel):
+    p = os.path.join(root, rel)
+    if os.path.islink(p) or not os.path.isfile(p):  # an absolute link would reach the host's copy
+        raise HostcheckError(f"{rel} is not a file in the tools root {root}")
+    return p
+
+
+def tool_argv(root, name):
+    """argv prefix that runs NAME: the host's on PATH without a root, else the root's."""
+    if not root:
+        return [name]
+    return [_root_file(root, TOOLS_LOADER), "--inhibit-cache",
+            "--library-path", ":".join(os.path.join(root, d) for d in TOOLS_LIBS),
+            "--argv0", name, _root_file(root, TOOLS[name])]
+
+
+def qemu_data_args(root):
+    """QEMU's firmware/ROM directory and module directory in the root: run through the loader,
+    QEMU would look for them relative to the loader's path."""
+    if not root:
+        return [], None
+    env = dict(os.environ, QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))
+    return ["-L", os.path.join(root, "usr/share/qemu")], env
+
+
+def resolve_tools(args):
+    """OVMF defaults to the root's when a root is given, else the host's."""
+    base = args.tools_root or "/"
+    if args.ovmf_code is None:
+        args.ovmf_code = os.path.join(base, TOOLS_OVMF[0])
+    if args.ovmf_vars is None:
+        args.ovmf_vars = os.path.join(base, TOOLS_OVMF[1])
+
+
+def stack_versions(root):
+    """The installed version of each STACK package in ROOT's dpkg status, for the report."""
+    if not root:
+        return "runner"
+    status = pathlib.Path(root, "var/lib/dpkg/status").read_text(errors="replace")
+    found = {}
+    for stanza in status.split("\n\n"):
+        f = dict(re.findall(r"^([A-Za-z-]+): (.*)$", stanza, re.M))
+        if f.get("Package") in STACK and f.get("Status", "").endswith(" installed"):
+            found[f["Package"]] = f.get("Version")
+    missing = [p for p in STACK if not found.get(p)]
+    if missing:
+        raise HostcheckError(f"not installed in the tools root {root}: {missing}")
+    return {p: found[p] for p in STACK}
+
+
 def run(cmd, **kw):
     p = subprocess.run(cmd, capture_output=True, text=True, **kw)
     if p.returncode:
@@ -218,12 +282,13 @@ class Qemu:
         sock_dir = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # unix socket paths stay short
         self.sock_dir = sock_dir
         tpm_sock = os.path.join(sock_dir, "tpm")
-        self.swtpm = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+        self.swtpm = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
                                        "--ctrl", f"type=unixio,path={tpm_sock}", "--terminate"],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _wait_path(tpm_sock)
         accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
-        cmd = ["qemu-system-x86_64", "-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
+        data, env = qemu_data_args(args.tools_root)
+        cmd = tool_argv(args.tools_root, "qemu-system-x86_64") + data + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
                "-smp", "2", "-m", "1024", "-nodefaults", "-display", "none", "-nic", "none",
                "-rtc", "base=utc,clock=host",
                "-global", "driver=cfi.pflash01,property=secure,value=on",
@@ -243,7 +308,8 @@ class Qemu:
                     "ahci": ["-device", f"ide-hd,drive=hd{i},bus=ide.{i}"]}[bus]
         if boot:
             cmd += boot
-        self.proc = subprocess.Popen(cmd, stdout=open(work / f"qemu-{label}.log", "wb"), stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen(cmd, stdout=open(work / f"qemu-{label}.log", "wb"), stderr=subprocess.STDOUT,
+                                     env=env)
         self.qmp = _connect(f"{sock_dir}/qmp", self.proc)
         self.serial = _connect(f"{sock_dir}/serial", self.proc)  # QEMU starts once both are connected
         self.qmp_file = self.qmp.makefile("rwb")
@@ -354,11 +420,12 @@ def guest_rtc_writes(events, os_starts):
     return out
 
 
-def qemu_tpm(work):
+def qemu_tpm(args, work):
     """Read the host TPM from outside the guest: swtpm on the same state."""
+    ioctl = tool_argv(args.tools_root, "swtpm_ioctl")
     d = tempfile.mkdtemp(prefix="hc", dir="/tmp")
     sock = os.path.join(d, "s")
-    p = subprocess.Popen(["swtpm", "socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+    p = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
                           "--server", f"type=unixio,path={sock}", "--ctrl", f"type=unixio,path={sock}.ctrl",
                           "--flags", "not-need-init,startup-clear"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -367,14 +434,14 @@ def qemu_tpm(work):
         _wait_path(sock + ".ctrl")
         yield f"swtpm:path={sock}"
     finally:
-        subprocess.run(["swtpm_ioctl", "--unix", sock + ".ctrl", "-s"], capture_output=True)
+        subprocess.run(ioctl + ["--unix", sock + ".ctrl", "-s"], capture_output=True)
         p.wait(timeout=30)
         shutil.rmtree(d, ignore_errors=True)
 
 
 def qemu_snapshot(args, work):
     disks = {name: work / "disks" / f"{name}.img" for name, _ in args.host_disks_bus}
-    gen = qemu_tpm(work)
+    gen = qemu_tpm(args, work)
     tcti = next(gen)
     try:
         return snapshot(disks, varstore=work / "vars.fd", tcti=tcti)
@@ -398,9 +465,9 @@ def standin_phases(plant):
     }
 
 
-def seed_tpm(work):
+def seed_tpm(args, work):
     """A host TPM that already holds an owner NV index, like a used PC's."""
-    gen = qemu_tpm(work)
+    gen = qemu_tpm(args, work)
     tcti = next(gen)
     try:
         run(["tpm2_nvdefine", "-T", tcti, "0x1500020", "-C", "o", "-s", "8",
@@ -411,6 +478,10 @@ def seed_tpm(work):
 
 
 def cmd_qemu(args):
+    resolve_tools(args)
+    stack = stack_versions(args.tools_root)
+    for name in TOOLS:
+        tool_argv(args.tools_root, name)  # a missing root tool fails before any state is made
     work = pathlib.Path(args.work)
     work.mkdir(parents=True, exist_ok=False)
     (work / "disks").mkdir()
@@ -423,7 +494,7 @@ def cmd_qemu(args):
         shutil.copyfile(m.group(2), work / "disks" / f"{m.group(1)}.img")  # the input stays as it was
         args.host_disks_bus.append((m.group(1), m.group(3) or "nvme"))
     shutil.copyfile(args.ovmf_vars, work / "vars.fd")
-    seed_tpm(work)
+    seed_tpm(args, work)
     if args.kernel:
         boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
         phases = standin_phases(args.plant)
@@ -453,7 +524,7 @@ def cmd_qemu(args):
         raise HostcheckError(f"host state changes on firmware-only boots: {unstable}")
     baseline = snaps["firmware-2"]
     report = {"baseline": baseline, "firmware_noise": sorted(k for _, k in noise),
-              "phases": []}
+              "phases": [], "stack": stack}
     for phase in args.phases.split(","):
         if phase not in phases:
             raise HostcheckError(f"unknown phase {phase!r}")
@@ -517,9 +588,11 @@ def main(argv=None):
     q.add_argument("--phases", default="task,restart")
     q.add_argument("--plant", default="", help="stand-in only: disk,uefi,nv,rtc (negative test)")
     q.add_argument("--flag", action="append", default=[], choices=["owner-boot-order"])
-    q.add_argument("--ovmf-code", default="/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
-                   help="an SMM build: without SMM, OVMF keeps variables in an NvVars file on the ESP")
-    q.add_argument("--ovmf-vars", default="/usr/share/OVMF/OVMF_VARS_4M.fd")
+    q.add_argument("--tools-root", help="a root holding qemu, swtpm and OVMF from pinned apt sources "
+                   "(CI: the image's Debian snapshot); default: the host's own")
+    q.add_argument("--ovmf-code", help="an SMM build: without SMM, OVMF keeps variables in an NvVars file "
+                   "on the ESP (default: OVMF_CODE_4M.secboot.fd in the tools root, else /usr/share/OVMF)")
+    q.add_argument("--ovmf-vars", help="default: OVMF_VARS_4M.fd beside it")
     q.add_argument("--timeout", type=int, default=600, help="seconds per QEMU process")
     args = ap.parse_args(argv)
     if args.cmd == "qemu" and bool(args.kernel) != bool(args.initrd):

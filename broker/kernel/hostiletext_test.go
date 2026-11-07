@@ -14,12 +14,16 @@ import (
 // the page (#3284), and the label Named looks for (#3438). Named keeps what
 // a STATUS line shows (the joiners, #2740, an emoji's variation selector),
 // since its match is exact; a label with nothing to see is still refused.
+// A store or class name a new seal takes refuses every shape (#3953).
 func TestNameCheckRefusesHostileText(t *testing.T) {
 	t.Run("backup target name", func(t *testing.T) {
 		hostiletext.Run(t, func(s string) bool { return BackupTarget{Name: s, Kind: KindDir, Locator: "/mnt/usb"}.shape() })
 	})
 	t.Run("backup target locator", func(t *testing.T) {
 		hostiletext.Run(t, func(s string) bool { return BackupTarget{Name: "usb", Kind: KindDir, Locator: "/mnt/" + s}.addable() })
+	})
+	t.Run("store and class name", func(t *testing.T) {
+		hostiletext.Run(t, name)
 	})
 	t.Run("named label", func(t *testing.T) {
 		hostiletext.Run(t, func(s string) bool {

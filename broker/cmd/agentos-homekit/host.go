@@ -236,6 +236,10 @@ type host struct {
 	stepLink link
 	wg       sync.WaitGroup
 	started  bool
+	// saveStop is a test seam only (REV-CHK-save, #4192): it ends save's
+	// privfile.WriteAtomic after a step as a crash would. Production leaves
+	// it nil.
+	saveStop func(int) bool
 }
 
 // load reads the devices file: missing is no device; any malformed record
@@ -283,7 +287,7 @@ func (h *host) save() error {
 	if err != nil {
 		return errSave
 	}
-	if privfile.WriteAtomic(h.dir, stateName, b, nil) != nil {
+	if privfile.WriteAtomic(h.dir, stateName, b, h.saveStop) != nil {
 		return errSave
 	}
 	return nil

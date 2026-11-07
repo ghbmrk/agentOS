@@ -144,7 +144,10 @@ type RecordStore interface {
 
 // FileRecord keeps SetupRecord in one JSON file, mode 0600, replaced
 // atomically. A missing file is an empty record.
-type FileRecord struct{ Path string }
+type FileRecord struct {
+	Path string
+	stop func(i int) bool // tests: crash Save's file write after step i
+}
 
 func (f FileRecord) Load() (SetupRecord, error) {
 	var r SetupRecord
@@ -171,8 +174,15 @@ func (f FileRecord) Save(r SetupRecord) error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, nil)
+	return privfile.WriteAtomic(filepath.Dir(f.Path), filepath.Base(f.Path), b, f.stop)
 }
+
+// saved reports whether a record save took effect. A save that failed only
+// at the directory sync (privfile.ErrUnsynced) renamed the new record into
+// place, so it counts: setup keeping the old record in memory would answer
+// a finish failed that the file holds, and the next save would write the
+// old record back (#4971).
+func saved(err error) bool { return err == nil || errors.Is(err, privfile.ErrUnsynced) }
 
 var phoneRe = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 
@@ -351,7 +361,7 @@ func (s *Setup) setEnrolledLocked(v bool) error {
 	}
 	next := s.rec
 	next.Enrolled = v
-	if s.cfg.Record.Save(next) != nil {
+	if !saved(s.cfg.Record.Save(next)) {
 		return errFailed
 	}
 	s.rec = next
@@ -407,7 +417,7 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	}
 	next := s.rec
 	next.Finished, next.Owner, next.Name, next.OwnerName = true, a.Owner, name, ownerName
-	if s.cfg.Record.Save(next) != nil {
+	if !saved(s.cfg.Record.Save(next)) {
 		s.mu.Unlock()
 		return nil, errFailed
 	}

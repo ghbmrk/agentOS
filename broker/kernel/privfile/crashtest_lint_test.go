@@ -64,16 +64,6 @@ import (
 // crashPending names the directories whose WriteAtomic calls fail the check
 // on main, each with the issue that gives its calls a seam and a test.
 const crashPending = `
-pending broker/cmd/agentos-camera #4192 nil stop on main when the lint landed
-pending broker/cmd/agentos-clerk-model #4192 nil stop on main when the lint landed
-pending broker/cmd/agentos-enroll #4192 nil stop on main when the lint landed
-pending broker/cmd/agentos-homekit #4192 nil stop on main when the lint landed
-pending broker/cmd/agentos-unlock #4192 nil stop on main when the lint landed
-pending broker/update #4192 nil stop on main when the lint landed
-pending broker/cmd/agentosd #4193 nil stop on main when the lint landed
-pending broker/localsrv #4193 nil stop on main when the lint landed
-pending broker/owner #4193 nil stop on main when the lint landed
-pending broker/question #4193 nil stop on main when the lint landed
 `
 
 func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {

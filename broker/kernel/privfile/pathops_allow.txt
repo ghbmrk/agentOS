@@ -192,7 +192,57 @@ allow broker/clerk/seal/seal.go writeTemp os.CreateTemp beside the store in root
 allow broker/clerk/seal/seal.go writeTemp os.Remove unlink(2) of the temporary this call made
 allow broker/clerk/seal/seal.go syncDir os.Open the store's directory, root's 0700 /var/lib/agentos-store, to sync it
 
-pending broker/cmd/agentosd #3941 agentosd
+# broker/cmd/agentosd (#3941). agentosd runs as root (agentosd.service: no
+# User=), and every path below is in a tree only root writes: its state in
+# root-held /var/lib/agentos (tmpfiles.d: 0700 root root; -machines,
+# -learn, recall and the modem's roles under it; agentos-modem binds
+# /var/lib/agentos/modem read-only), /etc/agentos in root-owned /etc,
+# -signin-routes (checked root's or agentosd's up to /), or a kernel-served
+# file system: procfs, and cgroup2 (kernfs), which has no symlink(2), so
+# no uid, a delegate included, can make a link among a group's files.
+# unlink(2), rmdir(2) and mkdir(2) follow no link at the final name, and
+# os.RemoveAll descends with O_NOFOLLOW, so a link a clerk left inside a
+# sign-in route is removed, never followed. -follow-anchors, -update-store
+# and -shipped-root are passed by no shipped unit today.
+allow broker/cmd/agentosd/cgroot.go delegatedRoot os.ReadFile /proc/self/cgroup (liveCgroups.ProcSelf), served by the kernel; /proc/self is procfs's own link and no uid plants one in procfs
+allow broker/cmd/agentosd/cgroot.go ioWeightNote os.Stat io.weight of the broker's group in agentosd's delegated cgroup2 group, where no uid can make a link
+allow broker/cmd/agentosd/cgroot.go ioWeightNote os.ReadFile io.cost.qos in the cgroup2 root, /sys/fs/cgroup, where no uid can make a link
+allow broker/cmd/agentosd/main.go openPool os.MkdirAll the broker's group in agentosd's delegated cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cmd/agentosd/infer.go inferenceLeaf os.ReadFile memory.max of the inference leaf beside the machine pool, in agentosd's delegated cgroup2 group, where no uid can make a link
+allow broker/cmd/agentosd/main.go main os.ReadFile /proc/meminfo, served by the kernel; no uid plants a link in procfs
+allow broker/cmd/agentosd/lostcard.go bootedAt os.ReadFile /proc/uptime, served by the kernel; no uid plants a link in procfs
+allow broker/cmd/agentosd/uplink.go routeOnline os.ReadFile /proc/net/route and /proc/net/ipv6_route, served by the kernel; no uid plants a link in procfs
+allow broker/cmd/agentosd/diskquota.go machineQuota os.MkdirAll -machines, /var/lib/agentos/machines, in root-held /var/lib/agentos
+allow broker/cmd/agentosd/forget.go openEraseRewind os.ReadFile erase-rewound.json in -machines, which only root writes (a guest writes only inside its own layer)
+allow broker/cmd/agentosd/recallheld.go openRecallHeld os.ReadFile recall-settled.json in -machines, which only root writes (a guest writes only inside its own layer)
+allow broker/cmd/agentosd/recallheld.go readRecallHeld os.Stat the old recall directory, /var/lib/agentos/recall, in root-held /var/lib/agentos
+allow broker/cmd/agentosd/recallheld.go recallLines os.ReadFile a recall store file in /var/lib/agentos/recall, root-held
+allow broker/cmd/agentosd/learnstate.go openLearnState os.MkdirAll -learn, /var/lib/agentos/learn, in root-held /var/lib/agentos
+allow broker/cmd/agentosd/learnstate.go sweepLearnTemp os.Remove unlink(2) of a crash-left .durable-* temp in -learn, root-held; it removes a link at the name, never follows it
+allow broker/cmd/agentosd/learnstate.go sweepTemp os.RemoveAll names os.RemoveAll as removeLearned's removeAll (no call here): it removes the old learning files in -learn, root-held, and descends with O_NOFOLLOW
+allow broker/cmd/agentosd/learnstate.go restoreHold os.ReadFile the forget log's .pending marker in -learn, root-held
+allow broker/cmd/agentosd/held.go heldNotice os.ReadFile the forget log's .pending marker in -learn, root-held
+allow broker/cmd/agentosd/restoreconfirm.go loadHeld os.ReadFile the held restore's question beside that marker in -learn, root-held
+allow broker/cmd/agentosd/restoreconfirm.go answerHeld os.Remove unlink(2) of the marker and the question in -learn, root-held; it removes a link at the name, never follows it
+allow broker/cmd/agentosd/lostcard.go lostCard.readShown os.ReadFile /var/lib/agentos/recovery-card-shown, root-held
+allow broker/cmd/agentosd/lostcard.go lostCard.clearShown os.Remove unlink(2) of /var/lib/agentos/recovery-card-shown, root-held; it removes a link at the name, never follows it
+allow broker/cmd/agentosd/lostcard.go lostCard.LostWithdraw os.Remove unlink(2) of /var/lib/agentos/recovery-request, root-held; it removes a link at the name, never follows it
+allow broker/cmd/agentosd/main.go removeOldDigest os.RemoveAll the old digest directory, /var/lib/agentos/digest, root-held, once Lstat shows a directory; RemoveAll descends with O_NOFOLLOW
+allow broker/cmd/agentosd/main.go removeOldDigest os.Remove unlink(2) of whatever else is at that name, a link included, never followed
+allow broker/cmd/agentosd/simroles.go recordOwnerSIM os.ReadFile -modem-roles, /var/lib/agentos/modem/roles.json: agentosd's StateDirectory (root, 0755) in root-held /var/lib/agentos, which agentos-modem binds read-only
+allow broker/cmd/agentosd/modemenv.go ensureDir os.Mkdir /etc/agentos, modem.env's directory, in root-owned /etc, which no other uid writes; mkdir(2) follows no link
+allow broker/cmd/agentosd/modemenv.go ensureDir os.Chmod the /etc/agentos that Mkdir just made, in root-owned /etc, which no other uid writes, so none can swap it
+allow broker/cmd/agentosd/follow.go newFollowSetting os.ReadFile -shipped-root, which no shipped unit passes; a row that wires it must name a root-only file, such as the image's in read-only, verity-checked /usr
+allow broker/cmd/agentosd/follow.go readAnchors os.Stat reads the mode and owner of -follow-anchors' directory (no unit passes the flag) to refuse one not root's alone; the file itself opens with O_NOFOLLOW and is checked through its fd
+allow broker/cmd/agentosd/signinhost.go prepareSignInRoutes os.Mkdir -signin-routes; mkdir(2) follows no link, and EvalSymlinks and the Lstat walk next refuse a link on the way or a directory up to / that is not root's or agentosd's or that another uid writes
+allow broker/cmd/agentosd/signinhost.go prepareSignInRoutes os.Chmod -signin-routes once that walk checked it and every directory above it root's or agentosd's, writable by no other uid, sticky directories aside
+allow broker/cmd/agentosd/signinhost.go prepareSignInRoutes os.ReadDir lists that checked -signin-routes
+allow broker/cmd/agentosd/signinhost.go prepareSignInRoutes os.RemoveAll a route left in that checked directory, which only root writes; RemoveAll descends with O_NOFOLLOW, so what the clerk left inside goes, never followed
+allow broker/cmd/agentosd/signinhost.go signInHost.Route os.RemoveAll a stale route in checked -signin-routes, which only root writes; RemoveAll descends with O_NOFOLLOW
+allow broker/cmd/agentosd/signinhost.go signInHost.Route os.Mkdir the route in checked -signin-routes; mkdir(2) follows no link
+allow broker/cmd/agentosd/signinhost.go signInHost.Route os.Remove rmdir(2) of the route Mkdir just made, when Lchown fails; it removes a link at the name, never follows it
+allow broker/cmd/agentosd/signinhost.go signInHost.removeRoute os.RemoveAll a route in checked -signin-routes (filepath.Dir must be h.Routes), which only root writes; RemoveAll descends with O_NOFOLLOW
+
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5

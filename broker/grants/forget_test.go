@@ -79,9 +79,6 @@ func TestAForgetsAgentTakeBackIsItem2OfTheSameRequest(t *testing.T) {
 	if ForgetGoal(ForgetAgentID("n", "g1")) != "" || ForgetAgentGoal(ForgetID("n", "g1")) != "" || ForgetAgentGoal(ForgetAgentID("n", "g1")) != "g1" {
 		t.Fatal("item 1 and item 2 IDs must not parse as each other")
 	}
-	if ForgetSibling(ForgetAgentID("n", "g1")) != ForgetID("n", "g1") || ForgetSibling(ForgetID("n", "g1")) != ForgetAgentID("n", "g1") {
-		t.Fatal("siblings")
-	}
 	for _, origin := range []string{"guest:agent.x", OriginOwner, OriginRecall} {
 		if st := r.submit(agent("a-"+origin, origin, "g1")); st.State != journal.Denied {
 			t.Fatalf("take-back from %s: %s", origin, st.State)
