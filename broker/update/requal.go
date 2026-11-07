@@ -71,6 +71,10 @@ type Requalifier struct {
 	// failed holds this process's security failures too, so a mark whose
 	// save failed still holds until the process ends.
 	failed map[string][]string
+	// saveStop is a test seam only (REV-CHK-save, #4192): it ends save's
+	// privfile.WriteAtomic after a step as a crash would. Production leaves
+	// it nil.
+	saveStop func(int) bool
 }
 
 // requalState is the saved record: the security suite's floor, which only
@@ -238,5 +242,5 @@ func (q *Requalifier) save(st requalState) error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(filepath.Dir(q.path), filepath.Base(q.path), b, nil)
+	return privfile.WriteAtomic(filepath.Dir(q.path), filepath.Base(q.path), b, q.saveStop)
 }
