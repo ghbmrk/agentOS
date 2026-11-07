@@ -1658,7 +1658,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             base = pathlib.Path(d) / "base.go"
             base.write_text("\n".join(row + " //mutgate" * (i in targets) for i, row in enumerate(src.split("\n"), 1)))
             plain = subprocess.run(["git", "diff", "--no-index", "-U0", str(base), str(pathlib.Path(d) / "broker/hint/hint.go")],
-                                   capture_output=True, text=True).stdout
+                                   capture_output=True, text=True, cwd=d).stdout
             self.assertFalse({9, 10} <= set().union(*mutgate.added_lines(plain)[0].values()), plain)
             for of in (1, 2):
                 res = pathlib.Path(d) / f"res-{of}"
