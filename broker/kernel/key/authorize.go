@@ -143,7 +143,7 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 		return r
 	}
 	if s.Rung < l.Rung {
-		return refuse(RRung, "proof %d, the key asks %d", s.Rung, l.Rung)
+		return refuse(RRung, "%v, the key asks %v", s.Rung, l.Rung)
 	}
 	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)

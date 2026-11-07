@@ -2,6 +2,7 @@ package key
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -10,28 +11,32 @@ import (
 
 // REQ: KEY-2, CH-3
 
-// ch3 is CH-3's table, each row's floor as a rung (D-307, D-311). A row
-// whose proof names no rung states the rung of the place it is given: the
-// owner page at home is P3.
-var ch3Rungs = map[string]Proof{
-	"STOP (pause all dispatch)":                                                                                       P0,
-	"Task chat, STATUS":                                                                                               P0,
-	"Approve a low-risk irreversible effect (CH-10)":                                                                  P1,
-	"Approve a high-risk irreversible effect (CH-10)":                                                                 P3,
-	"Unlock on an unknown host (STO-2)":                                                                               P3,
-	"New key (device keys except as the rows below say), raise budget, adopt a release":                               P3,
-	"Turn the computer-use retry back on for a site or all sites (CLK-5)":                                             P3,
-	"Connect devices or a hub from a connection plan":                                                                 P3,
-	"Connect a verified device that needs no secret, read only (DEV-10)":                                              P3,
-	"Key `actuate` or `present` on, or cut off from its vendor cloud, a connected device not marked safety or access": P1,
-	"Key `actuate-physical` on a connected device":                                                                    P3,
-	"Physical action in the unsafe direction, or a value outside `actuate` bounds that":                               P3,
-	"Start a reverse-engineering task (DEV-12)":                                                                       P3,
-	"Write firmware or software to a device (DEV-12)":                                                                 P3,
+// ch3Rows names each CH-3 row's act, so its floor is worth.go's (D-307,
+// D-311) and the two CH-3 tables in this package cannot drift.
+var ch3Rows = map[string]Act{
+	"STOP (pause all dispatch)":                                                                                       ActStop,
+	"Task chat, STATUS":                                                                                               ActChat,
+	"Approve a low-risk irreversible effect (CH-10)":                                                                  ActApproveLow,
+	"Approve a high-risk irreversible effect (CH-10)":                                                                 ActApproveHigh,
+	"Unlock on an unknown host (STO-2)":                                                                               ActUnlock,
+	"New key (device keys except as the rows below say), raise budget, adopt a release":                               ActGrant,
+	"Turn the computer-use retry back on for a site or all sites (CLK-5)":                                             ActRetryOn,
+	"Connect devices or a hub from a connection plan":                                                                 ActDeviceConnect,
+	"Connect a verified device that needs no secret, read only (DEV-10)":                                              ActDeviceReadOnly,
+	"Key `actuate` or `present` on, or cut off from its vendor cloud, a connected device not marked safety or access": ActDeviceKeyLow,
+	"Key `actuate-physical` on a connected device":                                                                    ActDeviceKeySafety,
+	"Physical action in the unsafe direction, or a value outside `actuate` bounds that":                               ActPhysicalUnsafe,
+	"Start a reverse-engineering task (DEV-12)":                                                                       ActReverseEngineer,
+	"Write firmware or software to a device (DEV-12)":                                                                 ActFirmwareWrite,
 }
 
+// spelled is how CH-3's proof column names a rung first.
+var spelled = map[string]Proof{"P0": P0, "P1": P1, "P2": P2, "P3": P3, "P4": P4,
+	"P3 with local confirmation": P3Local, "Local confirmation": P3Local}
+
 // TestCH3RowsAreTheFloor reads CH-3's table from SPEC.md: every row is a
-// case here, at the rung its proof names first, and each holds as a rung
+// case here, at worth.go's floor, which is the rung its proof names first
+// (a row naming none is given on the owner page, P3), and each holds as a rung
 // caveat: an owner event at that rung or above passes, one below is refused.
 func TestCH3RowsAreTheFloor(t *testing.T) {
 	spec, err := os.ReadFile("../../../SPEC.md")
@@ -41,7 +46,7 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 	s := string(spec)
 	s = s[strings.Index(s, "- **CH-3** "):]
 	s = s[:strings.Index(s, "\n- **CH-4** ")]
-	first := regexp.MustCompile(`\bP([0-4])\b`)
+	first := regexp.MustCompile(`\bP[0-4]( with local confirmation)?\b|^ Local confirmation`)
 	rows := 0
 	for _, line := range strings.Split(s, "\n") {
 		cells := strings.Split(line, "|")
@@ -50,9 +55,9 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 		}
 		action, proof := strings.TrimSpace(cells[1]), cells[2]
 		want, ok := P0, false
-		for prefix, r := range ch3Rungs {
+		for prefix, a := range ch3Rows {
 			if strings.HasPrefix(action, prefix) {
-				want, ok = r, true
+				want, ok = floor[a].proof, true
 			}
 		}
 		if !ok {
@@ -60,8 +65,8 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 			continue
 		}
 		rows++
-		if m := first.FindStringSubmatch(proof); m != nil && []Proof{P0, P1, P2, P3, P4}[m[1][0]-'0'] != want {
-			t.Errorf("%q: SPEC names P%s first, the case P%d", action, m[1], want)
+		if m := strings.TrimSpace(first.FindString(proof)); m != "" && spelled[m] != want {
+			t.Errorf("%q: SPEC names %s first, the floor %v", action, m, want)
 		}
 		o, h, k := root(t)
 		d, err := Derive(k, h.priv, gen(3).pub, LimitRung(want))
@@ -74,12 +79,12 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 			st.Rung = r
 			got := v.Authorize(st, ctx(1, nil))
 			if r >= want && got != nil || r < want && (got == nil || got.Code != RRung) {
-				t.Errorf("%q at P%d: %v", action, r, got)
+				t.Errorf("%q at %v: %v", action, r, got)
 			}
 		}
 	}
-	if rows != len(ch3Rungs) {
-		t.Errorf("SPEC's CH-3 has %d rows, the cases %d", rows, len(ch3Rungs))
+	if rows != len(ch3Rows) {
+		t.Errorf("SPEC's CH-3 has %d rows, the cases %d", rows, len(ch3Rows))
 	}
 }
 
@@ -117,8 +122,23 @@ func TestVoiceOnlyLowers(t *testing.T) {
 	for r := P0; r <= P4; r++ {
 		for heard := P0; heard <= P4; heard++ {
 			if got := Lower(r, heard); got != min(r, heard) {
-				t.Fatalf("Lower(P%d, P%d) = P%d", r, heard, got)
+				t.Fatalf("Lower(%v, %v) = %v", r, heard, got)
 			}
 		}
+	}
+}
+
+// A refusal names rungs as CH-3 does (P3Local, not its ordinal).
+func TestRungNames(t *testing.T) {
+	got := fmt.Sprint(P0, P1, P2, P3, P3Local, P4, PRecovery, PRecovery+1)
+	if got != "P0 P1 P2 P3 P3Local P4 PRecovery Proof(7)" {
+		t.Fatal(got)
+	}
+	o, h, k := root(t)
+	d, _ := Derive(k, h.priv, gen(3).pub, LimitRung(P3Local))
+	st := step(Trash)
+	st.Rung = P3
+	if rf := verified(t, d, o, gen(3)).Authorize(st, ctx(1, nil)); rf == nil || rf.Detail != "P3, the key asks P3Local" {
+		t.Fatalf("%v", rf)
 	}
 }

@@ -109,6 +109,14 @@ const (
 // Lower is rung r after a voice check that heard rung v: never higher (D-153).
 func Lower(r, v Proof) Proof { return min(r, v) }
 
+// String is a rung's CH-3 name, for refusals and logs.
+func (p Proof) String() string {
+	if p <= PRecovery {
+		return [...]string{"P0", "P1", "P2", "P3", "P3Local", "P4", "PRecovery"}[p]
+	}
+	return fmt.Sprintf("Proof(%d)", uint8(p))
+}
+
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
 // verbs, content and labels; Arg for arg; N for a cap, an expiry (unix ms) or
 // a hold's base window (ms); M for a hold's novelty window (ms), or 1 on a

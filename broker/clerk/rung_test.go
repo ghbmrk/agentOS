@@ -37,7 +37,7 @@ func TestClerkRefusesAStepBelowItsKeysRung(t *testing.T) {
 	for r := key.P0; r <= key.P4; r++ {
 		rf := check.Check(anchors, "mail", f.mail.Facts, 1, u, rungAt{inFlight{f.k.State(), f.plans}, r})
 		if r < key.P3 && (rf == nil || rf.Code != key.RRung) || r >= key.P3 && rf != nil {
-			t.Fatalf("P%d: %v", r, rf)
+			t.Fatalf("%v: %v", r, rf)
 		}
 	}
 	if res := f.mail.Do(u, rungAt{inFlight{f.k.State(), f.plans}, key.P2}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
