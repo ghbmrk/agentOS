@@ -40,8 +40,8 @@ func TestTheSpecVocabularyAndTheReplyGrammarHold(t *testing.T) {
 // The benign set is ordinary owner-task text. The hold count is the
 // measurement: it changes only when the check changes. "I dig it" went
 // through once a split needed a letter run or a seam (#4019); "Pass word
-// to Sam" is still held by rule (b)'s space seam, which Security
-// decides on #4019.
+// to Sam" is still held by rule (b)'s space seam, kept, Security on
+// #4896.
 func TestBenignTaskTextIsMeasured(t *testing.T) {
 	benign := []string{
 		"I fixed the code and pushed the branch.",

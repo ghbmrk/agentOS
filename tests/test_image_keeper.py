@@ -24,7 +24,8 @@ from test_image_noexec import STOCK_TMP, SYSTEM, shipped_units, stage_binaries  
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 # The keeper's files beside its units, which shipped_units (agentos* regular files) leaves out.
 KEEPER_FILES = tuple("usr/lib/systemd/system/" + n for n in (
-    "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf"))
+    "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf",
+    "agentos-mor.service.d/50-main-side.conf"))
 ENROLL = UNITS / "agentos-keeper-enroll.service"
 KERNEL = UNITS / "agentos-keeper-kernel.service"
 ROTATE = UNITS / "agentos-keeper-rotate@.service"
@@ -115,7 +116,7 @@ class KeeperTreeTest(unittest.TestCase):
     def test_every_main_side_unit_is_masked_from_the_keeper(self):
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
-                       + check.EMPTY_ROOT_UNITS)
+                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
         self.assertIn("agentos-localui.service", names)
         (self.root / SYSTEM / "agentos-.service.d/50-main-side.conf").unlink()
         want = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)" % (n, p)
@@ -154,10 +155,29 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(made["/var/lib/agentos-kernel"][3:5], ["agentos-kernel", "agentos-kernel"])
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
-                       + check.EMPTY_ROOT_UNITS)
+                       + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
         self.edit("agentos-.service.d/50-main-side.conf", " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
         self.assertEqual(self.v(), ["%s: InaccessiblePaths=-/var/lib/agentos-kernel gives no mask while the path is "
                                     "missing; the image makes it at boot (D-154)" % n for n in names])
+
+    def test_the_mor_clear_sees_what_it_lists(self):
+        # HW-8 (L3 on #5009): masked, /run/agentos-setup reads as empty, and agentos-mor would clear
+        # MOR while it holds the card's factors. The rest of the keeper's state stays masked, "-" allowed.
+        mor = "agentos-mor.service.d/50-main-side.conf"
+        hidden = ini(UNITS / mor)["Service"]["InaccessiblePaths"].split()
+        self.assertEqual([w.lstrip("-") for w in hidden], [p for p in check.KEEPER_PATHS if p not in check.MOR_LISTED])
+        self.assertNotIn("Unit", ini(UNITS / mor))
+        self.edit(mor, "-/var/lib/agentos-homekit", "-/var/lib/agentos-homekit /run/agentos-setup")
+        self.assertEqual(self.v(), ["agentos-mor.service: InaccessiblePaths holds /run/agentos-setup, which the MOR "
+                                    "clear lists; masked, it reads as empty (HW-8)"])
+        self.edit(mor, "-/var/lib/agentos-homekit /run/agentos-setup", "-/var/lib/agentos-homekit /run")
+        self.assertEqual(len(self.v()), 2, self.v())
+        self.edit(mor, " -/var/lib/agentos-homekit /run\n", "\n")
+        self.assertEqual(self.v(), ["agentos-mor.service: InaccessiblePaths does not hold /var/lib/agentos-homekit; "
+                                    "the main side never sees the keeper's state (D-154)"])
+        # Without its own file, the shared mask hides what it lists.
+        (self.root / SYSTEM / mor).unlink()
+        self.assertEqual(len(self.v()), len(check.MOR_LISTED), self.v())
 
     def test_the_setup_factors_are_masked_and_removed(self):
         # #2981 (Security 2): the Owner Card's factors are hidden from the main side, and enrollment

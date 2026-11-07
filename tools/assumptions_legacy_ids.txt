@@ -502,7 +502,6 @@ broker/journal/ASSUMPTIONS.md A17
 broker/journal/ASSUMPTIONS.md A18
 broker/journal/ASSUMPTIONS.md A19
 broker/journal/ASSUMPTIONS.md A20
-broker/journal/ASSUMPTIONS.md A21
 broker/journal/ASSUMPTIONS.md A22
 broker/journal/ASSUMPTIONS.md A23
 broker/journal/check/ASSUMPTIONS.md K1

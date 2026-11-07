@@ -112,8 +112,13 @@ func dataKeyID(k SubjectKey) string {
 
 func contentAAD(subject, class string) []byte { return []byte(subject + "\x00" + class) }
 
-// name is a store or class name: short, plain text.
-func name(s string) bool { return s != "" && len(s) <= 64 && utf8.ValidString(s) && shown(s) }
+// name is a store or class name: 1 to 64 printable ASCII, no space (#3953).
+func name(s string) bool { return s != "" && len(s) <= 64 && graphic(s) }
+
+// graphic reports whether s is printable ASCII with no space.
+func graphic(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool { return r < 0x21 || r > 0x7e })
+}
 
 // ValidStore reports whether s can name a content store: a name, and never
 // the key table. A backup's content/<store> section names use it too.

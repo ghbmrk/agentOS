@@ -560,23 +560,25 @@ func TestJSONFormRawWrapped(t *testing.T) {
 
 // KRN-12: an attacker-written stream of breaks costs about what plain text
 // does, whatever '\'s the table's forms hold: here MaxValue values of '<'s,
-// a '\' in every sixth byte of the JSON form, and of 'a's, and one of `\z`
-// 512 times, a '\' in every other byte. Each break looks up only the '\'s
-// with its own bytes beside them, and a run split by %0a joins as it comes
-// (#4681, Security on #4742). A near-copy stream, a form with a JSON break
+// a '\' in every sixth byte of the JSON form, and of 'a's, and ones of `\z`
+// and `\/` 512 times, a '\' in every other byte. Each break looks up only
+// the '\'s with its own bytes beside them, and a run split by %0a joins as
+// it comes (#4681, Security on #4742). A near-copy stream, a form with a JSON break
 // for every '\' but one unit short of the whole, makes each break walk the
 // form's rest and try its other '\'s: the rest is compared whole between
 // '\'s with the held breaks walked in order, a '\' whose prefix is not there
 // costs one byte (#4743), and a held break is walked once, when it is let
 // go, not again at each scan (#4853). So the '<'s' near-copy stays within 9
 // times plain text (about 3 here, 4 to 6 before #4853, 15 before #4743) and
-// the `\z`s' within 12 (about 4 to 6 here, 20 to 35 before #4853). Each is
-// timed against plain text in the same rounds, best of three, so a slow or
-// loaded runner or -race moves both.
+// the `\z`s' within 12 (about 4 to 6 here, 20 to 35 before #4853). The `\/`s'
+// is the worst measured, 7 to 12 times (#4871), so it is held within 16,
+// twice its median of about 8 and above the worst seen (#4900). Each is timed against
+// plain text in the same rounds, best of three, so a slow or loaded runner
+// or -race moves both.
 func TestBreakStreamCost(t *testing.T) {
 	m := match.New([]match.Value{{ID: 1, Bytes: []byte(strings.Repeat("<", match.MaxValue))},
 		{ID: 2, Bytes: []byte(strings.Repeat("a", match.MaxValue))}, {ID: 3, Bytes: []byte(`q7Xz\2pL9<mW4vR8tY3nB6kJ5h`)},
-		{ID: 4, Bytes: []byte(strings.Repeat(`\z`, match.MaxValue/2))}}, nil)
+		{ID: 4, Bytes: []byte(strings.Repeat(`\z`, match.MaxValue/2))}, {ID: 5, Bytes: []byte(strings.Repeat(`\/`, match.MaxValue/2))}}, nil)
 	run := func(unit string) time.Duration {
 		b := []byte(strings.Repeat(unit, 64<<10/len(unit)+1)[:64<<10])
 		start := time.Now()
@@ -593,7 +595,8 @@ func TestBreakStreamCost(t *testing.T) {
 		s     string
 		ratio time.Duration
 	}{{`x\n`, 3}, {`\%0a`, 3}, {`\%0a\%0D`, 3}, {strings.Repeat(`\nu003c`, match.MaxValue-1) + "x", 9},
-		{strings.Repeat(`\nz`, match.MaxValue/2-1) + "y", 12}, {strings.Repeat(`\n\nz`, match.MaxValue/2-1) + "y", 12}}
+		{strings.Repeat(`\nz`, match.MaxValue/2-1) + "y", 12}, {strings.Repeat(`\n\nz`, match.MaxValue/2-1) + "y", 12},
+		{strings.Repeat(`\n/`, match.MaxValue/2-1) + "y", 16}, {strings.Repeat(`\n\n/`, match.MaxValue/2-1) + "y", 12}}
 	plain, took := time.Duration(math.MaxInt64), make([]time.Duration, len(units))
 	for i := range took {
 		took[i] = time.Duration(math.MaxInt64)
@@ -713,6 +716,63 @@ func TestJoinedFormBesideRun(t *testing.T) {
 	for _, s := range []string{strings.ReplaceAll(v, "\n", "\r\n"), strings.ReplaceAll(v, "\n", ""), strings.ReplaceAll(v, "\n", "%0a")} {
 		wrappedTrips(t, m, s+"x", 11, 1)
 		wrappedTrips(t, m, s, 11, 1)
+	}
+}
+
+// KRN-12, DECOY-a-5: a value whose break text splits a '\' run (`\%0a\n\`)
+// trips with that break changed or dropped. Its joined form is made with the
+// carry a stream has, the form's length, so the break is held until the run's
+// last '\' joins it; with none the break is let go early and the joined form
+// is one no stream makes, and 4 of these 5 sends miss (#4871).
+func TestJoinedFormCarry(t *testing.T) {
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(`xxxxxxxx\%0a\n\yyyy`)}}, nil)
+	for _, s := range []string{`xxxxxxxx\yyyy`, `xxxxxxxx\%0d\yyyy`, `xxxxxxxx\%0a\yyyy`, `xxxxxxxx\\n\yyyy`, "xxxxxxxx\\\r\n\\yyyy"} {
+		wrappedTrips(t, m, "lead "+s+" tail", 9, 1)
+	}
+}
+
+// KRN-12, DECOY-a-5: only a break is removed from the joined text. A
+// `u000a` with no '\' before it is plain text, so a value it splits does not
+// trip; a %0a stands for no '\', so a value whose '\'s a JSON break reads
+// back at one place is not read back at a %0a in the other; and a value
+// holding a %0d in a '\' run and ending in a break's head (`\u000`) trips
+// with a JSON break inside that head (#4900).
+func TestJoinedOnlyBreaks(t *testing.T) {
+	for _, c := range []struct {
+		v, s  string
+		trips bool
+	}{{`abcdefghijklmnop`, `abcdefghu000aijklmnop`, false}, {`ab\cdefghij\klmnop`, `ab\ncdefghij%0aklmnop`, false},
+		{`ab\cdefghij\klmnop`, `ab\ncdefghij\nklmnop`, true}, {`abcdefgh\%0d\u000`, `abcdefgh\%0d\u00\n0`, true}} {
+		m := match.New([]match.Value{{ID: 1, Bytes: []byte(c.v)}}, nil)
+		if c.trips {
+			wrappedTrips(t, m, "lead "+c.s, 5, 1)
+			continue
+		}
+		st := m.Stream()
+		st.Write([]byte("lead " + c.s + " tail"))
+		if got := st.Result().Trips; len(got) != 0 {
+			t.Fatalf("%q tripped %v on %q", c.s, got, c.v)
+		}
+	}
+}
+
+// CLK-4: Detect replaces every labelled value that holds a digit, not only
+// the first, and a run of two character classes with 4 bits a character or
+// more, but not a run of one class or of less entropy, so a long word or a
+// repeated letter stays (#4900).
+func TestDetectEachLabelled(t *testing.T) {
+	r := match.Redacted
+	for _, c := range []struct {
+		in, out string
+		n       int
+	}{{"token: aaaaaaaaaaaaaaa1 and secret=bbbbbbbbbbbbbbb2", "token: " + r + " and secret=" + r, 2},
+		{"token: aaaaaaaaaaaaaaaaaaaa", "token: aaaaaaaaaaaaaaaaaaaa", 0}, // a labelled value holds a digit
+		{"id abcdefghijklmnop12345678 end", "id " + r + " end", 1}, {"id abcdefghijklmnopqrstuvwx end", "id abcdefghijklmnopqrstuvwx end", 0},
+		{"id aaaaaaaaaaaaaaaaaaaaaaa1 end", "id aaaaaaaaaaaaaaaaaaaaaaa1 end", 0}, // two classes, little entropy
+		{"id abcdefgh12345678abcdefgh12345678 end", "id " + r + " end", 1}} {      // exactly 4 bits a character
+		if out, n := match.Detect(c.in); out != c.out || n != c.n {
+			t.Errorf("Detect(%q) = %q, %d; want %q, %d", c.in, out, n, c.out, c.n)
+		}
 	}
 }
 

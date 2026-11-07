@@ -9,13 +9,17 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/types"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
@@ -582,4 +586,184 @@ func seenEnv(t *testing.T, env Env) []string {
 	got := strings.Fields(string(out))
 	sort.Strings(got)
 	return got
+}
+
+// REQ: CRED-1
+// bash run as /bin/sh (VULN-debian) imports exported functions
+// (BASH_FUNC_<name>%%), SHELLOPTS and BASHOPTS from its environment, and
+// bash by name also reads BASH_ENV (ENV when interactive): an inherited
+// one changes what a child shell runs (#3999). No child is given one,
+// even when the key is on the allowlist, so widening the allowlist
+// cannot let one through.
+func TestShellStateNeverReachesAChild(t *testing.T) {
+	names := []string{"BASH_FUNC_id%%", "BASH_FUNC_id()", "BASH_FUNC_x", "SHELLOPTS", "BASHOPTS", "BASH_ENV", "ENV"}
+	for _, k := range names {
+		if allowedKeys[k] != "" {
+			t.Errorf("%s is on the allowlist", k)
+		}
+	}
+	saved := maps.Clone(allowedKeys)
+	t.Cleanup(func() { allowedKeys = saved })
+	for _, k := range names {
+		allowedKeys[k] = "a future widening"
+	}
+	for _, k := range names {
+		t.Run(k, func(t *testing.T) {
+			c := Command(context.Background(), NewEnv("PATH=/usr/bin:/bin", k+"=() { echo FUNC-IMPORTED; }"), Options{}, "/bin/sh", "-c", "id")
+			err := c.Run()
+			if err == nil || !strings.Contains(err.Error(), "shell state") {
+				t.Fatalf("not refused as shell state: %v", err)
+			}
+			if c.Pid() > 0 {
+				t.Fatalf("a process started: pid %d", c.Pid())
+			}
+		})
+	}
+	// Names that only share a stem are not shell state.
+	allowedKeys["BASH_FUNCTIONAL"] = "test"
+	allowedKeys["XSHELLOPTS"] = "test"
+	if err := NewEnv("BASH_FUNCTIONAL=lookalike", "XSHELLOPTS=lookalike").check(); err != nil {
+		t.Fatalf("a look-alike name is refused: %v", err)
+	}
+}
+
+// Each refusal names its own reason, so one check never stands in for
+// another: an AGENTOS_ key is the daemon's own, not merely unlisted.
+func TestEachRefusalNamesItsReason(t *testing.T) {
+	for kv, want := range map[string]string{
+		"AGENTOS_X=1": "is agentosd's own",
+		"LD_X=1":      "is not allowlisted",
+	} {
+		if err := NewEnv(kv).check(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", kv, err, want)
+		}
+	}
+	if err := NewEnv("PATH=/bin", "PATH=/usr/bin").check(); err == nil || !strings.Contains(err.Error(), "given twice") {
+		t.Errorf("duplicate key: %v", err)
+	}
+}
+
+// A secret of exactly minContained bytes is refused inside a value too.
+func TestAShortestContainedSecretIsRefused(t *testing.T) {
+	s := tokenCanary[:minContained]
+	t.Setenv("SOME_API_TOKEN", s)
+	if err := NewEnv("HOME=/run/" + s + "/x").check(); err == nil {
+		t.Fatalf("a %d-byte secret inside a value was taken", minContained)
+	}
+	t.Setenv("SOME_API_TOKEN", s[:minContained-1])
+	if err := NewEnv("HOME=/run/" + s + "/x").check(); err != nil {
+		t.Fatalf("a %d-byte secret matched inside a value: %v", minContained-1, err)
+	}
+}
+
+func TestNilContextPanicsAsChildproc(t *testing.T) {
+	defer func() {
+		if r := recover(); r != "childproc: nil Context" {
+			t.Fatalf("panic %v, want childproc's own", r)
+		}
+	}()
+	var ctx context.Context
+	Command(ctx, NewEnv(), Options{}, "/bin/true")
+}
+
+// The options reach the child: its directory, its standard streams, its
+// extra files, its process attributes and its wait delay; and a command
+// never holds a nil environment, which exec would read as the process's.
+func TestOptionsReachTheChild(t *testing.T) {
+	dir := t.TempDir()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var out, errOut strings.Builder
+	o := Options{
+		Dir: dir, Stdin: strings.NewReader("in"), Stdout: &out, Stderr: &errOut,
+		ExtraFiles:  []*os.File{w},
+		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
+		WaitDelay:   time.Second,
+	}
+	c := Command(context.Background(), NewEnv(), o, "/bin/sh", "-c", `pwd; cat; echo err >&2; echo three >&3; cut -d" " -f5 /proc/$$/stat >&2`)
+	if c.c.Env == nil {
+		t.Fatal("a command holds a nil environment before its start")
+	}
+	if c.c.WaitDelay != time.Second {
+		t.Fatalf("WaitDelay %v, want 1s", c.c.WaitDelay)
+	}
+	err = c.Start()
+	w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := c.Pid()
+	if err := c.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if want := dir + "\nin"; out.String() != want {
+		t.Errorf("stdout %q, want %q", out.String(), want)
+	}
+	lines := strings.Fields(errOut.String())
+	if len(lines) != 2 || lines[0] != "err" || lines[1] != fmt.Sprint(pid) {
+		t.Errorf("stderr %q, want err and its own process group %d", errOut.String(), pid)
+	}
+	b := make([]byte, 16)
+	n, _ := r.Read(b)
+	if string(b[:n]) != "three\n" {
+		t.Errorf("fd 3 read %q", b[:n])
+	}
+}
+
+// KillGroup kills the child's whole process group when its context ends.
+func TestKillGroupKillsTheGroup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	o := Options{Stdout: w, SysProcAttr: &syscall.SysProcAttr{Setpgid: true}, KillGroup: true}
+	c := Command(ctx, NewEnv(), o, "/bin/sh", "-c", `sleep 30 >/dev/null & echo $!; wait`)
+	err = c.Start()
+	w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 32)
+	n, _ := r.Read(b)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b[:n])))
+	if err != nil {
+		t.Fatalf("no grandchild pid: %q", b[:n])
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	cancel()
+	c.Wait()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		st, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if err != nil {
+			return
+		}
+		if f := strings.Fields(string(st)); len(f) > 2 && f[2] == "Z" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the group's other process outlived the cancel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Output and the pipes refuse a stream the options already set.
+func TestSetStreamsRefused(t *testing.T) {
+	ctx := context.Background()
+	if _, err := Command(ctx, NewEnv(), Options{Stdout: &strings.Builder{}}, "/bin/true").Output(); err == nil {
+		t.Error("Output with Stdout set")
+	}
+	if _, err := Command(ctx, NewEnv(), Options{Stdin: strings.NewReader("")}, "/bin/cat").StdinPipe(); err == nil {
+		t.Error("StdinPipe with Stdin set")
+	}
+	if _, err := Command(ctx, NewEnv(), Options{Stdout: &strings.Builder{}}, "/bin/cat").StdoutPipe(); err == nil {
+		t.Error("StdoutPipe with Stdout set")
+	}
 }
