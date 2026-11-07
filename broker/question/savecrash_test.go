@@ -3,8 +3,12 @@ package question
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // REV-CHK-save-owner (#4193): the question book's save (persist) is stopped
@@ -89,5 +93,43 @@ func TestAnswerCrashDuringTheFileWrite(t *testing.T) {
 		if out, _ := r.answer("Q100 9:00"); out != `Got it: Q100 answered "9:00".` {
 			t.Fatalf("step %d: the resent answer: %q", step, out)
 		}
+	}
+}
+
+// unsynced makes the book's writes land on disk but report that the
+// directory sync failed (privfile.ErrUnsynced).
+func unsynced(path string) func([]byte) error {
+	return func(raw []byte) error {
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: synthetic", privfile.ErrUnsynced)
+	}
+}
+
+// REQ: HLD-1, CH-15
+// An ask and an answer whose saves fail only at the directory sync (#4971)
+// renamed the new book into place, so they count: memory holds the
+// question and then its answer, as the file and a restart do, and the
+// owner is not told to resend an answer the file already holds.
+func TestAskAndAnswerUnsyncedKeepMemoryEqualToTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "questions.json")
+	r := newRig(t, func(c *Config) { c.Path = path })
+	r.b.write = unsynced(path)
+	if _, err := r.b.Ask(context.Background(), "lin1", "q", slot()); err != nil {
+		t.Fatalf("unsynced ask: %v", err)
+	}
+	if st := r.status("lin1", "q"); st.State != Waiting {
+		t.Fatalf("memory after an unsynced ask: %+v", st)
+	}
+	if out, _ := r.answer("Q100 9:00"); out != `Got it: Q100 answered "9:00".` {
+		t.Fatalf("unsynced answer replied %q", out)
+	}
+	if st := r.status("lin1", "q"); st.State != Answered || st.Answer != "9:00" {
+		t.Fatalf("memory after an unsynced answer: %+v", st)
+	}
+	r.open() // restart
+	if st := r.status("lin1", "q"); st.State != Answered || st.Answer != "9:00" {
+		t.Fatalf("the file after an unsynced answer: %+v", st)
 	}
 }
