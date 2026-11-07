@@ -524,7 +524,7 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(vulncheck.initrd_status(self.initrds(ok)), (want, []))
         cases = {
             "no initrds": {},
-            "0 initrd members": {"a/initrd": mods},
+            "no initrd holds": {"a/initrd": mods},
             "2 initrd members": {**ok, "b/initrd": vulncheck.newc({S: want})},
             "not a regular file": {"a/initrd": vulncheck.newc({S: (0o120777, b"/var/lib/dpkg/status")})},
             "not a readable initrd": {**ok, "b/initrd": b"junk"},
@@ -536,11 +536,30 @@ class ImageTest(unittest.TestCase):
                 self.assertIsNone(status)
                 self.assertTrue(probs and what.split()[-1] in " ".join(probs), probs)
 
+    def test_each_initrd_problem_names_its_cause_and_next_step(self):
+        # #4927: an unreadable initrd is the one problem, not also "none holds it"; none holding it
+        # says to rebuild an image from before #4899; several name each copy; a link names the copier.
+        S, mods = vulncheck.INITRD_STATUS, vulncheck.newc({"usr/lib/modules/m.ko": b"x"})
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": mods, "b/initrd": b"junk"}))
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("b/initrd: not a readable initrd", probs[0])
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": mods}))
+        self.assertIn("built before #4899", probs[0])
+        self.assertIn("rebuild it", probs[0])
+        _, probs = vulncheck.initrd_status(self.initrds({"a/x": vulncheck.newc({S: b"y"}), "b/y": vulncheck.newc({S: b"y"})}))
+        self.assertTrue(probs[0].endswith("they are in %s, %s" % tuple(
+            str(pathlib.Path(probs[0].split(":")[0]) / r) for r in ("a/x", "b/y"))), probs)
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": vulncheck.newc({S: (0o120777, b"x")})}))
+        self.assertIn("keep_initrd_status", probs[0])
+
     def test_the_initrd_postinst_writes_where_the_scan_reads(self):
-        # #4000: mkosi-initrd cleans /var/lib/dpkg after postinst, so postinst copies it out.
-        text = INITRD_POSTINST.read_text()
-        self.assertIn('cp "$BUILDROOT/var/lib/dpkg/status" "$BUILDROOT/%s"' % vulncheck.INITRD_STATUS, text)
+        # #4000: mkosi-initrd cleans /var/lib/dpkg after postinst, so postinst copies it out. The
+        # initrd's postinst is drop.py (#4927), which purges first and then copies the status.
+        self.assertTrue(INITRD_POSTINST.is_symlink())
+        self.assertEqual(INITRD_POSTINST.resolve(), (ROOT / "image" / "mkosi" / "drop.py").resolve())
         self.assertTrue(INITRD_POSTINST.stat().st_mode & 0o111)
+        text = INITRD_POSTINST.read_text()
+        self.assertIn('INITRD_STATUS = "%s"' % vulncheck.INITRD_STATUS, text)
 
     def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},

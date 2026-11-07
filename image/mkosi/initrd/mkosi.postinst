@@ -1,11 +1,1 @@
-#!/bin/sh
-# Keep the default initrd's package list for the known-vulnerability scan (SPEC EVL-5, #4000).
-# mkosi-initrd sets CleanPackageMetadata=yes, so /var/lib/dpkg is gone before mkosi.finalize runs
-# and the initrd is built with no manifest; this runs before both, and copies dpkg's status file
-# into the initrd at the path tools/vulncheck.py reads it from (INITRD_STATUS). image/build.sh
-# copies the entry's initrds out of the ESP, and `vulncheck.py image` scans this list as its own
-# tree, so an advisory in a package only the initrd carries is reported, and a record accepting it
-# in the main tree does not accept it here.
-set -eu
-mkdir -p "$BUILDROOT/usr/share/agentos"
-cp "$BUILDROOT/var/lib/dpkg/status" "$BUILDROOT/usr/share/agentos/initrd.dpkg-status"
+../drop.py

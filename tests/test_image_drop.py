@@ -237,6 +237,79 @@ class NeededTest(unittest.TestCase):
         self.assertNotIn("bzip2", {drop.DROP[p][0] for p in drop.PARTIAL})
 
 
+class InitrdTest(unittest.TestCase):
+    """#4927: the default initrd purges what the main tree purges and it also carries."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        (self.root / "usr/bin").mkdir(parents=True)
+        (self.root / "usr/bin/bash").write_bytes(b"\x7fELF")
+        (self.root / "var/lib/dpkg/info").mkdir(parents=True)
+        (self.root / "var/lib/dpkg/status").write_text("Package: bash\n")
+
+    def calls(self, argv=(), env=None, stdout=""):
+        calls = []
+
+        def run(a, **kw):
+            calls.append(a)
+            return mock.Mock(stdout=stdout)
+
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "INITRD_FILES", ()):
+            rc = drop.run(list(argv), {"BUILDROOT": str(self.root)} if env is None else env)
+        return rc, calls
+
+    def test_every_source_the_issue_names_goes(self):
+        # The 32 image/initrd advisories #4927 accepted were in these sources.
+        self.assertEqual({src for p, (src, _) in drop.INITRD_DROP.items() if p not in drop.INITRD_PARTIAL},
+                         {"tar", "diffutils", "perl", "bzip2", "sqlite3", "dash", "shadow", "p11-kit", "adduser"})
+        self.assertTrue(set(drop.ESSENTIAL) <= set(drop.INITRD_DROP))
+        self.assertIn("usr/bin/lslogins", drop.INITRD_FILES)
+        self.assertIn("usr/bin/dpkg-deb", drop.INITRD_FILES)
+        self.assertNotIn("usr/bin/ss", drop.INITRD_FILES)
+        self.assertNotIn("libtirpc3t64", drop.INITRD_DROP)
+
+    def test_no_initrd_record_accepts_an_initrd_dropped_source(self):
+        # A stale record would quietly accept the advisory again if the package came back, and the
+        # scan only prints "unused record:" (Security finding 1 on #4899).
+        records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
+        gone = {src for p, (src, _) in drop.INITRD_DROP.items() if p not in drop.INITRD_PARTIAL}
+        self.assertTrue({drop.INITRD_DROP[p][0] for p in drop.INITRD_PARTIAL}.isdisjoint(gone))
+        self.assertEqual([r["id"] for r in records if r.get("where") == "image/initrd" and r["package"] in gone], [])
+
+    def test_no_tree_argument_purges_the_initrd_then_keeps_its_status(self):
+        rc, calls = self.calls(["final"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(calls[0][3:]), set(drop.INITRD_DROP))
+        purged = [p for c in calls if c[1:3] == ["dpkg", "--purge"] for p in c[3:] if not p.startswith("-")]
+        self.assertEqual(sorted(purged), sorted(drop.INITRD_DROP))
+        self.assertEqual((self.root / drop.INITRD_STATUS).read_text(), "Package: bash\n")
+
+    def test_a_failed_check_keeps_no_status(self):
+        (self.root / "usr/bin/odd").write_bytes(b"#!/usr/bin/perl\n")
+        (self.root / "usr/bin/odd").chmod(0o755)
+        rc, _ = self.calls([], stdout="/usr/bin/perl\n")
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.root / drop.INITRD_STATUS).exists())
+
+    def test_only_installed_perl_tools_apply_and_each_must_own_a_script(self):
+        (self.root / "var/lib/dpkg/info/debconf.list").write_text("/usr/sbin/dpkg-reconfigure\n")
+        (self.root / "usr/sbin").mkdir()
+        (self.root / "usr/sbin/dpkg-reconfigure").write_bytes(b"#!/usr/bin/perl -w\n")
+        (self.root / "usr/sbin/dpkg-reconfigure").chmod(0o755)
+        self.assertEqual(self.calls([], stdout="/usr/bin/perl\n")[0], 0)
+        (self.root / "usr/sbin/dpkg-reconfigure").unlink()
+        self.assertEqual(self.calls([], stdout="/usr/bin/perl\n")[0], 1)
+
+    def test_a_tree_argument_is_the_main_tree_and_nothing_is_refused(self):
+        with mock.patch.object(drop, "main", return_value=0) as m:
+            self.assertEqual(drop.run([str(self.root)], {}), 0)
+        m.assert_called_once_with(str(self.root))
+        with self.assertRaises(SystemExit):
+            drop.run([], {})
+
+
 class InterpreterTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -320,6 +393,11 @@ class WiringTest(unittest.TestCase):
         text = (MK / "mkosi.postinst").read_text()
         self.assertLess(text.index('python3 "$SRCDIR/drop.py" "$BUILDROOT"'), text.index("dpkg-status"))
         self.assertTrue(os.access(MK / "drop.py", os.X_OK))
+
+    def test_the_initrd_postinst_is_drop_py(self):
+        link = MK / "initrd/mkosi.postinst"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), "../drop.py")
 
     def test_no_record_accepts_a_dropped_source(self):
         records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
