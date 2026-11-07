@@ -551,6 +551,8 @@ func TestFollowClerkFlagsAndAnchors(t *testing.T) {
 	} {
 		if err := followClerkFlags(c.sock, c.anchors, c.uid, c.s); err == nil {
 			t.Fatalf("%+v: no error", c)
+		} else if (c.sock == "" || c.anchors == "") && !strings.Contains(err.Error(), "go together") {
+			t.Fatalf("%+v: %v", c, err)
 		}
 	}
 	if err := followClerkFlags("", "", -1, nil); err != nil {
@@ -612,5 +614,111 @@ func TestFollowClerkFlagsAndAnchors(t *testing.T) {
 	}
 	if _, err := readAnchors(filepath.Join(dir, "bad"), os.Getuid()); err == nil {
 		t.Fatal("a malformed file read")
+	}
+}
+
+// A trusted store with a shipped root that is missing, or does not read as
+// a root, is refused, and a missing one says so.
+func TestFollowSettingRefusesABadShippedRoot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "box")
+	if _, err := update.InitStore(dir, followRoot(t), 0); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := newFollowSetting(dir, filepath.Join(t.TempDir(), "missing.json"), noGuard); s != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing shipped root: %v %v", s, err)
+	}
+	bad := filepath.Join(t.TempDir(), "root.json")
+	if err := os.WriteFile(bad, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := newFollowSetting(dir, bad, noGuard); s != nil || err == nil {
+		t.Fatalf("a shipped root that does not read: %v %v", s, err)
+	}
+}
+
+// serveClerk refuses anchors it cannot read and a socket it cannot open,
+// and the socket closes when its context ends.
+func TestFollowClerkSocketLivesWithItsContext(t *testing.T) {
+	r := newClerkRig(t)
+	dir := filepath.Dir(r.sock)
+	anchors := filepath.Join(dir, "anchors")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.s.serveClerk(ctx, filepath.Join(dir, "a.sock"), filepath.Join(dir, "missing"), os.Getuid(), os.Getuid(), t.Logf); err == nil {
+		t.Fatal("served without anchors")
+	}
+	if err := r.s.serveClerk(ctx, filepath.Join(dir, "no", "b.sock"), anchors, os.Getuid(), os.Getuid(), t.Logf); err == nil {
+		t.Fatal("served on a socket in no directory")
+	}
+	sock := filepath.Join(dir, "c.sock")
+	cctx, ccancel := context.WithCancel(context.Background())
+	if err := r.s.serveClerk(cctx, sock, anchors, os.Getuid(), os.Getuid(), t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("the open socket: %v", err)
+	}
+	// Closing the listener removes its socket file.
+	ccancel()
+	for end := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(sock); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the socket outlived its context")
+		}
+	}
+}
+
+// readAnchors names why it refuses (a missing directory or file, a read
+// that fails, a file too long), and keeps no file open.
+func TestReadAnchorsSaysWhy(t *testing.T) {
+	dir, err := os.MkdirTemp("", "fa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := seedPair(1)
+	b, err := handoff.EncodeAnchors([]key.PublicKey{key.Ed25519(pub)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "anchors")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	long := filepath.Join(dir, "long")
+	if err := os.WriteFile(long, make([]byte, maxAnchorsFile+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ path, why string }{
+		{filepath.Join(dir, "no", "anchors"), "no such file"},
+		{filepath.Join(dir, "missing"), "no such file"},
+		{long, "too long"},
+		// A regular file, its owner's alone, whose read fails (EIO at 0).
+		{"/proc/self/mem", "input/output error"},
+	} {
+		if _, err := readAnchors(c.path, os.Getuid()); err == nil || !strings.Contains(err.Error(), c.why) {
+			t.Errorf("%s: %v, want %q", c.path, err, c.why)
+		}
+	}
+	open := func() int {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(fds)
+	}
+	before := open()
+	for range 64 {
+		if _, err := readAnchors(path, os.Getuid()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := open(); after > before+8 {
+		t.Fatalf("%d files open after 64 reads, %d before", after, before)
 	}
 }

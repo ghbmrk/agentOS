@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -72,5 +73,39 @@ func TestAHeldStepWaitsItsOwnWorth(t *testing.T) {
 	must(t, r.tick(hour))
 	if n := len(r.mail.Effects()); n != 2 {
 		t.Fatalf("after the buy's hour: %d effects, want 2", n)
+	}
+}
+
+// The clerk keeps a capped buy's priced hour on its own clock (KEY-9, CLK-2).
+func TestClerkKeepsThePricedHoldWhenTheKernelClockRunsAhead(t *testing.T) {
+	r := newRig(t)
+	ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "pb"}), 1<<40)
+	buy := st(key.Buy, "shop")
+	buy.Args["amount"] = "10"
+	r.plan("p1", ck, buy)
+	must(t, r.tick(0))
+	r.now = hour / 2
+	must(t, r.k.Tick(2*hour))
+	if len(r.mail.Effects()) != 0 || r.status("p1") != kernel.SFailed {
+		t.Fatalf("status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
+	}
+	if d := r.k.State().Plans["p1"].Steps[0].Detail; d != check.RHold {
+		t.Fatalf("detail %q", d)
+	}
+}
+
+// An irreversible step whose hold, worth term included, is zero is never
+// held: a rank-1 post under a clerk key with no KEY-8 window runs at once
+// (KEY-8, KEY-9).
+func TestAZeroHoldIsNoHold(t *testing.T) {
+	r := newRig(t)
+	ck := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Post}, Serial: "z1"}), 1<<40)
+	r.plan("p1", ck, st(key.Post, "alice"))
+	if a := kernel.Next(r.k.State(), "p1", hour); a.Kind != kernel.ActDispatch {
+		t.Fatalf("a post with no window: act %+v", a)
+	}
+	must(t, r.tick(hour))
+	if s := r.k.State().Plans["p1"].Steps[0]; s.HeldSeq != 0 || len(r.mail.Effects()) != 1 {
+		t.Fatalf("a post with no window: %+v, %d effects", s, len(r.mail.Effects()))
 	}
 }

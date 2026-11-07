@@ -300,16 +300,36 @@ func TestOSS10wClockFromLatest(t *testing.T) {
 func TestOSS10wNeedsEveryPiece(t *testing.T) {
 	r := newRig(t)
 	alert := func(context.Context, string) error { return nil }
+	// Each case lacks one piece only, so each refusal is that piece's.
 	for i, c := range []Config{
-		{Shipped: r.shipped, Clock: r.clk, Alert: alert},
-		{Store: r.store, Clock: r.clk, Alert: alert},
-		{Store: r.store, Shipped: r.shipped, Alert: alert},
-		{Store: r.store, Shipped: r.shipped, Clock: r.clk},
-		{Store: r.store, Shipped: []byte("{}"), Clock: r.clk, Alert: alert},
+		{Shipped: r.shipped, Clock: r.clk, Alert: alert, Pending: r.pending},
+		{Store: r.store, Clock: r.clk, Alert: alert, Pending: r.pending},
+		{Store: r.store, Shipped: r.shipped, Alert: alert, Pending: r.pending},
+		{Store: r.store, Shipped: r.shipped, Clock: r.clk, Pending: r.pending},
+		{Store: r.store, Shipped: r.shipped, Clock: r.clk, Alert: alert},
+		{Store: r.store, Shipped: []byte("{}"), Clock: r.clk, Alert: alert, Pending: r.pending},
 	} {
 		if _, err := New(c); err == nil {
 			t.Fatalf("case %d made an executor", i)
 		}
+	}
+	if _, err := New(Config{Store: r.store, Shipped: r.shipped, Clock: r.clk, Alert: alert, Pending: r.pending}); err != nil {
+		t.Fatalf("every piece: %v", err)
+	}
+}
+
+// Describe takes a chain of at most update.MaxRootRotations root files.
+func TestOSS10wrChainIsBounded(t *testing.T) {
+	r := newRig(t)
+	chain := make([][]byte, update.MaxRootRotations+1)
+	for i := range chain {
+		chain[i] = []byte("{}")
+	}
+	if _, err := r.x.Describe(context.Background(), r.fork, chain...); !errors.Is(err, update.ErrNotProject) {
+		t.Fatalf("%d root files: %v", len(chain), err)
+	}
+	if _, err := r.x.Describe(context.Background(), r.fork, chain[1:]...); err != nil {
+		t.Fatalf("%d root files: %v", len(chain)-1, err)
 	}
 }
 
@@ -333,6 +353,51 @@ func TestOSS10wHeldIsBounded(t *testing.T) {
 	}
 	if out := r.run(req("a1", "Acme", first)); out.Result != NotSwitched {
 		t.Fatalf("an evicted root was followed: %+v", out)
+	}
+}
+
+// MaxHeld roots are all held: the oldest goes only for one more.
+func TestOSS10wMaxHeldAreKept(t *testing.T) {
+	r := newRig(t)
+	first := r.describe(r.fork)
+	for i := 1; i < MaxHeld; i++ {
+		r.describe(rootOf(t, newKey(t), newKey(t)))
+	}
+	if out := r.run(req("a1", "Acme", first)); out.Result != SwitchedOK {
+		t.Fatalf("the oldest of %d held roots was not followed: %+v", MaxHeld, out)
+	}
+	// Its alert went out, so none is owed on disk.
+	if _, err := os.Stat(r.pending); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an alert sent is still owed: %v", err)
+	}
+}
+
+// Clearing the owed alert removes its file, and a file it cannot remove is
+// an error, never an alert silently still owed.
+func TestOSS10wClearingTheOwedAlertFailsLoudly(t *testing.T) {
+	r := newRig(t)
+	if err := r.x.setUnsent(""); err != nil {
+		t.Fatalf("nothing owed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(r.pending, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.x.setUnsent(""); err == nil {
+		t.Fatal("an owed alert that could not be removed cleared")
+	}
+}
+
+// Each root past MaxHeld evicts the oldest still held, not the same one twice.
+func TestOSS10wEachNewRootEvictsTheOldest(t *testing.T) {
+	r := newRig(t)
+	first, second := r.describe(r.fork), r.describe(rootOf(t, newKey(t), newKey(t)))
+	for i := 0; i < MaxHeld; i++ {
+		r.describe(rootOf(t, newKey(t), newKey(t)))
+	}
+	for _, d := range []string{first, second} {
+		if out := r.run(req("a1", "Acme", d)); out.Result != NotSwitched {
+			t.Fatalf("an evicted root was followed: %+v", out)
+		}
 	}
 }
 
