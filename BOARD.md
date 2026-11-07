@@ -426,7 +426,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-graph-brake | TN-graph `bounded` accepts a held brake only when turning it off is itself delayed or the witness watches the brake (KRN-11; #3193 Security 4, Potency 2). | TN-graph (#2857) | queued (later; tier A) |
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
 | EDGE-link-core-c2c later findings | EDGE-link-core-c2c later findings: a .link allowlist in the tree checks, the edge image's own link naming and address, ARP on the link, a stale link-set element, a long comment (later findings from the #3834 reviews). | EDGE-link-core-c2c #3459 | queued (later; tier A; one session) |
-| REV-CHK-links-agentosd | REV-CHK-links-agentosd: root-side path operations in `agentosd` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2 (#4044), UPD-5r-b7 (#4475), UPD-7w (#3961) | queued (A) |
@@ -450,7 +449,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-hostcheck-image-tools | CI-hostcheck-image-tools: hostcheck runs qemu, swtpm and OVMF from pinned sources, not the runner's packages. Release; from #4776. | #4776 | building (release) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
-| VULN-initrd-drop | VULN-initrd-drop: the initrd purges the packages the main tree purges (dash, tar, perl-base, sqlite3 and the rest), and their `image/initrd` records go | #4000 | queued |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
 | REV-CHK-save-owner-f1 | Owner-side saves (owner commit, question persist, localsrv setup record) keep memory equal to the file when only the directory sync failed (privfile.ErrUnsynced). | #4193 | building |
 | ENF-c-f3 | ENF-c-f3: recovery-code wording after the wait, rotating an unspent code, restart-proof retry card | #4967 | building |
@@ -509,4 +507,6 @@ issue #4984: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #5008: body has no board-row block
 issue #5041: body has no board-row block
 issue #5047: body has no board-row block
+issue #5053: body has no board-row block
+issue #5055: body has no board-row block
 ```
