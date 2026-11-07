@@ -274,7 +274,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	if c.checkerSeed != "" {
-		writeCheckerSeed(c.checkerSeed, st, k.ClerkRoot.Ref())
+		writeCheckerSeed(c.checkerSeed, st, k.ClerkRoot.Ref(), nil)
 	}
 	if c.clerkAnchors != "" {
 		ca, err := clerkAnchors(st, k, c.log)
@@ -620,8 +620,9 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 // a reader of the file holds the seed. A store with no seed removes it, so
 // a checker never starts on an earlier boot's. A failure is said, the file
 // removed if its directory is mine alone, and the kernel still starts.
-func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
-	if err := putCheckerSeed(path, st, root); err != nil {
+// stop is putCheckerSeed's.
+func writeCheckerSeed(path string, st *seal.Store, root *[32]byte, stop func(int) bool) {
+	if err := putCheckerSeed(path, st, root, stop); err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
 		if !errors.Is(err, errNotMine) { // a remove there could act through a planted link (#4966)
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -644,7 +645,10 @@ func ownDir(dir string, mode, mask os.FileMode) error {
 	return nil
 }
 
-func putCheckerSeed(path string, st *seal.Store, root *[32]byte) error {
+// putCheckerSeed writes the sealed seed for writeCheckerSeed. stop is a
+// test seam only (REV-CHK-save, #4192): it ends the privfile.WriteAtomic
+// after a step as a crash would; production passes nil.
+func putCheckerSeed(path string, st *seal.Store, root *[32]byte, stop func(int) bool) error {
 	dir := filepath.Dir(path)
 	if err := ownDir(dir, 0o700, 0o077); err != nil {
 		return err
@@ -679,7 +683,7 @@ func putCheckerSeed(path string, st *seal.Store, root *[32]byte) error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(dir, filepath.Base(path), blob, nil)
+	return privfile.WriteAtomic(dir, filepath.Base(path), blob, stop)
 }
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot

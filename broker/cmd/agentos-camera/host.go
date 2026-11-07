@@ -157,6 +157,10 @@ type host struct {
 	broken  map[string]bool
 	wg      sync.WaitGroup
 	started bool
+	// saveStop is a test seam only (REV-CHK-save, #4192): it ends save's
+	// privfile.WriteAtomic after a step as a crash would. Production leaves
+	// it nil.
+	saveStop func(int) bool
 }
 
 // load reads the settings file: missing is no camera; any malformed
@@ -198,7 +202,7 @@ func (h *host) save() error {
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(h.dir, stateName, b, nil)
+	return privfile.WriteAtomic(h.dir, stateName, b, h.saveStop)
 }
 
 // start loads the settings and adds every camera to the capture store,

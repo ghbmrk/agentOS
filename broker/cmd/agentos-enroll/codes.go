@@ -126,13 +126,14 @@ func readStagedSeed(path string) (stagedSeed, error) {
 	return parseStaged(b)
 }
 
-func writeStagedSeed(dir string, s stagedSeed) error {
+// writeStagedSeed replaces the staged seed in c.setupDir.
+func (c config) writeStagedSeed(s stagedSeed) error {
 	b, err := s.marshal()
 	if err != nil {
 		return err
 	}
 	defer clear(b)
-	return privfile.WriteAtomic(dir, codeSeedFile, b, nil)
+	return privfile.WriteAtomic(c.setupDir, codeSeedFile, b, c.seedStop)
 }
 
 // codesMain runs -codes on in and out and returns the exit status. The
@@ -191,7 +192,7 @@ func codes(c config, in io.Reader, now time.Time) (string, error) {
 	}
 	if r.Op == "enrol" {
 		s.seed.Wipe()
-		return enrolCodes(c.setupDir)
+		return enrolCodes(c)
 	}
 	defer s.seed.Wipe()
 	step, ok := totp.Match(s.seed.Seed.Get(), r.Code, now, 0)
@@ -203,23 +204,23 @@ func codes(c config, in io.Reader, now time.Time) (string, error) {
 			}
 			return "", errCodesAgain
 		}
-		if err := writeStagedSeed(c.setupDir, s); err != nil {
+		if err := c.writeStagedSeed(s); err != nil {
 			return "", err
 		}
 		return "", errCodesWrong
 	}
 	s.confirmed, s.wrong, s.seed.Step = true, 0, step
-	return "", writeStagedSeed(c.setupDir, s)
+	return "", c.writeStagedSeed(s)
 }
 
-// enrolCodes stages a fresh seed and returns its link.
-func enrolCodes(dir string) (string, error) {
+// enrolCodes stages a fresh seed in c.setupDir and returns its link.
+func enrolCodes(c config) (string, error) {
 	seed := make([]byte, codeSeedLen)
 	defer clear(seed)
 	if _, err := rand.Read(seed); err != nil {
 		return "", err
 	}
-	if err := writeStagedSeed(dir, stagedSeed{seed: handoff.CodeSeed{Seed: secret.Hide(seed)}}); err != nil {
+	if err := c.writeStagedSeed(stagedSeed{seed: handoff.CodeSeed{Seed: secret.Hide(seed)}}); err != nil {
 		return "", err
 	}
 	return otpauthURI(seed), nil

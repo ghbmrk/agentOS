@@ -44,7 +44,7 @@ func TestCheckerSeedRefusedDirectoryIsNotRemovedIn(t *testing.T) {
 		if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		writeCheckerSeed(victim, st, new([32]byte))
+		writeCheckerSeed(victim, st, new([32]byte), nil)
 		if _, err := os.Lstat(victim); err != nil {
 			t.Errorf("%s: the seed's name was removed in a refused directory: %v", name, err)
 		}
@@ -165,10 +165,10 @@ func TestCheckerSeedFailureRemovesTheStaleSeed(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := putCheckerSeed(stale, st, new([32]byte)); err == nil || errors.Is(err, errNotMine) {
+	if err := putCheckerSeed(stale, st, new([32]byte), nil); err == nil || errors.Is(err, errNotMine) {
 		t.Fatalf("putCheckerSeed = %v, want a failure past the directory check", err)
 	}
-	writeCheckerSeed(stale, st, new([32]byte))
+	writeCheckerSeed(stale, st, new([32]byte), nil)
 	if _, err := os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the stale seed was kept after a failed write: %v", err)
 	}

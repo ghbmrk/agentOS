@@ -166,13 +166,15 @@ var errSlotTooLarge = errors.New("agentos-clerk-model: the plan login's slot is 
 // openStore opens the slot in dir: a plain file of this uid's alone, or
 // none; anything else refuses the start, since it is the directory's
 // tampering, not the slot's. Its value is opened, and checked against the
-// plan, when plan.New binds it (newLogin).
-func openStore(dir, slot string, s clerk.Sealer) (*plan.Store, error) {
+// plan, when plan.New binds it (newLogin). stop is a test seam only
+// (REV-CHK-save, #4192): it ends the slot's privfile.WriteAtomic after a
+// step as a crash would; production passes nil.
+func openStore(dir, slot string, s clerk.Sealer, stop func(int) bool) (*plan.Store, error) {
 	store := plan.NewStore(s, func(b []byte) error {
 		if len(b) > maxPlanSlot {
 			return errSlotTooLarge
 		}
-		return privfile.WriteAtomic(dir, slot, b, nil)
+		return privfile.WriteAtomic(dir, slot, b, stop)
 	})
 	b, err := readSlot(dir, slot)
 	if err != nil {
@@ -211,13 +213,14 @@ var errKeysTooLarge = errors.New("agentos-clerk-model: the API keys' slot is too
 // openKeys opens the API keys' slot in dir as openStore opens the plan
 // login's. A value that does not open, or one over the limit, starts the
 // clerk with no key, logging one line, so the owner can set a key again
-// and that write replaces the slot (as newLogin does).
-func openKeys(dir string, s clerk.Sealer) (*model.Keys, error) {
+// and that write replaces the slot (as newLogin does). stop is openStore's
+// test seam.
+func openKeys(dir string, s clerk.Sealer, stop func(int) bool) (*model.Keys, error) {
 	keys := model.NewKeys(s, func(b []byte) error {
 		if len(b) > maxPlanSlot {
 			return errKeysTooLarge
 		}
-		return privfile.WriteAtomic(dir, keySlot, b, nil)
+		return privfile.WriteAtomic(dir, keySlot, b, stop)
 	})
 	b, err := readSlot(dir, keySlot)
 	if err != nil {
@@ -258,7 +261,7 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 	for _, r := range declarations(guard) {
 		// Each plan has its own slot and its own Login, so a placeholder
 		// one mints resolves at no other.
-		store, err := openStore(c.dir, planSlot(r.d.Name), sealer)
+		store, err := openStore(c.dir, planSlot(r.d.Name), sealer, nil)
 		if err != nil {
 			return err
 		}
@@ -273,7 +276,7 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 			Workers: run.SignInSock{Host: signIns, Login: login, SandboxUID: c.agentosdUID},
 		})
 	}
-	keys, err := openKeys(c.dir, sealer)
+	keys, err := openKeys(c.dir, sealer, nil)
 	if err != nil {
 		return err
 	}
