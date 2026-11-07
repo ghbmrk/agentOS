@@ -263,7 +263,8 @@ class InitrdTest(unittest.TestCase):
     def test_every_source_the_issue_names_goes(self):
         # The 32 image/initrd advisories #4927 accepted were in these sources.
         self.assertEqual({src for p, (src, _) in drop.INITRD_DROP.items() if p not in drop.INITRD_PARTIAL},
-                         {"tar", "diffutils", "perl", "bzip2", "sqlite3", "dash", "shadow", "p11-kit", "adduser"})
+                         {"tar", "diffutils", "perl", "bzip2", "sqlite3", "dash", "shadow", "p11-kit", "adduser",
+                          "libsemanage", "libsepol"})
         self.assertTrue(set(drop.ESSENTIAL) <= set(drop.INITRD_DROP))
         self.assertIn("usr/bin/lslogins", drop.INITRD_FILES)
         self.assertIn("usr/bin/dpkg-deb", drop.INITRD_FILES)
