@@ -8,6 +8,7 @@ planted fixture when both are on PATH (the vulncheck workflow installs them and 
 """
 import base64
 import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -29,6 +30,7 @@ import vulncheck  # noqa: E402
 WORKFLOW = ROOT / ".github" / "workflows" / "vulncheck.yml"
 IMAGE_WORKFLOW = ROOT / ".github" / "workflows" / "image.yml"
 POSTINST = ROOT / "image" / "mkosi" / "mkosi.postinst"
+INITRD_POSTINST = ROOT / "image" / "mkosi" / "initrd" / "mkosi.postinst"
 
 
 def stream(*findings, modules=("example.com/m",), config=True, osv=()):
@@ -344,13 +346,21 @@ class ImageTest(unittest.TestCase):
                              "packages": list(pkgs) + ([self.CANARY] if canary else [])}]}
 
     def scan(self, records, found, src="x"):
-        saved = vulncheck.run_image, vulncheck.manifest_problems
-        vulncheck.run_image = lambda src, env=None, offline=False: ([dict(f) for f in found], [])
+        """scan_image with each tree's findings FOUND (by where) and no file problems."""
+        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
+            [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
+        vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
         try:
             return vulncheck.scan_image({"accepted": records}, src)
         finally:
-            vulncheck.run_image, vulncheck.manifest_problems = saved
+            vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status = saved
+
+    def image_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return vulncheck.control_image(pathlib.Path(tmp.name) / "image")
 
     def test_every_vulnerability_in_an_image_package_fails(self):
         # TN-vulncheck-6: queried by source package; the binary is shown beside it; the
@@ -442,16 +452,114 @@ class ImageTest(unittest.TestCase):
     def test_the_image_scan_reports_a_manifest_mismatch(self):
         # Combined review 6376479024: scan_image must apply manifest_problems, not only have it.
         d = self.manifest_dir(lambda pkgs: pkgs.pop(0))
+        shutil.copytree(self.image_dir() / vulncheck.INITRDS, d / vulncheck.INITRDS)
         saved = vulncheck.run_image
-        vulncheck.run_image = lambda src, env=None, offline=False: ([], [])
+        vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
         try:
             _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
             self.assertEqual(probs, vulncheck.manifest_problems(d))
             self.assertEqual(len(probs), 1)
-            _, probs, _ = vulncheck.scan_image({"accepted": []}, vulncheck.FIXTURE / "image")
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, self.image_dir())
             self.assertEqual(probs, [])
         finally:
             vulncheck.run_image = saved
+
+    def test_the_initrd_is_scanned_as_its_own_tree(self):
+        # REQ: EVL-5. #4000: the initrd's dpkg status, read out of the entry's initrds, is queried
+        # like the main tree's, and its findings are the initrd's.
+        d, calls = self.image_dir(), []
+
+        def run(src, env=None, offline=False, where="image", status=None):
+            calls.append((where, status))
+            return [{**fail("DSA-1"), "where": where}], []
+        saved = vulncheck.run_image
+        vulncheck.run_image = run
+        try:
+            fs, probs, _ = vulncheck.scan_image({"accepted": []}, d)
+        finally:
+            vulncheck.run_image = saved
+        self.assertEqual(probs, [])
+        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes())])
+        self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs], [("image", "FAIL"), ("image/initrd", "FAIL")])
+
+    def test_a_record_accepts_an_image_advisory_only_in_its_own_tree(self):
+        # #4000: a main-tree acceptance must not hide the same advisory in the initrd, nor the reverse.
+        recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
+                {"id": "DSA-2", "issue": 2, "why": "x", "where": "image/initrd", "package": "m"}]
+        found = [{**fail(i), "where": w} for w in ("image", "image/initrd") for i in ("DSA-1", "DSA-2")]
+        fs, probs, unused = self.scan(recs, found)
+        self.assertEqual(([(f["where"], f["id"], vulncheck.verdict(f)) for f in fs], probs, unused), (
+            [("image", "DSA-1", "accepted #1"), ("image", "DSA-2", "FAIL"),
+             ("image/initrd", "DSA-1", "FAIL"), ("image/initrd", "DSA-2", "accepted #2")], [], []))
+
+    def test_the_initrd_archive_holds_the_initrds_status(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = pathlib.Path(tmp.name) / "a.tar"
+        vulncheck.image_archive(vulncheck.FIXTURE / "image", out, b"Package: libearly1\n")
+        with tarfile.open(out) as t:
+            manifest = json.load(t.extractfile("manifest.json"))
+            layer = tarfile.open(fileobj=t.extractfile(manifest[0]["Layers"][0]))
+            status = layer.extractfile("var/lib/dpkg/status").read()
+        self.assertTrue(status.startswith(b"Package: libearly1\n\n"))
+        self.assertIn(vulncheck.CANARY.encode(), status)
+        with self.assertRaises(vulncheck.ScanError):
+            vulncheck.image_archive(vulncheck.FIXTURE / "image", out, b"\n")
+
+    def initrds(self, files):
+        """An image directory whose initrds are FILES, {relative path: bytes}."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name)
+        for rel, data in files.items():
+            (d / vulncheck.INITRDS / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / vulncheck.INITRDS / rel).write_bytes(data)
+        return d
+
+    def test_the_initrd_status_is_read_from_exactly_one_initrd(self):
+        # #4000: the scan reads the list the initrd boots with, and fails rather than scan nothing.
+        want, S = b"Package: x\nStatus: install ok installed\n", vulncheck.INITRD_STATUS
+        mods = vulncheck.newc({"usr/lib/modules/m.ko": b"x"})
+        ok = {"a/modules": mods, "a/initrd": mods + b"\0" * 4 + gzip.compress(vulncheck.newc({"./" + S: want}))}
+        self.assertEqual(vulncheck.initrd_status(self.initrds(ok)), (want, []))
+        cases = {
+            "no initrds": {},
+            "no initrd holds": {"a/initrd": mods},
+            "2 initrd members": {**ok, "b/initrd": vulncheck.newc({S: want})},
+            "not a regular file": {"a/initrd": vulncheck.newc({S: (0o120777, b"/var/lib/dpkg/status")})},
+            "not a readable initrd": {**ok, "b/initrd": b"junk"},
+            "truncated": {**ok, "b/initrd": vulncheck.newc({S: want})[:150]},
+        }
+        for what, files in cases.items():
+            with self.subTest(what):
+                status, probs = vulncheck.initrd_status(self.initrds(files))
+                self.assertIsNone(status)
+                self.assertTrue(probs and what.split()[-1] in " ".join(probs), probs)
+
+    def test_each_initrd_problem_names_its_cause_and_next_step(self):
+        # #4927: an unreadable initrd is the one problem, not also "none holds it"; none holding it
+        # says to rebuild an image from before #4899; several name each copy; a link names the copier.
+        S, mods = vulncheck.INITRD_STATUS, vulncheck.newc({"usr/lib/modules/m.ko": b"x"})
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": mods, "b/initrd": b"junk"}))
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("b/initrd: not a readable initrd", probs[0])
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": mods}))
+        self.assertIn("built before #4899", probs[0])
+        self.assertIn("rebuild it", probs[0])
+        _, probs = vulncheck.initrd_status(self.initrds({"a/x": vulncheck.newc({S: b"y"}), "b/y": vulncheck.newc({S: b"y"})}))
+        self.assertTrue(probs[0].endswith("they are in %s, %s" % tuple(
+            str(pathlib.Path(probs[0].split(":")[0]) / r) for r in ("a/x", "b/y"))), probs)
+        _, probs = vulncheck.initrd_status(self.initrds({"a/initrd": vulncheck.newc({S: (0o120777, b"x")})}))
+        self.assertIn("keep_initrd_status", probs[0])
+
+    def test_the_initrd_postinst_writes_where_the_scan_reads(self):
+        # #4000: mkosi-initrd cleans /var/lib/dpkg after postinst, so postinst copies it out. The
+        # initrd's postinst is drop.py (#4927), which purges first and then copies the status.
+        self.assertTrue(INITRD_POSTINST.is_symlink())
+        self.assertEqual(INITRD_POSTINST.resolve(), (ROOT / "image" / "mkosi" / "drop.py").resolve())
+        self.assertTrue(INITRD_POSTINST.stat().st_mode & 0o111)
+        text = INITRD_POSTINST.read_text()
+        self.assertIn('INITRD_STATUS = "%s"' % vulncheck.INITRD_STATUS, text)
 
     def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
@@ -466,6 +574,9 @@ class ImageTest(unittest.TestCase):
         # Debian's fix decides an image record, so it names no version; every other record does.
         good = {"id": "DSA-1", "issue": 1, "why": "x"}
         self.assertEqual(vulncheck.record_problems([{**good, "where": "image", "package": "curl"}]), [])
+        self.assertEqual(vulncheck.record_problems([{**good, "where": "image/initrd", "package": "curl"}]), [])
+        self.assertEqual(len(vulncheck.record_problems([{**good, "where": "image/initrd", "package": "curl",
+                                                         "version": "1.0-1"}])), 1)
         for bad in ({**good, "where": "image"}, {**good, "package": "curl"},
                     {**good, "where": "broker", "package": "curl"}, {**good, "where": "image", "package": " "},
                     {**good, "where": "image", "package": "curl", "version": "1.0-1"}):
@@ -473,8 +584,9 @@ class ImageTest(unittest.TestCase):
 
     def test_check_issues_partitions_the_records(self):
         # Potency finding on #2917: closing #2919 must withdraw the image acceptances.
-        cfg = {"accepted": [{"id": "A", "where": "image"}, {"id": "B"}, {"id": "C", "where": "broker"}]}
-        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "image")], ["A"])
+        cfg = {"accepted": [{"id": "A", "where": "image"}, {"id": "B"}, {"id": "C", "where": "broker"},
+                            {"id": "D", "where": "image/initrd"}]}
+        self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "image")], ["A", "D"])
         self.assertEqual([r["id"] for r in vulncheck.issue_records(cfg, "run")], ["B", "C"])
 
     def test_a_record_cannot_accept_an_advisory_debian_has_fixed(self):
