@@ -19,7 +19,7 @@ var (
 
 // Forms is a without its zone, then every IPv4 address it embeds:
 // IPv4-mapped (alone, unmapped), IPv4-compatible, NAT64 (well-known, and
-// local-use at its /48 and /96 positions), SIIT IPv4-translated, 6to4,
+// local-use at its /48, /56, /64 and /96 positions), SIIT IPv4-translated, 6to4,
 // ISATAP and Teredo (its server and its client).
 func Forms(a netip.Addr) []netip.Addr {
 	a = a.WithZone("").Unmap()
@@ -33,8 +33,8 @@ func Forms(a netip.Addr) []netip.Addr {
 	switch {
 	case nat64.Contains(a), siit.Contains(a):
 		out = append(out, tail)
-	case nat64Local.Contains(a):
-		out = append(out, tail, v4(6, 7, 9, 10))
+	case nat64Local.Contains(a): // RFC 6052 §2.2: /96, /48, /56, /64; byte 8 is the u octet
+		out = append(out, tail, v4(6, 7, 9, 10), v4(7, 9, 10, 11), v4(9, 10, 11, 12))
 	case sixToFour.Contains(a):
 		out = append(out, v4(2, 3, 4, 5))
 	case teredo.Contains(a):

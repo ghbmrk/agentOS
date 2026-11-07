@@ -9,7 +9,8 @@
 # A PR fails when a measure ends above its ceiling and above main's measure, so while main is over
 # a ceiling a PR may not grow it, and adding means deleting as much elsewhere. Any PR may lower a
 # number. Raising one or deleting this file needs a `Ceiling: <decision ID>` line naming Mark's
-# active DECISIONS.md row on main that names the PR.
+# active DECISIONS.md row on main that names the PR. Each PR is measured against main at its last
+# push, so two PRs can land together above a ceiling; main is then over it and may not grow.
 
 trusted-lines 58895
 spec-words 65725

@@ -64,6 +64,12 @@ class CheckTest(unittest.TestCase):
         # (D-152 itself, say) cannot waive an unrelated PR's growth.
         head = {"spec": 120, "process": 50}
         self.assertTrue(word_budget.check(self.base, head, "Body.\nWord-budget: D-7\n", DECISIONS, 42)[0])
+        # #4946 UX: the waiver does not lift SPEC.md above its D-310 ceiling, and the line says so.
+        ok, lines = word_budget.check(self.base, {"spec": 101, "process": 50}, "Word-budget: D-7", DECISIONS, 42)
+        self.assertTrue(ok)
+        self.assertIn("SPEC.md stays capped by tools/ceilings.txt (D-310)", lines[-1])
+        ok, lines = word_budget.check(self.base, {"spec": 100, "process": 51}, "Word-budget: D-7", DECISIONS, 42)
+        self.assertNotIn("ceilings", lines[-1])
         self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS, 43)[0])
         self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-7", DECISIONS)[0])
         self.assertFalse(word_budget.check(self.base, head, "Word-budget: D-8", DECISIONS, 42)[0])

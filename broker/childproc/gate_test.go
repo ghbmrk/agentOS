@@ -44,6 +44,10 @@ var exempt = map[string]string{
 	// seccomp filter and exec the stack (syscall.Exec) with an empty
 	// environment. Same reason and same limits as the loader.
 	"enforcer/radio/confine": "the enforcer's radio launcher starts and execs the confined radio stacks; enforcer code cannot import childproc (ENF-k)",
+	// The resolver runner (ENF-l-b, #4464) starts each dnsmasq instance:
+	// one fixed absolute binary, an empty environment, its own process
+	// group so a stop kills its TCP children. Same reason and limits.
+	"enforcer/dns/run": "the enforcer's resolver runner starts its dnsmasq instances; enforcer code cannot import childproc (ENF-f-9)",
 	// The source lints' shared loader (REV-CHK-lintload, #4273) runs go
 	// list. Only _test.go files import it, which its own
 	// TestOnlyTestsImportTheLoader holds, so no shipped binary links it.
@@ -60,6 +64,7 @@ var exempt = map[string]string{
 // only, so the cut is that one package's too (#4755 item 9).
 var within = map[string]string{
 	"enforcer/nft/load":      "enforcer =cmd/agentos-enforcer",
+	"enforcer/dns/run":       "=cmd/agentos-enforcer",
 	"enforcer/radio/confine": "enforcer",
 }
 

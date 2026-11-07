@@ -1530,10 +1530,6 @@ func hexDigest(s string) bool {
 	return true
 }
 
-// FollowNameOK reports whether the gate admits name for a follow request,
-// so the page can say why one was not asked.
-func FollowNameOK(name string) bool { return followName(name) }
-
 // ReservedFollowName starts the switch-back's line; no name may.
 const ReservedFollowName = "the AgentOS project"
 

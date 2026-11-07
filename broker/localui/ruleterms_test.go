@@ -192,6 +192,12 @@ func TestSR3_3ASuggestionIsNotTheFinalCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for i := range 300 { // a clean checked record, so the silent-failure gate is open (D-309)
+		at := a.clock().Add(-80*24*time.Hour + time.Duration(i)*time.Hour)
+		if err := o.Record(attention.Outcome{Clerk: "mail", Step: time.Duration(i).String(), Ran: at, At: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for i := range 2 {
 		if err := o.Observe(attention.Decision{Clerk: "mail", Verb: key.Send, Approved: true, Verified: true, Content: "template:inv-std",
 			Recipients: []string{"billing@acme.example"}, At: a.clock().Add(time.Duration(i) * time.Hour)}); err != nil {
