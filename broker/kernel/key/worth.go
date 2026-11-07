@@ -1,5 +1,7 @@
 package key
 
+import "math"
+
 // Reach sets the price (KEY-9, D-307). A key's worth is the highest rank of
 // the asset classes its verbs reach, after its spend caps, by the fixed table
 // below, shipped in the signed image like the verb classes (KRN-3). An owner
@@ -7,9 +9,10 @@ package key
 // the table's column for the act at the key's worth. worth_test.go checks the
 // table's own rules: no rank, price or hold falls as worth rises.
 //
-// Reach here is a key's own verbs. The closure over the declarations' edges
-// (CLK-10, CLK-14), the wiring into grants and the hold, and
-// grows-then-narrows are #4999.
+// Reach here is a key's own verbs; the closure over the declarations' edges
+// (CLK-10, CLK-14) and grows-then-narrows are #4999's second part. A grant is
+// priced at its key's worth (kernel cosign.go), a held step at what its own
+// verb reaches (Window; Mark, 2026-11-07, #4999 comment 6705669120).
 
 // Proof is a rung of the CH-3 ladder, ordered by what an attacker must hold.
 type Proof uint8
@@ -40,12 +43,14 @@ const (
 type Rank uint8
 
 // reaches is what each verb reaches directly (CLK-14's effect classes:
-// sends and data readable or destroyable are data, accounts are identity,
-// devices are safety until a declaration rules it out).
+// sends and data readable or destroyable are data, accounts are identity).
+// A device is safety only when a declaration marks it safety or access, so
+// `actuate` reaches none and `present` only its audience; `actuate-physical`
+// is always safety (CH-3's device rows; Mark, 2026-11-07).
 var reaches = map[Verb][]Asset{
 	Read: {AssetData}, Fetch: {AssetData}, Draft: {AssetNone}, Organize: {AssetNone},
-	Trash: {AssetData}, Present: {AssetData, AssetSafety}, Unsubscribe: {AssetData},
-	Send: {AssetData}, Post: {AssetData}, Actuate: {AssetSafety}, Buy: {AssetMoney},
+	Trash: {AssetData}, Present: {AssetData}, Unsubscribe: {AssetData},
+	Send: {AssetData}, Post: {AssetData}, Actuate: {AssetNone}, Buy: {AssetMoney},
 	Share: {AssetData}, DeleteRemote: {AssetData, AssetIdentity},
 	ChangeAccount:        {AssetIdentity, AssetData, AssetMoney},
 	RevealOrCreateSecret: {AssetIdentity, AssetData}, ActuatePhysical: {AssetSafety},
@@ -164,3 +169,25 @@ func Price(a Act, r Rank) Proof {
 
 // HoldExtra lengthens an irreversible step's KEY-8 hold at worth r, in ms.
 func HoldExtra(r Rank) int64 { return holdExtra[min(r, MaxRank)] }
+
+// Window is the hold before an irreversible step of verb vb runs under v:
+// the key's window (KEY-8) lengthened by the worth of what vb reaches at the
+// key's caps (KEY-9), saturating. A step the owner approved one by one, a
+// bare root's or one under a link a passkey signed (ByOwner), gains none:
+// the term guards authority the owner did not look at step by step.
+func (v *Verified) Window(vb Verb, novel bool) int64 {
+	w := v.Limits.Window(novel)
+	if len(v.Key.Links) == 0 || v.ByOwner {
+		return w
+	}
+	x := HoldExtra(WorthOf(AssetsOf(vb), v.Limits.Capped()))
+	return min(w, math.MaxInt64-x) + x
+}
+
+// Due is when a step of verb vb held at heldAt may run under v (Limits.Due
+// over Window).
+func (v *Verified) Due(vb Verb, heldAt int64, novel bool) int64 {
+	l := v.Limits
+	l.HoldBase, l.HoldNovelty = v.Window(vb, false), v.Window(vb, true)
+	return l.Due(heldAt, novel)
+}

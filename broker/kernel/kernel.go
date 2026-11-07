@@ -195,12 +195,12 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CDuplicate, Detail: string(sp.Verb)}
 		return a
 	}
-	if class.Irreversible() && st.Phase == PQueued && max(v.Limits.Window(false), v.Limits.Window(true)) > 0 {
+	if class.Irreversible() && st.Phase == PQueued && max(v.Window(sp.Verb, false), v.Window(sp.Verb, true)) > 0 {
 		a.Kind, a.Novel = ActHold, s.seen[p.Root][Shape(sp)] <= 0
 		return a
 	}
 	if st.Phase == PHeld && !st.Approved {
-		if due := v.Limits.Due(st.HeldAt, st.Novel); now < due {
+		if due := v.Due(sp.Verb, st.HeldAt, st.Novel); now < due {
 			a.WakeAt = due
 			return a
 		}

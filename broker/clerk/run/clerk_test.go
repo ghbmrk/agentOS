@@ -184,9 +184,7 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		otherPlan      bool
 		detail         string
 	}{
-		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
 		{"a narrowing for anything else", r.narrow(key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
-		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of any verb", r.narrow(key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of change-account and more", r.narrow(key.LimitVerbs(key.ChangeAccount, key.Post), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of this grant and another", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest), grantPrint(other)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
@@ -196,6 +194,10 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		{"another grant", r.approve(other), "web", other, false, DNotStaged},
 		{"another clerk", r.approve(digest), "mail", digest, false, DNotThis},
 		{"another plan", r.approve(digest), "web", digest, true, DNotStaged},
+		// No passkey approved these two, so each first waits its worth (KEY-9):
+		// last, since the wait outlasts the approvals above.
+		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
+		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
 	} {
 		id := "case" + string(rune('a'+i))
 		staged := id
@@ -203,7 +205,17 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 			staged = "someone-else"
 		}
 		r.stage(staged, grant)
+		before, _ := r.sec.MarshalBinary()
 		st, changed := r.reconnect(id, c.k, c.target, c.digest)
+		if st.Phase == kernel.PHeld { // a change-account no passkey approved waits its worth first (KEY-9)
+			r.now += key.HoldExtra(key.MaxRank) + 1000
+			r.tick(r.now)
+			after, _ := r.sec.MarshalBinary()
+			if st = r.step(id); !bytes.Equal(before, after) || st.Phase == kernel.PDone {
+				t.Errorf("%s: after its hold, step %s %q, store changed", c.name, st.Phase, st.Detail)
+			}
+			continue
+		}
 		if changed || st.Detail != c.detail {
 			t.Errorf("%s: step %s %q, store changed %v", c.name, st.Phase, st.Detail, changed)
 		}
