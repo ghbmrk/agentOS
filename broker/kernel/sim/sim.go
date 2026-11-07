@@ -243,8 +243,8 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 		w.bad = append(w.bad, "effect for a step the log does not have in flight")
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
-		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
-			if !d.Held || (!d.Approved && now < ver.Limits.Due(d.HeldAt, d.Novel)) {
+		if win := max(ver.Window(st.Verb, false), ver.Window(st.Verb, true)); win > 0 {
+			if !d.Held || (!d.Approved && now < ver.Due(st.Verb, d.HeldAt, d.Novel)) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}
@@ -782,7 +782,7 @@ func (s *sim) pastHolds() int64 {
 				continue
 			}
 			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
-				if due := v.Limits.Due(p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
+				if due := v.Due(p.Plan.Step(i).Verb, p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
 					ahead = max(ahead, due-s.now+60_000) // a step never due sets no jump
 				}
 			}

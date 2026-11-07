@@ -757,6 +757,7 @@ func TestAmountHasOneSpellingSoDuplicateGuardHolds(t *testing.T) {
 	}
 	r.plan("p1", buy, step("10"))
 	must(t, r.tick(0))
+	must(t, r.tick(hour)) // a capped buy is worth 2: its hold is an hour (KEY-9)
 	for i, a := range []string{"10", "010", "+10", "-0"} {
 		id := "q" + string(rune('a'+i))
 		r.plan(id, buy, step(a))
@@ -931,6 +932,7 @@ func TestStatusCarriesTheRetryTierFacts(t *testing.T) {
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
 	r.plan("p1", ck, kernel.PlanStep{Verb: key.Buy, Clerk: "mail", Args: map[string]string{"to": "shop", "amount": "500", "item": "lamp"}})
 	must(t, r.tick(0))
+	must(t, r.tick(hour)) // past the capped buy's hour (KEY-9)
 	got := r.k.State().Status()
 	if len(got) != 1 || !got[0].Money || got[0].Amount != 500 || got[0].Recipient != "shop" || got[0].Attempt != 1 {
 		t.Fatalf("status %+v", got)
