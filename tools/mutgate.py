@@ -456,12 +456,52 @@ def covered_by(pkg, names, tmp):
     return out, None
 
 
+HUNKS = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def base_line_of(diff_text):
+    """{path: f} for a -U0 diff, where f(n) is the old line git pairs with new line n when n is in
+    no hunk: n less the lines every hunk before it adds net (#5008)."""
+    hunks, path, in_hunk = {}, None, False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            path, in_hunk = None, False
+        elif m := HUNKS.match(raw):
+            in_hunk = True
+            o, oc, n, nc = int(m[1]), int(m[2] or 1), int(m[3]), int(m[4] or 1)
+            if path is not None:
+                # A hunk adding nc lines from n, or deleting after line n when nc is 0, lies before n + max(nc, 1).
+                hunks.setdefault(path, []).append((n + max(nc, 1), nc - oc))
+        elif not in_hunk and raw.startswith("+++ "):
+            path = _header_path(raw)
+    return {p: (lambda n, hs=hs: n - sum(d for end, d in hs if end <= n)) for p, hs in hunks.items()}
+
+
+def gremlins_diff(pkg, base):
+    """The diff gremlins' -D reads for pkg against base: `git diff --merge-base` from the package
+    directory under DIFF_GIT_CONFIG, its names pinned to repo paths (prefix and colour only)."""
+    return subprocess.run(
+        ["git", "diff", "--merge-base", "--src-prefix=a/broker/" + pkg + "/", "--dst-prefix=b/broker/" + pkg + "/",
+         "--no-color", "--no-ext-diff", "--no-textconv", base],
+        cwd=BROKER / pkg, env={**os.environ, **DIFF_GIT_CONFIG}, capture_output=True, check=True,
+    ).stdout.decode("utf-8", errors="replace")
+
+
+# marked_base's tries at a base whose diff holds every target line; each try marks one more line at least.
+MARK_TRIES = 64
+
+
 @contextlib.contextmanager
-def marked_base(targets, tmp):
+def marked_base(pkg, targets, tmp):
     """Yield a commit BASE for gremlins' `-D`, which runs `git diff --merge-base BASE`, such that the
-    diff is exactly the target lines: BASE's tree is the work tree with each target line changed,
+    diff adds every target line: BASE's tree is the work tree with each target line changed,
     and HEAD points, until the context ends, at a child of BASE with HEAD's own tree. Nothing in the
-    work tree or any branch moves; HEAD is put back as it was."""
+    work tree or any branch moves; HEAD is put back as it was.
+
+    A non-target line equal to a target line can be paired with it by git, leaving the target
+    unchanged in the diff (#5008). Each such pair's base line is then marked too, until the diff
+    gremlins reads adds every target; the extra lines it adds are no target, and `run` drops their
+    mutants (outside_lines). Raises RuntimeError when no try gets there."""
     env = {**os.environ, "GIT_INDEX_FILE": str(pathlib.Path(tmp) / "marked.index"),
            "GIT_AUTHOR_NAME": "mutgate", "GIT_AUTHOR_EMAIL": "mutgate@example.invalid",
            "GIT_COMMITTER_NAME": "mutgate", "GIT_COMMITTER_EMAIL": "mutgate@example.invalid"}
@@ -470,23 +510,55 @@ def marked_base(targets, tmp):
         r = subprocess.run(["git", *a], cwd=ROOT, env=env, input=data, capture_output=True, check=check)
         return r.stdout.decode().strip()
     head, ref = git("rev-parse", "HEAD"), git("symbolic-ref", "-q", "HEAD", check=False)
-    git("read-tree", head)
-    for path, lines in sorted(targets.items()):
-        rows = (ROOT / path).read_bytes().split(b"\n")
-        for n in lines:
-            if n <= len(rows):
-                rows[n - 1] += b" //mutgate"
-        blob = git("hash-object", "-w", "--stdin", data=b"\n".join(rows))
-        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
-    base = git("commit-tree", git("write-tree"), "-m", "mutgate: the target lines, changed")
-    git("update-ref", "--no-deref", "HEAD", git("commit-tree", f"{head}^{{tree}}", "-p", base, "-m", "mutgate: HEAD"))
+    marks = {p: set(ls) for p, ls in targets.items()}
     try:
+        for _ in range(MARK_TRIES):
+            git("read-tree", head)
+            for path, lines in sorted(marks.items()):
+                rows = (ROOT / path).read_bytes().split(b"\n")
+                for n in lines:
+                    if n <= len(rows):
+                        rows[n - 1] += b" //mutgate"
+                blob = git("hash-object", "-w", "--stdin", data=b"\n".join(rows))
+                git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+            base = git("commit-tree", git("write-tree"), "-m", "mutgate: the target lines, changed")
+            git("update-ref", "--no-deref", "HEAD",
+                git("commit-tree", f"{head}^{{tree}}", "-p", base, "-m", "mutgate: HEAD"))
+            diff = gremlins_diff(pkg, base)
+            added, pair = added_lines(diff)[0], base_line_of(diff)
+            more = {(p, pair.get(p, lambda n: n)(n)) for p, ls in targets.items() for n in ls
+                    if n not in added.get(p, ())}
+            if not more:
+                break
+            if all(n in marks.get(p, ()) for p, n in more):
+                raise RuntimeError(f"git pairs target lines with marked base lines: {sorted(more)[:20]}")
+            for p, n in more:
+                marks.setdefault(p, set()).add(n)
+        else:
+            raise RuntimeError(f"no base in {MARK_TRIES} tries has a diff that adds every target line")
         yield base
     finally:
         if ref:
             git("symbolic-ref", "HEAD", ref)
         else:
             git("update-ref", "--no-deref", "HEAD", head)
+
+
+def outside_lines(data, pkg, mine):
+    """Gremlins' JSON with each verdict on a line outside mine written SKIPPED, as gremlins writes
+    one outside its diff, and its counts kept true: a marked base's diff can add lines that are no
+    target of this run (#5008), and a verdict there could be another shard's (join_shards)."""
+    for f in data.get("files") or []:
+        lines = mine.get(f"broker/{pkg}/{f.get('file_name')}", ())
+        for m in f.get("mutations") or []:
+            if m.get("status") in ("SKIPPED", None) or m.get("line") in lines:
+                continue
+            # gremlins' total is lived + killed + not viable (v0.6.0 report.go:178).
+            for key in (COUNTERS.get(m["status"]), "mutants_total" if m["status"] in TOTALLED else None):
+                if key and type(data.get(key)) is int:
+                    data[key] -= 1
+            m["status"] = "SKIPPED"
+    return data
 
 
 def coverage_record(names, targets):
@@ -554,9 +626,14 @@ def cmd_run(args):
             # The base's own diff marks exactly the target lines, so one unsharded run of a
             # non-test diff keeps it; a share or a test-only diff marks its lines on a commit.
             marked = record or args.of > 1
-            with marked_base(mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
-                r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
-                                    *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+            try:
+                with marked_base(pkg, mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
+                    r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                                        *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+            except RuntimeError as e:
+                print(f"mutgate: no marked base for broker/{pkg}/: {e}", file=sys.stderr)
+                bad += 1
+                continue
         else:
             r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
                                cwd=BROKER, env=env)
@@ -569,7 +646,7 @@ def cmd_run(args):
             print(f"mutgate: {dest} {problem}", file=sys.stderr)
             bad += 1
         elif args.git:
-            dest.write_text(json.dumps({**data, **extra}))
+            dest.write_text(json.dumps({**(outside_lines(data, pkg, mine) if marked else data), **extra}))
     cfgdir.cleanup()
     return 1 if bad else 0
 
@@ -584,6 +661,7 @@ COVER = re.compile(r"^(.+):(\d+)\.(\d+),(\d+)\.(\d+) \d+ (\d+)$")
 # Gremlins' own report fields for each status (internal/report, v0.6.0), kept equal so its totals stay true.
 COUNTERS = {"LIVED": "mutants_lived", "KILLED": "mutants_killed", "NOT VIABLE": "mutants_not_viable",
             "NOT COVERED": "mutants_not_covered"}
+TOTALLED = ("LIVED", "KILLED", "NOT VIABLE")
 
 
 def covered_blocks(profile):

@@ -1638,6 +1638,50 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
                 r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "x"), *bad, env=env)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_a_target_line_equal_to_an_earlier_non_target_line_is_still_mutated(self):
+        # #5008: lines 9-10 (`return -1`, `}`), run by TestUp, equal lines 5-6, which it does not
+        # run. Marking only the targets let git pair base 5-6 with head 9-10, gremlins skipped those
+        # targets and `run` failed. Each shard's diff now adds all its lines, and verdicts on lines
+        # the diff adds beyond them are dropped, so shards still join without overlap.
+        src = "package hint\n\nfunc Up(n int) int {\n\tif n > 10 {\n\t\treturn -1\n\t}\n\tn++\n" \
+              "\tif n > 5 {\n\t\treturn -1\n\t}\n\treturn n\n}\n"
+        test = 'package hint\n\nimport "testing"\n\nfunc TestUp(t *testing.T) {\n\tif Up(6) != -1 {\n\t\tt.Fatal("up")\n\t}\n}\n'
+        with tempfile.TemporaryDirectory() as d:
+            git = self.repo(d, test.replace("!= -1", "> 0"), src=src, test_base=test)
+            env = self.line_stub(d)
+            plan = pathlib.Path(d) / "targets.json"
+            r = self.mutgate(d, "plan", "--git", "HEAD~1", "--targets-out", str(plan))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            targets = set(json.loads(plan.read_text())["hint"]["lines"]["hint.go"])
+            self.assertTrue({9, 10} <= targets and not {5, 6} & targets, targets)
+            # The collision is real: the targets-only base gives git the misaligned pairing.
+            base = pathlib.Path(d) / "base.go"
+            base.write_text("\n".join(row + " //mutgate" * (i in targets) for i, row in enumerate(src.split("\n"), 1)))
+            plain = subprocess.run(["git", "diff", "--no-index", "-U0", str(base), str(pathlib.Path(d) / "broker/hint/hint.go")],
+                                   capture_output=True, text=True).stdout
+            self.assertFalse({9, 10} <= set().union(*mutgate.added_lines(plain)[0].values()), plain)
+            for of in (1, 2):
+                res = pathlib.Path(d) / f"res-{of}"
+                (pathlib.Path(d) / "seen-lines").unlink(missing_ok=True)
+                for i in range(of):
+                    out = res / f"mutants-{i}"
+                    r = self.mutgate(d, "run", "hint", "--git", "HEAD~1", "--out", str(out),
+                                     "--shard", str(i), "--of", str(of), "--targets", str(plan), env=env)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    mine = mutgate.shard_lines({"hint.go": targets}, i, of)["hint.go"]
+                    data = json.loads((out / "hint.json").read_text())
+                    self.assertTrue(mutgate.shape_ok(data))
+                    self.assertEqual({m["line"] for m in data["files"][0]["mutations"] if m["status"] != "SKIPPED"}, mine)
+                    r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                seen = [set(json.loads(row)["hint.go"]) for row in (pathlib.Path(d) / "seen-lines").read_text().splitlines()]
+                self.assertTrue(targets <= set().union(*seen), seen)
+                r = self.mutgate(d, "verify", str(res), "--git", "HEAD~1")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)  # line 4's stub mutant lives
+                self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
+                self.assertNotIn("skipped", r.stderr)
+            self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
+
     def test_a_shard_of_a_source_diff_mutates_only_its_own_lines(self):
         # #4961: one unsharded job keeps gremlins on the base's own diff; a shard marks its lines.
         with tempfile.TemporaryDirectory() as d:
