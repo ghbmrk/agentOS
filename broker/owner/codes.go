@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // Code hygiene limits (CH-18).
@@ -71,11 +73,14 @@ type codes struct {
 }
 
 // commit applies f to a copy of the state, saves it, and keeps it only if
-// the save succeeded.
+// the save succeeded. A save that failed only at the directory sync
+// (privfile.ErrUnsynced) renamed the new file into place, so it counts as
+// saved: memory keeping the old state would accept a spent code again and
+// the next commit would write that old state back over the file (#4971).
 func (c *codes) commit(f func(*State)) error {
 	next := copyState(c.st)
 	f(&next)
-	if err := c.store.Save(next); err != nil {
+	if err := c.store.Save(next); err != nil && !errors.Is(err, privfile.ErrUnsynced) {
 		return err
 	}
 	c.st = next

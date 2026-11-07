@@ -13,7 +13,7 @@ import (
 // ch3 is CH-3's table, each row's floor as a rung (D-307, D-311). A row
 // whose proof names no rung states the rung of the place it is given: the
 // owner page at home is P3.
-var ch3 = map[string]Rung{
+var ch3Rungs = map[string]Proof{
 	"STOP (pause all dispatch)":                                                                                       P0,
 	"Task chat, STATUS":                                                                                               P0,
 	"Approve a low-risk irreversible effect (CH-10)":                                                                  P1,
@@ -49,18 +49,18 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 			continue
 		}
 		action, proof := strings.TrimSpace(cells[1]), cells[2]
-		var want Rung = -1
-		for prefix, r := range ch3 {
+		want, ok := P0, false
+		for prefix, r := range ch3Rungs {
 			if strings.HasPrefix(action, prefix) {
-				want = r
+				want, ok = r, true
 			}
 		}
-		if want < 0 {
+		if !ok {
 			t.Errorf("CH-3 row %q is no case here", action)
 			continue
 		}
 		rows++
-		if m := first.FindStringSubmatch(proof); m != nil && Rung(m[1][0]-'0') != want {
+		if m := first.FindStringSubmatch(proof); m != nil && []Proof{P0, P1, P2, P3, P4}[m[1][0]-'0'] != want {
 			t.Errorf("%q: SPEC names P%s first, the case P%d", action, m[1], want)
 		}
 		o, h, k := root(t)
@@ -78,8 +78,8 @@ func TestCH3RowsAreTheFloor(t *testing.T) {
 			}
 		}
 	}
-	if rows != len(ch3) {
-		t.Errorf("SPEC's CH-3 has %d rows, the cases %d", rows, len(ch3))
+	if rows != len(ch3Rungs) {
+		t.Errorf("SPEC's CH-3 has %d rows, the cases %d", rows, len(ch3Rungs))
 	}
 }
 
@@ -92,15 +92,15 @@ func TestRungOnlyRises(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Derive(d, h2.priv, gen(4).pub, LimitRung(P3)); err != nil {
+	if _, err := Derive(d, h2.priv, gen(4).pub, LimitRung(P4)); err != nil {
 		t.Fatalf("raise: %v", err)
 	}
 	e := Extend(d, h2.priv, Link{Caveats: []Caveat{LimitRung(P0)}, Holder: gen(4).pub})
 	if _, err := Chain(e, []PublicKey{o.pk}); !errors.Is(err, ErrLoosens) {
 		t.Fatalf("lower: %v", err)
 	}
-	for _, bad := range []Rung{-1, P4 + 1} {
-		e := Extend(k, h.priv, Link{Caveats: []Caveat{LimitRung(bad)}, Holder: gen(4).pub})
+	for _, bad := range []int64{-1, int64(P4) + 1} {
+		e := Extend(k, h.priv, Link{Caveats: []Caveat{{Kind: KRung, N: bad}}, Holder: gen(4).pub})
 		if _, err := Chain(e, []PublicKey{o.pk}); !errors.Is(err, ErrMalformed) {
 			t.Fatalf("rung %d: %v", bad, err)
 		}

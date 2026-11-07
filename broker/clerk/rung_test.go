@@ -13,7 +13,7 @@ import (
 // rungAt is the view with every step a test built dispatched at rung.
 type rungAt struct {
 	inFlight
-	rung key.Rung
+	rung key.Proof
 }
 
 func (v rungAt) Dispatched(r kernel.Request) (kernel.Dispatch, bool) {

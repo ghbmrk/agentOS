@@ -31,7 +31,7 @@ type Step struct {
 	Amount    int64    // spend, in minor units
 	Recipient string
 	Task      string
-	Rung      Rung // the highest the owner events that start or approve it reached (CH-3)
+	Rung      Proof // the highest the owner events that start or approve it reached (CH-3)
 }
 
 // Use is one charged step, recorded in the log.
@@ -143,7 +143,7 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 		return r
 	}
 	if s.Rung < l.Rung {
-		return refuse(RRung, "P%d, the key asks P%d", s.Rung, l.Rung)
+		return refuse(RRung, "proof %d, the key asks %d", s.Rung, l.Rung)
 	}
 	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)

@@ -175,6 +175,10 @@ type config struct {
 	// stop, for tests only, ends the run after the named step as a crash
 	// would; nil runs every step.
 	stop func(step string) bool
+	// seedStop, for tests only (REV-CHK-save, #4192), ends the staged
+	// seed's privfile.WriteAtomic after a step as a crash would; nil runs
+	// every step.
+	seedStop func(int) bool
 	// now, for tests only, is the clock -rotate-recovery checks an
 	// approval's expiry by; nil is the system's.
 	now func() time.Time

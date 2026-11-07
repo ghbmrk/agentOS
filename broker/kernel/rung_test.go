@@ -17,11 +17,12 @@ import (
 // and is cancelled if its hold ends without one.
 func TestOwnerEventRungMeetsTheKeysRung(t *testing.T) {
 	r := newRig(t)
-	for _, bad := range []key.Rung{key.P0 - 1, key.P4 + 1} {
+	for _, bad := range []key.Proof{key.PRecovery, 255} {
 		if err := r.k.OpenTask(0, "bad", bad); err == nil {
 			t.Fatalf("a task opened at rung %d", bad)
 		}
 	}
+	must(t, r.k.OpenTask(0, "top", key.P4))
 	must(t, r.k.OpenTask(0, "t1", key.P1))
 	if got := r.k.State().Rung("t1", false); got != key.P1 {
 		t.Fatalf("task rung P%d, want P1", got)

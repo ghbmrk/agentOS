@@ -106,21 +106,8 @@ const (
 	KRung          = "rung"
 )
 
-// Rung is how much an owner event's proof shows, ordered by what an attacker
-// must hold (CH-3, D-311): P0 the number's claim, P1 a texted code returned,
-// P2 the handset, P3 a passkey or code on the owner page, P4 a hardware key.
-type Rung int64
-
-const (
-	P0 Rung = iota
-	P1
-	P2
-	P3
-	P4
-)
-
 // Lower is rung r after a voice check that heard rung v: never higher (D-153).
-func Lower(r, v Rung) Rung { return min(r, v) }
+func Lower(r, v Proof) Proof { return min(r, v) }
 
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
 // verbs, content and labels; Arg for arg; N for a cap, an expiry (unix ms) or
@@ -171,7 +158,7 @@ func LimitRateRecipient(n int64) Caveat { return Caveat{Kind: KRateRecipient, N:
 func LimitExpires(atMS int64) Caveat    { return Caveat{Kind: KExpires, N: atMS} }
 func LimitUses(n int64) Caveat          { return Caveat{Kind: KUses, N: n} }
 func LimitTask(id string) Caveat        { return Caveat{Kind: KTask, Set: []string{id}} }
-func LimitRung(r Rung) Caveat           { return Caveat{Kind: KRung, N: int64(r)} }
+func LimitRung(r Proof) Caveat          { return Caveat{Kind: KRung, N: int64(r)} }
 func LimitHold(baseMS, noveltyMS int64) Caveat {
 	return Caveat{Kind: KHold, N: baseMS, M: noveltyMS}
 }
@@ -203,7 +190,7 @@ type Limits struct {
 	HoldBase    int64
 	HoldNovelty int64
 	Task        string // the one task the key serves; "" for none (KRN-5)
-	Rung        Rung   // the lowest rung a step's owner events may reach (CH-3)
+	Rung        Proof  // the lowest rung a step's owner events may reach (CH-3)
 }
 
 // Fold is the limits of caveats cs alone, as one link sets them.
@@ -338,10 +325,10 @@ func (l *Limits) apply(c Caveat, scope ID) error {
 	case KRung:
 		if c.N < int64(P0) || c.N > int64(P4) {
 			return fmt.Errorf("%w: rung", ErrMalformed)
-		} else if Rung(c.N) < l.Rung {
+		} else if Proof(c.N) < l.Rung {
 			return fmt.Errorf("%w: rung", ErrLoosens)
 		}
-		l.Rung = Rung(c.N)
+		l.Rung = Proof(c.N)
 	default:
 		return ErrUnknownKind
 	}

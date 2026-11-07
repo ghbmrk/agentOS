@@ -251,7 +251,7 @@ type Dispatch struct {
 	Novel  bool
 	// Approved is a code approval of the step, which ends its hold (codeapproval.go).
 	Approved bool
-	Rung     key.Rung // the step's owner events' (State.Rung)
+	Rung     key.Proof // the step's owner events' (State.Rung)
 }
 
 // View is the read-only part of the state a clerk checks against (CLK-2).

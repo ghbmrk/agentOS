@@ -336,8 +336,9 @@ type send struct {
 // Book holds the box's questions.
 type Book struct {
 	cfg    Config
-	stop   func(i int) bool // tests: crash persist's file write after step i
-	sendMu sync.Mutex       // one sender at a time, so no question is texted twice
+	stop   func(i int) bool   // tests: crash persist's file write after step i
+	write  func([]byte) error // tests: replaces persist's file write
+	sendMu sync.Mutex         // one sender at a time, so no question is texted twice
 	mu     sync.Mutex
 	qs     []*entry
 	next   int
@@ -432,8 +433,21 @@ func New(cfg Config) (*Book, error) {
 	return b, nil
 }
 
-// persist writes the book through. Called with mu held.
+// persist writes the book through. Called with mu held. A write that
+// failed only at the directory sync (privfile.ErrUnsynced) renamed the new
+// book into place, so it counts as written and is only logged: a caller
+// that reverted memory would disagree with the file, and its next persist
+// would undo the change on disk too (#4971).
 func (b *Book) persist() error {
+	err := b.writeBook()
+	if errors.Is(err, privfile.ErrUnsynced) {
+		b.cfg.Logf("question: persist: %v", err)
+		return nil
+	}
+	return err
+}
+
+func (b *Book) writeBook() error {
 	if b.cfg.Path == "" {
 		return nil
 	}
@@ -441,6 +455,9 @@ func (b *Book) persist() error {
 		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore})
 	if err != nil {
 		return err
+	}
+	if b.write != nil {
+		return b.write(raw)
 	}
 	return privfile.WriteAtomic(filepath.Dir(b.cfg.Path), filepath.Base(b.cfg.Path), raw, b.stop)
 }
