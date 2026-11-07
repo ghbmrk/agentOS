@@ -358,3 +358,26 @@ func TestNewRecoveryCodeAction(t *testing.T) {
 		t.Errorf("rotate with a replacement waiting: %d", code)
 	}
 }
+
+// TestNewRecoveryChallengeRefusals (NET-4; ENF-c-f3 item 2): the challenge
+// for a new recovery code answers one refusal and no challenge, whatever
+// the state or a stray target. Catches a refusal that falls through and
+// issues a challenge after it, or one that takes a target.
+func TestNewRecoveryChallengeRefusals(t *testing.T) {
+	g := newEnrolRig(t)
+	a := newAuthenticator(t)
+	g.enrolAs(a, caseCode)
+	g.build()
+	w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery, "target": "x"})
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "challenge") {
+		t.Errorf("a target: %d %s", w.Code, w.Body)
+	}
+	recovery := strings.ReplaceAll(func() string { _, out := g.tapAct(a, ActNewRecovery); s, _ := out["recovery"].(string); return s }(), " ", "")
+	if code, _ := g.enrolAs(newAuthenticator(t), recovery); code != http.StatusOK {
+		t.Fatalf("recovery: %d", code)
+	}
+	w = g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery})
+	if w.Code != http.StatusNotFound || strings.Count(w.Body.String(), "{") != 1 || strings.Contains(w.Body.String(), "challenge") {
+		t.Errorf("a replacement waiting: %d %s", w.Code, w.Body)
+	}
+}

@@ -1068,3 +1068,30 @@ func TestRotateRecoveryCode(t *testing.T) {
 		t.Errorf("rotate with no passkey: %v", err)
 	}
 }
+
+type failRand struct{}
+
+func (failRand) Read([]byte) (int, error) { return 0, errors.New("entropy: unavailable") }
+
+// TestRotateNeedsEntropy (NET-4; ENF-c-f3 item 2): with no randomness,
+// Rotate answers the error and spends nothing: the saved code still works.
+// Catches a rotation that saves a verifier of nothing.
+func TestRotateNeedsEntropy(t *testing.T) {
+	g, _, code := enrolled(t)
+	g.bs.n, g.bs.failAt = 0, 0
+	before := g.bs.n
+	b, err := Open(Config{Name: rp, Store: g.bs, Network: g.ap, Alerts: g.alerts, Rand: failRand{}, Now: func() time.Time { return g.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.OpenPolicy(g.es); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, err := b.Rotate(); err == nil || !strings.Contains(err.Error(), "entropy: unavailable") || fresh != "" || g.bs.n != before {
+		t.Fatalf("rotate without entropy: %q %v, %d saves", fresh, err, g.bs.n-before)
+	}
+	g.reopen()
+	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); err != nil {
+		t.Errorf("the unspent code stopped working: %v", err)
+	}
+}
