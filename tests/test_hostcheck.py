@@ -317,6 +317,8 @@ class HostcheckJobTest(unittest.TestCase):
                 out.append("the tools root does not include exactly the pinned stack")
             if "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" not in root[0] or "security" in root[0]:
                 out.append("the tools root is not read from the image's snapshot alone")
+            if re.search(r'"deb\s', root[0]):  # #4996: a one-line entry drops the stanza's Signed-By
+                out.append("the tools root's sources are not the snapshot stanza verbatim")
         run = [b for _, b in steps if "tests.test_hostcheck" in b]
         if len(run) != 1 or not re.search(r"HOSTCHECK_TOOLS_ROOT: \$\{\{ runner\.temp \}\}/hostcheck-tools", run[0]):
             out.append("the hostcheck run does not name the tools root")
@@ -331,6 +333,8 @@ class HostcheckJobTest(unittest.TestCase):
             "runner ovmf": ("qemu-utils ", "qemu-utils ovmf "),
             "runner swtpm": ("qemu-utils ", "qemu-utils swtpm "),
             "root without ovmf": ("--include=qemu-system-x86,ovmf,", "--include=qemu-system-x86,"),
+            "one-line entry": ('"$RUNNER_TEMP/hostcheck-tools" "$src"',
+                               '"$RUNNER_TEMP/hostcheck-tools" "deb [check-valid-until=no] $uri trixie main"'),
             "no root env": ("HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools", "HOSTCHECK_X: x"),
         }.items():
             with self.subTest(name):

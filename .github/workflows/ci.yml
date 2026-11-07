@@ -716,12 +716,15 @@ jobs:
       # the root's own loader (--tools-root) and records the versions in its report.
       - name: QEMU, OVMF and swtpm, from the image's Debian snapshot
         run: |
-          uri=$(awk '$1 == "URIs:" && $2 ~ /^https:\/\/snapshot\.debian\.org\// {print $2}' \
-            image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources)
-          [ "$(echo "$uri" | wc -w)" = 1 ] || { echo "want one snapshot URI, got: $uri" >&2; exit 1; }
+          # The snapshot stanza verbatim (deb822 paragraph), so its Signed-By and Check-Valid-Until
+          # carry over: one-line entries without signed-by fail on the runner's keyring (#4996).
+          src="$RUNNER_TEMP/snapshot.sources"
+          awk -v RS= -v ORS='\n\n' '/\nURIs: https:\/\/snapshot\.debian\.org\//' \
+            image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources > "$src"
+          [ "$(grep -c '^URIs:' "$src")" = 1 ] || { echo "want one snapshot stanza, got:" >&2; cat "$src" >&2; exit 1; }
+          cat "$src"
           sudo mmdebstrap --mode=root --variant=essential --include=qemu-system-x86,ovmf,swtpm,swtpm-tools trixie \
-            "$RUNNER_TEMP/hostcheck-tools" "deb [check-valid-until=no] $uri trixie main" \
-            "deb [check-valid-until=no] $uri trixie-updates main"
+            "$RUNNER_TEMP/hostcheck-tools" "$src"
           sudo chroot "$RUNNER_TEMP/hostcheck-tools" dpkg-query -W qemu-system-x86 ovmf swtpm swtpm-tools
       - name: KVM for the runner user, if the runner has it
         run: |
