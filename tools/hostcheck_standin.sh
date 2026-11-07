@@ -19,14 +19,16 @@ trap 'rm -rf "$tmp"' EXIT
 root=$tmp/root
 mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/usr/bin"
 cp "$(command -v busybox)" "$root/bin/busybox"
-for app in sh mount echo printf dd sync reboot poweroff hwclock read cat sleep ln mkdir; do
+for app in sh mount echo printf dd sync reboot poweroff hwclock read cat sleep ln mkdir od; do
 	ln -s busybox "$root/bin/$app"
 done
 tpm2=$(readlink -f "$(command -v tpm2)")
 cp "$tpm2" "$root/usr/bin/tpm2"
 for t in nvdefine nvwrite; do ln -s tpm2 "$root/usr/bin/tpm2_$t"; done
+# e2fsprogs' chattr: efivarfs makes MOR's file immutable, and busybox-static has no chattr applet.
+cp "$(command -v chattr)" "$root/usr/bin/chattr"
 tcti=/usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0  # dlopened by name, so ldd misses it
-libs=$( (ldd "$tpm2"; ldd "$tcti") | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u)
+libs=$( (ldd "$tpm2"; ldd "$tcti"; ldd "$(command -v chattr)") | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u)
 for lib in $libs "$tcti"; do
 	mkdir -p "$root$(dirname "$lib")"
 	cp -L "$lib" "$root$lib"
@@ -49,9 +51,22 @@ plant() {
 	rtc) hwclock -w -u ;;
 	esac || { echo "HOSTCHECK-PLANT-FAILED $1"; ls /dev | grep -i tpm; dmesg | grep -i -E "tpm|crb" | tail -5; }
 }
+# The kernel's EFI stub sets MOR's ClearMemory bit at boot (RESET_ATTACK_MITIGATION) wherever the
+# firmware has the variable, as Debian's OVMF does (#4906). An orderly shutdown clears it, as the
+# image's agentos-mor.service does (HW-8, #4794): only bit 0, keeping the attributes and other bits.
+mor_clear() {
+	v=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+	[ -e "$v" ] || return 0
+	set -- $(od -An -tu1 -v "$v")
+	[ $# = 5 ] || { echo "HOSTCHECK-MOR-FAILED size"; return 0; }
+	[ $(($5 & 1)) = 1 ] || return 0
+	chattr -i "$v"
+	printf "$(printf '\\%03o\\%03o\\%03o\\%03o\\%03o' "$1" "$2" "$3" "$4" $(($5 & ~1 & 255)))" |
+		dd of="$v" bs=5 2>/dev/null || echo "HOSTCHECK-MOR-FAILED write"
+}
 while :; do
 	echo HOSTCHECK-READY
-	read -r cmd arg || exec poweroff -f
+	read -r cmd arg || { sync; mor_clear; exec poweroff -f; }
 	case $cmd in
 	task)
 		dd if=/dev/vda of=/dev/null bs=512 count=34 2>/dev/null
@@ -60,8 +75,8 @@ while :; do
 		fi
 		sync
 		echo HOSTCHECK-DONE ;;
-	reboot) sync; reboot -f ;;
-	poweroff) sync; poweroff -f ;;
+	reboot) sync; mor_clear; reboot -f ;;
+	poweroff) sync; mor_clear; poweroff -f ;;
 	esac
 done
 EOF
