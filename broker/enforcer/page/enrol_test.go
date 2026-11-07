@@ -22,6 +22,8 @@ const caseCode = "CANARY-CASE-CODE-AAAA-BBBB"
 
 type fakeNetwork struct{ n int }
 
+func (f *fakeNetwork) Replaced() bool { return f.n > 0 }
+
 func (f *fakeNetwork) Replace() (enrol.Card, error) {
 	f.n++
 	// A synthetic canary password, never a real one.
@@ -313,5 +315,69 @@ func TestEnrolAnswerFollowsState(t *testing.T) {
 		if !strings.Contains(page, id) {
 			t.Errorf("enrolment screen lacks %s", id)
 		}
+	}
+}
+
+// TestNewRecoveryCodeAction (NET-4; ENF-c-f3 item 2): the home page offers
+// "a new recovery code" behind the passkey in force's tap: another
+// passkey's tap does nothing, the owner's spends the old code and shows the
+// new one once, and the page offers none while a replacement waits (the
+// cancel does that) or with no passkey enrolled. Catches an owner stuck
+// with an unspent code after a failed recovery save.
+func TestNewRecoveryCodeAction(t *testing.T) {
+	g := newEnrolRig(t)
+	if w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery}); w.Code == http.StatusOK {
+		t.Fatalf("offered with no passkey enrolled: %d", w.Code)
+	}
+	a := newAuthenticator(t)
+	_, out := g.enrolAs(a, caseCode)
+	old, _ := out["recovery"].(string)
+	g.build()
+	if w := g.do(http.MethodGet, "/", nil); !strings.Contains(w.Body.String(), "Make a new recovery code") {
+		t.Fatalf("home lacks the action:\n%s", w.Body)
+	}
+	if code, _ := g.tapAct(newAuthenticator(t), ActNewRecovery); code != http.StatusForbidden {
+		t.Errorf("another passkey's tap: %d", code)
+	}
+	code, out := g.tapAct(a, ActNewRecovery)
+	fresh, _ := out["recovery"].(string)
+	if code != http.StatusOK || len(strings.ReplaceAll(fresh, " ", "")) != enrol.CodeLen || fresh == old || out["rotated"] != true {
+		t.Fatalf("rotate: %d %v", code, out)
+	}
+	b := newAuthenticator(t)
+	if code, _ := g.enrolAs(b, strings.ReplaceAll(old, " ", "")); code != http.StatusForbidden {
+		t.Errorf("the spent code: %d", code)
+	}
+	if code, out := g.enrolAs(b, strings.ReplaceAll(fresh, " ", "")); code != http.StatusOK || out["due"] == nil {
+		t.Fatalf("the new code: %d %v", code, out)
+	}
+	if w := g.do(http.MethodGet, "/", nil); strings.Contains(w.Body.String(), "Make a new recovery code") {
+		t.Error("offered while a replacement waits")
+	}
+	if code, _ := g.tapAct(a, ActNewRecovery); code != http.StatusNotFound {
+		t.Errorf("rotate with a replacement waiting: %d", code)
+	}
+}
+
+// TestNewRecoveryChallengeRefusals (NET-4; ENF-c-f3 item 2): the challenge
+// for a new recovery code answers one refusal and no challenge, whatever
+// the state or a stray target. Catches a refusal that falls through and
+// issues a challenge after it, or one that takes a target.
+func TestNewRecoveryChallengeRefusals(t *testing.T) {
+	g := newEnrolRig(t)
+	a := newAuthenticator(t)
+	g.enrolAs(a, caseCode)
+	g.build()
+	w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery, "target": "x"})
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "challenge") {
+		t.Errorf("a target: %d %s", w.Code, w.Body)
+	}
+	recovery := strings.ReplaceAll(func() string { _, out := g.tapAct(a, ActNewRecovery); s, _ := out["recovery"].(string); return s }(), " ", "")
+	if code, _ := g.enrolAs(newAuthenticator(t), recovery); code != http.StatusOK {
+		t.Fatalf("recovery: %d", code)
+	}
+	w = g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery})
+	if w.Code != http.StatusNotFound || strings.Count(w.Body.String(), "{") != 1 || strings.Contains(w.Body.String(), "challenge") {
+		t.Errorf("a replacement waiting: %d %s", w.Code, w.Body)
 	}
 }

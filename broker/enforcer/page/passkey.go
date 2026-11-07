@@ -528,6 +528,15 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusNotFound, enrol.ErrPhase)
 			return
 		}
+	case ActNewRecovery:
+		if s.cfg.Enrol == nil || req.Target != "" {
+			fail(w, http.StatusNotFound, errMalformed)
+			return
+		}
+		if _, waiting := s.cfg.Enrol.Recovery(); waiting || s.cfg.Enrol.Phase() != enrol.Enrolled {
+			fail(w, http.StatusNotFound, enrol.ErrPhase)
+			return
+		}
 	case ActKeep:
 		if s.cfg.Enrol == nil || req.Target != "" {
 			fail(w, http.StatusNotFound, errMalformed)
@@ -600,6 +609,12 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		var code string
 		if code, err = s.cfg.Enrol.Cancel(); err == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"done": true, "recovery": grouped(code)})
+			return
+		}
+	case ActNewRecovery:
+		var code string
+		if code, err = s.cfg.Enrol.Rotate(); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"done": true, "recovery": grouped(code), "rotated": true})
 			return
 		}
 	case ActCancel:

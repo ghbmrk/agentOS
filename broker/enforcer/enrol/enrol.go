@@ -111,8 +111,11 @@ type Card struct {
 // and pushes the access point's new configuration, so the sticker's
 // password opens nothing, and returns the Owner network's card. Called
 // again once replaced, it changes nothing and returns the same card.
+// Replaced reports whether the setup network is already gone, read from
+// the access point's own state, so it survives a restart of the book.
 type Network interface {
 	Replace() (Card, error)
+	Replaced() bool
 }
 
 // Alerts is the part of the enforcer's alerts (alert.Alerts) enrolment
@@ -209,10 +212,6 @@ type Book struct {
 	// guessing at one never locks the owner out of the other.
 	caseFails, recFails []int64
 	tix                 map[string]*ticket
-	// replaced is whether Network.Replace has answered since the book
-	// opened: a later Finish comes from the Owner network. Kept in memory
-	// only, since it matters when the store is failing.
-	replaced bool
 }
 
 // ticket is one Begin waiting for its Finish. It is good only for the
@@ -519,13 +518,14 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 	st := b.st
 	switch st.Phase {
 	case Factory, Reset:
+		// Asked before Replace: a Finish after the setup network is gone
+		// comes from the Owner network, across restarts too (ENF-c-f3).
+		retry := b.cfg.Network.Replaced()
 		card, err := b.cfg.Network.Replace()
 		if err != nil {
 			return Result{}, fmt.Errorf("enrol: the setup network was not replaced, so nothing was enrolled: %w", err)
 		}
 		res := Result{Card: card, SetupReplaced: st.Phase == Factory}
-		retry := b.replaced
-		b.replaced = true
 		st.Phase, st.Owner, st.Recovery = Enrolled, t.pk.Encode(), &rec
 		if err := b.take(&st); err != nil {
 			if !bytes.Equal(b.st.Owner, st.Owner) {
@@ -618,6 +618,29 @@ func (b *Book) Cancel() (string, error) {
 		return "", err
 	}
 	b.cfg.Alerts.Recovery(false)
+	return code, nil
+}
+
+// Rotate spends the recovery code and returns its replacement, shown once.
+// It is for an owner whose recovery code may be known to someone else, such
+// as after a replacement whose save failed (the code stays unspent then).
+// With a replacement waiting, Cancel does the same and more. The page calls
+// it only after a tap of the passkey in force (NET-4).
+func (b *Book) Rotate() (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.st.Phase != Enrolled || b.st.Pending != nil {
+		return "", ErrPhase
+	}
+	code, rec, err := b.code()
+	if err != nil {
+		return "", err
+	}
+	st := b.st
+	st.Recovery = &rec
+	if err := b.save(st); err != nil {
+		return "", err
+	}
 	return code, nil
 }
 
