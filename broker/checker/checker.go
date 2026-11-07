@@ -1,13 +1,16 @@
-// Package checker holds the key holders' side of the CH-4 checker's
+// Package checker holds the key holders' side of the old CH-4 checker's
 // approvals (SIM-split): Act, the digest that binds an approval to the
-// exact request a holder sends, and Redeemer, the holder's client for the
-// checker's redeem socket. A key holder serves an irreversible act only
-// once it redeems that act's approval there, so a compromised holder
-// cannot approve a high-risk act alone.
+// exact request a holder sends, and Redeemer, the holder's client for a
+// redeem socket. A key holder serves an irreversible act only once it
+// redeems that act's approval, so a compromised holder cannot approve a
+// high-risk act alone.
 //
-// The checker process itself is cmd/agentos-checker, which serves the
-// verify socket through clerk/codecheck; the hand socket's protocol is
-// holder.Keeper's, and the verify client is package checkersock.
+// Since D-244 nothing serves the redeem socket or the hand socket:
+// cmd/agentos-checker listens only on verify.sock, through
+// clerk/codecheck, which keeps no approvals and redeems nothing. So
+// agentos-holder and agentos-egress with -checker set fail closed: every
+// redeem and every hand or unlock check through these clients is an
+// error, and nothing is approved.
 package checker
 
 import (
@@ -24,9 +27,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 )
 
-// HandSocket is the hand socket's name inside the checker's run
-// directory: the unlock step's (GET /state, PUT and DELETE /secret, and
-// POST /verify for the unlock's own code).
+// HandSocket is the name agentos-egress -checker dials inside the
+// directory it is given, for the unlock step's GET /state, PUT and DELETE
+// /secret and POST /verify. No process serves it since D-244.
 const HandSocket = "hand.sock"
 
 // PausedError refuses a verify until the oldest wrong code in its bucket

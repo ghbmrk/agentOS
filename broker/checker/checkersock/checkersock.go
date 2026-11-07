@@ -1,7 +1,9 @@
-// Package checkersock is the checker's hand-socket verify contract and its
-// client (SIM-split-wire). agentos-egress -checker asks the checker to
-// verify the unlock's owner codes through it, and key holders dial the
-// redeem socket with UnixClient; every dial is to a unix socket.
+// Package checkersock is the old checker's hand-socket verify contract and
+// its client (SIM-split-wire). agentos-egress -checker sends the unlock's
+// owner codes through it, and key holders dial a redeem socket with
+// UnixClient; every dial is to a unix socket. Since D-244 no process
+// serves either socket (cmd/agentos-checker serves only verify.sock, in
+// clerk/codecheck's wire), so these clients fail closed.
 package checkersock
 
 import (
@@ -61,7 +63,8 @@ func UnixClient(socket string) *http.Client {
 	}
 }
 
-// Client is the unlock step's client for the hand socket's POST /verify.
+// Client is the unlock step's client for the hand socket's POST /verify,
+// which no process serves since D-244.
 type Client struct{ hc *http.Client }
 
 // VerifyClient returns a client for POST /verify at socket. Its callers
