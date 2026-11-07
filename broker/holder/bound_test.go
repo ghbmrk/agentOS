@@ -8,11 +8,10 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/checker"
-	"github.com/ghbmrk/agentos/broker/checker/checkersock"
 	"github.com/ghbmrk/agentos/broker/egress"
+	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
 // REQ: CH-10, CRED-1, ADP-10
@@ -21,9 +20,9 @@ import (
 // approval for an act is refused by account B's holder for the same bytes,
 // even with one checker and one redeem socket shared by both (CH-10).
 func TestApprovalIsBoundToTheAccount(t *testing.T) {
-	c, seed := seededChecker(t)
+	c := newApprovals()
 	up := &upstream{reply: answer(200, nil, "{}")}
-	redeem := func(_ context.Context, act string, secret bool) (bool, error) { return c.Redeem(act, secret), nil }
+	redeem := c.redeem
 	hA := approvingHolder(t, up, redeem)
 	b := planAdapter()
 	b.Credential = "plan-login-b"
@@ -34,10 +33,7 @@ func TestApprovalIsBoundToTheAccount(t *testing.T) {
 	hB.Hand([]byte(canary(t, "sk-canary-b-")))
 
 	body := `{"to":"canary@example.invalid"}`
-	actA := checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body))
-	if _, ok, err := c.Verify(totp(seed, time.Now()), 0, true, []checkersock.Act{{Act: actA}}); !ok || err != nil {
-		t.Fatalf("verify: %v %v", ok, err)
-	}
+	c.approve(checker.Act("plan-login", "plan.example", "POST", "/v1/send", []byte(body)))
 	if w := do(hB, req("POST", "/v1/send", body)); w.Code != http.StatusForbidden || w.Header().Get(ErrorHeader) != ErrUnapproved {
 		t.Fatalf("account B spent A's approval: %d %q", w.Code, w.Header().Get(ErrorHeader))
 	}
@@ -68,7 +64,7 @@ func TestRedeemErrorSendsNothing(t *testing.T) {
 func TestRedeemAnswered500SendsNothing(t *testing.T) {
 	dir := socketDir(t)
 	path := dir + "/redeem.sock"
-	ln, err := checker.Listen(path, os.Getuid())
+	ln, err := sockets.ListenPeers(path, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
 	}
