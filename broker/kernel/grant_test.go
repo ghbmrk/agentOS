@@ -430,7 +430,7 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 	}
 	// What the anchor signed outlives a logged cut-off of it: its task
 	// approval and its grant still in the hold.
-	must(t, r.k.OpenTask(1, "t1"))
+	must(t, r.k.OpenTask(1, "t1", 0))
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	held := trashRoot(r, "r2", r.owner)
 	must(t, r.issue(1, held))

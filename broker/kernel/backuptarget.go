@@ -118,13 +118,11 @@ func BackupTargetHash(n int, t BackupTarget) [32]byte {
 // separator or default-ignorable characters), for a directory a clean absolute path.
 func (t BackupTarget) shape() bool {
 	if len(t.Name) == 0 || len(t.Name) > MaxTargetName || len(t.Locator) == 0 || len(t.Locator) > MaxLocator ||
-		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), invisible) || t.Name[0] == '.' {
+		!utf8.ValidString(t.Locator) || slices.ContainsFunc([]rune(t.Locator), invisible) || t.Name[0] == '.' ||
+		strings.ContainsFunc(t.Name, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.')
+		}) {
 		return false
-	}
-	for _, c := range t.Name {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
-			return false
-		}
 	}
 	switch t.Kind {
 	case KindDir:

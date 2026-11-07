@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -79,12 +80,7 @@ func Rederive(anchors []key.PublicKey, head ed25519.PublicKey, es []Entry, pinne
 }
 
 func matches(cands []derived, e Entry) bool {
-	for _, c := range cands {
-		if c.typ == e.Type && bytes.Equal(c.body, e.Body) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(cands, func(c derived) bool { return c.typ == e.Type && bytes.Equal(c.body, e.Body) })
 }
 
 func entry(typ string, body any) derived {

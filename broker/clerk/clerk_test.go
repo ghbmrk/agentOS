@@ -406,7 +406,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	f := setup(t, key.Trash)
 	opub, opriv := gen(1)
 	anchors := []key.PublicKey{key.Ed25519(opub)}
-	if err := f.k.OpenTask(1, "t1"); err != nil {
+	if err := f.k.OpenTask(1, "t1", 0); err != nil {
 		t.Fatal(err)
 	}
 	a := kernel.TaskApproval{Site: "shop.example", First: "https://shop.example/"}

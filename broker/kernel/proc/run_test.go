@@ -223,7 +223,7 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 	in := kernel.SignPlan(kernel.Plan{ID: "in", Key: served, Steps: []kernel.PlanStep{ps}}, holderPriv)
 	out := kernel.SignPlan(kernel.Plan{ID: "out", Key: b.key, Steps: []kernel.PlanStep{ps}}, holderPriv)
 	b.h.With(func(k *kernel.Kernel) error {
-		if err := k.OpenTask(b.now, "t1"); err != nil {
+		if err := k.OpenTask(b.now, "t1", 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := k.ApproveTask(b.now, "t1", a); err != nil {

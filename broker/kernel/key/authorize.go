@@ -31,6 +31,7 @@ type Step struct {
 	Amount    int64    // spend, in minor units
 	Recipient string
 	Task      string
+	Rung      Proof // the highest the owner events that start or approve it reached (CH-3)
 }
 
 // Use is one charged step, recorded in the log.
@@ -78,6 +79,7 @@ const (
 	RRate      = "rate"
 	RUses      = "uses"
 	RTask      = "task" // a step or a metered call for another task than the key's (KRN-5)
+	RRung      = "rung" // the step's owner events reached a lower rung than the key asks (CH-3)
 )
 
 // Refusal is a closed reason code plus detail for the log.
@@ -139,6 +141,9 @@ func (v *Verified) Authorize(s Step, c Context) *Refusal {
 	}
 	if r := v.task(s.Task); r != nil {
 		return r
+	}
+	if s.Rung < l.Rung {
+		return refuse(RRung, "%v, the key asks %v", s.Rung, l.Rung)
 	}
 	if !in(l.Verbs, string(s.Verb)) {
 		return refuse(RVerb, "%s", s.Verb)

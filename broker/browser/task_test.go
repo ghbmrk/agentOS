@@ -38,7 +38,7 @@ func newCheckout(t *testing.T, id string) (*clerkRig, key.Key) {
 		"snapshot": shopReply("/cart", contPage),
 		"click":    []any{shopReply("/checkout", orderPage), shopReply("/done", doneShot)},
 	}, "", 0))
-	if err := r.k.OpenTask(0, id); err != nil {
+	if err := r.k.OpenTask(0, id, 0); err != nil {
 		t.Fatal(err)
 	}
 	k := r.taskKey(t, id)
@@ -140,13 +140,13 @@ func TestTaskApprovalStaysInItsTask(t *testing.T) {
 	r.run(t, 2, "ask", k, read(pressCont))
 	a1 := r.stepApproval(t, "ask")
 	r.tapTask(t, 3, "t1", a1)
-	if err := r.k.OpenTask(4, "t2"); err != nil {
+	if err := r.k.OpenTask(4, "t2", 0); err != nil {
 		t.Fatal(err)
 	}
 	// A tap for a site this gate never built an approval for covers
 	// nothing and names no site a card could offer (a site split the
 	// gate saw is TestASiteSplitAsksForTheOtherSitesTap).
-	if err := r.k.OpenTask(4, "t3"); err != nil {
+	if err := r.k.OpenTask(4, "t3", 0); err != nil {
 		t.Fatal(err)
 	}
 	elsewhere := a1
@@ -265,7 +265,7 @@ func TestSitelessPageIsNeverCovered(t *testing.T) {
 		t.Fatalf("site %q: %+v", a.Site, res)
 	}
 	r := newClerkRig(t, newHarness(t, map[string]any{"snapshot": blank, "click": shopReply("/done", doneShot)}, "", 0))
-	if err := r.k.OpenTask(0, "t1"); err != nil {
+	if err := r.k.OpenTask(0, "t1", 0); err != nil {
 		t.Fatal(err)
 	}
 	k := r.taskKey(t, "t1")
@@ -313,7 +313,7 @@ func TestCoveredLineOnlyWhenSent(t *testing.T) {
 		"snapshot": shopReply("/cart", contPage),
 		"click":    map[string]any{"ok": false, "error": "timeout_in_page", "url": "https://shop.example.test/cart"},
 	}, "", 0))
-	if err := r.k.OpenTask(0, "t1"); err != nil {
+	if err := r.k.OpenTask(0, "t1", 0); err != nil {
 		t.Fatal(err)
 	}
 	k := r.taskKey(t, "t1")
@@ -362,7 +362,7 @@ func TestASiteSplitAsksForTheOtherSitesTap(t *testing.T) {
 		"snapshot": shopReply("/cart", contPage),
 		"click":    []any{shopReply("/checkout", payPage), shopReply("/done", doneShot)},
 	}, "", 0))
-	if err := r.k.OpenTask(0, "t1"); err != nil {
+	if err := r.k.OpenTask(0, "t1", 0); err != nil {
 		t.Fatal(err)
 	}
 	k := r.taskKey(t, "t1")

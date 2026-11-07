@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"sort"
 )
 
 // Signing domains. A key signature and a log-head signature (kernel.DomainHead)
@@ -104,7 +103,19 @@ const (
 	KUses          = "uses"
 	KHold          = "hold"
 	KTask          = "task"
+	KRung          = "rung"
 )
+
+// Lower is rung r after a voice check that heard rung v: never higher (D-153).
+func Lower(r, v Proof) Proof { return min(r, v) }
+
+// String is a rung's CH-3 name, for refusals and logs.
+func (p Proof) String() string {
+	if p <= PRecovery {
+		return [...]string{"P0", "P1", "P2", "P3", "P3Local", "P4", "PRecovery"}[p]
+	}
+	return fmt.Sprintf("Proof(%d)", uint8(p))
+}
 
 // Caveat is one typed predicate. Which fields count depends on Kind: Set for
 // verbs, content and labels; Arg for arg; N for a cap, an expiry (unix ms) or
@@ -129,15 +140,8 @@ type ArgBound struct {
 
 func set(s []string) []string {
 	out := append([]string{}, s...)
-	sort.Strings(out)
-	w := 0
-	for i, v := range out {
-		if i == 0 || v != out[w-1] {
-			out[w] = v
-			w++
-		}
-	}
-	return out[:w]
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func LimitVerbs(v ...Verb) Caveat {
@@ -162,6 +166,7 @@ func LimitRateRecipient(n int64) Caveat { return Caveat{Kind: KRateRecipient, N:
 func LimitExpires(atMS int64) Caveat    { return Caveat{Kind: KExpires, N: atMS} }
 func LimitUses(n int64) Caveat          { return Caveat{Kind: KUses, N: n} }
 func LimitTask(id string) Caveat        { return Caveat{Kind: KTask, Set: []string{id}} }
+func LimitRung(r Proof) Caveat          { return Caveat{Kind: KRung, N: int64(r)} }
 func LimitHold(baseMS, noveltyMS int64) Caveat {
 	return Caveat{Kind: KHold, N: baseMS, M: noveltyMS}
 }
@@ -193,6 +198,7 @@ type Limits struct {
 	HoldBase    int64
 	HoldNovelty int64
 	Task        string // the one task the key serves; "" for none (KRN-5)
+	Rung        Proof  // the lowest rung a step's owner events may reach (CH-3)
 }
 
 // Fold is the limits of caveats cs alone, as one link sets them.
@@ -230,7 +236,7 @@ func (l Limits) Within(b Limits) bool {
 			return false
 		}
 	}
-	return (b.Task == "" || l.Task == b.Task) && l.HoldBase >= b.HoldBase && l.HoldNovelty >= b.HoldNovelty
+	return (b.Task == "" || l.Task == b.Task) && l.HoldBase >= b.HoldBase && l.HoldNovelty >= b.HoldNovelty && l.Rung >= b.Rung
 }
 
 func subset(a, b []string) bool {
@@ -238,27 +244,10 @@ func subset(a, b []string) bool {
 	for _, v := range b {
 		m[v] = true
 	}
-	for _, v := range a {
-		if !m[v] {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(a, func(v string) bool { return !m[v] })
 }
 
-func canonical(s []string) bool { return s != nil && equal(s, set(s)) }
-
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+func canonical(s []string) bool { return s != nil && slices.Equal(s, set(s)) }
 
 func narrowSet(cur *[]string, c Caveat, what string) error {
 	if !canonical(c.Set) {
@@ -341,6 +330,13 @@ func (l *Limits) apply(c Caveat, scope ID) error {
 			return fmt.Errorf("%w: hold", ErrLoosens)
 		}
 		l.HoldBase, l.HoldNovelty = c.N, c.M
+	case KRung:
+		if c.N < int64(P0) || c.N > int64(P4) {
+			return fmt.Errorf("%w: rung", ErrMalformed)
+		} else if Proof(c.N) < l.Rung {
+			return fmt.Errorf("%w: rung", ErrLoosens)
+		}
+		l.Rung = Proof(c.N)
 	default:
 		return ErrUnknownKind
 	}

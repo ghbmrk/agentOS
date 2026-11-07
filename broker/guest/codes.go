@@ -22,7 +22,7 @@ var codes = set(
 	kernel.CTrip, kernel.CTripped, kernel.CErased,
 	key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
 	key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay,
-	key.RRate, key.RUses, key.RTask,
+	key.RRate, key.RUses, key.RTask, key.RRung,
 
 	// The kernel's clerk wire (kernel/proc).
 	"unreachable", "lost", "view", "too-large",
