@@ -1,8 +1,10 @@
 package localsrv
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -64,5 +66,65 @@ func TestFinishCrashDuringTheRecordWrite(t *testing.T) {
 		if got, ok := r.s.Owner(); !ok || got != owner || len(r.finished) != 1 {
 			t.Fatalf("step %d: finish after the restart named %q %v (finished %v)", step, got, ok, r.finished)
 		}
+	}
+}
+
+// unsyncedRecord is a FileRecord whose saves land on disk but report that
+// the directory sync failed (privfile.ErrUnsynced).
+type unsyncedRecord struct{ FileRecord }
+
+func (u unsyncedRecord) Save(rec SetupRecord) error {
+	if err := u.FileRecord.Save(rec); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: synthetic", privfile.ErrUnsynced)
+}
+
+// REQ: ONB-3, ONB-6
+// A finish whose record save fails only at the directory sync (#4971)
+// renamed the finished record into place, so it counts: it answers ok,
+// names the owner and closes setup in memory, as the file and a restart do.
+func TestFinishUnsyncedKeepsMemoryEqualToTheRecord(t *testing.T) {
+	const owner = "+15550100100"
+	r := newSetupRig(t)
+	r.enrollAndConfirm()
+	r.s.cfg.Record = unsyncedRecord{FileRecord{Path: r.path}}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil); err != nil {
+		t.Fatalf("unsynced finish answered %v", err)
+	}
+	if got, ok := r.s.Owner(); !ok || got != owner || len(r.finished) != 1 {
+		t.Fatalf("memory does not hold the finish: %q %v (finished %v)", got, ok, r.finished)
+	}
+	if err := r.call(localapi.OpSetupProgress, nil, nil); code(err) != localapi.ErrSetupClosed {
+		t.Fatalf("setup open in memory after an unsynced finish: %v", err)
+	}
+	if rec, err := (FileRecord{Path: r.path}).Load(); err != nil || !rec.Finished || rec.Owner != owner {
+		t.Fatalf("the record is not the finish: %+v %v", rec, err)
+	}
+}
+
+// REQ: ONB-3
+// An enrolled mark and an owed provider answer whose record saves fail
+// only at the directory sync (#4971) count as saved: each returns nil and
+// leaves memory equal to the record on disk.
+func TestEnrolledAndOwedUnsyncedKeepMemoryEqualToTheRecord(t *testing.T) {
+	r := newSetupRig(t)
+	r.s.cfg.Record = unsyncedRecord{FileRecord{Path: r.path}}
+	if err := r.s.setEnrolled(true); err != nil {
+		t.Fatalf("unsynced enrolled mark: %v", err)
+	}
+	if rec, err := (FileRecord{Path: r.path}).Load(); err != nil || !rec.Enrolled || !r.s.rec.Enrolled {
+		t.Fatalf("enrolled: memory %+v, record %+v %v", r.s.rec, rec, err)
+	}
+	yes := true
+	r.s.mu.Lock()
+	err := r.s.setOwedLocked("openai", &yes)
+	r.s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unsynced owed answer: %v", err)
+	}
+	rec, err := FileRecord{Path: r.path}.Load()
+	if err != nil || !rec.Owed["openai"] || !r.s.rec.Owed["openai"] {
+		t.Fatalf("owed: memory %+v, record %+v %v", r.s.rec, rec, err)
 	}
 }

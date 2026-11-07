@@ -275,7 +275,7 @@ func (s *Setup) setOwedLocked(p string, ok *bool) error {
 	if len(next.Owed) == 0 {
 		next.Owed = nil
 	}
-	if s.cfg.Record.Save(next) != nil {
+	if !saved(s.cfg.Record.Save(next)) {
 		return errFailed
 	}
 	s.rec = next
