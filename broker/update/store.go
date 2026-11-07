@@ -317,7 +317,9 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		// Not ErrUnsafeStore: the path passed its checks, and EACCES or
+		// ENOSPC is the directory to change, named here (#4977 item 2).
+		return nil, fmt.Errorf("update store %s: %w", dir, err)
 	}
 	if err := safeDir(dir); err != nil {
 		return nil, err
@@ -388,7 +390,9 @@ func checkChain(abs string, euid uint32, store bool) error {
 	for p := abs; ; p = filepath.Dir(p) {
 		fi, err := os.Lstat(p)
 		if err != nil {
-			return err
+			// Still errors.Is(os.ErrNotExist) for a missing store (#4977
+			// item 3).
+			return fmt.Errorf("%w: %w", ErrUnsafeStore, err)
 		}
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		switch {

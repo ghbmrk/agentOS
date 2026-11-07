@@ -103,8 +103,9 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{"signed":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := do("verify", "-repo", repo, "-root", bad, "-installed", "6"); err == nil || strings.Contains(err.Error(), "TMPDIR") {
-		t.Fatalf("verify with a malformed root: %v, want an error that does not name TMPDIR", err)
+	// It names the -root file, not only the repository (#4977 item 4).
+	if err := do("verify", "-repo", repo, "-root", bad, "-installed", "6"); err == nil || strings.Contains(err.Error(), "TMPDIR") || !strings.Contains(err.Error(), "-root "+bad) {
+		t.Fatalf("verify with a malformed root: %v, want an error naming -root %s and not TMPDIR", err, bad)
 	}
 }
 
