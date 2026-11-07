@@ -428,7 +428,7 @@ func holds(k *kernel.Kernel, acct *inbox.Account, unsub key.Key, planner ed25519
 			w = "novelty"
 		}
 		out = append(out, Hold{Mail: acct.Origin(p.Plan.Steps[0].Args["to"]), Window: w,
-			Seconds: ver.Limits.Window(b.Novel) / 1000,
+			Seconds: ver.Window(key.Unsubscribe, b.Novel) / 1000,
 			Stopped: p.Status == kernel.SCancelled})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mail < out[j].Mail })

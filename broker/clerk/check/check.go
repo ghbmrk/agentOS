@@ -83,11 +83,11 @@ func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 	if rf := ver.Authorize(st, ctx); rf != nil {
 		return ver, rf
 	}
-	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Limits.Window(false), ver.Limits.Window(true)) > 0 {
+	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() && max(ver.Window(st.Verb, false), ver.Window(st.Verb, true)) > 0 {
 		if !d.Held {
 			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
-		if !d.Approved && now < ver.Limits.Due(d.HeldAt, d.Novel) {
+		if !d.Approved && now < ver.Due(st.Verb, d.HeldAt, d.Novel) {
 			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}
