@@ -92,6 +92,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | KRN-keys-print-enroll-counter | KRN-keys-print-enroll-counter: agentos-enroll's counterRec.Auth prints no auth value (DECOY-b-8, CLK-1) | #4833 | queued (release; tier A; size XS; from #4861 L3 review; waits on #4861) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
+| KRN-stop-task | KRN-stop-task: a STOP or a task's end cancels its plans' unsent steps in the fold, so no held step runs after STOP then RESUME or after its task ends (KRN-5, KRN-7, KEY-8) | #5006 (D-111) | queued (tier A; Opus; Defect: MIG-2) |
 
 ## Harness and operating model
 
@@ -149,15 +150,15 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CH-photo-heic-wire | CH-photo-heic-wire: reserve the photo one-shot's 960 MiB in RES-2/HW-4 admission, one run at a time, when CH-photo-c wires photo.Decoder; consider building agentos-photo with -tags noasm (later; from #3124 reviews) | #3124 | queued (later; tier A) |
 | CH-21f-wire | agentosd starts the owner channel with the setup names | CH-21f-wire | queued (tier A; release finding of #948) |
 | REV-LOW-msg | REV-LOW-msg: owner message findings (cross-reply code expiry, security notice held by quiet hours, Unicode question clipping, false passed-on for a late correction, NAME uncertain save) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
-| KEY-9-reach | KEY-9-reach: fixed worth table and reach computation in the key-check library; CH-3 stays the floor (KEY-9, D-307) | #4528 | building (release; tier A; lane primary) |
 | OWN-phone-wording | OWN-phone-wording: "the phone" restated by capability across the spec; ONB-6 pairs the number by a texted code keyed into the page; KRN-forget-c option B closes (D-311 row 2). | #4937 | queued (L1; tier B) |
 | OWN-surfaces-spec | OWN-surfaces-spec: text, call and page as surface declarations with rung, binding, audience and size; one kernel check over them; CH-12 becomes the text row (D-311 row 3). | #4937 | queued (L1; tier B) |
 | OWN-rung-caveat | OWN-rung-caveat: `rung` caveat kind in broker/kernel/key; kernel stamps owner events with their rung and refuses below; CH-3 rows as table tests (D-311 row 4). | #4937 | building (tier A; Opus) |
 | OWN-page-session | OWN-page-session: broker/owner loses the texted unlock, RUN and held-text readback; the page opens the session and runs held texts; eight text-path defect rows folded in as tests (D-311 row 5). | #4937, #4940 | queued (tier A; Opus) |
 | OWN-surface-decls | OWN-surface-decls: text, call and page as declarations in code; one kernel approval and disclosure check over them (D-311 row 6). | #4939, #4940 | queued (tier A; Opus) |
 | OWN-drop-generator | OWN-drop-generator: after QUAL-page-ca passes, delete codecheck, the kernel's code path, broker/checker, secrets.go and totp.go; CH-4 retires; close #3969, cut #3684 (D-311 row 7). | #3170, #4941 | queued (tier A; Opus; gate file) |
-| KEY-9-reach-b | KEY-9-reach-b: graph reach over declarations, price wired into grant/widen and the hold, grows-then-narrows (KEY-9, D-307) | #4529 | queued (release; tier A; lane primary) |
+| KEY-9-reach-b | KEY-9-reach-b: graph reach over declarations, price wired into grant/widen and the hold, grows-then-narrows (KEY-9, D-307) | #4529 | building (release; tier A; lane primary) |
 | OWN-rung-standing | OWN-rung-standing: standing-key steps and task approvals carry their deriving event's rung (CH-3, KEY-2; release item of #4940) | #4940 | queued (tier A; Opus) |
+| KEY-9-reach-b2 | KEY-9-reach-b2: graph reach over declarations, grows-then-narrows, FRM-key worth term (KEY-9, D-307) | #4999 | queued (release; tier A; lane primary) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -450,7 +451,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-c-f3 | ENF-c-f3: recovery-code wording after the wait, rotating an unspent code, restart-proof retry card | #4967 | building |
 | REV-CHK-links-vm-r2 | REV-CHK-links-vm-r2: pin vm.Open's second state-path check with a race seam | #4968 | building |
 | REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
-| REV-CHK-update-2 | REV-CHK-update-2: store refusals all wrap ErrUnsafeStore; MkdirAll and checkChain errors carry store context; verify names a bad -root | #4972 | queued |
 | MUT-shard-polish | MUT-shard-polish: release items from #4978's review (mutgate shard messages, job names, stub totals, budget check) | #4978 | in review (release) |
 | CI-hostcheck-guest-kernel | CI-hostcheck-guest-kernel: the stand-in guest's kernel comes from a pinned source, not the runner's archive. Release; from #4906. | #4906 | queued (release) |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
@@ -458,6 +458,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-names-3 | REV-CHK-names-3: run the hostile-text corpus through the ten test-only name checks | #3953 | queued |
 | ENF-c-f4 | ENF-c-f4: rotate alert, new-recovery block placement and guard, false-alarm recovery text | #5042 | queued |
 | MIG-5-checker-server-f1 | MIG-5-checker-server-f1: dead -checker socket wording, egress checker-wire test gaps | #5044 | queued |
+| REV-CHK-update-3 | REV-CHK-update-3: pin the MkdirAll non-wrap with a distinct prefix; test or drop verify's -root classes; name a malformed root file | #5058 | queued |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -505,4 +506,5 @@ issue #5041: body has no board-row block
 issue #5047: body has no board-row block
 issue #5053: body has no board-row block
 issue #5055: body has no board-row block
+issue #5062: body has no board-row block
 ```
