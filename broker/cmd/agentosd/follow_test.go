@@ -475,7 +475,9 @@ func TestUnapprovedFollowRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := r.run(kernel.SignPlan(kernel.Plan{ID: "standing", Key: ck, Steps: []kernel.PlanStep{followclerk.Step(d, "Acme")}}, hpriv))
-	if err != nil || st.Phase != kernel.PFailed || st.Detail != followclerk.ROwner {
+	// No passkey approved the step, so it waits its worth (KEY-9) before the
+	// clerk refuses it (follow's TestStepWithoutOwnerApprovalRefused).
+	if err != nil || st.Phase != kernel.PHeld {
 		t.Fatalf("standing key: %+v %v", st, err)
 	}
 	unchanged("standing key")

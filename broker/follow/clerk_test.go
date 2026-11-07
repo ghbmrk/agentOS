@@ -391,7 +391,15 @@ func TestStepWithoutOwnerApprovalRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := kernel.SignPlan(kernel.Plan{ID: "standing", Key: ck, Steps: []kernel.PlanStep{followclerk.Step(d, "Acme")}}, hpriv)
-	if st := r.run(p); st.Phase != kernel.PFailed || st.Detail != followclerk.ROwner {
+	if st := r.run(p); st.Phase != kernel.PHeld {
+		t.Fatalf("standing key, before its hold: %+v", st)
+	}
+	// No passkey approved the step, so it first waits its worth (KEY-9).
+	r.clk.at = r.clk.at.Add(time.Duration(key.HoldExtra(key.MaxRank)+1000) * time.Millisecond)
+	if err := r.k.Tick(r.now()); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.k.State().Plans[p.ID].Steps[0]; st.Phase != kernel.PFailed || st.Detail != followclerk.ROwner {
 		t.Fatalf("standing key: %+v", st)
 	}
 	// A plan the owner did not sign never reaches the clerk's switch.

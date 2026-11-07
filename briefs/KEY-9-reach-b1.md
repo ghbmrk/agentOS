@@ -6,7 +6,7 @@ Board section: Owner channel and approvals (SPEC §10). Work item #4999, split u
 
 **Requirements:** KEY-9 (part b1), KEY-8, KEY-4. `actuate` reaches none and `present` data; a new grant worth rank 3 needs the co-sign (two passkeys, one an anchor); an irreversible step's hold adds `HoldExtra` of its own verb's worth, except a step the owner approved one by one.
 
-**Scope:** `broker/kernel/key/worth.go`, `worth_test.go`; `broker/kernel/cosign.go`, `state.go` (one line), `kernel.go` (the hold), `worth_test.go`, `kernel_test.go`, `ASSUMPTIONS.md`; `broker/clerk/check/check.go`, `broker/kernel/sim/sim.go`, `broker/clerk/inbox/cmd/slice/run.go` (the same window); `broker/clerk/run/clerk_test.go`; this brief.
+**Scope:** `broker/kernel/key/worth.go`, `worth_test.go`; `broker/kernel/cosign.go`, `state.go` (one line), `kernel.go` (the hold), `worth_test.go`, `kernel_test.go`, `ASSUMPTIONS.md`; `broker/clerk/check/check.go`, `broker/kernel/sim/sim.go`, `broker/clerk/inbox/cmd/slice/run.go` (the same window); `broker/clerk/run/clerk_test.go`, `broker/follow/clerk_test.go`, `broker/cmd/agentosd/follow_test.go` (tests whose unapproved change-account now waits its worth); this brief.
 
 **Acceptance tests:** `kernel/key/worth_test.go`: `TestEveryVerbsReachIsPinned` (device rows), `TestStepHoldIsPricedByItsOwnVerb`. `kernel/worth_test.go`: `TestARankThreeGrantNeedsTheHardwareKey`, `TestAHeldStepWaitsItsOwnWorth`.
 
