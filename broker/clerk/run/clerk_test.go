@@ -177,6 +177,7 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 	grant := []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`)
 	digest := grantDigest(grant)
 	other := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
+	var held []string
 	for i, c := range []struct {
 		name           string
 		k              key.Key
@@ -194,8 +195,7 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		{"another grant", r.approve(other), "web", other, false, DNotStaged},
 		{"another clerk", r.approve(digest), "mail", digest, false, DNotThis},
 		{"another plan", r.approve(digest), "web", digest, true, DNotStaged},
-		// No passkey approved these two, so each first waits its worth (KEY-9):
-		// last, since the wait outlasts the approvals above.
+		// No passkey approved these two one by one, so each waits its worth (KEY-9).
 		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
 	} {
@@ -205,20 +205,27 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 			staged = "someone-else"
 		}
 		r.stage(staged, grant)
-		before, _ := r.sec.MarshalBinary()
 		st, changed := r.reconnect(id, c.k, c.target, c.digest)
-		if st.Phase == kernel.PHeld { // a change-account no passkey approved waits its worth first (KEY-9)
-			r.now += key.HoldExtra(key.MaxRank) + 1000
-			r.tick(r.now)
-			after, _ := r.sec.MarshalBinary()
-			if st = r.step(id); !bytes.Equal(before, after) || st.Phase == kernel.PDone {
-				t.Errorf("%s: after its hold, step %s %q, store changed", c.name, st.Phase, st.Detail)
-			}
+		if st.Phase == kernel.PHeld && !changed { // not approved one by one: it waits its worth first (KEY-9)
+			held = append(held, id)
 			continue
 		}
 		if changed || st.Detail != c.detail {
 			t.Errorf("%s: step %s %q, store changed %v", c.name, st.Phase, st.Detail, changed)
 		}
+	}
+	// The held ones never change the store, past their hold too.
+	before, _ := r.sec.MarshalBinary()
+	r.now += key.HoldExtra(key.MaxRank) + 1000
+	r.tick(r.now)
+	after, _ := r.sec.MarshalBinary()
+	for _, id := range held {
+		if st := r.step(id); !bytes.Equal(before, after) || st.Phase == kernel.PDone {
+			t.Errorf("%s: after its hold, step %s %q", id, st.Phase, st.Detail)
+		}
+	}
+	if len(held) != 3 {
+		t.Errorf("held %v, want the clerk's own key, the planner's narrowing and the two-use approval", held)
 	}
 	r.stage("ok", grant)
 	st, changed := r.reconnect("ok", r.approve(digest), "web", digest)

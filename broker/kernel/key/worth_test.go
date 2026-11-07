@@ -323,3 +323,31 @@ func TestStepHoldIsPricedByItsOwnVerb(t *testing.T) {
 		t.Errorf("a window near MaxInt64 wraps: window %d, due %d", w, d)
 	}
 }
+
+// Only a one-use passkey narrowing is a step approved one by one (Security
+// 6706162072): a passkey narrowing of many uses keeps the worth term on
+// every step, and one of exactly one use waives it.
+func TestOnlyAOneUseApprovalWaivesTheWorthTerm(t *testing.T) {
+	owner, holder := gen(1), gen(2)
+	r := Issue(owner.pass, Root{Clerk: "c", Verbs: []Verb{ChangeAccount}, Serial: "r"})
+	k, err := ClerkKey(r, owner.pass, holder.pub, 0, 100, LimitHold(60_000, 600_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for uses, want := range map[int64]int64{1000: 60_000 + 4*3600_000, 2: 60_000 + 4*3600_000, 1: 60_000} {
+		n, err := Narrow(k, owner.pass, LimitUses(uses))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := Chain(n, []PublicKey{owner.pk})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !v.ByOwner {
+			t.Fatal("a passkey narrowing is not ByOwner")
+		}
+		if got := v.Window(ChangeAccount, false); got != want {
+			t.Errorf("a %d-use passkey narrowing waits %d, want %d", uses, got, want)
+		}
+	}
+}

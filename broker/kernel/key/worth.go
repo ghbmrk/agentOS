@@ -1,6 +1,9 @@
 package key
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // Reach sets the price (KEY-9, D-307). A key's worth is the highest rank of
 // the asset classes its verbs reach, after its spend caps, by the fixed table
@@ -173,11 +176,13 @@ func HoldExtra(r Rank) int64 { return holdExtra[min(r, MaxRank)] }
 // Window is the hold before an irreversible step of verb vb runs under v:
 // the key's window (KEY-8) lengthened by the worth of what vb reaches at the
 // key's caps (KEY-9), saturating. A step the owner approved one by one, a
-// bare root's or one under a link a passkey signed (ByOwner), gains none:
-// the term guards authority the owner did not look at step by step.
+// bare root's or one under a passkey-signed tip link (ByOwner) of exactly
+// one use, gains none; a passkey narrowing over many steps, a task envelope
+// (D-249) included, keeps the term.
 func (v *Verified) Window(vb Verb, novel bool) int64 {
 	w := v.Limits.Window(novel)
-	if len(v.Key.Links) == 0 || v.ByOwner {
+	if len(v.Key.Links) == 0 || v.ByOwner && slices.ContainsFunc(v.Key.Links[len(v.Key.Links)-1].Caveats,
+		func(c Caveat) bool { return c.Kind == KUses && c.N == 1 }) {
 		return w
 	}
 	x := HoldExtra(WorthOf(AssetsOf(vb), v.Limits.Capped()))
