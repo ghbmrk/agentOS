@@ -92,7 +92,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | KRN-keys-print-enroll-counter | KRN-keys-print-enroll-counter: agentos-enroll's counterRec.Auth prints no auth value (DECOY-b-8, CLK-1) | #4833 | queued (release; tier A; size XS; from #4861 L3 review; waits on #4861) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
-| MIG-5-checker-server | MIG-5-checker-server: delete broker/checker's unrun server and rework the holder and agentos-egress tests that use it | #5011; D-310; MIG-5 | building (tier A) |
 
 ## Harness and operating model
 
@@ -431,7 +430,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2 (#4044), UPD-5r-b7 (#4475), UPD-7w (#3961) | queued (A) |
 | UPD-5r-b3s | security suite over the kernel socket: seed, read, drop, keep, notice (brief briefs/UPD-5r-b.md, b3) | UPD-5r-b3 (#4045), #4108 | queued (A; trusted core: kernel/proc) |
 | MIG-4-recovery-r4h | MIG-4-recovery-r4h: the localui r4b-3 assumption row says what r4c changed | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
-| REV-CHK-save-hosts | The host binaries' saves pass a test-set stop to `privfile.WriteAtomic` (broker/cmd/agentos-camera, broker/cmd/agentos-clerk-model, broker/cmd/agentos-enroll, broker/cmd/agentos-homekit, broker/cmd/agentos-unlock, broker/update); removes their REV-CHK-save pending lines. | #3903 | building |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
 | GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
@@ -446,11 +444,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b7f-step-session-d | UPD-5r-b7f-step-session-d: pin the ASSUMPTIONS row's kernel step-check list to the code (PLN-4, EVL-3) | #4734 | queued (release; tier A; from #4734 Security review) |
 | UNIT-RULES-release-2 | UNIT-RULES-release-2: offline_systemd unshare -u -i; MERGED links must resolve to /usr/<name>; the test gaps from #4779 round-2 surviving mutants; a no-fragment mount drop-in's Environment=. Release; from #4779. | #4779, #4767 | queued (release) |
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
-| CI-hostcheck-image-tools | CI-hostcheck-image-tools: hostcheck runs qemu, swtpm and OVMF from pinned sources, not the runner's packages. Release; from #4776. | #4776 | building (release) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
-| REV-CHK-save-owner-f1 | Owner-side saves (owner commit, question persist, localsrv setup record) keep memory equal to the file when only the directory sync failed (privfile.ErrUnsynced). | #4193 | building |
 | ENF-c-f3 | ENF-c-f3: recovery-code wording after the wait, rotating an unspent code, restart-proof retry card | #4967 | building |
 | REV-CHK-links-vm-r2 | REV-CHK-links-vm-r2: pin vm.Open's second state-path check with a race seam | #4968 | building |
 | REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
