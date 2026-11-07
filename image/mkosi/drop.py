@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Purge packages the box does not need, then refuse a tree that links a library it lacks (#2919).
 
-mkosi.postinst runs this with the image tree's path, before it copies dpkg's status file out for the
-known-vulnerability scan (EVL-5), so the scan and the package manifest see the packages gone. Each
+It runs on both trees the box boots. mkosi.postinst runs it with the image tree's path, before it
+copies dpkg's status file out for the known-vulnerability scan (EVL-5), so the scan and the package
+manifest see the packages gone. The default initrd's mkosi.postinst is a link to this file, which
+mkosi runs with no tree argument and the initrd's tree in $BUILDROOT: there it purges INITRD_DROP
+with the same checks, then copies the initrd's dpkg status to INITRD_STATUS for the scan (#4927). Each
 package below is a hard dependency of one the box keeps, so apt would remove the keeper with it;
 dpkg purges it with --force-depends instead, and FILES removes what used it. The NEEDED check then
 fails the build if any ELF file under usr still names a library a dropped package shipped: a forced
@@ -11,9 +14,11 @@ whose interpreter a dropped package shipped (perl), bar the package tools in PER
 goes too: /usr/bin/sh is diverted and relinked to bash first, so sh still runs (as bash).
 
 Source names are Debian's (what the advisories and assurance/vulncheck.json name); a dropped
-source has no image record there (tests/test_image_drop.py)."""
+source has no image record there, and an initrd-dropped one no image/initrd record
+(tests/test_image_drop.py)."""
 import glob
 import os
+import shutil
 import stat
 import struct
 import subprocess
@@ -43,9 +48,26 @@ DROP = {
     "libbz2-1.0": ("bzip2", "only dpkg-deb links it; the box unpacks no package"),
     "dash": ("dash", "Essential as /bin/sh, which is relinked to bash first; nothing runs dash by name"),
 }
+# The default initrd's drops (#4927): what the main tree drops and the initrd also carries (mkosi-initrd
+# installs every Essential package), and the account tools tpm-udev's tss group pulled in. Traced
+# with the initrd's own package list (image.yml build (a) at b64c943b, 2026-11-06).
+INITRD_DROP = {p: DROP[p] for p in ("tar", "diffutils", "perl-base", "libsqlite3-0", "liblastlog2-2",
+                                    "libbz2-1.0", "dash")}
+INITRD_DROP.update({
+    "adduser": ("adduser", "tpm-udev's postinst ran it to add the tss group; it is perl, and nothing in the initrd runs it"),
+    "passwd": ("shadow", "only adduser needs it; systemd-firstboot writes root's entry, and the initrd adds no account"),
+    "login.defs": ("shadow", "only passwd's tools read it"),
+    "libsemanage2": ("libsemanage", "only passwd links it, and it links libbz2 (CI build (a) of #5051)"),
+    "libsemanage-common": ("libsemanage", "only libsemanage2 reads its /etc/selinux/semanage.conf"),
+    "libsepol2": ("libsepol", "only libsemanage2 links it"),
+    "p11-kit": ("p11-kit", "mkosi-initrd adds it for PKCS#11 unlocking, and no crypttab or unit here names a token"),
+    "p11-kit-modules": ("p11-kit", "as p11-kit"),
+    "libp11-kit0": ("p11-kit", "only p11-kit and p11-kit-modules link it; systemd opens it only for a PKCS#11 token"),
+})
 # Dropped packages whose source the box still runs other packages of, so the source's image
 # records stay (tests/test_image_drop.py).
 PARTIAL = ("liblastlog2-2",)
+INITRD_PARTIAL = ("liblastlog2-2",)
 # Essential packages: dpkg removes them only with --force-remove-essential, in a second call after
 # the rest, so no other package's removal script finds perl or diff already gone.
 ESSENTIAL = ("tar", "diffutils", "perl-base")
@@ -65,6 +87,11 @@ FILES = (
     "usr/lib/systemd/system/dpkg-db-backup.timer",
     "usr/libexec/dpkg/dpkg-db-backup",
 )
+# The initrd's: it has no ss, so libtirpc and krb5 are not dropped there.
+INITRD_FILES = tuple(f for f in FILES if f != "usr/bin/ss")
+# Where the initrd's dpkg status goes: mkosi-initrd sets CleanPackageMetadata=yes, so /var/lib/dpkg
+# is gone before mkosi.finalize runs; tools/vulncheck.py reads it from here (its INITRD_STATUS).
+INITRD_STATUS = "usr/share/agentos/initrd.dpkg-status"
 # Kept packages whose perl scripts stay, unrunnable: package and admin tools that only maintainer
 # scripts or a person at a shell would start, and the box runs neither. The #! check refuses a perl
 # script from any other package, and a package here that ships none is stale.
@@ -224,11 +251,11 @@ def interpreter_violations(root, gone, allowed=(), top="usr"):
     return out
 
 
-def remove_files(root):
-    """Delete FILES from the tree, and the links under etc/systemd that enabled a unit among them;
-    one line per pattern that matched nothing."""
+def remove_files(root, patterns=None):
+    """Delete PATTERNS (FILES by default) from the tree, and the links under etc/systemd that
+    enabled a unit among them; one line per pattern that matched nothing."""
     out, units = [], set()
-    for pattern in FILES:
+    for pattern in FILES if patterns is None else patterns:
         hits = sorted(glob.glob(os.path.join(root, pattern)))
         if not hits:
             out.append("%s: matches nothing; drop.py's FILES is stale" % pattern)
@@ -252,24 +279,57 @@ def relink_sh(root):
     os.replace(link + ".new", link)
 
 
-def main(root):
+def installed(root):
+    """The packages dpkg lists in the tree."""
+    return {os.path.basename(p)[:-len(".list")].split(":")[0]
+            for p in glob.glob(os.path.join(root, "var/lib/dpkg/info/*.list"))}
+
+
+def main(root, initrd=False):
+    """Purge DROP from the image tree at ROOT, or with INITRD, INITRD_DROP from the initrd's, and
+    check the tree; 1 if a check fails. PERL_TOOLS lists the main tree's packages; in the initrd
+    only those it installs apply, and each of them must still own a perl script."""
+    pkgs = INITRD_DROP if initrd else DROP
+    files = INITRD_FILES if initrd else FILES
+    tools = {p: w for p, w in PERL_TOOLS.items() if p in installed(root)} if initrd else PERL_TOOLS
     if not os.path.isfile(os.path.join(root, "usr/bin/bash")):
         raise SystemExit("drop.py: usr/bin/bash is missing, so sh cannot move off dash")
-    listed = subprocess.run(["mkosi-chroot", "dpkg-query", "-L", *DROP], check=True,
+    listed = subprocess.run(["mkosi-chroot", "dpkg-query", "-L", *pkgs], check=True,
                             stdout=subprocess.PIPE, text=True).stdout.splitlines()
-    rest = [p for p in DROP if p not in ESSENTIAL and p != SHELL]
+    rest = [p for p in pkgs if p not in ESSENTIAL and p != SHELL]
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", *rest], check=True)
     relink_sh(root)
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
                     SHELL], check=True)
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
                     *ESSENTIAL], check=True)
-    problems = (remove_files(root) + needed_violations(root, shipped(listed))
-                + interpreter_violations(root, programs(listed) - {SH}, PERL_TOOLS))
+    problems = (remove_files(root, files) + needed_violations(root, shipped(listed))
+                + interpreter_violations(root, programs(listed) - {SH}, tools))
     for p in problems:
         print("drop.py: " + p, file=sys.stderr)
     return 1 if problems else 0
 
 
+def keep_initrd_status(root):
+    """Copy the initrd's dpkg status, now without the dropped packages, to INITRD_STATUS."""
+    dest = os.path.join(root, INITRD_STATUS)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copyfile(os.path.join(root, "var/lib/dpkg/status"), dest)
+
+
+def run(argv, env):
+    """The main tree when ARGV names one directory (mkosi.postinst); otherwise the initrd, whose
+    postinst mkosi runs as this file with no tree argument and the tree in $BUILDROOT."""
+    if len(argv) == 1 and os.path.isdir(argv[0]):
+        return main(argv[0])
+    root = env.get("BUILDROOT", "")
+    if not os.path.isdir(root):
+        raise SystemExit("drop.py: pass the image tree, or run as the initrd's mkosi.postinst with $BUILDROOT set")
+    rc = main(root, initrd=True)
+    if rc == 0:
+        keep_initrd_status(root)
+    return rc
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(run(sys.argv[1:], os.environ))
