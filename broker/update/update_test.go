@@ -844,9 +844,17 @@ func TestSafeDirNamesEachRefusal(t *testing.T) {
 	}
 	want := func(what string, err error, msg string) {
 		t.Helper()
-		if err == nil || !strings.Contains(err.Error(), msg) {
-			t.Errorf("%s: %v, want %q", what, err, msg)
+		if err == nil || !strings.Contains(err.Error(), msg) || !errors.Is(err, ErrUnsafeStore) {
+			t.Errorf("%s: %v, want %q wrapping ErrUnsafeStore", what, err, msg)
 		}
+	}
+	want("a relative store", safeDir("rel/box"), "rel/box is not an absolute path")
+	// checkChain's own Lstat failure is a store refusal that still reads
+	// as the missing directory (#4977 item 3).
+	missing := filepath.Join(base, "missing")
+	want("a missing store", safeDir(missing), "update store: lstat "+missing)
+	if err := safeDir(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing store: %v, want os.ErrNotExist", err)
 	}
 	want("a linked parent", safeDir(filepath.Join(linked, "box")), linked+" is not a directory")
 	want("a linked store", safeDir(linked), linked+" is not a directory")
@@ -877,8 +885,8 @@ func TestInitStoreRefusesBeforeCreating(t *testing.T) {
 	f.must(err)
 	base := t.TempDir()
 	t.Chdir(base)
-	if _, err := InitStore("rel/box", root, 1); err == nil {
-		t.Fatal("InitStore took a relative path")
+	if _, err := InitStore("rel/box", root, 1); !errors.Is(err, ErrUnsafeStore) {
+		t.Fatalf("InitStore with a relative path: %v, want an ErrUnsafeStore refusal", err)
 	}
 	if _, err := os.Lstat(filepath.Join(base, "rel")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused relative path left a directory: %v", err)
@@ -903,6 +911,19 @@ func TestInitStoreRefusesBeforeCreating(t *testing.T) {
 	}
 	if _, err := InitStore(sticky, root, 1); !errors.Is(err, ErrUnsafeStore) {
 		t.Fatalf("InitStore at a sticky dir writable by all: %v, want refused", err)
+	}
+
+	// A MkdirAll failure past the pre-check names the store it was making
+	// (#4977 item 2): a private parent this uid cannot write passes the
+	// chain check, and the kernel refuses the mkdir.
+	if os.Geteuid() != 0 {
+		ro := filepath.Join(base, "ro")
+		f.must(os.Mkdir(ro, 0o500))
+		box := filepath.Join(ro, "a", "box")
+		_, err := InitStore(box, root, 1)
+		if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "update store "+box+":") {
+			t.Fatalf("InitStore under an unwritable parent: %v, want a permission error naming %s", err, box)
+		}
 	}
 
 	// A path through a file fails the pre-check as a store refusal.

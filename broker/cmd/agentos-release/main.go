@@ -281,6 +281,13 @@ func run(args []string, out io.Writer) error {
 		if errors.Is(err, update.ErrUnsafeStore) {
 			return fmt.Errorf("verify: scratch store in %s refused (set TMPDIR to a directory only this user writes): %w", tmp, err)
 		}
+		// InitStore checks the root before it reaches the store path, and
+		// classify reads a bad root as a bad repository; name the -root
+		// file instead (#4977 item 4).
+		if errors.Is(err, update.ErrBadRepository) || errors.Is(err, update.ErrSignatures) ||
+			errors.Is(err, update.ErrExpired) || errors.Is(err, update.ErrRollback) {
+			return fmt.Errorf("verify: -root %s: %w", root, err)
+		}
 		if err != nil {
 			return err
 		}
