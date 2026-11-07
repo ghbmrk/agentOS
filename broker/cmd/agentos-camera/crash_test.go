@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
@@ -36,9 +37,13 @@ func TestStoppedSaveKeepsTheOldSettings(t *testing.T) {
 		if err := b.h.disconnect("porch"); !errors.Is(err, privfile.ErrStopped) {
 			t.Fatalf("step %d: disconnect: got %v, want ErrStopped", step, err)
 		}
+		dials := b.node.dials.Load()
 		if err := b.h.resume(); !errors.Is(err, privfile.ErrStopped) {
 			t.Fatalf("step %d: resume: got %v, want ErrStopped", step, err)
 		}
+		// The effect, not the rolled-back flag: no stream is dialed after a
+		// refused RESUME (#5048 Potency 1).
+		stays(t, "no dial after a refused RESUME", func() bool { return b.node.dials.Load() == dials && b.node.conns.Load() == 0 })
 		b.h.mu.Lock()
 		n, stopped := len(b.h.st.Cameras), b.h.st.Stopped
 		b.h.mu.Unlock()
@@ -53,5 +58,16 @@ func TestStoppedSaveKeepsTheOldSettings(t *testing.T) {
 			t.Fatalf("step %d: the file moved on a stopped save:\n%s", step, st)
 		}
 		b.halt()
+	}
+}
+
+// stays fails unless cond holds throughout 300ms, the window a run started
+// before a refused save would need to dial.
+func stays(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if !cond() {
+			t.Fatalf("%s: it did not hold", what)
+		}
 	}
 }

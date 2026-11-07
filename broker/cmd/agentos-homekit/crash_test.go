@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/homekit"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -41,15 +42,26 @@ func TestStoppedSaveKeepsTheOldDevices(t *testing.T) {
 		if ldBounds != 0 {
 			t.Fatalf("step %d: a refused bounds save left the link holding %d bounds", step, ldBounds)
 		}
+		opens := get(b, func(a *fakeAcc) int { return a.opens })
 		if _, err := b.h.disconnect("hall"); !errors.Is(err, errSave) {
 			t.Fatalf("step %d: disconnect: got %v, want errSave", step, err)
 		}
 		if b.stateOf("hall") == "" || b.file() != before {
 			t.Fatalf("step %d: a refused disconnect dropped the device: %s", step, b.file())
 		}
+		// The device's runner starts again: a link reopens (#5048 Potency 3).
+		waitFor(t, "the link to reopen after a refused disconnect", func() bool { return get(b, func(a *fakeAcc) int { return a.opens }) > opens+1 })
 		b.h.stop() // its own save is stopped too; the links close regardless
+		opens = get(b, func(a *fakeAcc) int { return a.opens })
 		if err := b.h.resume(); !errors.Is(err, errSave) {
 			t.Fatalf("step %d: resume: got %v, want errSave", step, err)
+		}
+		// The effect, not the rolled-back flag: no link opens after a
+		// refused RESUME (#5048 Potency 2).
+		for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if n := get(b, func(a *fakeAcc) int { return a.opens }); n != opens {
+				t.Fatalf("step %d: a refused RESUME opened %d link(s)", step, n-opens)
+			}
 		}
 		if s := b.stateOf("hall"); s != "stopped" || b.file() != before {
 			t.Fatalf("step %d: after a refused RESUME hall is %q, file %s", step, s, b.file())
