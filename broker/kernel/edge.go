@@ -371,13 +371,8 @@ func (k *Kernel) EdgeRevoke(now int64, edge ed25519.PublicKey) error {
 // was not by this PC's TPM slot, naming that slot (§12.2). Only a page-step
 // enrolment trusts an edge again. With nothing live it logs nothing.
 func (k *Kernel) EdgeCut(now int64, slot string) error {
-	if len(slot) == 0 || len(slot) > MaxSlot {
+	if len(slot) == 0 || len(slot) > MaxSlot || !graphic(slot) {
 		return ErrEdgeSlot
-	}
-	for _, c := range []byte(slot) {
-		if c < 0x21 || c > 0x7e {
-			return ErrEdgeSlot
-		}
 	}
 	if k.LiveEdge() == nil {
 		return nil

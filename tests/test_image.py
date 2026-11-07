@@ -94,9 +94,11 @@ def noexec(root):
 
 
 # The main side's mask over the keeper's state and the keeper's lift of it (STO-2c, D-154), which
-# every agentos unit carries; the tree check refuses the units nodump() writes without them.
+# every agentos unit carries, and the MOR unit's replacement of it (HW-8); the tree check refuses the
+# units nodump() writes without them.
 MAIN_SIDE_FILES = ("usr/lib/systemd/system/agentos-.service.d/50-main-side.conf",
-                   "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf")
+                   "usr/lib/systemd/system/agentos-keeper-.service.d/90-keeper.conf",
+                   "usr/lib/systemd/system/agentos-mor.service.d/50-main-side.conf")
 
 
 BT_BLOCK = "usr/lib/modprobe.d/agentos-no-bluetooth.conf"
@@ -4196,6 +4198,13 @@ class ReferenceToolTest(unittest.TestCase):
         self.assertIn("image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", build)
         self.assertIn('"$RUNNER_TEMP/image-tools"', build)
         self.assertLess(ci.index("- name: The image's systemd and kmod"), ci.index("- name: Unit tests"))
+        # A snapshot.debian.org outage retries the whole bounded build from an empty root, and the
+        # last failure still fails the step with mmdebstrap's exit code.
+        self.assertIn("for wait in 15 30 60 last; do", build)
+        self.assertIn('sudo rm -rf --one-file-system "$RUNNER_TEMP/image-tools"', build)
+        self.assertIn("sudo timeout 240 mmdebstrap ", build)
+        self.assertIn('[ "$wait" != last ] || exit "$err"', build)
+        self.assertEqual(build.count("mmdebstrap --mode="), 1)
         self.assertIn("python tools/unit_tests.py", step)
         self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 
@@ -6275,6 +6284,7 @@ UNIT_DEVICES = {
     "agentos-keeper-link-capture.service": ("root", "private"),
     "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
+    "agentos-mor.service": ("root", "closed"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),
     "agentos-localui-claim.service": ("root", "closed"),

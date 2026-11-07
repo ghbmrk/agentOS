@@ -66,7 +66,7 @@ const (
 	// ActionLearnForget forgets one owner task from what the learning
 	// plane keeps (W3-forget, CAP-3): only the broker submits it, on the
 	// owner's FORGET, and only the owner approves it. It has no params:
-	// the goal ID rides in the intent ID (grants.ForgetID), since the
+	// the goal ID rides in the intent ID (forget/<nonce>/<goal>), since the
 	// journal redacts params, and the task's text is never in it.
 	ActionLearnForget = "meta.learn.forget"
 	// ActionEvidence sets or clears the one destination that private

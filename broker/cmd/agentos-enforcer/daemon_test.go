@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -60,7 +61,8 @@ func TestChannelElapsedIsBootTime(t *testing.T) {
 // firewall, light or radio host.
 func TestDepsRequired(t *testing.T) {
 	x := newBox(t, false)
-	full := deps{Elapsed: bootTime, Fire: x.fire, Network: x.net, Light: x.light, Radio: noRadio{}, Logf: func(string) {}}
+	full := x.deps()
+	full.Elapsed = bootTime
 	for name, f := range map[string]func(*deps){
 		"Elapsed": func(d *deps) { d.Elapsed = nil },
 		"Fire":    func(d *deps) { d.Fire = nil },
@@ -68,6 +70,10 @@ func TestDepsRequired(t *testing.T) {
 		"Light":   func(d *deps) { d.Light = nil },
 		"Radio":   func(d *deps) { d.Radio = nil },
 		"Logf":    func(d *deps) { d.Logf = nil },
+		"DNS":     func(d *deps) { d.DNS = nil },
+		"MDNS":    func(d *deps) { d.MDNS = nil },
+		"Wake":    func(d *deps) { d.Wake = nil },
+		"Boot":    func(d *deps) { d.Boot = nil },
 	} {
 		d := full
 		f(&d)
@@ -112,12 +118,26 @@ func TestConfigRefused(t *testing.T) {
 		"chan port mismatch": func(c *Config) { c.Channel = netip.MustParseAddrPort("10.50.0.1:7444") },
 		"page port mismatch": func(c *Config) { c.Page = []netip.AddrPort{netip.MustParseAddrPort("10.10.0.1:8443")} },
 		"relative nft":       func(c *Config) { c.Nft = "nft" },
+		"relative dnsmasq":   func(c *Config) { c.Dnsmasq = "dnsmasq" },
+		"dns misses a net":   func(c *Config) { c.DNS.Nets = slices.Clone(c.DNS.Nets[1:]) },
+		"wake on no network": func(c *Config) { c.Wake = []WakeMachine{{MAC: "02:00:00:00:00:01", Iface: "eth9"}} },
 	} {
 		c := good
 		f(&c)
 		if c.check() == nil {
 			t.Errorf("%s: taken", name)
 		}
+	}
+	// A hardware address that does not parse is named as it was written.
+	bad := good
+	bad.Wake = []WakeMachine{{MAC: "zz", Iface: "hh0"}}
+	if err := bad.check(); err == nil || !strings.Contains(err.Error(), `wake: hardware address "zz"`) {
+		t.Errorf("an unparsable wake address: %v", err)
+	}
+	ok := good
+	ok.Wake = []WakeMachine{{MAC: "02:00:00:00:00:01", Iface: "hh0"}}
+	if err := ok.check(); err != nil {
+		t.Errorf("a good wake machine was refused: %v", err)
 	}
 	b, err := json.Marshal(good)
 	if err != nil {
@@ -152,12 +172,9 @@ func TestIdleTickQuiet(t *testing.T) {
 	var buf bytes.Buffer
 	ll := newLogLight(log.New(&buf, "", 0))
 	for _, light := range []alert.Light{cl, ll} {
-		d, err := open(x.cfg, x.dir, deps{
-			Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
-			Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
-			Fire:    x.fire, Network: x.net, Light: light, Radio: noRadio{},
-			Logf: func(string) {},
-		})
+		dp := x.deps()
+		dp.Light = light
+		d, err := open(x.cfg, x.dir, dp)
 		if err != nil {
 			t.Fatal(err)
 		}

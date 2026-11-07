@@ -706,3 +706,35 @@ func TestNamedRefusesBlankAndInvalidQuery(t *testing.T) {
 		t.Errorf("a typed U+FFFD label: %v %v", got, err)
 	}
 }
+
+// Seal takes a store or class name only as printable ASCII with no space,
+// so a class with nothing to see, a blank or a reordering character never
+// reaches an erase list; the classes in use still seal (#3953).
+func TestSealRefusesAClassNameNoOneCanSee(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	for _, c := range []string{kernel.ClassLabel, "message", "wrap-key", "!", "~", strings.Repeat("c", 64)} {
+		r.seal(s, "mail", c, "x"+c)
+	}
+	for _, c := range []string{"", " ", "ㅤ", "mailㅤ", "Mail Body", "mail‮", "mél", "\x7f", strings.Repeat("c", 65)} {
+		if _, err := r.k.Seal(2, s, "mail", c, []byte("y")); !errors.Is(err, kernel.ErrStore) {
+			t.Errorf("seal class %q: %v, want ErrStore", c, err)
+		}
+	}
+}
+
+// A content.stored entry written past the kernel with a class Seal refuses
+// folds to nothing, so replay and the live kernel agree on what an erase
+// lists (#3953).
+func TestAHiddenClassWrittenPastSealFoldsToNothing(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	if _, err := r.k.Log().Append(2, kernel.TContentStored, 1, map[string]any{"subject": s, "store": "mail", "hash": kernel.Hash{7}, "class": "mail\u3164"}); err != nil {
+		t.Fatal(err)
+	}
+	re, err := kernel.Replay(nil, r.k.Log().Entries())
+	must(t, err)
+	if rc, _ := re.Recall(s); len(rc.Items) != 0 {
+		t.Fatalf("recall after replay %+v, want no item", rc.Items)
+	}
+}
