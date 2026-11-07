@@ -102,3 +102,29 @@ func TestFinishUnsyncedKeepsMemoryEqualToTheRecord(t *testing.T) {
 		t.Fatalf("the record is not the finish: %+v %v", rec, err)
 	}
 }
+
+// REQ: ONB-3
+// An enrolled mark and an owed provider answer whose record saves fail
+// only at the directory sync (#4971) count as saved: each returns nil and
+// leaves memory equal to the record on disk.
+func TestEnrolledAndOwedUnsyncedKeepMemoryEqualToTheRecord(t *testing.T) {
+	r := newSetupRig(t)
+	r.s.cfg.Record = unsyncedRecord{FileRecord{Path: r.path}}
+	if err := r.s.setEnrolled(true); err != nil {
+		t.Fatalf("unsynced enrolled mark: %v", err)
+	}
+	if rec, err := (FileRecord{Path: r.path}).Load(); err != nil || !rec.Enrolled || !r.s.rec.Enrolled {
+		t.Fatalf("enrolled: memory %+v, record %+v %v", r.s.rec, rec, err)
+	}
+	yes := true
+	r.s.mu.Lock()
+	err := r.s.setOwedLocked("openai", &yes)
+	r.s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unsynced owed answer: %v", err)
+	}
+	rec, err := FileRecord{Path: r.path}.Load()
+	if err != nil || !rec.Owed["openai"] || !r.s.rec.Owed["openai"] {
+		t.Fatalf("owed: memory %+v, record %+v %v", r.s.rec, rec, err)
+	}
+}
