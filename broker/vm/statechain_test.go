@@ -218,6 +218,33 @@ func TestOpenRechecksStateDirsAfterMaking(t *testing.T) {
 	}
 }
 
+// A name another uid links into a missing component after the first
+// check and before MkdirAll (which follows a link to a directory without
+// error) is refused by the second check, and the link's target keeps its
+// mode: the race the post-make test above cannot plant.
+// REQ: KRN-2
+func TestOpenRefusesALinkRacedIntoAMissingName(t *testing.T) {
+	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+	elsewhere := mode(t, filepath.Join(top, "elsewhere"), 0o755)
+	cfg := newCfg(t)
+	cfg.StateDir = filepath.Join(top, "state")
+	t.Cleanup(func() { stateDirsChecked = func() {} })
+	stateDirsChecked = func() {
+		if _, err := os.Lstat(cfg.StateDir); err == nil {
+			t.Fatal("StateDir exists before the race is planted")
+		}
+		if err := os.Symlink(elsewhere, cfg.StateDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirExposed) {
+		t.Errorf("Open = %v, want ErrStateDirExposed", err)
+	}
+	if fi, err := os.Stat(elsewhere); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("link target after Open: %v, %v; want mode 0755 unchanged", fi, err)
+	}
+}
+
 // A sticky world-writable directory such as /tmp is kept: another uid
 // can make a name in it but cannot rename or remove one it does not own,
 // so the directories below it that Open checks stay where they are.

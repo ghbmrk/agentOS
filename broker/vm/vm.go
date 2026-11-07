@@ -472,10 +472,12 @@ var ErrStateDirExposed = errors.New("vm: the state directory's path is open to a
 
 // stateDirOwner and stateDirsMade are seams: tests give a directory a
 // foreign owner without root, and change a directory between Open's two
-// checks.
+// checks: stateDirsChecked runs after the first and before MkdirAll,
+// stateDirsMade after MkdirAll and before the second.
 var (
-	stateDirOwner = overlay.Owner
-	stateDirsMade = func() {}
+	stateDirOwner    = overlay.Owner
+	stateDirsChecked = func() {}
+	stateDirsMade    = func() {}
 )
 
 // checkStateDirs checks the premise the vm allow lines rest on
@@ -571,6 +573,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 	if err := checkStateDirs(dirs, false); err != nil {
 		return nil, err
 	}
+	stateDirsChecked()
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
