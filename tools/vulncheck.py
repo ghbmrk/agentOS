@@ -1327,11 +1327,15 @@ def initrd_status(src):
             found += [(f, mode, body) for mode, body in cpio_files(f.read_bytes(), INITRD_STATUS)]
         except (ValueError, OSError, subprocess.CalledProcessError) as e:
             problems.append(f"{f}: not a readable initrd ({e}), so its packages cannot be scanned")
-    if len(found) != 1:
-        problems.append(f"{d}: {len(found)} initrd members are {INITRD_STATUS}, want exactly one "
-                        "(image/mkosi/initrd/mkosi.postinst writes it)")
-    elif found[0][1] & 0o170000 != 0o100000:
-        problems.append(f"{found[0][0]}: {INITRD_STATUS} is not a regular file (mode {found[0][1]:o})")
+    if len(found) > 1:
+        problems.append(f"{d}: {len(found)} initrd members are {INITRD_STATUS}, want exactly one; they are in "
+                        + ", ".join(str(f) for f, _, _ in found))
+    elif not found and not problems:
+        problems.append(f"{d}: no initrd holds {INITRD_STATUS}; an image built before #4899 has none, so "
+                        "rebuild it (image/mkosi/initrd/mkosi.postinst, a link to drop.py, writes it)")
+    elif found and found[0][1] & 0o170000 != 0o100000:
+        problems.append(f"{found[0][0]}: {INITRD_STATUS} is not a regular file (mode {found[0][1]:o}); "
+                        "image/mkosi/drop.py's keep_initrd_status copies a regular file there")
     return (found[0][2] if len(found) == 1 and not problems else None), problems
 
 
