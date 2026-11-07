@@ -48,9 +48,14 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          container image, so each installed package is queried by its source package in
          Debian:<VERSION_ID>, with a canary (source curl at version 0) that must match an
          advisory, since osv-scanner reports a failed image query as no vulnerabilities. The
-         status file must list exactly the packages of the mkosi manifest in DIR. Any
-         vulnerability fails. Only records whose where is "image" apply here (`run` ignores
-         them); each names its source package, and accepts only an advisory with no Debian fix.
+         status file must list exactly the packages of the mkosi manifest in DIR. The initrd
+         is scanned the same way as its own tree, "image/initrd" (#4000): mkosi-initrd keeps
+         no package metadata and writes no manifest, so image/mkosi/initrd/mkosi.postinst
+         copies its dpkg status into it (INITRD_STATUS), and exactly one initrd under
+         DIR/initrd (image/build.sh copies the entry's there) must hold that file. Any
+         vulnerability fails. Only records whose where is "image" or "image/initrd" apply here
+         (`run` ignores them), each only to its own tree; each names its source package, and
+         accepts only an advisory with no Debian fix.
 reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
          closing a cited issue withdraws its records' acceptance and fails every scan that
          applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
@@ -78,7 +83,9 @@ Exit 0 pass, 1 unaccepted findings or a failed check, 2 a scanner or usage error
 import argparse
 import base64
 import concurrent.futures
+import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -95,6 +102,11 @@ import urllib.request
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# The initrd reader the build's Bluetooth check uses, loaded by path so nothing else in image/ can
+# shadow a module this imports.
+_spec = importlib.util.spec_from_file_location("finish_image", ROOT / "image" / "finish_image.py")
+finish_image = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(finish_image)
 CONFIG = ROOT / "assurance" / "vulncheck.json"
 FIXTURE = ROOT / "tests" / "fixtures" / "vulncheck"
 STDLIB = "stdlib"
@@ -107,10 +119,15 @@ PRUNED_KEYS = {"where", "holder", "path", "why"}
 # The lockfiles whose guest build may prune installed files (D-308). OpenClaw only: a plan CLI
 # guest (Codex) runs as its provider ships it (CLK-7).
 PRUNABLE = {"guest/openclaw/package-lock.json"}
-# The `where` of every image finding, and of every record that accepts one.
-IMAGE = "image"
+# The `where` of every image finding, and of every record that accepts one: the main tree, and
+# the default initrd's (#4000). A record accepts a finding only in its own tree.
+IMAGE, INITRD = "image", "image/initrd"
+IMAGE_TREES = (IMAGE, INITRD)
 # What mkosi.postinst writes to the image build's output directory.
 DPKG_STATUS, OS_RELEASE = "agentos.dpkg-status", "agentos.os-release"
+# Where the image's initrds are, under the build's output directory (image/build.sh), and the
+# initrd member image/mkosi/initrd/mkosi.postinst writes the initrd's dpkg status to.
+INITRDS, INITRD_STATUS = "initrd", "usr/share/agentos/initrd.dpkg-status"
 # A package the image scan adds to every query: source curl at version 0, which every Debian
 # advisory against curl affects. osv-scanner's image scan reports packages with no
 # vulnerabilities when its OSV query fails, and exits 0; a canary with no advisory is that.
@@ -158,10 +175,16 @@ CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined i
 # The image plants: binary libplant1 of source agentos-plant 1.0-1, queried by its source, whose
 # advisory Debian has fixed (in 1.0-2), so no record can accept it; and agentos-nofix, whose
 # advisory has no fix, which the fixture's record accepts. agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
-# which has its own advisory) is not installed, so none of them may be reported.
-CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4")}
-# With the fixture's records: the fixed advisory still fails and its record goes unused.
-CONTROL_IMAGE_VERDICTS = {("AGENTOS-VULNCHECK-DEB-1", "FAIL"), ("AGENTOS-VULNCHECK-DEB-4", "accepted #1")}
+# which has its own advisory) is not installed, so none of them may be reported. The initrd
+# (#4000; CONTROL_INITRD) holds agentos-nofix too, and agentos-early, which the main tree lacks.
+CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4"),
+                       (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5")}
+# With the fixture's records: the fixed advisory still fails and its record goes unused, and the
+# main tree's record for agentos-nofix does not accept the same advisory in the initrd.
+CONTROL_IMAGE_VERDICTS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1", "FAIL"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4", "accepted #1"),
+                          (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1")}
+# The initrd's status file in the fixture, which the control packs into an initrd (control_image).
+CONTROL_INITRD = FIXTURE / "initrd" / "dpkg-status"
 CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
@@ -193,6 +216,8 @@ CONTROL_CONFIG = {
          "cannot accept it", "where": IMAGE, "package": "agentos-plant"},
         {"id": "CVE-0000-0105", "issue": 1, "why": "control: no Debian fix; accepted by alias",
          "where": IMAGE, "package": "agentos-nofix"},
+        {"id": "AGENTOS-VULNCHECK-DEB-5", "issue": 1, "why": "control: only the initrd has it",
+         "where": INITRD, "package": "agentos-early"},
     ],
 }
 
@@ -341,7 +366,7 @@ def record_problems(records):
         if not isinstance(r.get("package"), str) or not r["package"].strip():
             problems.append(f"{tag}: package must name the package it accepts (a Debian source "
                             "package for an image record)")
-        if r.get("where") == IMAGE:
+        if r.get("where") in IMAGE_TREES:
             if "version" in r:
                 problems.append(f"{tag}: an image record names no version; it accepts only an "
                                 "advisory Debian has not fixed")
@@ -1122,16 +1147,20 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None, 
     return findings, problems
 
 
-def image_archive(src, dest):
-    """A one-layer docker-archive holding SRC's dpkg status and os-release where a Debian
-    tree keeps them, the input osv-scanner's image scan reads: its dpkg extractor takes the
-    ecosystem from os-release and queries each installed package by its source package. The
-    status file gains the canary (CANARY_STANZA)."""
+def image_archive(src, dest, status=None):
+    """A one-layer docker-archive holding SRC's dpkg status (or STATUS, the initrd's) and
+    os-release where a Debian tree keeps them, the input osv-scanner's image scan reads: its
+    dpkg extractor takes the ecosystem from os-release and queries each installed package by its
+    source package. The status file gains the canary (CANARY_STANZA)."""
     files = {"etc/os-release": pathlib.Path(src) / OS_RELEASE,
              "var/lib/dpkg/status": pathlib.Path(src) / DPKG_STATUS}
-    for f in files.values():
+    for name, f in files.items():
+        if status is not None and name == "var/lib/dpkg/status":
+            continue
         if not f.is_file() or not f.stat().st_size:
             raise ScanError(f"{f}: missing or empty; the image build writes it (image/mkosi/mkosi.postinst)")
+    if status is not None and not status.strip():
+        raise ScanError(f"the initrd's {INITRD_STATUS} is empty")
     layer = io.BytesIO()
     with tarfile.open(fileobj=layer, mode="w", format=tarfile.PAX_FORMAT) as t:
         for d in ("etc", "var", "var/lib", "var/lib/dpkg"):
@@ -1139,7 +1168,7 @@ def image_archive(src, dest):
             ti.type, ti.mode = tarfile.DIRTYPE, 0o755
             t.addfile(ti)
         for name, f in files.items():
-            data = f.read_bytes()
+            data = status if status is not None and name == "var/lib/dpkg/status" else f.read_bytes()
             if name == "var/lib/dpkg/status":
                 data = data.rstrip(b"\n") + b"\n\n" + CANARY_STANZA.encode()
             ti = tarfile.TarInfo(name)
@@ -1160,14 +1189,15 @@ def image_archive(src, dest):
             t.addfile(ti, io.BytesIO(data))
 
 
-def image_findings(doc):
-    """Findings from an osv-scanner image report, and the problems with what it scanned."""
+def image_findings(doc, where=IMAGE):
+    """Findings in tree WHERE from an osv-scanner image report, and the problems with what it
+    scanned."""
     found, problems, n, canary = [], [], 0, None
     for res in doc.get("results") or []:
         for pkg in res.get("packages") or []:
             meta = pkg["package"]
             if meta.get("os_package_name") == CANARY:
-                canary = len(_vulns(pkg, IMAGE, "", ""))
+                canary = len(_vulns(pkg, where, "", ""))
                 continue
             n += 1
             eco = meta.get("ecosystem", "")
@@ -1175,7 +1205,7 @@ def image_findings(doc):
                 problems.append(f"{meta.get('name')}: ecosystem {eco!r} is not a versioned Debian "
                                 "release, so its advisories would not match; check agentos.os-release")
             binary = meta.get("os_package_name") or meta.get("name", "")
-            vulns = _vulns(pkg, IMAGE, f"{eco}:{meta.get('name', '')} ({binary})", meta.get("version", ""))
+            vulns = _vulns(pkg, where, f"{eco}:{meta.get('name', '')} ({binary})", meta.get("version", ""))
             for f in vulns:
                 f["fixed"] = debian_fix(pkg, {f["id"], *f["aliases"]}, meta.get("name"), eco)
             found += vulns
@@ -1233,12 +1263,76 @@ def debian_fix(pkg, ids, name, eco):
     return ""
 
 
-def run_image(src, env=None, offline=False):
+def run_image(src, env=None, offline=False, where=IMAGE, status=None):
+    """Findings and problems for one tree of the image at SRC: the main tree's status file, or
+    with STATUS the initrd's."""
     with tempfile.TemporaryDirectory() as tmp:
         tar = pathlib.Path(tmp) / "packages.tar"
-        image_archive(src, tar)
+        image_archive(src, tar, status)
         doc = osv_scan(["image", "--archive", str(tar)], tmp, env, offline)
-    return image_findings(doc)
+    return image_findings(doc, where)
+
+
+def cpio_files(data, want, decompress=None):
+    """The (mode, body) of each member named WANT in initrd bytes DATA, read as the kernel reads
+    an initrd and as image/finish_image.py's cpio_names does, with its header parser and
+    decompressors: newc archives and zstd, xz or gzip streams of them, back to back with zero
+    padding. Raises ValueError on anything else, so an initrd this cannot read is never taken
+    for one without the file."""
+    decompress = decompress or {finish_image.ZSTD: finish_image.unzstd, finish_image.XZ: finish_image.unxz,
+                                finish_image.GZIP: finish_image.ungzip}
+    found, off = [], 0
+    while True:
+        while off < len(data) and data[off] == 0:
+            off += 1
+        if off >= len(data):
+            return found
+        fn = next((fn for magic, fn in decompress.items() if data.startswith(magic, off)), None)
+        if fn:
+            out, data = fn(data[off:])
+            found += cpio_files(out, want, decompress)
+            off = 0
+            continue
+        while True:
+            if off + 110 > len(data) or data[off:off + 6] not in finish_image.CPIO_MAGICS:
+                raise ValueError(f"bad or truncated cpio header at offset {off}")
+            hdr = finish_image.newc_header(data, off)
+            size, end = hdr["filesize"], off + 110 + hdr["namesize"]
+            if hdr["namesize"] < 1 or end > len(data):
+                raise ValueError(f"truncated cpio name at offset {off}")
+            name = data[off + 110:end - 1].decode("utf-8", "surrogateescape")
+            off = (end + 3) & ~3
+            if off + size > len(data):
+                raise ValueError(f"truncated cpio file {name!r}")
+            if name == "TRAILER!!!":
+                off = (off + size + 3) & ~3
+                break
+            if name.removeprefix("./") == want:
+                found.append((hdr["mode"], data[off:off + size]))
+            off = (off + size + 3) & ~3
+
+
+def initrd_status(src):
+    """The initrd's dpkg status (INITRD_STATUS) from the one initrd under SRC/INITRDS that holds
+    it, and the problems: no initrds, an unreadable one, none or more than one holding the file,
+    or the file not a regular file (a link's body is its target, not a package list)."""
+    d = pathlib.Path(src) / INITRDS
+    files = sorted(f for f in d.rglob("*") if f.is_file()) if d.is_dir() else []
+    if not files:
+        return None, [f"{d}: no initrds; image/build.sh copies the entry's there, and the initrd's "
+                      "packages are scanned from them (#4000)"]
+    found, problems = [], []
+    for f in files:
+        try:
+            found += [(f, mode, body) for mode, body in cpio_files(f.read_bytes(), INITRD_STATUS)]
+        except (ValueError, OSError, subprocess.CalledProcessError) as e:
+            problems.append(f"{f}: not a readable initrd ({e}), so its packages cannot be scanned")
+    if len(found) != 1:
+        problems.append(f"{d}: {len(found)} initrd members are {INITRD_STATUS}, want exactly one "
+                        "(image/mkosi/initrd/mkosi.postinst writes it)")
+    elif found[0][1] & 0o170000 != 0o100000:
+        problems.append(f"{found[0][0]}: {INITRD_STATUS} is not a regular file (mode {found[0][1]:o})")
+    return (found[0][2] if len(found) == 1 and not problems else None), problems
 
 
 def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
@@ -1246,7 +1340,7 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
     the control's offline copies of the tarballs its lockfiles name."""
     problems = (record_problems(config.get("accepted", [])) + inlined_problems(config.get("inlined", []))
                 + pruned_problems(config.get("pruned", [])))
-    records = [r for r in config.get("accepted", []) if r.get("where") != IMAGE]
+    records = [r for r in config.get("accepted", []) if r.get("where") not in IMAGE_TREES]
     for key in ("go_targets", "osv_sources"):
         if not config.get(key):
             problems.append(f"{key} is empty, so that side of the scan would read nothing")
@@ -1273,23 +1367,30 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
 
 
 def scan_image(config, src, osv_env=None, offline=False):
-    """Findings and problems for one image's packages; image records applied.
+    """Findings and problems for one image's packages, its main tree's and its initrd's; each
+    tree's records applied to it alone.
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
     ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
     problems = record_problems(config.get("accepted", []))
     if problems:
         return [], problems, []
-    records = [r for r in config.get("accepted", []) if r.get("where") == IMAGE]
+    records = [r for r in config.get("accepted", []) if r.get("where") in IMAGE_TREES]
     findings, problems = run_image(src, osv_env, offline)
     problems += manifest_problems(src)
+    status, probs = initrd_status(src)
+    problems += probs
+    if status is not None:
+        found, probs = run_image(src, osv_env, offline, INITRD, status)
+        findings += found
+        problems += [f"initrd: {p}" for p in probs]
     return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
 
 
 def issue_records(config, cmd):
-    """The records whose issues `cmd --check-issues` checks: the image's for `image`, the
-    rest for `run`."""
-    return [r for r in config.get("accepted", []) if (r.get("where") == IMAGE) == (cmd == "image")]
+    """The records whose issues `cmd --check-issues` checks: the image's and its initrd's for
+    `image`, the rest for `run`."""
+    return [r for r in config.get("accepted", []) if (r.get("where") in IMAGE_TREES) == (cmd == "image")]
 
 
 def verdict(f):
@@ -1312,10 +1413,10 @@ def summary(findings, problems, unused, out=None):
         print(f"problem: {p}", file=out)
     failing = [f for f in findings if verdict(f) == "FAIL"]
     print(f"{len(findings)} findings, {len(failing)} failing, {len(problems)} problems", file=out)
-    if any(f["where"] == IMAGE and f["fixed"] for f in failing):
+    if any(f["where"] in IMAGE_TREES and f["fixed"] for f in failing):
         print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
               "version, and no record can accept those", file=out)
-    if any(not (f["where"] == IMAGE and f["fixed"]) for f in failing):
+    if any(not (f["where"] in IMAGE_TREES and f["fixed"]) for f in failing):
         print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
     return not failing and not problems
@@ -1336,6 +1437,31 @@ def control_unversioned(probs):
         if got != want:
             rest.append(f"{what}: want {sorted(want)}, got {sorted(got)}")
     return rest
+
+
+def newc(members):
+    """An uncompressed newc cpio archive of MEMBERS, {name: body or (mode, body)}, ending in its
+    trailer: the control's initrds."""
+    out = bytearray()
+    for ino, (name, body) in enumerate([*members.items(), ("TRAILER!!!", (0, b""))], 1):
+        mode, body = body if isinstance(body, tuple) else (0o100644, body)
+        n = name.encode() + b"\0"
+        out += b"070701" + b"".join(b"%08X" % v for v in (ino, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(n), 0))
+        out += n + b"\0" * (-(110 + len(n)) % 4)
+        out += body + b"\0" * (-len(body) % 4)
+    return bytes(out)
+
+
+def control_image(dest):
+    """DEST: the fixture's image directory with the entry's initrds as image/build.sh copies them
+    out: a modules initrd, and a gzip stream of the default initrd holding CONTROL_INITRD."""
+    shutil.copytree(FIXTURE / IMAGE, dest)
+    d = pathlib.Path(dest) / INITRDS / "agentos" / "control"
+    d.mkdir(parents=True)
+    (d / "modules-initrd").write_bytes(newc({"usr/lib/modules/control/modules.dep": b""}))
+    (d / "initrd").write_bytes(gzip.compress(newc({"etc/initrd-release": b"ID=debian\n",
+                                                   INITRD_STATUS: CONTROL_INITRD.read_bytes()}), mtime=0))
+    return dest
 
 
 def control():
@@ -1377,16 +1503,17 @@ def control():
                             f"unused {[r['id'] for r in unused]}")
 
         img = dict(osv_env=kw["osv_env"], offline=True)
-        findings, probs, _ = scan_image(bare, FIXTURE / IMAGE, **img)
+        image = control_image(pathlib.Path(tmp) / IMAGE)
+        findings, probs, _ = scan_image(bare, image, **img)
         summary(findings, probs, [])
         problems += [f"image, no records: {p}" for p in probs]
         fails = {(f["where"], f["id"]) for f in findings}
         if fails != CONTROL_IMAGE_FAILS:
             problems.append(f"planted image failures: want {sorted(CONTROL_IMAGE_FAILS)}, got {sorted(fails)}")
-        findings, probs, unused = scan_image(CONTROL_CONFIG, FIXTURE / IMAGE, **img)
+        findings, probs, unused = scan_image(CONTROL_CONFIG, image, **img)
         summary(findings, probs, unused)
         problems += [f"image, with records: {p}" for p in probs]
-        got = {(f["id"], verdict(f)) for f in findings}
+        got = {(f["where"], f["id"], verdict(f)) for f in findings}
         if got != CONTROL_IMAGE_VERDICTS or [r["id"] for r in unused] != ["AGENTOS-VULNCHECK-DEB-1"]:
             problems.append(f"image records: want {sorted(CONTROL_IMAGE_VERDICTS)} with the DEB-1 record "
                             f"unused, got {sorted(got)}, unused {[r['id'] for r in unused]}")

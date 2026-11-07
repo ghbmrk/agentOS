@@ -64,8 +64,10 @@ class TestImageShipsNoWiFiClient(unittest.TestCase):
             self.assertNotIn(p, drop.PERL_TOOLS)
         # And no advisory record accepts a source the image no longer ships: NetworkManager's and
         # wpasupplicant's own, polkitd's, what only they linked, and b1's radio firmware (#3440's build
-        # installs none).
-        records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
+        # installs none). The main tree's records only: the initrd still carries p11-kit, and its
+        # image/initrd records hold until #4927 purges it there (#4000).
+        records = [r for r in json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
+                   if r.get("where") != "image/initrd"]
         gone = ("network-manager", "wpa", "policykit-1", "duktape", "glib2.0", "curl", "brotli", "cyrus-sasl2",
                 "nghttp2", "openldap", "rtmpdump", "gnutls28", "p11-kit", "firmware-nonfree")
         self.assertEqual([r["id"] for r in records if r.get("package") in gone], [])
