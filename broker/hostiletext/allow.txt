@@ -5,7 +5,6 @@
 # Refuse every shape today; the test that keeps it so is #5035.
 clerk/clerkkey ValidName ASCII regex; #5035
 clerk/inbox dnsName ASCII DNS labels; #5035
-cmd/agentos-link ifaceName ASCII interface names; #5035
 enforcer/page dnsName ASCII DNS labels; #5035
 enforcer/radio name printable ASCII, no space; #5035
 kernel/proc ValidStoreName ASCII regex; #5035
