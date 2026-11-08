@@ -48,11 +48,22 @@ func eraseErr(err error) error {
 	return sockets.Code(localapi.ErrEraseUnavailable)
 }
 
-// eraseName is a name the kernel can look up: some text in its bound,
-// with no control characters.
+// eraseName is a name the kernel can look up: in its bound, with no
+// space at either end, and only letters, digits, spaces and plain
+// punctuation (an address's '@' among it), as recovery's validName. No
+// invisible character can pass, so what the page shows is what is looked
+// up (the hostile-text corpus, #3901).
 func eraseName(n string) bool {
-	return strings.TrimSpace(n) != "" && len(n) <= localapi.MaxEraseName && utf8.ValidString(n) &&
-		strings.IndexFunc(n, unicode.IsControl) < 0
+	if n == "" || len(n) > localapi.MaxEraseName || !utf8.ValidString(n) || strings.TrimSpace(n) != n {
+		return false
+	}
+	for _, r := range n {
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
+			!(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&@", r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // eraseHandle is a find's handle: lowercase hex of EraseHandle.
