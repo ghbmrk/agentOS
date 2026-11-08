@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening), that
+"""Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening): a Wi-Fi
+package, a missing module block or a blocked module installed. Refuse one that
 enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
 dump to a file (#4459), or that leaves the kernel's reverse-path filter on anywhere (#4810). mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
 build log. The running box checks the same
@@ -117,6 +118,11 @@ def violations(root):
     for f in sorted((root / "usr/lib/modprobe.d").glob("*.conf")):
         lines |= {ln.strip() for ln in f.read_text().splitlines()}
     out += ["modprobe.d lacks '%s'" % b for b in BLOCKS if b not in lines]
+    # #4810: a blocked module is not in the image at all (mkosi.conf KernelModulesExclude=), since the
+    # block alone did not stop cfg80211 loading once a network card was present.
+    blocked = {b.split()[1].replace("_", "-") for b in BLOCKS}
+    out += ["module %s is installed" % m.relative_to(root) for m in sorted((root / "usr/lib/modules").rglob("*.ko*"))
+            if m.name.partition(".")[0].replace("_", "-") in blocked]
     # No other module configuration. Debian ships etc/modules-load.d/modules.conf as a link to a
     # comment-only etc/modules, so a file counts only by its lines that are not blank or comments;
     # a link that leaves the tree or dangles is refused.

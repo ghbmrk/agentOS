@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the enforcer's tree check (mkosi/mkosi.finalize): the core dump settings (#4459) and the
-reverse-path filter (#4810)."""
+"""Tests for the enforcer's tree check (mkosi/mkosi.finalize): the core dump settings (#4459), the
+reverse-path filter and the blocked modules left out of the image (#4810)."""
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -143,6 +143,29 @@ class RpFilter(Tree):
         self.put("etc/sysctl.d/zz-x.conf", "# net.ipv4.conf.all.rp_filter=1\nnet.ipv4.conf.all.forwarding=1\n"
                  "net.ipv6.conf.all.rp_filter=1\nnet.ipv4.conf.all.arp_filter=1\n")
         self.assertEqual(self.refusals(), [])
+
+
+class BlockedModules(Tree):
+    """REQ: NET-2. Wi-Fi and USB storage cannot load: their modules are not in the image, since the
+    modprobe.d block alone let cfg80211 load once a network card was present (#4810)."""
+
+    KDIR = "usr/lib/modules/6.12.0-1-amd64/kernel/"
+
+    def refusals(self):
+        return [v for v in fin.violations(self.root) if v.startswith("module ")]
+
+    def test_kept_modules_pass(self):
+        for rel in ("drivers/net/virtio_net.ko.xz", "drivers/net/ethernet/intel/igc/igc.ko.xz", "net/wireless_x.ko"):
+            self.put(self.KDIR + rel, "")
+        self.assertEqual(fin.violations(self.root), [])
+
+    def test_each_blocked_module_refused(self):
+        for rel in ("net/wireless/cfg80211.ko.xz", "net/mac80211/mac80211.ko.zst", "drivers/usb/storage/usb-storage.ko",
+                    "drivers/usb/storage/uas.ko.xz", "updates/usb_storage.ko"):
+            with self.subTest(rel=rel):
+                self.put(self.KDIR + rel, "")
+                self.assertEqual(self.refusals(), ["module %s is installed" % (self.KDIR + rel)])
+                (self.root / self.KDIR / rel).unlink()
 
 
 if __name__ == "__main__":
