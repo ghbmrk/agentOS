@@ -365,8 +365,10 @@ func (h *home) listen(x *host, port int) {
 
 // reaches reports whether host from completes a TCP connection to addr:80.
 func (h *home) reaches(from, addr string) bool {
+	h.t.Helper()
+	x := h.host(from)
 	ok := false
-	within(h.t, h.hosts[from], func() {
+	within(h.t, x, func() {
 		c, err := net.DialTimeout("tcp4", net.JoinHostPort(addr, "80"), 700*time.Millisecond)
 		if err == nil {
 			c.Close()
@@ -428,14 +430,26 @@ func (h *home) pin(from string, a netip.Addr) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.in(h.hosts[from], "ip", "-6", "neigh", "replace", a.String(), "lladdr", i.HardwareAddr.String(), "dev", "eth0", "nud", "permanent")
+	h.in(h.host(from), "ip", "-6", "neigh", "replace", a.String(), "lladdr", i.HardwareAddr.String(), "dev", "eth0", "nud", "permanent")
+}
+
+// host is the host named from. A name with no host fails the test: a
+// nil host would run the probe in the enforcer's own namespace (within),
+// where a case that expects failure could pass.
+func (h *home) host(from string) *host {
+	h.t.Helper()
+	x, ok := h.hosts[from]
+	if !ok {
+		h.t.Fatalf("no host %q", from)
+	}
+	return x
 }
 
 // enforcerEnd is the enforcer's interface on host from's link.
 func (h *home) enforcerEnd(from string) string {
 	h.t.Helper()
-	x, ok := h.hosts[from]
-	if !ok || x.ifc == "" {
+	x := h.host(from)
+	if x.ifc == "" {
 		h.t.Fatalf("%s has no link to the enforcer", from)
 	}
 	return x.ifc
@@ -484,8 +498,10 @@ func (h *home) arrivals(from string, a netip.Addr) func() int {
 // query asks server for name's A records from host from over network, and
 // gives the reply's rcode and addresses.
 func (h *home) query(from, network, server, name string) (int, []string) {
+	h.t.Helper()
+	x := h.host(from)
 	rcode, addrs := noAnswer, []string(nil)
-	within(h.t, h.hosts[from], func() {
+	within(h.t, x, func() {
 		c, err := net.DialTimeout(network, net.JoinHostPort(server, "53"), time.Second)
 		if err != nil {
 			return
@@ -789,8 +805,8 @@ func TestNoServiceOnEdge(t *testing.T) {
 	// to redirect a query: one sent to another view's address arriving on
 	// a different interface gets nothing, over UDP or TCP, and over IPv6
 	// at another view's global or link-local address (ENF-f-4). ask checks
-	// each query reached the enforcer on the asker's own interface, so the
-	// silence is the enforcer's, not a packet never sent (#4221).
+	// each query reached the enforcer on its end of the asker's link, so
+	// the silence is the enforcer's, not a packet never sent (#4221).
 	silent := [][3]string{{"core0", tvDNS, "tv.example"}, {"ap0.101", "10.103.0.1", "plug.example"}, {"ap0.101", coreDNS, "core.example"}}
 	answers := [][3]string{{"ap0.101", tvDNS, "tv.example"}, {"core0", coreDNS, "core.example"}}
 	if h.has6() {
@@ -840,10 +856,11 @@ func TestNoServiceOnEdge(t *testing.T) {
 	var mu sync.Mutex
 	got := map[string]bool{}
 	for from := range offers {
+		x := h.host(from)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok := h.dhcp(from)
+			ok := h.dhcp(x)
 			mu.Lock()
 			got[from] = ok
 			mu.Unlock()
@@ -866,11 +883,11 @@ func TestNoServiceOnEdge(t *testing.T) {
 	}
 }
 
-// dhcp reports whether a DHCPDISCOVER broadcast from host from gets an
-// offer.
-func (h *home) dhcp(from string) bool {
+// dhcp reports whether a DHCPDISCOVER broadcast from host x gets an
+// offer. The caller looks x up (host) on the test's goroutine.
+func (h *home) dhcp(x *host) bool {
 	got := false
-	within(h.t, h.hosts[from], func() {
+	within(h.t, x, func() {
 		lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 			var serr error
 			c.Control(func(fd uintptr) {
