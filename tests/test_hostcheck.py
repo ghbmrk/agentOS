@@ -294,7 +294,7 @@ class ToolsRootTest(unittest.TestCase):
 
 
 class HostcheckJobTest(unittest.TestCase):
-    """ci.yml's hostcheck job installs the VM stack from the image's snapshot, not the runner's archive."""
+    """ci.yml's hostcheck job takes the VM stack and guest kernel from pinned snapshots, not the runner's archive."""
 
     def setUp(self):
         self.ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
@@ -319,9 +319,43 @@ class HostcheckJobTest(unittest.TestCase):
                 out.append("the tools root is not read from the image's snapshot alone")
             if re.search(r'"deb\s', root[0]):  # #4996: a one-line entry drops the stanza's Signed-By
                 out.append("the tools root's sources are not the snapshot stanza verbatim")
+        out += self.kernel_problems(steps, runner_apt)
         run = [b for _, b in steps if "tests.test_hostcheck" in b]
         if len(run) != 1 or not re.search(r"HOSTCHECK_TOOLS_ROOT: \$\{\{ runner\.temp \}\}/hostcheck-tools", run[0]):
             out.append("the hostcheck run does not name the tools root")
+        return out
+
+    def kernel_problems(self, steps, runner_apt):
+        """#4994: the guest kernel is one exact package from a dated Ubuntu snapshot, hash-checked."""
+        out = []
+        if re.search(r"linux-image", runner_apt) or any("apt-cache" in b for _, b in steps):
+            out.append("the guest kernel comes from the runner's archive")
+        k = [b for _, b in steps if "HOSTCHECK_KERNEL=" in b]
+        if len(k) != 1:
+            return out + ["no single step names the guest kernel"]
+        b = k[0]
+        env = dict(re.findall(r"^          (KERNEL_\w+): (\S+)$", b, re.M))
+        url = re.fullmatch(r"https://snapshot\.ubuntu\.com/ubuntu/\d{8}T\d{6}Z/pool/main/l/linux-signed/"
+                           r"linux-image-(\d+\.\d+\.\d+-\d+)-generic_[\w.+~-]+_amd64\.deb",
+                           env.get("KERNEL_URL", ""))
+        if not url:
+            out.append("the guest kernel URL is not one package in a dated Ubuntu snapshot")
+        if not re.fullmatch(r"[0-9a-f]{64}", env.get("KERNEL_SHA256", "")):
+            out.append("the guest kernel has no SHA-256 pin")
+        if not url or env.get("KERNEL_VMLINUZ") != f"boot/vmlinuz-{url.group(1)}-generic":
+            out.append("the guest kernel path is not the pinned package's vmlinuz")
+        lines = [ln.strip() for ln in b.splitlines()]
+        want = ['got=$(sha256sum "$deb" | cut -d\' \' -f1)',
+                '[ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned '
+                '$KERNEL_SHA256"; exit 1; }',
+                'dpkg-deb -x "$deb" "$RUNNER_TEMP/k"',
+                'test -f "$RUNNER_TEMP/k/$KERNEL_VMLINUZ"',
+                'echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"']
+        idx = [lines.index(w) if w in lines else -1 for w in want]
+        if -1 in idx or idx != sorted(idx):
+            out.append("the guest kernel is not hash-checked before it is unpacked and named")
+        if not any(ln.startswith("curl --proto '=https' ") and ln.endswith('-o "$deb" "$KERNEL_URL"') for ln in lines):
+            out.append("the guest kernel is not fetched from the pinned URL over HTTPS")
         return out
 
     def test_vm_stack_comes_from_the_snapshot(self):
@@ -336,6 +370,18 @@ class HostcheckJobTest(unittest.TestCase):
             "one-line entry": ('"$RUNNER_TEMP/hostcheck-tools" "$src"',
                                '"$RUNNER_TEMP/hostcheck-tools" "deb [check-valid-until=no] $uri trixie main"'),
             "no root env": ("HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools", "HOSTCHECK_X: x"),
+            "runner kernel": ('dpkg-deb -x "$deb" "$RUNNER_TEMP/k"',
+                              'apt-get download linux-image-generic && dpkg-deb -x "$deb" "$RUNNER_TEMP/k"'),
+            "live archive": ("https://snapshot.ubuntu.com/ubuntu/2026", "http://archive.ubuntu.com/ubuntu/x"),
+            "undated snapshot": ("ubuntu/20261107T000000Z/", "ubuntu/latest/"),
+            "no hash pin": ("KERNEL_SHA256: b8", "KERNEL_SHA256: $X"),
+            "hash unchecked": ('[ "$got" = "$KERNEL_SHA256" ] ||', 'true ||'),
+            "globbed vmlinuz": ("KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic", "KERNEL_VMLINUZ: boot/vmlinuz-*"),
+            "other vmlinuz": ("KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic",
+                              "KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-150-generic"),
+            "plain http": ("curl --proto '=https' ", "curl "),
+            "kernel env elsewhere": ('echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"',
+                                     'echo "HOSTCHECK_KERNEL=$(ls "$RUNNER_TEMP"/k/boot/vmlinuz-*)" >> "$GITHUB_ENV"'),
         }.items():
             with self.subTest(name):
                 self.assertIn(old, self.ci)

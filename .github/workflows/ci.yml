@@ -732,11 +732,24 @@ jobs:
             echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
             sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
           fi
-      - name: Stand-in guest kernel (Ubuntu's virtual kernel)
+      # CI-hostcheck-guest-kernel (#4994): the stand-in guest boots one exact Ubuntu kernel from a
+      # dated snapshot, checked by SHA-256, never the runner's archive, whose kernel moves about weekly
+      # (EFI stub writes, #4794; built-in virtio-blk/tpm_crb/efivarfs: the stand-in initrd loads no
+      # modules, so a Debian kernel does not fit). Moving it = new URL + hash in one reviewed PR.
+      - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a dated snapshot)
+        env:
+          KERNEL_URL: https://snapshot.ubuntu.com/ubuntu/20261107T000000Z/pool/main/l/linux-signed/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
+          KERNEL_SHA256: b8757670b7ec8aead358d4fba420064b9f31d344c3393548105aca2b3956d2ab
+          KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic
         run: |
-          pkg=$(apt-cache depends linux-image-virtual | awk '/Depends: linux-image-[0-9]/{print $2; exit}')
-          cd "$RUNNER_TEMP" && apt-get download "$pkg" && dpkg-deb -x "$pkg"_*.deb k
-          echo "HOSTCHECK_KERNEL=$(ls "$RUNNER_TEMP"/k/boot/vmlinuz-*)" >> "$GITHUB_ENV"
+          deb="$RUNNER_TEMP/guest-kernel.deb"
+          curl --proto '=https' -fsSL --retry 3 --retry-delay 5 -o "$deb" "$KERNEL_URL"
+          got=$(sha256sum "$deb" | cut -d' ' -f1)
+          echo "guest kernel: $KERNEL_URL sha256 $got (pinned: $KERNEL_SHA256)"
+          [ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/k"
+          test -f "$RUNNER_TEMP/k/$KERNEL_VMLINUZ"
+          echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"
       - name: Host-untouched check, clean and with planted writes
         env:
           HOSTCHECK_QEMU: "1"
