@@ -45,10 +45,16 @@ func (b *book) add(typ string, body any) uint64 {
 }
 
 // plan logs plan id under k, accepted, with two steps.
-func (b *book) plan(id string, k key.Key) {
+func (b *book) plan(id string, k key.Key) { b.accept(id, k, b.submit(id, k)) }
+
+// submit logs plan id under k, with two steps, and returns its entry.
+func (b *book) submit(id string, k key.Key) uint64 {
 	st := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": id}}
-	p := kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{st, st}}, b.holder.priv)
-	seq := b.add(kernel.TPlanSubmit, p)
+	return b.add(kernel.TPlanSubmit, kernel.SignPlan(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{st, st}}, b.holder.priv))
+}
+
+// accept logs plan id's acceptance, caused by its submit entry seq.
+func (b *book) accept(id string, k key.Key, seq uint64) {
 	b.add(kernel.TPlanAccepted, map[string]any{"plan": id, "cause": seq, "root": k.Tip(), "scopes": []key.ID{k.Tip()}})
 }
 
@@ -84,6 +90,13 @@ func TestStopsHoldNamesEachNarrowingOutrun(t *testing.T) {
 			b.plan("p1", b.clerk)
 			b.add(kernel.TStop, struct{}{})
 			b.add(kernel.TResume, struct{}{})
+			b.dispatch("p1", 0)
+		}, "after a STOP reached it"},
+		"a plan still pending at the STOP": {func(b *book) {
+			seq := b.submit("p1", b.clerk)
+			b.add(kernel.TStop, struct{}{})
+			b.add(kernel.TResume, struct{}{})
+			b.accept("p1", b.clerk, seq)
 			b.dispatch("p1", 0)
 		}, "after a STOP reached it"},
 		"a plan submitted after the STOP": {func(b *book) {
@@ -207,5 +220,35 @@ func TestTheSimsJudgeNarrowingsOutrun(t *testing.T) {
 		if err := judge(); err == nil || !strings.Contains(err.Error(), "after a STOP reached it") {
 			t.Errorf("%s: got %v, want the STOP outrun", name, err)
 		}
+	}
+}
+
+// tally counts what the task and STOP ops left: a STOP with a RESUME as the
+// very next entry at its time, each task's open and end, and of the plans
+// serving a task those its end cancelled or ended.
+func TestTallyCountsWhatTheTaskOpsLeft(t *testing.T) {
+	b := newBook(t)
+	es := []kernel.Entry{
+		{Type: kernel.TStop, At: 4}, {Type: kernel.TResume, At: 4}, // resumed at once
+		{Type: kernel.TStop, At: 5}, {Type: kernel.TResume, At: 5}, // and again
+		{Type: kernel.TStop, At: 6}, {Type: kernel.TResume, At: 7}, // a tick between
+		{Type: kernel.TTaskOpened}, {Type: kernel.TTaskOpened}, {Type: kernel.TTaskEnded},
+		{Type: kernel.TResume, At: 8}, {Type: kernel.TStop, At: 8}, // a STOP last
+	}
+	st := kernel.NewState(nil)
+	for id, p := range map[string]*kernel.PlanState{
+		"plain":     {Plan: kernel.Plan{Key: b.clerk}, Cancel: kernel.CTask},
+		"cancelled": {Plan: kernel.Plan{Key: b.task("t1")}, Cancel: kernel.CTask},
+		"ended":     {Plan: kernel.Plan{Key: b.task("t1")}, Ended: kernel.CTask},
+		"stopped":   {Plan: kernel.Plan{Key: b.task("t1")}, Cancel: key.RStopped},
+		"live":      {Plan: kernel.Plan{Key: b.task("t1")}},
+	} {
+		st.Order = append(st.Order, id)
+		st.Plans[id] = p
+	}
+	var r Result
+	r.tally(st, es)
+	if r.StopResumed != 2 || r.TasksOpened != 2 || r.TasksEnded != 1 || r.TaskPlans != 4 || r.TaskCancels != 2 {
+		t.Fatalf("tally %+v", r)
 	}
 }
