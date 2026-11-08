@@ -60,17 +60,7 @@ hasnt() { grep -aqF "$2" "$1" && { echo "UNEXPECTED $2"; fail=1; } || echo "ok  
 D=$W/drive.raw
 copy "$D"
 truncate -s 64M "$W/stick.raw"
-DIAG=$(cat <<'EOS' | base64 -w0
-echo "enforcer-diag: modules $(grep -oE '^(cfg80211|rfkill|mac80211|virtio_net) ' /proc/modules | tr '\n' ' ') nets $(ls /sys/class/net | tr '\n' ' ')"
-for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo "enforcer-diag: $f=$(cat $f)"; done
-journalctl -b -o short-monotonic --no-pager | grep -iE 'cfg80211|nl80211|rfkill|modprobe|request_module' | head -20 | sed 's/^/enforcer-diag: j /'
-dmesg | grep -iE 'cfg80211|rfkill|regulatory' | head | sed 's/^/enforcer-diag: k /'
-modprobe -c | grep -E 'cfg80211|nl80211' | sed 's/^/enforcer-diag: c /'
-modprobe -n -v net-pf-16-proto-16-family-nl80211 2>&1 | sed 's/^/enforcer-diag: n /'
-echo "enforcer-diag: initstate $(cat /sys/module/cfg80211/initstate 2>&1) holders $(ls /sys/module/cfg80211/holders 2>&1 | tr '\n' ' ') refcnt $(cat /sys/module/cfg80211/refcnt 2>&1)"
-EOS
-)
-HWSIM="[Service]\nExecStartPre=-/bin/sh -c 'echo $DIAG | base64 -d | sh'\nExecStartPre=-/bin/sh -c 'modprobe mac80211_hwsim radios=1 && echo enforcer-ci: hwsim loaded || echo enforcer-ci: hwsim refused'\n"
+HWSIM="[Service]\nExecStartPre=-/bin/sh -c 'modprobe mac80211_hwsim radios=1 && echo enforcer-ci: hwsim loaded || echo enforcer-ci: hwsim refused'\n"
 EXTRA="-device qemu-xhci,id=xhci -drive if=none,id=stick,format=raw,file=$W/stick.raw -device usb-storage,bus=xhci.0,drive=stick \
 -netdev user,id=wan,restrict=on -device virtio-net-pci,netdev=wan$(smbios_cred systemd.unit-dropin.enforcer-health.service "$HWSIM")" \
 	boot "$W/console.log" "$D"
