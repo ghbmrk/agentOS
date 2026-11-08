@@ -65,6 +65,40 @@ type Result struct {
 	HeldByClerk   int // irreversible steps the clerk held back on its own clock
 	CutRefused    int // grants a cut-off phone signed, refused
 	CutCancelled  int // a cut-off phone's grants still in their hold, cancelled with it
+
+	// What the task and STOP ops left in the log (taskOp), counted from it.
+	StopResumed int // a STOP with a RESUME the very next entry, no tick between
+	TasksOpened int
+	TasksEnded  int // task.ended entries, the planner's and the timeout's
+	TaskPlans   int // plans under a key serving a task
+	TaskCancels int // plans their task's end cancelled or ended
+}
+
+// tally counts what taskOp left in the log es, for the sweep to show each op
+// took effect.
+func (r *Result) tally(st *kernel.State, es []kernel.Entry) {
+	for i, e := range es {
+		switch e.Type {
+		case kernel.TStop:
+			if i+1 < len(es) && es[i+1].Type == kernel.TResume && es[i+1].At == e.At {
+				r.StopResumed++
+			}
+		case kernel.TTaskOpened:
+			r.TasksOpened++
+		case kernel.TTaskEnded:
+			r.TasksEnded++
+		}
+	}
+	for _, id := range st.Order {
+		p := st.Plans[id]
+		if key.TaskOf(p.Plan.Key) == "" {
+			continue
+		}
+		r.TaskPlans++
+		if p.Cancel == kernel.CTask || p.Ended == kernel.CTask {
+			r.TaskCancels++
+		}
+	}
 }
 
 var errAnchor = errors.New("sim: anchor down")
@@ -381,8 +415,8 @@ func (s *sim) derived() (key.Key, bool) {
 	if s.pick(2) == 0 { // half the derived keys hold irreversible steps
 		cav = append(cav, key.LimitHold(hour/6, hour/2))
 	}
-	if len(s.tasks) > 0 && s.pick(3) == 0 { // a third serve a task the kernel opened
-		cav = append(cav, key.LimitTask(s.tasks[s.pick(len(s.tasks))]))
+	if len(s.tasks) > 0 && s.pick(3) == 0 { // a third serve a task the kernel opened, mostly the latest
+		cav = append(cav, key.LimitTask(s.tasks[max(0, len(s.tasks)-1-s.pick(3))]))
 		if s.pick(2) == 0 { // half of those under a hold their task may not outlive
 			cav = append(cav, key.LimitHold(hour, 30*hour))
 		}
@@ -626,7 +660,7 @@ func (s *sim) op() error {
 // taskOp has the owner STOP, sometimes with a RESUME right after and no
 // tick between (KRN-7), or the kernel open a task or end one (KRN-5).
 func (s *sim) taskOp() error {
-	switch s.pick(6) {
+	switch s.pick(8) {
 	case 0, 1:
 		s.logf("stop")
 		if err := s.k.Stop(s.kt()); err != nil || s.pick(2) == 0 {
@@ -634,19 +668,20 @@ func (s *sim) taskOp() error {
 		}
 		s.logf("resume at once")
 		return s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
-	case 2:
+	case 2, 3, 4: // a STOP ends every task, so they open often
 		s.ntasks++
 		id := fmt.Sprintf("t%d", s.ntasks)
 		s.logf("open task %s", id)
 		err := s.k.OpenTask(s.kt(), id, key.P0)
-		if err == nil {
-			s.tasks = append(s.tasks, id)
-		}
 		if errors.Is(err, kernel.ErrTaskOpen) {
 			return nil
 		}
-		return err
-	case 3:
+		if err != nil {
+			return err
+		}
+		s.tasks = append(s.tasks, id)
+		return s.taskPlan(id)
+	case 5:
 		if len(s.tasks) > 0 {
 			id := s.tasks[s.pick(len(s.tasks))]
 			s.logf("end task %s", id)
@@ -655,6 +690,31 @@ func (s *sim) taskOp() error {
 			}
 		}
 	}
+	return nil
+}
+
+// taskPlan submits the planner's first plan for task id, under a live key
+// narrowed to the task, half the time under a hold the task may not outlive.
+func (s *sim) taskPlan(id string) error {
+	live := s.live()
+	if len(live) == 0 {
+		return nil
+	}
+	cav := []key.Caveat{key.LimitTask(id)}
+	if s.pick(2) == 0 {
+		cav = append(cav, key.LimitHold(hour, 30*hour))
+	}
+	k, err := key.Derive(live[s.pick(len(live))], s.holder.priv, s.planr.pub, cav...)
+	if err != nil {
+		return nil
+	}
+	s.submits++
+	p := kernel.Plan{ID: fmt.Sprintf("p%d", s.submits), Key: k, Steps: []kernel.PlanStep{s.step(), s.step()}}
+	s.logf("submit %s for task %s", p.ID, id)
+	if err := s.k.Submit(s.kt(), kernel.SignPlan(p, s.planr.priv)); err != nil {
+		return err
+	}
+	s.plans = append(s.plans, p.ID)
 	return nil
 }
 
@@ -961,10 +1021,12 @@ func Run(c Config) (*Result, error) {
 	if err := s.check(); err != nil {
 		return fail(err)
 	}
-	return &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
+	r := &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
 		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld, BigRefused: s.bigRefused,
-		HeldByClerk: s.w.held, CutRefused: s.cutRefused, CutCancelled: s.cutCancelled}, nil
+		HeldByClerk: s.w.held, CutRefused: s.cutRefused, CutCancelled: s.cutCancelled}
+	r.tally(s.k.State(), r.Entries)
+	return r, nil
 }
 
 func tail(t []string) []string {

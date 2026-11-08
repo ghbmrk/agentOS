@@ -8,6 +8,7 @@ package kernel_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -66,6 +67,12 @@ func TestAStepInFlightAtSTOPReconcilesAndItsPlanStops(t *testing.T) {
 	if len(r.mail.Effects()) != 1 {
 		t.Fatalf("%d effects, want the reconciled one only", len(r.mail.Effects()))
 	}
+	// Next refuses the second step itself: it is never even logged in flight.
+	for _, e := range r.k.Log().Entries() {
+		if e.Type == kernel.TStepDispatch && strings.Contains(string(e.Body), `"index":1`) {
+			t.Fatalf("entry %d dispatched the stopped plan's second step", e.Seq)
+		}
+	}
 	r.replays()
 }
 
@@ -105,6 +112,26 @@ func TestAHoldLongerThanItsTaskIsCancelledAtTheTimeout(t *testing.T) {
 	must(t, r.tick(32*hour))
 	if r.k.Log().Len() != n {
 		t.Fatal("a task's end was logged twice")
+	}
+	r.replays()
+}
+
+// At its very timeout every task due ends, each in its own entry, before
+// any step is scheduled.
+func TestEveryTaskDueEndsAtItsTimeout(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
+	must(t, r.k.OpenTask(1, "t3", 0))
+	n := r.k.Log().Len()
+	must(t, r.tick(kernel.TaskTimeout))
+	es := r.k.Log().Entries()[n:]
+	if len(es) != 2 || es[0].Type != kernel.TTaskEnded || es[1].Type != kernel.TTaskEnded ||
+		string(es[0].Body) != `{"task":"t1"}` || string(es[1].Body) != `{"task":"t2"}` {
+		t.Fatalf("at the timeout the log took %+v, want t1's and t2's ends", es)
+	}
+	if _, ok := r.k.State().Task("t3", kernel.TaskTimeout); !ok {
+		t.Fatal("a task not yet due ended")
 	}
 	r.replays()
 }
