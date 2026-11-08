@@ -134,8 +134,15 @@ type Declaration struct {
 	// the one value the CLI sends (#3110). A refresh body is exactly these
 	// keys and refresh_token, all strings: grant_type is refresh_token and
 	// refresh_token is the guest's placeholder. Any other value would let a
-	// guest shape the provider's answer into an unswappable stop.
+	// guest shape the provider's answer into an unswappable stop. Its
+	// client_id is also the one a code exchange must send.
 	Refresh map[string]string
+	// RefreshHeaders are a refresh's every header but the clerk's own
+	// Content-Type and Accept-Encoding, each with the one value the CLI
+	// sends: the clerk sets them, and passes none of the guest's, so no
+	// guest header shapes a refresh's answer either. Without a declared
+	// User-Agent, a refresh sends none.
+	RefreshHeaders map[string]string
 	// RedirectFrom is the redirect_uri the CLI sends in its code exchange
 	// (its local callback); the clerk sends RedirectTo, which the provider
 	// bound the code to. Any other redirect_uri is refused.
@@ -415,6 +422,16 @@ func (p *Login) validate() error {
 	if _, ok := d.Refresh[fRefresh]; ok || d.Refresh["grant_type"] != "refresh_token" {
 		return errors.New("clerk: a refresh declares grant_type refresh_token, and refresh_token as the guest's")
 	}
+	for _, e := range d.Endpoints {
+		if e.Kind == Code && d.Refresh["client_id"] == "" {
+			return errors.New("clerk: a code exchange sends the client_id its refresh declares")
+		}
+	}
+	for k, v := range d.RefreshHeaders {
+		if c := http.CanonicalHeaderKey(k); c != k || forbiddenHeader(c) || c == "Content-Type" || !headerValue(v) {
+			return fmt.Errorf("clerk: refresh header %q may not be declared", k)
+		}
+	}
 	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
 		if forbiddenHeader(http.CanonicalHeaderKey(h)) {
 			return fmt.Errorf("clerk: header %q may not pass", h)
@@ -466,6 +483,12 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// headerValue reports whether v is a non-empty header value of visible
+// ASCII and spaces, unpadded.
+func headerValue(v string) bool {
+	return v != "" && v == strings.TrimSpace(v) && !strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r > '~' })
 }
 
 // forbiddenHeader is a header no plan route passes: credentials, framing,
@@ -932,7 +955,7 @@ func (p *Login) Do(ctx context.Context, guest string, r *http.Request, meter Met
 	}
 	switch e.Kind {
 	case Refresh:
-		return p.refresh(ctx, guest, r.Header, e, query, body)
+		return p.refresh(ctx, guest, e, query, body)
 	case Code:
 		f, ok := p.checkCode(r.Header, body)
 		if !ok {
@@ -1267,8 +1290,9 @@ func (p *Login) exchange(up *http.Request) (*planAnswer, string) {
 }
 
 // refresh forwards the guest's token refresh: one flight per login, each
-// joining guest's answer swapped to its own placeholders.
-func (p *Login) refresh(ctx context.Context, guest string, h http.Header, e Endpoint, query string, body []byte) (*http.Response, string) {
+// joining guest's answer swapped to its own placeholders. It carries the
+// declared refresh headers, never the guest's.
+func (p *Login) refresh(ctx context.Context, guest string, e Endpoint, query string, body []byte) (*http.Response, string) {
 	if _, ok := p.checkRefresh(guest, body); !ok {
 		return nil, DPlaceholder
 	}
@@ -1286,8 +1310,12 @@ func (p *Login) refresh(ctx context.Context, guest string, h http.Header, e Endp
 		}
 		xctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exchangeFor)
 		defer cancel()
-		up := p.upstream(xctx, h, e, query, p.d.RequestHeaders, out)
+		up := p.upstream(xctx, nil, e, query, nil, out)
 		up.Header.Set("Content-Type", "application/json")
+		up.Header["User-Agent"] = []string{""} // none, unless declared
+		for k, v := range p.d.RefreshHeaders {
+			up.Header[k] = []string{v}
+		}
 		ans, detail := p.exchange(up)
 		if detail == "" {
 			ans.refresh, ans.gen = true, gen
@@ -1390,8 +1418,9 @@ func (p *Login) checkRefresh(guest string, body []byte) ([]byte, bool) {
 	return out, err == nil
 }
 
-// checkCode admits the code exchange in its exact form, and rewrites the
-// CLI's callback to the one the provider bound the code to.
+// checkCode admits the code exchange in its exact form, with the declared
+// client_id, and rewrites the CLI's callback to the one the provider bound
+// the code to.
 func (p *Login) checkCode(h http.Header, body []byte) (url.Values, bool) {
 	if mt, _, err := mime.ParseMediaType(h.Get("Content-Type")); err != nil || mt != "application/x-www-form-urlencoded" {
 		return nil, false
@@ -1405,7 +1434,8 @@ func (p *Login) checkCode(h http.Header, body []byte) (url.Values, bool) {
 			return nil, false
 		}
 	}
-	if f.Get("grant_type") != "authorization_code" || f.Get("redirect_uri") != p.d.RedirectFrom {
+	if f.Get("grant_type") != "authorization_code" || f.Get("redirect_uri") != p.d.RedirectFrom ||
+		f.Get("client_id") != p.d.Refresh["client_id"] {
 		return nil, false
 	}
 	f.Set("redirect_uri", p.d.RedirectTo)
@@ -1752,9 +1782,14 @@ func Codex(guard *netguard.Policy) Declaration {
 		// request_chatgpt_token_refresh, login/src/oauth/client.rs refresh):
 		// its OAuth client ID and the grant, as JSON, and no scope. The ID
 		// is the public CLIENT_ID compiled into the pinned binary.
-		Refresh:      map[string]string{"client_id": CodexClientID, "grant_type": "refresh_token"},
-		RedirectFrom: "http://127.0.0.1:18432/deviceauth/callback",
-		RedirectTo:   "https://" + auth + "/deviceauth/callback",
+		Refresh: map[string]string{"client_id": CodexClientID, "grant_type": "refresh_token"},
+		// Its refresh's headers (codex-rs login/src/auth/default_client.rs
+		// default_headers): the default originator and a User-Agent naming
+		// the guest's OS, which the clerk does not send. The CLI's own
+		// device steps to the same host send neither (create_raw_auth_client).
+		RefreshHeaders: map[string]string{"Originator": "codex_cli_rs"},
+		RedirectFrom:   "http://127.0.0.1:18432/deviceauth/callback",
+		RedirectTo:     "https://" + auth + "/deviceauth/callback",
 		RequestHeaders: []string{
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
