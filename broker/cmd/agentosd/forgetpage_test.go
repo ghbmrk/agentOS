@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -376,5 +377,66 @@ func TestAnUnsentForgetNoticeIsKept(t *testing.T) {
 	}
 	if b, err := os.ReadFile(path + ".corrupt"); err != nil || string(b) != "{" {
 		t.Fatalf("set aside: %q %v", b, err)
+	}
+}
+
+// The unsent record's edges: a missing one logs nothing; one that cannot
+// be read (a directory) is logged and never copied aside; one of the
+// wrong shape is set aside and read as empty. A failed send is logged,
+// and run keeps trying at its interval until a send goes.
+func TestTheUnsentForgetRecordsEdges(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	dir := t.TempDir()
+	send := func(string) error { return nil }
+	if told := openForgetTold(filepath.Join(dir, "none.json"), send); len(told.texts) != 0 || logged.Len() != 0 {
+		t.Fatalf("missing record: %q, logged %q", told.texts, logged.String())
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	openForgetTold(sub, send)
+	if _, err := os.Stat(sub + ".corrupt"); !errors.Is(err, os.ErrNotExist) || !strings.Contains(logged.String(), "unreadable") {
+		t.Fatalf("unreadable record: %v, logged %q", err, logged.String())
+	}
+	odd := filepath.Join(dir, "odd.json")
+	if err := os.WriteFile(odd, []byte(`["a",1]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if told := openForgetTold(odd, send); len(told.texts) != 0 {
+		t.Fatalf("a wrong-shaped record read as %q", told.texts)
+	}
+	logged.Reset()
+	var tries int
+	var sent []string
+	told := openForgetTold(filepath.Join(dir, "retry.json"), func(s string) error {
+		tries++
+		if tries < 3 {
+			return errors.New("no owner channel")
+		}
+		sent = append(sent, s)
+		return nil
+	})
+	told.tell("one")
+	if !strings.Contains(logged.String(), "could not be told yet: no owner channel") {
+		t.Fatalf("a failed send was not logged: %q", logged.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { told.run(ctx, time.Millisecond); close(done) }()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		told.mu.Lock()
+		n := len(sent)
+		told.mu.Unlock()
+		if n > 0 {
+			break
+		}
+	}
+	cancel()
+	<-done
+	if !slices.Equal(sent, []string{"one"}) {
+		t.Fatalf("sent %q after %d tries", sent, tries)
 	}
 }

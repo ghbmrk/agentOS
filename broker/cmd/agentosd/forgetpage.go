@@ -235,9 +235,6 @@ func (t *forgetTold) flushLocked() {
 		}
 		sent++
 	}
-	if sent == 0 {
-		return
-	}
 	t.texts = t.texts[sent:]
 	if err := t.saveLocked(); err != nil {
 		log.Printf(LogForgetUntold, err)
@@ -245,18 +242,14 @@ func (t *forgetTold) flushLocked() {
 }
 
 func (t *forgetTold) saveLocked() error {
-	b, err := json.Marshal(append([]string{}, t.texts...))
-	if err != nil {
-		return err
-	}
+	b, _ := json.Marshal(append([]string{}, t.texts...)) // a []string always marshals
 	return writeSynced(t.path, b)
 }
 
 // run retries the saved notices every every until ctx ends, first at
 // once, so a restart sends what an earlier run could not.
 func (t *forgetTold) run(ctx context.Context, every time.Duration) {
-	tick := time.NewTicker(every)
-	defer tick.Stop()
+	tick := time.NewTicker(every) // collected once run returns (Go 1.23)
 	for {
 		t.mu.Lock()
 		if len(t.texts) > 0 {
