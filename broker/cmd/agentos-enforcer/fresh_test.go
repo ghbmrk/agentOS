@@ -378,6 +378,22 @@ func TestFreshDayRecordOnlyInItsDay(t *testing.T) {
 	if x.d.fresh.due != 0 || x.stopped() {
 		t.Fatal("an approval outlived the day it was approved for")
 	}
+	// A day that reads back and also carries a fresh_day key (Security
+	// 6726152053, L3 6726151888) restores no wait: only a spent day holds
+	// an approval.
+	x.d.Close()
+	var st map[string]any
+	json.Unmarshal(day, &st)
+	st["fresh_day"] = map[string]any{"due": 1}
+	both, _ := json.Marshal(st)
+	if err := os.WriteFile(filepath.Join(x.dir, fileTraffic), both, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
+	x.advance(time.Second)
+	if x.d.net.spent || x.d.fresh.due != 0 || x.stopped() {
+		t.Fatal("a day that reads back restored an approval")
+	}
 }
 
 // TestFreshDaySteps: the daemon's own refusals, which hold whatever the

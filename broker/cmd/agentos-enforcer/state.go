@@ -196,15 +196,19 @@ func (d *Enforcer) freshErr(msg string) {
 }
 
 // openFresh restores the wait a spent day's record holds; anything else
-// in traffic.json (a day that reads back, the unreadable bytes, a cancel)
-// starts nothing.
+// beside a spent day (the unreadable bytes, a cancel) starts nothing, and
+// a day that reads back restores none, even one that also carries a
+// fresh_day key.
 func (d *Enforcer) openFresh() {
+	if !d.net.spent {
+		return // a day that reads back holds no approval, whatever keys it also has
+	}
 	b, err := d.store(fileTraffic).Load()
 	var r freshRecord
 	switch {
 	case err != nil || json.Unmarshal(b, &r) != nil || r.FreshDay == nil:
-		// a day that reads back, or the unreadable day itself, which no
-		// owner has acted on (openNetwork refused a file it cannot read)
+		// the unreadable day itself, which no owner has acted on
+		// (openNetwork refused a file it cannot read)
 	case r.FreshDay.Due > 0:
 		d.fresh.due = r.FreshDay.Due
 		d.dp.Logf("byte caps: the fresh day the owner approved starts at " + time.UnixMilli(r.FreshDay.Due).In(d.cfg.zone).Format("2006-01-02 15:04 MST"))
