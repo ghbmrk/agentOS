@@ -131,4 +131,7 @@ func TestSilentAfterSilentEvent(t *testing.T) {
 	if ev := h.of(Silent); len(ev) != 1 {
 		t.Fatalf("%d silent events for one silence, want 1", len(ev))
 	}
+	if n := strings.Count(r.log.all(), "camera "+testID+": silent past its interval"); n != 1 {
+		t.Fatalf("%d silent lines for one silence, want 1", n)
+	}
 }
