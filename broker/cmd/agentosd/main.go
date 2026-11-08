@@ -592,8 +592,9 @@ func main() {
 	}
 
 	// The old learning plane's state is erased, and FORGET, RENEW and the
-	// loop settings get fixed replies (#2781).
-	openLearnState(learnDir, &cfg)
+	// loop settings get fixed replies (#2781); FORGET's names the page's
+	// Forget step when the page serves it (-passkey-rp-id, D-284).
+	openLearnState(learnDir, &cfg, passkeyRPID != "")
 	// Intents left open for the deleted change, loops, forget and recall
 	// executors settle as not applied (NL-8).
 	registerRetired(&cfg)
@@ -662,7 +663,8 @@ func main() {
 		// Erase by name (KRN-forget b): every agent is contained until the
 		// kernel says which read erased content; the start-up pass below
 		// takes those back. The owner page's Forget step (KRN-forget c,
-		// #3414) calls newForgetFlow's find and confirm.
+		// #3414, D-284) calls the flow's find and confirm on a passkey's
+		// tap over the list found.
 		eraseBack.attach(*seat, func() lineageForgetter {
 			if m := pre.m.Load(); m != nil {
 				return m
@@ -702,6 +704,14 @@ func main() {
 				rf := newRecoveryFlow(*seat, bs)
 				cfg.PageSocket.Recovery = recoveryOps{rf, newLostCard(*seat, bs)}
 				go rf.run(ctx, backupCheckEvery)
+				// The Forget page (KRN-forget c, D-284): erase by name on
+				// any of the owner's passkeys' taps, which the owner hears.
+				cfg.PageSocket.Erase = pageForget{F: newForgetFlow(*seat, eraseBack), K: *seat, Tell: alertOwner(func() *owner.Channel {
+					if d := served.Load(); d != nil {
+						return d.Owner()
+					}
+					return nil
+				})}
 			}
 		}
 		go bs.run(ctx, backupCheckEvery)

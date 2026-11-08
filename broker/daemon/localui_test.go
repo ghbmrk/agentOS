@@ -212,6 +212,7 @@ func (pageForget) PageForget(context.Context, string, bool) string { return "for
 type pagePasskeys struct{ localsrv.Passkeys }
 type pageBackups struct{ localsrv.Backups }
 type pageRecovery struct{ localsrv.Recovery }
+type pageErase struct{ localsrv.Erase }
 
 // startPage runs agentosd serving the page with every optional part set,
 // and returns its socket and a signed-in session's token.
@@ -229,7 +230,7 @@ func startPage(t *testing.T) (sock, token string, d *Daemon) {
 			UID:        os.Getuid(),
 			PlanSignIn: pagePlan{},
 			Accounts:   map[string]localsrv.AccountSignIn{"mail": pageAccount{}},
-			Passkeys:   pagePasskeys{}, Backups: pageBackups{}, Recovery: pageRecovery{},
+			Passkeys:   pagePasskeys{}, Backups: pageBackups{}, Recovery: pageRecovery{}, Erase: pageErase{},
 			BackupNotes: func() []string { return []string{"only one copy"} },
 			Held:        func() localapi.HeldList { return localapi.HeldList{} },
 			Forget:      pageForget{},
@@ -249,7 +250,7 @@ func startPage(t *testing.T) (sock, token string, d *Daemon) {
 
 // Every part of the page agentosd is given reaches the page: the plan's
 // sign-in, the account clerks, the backups notice and ops, the recovery
-// ops, what was held, FORGET's tasks, and what following a root would
+// ops, the Forget step's erase ops, what was held, FORGET's tasks, and what following a root would
 // change (P2-2w; #1264, #3006, BAK-1, REC-4, #993, W3-forget-b3r, OSS-10).
 func TestEveryPagePartAgentosdIsGivenReachesThePage(t *testing.T) {
 	sock, tok, _ := startPage(t)
@@ -267,7 +268,7 @@ func TestEveryPagePartAgentosdIsGivenReachesThePage(t *testing.T) {
 	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || json.Unmarshal(r.Result, &st) != nil || !slices.Equal(st.Backups, []string{"only one copy"}) {
 		t.Errorf("status's backups notice: %+v", r)
 	}
-	for _, op := range []string{localapi.OpBackups, localapi.OpRecoveryBegin, localapi.OpHeld} {
+	for _, op := range []string{localapi.OpBackups, localapi.OpRecoveryBegin, localapi.OpEraseFind, localapi.OpEraseConfirm, localapi.OpHeld} {
 		if r := send(t, sock, op, struct{}{}); r.Error == "unknown op" {
 			t.Errorf("%s is not served", op)
 		}
