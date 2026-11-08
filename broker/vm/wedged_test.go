@@ -1,10 +1,14 @@
 package vm
 
-// REQ: RES-4, CAP-8
+// REQ: RES-4, PLN-6
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -16,6 +20,12 @@ import (
 // a row the failure says so (ErrWedged); a different outcome resets the
 // count, and a kill that finally works stops the machine as usual.
 func TestRepeatedPendingKillReportsWedged(t *testing.T) {
+	if wedgedAfter != 3 {
+		t.Fatalf("wedgedAfter is %d, V37 says the third failure in a row", wedgedAfter)
+	}
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	e := newEnv(t, 2000)
 	e.create("exp", admission.Experiment, 1500)
 	pending := fmt.Errorf("fake: %w", ErrKillPending)
@@ -55,6 +65,10 @@ func TestRepeatedPendingKillReportsWedged(t *testing.T) {
 	setRefuse(pending)
 	for i := 1; i <= wedgedAfter+1; i++ {
 		preempt(i, i >= wedgedAfter)
+	}
+	// The wedged line is logged once, at the wedgedAfter-th failure.
+	if n := strings.Count(logged.String(), "exp: wedged"); n != 1 {
+		t.Fatalf("wedged logged %d times, want once:\n%s", n, logged.String())
 	}
 	if _, ok := e.rt.memOf("exp"); !ok {
 		t.Fatal("fake: the machine should still be running")

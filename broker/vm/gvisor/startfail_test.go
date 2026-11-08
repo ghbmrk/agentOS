@@ -78,3 +78,10 @@ func TestFailedStartKillIsBounded(t *testing.T) {
 		t.Fatalf("Kill with the kill pending: %v, want vm.ErrKillPending", err)
 	}
 }
+
+// Runtime.KillTimeout's zero value is the 10 s V37 states.
+func TestFailedStartKillTimeoutDefault(t *testing.T) {
+	if d := (&Runtime{}).killTimeout(); d != 10*time.Second {
+		t.Fatalf("default failed-start Kill deadline %s, want 10s", d)
+	}
+}

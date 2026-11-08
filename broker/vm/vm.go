@@ -402,8 +402,8 @@ type machine struct {
 	// (see Preempt); startFrom refuses to start the machine meanwhile.
 	preempting atomic.Bool
 	// killPending counts the machine's Kills in a row that failed on
-	// ErrKillPending (ErrWedged). Preempt kills without mu, so atomic.
-	killPending atomic.Int32
+	// ErrKillPending (ErrWedged). Under mu, which stopRuntime runs under.
+	killPending int
 	// execCancel ends a worker's command in flight (Exec), so erasure,
 	// rollback and destroy never wait behind it for the lock.
 	execCancel atomic.Pointer[context.CancelFunc]
@@ -1136,7 +1136,7 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 		// stopped (a preemption would otherwise report a live guest dead).
 		return m.countKillPending(mc, err)
 	}
-	mc.killPending.Store(0)
+	mc.killPending = 0
 	// Only a guest known dead stops counting against the reserve.
 	m.uncommitDisk(mc)
 	if mc.State == Running {
@@ -1151,10 +1151,11 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 // count: the runtime got past its wait, so no earlier kill held it.
 func (m *Manager) countKillPending(mc *machine, err error) error {
 	if !errors.Is(err, ErrKillPending) {
-		mc.killPending.Store(0)
+		mc.killPending = 0
 		return err
 	}
-	n := mc.killPending.Add(1)
+	mc.killPending++
+	n := mc.killPending
 	if n < wedgedAfter {
 		return err
 	}
