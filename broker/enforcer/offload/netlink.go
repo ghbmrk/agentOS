@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -37,11 +38,6 @@ func open(proto int) (*conn, error) {
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		c.close()
 		return nil, fmt.Errorf("netlink bind: %w", err)
-	}
-	// A kernel that never answers fails the call rather than hang it.
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 5}); err != nil {
-		c.close()
-		return nil, fmt.Errorf("netlink timeout: %w", err)
 	}
 	return c, nil
 }
@@ -151,16 +147,38 @@ func (c *conn) request(typ, flags uint16, body []byte) ([][]byte, error) {
 	return c.recv(want)
 }
 
+// replyWait is how long one request may wait for all of the kernel's
+// replies, however many other datagrams arrive meanwhile.
+var replyWait = 5 * time.Second
+
+var errNoReply = errors.New("no reply from the kernel in time")
+
 // recv reads the replies of type want to request c.seq up to the
 // acknowledgement or a dump's end. Only the kernel's datagrams are read:
 // one from any other sender (a process that found this socket's port) is
 // dropped unread, so it can neither answer for the kernel nor end the
-// request.
+// request. The request fails once replyWait has passed, so neither a
+// silent kernel nor a flood of other datagrams holds it.
 func (c *conn) recv(want uint16) ([][]byte, error) {
 	var replies [][]byte
 	buf := make([]byte, 1<<16)
+	end := time.Now().Add(replyWait)
 	for {
+		left := time.Until(end)
+		if left <= 0 {
+			return nil, errNoReply
+		}
+		tv := syscall.NsecToTimeval(max(left.Nanoseconds(), int64(time.Microsecond)))
+		if err := syscall.SetsockoptTimeval(c.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+			return nil, fmt.Errorf("netlink timeout: %w", err)
+		}
 		n, from, err := syscall.Recvfrom(c.fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) { // a signal to this thread (Go's preemption): read on
+			continue
+		}
+		if errors.Is(err, syscall.EAGAIN) {
+			return nil, errNoReply
+		}
 		if err != nil {
 			return nil, err
 		}

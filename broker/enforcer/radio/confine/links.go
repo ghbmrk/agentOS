@@ -2,8 +2,10 @@ package confine
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"syscall"
+	"time"
 )
 
 // setupLinks brings lo up and creates each named dummy link, up and
@@ -71,14 +73,40 @@ func request(fd int, seq uint32, msg []byte) error {
 	if err := syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return err
 	}
+	return ack(fd, seq)
+}
+
+// ackWait is how long one request may wait for the kernel's
+// acknowledgement, however many other datagrams arrive meanwhile.
+var ackWait = 5 * time.Second
+
+var errNoAck = errors.New("no acknowledgement from the kernel in time")
+
+// ack reads the kernel's acknowledgement of request seq. Only the kernel
+// answers: a datagram from any other sender (a process that found this
+// socket's port) is dropped unread, and the wait ends at ackWait, so
+// neither a silent kernel nor a flood holds the stack's start.
+func ack(fd int, seq uint32) error {
 	buf := make([]byte, 4096)
+	end := time.Now().Add(ackWait)
 	for {
-		n, from, err := syscall.Recvfrom(fd, buf, 0)
-		if err != nil {
+		left := time.Until(end)
+		if left <= 0 {
+			return errNoAck
+		}
+		tv := syscall.NsecToTimeval(max(left.Nanoseconds(), int64(time.Microsecond)))
+		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
 			return err
 		}
-		// Only the kernel answers: a datagram from any other sender (a
-		// process that found this socket's port) is dropped unread.
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
+		switch {
+		case errors.Is(err, syscall.EINTR): // a signal to this thread: read on
+			continue
+		case errors.Is(err, syscall.EAGAIN):
+			return errNoAck
+		case err != nil:
+			return err
+		}
 		if sa, ok := from.(*syscall.SockaddrNetlink); !ok || sa.Pid != 0 {
 			continue
 		}

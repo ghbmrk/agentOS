@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -183,5 +184,62 @@ func TestWalkFailsClosed(t *testing.T) {
 	}
 	if _, err := walk(links, []string{"mv1"}); err == nil || !strings.Contains(err.Error(), "mv1: its parent is in another namespace") {
 		t.Fatalf("a parent in another namespace: %v", err)
+	}
+}
+
+// TestFloodEndsRequest (ENF-gro-4): datagrams from another sender that
+// keep arriving do not hold a request past replyWait: it fails (and the
+// daemon holds the port at its caps) rather than stall the reading.
+func TestFloodEndsRequest(t *testing.T) {
+	defer func(w time.Duration) { replyWait = w }(replyWait)
+	replyWait = 300 * time.Millisecond
+	c, err := open(unix.NETLINK_ROUTE)
+	if err != nil {
+		t.Skipf("no netlink socket here: %v", err)
+	}
+	defer c.close()
+	sa, err := syscall.Getsockname(c.fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Pid: sa.(*syscall.SockaddrNetlink).Pid}
+	f, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(f)
+	if err := syscall.Bind(f, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		t.Fatal(err)
+	}
+	noop := nlmsg(syscall.NLMSG_NOOP, nil)
+	ne.PutUint32(noop[0:], uint32(len(noop)))
+	stop := make(chan struct{})
+	flooding := make(chan struct{})
+	go func() {
+		defer close(flooding)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			syscall.Sendto(f, noop, 0, to) // a full queue refuses some: the rest keep coming
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	defer func() { close(stop); <-flooding }()
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { _, err := c.recv(syscall.RTM_NEWLINK); done <- err }() // a reply the kernel never sends
+	select {
+	case err := <-done:
+		if !errors.Is(err, errNoReply) {
+			t.Fatalf("a flooded request: %v", err)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("a flooded request took %v", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a flood of other datagrams held the request past replyWait")
 	}
 }

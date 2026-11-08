@@ -4,8 +4,10 @@ package confine
 
 import (
 	"encoding/binary"
+	"errors"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // TestLinkAckOnlyFromKernel (#5095, the netlink sender check offload has):
@@ -18,9 +20,6 @@ func TestLinkAckOnlyFromKernel(t *testing.T) {
 	}
 	defer syscall.Close(fd)
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 5}); err != nil {
 		t.Fatal(err)
 	}
 	sa, err := syscall.Getsockname(fd)
@@ -47,5 +46,60 @@ func TestLinkAckOnlyFromKernel(t *testing.T) {
 	// no CAP_NET_ADMIN, any change).
 	if err := request(fd, 1, newLink("agentosnone0", "", syscall.IFF_UP, syscall.NLM_F_ACK)); err == nil {
 		t.Fatal("a forged acknowledgement read as the kernel's")
+	}
+}
+
+// TestLinkAckFloodEnds: datagrams from another sender that keep arriving
+// do not hold the wait for an acknowledgement past ackWait.
+func TestLinkAckFloodEnds(t *testing.T) {
+	defer func(w time.Duration) { ackWait = w }(ackWait)
+	ackWait = 300 * time.Millisecond
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
+	if err != nil {
+		t.Skipf("no netlink socket here: %v", err)
+	}
+	defer syscall.Close(fd)
+	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Pid: sa.(*syscall.SockaddrNetlink).Pid}
+	f, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(f)
+	if err := syscall.Bind(f, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		t.Fatal(err)
+	}
+	noop := make([]byte, syscall.SizeofNlMsghdr)
+	binary.NativeEndian.PutUint32(noop[0:], uint32(len(noop)))
+	binary.NativeEndian.PutUint16(noop[4:], syscall.NLMSG_NOOP)
+	stop, flooding := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(flooding)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			syscall.Sendto(f, noop, 0, to) // a full queue refuses some: the rest keep coming
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	defer func() { close(stop); <-flooding }()
+	done := make(chan error, 1)
+	go func() { done <- ack(fd, 99) }() // an acknowledgement the kernel never sends
+	select {
+	case err := <-done:
+		if !errors.Is(err, errNoAck) {
+			t.Fatalf("a flooded wait: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a flood of other datagrams held the wait past ackWait")
 	}
 }
