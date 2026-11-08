@@ -97,6 +97,9 @@ var (
 	ErrDriveTooOld = errors.New("drive's update is too old to trust offline")
 	// ErrBadRepository: anything else wrong with what the source served.
 	ErrBadRepository = errors.New("update repository is malformed")
+	// ErrBadRoot: the root given to InitStore is not root metadata its own
+	// keys can check; the fault is in that file, not a repository.
+	ErrBadRoot = errors.New("root metadata file is malformed")
 )
 
 func classify(err error) error {
@@ -288,11 +291,16 @@ type Ref struct {
 // image's own release version.
 func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	m, err := metadata.Root().FromBytes(root)
-	if err != nil {
-		return nil, classify(err)
+	if err == nil {
+		err = m.VerifyDelegate(metadata.ROOT, m)
 	}
-	if err := m.VerifyDelegate(metadata.ROOT, m); err != nil {
-		return nil, classify(err)
+	if err != nil {
+		// A root short of its own signatures is a signature failure;
+		// anything else is the root file's fault, not a repository's.
+		if c := classify(err); errors.Is(c, ErrSignatures) {
+			return nil, c
+		}
+		return nil, fmt.Errorf("%w: %v", ErrBadRoot, err)
 	}
 	// Check before creating anything, so a refused path leaves no
 	// directory behind (#4225 item 6): the path is absolute, and the
@@ -319,7 +327,9 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		// Not ErrUnsafeStore: the path passed its checks, and EACCES or
 		// ENOSPC is the directory to change, named here (#4977 item 2).
-		return nil, fmt.Errorf("update store %s: %w", dir, err)
+		// The distinct prefix keeps it apart from an "update store:"
+		// refusal in a log (#5059 item 2).
+		return nil, fmt.Errorf("create update store %s: %w", dir, err)
 	}
 	if err := safeDir(dir); err != nil {
 		return nil, err
