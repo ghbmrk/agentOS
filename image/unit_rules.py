@@ -302,11 +302,35 @@ def package_sockets(shown, pkg):
     return out
 
 
+def fed_services(shown, pkgsock):
+    """Whether a unit name is a service a package's socket (PKGSOCK) hands its connections or listening
+    fds to: read from each such socket's side (its Triggers, its implicit same-name service and every
+    instance of its <prefix>@.service, which Accept=yes starts), since the lint's manager drops an
+    inactive service between show calls and with it the TriggeredBy those edges add (#5072 Security
+    round 3), and from the service's own TriggeredBy (Sockets=). Every name of such a unit counts."""
+    feeds, prefixes = set(), set()
+    for n, s in shown.items():
+        if n.endswith(".socket") and s["LoadState"] == "loaded" and s["Id"] in pkgsock:
+            feeds |= set(words(s, "Triggers"))
+            for x in words(s, "Names"):
+                feeds.add(x[:-len(".socket")] + ".service")
+                prefixes.add(x[:-len(".socket")].split("@")[0] + "@")
+    for n, s in shown.items():
+        if set(words(s, "TriggeredBy")) & pkgsock:
+            feeds.add(n)
+    fed = set(feeds)
+    for n, s in shown.items():
+        names = set(words(s, "Names"))
+        if names & feeds:
+            fed |= names
+    return lambda u: u.endswith(".service") and (u in fed or u.startswith(tuple(prefixes)))
+
+
 def records(view, shown, dirs, prov):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
     "text"}]}], "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names()
     found. package marks a socket whose endpoint is a package's (package_sockets), fed a service such a
-    socket hands its connections to."""
+    socket hands its connections to (fed_services)."""
     recs, own, done = [], set(), set()
     pkgsock = package_sockets(shown, packaged_names(view, dirs, prov))
     for name in sorted(shown):
@@ -353,13 +377,10 @@ def records(view, shown, dirs, prov):
                 if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
-    # a service a package's socket hands its connections or listening fds to (TriggeredBy: its Service=,
-    # implicit name or Accept=yes template, or a Sockets= line)
-    fed = {s["Id"] for s in shown.values() if s["LoadState"] == "loaded" and s["Id"].endswith(".service")
-           and set(words(s, "TriggeredBy")) & pkgsock}
+    fed = fed_services(shown, pkgsock)
     for rec in recs:
         rec["package"] = rec["unit"] in pkgsock
-        rec["fed"] = rec["unit"] in fed
+        rec["fed"] = fed(rec["unit"])
     fstab = None
     final, _ = view.resolve("/etc/fstab")
     if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):

@@ -309,6 +309,31 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual(sorted((u["unit"], u["package"], u["fed"]) for u in got["units"]),
                              [("u.socket", True, False), ("v.socket", True, False), ("x.service", False, True)])
 
+    def test_a_service_a_packages_socket_feeds_is_read_from_the_socket_side(self):
+        # #5072 Security round 3: the lint's manager drops an inactive service between show calls, so its
+        # TriggeredBy is empty for a socket's Service=, implicit name or Accept=yes template. Each route
+        # alone marks its service: Triggers (t), implicit name (i), template (a@...), TriggeredBy (s), alias (v)
+        files = {LIB + n: "p" for n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket")}
+        files.update({ETC + n: "o" for n in ("tt.service", "i.service", "a@.service", "x.service", "vv.service",
+                                             "o.socket", "o.service")})
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({n: ("loaded", (LIB if n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket")
+                                           else ETC) + n.replace("@agentos-unit-lint", "@").replace("@x.", "@."), [])
+                           for n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket", "tt.service",
+                                     "i.service", "a@agentos-unit-lint.service", "a@x.service", "x.service",
+                                     "vv.service", "o.socket", "o.service")})
+            units["vv.service"]["Names"] = "vv.service valias.service"
+            units["t.socket"]["Triggers"] = "tt.service"
+            units["v.socket"]["Triggers"] = "valias.service"
+            units["x.service"]["TriggeredBy"] = "s.socket"
+            units["o.socket"]["Triggers"] = "o.service"  # a socket of ours feeding a service of ours
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["fed"]),
+                             ["a@agentos-unit-lint.service", "a@x.service", "i.service", "tt.service",
+                              "vv.service", "x.service"])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
