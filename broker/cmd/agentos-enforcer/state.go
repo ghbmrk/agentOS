@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,7 @@ func (p pageCaps) Fresh(nowMS int64) (int64, error) {
 	}
 	due := nowMS + policy.Wait
 	b, _ := json.Marshal(freshState{Due: due, Day: n.spentDay})
-	if err := p.d.store(fileFresh).Save(b); err != nil {
+	if err := p.d.save(fileFresh, b); err != nil {
 		p.d.dp.Logf("byte caps: fresh day not saved: " + err.Error())
 		return 0, errFreshUnsaved
 	}
@@ -124,13 +125,30 @@ func (p pageCaps) CancelFresh() error {
 		return errNoFreshDay
 	}
 	b, _ := json.Marshal(freshState{})
-	if err := p.d.store(fileFresh).Save(b); err != nil {
+	if err := p.d.save(fileFresh, b); err != nil {
 		p.d.dp.Logf("byte caps: fresh day's cancel not saved: " + err.Error())
 		return errCancelUnsaved
 	}
 	n.freshDue = 0
 	p.d.dp.Logf("byte caps: the owner cancelled the fresh day")
 	return nil
+}
+
+// save saves b to the state file name, and the file decides: a Save that
+// fails once the new file is in place (its directory sync) still put b
+// there, so it counts as saved, and every step here acts on what the
+// file holds, never on the error alone (Security on #5101). A Save
+// that fails before that changed nothing.
+func (d *Enforcer) save(name string, b []byte) error {
+	err := d.store(name).Save(b)
+	if err == nil {
+		return nil
+	}
+	if got, lerr := d.store(name).Load(); lerr == nil && bytes.Equal(got, b) {
+		d.dp.Logf("byte caps: " + name + " saved, but not confirmed on disk: " + err.Error())
+		return nil
+	}
+	return err
 }
 
 // openFresh restores a fresh day waiting only for the unreadable day it
@@ -147,7 +165,7 @@ func (d *Enforcer) openFresh() error {
 		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits: " + err.Error())
 	case err == nil && (b == nil || !d.net.spent && string(b) == "{}"):
 	case !d.net.spent: // read or not, nothing may outlive the day it was for
-		if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
+		if err := d.save(fileFresh, []byte("{}")); err != nil {
 			return fmt.Errorf("byte caps: a stale %s is not erased: %w", fileFresh, err)
 		}
 		d.dp.Logf("byte caps: erased a stale " + fileFresh + " beside a day that reads back")
@@ -187,12 +205,12 @@ func (d *Enforcer) tickFresh(now time.Time) {
 	// The approval is spent before the new day is saved: a day not
 	// saved then leaves no approval on disk, so a restart in between
 	// needs a new tap, and a cancel meanwhile stops the retry.
-	if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
+	if err := d.save(fileFresh, []byte("{}")); err != nil {
 		d.dp.Logf("byte caps: " + fileFresh + " not cleared, the fresh day tried again at the next tick: " + err.Error())
 		return
 	}
 	c := traffic.NewCounter(d.dp.Now, traffic.CapsOf(d.loadedDoc))
-	if err := d.store(fileTraffic).Save(c.Save()); err != nil {
+	if err := d.save(fileTraffic, c.Save()); err != nil {
 		d.dp.Logf("byte caps: the fresh day was not saved, tried again at the next tick: " + err.Error())
 		return
 	}

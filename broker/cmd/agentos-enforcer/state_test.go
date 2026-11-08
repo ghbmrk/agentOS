@@ -248,3 +248,57 @@ func TestFreshDayStartFaults(t *testing.T) {
 		t.Fatal("an approval spent on a day not saved started one after a restart")
 	}
 }
+
+// TestFreshDayAfterRenameFaults (Security delta 2 on #5101): a save that
+// errors once the new file is in place (a failed directory sync) counts
+// as what the file holds, at every fresh-day step, so the page's answer,
+// the run and a restart all agree with the disk.
+func TestFreshDayAfterRenameFaults(t *testing.T) {
+	x, a := spentBox(t)
+	// The approval: in place, so it waits, and a restart keeps it.
+	x.failAfter(fileFresh, true)
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK || x.page("Caps") != "fresh waiting" ||
+		!strings.Contains(x.logText(), fileFresh+" saved, but not confirmed on disk") {
+		t.Fatalf("an approval on disk: %d %s", w.Code, w.Body)
+	}
+	due := x.d.net.freshDue
+	x.restart()
+	if x.d.net.freshDue != due {
+		t.Fatal("the run and the disk disagree on the approval")
+	}
+	// The cancel: in place, so nothing waits, and a restart agrees.
+	if w := x.b.act(a, "cancel-fresh", ""); w.Code != http.StatusOK || x.page("Caps") != "spent" {
+		t.Fatalf("a cancel on disk: %d %s", w.Code, w.Body)
+	}
+	x.restart()
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || x.d.net.freshDue != 0 {
+		t.Fatal("a cancel on disk did not hold across a restart")
+	}
+	// The start: the erase and the new day in place, so the day starts in
+	// the run, a cancel then is refused, and a restart agrees.
+	x.failAfter(fileFresh, false)
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	x.failAfter(fileFresh, true)
+	x.failAfter(fileTraffic, true)
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if x.d.net.spent {
+		t.Fatal("a fresh day on disk did not start in the run")
+	}
+	if err := (pageCaps{x.d}).CancelFresh(); err != errNoFreshDay {
+		t.Fatalf("a cancel after a start on disk: %v", err)
+	}
+	x.failAfter(fileTraffic, false)
+	x.restart()
+	if x.d.net.spent || x.readState(fileFresh) != "{}" {
+		t.Fatal("the run and the disk disagree on the fresh day")
+	}
+	// The stale erase at start: in place, so the daemon starts.
+	x.writeState(fileFresh, `{"due":1,"day":"x"}`)
+	x.restart()
+	if x.readState(fileFresh) != "{}" {
+		t.Fatal("a stale approval erased on disk stopped the start or stayed")
+	}
+}

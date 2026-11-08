@@ -367,6 +367,8 @@ type box struct {
 	// failing names the state files whose Save fails (fileStore.fault);
 	// waits replaces the daemon's channel and firewall timeouts.
 	failing map[string]bool
+	// failingAfter fails a Save once the new file is in place.
+	failingAfter map[string]bool
 	// failNth names state files whose k-th Save from now fails alone
 	// (failOn); saves counts the Saves since.
 	failNth map[string]int
@@ -431,6 +433,14 @@ func (x *box) open() (*Enforcer, error) {
 		}
 		return nil
 	}
+	dp.AfterFault = func(path string) error {
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		if x.failingAfter[filepath.Base(path)] {
+			return errors.New("disk: directory sync failed")
+		}
+		return nil
+	}
 	dp.HelloWait, dp.IdleWait, dp.FireWait = x.waits.HelloWait, x.waits.IdleWait, x.waits.FireWait
 	return open(x.cfg, x.dir, dp)
 }
@@ -465,6 +475,17 @@ func (x *box) fail(name string, on bool) {
 		x.failing = map[string]bool{}
 	}
 	x.failing[name] = on
+}
+
+// failAfter makes Save of the state file name fail once the new file is
+// in place, as a failed directory sync does (on), or work again.
+func (x *box) failAfter(name string, on bool) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.failingAfter == nil {
+		x.failingAfter = map[string]bool{}
+	}
+	x.failingAfter[name] = on
 }
 
 // failOn makes only the k-th Save of the state file name from now fail.

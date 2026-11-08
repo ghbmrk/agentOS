@@ -101,9 +101,10 @@ type deps struct {
 	Listen bool
 
 	// The lifecycle test's seams; zero in production. SaveFault fails a
-	// state file's Save; the waits replace helloTimeout, idleTimeout and
-	// fireTimeout.
-	SaveFault                     func(path string) error
+	// state file's Save before it writes, AfterFault after the new file
+	// is in place (a failed directory sync); the waits replace
+	// helloTimeout, idleTimeout and fireTimeout.
+	SaveFault, AfterFault         func(path string) error
 	HelloWait, IdleWait, FireWait time.Duration
 }
 
@@ -238,7 +239,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 
 // store is the state file name under the state directory.
 func (d *Enforcer) store(name string) fileStore {
-	return fileStore{path: filepath.Join(d.dir, name), fault: d.dp.SaveFault}
+	return fileStore{path: filepath.Join(d.dir, name), fault: d.dp.SaveFault, after: d.dp.AfterFault}
 }
 
 func (d *Enforcer) openChannel(at func(string) string) error {
