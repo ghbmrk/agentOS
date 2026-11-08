@@ -69,7 +69,12 @@ mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$N/dev/shm"
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
 chmod 1777 "$N/tmp"
-exec env -i container=agentos-offline "$(command -v chroot)" "$N" /usr/lib/systemd/systemd "$@"
+# pivot_root, not chroot: the kernel refuses a user namespace to a chrooted process (EPERM), and a unit's
+# sandbox may make one (runsc rootless, #4392). The old root, stacked on the new one, is detached.
+cd "$N"
+pivot_root . .
+umount -l .
+exec env -i container=agentos-offline /usr/lib/systemd/systemd "$@"
 '''
 # The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
 # reaching its private bus through /proc/PID/root.
