@@ -323,14 +323,18 @@ def fed_services(shown, pkgsock):
         names = set(words(s, "Names"))
         if names & feeds:
             fed |= names
+    # an instance's template is fed too: the lint's manager shows only the lint's instance of it, and
+    # files of ours in the template's directories reach every instance (#5072 round 4)
+    prefixes |= {u.split("@")[0] + "@" for u in fed if "@" in u}
     return lambda u: u.endswith(".service") and (u in fed or u.startswith(tuple(prefixes)))
 
 
 def records(view, shown, dirs, prov):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
-    "text"}]}], "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names()
-    found. package marks a socket whose endpoint is a package's (package_sockets), fed a service such a
-    socket hands its connections to (fed_services)."""
+    "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}]}, from SHOWN, systemctl's
+    reply for every name names() found. package marks a socket whose endpoint is a package's
+    (package_sockets), fed a service such a socket hands its connections to (fed_services); a mask is a
+    file of ours that hides a package's drop-in."""
     recs, own, done = [], set(), set()
     pkgsock = package_sockets(shown, packaged_names(view, dirs, prov))
     for name in sorted(shown):
@@ -377,6 +381,23 @@ def records(view, shown, dirs, prov):
                 if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
+    # A .conf of ours (a /dev/null link, an empty file, any file) named as a package's drop-in of its type,
+    # or at a path a package lists, hides that file's lines, say SocketMode= or User= (#5072 round 4)
+    masks, pkgdrop, ourdrop = [], {}, []
+    listed = getattr(prov.packaged, "listed", lambda p: False)
+    for d in dirs:
+        for e in (e for e in view.entries(d) if e.endswith(".d")):
+            ext = os.path.splitext(e[:-2])[1] or "." + e[:-2]  # service.d: .service
+            for c in (c for c in view.entries(view.resolve(d + "/" + e)[0]) if c.endswith(".conf")):
+                p = d + "/" + e + "/" + c
+                final, links = view.resolve(p)
+                if prov.ours(p):
+                    ourdrop.append((ext, c, p))
+                    if not links and listed(final):
+                        masks.append({"path": p, "hides": final})
+                elif view.kind(final) == 0o100000:
+                    pkgdrop.setdefault((ext, c), []).append(p)
+    masks += [{"path": p, "hides": q} for ext, c, p in ourdrop for q in pkgdrop.get((ext, c), [])]
     fed = fed_services(shown, pkgsock)
     for rec in recs:
         rec["package"] = rec["unit"] in pkgsock
@@ -393,7 +414,7 @@ def records(view, shown, dirs, prov):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab}
+    return {"units": recs, "fstab": fstab, "masks": masks}
 
 
 def lint(root, usr, cmdline, packaged, plant_files=None):
@@ -462,6 +483,7 @@ def dpkg_packaged(out):
                 return False
             with open(view.host(p), "rb") as f:
                 return hashlib.md5(f.read()).hexdigest() in want[p]
+        packaged.listed = want.__contains__  # a path a package installed, whatever it now holds
         return packaged
     return for_view
 

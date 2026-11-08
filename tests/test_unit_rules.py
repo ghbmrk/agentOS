@@ -334,6 +334,45 @@ class RecordsTest(unittest.TestCase):
                              ["a@agentos-unit-lint.service", "a@x.service", "i.service", "tt.service",
                               "vv.service", "x.service"])
 
+    def test_an_instance_a_packages_socket_names_feeds_its_template(self):
+        # #5072 round 4: Service=b@x.service names an instance the lint's manager never shows; the template,
+        # its lint instance and its alone records are fed, by Triggers and by TriggeredBy alike
+        files = {LIB + "f.socket": "p", LIB + "g.socket": "p", ETC + "b@.service": "o", ETC + "c@.service": "o",
+                 ETC + "d@.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"f.socket": ("loaded", LIB + "f.socket", []), "g.socket": ("loaded", LIB + "g.socket", []),
+                           "b@agentos-unit-lint.service": ("loaded", ETC + "b@.service", []),
+                           "c@agentos-unit-lint.service": ("loaded", ETC + "c@.service", []),
+                           "c@y.service": ("loaded", ETC + "c@.service", []),
+                           "d@agentos-unit-lint.service": ("loaded", ETC + "d@.service", [])})
+            units["f.socket"]["Triggers"] = "b@x.service"
+            units["c@y.service"]["TriggeredBy"] = "g.socket"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["fed"]),
+                             ["b@agentos-unit-lint.service", "c@agentos-unit-lint.service", "c@y.service"])
+            fed = r.fed_services(units, {"f.socket", "g.socket"})
+            self.assertTrue(fed("b@.service") and fed("c@.service") and not fed("d@.service"))
+
+    def test_a_file_of_ours_named_as_a_packages_drop_in_is_a_mask(self):
+        # #5072 round 4: a /dev/null link, an empty file or any file of ours, by name in a drop-in directory
+        # of the same type (a more specific one overrides a shared one), or at the path a package lists
+        files = {LIB + "u.socket.d/p.conf": "SocketMode=0600", ETC + "u.socket.d/p.conf": "-> /dev/null",
+                 LIB + "service.d/q.conf": "User=x", ETC + "v.service.d/q.conf": "",
+                 LIB + "w.service.d/r.conf": "User=x", ETC + "w.socket.d/r.conf": "", ETC + "w.service.d/o.conf": "",
+                 LIB + "z.service.d/e.conf": "edited"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            packaged = lambda p: p.startswith("/usr/") and p != LIB + "z.service.d/e.conf"  # noqa: E731
+            packaged.listed = lambda p: p.startswith("/usr/")
+            got = r.records(v, {}, dirs, r.Provenance(v, dirs, packaged))
+            self.assertEqual(sorted((m["path"], m["hides"]) for m in got["masks"]), [
+                (ETC + "u.socket.d/p.conf", LIB + "u.socket.d/p.conf"),
+                (ETC + "v.service.d/q.conf", LIB + "service.d/q.conf"),
+                (LIB + "z.service.d/e.conf", LIB + "z.service.d/e.conf")])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
