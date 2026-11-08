@@ -118,6 +118,15 @@ func TestGolden(t *testing.T) {
 
 func has(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+"\n") }
 
+// fillSpec is the sets an answer for name fills in allow set a, per
+// family: the allow set, the name's own set and the fresh set (nft
+// ENF-set-ttl-1).
+func fillSpec(a nft.AllowSet, name string) string {
+	p := "#inet#" + nft.Table + "#"
+	return "4" + p + a.Set4 + ",4" + p + a.Named(name, false) + ",4" + p + a.Fresh(false) +
+		",6" + p + a.Set6 + ",6" + p + a.Named(name, true) + ",6" + p + a.Fresh(true)
+}
+
 // fills is the nftset line that puts name's answers in the allow set set4
 // (and its IPv6 twin) of the fixture and in name's own sets there.
 func fills(t *testing.T, name, set4 string) string {
@@ -128,8 +137,7 @@ func fills(t *testing.T, name, set4 string) string {
 	}
 	for _, a := range sets {
 		if a.Set4 == set4 {
-			p := "#inet#" + nft.Table + "#"
-			return "nftset=/" + name + "/4" + p + a.Set4 + ",4" + p + a.Named(name, false) + ",6" + p + a.Set6 + ",6" + p + a.Named(name, true)
+			return "nftset=/" + name + "/" + fillSpec(a, name)
 		}
 	}
 	t.Fatalf("no allow set %s", set4)
@@ -298,8 +306,7 @@ func TestViewsAreOwnLists(t *testing.T) {
 					got = append(got, name)
 					named++
 					a := setOf[sets[v.Iface]]
-					p := "#inet#" + nft.Table + "#"
-					if spec != "4"+p+a.Set4+",4"+p+a.Named(name, false)+",6"+p+a.Set6+",6"+p+a.Named(name, true) {
+					if spec != fillSpec(a, name) {
 						t.Errorf("seed %d: %s fills %q", seed, v.Iface, spec)
 					}
 				}
