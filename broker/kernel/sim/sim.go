@@ -913,10 +913,13 @@ func crashed(err error) bool {
 // reverifies every plan.
 func (s *sim) rederive() error {
 	es := s.k.Log().Entries()
+	if err := stopsHold(s.w.anchors, es); err != nil {
+		return err
+	}
 	if _, err := kernel.Rederive(s.w.anchors, s.k.Box(), es); err != nil {
 		return fmt.Errorf("invariant: %w", err)
 	}
-	return stopsHold(s.w.anchors, es)
+	return nil
 }
 
 // check judges the run so far.

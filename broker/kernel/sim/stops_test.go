@@ -168,3 +168,44 @@ func TestStopsHoldReportsAnUnfoldableLog(t *testing.T) {
 		t.Fatal("a log out of order was judged")
 	}
 }
+
+// booted writes the book into a booted kernel's log without folding it, as
+// only a fix-free kernel would have written it.
+func (b *book) booted() *kernel.Kernel {
+	head := gen(rand.New(rand.NewPCG(3, 4)))
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{},
+		Pub: head.pub, Sign: head.priv, Rand: rand.NewChaCha8([32]byte{})})
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	k, err := kernel.Boot(l, []key.PublicKey{b.owner.pk}, nil, 0)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	for _, e := range b.es {
+		if _, err := k.Log().Append(e.At, e.Type, e.V, json.RawMessage(e.Body)); err != nil {
+			b.t.Fatal(err)
+		}
+	}
+	return k
+}
+
+// The sim's boot check and the erase sim's judge each run stopsHold on the
+// whole log, and report its finding rather than a later check's.
+func TestTheSimsJudgeNarrowingsOutrun(t *testing.T) {
+	b := newBook(t)
+	b.plan("p1", b.clerk)
+	b.add(kernel.TStop, struct{}{})
+	b.add(kernel.TResume, struct{}{})
+	b.dispatch("p1", 0)
+	k := b.booted()
+	anchors := []key.PublicKey{b.owner.pk}
+	for name, judge := range map[string]func() error{
+		"rederive at boot": func() error { return (&sim{k: k, w: &world{anchors: anchors}}).rederive() },
+		"erase judge":      func() error { return judgeErase(k, anchors, crashKeys{}, nil, nil, nil, nil) },
+	} {
+		if err := judge(); err == nil || !strings.Contains(err.Error(), "after a STOP reached it") {
+			t.Errorf("%s: got %v, want the STOP outrun", name, err)
+		}
+	}
+}
