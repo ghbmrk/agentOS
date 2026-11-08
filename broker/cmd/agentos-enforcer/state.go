@@ -196,19 +196,15 @@ func (d *Enforcer) freshErr(msg string) {
 }
 
 // openFresh restores the wait a spent day's record holds; anything else
-// on disk beside a spent day (the unreadable bytes, a cancel) starts
-// nothing. Beside a day that reads back there is no record to restore.
+// in traffic.json (a day that reads back, the unreadable bytes, a cancel)
+// starts nothing.
 func (d *Enforcer) openFresh() {
-	if !d.net.spent {
-		return
-	}
 	b, err := d.store(fileTraffic).Load()
 	var r freshRecord
 	switch {
-	case err != nil:
-		d.dp.Logf("byte caps: " + fileTraffic + " unreadable, no fresh day waits: " + err.Error())
-	case json.Unmarshal(b, &r) != nil || r.FreshDay == nil:
-		// the unreadable day itself, which no owner has acted on
+	case err != nil || json.Unmarshal(b, &r) != nil || r.FreshDay == nil:
+		// a day that reads back, or the unreadable day itself, which no
+		// owner has acted on (openNetwork refused a file it cannot read)
 	case r.FreshDay.Due > 0:
 		d.fresh.due = r.FreshDay.Due
 		d.dp.Logf("byte caps: the fresh day the owner approved starts at " + time.UnixMilli(r.FreshDay.Due).In(d.cfg.zone).Format("2006-01-02 15:04 MST"))
@@ -225,18 +221,12 @@ func (d *Enforcer) openFresh() {
 // d.fresh.mu, across the check, the reading, the save and the commit, so
 // a cancel either wins before it or is refused.
 func (d *Enforcer) tickFresh(ctx context.Context, now time.Time) {
-	if !d.net.spent {
-		return
-	}
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	f := &d.fresh
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
-	case f.started:
-		d.stopForFresh()
-		return
 	case !f.starting && f.due != 0 && now.UnixMilli() >= f.due:
 		f.starting, f.due, f.unsaved = true, 0, nil
 		d.dp.Logf("byte caps: the fresh day's wait is over, so it starts")
@@ -268,11 +258,11 @@ func (d *Enforcer) freshState(ctx context.Context, now time.Time) ([]byte, error
 	if d.loaded != "" {
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
+		var r traffic.Reading
 		listing, err := d.dp.Fire.List(lctx, nft.Table)
-		if err != nil {
-			return nil, fmt.Errorf("reading: %w", err)
+		if err == nil {
+			r, err = traffic.ReadingOf(d.loadedDoc, d.cfg.Layout, d.net.boot, listing)
 		}
-		r, err := traffic.ReadingOf(d.loadedDoc, d.cfg.Layout, d.net.boot, listing)
 		if err != nil {
 			return nil, fmt.Errorf("reading: %w", err)
 		}
@@ -282,13 +272,10 @@ func (d *Enforcer) freshState(ctx context.Context, now time.Time) ([]byte, error
 	return b, nil
 }
 
-// stopForFresh asks the daemon's loop to stop, once.
-func (d *Enforcer) stopForFresh() {
-	select {
-	case d.freshStop <- errFreshDay:
-	default:
-	}
-}
+// stopForFresh asks the daemon's loop to stop. A run starts at most one
+// fresh day (Fresh refuses once one started), so the buffered send never
+// waits.
+func (d *Enforcer) stopForFresh() { d.freshStop <- errFreshDay }
 
 // closeFresh saves once more a step not yet confirmed, at a clean stop.
 func (d *Enforcer) closeFresh() {

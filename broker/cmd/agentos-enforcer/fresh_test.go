@@ -379,3 +379,71 @@ func TestFreshDayRecordOnlyInItsDay(t *testing.T) {
 		t.Fatal("an approval outlived the day it was approved for")
 	}
 }
+
+// TestFreshDaySteps: the daemon's own refusals, which hold whatever the
+// page drew (a tap drawn before the state changed), each step's log line,
+// the page once the day is saved, a step saved at a clean stop, and a
+// running table that does not read keeping the start from being saved.
+func TestFreshDaySteps(t *testing.T) {
+	x, doc, _ := capped(t)
+	caps := pageCaps{x.d}
+	if _, _, err := caps.Fresh(x.nowMS()); !errors.Is(err, errReadsBack) {
+		t.Fatalf("a fresh day for a day that reads back: %v", err)
+	}
+	x.unreadable()
+	x.setListing(listing(t, x, doc, 9, 0))
+	caps = pageCaps{x.d}
+	if _, err := caps.CancelFresh(); !errors.Is(err, errNoFreshDay) {
+		t.Fatalf("a cancel with nothing waiting: %v", err)
+	}
+	x.fail(fileTraffic, true) // the approval is not saved before it writes
+	if _, saved, err := caps.Fresh(x.nowMS()); err != nil || saved {
+		t.Fatalf("an approval not saved: saved %v, %v", saved, err)
+	}
+	if _, _, err := caps.Fresh(x.nowMS()); !errors.Is(err, errFreshWaits) {
+		t.Fatalf("a second approval: %v", err)
+	}
+	x.fail(fileTraffic, false)
+	x.restart() // a clean stop saves it
+	if x.d.fresh.due == 0 {
+		t.Fatal("a clean stop did not save the approval")
+	}
+	if _, err := (pageCaps{x.d}).CancelFresh(); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if _, _, err := (pageCaps{x.d}).Fresh(x.nowMS()); err != nil {
+		t.Fatal(err)
+	}
+	x.setListing([]byte(`{"nftables":`))
+	x.advance(wait)
+	if _, back, _ := x.day(); back || x.stopped() {
+		t.Fatal("a start was saved from a running table that does not read")
+	}
+	x.setListing(listing(t, x, doc, 9, 0))
+	x.advance(time.Second)
+	if !x.stopped() {
+		t.Fatal("the start was not saved again")
+	}
+	if _, _, err := (pageCaps{x.d}).Fresh(x.nowMS()); !errors.Is(err, errStarting) {
+		t.Fatalf("an approval once the day started: %v", err)
+	}
+	home := x.b.do(http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(home, "The enforcer restarts to take it up") || strings.Contains(home, "could not be saved") {
+		t.Fatal("the page does not say the saved fresh day is being taken up")
+	}
+	for _, want := range []string{
+		"the owner approved a fresh day, which starts at",
+		"the fresh day's step is in force but not confirmed on disk",
+		"the fresh day the owner approved starts at",
+		"the owner cancelled the fresh day\n",
+		"the owner cancelled the fresh day; every cap stays spent until a new one",
+		"the fresh day's wait is over, so it starts",
+		"the fresh day was not saved, every cap stays spent",
+		"a fresh day from zero is saved, as the owner approved",
+	} {
+		if !strings.Contains(x.logText()+"\n", want) {
+			t.Errorf("not logged: %q", want)
+		}
+	}
+}
