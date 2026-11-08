@@ -131,7 +131,8 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	}
 	line, err := bufio.NewReader(p.Out()).ReadString('\n')
 	if err != nil || line != "frame\n" {
-		t.Fatalf("decoder answered %q, %v", line, err)
+		<-p.Done()
+		t.Fatalf("decoder answered %q, %v; %s", line, err, why(p, state))
 	}
 	p.Stop()
 	<-p.Done()
@@ -156,4 +157,17 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 			t.Errorf("the decoder sees %q", l)
 		}
 	}
+}
+
+// why is what ended a sandbox early: its run's error and runsc's own
+// lines, which the runtime keeps in its exec log.
+func why(p camera.Proc, state string) string {
+	out := ""
+	if e, ok := p.(interface{ Err() error }); ok {
+		out = fmt.Sprintf("the run ended: %v", e.Err())
+	}
+	if b, err := os.ReadFile(filepath.Join(state, "exec.log")); err == nil {
+		out += "\n-- runsc\n" + string(b)
+	}
+	return out
 }
