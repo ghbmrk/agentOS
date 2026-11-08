@@ -99,8 +99,11 @@ func TestWedgedListsTheMachine(t *testing.T) {
 	}
 	wantWedged := func(step string, want ...string) {
 		t.Helper()
-		if got := e.m.Wedged(); !slices.Equal(got, want) {
-			t.Fatalf("%s: Wedged() = %q, want %q", step, got, want)
+		// Map order varies between reads: many reads catch an unsorted list.
+		for range 64 {
+			if got := e.m.Wedged(); !slices.Equal(got, want) {
+				t.Fatalf("%s: Wedged() = %q, want %q", step, got, want)
+			}
 		}
 	}
 	refuse := func(id string, n int) {
