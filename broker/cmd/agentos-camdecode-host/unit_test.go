@@ -23,8 +23,9 @@ import (
 
 // TestDecoderStartsInItsUnit runs as one session of the image's own
 // agentos-camdecode@.service, started by the image's agentos-camdecode.socket
-// on a connection from the clerk's user, with only ExecStart= replaced (CI's
-// camera decoder step). Its user is neither root nor the clerk's and it
+// under the image's own systemd on a connection from the clerk's user, with
+// only ExecStart= and its output replaced (CI's camera decoder step,
+// tools/camdecode_unit.py). Its user is neither root nor the clerk's and it
 // tells the step its uid on the connection, so the step can see that two
 // sessions at once have two. It cannot write the clerk's runtime directory,
 // see the clerk's state, or open a session of its own; and a decoder
@@ -43,6 +44,15 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	uid := os.Getuid()
 	if uid == 0 || strconv.Itoa(uid) == clerk.Uid || os.Geteuid() != uid {
 		t.Fatalf("the session runs as uid %d (euid %d); the clerk's is %s", uid, os.Geteuid(), clerk.Uid)
+	}
+	// A pid namespace of its own (PrivatePIDs=, systemd 257), where it is
+	// PID 1, so it sees and signals no other session; and an empty /run,
+	// so none of the box's path sockets (#4392).
+	if pid := os.Getpid(); pid != 1 {
+		t.Errorf("the session is pid %d, not 1 in a pid namespace of its own", pid)
+	}
+	if es, err := os.ReadDir("/run"); err != nil || len(es) != 0 {
+		t.Errorf("the session's /run holds %d entries (%v); want an empty one", len(es), err)
 	}
 	conn, err := net.FileConn(os.Stdin)
 	if err != nil {

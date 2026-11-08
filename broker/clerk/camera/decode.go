@@ -252,21 +252,7 @@ func (d *Decoder) Cut(id string) {
 // Remove stops camera id's sandbox and forgets it. It returns once no
 // frame of it can reach Out.
 func (d *Decoder) Remove(id string) {
-	d.mu.Lock()
-	c := d.cams[id]
-	delete(d.cams, id)
-	d.mu.Unlock()
-	if c == nil {
-		return
-	}
-	c.cancel()
-	// No loop starts once c is out of the map, so done is final here.
-	d.mu.Lock()
-	done := c.done
-	d.mu.Unlock()
-	if done != nil {
-		<-done
-	}
+	d.remove([]string{id})
 }
 
 // Close removes every camera.
@@ -277,10 +263,35 @@ func (d *Decoder) Close() {
 		ids = append(ids, id)
 	}
 	d.mu.Unlock()
-	for _, id := range ids {
-		d.Remove(id)
-	}
+	d.remove(ids)
 	d.wg.Wait()
+}
+
+// remove forgets the cameras ids and stops their sessions all at once,
+// then waits for each: a session's Stop may wait decoderStop for its unit,
+// so one camera after another would wait that long for each (#4392).
+func (d *Decoder) remove(ids []string) {
+	d.mu.Lock()
+	cams := make([]*decodeCam, 0, len(ids))
+	for _, id := range ids {
+		if c := d.cams[id]; c != nil {
+			cams = append(cams, c)
+			delete(d.cams, id)
+		}
+	}
+	d.mu.Unlock()
+	for _, c := range cams {
+		c.cancel()
+	}
+	for _, c := range cams {
+		// No loop starts once c is out of the map, so done is final here.
+		d.mu.Lock()
+		done := c.done
+		d.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+	}
 }
 
 // Frame queues a video or thermal frame for camera id's sandbox,

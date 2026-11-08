@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"path/filepath"
@@ -109,5 +110,72 @@ func TestDialDecoderSendsTheSpecAndStopsOnTheUnitsClose(t *testing.T) {
 	// No socket, no session.
 	if _, err := DialDecoder(filepath.Join(t.TempDir(), "none"))(context.Background(), Spec{picture, lepton}); err == nil {
 		t.Error("a session started with no decoder unit")
+	}
+}
+
+// TestCloseStopsHungUnitsAtOnce (#4392): Close stops every camera's
+// session at once, so units that never close their side hold it for one
+// decoderStop, not one each. It fails if Close removes the cameras one
+// after another, which takes cams times decoderStop.
+func TestCloseStopsHungUnitsAtOnce(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "conn.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	const cams = 6
+	opened := make(chan net.Conn, cams)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				if _, err := ReadSpec(c); err != nil {
+					c.Close()
+					return
+				}
+				opened <- c
+				io.Copy(io.Discard, c) // a hung unit: never closes its side
+			}(c)
+		}
+	}()
+	old := decoderStop
+	decoderStop = 400 * time.Millisecond
+	defer func() { decoderStop = old }()
+	d, err := NewDecoder(DecodeConfig{Start: DialDecoder(sock), Stall: time.Minute, Idle: time.Minute,
+		Out: func(Decoded) {}, Report: func(string, Kind) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cams {
+		id := fmt.Sprintf("cam%d", i)
+		if err := d.Add(id, picture, lepton); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.Frame(id, thermalN(1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var conns []net.Conn
+	for range cams {
+		select {
+		case c := <-opened:
+			conns = append(conns, c)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%d of %d sessions opened", len(conns), cams)
+		}
+	}
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	t0 := time.Now()
+	d.Close()
+	if got := time.Since(t0); got >= 3*decoderStop {
+		t.Fatalf("Close took %v for %d hung units, each stopped after %v: one after another", got, cams, decoderStop)
 	}
 }

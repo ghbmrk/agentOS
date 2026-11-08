@@ -25,7 +25,10 @@ UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 # The keeper's files beside its units, which shipped_units (agentos* regular files) leaves out.
 KEEPER_FILES = tuple("usr/lib/systemd/system/" + n for n in (
     "agentos-keeper.slice", "agentos-.service.d/50-main-side.conf", "agentos-keeper-.service.d/90-keeper.conf",
-    "agentos-mor.service.d/50-main-side.conf"))
+    "agentos-mor.service.d/50-main-side.conf", "agentos-camdecode@.service.d/90-empty-run.conf"))
+# #4392: the decoder unit's empty /run, and its lift of the main side's mask there.
+EMPTY_RUN = "agentos-camdecode@.service"
+EMPTY_RUN_DROPIN = EMPTY_RUN + ".d/90-empty-run.conf"
 ENROLL = UNITS / "agentos-keeper-enroll.service"
 KERNEL = UNITS / "agentos-keeper-kernel.service"
 ROTATE = UNITS / "agentos-keeper-rotate@.service"
@@ -119,8 +122,10 @@ class KeeperTreeTest(unittest.TestCase):
                        + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
         self.assertIn("agentos-localui.service", names)
         (self.root / SYSTEM / "agentos-.service.d/50-main-side.conf").unlink()
+        (self.root / SYSTEM / EMPTY_RUN_DROPIN).unlink()
+        # #4392: the decoder unit's empty /run leaves the keeper's /run paths out of its view.
         want = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)" % (n, p)
-                for n in names for p in check.KEEPER_PATHS]
+                for n in names for p in check.KEEPER_PATHS if n != EMPTY_RUN or not p.startswith("/run/")]
         self.assertEqual(self.v(), want)
 
     def test_a_unit_that_lifts_the_mask_is_refused(self):
@@ -157,8 +162,44 @@ class KeeperTreeTest(unittest.TestCase):
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
                        + check.EMPTY_ROOT_UNITS + (check.MOR_UNIT,))
         self.edit("agentos-.service.d/50-main-side.conf", " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
+        self.edit(EMPTY_RUN_DROPIN, " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
         self.assertEqual(self.v(), ["%s: InaccessiblePaths=-/var/lib/agentos-kernel gives no mask while the path is "
                                     "missing; the image makes it at boot (D-154)" % n for n in names])
+
+    def test_an_empty_run_lifts_only_the_keeper_s_run_paths(self):
+        # #4392: below a unit's own empty tmpfs a keeper path is not in view, and systemd fails a mask of a
+        # path missing there (226/NAMESPACE), so the decoder unit lifts the mask of the /run paths only.
+        self.assertEqual(self.v(), [])
+        dec = ini(UNITS / EMPTY_RUN)["Service"]
+        self.assertEqual(dec["TemporaryFileSystem"], "/run:ro,noexec")
+        lift = (MK / "mkosi.extra" / SYSTEM / EMPTY_RUN_DROPIN).read_text()
+        self.assertIn("[Service]\nInaccessiblePaths=\nInaccessiblePaths=%s\n" % " ".join(
+            p for p in check.KEEPER_PATHS if not p.startswith("/run/")), lift)
+        run = [p for p in check.KEEPER_PATHS if p.startswith("/run/")]
+        self.assertTrue(run)
+        lacks = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
+                 % (EMPTY_RUN, p) for p in run]
+        good = self.unit(EMPTY_RUN).read_text()
+        for line, why in (("", "no empty /run"), ("TemporaryFileSystem=/run/agentos", "a tmpfs beside the paths"),
+                          ("TemporaryFileSystem=/run/%i", "a specifier"), ("TemporaryFileSystem=/run/x/../..", "a .. step"),
+                          ("TemporaryFileSystem=/", "an empty root, not a driver's")):
+            with self.subTest(why):
+                self.edit(EMPTY_RUN, "TemporaryFileSystem=/run:ro,noexec\n", line + "\n" if line else "")
+                got = self.v()
+                self.unit(EMPTY_RUN).write_text(good)
+                self.assertEqual([l for l in got if l in lacks], lacks)
+        # Another entry at /run would be kept in the tmpfs's place (root_mounts).
+        for line in ("ReadOnlyPaths=/run", "ReadWritePaths=-/run/", "BindReadOnlyPaths=/srv:/run",
+                     "TemporaryFileSystem=/run"):
+            with self.subTest(line):
+                self.add(EMPTY_RUN, "Service", line)
+                got = self.v()
+                self.unit(EMPTY_RUN).write_text(good)
+                self.assertEqual(got, lacks)
+        # The rest of the mask still holds.
+        self.edit(EMPTY_RUN_DROPIN, " /var/lib/agentos-camera", "")
+        self.assertEqual(self.v(), ["%s: InaccessiblePaths does not hold /var/lib/agentos-camera; the main side never "
+                                    "sees the keeper's state (D-154)" % EMPTY_RUN])
 
     def test_the_mor_clear_sees_what_it_lists(self):
         # HW-8 (L3 on #5009): masked, /run/agentos-setup reads as empty, and agentos-mor would clear

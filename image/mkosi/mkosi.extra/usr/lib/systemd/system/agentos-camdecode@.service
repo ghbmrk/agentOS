@@ -4,7 +4,8 @@
 # copies frames between the two. The property: a sandbox escape lands as this unit's user, a dynamic
 # one per connection (User= names the instance), which owns no file on the box, is no other session's
 # and is not the clerk's, so it cannot read the clerk's sealed store or capture, signal the clerk, or
-# replace its owner socket; it has no network, and sees no keeper path (the main side's mask).
+# replace its owner socket; it has no network, and sees no keeper path (the main side's mask) and nothing
+# under /run.
 [Unit]
 Description=agentOS camera decoder: one session
 CollectMode=inactive-or-failed
@@ -21,6 +22,10 @@ StandardError=journal
 PrivatePIDs=yes
 # runsc's state and the sandbox's bundle: this unit's own /tmp (DynamicUser= makes it private).
 PrivateTmp=yes
+# An empty /run: none of the box's path sockets there (the system bus, journald, userdb) is in view, and
+# nothing the process or runsc needs is there (#4392). The connection and the journal stream are handed
+# to it as descriptors. The main side's mask of the keeper's /run paths is lifted (90-empty-run.conf).
+TemporaryFileSystem=/run:ro,noexec
 # The group's controllers are the process's to give the sandbox (broker/cgroup Controllers): it moves
 # into its leaf, and the sandbox's group, with the decoder's memory cap, is made beside it.
 Delegate=cpu io memory pids

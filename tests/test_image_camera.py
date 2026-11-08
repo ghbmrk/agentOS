@@ -2,9 +2,10 @@
 decoder sessions' socket and unit, in the image, against the kernel's unit and the mains they run
 (broker/cmd/agentos-camera, broker/cmd/agentos-camdecode-host; CAM-host-9, CAM-host-11).
 
-CI's camera decoder step runs the shipped socket and decoder unit on a systemd host, with only the decoder
-unit's ExecStart= replaced by its test, and connects as the clerk's user: each session runs a sandbox under a
-user of its own, neither root nor the clerk's (broker/cmd/agentos-camdecode-host TestDecoderStartsInItsUnit)."""
+CI's camera decoder step runs the shipped socket and decoder unit under the image's own systemd
+(tools/camdecode_unit.py), with only the decoder unit's ExecStart= and output replaced by its test, and connects
+as the clerk's user: each session runs a sandbox under a user of its own, neither root nor the clerk's, in a pid
+namespace of its own and with an empty /run (broker/cmd/agentos-camdecode-host TestDecoderStartsInItsUnit)."""
 # REQ: CLK-1, NET-2, DEV-2, RES-2, UPD-10
 import pathlib
 import re
@@ -246,7 +247,9 @@ class DecoderUnitTest(unittest.TestCase):
                      ("ProtectSystem", "strict"), ("ProtectHome", "yes"), ("PrivateIPC", "yes"),
                      ("PrivateDevices", "yes"), ("DevicePolicy", "closed"), ("ProtectProc", "invisible"),
                      ("NoExecPaths", "/"), ("ExecPaths", "/usr"), ("SystemCallArchitectures", "native"),
-                     ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"), ("RestrictAddressFamilies", "AF_UNIX")):
+                     ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"), ("RestrictAddressFamilies", "AF_UNIX"),
+                     # #4392: no path socket of the box's (the system bus, journald, userdb) is in view.
+                     ("TemporaryFileSystem", "/run:ro,noexec")):
             self.assertEqual(s[k], v, k)
         for key in ("IPAddressAllow", "DeviceAllow", "MemoryDenyWriteExecute"):
             self.assertNotIn(key, s)
@@ -266,8 +269,31 @@ class DecoderUnitTest(unittest.TestCase):
         self.assertIn("U=$S/%s\n" % DECODER.name, ci)
         self.assertIn("$S/%s" % DEC_SOCKET.name, ci)
         self.assertIn("TestDecoderStartsInItsUnit", ci)
+        # #4392: under the image's own systemd, which applies PrivatePIDs= (257), with the unit's lift of the mask.
+        self.assertIn("E=$S/%s.d/90-empty-run.conf\n" % DECODER.name, ci)
+        self.assertIn("$E $T$D/%s.d/90-empty-run.conf\n" % DECODER.name, ci)
+        self.assertIn("sudo python3 -I ../tools/camdecode_unit.py \"$T\" agentos-camera", ci)
+        self.assertIn("offline_systemd.Manager(", (ROOT / "tools/camdecode_unit.py").read_text())
         test = (HOST_CMD / "unit_test.go").read_text()
         self.assertIn("func TestDecoderStartsInItsUnit(", test)
+        self.assertIn("os.Getpid(); pid != 1", test)
+        self.assertIn('os.ReadDir("/run")', test)
+
+
+class DecoderStepTest(unittest.TestCase):
+    """tools/camdecode_unit.py's reading of the sessions' test output (#4392)."""
+
+    # REQ: CLK-1
+    def test_each_session_must_pass_once(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import camdecode_unit
+        ok = "=== RUN   TestDecoderStartsInItsUnit\n--- PASS: TestDecoderStartsInItsUnit (1.00s)\nPASS\n"
+        self.assertEqual(camdecode_unit.check_logs({"a.log": ok, "b.log": ok}), [])
+        self.assertEqual(camdecode_unit.check_logs({"a.log": ok}), ["1 session logs, want 2"])
+        for bad in ("--- SKIP: TestDecoderStartsInItsUnit (0.00s)\n", ok + ok, ok + "--- FAIL: x\n", ""):
+            with self.subTest(bad):
+                self.assertEqual(camdecode_unit.check_logs({"a.log": ok, "b.log": bad}),
+                                 ["b.log: TestDecoderStartsInItsUnit did not pass once"])
 
 
 if __name__ == "__main__":
