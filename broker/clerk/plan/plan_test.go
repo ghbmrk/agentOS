@@ -514,6 +514,9 @@ func TestPlanRefreshPinsClientIDAndScope(t *testing.T) {
 		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token","refresh_token":"` + ph + `","scope":"openid"}`,
 		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token","refresh_token":"` + ph + `","scope":""}`,
 		`{"grant_type":"refresh_token","refresh_token":"` + ph + `","scope":"openid profile email"}`,
+		// Three keys, as the declared body has: an undeclared key with an
+		// empty value stands where client_id belongs.
+		`{"grant_type":"refresh_token","refresh_token":"` + ph + `","scope":""}`,
 		`{"grant_type":"refresh_token","refresh_token":"` + ph + `"}`,
 		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token"}`,
 	} {
