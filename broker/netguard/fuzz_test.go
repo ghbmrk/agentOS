@@ -290,6 +290,19 @@ func (h *fuzzHost) checkRead(t fuzzT, s *Sources, op string, m Network, err erro
 			t.Fatalf("%s: cached %v on gateway %+v, which never answered it", op, e.ext, e.key)
 		}
 	}
+	// A known-silent gateway has a MAC, no address, and its own bound
+	// (#1539).
+	if m.GatewaySilent && m.External.IsValid() {
+		t.Fatalf("%s: known silent with external %v", op, m.External)
+	}
+	if len(s.silent) > maxGatewayExternals {
+		t.Fatalf("%s: %d silent gateways kept, bound %d", op, len(s.silent), maxGatewayExternals)
+	}
+	for _, k := range s.silent {
+		if k.mac == "" || s.externalLocked(k).IsValid() {
+			t.Fatalf("%s: silent gateway %+v has no MAC or an address", op, k)
+		}
+	}
 }
 
 // fuzzSeeds are hand-picked inputs: answers, moves before and after the
