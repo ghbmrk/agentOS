@@ -2,10 +2,12 @@ package confine
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -255,5 +257,123 @@ func TestEmptyFailsFastOnADeepWriter(t *testing.T) {
 	}
 	if n != emptyPasses {
 		t.Errorf("Empty visited the writer %d times, want %d: a failing subdirectory was retried from above", n, emptyPasses)
+	}
+}
+
+// TestEmptyErrorStaysSmallAtDepth: a stack nests directories with long
+// names deeper than the enforcer's descriptor limit, so the open of one
+// deep down fails (EMFILE) and Empty fails there. The error names that one
+// entry and its errno, whatever the depth: never every name on the way
+// down, which made it grow with the square of the depth (a 1200-deep tree
+// of 250-byte names gave a 275 KB error and 148 MB of heap).
+func TestEmptyErrorStaysSmallAtDepth(t *testing.T) {
+	const depth = 128
+	name := strings.Repeat("n", 250)
+	dir := t.TempDir()
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range depth { // past PATH_MAX, so built through descriptors
+		if err := syscall.Mkdirat(fd, name, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sub, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+		syscall.Close(fd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd = sub
+	}
+	syscall.Close(fd)
+	var was syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &was); err != nil {
+		t.Fatal(err)
+	}
+	// Descriptors for half the tree: the open fails halfway down.
+	low := syscall.Rlimit{Cur: uint64(openFDs(t) + depth/2), Max: was.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &low); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Setrlimit(syscall.RLIMIT_NOFILE, &was) })
+	err = Empty(dir)
+	if err == nil {
+		t.Fatal("Empty of a tree deeper than the descriptor limit succeeded")
+	}
+	if msg := err.Error(); len(msg) > 1024 || !strings.Contains(msg, strconv.Quote(name)) {
+		t.Errorf("Empty's error is %d bytes, want one quoted name under 1 KiB: %.300s", len(msg), msg)
+	}
+	if !errors.Is(err, syscall.EMFILE) {
+		t.Errorf("Empty of a tree deeper than the descriptor limit: %.300v, want EMFILE", err)
+	}
+}
+
+// TestEmptyNamesOnlyAFinalPassFailure: a name that failed in an early pass
+// (a directory swapped for a link) and was removed later is not named when
+// a live writer fails Empty: the error names only what the final pass left.
+func TestEmptyNamesOnlyAFinalPassFailure(t *testing.T) {
+	root := t.TempDir()
+	o := outside(t, root)
+	dir := filepath.Join(root, "run")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	emptyRace = func(name string) {
+		if name == "sub" {
+			if err := os.Rename(filepath.Join(dir, "sub"), filepath.Join(root, "moved")); err != nil {
+				t.Error(err)
+			}
+			if err := os.Symlink(o, filepath.Join(dir, "sub")); err != nil {
+				t.Error(err)
+			}
+		}
+		n++
+		if err := os.Mkdir(filepath.Join(dir, "d"+strconv.Itoa(n)), 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { emptyRace = nil })
+	err := Empty(dir)
+	if err == nil {
+		t.Fatal("Empty of a directory still being written succeeded")
+	}
+	if strings.Contains(err.Error(), `"sub"`) {
+		t.Errorf("Empty's error names an entry an earlier pass failed on and a later one removed: %v", err)
+	}
+	intact(t, o)
+}
+
+// TestEmptyNamesWhatItCannotRemove: a name the kernel refuses to remove (a
+// mount point: a file bind-mounted, or a directory with a tmpfs on it,
+// which empties but cannot be removed) fails Empty with that name and the
+// refusal's errno.
+func TestEmptyNamesWhatItCannotRemove(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("needs root to mount")
+	}
+	for _, name := range []string{"file", "dir"} {
+		dir := t.TempDir()
+		at := filepath.Join(dir, name)
+		var err error
+		if name == "file" {
+			err = os.WriteFile(at, nil, 0o600)
+			if err == nil {
+				err = syscall.Mount(at, at, "", syscall.MS_BIND, "")
+			}
+		} else {
+			err = os.Mkdir(at, 0o700)
+			if err == nil {
+				err = syscall.Mount("tmpfs", at, "tmpfs", 0, "size=4k")
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { syscall.Unmount(at, syscall.MNT_DETACH) })
+		err = Empty(dir)
+		if !errors.Is(err, syscall.EBUSY) || !strings.Contains(fmt.Sprint(err), strconv.Quote(name)) {
+			t.Errorf("Empty of a directory holding a mounted %s: %v, want EBUSY naming %q", name, err, name)
+		}
 	}
 }

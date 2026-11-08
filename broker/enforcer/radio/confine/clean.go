@@ -48,10 +48,14 @@ func Empty(dir string) error {
 // It succeeds only on reading the directory empty: a name it could not
 // remove (gone, swapped, or refused) is simply read again next pass, but a
 // subdirectory that fails to empty fails it at once, so a deep tree that
-// cannot be emptied costs one try per level, not emptyPasses^depth.
+// cannot be emptied costs one try per level, not emptyPasses^depth. That
+// failure names one entry, the last its final pass could not remove, and
+// is passed up unwrapped: a name added at every level would grow the error
+// with the square of a depth the stack chooses.
 func emptyAt(fd int) error {
 	f := os.NewFile(uintptr(fd), "")
 	defer f.Close()
+	var left error
 	for range emptyPasses {
 		if _, err := f.Seek(0, 0); err != nil {
 			return err
@@ -63,34 +67,47 @@ func emptyAt(fd int) error {
 		if len(names) == 0 {
 			return nil
 		}
+		left = nil
 		for _, n := range names {
-			if err := removeAt(fd, n); err != nil {
+			why, err := removeAt(fd, n)
+			if err != nil {
 				return err
+			}
+			if why != nil {
+				left = fmt.Errorf("entries remain after %d passes; removing %q failed: %w", emptyPasses, n, why)
 			}
 		}
 	}
-	return fmt.Errorf("entries remain after %d passes", emptyPasses)
+	if left == nil {
+		left = fmt.Errorf("entries remain after %d passes", emptyPasses)
+	}
+	return left
 }
 
 // removeAt tries once to remove name from the directory open at fd: a
 // file, socket, device or link by unlinkat (a link is the link, never its
 // target); a directory by emptying it through a descriptor opened
 // O_NOFOLLOW, then unlinkat AT_REMOVEDIR. A directory swapped for a link
-// between the two steps fails the open and is unlinked next pass. Only a
-// subdirectory that fails to empty is an error.
-func removeAt(fd int, name string) error {
-	if unlinkat(fd, name, 0) == syscall.EISDIR {
-		if emptyRace != nil {
-			emptyRace(name)
-		}
-		if sub, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0); err == nil {
-			if err := emptyAt(sub); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-		}
-		_ = unlinkat(fd, name, atRemovedir)
+// between the two steps fails the open and is unlinked next pass. why is
+// what kept name in place (nil once it is gone); err is a subdirectory's
+// failure to empty, as it is.
+func removeAt(fd int, name string) (why, err error) {
+	if why = unlinkat(fd, name, 0); why != syscall.EISDIR {
+		return why, nil
 	}
-	return nil
+	if emptyRace != nil {
+		emptyRace(name)
+	}
+	sub, open := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if open == nil {
+		if err := emptyAt(sub); err != nil {
+			return nil, err
+		}
+	}
+	if why = unlinkat(fd, name, atRemovedir); why != nil && open != nil {
+		why = open // the open's failure is why the directory is not empty
+	}
+	return why, nil
 }
 
 // unlinkat is unlinkat(2) with its flags, which syscall.Unlinkat lacks.
