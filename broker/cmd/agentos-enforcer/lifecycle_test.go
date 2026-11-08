@@ -360,6 +360,9 @@ type box struct {
 	// waits replaces the daemon's channel and firewall timeouts.
 	failing map[string]bool
 	waits   deps
+	// offloads are the ports of each Offload call; offloadErr fails them.
+	offloads   [][]string
+	offloadErr error
 
 	d *Enforcer
 	b *browser
@@ -422,8 +425,18 @@ func (x *box) deps() deps {
 		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
 		Logf: func(string) {},
 		DNS:  x.dns, MDNS: x.mdns.serve, Boot: func() (string, error) { return "boot-1", nil },
-		Wake: func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
+		Wake:    func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
+		Offload: x.offload,
 	}
+}
+
+// offload is the box's ports: it records each call's ports and fails
+// while offloadErr is set.
+func (x *box) offload(ports ...string) error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.offloads = append(x.offloads, slices.Clone(ports))
+	return x.offloadErr
 }
 
 // fail makes Save of the state file name fail (on) or work again.

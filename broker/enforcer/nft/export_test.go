@@ -2,6 +2,7 @@ package nft
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os/exec"
 	"strconv"
@@ -159,4 +160,33 @@ func (h *home) Dial(from, addr string, port int, wait time.Duration, f func(net.
 		n = f(c)
 	})
 	return n
+}
+
+// Within runs f with the calling thread in fixture host name's network
+// namespace.
+func (h *home) Within(name string, f func()) { within(h.t, h.hosts[name], f) }
+
+// MAC is the hardware address of the enforcer's interface ifc.
+func (h *home) MAC(ifc string) string {
+	h.t.Helper()
+	i, err := net.InterfaceByName(ifc)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return i.HardwareAddr.String()
+}
+
+// TxIP is the IP bytes host name's eth0 has sent: its transmitted bytes
+// less each frame's Ethernet header.
+func (h *home) TxIP(name string) uint64 {
+	h.t.Helper()
+	var links []struct {
+		Stats struct {
+			Tx struct{ Bytes, Packets uint64 } `json:"tx"`
+		} `json:"stats64"`
+	}
+	if err := json.Unmarshal([]byte(h.in(h.hosts[name], "ip", "-s", "-j", "link", "show", "eth0")), &links); err != nil || len(links) != 1 {
+		h.t.Fatalf("%s eth0 stats: %v", name, err)
+	}
+	return links[0].Stats.Tx.Bytes - 14*links[0].Stats.Tx.Packets
 }

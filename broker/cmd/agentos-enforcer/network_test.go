@@ -908,3 +908,64 @@ func TestDropRefusedRefusesLoad(t *testing.T) {
 	}
 	x.start()
 }
+
+// TestMergingPortRefusesStart (ENF-cap-gro, #4610; NET-2 Byte caps): the
+// daemon asks for merging off on the core's and the edge's ports, and
+// does not start while one stays merging, so no cap counts one header
+// for several segments.
+func TestMergingPortRefusesStart(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.d.Close()
+	x.mu.Lock()
+	x.offloads, x.offloadErr = nil, errors.New("offload: core0: rx-gro on")
+	x.mu.Unlock()
+	if d, err := x.open(); err == nil || !strings.Contains(err.Error(), "byte caps: offload: core0: rx-gro on") {
+		if d != nil {
+			d.Close()
+		}
+		t.Fatalf("a merging port started: %v", err)
+	}
+	x.mu.Lock()
+	got, want := x.offloads, [][]string{{x.cfg.Layout.Core, x.cfg.Layout.Edge}}
+	x.offloadErr = nil
+	x.mu.Unlock()
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("asked for merging off on %v, want %v", got, want)
+	}
+	x.start()
+}
+
+// TestMergingKeptOffAtEachReading (ENF-cap-gro): before each reading the
+// counted ports are asked again, so a port whose device was made again
+// does not stay merging; a failure is logged once while it lasts, and its
+// end once.
+func TestMergingKeptOffAtEachReading(t *testing.T) {
+	x, _, _ := capped(t)
+	calls := func() int { x.mu.Lock(); defer x.mu.Unlock(); return len(x.offloads) }
+	n := calls()
+	x.advance(readEvery)
+	if calls() != n+1 {
+		t.Fatalf("%d calls at a reading, want 1", calls()-n)
+	}
+	x.advance(time.Second)
+	if calls() != n+1 {
+		t.Fatal("asked again within readEvery")
+	}
+	x.mu.Lock()
+	x.offloadErr = errors.New("offload: edge0: rx-lro on")
+	x.mu.Unlock()
+	x.advance(readEvery)
+	x.advance(readEvery)
+	const bad = "byte caps: a counted port merges segments, its bytes count short: offload: edge0: rx-lro on"
+	if c := strings.Count(x.logText(), bad); c != 1 {
+		t.Fatalf("a lasting failure logged %d times:\n%s", c, x.logText())
+	}
+	x.mu.Lock()
+	x.offloadErr = nil
+	x.mu.Unlock()
+	x.advance(readEvery)
+	x.advance(readEvery)
+	if c := strings.Count(x.logText(), "byte caps: the counted ports merge no segments again"); c != 1 {
+		t.Fatalf("the end of a failure logged %d times", c)
+	}
+}

@@ -41,6 +41,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/enforcer/offload"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
@@ -111,6 +112,7 @@ func run(args []string) error {
 		MDNS:    mdns.Serve,
 		Wake:    func(ctx context.Context, r *wol.Relay) error { return r.Serve(ctx) },
 		Boot:    traffic.BootID,
+		Offload: offload.Off,
 		Elapsed: bootTime,
 		Fire:    load.Loader{Bin: cfg.Nft},
 		Network: unwiredNetwork{},
