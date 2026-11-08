@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
 import metrics  # noqa: E402
@@ -262,7 +263,7 @@ class FreezeTest(unittest.TestCase):
 
 
 class CollectTest(unittest.TestCase):
-    def test_runs_listing_is_unfiltered_paged_and_skips_unfinished_runs(self):
+    def test_runs_listing_is_windowed_paged_and_skips_unfinished_runs(self):
         calls = []
         runs = [{"id": i, "name": "ci", "head_sha": f"s{i}", "created_at": "2026-10-05T00:00:00Z",
                  "status": "completed", "conclusion": "success", "run_attempt": 1,
@@ -284,7 +285,9 @@ class CollectTest(unittest.TestCase):
                 return []
             if path.startswith("actions/runs?"):
                 page = int(path.rsplit("page=", 1)[1])
-                return {"workflow_runs": runs[(page - 1) * 100: page * 100]}
+                lo, hi = path.split("created=")[1].split("&")[0].split("..")
+                hit = [r for r in runs if lo <= r["created_at"] <= hi]
+                return {"workflow_runs": hit[(page - 1) * 100: page * 100]}
             if path == "actions/runs/1/attempts/1":
                 return {"conclusion": "failure"}
             raise AssertionError(path)
@@ -304,11 +307,12 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(len(got2), 49)
         self.assertNotIn("pulls/6/reviews?per_page=100&page=1", calls)
         self.assertEqual(sorted(p["number"] for p in pulls2 if p["verdicts"] is None), [6])
-        self.assertEqual([c for c in calls if c.startswith("actions/runs?")], ["actions/runs?per_page=100&page=1"])
+        one = [c for c in calls if c.startswith("actions/runs?")]
+        self.assertEqual(len(one), 1)
+        self.assertTrue(one[0].startswith("actions/runs?created=2026-10-04T10:00:00Z.."))
         calls = calls_all
         listing = [c for c in calls if c.startswith("actions/runs?")]
-        # GitHub caps filtered listings at 1,000 results, so no filter may be passed.
-        self.assertEqual(listing, ["actions/runs?per_page=100&page=1", "actions/runs?per_page=100&page=2"])
+        self.assertEqual([c.split("&", 1)[1] for c in listing], ["per_page=100&page=1", "per_page=100&page=2"])
         self.assertEqual(len(got), 149)
         self.assertEqual(next(r for r in got if r["sha"] == "s1")["conclusions"], ["failure", "success"])
         # Only the L3 review counts as a verdict.
@@ -341,6 +345,46 @@ class StatesTest(unittest.TestCase):
 class TrustTest(unittest.TestCase):
     """Security review 2, finding 8: on a public repository anyone can post a review or run
     a fork's CI, so only collaborators' reviews and this repository's own runs count."""
+
+    def _capped_api(self, runs, report_total):
+        """Fake GitHub: an unfiltered runs listing 422s past page 400, a created= listing returns
+        at most 1,000 results (page 11 is a 422), and total_count is the full match count."""
+        def api(repo, path, token):
+            if path.startswith("pulls?") or path.startswith("issues/"):
+                return []
+            self.assertTrue(path.startswith("actions/runs?"), path)
+            page = int(path.rsplit("page=", 1)[1])
+            hit = runs
+            if "created=" in path:
+                lo, hi = path.split("created=")[1].split("&")[0].split("..")
+                hit = [r for r in runs if lo <= r["created_at"] <= hi]
+            limit = 10 if "created=" in path else 400
+            if page > limit:
+                raise urllib.error.HTTPError(path, 422, "Unprocessable Entity", {}, None)
+            out = {"workflow_runs": hit[(page - 1) * 100: page * 100]}
+            if report_total:
+                out["total_count"] = len(hit)
+            return out
+        return api
+
+    def test_runs_listing_splits_windows_past_the_1000_result_cap(self):
+        # Brief ID MET-1a (local, not in SPEC.md): the daily metrics run must not stall on the runs cap
+        start = dt.datetime(2026, 10, 1)
+        stamp = lambda i: (start + dt.timedelta(seconds=i * 60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        runs = [{"id": i, "name": "ci", "head_sha": f"s{i}", "created_at": stamp(i), "status": "completed",
+                 "conclusion": "success", "run_attempt": 1, "head_repository": {"full_name": "o/r"}}
+                for i in range(2600, -1, -1)]  # newest first, as GitHub lists them
+        for report_total in (True, False):
+            orig = metrics._api
+            metrics._api = self._capped_api(runs, report_total)
+            try:
+                _, got = metrics.collect_github("o/r", None)
+                _, got_since = metrics.collect_github("o/r", None, since=stamp(2000))
+            finally:
+                metrics._api = orig
+            self.assertEqual(len(got), 2601, report_total)
+            self.assertEqual(len({r["sha"] for r in got}), 2601, report_total)
+            self.assertEqual(len(got_since), 601, report_total)
 
     def test_only_collaborator_reviews_and_own_runs_count(self):
         own = {"full_name": "o/R"}

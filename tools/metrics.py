@@ -303,6 +303,34 @@ def _pages(repo, path, token, key=None):
         page += 1
 
 
+RUNS_CAP = 1000  # results GitHub returns for any filtered actions/runs listing
+
+
+def _runs_window(repo, token, lo, hi):
+    """Runs created in [lo, hi] (naive UTC datetimes), newest first, each once. A window of
+    RUNS_CAP results or more may be cut off by GitHub, so it is split at its midpoint."""
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    path = f"actions/runs?created={lo.strftime(fmt)}..{hi.strftime(fmt)}"
+    items = []
+    for page in range(1, RUNS_CAP // 100 + 1):
+        data = _api(repo, f"{path}&per_page=100&page={page}", token)
+        if data.get("total_count", 0) > RUNS_CAP:
+            break
+        items += data["workflow_runs"]
+        if len(data["workflow_runs"]) < 100:
+            return items
+    # Ten full pages (or a total over the cap): the window may hold more than GitHub returns.
+    if lo >= hi:
+        raise RuntimeError(f"more than {RUNS_CAP} runs created at {lo.strftime(fmt)}")
+    mid = lo + (hi - lo) // 2
+    seen, out = set(), []
+    for r in _runs_window(repo, token, mid + dt.timedelta(seconds=1), hi) + _runs_window(repo, token, lo, mid):
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            out.append(r)
+    return out
+
+
 def collect_github(repo, token, since=None):
     """PRs and Actions runs. With `since` (an ISO time), skip what only frozen weeks use:
     reviews of PRs merged earlier (verdicts None = not collected) and older runs. That keeps
@@ -345,12 +373,11 @@ def collect_github(repo, token, since=None):
                       "labels": [l["name"] for l in p.get("labels") or []],
                       "causes": causes, "rounds": rounds, "noise": notes_noise})
     runs = []
-    # No query filter: GitHub caps any filtered runs listing (status, created, ...) at 1,000
-    # results, which this repo passes in days. The listing is newest first, so paging stops
-    # at `since`; unfinished runs are skipped here.
-    for r in _pages(repo, "actions/runs", token, "workflow_runs"):
-        if since is not None and r["created_at"] < since:
-            break
+    # The unfiltered runs listing stops at page 400 (page 401 is a 422), which this repo now
+    # passes. A `created=` listing is capped at 1,000 results instead, so the runs are read in
+    # time windows, each split in two whenever it holds that many. Unfinished runs are skipped.
+    floor = dt.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ") if since else dt.datetime(2019, 1, 1)
+    for r in _runs_window(repo, token, floor, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None, microsecond=0)):
         if r.get("status") != "completed" or not own_run(r, repo):
             continue
         conclusions = [r["conclusion"]]
