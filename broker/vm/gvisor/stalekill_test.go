@@ -223,7 +223,7 @@ func TestKillFailsClosedWhenItsContextEndsFirst(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		err := k.killed(k.kill(ctx, "wk-1"), 3*time.Second)
 		cancel()
-		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "a cancelled command's kill still runs") {
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, vm.ErrKillPending) || !strings.Contains(err.Error(), "a cancelled command's kill still runs") || !strings.Contains(err.Error(), "not killing or deleting the container") {
 			t.Fatalf("Kill with its context ended before the pending kill: %v, want the pending kill named", err)
 		}
 		if v := k.verbs(); v != "kill-pid-start wk-1_\n" {

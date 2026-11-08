@@ -351,7 +351,22 @@ var (
 	// ErrContained refuses a fork or merge of a lineage that holds a
 	// record the owner deleted (Config.Contained).
 	ErrContained = errors.New("vm: this agent holds a record the owner deleted; no fork or merge until that is settled")
+	// ErrKillPending is a runtime's Kill that refused because a kill it
+	// started earlier in the machine still runs (gvisor, V37). The runtime
+	// neither killed nor deleted the container, so the machine stays
+	// Running; the cgroup backstop may still have killed the guest.
+	ErrKillPending = errors.New("vm: an earlier kill in the machine still runs")
+	// ErrWedged is a machine whose kills have failed on ErrKillPending
+	// wedgedAfter times in a row: the earlier kill is stuck where SIGKILL
+	// cannot reach it, so the machine cannot be stopped or restarted
+	// until the host is.
+	ErrWedged = errors.New("vm: machine is wedged: an earlier kill in it never ends; restart the host")
 )
+
+// wedgedAfter is how many Kills in a row may fail on ErrKillPending
+// before the machine is reported wedged. Each waits up to KillTimeout
+// for a kill that ends within 6 s when SIGKILL reaches it (V37).
+const wedgedAfter = 3
 
 // maxIDLen is the longest machine ID idRE allows.
 const maxIDLen = 40
@@ -386,6 +401,9 @@ type machine struct {
 	// preempting is set, without the lock, while a preemption is under way
 	// (see Preempt); startFrom refuses to start the machine meanwhile.
 	preempting atomic.Bool
+	// killPending counts the machine's Kills in a row that failed on
+	// ErrKillPending (ErrWedged). Preempt kills without mu, so atomic.
+	killPending atomic.Int32
 	// execCancel ends a worker's command in flight (Exec), so erasure,
 	// rollback and destroy never wait behind it for the lock.
 	execCancel atomic.Pointer[context.CancelFunc]
@@ -1116,14 +1134,34 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 		// Not known dead: it stays Running, so its memory and disk stay
 		// counted and a retry kills it again rather than reading it as
 		// stopped (a preemption would otherwise report a live guest dead).
-		return err
+		return m.countKillPending(mc, err)
 	}
+	mc.killPending.Store(0)
 	// Only a guest known dead stops counting against the reserve.
 	m.uncommitDisk(mc)
 	if mc.State == Running {
 		mc.State = Stopped
 	}
 	return nil
+}
+
+// countKillPending counts a failed stop that the runtime refused on
+// ErrKillPending, and from the wedgedAfter-th in a row answers ErrWedged
+// as well, logged once when it is reached. Any other failure resets the
+// count: the runtime got past its wait, so no earlier kill held it.
+func (m *Manager) countKillPending(mc *machine, err error) error {
+	if !errors.Is(err, ErrKillPending) {
+		mc.killPending.Store(0)
+		return err
+	}
+	n := mc.killPending.Add(1)
+	if n < wedgedAfter {
+		return err
+	}
+	if n == wedgedAfter {
+		log.Printf("vm: %s: wedged: %d kills in a row refused because an earlier kill in it still runs; it stays Running and counted until the host restarts: %v", mc.ID, n, err)
+	}
+	return fmt.Errorf("%w: %w", ErrWedged, err)
 }
 
 func (m *Manager) get(id string) (*machine, error) {
