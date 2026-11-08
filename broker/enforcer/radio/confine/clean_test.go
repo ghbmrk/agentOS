@@ -187,8 +187,13 @@ func TestEmptyAtFailsOnANonDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := emptyAt(d); err == nil {
+		err = emptyAt(d)
+		if err == nil {
 			t.Errorf("emptyAt on %s succeeded", what)
+		}
+		// A pipe fails at the rewind (ESPIPE), before any read.
+		if what == "a pipe" && !errors.Is(err, syscall.ESPIPE) {
+			t.Errorf("emptyAt on a pipe: %v, want ESPIPE", err)
 		}
 	}
 	f.Close()
