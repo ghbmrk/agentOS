@@ -138,7 +138,7 @@ func TestStaleFreshDay(t *testing.T) {
 	}
 	x.fail(fileFresh, false)
 	x.start()
-	if x.d.net.spent || x.readState(fileFresh) != "{}" {
+	if x.d.net.spent || x.readState(fileFresh) != "{}" || !strings.Contains(x.logText(), "erased a stale "+fileFresh) {
 		t.Fatalf("a stale approval beside a readable day was kept: %s", x.readState(fileFresh))
 	}
 	x.writeState(fileTraffic, "{}")
@@ -179,5 +179,25 @@ func TestStaleFreshDay(t *testing.T) {
 	x.advance(time.Duration(policy.Wait) * time.Millisecond)
 	if !x.d.net.spent {
 		t.Fatal("a spent approval started a later unreadable day")
+	}
+}
+
+// TestFreshDayFileUnreadable (Security on #5101): a fresh-day file that
+// cannot be read stops no start, beside a readable day or a spent one,
+// and starts nothing.
+func TestFreshDayFileUnreadable(t *testing.T) {
+	x, _, _ := capped(t)
+	if err := os.Mkdir(filepath.Join(x.dir, fileFresh), 0o700); err != nil { // every read fails
+		t.Fatal(err)
+	}
+	x.restart()
+	if !strings.Contains(x.logText(), fileFresh+" unreadable, no fresh day waits") {
+		t.Fatal("an unreadable fresh-day file beside a readable day was not logged")
+	}
+	x.writeState(fileTraffic, "{}")
+	x.restart()
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || x.d.net.freshDue != 0 {
+		t.Fatal("an unreadable fresh-day file started a fresh day")
 	}
 }

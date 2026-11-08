@@ -139,31 +139,19 @@ func (p pageCaps) CancelFresh() error {
 // erase is unsaved. One that does not read back, is for another day, or
 // cannot be read, starts nothing and does not stop the start.
 func (d *Enforcer) openFresh() error {
-	if !d.net.spent {
-		b, err := d.store(fileFresh).Load()
-		if err != nil {
-			d.dp.Logf("byte caps: " + fileFresh + " unreadable beside a day that reads back: " + err.Error())
-			return nil
-		}
-		if b == nil || string(b) == "{}" {
-			return nil
-		}
-		if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
-			return fmt.Errorf("byte caps: a stale %s is not erased: %w", fileFresh, err)
-		}
-		d.dp.Logf("byte caps: erased a stale " + fileFresh + " beside a day that reads back")
-		return nil
-	}
 	b, err := d.store(fileFresh).Load()
 	if err != nil {
 		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits: " + err.Error())
 		return nil
 	}
-	if b == nil {
-		return nil
-	}
 	var st freshState
 	switch {
+	case b == nil || !d.net.spent && string(b) == "{}":
+	case !d.net.spent:
+		if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
+			return fmt.Errorf("byte caps: a stale %s is not erased: %w", fileFresh, err)
+		}
+		d.dp.Logf("byte caps: erased a stale " + fileFresh + " beside a day that reads back")
 	case json.Unmarshal(b, &st) != nil || st.Due < 0:
 		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits")
 	case st.Due != 0 && st.Day != d.net.spentDay:
