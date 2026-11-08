@@ -38,7 +38,7 @@ import finish_image  # noqa: E402
 
 # The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
 # a mount over it), its own /usr, a private /proc with /proc/sys read-only, a /sys with only a cgroup2
-# tree in its own cgroup namespace, five character devices and a pty as console, an empty /run, no network. It starts only
+# tree in its own cgroup namespace, five character devices, a devpts of its own, /dev/shm and a pty as console, an empty /run, no network. It starts only
 # -.slice, which every manager has and which starts nothing. Its argv is the boot entry's command line,
 # which systemd in a container reads as the kernel's, then the pinned options (manager_argv).
 MANAGER = r'''set -eu
@@ -59,6 +59,12 @@ mkdir -p "$N/sys/fs/cgroup"
 mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$N/dev"
 for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
+# A devpts of its own, /dev/ptmx and /dev/shm, as on a booted box: a unit's PrivateDevices= binds them into its
+# private /dev and fails (226/NAMESPACE) without them (systemd 257 namespace.c mount_private_dev; #4392).
+mkdir "$N/dev/pts" "$N/dev/shm"
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,nosuid,noexec devpts "$N/dev/pts"
+ln -s pts/ptmx "$N/dev/ptmx"
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$N/dev/shm"
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
 chmod 1777 "$N/tmp"
