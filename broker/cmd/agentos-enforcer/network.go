@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -63,15 +61,9 @@ type network struct {
 
 	// The byte caps: counter is nil when the saved state did not read
 	// back (spent), and then every capped send is dropped until the
-	// owner's fresh day starts (state.go) or the state is replaced
-	// (traffic ErrState; ENF-l-14). fwMu holds counter; freshMu holds
-	// spent's change and freshDue, when the fresh day the owner approved
-	// starts (0: none waiting), which the page reads.
+	// state is replaced (traffic ErrState; ENF-l-14).
 	counter  *traffic.Counter
-	freshMu  sync.Mutex
 	spent    bool
-	spentDay string // SHA-256 (hex) of the unreadable saved day
-	freshDue int64
 	boot     string
 	past     bool
 	lastRead time.Time
@@ -132,12 +124,11 @@ func (d *Enforcer) openNetwork() error {
 			if !errors.Is(err, traffic.ErrState) {
 				return fmt.Errorf("byte caps: %w", err)
 			}
-			sum := sha256.Sum256(b)
-			d.net.counter, d.net.spent, d.net.spentDay = nil, true, hex.EncodeToString(sum[:])
-			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until the owner starts a fresh day on the page or " + fileTraffic + " is replaced: " + err.Error())
+			d.net.counter, d.net.spent = nil, true
+			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until " + fileTraffic + " is replaced: " + err.Error())
 		}
 	}
-	return d.openFresh()
+	return nil
 }
 
 // ServeWake runs the Wake-on-LAN relay until ctx ends; with no machine
@@ -468,10 +459,7 @@ func (d *Enforcer) trafficRead(device string) ([]byte, error) {
 // at the request (#4174), so they hold every byte the firewall counted
 // before it. With the saved day unreadable it is refused.
 func (d *Enforcer) counts() (wire.Counts, error) {
-	d.fwMu.Lock()
-	c := d.net.counter // set by a fresh day (state.go) under fwMu
-	d.fwMu.Unlock()
-	if c == nil {
+	if d.net.counter == nil {
 		return wire.Counts{}, errors.New("byte caps: saved day unreadable")
 	}
 	// The channel asks from its read loop: a cap passed is tripped off it,
@@ -487,7 +475,7 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	if err != nil {
 		return wire.Counts{}, err
 	}
-	return c.Counts(), nil
+	return d.net.counter.Counts(), nil
 }
 
 // closeNetwork takes a last reading of the byte caps, so a clean stop

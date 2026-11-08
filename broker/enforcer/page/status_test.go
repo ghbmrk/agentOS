@@ -42,25 +42,10 @@ func (f *fakeCore) Revoke(sig []byte) error {
 }
 func (f *fakeCore) Revoked() bool { return f.revoked }
 
-type fakeCaps struct {
-	spent  bool
-	due    int64
-	asked  []int64
-	cancel int
-}
-
-func (f *fakeCaps) Spent() (bool, int64) { return f.spent, f.due }
-func (f *fakeCaps) Fresh(nowMS int64) (int64, error) {
-	f.asked = append(f.asked, nowMS)
-	f.due = nowMS + 600_000
-	return f.due, nil
-}
-func (f *fakeCaps) CancelFresh() error { f.cancel++; f.due = 0; return nil }
-
 // stateRig is newRig's page with the enforcer's state wired in: two open
 // alerts (a trip, sent; a paused channel, not), the core silent and the
-// light red, a core key and the byte caps.
-func stateRig(t *testing.T) (*rig, *fakeAlerts, *fakeCore, *fakeCaps) {
+// light red, and a core key.
+func stateRig(t *testing.T) (*rig, *fakeAlerts, *fakeCore) {
 	t.Helper()
 	g := newRig(t)
 	at := time.Date(2026, 11, 8, 20, 30, 0, 0, time.UTC)
@@ -69,14 +54,14 @@ func stateRig(t *testing.T) (*rig, *fakeAlerts, *fakeCore, *fakeCaps) {
 		{ID: 9, Text: "Enforcer: the core's channel sent too much and is paused.", At: at, Count: 1, Fixed: true},
 		{ID: 11, Text: "Enforcer: the core's log does not match the copy the enforcer keeps.", At: at, Count: 1, Revoke: true},
 	}}}
-	co, ca := &fakeCore{}, &fakeCaps{}
+	co := &fakeCore{}
 	cfg := g.s.cfg
-	cfg.Alerts, cfg.Core, cfg.Caps, cfg.Lock = al, co, ca, nil
+	cfg.Alerts, cfg.Core, cfg.Lock = al, co, nil
 	var err error
 	if g.s, err = New(cfg); err != nil {
 		t.Fatal(err)
 	}
-	return g, al, co, ca
+	return g, al, co
 }
 
 // tapState draws action's challenge on target and taps it with a.
@@ -107,7 +92,7 @@ func (g *rig) homeHTML() string {
 // text; a silent core; and the light's colour. Each alert but a paused
 // channel's has a clear; with no alerts wired, none of it shows.
 func TestHomeShowsStatus(t *testing.T) {
-	g, al, _, _ := stateRig(t)
+	g, al, _ := stateRig(t)
 	h := g.homeHTML()
 	for _, want := range []string{
 		"The light is red", "The core is down",
@@ -133,7 +118,7 @@ func TestHomeShowsStatus(t *testing.T) {
 		t.Errorf("home with nothing open:\n%s", h)
 	}
 	g = newRig(t)
-	if h := g.homeHTML(); strings.Contains(h, "<h2>Alerts</h2>") || strings.Contains(h, "revoke-core") || strings.Contains(h, "Byte caps") {
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Alerts</h2>") || strings.Contains(h, "revoke-core") {
 		t.Error("home shows state it was not given")
 	}
 }
@@ -141,7 +126,7 @@ func TestHomeShowsStatus(t *testing.T) {
 // #4750: an alert clears only with the passkey's tap, and only an open
 // one that a clear may close; each refusal leaves it open.
 func TestClearAlert(t *testing.T) {
-	g, al, _, _ := stateRig(t)
+	g, al, _ := stateRig(t)
 	if code, _ := g.tapState(newAuthenticator(t), ActClear, "7"); code != http.StatusForbidden || len(al.resolved) != 0 {
 		t.Fatalf("a stranger's clear: %d %v", code, al.resolved)
 	}
@@ -170,7 +155,7 @@ func TestClearAlert(t *testing.T) {
 // tap the daemon gets is the heads store's to check; a stranger's tap,
 // a target, a second revocation and a page with no core are refused.
 func TestRevokeCore(t *testing.T) {
-	g, _, co, _ := stateRig(t)
+	g, _, co := stateRig(t)
 	h := g.homeHTML()
 	if !strings.Contains(h, `data-action="revoke-core"`) {
 		t.Fatal("home offers no revocation")
@@ -216,57 +201,5 @@ func TestRevokeCore(t *testing.T) {
 	g = newRig(t)
 	if code, _ := g.tapState(g.a, ActRevokeCore, ""); code != http.StatusNotFound {
 		t.Errorf("a revocation with no core: %d", code)
-	}
-}
-
-// #5013 (NET-2 Byte caps, D-255): an unreadable byte-cap day shows with
-// its reason, and the passkey starts it afresh only after the wait, which
-// the page shows with a cancel; with the day readable there is nothing to
-// start.
-func TestFreshDay(t *testing.T) {
-	g, _, _, ca := stateRig(t)
-	if strings.Contains(g.homeHTML(), "Byte caps") {
-		t.Error("home shows a readable day as spent")
-	}
-	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict || len(ca.asked) != 0 {
-		t.Errorf("a fresh day while the day reads back: %d", code)
-	}
-	ca.spent = true
-	h := g.homeHTML()
-	if !strings.Contains(h, "could not read its record of today's bytes, so agentOS and the edge are blocked") || !strings.Contains(h, "waits 10 minutes") ||
-		!strings.Contains(h, `data-action="fresh-day"`) {
-		t.Errorf("home does not show the spent day:\n%s", h)
-	}
-	if code, _ := g.tapState(newAuthenticator(t), ActFreshDay, ""); code != http.StatusForbidden || len(ca.asked) != 0 {
-		t.Fatalf("a stranger's fresh day: %d", code)
-	}
-	if code, _ := g.tapState(g.a, ActCancelFresh, ""); code != http.StatusNotFound {
-		t.Errorf("a cancel with nothing waiting: %d", code)
-	}
-	code, res := g.tapState(g.a, ActFreshDay, "")
-	if code != http.StatusOK || res["done"] != true || len(ca.asked) != 1 || ca.asked[0] != g.now.UnixMilli() || res["due"] != g.s.when(ca.due) {
-		t.Fatalf("fresh day: %d %v %v", code, res, ca.asked)
-	}
-	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict {
-		t.Errorf("a second fresh day: %d", code)
-	}
-	h = g.homeHTML()
-	if !strings.Contains(h, "A fresh day starts at "+g.s.when(ca.due)) || !strings.Contains(h, `data-action="cancel-fresh"`) {
-		t.Errorf("home does not show the fresh day waiting:\n%s", h)
-	}
-	if code, _ := g.tapState(newAuthenticator(t), ActCancelFresh, ""); code != http.StatusForbidden || ca.cancel != 0 {
-		t.Errorf("a stranger's cancel: %d", code)
-	}
-	if code, _ := g.tapState(g.a, ActCancelFresh, ""); code != http.StatusOK || ca.cancel != 1 {
-		t.Errorf("cancel: %d", code)
-	}
-	if code, _ := g.tapState(g.a, ActFreshDay, "x"); code != http.StatusNotFound {
-		t.Errorf("a fresh day with a target: %d", code)
-	}
-	cfg := g.s.cfg
-	cfg.Caps, cfg.Lock = nil, nil
-	g.s, _ = New(cfg)
-	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusNotFound {
-		t.Errorf("a fresh day with no caps wired: %d", code)
 	}
 }

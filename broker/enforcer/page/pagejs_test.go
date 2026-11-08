@@ -117,7 +117,7 @@ func TestPageScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset, _ := g.screen(dir, "reset")
-	sg, _, _, _ := stateRig(t) // home with an alert to clear and the core's key to revoke
+	sg, _, _ := stateRig(t) // home with an alert to clear and the core's key to revoke
 	home := filepath.Join(dir, "home.html")
 	if err := os.WriteFile(home, []byte(sg.homeHTML()), 0o600); err != nil {
 		t.Fatal(err)
