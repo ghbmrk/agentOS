@@ -146,6 +146,10 @@ type rig struct {
 	// base is the goroutine count before the call: every goroutine the
 	// call starts must be gone after it ends.
 	base int
+	// bubble marks a rig made in a synctest bubble. Its sleeps pass no real
+	// time, so the count can see goroutines outside it still ending; the
+	// bubble checks instead, failing the test on any goroutine left blocked.
+	bubble bool
 }
 
 func newRig(t *testing.T, script func(call.Ask) []string) *rig {
@@ -168,6 +172,9 @@ func (r *rig) runCtx(ctx context.Context, rung call.Rung) {
 // settle fails the test if goroutines the call started outlive it.
 func (r *rig) settle() {
 	r.t.Helper()
+	if r.bubble {
+		return
+	}
 	for i := 0; i < 200 && runtime.NumGoroutine() > r.base; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
