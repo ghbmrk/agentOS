@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening), that
 enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
-dump to a file (#4459). mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
+dump to a file (#4459), or that leaves the kernel's reverse-path filter on anywhere (#4810). mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
 build log. The running box checks the same
 (agentos-enforcer/health); this catches it before an image exists."""
 import fnmatch
@@ -22,6 +22,10 @@ WANTS_DIRS = ("etc/systemd/system",)
 # "core", which writes into the crashed process's working directory: a radio stack's run directory,
 # which its adapter sees. These are what usr/lib/sysctl.d/99-enforcer-nodump.conf sets.
 NODUMP = {"kernel/core_pattern": "|/usr/bin/false", "fs/suid_dumpable": "0"}
+# #4810: the reverse-path filter is off on every interface (usr/lib/sysctl.d/99-enforcer-rpfilter.conf),
+# since the ruleset's rpf chain replaces it and, on, it drops the WAN's DHCP answers. These three must
+# be 0, and so must every other key that names or globs an interface's rp_filter (rp_filter_key).
+RPF = ("net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter", "net/ipv4/conf/*/rp_filter")
 # Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
 # name lower down, and the files are read in name order.
 SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
@@ -61,6 +65,18 @@ def sysctl_key(k):
     return "/".join(c for c in k.split("/") if c not in ("", "."))
 
 
+def globmatch(name, pattern):
+    """glob(3)'s match of one name: as fnmatch, but "[^" negates a class as "[!" does."""
+    return fnmatch.fnmatchcase(name, pattern.replace("[^", "[!"))
+
+
+def rp_filter_key(key):
+    """True when key (sysctl_key form) names or globs some interface's rp_filter. systemd globs
+    /proc/sys one component at a time, and any fourth component matches some interface's name."""
+    c = key.split("/")
+    return len(c) == 5 and all(globmatch(w, p) for p, w in zip(c[:3] + c[4:], ("net", "ipv4", "conf", "rp_filter")))
+
+
 def sysctls(root):
     """What systemd-sysctl sets, key by key (sysctl_key), and the refusals: a link anywhere in
     sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL,
@@ -88,7 +104,7 @@ def sysctls(root):
             k, eq, v = ln.lstrip("-").partition("=")
             key = sysctl_key(k.strip(" \t"))
             for n in NODUMP:
-                if n != key and fnmatch.fnmatchcase(n, key):
+                if n != key and globmatch(n, key):
                     vals[n] = "a glob, %s" % key
             vals[key] = v.strip(" \t") if eq else None
     return vals, out
@@ -118,6 +134,10 @@ def violations(root):
     out += ["sysctl.d: " + b for b in bad]
     out += ["sysctl.d sets %s to %s; must be %s" % (k.replace("/", "."), vals.get(k), v)
             for k, v in NODUMP.items() if vals.get(k) != v]
+    # systemd applies a name over any glob that matches it, and a glob replaces only the same glob
+    # from an earlier file, so a non-zero rp_filter key anywhere in the final set leaves one on.
+    out += ["sysctl.d sets %s to %s; rp_filter must be 0" % (k.replace("/", "."), vals.get(k))
+            for k in sorted(set(RPF) | {k for k in vals if rp_filter_key(k)}) if vals.get(k) != "0"]
     return out
 
 
