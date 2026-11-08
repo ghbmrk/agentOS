@@ -298,6 +298,8 @@ type sim struct {
 	byPhone                          []key.ID  // grants the current phone signed
 	cutPhones                        []keyPair // phones the owner cut off
 	phoneKeys                        []key.Key // clerk keys a phone renewed or narrowed, cut off or not
+	tasks                            []string  // tasks the kernel opened, live or ended
+	ntasks                           int
 }
 
 // kt is the kernel's clock.
@@ -378,6 +380,12 @@ func (s *sim) derived() (key.Key, bool) {
 	var cav []key.Caveat
 	if s.pick(2) == 0 { // half the derived keys hold irreversible steps
 		cav = append(cav, key.LimitHold(hour/6, hour/2))
+	}
+	if len(s.tasks) > 0 && s.pick(3) == 0 { // a third serve a task the kernel opened
+		cav = append(cav, key.LimitTask(s.tasks[s.pick(len(s.tasks))]))
+		if s.pick(2) == 0 { // half of those under a hold their task may not outlive
+			cav = append(cav, key.LimitHold(hour, 30*hour))
+		}
 	}
 	switch s.pick(5) {
 	case 1:
@@ -556,10 +564,7 @@ func (s *sim) op() error {
 			s.logf("resume")
 			return s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
 		}
-		if s.pick(3) == 0 {
-			s.logf("stop")
-			return s.k.Stop(s.kt())
-		}
+		return s.taskOp()
 	case c == 12 && len(s.plans) > 0:
 		p := s.plans[s.pick(len(s.plans))]
 		s.logf("cancel/undo %s", p)
@@ -614,6 +619,41 @@ func (s *sim) op() error {
 			return s.refusedBig(err)
 		}
 		s.remember(r, k)
+	}
+	return nil
+}
+
+// taskOp has the owner STOP, sometimes with a RESUME right after and no
+// tick between (KRN-7), or the kernel open a task or end one (KRN-5).
+func (s *sim) taskOp() error {
+	switch s.pick(6) {
+	case 0, 1:
+		s.logf("stop")
+		if err := s.k.Stop(s.kt()); err != nil || s.pick(2) == 0 {
+			return err
+		}
+		s.logf("resume at once")
+		return s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
+	case 2:
+		s.ntasks++
+		id := fmt.Sprintf("t%d", s.ntasks)
+		s.logf("open task %s", id)
+		err := s.k.OpenTask(s.kt(), id, key.P0)
+		if err == nil {
+			s.tasks = append(s.tasks, id)
+		}
+		if errors.Is(err, kernel.ErrTaskOpen) {
+			return nil
+		}
+		return err
+	case 3:
+		if len(s.tasks) > 0 {
+			id := s.tasks[s.pick(len(s.tasks))]
+			s.logf("end task %s", id)
+			if err := s.k.EndTask(s.kt(), id); !errors.Is(err, kernel.ErrTask) {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -807,14 +847,16 @@ func crashed(err error) bool {
 }
 
 // rederive checks that the live log, before a boot can drop its unconfirmed
-// tail, gives every decision in it again from the entries before it (KRN-1).
-// Each entry is in the log at some boot, so this sees every one; it runs only
-// there because it reverifies every plan.
+// tail, gives every decision in it again from the entries before it (KRN-1),
+// and that no narrowing in it was outrun (stopsHold). Each entry is in the
+// log at some boot, so this sees every one; it runs only there because it
+// reverifies every plan.
 func (s *sim) rederive() error {
-	if _, err := kernel.Rederive(s.w.anchors, s.k.Box(), s.k.Log().Entries()); err != nil {
+	es := s.k.Log().Entries()
+	if _, err := kernel.Rederive(s.w.anchors, s.k.Box(), es); err != nil {
 		return fmt.Errorf("invariant: %w", err)
 	}
-	return nil
+	return stopsHold(s.w.anchors, es)
 }
 
 // check judges the run so far.

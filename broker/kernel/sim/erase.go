@@ -353,6 +353,9 @@ func judgeErase(k *kernel.Kernel, anchors []key.PublicKey, keys crashKeys, store
 	if !reflect.DeepEqual(re, k.State()) {
 		return errors.New("invariant: replay differs from the live state")
 	}
+	if err := stopsHold(anchors, es); err != nil {
+		return err
+	}
 	erased := map[string]int{}
 	confirmed := map[[2]string]int{}
 	for _, e := range es {

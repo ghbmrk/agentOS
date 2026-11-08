@@ -41,8 +41,9 @@ type Input struct {
 	Mailbox string `json:"mailbox"`
 }
 
-// Scripted is one thing that happens during the run: the owner stops a hold,
-// or the planner issues a step it was not given a key for.
+// Scripted is one thing that happens during the run: the owner sends STOP,
+// RESUME, or UNDO of one mail's hold, or the planner issues a step it was not
+// given a key for.
 type Scripted struct {
 	Owner       string       `json:"owner"`
 	Mail        string       `json:"mail"`
@@ -197,7 +198,8 @@ func Run(in Input) (Outcome, error) {
 		return Outcome{}, err
 	}
 	lapse := setup + key.ClerkLife
-	// renewals are the log entries of those renewals. Each rides a tap the
+	// renewals are the log entries of those renewals, and of a scripted
+	// RESUME, which is the owner's, not the run's. Each renewal rides a tap the
 	// owner already makes (D-146: every passkey tap renews), so none is a tap
 	// the run asked for.
 	renewals := map[uint64]bool{}
@@ -289,6 +291,20 @@ func Run(in Input) (Outcome, error) {
 	for i, s := range in.Script {
 		switch {
 		case s.Owner == "STOP":
+			// The owner's STOP, as every channel sends it (KRN-7): it stops
+			// every hold still running, not one mail's.
+			if err := k.Stop(t0 + 1000); err != nil {
+				return Outcome{}, err
+			}
+		case s.Owner == "RESUME":
+			// RESUME with its code, before the kernel's next tick; it is no
+			// tap the run asked for.
+			if err := k.Resume(t0+1000, k.State().Stops); err != nil {
+				return Outcome{}, err
+			}
+			renewals[k.State().Seq] = true
+		case s.Owner == "UNDO":
+			// The owner stops one mail's hold (KEY-8).
 			if h, ok := handleOf[s.Mail]; ok {
 				if err := k.Cancel(t0+1000, "unsub-"+h); err != nil {
 					return Outcome{}, err

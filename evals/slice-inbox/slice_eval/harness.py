@@ -406,7 +406,10 @@ def reference(case, world):
     acct = account(case, world)
     mails = by_id(world)
     script = case.get("variant", {}).get("script", [])
-    stops = {s["mail"] for s in script if s.get("owner") == "STOP"}
+    # UNDO stops one mail's hold; a STOP every hold still running, which a
+    # RESUME after it does not bring back (KRN-7).
+    undone = {s["mail"] for s in script if s.get("owner") == "UNDO"}
+    stop = any(s.get("owner") == "STOP" for s in script)
     standing = later_run_key(case)
     key = standing or {"verbs": sorted(SLICE_VERBS), "account": world["owner"]}
     out = {"requests": [], "effects": [], "refusals": [], "status_lines": [], "holds": [],
@@ -439,7 +442,7 @@ def reference(case, world):
     for i, url in sorted(eligible(case, world).items()):
         window = "novelty" if first_ever(world, mails[i]) else "base"
         seconds = NOVELTY_SECONDS if window == "novelty" else BASE_SECONDS
-        stopped = i in stops
+        stopped = stop or i in undone
         out["holds"].append({"mail": i, "window": window, "seconds": seconds, "stopped": stopped})
         if not stopped:
             out["requests"].append({"method": "POST", "url": url, "body": world["one_click_body"],

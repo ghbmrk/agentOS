@@ -39,7 +39,8 @@ func (d derived) String() string { return d.typ + " " + string(d.body) }
 
 // Rederive folds es from empty and, before each decision in it, derives that
 // decision again from the state so far at the entry's own time, with the same
-// pure functions the live kernel used (Admit, Next, the send check, WindowDue),
+// pure functions the live kernel used (Admit, Next, the send check, WindowDue,
+// a task's timeout),
 // and compares bytes. Inputs (owner actions, plans, clerk answers and probes,
 // metered usage, pool readings) are folded as given: the log is where they
 // enter (KRN-1). So a log prefix reproduces every decision in it, and the
@@ -113,7 +114,24 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		if refused != nil {
 			cands = append(cands, *refused)
 		}
+		// A log written before a STOP cancelled in its own fold carries the
+		// cancel Next logged for it after; the fold has applied it already.
+		if p := s.Plans[ref.Plan]; p != nil && p.Status == SCancelled && p.Cancel == key.RStopped {
+			cands = append(cands, entry(TPlanCancel, planCancel{Plan: ref.Plan, Code: p.Cancel, Detail: p.CancelDetail}))
+		}
 		return cands, true
+	case TTaskEnded:
+		// An end at the timeout is the scheduler's (endDue); one before it
+		// is EndTask's, an input, and only for a live task.
+		var b taskEnded
+		if json.Unmarshal(e.Body, &b) != nil {
+			return nil, false // the fold refuses it
+		}
+		if s.taskDue(b.Task, e.At) {
+			return []derived{entry(TTaskEnded, taskEnded{b.Task})}, true
+		}
+		_, live := s.Task(b.Task, e.At)
+		return nil, !live
 	case TPoolReset:
 		_ = json.Unmarshal(e.Body, &ref)
 		if s.WindowDue(e.At, ref.Pool, ref.Window) {
@@ -155,7 +173,7 @@ var recorded = map[string]bool{
 	TLine: true, TStop: true, TResume: true, TPlanSubmit: true, TStepResult: true, TStepProbed: true,
 	TStepUndone: true, TStepRetried: true, TModelUsed: true, TSpendReserved: true, TSpendHeld: true,
 	TSpendExtend: true, TPoolRead: true, TReserveUp: true, TReserveDown: true,
-	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
+	TTaskOpened: true, TTaskApproved: true, TAnchorsSet: true,
 	TSubjectOpened: true, TContentStored: true, TSubjectErased: true, TEraseConfirmed: true, TContentRead: true,
 	TBackupTarget: true, TBackupUntarget: true, TBackupTaken: true, TEdgeRevoked: true, TEdgeCut: true,
 	TRecoveryRotate: true, TCodeApproved: true, TDecoyTable: true, TTripResumed: true,

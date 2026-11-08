@@ -180,18 +180,29 @@ def key_vectors(dump):
 def hold_vectors(dump):
     """The earliest dispatch the model allows for each scenario: the hold, the
     verb, whether the shape was seen before the hold, and whether one of the
-    same shape completed during it. Scenarios with no dispatch are left out."""
-    best = {}
+    same shape completed during it. Scenarios with no dispatch are left out.
+    Each STOP scenario adds the hour the owner's STOP folded, followed by a
+    RESUME, and the model's answer that the step is never sent (sent_at -1),
+    for each hour before its earliest dispatch, or at it when no step of the
+    shape completes mid-hold: the kernel holds and sends at the same tick, so
+    it has not sent the step yet only then."""
+    best, stops = {}, set()
     for st in states(dump):
-        if st["phase"] != "sent":
-            continue
         held = st["heldAt"] >= 0
         seen = (not st["novel"]) if held else st["seen"]
         k = (tuple(st["hold"]), st["verb"], seen, st["midHold"])
-        best[k] = min(best.get(k, st["sentAt"]), st["sentAt"])
-    return {"unit": "hour", "scenarios": [
-        {"hold": list(h), "verb": verb, "seen": seen, "mid_hold": mid, "sent_at": at}
-        for (h, verb, seen, mid), at in sorted(best.items())]}
+        if st["phase"] == "sent":
+            if st["stopAt"] >= 0:
+                sys.exit("formal: a step sent after a STOP folded")
+            best[k] = min(best.get(k, st["sentAt"]), st["sentAt"])
+        elif st["stopAt"] >= 0 and not st["stopped"]:
+            stops.add(k + (st["stopAt"],))
+    out = [{"hold": list(h), "verb": verb, "seen": seen, "mid_hold": mid, "stop_at": -1, "sent_at": at}
+           for (h, verb, seen, mid), at in sorted(best.items())]
+    out += [{"hold": list(h), "verb": verb, "seen": seen, "mid_hold": mid, "stop_at": stop, "sent_at": -1}
+            for (h, verb, seen, mid, stop) in sorted(stops)
+            if (h, verb, seen, mid) in best and (stop < best[h, verb, seen, mid] or stop == best[h, verb, seen, mid] and not mid)]
+    return {"unit": "hour", "scenarios": out}
 
 
 def dumps(v):
