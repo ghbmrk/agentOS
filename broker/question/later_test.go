@@ -54,10 +54,14 @@ func crash(t *testing.T, r *rig, path string, snap []byte) {
 // counts toward the hour.
 func TestACrashAfterTheSendDoesNotTextItAgain(t *testing.T) {
 	r, path, snap := snapRig(t, func(c *Config) { c.SendsPerHour = 1 })
+	r.advance(time.Hour) // the monotonic clock is well past the wait at the restart
 	sent := r.clock
 	st := r.ask("lin1", "q", slot())
 	if st.State != Waiting || len(r.texts()) != 1 {
 		t.Fatalf("before the crash: %+v, texts %q", st, r.texts())
+	}
+	if raw, err := os.ReadFile(path); err != nil || strings.Contains(string(raw), `"sending"`) {
+		t.Fatalf("the book kept the sent text's record (%v): %s", err, raw)
 	}
 	crash(t, r, path, *snap)
 	r.advance(time.Minute)
@@ -66,6 +70,13 @@ func TestACrashAfterTheSendDoesNotTextItAgain(t *testing.T) {
 	if got.State != Waiting || got.ID != st.ID || !got.Deadline.Equal(sent.Add(30*time.Minute)) {
 		t.Fatalf("after the restart: %+v, want waiting under %s until %v", got, st.ID, sent.Add(30*time.Minute))
 	}
+	// Its wait on the monotonic clock runs from the restart too (Q15).
+	r.set(func() { r.restricted = true })
+	r.b.Tick(context.Background())
+	if got := r.status("lin1", "q"); got.State != Waiting {
+		t.Fatalf("a restricted tick a minute after the restart: %+v", got)
+	}
+	r.set(func() { r.restricted = false })
 	if other := r.ask("lin2", "q", slot()); other.State != Held {
 		t.Fatalf("the hour's one text is spent, yet lin2's question is %+v", other)
 	}
@@ -133,7 +144,11 @@ func TestAnUnsentTextIsRetriedAfterACrash(t *testing.T) {
 // A book that cannot save the sending record does not send: the question
 // stays held, and goes once the book can save again.
 func TestATextThatCannotBeRecordedIsNotSent(t *testing.T) {
-	r := newRig(t, func(c *Config) { c.Path = filepath.Join(t.TempDir(), "questions.json") })
+	var logs []string
+	r := newRig(t, func(c *Config) {
+		c.Path = filepath.Join(t.TempDir(), "questions.json")
+		c.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	})
 	r.set(func() { r.quiet = true })
 	r.ask("lin1", "q", slot())
 	r.set(func() { r.quiet = false })
@@ -146,10 +161,22 @@ func TestATextThatCannotBeRecordedIsNotSent(t *testing.T) {
 	if st := r.status("lin1", "q"); saves == 0 || st.State != Held || len(r.texts()) != 0 {
 		t.Fatalf("an unrecorded text: saves %d, %+v, texts %q", saves, st, r.texts())
 	}
+	if !strings.Contains(strings.Join(logs, "\n"), "question: save before send: disk full") {
+		t.Fatalf("the failed save is not logged: %q", logs)
+	}
+	// The record that failed to save is not kept for a later save to
+	// write: a crash after one still finds the question held.
 	r.b.write = nil
+	r.set(func() { r.quiet = true })
+	r.ask("lin2", "q", slot())
+	r.open()
+	if st := r.status("lin1", "q"); st.State != Held {
+		t.Fatalf("after a later save and a restart: %+v", st)
+	}
+	r.set(func() { r.quiet = false })
 	r.b.Tick(context.Background())
 	if st := r.status("lin1", "q"); st.State != Waiting || len(r.texts()) != 1 {
-		t.Fatalf("once the book saves again: %+v, texts %q", st, r.texts())
+		t.Fatalf("once the book saves again: %+v, texts %q", st, r.texts()) // lin2's question shares the text
 	}
 }
 
@@ -275,5 +302,68 @@ func TestContextCancelledDuringTicksNowLapsesNothing(t *testing.T) {
 	r.b.Tick(context.Background())
 	if st := r.status("lin1", "q"); st.State != Defaulted {
 		t.Fatalf("after a live tick: %+v", st)
+	}
+}
+
+// REQ: CH-15, HLD-1
+// The share counts the questions already joined to the text being built
+// (#2380 review): an asker one below its share has two questions due,
+// and only one of them joins the text.
+func TestTheShareCountsQuestionsInTheSameText(t *testing.T) {
+	r := newRig(t, nil)
+	room := numTags - r.b.cfg.MaxOpen
+	r.b.mu.Lock()
+	for i := range room/2 - 1 {
+		r.b.qs = append(r.b.qs, &entry{ID: fmt.Sprintf("Q%d", firstTag+i), Asker: "f", Req: fmt.Sprintf("old%d", i),
+			Text: "Lunch?", Default: "wait", Wait: 30 * time.Minute, State: Answered, Texted: true, Closed: r.clock})
+	}
+	r.b.next = firstTag + room/2 - 2
+	r.b.mu.Unlock()
+	r.set(func() { r.quiet = true })
+	r.ask("f", "a", slot())
+	r.ask("f", "b", slot())
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	a, b := r.status("f", "a"), r.status("f", "b")
+	if len(r.texts()) != 1 || a.State != Waiting || b.State != Held {
+		t.Fatalf("one below its share: a %+v, b %+v, texts %q", a, b, r.texts())
+	}
+}
+
+// REQ: CH-15
+// A text records who asked: the first question's asker, and the askers
+// of the questions that joined it, which the hour's order reads (PQ1).
+func TestASharedTextRecordsItsOtherAskers(t *testing.T) {
+	r := newRig(t, nil)
+	r.set(func() { r.quiet = true })
+	r.ask("lin1", "q", slot())
+	r.ask("lin2", "q", short("Lunch at noon?"))
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	r.b.mu.Lock()
+	defer r.b.mu.Unlock()
+	if len(r.texts()) != 1 || len(r.b.sends) != 1 || r.b.sends[0].Asker != "lin1" || fmt.Sprint(r.b.sends[0].Others) != "[lin2]" {
+		t.Fatalf("texts %q, sends %+v", r.texts(), r.b.sends)
+	}
+}
+
+// REQ: CH-15, CH-12
+// A question joins a text that it brings to exactly MaxRendered bytes.
+func TestAQuestionJoinsATextThatFitsExactly(t *testing.T) {
+	r := newRig(t, nil)
+	r.set(func() { r.quiet = true })
+	r.ask("lin1", "q", short("Lunch at noon with "+strings.Repeat("b", 100)+"?"))
+	by := "by " + r.b.clock(r.clock, r.clock.Add(30*time.Minute))
+	r.b.mu.Lock()
+	first := r.b.renderBy(r.b.findLocked("lin1", "q"), by)
+	r.b.mu.Unlock()
+	base := len(first) + 1 + len(r.b.renderBy(&entry{ID: "Q101", Text: "Tea at  four?", Default: "wait"}, by))
+	text := "Tea at " + strings.Repeat("a", MaxRendered-base) + " four?"
+	r.ask("lin2", "q", short(text))
+	r.set(func() { r.quiet = false })
+	r.b.Tick(context.Background())
+	got := r.texts()
+	if len(got) != 1 || len(got[0]) != MaxRendered || r.status("lin2", "q").State != Waiting {
+		t.Fatalf("texts %q, want one of %d bytes", got, MaxRendered)
 	}
 }

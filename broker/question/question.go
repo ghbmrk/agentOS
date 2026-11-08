@@ -1129,9 +1129,6 @@ func (b *Book) textedLocked(batch []*entry, s send) {
 				e.Deadline = s.At.Add(e.Wait)
 			}
 		}
-		if !s.At.IsZero() {
-			e.Sent = s.At
-		}
 		e.Texted, e.sentMono, e.monoSet = true, s.mono, true
 	}
 	b.sends = append(b.sends, s)
