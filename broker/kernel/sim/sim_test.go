@@ -45,6 +45,11 @@ var sweep = sync.OnceValues(func() (Result, error) {
 		sum.TasksEnded += r.TasksEnded
 		sum.TaskPlans += r.TaskPlans
 		sum.TaskCancels += r.TaskCancels
+		sum.TimedOut += r.TimedOut
+		sum.KeysWithTasks += r.KeysWithTasks
+		sum.TaskKeys += r.TaskKeys
+		sum.ReplayedTask += r.ReplayedTask
+		sum.CancelledTask += r.CancelledTask
 		for _, l := range r.Trace { // the trace names each op it ran
 			for _, op := range []string{"stop", "resume at once", "open task", "end task"} {
 				if _, rest, ok := strings.Cut(l, " "); ok && (rest == op || strings.HasPrefix(rest, op+" ")) {
@@ -121,14 +126,20 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"tasks ended":                                  sum.TasksEnded,
 		"plans serving a task":                         sum.TaskPlans,
 		"plans their task's end cancelled":             sum.TaskCancels,
+		"held steps their task's timeout cancelled":    sum.TimedOut,
+		"replayed ids of a task plan":                  sum.ReplayedTask,
+		"cancel or undo picks of a task plan":          sum.CancelledTask,
 		"traced STOPs":                                 traced["stop"],
 		"traced RESUMEs at once":                       traced["resume at once"],
 		"traced task opens":                            traced["open task"],
 		"traced task ends":                             traced["end task"],
 	} {
-		if n == 0 {
+		if n <= 0 {
 			t.Errorf("the sweep never reached: %s", name)
 		}
+	} // A third of the keys drawn while a task is open serve one (derived).
+	if k, n := sum.TaskKeys, sum.KeysWithTasks; 4*k < n || 12*k > 5*n {
+		t.Errorf("%d of %d keys drawn while a task was open serve one, want about a third", k, n)
 	}
 }
 

@@ -72,12 +72,31 @@ type Result struct {
 	TasksEnded  int // task.ended entries, the planner's and the timeout's
 	TaskPlans   int // plans under a key serving a task
 	TaskCancels int // plans their task's end cancelled or ended
+	TimedOut    int // held steps under a hold longer than a task that their task's timeout cancelled
+
+	KeysWithTasks, TaskKeys     int // derived keys drawn while a task was open, and those bound to one
+	ReplayedTask, CancelledTask int // replayed ids and op-12 picks that landed on a plan taskPlan submitted
+}
+
+// outlives reports whether k holds a novel step longer than any task lives.
+func outlives(k key.Key) bool {
+	for _, l := range k.Links {
+		for _, c := range l.Caveats {
+			if c.Kind == key.KHold && c.M > kernel.TaskTimeout {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // tally counts what taskOp left in the log es, for the sweep to show each op
 // took effect.
 func (r *Result) tally(st *kernel.State, es []kernel.Entry) {
+	opened, timedOut := map[string]int64{}, map[string]bool{}
 	for i, e := range es {
+		var b struct{ ID, Task string }
+		_ = json.Unmarshal(e.Body, &b)
 		switch e.Type {
 		case kernel.TStop:
 			if i+1 < len(es) && es[i+1].Type == kernel.TResume && es[i+1].At == e.At {
@@ -85,8 +104,10 @@ func (r *Result) tally(st *kernel.State, es []kernel.Entry) {
 			}
 		case kernel.TTaskOpened:
 			r.TasksOpened++
+			opened[b.ID] = e.At
 		case kernel.TTaskEnded:
 			r.TasksEnded++
+			timedOut[b.Task] = e.At >= opened[b.Task]+kernel.TaskTimeout
 		}
 	}
 	for _, id := range st.Order {
@@ -97,6 +118,11 @@ func (r *Result) tally(st *kernel.State, es []kernel.Entry) {
 		r.TaskPlans++
 		if p.Cancel == kernel.CTask || p.Ended == kernel.CTask {
 			r.TaskCancels++
+		}
+		for _, st := range p.Steps {
+			if p.Cancel == kernel.CTask && st.HeldSeq != 0 && st.Phase == kernel.PCancelled && timedOut[p.Plan.Task()] && outlives(p.Plan.Key) {
+				r.TimedOut++
+			}
 		}
 	}
 }
@@ -334,6 +360,9 @@ type sim struct {
 	phoneKeys                        []key.Key // clerk keys a phone renewed or narrowed, cut off or not
 	tasks                            []string  // tasks the kernel opened, live or ended
 	ntasks                           int
+	taskPlans                        map[string]int // 1 for each plan taskPlan submitted
+	keysWithTasks, taskKeys          int            // derived keys drawn while a task was open, and those bound to one
+	replayedTask, cancelledTask      int            // replay and op-12 picks that landed on a taskPlan plan
 }
 
 // kt is the kernel's clock.
@@ -415,11 +444,12 @@ func (s *sim) derived() (key.Key, bool) {
 	if s.pick(2) == 0 { // half the derived keys hold irreversible steps
 		cav = append(cav, key.LimitHold(hour/6, hour/2))
 	}
+	if len(s.tasks) > 0 {
+		s.keysWithTasks++
+	}
 	if len(s.tasks) > 0 && s.pick(3) == 0 { // a third serve a task the kernel opened, mostly the latest
+		s.taskKeys++
 		cav = append(cav, key.LimitTask(s.tasks[max(0, len(s.tasks)-1-s.pick(3))]))
-		if s.pick(2) == 0 { // half of those under a hold their task may not outlive
-			cav = append(cav, key.LimitHold(hour, 30*hour))
-		}
 	}
 	switch s.pick(5) {
 	case 1:
@@ -543,6 +573,7 @@ func (s *sim) submit() error {
 	id := fmt.Sprintf("p%d", s.submits)
 	if len(s.plans) > 0 && s.pick(12) == 0 {
 		id = s.plans[s.pick(len(s.plans))] // a replayed plan id
+		s.replayedTask += s.taskPlans[id]
 	}
 	steps := make([]kernel.PlanStep, 1+s.pick(3))
 	if s.pick(40) == 0 {
@@ -601,6 +632,7 @@ func (s *sim) op() error {
 		return s.taskOp()
 	case c == 12 && len(s.plans) > 0:
 		p := s.plans[s.pick(len(s.plans))]
+		s.cancelledTask += s.taskPlans[p]
 		s.logf("cancel/undo %s", p)
 		if s.pick(2) == 0 {
 			return s.k.Cancel(s.kt(), p)
@@ -715,6 +747,10 @@ func (s *sim) taskPlan(id string) error {
 		return err
 	}
 	s.plans = append(s.plans, p.ID)
+	if s.taskPlans == nil {
+		s.taskPlans = map[string]int{}
+	}
+	s.taskPlans[p.ID] = 1
 	return nil
 }
 
@@ -1027,7 +1063,8 @@ func Run(c Config) (*Result, error) {
 	r := &Result{Trace: s.trace, Entries: s.k.Log().Entries(), Effects: len(s.w.effects),
 		Refused: s.disk.refused, ClockBack: s.clockBack, StaleRefused: s.w.stale,
 		AnchorFailed: s.anchor.failed, WidenUnproven: s.widenUnproven, UnheldRefused: s.unheld, BigRefused: s.bigRefused,
-		HeldByClerk: s.w.held, CutRefused: s.cutRefused, CutCancelled: s.cutCancelled}
+		HeldByClerk: s.w.held, CutRefused: s.cutRefused, CutCancelled: s.cutCancelled,
+		KeysWithTasks: s.keysWithTasks, TaskKeys: s.taskKeys, ReplayedTask: s.replayedTask, CancelledTask: s.cancelledTask}
 	r.tally(s.k.State(), r.Entries)
 	return r, nil
 }
