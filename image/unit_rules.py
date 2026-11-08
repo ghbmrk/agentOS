@@ -303,9 +303,10 @@ def package_sockets(shown, pkg):
 
 
 def records(view, shown, dirs, prov):
-    """The records of one run: {"units": [{"unit", "alone", "package", "files": [{"path", "ours",
+    """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
     "text"}]}], "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names()
-    found. package marks a socket whose endpoint is a package's (package_sockets)."""
+    found. package marks a socket whose endpoint is a package's (package_sockets), fed a service such a
+    socket hands its connections to."""
     recs, own, done = [], set(), set()
     pkgsock = package_sockets(shown, packaged_names(view, dirs, prov))
     for name in sorted(shown):
@@ -352,8 +353,13 @@ def records(view, shown, dirs, prov):
                 if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
+    # a service a package's socket hands its connections or listening fds to (TriggeredBy: its Service=,
+    # implicit name or Accept=yes template, or a Sockets= line)
+    fed = {s["Id"] for s in shown.values() if s["LoadState"] == "loaded" and s["Id"].endswith(".service")
+           and set(words(s, "TriggeredBy")) & pkgsock}
     for rec in recs:
         rec["package"] = rec["unit"] in pkgsock
+        rec["fed"] = rec["unit"] in fed
     fstab = None
     final, _ = view.resolve("/etc/fstab")
     if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):

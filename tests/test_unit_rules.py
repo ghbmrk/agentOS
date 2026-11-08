@@ -294,6 +294,21 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual(sorted(u["unit"] for u in got["units"] if u["package"]),
                              ["a.socket", "b.socket", "t@1.socket", "u.socket"])
 
+    def test_a_hidden_package_socket_by_its_name_alone_and_the_service_it_feeds(self):
+        # #5072 L3 round 2: a package's name hidden by a fragment of ours, with no Triggers or TriggeredBy,
+        # and a package's name reached only through an alias in Names; and a service of ours fed by such a
+        # socket (Security round 2)
+        files = {LIB + "u.socket": "p", ETC + "u.socket": "o", LIB + "w.socket": "p", ETC + "x.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"u.socket": ("loaded", ETC + "u.socket", []), "v.socket": ("loaded", ETC + "u.socket", [], ["w.socket"]),
+                           "x.service": ("loaded", ETC + "x.service", [])})
+            units["x.service"]["TriggeredBy"] = "u.socket"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted((u["unit"], u["package"], u["fed"]) for u in got["units"]),
+                             [("u.socket", True, False), ("v.socket", True, False), ("x.service", False, True)])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
