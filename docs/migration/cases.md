@@ -67,6 +67,7 @@ Copied from briefs/SIM-cases.md at commit 0b3d474, which mapped the 67 W5-D draf
 | #335 W5-D37 | An aged request's priority turn, then a restart | The aged request still goes first |
 | #335 W5-D37 | A pacing storage fault on any request path | The request is requeued, never sent uncounted or dropped |
 | #335 W5-D37, #333 W5-D35 | Concurrent sends, and questions and updates together | Never more than one hourly allowance, shared across kinds |
+| #1639 P2 | A question reserved ahead of a waiting approval batch (its once-an-hour aged pass) that the channel then refuses as paced | The pass is given back, so only a text that went spends it |
 | #335 W5-D37 | A blocked pacing save | STOP and urgent texts are not delayed by it, nor by any blocked storage |
 | #336 W5-D38 | A pacing save that fails before a text goes out | The text is not sent and the error is returned |
 | #287 W5-sid | A short request ID lent, then a restart before it is saved | Two open requests never share a short ID |
