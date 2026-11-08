@@ -12,7 +12,8 @@ import (
 // WatchNetlink sends on the returned channel each time the kernel reports an
 // address, route or link change (DEV-2: a new prefix is refused within the
 // event, not at the next poll), or a change to the default gateway's
-// neighbour entry (a swapped router's new MAC is seen within the event). The channel holds one pending event; further
+// neighbour entry's MAC or validity (a swapped router's new MAC is seen
+// within the event; neighWatch). The channel holds one pending event; further
 // changes while it is full coalesce into it. It ends with ctx. Where the
 // socket cannot be opened the error is returned and the caller keeps the
 // poll, which stays as the backstop either way.
@@ -29,6 +30,7 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 		defer unix.Close(fd)
 		defer close(out)
 		buf := make([]byte, 1<<16)
+		var nw neighWatch
 		for ctx.Err() == nil {
 			n, _, err := unix.Recvfrom(fd, buf, 0)
 			if err != nil {
@@ -36,6 +38,7 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 					continue
 				}
 				if err == unix.ENOBUFS { // overflow: something changed
+					nw.forget()
 					notify(out)
 					continue
 				}
@@ -44,7 +47,7 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 				}
 				return
 			}
-			if netlinkChange(buf[:n], routeGateway) {
+			if nw.change(buf[:n], routeGateway) {
 				notify(out)
 			}
 		}

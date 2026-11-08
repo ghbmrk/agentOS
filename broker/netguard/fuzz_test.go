@@ -398,7 +398,7 @@ func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 	}
 	p := New(Config{Source: read, Quick: s.ReadLocal})
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // a held destination is refused at once
+	cancel() // a held destination fails at once
 	for n := 0; n < fuzzMaxOps && in.more(); n++ {
 		op := ""
 		switch in.next() % 3 {
@@ -428,7 +428,12 @@ func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 		if !k.gw.IsValid() || !ext.IsValid() {
 			continue
 		}
-		if err := pl.doCheck(p, ctx, ext, 443, "tcp"); !errors.Is(err, ErrDenied) {
+		// A held dial whose context has ended fails with that context's
+		// error (#1540); it is never allowed.
+		p.mu.RLock()
+		held := p.hold != nil
+		p.mu.RUnlock()
+		if err := pl.doCheck(p, ctx, ext, 443, "tcp"); !errors.Is(err, ErrDenied) && !(held && errors.Is(err, context.Canceled)) {
 			t.Fatalf("after a %s on gateway %+v, its router's external %v: %v", op, k, ext, err)
 		}
 	}
