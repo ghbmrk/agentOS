@@ -203,3 +203,114 @@ func TestRevokeCore(t *testing.T) {
 		t.Errorf("a revocation with no core: %d", code)
 	}
 }
+
+type fakeCaps struct {
+	day          CapsDay
+	saved        bool
+	err          error
+	fresh, cncl  int
+	lastFreshNow int64
+}
+
+func (f *fakeCaps) Day() CapsDay { return f.day }
+func (f *fakeCaps) Fresh(nowMS int64) (int64, bool, error) {
+	f.fresh++
+	f.lastFreshNow = nowMS
+	if f.err != nil {
+		return 0, false, f.err
+	}
+	f.day.DueMS = nowMS + 600_000
+	return f.day.DueMS, f.saved, nil
+}
+func (f *fakeCaps) CancelFresh() (bool, error) {
+	f.cncl++
+	if f.err != nil {
+		return false, f.err
+	}
+	f.day.DueMS = 0
+	return f.saved, nil
+}
+
+// #5013 (NET-2 Byte caps, NET-4, D-255): an unreadable byte-cap day shows
+// why every cap is spent and offers a fresh day after a tap; one waiting
+// is listed under Waiting to apply with its cancel; a start being retried
+// and a step the disk has not confirmed say so. Each step takes the
+// passkey's tap, carries no target, and is drawn only when it applies.
+func TestFreshDayPage(t *testing.T) {
+	g := newRig(t)
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Byte caps</h2>") {
+		t.Fatal("home shows byte caps it was not given")
+	}
+	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusNotFound {
+		t.Errorf("a fresh day with no caps wired: %d", code)
+	}
+	ca := &fakeCaps{saved: true}
+	cfg := g.s.cfg
+	cfg.Caps, cfg.Lock = ca, nil
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Byte caps</h2>") {
+		t.Fatal("home shows a day that reads back as spent")
+	}
+	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict || ca.fresh != 0 {
+		t.Errorf("a fresh day for a day that reads back: %d", code)
+	}
+	ca.day.Spent = true
+	h := g.homeHTML()
+	if !strings.Contains(h, "could not read its record of today's bytes") || !strings.Contains(h, "it waits 10 minutes") ||
+		!strings.Contains(h, `data-action="fresh-day"`) || strings.Contains(h, `data-action="cancel-fresh"`) {
+		t.Fatalf("home does not show the spent day and its step:\n%s", h)
+	}
+	for _, c := range []struct {
+		action, target string
+		want           int
+	}{{ActFreshDay, "x", http.StatusNotFound}, {ActCancelFresh, "", http.StatusNotFound}} {
+		if code, _ := g.tapState(g.a, c.action, c.target); code != c.want {
+			t.Errorf("%s %q: %d, want %d", c.action, c.target, code, c.want)
+		}
+	}
+	if code, _ := g.tapState(newAuthenticator(t), ActFreshDay, ""); code != http.StatusForbidden || ca.fresh != 0 {
+		t.Fatalf("a stranger's fresh day: %d", code)
+	}
+	code, res := g.tapState(g.a, ActFreshDay, "")
+	if code != http.StatusOK || res["done"] != true || res["saved"] != true || res["due"] == nil || ca.lastFreshNow != g.s.nowMS() {
+		t.Fatalf("fresh day: %d %v", code, res)
+	}
+	h = g.homeHTML()
+	waiting := h[strings.Index(h, "<h2>Waiting to apply</h2>"):]
+	if !strings.Contains(waiting, "A fresh byte-cap day starts at") || !strings.Contains(waiting, `data-action="cancel-fresh"`) ||
+		strings.Contains(waiting, "<p>Nothing.</p>") || strings.Contains(h, `data-action="fresh-day"`) {
+		t.Fatalf("the waiting fresh day is not under Waiting to apply:\n%s", h)
+	}
+	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict {
+		t.Errorf("a second fresh day: %d", code)
+	}
+	ca.saved = false
+	if code, res := g.tapState(g.a, ActCancelFresh, ""); code != http.StatusOK || res["saved"] != false {
+		t.Fatalf("a cancel the disk has not confirmed: %d %v", code, res)
+	}
+	ca.day.Unsaved = true
+	if h := g.homeHTML(); !strings.Contains(h, "the disk has not confirmed it yet") {
+		t.Error("home does not say the step is not confirmed")
+	}
+	ca.day = CapsDay{Spent: true, Starting: true, Retrying: true}
+	h = g.homeHTML()
+	if !strings.Contains(h, "could not be saved. The enforcer tries again every second") || strings.Contains(h, `data-action="fresh-day"`) {
+		t.Errorf("home does not say the start is retried:\n%s", h)
+	}
+	for _, action := range []string{ActFreshDay, ActCancelFresh} {
+		if code, res := g.tapState(g.a, action, ""); code != http.StatusConflict || !strings.Contains(res["error"].(string), "starting") {
+			t.Errorf("%s while starting: %d %v", action, code, res)
+		}
+	}
+	ca.day.Retrying = false
+	if h := g.homeHTML(); !strings.Contains(h, "The enforcer restarts to take it up") {
+		t.Error("home does not say the saved fresh day is being taken up")
+	}
+	ca.day, ca.err = CapsDay{Spent: true, DueMS: 1}, errors.New("byte caps: no")
+	if code, res := g.tapState(g.a, ActCancelFresh, ""); code != http.StatusConflict || res["error"] != "byte caps: no" {
+		t.Errorf("a refused cancel: %d %v", code, res)
+	}
+}

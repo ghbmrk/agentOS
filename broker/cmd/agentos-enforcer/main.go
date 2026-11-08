@@ -154,6 +154,10 @@ func run(args []string) error {
 			return nil
 		case err := <-chDown:
 			return fmt.Errorf("channel listener stopped: %w", err)
+		case err := <-d.freshStop:
+			// The fresh byte-cap day is saved: the service manager starts
+			// the daemon again, which reads it as any saved day (ENF-l-19).
+			return err
 		case <-t.C:
 		case <-d.changed:
 		}

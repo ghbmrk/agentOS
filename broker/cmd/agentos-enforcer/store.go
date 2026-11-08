@@ -48,8 +48,9 @@ func checkStateDir(dir string) error {
 type fileStore struct {
 	path string
 	// fault is the lifecycle test's seam: a non-nil error from it fails
-	// Save before any write. Nil in production.
-	fault func(path string) error
+	// Save before any write. after fails it once the new file is in
+	// place, as a failed directory sync does. Nil in production.
+	fault, after func(path string) error
 }
 
 func (f fileStore) Load() ([]byte, error) {
@@ -66,7 +67,10 @@ func (f fileStore) Save(b []byte) error {
 			return err
 		}
 	}
-	return writeAtomic(f.path, b)
+	if err := writeAtomic(f.path, b); err != nil || f.after == nil {
+		return err
+	}
+	return f.after(f.path)
 }
 
 func writeAtomic(path string, b []byte) error {
