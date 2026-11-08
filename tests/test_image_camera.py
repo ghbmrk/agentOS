@@ -279,7 +279,7 @@ class DecoderUnitTest(unittest.TestCase):
         self.assertIn("func TestDecoderStartsInItsUnit(", test)
         self.assertIn("os.Getpid(); pid != 1", test)
         self.assertIn('runHolds(t, "/run")', test)
-        self.assertIn("syscall.Access(p, 1)", test)
+        self.assertIn("unix.AT_EACCESS), unix.EACCES)", test)
 
 
 class DecoderStepTest(unittest.TestCase):

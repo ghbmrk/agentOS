@@ -193,11 +193,7 @@ class Manager:
         while time.monotonic() < end:
             if self.proc.poll() is not None:
                 break
-            try:
-                with open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)) as f:
-                    kids = f.read().split()
-            except OSError:
-                kids = []
+            kids = children(self.proc.pid)
             if kids:
                 self.pid = int(kids[0])
                 r = self.ctl(["show", "-p", "SystemState", "--value"], check=False)
@@ -264,7 +260,8 @@ class Manager:
     def stop(self):
         # PID 1 by its host pid: known once wait() found it, else unshare's child, which outlives a killed
         # unshare (no --kill-child), as after a failure between the fork and wait().
-        pids = [self.pid] if self.pid else children(self.proc.pid)
+        # unshare's children only while it is unreaped: a reaped pid may be another process's.
+        pids = [self.pid] if self.pid else children(self.proc.pid) if self.proc.poll() is None else []
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)

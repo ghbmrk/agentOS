@@ -67,7 +67,8 @@ func (r *record) Logf(f string, a ...any)   { r.logs = append(r.logs, fmt.Sprint
 // TestRunHoldsOnlyDirectories (#4392): the session's /run check passes
 // directories only. A socket fails it, and so does one in a directory the
 // session can search but not list; a directory it can neither list nor
-// search hides whatever it holds.
+// search hides whatever it holds. Root lists every directory, so only a
+// run as another user (CI's broker-race) tests the unsearchable case.
 func TestRunHoldsOnlyDirectories(t *testing.T) {
 	run := t.TempDir()
 	os.MkdirAll(filepath.Join(run, "user"), 0o755)

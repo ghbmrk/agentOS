@@ -949,3 +949,68 @@ func TestDecoderBehindClerk(t *testing.T) {
 		t.Error("a sample reached the clerk's log")
 	}
 }
+
+// gatedProc is a fakeProc whose Stop says it has begun, then holds until
+// the test opens gate.
+type gatedProc struct {
+	*fakeProc
+	stopping chan<- struct{}
+	gate     <-chan struct{}
+}
+
+func (p *gatedProc) Stop() {
+	select {
+	case p.stopping <- struct{}{}:
+	default:
+	}
+	<-p.gate
+	p.fakeProc.Stop()
+}
+
+// TestCloseWaitsLoopsAlreadyOutOfTheMap (#4392): Close also waits for a
+// session loop that a Remove or Cut in flight has already taken out of the
+// map, so no loop of the decoder still runs once Close returns.
+func TestCloseWaitsLoopsAlreadyOutOfTheMap(t *testing.T) {
+	for _, op := range []struct {
+		name string
+		run  func(*Decoder)
+	}{
+		{"Remove", func(d *Decoder) { d.Remove(testID) }},
+		{"Cut", func(d *Decoder) { d.Cut(testID) }},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			stopping, gate, started := make(chan struct{}, 1), make(chan struct{}), make(chan struct{}, 4)
+			d, err := NewDecoder(DecodeConfig{
+				Start: func(context.Context, Spec) (Proc, error) {
+					started <- struct{}{}
+					return &gatedProc{newFakeProc(nil), stopping, gate}, nil
+				},
+				Stall: time.Minute, Idle: time.Minute, Out: func(Decoded) {}, Report: func(string, Kind) {},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.Add(testID, picture, lepton); err != nil {
+				t.Fatal(err)
+			}
+			d.Frame(testID, thermalN(1))
+			<-started
+			go op.run(d)
+			<-stopping
+			closed := make(chan struct{})
+			go func() { d.Close(); close(closed) }()
+			select {
+			case <-closed:
+				close(gate)
+				t.Fatalf("Close returned while a loop that %s took out of the map still stopped its unit", op.name)
+			case <-time.After(300 * time.Millisecond):
+			}
+			close(gate)
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not return once the unit stopped")
+			}
+		})
+	}
+}

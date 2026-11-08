@@ -15,13 +15,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/camera"
 	"github.com/ghbmrk/agentos/broker/clerk/camera/decodehost"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
+	"golang.org/x/sys/unix"
 )
 
 // TestDecoderStartsInItsUnit runs as one session of the image's own
@@ -172,7 +172,7 @@ type logger interface {
 func runHolds(t logger, run string) {
 	err := filepath.WalkDir(run, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if d != nil && d.IsDir() && errors.Is(err, fs.ErrPermission) && syscall.Access(p, 1) != nil {
+			if d != nil && d.IsDir() && errors.Is(err, fs.ErrPermission) && errors.Is(unix.Faccessat(unix.AT_FDCWD, p, unix.X_OK, unix.AT_EACCESS), unix.EACCES) {
 				t.Logf("/run: %s cannot be listed or searched", p)
 				return fs.SkipDir
 			}
