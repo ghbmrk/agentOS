@@ -511,8 +511,9 @@ func TestCapIdleAddressStillInItsSet(t *testing.T) {
 // fails if Off leaves a port merging. The sender segments in software
 // (its TCP segmentation offloads off), so what leaves its port is what a
 // cable carries; its IP bytes are its port's transmitted bytes less each
-// frame's Ethernet header, with its gateway's neighbour entry fixed so no
-// ARP is in them.
+// frame's Ethernet header and less what it sent anywhere but the server
+// (IPv6 control, counted in its own output chain), with its gateway's
+// neighbour entry fixed so no ARP is in them.
 func TestCapCountsEverySegmentHeader(t *testing.T) {
 	if !nft.InNetns(t) {
 		return
@@ -541,6 +542,29 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+		// The rest of what the box sends in a window (IPv6 neighbour and
+		// multicast control where the kernel has IPv6, anything to another
+		// address) is counted on its own and taken off.
+		r.h.In(tc.box, "nft", "add table inet tx; add counter inet tx other; "+
+			"add chain inet tx out { type filter hook output priority filter; }; "+
+			"add rule inet tx out meta nfproto ipv6 counter name other; add rule inet tx out ip daddr != "+tc.to+" counter name other")
+		other := func() uint64 {
+			var doc struct {
+				Nftables []struct {
+					Counter *struct{ Bytes uint64 } `json:"counter"`
+				} `json:"nftables"`
+			}
+			if err := json.Unmarshal([]byte(r.h.In(tc.box, "nft", "-j", "list", "counter", "inet", "tx", "other")), &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, o := range doc.Nftables {
+				if o.Counter != nil {
+					return o.Counter.Bytes
+				}
+			}
+			t.Fatal("no counter inet tx other")
+			return 0
+		}
 		mac := r.h.MAC(tc.port)
 		r.h.In(tc.box, "ip", "neigh", "replace", tc.seg, "lladdr", mac, "nud", "permanent", "dev", "eth0")
 		port := 9400 + i
@@ -550,13 +574,15 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 		})
 		send := func() (counted, sent uint64) {
 			r.read()
-			before, tx := tc.count(r.c.Counts()), r.h.TxIP(tc.box)
+			before, tx, o := tc.count(r.c.Counts()), r.h.TxIP(tc.box), other()
 			r.h.Dial(tc.box, tc.to, port, 5*time.Second, func(c net.Conn) int {
 				n, _ := c.Write(make([]byte, 8<<20))
 				return n
 			})
 			time.Sleep(100 * time.Millisecond) // the last segments cross the enforcer
-			sent = r.h.TxIP(tc.box) - tx
+			rest := other() - o
+			sent = r.h.TxIP(tc.box) - tx - rest
+			t.Logf("%s sent %d IP bytes elsewhere in the window", tc.box, rest)
 			r.read()
 			return tc.count(r.c.Counts()) - before, sent
 		}
