@@ -1094,8 +1094,8 @@ func TestAnswersRefreshed(t *testing.T) {
 	logged := len(x.logText())
 	x.advance(readEvery)
 	x.advance(readEvery)
-	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 {
-		t.Fatalf("a failing step logged %d times over two intervals, want once", got)
+	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 || !strings.Contains(x.logText()[logged:], "until one is: nft: gone") {
+		t.Fatalf("a failing step logged %d times over two intervals, want once with its cause:\n%s", got, x.logText()[logged:])
 	}
 	x.fire.mu.Lock()
 	x.fire.listErr = nil
@@ -1103,5 +1103,22 @@ func TestAnswersRefreshed(t *testing.T) {
 	x.advance(readEvery)
 	if !strings.Contains(x.logText()[logged:], "resolver answers: refreshed again") || refreshes() != 2 {
 		t.Fatal("the step's recovery was not logged or did not refresh")
+	}
+}
+
+// TestNoRefreshBeforeALoad (#4453): while no ruleset has loaded (each
+// load so far refused) there are no answers to refresh, so the step reads
+// nothing.
+func TestNoRefreshBeforeALoad(t *testing.T) {
+	x := newBox(t, false)
+	x.d.fwMu.Lock()
+	x.d.loaded = ""
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: no table")
+	x.fire.mu.Unlock()
+	n := x.listed()
+	if err := x.d.refreshAnswers(context.Background()); err != nil || x.listed() != n {
+		t.Fatalf("the step ran before any load: %v, %d lists", err, x.listed()-n)
 	}
 }

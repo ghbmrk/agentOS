@@ -57,13 +57,13 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 				all = append(all, kept...)
 			}
 			w.elements(a.set(v6), all)
-			kept := map[netip.Addr]bool{}
+			kept := map[string]bool{}
 			for _, e := range all {
-				kept[e] = true
+				kept[e.String()] = true
 			}
 			var fresh []netip.Addr
 			for _, e := range ofFamily(have[a.Fresh(v6)], v6) {
-				if kept[e] {
+				if kept[e.String()] {
 					fresh = append(fresh, e)
 				}
 			}
@@ -71,7 +71,7 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 			var rs []string
 			for _, r := range left[a.Recent(v6)] {
 				if kept[r.addr] {
-					rs = append(rs, r.addr.String()+" expires "+secs(int(r.left)))
+					rs = append(rs, r.addr+" expires "+secs(int(r.left)))
 				}
 			}
 			if len(rs) > 0 {
@@ -149,40 +149,34 @@ func ofFamily(es []netip.Addr, v6 bool) []netip.Addr {
 	return out
 }
 
-// aging is one recent set's element: its address and the seconds it has
-// left.
+// aging is one recent set's element: its address as nft printed it and
+// the seconds it has left.
 type aging struct {
-	addr netip.Addr
+	addr string
 	left int64
 }
 
-// recent is each listed set's elements that are a plain address with an
-// expiry and no timeout of their own, as a recent set holds them, each
-// with the time it has left; one with more than AnswerTimeout left, or
-// none, is left out, so it is not kept.
+// recent is each listed set's elements that are a value with an expiry
+// and no timeout of their own, as a recent set holds them, each with the
+// time it has left; one with more than AnswerTimeout left, or none, is
+// left out, so it is not kept. Reload keeps only a value that is the
+// printed form of a kept address, so a value in any other form is never
+// carried.
 func recent(sets []listedSet) map[string][]aging {
 	out := map[string][]aging{}
 	for _, s := range sets {
 		for _, raw := range s.Elem {
 			var e struct {
 				Elem *struct {
-					Val     json.RawMessage `json:"val"`
-					Timeout *int64          `json:"timeout"`
-					Expires int64           `json:"expires"`
+					Val     string `json:"val"`
+					Timeout *int64 `json:"timeout"`
+					Expires int64  `json:"expires"`
 				} `json:"elem"`
 			}
 			if json.Unmarshal(raw, &e) != nil || e.Elem == nil || e.Elem.Timeout != nil || e.Elem.Expires <= 0 || e.Elem.Expires > AnswerTimeout {
 				continue
 			}
-			var str string
-			if json.Unmarshal(e.Elem.Val, &str) != nil {
-				continue
-			}
-			a, err := netip.ParseAddr(str)
-			if err != nil || a.Zone() != "" || a.Is4In6() {
-				continue
-			}
-			out[s.Name] = append(out[s.Name], aging{a, e.Elem.Expires})
+			out[s.Name] = append(out[s.Name], aging{e.Elem.Val, e.Elem.Expires})
 		}
 	}
 	return out

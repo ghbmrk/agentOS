@@ -263,10 +263,13 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 		tv.Named("tv.example", true):   {"2001:db8::10"},
 		tv.Fresh(false):                {"203.0.113.10", "203.0.113.20", "203.0.113.99", "2001:db8::10"},
 		tv.Recent(false): {
+			elem("203.0.113.14", `, "expires": 90`),
 			elem("203.0.113.11", `, "expires": 120`),
+			raw{`{"elem": {"val": {"prefix": {"addr": "203.0.113.10", "len": 32}}, "expires": 60}}`},
+			elem("203.0.113.010", `, "expires": 60`),
 			elem("203.0.113.12", `, "expires": 601`),
 			elem("203.0.113.13", `, "expires": 0`),
-			elem("203.0.113.14", `, "timeout": 60, "expires": 30`),
+			elem("203.0.113.13", `, "timeout": 60, "expires": 30`),
 			elem("203.0.113.20", `, "expires": 120`),
 			elem("2001:db8::10", `, "expires": 120`),
 		},
@@ -278,14 +281,14 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 	}
 	for _, want := range []string{
 		"add element inet enforcer " + tv.Fresh(false) + " { 203.0.113.10 }\n",
-		"add element inet enforcer " + tv.Recent(false) + " { 203.0.113.11 expires 120s }\n",
+		"add element inet enforcer " + tv.Recent(false) + " { 203.0.113.11 expires 120s, 203.0.113.14 expires 90s }\n",
 		"add element inet enforcer " + tv.Recent(true) + " { 2001:db8::10 expires 600s }\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reload lacks %q", want)
 		}
 	}
-	for _, bad := range []string{"203.0.113.20", "203.0.113.99", "203.0.113.12 expires", "203.0.113.13 expires", "203.0.113.14 expires"} {
+	for _, bad := range []string{"203.0.113.20", "203.0.113.99", "203.0.113.12 expires", "203.0.113.13 expires", "203.0.113.10 expires", "203.0.113.010"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("reload carried %s", bad)
 		}
