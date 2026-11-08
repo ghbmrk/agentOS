@@ -57,16 +57,20 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 				all = append(all, kept...)
 			}
 			w.elements(a.set(v6), all)
+			kept := map[netip.Addr]bool{}
+			for _, e := range all {
+				kept[e] = true
+			}
 			var fresh []netip.Addr
 			for _, e := range ofFamily(have[a.Fresh(v6)], v6) {
-				if slices.Contains(all, e) {
+				if kept[e] {
 					fresh = append(fresh, e)
 				}
 			}
 			w.elements(a.Fresh(v6), fresh)
 			var rs []string
 			for _, r := range left[a.Recent(v6)] {
-				if r.addr.Is6() == v6 && slices.Contains(all, r.addr) {
+				if kept[r.addr] {
 					rs = append(rs, r.addr.String()+" expires "+secs(int(r.left)))
 				}
 			}
