@@ -39,7 +39,10 @@ func (p pageCore) RevokeMsg(owner key.PublicKey) []byte {
 }
 
 // Revoke is RevokeCore on the pinned key. A revocation the head store
-// keeps in force but could not save says so, so the owner taps again.
+// keeps in force but could not save says so, so the owner taps again: a
+// restart may not keep it. A tap answered done is a whole journal line,
+// since the store appends nothing after a fragment it could not cut back
+// (heads ENF-h-5).
 func (p pageCore) Revoke(sig []byte) error {
 	err := p.d.RevokeCore(p.d.core, sig)
 	switch {
