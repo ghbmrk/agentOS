@@ -316,6 +316,17 @@ type file struct {
 	NotAskedLines int    `json:"not_asked_lines,omitempty"`
 	NotAskedMore  int    `json:"not_asked_more,omitempty"`
 	Sends         []send `json:"sends,omitempty"`
+	// Sending is a text that was about to go out when the book was saved
+	// (#2379). Files written before it have none.
+	Sending *sending `json:"sending,omitempty"`
+}
+
+// sending is a question text saved before it is sent, so a crash between
+// the send and the save that books it cannot text it again: a restart
+// books it as sent at the recorded time, as an unknown outcome (D-116).
+type sending struct {
+	IDs  []string `json:"ids"`
+	Send send     `json:"send"`
 }
 
 // send is one owner text, kept an hour for pacing (CH-15). Others are
@@ -350,6 +361,7 @@ type Book struct {
 	// maxNotAskedLines, notAskedMore counts the rest.
 	notAskedLines, notAskedMore int
 	sends                       []send
+	sending                     *sending
 	// loaded is set when questions came from disk; grace, set at the first
 	// trusted tick after that, is when lapsing resumes, so owner replies
 	// the carrier queued while the box was down arrive first.
@@ -418,6 +430,16 @@ func New(cfg Config) (*Book, error) {
 		b.notAskedLines, b.notAskedMore = f.NotAskedLines, f.NotAskedMore
 		b.loaded = len(b.qs) > 0
 		m := cfg.Mono()
+		if p := f.Sending; p != nil {
+			var batch []*entry
+			for _, id := range p.IDs {
+				if e := b.byIDLocked(id); e != nil && !e.texted() {
+					batch = append(batch, e)
+				}
+			}
+			p.Send.mono, p.Send.monoSet = m, true
+			b.textedLocked(batch, p.Send)
+		}
 		for _, e := range b.qs {
 			if e.State == Held && !e.texted() {
 				e.askedMono, e.askMono, e.askLoaded = m, true, true
@@ -452,7 +474,7 @@ func (b *Book) writeBook() error {
 		return nil
 	}
 	raw, err := json.Marshal(file{Next: b.next, Questions: b.qs, Digest: b.digest, Sends: b.sends, Refused: b.refused,
-		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore})
+		NotAskedLines: b.notAskedLines, NotAskedMore: b.notAskedMore, Sending: b.sending})
 	if err != nil {
 		return err
 	}
@@ -822,21 +844,35 @@ const (
 	numTags  = 900
 )
 
-// tagRoomLocked is how many more questions may be texted now. A texted
-// question holds its tag until Keep after it closes, and an untexted one
-// only while it is open, so at most numTags-MaxOpen texted questions are
-// kept at once: an asker under the open cap always finds a tag, whatever
-// TEXTS and Keep are, and a tag is never reused while the owner may still
-// answer its question (P3-8 Q5, security B2 on #2372). Past it, questions
-// are held until kept ones age out.
-func (b *Book) tagRoomLocked() int {
-	room := numTags - b.cfg.MaxOpen
-	for _, e := range b.qs {
-		if e.texted() {
-			room--
+// mayTextLocked reports whether one more of asker's questions may be
+// texted, with add[a] of a's questions already joined to the text being
+// built. A texted question holds its tag until Keep after it closes, and
+// an untexted one only while it is open, so at most numTags-MaxOpen
+// texted questions are kept at once: an asker under the open cap always
+// finds a tag, whatever TEXTS and Keep are, and a tag is never reused
+// while the owner may still answer its question (P3-8 Q5, security B2 on
+// #2372). Of that room, an asker may keep at most half, rounded up, of
+// what the other askers leave, so no flood of lineages holds another's
+// question: n flooders keep about 1/(n+1) of the room each, and the rest
+// stays free (#2380). Past its share, an asker's questions are held until
+// its kept ones age out.
+func (b *Book) mayTextLocked(asker string, add map[string]int) bool {
+	mine, others := add[asker], 0
+	for a, n := range add {
+		if a != asker {
+			others += n
 		}
 	}
-	return room
+	for _, e := range b.qs {
+		switch {
+		case !e.texted():
+		case e.Asker == asker:
+			mine++
+		default:
+			others++
+		}
+	}
+	return 2*(mine+1) <= numTags-b.cfg.MaxOpen-others+1
 }
 
 // allocLocked returns the next free tag, skipping any still known (open,
@@ -980,11 +1016,10 @@ func (b *Book) sendDue(ctx context.Context) {
 		// one that was not, so one lineage cannot take the whole budget;
 		// a question held AgedAfter goes first (PQ5).
 		var batch []*entry
-		room := b.tagRoomLocked()
-		if room > 0 && len(b.sends) < b.cfg.MaxSendsPerHour && (chat || counted < b.perHour()) {
+		if len(b.sends) < b.cfg.MaxSendsPerHour && (chat || counted < b.perHour()) {
 			for tier := range 3 {
 				for _, q := range b.qs {
-					if !b.dueLocked(q, now, trusted, m) {
+					if !b.dueLocked(q, now, trusted, m) || !b.mayTextLocked(q.Asker, nil) {
 						continue
 					}
 					t := 2
@@ -1014,19 +1049,31 @@ func (b *Book) sendDue(ctx context.Context) {
 		// The first goes alone if need be; the rest join while the text
 		// still fits and is not withheld as secret-shaped (CH-19).
 		text := b.renderBy(batch[0], by(batch[0]))
-		n := 1
+		n, add := 1, map[string]int{batch[0].Asker: 1}
 		for _, q := range batch[1:] {
-			if n == MaxPerText || n == room {
+			if n == MaxPerText {
 				break
 			}
 			t := text + " " + b.renderBy(q, by(q))
-			if len(t) > MaxRendered || b.cfg.Hidden != nil && b.cfg.Hidden(t) {
+			if len(t) > MaxRendered || b.cfg.Hidden != nil && b.cfg.Hidden(t) || !b.mayTextLocked(q.Asker, add) {
 				continue
 			}
 			text, batch[n] = t, q
+			add[q.Asker]++
 			n++
 		}
 		batch = batch[:n]
+		s := send{Asker: batch[0].Asker, Chat: chat, mono: m, monoSet: true}
+		if trusted {
+			s.At = now
+		}
+		var ids []string
+		for _, e := range batch {
+			if e != batch[0] {
+				s.Others = append(s.Others, e.Asker)
+			}
+			ids = append(ids, e.ID)
+		}
 		b.mu.Unlock()
 		// The shared budget is reserved outside b.mu, and sendMu keeps it
 		// to one text at a time.
@@ -1036,7 +1083,22 @@ func (b *Book) sendDue(ctx context.Context) {
 		} else if b.cfg.Reserve != nil && !b.cfg.Reserve(aged) {
 			return
 		}
+		// Saved before it is sent (#2379): a book that cannot record the
+		// text does not send it, so the questions stay held.
+		b.mu.Lock()
+		b.sending = &sending{IDs: ids, Send: s}
+		if err := b.persist(); err != nil {
+			b.sending = nil
+			b.mu.Unlock()
+			b.cfg.Logf("question: save before send: %v", err)
+			return
+		}
+		b.mu.Unlock()
 		if err := deliver(text); errors.Is(err, ErrNotSent) {
+			b.mu.Lock()
+			b.sending = nil
+			b.save("unsent")
+			b.mu.Unlock()
 			return
 		} else if err != nil {
 			// It may have gone: booked as sent, so the hour counts it and
@@ -1044,32 +1106,35 @@ func (b *Book) sendDue(ctx context.Context) {
 			b.cfg.Logf("question text outcome unknown, counted as sent: %v", err)
 		}
 		b.mu.Lock()
-		s := send{Asker: batch[0].Asker, Chat: chat, mono: m, monoSet: true}
-		if trusted {
-			s.At = now
-		}
 		for _, e := range batch {
-			if e != batch[0] {
-				s.Others = append(s.Others, e.Asker)
-			}
 			// How long questions wait for a text, to tune AgedAfter (PQ5).
 			b.cfg.Logf("question %s texted after %s held", e.ID, b.heldFor(e, now, trusted, m).Round(time.Minute))
-			if e.State == Held { // the owner may have answered meanwhile
-				e.State = Waiting
-				if trusted {
-					e.Deadline = now.Add(e.Wait)
-				}
-			}
-			if trusted {
-				e.Sent = now
-			}
-			e.Texted, e.sentMono, e.monoSet = true, m, true
 		}
-		b.sends = append(b.sends, s)
+		b.sending = nil
+		b.textedLocked(batch, s)
 		b.wakeLocked()
 		b.save("send")
 		b.mu.Unlock()
 	}
+}
+
+// textedLocked books batch as texted by s: at s.At when the clock was
+// trusted, else on the monotonic clock until a trusted tick dates it
+// (PQ4).
+func (b *Book) textedLocked(batch []*entry, s send) {
+	for _, e := range batch {
+		if e.State == Held { // the owner may have answered meanwhile
+			e.State = Waiting
+			if !s.At.IsZero() {
+				e.Deadline = s.At.Add(e.Wait)
+			}
+		}
+		if !s.At.IsZero() {
+			e.Sent = s.At
+		}
+		e.Texted, e.sentMono, e.monoSet = true, s.mono, true
+	}
+	b.sends = append(b.sends, s)
 }
 
 // perHour is the hour's limit on question texts: the owner's TEXTS
