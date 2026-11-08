@@ -266,7 +266,8 @@ def collect_states(repo, token):
     The generated BOARD.md only shows a package while it is open, and a state held between two
     board renders never reaches its history, so escalations and reviews are also counted here."""
     out = []
-    for e in _pages(repo, "issues/events", token):
+    # GitHub stops this feed at 300 pages and has no filter to narrow it, so the cap ends the walk.
+    for e in _pages(repo, "issues/events", token, capped=True):
         issue, label = e.get("issue") or {}, (e.get("label") or {}).get("name", "")
         names = {x["name"] for x in issue.get("labels", [])}
         m = WORK_ITEM_TITLE.match(issue.get("title", ""))
@@ -291,11 +292,20 @@ def _since(previous_md, tz):
     return start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _pages(repo, path, token, key=None):
+def _pages(repo, path, token, key=None, capped=False):
+    """Every item of a paged listing. With `capped`, a 422 after page 1 is GitHub's page limit
+    on a feed with no filter: the listing ends there, and one line on stderr says so."""
     sep = "&" if "?" in path else "?"
     page = 1
     while True:
-        data = _api(repo, f"{path}{sep}per_page=100&page={page}", token)
+        try:
+            data = _api(repo, f"{path}{sep}per_page=100&page={page}", token)
+        except urllib.error.HTTPError as e:
+            if capped and e.code == 422 and page > 1:
+                print(f"{path}: GitHub lists no further than page {page - 1}; older items are not read",
+                      file=sys.stderr)
+                return
+            raise
         items = data[key] if key else data
         yield from items
         if len(items) < 100:
