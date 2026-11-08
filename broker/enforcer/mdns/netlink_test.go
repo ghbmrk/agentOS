@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -59,6 +60,10 @@ func dumpEnd() []byte { return nlmsg(syscall.NLMSG_DONE, make([]byte, 4)) }
 // a sender's own link (ENF-f-m3), nor end a request early. Each forgery
 // is queued before the request, ahead of the kernel's reply.
 func TestForgedDumpRefused(t *testing.T) {
+	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
+		return
+	}
+	run(t, "ip", "link", "set", "lo", "up") // lo's 127.0.0.1/8 is the kernel's answer to read
 	r, err := openRoute()
 	if err != nil {
 		t.Skipf("no netlink socket here: %v", err)
@@ -124,6 +129,9 @@ func TestForgedDumpRefused(t *testing.T) {
 // replyWait: it fails, and the relay then treats nothing as a sender's
 // own link (prefixes is empty), rather than stall on the flood.
 func TestFloodEndsRequest(t *testing.T) {
+	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
+		return
+	}
 	defer func(w time.Duration) { replyWait = w }(replyWait)
 	replyWait = 300 * time.Millisecond
 	r, err := openRoute()
@@ -148,6 +156,7 @@ func TestFloodEndsRequest(t *testing.T) {
 	ne.PutUint32(noop[0:], uint32(len(noop)))
 	stop := make(chan struct{})
 	flooding := make(chan struct{})
+	var sent atomic.Int64
 	go func() {
 		defer close(flooding)
 		for {
@@ -156,7 +165,9 @@ func TestFloodEndsRequest(t *testing.T) {
 				return
 			default:
 			}
-			syscall.Sendto(f, noop, 0, to) // a full queue refuses some: the rest keep coming
+			if syscall.Sendto(f, noop, 0, to) == nil { // a full queue refuses some: the rest keep coming
+				sent.Add(1)
+			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -171,6 +182,9 @@ func TestFloodEndsRequest(t *testing.T) {
 		}
 		if d := time.Since(start); d > 2*time.Second {
 			t.Fatalf("a flooded request took %v", d)
+		}
+		if sent.Load() == 0 {
+			t.Fatal("no flood datagram reached the socket: the test proved nothing")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a flood of other datagrams held the request past replyWait")
