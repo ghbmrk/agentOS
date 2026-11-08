@@ -6,6 +6,19 @@
 <body>
 <h1>Home enforcer</h1>
 <p>Policy version {{.Version}}.</p>
+{{if .Shown}}
+<h2>Alerts</h2>
+{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off when the cut lifts or you clear its alert below.</p>
+{{else}}<p>The light is off: no known attack is open.</p>{{end}}
+{{if .CoreDown}}<p class="warn">The core is down: the enforcer has not heard from it lately. Your rules here stay as they are, but the enforcer's texts cannot reach your phone while the core is down, so check this page.</p>{{end}}
+{{range .Alerts}}<div class="pending warn">
+<p>{{.Text}}</p>
+<p>Since {{when .At.UnixMilli}}{{if gt .Count 1}}, {{.Count}} times{{end}}. {{if .Sent}}Handed to the core to text you; the core may not have sent it.{{else}}Not texted: the core has not taken it.{{end}}</p>
+{{if and .Revoke $.Core (not $.Revoked)}}<p>Choose: if you trust the core, clear this and keep it. If you do not, <a href="#revoke">revoke the core's key</a> below, then clear this.</p>{{end}}
+{{if not .Fixed}}<button class="act" data-action="clear" data-target="{{.ID}}" data-rp="{{$.Name}}">Clear with your passkey</button>{{end}}
+</div>
+{{else}}<p>No open alerts.</p>{{end}}
+{{end}}
 {{if .Recovery}}
 <div class="pending warn">
 <p>A new passkey is being enrolled with the recovery code. At {{.Recovery}} it replaces your passkey, and your passkey stops working. If this is not you, cancel it now.</p>
@@ -44,6 +57,9 @@
 <h2>agentOS channel</h2>
 <p>The channel is {{.Channel}}.</p>
 {{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
+{{if .Core}}<div id="revoke">{{if .Revoked}}<p>The core's channel key is revoked: the enforcer takes no message from the core over its channel. The core's network access stays as your rules set it.</p>
+{{else}}<p>If the core box was stolen or you no longer trust it, revoke its key here. The enforcer then takes no message from the core over its channel: no rule change, count read or log copy, and the core cannot stop this. The core's network access stays as your rules set it. The enforcer's texts stop too, since they go through the core. It cannot be undone: the core works with the enforcer again only once a new core key is set up.</p>
+<button class="act" data-action="revoke-core" data-target="" data-rp="{{.Name}}" data-confirm="Revoke the core's key? The enforcer will take no message from the core over its channel, its texts to you stop, and this cannot be undone.">Revoke the core's key with your passkey</button>{{end}}</div>{{end}}
 
 {{if .Offers}}<h2>Names heard</h2>
 {{range .Offers}}<div class="pending">

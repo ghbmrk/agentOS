@@ -603,3 +603,62 @@ func TestLiftKeepsClosedTripTime(t *testing.T) {
 	}
 	check("after restart", b.Log())
 }
+
+// torn is a journal whose append writes half its line while short is
+// set, and whose cut-back fails while noCut is.
+type torn struct {
+	journal
+	short, noCut bool
+}
+
+func (j *torn) Append(b []byte) error {
+	if j.short {
+		j.journal.b = append(j.journal.b, b[:len(b)/2]...)
+		return errors.New("disk full")
+	}
+	return j.journal.Append(b)
+}
+
+func (j *torn) Truncate(n int) error {
+	if j.noCut {
+		return errors.New("disk: truncate failed")
+	}
+	return j.journal.Truncate(n)
+}
+
+// A failed append whose cut-back fails too leaves a fragment: no record
+// is appended after it until a cut-back succeeds, so a saved record never
+// sits glued to the fragment, and a later failed append's cut-back never
+// removes it (Security 6722859700 on #5101).
+func TestFailedCutBackKeepsSavedRecord(t *testing.T) {
+	j := &torn{}
+	a, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: j})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.short, j.noCut = true, true
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("a torn record was reported saved")
+	}
+	j.short = false
+	torn := len(j.b)
+	if _, err := a.Raise(RoutineLock, "front-door"); err == nil || len(j.b) != torn {
+		t.Fatalf("a record was appended after a fragment not cut back: %v", err)
+	}
+	j.noCut = false
+	saved, err := a.Raise(RoutineLock, "back-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.short = true
+	if _, err := a.Raise(RoutineLock, "side-door"); err == nil {
+		t.Fatal("a torn record was reported saved")
+	}
+	b, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: &journal{b: slices.Clone(j.b)}})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if !slices.ContainsFunc(b.Log(), func(r Record) bool { return r.ID == saved.ID && r.Device == "back-door" }) {
+		t.Fatalf("a saved record was lost to a later cut-back: %+v", b.Log())
+	}
+}

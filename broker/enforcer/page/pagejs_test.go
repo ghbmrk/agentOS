@@ -90,7 +90,8 @@ func (g *enrolScreens) screen(dir, name string) (string, string) {
 // in Node against the enrolment screens (first boot, after a factory
 // reset, a passkey in force), shows the owner what each answer means: the
 // recovery code once, the card with the words that fit the state, and a
-// form left ready after a failure. An id the script reads that a screen
+// form left ready after a failure; on home, a step that cannot be undone
+// (revoking the core's key, #4751) asks before the tap. An id the script reads that a screen
 // lacks fails it, as it throws in a browser. Catches the script's mutants
 // that Go tests cannot see. CI has Node, so there a missing node fails
 // rather than skips.
@@ -116,7 +117,12 @@ func TestPageScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset, _ := g.screen(dir, "reset")
-	out, err := exec.Command(node, "testdata/pagejs.js", "static/page.js", factory, reset, enrolled).CombinedOutput()
+	sg, _, _ := stateRig(t) // home with an alert to clear and the core's key to revoke
+	home := filepath.Join(dir, "home.html")
+	if err := os.WriteFile(home, []byte(sg.homeHTML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, "testdata/pagejs.js", "static/page.js", factory, reset, enrolled, home).CombinedOutput()
 	if err != nil {
 		t.Fatalf("page.js: %v\n%s", err, out)
 	}
