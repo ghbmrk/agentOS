@@ -163,7 +163,6 @@ type planSignIn struct {
 	guest, code string
 	cancel      context.CancelFunc
 	done        chan struct{}
-	removed     bool // Remove ended it, under PlanHost.mu
 }
 
 // PlanState is the route as the owner's page shows it.
@@ -183,7 +182,9 @@ type PlanState struct {
 	Code    string `json:"code,omitempty"`
 	From    string `json:"from,omitempty"`
 	// Last is how the last sign-in ended: DSignedIn, a DSignIn* detail,
-	// or "".
+	// or "". It never names a login that is gone: a Remove that deletes
+	// the login reads DSignInStopped if it ended a sign-in and clears
+	// DSignedIn, and one that fails leaves it as the login is.
 	Last string `json:"last,omitempty"`
 }
 
@@ -341,18 +342,14 @@ func (h *PlanHost) await(ctx context.Context, s *planSignIn, w SignInWorker, t S
 // end forgets the sign-in guest and records how its sign-in ended. A code
 // exchange that committed before Forget wins over detail, and one that
 // answers after it is dropped (plan.DEnded), so a late approval is never
-// stored behind a timed-out sign-in. A sign-in Remove ended reads
-// DSignInStopped even if it committed first, since Remove then deletes
-// that login.
+// stored behind a timed-out sign-in. A sign-in Remove ends is relabelled by
+// Remove once the login is deleted.
 func (h *PlanHost) end(s *planSignIn, detail string) {
 	if h.Login.Forget(s.guest) {
 		detail = DSignedIn
 	}
 	s.cancel()
 	h.mu.Lock()
-	if s.removed {
-		detail = DSignInStopped
-	}
 	if h.cur == s {
 		h.cur = nil
 		h.last = detail
@@ -389,25 +386,33 @@ func (h *PlanHost) Resume() (string, error) {
 }
 
 // Remove ends any sign-in, waiting for its sandbox to go, and deletes the
-// login. No sign-in begins while it runs.
+// login. No sign-in begins while it runs. Once the login is deleted, last
+// reads DSignInStopped if Remove ended a sign-in, even one that committed
+// first, and a DSignedIn is cleared; if the delete fails, last stays as
+// the sign-in ended, matching the login still stored.
 func (h *PlanHost) Remove() error {
 	h.mu.Lock()
 	s := h.cur
 	if s != nil {
-		s.removed = true
 		s.cancel()
 	}
 	h.removing++
 	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		h.removing--
-		h.mu.Unlock()
-	}()
 	if s != nil {
 		<-s.done
 	}
-	return h.Login.Remove()
+	err := h.Login.Remove()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.removing--
+	switch {
+	case err != nil:
+	case s != nil:
+		h.last = DSignInStopped
+	case h.last == DSignedIn:
+		h.last = ""
+	}
+	return err
 }
 
 // ListenPlanOwner opens the model clerk process's plan owner socket,

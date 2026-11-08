@@ -227,7 +227,7 @@ func read(t *testing.T, resp *http.Response) string {
 // codeForm is the CLI's code exchange of code and verifier, with its local
 // callback.
 func codeForm(code, verifier string) string {
-	return url.Values{"client_id": {"app_x"}, "code": {code}, "code_verifier": {verifier}, "grant_type": {"authorization_code"},
+	return url.Values{"client_id": {plan.CodexClientID}, "code": {code}, "code_verifier": {verifier}, "grant_type": {"authorization_code"},
 		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
 }
 
@@ -1004,5 +1004,125 @@ func TestPlanCancelledRefreshStillCommits(t *testing.T) {
 	read(t, resp)
 	if _, body := f.last(); !strings.Contains(body, `"refresh_token":"real-refresh-2"`) {
 		t.Fatalf("the next refresh sent %q", body)
+	}
+}
+
+// REQ: CLK-7
+//
+// A code exchange sends the declared client_id, the one its refresh sends
+// (#5089 item 7): another is refused with nothing sent, and the declared
+// one passes.
+func TestPlanCodeExchangePinsClientID(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "s")
+	before := f.hits()
+	for _, id := range []string{"app_other", plan.CodexClientID + "x", strings.ToLower(plan.CodexClientID)} {
+		b := strings.Replace(form, "client_id="+plan.CodexClientID, "client_id="+url.QueryEscape(id), 1)
+		if resp, d := p.Do(context.Background(), "s", req("POST", "/oauth/token", b, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil); resp != nil || d != plan.DUndeclared {
+			t.Errorf("code exchange with client_id %q: served or %q", id, d)
+		}
+	}
+	if f.hits() != before || p.Signed() {
+		t.Fatalf("a refused code exchange reached the provider (%d sent) or signed in", f.hits()-before)
+	}
+	resp, d := p.Do(context.Background(), "s", req("POST", "/oauth/token", form, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
+	if d != "" {
+		t.Fatalf("the declared code exchange: %s", d)
+	}
+	read(t, resp)
+	if _, body := f.last(); !strings.Contains(body, "client_id="+plan.CodexClientID+"&") || !p.SignedIn("s") {
+		t.Fatalf("the declared code exchange sent %q", body)
+	}
+}
+
+// REQ: CLK-7
+//
+// A refresh carries the declared refresh headers and none of the guest's
+// (#5089 item 2): a guest's Accept, User-Agent, Originator or account
+// header never reaches the provider, so a guest cannot shape a refresh's
+// answer through its headers either.
+func TestPlanRefreshSendsOnlyDeclaredHeaders(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	h := map[string]string{
+		"Content-Type": "application/json", "Accept": "application/x-www-form-urlencoded", "User-Agent": "guest/1",
+		"Originator": "guest", "Chatgpt-Account-Id": "acct-other", "Session_id": "s-1", "Openai-Beta": "x", "Version": "9",
+	}
+	resp, d := p.Do(context.Background(), "g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), h), nil)
+	if d != "" {
+		t.Fatalf("refresh: %s", d)
+	}
+	read(t, resp)
+	up, _ := f.last()
+	if up.URL.Path != "/oauth/token" || up.Header.Get("Originator") != "codex_cli_rs" || up.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("the refresh sent %v", up.Header)
+	}
+	for k := range up.Header {
+		switch k {
+		case "Originator", "Content-Type", "Content-Length", "Accept-Encoding":
+		default:
+			t.Errorf("the refresh sent header %s: %q", k, up.Header.Values(k))
+		}
+	}
+	if len(up.Header.Values("Originator")) != 1 {
+		t.Errorf("the refresh sent Originator %q", up.Header.Values("Originator"))
+	}
+}
+
+// REQ: CLK-7
+//
+// New refuses a declaration whose refresh would not be the CLI's exact one
+// (#5089 items 1 and 9): refresh_token declared as a fixed value, a
+// grant_type other than refresh_token or none, a code exchange without the
+// client_id, or a refresh header that is a credential, framing or the
+// clerk's own, non-canonical, or no plain value. Codex's declaration
+// passes.
+func TestPlanDeclarationHoldsTheRefresh(t *testing.T) {
+	f := newPlanFix(t)
+	if _, err := plan.New(f.decl(t), plan.NewStore(sealer(t), nil), f.roots); err != nil {
+		t.Fatalf("Codex: %v", err)
+	}
+	cases := map[string]func(d *plan.Declaration){
+		"refresh_token fixed": func(d *plan.Declaration) { d.Refresh["refresh_token"] = "x" },
+		"no grant_type":       func(d *plan.Declaration) { delete(d.Refresh, "grant_type") },
+		"another grant_type":  func(d *plan.Declaration) { d.Refresh["grant_type"] = "authorization_code" },
+		"no client_id":        func(d *plan.Declaration) { delete(d.Refresh, "client_id") },
+		"empty client_id":     func(d *plan.Declaration) { d.Refresh["client_id"] = "" },
+		"Authorization":       func(d *plan.Declaration) { d.RefreshHeaders["Authorization"] = "Bearer x" },
+		"Cookie":              func(d *plan.Declaration) { d.RefreshHeaders["Cookie"] = "c=1" },
+		"Content-Type":        func(d *plan.Declaration) { d.RefreshHeaders["Content-Type"] = "text/plain" },
+		"Accept-Encoding":     func(d *plan.Declaration) { d.RefreshHeaders["Accept-Encoding"] = "gzip" },
+		"X-Forwarded-For":     func(d *plan.Declaration) { d.RefreshHeaders["X-Forwarded-For"] = "1.2.3.4" },
+		"non-canonical":       func(d *plan.Declaration) { d.RefreshHeaders["originator"] = "codex_cli_rs" },
+		"empty value":         func(d *plan.Declaration) { d.RefreshHeaders["Originator"] = "" },
+		"padded value":        func(d *plan.Declaration) { d.RefreshHeaders["Originator"] = " codex_cli_rs" },
+		"line break":          func(d *plan.Declaration) { d.RefreshHeaders["Originator"] = "codex\r\nX-A: b" },
+		"non-ASCII":           func(d *plan.Declaration) { d.RefreshHeaders["Originator"] = "codexé" },
+	}
+	for name, mutate := range cases {
+		d := f.decl(t)
+		mutate(&d)
+		if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
+			t.Errorf("%s: New accepted the declaration", name)
+		}
+	}
+	// Without a code exchange, a refresh needs no client_id.
+	d := f.decl(t)
+	delete(d.Refresh, "client_id")
+	var keep []plan.Endpoint
+	for _, e := range d.Endpoints {
+		if e.Kind != plan.Code {
+			keep = append(keep, e)
+		}
+	}
+	d.Endpoints = keep
+	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err != nil {
+		t.Fatalf("no code exchange, no client_id: %v", err)
 	}
 }

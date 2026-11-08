@@ -5,6 +5,7 @@ package netguard
 import (
 	"context"
 	"log"
+	"net/netip"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,26 +34,38 @@ func WatchNetlink(ctx context.Context) (<-chan struct{}, error) {
 		var nw neighWatch
 		for ctx.Err() == nil {
 			n, _, err := unix.Recvfrom(fd, buf, 0)
-			if err != nil {
-				if err == unix.EAGAIN || err == unix.EINTR {
-					continue
-				}
-				if err == unix.ENOBUFS { // overflow: something changed
-					nw.forget()
-					notify(out)
-					continue
-				}
+			changed, end := nw.onRecv(buf, n, err, routeGateway)
+			if end {
 				if ctx.Err() == nil {
 					log.Printf("netguard: netlink feed ended, polling only: %v", err)
 				}
 				return
 			}
-			if nw.change(buf[:n], routeGateway) {
+			if changed {
 				notify(out)
 			}
 		}
 	}()
 	return out, nil
+}
+
+// onRecv applies one receive (n bytes of buf, or err) to w. It reports
+// whether the receive is a network change, and whether the feed ends: on an
+// error other than the receive timeout, an interrupt or an overflow. An
+// overflow (ENOBUFS) lost messages, so it is a change, and w forgets the
+// gateway's entry, so the entry that next arrives is one too: a swap A to B
+// lost in the overflow, then back to A, is still seen (#5094).
+func (w *neighWatch) onRecv(buf []byte, n int, err error, gateway func() (netip.Addr, int32)) (changed, end bool) {
+	switch err {
+	case nil:
+		return w.change(buf[:n], gateway), false
+	case unix.EAGAIN, unix.EINTR:
+		return false, false
+	case unix.ENOBUFS:
+		w.forget()
+		return true, false
+	}
+	return false, true
 }
 
 // openNetlink opens the rtnetlink socket WatchNetlink reads, bound to the

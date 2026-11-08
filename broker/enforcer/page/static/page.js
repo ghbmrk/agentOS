@@ -135,6 +135,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) { say("Not done: " + e.message); }
   });
   for (const b of document.querySelectorAll("button.act")) b.addEventListener("click", async () => {
+    if (b.dataset.confirm && !confirm(b.dataset.confirm)) return; // a step that cannot be undone
     b.disabled = true;
     try {
       const c = await post("/challenge", { action: b.dataset.action, target: b.dataset.target });

@@ -77,6 +77,11 @@ type Config struct {
 	// tap on the passkey page's name. When unset, Passkeys that also serve
 	// the backup ops (AgentosdPasskeys, on the same socket) serve it.
 	Backups Backups
+	// Forget, when set with Passkeys, serves the Forget page at /forget/
+	// behind sign-in (LOG-4, KRN-forget c, D-284): erase by name on a
+	// passkey's tap on the passkey page's name. When unset, Passkeys that
+	// also serve the erase ops (AgentosdPasskeys) serve it.
+	Forget Forget
 	// Cameras, when set, serves the Cameras page at /cameras/ behind
 	// sign-in (CAM-clerk part d, #3514): the tier-4 connect, capture
 	// turn-on, retention and re-pin steps, and the disconnect.
@@ -207,6 +212,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Backups != nil && cfg.Passkeys == nil {
 		return nil, errors.New("localui: the Backups page needs the passkey page's name")
 	}
+	if fg, ok := cfg.Passkeys.(Forget); ok && cfg.Forget == nil {
+		cfg.Forget = fg
+	}
+	if cfg.Forget != nil && cfg.Passkeys == nil {
+		return nil, errors.New("localui: the Forget page needs the passkey page's name")
+	}
 	if rc, ok := cfg.Passkeys.(Recovery); ok && cfg.Recovery == nil {
 		cfg.Recovery = rc
 	}
@@ -327,6 +338,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Recovery != nil {
 		s.Mount("/recovery", "Recovery key", http.HandlerFunc(s.recoveryPage))
+	}
+	if s.cfg.Forget != nil {
+		s.Mount("/forget", "Forget", http.HandlerFunc(s.forgetPage))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)

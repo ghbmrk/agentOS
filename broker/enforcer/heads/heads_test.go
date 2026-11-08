@@ -583,3 +583,58 @@ func TestShortWriteLeavesNoFragment(t *testing.T) {
 		t.Fatalf("after a short write: %v", got)
 	}
 }
+
+// torn is a journal whose append writes half its line while short is
+// set, and whose cut-back fails while noCut is.
+type torn struct {
+	journal
+	short, noCut bool
+}
+
+func (j *torn) Append(b []byte) error {
+	if j.short {
+		j.journal.b = append(j.journal.b, b[:len(b)/2]...)
+		return errors.New("disk full")
+	}
+	return j.journal.Append(b)
+}
+
+func (j *torn) Truncate(n int) error {
+	if j.noCut {
+		return errors.New("disk: truncate failed")
+	}
+	return j.journal.Truncate(n)
+}
+
+// A failed append whose cut-back fails too leaves a fragment: no record
+// is appended after it until a cut-back succeeds, so a saved revocation
+// never sits glued to the fragment, and a later failed append's cut-back
+// never removes it (Security 6722859700 on #5101).
+func TestFailedCutBackKeepsSavedRevocation(t *testing.T) {
+	pub, _ := keys(t)
+	j := &torn{}
+	s := open(t, pub, &j.journal)
+	s.cfg.Journal = j
+	owner := newAuthenticator(t, "enforcer.home.arpa")
+	sig := owner.Sign(key.RootMsg(SubKeyRoot(owner.Public(), pub)))
+	j.short, j.noCut = true, true
+	if err := s.RevokeSubKey(owner.Public(), pub, sig); err == nil {
+		t.Fatal("a torn revocation was reported saved")
+	}
+	j.short = false
+	torn := len(j.b)
+	if err := s.RevokeSubKey(owner.Public(), pub, sig); err == nil || len(j.b) != torn {
+		t.Fatalf("a revocation was appended after a fragment not cut back: %v", err)
+	}
+	j.noCut = false
+	if err := s.RevokeSubKey(owner.Public(), pub, sig); err != nil {
+		t.Fatal(err)
+	}
+	j.short = true
+	if err := s.Trip(); err == nil {
+		t.Fatal("a torn trip was reported saved")
+	}
+	if r := open(t, pub, &journal{b: slices.Clone(j.b)}); !r.Revoked(pub) {
+		t.Fatal("a saved revocation was lost to a later cut-back")
+	}
+}

@@ -291,7 +291,7 @@ var enforcer = map[string]struct {
 	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the Wake-on-LAN relay
 	"enforcer/dns/run":  {[]string{"enforcer/dns"}, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })}, // slice l: runs dnsmasq in step with the firewall (#4464)
 	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid},                                             // slice i: traffic summaries; byte-cap counts (#4174)
-	"enforcer/offload":  {nil, droneForbid},                                                                                                      // ENF-cap-gro (#4610): merging offloads off on the counted ports, over netlink through syscall
+	"enforcer/offload":  {[]string{"golang.org/x/sys/unix"}, droneForbid},                                                                        // ENF-cap-gro (#4610): merging offloads off on the counted ports, over netlink through syscall, with x/sys/unix's names for the kernel's numbers (#5088)
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
@@ -554,7 +554,9 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 			}
 		}
 	}
-	check(rest, forbiddenDeps)
+	// Of them only offload imports x/sys/unix (its rule above), for the
+	// kernel's numbers; the daemon links it anyway.
+	check(rest, forbiddenDeps, "golang.org/x/sys/unix")
 	for _, p := range append(slices.Clone(enforcerExec), enforcerWeb, enforcerSSH) {
 		if own[p] {
 			t.Errorf("an enforcer package other than %s links it", p)

@@ -59,7 +59,7 @@ func neighmsgAt(typ uint16, fam byte, dst []byte, state uint16, mac []byte) []by
 func TestNetlinkEventsAreAddressRouteLinkAndGatewayNeighbourChanges(t *testing.T) {
 	gw := netip.MustParseAddr("192.168.1.1")
 	asked := 0
-	gateway := func() netip.Addr { asked++; return gw }
+	gateway := func() (netip.Addr, int32) { asked++; return gw, 2 }
 	var w neighWatch
 	for _, typ := range []uint16{syscall.RTM_NEWADDR, syscall.RTM_DELADDR, syscall.RTM_NEWROUTE, syscall.RTM_DELROUTE, syscall.RTM_NEWLINK, syscall.RTM_DELLINK} {
 		if !w.change(nlmsg(typ), gateway) {
@@ -95,7 +95,7 @@ func TestNetlinkEventsAreAddressRouteLinkAndGatewayNeighbourChanges(t *testing.T
 		t.Fatalf("one read of other hosts' entries asked the gateway %d times", asked)
 	}
 	var fresh neighWatch
-	if fresh.change(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 1}), func() netip.Addr { return netip.Addr{} }) {
+	if fresh.change(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 1}), func() (netip.Addr, int32) { return netip.Addr{}, 0 }) {
 		t.Fatal("a neighbour entry with no default gateway is not a network change")
 	}
 }
@@ -109,7 +109,7 @@ func TestNetlinkEventsAreAddressRouteLinkAndGatewayNeighbourChanges(t *testing.T
 func TestNetlinkGatewayNeighbourCountsOnlyMACOrValidityChanges(t *testing.T) {
 	gwA, gwB := []byte{192, 168, 1, 1}, []byte{192, 168, 1, 2}
 	cur := netip.AddrFrom4([4]byte(gwA))
-	gateway := func() netip.Addr { return cur }
+	gateway := func() (netip.Addr, int32) { return cur, 0 }
 	macA, macB := []byte{2, 0, 0, 0, 0, 0x0a}, []byte{2, 0, 0, 0, 0, 0x0b}
 	const reachable, stale, delay, probe, failed, incomplete = 0x02, 0x04, 0x08, 0x10, 0x20, 0x01
 	var w neighWatch
@@ -137,7 +137,8 @@ func TestNetlinkGatewayNeighbourCountsOnlyMACOrValidityChanges(t *testing.T) {
 		}
 	}
 	// The same router's MAC on another interface is a change: the gateway
-	// key carries the interface.
+	// key carries the interface (the route's interface unknown here, so no
+	// message is filtered).
 	other := neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB)
 	binary.NativeEndian.PutUint32(other[syscall.NLMSG_HDRLEN+4:], 3)
 	if !w.change(other, gateway) {
@@ -157,6 +158,50 @@ func TestNetlinkGatewayNeighbourCountsOnlyMACOrValidityChanges(t *testing.T) {
 	two := append(neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, stale, macA), neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, reachable, macB)...)
 	if !w.change(two, gateway) {
 		t.Fatal("a read whose first message swaps the MAC and second swaps it back is not a change")
+	}
+}
+
+// neighmsgOn is neighmsgAt on interface index ifindex.
+func neighmsgOn(ifindex uint32, typ uint16, dst []byte, state uint16, mac []byte) []byte {
+	b := neighmsgAt(typ, syscall.AF_INET, dst, state, mac)
+	binary.NativeEndian.PutUint32(b[syscall.NLMSG_HDRLEN+4:], ifindex)
+	return b
+}
+
+// The gateway's entry is the one on its route's interface, the entry
+// ReadLocal reads (#5094): with one address on two links, the other link's
+// entry changes nothing, so the two entries do not alternate keys and churn
+// reads. When the route moves to the other link, that link's entry is the
+// gateway's, and the same MAC there is a new key: the key carries the
+// interface.
+func TestNetlinkGatewayNeighbourOnlyOnTheRoutesInterface(t *testing.T) {
+	gwA := []byte{192, 168, 1, 1}
+	gw := netip.AddrFrom4([4]byte(gwA))
+	dev := int32(2)
+	gateway := func() (netip.Addr, int32) { return gw, dev }
+	mac, macOther := []byte{2, 0, 0, 0, 0, 0x0a}, []byte{2, 0, 0, 0, 0, 0x0b}
+	const reachable, stale = 0x02, 0x04
+	var w neighWatch
+	if !w.change(neighmsgOn(2, syscall.RTM_NEWNEIGH, gwA, reachable, mac), gateway) {
+		t.Fatal("the first entry on the route's interface is not a change")
+	}
+	for i, m := range [][]byte{
+		neighmsgOn(3, syscall.RTM_NEWNEIGH, gwA, reachable, macOther),
+		neighmsgOn(2, syscall.RTM_NEWNEIGH, gwA, stale, mac),
+		neighmsgOn(3, syscall.RTM_NEWNEIGH, gwA, stale, macOther),
+		neighmsgOn(3, syscall.RTM_DELNEIGH, gwA, stale, macOther),
+		neighmsgOn(2, syscall.RTM_NEWNEIGH, gwA, reachable, mac),
+	} {
+		if w.change(m, gateway) {
+			t.Fatalf("message %d: the gateway address's entry on another link, or a NUD step on the route's, is a change", i)
+		}
+	}
+	dev = 3 // the route moved to the other link
+	if !w.change(neighmsgOn(3, syscall.RTM_NEWNEIGH, gwA, reachable, mac), gateway) {
+		t.Fatal("the same MAC on the route's new interface is not a change")
+	}
+	if w.change(neighmsgOn(2, syscall.RTM_DELNEIGH, gwA, reachable, mac), gateway) {
+		t.Fatal("the old link's entry is a change after the route moved off it")
 	}
 }
 
@@ -1204,5 +1249,90 @@ func TestIPv6OnlyGatewayChangeHoldEndsAtFailedRead(t *testing.T) {
 	}
 	if err := p.Check(context.Background(), netip.MustParseAddr("2001:4860::8888"), 443, "tcp"); err != nil {
 		t.Fatalf("a public destination after the failed read: %v", err)
+	}
+}
+
+// A router that never answers NAT-PMP is remembered (#1539): the first visit
+// holds public dials until its full read, and a return after another
+// network opens no hold. A transient empty-MAC key on the same address and
+// interface (an entry flushed in a Wi-Fi blip) holds only until the entry
+// resolves again, without waiting for a full read: with no MAC, another
+// router behind that address cannot be told apart, so the hold stays fail
+// closed. A never-seen router at that address still holds.
+func TestKnownSilentGatewayOpensNoHold(t *testing.T) {
+	g := &gwSources{answer: make(chan netip.Addr, 1)}
+	g.ext = func(ctx context.Context) (netip.Addr, error) {
+		select {
+		case a := <-g.answer:
+			return a, nil
+		default:
+			return netip.Addr{}, errors.New("no NAT-PMP")
+		}
+	}
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal})
+	public := netip.MustParseAddr("1.1.1.1")
+	const silentGW, silentMAC = "0101A8C0", "02:00:00:00:00:0a"
+	g.gw.Store(silentGW)
+	g.mac.Store(silentMAC)
+	p.quickLearn()
+	if !holdOpen(p) {
+		t.Fatal("the first visit to a silent router opened no hold")
+	}
+	if err := p.Refresh(); err != nil || holdOpen(p) {
+		t.Fatalf("the silent router's full read: %v, hold %v", err, holdOpen(p))
+	}
+	// Another network, whose router answers.
+	g.gw.Store("0102A8C0")
+	g.mac.Store("02:00:00:00:00:0b")
+	p.quickLearn()
+	g.answer <- netip.MustParseAddr("9.9.9.9")
+	if err := p.Refresh(); err != nil || holdOpen(p) {
+		t.Fatalf("the answering router's full read: %v, hold %v", err, holdOpen(p))
+	}
+	// Back to the silent router: no hold, a public dial goes at once.
+	g.gw.Store(silentGW)
+	g.mac.Store(silentMAC)
+	p.quickLearn()
+	if holdOpen(p) {
+		t.Fatal("the return to a known-silent router opened a hold")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.Check(ctx, public, 443, "tcp"); err != nil {
+		t.Fatalf("a public dial on the known-silent router: %v", err)
+	}
+	// The entry flushes (same address and interface, no MAC): held until it
+	// resolves, and a dial held then goes ahead with no full read.
+	g.mac.Store("")
+	p.quickLearn()
+	if !holdOpen(p) {
+		t.Fatal("an unknown router behind the silent router's address opened no hold")
+	}
+	held := make(chan error, 1)
+	go func() { held <- p.Check(context.Background(), public, 443, "tcp") }()
+	select {
+	case err := <-held:
+		t.Fatalf("a public dial was decided while the gateway's MAC was unknown: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	g.mac.Store(silentMAC) // the neighbour event: the entry resolved to the same router
+	p.quickLearn()
+	if holdOpen(p) {
+		t.Fatal("the entry resolved to the known-silent router and the hold stayed")
+	}
+	select {
+	case err := <-held:
+		if err != nil {
+			t.Fatalf("the held dial after the entry resolved: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held dial did not go ahead when the entry resolved")
+	}
+	// Another router at the same address and interface is never seen: held.
+	g.mac.Store("02:00:00:00:00:0c")
+	p.quickLearn()
+	if !holdOpen(p) {
+		t.Fatal("a never-seen router behind the silent router's address opened no hold")
 	}
 }

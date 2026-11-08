@@ -114,6 +114,10 @@ type Network struct {
 	// External is the router's external address, where NAT-PMP or PCP
 	// reports it.
 	External netip.Addr
+	// GatewaySilent is set when this gateway (address, interface and MAC)
+	// is known: a full read asked its router, which answered nothing, and no
+	// address is filed for it. A quick read on it opens no hold (#1539).
+	GatewaySilent bool
 	// Resolver is the currently assigned resolver (DHCP or RDNSS). Learned,
 	// not pinned: a rogue DHCP or RA can move it, which is why every answer
 	// is still checked at connect time.
@@ -246,7 +250,7 @@ var mappedBase = netip.AddrFrom16([16]byte{10: 0xff, 11: 0xff})
 // learned (before the cap) adds 0.0.0.0/0, so no prefix length is dropped or
 // allows less than it covers.
 func normalise(n Network) Network {
-	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), GatewayDev: n.GatewayDev, GatewayMAC: n.GatewayMAC, External: n.External.WithZone("").Unmap(), Resolver: n.Resolver.WithZone("").Unmap()}
+	out := Network{Gateway: n.Gateway.WithZone("").Unmap(), GatewayDev: n.GatewayDev, GatewayMAC: n.GatewayMAC, External: n.External.WithZone("").Unmap(), GatewaySilent: n.GatewaySilent, Resolver: n.Resolver.WithZone("").Unmap()}
 	if out.Resolver.IsLoopback() || out.Resolver.IsUnspecified() {
 		out.Resolver = netip.Addr{}
 	}
@@ -379,9 +383,9 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 // external address is always the one learned, never the quick read's copy
 // (which may predate a newer full read), and the resolver stays when the
 // quick read has none. On a new gateway the quick read's own external
-// address (the last one read on that gateway) applies; with none, public
-// destinations are held until that gateway's full read stores (fail closed,
-// bounded by externalHold).
+// address (the last one read on that gateway) applies; with none, unless the
+// gateway is known silent, public destinations are held until that
+// gateway's full read stores (fail closed, bounded by externalHold).
 func (p *Policy) quickLearn() {
 	if p.quick == nil {
 		return
@@ -414,7 +418,7 @@ func (p *Policy) applyQuickLocked(out Network) {
 		if !out.Resolver.IsValid() {
 			out.Resolver = old.Resolver
 		}
-	} else if out.Gateway.IsValid() && !out.External.IsValid() && p.source != nil {
+	} else if out.Gateway.IsValid() && !out.External.IsValid() && !out.GatewaySilent && p.source != nil {
 		if p.hold == nil {
 			p.hold = make(chan struct{})
 		}

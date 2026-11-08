@@ -580,3 +580,102 @@ func TestPrefixesKeepMappedPrefixShorterThan96(t *testing.T) {
 		}
 	}
 }
+
+// A gateway (address, interface and MAC) whose router answers no NAT-PMP is
+// filed as known silent by its full read, so the quick read on a return
+// marks it (#1539). Silent gateways have their own bound: they never push an
+// answering router's address out. A gateway that later answers is no longer
+// silent, and a key with no MAC (no entry yet, or no neighbour table) is
+// never filed silent, since another router behind it cannot be told apart.
+func TestSourcesRememberKnownSilentGateways(t *testing.T) {
+	g := &gwSources{}
+	var answer netip.Addr
+	g.ext = func(context.Context) (netip.Addr, error) {
+		if !answer.IsValid() {
+			return netip.Addr{}, errors.New("no NAT-PMP")
+		}
+		return answer, nil
+	}
+	s := g.sources()
+	at := func(gw, mac, dev string) {
+		g.gw.Store(gw)
+		g.mac.Store(mac)
+		g.dev.Store(dev)
+	}
+	eA := netip.MustParseAddr("8.8.8.8")
+	at("0101A8C0", "02:00:00:00:00:0a", "eth0")
+	answer = eA
+	if n, err := s.Read(); err != nil || n.External != eA || n.GatewaySilent {
+		t.Fatalf("answering A: %+v, %v", n, err)
+	}
+	answer = netip.Addr{}
+	at("0102A8C0", "02:00:00:00:00:0b", "eth0")
+	if n, _ := s.ReadLocal(); n.GatewaySilent {
+		t.Fatal("a never-read gateway is known silent")
+	}
+	if n, err := s.Read(); err != nil || !n.GatewaySilent || n.External.IsValid() {
+		t.Fatalf("silent B's full read: %+v, %v", n, err)
+	}
+	if n, _ := s.ReadLocal(); !n.GatewaySilent {
+		t.Fatal("the quick read on silent B does not know it")
+	}
+	// The same address and interface with no entry is another key.
+	at("0102A8C0", "", "eth0")
+	if n, _ := s.ReadLocal(); n.GatewaySilent {
+		t.Fatal("B's address with no neighbour entry is known silent")
+	}
+	if n, err := s.Read(); err != nil || n.GatewaySilent {
+		t.Fatalf("a silent full read with no MAC: %+v, %v", n, err)
+	}
+	if n, _ := s.ReadLocal(); n.GatewaySilent {
+		t.Fatal("a key with no MAC was filed silent")
+	}
+	// Silent A stays A's: an answered gateway keeps its address, not silence.
+	at("0101A8C0", "02:00:00:00:00:0a", "eth0")
+	if n, _ := s.Read(); n.External != eA || n.GatewaySilent {
+		t.Fatalf("A's silent return: %+v", n)
+	}
+	// More silent gateways than the bound: the oldest is forgotten, and A's
+	// address stays.
+	for i := 0; i <= maxGatewayExternals; i++ {
+		at(fmt.Sprintf("%02X01A8C0", 0x10+i), "02:00:00:00:00:0c", "eth0")
+		if n, err := s.Read(); err != nil || !n.GatewaySilent {
+			t.Fatalf("silent gateway %d: %+v, %v", i, n, err)
+		}
+	}
+	if len(s.silent) != maxGatewayExternals {
+		t.Fatalf("%d silent gateways kept, bound %d", len(s.silent), maxGatewayExternals)
+	}
+	at("1001A8C0", "02:00:00:00:00:0c", "eth0")
+	if n, _ := s.ReadLocal(); n.GatewaySilent {
+		t.Fatal("the oldest silent gateway past the bound is still known")
+	}
+	at(fmt.Sprintf("%02X01A8C0", 0x10+maxGatewayExternals), "02:00:00:00:00:0c", "eth0")
+	if n, _ := s.ReadLocal(); !n.GatewaySilent {
+		t.Fatal("the most recent silent gateway is forgotten")
+	}
+	at("0101A8C0", "02:00:00:00:00:0a", "eth0")
+	if n, _ := s.ReadLocal(); n.External != eA {
+		t.Fatalf("silent gateways pushed A's address out: %+v", n)
+	}
+	// B starts answering: it is filed with its address and is no longer
+	// silent, and a later silent read keeps that address.
+	eB := netip.MustParseAddr("9.9.9.9")
+	at("0102A8C0", "02:00:00:00:00:0b", "eth0")
+	if n, _ := s.Read(); !n.GatewaySilent {
+		t.Fatal("silent B's second full read does not know it")
+	}
+	answer = eB
+	if n, _ := s.Read(); n.External != eB || n.GatewaySilent {
+		t.Fatalf("B answering: %+v", n)
+	}
+	answer = netip.Addr{}
+	if n, _ := s.Read(); n.External != eB || n.GatewaySilent {
+		t.Fatalf("B silent again after answering: %+v", n)
+	}
+	for _, k := range s.silent {
+		if k == (gatewayKey{netip.MustParseAddr("192.168.2.1"), "eth0", "02:00:00:00:00:0b"}) {
+			t.Fatal("B is filed both answering and silent")
+		}
+	}
+}

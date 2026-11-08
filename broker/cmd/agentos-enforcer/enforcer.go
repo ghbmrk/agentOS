@@ -143,9 +143,12 @@ type Enforcer struct {
 	net       network // network.go: resolver, relays, byte caps
 
 	coreSeen atomic.Int64 // Elapsed at the core's last authenticated line, +1; 0 never
-	conns    atomic.Int32
-	changed  chan struct{}
-	lastLit  time.Time
+	// revokeUnsaved: the owner's revocation of the core's key is in force
+	// for this run but its save failed, so the page offers it again.
+	revokeUnsaved atomic.Bool
+	conns         atomic.Int32
+	changed       chan struct{}
+	lastLit       time.Time
 	// The page's core and recovery state as last told to the alerts:
 	// Tick tells them only a change, since each call re-shows the light
 	// and coming up re-offers every unsent alert (ENF-h-a5). upMu holds
@@ -315,7 +318,8 @@ func (d *Enforcer) kick() {
 }
 
 // syncFirewall loads the ruleset for the policy in force if it is not the
-// one loaded, in step with the resolver and the relays (network.go). A
+// one loaded, or again when a counted port starts or stops merging
+// (offloads), in step with the resolver and the relays (network.go). A
 // load that fails leaves the previous ruleset (nft's transaction, P5) and
 // is tried again at the next tick.
 func (d *Enforcer) syncFirewall(ctx context.Context) error {
@@ -328,13 +332,13 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	}
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
-	if h == d.loaded {
+	if h == d.loaded && !d.net.reload {
 		return nil
 	}
 	if err := d.loadNetwork(ctx, doc); err != nil {
 		return err
 	}
-	d.loaded, d.loadedDoc = h, doc
+	d.loaded, d.loadedDoc, d.net.reload = h, doc, false
 	return nil
 }
 
@@ -421,10 +425,11 @@ func (d *Enforcer) rebuildPage() error {
 		Name: d.cfg.Name, Owner: owner, Enrol: d.book, CA: cert.Root, CoreCA: d.coreCA,
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
-		Heard: mdns.HeardBy(d.net.filter, d.cfg.Layout),
+		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
+		Alerts: pageAlerts{d.alerts},
 	}
 	if d.ch != nil {
-		pc.Channel = d.cut
+		pc.Channel, pc.Core = d.cut, pageCore{d}
 	}
 	s, err := page.New(pc)
 	if err != nil {

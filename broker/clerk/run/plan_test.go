@@ -95,6 +95,12 @@ func deviceSteps(h http.Handler) http.Handler {
 // planLoginAt is a plan login of mode, not signed in, whose provider is h.
 func planLoginAt(t *testing.T, mode plan.Mode, h http.Handler) (*plan.Login, *x509.CertPool) {
 	t.Helper()
+	return planLoginWrite(t, mode, h, nil)
+}
+
+// planLoginWrite is planLoginAt over a store that writes through write.
+func planLoginWrite(t *testing.T, mode plan.Mode, h http.Handler, write func([]byte) error) (*plan.Login, *x509.CertPool) {
+	t.Helper()
 	srv := httptest.NewTLSServer(deviceSteps(h))
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
@@ -113,7 +119,7 @@ func planLoginAt(t *testing.T, mode plan.Mode, h http.Handler) (*plan.Login, *x5
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := plan.New(d, plan.NewStore(s, nil), roots)
+	p, err := plan.New(d, plan.NewStore(s, write), roots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +158,7 @@ func codeRequest(t *testing.T, p *plan.Login, guest string) *http.Request {
 	}
 	uc := step("/api/accounts/deviceauth/usercode", map[string]string{"client_id": "app_x"})
 	ct := step("/api/accounts/deviceauth/token", map[string]string{"device_auth_id": uc["device_auth_id"], "user_code": uc["user_code"]})
-	form := url.Values{"client_id": {"app_x"}, "code": {ct["authorization_code"]}, "code_verifier": {ct["code_verifier"]},
+	form := url.Values{"client_id": {plan.CodexClientID}, "code": {ct["authorization_code"]}, "code_verifier": {ct["code_verifier"]},
 		"grant_type": {"authorization_code"}, "redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
 	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token", strings.NewReader(form))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")

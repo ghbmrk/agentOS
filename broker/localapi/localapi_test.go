@@ -2,6 +2,7 @@ package localapi
 
 import (
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,7 +17,7 @@ import (
 func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 	others := []string{"message", "whoami", bridgeproto.OpInbound, bridgeproto.OpOutbox, bridgeproto.OpSent, bridgeproto.OpState}
 	seen := map[string]bool{}
-	for _, op := range append(append(append(append(append(append(append([]string{}, Ops...), SetupOps...), PasskeyOps...), BackupOps...), RecoveryOps...), CameraOps...), HomeKitOps...) {
+	for _, op := range slices.Concat(Ops, SetupOps, PasskeyOps, BackupOps, RecoveryOps, CameraOps, HomeKitOps, EraseOps) {
 		if !strings.HasPrefix(op, "page_") || seen[op] {
 			t.Errorf("op %q", op)
 		}
@@ -27,7 +28,7 @@ func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 58 {
+	if len(seen) != 60 {
 		t.Fatalf("%d ops", len(seen))
 	}
 }

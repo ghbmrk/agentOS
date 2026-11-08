@@ -213,8 +213,13 @@ type Alerts struct {
 	coreDown bool
 
 	// size is the journal's length after its last good append, so a
-	// failed append is cut back and leaves no fragment.
-	size int
+	// failed append is cut back and leaves no fragment. dirty is set
+	// while a failed append's cut-back failed too, so the journal may be
+	// longer than size: no record is appended until a cut-back succeeds,
+	// so none sits glued to a fragment or past size, where a later
+	// cut-back would remove it.
+	size  int
+	dirty bool
 
 	// lightMu orders light updates so a stale colour never lands last.
 	lightMu sync.Mutex
@@ -271,8 +276,16 @@ func (a *Alerts) write(r Record) error {
 		return err
 	}
 	b = append(b, '\n')
+	if a.dirty {
+		if err := a.cfg.Journal.Truncate(a.size); err != nil {
+			return fmt.Errorf("journal not cut back after a failed append: %w", err)
+		}
+		a.dirty = false
+	}
 	if err := a.cfg.Journal.Append(b); err != nil {
-		_ = a.cfg.Journal.Truncate(a.size) // a short write leaves no fragment
+		// A short write leaves no fragment; a cut-back that fails too
+		// is tried again before the next append.
+		a.dirty = a.cfg.Journal.Truncate(a.size) != nil
 		return err
 	}
 	a.size += len(b)

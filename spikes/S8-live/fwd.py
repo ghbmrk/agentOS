@@ -2,7 +2,8 @@
 relays to the real hosts through the session proxy, and logs only what the measurements need:
 paths, statuses, x-codex-* response headers, the tools of responses requests (top-level `tools` and
 `additional_tools` input items), and key names (never values) of auth bodies, except a refresh's
-client_id, grant_type and scope and a digest of the answered user_code. Secrets are never written.
+client_id, grant_type and scope and its originator and user-agent, the code exchange's client_id,
+and a digest of the answered user_code. Secrets are never written.
 In relay mode it refuses every model call, so a run spends no plan usage, credits or API usage
 (Mark, 2026-10-14). Usage: fwd.py LOG relay|stub SOCKET"""
 import hashlib, json, os, sys, threading, time
@@ -73,6 +74,10 @@ class H(BaseHTTPRequestHandler):
                 if isinstance(j, dict) and j.get("grant_type") == "refresh_token":
                     rec["refresh_fixed"] = {k: (v if k in ("client_id", "grant_type", "scope") else "<unlogged>")
                                             for k, v in j.items() if k != "refresh_token"}
+                    # #5089: the refresh's own header values the clerk pins
+                    # (Declaration.RefreshHeaders); neither carries a credential.
+                    rec["refresh_headers"] = {k.lower(): v for k, v in self.headers.items()
+                                              if k.lower() in ("originator", "user-agent")}
             except Exception:
                 rec["body_keys"] = "unparsed"
         elif body:
@@ -83,6 +88,10 @@ class H(BaseHTTPRequestHandler):
             from urllib.parse import parse_qsl, urlencode
             pairs = []
             for k, v in parse_qsl(body.decode()):
+                # #5089: the code exchange's client_id, which the clerk pins to the
+                # refresh's; the public OAuth client ID, never a secret.
+                if k == "client_id":
+                    rec["code_client_id"] = v
                 if k == "redirect_uri" and v.startswith("http://127.0.0.1:18432/"):
                     v = "https://auth.openai.com/" + v[len("http://127.0.0.1:18432/"):]
                     rec["redirect_uri_swapped"] = True
