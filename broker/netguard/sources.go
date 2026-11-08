@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -118,6 +119,16 @@ func (s *Sources) rememberSilentLocked(k gatewayKey) {
 	s.silent = out
 }
 
+// silence reports whether err from the router request means the router
+// does not speak NAT-PMP: the request timed out, or the gateway refused the
+// port (ICMP port unreachable, ECONNREFUSED on the connected socket). Any
+// other error (a malformed or refused NAT-PMP answer, a dial or send error)
+// says nothing about the router, so the gateway is not filed silent (#5111).
+func silence(err error) bool {
+	var to interface{ Timeout() bool }
+	return errors.As(err, &to) && to.Timeout() || errors.Is(err, syscall.ECONNREFUSED)
+}
+
 // without returns ks less k.
 func without(ks []gatewayKey, k gatewayKey) []gatewayKey {
 	var out []gatewayKey
@@ -138,9 +149,10 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // default gateway from the kernel routing tables, the resolver from the
 // DHCP- or RA-written resolv.conf, and the router's external address from
 // NAT-PMP (when the gateway does not answer, the last address read on that
-// gateway, else none, and a gateway with a MAC is then filed as known
-// silent). A read that finds no non-loopback interface prefix fails, so the
-// last learned set stays.
+// gateway, else none; a gateway with a MAC whose request timed out or was
+// refused is then filed as known silent, and any other failure unfiles it,
+// so the next return holds). A read that finds no non-loopback interface
+// prefix fails, so the last learned set stays.
 //
 // The host is read again after each router request (answered or timed
 // out), and the network at that point is the one returned. The answer is
@@ -180,8 +192,10 @@ func (s *Sources) Read() (Network, error) {
 			s.rememberLocked(k, a.Unmap())
 		} else if e := s.externalLocked(k); e.IsValid() {
 			s.rememberLocked(k, e)
-		} else {
+		} else if silence(err) {
 			s.rememberSilentLocked(k)
+		} else {
+			s.silent = without(s.silent, k)
 		}
 		m.External = s.externalLocked(k)
 		m.GatewaySilent = s.silentLocked(k)

@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -665,5 +667,24 @@ func TestQuickReadWithoutResolverKeepsLearnedResolver(t *testing.T) {
 	}
 	if err := p.Check(WithPurpose(context.Background(), PurposeDNS), rs, 53, "udp"); err != nil {
 		t.Fatalf("names stopped resolving after the quick read: %v", err)
+	}
+}
+
+// The package, tests included, builds and vets off Linux: the netlink
+// parsing is behind the linux build tag, and the poll alone applies there
+// (#5111). CI vets only Linux, so this test runs the other platforms' vet.
+func TestNetguardVetsOffLinux(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs the go tool")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no go tool")
+	}
+	for _, goos := range []string{"darwin", "windows"} {
+		cmd := exec.Command("go", "vet", ".")
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH=amd64", "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("GOOS=%s go vet: %v\n%s", goos, err, out)
+		}
 	}
 }
