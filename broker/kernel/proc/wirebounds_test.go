@@ -3,6 +3,7 @@ package proc
 // REQ: CLK-1, LOG-7
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -123,5 +124,112 @@ func TestAClosedLogFileRefuses(t *testing.T) {
 	}
 	if err := st.Append([]byte("x")); err == nil {
 		t.Fatal("appended to a closed log")
+	}
+}
+
+// viewClerk records the view each Do is given.
+type viewClerk struct{ got chan kernel.View }
+
+func (c viewClerk) Do(_ kernel.Request, v kernel.View) kernel.Result {
+	c.got <- v
+	return kernel.Result{Outcome: "ok"}
+}
+func (viewClerk) Probe(kernel.Request, kernel.View) kernel.Result { return kernel.Result{} }
+
+// Tick hands the clerk the view of the step it sends: its dispatch, as the
+// log holds it, and a ledger entry for every scope the chain charges.
+func TestTickSendsTheStepsOwnView(t *testing.T) {
+	c := viewClerk{make(chan kernel.View, 1)}
+	b := newBox(t, serveFake(t, c))
+	id := b.submit("dave")
+	b.tick(b.now)
+	var req kernel.Request
+	var seq uint64 // the step's dispatch entry
+	b.h.With(func(k *kernel.Kernel) error {
+		req = kernel.Request{Plan: k.State().Plans[id].Plan}
+		for _, e := range k.Log().Entries() {
+			if e.Type == kernel.TStepDispatch {
+				seq = e.Seq
+			}
+		}
+		return nil
+	})
+	var v kernel.View
+	select {
+	case v = <-c.got:
+	default:
+		t.Fatal("the clerk was not called")
+	}
+	if d, ok := v.Dispatched(req); !ok || seq == 0 || d.Seq != seq {
+		t.Fatalf("the clerk got dispatch %+v %v, want the one at entry %d", d, ok, seq)
+	}
+	ver, err := kernel.VerifyPlan(req.Plan, anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.(*snapshot).covers(anchors, req) || len(ver.Scopes()) == 0 {
+		t.Fatalf("the clerk's view leaves out a scope of %d", len(ver.Scopes()))
+	}
+}
+
+// notSent is a view whose request was never dispatched.
+type notSent struct{ *fakeView }
+
+func (notSent) Dispatched(kernel.Request) (kernel.Dispatch, bool) { return kernel.Dispatch{}, false }
+
+// A view of a step the log never dispatched carries no dispatch and no
+// ledger, so the clerk refuses it; and covers asks a ledger only of a view
+// with a dispatch, and of a plan that verifies.
+func TestAViewOfAnUnsentStepCarriesNoDispatch(t *testing.T) {
+	b := newBox(t, filepath.Join(t.TempDir(), "unused.sock"))
+	id := b.submit("dave")
+	var req kernel.Request
+	b.h.With(func(k *kernel.Kernel) error { req = kernel.Request{Plan: k.State().Plans[id].Plan}; return nil })
+	ver, err := kernel.VerifyPlan(req.Plan, anchors)
+	if err != nil || len(ver.Scopes()) == 0 {
+		t.Fatalf("verify: %v, %d scopes", err, len(ver.Scopes()))
+	}
+	f := &fakeView{grants: map[key.ID]int64{}, ledger: map[key.ID][]key.Use{}, dispatch: kernel.Dispatch{Seq: 3}}
+	s := view(notSent{f}, anchors, nil, req, b.now)
+	if s.Dispatch != nil || len(s.Ledger) != 0 {
+		t.Fatalf("an unsent step's view: dispatch %v, ledger %v", s.Dispatch, s.Ledger)
+	}
+	if !s.covers(anchors, req) {
+		t.Fatal("covers asked a ledger of a view with no dispatch")
+	}
+	s.Dispatch = &kernel.Dispatch{Seq: 3}
+	if s.covers(anchors, req) {
+		t.Fatal("covers took a dispatched view with no ledger")
+	}
+	if !s.covers(nil, req) {
+		t.Fatal("covers judged the ledger of a plan that does not verify")
+	}
+}
+
+// A call with no arguments goes out as an empty object, so an op that
+// takes arguments decodes them all as unset.
+func TestACallWithNoArgumentsSendsAnEmptyObject(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "k.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		ServeOne(conn, func(_ string, args json.RawMessage) (json.RawMessage, error) {
+			got <- string(args)
+			return nil, nil
+		})
+	}()
+	if err := (Conn{Socket: sock, UID: os.Getuid(), Timeout: 5 * time.Second}).Call("status", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a := <-got; a != "{}" {
+		t.Fatalf("nil arguments went out as %s", a)
 	}
 }
