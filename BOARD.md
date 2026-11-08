@@ -88,7 +88,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ERASE-contain-first | ERASE-contain-first: contain the reader lineage before the erase is logged, the guest plane refuses a contained lineage's plans, and the erase confirmation lists the cancelled plans (LOG-4) | #3870 | queued(release; tier A; size M; from #4805 reviews) |
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
-| KRN-stop-task | KRN-stop-task: a STOP or a task's end cancels its plans' unsent steps in the fold, so no held step runs after STOP then RESUME or after its task ends (KRN-5, KRN-7, KEY-8) | #5006 (D-111) | queued (tier A; Opus; Defect: MIG-2) |
+| KRN-stop-task | KRN-stop-task: a STOP or a task's end cancels its plans' unsent steps in the fold, so no held step runs after STOP then RESUME or after its task ends (KRN-5, KRN-7, KEY-8) | #5006 (D-111) | building (tier A; Opus; Defect: MIG-2) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
 
 ## Harness and operating model
