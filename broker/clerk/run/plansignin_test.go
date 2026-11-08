@@ -960,3 +960,95 @@ func TestPlanStateNamesThePoolWithoutFigures(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CLK-7
+//
+// Last never names a login that is gone, and never disagrees with the login
+// still stored (#5089 items 3 and 8). A Remove after a sign-in ended
+// signedin clears it. A Remove whose delete fails leaves last as the
+// sign-in ended, with the login still stored, whether or not it ended a
+// sign-in; once a later Remove deletes the login, last follows.
+func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
+	var calls atomic.Int32
+	var failing atomic.Bool
+	write := func([]byte) error {
+		if failing.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	login, _ := planLoginWrite(t, plan.Permitted, tokenProvider(&calls, nil), write)
+	signInOnce := func(h *PlanHost, cli *fakeCLI) {
+		t.Helper()
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		_, guest := cli.started()
+		if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.SignedIn(guest) {
+			t.Fatalf("the CLI's code exchange: %d", code)
+		}
+	}
+
+	t.Run("after a signed-in sign-in", func(t *testing.T) {
+		cli := newFakeCLI(login, codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		signInOnce(h, cli)
+		cli.waitStopped(t)
+		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+		if st := h.State(); st.Last != DSignedIn || !st.SignedIn {
+			t.Fatalf("signed in: %+v", st)
+		}
+		failing.Store(true)
+		if err := h.Remove(); err == nil {
+			t.Fatal("a Remove whose delete failed answered nil")
+		}
+		if st := h.State(); st.Last != DSignedIn || !st.SignedIn {
+			t.Fatalf("after a failed remove: %+v", st)
+		}
+		failing.Store(false)
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
+		}
+		if st := h.State(); st.Last != "" || st.SignedIn {
+			t.Fatalf("after the remove: %+v", st)
+		}
+	})
+	t.Run("ending a sign-in that committed", func(t *testing.T) {
+		cli := newFakeCLI(login, codexPrinted)
+		// The watcher reads the record only once an hour, so the commit is
+		// still unread when Remove ends the sign-in.
+		times := quick
+		times.Poll = time.Hour
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
+		signInOnce(h, cli)
+		failing.Store(true)
+		if err := h.Remove(); err == nil {
+			t.Fatal("a Remove whose delete failed answered nil")
+		}
+		cli.waitStopped(t)
+		if st := h.State(); st.Last != DSignedIn || !st.SignedIn || st.Signing {
+			t.Fatalf("after a failed remove: %+v", st)
+		}
+		failing.Store(false)
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
+		}
+		if st := h.State(); st.Last != "" || st.SignedIn {
+			t.Fatalf("after the remove: %+v", st)
+		}
+	})
+	t.Run("a remove with no sign-in keeps a failed one's label", func(t *testing.T) {
+		cli := newFakeCLI(login, "error")
+		cli.exited = true
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Detail != DSignInFailed {
+			t.Fatalf("begun: %+v", b)
+		}
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
+		}
+		if st := h.State(); st.Last != DSignInFailed || st.SignedIn {
+			t.Fatalf("after the remove: %+v", st)
+		}
+	})
+}

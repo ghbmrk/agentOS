@@ -12,15 +12,16 @@
 #   plan   sign-in and credits measurement with the owner's ChatGPT plan: device sign-in through
 #          the forwarder, then one `codex exec` whose model call the forwarder refuses with a 401,
 #          so nothing is spent and the CLI sends its own refresh. qualify.py then checks the
-#          printed code against the answered user_code and the refresh body against the Codex
-#          declaration. The login lives in the machine's memory overlay and is gone when it exits.
+#          printed code against the answered user_code, and the refresh body and headers and the
+#          code exchange's client_id against the Codex declaration (codexdecl.go). The login
+#          lives in the machine's memory overlay and is gone when it exits.
 #   shapes credential shapes for #2313 (SHAPES.md): device sign-in through the forwarder, then
 #          shapes/ reads auth.json inside the machine and prints only shapes to its stdout, which
 #          run.sh cuts into shapes.json; the CLI logs out and auth.json is removed. No model call.
 #   clean  stop the forwarder and remove the work directory.
 # Logs never hold tokens or bodies: fwd.py writes paths, statuses, x-codex-* headers, tool types
-# and key names only.
-set -eu
+# and key names only. The printed user code is shown, never written: only its digest is.
+set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 W=${S8LIVE_DIR:-/tmp/agentos-s8live}
 mkdir -p "$W"
@@ -84,10 +85,11 @@ codex login --experimental_issuer http://127.0.0.1:18432 --device-auth || exit 1
 echo "Reply ok." | codex exec --json --skip-git-repo-check --cd /var/lib/agentos-work - >/var/lib/agentos-work/exec-plan.out 2>&1
 echo "== session done"
 EOF
+	(cd "$here/../../broker" && go run "$here/codexdecl.go") >"$W/codex-decl.json"
 	echo "Sign-in page for the owner: https://auth.openai.com/codex/device (the CLI prints the forwarder's address)"
-	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh 2>&1 | tee "$W/plan-session.out"
-	jq -c 'del(.t, .req_headers, .body_keys, .resp_keys)' "$W/plan.jsonl"
-	python3 -I "$here/qualify.py" "$W/plan-session.out" "$W/plan.jsonl" "$here/../../broker/clerk/plan/plan.go"
+	inm "$W/root" /bin/bash /var/lib/agentos-work/session.sh 2>&1 | python3 -I "$here/qualify.py" printed "$W/plan-printed.json"
+	jq -c 'del(.t, .req_headers, .body_keys, .resp_keys, .refresh_headers)' "$W/plan.jsonl"
+	python3 -I "$here/qualify.py" check "$W/plan-printed.json" "$W/plan.jsonl" "$W/codex-decl.json"
 	;;
 shapes)
 	# runsc do's in-memory overlay also covers volumes, so nothing the machine writes reaches
