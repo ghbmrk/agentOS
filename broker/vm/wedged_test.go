@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -154,4 +155,51 @@ func TestWedgedListsTheMachine(t *testing.T) {
 	setRefuse(nil)
 	must(t, e.m.Destroy(bg, "other"))
 	wantWedged("destroyed")
+}
+
+// #5098: a preemption that released the machine's memory without its lock
+// records it Preempted even when the runtime's cleanup is then refused on
+// ErrKillPending. It is no longer Running or counted, so it is not wedged,
+// even when that refusal is the wedgedAfter-th in a row.
+func TestPreemptedMachineIsNotWedged(t *testing.T) {
+	log.SetOutput(new(bytes.Buffer))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	pending := fmt.Errorf("fake: %w", ErrKillPending)
+	e.rt.mu.Lock()
+	e.rt.refuseKill = pending
+	e.rt.mu.Unlock()
+	for i := 1; i < wedgedAfter; i++ {
+		if err := e.m.Preempt("exp"); !errors.Is(err, ErrKillPending) {
+			t.Fatalf("preemption %d: %v, want ErrKillPending", i, err)
+		}
+	}
+	// Hold the machine's lock, as an operation in flight does, so Preempt
+	// kills without it.
+	mc, err := e.m.get("exp")
+	must(t, err)
+	mc.mu.Lock()
+	// The kill without the lock works; stopRuntime's, under it, is refused.
+	var kills atomic.Int32
+	e.rt.onKill = func(string) {
+		e.rt.mu.Lock()
+		defer e.rt.mu.Unlock()
+		if kills.Add(1) > 1 {
+			e.rt.refuseKill = pending
+		}
+	}
+	e.rt.mu.Lock()
+	e.rt.refuseKill = nil
+	e.rt.mu.Unlock()
+	err = e.m.Preempt("exp")
+	mc.mu.Unlock()
+	must(t, err)
+	waitState(t, e, "exp", Preempted)
+	if n := kills.Load(); n < 2 {
+		t.Fatalf("%d kills, want the lock-free one and stopRuntime's", n)
+	}
+	if got := e.m.Wedged(); len(got) != 0 {
+		t.Fatalf("Wedged() = %q after a preemption released the memory, want none", got)
+	}
 }

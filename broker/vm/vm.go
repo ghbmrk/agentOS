@@ -2325,8 +2325,9 @@ func (m *Manager) preemptLocked(mc *machine, killed bool) error {
 		return err
 	}
 	// After a failed cleanup the disk stays committed: only the memory is
-	// known released.
+	// known released. A machine not Running is not wedged (#5098).
 	mc.State = Preempted
+	setKillPending(mc, 0)
 	return errors.Join(err, m.saveMachine(mc))
 }
 
