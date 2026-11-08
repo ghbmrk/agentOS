@@ -288,7 +288,7 @@ func model(p *plan.Login, guest, bearer string) (*http.Response, string) {
 func free([]byte) (func(plan.Used), string) { return func(plan.Used) {}, "" }
 
 func refreshBody(ph string) string {
-	return `{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"` + ph + `"}`
+	return `{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token","refresh_token":"` + ph + `"}`
 }
 
 func refreshReq(p *plan.Login, guest, ph string) (*http.Response, string) {
@@ -491,6 +491,52 @@ func TestPlanRefreshSwapsBackToPlaceholders(t *testing.T) {
 	}
 	if f.hits() != before {
 		t.Fatal("a refused refresh reached the provider")
+	}
+}
+
+// REQ: CLK-7
+//
+// A refresh body carries the CLI's own client_id and no scope (#3110): one
+// with another client_id or scope, or without the client_id, is refused
+// with nothing sent, so a guest cannot shape the provider's answer into an
+// unswappable stop. The declared values pass.
+func TestPlanRefreshPinsClientIDAndScope(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["refresh_token"]
+	before := f.hits()
+	for _, b := range []string{
+		`{"client_id":"app_other","grant_type":"refresh_token","refresh_token":"` + ph + `"}`,
+		`{"client_id":"` + plan.CodexClientID + `x","grant_type":"refresh_token","refresh_token":"` + ph + `"}`,
+		`{"client_id":"` + strings.ToLower(plan.CodexClientID) + `","grant_type":"refresh_token","refresh_token":"` + ph + `"}`,
+		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token","refresh_token":"` + ph + `","scope":"openid"}`,
+		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token","refresh_token":"` + ph + `","scope":""}`,
+		`{"grant_type":"refresh_token","refresh_token":"` + ph + `","scope":"openid profile email"}`,
+		// Three keys, as the declared body has: an undeclared key with an
+		// empty value stands where client_id belongs.
+		`{"grant_type":"refresh_token","refresh_token":"` + ph + `","scope":""}`,
+		`{"grant_type":"refresh_token","refresh_token":"` + ph + `"}`,
+		`{"client_id":"` + plan.CodexClientID + `","grant_type":"refresh_token"}`,
+	} {
+		if resp, d := p.Do(context.Background(), "g", req("POST", "/oauth/token", b, map[string]string{"Content-Type": "application/json"}), nil); resp != nil || d != plan.DPlaceholder {
+			t.Errorf("refresh %s: served or %q", b, d)
+		}
+	}
+	if f.hits() != before || p.Stopped() != "" {
+		t.Fatalf("a refused refresh reached the provider (%d sent) or stopped the route (%q)", f.hits()-before, p.Stopped())
+	}
+	resp, d := refreshReq(p, "g", ph)
+	if d != "" {
+		t.Fatalf("the declared refresh: %s", d)
+	}
+	read(t, resp)
+	_, body := f.last()
+	var sent map[string]string
+	if err := json.Unmarshal([]byte(body), &sent); err != nil || len(sent) != 3 || sent["client_id"] != plan.CodexClientID ||
+		sent["grant_type"] != "refresh_token" || sent["refresh_token"] != "real-refresh-1" {
+		t.Fatalf("the declared refresh sent %q", body)
 	}
 }
 

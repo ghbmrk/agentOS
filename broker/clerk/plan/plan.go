@@ -130,9 +130,12 @@ type Declaration struct {
 	// when the provider refuses the login, as {"error":"<code>"} or
 	// {"error":{"code":"<code>"}}.
 	Refused []string
-	// RefreshKeys are the refresh body's keys, all strings; grant_type is
-	// refresh_token and refresh_token is the guest's placeholder.
-	RefreshKeys []string
+	// Refresh is the refresh body's every key but refresh_token, each with
+	// the one value the CLI sends (#3110). A refresh body is exactly these
+	// keys and refresh_token, all strings: grant_type is refresh_token and
+	// refresh_token is the guest's placeholder. Any other value would let a
+	// guest shape the provider's answer into an unswappable stop.
+	Refresh map[string]string
 	// RedirectFrom is the redirect_uri the CLI sends in its code exchange
 	// (its local callback); the clerk sends RedirectTo, which the provider
 	// bound the code to. Any other redirect_uri is refused.
@@ -409,8 +412,8 @@ func (p *Login) validate() error {
 	for _, c := range d.Refused {
 		p.refused[c] = true
 	}
-	if !contains(d.RefreshKeys, "grant_type") || !contains(d.RefreshKeys, fRefresh) {
-		return errors.New("clerk: a refresh declares grant_type and refresh_token")
+	if _, ok := d.Refresh[fRefresh]; ok || d.Refresh["grant_type"] != "refresh_token" {
+		return errors.New("clerk: a refresh declares grant_type refresh_token, and refresh_token as the guest's")
 	}
 	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
 		if forbiddenHeader(http.CanonicalHeaderKey(h)) {
@@ -1363,21 +1366,19 @@ func (p *Login) refusedLogin(a *planAnswer) bool {
 	return code != "" && p.refused[code]
 }
 
-// checkRefresh holds a refresh body to its declared keys, all strings, with
-// grant_type refresh_token and the guest's own refresh placeholder, and
-// returns it with the real refresh token in its place.
+// checkRefresh holds a refresh body to its declared keys and values, all
+// strings, with the guest's own refresh placeholder, and returns it with the
+// real refresh token in its place.
 func (p *Login) checkRefresh(guest string, body []byte) ([]byte, bool) {
 	obj, err := strictObject(body)
-	if err != nil {
+	if err != nil || len(obj) != len(p.d.Refresh)+1 {
 		return nil, false
 	}
 	for k, v := range obj {
-		if _, ok := v.(string); !ok || !contains(p.d.RefreshKeys, k) {
+		s, ok := v.(string)
+		if want, fixed := p.d.Refresh[k]; !ok || k != fRefresh && (!fixed || s != want) {
 			return nil, false
 		}
-	}
-	if obj["grant_type"] != "refresh_token" {
-		return nil, false
 	}
 	ph, _ := obj[fRefresh].(string)
 	real, ok := p.resolve(guest, fRefresh, ph)
@@ -1708,6 +1709,10 @@ func codexMeta() map[string]Value {
 	}
 }
 
+// CodexClientID is Codex CLI 0.162.1's public OAuth client ID, the one its
+// refresh sends (#3110).
+const CodexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
 // Codex is the Codex CLI's plan route as measured on CLI 0.162.1 (#809):
 // the ChatGPT plan's model and models endpoints, the refresh, and the
 // device-code sign-in, with the CLI's local callback rewritten to the auth
@@ -1742,8 +1747,12 @@ func Codex(guard *netguard.Policy) Declaration {
 		AccountClaim: []string{"https://api.openai.com/auth", "chatgpt_account_id"},
 		// The refresh failures the CLI itself treats as a dead login
 		// (codex-rs auth). invalid_grant is not one: a guest can provoke it.
-		Refused:      []string{"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"},
-		RefreshKeys:  []string{"client_id", "grant_type", fRefresh, "scope"},
+		Refused: []string{"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"},
+		// The refresh body CLI 0.162.1 sends (codex-rs login/src/auth/manager.rs
+		// request_chatgpt_token_refresh, login/src/oauth/client.rs refresh):
+		// its OAuth client ID and the grant, as JSON, and no scope. The ID
+		// is the public CLIENT_ID compiled into the pinned binary.
+		Refresh:      map[string]string{"client_id": CodexClientID, "grant_type": "refresh_token"},
 		RedirectFrom: "http://127.0.0.1:18432/deviceauth/callback",
 		RedirectTo:   "https://" + auth + "/deviceauth/callback",
 		RequestHeaders: []string{
