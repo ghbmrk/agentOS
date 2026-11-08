@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,4 +79,76 @@ func TestRepeatedPendingKillReportsWedged(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, e, "exp", Preempted)
+}
+
+// #5098: the wedged state reaches the status the owner reads. Wedged lists
+// a machine from the wedgedAfter-th pending-kill refusal in a row, while it
+// still reads Running and stays counted (RES-4); a refusal of another kind
+// or a kill that works takes it off, and a destroyed machine is never
+// listed.
+func TestWedgedListsTheMachine(t *testing.T) {
+	log.SetOutput(new(bytes.Buffer))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	e := newEnv(t, 4000)
+	e.create("exp", admission.Experiment, 1500)
+	e.create("other", admission.Experiment, 1500)
+	setRefuse := func(err error) {
+		e.rt.mu.Lock()
+		e.rt.refuseKill = err
+		e.rt.mu.Unlock()
+	}
+	wantWedged := func(step string, want ...string) {
+		t.Helper()
+		if got := e.m.Wedged(); !slices.Equal(got, want) {
+			t.Fatalf("%s: Wedged() = %q, want %q", step, got, want)
+		}
+	}
+	refuse := func(id string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := e.m.Preempt(id); !errors.Is(err, ErrKillPending) {
+				t.Fatalf("%s preemption %d: %v, want ErrKillPending", id, i+1, err)
+			}
+		}
+	}
+	pending := fmt.Errorf("fake: %w", ErrKillPending)
+	wantWedged("fresh")
+	setRefuse(pending)
+	refuse("exp", wedgedAfter-1)
+	wantWedged("below the threshold")
+	refuse("exp", 1)
+	wantWedged("at the threshold", "exp")
+	refuse("exp", 1)
+	wantWedged("past the threshold", "exp")
+	// Still Running and counted: only a host restart frees it.
+	if mc, err := e.m.Get("exp"); err != nil || mc.State != Running {
+		t.Fatalf("wedged machine: %+v, %v, want Running", mc, err)
+	}
+	if _, ok := e.adm.Snapshot().Running["exp"]; !ok {
+		t.Fatal("wedged machine no longer counted by admission")
+	}
+	refuse("other", wedgedAfter)
+	wantWedged("two wedged", "exp", "other")
+	// A refusal of another kind: the runtime got past its wait.
+	setRefuse(errors.New("fake: kill refused"))
+	if err := e.m.Preempt("other"); err == nil || errors.Is(err, ErrKillPending) {
+		t.Fatalf("other kill failure: %v", err)
+	}
+	wantWedged("after another failure", "exp")
+	// A kill that works.
+	setRefuse(nil)
+	must(t, e.m.Preempt("exp"))
+	waitState(t, e, "exp", Preempted)
+	wantWedged("after a kill that works")
+	// Wedged again, then destroyed once a kill works: never listed after.
+	setRefuse(pending)
+	refuse("other", wedgedAfter)
+	wantWedged("other wedged", "other")
+	if err := e.m.Destroy(bg, "other"); !errors.Is(err, ErrWedged) {
+		t.Fatalf("destroy of a wedged machine: %v, want ErrWedged", err)
+	}
+	wantWedged("destroy refused", "other")
+	setRefuse(nil)
+	must(t, e.m.Destroy(bg, "other"))
+	wantWedged("destroyed")
 }
