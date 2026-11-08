@@ -104,6 +104,8 @@ type Config struct {
 	// Now, if set, is the clock events and the limit read.
 	Now func() time.Time
 	// Log, if set, gets the clerk's fixed lines, which name only the camera.
+	// It may run under any of the clerk's locks, so it must not call the
+	// clerk (#4450).
 	Log func(string)
 }
 
@@ -476,30 +478,38 @@ func (c *Clerk) gap(n *node, pin Node) {
 	}
 }
 
+// markSilent raises the silent event once per silence. STATUS reads
+// silent only once the line and the event are out, the order turnOff keeps
+// (#4450). Only the node's one running loop calls it, so nothing marks the
+// node between the check and the set.
 func (c *Clerk) markSilent(n *node, id string) {
 	c.mu.Lock()
 	was := n.silent
+	c.mu.Unlock()
+	if was {
+		return
+	}
+	c.log(id, "silent past its interval")
+	c.event(id, Silent)
+	c.mu.Lock()
 	n.silent = true
 	c.mu.Unlock()
-	if !was {
-		c.log(id, "silent past its interval")
-		c.event(id, Silent)
-	}
 }
 
 // turnOff is DEV-3's refusal: the node is off and dialed no more until
 // the owner re-pins it, and the loss is logged and in STATUS (KRN-7). It
-// reports false, and changes nothing, when the owner re-pinned the node
-// after pin was dialed. STATUS reads off only once the line and the event
-// are out (#4431); the delivery lock holds a re-pin until then, so the
-// owner's newer word still wins.
+// reports false, and changes nothing, when the owner re-pinned or removed
+// the node after pin was dialed (#4450). STATUS reads off only once the
+// line and the event are out (#4431); the delivery lock holds a re-pin
+// until then, so the owner's newer word still wins.
 func (c *Clerk) turnOff(n *node, pin Node) bool {
 	id := pin.ID
 	n.deliver.Lock()
 	defer n.deliver.Unlock()
 	c.mu.Lock()
-	// A re-pin that landed after this handshake is the owner's newer word.
-	stale := n.pin.Key != pin.Key
+	// A re-pin or a Remove that landed after this handshake is the owner's
+	// newer word.
+	stale := c.nodes[id] != n || n.pin.Key != pin.Key
 	c.mu.Unlock()
 	if stale {
 		return false

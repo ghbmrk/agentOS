@@ -328,12 +328,14 @@ func (p *Policy) Refresh() error {
 // before Refresh takes the lock to check the generation and store.
 var refreshGapHook func()
 
-// Watch refreshes on each event until ctx ends: the broker sends one on
-// every address or route change. Each event applies the quick read at once;
-// the full read (which may wait on the router) runs single-flight on its own
-// goroutine, so a later event is never queued behind it. When ctx ends,
-// Watch returns only after that goroutine has, so no full read outlives it.
+// Watch refreshes on each event until ctx ends or events closes: the broker
+// sends one on every address or route change. Each event applies the quick
+// read at once; the full read (which may wait on the router) runs
+// single-flight on its own goroutine, so a later event is never queued
+// behind it. On either end, Watch stops that goroutine and returns only
+// after it has, so no full read outlives Watch.
 func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
+	ctx, cancel := context.WithCancel(ctx)
 	kick := make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {
@@ -354,10 +356,10 @@ func (p *Policy) Watch(ctx context.Context, events <-chan struct{}) {
 			}
 		}
 	}()
+	defer func() { cancel(); <-done }()
 	for {
 		select {
 		case <-ctx.Done():
-			<-done
 			return
 		case _, ok := <-events:
 			if !ok {
@@ -501,7 +503,7 @@ func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto str
 		a = a.Unmap()
 	}
 	err := p.check(ctx, r, a, port, proto)
-	if err != nil && p.onDeny != nil {
+	if err != nil && p.onDeny != nil && !isContextErr(err) {
 		var de *DeniedError
 		reason := err.Error()
 		if errors.As(err, &de) {
@@ -527,11 +529,24 @@ func (p *Policy) check(ctx context.Context, r request, a netip.Addr, port uint16
 		select {
 		case <-hold:
 		case <-ctx.Done():
-			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+			// The caller gave up (cancelled, or its own deadline passed):
+			// the dial fails with that error, not as a netguard refusal.
+			return ctx.Err()
 		case <-deadline:
-			return &DeniedError{a, "the router's external address on this gateway is not learned yet"}
+			return &DeniedError{a, reasonHold}
 		}
 	}
+}
+
+// reasonHold is the refusal of a destination still held when the hold bound
+// (externalHold) ends. A new router behind an unchanged gateway address also
+// opens a hold, so the reason names the router, not the gateway.
+const reasonHold = "the external address of this network's router is not learned yet"
+
+// isContextErr reports whether err is a held dial's own context ending,
+// which Check returns unjournalled.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // checkOnce decides a against what is learned now. A destination every

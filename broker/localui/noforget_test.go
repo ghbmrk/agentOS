@@ -8,10 +8,11 @@ import (
 
 // REQ: CAP-3, CH-7
 
-// FORGET is deleted from agentosd until the kernel's erase brings it back
-// (#2781, #2823), so nothing backs a Forget page. The page is not served
-// and home does not list it: a page that offered to ask could only fail
-// and tell the owner to reload, a step that can never work (UX on #2827).
+// FORGET's task list is deleted from agentosd (#2781), so nothing backs
+// it: home does not list it, and without agentosd's erase ops (the erase
+// by name, KRN-forget-c-page, D-284) no Forget page is served: a page that offered to
+// ask could only fail and tell the owner to reload, a step that can never
+// work (UX on #2827).
 func TestNoForgetPageWhileForgetIsDeleted(t *testing.T) {
 	a := newApprovalRig(t)
 	home := a.get("/home")

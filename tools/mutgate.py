@@ -11,8 +11,9 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              can fail, so the only ones CI runs gremlins on
   tools/mutgate.py plan --git BASE [--targets-out FILE]
                                              the `mutants` matrix as JSON: K shards for each claimed
-                                             package, K from its target lines and deletion sites (#4961);
-                                             FILE gets each test-only package's target lines
+                                             package, K from its target lines, deletion sites and
+                                             suite time (#4961, #5069); FILE gets each test-only
+                                             package's target lines
   tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K] [--targets FILE]]
                                              run gremlins per package (default: all listed),
                                              one JSON file per package in DIR (default mutants/);
@@ -85,6 +86,7 @@ import concurrent.futures
 import contextlib
 import glob
 import json
+import math
 import os
 import pathlib
 import re
@@ -352,12 +354,41 @@ def violations(targets, live, waived=None):
 LINES_PER_SHARD = 250
 SITES_PER_SHARD = 100
 MATRIX_MAX = 256
+# Every gremlins mutant and every deletion runs the package's whole suite, so a shard's time is its
+# count times the suite's (#5069): kernel/sim's 48 s suite ran 6 shards of 89 sites past 60 minutes
+# on #5006 (run 42368800375), where browser's 7 s suite ran 9 shards of 92 in 6 to 14. Seen there, a
+# target line cost gremlins 0.1 to 0.2 suite runs and a site about 0.6 (its parallel run, then a
+# detected one's run alone); the budget is half the job, as one package's shards took up to twice
+# another's time.
+LINE_RUNS = 0.25
+SITE_RUNS = 1
+SHARD_SECONDS = 1800
 
 
-def shard_count(targets, sites):
-    """K for a package with these target lines ({path: lines}) and deletion sites: at least one."""
+def shard_count(targets, sites, suite=0.0):
+    """K for a package with these target lines ({path: lines}) and deletion sites, whose whole test
+    suite takes suite seconds: at least one."""
     lines = sum(len(v) for v in targets.values())
-    return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD))
+    runs = LINE_RUNS * lines + SITE_RUNS * len(sites)
+    return max(1, -(-lines // LINES_PER_SHARD), -(-len(sites) // SITES_PER_SHARD),
+               math.ceil(suite * runs / SHARD_SECONDS))
+
+
+def suite_seconds(pkg, tmp):
+    """(seconds, None) one run of broker/<pkg>/'s whole test suite takes, built as `delete` builds
+    it (#5069), 0 for a package with no tests; or (None, problem)."""
+    pkg_dir, binary = BROKER / pkg, pathlib.Path(tmp) / "suite.test"
+    binary.unlink(missing_ok=True)
+    # Output goes to stderr: `plan` prints the matrix on stdout (#4961).
+    build = ["go", "test", "-c", "-cover", "-covermode=set", "-o", str(binary), "."]
+    if subprocess.run(build, cwd=pkg_dir, stdout=sys.stderr).returncode:
+        return None, f"broker/{pkg}/ does not build its tests"
+    if not binary.exists():
+        return 0.0, None
+    began = time.monotonic()
+    if subprocess.run([str(binary), "-test.failfast"], cwd=pkg_dir, stdout=sys.stderr).returncode:
+        return None, f"broker/{pkg}/'s tests fail before any mutant runs, so its shards cannot be sized"
+    return time.monotonic() - began, None
 
 
 def shard_lines(targets, index, of):
@@ -1278,9 +1309,13 @@ def cmd_plan(args):
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 return 1
-            of = shard_count(targets, sites)
+            suite, problem = suite_seconds(pkg, tmp) if targets or sites else (0.0, None)
+            if problem:
+                print(f"mutgate: {problem}", file=sys.stderr)
+                return 1
+            of = shard_count(targets, sites, suite)
             print(f"mutgate: {pkg}: {sum(map(len, targets.values()))} target lines, {len(sites)} deletion "
-                  f"sites, {of} shard(s)", file=sys.stderr)
+                  f"sites, a {suite:.0f} s suite, {of} shard(s)", file=sys.stderr)
             include += [{"pkg": pkg, "shard": i, "of": of} for i in range(of)]
     if not include or len(include) > MATRIX_MAX:
         fix = ("split the PR so each part changes fewer tier-A or tier-B packages" if include

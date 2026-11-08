@@ -318,7 +318,8 @@ func (d *Enforcer) kick() {
 }
 
 // syncFirewall loads the ruleset for the policy in force if it is not the
-// one loaded, in step with the resolver and the relays (network.go). A
+// one loaded, or again when a counted port starts or stops merging
+// (offloads), in step with the resolver and the relays (network.go). A
 // load that fails leaves the previous ruleset (nft's transaction, P5) and
 // is tried again at the next tick.
 func (d *Enforcer) syncFirewall(ctx context.Context) error {
@@ -331,13 +332,13 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	}
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
-	if h == d.loaded {
+	if h == d.loaded && !d.net.reload {
 		return nil
 	}
 	if err := d.loadNetwork(ctx, doc); err != nil {
 		return err
 	}
-	d.loaded, d.loadedDoc = h, doc
+	d.loaded, d.loadedDoc, d.net.reload = h, doc, false
 	return nil
 }
 

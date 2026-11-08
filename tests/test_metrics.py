@@ -342,6 +342,48 @@ class StatesTest(unittest.TestCase):
                                {"at": "2", "id": "SIM-x", "state": "escalated"}])
 
 
+class StatesCapTest(unittest.TestCase):
+    """Brief ID MET-1b (local, not in SPEC.md): the issues/events feed ends at GitHub's page cap."""
+
+    def _states(self, cap_pages, total_pages):
+        item = {"title": "SIM-x: Thing", "labels": [{"name": "work-item"}]}
+        def api(repo, path, token):
+            page = int(path.rsplit("page=", 1)[1])
+            if page > cap_pages:
+                raise urllib.error.HTTPError(path, 422, "Unprocessable Entity", {}, None)
+            if page > total_pages:
+                return []
+            return [{"event": "labeled", "created_at": f"{page:04d}-{i:03d}", "label": {"name": "state:queued"},
+                     "issue": dict(item, title=f"SIM-{page}-{i}: Thing")} for i in range(100)]
+        orig = metrics._api
+        metrics._api = api
+        try:
+            return metrics.collect_states("o/r", None)
+        finally:
+            metrics._api = orig
+
+    def test_page_cap_ends_the_feed_and_keeps_what_was_read(self):
+        self.assertEqual(len(self._states(cap_pages=3, total_pages=9)), 300)
+
+    def test_feed_shorter_than_the_cap_is_read_whole(self):
+        self.assertEqual(len(self._states(cap_pages=3, total_pages=2)), 200)
+
+    def test_a_422_on_the_first_page_still_fails(self):
+        with self.assertRaises(urllib.error.HTTPError):
+            self._states(cap_pages=0, total_pages=9)
+
+    def test_other_listings_do_not_swallow_a_422(self):
+        def api(repo, path, token):
+            raise urllib.error.HTTPError(path, 422, "Unprocessable Entity", {}, None)
+        orig = metrics._api
+        metrics._api = api
+        try:
+            with self.assertRaises(urllib.error.HTTPError):
+                list(metrics._pages("o/r", "pulls", None))
+        finally:
+            metrics._api = orig
+
+
 class TrustTest(unittest.TestCase):
     """Security review 2, finding 8: on a public repository anyone can post a review or run
     a fork's CI, so only collaborators' reviews and this repository's own runs count."""

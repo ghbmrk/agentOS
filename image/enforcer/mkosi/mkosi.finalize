@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening), or that
-enables a unit outside the enforcer's preset (only the services it needs). mkosi runs this with the
-tree in $BUILDROOT; each refusal is a line of the build log. The running box checks the same
+"""Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening), that
+enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
+dump to a file (#4459). mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
+build log. The running box checks the same
 (agentos-enforcer/health); this catches it before an image exists."""
+import fnmatch
 import os
 import pathlib
 import re
@@ -16,6 +18,13 @@ BLOCKS = ("install cfg80211 /bin/false", "install mac80211 /bin/false",
 # Units the preset enables (usr/lib/systemd/system-preset/50-enforcer.preset), and the .wants links
 # systemd and udev ship statically. Anything else in a .wants or .requires directory is refused.
 WANTS_DIRS = ("etc/systemd/system",)
+# #4459: a crash is never written to a file. The kernel's default core_pattern is the relative
+# "core", which writes into the crashed process's working directory: a radio stack's run directory,
+# which its adapter sees. These are what usr/lib/sysctl.d/99-enforcer-nodump.conf sets.
+NODUMP = {"kernel/core_pattern": "|/usr/bin/false", "fs/suid_dumpable": "0"}
+# Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
+# name lower down, and the files are read in name order.
+SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
 
 
 def installed(root):
@@ -43,6 +52,48 @@ def inert(root, f):
     return all(not ln.strip() or ln.lstrip().startswith(("#", ";")) for ln in text.splitlines())
 
 
+def sysctl_key(k):
+    """systemd's sysctl_normalize: if the first separator is a dot, dots and slashes swap; empty and
+    "." components drop out. So "kernel.core_pattern" and "/kernel//core_pattern" are one key."""
+    seps = [i for i in (k.find("."), k.find("/")) if i >= 0]
+    if seps and k[min(seps)] == ".":
+        k = k[:min(seps)] + k[min(seps):].translate(str.maketrans("./", "/."))
+    return "/".join(c for c in k.split("/") if c not in ("", "."))
+
+
+def sysctls(root):
+    """What systemd-sysctl sets, key by key (sysctl_key), and the refusals: a link anywhere in
+    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL,
+    "#" and ";" start comments, a leading "-" only ignores errors, and the last assignment wins. A
+    glob key that matches a NODUMP key counts as setting it."""
+    files, out = {}, []
+    for d in SYSCTL_DIRS:
+        p = root / d
+        if p.is_symlink():
+            out.append("%s is a link" % d)
+            continue
+        if not p.is_dir():
+            continue
+        for f in p.iterdir():
+            if f.is_symlink():
+                out.append("%s/%s is a link" % (d, f.name))
+            elif f.name.endswith(".conf") and not f.name.startswith("."):
+                files.setdefault(f.name, f)
+    vals = {}
+    for name in sorted(files, key=os.fsencode):
+        for raw in re.split(rb"[\n\r\x00]", files[name].read_bytes()):
+            ln = raw.strip(b" \t").decode(errors="replace")
+            if not ln or ln[0] in "#;":
+                continue
+            k, eq, v = ln.lstrip("-").partition("=")
+            key = sysctl_key(k.strip(" \t"))
+            for n in NODUMP:
+                if n != key and fnmatch.fnmatchcase(n, key):
+                    vals[n] = "a glob, %s" % key
+            vals[key] = v.strip(" \t") if eq else None
+    return vals, out
+
+
 def violations(root):
     root = pathlib.Path(root)
     out = ["package %s could turn Wi-Fi on" % p for p in installed(root) if WIFI_PACKAGES.fullmatch(p)]
@@ -63,6 +114,10 @@ def violations(root):
             for u in sorted(w.iterdir()):
                 if u.name not in enabled:
                     out.append("%s/%s is enabled but not in the enforcer preset" % (w.relative_to(root), u.name))
+    vals, bad = sysctls(root)
+    out += ["sysctl.d: " + b for b in bad]
+    out += ["sysctl.d sets %s to %s; must be %s" % (k.replace("/", "."), vals.get(k), v)
+            for k, v in NODUMP.items() if vals.get(k) != v]
     return out
 
 

@@ -5,6 +5,7 @@ package dns
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -133,6 +134,26 @@ func fills(t *testing.T, name, set4 string) string {
 	}
 	t.Fatalf("no allow set %s", set4)
 	return ""
+}
+
+// TestListedNameOnce: a name a list holds twice is written once, so a
+// view's configuration is the same whatever repeats the list carries.
+func TestListedNameOnce(t *testing.T) {
+	d := fixturePolicy()
+	d.Devices[0].Allow = []string{"tv.example", "cdn.example", "tv.example"}
+	f, err := Generate(d, fixtureLayout(), fixtureSetup())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := generate(t).Listed
+	if len(f.Listed) != len(want) {
+		t.Fatalf("%d views, want %d", len(f.Listed), len(want))
+	}
+	for i := range want {
+		if f.Listed[i] != want[i] {
+			t.Errorf("%s with a repeated name:\n%s\nwant\n%s", want[i].Iface, f.Listed[i].Conf, want[i].Conf)
+		}
+	}
 }
 
 // TestListedNamesOnly: each listed view answers on its own interface
@@ -297,55 +318,73 @@ func TestViewsAreOwnLists(t *testing.T) {
 
 func TestGenerateRefuses(t *testing.T) {
 	l := fixtureLayout()
-	for name, mod := range map[string]func(*policy.Document, *Setup){
-		"edge DHCP":     func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Edge },
-		"WAN DHCP":      func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.WAN },
-		"AP mgmt DHCP":  func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.APMgmt },
-		"unknown iface": func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = "eth9" },
-		"trunk itself":  func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk },
-		"bad VLAN":      func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk + ".0101" },
-		"net twice":     func(_ *policy.Document, s *Setup) { s.Nets[1].Iface = s.Nets[0].Iface },
-		"public prefix": func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("203.0.113.0/24") },
-		"unmasked":      func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.1/24") },
-		"tiny prefix":   func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.0/30") },
-		"v6 not /64":    func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix6 = netip.MustParsePrefix("fd00:10::/56") },
-		"no upstream":   func(_ *policy.Document, s *Setup) { s.Upstream = nil },
-		"no DHCP": func(_ *policy.Document, s *Setup) {
+	type mod = func(*policy.Document, *Setup)
+	// Each case names the text of the check that must refuse it, so a
+	// case cannot pass on some other refusal.
+	host := func(n string) string { return fmt.Sprintf("%q is not a DNS host name", n) }
+	allow := func(n string) mod { return func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{n} } }
+	// The core's list, with the cap the policy requires of a destination.
+	dest := func(n string) mod {
+		return func(d *policy.Document, _ *Setup) {
+			d.Destinations = []string{n}
+			d.Caps = map[string]uint64{n: 1 << 40}
+		}
+	}
+	long := strings.Repeat("a", 64) + ".example"
+	for name, c := range map[string]struct {
+		want string
+		mod  mod
+	}{
+		"edge DHCP":     {`"edge0" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Edge }},
+		"WAN DHCP":      {`"wan0" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.WAN }},
+		"AP mgmt DHCP":  {`"apm0" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.APMgmt }},
+		"unknown iface": {`"eth9" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = "eth9" }},
+		"trunk itself":  {`"ap0" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk }},
+		"bad VLAN":      {`"ap0.0101" is not a served network`, func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk + ".0101" }},
+		"net twice":     {`network "own0" twice`, func(_ *policy.Document, s *Setup) { s.Nets[1].Iface = s.Nets[0].Iface }},
+		"public prefix": {"own0: IPv4 prefix 203.0.113.0/24", func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("203.0.113.0/24") }},
+		"unmasked":      {"own0: IPv4 prefix 10.10.0.1/24", func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.1/24") }},
+		"tiny prefix":   {"own0: IPv4 prefix 10.10.0.0/30", func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.0/30") }},
+		"v6 not /64":    {"own0: IPv6 prefix fd00:10::/56", func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix6 = netip.MustParsePrefix("fd00:10::/56") }},
+		"no upstream":   {"no upstream resolver", func(_ *policy.Document, s *Setup) { s.Upstream = nil }},
+		"no DHCP": {"no network is served DHCP", func(_ *policy.Document, s *Setup) {
 			for i := range s.Nets {
 				s.Nets[i].DHCP = false
 			}
-		},
-		"private up":  func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") },
-		"loopback up": func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") },
-		"served v6 up": func(_ *policy.Document, s *Setup) {
+		}},
+		"private up":  {"upstream 192.168.1.1:53", func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") }},
+		"loopback up": {"upstream 127.0.0.1:53", func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") }},
+		"served v6 up": {"upstream [2001:db8:101::53]:53 is on ap0.101", func(_ *policy.Document, s *Setup) {
 			s.Nets[5].Prefix6 = netip.MustParsePrefix("2001:db8:101::/64")
 			s.Upstream = append(s.Upstream, netip.MustParseAddrPort("[2001:db8:101::53]:53"))
-		},
-		"lease relative": func(_ *policy.Document, s *Setup) { s.LeaseFile = "dhcp.leases" },
-		"lease quoting":  func(_ *policy.Document, s *Setup) { s.LeaseFile = "/var/lib/a b" },
-		"name upper":     func(d *policy.Document, _ *Setup) { d.Destinations = []string{"Core.example"} },
-		"name wildcard":  func(d *policy.Document, _ *Setup) { d.Destinations = []string{"*.core.example"} },
-		"name hash":      func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"tv.example#53"} },
-		"name comma":     func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"a.example,b.example"} },
-		"name one label": func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"localhost"} },
-		"name non-ASCII": func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"tv.exämple"} },
-		"name empty lbl": func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"tv..example"} },
-		"name trail dot": func(d *policy.Document, _ *Setup) { d.Devices[0].Allow = []string{"tv.example."} },
-		"name long label": func(d *policy.Document, _ *Setup) {
-			d.Devices[0].Allow = []string{strings.Repeat("a", 64) + ".example"}
-		},
-		"bad layout": func(_ *policy.Document, _ *Setup) {},
+		}},
+		"lease relative":  {`lease file "dhcp.leases"`, func(_ *policy.Document, s *Setup) { s.LeaseFile = "dhcp.leases" }},
+		"lease quoting":   {`lease file "/var/lib/a b"`, func(_ *policy.Document, s *Setup) { s.LeaseFile = "/var/lib/a b" }},
+		"name upper":      {host("Core.example"), dest("Core.example")},
+		"name wildcard":   {host("*.core.example"), dest("*.core.example")},
+		"name hash":       {host("tv.example#53"), allow("tv.example#53")},
+		"name comma":      {host("a.example,b.example"), allow("a.example,b.example")},
+		"name one label":  {host("localhost"), allow("localhost")},
+		"name non-ASCII":  {host("tv.exämple"), allow("tv.exämple")},
+		"name empty lbl":  {host("tv..example"), allow("tv..example")},
+		"name trail dot":  {host("tv.example."), allow("tv.example.")},
+		"name long label": {host(long), allow(long)},
+		"bad layout":      {"bad layout", func(_ *policy.Document, _ *Setup) {}},
 	} {
 		d, s := fixturePolicy(), fixtureSetup()
 		ll := l
 		if name == "bad layout" {
 			ll.Edge = ll.Core
 		}
-		mod(&d, &s)
-		if _, err := Generate(d, ll, s); err == nil {
+		c.mod(&d, &s)
+		_, err := Generate(d, ll, s)
+		switch {
+		case err == nil:
 			t.Errorf("%s: generated", name)
-		} else if name != "bad layout" && !strings.HasPrefix(name, "name") && !errors.Is(err, ErrConfig) {
-			t.Errorf("%s: %v", name, err)
+		case name != "bad layout" && !errors.Is(err, ErrConfig):
+			t.Errorf("%s: not this package's refusal: %v", name, err)
+		case !strings.Contains(err.Error(), c.want):
+			t.Errorf("%s: refused by another check: %v, want %q", name, err, c.want)
 		}
 	}
 	// A name the policy accepts but this package refuses still refuses a

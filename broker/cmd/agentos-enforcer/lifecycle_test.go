@@ -372,9 +372,10 @@ type box struct {
 	failNth map[string]int
 	saves   map[string]int
 	waits   deps
-	// offloads are the ports of each Offload call; offloadErr fails them.
+	// offloads are the ports of each Offload call; offloadErr fails a
+	// call that names its port.
 	offloads   [][]string
-	offloadErr error
+	offloadErr map[string]error
 
 	d *Enforcer
 	b *browser
@@ -449,12 +450,26 @@ func (x *box) deps() deps {
 }
 
 // offload is the box's ports: it records each call's ports and fails
-// while offloadErr is set.
+// for each port offloadErr names.
 func (x *box) offload(ports ...string) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.offloads = append(x.offloads, slices.Clone(ports))
-	return x.offloadErr
+	var errs []error
+	for _, p := range ports {
+		errs = append(errs, x.offloadErr[p])
+	}
+	return errors.Join(errs...)
+}
+
+// merges makes the port named merge segments (err) or stop (nil).
+func (x *box) merges(port string, err error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.offloadErr == nil {
+		x.offloadErr = map[string]error{}
+	}
+	x.offloadErr[port] = err
 }
 
 // fail makes Save of the state file name fail (on) or work again.

@@ -64,7 +64,7 @@ EXTRA="-device qemu-xhci,id=xhci -drive if=none,id=stick,format=raw,file=$W/stic
 	boot "$W/console.log" "$D"
 show "$W/console.log"
 has "$W/console.log" "enforcer-ci: hwsim refused"
-has "$W/console.log" "enforcer-health: PASS secure_boot=on usr=verity wifi=off usb_storage=off usb_default=0 watchdog=watchdog0:"
+has "$W/console.log" "enforcer-health: PASS secure_boot=on usr=verity wifi=off usb_storage=off usb_default=0 dumps=off watchdog=watchdog0:"
 has "$W/console.log" "enforcer-boot: bless=good"
 has "$W/console.log" " root=noexec watchdog_runtime=30s usb_devices=1 usb_unauthorised=1"
 hasnt "$W/console.log" "enforcer-ci: hwsim loaded"

@@ -141,17 +141,19 @@ const passkeyJS = `(function () {
     }, function () { say("No passkey was made. Try again."); });
   });
   if (tap) tap.addEventListener("click", function () {
-    var f = el("pk-finish");
-    navigator.credentials.get({ publicKey: {
+    var f = el("pk-finish"), any = f.dataset.any === "1";
+    var pk = {
       challenge: unb64(f.dataset.challenge), rpId: f.dataset.rp,
       allowCredentials: [], userVerification: "required", hints: ["security-key"]
-    } }).then(function (c) {
+    };
+    if (any) pk.hints = [];
+    navigator.credentials.get({ publicKey: pk }).then(function (c) {
       var r = c.response;
       f.elements.ad.value = b64(r.authenticatorData);
       f.elements.cd.value = b64(r.clientDataJSON);
       f.elements.sig.value = b64(r.signature);
       f.submit();
-    }, function () { say("No hardware key answered. Try again."); });
+    }, function () { say(any ? "No passkey answered. Try again." : "No hardware key answered. Try again."); });
   });
 })();`
 

@@ -59,6 +59,11 @@ type Runtime struct {
 	// a clerk under its own user (CLK-1). runsc takes it for run, not for
 	// create, so only streams and one-shot runs use it.
 	Rootless bool
+	// KillTimeout bounds the Kill that cleans up after a failed start, so
+	// a cancelled command's kill stuck in it cannot hang the start (V37);
+	// vm's own cleanup kills again under vm.Config.KillTimeout. Zero
+	// means 10 s.
+	KillTimeout time.Duration
 
 	logMu sync.Mutex // the exec log's appends and rotation
 
@@ -81,6 +86,13 @@ var _ vm.Runtime = (*Runtime)(nil)
 // would match "m10"; the trailing "_" (not allowed in machine IDs) makes
 // every ID a non-prefix of every other (S3 surprise 2).
 func cid(id string) string { return id + "_" }
+
+func (r *Runtime) killTimeout() time.Duration {
+	if r.KillTimeout == 0 {
+		return 10 * time.Second
+	}
+	return r.KillTimeout
+}
 
 func (r *Runtime) platform() string {
 	if r.Platform == "" {
@@ -223,7 +235,9 @@ func (r *Runtime) startConsole(ctx context.Context, l vm.Launch, o childproc.Opt
 		pw.Close() // the sandbox holds its own copy
 		return nil
 	}
-	r.Kill(context.WithoutCancel(ctx), l)
+	kctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.killTimeout())
+	r.Kill(kctx, l)
+	cancel()
 	pw.Close()
 	select {
 	case <-copied:
@@ -658,7 +672,7 @@ func (r *Runtime) waitPendingKills(ctx context.Context, id string) error {
 		}
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("gvisor: %s: a cancelled command's kill still runs after %s; not killing the sandbox: %w", id, time.Since(start).Round(time.Millisecond), ctx.Err())
+		return fmt.Errorf("gvisor: %s: a cancelled command's kill still runs after %s; not killing or deleting the container: %w: %w", id, time.Since(start).Round(time.Millisecond), vm.ErrKillPending, ctx.Err())
 	}
 }
 
@@ -708,9 +722,10 @@ var _ vm.Execer = (*Runtime)(nil)
 // Exec's in-sandbox kill still running: runsc's container ID is the same
 // for every incarnation of a machine, so a kill let outlive Kill could
 // land in the sandbox a Rollback or Rebuild starts next (GVISOR-stale-kill).
-// If ctx ends before that kill does, Kill fails without touching the
-// sandbox, so the machine is not known dead and nothing restarts it
-// (GVISOR-killwait-ctx).
+// If ctx ends before that kill does, Kill fails on vm.ErrKillPending
+// without killing or deleting the container, so the machine is not known
+// dead and nothing restarts it (GVISOR-killwait-ctx); vm's cgroup
+// backstop may still kill the guest.
 func (r *Runtime) Kill(ctx context.Context, l vm.Launch) error {
 	if err := r.waitPendingKills(ctx, l.ID); err != nil {
 		return err

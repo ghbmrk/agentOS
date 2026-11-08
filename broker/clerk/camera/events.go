@@ -38,7 +38,10 @@ type Event struct {
 }
 
 // EventSink takes the clerk's events: the kernel's device-report entry
-// (DEVSLOT b3, #3321).
+// (DEVSLOT b3, #3321). Emit runs under the clerk's locks (the event
+// limiter's, and the camera's delivery lock while a key-refused event goes
+// out), so it must not call the clerk's Remove, SetCapture, Repin or
+// Flush: each would deadlock (#4450).
 type EventSink interface {
 	Emit(Event) error
 }

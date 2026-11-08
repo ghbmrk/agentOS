@@ -24,10 +24,18 @@ func nlmsg(typ uint16) []byte {
 }
 
 // neighmsg is one RTM_NEWNEIGH/RTM_DELNEIGH message for dst (an ndmsg of
-// family fam, then an NDA_LLADDR and an NDA_DST attribute).
+// family fam on interface 2 in state REACHABLE, then an NDA_LLADDR and an
+// NDA_DST attribute).
 func neighmsg(typ uint16, fam byte, dst []byte) []byte {
+	return neighmsgAt(typ, fam, dst, 0x02, []byte{2, 0, 0, 0, 0, 0x0b})
+}
+
+// neighmsgAt is neighmsg with the entry's NUD state and MAC.
+func neighmsgAt(typ uint16, fam byte, dst []byte, state uint16, mac []byte) []byte {
 	nd := make([]byte, 12)
 	nd[0] = fam
+	binary.NativeEndian.PutUint32(nd[4:], 2)
+	binary.NativeEndian.PutUint16(nd[8:], state)
 	attr := func(t uint16, v []byte) []byte {
 		a := make([]byte, (4+len(v)+3)&^3)
 		binary.NativeEndian.PutUint16(a[0:], uint16(4+len(v)))
@@ -35,7 +43,7 @@ func neighmsg(typ uint16, fam byte, dst []byte) []byte {
 		copy(a[4:], v)
 		return a
 	}
-	body := append(append(nd, attr(2, []byte{2, 0, 0, 0, 0, 0x0b})...), attr(1, dst)...)
+	body := append(append(nd, attr(2, mac)...), attr(1, dst)...)
 	b := make([]byte, syscall.NLMSG_HDRLEN, syscall.NLMSG_HDRLEN+len(body))
 	b = append(b, body...)
 	binary.NativeEndian.PutUint32(b[0:], uint32(len(b)))
@@ -52,41 +60,103 @@ func TestNetlinkEventsAreAddressRouteLinkAndGatewayNeighbourChanges(t *testing.T
 	gw := netip.MustParseAddr("192.168.1.1")
 	asked := 0
 	gateway := func() netip.Addr { asked++; return gw }
+	var w neighWatch
 	for _, typ := range []uint16{syscall.RTM_NEWADDR, syscall.RTM_DELADDR, syscall.RTM_NEWROUTE, syscall.RTM_DELROUTE, syscall.RTM_NEWLINK, syscall.RTM_DELLINK} {
-		if !netlinkChange(nlmsg(typ), gateway) {
+		if !w.change(nlmsg(typ), gateway) {
 			t.Fatalf("type %d is a network change", typ)
 		}
 	}
 	for _, typ := range []uint16{syscall.NLMSG_DONE, syscall.NLMSG_NOOP, syscall.RTM_NEWNEIGH, syscall.RTM_GETNEIGH} {
-		if netlinkChange(nlmsg(typ), gateway) {
+		if w.change(nlmsg(typ), gateway) {
 			t.Fatalf("type %d is not a network change", typ)
 		}
 	}
-	if netlinkChange([]byte{1, 2, 3}, gateway) {
+	if w.change([]byte{1, 2, 3}, gateway) {
 		t.Fatal("a truncated message is not a change")
 	}
 	if asked != 0 {
 		t.Fatalf("the gateway was read %d times for messages with no neighbour address", asked)
 	}
 	for _, typ := range []uint16{syscall.RTM_NEWNEIGH, syscall.RTM_DELNEIGH} {
-		if !netlinkChange(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 1}), gateway) {
+		if !w.change(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 1}), gateway) {
 			t.Fatalf("type %d on the gateway's entry is a network change", typ)
 		}
-		if netlinkChange(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 9}), gateway) {
+		if w.change(neighmsg(typ, syscall.AF_INET, []byte{192, 168, 1, 9}), gateway) {
 			t.Fatalf("type %d on another host's entry is not a network change", typ)
 		}
 	}
 	v6 := netip.MustParseAddr("fe80::1").As16()
-	if netlinkChange(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET6, v6[:]), gateway) {
+	if w.change(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET6, v6[:]), gateway) {
 		t.Fatal("an IPv6 neighbour entry is not a network change")
 	}
 	two := append(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 9}), neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 8})...)
 	asked = 0
-	if netlinkChange(two, gateway) || asked != 1 {
+	if w.change(two, gateway) || asked != 1 {
 		t.Fatalf("one read of other hosts' entries asked the gateway %d times", asked)
 	}
-	if netlinkChange(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 1}), func() netip.Addr { return netip.Addr{} }) {
+	var fresh neighWatch
+	if fresh.change(neighmsg(syscall.RTM_NEWNEIGH, syscall.AF_INET, []byte{192, 168, 1, 1}), func() netip.Addr { return netip.Addr{} }) {
 		t.Fatal("a neighbour entry with no default gateway is not a network change")
+	}
+}
+
+// Only a change to what the gateway's neighbour entry says about the router
+// is an event: its MAC, its interface, or whether it is valid (#1578). The
+// NUD transitions a full read's own router packet drives (REACHABLE, STALE,
+// DELAY, PROBE, all with the same MAC) are not, so the reads do not feed
+// each other; a swapped MAC, a failed or deleted entry, and a new gateway
+// address still are.
+func TestNetlinkGatewayNeighbourCountsOnlyMACOrValidityChanges(t *testing.T) {
+	gwA, gwB := []byte{192, 168, 1, 1}, []byte{192, 168, 1, 2}
+	cur := netip.AddrFrom4([4]byte(gwA))
+	gateway := func() netip.Addr { return cur }
+	macA, macB := []byte{2, 0, 0, 0, 0, 0x0a}, []byte{2, 0, 0, 0, 0, 0x0b}
+	const reachable, stale, delay, probe, failed, incomplete = 0x02, 0x04, 0x08, 0x10, 0x20, 0x01
+	var w neighWatch
+	steps := []struct {
+		what string
+		msg  []byte
+		want bool
+	}{
+		{"first sight of the entry", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macA), true},
+		{"REACHABLE to STALE", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, stale, macA), false},
+		{"STALE to DELAY", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, delay, macA), false},
+		{"DELAY to PROBE", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, probe, macA), false},
+		{"PROBE to REACHABLE", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macA), false},
+		{"a new router's MAC", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, stale, macB), true},
+		{"the same router again", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB), false},
+		{"the entry failed", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, failed, macB), true},
+		{"still unresolved", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, incomplete, nil), false},
+		{"valid again", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB), true},
+		{"the entry deleted", neighmsgAt(syscall.RTM_DELNEIGH, syscall.AF_INET, gwA, reachable, macB), true},
+		{"back with the same MAC", neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB), true},
+	}
+	for _, s := range steps {
+		if got := w.change(s.msg, gateway); got != s.want {
+			t.Fatalf("%s: change %v, want %v", s.what, got, s.want)
+		}
+	}
+	// The same router's MAC on another interface is a change: the gateway
+	// key carries the interface.
+	other := neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB)
+	binary.NativeEndian.PutUint32(other[syscall.NLMSG_HDRLEN+4:], 3)
+	if !w.change(other, gateway) {
+		t.Fatal("the gateway's MAC on another interface is not a change")
+	}
+	// A new default gateway's entry is a change even with the same MAC.
+	cur = netip.AddrFrom4([4]byte(gwB))
+	if !w.change(neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, reachable, macB), gateway) {
+		t.Fatal("the first entry of a new gateway address is not a change")
+	}
+	// After an overflow the entry is not trusted: the next one counts.
+	w.forget()
+	if !w.change(neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, stale, macB), gateway) {
+		t.Fatal("the first entry after a lost-message overflow is not a change")
+	}
+	// Two transitions in one read: a MAC change anywhere in it counts.
+	two := append(neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, stale, macA), neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, reachable, macB)...)
+	if !w.change(two, gateway) {
+		t.Fatal("a read whose first message swaps the MAC and second swaps it back is not a change")
 	}
 }
 
@@ -507,8 +577,8 @@ func TestNeverSeenGatewayHoldsPublicUntilFullRead(t *testing.T) {
 }
 
 // The hold is bounded: if the gateway's full read never stores, a held
-// public destination is refused when the bound or the caller's context ends,
-// never allowed.
+// public destination is refused when the bound ends, or fails with the
+// caller's context error when that ends first, never allowed.
 func TestNeverSeenGatewayHoldFailsClosed(t *testing.T) {
 	old := externalHold
 	externalHold = 50 * time.Millisecond
@@ -530,8 +600,8 @@ func TestNeverSeenGatewayHoldFailsClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	externalHold = time.Hour
-	if err := p.Check(ctx, public, 443, "tcp"); !errors.Is(err, ErrDenied) {
-		t.Fatalf("a cancelled held check is not refused: %v", err)
+	if err := p.Check(ctx, public, 443, "tcp"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled held check does not fail with its context's error: %v", err)
 	}
 }
 
