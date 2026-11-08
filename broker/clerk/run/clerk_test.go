@@ -177,6 +177,8 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 	grant := []byte(`{"refresh_token":"canary-refresh-new","client_id":"agentos-test"}`)
 	digest := grantDigest(grant)
 	other := grantDigest([]byte(`{"refresh_token":"canary-refresh-other","client_id":"agentos-test"}`))
+	var held []string
+	planner := ""
 	for i, c := range []struct {
 		name           string
 		k              key.Key
@@ -184,9 +186,7 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		otherPlan      bool
 		detail         string
 	}{
-		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
 		{"a narrowing for anything else", r.narrow(key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
-		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of any verb", r.narrow(key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of change-account and more", r.narrow(key.LimitVerbs(key.ChangeAccount, key.Post), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
 		{"an approval of this grant and another", r.narrow(key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest), grantPrint(other)), key.LimitUses(1), key.LimitExpires(r.now+MaxApproval)), "web", digest, false, DNotApproved},
@@ -196,6 +196,10 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		{"another grant", r.approve(other), "web", other, false, DNotStaged},
 		{"another clerk", r.approve(digest), "mail", digest, false, DNotThis},
 		{"another plan", r.approve(digest), "web", digest, true, DNotStaged},
+		// No passkey approved these two one by one, so each waits its worth (KEY-9).
+		// The planner's narrowing outlasts its hold, so the clerk judges it.
+		{"the planner's own exact narrowing", r.narrowBy(holderPriv, key.LimitVerbs(key.ChangeAccount), key.LimitContent(grantPrint(digest)), key.LimitUses(1), key.LimitExpires(r.now+key.HoldExtra(key.MaxRank)+MaxApproval)), "web", digest, false, DNotApproved},
+		{"the clerk's own key", r.key, "web", digest, false, DNotApproved},
 	} {
 		id := "case" + string(rune('a'+i))
 		staged := id
@@ -204,9 +208,35 @@ func TestReconnectNeedsTheOwnersExactApprovalAndTheStagedGrant(t *testing.T) {
 		}
 		r.stage(staged, grant)
 		st, changed := r.reconnect(id, c.k, c.target, c.digest)
+		if st.Phase == kernel.PHeld && !changed { // not approved one by one: it waits its worth first (KEY-9)
+			held = append(held, id)
+			if c.name == "the planner's own exact narrowing" {
+				planner = id
+			}
+			continue
+		}
 		if changed || st.Detail != c.detail {
 			t.Errorf("%s: step %s %q, store changed %v", c.name, st.Phase, st.Detail, changed)
 		}
+	}
+	// The held ones never change the store, past their hold too: the
+	// planner's narrowing, its grant staged and its link not yet expired,
+	// reaches the clerk, which refuses it as no passkey's.
+	r.stage(planner, grant)
+	before, _ := r.sec.MarshalBinary()
+	r.now += key.HoldExtra(key.MaxRank) + 1000
+	r.tick(r.now)
+	after, _ := r.sec.MarshalBinary()
+	for _, id := range held {
+		if st := r.step(id); !bytes.Equal(before, after) || st.Phase == kernel.PDone {
+			t.Errorf("%s: after its hold, step %s %q", id, st.Phase, st.Detail)
+		}
+	}
+	if st := r.step(planner); st.Phase != kernel.PFailed || st.Detail != DNotApproved {
+		t.Errorf("the planner's narrowing, after its hold: step %s %q", st.Phase, st.Detail)
+	}
+	if len(held) != 3 {
+		t.Errorf("held %v, want the clerk's own key, the planner's narrowing and the two-use approval", held)
 	}
 	r.stage("ok", grant)
 	st, changed := r.reconnect("ok", r.approve(digest), "web", digest)
@@ -475,5 +505,52 @@ func TestAReconnectClaimingAnotherGrantIsRefused(t *testing.T) {
 	st, changed := r.reconnectClaiming("claim", r.approve(approved), "web", digest, grantPrint(approved))
 	if changed || st.Detail != check.RClaim {
 		t.Fatalf("step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+}
+
+// Only a change-account step stops at the exit host: any other goes on to
+// the clerk, here to its token endpoint, which does not answer.
+func TestAnotherVerbGoesOnToTheClerk(t *testing.T) {
+	r := newExitRig(t)
+	id := r.submit("alice")
+	r.tick(r.now)
+	if st := r.step(id); st.Phase != kernel.PFailed || st.Detail != clerk.DRefresh {
+		t.Fatalf("a post through the exit host: step %s %q", st.Phase, st.Detail)
+	}
+}
+
+// A grant leaves memory once it is spent or replaced: its bytes are wiped,
+// not only let go.
+func TestASpentOrReplacedGrantIsWiped(t *testing.T) {
+	r := newExitRig(t)
+	// Read under the host's lock, which every write of the grant holds.
+	zero := func(b []byte) bool {
+		r.host.mu.Lock()
+		defer r.host.mu.Unlock()
+		for _, c := range b {
+			if c != 0 {
+				return false
+			}
+		}
+		return len(b) > 0
+	}
+	staged := func() []byte {
+		r.host.mu.Lock()
+		defer r.host.mu.Unlock()
+		return r.host.staged.grant
+	}
+	r.stage("first", []byte(`{"refresh_token":"canary-refresh-first","client_id":"agentos-test"}`))
+	first := staged()
+	grant := []byte(`{"refresh_token":"canary-refresh-second","client_id":"agentos-test"}`)
+	digest := r.stage("second", grant)
+	if !zero(first) {
+		t.Fatal("a replaced staged grant is still in memory")
+	}
+	second := staged()
+	if st, changed := r.reconnect("second", r.approve(digest), "web", digest); !changed || st.Phase != kernel.PDone {
+		t.Fatalf("the approved reconnect: step %s %q, store changed %v", st.Phase, st.Detail, changed)
+	}
+	if !zero(second) {
+		t.Fatal("a spent staged grant is still in memory")
 	}
 }

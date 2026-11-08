@@ -786,14 +786,24 @@ func readSecretMax(path string, max int) ([]byte, error) {
 	return b, nil
 }
 
-// counterRec is counterEntry's value.
+// counterRec is counterEntry's value. Its auth sits behind a pointer to a
+// pointer, which fmt prints as an address and JSON reads through, so the
+// record agentos-unlock reads is unchanged (CLK-1, #4865).
 type counterRec struct {
 	Ref  tpmseal.CounterRef `json:"ref"`
-	Auth []byte             `json:"auth"`
+	Auth **[]byte           `json:"auth"`
+}
+
+// auth is the counter's auth value, or nil when the record holds none.
+func (r counterRec) auth() []byte {
+	if r.Auth == nil || *r.Auth == nil {
+		return nil
+	}
+	return **r.Auth
 }
 
 func (r counterRec) Counter(t transport.TPM, srk []byte) tpmseal.Counter {
-	return tpmseal.Counter{TPM: t, SRK: srk, Ref: r.Ref, Auth: secret.Hide(r.Auth)}
+	return tpmseal.Counter{TPM: t, SRK: srk, Ref: r.Ref, Auth: secret.Hide(r.auth())}
 }
 
 // newCounter defines store id's counter. A define that reports an error
@@ -810,14 +820,15 @@ func newCounter(t transport.TPM, srk, id []byte) (counterRec, error) {
 		return counterRec{}, err
 	}
 	// Hex, so the auth value has no zero byte (T7).
-	r := counterRec{Auth: []byte(hex.EncodeToString(raw))}
-	ref, err := tpmseal.DefineCounter(t, srk, id, r.Auth)
+	auth := []byte(hex.EncodeToString(raw))
+	r := counterRec{Auth: new(&auth)}
+	ref, err := tpmseal.DefineCounter(t, srk, id, auth)
 	if err != nil {
 		found, ferr := tpmseal.FindCounter(t, id)
 		if ferr != nil || !found {
 			return counterRec{}, err
 		}
-		if ref, err = tpmseal.DefineCounter(t, srk, id, r.Auth); err != nil {
+		if ref, err = tpmseal.DefineCounter(t, srk, id, auth); err != nil {
 			return counterRec{}, err
 		}
 	}

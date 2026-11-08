@@ -4,11 +4,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/update"
 )
 
 // The whole maintainer flow through the command: keys, a 2-of-3 root and
@@ -103,9 +106,34 @@ func TestReleaseFlowThroughTheCommand(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{"signed":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// It names the -root file, not only the repository (#4977 item 4).
-	if err := do("verify", "-repo", repo, "-root", bad, "-installed", "6"); err == nil || strings.Contains(err.Error(), "TMPDIR") || !strings.Contains(err.Error(), "-root "+bad) {
-		t.Fatalf("verify with a malformed root: %v, want an error naming -root %s and not TMPDIR", err, bad)
+	// It names the -root file as malformed, not the repository (#4977
+	// item 4, #5059 item 4).
+	if err := do("verify", "-repo", repo, "-root", bad, "-installed", "6"); err == nil || strings.Contains(err.Error(), "TMPDIR") ||
+		!strings.HasPrefix(err.Error(), "verify: -root "+bad+": root metadata file is malformed") || strings.Contains(err.Error(), "repository") {
+		t.Fatalf("verify with a malformed root: %v, want an error naming -root %s as malformed, not TMPDIR or the repository", err, bad)
+	}
+	// A root that parses but is not signed by its own keys names the -root
+	// file as a signature failure (#5059 item 3).
+	good, err := os.ReadFile(filepath.Join(repo, "metadata", "1.root.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(good, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["signatures"] = []any{}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := filepath.Join(d, "unsigned.root.json")
+	if err := os.WriteFile(unsigned, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := do("verify", "-repo", repo, "-root", unsigned, "-installed", "6"); err == nil ||
+		!strings.HasPrefix(err.Error(), "verify: -root "+unsigned+": "+update.ErrSignatures.Error()) {
+		t.Fatalf("verify with a root not signed by its own keys: %v, want an error naming -root %s and its signatures", err, unsigned)
 	}
 }
 

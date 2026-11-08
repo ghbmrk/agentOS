@@ -575,11 +575,11 @@ func (s *State) Pending(now int64) []key.ID {
 var ErrNotAGrant = errors.New("kernel: only a root or a first link off a granted root is granted")
 
 // grants decides one batch logged at at, in order: the grants it adds, or
-// the first refusal. A big batch needs its second passkey, as a whole. The
+// the first refusal. A big or priced batch needs its second passkey, as a whole. The
 // fold and Issue share it, so Issue logs only what the fold grants.
 func (s *State) grants(keys []key.Key, cos []key.Cosign, at int64) (map[key.ID]Grant, error) {
 	out := map[key.ID]Grant{}
-	if s.big(keys, at) && !s.cosigned(keys, cos) {
+	if (s.big(keys, at) || s.priced(keys, at)) && !s.cosigned(keys, cos) {
 		return out, ErrNeedsCosign
 	}
 	for _, k := range keys {

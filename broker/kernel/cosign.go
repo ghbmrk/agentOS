@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 	"strconv"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -157,6 +158,18 @@ func (s *State) big(keys []key.Key, at int64) bool {
 		}
 	}
 	return false
+}
+
+// priced reports whether a grant in keys is worth more than a passkey's tap
+// proves (KEY-9): a new key of rank 3 (identity, safety or uncapped money)
+// asks the hardware key, so its batch needs the co-sign a big one does. A
+// grant already in the log or a same-limit renewal widens nothing.
+func (s *State) priced(keys []key.Key, at int64) bool {
+	return slices.ContainsFunc(keys, func(k key.Key) bool {
+		w, _ := key.Worth(k) // a malformed key is worth the most
+		_, had := s.Grants[k.Tip()]
+		return key.Price(key.ActGrant, w) > key.P3Local && !had && (len(k.Links) != 1 || !s.renews(k, at))
+	})
 }
 
 // cosigned reports whether a big batch has its two passkeys, one an anchor:

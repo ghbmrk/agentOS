@@ -1,6 +1,7 @@
 package key
 
 import (
+	"math"
 	"math/rand"
 	"slices"
 	"sort"
@@ -215,7 +216,9 @@ func TestTableHoldsItsRules(t *testing.T) {
 }
 
 // Every verb's reach and worth, typed by hand from CLK-14's effect classes
-// (KEY-9-reach-a-1), so a table edit that lowers one fails here.
+// (KEY-9-reach-a-1), so a table edit that lowers one fails here. A device is
+// safety only by a declaration (Mark, 2026-11-07, #4999), so `actuate` and
+// `present` stay low and only `actuate-physical` is safety.
 func TestEveryVerbsReachIsPinned(t *testing.T) {
 	d, m, id, s := AssetData, AssetMoney, AssetIdentity, AssetSafety
 	want := map[Verb]struct {
@@ -223,9 +226,9 @@ func TestEveryVerbsReachIsPinned(t *testing.T) {
 		capped, uncapped Rank
 	}{
 		Read: {[]Asset{d}, 1, 1}, Fetch: {[]Asset{d}, 1, 1}, Draft: {[]Asset{AssetNone}, 0, 0},
-		Organize: {[]Asset{AssetNone}, 0, 0}, Trash: {[]Asset{d}, 1, 1}, Present: {[]Asset{d, s}, 3, 3},
+		Organize: {[]Asset{AssetNone}, 0, 0}, Trash: {[]Asset{d}, 1, 1}, Present: {[]Asset{d}, 1, 1},
 		Unsubscribe: {[]Asset{d}, 1, 1}, Send: {[]Asset{d}, 1, 1}, Post: {[]Asset{d}, 1, 1},
-		Actuate: {[]Asset{s}, 3, 3}, Buy: {[]Asset{m}, 2, 3}, Share: {[]Asset{d}, 1, 1},
+		Actuate: {[]Asset{AssetNone}, 0, 0}, Buy: {[]Asset{m}, 2, 3}, Share: {[]Asset{d}, 1, 1},
 		DeleteRemote: {[]Asset{d, id}, 3, 3}, ChangeAccount: {[]Asset{id, d, m}, 3, 3},
 		RevealOrCreateSecret: {[]Asset{id, d}, 3, 3}, ActuatePhysical: {[]Asset{s}, 3, 3},
 	}
@@ -273,5 +276,78 @@ func TestCappedMeansSpendCap(t *testing.T) {
 	}
 	if WorthOf([]Asset{assets}, true) != MaxRank {
 		t.Error("the class just past the table is not priced highest")
+	}
+}
+
+// Each step's hold is priced by what that step's own verb reaches at its
+// key's caps, not by the key's highest verb (Mark, 2026-11-07, #4999): under
+// one capped key a read waits the key's window, a buy an hour more and an
+// account change four. A bare root's step is the owner's own tap and gains
+// none; a window near MaxInt64 saturates rather than wraps.
+func TestStepHoldIsPricedByItsOwnVerb(t *testing.T) {
+	owner, holder := gen(1), gen(2)
+	r := Issue(owner.pass, Root{Clerk: "c", Verbs: []Verb{Read, Buy, ChangeAccount, Actuate, ActuatePhysical}, Serial: "r"})
+	const base, novel = int64(60_000), int64(600_000)
+	k, err := ClerkKey(r, owner.pass, holder.pub, 0, 100, LimitHold(base, novel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := Chain(k, []PublicKey{owner.pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for vb, extra := range map[Verb]int64{Read: 0, Actuate: 0, Buy: 3600_000, ChangeAccount: 4 * 3600_000, ActuatePhysical: 4 * 3600_000} {
+		if got := v.Window(vb, false); got != base+extra {
+			t.Errorf("%s base window %d, want %d", vb, got, base+extra)
+		}
+		if got := v.Due(vb, 1000, true); got != 1000+novel+extra {
+			t.Errorf("%s novel due %d, want %d", vb, got, 1000+novel+extra)
+		}
+	}
+	rv, err := Chain(r, []PublicKey{owner.pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := rv.Window(ChangeAccount, true); w != 0 {
+		t.Errorf("a bare root's step waits %d", w)
+	}
+	huge, err := ClerkKey(r, owner.pass, holder.pub, 0, 100, LimitHold(math.MaxInt64-1, math.MaxInt64-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hv, err := Chain(huge, []PublicKey{owner.pk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, d := hv.Window(ChangeAccount, false), hv.Due(ChangeAccount, 5, false); w != math.MaxInt64 || d != math.MaxInt64 {
+		t.Errorf("a window near MaxInt64 wraps: window %d, due %d", w, d)
+	}
+}
+
+// Only a one-use passkey narrowing is a step approved one by one (Security
+// 6706162072): a passkey narrowing of many uses keeps the worth term on
+// every step, and one of exactly one use waives it.
+func TestOnlyAOneUseApprovalWaivesTheWorthTerm(t *testing.T) {
+	owner, holder := gen(1), gen(2)
+	r := Issue(owner.pass, Root{Clerk: "c", Verbs: []Verb{ChangeAccount}, Serial: "r"})
+	k, err := ClerkKey(r, owner.pass, holder.pub, 0, 100, LimitHold(60_000, 600_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for uses, want := range map[int64]int64{1000: 60_000 + 4*3600_000, 2: 60_000 + 4*3600_000, 1: 60_000} {
+		n, err := Narrow(k, owner.pass, LimitUses(uses))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := Chain(n, []PublicKey{owner.pk})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !v.ByOwner {
+			t.Fatal("a passkey narrowing is not ByOwner")
+		}
+		if got := v.Window(ChangeAccount, false); got != want {
+			t.Errorf("a %d-use passkey narrowing waits %d, want %d", uses, got, want)
+		}
 	}
 }

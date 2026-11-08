@@ -72,7 +72,7 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
 			return key.ID{}, nil, on(&key.Refusal{Code: CPlan, Detail: "unknown verb " + string(st.Verb)}, &i)
 		}
 		c, _ := key.ClassOf(st.Verb)
-		st.Rung = s.Rung(v.Limits.Task, c.Irreversible() && max(v.Limits.Window(false), v.Limits.Window(true)) > 0)
+		st.Rung = s.Rung(v.Limits.Task, c.Irreversible() && max(v.Window(st.Verb, false), v.Window(st.Verb, true)) > 0)
 		if r := v.Authorize(st, ctx); r != nil {
 			return key.ID{}, nil, on(r, &i)
 		}
@@ -186,8 +186,8 @@ func Next(s *State, id string, now int64) Act {
 		led = s.LedgerBefore(st.DispatchSeq) // a redo is not charged twice
 	}
 	class, _ := key.ClassOf(sp.Verb)
-	holds := class.Irreversible() && max(v.Limits.Window(false), v.Limits.Window(true)) > 0
-	due := v.Limits.Due(st.HeldAt, st.Novel)
+	holds := class.Irreversible() && max(v.Window(sp.Verb, false), v.Window(sp.Verb, true)) > 0
+	due := v.Due(sp.Verb, st.HeldAt, st.Novel)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now < due))
 	if r := v.Authorize(sp, key.Context{Now: now, Changes: &s.Changes, Ledger: led}); r != nil {
 		if r.Code == key.RPaused {
