@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,6 +70,7 @@ type network struct {
 	counter  *traffic.Counter
 	freshMu  sync.Mutex
 	spent    bool
+	spentDay string // SHA-256 (hex) of the unreadable saved day
 	freshDue int64
 	boot     string
 	past     bool
@@ -129,7 +132,8 @@ func (d *Enforcer) openNetwork() error {
 			if !errors.Is(err, traffic.ErrState) {
 				return fmt.Errorf("byte caps: %w", err)
 			}
-			d.net.counter, d.net.spent = nil, true
+			sum := sha256.Sum256(b)
+			d.net.counter, d.net.spent, d.net.spentDay = nil, true, hex.EncodeToString(sum[:])
 			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until the owner starts a fresh day on the page or " + fileTraffic + " is replaced: " + err.Error())
 		}
 	}

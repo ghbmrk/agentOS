@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
@@ -30,7 +31,7 @@ func (p pageAlerts) Status() page.Status {
 	out := page.Status{CoreDown: st.CoreDown, Red: st.Colour == alert.Red}
 	for _, r := range st.Open {
 		out.Open = append(out.Open, page.Alert{ID: r.ID, Text: r.Text, At: r.At, Count: r.Count, Sent: r.Sent,
-			Fixed: r.Kind == alert.ChannelPaused})
+			Fixed: r.Kind == alert.ChannelPaused, Revoke: r.Kind == alert.HeadFork})
 	}
 	return out
 }
@@ -72,12 +73,16 @@ type pageCaps struct{ d *Enforcer }
 
 type freshState struct {
 	Due int64 `json:"due,omitempty"`
+	// Day is the SHA-256 (hex) of the unreadable traffic.json the owner
+	// approved a fresh day for: the approval holds for that day alone.
+	Day string `json:"day,omitempty"`
 }
 
 var (
 	errFreshUnsaved  = errors.New("the fresh day was not saved, so nothing is waiting: try again")
 	errCancelUnsaved = errors.New("the cancel was not saved, so the fresh day still waits: cancel it again")
 	errReadsBack     = errors.New("the byte caps' day reads back")
+	errNoFreshDay    = errors.New("no fresh day is waiting")
 )
 
 func (p pageCaps) Spent() (bool, int64) {
@@ -87,8 +92,9 @@ func (p pageCaps) Spent() (bool, int64) {
 	return n.spent, n.freshDue
 }
 
-// Fresh starts the day afresh after policy.Wait from nowMS: saved before
-// it waits, so a restart keeps the wait it had.
+// Fresh starts the day afresh after policy.Wait from nowMS: saved, bound
+// to the unreadable day it is for, before it waits, so a restart keeps
+// the wait it had.
 func (p pageCaps) Fresh(nowMS int64) (int64, error) {
 	n := &p.d.net
 	n.freshMu.Lock()
@@ -97,7 +103,7 @@ func (p pageCaps) Fresh(nowMS int64) (int64, error) {
 		return 0, errReadsBack
 	}
 	due := nowMS + policy.Wait
-	b, _ := json.Marshal(freshState{Due: due})
+	b, _ := json.Marshal(freshState{Due: due, Day: n.spentDay})
 	if err := p.d.store(fileFresh).Save(b); err != nil {
 		p.d.dp.Logf("byte caps: fresh day not saved: " + err.Error())
 		return 0, errFreshUnsaved
@@ -107,11 +113,16 @@ func (p pageCaps) Fresh(nowMS int64) (int64, error) {
 	return due, nil
 }
 
-// CancelFresh cancels a fresh day waiting; one not saved still waits.
+// CancelFresh cancels a fresh day still waiting, checked under the lock
+// tickFresh starts it under, so a cancel that lost to the start says so;
+// one not saved still waits.
 func (p pageCaps) CancelFresh() error {
 	n := &p.d.net
 	n.freshMu.Lock()
 	defer n.freshMu.Unlock()
+	if !n.spent || n.freshDue == 0 {
+		return errNoFreshDay
+	}
 	b, _ := json.Marshal(freshState{})
 	if err := p.d.store(fileFresh).Save(b); err != nil {
 		p.d.dp.Logf("byte caps: fresh day's cancel not saved: " + err.Error())
@@ -122,20 +133,44 @@ func (p pageCaps) CancelFresh() error {
 	return nil
 }
 
-// openFresh restores a fresh day waiting, only while the saved day is
-// spent: once the day reads back there is nothing to start afresh. One
-// that does not read back is dropped, so nothing loosens unasked.
+// openFresh restores a fresh day waiting only for the unreadable day it
+// was approved for (freshState.Day). Beside a day that reads back, a
+// fresh-day file is erased, and the daemon does not start while that
+// erase is unsaved. One that does not read back, is for another day, or
+// cannot be read, starts nothing and does not stop the start.
 func (d *Enforcer) openFresh() error {
-	b, err := d.store(fileFresh).Load()
-	if err != nil || b == nil || !d.net.spent {
-		return err
-	}
-	var st freshState
-	if err := json.Unmarshal(b, &st); err != nil || st.Due < 0 {
-		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits")
+	if !d.net.spent {
+		b, err := d.store(fileFresh).Load()
+		if err != nil {
+			d.dp.Logf("byte caps: " + fileFresh + " unreadable beside a day that reads back: " + err.Error())
+			return nil
+		}
+		if b == nil || string(b) == "{}" {
+			return nil
+		}
+		if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
+			return fmt.Errorf("byte caps: a stale %s is not erased: %w", fileFresh, err)
+		}
+		d.dp.Logf("byte caps: erased a stale " + fileFresh + " beside a day that reads back")
 		return nil
 	}
-	d.net.freshDue = st.Due
+	b, err := d.store(fileFresh).Load()
+	if err != nil {
+		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits: " + err.Error())
+		return nil
+	}
+	if b == nil {
+		return nil
+	}
+	var st freshState
+	switch {
+	case json.Unmarshal(b, &st) != nil || st.Due < 0:
+		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits")
+	case st.Due != 0 && st.Day != d.net.spentDay:
+		d.dp.Logf("byte caps: " + fileFresh + " was approved for another unreadable day, no fresh day waits")
+	default:
+		d.net.freshDue = st.Due
+	}
 	return nil
 }
 
@@ -153,20 +188,27 @@ func (d *Enforcer) tickFresh(now time.Time) {
 		return
 	}
 	d.fwMu.Lock()
+	defer d.fwMu.Unlock()
+	// The check, both saves and the start under freshMu (after fwMu), so
+	// a cancel either wins before or answers that nothing is waiting.
+	n.freshMu.Lock()
+	defer n.freshMu.Unlock()
+	if n.freshDue != due {
+		return // cancelled meanwhile
+	}
 	c := traffic.NewCounter(d.dp.Now, traffic.CapsOf(d.loadedDoc))
 	if err := d.store(fileTraffic).Save(c.Save()); err != nil {
-		d.fwMu.Unlock()
 		d.dp.Logf("byte caps: the fresh day was not saved, tried again at the next tick: " + err.Error())
 		return
 	}
-	n.freshMu.Lock()
-	n.counter, n.spent, n.freshDue = c, false, 0
-	n.freshMu.Unlock()
-	d.fwMu.Unlock()
+	// The approval is spent before the day starts: one left on disk
+	// would be erased at the next start anyway (openFresh), but the run
+	// keeps the day spent until it is.
 	if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
-		// Harmless: a saved day that reads back ignores it (openFresh).
-		d.dp.Logf("byte caps: " + fileFresh + " not cleared: " + err.Error())
+		d.dp.Logf("byte caps: " + fileFresh + " not cleared, the fresh day tried again at the next tick: " + err.Error())
+		return
 	}
+	n.counter, n.spent, n.freshDue = c, false, 0
 	d.dp.Logf("byte caps: a fresh day started, as the owner approved")
 	n.lastRead = time.Time{} // tickNetwork, next in this tick, reads at once
 }

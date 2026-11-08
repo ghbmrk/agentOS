@@ -29,13 +29,17 @@ type Status struct {
 // Alert is one open alert: its fixed wording, when it was first raised,
 // how often since, and whether the core took its text. Fixed is an alert
 // only another step clears (a paused channel clears when it resumes).
+// Revoke is one whose choice is to keep the core or revoke its key (the
+// core's log forked from the copies: it may have been rolled back), so
+// its card names that choice and leads to the revoke step.
 type Alert struct {
-	ID    uint64
-	Text  string
-	At    time.Time
-	Count int
-	Sent  bool
-	Fixed bool
+	ID     uint64
+	Text   string
+	At     time.Time
+	Count  int
+	Sent   bool
+	Fixed  bool
+	Revoke bool
 }
 
 // Core is the core's channel sub-key as the page revokes it (heads

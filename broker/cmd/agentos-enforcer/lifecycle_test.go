@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net"
@@ -980,8 +981,8 @@ func TestLifecycle(t *testing.T) {
 		// The page is the record (#4750): it shows the alert until the
 		// owner's passkey clears it there, and a stranger's cannot.
 		words, _ := alert.Words(alert.HeadFork, "")
-		if !strings.Contains(x.home(), html.EscapeString(words)) {
-			t.Fatal("the page does not show the open alert")
+		if h := x.home(); !strings.Contains(h, html.EscapeString(words)) || !strings.Contains(h, `href="#revoke"`) {
+			t.Fatal("the page does not show the open alert, or its choice to revoke the core's key")
 		}
 		var id string
 		for _, r := range x.d.alerts.Status().Open {
@@ -1018,6 +1019,12 @@ func TestLifecycle(t *testing.T) {
 		x.advance(time.Minute)
 		if !x.opened(alert.ChannelPaused) || !x.opened(alert.Trip) || x.light.c != alert.Red || x.page("Light") != "red" {
 			t.Fatalf("the trip does not show: %+v light %d", x.d.alerts.Status(), x.light.c)
+		}
+		for _, r := range x.d.alerts.Status().Open {
+			// A paused channel's alert clears only by resuming (#4750).
+			if clear := strings.Contains(x.home(), fmt.Sprintf(`data-action="clear" data-target="%d"`, r.ID)); clear == (r.Kind == alert.ChannelPaused) {
+				t.Fatalf("alert %d (kind %d): clear offered %v", r.ID, r.Kind, clear)
+			}
 		}
 		x.restart()
 		x.advance(time.Second)
@@ -1242,7 +1249,7 @@ func (x *box) page(field string) string {
 		switch {
 		case strings.Contains(body, "A fresh day starts at"):
 			return "fresh waiting"
-		case strings.Contains(body, "every cap counts as spent"):
+		case strings.Contains(body, "could not read its record of today's bytes"):
 			return "spent"
 		}
 		return "counting"

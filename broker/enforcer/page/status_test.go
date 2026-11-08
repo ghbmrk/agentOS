@@ -67,6 +67,7 @@ func stateRig(t *testing.T) (*rig, *fakeAlerts, *fakeCore, *fakeCaps) {
 	al := &fakeAlerts{st: Status{CoreDown: true, Red: true, Open: []Alert{
 		{ID: 7, Text: "Enforcer: core touched a decoy or broke a limit, a known attack.", At: at, Count: 3, Sent: true},
 		{ID: 9, Text: "Enforcer: the core's channel sent too much and is paused.", At: at, Count: 1, Fixed: true},
+		{ID: 11, Text: "Enforcer: the core's log does not match the copy the enforcer keeps.", At: at, Count: 1, Revoke: true},
 	}}}
 	co, ca := &fakeCore{}, &fakeCaps{}
 	cfg := g.s.cfg
@@ -120,6 +121,11 @@ func TestHomeShowsStatus(t *testing.T) {
 	}
 	if strings.Contains(h, `data-target="9"`) {
 		t.Error("a paused channel's alert has a clear")
+	}
+	// A forked log's card names the choice and leads to the revoke step
+	// (UX on #5101); no other card does.
+	if strings.Count(h, `href="#revoke"`) != 1 || !strings.Contains(h, `id="revoke"`) || !strings.Contains(h, "if you trust the core, clear this and keep it") {
+		t.Error("the forked log's card does not name the choice to revoke the core's key")
 	}
 	al.st = Status{}
 	h = g.homeHTML()
@@ -189,8 +195,8 @@ func TestRevokeCore(t *testing.T) {
 	if !g.a.Public().Verify(co.RevokeMsg(g.a.Public()), co.sigs[len(co.sigs)-1]) {
 		t.Error("the daemon was handed a signature that is not the owner's over the core's message")
 	}
-	if h := g.homeHTML(); !strings.Contains(h, "key is revoked") || strings.Contains(h, `data-action="revoke-core"`) {
-		t.Error("home does not show the key revoked")
+	if h := g.homeHTML(); !strings.Contains(h, "key is revoked") || strings.Contains(h, `data-action="revoke-core"`) || strings.Contains(h, `href="#revoke"`) {
+		t.Error("home does not show the key revoked, or still offers the choice")
 	}
 	if code, _ := g.tapState(g.a, ActRevokeCore, ""); code != http.StatusConflict {
 		t.Errorf("a second revocation: %d", code)
@@ -215,7 +221,7 @@ func TestFreshDay(t *testing.T) {
 	}
 	ca.spent = true
 	h := g.homeHTML()
-	if !strings.Contains(h, "saved day did not read back, so every cap counts as spent") || !strings.Contains(h, "waits 10 minutes") ||
+	if !strings.Contains(h, "could not read its record of today's bytes, so agentOS and the edge are blocked") || !strings.Contains(h, "waits 10 minutes") ||
 		!strings.Contains(h, `data-action="fresh-day"`) {
 		t.Errorf("home does not show the spent day:\n%s", h)
 	}
