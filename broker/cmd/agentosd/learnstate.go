@@ -112,7 +112,7 @@ const loopsOffText = "I don't do spare-time work (learning, self-tests, update c
 // which does not run in this version (#2781).
 const (
 	forgetPageText = "To forget everything named someone or something, open Forget on my Wi-Fi page and confirm with your passkey."
-	forgetOffText  = "I can't forget things by text, and my Wi-Fi page has no Forget step on this box."
+	forgetOffText  = "I can't forget things by text, and my Wi-Fi page has no Forget step yet."
 	renewOffText   = "I don't keep agent memory across tasks in this version, so there is nothing to renew."
 )
 
