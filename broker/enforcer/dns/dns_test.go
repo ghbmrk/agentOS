@@ -136,6 +136,26 @@ func fills(t *testing.T, name, set4 string) string {
 	return ""
 }
 
+// TestListedNameOnce: a name a list holds twice is written once, so a
+// view's configuration is the same whatever repeats the list carries.
+func TestListedNameOnce(t *testing.T) {
+	d := fixturePolicy()
+	d.Devices[0].Allow = []string{"tv.example", "cdn.example", "tv.example"}
+	f, err := Generate(d, fixtureLayout(), fixtureSetup())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := generate(t).Listed
+	if len(f.Listed) != len(want) {
+		t.Fatalf("%d views, want %d", len(f.Listed), len(want))
+	}
+	for i := range want {
+		if f.Listed[i] != want[i] {
+			t.Errorf("%s with a repeated name:\n%s\nwant\n%s", want[i].Iface, f.Listed[i].Conf, want[i].Conf)
+		}
+	}
+}
+
 // TestListedNamesOnly: each listed view answers on its own interface
 // alone and forwards only its own list's names, each exactly, filling only
 // its own list's set; a device without internet resolves nothing, and
