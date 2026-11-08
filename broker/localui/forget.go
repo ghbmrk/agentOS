@@ -51,6 +51,26 @@ func (a AgentosdPasskeys) ForgetConfirm(ctx context.Context, session, handle str
 // taps again.
 const ForgetTapAgainText = "That tap didn't match one of your passkeys, so nothing was forgotten. Tap again with your passkey."
 
+// ForgetUnknownText answers a confirm that went out but got no refusal
+// back (a timeout, a dropped socket): it may have erased.
+const ForgetUnknownText = "I can't tell yet whether those were forgotten. Look the name up again to see what I still keep."
+
+// forgetRefusedBefore reports whether err is one of agentosd's refusals,
+// each given before anything is erased (localapi.EraseCodes and the
+// session and argument checks).
+func forgetRefusedBefore(err error) bool {
+	var r Refused
+	if !errors.As(err, &r) {
+		return false
+	}
+	switch string(r) {
+	case localapi.ErrEraseBadAssertion, localapi.ErrEraseStale, localapi.ErrEraseUnavailable,
+		localapi.ErrBadArgs, localapi.ErrLimited, localapi.ErrUnauthorized:
+		return true
+	}
+	return false
+}
+
 // forgetText is the owner's wording for each refusal; none carries a
 // value, and anything else reads as agentosd not answering. Each says
 // that nothing was forgotten.
@@ -173,6 +193,12 @@ func (s *Server) forgetPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			v.Done, v.Err = "", forgetText(err)
+			if !forgetRefusedBefore(err) {
+				// The confirm went out and no refusal came back: agentosd
+				// may have erased, since its confirm runs to the end on its
+				// own (D-169).
+				v.Err = ForgetUnknownText
+			}
 		}
 	default:
 		http.Error(w, "Bad request", http.StatusBadRequest)

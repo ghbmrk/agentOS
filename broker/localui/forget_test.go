@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"html"
 	"math/rand"
 	"net/http"
@@ -215,7 +216,12 @@ func TestForgetPageWordsEachRefusal(t *testing.T) {
 		txt := forgetText(Refused(c))
 		for _, step := range []url.Values{{"step": {"find"}, "name": {"Alice"}}, form} {
 			p := html.UnescapeString(r.post("/forget/", step).Body.String())
-			if !strings.Contains(p, txt) || strings.Contains(p, "kernel:") || strings.Contains(p, ff.result) {
+			want := txt
+			if step.Get("step") == "confirm" && !forgetRefusedBefore(Refused(c)) {
+				// A confirm may have erased (TestForgetPageNeverSaysNothingWhenItCannotTell).
+				want = ForgetUnknownText
+			}
+			if !strings.Contains(p, want) || strings.Contains(p, "kernel:") || strings.Contains(p, ff.result) {
 				t.Fatalf("%s (%s):\n%s", c, step.Get("step"), p)
 			}
 		}
@@ -236,5 +242,27 @@ func TestForgetPageWordsEachRefusal(t *testing.T) {
 	})
 	if w.Code != http.StatusForbidden || len(ff.confirms) != n {
 		t.Fatalf("a cross-origin confirm: %d", w.Code)
+	}
+}
+
+// A confirm that went out but got no refusal back (a timeout, a dropped
+// socket, agentosd's own failure) may have erased, since agentosd's
+// confirm runs to the end: the page never says nothing was forgotten then
+// (Potency on #5092).
+func TestForgetPageNeverSaysNothingWhenItCannotTell(t *testing.T) {
+	r, ff := forgetRig(t)
+	r.signIn()
+	form, _ := r.forgetTapStep(t)
+	for _, e := range []error{context.DeadlineExceeded, errors.New("bridgeclient: connection reset"), Refused("request failed")} {
+		ff.err = e
+		p := html.UnescapeString(r.post("/forget/", form).Body.String())
+		if !strings.Contains(p, ForgetUnknownText) || strings.Contains(p, "nothing was forgotten") {
+			t.Fatalf("%v:\n%s", e, p)
+		}
+	}
+	// A refusal agentosd gives before any erase still says nothing went.
+	ff.err = Refused(localapi.ErrEraseStale)
+	if p := html.UnescapeString(r.post("/forget/", form).Body.String()); !strings.Contains(p, "nothing was forgotten") || strings.Contains(p, ForgetUnknownText) {
+		t.Fatalf("stale:\n%s", p)
 	}
 }

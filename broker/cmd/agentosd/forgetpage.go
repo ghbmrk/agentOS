@@ -65,8 +65,13 @@ type pageForget struct {
 
 // forgetNotice is the owner's text after a page erase: by count, never by
 // name (an erased label is not kept).
-func forgetNotice(items int, by key.PublicKey) string {
-	return "I forgot " + plural(items, "item") + " on my Wi-Fi page after a tap by passkey " + noticePrint(by) + ". Not you? Text STOP."
+// A partial erase says so: its count of items erased is not known here.
+func forgetNotice(r forgetResult, by key.PublicKey) string {
+	what := plural(r.Items, "item")
+	if r.NotErased > 0 {
+		what = "some of " + plural(r.Items, "item") + ", not all,"
+	}
+	return "I forgot " + what + " on my Wi-Fi page after a tap by passkey " + noticePrint(by) + ". Not you? Text STOP."
 }
 
 // LogForgetUntold is logged when a page erase's notice could not be sent.
@@ -120,7 +125,7 @@ func (p pageForget) Confirm(ctx context.Context, session, handle string, authDat
 		return "", sockets.Code(localapi.ErrEraseUnavailable)
 	}
 	if r.Erased > 0 && p.Tell != nil {
-		if err := p.Tell(forgetNotice(r.Items, by)); err != nil {
+		if err := p.Tell(forgetNotice(r, by)); err != nil {
 			log.Printf(LogForgetUntold, err)
 		}
 	}

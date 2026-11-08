@@ -80,7 +80,7 @@ func TestTheForgetTapErasesTheListShown(t *testing.T) {
 	}
 	// The owner is texted of the page erase by count and the passkey that
 	// tapped, never by the name.
-	note := forgetNotice(3, r.pk.anchors[1].public(t))
+	note := forgetNotice(forgetResult{Items: 3, Erased: 1}, r.pk.anchors[1].public(t))
 	if !slices.Equal(r.told, []string{note}) || strings.Contains(strings.ToLower(note), "alice") ||
 		!strings.HasPrefix(note, "I forgot 3 items on my Wi-Fi page after a tap by passkey ") || !strings.HasSuffix(note, ". Not you? Text STOP.") {
 		t.Fatalf("told %q", r.told)
@@ -221,5 +221,30 @@ func TestTheForgetMessageIsItsOwn(t *testing.T) {
 	if slices.Equal(m, forgetMsg("s", "h", []string{"ab"})) || slices.Equal(m, forgetMsg("s", "h", []string{"a"})) ||
 		slices.Equal(m, forgetMsg("sh", "", []string{"a", "b"})) {
 		t.Fatal("two lists sign the same")
+	}
+}
+
+// A partial erase is never texted as whole: the page says "Not finished"
+// and the owner's text says only some went (UX 1 on #5092).
+func TestAPartialPageEraseIsNotTextedAsWhole(t *testing.T) {
+	r := newForgetPageRig(t)
+	r.k.add("s3", "Carol", 1, nil)
+	r.k.add("s4", "Carol", 2, nil)
+	r.k.eraseErr["s4"] = errors.New("kernel: unreachable")
+	f := r.find("sess-a", "Carol")
+	text, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0])
+	if err != nil || !strings.HasPrefix(text, "Not finished:") || !slices.Equal(r.k.erases, []string{"s3"}) {
+		t.Fatalf("partial: %q %v, erased %v", text, err, r.k.erases)
+	}
+	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot some of 3 items, not all, on my Wi-Fi page") {
+		t.Fatalf("told %q", r.told)
+	}
+	// Nothing erased texts nothing.
+	r.k.eraseErr["s3"], r.told = errors.New("kernel: unreachable"), nil
+	r.k.erased["s3"] = false
+	r.k.erases = nil
+	f = r.find("sess-a", "Carol")
+	if text, err = r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || !strings.HasPrefix(text, "Nothing was forgotten") || len(r.told) != 0 {
+		t.Fatalf("none: %q %v, told %q", text, err, r.told)
 	}
 }
