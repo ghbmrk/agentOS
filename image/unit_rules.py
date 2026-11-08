@@ -31,9 +31,13 @@ template or a name whose part before the @ or the type ends in -, so every drop-
 shared directory (type-wide, a-.service.d, x@.service.d, a-@i.service.d) is printed alone,
 whatever loaded. One in any other directory is read only by the unit of that name, so it is
 printed alone only when no unit loads under that name. So is each file of ours in a unit that did
-not finish loading as the lint's instance (bad-setting, error), which may stop before its drop-ins
-while an instance under another name does not (a unit under any other name loads as it would at boot). /etc/fstab is printed
-whole when it is ours; the units its generator writes are read like any other.
+not finish loading as the lint's instance (bad-setting), which may stop before its drop-ins while an
+instance under another name does not (a unit under any other name loads as it would at boot). A lint
+instance in error (systemd could not read its template's files) fails the run, and so does a
+generator that failed: either hides files a boot reads. A name masked or in error is taken not to
+load at boot, which holds only for units no generator writes, or while the generators' output in the
+container matches a boot's. /etc/fstab is printed whole when it is ours; the units its generator
+writes are read like any other.
 
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
 prints them with CONTROL planted, which the lint must refuse; --fixture ROOT PACKAGED prints a fixture
@@ -278,6 +282,12 @@ def records(view, shown, dirs, prov):
         own |= {n + ".d" for n in words(s, "Names")}
         if s["LoadState"] == "masked" or s["Id"] in done:
             continue
+        if s["LoadState"] == "error" and "@" + INSTANCE + "." in s["Id"]:
+            # systemd could not read the template's files, so which drop-ins its instances read (one of
+            # ours may mask a package's User= line) and what a package's lines run cannot be seen (#4821
+            # Security R1)
+            raise SystemExit("unit rules: %s: load state error; the lint's instance stands for every instance "
+                             "a boot may start, so its template must load" % s["Id"])
         done.add(s["Id"])
         frag = [s["FragmentPath"]] if s["FragmentPath"] else []
         files = []
@@ -335,15 +345,28 @@ def lint(root, usr, cmdline, packaged, plant_files=None):
             view = View(m.view_root)
             dirs = unit_dirs(view)
             shown = m.show(names(view, dirs), PROPS)
+            failed = m.failed_generators()
+            if failed:
+                # a failed generator wrote none or only some of its units, which a boot may write and start
+                raise SystemExit("unit rules: generators failed, so their units are not all in the tree: %s"
+                                 % ", ".join(sorted(failed)))
             return records(view, shown, dirs, Provenance(view, dirs, packaged(view)))
         finally:
             m.stop()
 
 
+def merged(view, link):
+    """Whether LINK is a merged-/usr top link as a package lays it out: one of MERGED, resolving in the
+    tree to /usr/<its name> (#4779 Security R-b: /lib -> etc made our /etc files a
+    package's)."""
+    return link in MERGED and view.resolve(link)[0] == "/usr" + link
+
+
 def dpkg_packaged(out):
     """For a view, whether a file of build OUT is byte-identical to one a package installed: dpkg's
     md5sums (mkosi.postinst's agentos.dpkg-md5sums) and the conffiles in its status file. A listed path
-    counts only resolved through MERGED links alone: any other link on it may be ours (#4779 Security 2)."""
+    counts only resolved through MERGED links alone, each to /usr/<its name> (merged()): any other link on
+    it may be ours (#4779 Security 2)."""
     listed = []
     for line in (pathlib.Path(out) / "agentos.dpkg-md5sums").read_text().splitlines():
         md5, _, p = line.partition("  ")
@@ -366,7 +389,7 @@ def dpkg_packaged(out):
         want = {}
         for p, md5 in listed:
             final, links = view.resolve(p)
-            if set(links) <= MERGED:
+            if all(merged(view, l) for l in links):
                 want.setdefault(final, set()).add(md5)
 
         def packaged(p):

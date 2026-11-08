@@ -63,6 +63,7 @@ package privfile
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -713,6 +714,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 	user := "[Service]\nUser=systemd-x\nExecStart=/usr/lib/systemd/systemd-x\n"
 	bad := "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 	badRoot := "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+	udevSocket := "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0600\n"
 	for name, c := range map[string]struct {
 		files map[string]string
 		ours  func(string) bool
@@ -789,11 +791,14 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #4779 round 3: no instance but the lint's own, loaded, stands for its template's drop-ins
 		"a template drop-in beside a bad-setting lint instance": {map[string]string{lib + "x@.service": "[Service]\nExecStart=%I\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
 		"a template drop-in beside a bad-setting template":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nUser=a:b\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an error lint instance":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nDescription=" + strings.Repeat("a", 1100*1024) + "\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an instance's own drop-in":   {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an instance's own fragment":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside a non-root instance":         {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a file of the lint's own instance":                     {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
+		// #4821 Security R1: a lint instance systemd cannot load (a line
+		// over its 1 MiB limit) hides which drop-ins its instances read and
+		// what a package's lines run, so the run fails.
+		"a template drop-in beside an error lint instance":     {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nDescription=" + strings.Repeat("a", 1100*1024) + "\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `x@agentos-unit-lint.service: load state error`},
+		"a template drop-in beside an instance's own drop-in":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside an instance's own fragment": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside a non-root instance":        {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a file of the lint's own instance":                    {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
 		// #4779 re-plan (L3 6592951044 P1): a template's drop-in directory is
 		// read by the instances of every template whose name it prefixes, so a
 		// shared directory's drop-ins of ours are read alone whatever loaded.
@@ -815,6 +820,11 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a group line in a shared drop-in":             {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "service.d/g.conf": "[Service]\nGroup=agentos-x\n"}, ourEtc, `may not set a directory's owner`},
 		"a mode of ours on a package's 0770 directory": {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "foo.service.d/g.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `in or above /var/lib/foo/run`},
 		"a mode of ours on a package's directory":      {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
+		// #4821 Security R4, L3 R3: who may connect to a package's socket.
+		"a socket mode of ours on a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketMode=0666\n"}, ourEtc, `may not set the socket's owner or mode`},
+		"a socket group of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketGroup=agentos-x\nSocketMode=0660\n"}, ourEtc, `SocketGroup=agentos-x: a line of ours on a package's socket`},
+		"a socket owner in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nSocketUser=agentos-x\n"}, ourEtc, `may not set the socket's owner or mode`},
+		"a socket directory mode of ours":              {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a line of ours`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -847,6 +857,8 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #4737 Security 6588498486 R1: a package's own grant the reader
 		// cannot read, on a unit none of ours touches.
 		"a package's specifier directory": {map[string]string{lib + "foo@.service": "[Service]\nExecStart=/usr/bin/foo\nDynamicUser=yes\nStateDirectory=foo/%i\n"}, pkg},
+		// A socket all of whose files are ours sets its own owner and mode.
+		"a socket of ours with its owner": {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nSocketUser=root\nSocketGroup=agentos-x\nSocketMode=0660\nDirectoryMode=0755\n"}, ourEtc},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err != nil {
@@ -2290,6 +2302,12 @@ type unitCheck struct {
 // *DirectoryMode=, the whole input of that chown and chmod (#4821 Security 1).
 var owners = map[string]bool{"User": true, "Group": true, "DynamicUser": true}
 
+// socketOwners set who may connect to a socket unit's node: its owner,
+// group and mode, and the mode of the directories systemd makes above it
+// ([Socket] DirectoryMode=). One of ours on a package's socket hands its
+// daemon's endpoint to another uid (#4821 Security R4, L3 R3).
+var socketOwners = map[string]bool{"SocketUser": true, "SocketGroup": true, "SocketMode": true, "DirectoryMode": true}
+
 // unit reads the unit name from paths: its unit file and the drop-ins
 // systemd reads for it, or, alone, one drop-in read with no unit file, as a
 // unit that runs as root and whose user owns its directories. A file in
@@ -2324,6 +2342,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	userOurs := false             // an owner line (owners) not trusted
 	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
 	reread := ""                  // the first such line, which changes how a package's lines read
+	socket := ""                  // the first socketOwners line not trusted
+	pkgFile := false              // a file in trusted
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -2334,8 +2354,12 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		if err != nil {
 			return fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
 		}
+		pkgFile = pkgFile || trusted[f]
 		for _, line := range ul {
 			k, v := line.key, line.value
+			if socket == "" && section == "Socket" && line.section == section && !trusted[f] && socketOwners[k] {
+				socket = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
 			if line.section == section && !trusted[f] {
 				userOurs = userOurs || owners[k]
 				key, mode := strings.CutSuffix(k, "Mode")
@@ -2380,6 +2404,11 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	// alone is the worst context only without one (#4779 re-plan).
 	if alone && reread != "" {
 		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread)
+	}
+	// Who may connect to a package's socket is the package's: a line of
+	// ours may set it only on a socket all of whose files are ours.
+	if socket != "" && (alone || pkgFile) {
+		return fmt.Errorf("%s: a line of ours on a package's socket, or in a file read alone, may not set the socket's owner or mode", socket)
 	}
 	rootCmd := false
 	for _, l := range lines {
@@ -2545,6 +2574,9 @@ func builtUnits(recs unitRecords, dir string) error {
 		return f, os.WriteFile(f, []byte(text), 0o644)
 	}
 	c := &unitCheck{root: dir, seen: map[string]bool{}}
+	// Every refusal is reported, so one does not hide the rest of the
+	// tree (#4821 Security R3).
+	var errs []error
 	for _, u := range recs.Units {
 		var paths []string
 		trusted := map[string]bool{}
@@ -2562,7 +2594,7 @@ func builtUnits(recs unitRecords, dir string) error {
 			continue
 		}
 		if err := c.unit(u.Unit, paths, u.Alone, trusted); err != nil {
-			return fmt.Errorf("%s: %v", u.Unit, err)
+			errs = append(errs, fmt.Errorf("%s: %v", u.Unit, err))
 		}
 	}
 	if recs.Fstab != nil {
@@ -2571,24 +2603,44 @@ func builtUnits(recs unitRecords, dir string) error {
 			return err
 		}
 		if err := fstabLines(dir, f); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	if err := grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)); err != nil {
-		return err
-	}
-	return grantsHeld(c.pkgGrants, c.progs)
+	errs = append(errs, grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)))
+	errs = append(errs, grantsHeld(c.pkgGrants, c.progs))
+	return errors.Join(errs...)
 }
 
-// grantsHeld fails on a grant in or above held, a tree or program root
-// reads or runs.
-func grantsHeld(grants []grant, held []string) error {
-	for _, g := range grants {
-		if h, ok := inOrAbove(g.path, held); ok {
-			return fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h)
+// TestBuiltUnitsEveryRefusal: builtUnits reports every refusal in one
+// pass, so the first does not hide the rest of the tree (#4821 Security R3).
+func TestBuiltUnitsEveryRefusal(t *testing.T) {
+	var recs unitRecords
+	b := `{"units": [
+		{"unit": "a.service", "alone": true, "files": [{"path": "/etc/systemd/system/a.service.d/z.conf", "ours": true, "text": "[Service]\nEnvironment=LD_PRELOAD=/tmp/a.so\n"}]},
+		{"unit": "b.service", "alone": true, "files": [{"path": "/etc/systemd/system/b.service.d/z.conf", "ours": true, "text": "[Service]\nWorkingDirectory=/tmp/b\n"}]},
+		{"unit": "c.service", "alone": false, "files": [{"path": "/etc/systemd/system/c.service", "ours": true, "text": "[Service]\nUser=c\nExecStart=/usr/bin/c\nStateDirectory=c\nStateDirectoryMode=0777\n"}]},
+		{"unit": "d.service", "alone": false, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nExecStart=/var/lib/c/run\n"}]}]}`
+	if err := json.Unmarshal([]byte(b), &recs); err != nil {
+		t.Fatal(err)
+	}
+	err := builtUnits(recs, t.TempDir())
+	for _, want := range []string{`a.service: `, `variable "LD_PRELOAD"`, `b.service: `, `path "/tmp/b"`, `in or above /var/lib/c/run`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("got %v, want every refusal, with %q", err, want)
 		}
 	}
-	return nil
+}
+
+// grantsHeld fails on each grant in or above held, a tree or program root
+// reads or runs.
+func grantsHeld(grants []grant, held []string) error {
+	var errs []error
+	for _, g := range grants {
+		if h, ok := inOrAbove(g.path, held); ok {
+			errs = append(errs, fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // plainFS are the file system types a mount may name: in-kernel types

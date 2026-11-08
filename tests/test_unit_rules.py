@@ -104,6 +104,15 @@ class ProvenanceTest(unittest.TestCase):
             self.assertTrue(p.ours("/etc/agentos/z.conf"))
             self.assertFalse(p.ours("/usr/share/p/z.conf"))
 
+    def test_an_alias_named_through_a_linked_unit_directory_is_an_alias(self):
+        # #4779 L3 release 1: p's own directory is resolved in the tree before it is matched to a unit
+        # directory, so /lib/systemd/system/a.service, an alias of b, keeps b's provenance
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prov(d, {"/lib": "-> usr/lib", LIB + "a.service": "-> b.service", LIB + "b.service": "b"},
+                          {LIB + "b.service"})
+            self.assertEqual(p.alias_target("/lib/systemd/system/a.service"), LIB + "b.service")
+            self.assertFalse(p.ours("/lib/systemd/system/a.service"))
+
     def test_a_file_not_listed_as_a_packages_is_ours(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.prov(d, {LIB + "y.service": "y", LIB + "z.service": "z"}, {LIB + "y.service"})
@@ -140,6 +149,29 @@ class DpkgTest(unittest.TestCase):
             packaged = r.dpkg_packaged(out)(v)
             self.assertFalse(packaged(ETC + "bar.service.d/x.conf"))
             self.assertFalse(packaged("/etc/real.conf"))
+
+    def test_a_merged_link_counts_only_to_usr_of_its_own_name(self):
+        # #4779 Security R-b: /lib -> etc made our /etc/systemd/system/bar.service.d/x.conf the package's
+        # lib/systemd/system/bar.service.d/x.conf; and a link of ours before a merged one (#4779 L3 release 1)
+        for name, files, listed, mine in (
+                ("a top link to /etc", {"/lib": "-> etc"}, "lib/systemd/system/bar.service.d/x.conf",
+                 ETC + "bar.service.d/x.conf"),
+                ("a top link to another /usr name", {"/lib": "-> usr/share"}, "lib/systemd/system/bar.service.d/x.conf",
+                 "/usr/share/systemd/system/bar.service.d/x.conf"),
+                ("a top link through a link of ours", {"/lib": "-> l", "/l": "-> usr/lib"},
+                 "lib/systemd/system/bar.service.d/x.conf", LIB + "bar.service.d/x.conf"),
+                ("a link of ours before a merged one", {"/etc/l": "-> /lib", "/lib": "-> usr/lib"},
+                 "etc/l/systemd/system/bar.service.d/x.conf", LIB + "bar.service.d/x.conf")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(files, **{mine: "x"}))
+                out = pathlib.Path(d)
+                self.write(out, "%s  %s\n" % (md5("x"), listed), "Package: p\n")
+                self.assertFalse(r.dpkg_packaged(out)(v)(mine))
+        with tempfile.TemporaryDirectory() as d:  # the control: /lib -> usr/lib as the package laid it out
+            v = tree(d, {"/lib": "-> usr/lib", LIB + "bar.service.d/x.conf": "x"})
+            out = pathlib.Path(d)
+            self.write(out, "%s  lib/systemd/system/bar.service.d/x.conf\n" % md5("x"), "Package: p\n")
+            self.assertTrue(r.dpkg_packaged(out)(v)(LIB + "bar.service.d/x.conf"))
 
     def test_no_listed_files_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -210,6 +242,37 @@ class RecordsTest(unittest.TestCase):
                 ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])
             self.assertIsNone(got["fstab"])
 
+    def test_a_loaded_unit_with_no_fragment_reads_only_its_files_of_ours_alone(self):
+        # #4779 L3 release 1: usr.mount from mountinfo loads with no fragment; a package's drop-in on it
+        # is not printed, one of ours is, alone
+        files = {"/usr/lib/systemd/system/usr.mount.d/p.conf": "p", ETC + "usr.mount.d/z.conf": "z"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            got = r.records(v, shown({"usr.mount": ("loaded", "", [ETC + "usr.mount.d/z.conf",
+                                                                "/usr/lib/systemd/system/usr.mount.d/p.conf"])}),
+                            dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual([(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]],
+                             [("usr.mount", True, [(ETC + "usr.mount.d/z.conf", True)])])
+
+    def test_the_lint_instance_in_error_fails_the_run(self):
+        # #4821 Security R1: its template's files were not read, so a drop-in of ours that masks a
+        # package's User= line in a shared directory, and what the package's lines run, go unseen
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "t@agentos-unit-lint.service: load state error"):
+                self.recs(d, {"t@agentos-unit-lint.service": ("error", "", [])})
+        with tempfile.TemporaryDirectory() as d:  # another instance in error is judged as itself
+            got = self.recs(d, {"t@x.service": ("error", LIB + "t@.service", [])})["units"]
+            self.assertEqual([u["alone"] for u in got if u["unit"] == "t@x.service"], [False])
+
+    def test_only_the_lint_instance_itself_is_read_as_it(self):
+        # #4779 round 4 M5: x@fooagentos-unit-lint is an instance of its own, judged as itself
+        with tempfile.TemporaryDirectory() as d:
+            got = self.recs(d, {"t@fooagentos-unit-lint.service": ("bad-setting", LIB + "t@.service", []),
+                                "t@fooagentos-unit-lint.socket": ("error", "", [])})
+            self.assertEqual([(u["unit"], u["alone"]) for u in got["units"]
+                              if u["unit"].startswith("t@foo")], [("t@fooagentos-unit-lint.service", False)])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
@@ -275,10 +338,49 @@ class ShowTest(unittest.TestCase):
                 ("a missing block", a, "blocks"),
                 ("a block for another name", a + "\n" + self.block("c.service"), "systemctl gave"),
                 ("an extra line", a + "\n" + self.block("b.service") + "Alias=a\n", "systemctl line"),
-                ("a repeated key", a + "\n" + self.block("b.service") + "Id=b.service\n", "systemctl line")):
+                ("a repeated key", a + "\n" + self.block("b.service") + "Id=b.service\n", "systemctl line"),
+                # #4779 L3 release 1: a missing key fails by name, not through a KeyError
+                ("a missing key", a + "\n" + self.block("b.service").replace("LoadState=loaded\n", ""),
+                 "systemctl gave")):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(SystemExit, want):
                     self.show(reply, ["a.service", "b.service"])
+
+
+class LintTest(unittest.TestCase):
+    """lint() refuses a run in which a generator failed (#4817, from #4767's harness)."""
+
+    def test_a_failed_generator_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {ETC + "a.service": "[Service]\n"})  # View(view_root): no separate /usr
+            stopped = []
+
+            class Fake:
+                def __init__(self, root, usr, cmdline, plant):
+                    self.view_root = v.root
+
+                def show(self, units, props):
+                    return shown({u: ("loaded", ETC + "a.service", []) for u in units})
+
+                def failed_generators(self):
+                    return self.failed
+
+                def stop(self):
+                    stopped.append(1)
+            real = offline_systemd.Manager
+            offline_systemd.Manager = Fake
+            try:
+                for failed in ({"x-generator"}, {offline_systemd.GENERATOR_TIMEOUT}):
+                    with self.subTest(failed=failed):
+                        Fake.failed = failed
+                        with self.assertRaisesRegex(SystemExit, "generators failed"):
+                            r.lint(d, d, "", lambda view: lambda p: False)
+                Fake.failed = set()
+                self.assertEqual([u["unit"] for u in r.lint(d, d, "", lambda view: lambda p: False)["units"]],
+                                 ["a.service"])
+            finally:
+                offline_systemd.Manager = real
+            self.assertEqual(len(stopped), 3)
 
 
 class NamesTest(unittest.TestCase):
