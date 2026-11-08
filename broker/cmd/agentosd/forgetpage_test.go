@@ -439,4 +439,16 @@ func TestTheUnsentForgetRecordsEdges(t *testing.T) {
 	if !slices.Equal(sent, []string{"one"}) {
 		t.Fatalf("sent %q after %d tries", sent, tries)
 	}
+	// A notice is on disk before its send starts, so a crash during the
+	// send does not lose it.
+	saved := filepath.Join(dir, "saved.json")
+	var onDisk string
+	openForgetTold(saved, func(string) error {
+		b, _ := os.ReadFile(saved)
+		onDisk = string(b)
+		return nil
+	}).tell("two")
+	if onDisk != `["two"]` {
+		t.Fatalf("on disk during the send: %q", onDisk)
+	}
 }
