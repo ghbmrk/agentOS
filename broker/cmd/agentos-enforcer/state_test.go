@@ -206,7 +206,7 @@ func TestFreshDayFileUnreadable(t *testing.T) {
 	}
 	x.restart()
 	x.advance(time.Duration(policy.Wait) * time.Millisecond)
-	if !x.d.net.spent || x.d.net.freshDue != 0 || !strings.Contains(x.logText(), fileFresh+" unreadable, no fresh day waits") {
+	if !x.d.net.spent || x.d.net.freshDue != 0 || !strings.Contains(x.logText(), fileFresh+" unreadable, no fresh day waits: read") {
 		t.Fatal("an unreadable fresh-day file beside a spent day started a fresh day or went unlogged")
 	}
 }
