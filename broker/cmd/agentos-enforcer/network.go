@@ -55,6 +55,10 @@ type network struct {
 	edgeMu  sync.Mutex
 	edgeDay uint32 // the day the edge's overrun was last logged
 
+	// offloadErr is the last failure to keep the counted ports from
+	// merging, logged once while it lasts ("" while they merge nothing).
+	offloadErr string
+
 	// The byte caps: counter is nil when the saved state did not read
 	// back (spent), and then every capped send is dropped until the
 	// state is replaced (traffic ErrState; ENF-l-14).
@@ -68,6 +72,13 @@ type network struct {
 // openNetwork builds the network side before the first load: the relay's
 // filter, the Wake-on-LAN relay and the byte caps restored from disk.
 func (d *Enforcer) openNetwork() error {
+	// The byte caps count each packet as the port received it: one that
+	// merges segments counts one IP header for several, so the daemon
+	// does not start while the core's or the edge's port merges
+	// (ASSUMPTIONS ENF-l-16).
+	if err := d.dp.Offload(d.counted()...); err != nil {
+		return fmt.Errorf("byte caps: %w", err)
+	}
 	d.net.filter = mdns.NewFilter()
 	ms, err := d.cfg.machines()
 	if err != nil {
@@ -304,9 +315,34 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 		return
 	}
 	d.net.lastRead = now
+	d.keepOffloadsOff()
 	if err := d.readCaps(ctx); err != nil {
 		d.dp.Logf("byte caps: " + err.Error())
 	}
+}
+
+// counted are the ports whose received bytes the byte caps count: the
+// core's and the edge's.
+func (d *Enforcer) counted() []string { return []string{d.cfg.Layout.Core, d.cfg.Layout.Edge} }
+
+// keepOffloadsOff turns merging off again on the counted ports before each
+// reading, since a port whose device is made again (a VLAN added back)
+// starts with its driver's defaults. A failure is logged when it starts
+// or changes, and the end of one once.
+func (d *Enforcer) keepOffloadsOff() {
+	msg := ""
+	if err := d.dp.Offload(d.counted()...); err != nil {
+		msg = err.Error()
+	}
+	if msg == d.net.offloadErr {
+		return
+	}
+	if msg != "" {
+		d.dp.Logf("byte caps: a counted port merges segments, its bytes count short: " + msg)
+	} else {
+		d.dp.Logf("byte caps: the counted ports merge no segments again")
+	}
+	d.net.offloadErr = msg
 }
 
 // readCaps takes one reading of the byte caps' counters (#4376 wiring

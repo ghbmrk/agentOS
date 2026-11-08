@@ -291,6 +291,7 @@ var enforcer = map[string]struct {
 	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                                                                                 // slice f: the Wake-on-LAN relay
 	"enforcer/dns/run":  {[]string{"enforcer/dns"}, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })}, // slice l: runs dnsmasq in step with the firewall (#4464)
 	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy", "enforcer/wire"}, droneForbid},                                             // slice i: traffic summaries; byte-cap counts (#4174)
+	"enforcer/offload":  {nil, droneForbid},                                                                                                      // ENF-cap-gro (#4610): merging offloads off on the counted ports, over netlink through syscall
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
@@ -362,8 +363,8 @@ var enforcerMainRule = struct {
 	forbid  []string
 }{
 	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/dns", "enforcer/dns/run", "enforcer/enrol", "enforcer/heads",
-		"enforcer/mdns", "enforcer/nft", "enforcer/nft/load", "enforcer/page", "enforcer/policy", "enforcer/traffic", "enforcer/wire",
-		"enforcer/wol", "golang.org/x/sys/unix"},
+		"enforcer/mdns", "enforcer/nft", "enforcer/nft/load", "enforcer/offload", "enforcer/page", "enforcer/policy", "enforcer/traffic",
+		"enforcer/wire", "enforcer/wol", "golang.org/x/sys/unix"},
 	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
 }
 

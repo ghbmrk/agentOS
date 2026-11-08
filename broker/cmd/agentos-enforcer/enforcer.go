@@ -93,6 +93,9 @@ type deps struct {
 	MDNS func(context.Context, mdns.Plan, *mdns.Filter) error
 	Wake func(context.Context, *wol.Relay) error
 	Boot func() (string, error)
+	// Offload keeps the receive offloads that merge segments off on the
+	// counted ports and reads them back (offload.Off, ENF-cap-gro).
+	Offload func(ports ...string) error
 	// Listen binds the page's addresses; the lifecycle test drives the
 	// page's handler instead.
 	Listen bool
@@ -174,7 +177,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		dp.FireWait = fireTimeout
 	}
 	if dp.Elapsed == nil || dp.Fire == nil || dp.Network == nil || dp.Light == nil || dp.Radio == nil || dp.Logf == nil ||
-		dp.DNS == nil || dp.MDNS == nil || dp.Wake == nil || dp.Boot == nil {
+		dp.DNS == nil || dp.MDNS == nil || dp.Wake == nil || dp.Boot == nil || dp.Offload == nil {
 		return nil, errors.New("daemon: deps incomplete")
 	}
 	if err := checkStateDir(dir); err != nil {

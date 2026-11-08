@@ -16,8 +16,10 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/enforcer/offload"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
+	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 )
 
 // These tests run the byte caps end to end (NET-2 Byte caps, D-255,
@@ -498,4 +500,107 @@ func TestCapIdleAddressStillInItsSet(t *testing.T) {
 	r.send("core", nft.NetCore, 22, true, "a sends after two idle days")
 	r.send("core", nft.NetCore, 22, true, "a sends its whole cap after two idle days")
 	r.expectOver("after two idle days", r.read())
+}
+
+// NET-2 Byte caps, D-255, ENF-cap-gro (#4610; Security on #4611, comment
+// 6572938206): with the receive offloads that merge segments off on the
+// core's and the edge's ports (offload.Off, as the daemon keeps them), a
+// bulk send counts every segment's IP header: each box's count is at least
+// the IP bytes that left its port, segment by segment. The same send with
+// GRO on is counted short, which shows the harness merges, so the test
+// fails if Off leaves a port merging. The sender segments in software
+// (its TCP segmentation offloads off), so what leaves its port is what a
+// cable carries; its IP bytes are its port's transmitted bytes less each
+// frame's Ethernet header and less what it sent anywhere but the server
+// (IPv6 control, counted in its own output chain), with its gateway's
+// neighbour entry fixed so no ARP is in them.
+func TestCapCountsEverySegmentHeader(t *testing.T) {
+	if !nft.InNetns(t) {
+		return
+	}
+	r := newRig(t, capDoc(map[string]uint64{"bulk.example": 1 << 40}, 1<<40))
+	r.answer("bulk.example", nft.NetCore)
+	l := nft.FixtureLayout()
+	for i, tc := range []struct {
+		box, port, seg, to string
+		count              func(wire.Counts) uint64
+	}{
+		{"core", l.Core, "10.50.0.1", nft.NetCore, func(c wire.Counts) uint64 {
+			for _, g := range c.Groups {
+				if len(g.Dests) == 1 && g.Dests[0].Name == "bulk.example" {
+					return g.Count
+				}
+			}
+			t.Fatalf("no bulk.example group in %+v", c)
+			return 0
+		}},
+		{"edge", l.Edge, "10.60.0.1", nft.NetOther, func(c wire.Counts) uint64 { return c.EdgeCount }},
+	} {
+		r.h.Within(tc.box, func() {
+			if err := offload.Set("eth0", map[string]bool{"tx-tcp-segmentation": false, "tx-tcp6-segmentation": false,
+				"tx-tcp-ecn-segmentation": false, "tx-tcp-mangleid-segmentation": false, "tx-generic-segmentation": false}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		// The rest of what the box sends in a window (IPv6 neighbour and
+		// multicast control where the kernel has IPv6, anything to another
+		// address) is counted on its own and taken off.
+		r.h.In(tc.box, "nft", "add table inet tx; add counter inet tx other; "+
+			"add chain inet tx out { type filter hook output priority filter; }; "+
+			"add rule inet tx out meta nfproto ipv6 counter name other; add rule inet tx out ip daddr != "+tc.to+" counter name other")
+		other := func() uint64 {
+			var doc struct {
+				Nftables []struct {
+					Counter *struct{ Bytes uint64 } `json:"counter"`
+				} `json:"nftables"`
+			}
+			if err := json.Unmarshal([]byte(r.h.In(tc.box, "nft", "-j", "list", "counter", "inet", "tx", "other")), &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, o := range doc.Nftables {
+				if o.Counter != nil {
+					return o.Counter.Bytes
+				}
+			}
+			t.Fatal("no counter inet tx other")
+			return 0
+		}
+		mac := r.h.MAC(tc.port)
+		r.h.In(tc.box, "ip", "neigh", "replace", tc.seg, "lladdr", mac, "nud", "permanent", "dev", "eth0")
+		port := 9400 + i
+		r.h.Serve(tc.to, port, func(c net.Conn) {
+			c.SetDeadline(time.Now().Add(5 * time.Second))
+			io.Copy(io.Discard, c)
+		})
+		send := func() (counted, sent uint64) {
+			r.read()
+			before, tx, o := tc.count(r.c.Counts()), r.h.TxIP(tc.box), other()
+			r.h.Dial(tc.box, tc.to, port, 5*time.Second, func(c net.Conn) int {
+				n, _ := c.Write(make([]byte, 8<<20))
+				return n
+			})
+			time.Sleep(100 * time.Millisecond) // the last segments cross the enforcer
+			rest := other() - o
+			sent = r.h.TxIP(tc.box) - tx - rest
+			t.Logf("%s sent %d IP bytes elsewhere in the window", tc.box, rest)
+			r.read()
+			return tc.count(r.c.Counts()) - before, sent
+		}
+		if err := offload.Set(tc.port, map[string]bool{"rx-gro": true}); err != nil {
+			t.Fatal(err)
+		}
+		merged, sent := send()
+		t.Logf("%s with GRO on: counted %d of the %d IP bytes sent", tc.box, merged, sent)
+		if merged >= sent {
+			t.Errorf("%s: with GRO on the count (%d) did not run under the %d IP bytes sent: the harness merges nothing, so this test proves nothing", tc.box, merged, sent)
+		}
+		if err := offload.Off(tc.port); err != nil {
+			t.Fatal(err)
+		}
+		counted, sent := send()
+		t.Logf("%s with merging off: counted %d of the %d IP bytes sent", tc.box, counted, sent)
+		if counted < sent {
+			t.Errorf("%s: counted %d IP bytes, less than the %d that left its port", tc.box, counted, sent)
+		}
+	}
 }

@@ -74,6 +74,7 @@ func TestDepsRequired(t *testing.T) {
 		"MDNS":    func(d *deps) { d.MDNS = nil },
 		"Wake":    func(d *deps) { d.Wake = nil },
 		"Boot":    func(d *deps) { d.Boot = nil },
+		"Offload": func(d *deps) { d.Offload = nil },
 	} {
 		d := full
 		f(&d)
