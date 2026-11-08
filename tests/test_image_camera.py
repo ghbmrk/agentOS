@@ -7,6 +7,7 @@ CI's camera decoder step runs the shipped socket and decoder unit under the imag
 as the clerk's user: each session runs a sandbox under a user of its own, neither root nor the clerk's, in a pid
 namespace of its own and with an empty /run (broker/cmd/agentos-camdecode-host TestDecoderStartsInItsUnit)."""
 # REQ: CLK-1, NET-2, DEV-2, RES-2, UPD-10
+import os
 import pathlib
 import re
 import sys
@@ -294,6 +295,32 @@ class DecoderStepTest(unittest.TestCase):
             with self.subTest(bad):
                 self.assertEqual(camdecode_unit.check_logs({"a.log": ok, "b.log": bad}),
                                  ["b.log: TestDecoderStartsInItsUnit did not pass once"])
+
+
+    # REQ: CLK-1
+    def test_only_eacces_is_a_refusal(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import camdecode_unit
+        self.assertIsNone(camdecode_unit.refusal_failure(camdecode_unit.REFUSED, "[Errno 13] Permission denied"))
+        self.assertEqual(camdecode_unit.refusal_failure(0, "connected"), "nobody opened a decoder session")
+        # setpriv failing to change user (exit 1), or the probe failing otherwise, is not a refusal.
+        for rc, out in ((1, "setpriv: unknown group nobody"), (1, "[Errno 2] No such file or directory"), (2, "")):
+            with self.subTest(out):
+                self.assertIn("did not run to a refusal", camdecode_unit.refusal_failure(rc, out))
+        # The probe exits REFUSED on EACCES only, run here against a socket no one listens on and one at mode 0.
+        import socket, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = d + "/s"
+            r = subprocess.run([sys.executable, "-I", "-c", camdecode_unit.PROBE, p], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            if os.geteuid() != 0:
+                s = socket.socket(socket.AF_UNIX)
+                s.bind(p)
+                s.listen()
+                os.chmod(p, 0)
+                r = subprocess.run([sys.executable, "-I", "-c", camdecode_unit.PROBE, p], capture_output=True, text=True)
+                s.close()
+                self.assertEqual(r.returncode, camdecode_unit.REFUSED, r.stdout)
 
 
 if __name__ == "__main__":

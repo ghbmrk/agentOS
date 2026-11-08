@@ -26,9 +26,29 @@ TEST = "TestDecoderStartsInItsUnit"
 SESSIONS = 2
 
 
+# The refusal probe's exit code when the connect fails with EACCES, and only then; any other end (setpriv
+# failing to change user, python failing to start, another error) is not a refusal.
+REFUSED = 77
+PROBE = ("import errno, socket, sys\n"
+         "try:\n    socket.socket(socket.AF_UNIX).connect(sys.argv[1])\n"
+         "except OSError as e:\n    print(e)\n    sys.exit(%d if e.errno == errno.EACCES else 1)\n"
+         "print('connected')\n" % REFUSED)
+
+
 def as_user(user, argv, fd):
-    return subprocess.run(["setpriv", "--reuid=" + user, "--regid=" + user, "--clear-groups"] + argv,
+    """ARGV as USER's uid and primary gid (numeric: a user's group need not share its name), with fd FD."""
+    pw = pwd.getpwnam(user)
+    return subprocess.run(["setpriv", "--reuid=%d" % pw.pw_uid, "--regid=%d" % pw.pw_gid, "--clear-groups"] + argv,
                           pass_fds=(fd,), cwd="/", capture_output=True, text=True, timeout=600)
+
+
+def refusal_failure(returncode, output):
+    """The failure, or None, of the probe that another user is refused the socket: only REFUSED counts."""
+    if returncode == REFUSED:
+        return None
+    if returncode == 0:
+        return "nobody opened a decoder session"
+    return "the refusal probe did not run to a refusal (exit %d): %s" % (returncode, output.strip()[-500:])
 
 
 def check_logs(texts):
@@ -57,10 +77,11 @@ def main(tree, clerk, logs):
         print(r.stdout + r.stderr)
         if r.returncode != 0:
             fails.append("the clerk's sessions failed")
-        r = as_user("nobody", ["python3", "-I", "-c", "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])",
-                               sock], fd)
-        if r.returncode == 0:
-            fails.append("nobody opened a decoder session")
+        r = as_user("nobody", ["python3", "-I", "-c", PROBE, sock], fd)
+        print("nobody's probe (exit %d): %s" % (r.returncode, (r.stdout + r.stderr).strip()))
+        f = refusal_failure(r.returncode, r.stdout + r.stderr)
+        if f:
+            fails.append(f)
         os.close(fd)
         d = pathlib.Path("/proc/%d/root" % m.pid) / logs.lstrip("/")
         texts = {p.name: p.read_text(errors="replace") for p in sorted(d.glob("*.log"))} if d.is_dir() else {}
