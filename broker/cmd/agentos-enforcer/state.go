@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -141,10 +140,11 @@ func (d *Enforcer) openFresh() error {
 }
 
 // tickFresh starts the fresh day once its wait is over: a new day from
-// zero for the ruleset in force, saved before it counts, then a reading
-// that counts the running table's bytes and moves the drop to it. A day
-// not saved is tried again at the next tick.
-func (d *Enforcer) tickFresh(ctx context.Context, now time.Time) {
+// zero for the ruleset in force, saved before it counts; the reading that
+// follows in the same tick counts the running table's bytes and moves the
+// drop to it. A day not saved is tried again at the next tick. It runs on
+// Tick's goroutine, as tickNetwork does.
+func (d *Enforcer) tickFresh(now time.Time) {
 	n := &d.net
 	n.freshMu.Lock()
 	due := n.freshDue
@@ -168,7 +168,5 @@ func (d *Enforcer) tickFresh(ctx context.Context, now time.Time) {
 		d.dp.Logf("byte caps: " + fileFresh + " not cleared: " + err.Error())
 	}
 	d.dp.Logf("byte caps: a fresh day started, as the owner approved")
-	if err := d.readCaps(ctx); err != nil {
-		d.dp.Logf("byte caps: " + err.Error())
-	}
+	n.lastRead = time.Time{} // tickNetwork, next in this tick, reads at once
 }

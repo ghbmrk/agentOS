@@ -367,7 +367,7 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
 	}
-	d.tickFresh(ctx, now)
+	d.tickFresh(now)
 	d.tickNetwork(ctx, now)
 	d.upMu.Lock()
 	if up := d.coreUp(); up != d.toldUp {

@@ -22,7 +22,8 @@ func TestRevokeUnsaved(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := x.b.act(a, "revoke-core", "")
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "not saved: revoke it again") {
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "not saved: revoke it again") ||
+		!strings.Contains(x.logText(), "revocation is in force but not saved") {
 		t.Fatalf("an unsaved revocation: %d %s", w.Code, w.Body)
 	}
 	if _, ok := x.dial(addr, x.core); ok {
@@ -31,8 +32,11 @@ func TestRevokeUnsaved(t *testing.T) {
 	if err := os.Remove(journal); err != nil {
 		t.Fatal(err)
 	}
-	if w := x.b.act(a, "revoke-core", ""); w.Code != http.StatusOK {
+	if w := x.b.act(a, "revoke-core", ""); w.Code != http.StatusOK || x.page("Key") != "revoked" {
 		t.Fatalf("the revocation again: %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(x.logText(), "the owner revoked the core's channel key") {
+		t.Fatal("the revocation was not logged")
 	}
 	x.restart()
 	if _, ok := x.dial(x.serve(), x.core); ok || x.page("Key") != "revoked" {

@@ -226,7 +226,7 @@ func TestFreshDay(t *testing.T) {
 		t.Errorf("a cancel with nothing waiting: %d", code)
 	}
 	code, res := g.tapState(g.a, ActFreshDay, "")
-	if code != http.StatusOK || len(ca.asked) != 1 || ca.asked[0] != g.now.UnixMilli() || res["due"] != g.s.when(ca.due) {
+	if code != http.StatusOK || res["done"] != true || len(ca.asked) != 1 || ca.asked[0] != g.now.UnixMilli() || res["due"] != g.s.when(ca.due) {
 		t.Fatalf("fresh day: %d %v %v", code, res, ca.asked)
 	}
 	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict {
