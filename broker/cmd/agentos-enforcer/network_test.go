@@ -227,7 +227,7 @@ func TestByteCapTripsTheCore(t *testing.T) {
 // group's count is its cap), the day is not overwritten, and the
 // channel's counts read is refused.
 func TestByteCapStateUnreadable(t *testing.T) {
-	x, doc, _ := capped(t)
+	x, doc, a := capped(t)
 	if err := os.WriteFile(filepath.Join(x.dir, fileTraffic), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +266,110 @@ func TestByteCapStateUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(x.logText(), "saved day unreadable") {
 		t.Fatal("an unreadable day was not logged")
+	}
+
+	// The page (#5013, D-255): the spent day shows with its reason, and
+	// only the owner's passkey starts it afresh, after the wait a
+	// loosening takes, which a restart keeps and a cancel ends.
+	if x.page("Caps") != "spent" {
+		t.Fatal("the page does not show the spent day")
+	}
+	if w := x.b.act(newAuthenticator(t), "fresh-day", ""); w.Code == http.StatusOK || x.page("Caps") != "spent" {
+		t.Fatal("a stranger's passkey started a fresh day")
+	}
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	if w := x.b.act(a, "cancel-fresh", ""); w.Code != http.StatusOK || x.page("Caps") != "spent" {
+		t.Fatalf("cancel: %d %s", w.Code, w.Body)
+	}
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent {
+		t.Fatal("a cancelled fresh day started")
+	}
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK || x.page("Caps") != "fresh waiting" {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	due := x.d.net.freshDue
+	x.restart()
+	if !x.d.net.spent || x.d.net.freshDue != due {
+		t.Fatal("a restart lost the fresh day's wait or started it early")
+	}
+	x.advance(time.Duration(policy.Wait)*time.Millisecond - time.Minute)
+	if b, _ := os.ReadFile(filepath.Join(x.dir, fileTraffic)); !x.d.net.spent || string(b) != "{}" {
+		t.Fatal("the fresh day started before its wait")
+	}
+	x.fire.mu.Lock()
+	before := len(x.fire.updates)
+	x.fire.mu.Unlock()
+	x.advance(2 * time.Minute)
+	x.fire.mu.Lock()
+	ups := slices.Clone(x.fire.updates[before:])
+	x.fire.mu.Unlock()
+	if len(ups) == 0 || !strings.HasPrefix(ups[len(ups)-1], nft.DropHeader) {
+		t.Fatal("the drop did not move to the fresh day")
+	}
+	if x.d.net.spent || x.page("Caps") != "counting" {
+		t.Fatal("the fresh day did not start after its wait")
+	}
+	b, _ := os.ReadFile(filepath.Join(x.dir, fileTraffic))
+	if _, err := traffic.Restore(time.Now, traffic.CapsOf(doc), b); err != nil {
+		t.Fatalf("the fresh day was not saved: %v", err)
+	}
+	c, err := x.d.counts()
+	if err != nil || len(c.Groups) != 1 || c.Groups[0].Count != 10 {
+		t.Fatalf("the fresh day does not count the running table's bytes: %+v %v", c, err)
+	}
+	x.restart()
+	if x.d.net.spent || x.d.net.freshDue != 0 {
+		t.Fatal("the fresh day did not survive a restart")
+	}
+}
+
+// TestFreshDayFailsClosed (#5013): a fresh day whose wait is not saved
+// does not wait, a cancel not saved leaves it waiting, a new day not
+// saved does not start (and starts at a later tick once it saves), and a
+// fresh-day file that does not read back starts nothing.
+func TestFreshDayFailsClosed(t *testing.T) {
+	x, _, a := capped(t)
+	if err := os.WriteFile(filepath.Join(x.dir, fileTraffic), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	x.fail(fileFresh, true)
+	if w := x.b.act(a, "fresh-day", ""); w.Code == http.StatusOK || x.page("Caps") != "spent" {
+		t.Fatalf("an unsaved fresh day: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileFresh, false)
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileFresh, true)
+	if w := x.b.act(a, "cancel-fresh", ""); w.Code == http.StatusOK || x.page("Caps") != "fresh waiting" {
+		t.Fatalf("an unsaved cancel: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileFresh, false)
+	x.fail(fileTraffic, true)
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || !strings.Contains(x.logText(), "the fresh day was not saved") {
+		t.Fatal("a fresh day not on disk started")
+	}
+	x.fail(fileTraffic, false)
+	x.advance(time.Second)
+	if x.d.net.spent {
+		t.Fatal("the fresh day did not start once it saved")
+	}
+	// A fresh-day file that does not read back starts nothing.
+	if err := os.WriteFile(filepath.Join(x.dir, fileTraffic), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(x.dir, fileFresh), []byte(`{"due":"soon"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || x.page("Caps") != "spent" {
+		t.Fatal("an unreadable fresh-day file started a fresh day")
 	}
 }
 

@@ -3,7 +3,9 @@
 // from the policy itself, issues a passkey challenge per rendered diff and
 // checks the assertion, lists pending loosenings with cancel, shows whether
 // the passkey is synced, resumes a paused channel, and shows NET-1's limits
-// and each device's label from the signed policy.
+// and each device's label from the signed policy. It shows every open
+// alert, a silent core and the light, revokes the core's channel sub-key,
+// and starts an unreadable byte-cap day afresh (status.go).
 //
 // It answers only the Owner network and the wired admin port: it binds
 // only their addresses and also drops any connection or request from
@@ -109,6 +111,16 @@ type Config struct {
 	// page's own lock.
 	Lock    sync.Locker
 	Channel Channel // nil until slice d is wired
+	// Alerts is the enforcer's alert log (slice h): home shows every open
+	// alert, a silent core and the light, and clears an alert after a
+	// tap; nil shows none (status.go).
+	Alerts Alerts
+	// Core revokes the core's channel sub-key after a tap; nil with no
+	// core pinned.
+	Core Core
+	// Caps is the byte caps' day when it did not read back, and the
+	// owner's fresh start of it; nil with no byte caps.
+	Caps Caps
 	// Act carries out the owner's asserted actions on safety-list devices
 	// (slice s); nil serves none. ActTimeout bounds each call, and so how
 	// long a tap holds Lock: zero means action.Timeout, and more is refused.

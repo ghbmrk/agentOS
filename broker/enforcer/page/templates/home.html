@@ -6,6 +6,26 @@
 <body>
 <h1>Home enforcer</h1>
 <p>Policy version {{.Version}}.</p>
+{{if .Shown}}
+<h2>Alerts</h2>
+{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off when the cut lifts or you clear its alert below.</p>
+{{else}}<p>The light is off: no known attack is open.</p>{{end}}
+{{if .CoreDown}}<p class="warn">The core is down: the enforcer has not heard from it lately. Your rules here stay as they are, but the enforcer's texts cannot reach your phone while the core is down, so check this page.</p>{{end}}
+{{range .Alerts}}<div class="pending warn">
+<p>{{.Text}}</p>
+<p>Since {{when .At.UnixMilli}}{{if gt .Count 1}}, {{.Count}} times{{end}}. {{if .Sent}}Handed to the core to text you; the core may not have sent it.{{else}}Not texted: the core has not taken it.{{end}}</p>
+{{if not .Fixed}}<button class="act" data-action="clear" data-target="{{.ID}}" data-rp="{{$.Name}}">Clear with your passkey</button>{{end}}
+</div>
+{{else}}<p>No open alerts.</p>{{end}}
+{{end}}
+{{if .Spent}}<h2>Byte caps</h2>
+<div class="pending warn">
+<p>The byte caps' saved day did not read back, so every cap counts as spent: the core and the edge reach no capped destination. Starting the day afresh forgets today's bytes so far, so like any loosening it waits {{.Wait}}.</p>
+{{if .FreshDue}}<p>A fresh day starts at {{.FreshDue}} unless you cancel it.</p>
+<button class="act" data-action="cancel-fresh" data-target="" data-rp="{{.Name}}">Cancel with your passkey</button>
+{{else}}<button class="act" data-action="fresh-day" data-target="" data-rp="{{.Name}}">Start the day afresh with your passkey</button>{{end}}
+</div>
+{{end}}
 {{if .Recovery}}
 <div class="pending warn">
 <p>A new passkey is being enrolled with the recovery code. At {{.Recovery}} it replaces your passkey, and your passkey stops working. If this is not you, cancel it now.</p>
@@ -44,6 +64,9 @@
 <h2>agentOS channel</h2>
 <p>The channel is {{.Channel}}.</p>
 {{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
+{{if .Core}}{{if .Revoked}}<p>The core's channel key is revoked: the enforcer refuses everything from it.</p>
+{{else}}<p>If the core box was stolen or you no longer trust it, revoke its key here: the enforcer then refuses everything from it, and the core cannot stop this. It cannot be undone for this key.</p>
+<button class="act" data-action="revoke-core" data-target="" data-rp="{{.Name}}" data-confirm="Revoke the core's key? The enforcer will refuse the core from now on, and this cannot be undone.">Revoke the core's key with your passkey</button>{{end}}{{end}}
 
 {{if .Offers}}<h2>Names heard</h2>
 {{range .Offers}}<div class="pending">

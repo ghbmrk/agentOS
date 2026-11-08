@@ -61,9 +61,14 @@ type network struct {
 
 	// The byte caps: counter is nil when the saved state did not read
 	// back (spent), and then every capped send is dropped until the
-	// state is replaced (traffic ErrState; ENF-l-14).
+	// owner's fresh day starts (state.go) or the state is replaced
+	// (traffic ErrState; ENF-l-14). fwMu holds counter; freshMu holds
+	// spent's change and freshDue, when the fresh day the owner approved
+	// starts (0: none waiting), which the page reads.
 	counter  *traffic.Counter
+	freshMu  sync.Mutex
 	spent    bool
+	freshDue int64
 	boot     string
 	past     bool
 	lastRead time.Time
@@ -125,10 +130,10 @@ func (d *Enforcer) openNetwork() error {
 				return fmt.Errorf("byte caps: %w", err)
 			}
 			d.net.counter, d.net.spent = nil, true
-			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until " + fileTraffic + " is replaced: " + err.Error())
+			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until the owner starts a fresh day on the page or " + fileTraffic + " is replaced: " + err.Error())
 		}
 	}
-	return nil
+	return d.openFresh()
 }
 
 // ServeWake runs the Wake-on-LAN relay until ctx ends; with no machine
@@ -459,7 +464,10 @@ func (d *Enforcer) trafficRead(device string) ([]byte, error) {
 // at the request (#4174), so they hold every byte the firewall counted
 // before it. With the saved day unreadable it is refused.
 func (d *Enforcer) counts() (wire.Counts, error) {
-	if d.net.counter == nil {
+	d.fwMu.Lock()
+	c := d.net.counter // set by a fresh day (state.go) under fwMu
+	d.fwMu.Unlock()
+	if c == nil {
 		return wire.Counts{}, errors.New("byte caps: saved day unreadable")
 	}
 	// The channel asks from its read loop: a cap passed is tripped off it,
@@ -475,7 +483,7 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	if err != nil {
 		return wire.Counts{}, err
 	}
-	return d.net.counter.Counts(), nil
+	return c.Counts(), nil
 }
 
 // closeNetwork takes a last reading of the byte caps, so a clean stop

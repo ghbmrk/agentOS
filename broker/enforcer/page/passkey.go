@@ -494,8 +494,9 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// challenge draws a tap for a page action: cancelling a pending loosening
-// or resuming the paused channel (NET-4, NET-6).
+// challenge draws a tap for a page action: cancelling a pending loosening,
+// resuming the paused channel (NET-4, NET-6), the enrolment state's
+// actions (enrol.go) or the enforcer state's (status.go).
 func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action string `json:"action"`
@@ -543,12 +544,21 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		fail(w, http.StatusBadRequest, errMalformed)
-		return
+		known, code, err := s.stateChallenge(req.Action, req.Target)
+		if !known {
+			code, err = http.StatusBadRequest, errMalformed
+		}
+		if err != nil {
+			fail(w, code, err)
+			return
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := &challenge{kind: req.Action, target: req.Target}
+	if req.Action == ActRevokeCore {
+		c.msg = s.cfg.Core.RevokeMsg(s.cfg.Owner) // heads.SubKeyRoot's, which the heads store checks again
+	}
 	if req.Action == ActKeep {
 		s.cfg.Lock.Lock()
 		cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
@@ -626,6 +636,13 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Lock.Unlock()
 	case ActResume:
 		err = s.cfg.Channel.Resume()
+	case ActClear, ActRevokeCore, ActFreshDay, ActCancelFresh:
+		var res map[string]any
+		if res, err = s.stateAct(c, sig); err == nil && res != nil {
+			res["done"] = true
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
 	}
 	if err != nil {
 		fail(w, http.StatusConflict, err)

@@ -143,9 +143,12 @@ type Enforcer struct {
 	net       network // network.go: resolver, relays, byte caps
 
 	coreSeen atomic.Int64 // Elapsed at the core's last authenticated line, +1; 0 never
-	conns    atomic.Int32
-	changed  chan struct{}
-	lastLit  time.Time
+	// revokeUnsaved: the owner's revocation of the core's key is in force
+	// for this run but its save failed, so the page offers it again.
+	revokeUnsaved atomic.Bool
+	conns         atomic.Int32
+	changed       chan struct{}
+	lastLit       time.Time
 	// The page's core and recovery state as last told to the alerts:
 	// Tick tells them only a change, since each call re-shows the light
 	// and coming up re-offers every unsent alert (ENF-h-a5). upMu holds
@@ -339,8 +342,9 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 }
 
 // Tick is the daemon's clock, run from one goroutine: replacement passkeys and loosenings whose
-// wait is over, the firewall, the core's silence, the light and the
-// page's certificate, and the page rebuilt for the passkey in force.
+// wait is over, the firewall, a fresh byte-cap day whose wait is over,
+// the core's silence, the light and the page's certificate, and the page
+// rebuilt for the passkey in force.
 func (d *Enforcer) Tick(ctx context.Context) {
 	now := d.dp.Now()
 	// The book takes the policy lock itself (enrol ASSUMPTIONS ENF-c-8).
@@ -363,6 +367,7 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
 	}
+	d.tickFresh(ctx, now)
 	d.tickNetwork(ctx, now)
 	d.upMu.Lock()
 	if up := d.coreUp(); up != d.toldUp {
@@ -421,10 +426,11 @@ func (d *Enforcer) rebuildPage() error {
 		Name: d.cfg.Name, Owner: owner, Enrol: d.book, CA: cert.Root, CoreCA: d.coreCA,
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
-		Heard: mdns.HeardBy(d.net.filter, d.cfg.Layout),
+		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
+		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d},
 	}
 	if d.ch != nil {
-		pc.Channel = d.cut
+		pc.Channel, pc.Core = d.cut, pageCore{d}
 	}
 	s, err := page.New(pc)
 	if err != nil {

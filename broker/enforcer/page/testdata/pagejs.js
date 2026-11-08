@@ -2,18 +2,19 @@
 // the server rendered (#4929 R-P1), and asserts what the owner is shown.
 // An id page.js reads that the screen lacks is null here, as in a browser.
 //
-//   node pagejs.js page.js factory.html reset.html enrolled.html
+//   node pagejs.js page.js factory.html reset.html enrolled.html home.html
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const [script, factoryHTML, resetHTML, enrolledHTML] = process.argv.slice(2).map(p => fs.readFileSync(p, "utf8"));
+const [script, factoryHTML, resetHTML, enrolledHTML, homeHTML] = process.argv.slice(2).map(p => fs.readFileSync(p, "utf8"));
 
 // dom is a flat stub of html's elements: each tag with an id, a form's
-// button and named inputs, and its hidden attribute.
+// button and named inputs, its hidden attribute, and the page actions'
+// buttons (class "act") by their data-action.
 function dom(html) {
-  const byId = {}, forms = [];
+  const byId = {}, forms = [], acts = [];
   let form = null;
   for (const m of html.matchAll(/<(\/?)(\w+)([^>]*)>/g)) {
     const [, close, tag, attrs] = m;
@@ -26,21 +27,25 @@ function dom(html) {
       setAttribute() {}, appendChild(c) { this.children.push(c); },
       querySelector(s) { return s === "button" ? this.button : null; },
     };
-    const rp = attr("data-rp");
-    if (rp !== null) el.dataset.rp = rp;
+    for (const d of ["rp", "action", "target", "confirm"]) {
+      const v = attr("data-" + d);
+      if (v !== null) el.dataset[d] = v;
+    }
+    if (tag === "button" && attr("class") === "act") acts.push(el);
     if (el.id) byId[el.id] = el;
     if (tag === "form") { forms.push(el); form = el; }
     if (form && tag === "button") form.button = el;
     if (form && tag === "input" && attr("name")) form.elements[attr("name")] = el;
   }
-  return { byId, forms };
+  return { byId, forms, acts };
 }
 
 // run loads page.js on html with fetch answering answers[path] as
 // [status, body], or as a list of them taken in turn, and returns the stub
-// elements.
-function run(html, answers) {
-  const { byId, forms } = dom(html);
+// elements; confirmed is the owner's answer to a confirm().
+function run(html, answers, confirmed = true) {
+  const { byId, forms, acts } = dom(html);
+  const posted = [];
   let ready = null;
   const cred = { rawId: new ArrayBuffer(1), response: {
     getPublicKeyAlgorithm: () => -7, getPublicKey: () => new ArrayBuffer(1),
@@ -48,7 +53,7 @@ function run(html, answers) {
   const ctx = {
     document: {
       getElementById: id => byId[id] || null,
-      querySelectorAll: s => s === "form" ? forms : [],
+      querySelectorAll: s => s === "form" ? forms : s === "button.act" ? acts : [],
       querySelector: () => ({ content: "token" }),
       addEventListener: (t, f) => { ready = f; },
       createElementNS: () => ({ tag: "rect", setAttribute() {} }),
@@ -58,17 +63,18 @@ function run(html, answers) {
     atob: s => Buffer.from(s, "base64").toString("binary"),
     btoa: s => Buffer.from(s, "binary").toString("base64"),
     fetch: async path => {
+      posted.push(path);
       const a = answers[path];
       const [status, body] = Array.isArray(a[0]) ? a.shift() : a;
       return { ok: status === 200, status, statusText: "", json: async () => body };
     },
-    confirm: () => true,
+    confirm: () => confirmed,
     location: { reload() { ctx.reloaded = true; }, hash: "" },
     Uint8Array, ArrayBuffer, Error, String, JSON,
   };
   vm.runInNewContext(script, ctx);
   ready();
-  return { el: byId, ctx };
+  return { el: byId, ctx, acts, posted };
 }
 
 const begin = [200, { id: "t", challenge: "AA", rp_id: "enforcer.home.arpa" }];
@@ -163,6 +169,30 @@ const cases = {
     const { el, ctx } = run(enrolledHTML, { "/enrol/reset": [200, { done: true }] });
     await submit(el, "reset");
     assert.equal(ctx.reloaded, true);
+  },
+  // Revoking the core's key cannot be undone, so the button asks first;
+  // declined, nothing is posted and no tap is asked for (#4751).
+  async revokeDeclined() {
+    const { acts, posted } = run(homeHTML, {}, false);
+    const b = acts.find(b => b.dataset.action === "revoke-core");
+    assert.ok(b.dataset.confirm);
+    await b.listeners.click();
+    assert.deepEqual(posted, []);
+    assert.equal(b.disabled, false);
+  },
+  async revokeConfirmed() {
+    const { acts, posted, ctx } = run(homeHTML, { "/challenge": begin, "/act": [200, { done: true }] });
+    await acts.find(b => b.dataset.action === "revoke-core").listeners.click();
+    assert.deepEqual(posted, ["/challenge", "/act"]);
+    assert.equal(ctx.reloaded, true);
+  },
+  // A step that can be undone asks nothing before the tap.
+  async clearAsksNothing() {
+    const { acts, posted } = run(homeHTML, { "/challenge": begin, "/act": [200, { done: true }] }, false);
+    const b = acts.find(b => b.dataset.action === "clear");
+    assert.equal(b.dataset.confirm, undefined);
+    await b.listeners.click();
+    assert.deepEqual(posted, ["/challenge", "/act"]);
   },
 };
 

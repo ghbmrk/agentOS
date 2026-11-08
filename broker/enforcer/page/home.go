@@ -3,6 +3,7 @@ package page
 import (
 	"errors"
 	"html/template"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -95,8 +96,9 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, draw func(*http
 // home is the page's status: the policy in force, the loosening waiting
 // with its cancel, whether the passkey is synced, the channel's pause, the
 // names heard since a device's pair was signed with a link to let or hold
-// them (#4566), each device's label from the signed policy, and NET-1's
-// limits.
+// them (#4566), each device's label from the signed policy, NET-1's
+// limits, and the enforcer's own state (status.go): open alerts, a silent
+// core, the light, the core's key and an unreadable byte-cap day.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
@@ -123,7 +125,8 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			recovery = s.when(due.UnixMilli())
 		}
 	}
-	s.render(w, r, "home.html", map[string]any{
+	data := s.status()
+	maps.Copy(data, map[string]any{
 		"Keep":     keep,
 		"Recovery": recovery,
 		"Enrol":    s.cfg.Enrol != nil,
@@ -135,5 +138,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"Devices":  devs,
 		"Offers":   offers,
 		"Limits":   Limits,
+		"Wait":     minutes(time.Duration(policy.Wait) * time.Millisecond),
 	})
+	s.render(w, r, "home.html", data)
 }
