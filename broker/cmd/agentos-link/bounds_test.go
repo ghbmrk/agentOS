@@ -13,8 +13,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -262,8 +265,9 @@ func TestAKernelThatDoesNotAnswerTakesNoHello(t *testing.T) {
 	if _, n := k.counts(); n != 0 || !said {
 		t.Fatalf("candidates %d, log %q", n, log.String())
 	}
-	// Mutant link.go:211, the return after it dropped: the closed
-	// connection's hello read fails and is counted as the edge's fault.
+	// Mutant link.go:211, the return after it dropped: a hello already in
+	// the TLS buffer is still read and handed on as a candidate (or, read
+	// after the close, counted as the edge's fault).
 	time.Sleep(500 * time.Millisecond)
 	if _, n := k.counts(); n != 0 || s.faults.Load() != 0 {
 		t.Fatalf("candidates %d, faults %d: the hello went on being read after the kernel's silence", n, s.faults.Load())
@@ -624,23 +628,136 @@ func TestCaptureHelpersRefuseWhatTheyCannotTake(t *testing.T) {
 	}) || err == nil {
 		t.Fatalf("a capture into a missing directory: %v", err)
 	}
-	// Mutant bind_linux.go:36, a listener that is not TCP read as one.
+	// Mutants bind_linux.go:36-37, a listener that is not TCP read as one:
+	// SyscallConn's EINVAL comes back in place of the refusal.
 	ln, err := net.Listen("unix", filepath.Join(dir, "u.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	var derr error
-	func() {
+	bound := func(l net.Listener) (err error) {
 		defer func() {
-			if recover() != nil {
-				derr = nil
+			if r := recover(); r != nil {
+				err = nil
 			}
 		}()
-		_, derr = boundDevice(ln)
-	}()
-	if derr == nil {
-		t.Fatal("boundDevice took a Unix listener")
+		_, err = boundDevice(l)
+		return err
+	}
+	if err := bound(ln); err == nil || !strings.Contains(err.Error(), "not a TCP listener") {
+		t.Fatalf("boundDevice of a Unix listener: %v", err)
+	}
+	// Mutant bind_linux.go:40, SyscallConn's error ignored: a TCP listener
+	// with no socket behind it (typed nil, zero value) panics in Control.
+	for _, l := range []*net.TCPListener{nil, {}} {
+		if err := bound(l); err == nil {
+			t.Fatalf("boundDevice of %#v: no error", l)
+		}
+	}
+}
+
+// fds counts this process's open descriptors.
+func fds(t *testing.T) int {
+	t.Helper()
+	es, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	return len(es)
+}
+
+func TestWriteCaptureHoldsItsModeAndItsDescriptors(t *testing.T) {
+	dir := t.TempDir()
+	path, store := filepath.Join(dir, "first-edge"), filepath.Join(dir, "store")
+	// Mutant capture.go:83, the Chmod dropped: under a umask that clears
+	// owner bits the capture is not 0600.
+	old := syscall.Umask(0o277)
+	defer syscall.Umask(old)
+	// Mutant capture.go:95, the Close dropped: the capture's descriptor
+	// leaks. GC is off so no finalizer closes it first.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	before := fds(t)
+	if err := writeCapture(path, store, make([]byte, captureLen)); err != nil {
+		t.Fatal(err)
+	}
+	if after := fds(t); after != before {
+		t.Fatalf("descriptors %d -> %d across writeCapture", before, after)
+	}
+	syscall.Umask(old)
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("capture mode %v (%v), want 0600", fi.Mode().Perm(), err)
+	}
+}
+
+func TestATakenCaptureIsTakenEvenWhereNoFileCanBeMade(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a 0500 directory")
+	}
+	dir := t.TempDir()
+	path, store := filepath.Join(dir, "first-edge"), filepath.Join(dir, "store")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	// Mutants capture.go:67-68, the existing capture not checked first:
+	// CreateTemp fails before link(2), so the ignored hello becomes an
+	// error exit and a restart.
+	if err := writeCapture(path, store, make([]byte, captureLen)); !errors.Is(err, errTaken) {
+		t.Fatalf("a second capture into a full directory: %v", err)
+	}
+}
+
+// slowGone is a kernel whose edgekey answers not live, slowly, counting.
+type slowGone struct {
+	*fakeKernel
+	n atomic.Int64
+}
+
+func (k *slowGone) EdgeKey(ed25519.PublicKey) (Edge, error) {
+	k.n.Add(1)
+	time.Sleep(30 * time.Millisecond)
+	return Edge{}, nil
+}
+
+func TestRecheckAsksNoMoreOnceItCloses(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		k := &slowGone{fakeKernel: newFakeKernel(t)}
+		s := &server{kernel: k, every: 5 * time.Millisecond, limit: time.Second}
+		a, b := net.Pipe()
+		c := &served{conn: tls.Server(a, &tls.Config{}), done: make(chan struct{})}
+		// Mutant link.go:286, no return after the close: a tick pending
+		// beside done is picked at random, and the kernel is asked again
+		// about a connection already closed.
+		if !within(2*time.Second, func() { s.recheck(c, nil) }) {
+			t.Fatalf("trial %d: recheck ran on after closing", i)
+		}
+		b.Close()
+		if n := k.n.Load(); n != 1 {
+			t.Fatalf("trial %d: the kernel was asked %d times", i, n)
+		}
+	}
+}
+
+func TestUntilStoreCallsDoneOnce(t *testing.T) {
+	old := storePoll
+	storePoll = 5 * time.Millisecond
+	t.Cleanup(func() { storePoll = old })
+	store := filepath.Join(t.TempDir(), "store")
+	if err := os.WriteFile(store, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int64
+	// Mutant main.go:226, no return after done: a done that does not end
+	// ctx is called on every tick.
+	if !within(2*time.Second, func() { untilStore(context.Background(), store, func() { calls.Add(1) }) }) {
+		t.Fatalf("untilStore did not return after done; done called %d times", calls.Load())
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("done called %d times", n)
 	}
 }
 
