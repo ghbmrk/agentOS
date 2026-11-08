@@ -171,8 +171,20 @@ func TestClearAlert(t *testing.T) {
 // a target, a second revocation and a page with no core are refused.
 func TestRevokeCore(t *testing.T) {
 	g, _, co, _ := stateRig(t)
-	if !strings.Contains(g.homeHTML(), `data-action="revoke-core"`) {
+	h := g.homeHTML()
+	if !strings.Contains(h, `data-action="revoke-core"`) {
 		t.Fatal("home offers no revocation")
+	}
+	// It says what it does and no more (Potency on #5101): the channel
+	// closes, network access stays, texts stop, and it is final.
+	for _, want := range []string{"takes no message from the core over its channel", "network access stays as your rules set it",
+		"texts stop too", "cannot be undone", "its texts to you stop, and this cannot be undone"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("the revoke step lacks %q", want)
+		}
+	}
+	if strings.Contains(h, "refuses everything") {
+		t.Error("the revoke step claims the core is cut off")
 	}
 	w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActRevokeCore})
 	if c := answer(t, w); w.Code != http.StatusOK || c["challenge"] != chal(co.RevokeMsg(g.a.Public())) {

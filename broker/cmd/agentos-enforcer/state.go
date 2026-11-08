@@ -135,19 +135,18 @@ func (p pageCaps) CancelFresh() error {
 
 // openFresh restores a fresh day waiting only for the unreadable day it
 // was approved for (freshState.Day). Beside a day that reads back, a
-// fresh-day file is erased, and the daemon does not start while that
-// erase is unsaved. One that does not read back, is for another day, or
-// cannot be read, starts nothing and does not stop the start.
+// fresh-day file, readable or not, is erased, and the daemon does not
+// start while that erase is unsaved. Beside a spent day, one that does not
+// read back, is for another day, or cannot be read, starts nothing and
+// does not stop the start.
 func (d *Enforcer) openFresh() error {
 	b, err := d.store(fileFresh).Load()
-	if err != nil {
-		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits: " + err.Error())
-		return nil
-	}
 	var st freshState
 	switch {
-	case b == nil || !d.net.spent && string(b) == "{}":
-	case !d.net.spent:
+	case err != nil && d.net.spent:
+		d.dp.Logf("byte caps: " + fileFresh + " unreadable, no fresh day waits: " + err.Error())
+	case err == nil && (b == nil || !d.net.spent && string(b) == "{}"):
+	case !d.net.spent: // read or not, nothing may outlive the day it was for
 		if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
 			return fmt.Errorf("byte caps: a stale %s is not erased: %w", fileFresh, err)
 		}
@@ -162,8 +161,9 @@ func (d *Enforcer) openFresh() error {
 	return nil
 }
 
-// tickFresh starts the fresh day once its wait is over: a new day from
-// zero for the ruleset in force, saved before it counts; the reading that
+// tickFresh starts the fresh day once its wait is over: the approval
+// erased, then a new day from zero for the ruleset in force saved, both
+// before it counts; the reading that
 // follows in the same tick counts the running table's bytes and moves the
 // drop to it. A day not saved is tried again at the next tick. It runs on
 // Tick's goroutine, as tickNetwork does.
@@ -184,16 +184,16 @@ func (d *Enforcer) tickFresh(now time.Time) {
 	if n.freshDue != due {
 		return // cancelled meanwhile
 	}
+	// The approval is spent before the new day is saved: a day not
+	// saved then leaves no approval on disk, so a restart in between
+	// needs a new tap, and a cancel meanwhile stops the retry.
+	if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
+		d.dp.Logf("byte caps: " + fileFresh + " not cleared, the fresh day tried again at the next tick: " + err.Error())
+		return
+	}
 	c := traffic.NewCounter(d.dp.Now, traffic.CapsOf(d.loadedDoc))
 	if err := d.store(fileTraffic).Save(c.Save()); err != nil {
 		d.dp.Logf("byte caps: the fresh day was not saved, tried again at the next tick: " + err.Error())
-		return
-	}
-	// The approval is spent before the day starts: one left on disk
-	// would be erased at the next start anyway (openFresh), but the run
-	// keeps the day spent until it is.
-	if err := d.store(fileFresh).Save([]byte("{}")); err != nil {
-		d.dp.Logf("byte caps: " + fileFresh + " not cleared, the fresh day tried again at the next tick: " + err.Error())
 		return
 	}
 	n.counter, n.spent, n.freshDue = c, false, 0

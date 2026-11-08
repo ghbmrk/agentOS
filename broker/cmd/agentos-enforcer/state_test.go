@@ -182,22 +182,69 @@ func TestStaleFreshDay(t *testing.T) {
 	}
 }
 
-// TestFreshDayFileUnreadable (Security on #5101): a fresh-day file that
-// cannot be read stops no start, beside a readable day or a spent one,
-// and starts nothing.
+// TestFreshDayFileUnreadable (Security and L3 on #5101): beside a day
+// that reads back, a fresh-day file that cannot be read is erased, and the
+// daemon does not start while it cannot be; beside a spent day it stops
+// no start and starts nothing.
 func TestFreshDayFileUnreadable(t *testing.T) {
 	x, _, _ := capped(t)
-	if err := os.Mkdir(filepath.Join(x.dir, fileFresh), 0o700); err != nil { // every read fails
+	dir := filepath.Join(x.dir, fileFresh)
+	if err := os.Mkdir(dir, 0o700); err != nil { // every read and every replace fails
+		t.Fatal(err)
+	}
+	x.d.Close()
+	if _, err := x.open(); err == nil {
+		t.Fatal("started beside a readable day with a fresh-day file it could neither read nor erase")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
+	x.writeState(fileTraffic, "{}")
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	x.restart()
-	if !strings.Contains(x.logText(), fileFresh+" unreadable, no fresh day waits") {
-		t.Fatal("an unreadable fresh-day file beside a readable day was not logged")
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || x.d.net.freshDue != 0 || !strings.Contains(x.logText(), fileFresh+" unreadable, no fresh day waits") {
+		t.Fatal("an unreadable fresh-day file beside a spent day started a fresh day or went unlogged")
 	}
-	x.writeState(fileTraffic, "{}")
+}
+
+// TestFreshDayStartFaults (Security delta on #5101): the start erases the
+// approval before it saves the new day. An erase that fails leaves the
+// day spent and unsaved, so a cancel that then answers done is true; a
+// day that fails to save leaves no approval for a restart to act on.
+func TestFreshDayStartFaults(t *testing.T) {
+	x, a := spentBox(t)
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileFresh, true)
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	x.fail(fileFresh, false)
+	if err := (pageCaps{x.d}).CancelFresh(); err != nil {
+		t.Fatal(err)
+	}
+	if x.readState(fileTraffic) != "{}" {
+		t.Fatal("a cancel answered done with the fresh day already on disk")
+	}
+	x.restart()
+	if !x.d.net.spent {
+		t.Fatal("a cancelled fresh day is in force after a restart")
+	}
+	if w := x.b.act(a, "fresh-day", ""); w.Code != http.StatusOK {
+		t.Fatalf("fresh day: %d %s", w.Code, w.Body)
+	}
+	x.fail(fileTraffic, true)
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if !x.d.net.spent || x.readState(fileFresh) != "{}" {
+		t.Fatalf("a day not saved started, or its approval stayed: %s", x.readState(fileFresh))
+	}
+	x.fail(fileTraffic, false)
 	x.restart()
 	x.advance(time.Duration(policy.Wait) * time.Millisecond)
-	if !x.d.net.spent || x.d.net.freshDue != 0 {
-		t.Fatal("an unreadable fresh-day file started a fresh day")
+	if !x.d.net.spent {
+		t.Fatal("an approval spent on a day not saved started one after a restart")
 	}
 }
