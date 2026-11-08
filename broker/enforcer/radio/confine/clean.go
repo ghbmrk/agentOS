@@ -1,7 +1,6 @@
 package confine
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -12,8 +11,8 @@ const atRemovedir = 0x200 // AT_REMOVEDIR
 
 // emptyPasses bounds the passes Empty makes over a directory. One pass
 // empties a directory no process writes; a further pass removes a name a
-// writer swapped mid-pass (a directory turned into a link), and finding
-// names still there after that means something is still writing.
+// writer swapped mid-pass (a directory turned into a link), and names
+// still there after that mean something is still writing, or refuses.
 const emptyPasses = 4
 
 // emptyRace, when set, runs after Empty finds name to be a directory and
@@ -29,7 +28,8 @@ var emptyRace func(name string)
 // through descriptors, each subdirectory opened O_NOFOLLOW from its
 // parent's, so a link the stack planted is removed, never resolved. Call
 // it once the stack and every process it started have exited; a
-// directory still being written fails rather than being chased.
+// directory still being written, or holding a name it cannot remove,
+// fails rather than being chased.
 func Empty(dir string) error {
 	how := [3]uint64{syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC, 0, resolveNoSymlinks} // struct open_how
 	r, err := pathCall(sysOpenat2, dir, func(s uintptr) (uintptr, uintptr, syscall.Errno) {
@@ -45,6 +45,8 @@ func Empty(dir string) error {
 }
 
 // emptyAt removes every entry of the directory open at fd, and closes fd.
+// It succeeds only on reading the directory empty: a name it could not
+// remove (gone, swapped, or refused) is simply read again next pass.
 func emptyAt(fd int) error {
 	f := os.NewFile(uintptr(fd), "")
 	defer f.Close()
@@ -60,45 +62,27 @@ func emptyAt(fd int) error {
 			return nil
 		}
 		for _, n := range names {
-			if err := removeAt(fd, n); err != nil {
-				return err
-			}
+			removeAt(fd, n)
 		}
 	}
-	return errors.New("still changing")
+	return fmt.Errorf("entries remain after %d passes", emptyPasses)
 }
 
-// removeAt removes name from the directory open at fd: a file, socket,
-// device or link by unlinkat (a link is the link, never its target); a
-// directory by emptying it through a descriptor opened O_NOFOLLOW, then
-// unlinkat AT_REMOVEDIR. A name that is gone, or was swapped for
-// something else between the two steps, is left for emptyAt's next pass.
-func removeAt(fd int, name string) error {
-	err := unlinkat(fd, name, 0)
-	if err == nil || err == syscall.ENOENT {
-		return nil
+// removeAt tries once to remove name from the directory open at fd: a
+// file, socket, device or link by unlinkat (a link is the link, never its
+// target); a directory by emptying it through a descriptor opened
+// O_NOFOLLOW, then unlinkat AT_REMOVEDIR. A directory swapped for a link
+// between the two steps fails the open and is unlinked next pass.
+func removeAt(fd int, name string) {
+	if unlinkat(fd, name, 0) == syscall.EISDIR {
+		if emptyRace != nil {
+			emptyRace(name)
+		}
+		if sub, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0); err == nil {
+			_ = emptyAt(sub)
+		}
+		_ = unlinkat(fd, name, atRemovedir)
 	}
-	if err != syscall.EISDIR {
-		return err
-	}
-	if emptyRace != nil {
-		emptyRace(name)
-	}
-	sub, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	switch err {
-	case nil:
-	case syscall.ENOENT, syscall.ELOOP, syscall.ENOTDIR:
-		return nil
-	default:
-		return err
-	}
-	if err := emptyAt(sub); err != nil {
-		return err
-	}
-	if err := unlinkat(fd, name, atRemovedir); err != nil && err != syscall.ENOENT && err != syscall.ENOTDIR {
-		return err
-	}
-	return nil
 }
 
 // unlinkat is unlinkat(2) with its flags, which syscall.Unlinkat lacks.

@@ -1,6 +1,7 @@
 package confine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,8 +70,21 @@ func TestEmptyFollowsNoPlantedLink(t *testing.T) {
 	must(syscall.Mkfifo(filepath.Join(dir, "a", "b", "fifo"), 0o600))
 	var before syscall.Stat_t
 	must(syscall.Lstat(dir, &before))
+	var visited []string
+	emptyRace = func(name string) { visited = append(visited, name) }
+	t.Cleanup(func() { emptyRace = nil })
+	fds := openFDs(t)
 
 	must(Empty(dir))
+
+	// Only directories are opened, and every descriptor is closed again.
+	slices.Sort(visited)
+	if want := []string{"a", "b", "c"}; !slices.Equal(visited, want) {
+		t.Errorf("Empty opened %v as directories, want %v", visited, want)
+	}
+	if n := openFDs(t); n != fds {
+		t.Errorf("Empty left %d descriptors open", n-fds)
+	}
 
 	ents, err := os.ReadDir(dir)
 	if err != nil || len(ents) != 0 {
@@ -97,10 +111,13 @@ func TestEmptyRefusesALinkedPath(t *testing.T) {
 	if err := os.Symlink(root, filepath.Join(root, "via")); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{filepath.Join(root, "state"), filepath.Join(root, "via", "outside")} {
-		if err := Empty(p); err == nil {
-			t.Errorf("Empty(%s) through a link succeeded", p)
-		}
+	// The last component a link: O_NOFOLLOW with O_DIRECTORY gives ENOTDIR.
+	if err := Empty(filepath.Join(root, "state")); !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("Empty of a link: %v, want ENOTDIR", err)
+	}
+	// A link earlier in the path: RESOLVE_NO_SYMLINKS gives ELOOP.
+	if err := Empty(filepath.Join(root, "via", "outside")); !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("Empty through a link: %v, want ELOOP", err)
 	}
 	intact(t, o)
 }
@@ -141,6 +158,41 @@ func TestEmptyRaceSwapsDirForLink(t *testing.T) {
 		t.Errorf("after Empty, %s holds %v", dir, ents)
 	}
 	intact(t, o)
+}
+
+// openFDs counts this process's open descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ents)
+}
+
+// TestEmptyAtFailsOnANonDirectory: a descriptor Empty cannot seek or read
+// as a directory is an error, never read as empty.
+func TestEmptyAtFailsOnANonDirectory(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	for what, fd := range map[string]uintptr{"a file": f.Fd(), "a pipe": r.Fd()} {
+		d, err := syscall.Dup(int(fd))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := emptyAt(d); err == nil {
+			t.Errorf("emptyAt on %s succeeded", what)
+		}
+	}
+	f.Close()
+	r.Close()
 }
 
 // TestEmptyFailsWhileWritten: a directory that is not empty after every
