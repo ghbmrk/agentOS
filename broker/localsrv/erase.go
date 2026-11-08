@@ -49,8 +49,10 @@ func eraseErr(err error) error {
 }
 
 // eraseName is a name the kernel can look up: in its bound, with no
-// space at either end, and only letters, digits, spaces and plain
-// punctuation (an address's '@' among it), as recovery's validName. No
+// space at either end, and only letters, combining marks (Devanagari,
+// Tamil, Thai names, a decomposed accent), digits, spaces and plain
+// punctuation (an address's '@' and a typographic apostrophe among it).
+// Default-ignorable marks and variation selectors are refused, so no
 // invisible character can pass, so what the page shows is what is looked
 // up (the hostile-text corpus, #3901).
 func eraseName(n string) bool {
@@ -58,8 +60,8 @@ func eraseName(n string) bool {
 		return false
 	}
 	for _, r := range n {
-		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
-			!(unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'/+&@", r)) {
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) ||
+			!(unicode.IsLetter(r) || unicode.IsMark(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'’/+&@", r)) {
 			return false
 		}
 	}

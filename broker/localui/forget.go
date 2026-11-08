@@ -83,7 +83,7 @@ func forgetText(err error) string {
 	case localapi.ErrEraseStale:
 		return "That look-up expired or was already used, so nothing was forgotten. Look the name up again."
 	case localapi.ErrBadArgs:
-		return "Type a name of at most 256 letters, digits, spaces or plain punctuation, then look it up."
+		return "Type a shorter name of letters, digits, spaces or plain punctuation, then look it up."
 	case localapi.ErrLimited:
 		return "Too many look-ups. Wait a minute, then try again."
 	case localapi.ErrUnauthorized:
