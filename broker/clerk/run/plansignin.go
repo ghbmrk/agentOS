@@ -37,8 +37,10 @@ import (
 // device-code sign-in.
 type SignInWorkers interface {
 	// Start runs plan's sign-in CLI as guest in a fresh sandbox whose only
-	// route out is guest's plan endpoint in this process (ServePlan). It
-	// returns once ctx ends.
+	// route out is guest's plan endpoint in this process (ServePlan). ctx
+	// bounds only the start: Start returns once ctx ends, and ctx is
+	// cancelled when Begin returns, but the sandbox outlives it, waiting
+	// for the owner's approval, until Stop.
 	Start(ctx context.Context, plan, guest string) (SignInWorker, error)
 }
 
@@ -161,6 +163,7 @@ type planSignIn struct {
 	guest, code string
 	cancel      context.CancelFunc
 	done        chan struct{}
+	removed     bool // Remove ended it, under PlanHost.mu
 }
 
 // PlanState is the route as the owner's page shows it.
@@ -338,13 +341,18 @@ func (h *PlanHost) await(ctx context.Context, s *planSignIn, w SignInWorker, t S
 // end forgets the sign-in guest and records how its sign-in ended. A code
 // exchange that committed before Forget wins over detail, and one that
 // answers after it is dropped (plan.DEnded), so a late approval is never
-// stored behind a timed-out sign-in.
+// stored behind a timed-out sign-in. A sign-in Remove ended reads
+// DSignInStopped even if it committed first, since Remove then deletes
+// that login.
 func (h *PlanHost) end(s *planSignIn, detail string) {
 	if h.Login.Forget(s.guest) {
 		detail = DSignedIn
 	}
 	s.cancel()
 	h.mu.Lock()
+	if s.removed {
+		detail = DSignInStopped
+	}
 	if h.cur == s {
 		h.cur = nil
 		h.last = detail
@@ -386,6 +394,7 @@ func (h *PlanHost) Remove() error {
 	h.mu.Lock()
 	s := h.cur
 	if s != nil {
+		s.removed = true
 		s.cancel()
 	}
 	h.removing++

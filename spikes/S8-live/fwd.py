@@ -1,10 +1,11 @@
 """Measurement forwarder for #809: stands where #1014's in-worker forwarder will (127.0.0.1:18432),
 relays to the real hosts through the session proxy, and logs only what the measurements need:
 paths, statuses, x-codex-* response headers, the tools of responses requests (top-level `tools` and
-`additional_tools` input items), and key names (never values) of auth bodies. Secrets are never
-written. In relay mode it refuses every model call, so a run spends no plan usage, credits or API
-usage (Mark, 2026-10-14). Usage: fwd.py LOG relay|stub SOCKET"""
-import json, os, sys, threading, time
+`additional_tools` input items), and key names (never values) of auth bodies, except a refresh's
+client_id, grant_type and scope and a digest of the answered user_code. Secrets are never written.
+In relay mode it refuses every model call, so a run spends no plan usage, credits or API usage
+(Mark, 2026-10-14). Usage: fwd.py LOG relay|stub SOCKET"""
+import hashlib, json, os, sys, threading, time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import requests
 
@@ -66,6 +67,12 @@ class H(BaseHTTPRequestHandler):
                                           for it in j.get("input", []) if isinstance(it, dict) and isinstance(it.get("tools"), list)]
                     rec["model"] = j.get("model"); rec["include"] = j.get("include"); rec["tool_choice"] = j.get("tool_choice")
                 rec["body_keys"] = keys(j)
+                # #3110: a refresh's non-token values, the ones the plan clerk pins
+                # (broker/clerk/plan Declaration.Refresh). Only these keys' values are
+                # logged; the refresh token never is.
+                if isinstance(j, dict) and j.get("grant_type") == "refresh_token":
+                    rec["refresh_fixed"] = {k: (v if k in ("client_id", "grant_type", "scope") else "<unlogged>")
+                                            for k, v in j.items() if k != "refresh_token"}
             except Exception:
                 rec["body_keys"] = "unparsed"
         elif body:
@@ -104,11 +111,13 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 pr["error"] = repr(e)[:300]
             log(pr)
-        # No model calls upstream: Mark wants no credits or API usage spent.
+        # No model calls upstream: Mark wants no credits or API usage spent. The refusal
+        # is a 401, so the CLI's unauthorized recovery sends its own refresh (#3110),
+        # which is relayed and logged above; a refresh spends nothing.
         if MODE == "relay" and self.path.split("?")[0].endswith("/responses"):
             rec["blocked"] = "model call"
             log(rec)
-            self.send_response(403)
+            self.send_response(401)
             self.send_header("content-length", "0")
             self.end_headers()
             return
@@ -170,6 +179,10 @@ class H(BaseHTTPRequestHandler):
             try:
                 j = json.loads(buf)
                 rec["resp_keys"] = keys(j)
+                # #3180: the answered user_code, as a digest only, for qualify.py to
+                # match against the code the CLI printed.
+                if isinstance(j, dict) and isinstance(j.get("user_code"), str):
+                    rec["user_code_sha256"] = hashlib.sha256(j["user_code"].encode()).hexdigest()
                 # Non-secret shape fields the measurement reports.
                 for k in ("verification_uri", "verification_uri_complete", "interval", "error", "detail",
                           "plan_type", "rate_limit", "credits"):

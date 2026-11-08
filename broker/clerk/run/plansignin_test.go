@@ -362,7 +362,7 @@ func TestPlanOwnerSocket(t *testing.T) {
 	}
 	bad.Store(true)
 	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token",
-		strings.NewReader(`{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"`+tok.Tokens["refresh_token"]+`"}`))
+		strings.NewReader(`{"client_id":"`+plan.CodexClientID+`","grant_type":"refresh_token","refresh_token":"`+tok.Tokens["refresh_token"]+`"}`))
 	r.Header.Set("Content-Type", "application/json")
 	if code, body := serve(PlanGuest{Login: login, Guest: "g"}, r); code == 200 || strings.Contains(body, "real-") {
 		t.Fatalf("an unswappable refresh: %d %q", code, body)
@@ -590,6 +590,36 @@ func TestPlanSignInWaitsOutARemove(t *testing.T) {
 	cli.waitStopped(t)
 }
 
+// REQ: CLK-7
+//
+// A Remove that ends a sign-in whose code exchange committed just before it
+// reports the sign-in as stopped, not signed in: Remove then deletes that
+// login, so "signedin" would name a login that is gone (#3180 item 5).
+func TestPlanRemoveAfterACommitReadsStopped(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	cli := newFakeCLI(login, codexPrinted)
+	// The watcher reads the record only once an hour, so the commit is
+	// still unread when Remove ends the sign-in.
+	times := quick
+	times.Poll = time.Hour
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
+	if b := h.Begin(context.Background()); b.Code == "" {
+		t.Fatalf("begun: %+v", b)
+	}
+	_, guest := cli.started()
+	if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.SignedIn(guest) {
+		t.Fatalf("the CLI's code exchange: %d", code)
+	}
+	if err := h.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	cli.waitStopped(t)
+	if st := h.State(); st.Last != DSignInStopped || st.SignedIn || st.Signing {
+		t.Fatalf("after the remove: %+v", st)
+	}
+}
+
 // servedOwner serves hosts on a fresh owner socket and returns its caller.
 func servedOwner(t *testing.T, hosts ...*PlanHost) PlanOwner {
 	t.Helper()
@@ -650,7 +680,7 @@ func refusedRefresh(calls *atomic.Int32, refuse *atomic.Bool) http.Handler {
 
 func refreshRequest(ph string) *http.Request {
 	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token",
-		strings.NewReader(`{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"`+ph+`"}`))
+		strings.NewReader(`{"client_id":"`+plan.CodexClientID+`","grant_type":"refresh_token","refresh_token":"`+ph+`"}`))
 	r.Header.Set("Content-Type", "application/json")
 	return r
 }

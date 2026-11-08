@@ -58,6 +58,41 @@ func TestPlanForgetEndsALateCodeExchange(t *testing.T) {
 	}
 }
 
+// A late code exchange stores no login, but its answer is still judged for
+// shape first (#3180 item 1, a12): a 200 answer without an account that
+// arrives after Forget stops the route as unswappable and stores no login.
+// The stop fails closed.
+func TestPlanLateOutOfShapeCodeExchangeStillStops(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	f.gate = make(chan struct{})
+	f.answer = func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"real-access-9","refresh_token":"real-refresh-9"}`))
+		return true
+	}
+	if err := p.BeginSignIn("g"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "g")
+	out := make(chan string, 1)
+	go func() {
+		_, d := p.Do(context.Background(), "g", req("POST", "/oauth/token", form, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
+		out <- d
+	}()
+	for f.exchanges.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	p.Forget("g")
+	close(f.gate)
+	if d := <-out; d != plan.DUnswappable {
+		t.Fatalf("the late out-of-shape exchange: %q", d)
+	}
+	if p.Signed() || p.SignedIn("g") || p.Stopped() != plan.StopUnswappable {
+		t.Fatalf("stored=%v signedIn=%v stopped=%q", p.Signed(), p.SignedIn("g"), p.Stopped())
+	}
+}
+
 // The user code shown to the owner is the one the clerk forwarded on the
 // declared device step to that sign-in guest, recorded per guest and
 // dropped with it; only a device step declares where it is (#3149 item 3).
