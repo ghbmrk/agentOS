@@ -197,19 +197,19 @@ const (
 	forgetToldEvery = time.Minute
 )
 
-// openForgetTold reads the notices a past run did not send. An unreadable
-// record is logged and set aside, never overwritten.
+// openForgetTold reads the notices a past run did not send. A corrupt
+// record is set aside (a durable copy, as erase-rewound.json's) and
+// logged; one that cannot be read is logged.
 func openForgetTold(path string, send func(string) error) *forgetTold {
 	t := &forgetTold{path: path, send: send}
 	b, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-	case err == nil && json.Unmarshal(b, &t.texts) == nil:
-	default:
+	case err != nil:
 		log.Printf(LogForgetUntold, fmt.Errorf("the unsent record is unreadable: %v", err))
-		if err == nil {
-			_ = os.Rename(path, path+".bad")
-		}
+	case json.Unmarshal(b, &t.texts) != nil:
+		t.texts = nil
+		log.Printf(LogForgetUntold, fmt.Errorf("the unsent record is corrupt, set aside: %v", writeSynced(path+".corrupt", b)))
 	}
 	return t
 }
@@ -245,14 +245,7 @@ func (t *forgetTold) flushLocked() {
 }
 
 func (t *forgetTold) saveLocked() error {
-	if len(t.texts) == 0 {
-		err := os.Remove(t.path)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	b, err := json.Marshal(t.texts)
+	b, err := json.Marshal(append([]string{}, t.texts...))
 	if err != nil {
 		return err
 	}

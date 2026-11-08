@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -361,21 +360,21 @@ func TestAnUnsentForgetNoticeIsKept(t *testing.T) {
 	if !slices.Equal(sent, []string{"one", "two"}) {
 		t.Fatalf("sent %q", sent)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("the record stays: %v", err)
+	if b, err := os.ReadFile(path); err != nil || string(b) != "[]" {
+		t.Fatalf("the record holds %q: %v", b, err)
 	}
 	told.tell("three")
 	if !slices.Equal(sent, []string{"one", "two", "three"}) {
 		t.Fatalf("sent %q", sent)
 	}
-	// An unreadable record is set aside, not overwritten.
+	// A corrupt record is set aside before anything overwrites it.
 	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if told = openForgetTold(path, send); len(told.texts) != 0 {
 		t.Fatal("read a bad record")
 	}
-	if b, err := os.ReadFile(path + ".bad"); err != nil || string(b) != "{" {
+	if b, err := os.ReadFile(path + ".corrupt"); err != nil || string(b) != "{" {
 		t.Fatalf("set aside: %q %v", b, err)
 	}
 }
