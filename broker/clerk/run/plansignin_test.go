@@ -967,7 +967,8 @@ func TestPlanStateNamesThePoolWithoutFigures(t *testing.T) {
 // still stored (#5089 items 3 and 8). A Remove after a sign-in ended
 // signedin clears it. A Remove whose delete fails leaves last as the
 // sign-in ended, with the login still stored, whether or not it ended a
-// sign-in; once a later Remove deletes the login, last follows.
+// sign-in; once a later Remove deletes the login, last follows. A failed
+// Remove does not hold off the next sign-in.
 func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 	var calls atomic.Int32
 	var failing atomic.Bool
@@ -1036,6 +1037,23 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 		if st := h.State(); st.Last != "" || st.SignedIn {
 			t.Fatalf("after the remove: %+v", st)
 		}
+	})
+	t.Run("a failed remove does not hold off the next sign-in", func(t *testing.T) {
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: newFakeCLI(login, codexPrinted), Times: quick}
+		failing.Store(true)
+		if err := h.Remove(); err == nil {
+			t.Fatal("a Remove whose delete failed answered nil")
+		}
+		failing.Store(false)
+		cli := newFakeCLI(login, codexPrinted)
+		h.Workers = cli
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun after a failed remove: %+v", b)
+		}
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
+		}
+		cli.waitStopped(t)
 	})
 	t.Run("a remove with no sign-in keeps a failed one's label", func(t *testing.T) {
 		cli := newFakeCLI(login, "error")
