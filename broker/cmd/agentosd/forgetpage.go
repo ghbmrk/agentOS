@@ -4,9 +4,15 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log"
+	"os"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -52,30 +58,46 @@ func (f *forgetFlow) shown(handle string) ([]string, bool) {
 }
 
 // pageForget serves the erase ops (localsrv.Erase) over the forget flow
-// and the kernel's owner keys. Tell texts the owner (alertOwner, never
-// held) after each erase a tap confirmed, naming the passkey but never
-// the name: the passkey signs a challenge the owner cannot read, so a
-// hacked page could put another find under the owner's tap, and the owner
-// sees every page erase (as every passkey enrolled, #3228).
+// and the kernel's owner keys. Tell texts the owner (forgetTold, kept until
+// sent) after each erase a tap confirmed, naming the passkey and the
+// counts by kind but never the name: the passkey signs a challenge the
+// owner cannot read, so a hacked page could put another find under the
+// owner's tap, and the owner sees every page erase (as every passkey
+// enrolled, #3228).
 type pageForget struct {
 	F    *forgetFlow
 	K    keyReader
-	Tell func(string) error
+	Tell func(string)
+	Now  func() time.Time // nil: time.Now
 }
 
-// forgetNotice is the owner's text after a page erase: by count, never by
-// name (an erased label is not kept).
-// A partial erase says so: its count of items erased is not known here.
-func forgetNotice(r forgetResult, by key.PublicKey) string {
-	what := plural(r.Items, "item")
-	if r.NotErased > 0 {
-		what = "some of " + plural(r.Items, "item") + ", not all,"
+// forgetNotice is the owner's text after a page erase: what this erase
+// took, by count and kind, never by name (an erased label is not kept),
+// and when. STOP ends every page session's reach to the erase ops
+// (localsrv), and a phone passkey can be cut off; a hardware key cannot
+// on the page, so its text names STOP alone.
+func forgetNotice(r forgetResult, by key.PublicKey, phone bool, at time.Time) string {
+	n := 0
+	for _, c := range r.ErasedKinds {
+		n += c
 	}
-	return "I forgot " + what + " on my Wi-Fi page after a tap by passkey " + noticePrint(by) + ". Not you? Text STOP."
+	what := plural(n, "item") + " (" + kindList(r.ErasedKinds) + ")"
+	if n == 0 {
+		what = "a name with nothing kept under it"
+	}
+	out := "I forgot " + what + " on my Wi-Fi page at " + at.Format("15:04") + " after a tap by passkey " + noticePrint(by) + "."
+	if r.NotErased > 0 {
+		out += " Some others found with them are still kept."
+	}
+	if phone {
+		return out + " Not you? Text STOP, and cut that passkey off on the passkey page."
+	}
+	return out + " Not you? Text STOP."
 }
 
-// LogForgetUntold is logged when a page erase's notice could not be sent.
-const LogForgetUntold = "forget: a page erase went through but the owner could not be told: %v"
+// LogForgetUntold is logged when a page erase's notice could not be sent
+// or saved; a saved one is sent again.
+const LogForgetUntold = "forget: a page erase went through but the owner could not be told yet: %v"
 
 // LogForgetFind is logged when a find did not reach the kernel; the page
 // gets ErrEraseUnavailable and no kernel text.
@@ -103,51 +125,155 @@ func (p pageForget) Find(ctx context.Context, session, name string) (localapi.Er
 // Confirm erases what handle's find showed once one of the owner's
 // passkeys tapped over it in this session. Every refusal erases nothing
 // and, but for ErrEraseStale, leaves the find to tap again.
-func (p pageForget) Confirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (string, error) {
+func (p pageForget) Confirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (localapi.EraseDone, error) {
 	subjects, ok := p.F.shown(handle)
 	if !ok {
-		return "", sockets.Code(localapi.ErrEraseStale)
+		return localapi.EraseDone{}, sockets.Code(localapi.ErrEraseStale)
 	}
 	anchors, live, _, err := ownerKeys(ctx, p.K)
 	if err != nil {
-		return "", sockets.Code(localapi.ErrEraseUnavailable)
+		return localapi.EraseDone{}, sockets.Code(localapi.ErrEraseUnavailable)
 	}
-	by, ok := ownerTapped(forgetMsg(session, handle, subjects), anchors, live, authData, clientData, sig)
+	by, phone, ok := ownerTapped(forgetMsg(session, handle, subjects), anchors, live, authData, clientData, sig)
 	if !ok {
-		return "", sockets.Code(localapi.ErrEraseBadAssertion)
+		return localapi.EraseDone{}, sockets.Code(localapi.ErrEraseBadAssertion)
 	}
 	r, err := p.F.confirm(ctx, handle)
 	if errors.Is(err, ErrForgetHandle) {
 		// Another confirm of the same find took it first.
-		return "", sockets.Code(localapi.ErrEraseStale)
+		return localapi.EraseDone{}, sockets.Code(localapi.ErrEraseStale)
 	}
 	if err != nil {
-		return "", sockets.Code(localapi.ErrEraseUnavailable)
+		return localapi.EraseDone{}, sockets.Code(localapi.ErrEraseUnavailable)
 	}
 	if r.Erased > 0 && p.Tell != nil {
-		if err := p.Tell(forgetNotice(r, by)); err != nil {
-			log.Printf(LogForgetUntold, err)
+		now := time.Now
+		if p.Now != nil {
+			now = p.Now
 		}
+		p.Tell(forgetNotice(r, by, phone, now()))
 	}
-	return r.Text(), nil
+	return localapi.EraseDone{Text: r.Text(), Kept: r.kept()}, nil
 }
 
-// ownerTapped is the owner's passkey, an anchor or a live phone passkey,
-// that made this assertion over msg (KEY-7's one encoding), if any.
-func ownerTapped(msg []byte, anchors []key.PublicKey, live []key.Enrollment, authData, clientData, sig []byte) (key.PublicKey, bool) {
+// ownerTapped is the owner's passkey, an anchor or a live phone passkey
+// (phone), that made this assertion over msg (KEY-7's one encoding), if
+// any.
+func ownerTapped(msg []byte, anchors []key.PublicKey, live []key.Enrollment, authData, clientData, sig []byte) (by key.PublicKey, phone, ok bool) {
 	canon, err := key.AssertionSig(key.Assertion{AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig})
 	if err != nil {
-		return key.PublicKey{}, false
+		return key.PublicKey{}, false, false
 	}
 	for _, a := range anchors {
 		if a.Verify(msg, canon) {
-			return a, true
+			return a, false, true
 		}
 	}
 	for _, e := range live {
 		if e.Passkey.Verify(msg, canon) {
-			return e.Passkey, true
+			return e.Passkey, true, true
 		}
 	}
-	return key.PublicKey{}, false
+	return key.PublicKey{}, false, false
+}
+
+// forgetTold is the page erases' notices not yet sent, saved in the state
+// directory before each is sent, so a failed send or a restart does not
+// lose one (KRN-forget-c-3 rests on the owner hearing every page erase).
+// Each goes in order; a failed send leaves it and those after it for the
+// next try.
+type forgetTold struct {
+	path string
+	send func(string) error
+
+	mu    sync.Mutex
+	texts []string
+}
+
+const (
+	// forgetToldFile holds forgetTold's notices in the state directory.
+	forgetToldFile = "forget-untold.json"
+	// forgetToldEvery is how often an unsent notice is tried again.
+	forgetToldEvery = time.Minute
+)
+
+// openForgetTold reads the notices a past run did not send. An unreadable
+// record is logged and set aside, never overwritten.
+func openForgetTold(path string, send func(string) error) *forgetTold {
+	t := &forgetTold{path: path, send: send}
+	b, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err == nil && json.Unmarshal(b, &t.texts) == nil:
+	default:
+		log.Printf(LogForgetUntold, fmt.Errorf("the unsent record is unreadable: %v", err))
+		if err == nil {
+			_ = os.Rename(path, path+".bad")
+		}
+	}
+	return t
+}
+
+// tell saves text, then sends what is saved.
+func (t *forgetTold) tell(text string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.texts = append(t.texts, text)
+	if err := t.saveLocked(); err != nil {
+		log.Printf(LogForgetUntold, err)
+	}
+	t.flushLocked()
+}
+
+// flushLocked sends the saved notices in order until one fails.
+func (t *forgetTold) flushLocked() {
+	sent := 0
+	for _, text := range t.texts {
+		if err := t.send(text); err != nil {
+			log.Printf(LogForgetUntold, err)
+			break
+		}
+		sent++
+	}
+	if sent == 0 {
+		return
+	}
+	t.texts = t.texts[sent:]
+	if err := t.saveLocked(); err != nil {
+		log.Printf(LogForgetUntold, err)
+	}
+}
+
+func (t *forgetTold) saveLocked() error {
+	if len(t.texts) == 0 {
+		err := os.Remove(t.path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	b, err := json.Marshal(t.texts)
+	if err != nil {
+		return err
+	}
+	return writeSynced(t.path, b)
+}
+
+// run retries the saved notices every every until ctx ends, first at
+// once, so a restart sends what an earlier run could not.
+func (t *forgetTold) run(ctx context.Context, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		t.mu.Lock()
+		if len(t.texts) > 0 {
+			t.flushLocked()
+		}
+		t.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }

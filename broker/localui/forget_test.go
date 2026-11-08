@@ -22,7 +22,7 @@ import (
 type fakeForgetOps struct {
 	*fakePasskeys
 	found    localapi.EraseFound
-	result   string
+	result   localapi.EraseDone
 	finds    []string
 	confirms []localapi.EraseConfirm
 	err      error // every op answers it
@@ -33,10 +33,10 @@ func (f *fakeForgetOps) ForgetFind(_ context.Context, _, name string) (localapi.
 	return f.found, f.err
 }
 
-func (f *fakeForgetOps) ForgetConfirm(_ context.Context, _, handle string, ad, cd, sig []byte) (string, error) {
+func (f *fakeForgetOps) ForgetConfirm(_ context.Context, _, handle string, ad, cd, sig []byte) (localapi.EraseDone, error) {
 	f.confirms = append(f.confirms, localapi.EraseConfirm{Handle: handle, AuthenticatorData: ad, ClientDataJSON: cd, Signature: sig})
 	if f.err != nil {
-		return "", f.err
+		return localapi.EraseDone{}, f.err
 	}
 	return f.result, nil
 }
@@ -51,7 +51,7 @@ func forgetRig(t *testing.T) (*rig, *fakeForgetOps) {
 	r := newRig(t)
 	ff := &fakeForgetOps{fakePasskeys: &fakePasskeys{},
 		found:  localapi.EraseFound{Text: "Found 3 items named Alice (message 3). Confirm to forget them.", Handle: forgetHandle, Challenge: forgetChallenge},
-		result: "Forgot everything named Alice (3 items). It can no longer be read. Agent L1 went back to before it read them."}
+		result: localapi.EraseDone{Text: "Forgot everything named Alice (3 items). It can no longer be read. Agent L1 went back to before it read them."}}
 	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Passkeys: ff, PasskeyRPID: DefaultPageName,
 		Now: r.clock, Rand: rand.New(rand.NewSource(9))})
@@ -142,7 +142,7 @@ func TestForgetPageForgetsOnAPasskeyTap(t *testing.T) {
 	if c.Handle != forgetHandle || string(c.AuthenticatorData) != "ad" || string(c.ClientDataJSON) != "cd" || string(c.Signature) != "sig" {
 		t.Fatalf("confirmed %+v", c)
 	}
-	if !strings.Contains(p, `<p class="ok">`+ff.result+`</p>`) || strings.Contains(p, `id="pk-tap"`) {
+	if !strings.Contains(p, `<p class="ok">`+ff.result.Text+`</p>`) || strings.Contains(p, `id="pk-tap"`) {
 		t.Fatalf("result:\n%s", p)
 	}
 	// The script's tap asks for any passkey on this page, a hardware key
@@ -190,7 +190,9 @@ func TestForgetPageWrongTapStaysOnlyOnItsOwnFind(t *testing.T) {
 		}
 		forged.Set(k, bad)
 		p = html.UnescapeString(r.post("/forget/", forged).Body.String())
-		if strings.Contains(p, `id="pk-tap"`) || strings.Contains(p, made) || strings.Contains(p, "Tap to continue") || !strings.Contains(p, ForgetTapAgainText) {
+		// Off the tap step, nothing can be tapped again (UX 4 on #5092).
+		if strings.Contains(p, `id="pk-tap"`) || strings.Contains(p, made) || strings.Contains(p, "Tap to continue") || strings.Contains(p, ForgetTapAgainText) ||
+			!strings.Contains(p, "nothing was forgotten. Look the name up again.") {
 			t.Fatalf("forged %s was shown back:\n%s", k, p)
 		}
 	}
@@ -210,6 +212,11 @@ func TestForgetPageWordsEachRefusal(t *testing.T) {
 	r.signIn()
 	form, _ := r.forgetTapStep(t)
 	seen := map[string]bool{}
+	// agentosd's refusals given before anything is erased, pinned here
+	// rather than read from forgetRefusedBefore, so a code dropped from
+	// it fails (combined 3 on #5092).
+	before := map[string]bool{localapi.ErrEraseBadAssertion: true, localapi.ErrEraseStale: true, localapi.ErrEraseUnavailable: true,
+		localapi.ErrEraseStopped: true, localapi.ErrBadArgs: true, localapi.ErrLimited: true, localapi.ErrUnauthorized: true}
 	codes := append(append([]string{}, localapi.EraseCodes...), localapi.ErrBadArgs, localapi.ErrLimited, localapi.ErrUnauthorized)
 	for _, c := range append(codes, "kernel: content closed") {
 		ff.err = Refused(c)
@@ -217,11 +224,15 @@ func TestForgetPageWordsEachRefusal(t *testing.T) {
 		for _, step := range []url.Values{{"step": {"find"}, "name": {"Alice"}}, form} {
 			p := html.UnescapeString(r.post("/forget/", step).Body.String())
 			want := txt
-			if step.Get("step") == "confirm" && !forgetRefusedBefore(Refused(c)) {
+			switch {
+			case step.Get("step") == "confirm" && c == localapi.ErrEraseBadAssertion:
+				// Its own find stands, so the owner taps again.
+				want = ForgetTapAgainText
+			case step.Get("step") == "confirm" && !before[c]:
 				// A confirm may have erased (TestForgetPageNeverSaysNothingWhenItCannotTell).
 				want = ForgetUnknownText
 			}
-			if !strings.Contains(p, want) || strings.Contains(p, "kernel:") || strings.Contains(p, ff.result) {
+			if !strings.Contains(p, want) || strings.Contains(p, "kernel:") || strings.Contains(p, ff.result.Text) {
 				t.Fatalf("%s (%s):\n%s", c, step.Get("step"), p)
 			}
 		}
@@ -264,5 +275,61 @@ func TestForgetPageNeverSaysNothingWhenItCannotTell(t *testing.T) {
 	ff.err = Refused(localapi.ErrEraseStale)
 	if p := html.UnescapeString(r.post("/forget/", form).Body.String()); !strings.Contains(p, "nothing was forgotten") || strings.Contains(p, ForgetUnknownText) {
 		t.Fatalf("stale:\n%s", p)
+	}
+}
+
+// A result that left something kept shows as a failure, never in the
+// success style (UX 3 on #5092).
+func TestForgetPageShowsAKeptResultAsAFailure(t *testing.T) {
+	r, ff := forgetRig(t)
+	r.signIn()
+	form, _ := r.forgetTapStep(t)
+	ff.result = localapi.EraseDone{Text: "Not finished: I could not forget 1 thing of everything named Alice (3 items) just now, so those are still kept.", Kept: true}
+	p := html.UnescapeString(r.post("/forget/", form).Body.String())
+	if !strings.Contains(p, `<p class="err">`+ff.result.Text+`</p>`) || strings.Contains(p, `class="ok"`) {
+		t.Fatalf("kept result:\n%s", p)
+	}
+}
+
+// The name's bound is in bytes, as agentosd's: a name past it is refused
+// here, in words that say so, and never reaches agentosd, though the
+// browser's maxlength (UTF-16 units) let it through (#5097 items 6, 14).
+func TestForgetPageRefusesANameOverItsBytes(t *testing.T) {
+	r, ff := forgetRig(t)
+	r.signIn()
+	cjk := strings.Repeat("\u738b", 100) // 100 characters, 300 bytes
+	p := html.UnescapeString(r.post("/forget/", url.Values{"step": {"find"}, "name": {cjk}}).Body.String())
+	if len(ff.finds) != 0 || !strings.Contains(p, ForgetLongText) || !strings.Contains(ForgetLongText, "256 bytes") {
+		t.Fatalf("a 300-byte name: finds %d\n%s", len(ff.finds), p)
+	}
+	at := strings.Repeat("\u738b", localapi.MaxEraseName/3) + "a"
+	r.post("/forget/", url.Values{"step": {"find"}, "name": {at}})
+	if len(ff.finds) != 1 || len(ff.finds[0]) != localapi.MaxEraseName {
+		t.Fatalf("a name at the bound: %d finds", len(ff.finds))
+	}
+}
+
+// A STOP since sign-in reads as stopped, with the step that lifts it.
+func TestForgetPageWordsAStop(t *testing.T) {
+	r, ff := forgetRig(t)
+	r.signIn()
+	ff.err = Refused(localapi.ErrEraseStopped)
+	p := html.UnescapeString(r.post("/forget/", url.Values{"step": {"find"}, "name": {"Alice"}}).Body.String())
+	if !strings.Contains(p, "I'm stopped") || !strings.Contains(p, "RESUME") || !strings.Contains(p, "nothing was forgotten") {
+		t.Fatalf("stopped:\n%s", p)
+	}
+}
+
+// The name goes to agentosd in NFC, so a decomposed accent finds the
+// composed name; the curly apostrophe stays as typed, since agentosd
+// looks up both (#5097 item 10).
+func TestForgetPageSendsTheNameInNFC(t *testing.T) {
+	r, ff := forgetRig(t)
+	r.signIn()
+	for _, n := range []string{"Jose\u0301", "Zoe\u0308 O\u2019Brien"} {
+		r.post("/forget/", url.Values{"step": {"find"}, "name": {n}})
+	}
+	if len(ff.finds) != 2 || ff.finds[0] != "Jos\u00e9" || ff.finds[1] != "Zo\u00eb O\u2019Brien" {
+		t.Fatalf("finds %q", ff.finds)
 	}
 }

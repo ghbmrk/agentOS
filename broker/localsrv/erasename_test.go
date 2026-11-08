@@ -17,8 +17,11 @@ func TestEraseNameRefusesTheHostileCorpus(t *testing.T) {
 			t.Errorf("refuses %q", n)
 		}
 	}
-	// Invisible marks stay refused (Security on #5092).
-	for _, n := range []string{"na\u034fme", "na\ufe0fme", "na\U000E0100me", "na\U0001D173me", "na\u200cme"} {
+	// Invisible marks and fillers stay refused (Security on #5092; #5097
+	// item 12), and so does a name of marks alone or one that starts with
+	// a mark, which is no name (#5097 item 13).
+	for _, n := range []string{"na\u034fme", "na\ufe0fme", "na\U000E0100me", "na\U0001D173me", "na\u200cme",
+		"na\U00016FE4me", "\U00016FE4", "\u0301", "\u0301\u0302", "\u0301Alice", "\u093fराम"} {
 		if eraseName(n) {
 			t.Errorf("takes %q", n)
 		}

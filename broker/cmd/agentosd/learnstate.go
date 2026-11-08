@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/change"
@@ -111,7 +110,7 @@ const loopsOffText = "I don't do spare-time work (learning, self-tests, update c
 // has no Forget step (no -passkey-rp-id). renewOffText answers RENEW,
 // which does not run in this version (#2781).
 const (
-	forgetPageText = "To forget everything named someone or something, open Forget on my Wi-Fi page and confirm with your passkey."
+	forgetPageText = "To have me forget everything under a name, open Forget on my Wi-Fi page, type the name and tap your passkey."
 	forgetOffText  = "I can't forget things by text, and my Wi-Fi page has no Forget step yet."
 	renewOffText   = "I don't keep agent memory across tasks in this version, so there is nothing to renew."
 )
@@ -152,23 +151,15 @@ func ownerWords(msg string) []string {
 }
 
 // oldSetting reads the texts the deleted FORGET and RENEW took, so they
-// stay settings and never reach the agent as chat: FORGET alone, FORGET
-// LAST or FORGET and a list number of at most two digits; RENEW alone or
-// with one more word. Longer texts are task chat, as before.
+// stay settings and never reach the agent as chat: FORGET with anything
+// after it, since an agent cannot erase and must never seem to (D-284);
+// RENEW alone or with one more word, longer RENEW texts being task chat.
 func oldSetting(msg string) (string, bool) {
 	f := ownerWords(msg)
-	if len(f) == 0 || len(f) > 2 {
-		return "", false
-	}
-	switch f[0] {
-	case "FORGET":
-		if len(f) == 1 || f[1] == "LAST" {
-			return forgetOffText, true
-		}
-		if _, err := strconv.Atoi(f[1]); err == nil && len(f[1]) <= 2 {
-			return forgetOffText, true
-		}
-	case "RENEW":
+	switch {
+	case len(f) > 0 && f[0] == "FORGET":
+		return forgetOffText, true
+	case len(f) > 0 && len(f) <= 2 && f[0] == "RENEW":
 		return renewOffText, true
 	}
 	return "", false
