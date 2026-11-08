@@ -19,8 +19,8 @@ image/enforcer/build.sh OUT [VERSION]` on a Linux host that reaches the Debian m
 | `throwaway_feeds.sh` | CI only: throwaway agentOS and enforcer feeds made with `agentos-release`, and the key separation on them |
 | `mkosi/mkosi.conf` | Packages, boot chain, command line (`usbcore.authorized_default=0`), pinned snapshot, seed |
 | `mkosi/mkosi.repart/` | ESP, `/usr` A and B with verity (`enforcer_VERSION`), the writable state partition last |
-| `mkosi/mkosi.finalize` | Refuses Wi-Fi packages and firmware, a missing module block, and any unit enabled outside the preset |
-| `mkosi/mkosi.extra/` | Self-check (`agentos-enforcer/health`), fallback, boot report, watchdog, module blocks, preset, the placeholder daemon unit |
+| `mkosi/mkosi.finalize` | Refuses Wi-Fi packages and firmware, a missing module block, any unit enabled outside the preset, and a core dump setting other than discard (`test_finalize.py`) |
+| `mkosi/mkosi.extra/` | Self-check (`agentos-enforcer/health`), fallback, boot report, watchdog, module blocks, core dumps discarded, preset, the placeholder daemon unit |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot, swtpm and an i6300esb watchdog: self-check, blessing, state growth, a USB stick left unauthorised, Wi-Fi refused, and the rollback |
 
 The image ships the enforcer feed's root at `/usr/share/agentos-enforcer/release-root.json`; it is
