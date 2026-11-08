@@ -72,7 +72,7 @@ DEP_DIRS = (".wants", ".requires", ".upholds")
 # name may hold (unit-name.c) and a drop-in's. A name with any other byte (a space, a newline) could
 # not be told apart in systemctl's reply, so the tree is refused.
 SAFE = re.compile(r"[A-Za-z0-9:_.@\\+-]+\Z")
-PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths")
+PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths", "Triggers", "TriggeredBy")
 # systemd will not start a bad-setting or error unit, but its files are held as a loaded one's: stricter.
 STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
 # Every template is loaded as one instance of each instance name the tree holds (so a-@i.service.d is
@@ -268,10 +268,46 @@ def words(s, prop):
     return offline_systemd.shell_words(s[prop], "%s %s" % (s["Id"], prop))
 
 
+def packaged_names(view, dirs, prov):
+    """Every unit name a package ships a unit file for, in any unit directory: whether or not a file of
+    ours hides it."""
+    out = set()
+    for d in dirs:
+        for e in view.entries(d):
+            final, _ = view.resolve(d + "/" + e)
+            if e.endswith(TYPES) and final != "/dev/null" and view.kind(final) == 0o100000 and not prov.ours(d + "/" + e):
+                out.add(e)
+    return out
+
+
+def package_sockets(shown, pkg):
+    """The sockets whose endpoint is a package's: one whose name, or a name of the unit it activates
+    (Triggers, or the template an Accept=yes socket starts), a package ships, and one a package's service takes (TriggeredBy, Sockets=). Who may
+    connect to such a socket is the package's (#5072 Security 1)."""
+    def shipped(n):
+        base, ext = os.path.splitext(n)
+        names = words(shown[n], "Names") if n in shown else [n]
+        return any(x in pkg or "@" in base and x.split("@")[0] + "@" + ext in pkg for x in names)
+    out = set()
+    for n, s in shown.items():
+        if s["LoadState"] != "loaded":
+            continue
+        if n.endswith(".socket"):
+            # the service it activates: Triggers, or, with Accept=yes (no Triggers), its name's template
+            feeds = words(s, "Triggers") + [n[:-len(".socket")] + "@.service"]
+            if shipped(n) or any(shipped(t) for t in feeds):
+                out.add(s["Id"])
+        if shipped(n):
+            out |= {t for t in words(s, "TriggeredBy") if t.endswith(".socket")}
+    return out
+
+
 def records(view, shown, dirs, prov):
-    """The records of one run: {"units": [{"unit", "alone", "files": [{"path", "ours", "text"}]}],
-    "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names() found."""
+    """The records of one run: {"units": [{"unit", "alone", "package", "files": [{"path", "ours",
+    "text"}]}], "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names()
+    found. package marks a socket whose endpoint is a package's (package_sockets)."""
     recs, own, done = [], set(), set()
+    pkgsock = package_sockets(shown, packaged_names(view, dirs, prov))
     for name in sorted(shown):
         s = shown[name]
         if s["LoadState"] not in STATES:
@@ -316,6 +352,8 @@ def records(view, shown, dirs, prov):
                 if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
+    for rec in recs:
+        rec["package"] = rec["unit"] in pkgsock
     fstab = None
     final, _ = view.resolve("/etc/fstab")
     if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):

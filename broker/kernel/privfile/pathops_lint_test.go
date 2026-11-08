@@ -821,10 +821,19 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a mode of ours on a package's 0770 directory": {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "foo.service.d/g.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `in or above /var/lib/foo/run`},
 		"a mode of ours on a package's directory":      {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 		// #4821 Security R4, L3 R3: who may connect to a package's socket.
-		"a socket mode of ours on a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketMode=0666\n"}, ourEtc, `may not set the socket's owner or mode`},
+		"a socket mode of ours on a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketMode=0666\n"}, ourEtc, `may not set where it listens`},
 		"a socket group of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketGroup=agentos-x\nSocketMode=0660\n"}, ourEtc, `SocketGroup=agentos-x: a line of ours on a package's socket`},
-		"a socket owner in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nSocketUser=agentos-x\n"}, ourEtc, `may not set the socket's owner or mode`},
-		"a socket directory mode of ours":              {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a line of ours`},
+		"a socket owner in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nSocketUser=agentos-x\n"}, ourEtc, `may not set where it listens`},
+		// #5072 Security 1: a package's socket by its name or its service.
+		"a fragment of ours hiding a package's socket":     {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"}, ourEtc, `a line of ours on a package's socket`},
+		"a socket of ours feeding a package's service":     {map[string]string{lib + "systemd-udevd.service": root, etc + "agentos-x.socket": "[Socket]\nService=systemd-udevd.service\nListenStream=/run/agentos-x\nSocketMode=0666\n"}, ourEtc, `a line of ours on a package's socket`},
+		"a socket of ours a package's service takes":       {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/s.conf": "[Service]\nSockets=agentos-x.socket\n", etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x\n"}, ourEtc, `ListenStream=/run/agentos-x: a line of ours on a package's socket`},
+		"a socket of ours activating a package's template": {map[string]string{lib + "systemd-x@.service": root, etc + "systemd-x.socket": "[Socket]\nListenStream=/run/agentos-x\nAccept=yes\n"}, ourEtc, `a line of ours on a package's socket`},
+		// #5072 Security 2: where a package's socket listens.
+		"a listen line of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nListenStream=0.0.0.0:7777\n"}, ourEtc, `ListenStream=0.0.0.0:7777: a line of ours`},
+		"a listen line in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nListenStream=0.0.0.0:7777\n"}, ourEtc, `ListenStream=0.0.0.0:7777: a line of ours`},
+		"a device bind of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nBindToDevice=eth0\n"}, ourEtc, `BindToDevice=eth0: a line of ours`},
+		"a socket directory mode of ours":             {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a line of ours`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -2295,6 +2304,8 @@ type unitCheck struct {
 	// What trusted lines alone run as root or let another uid write.
 	pkgProgs  []string
 	pkgGrants []grant
+	// Sockets whose endpoint is a package's (unit_rules.py's package).
+	pkgSockets map[string]bool
 }
 
 // owners are the keys that set the owner systemd gives a unit's *Directory=
@@ -2302,11 +2313,17 @@ type unitCheck struct {
 // *DirectoryMode=, the whole input of that chown and chmod (#4821 Security 1).
 var owners = map[string]bool{"User": true, "Group": true, "DynamicUser": true}
 
-// socketOwners set who may connect to a socket unit's node: its owner,
-// group and mode, and the mode of the directories systemd makes above it
-// ([Socket] DirectoryMode=). One of ours on a package's socket hands its
-// daemon's endpoint to another uid (#4821 Security R4, L3 R3).
-var socketOwners = map[string]bool{"SocketUser": true, "SocketGroup": true, "SocketMode": true, "DirectoryMode": true}
+// socketKeys set who may connect to a socket unit's endpoint: where it
+// listens (every Listen*= key, BindToDevice=, Symlinks=), its node's owner,
+// group and mode, the mode of the directories systemd makes above it
+// ([Socket] DirectoryMode=), and the service it hands connections to
+// (Service=). One of ours on a package's socket hands its daemon's endpoint
+// to another uid or the network (#4821 Security R4, L3 R3; #5072 Security
+// 2).
+var socketKeys = map[string]bool{"SocketUser": true, "SocketGroup": true, "SocketMode": true, "DirectoryMode": true,
+	"BindToDevice": true, "Symlinks": true, "Service": true}
+
+func socketKey(k string) bool { return socketKeys[k] || strings.HasPrefix(k, "Listen") }
 
 // unit reads the unit name from paths: its unit file and the drop-ins
 // systemd reads for it, or, alone, one drop-in read with no unit file, as a
@@ -2342,7 +2359,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	userOurs := false             // an owner line (owners) not trusted
 	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
 	reread := ""                  // the first such line, which changes how a package's lines read
-	socket := ""                  // the first socketOwners line not trusted
+	socket := ""                  // the first socketKey line not trusted
 	pkgFile := false              // a file in trusted
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
@@ -2357,7 +2374,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		pkgFile = pkgFile || trusted[f]
 		for _, line := range ul {
 			k, v := line.key, line.value
-			if socket == "" && section == "Socket" && line.section == section && !trusted[f] && socketOwners[k] {
+			if socket == "" && section == "Socket" && line.section == section && !trusted[f] && socketKey(k) {
 				socket = filepath.ToSlash(rel) + ": " + k + "=" + v
 			}
 			if line.section == section && !trusted[f] {
@@ -2406,9 +2423,10 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread)
 	}
 	// Who may connect to a package's socket is the package's: a line of
-	// ours may set it only on a socket all of whose files are ours.
-	if socket != "" && (alone || pkgFile) {
-		return fmt.Errorf("%s: a line of ours on a package's socket, or in a file read alone, may not set the socket's owner or mode", socket)
+	// ours may set it only on a socket none of whose files, name or
+	// service is a package's (pkgSockets, from unit_rules.py).
+	if socket != "" && (alone || pkgFile || c.pkgSockets[name]) {
+		return fmt.Errorf("%s: a line of ours on a package's socket (by a file, its name or the service it feeds), or in a file read alone, may not set where it listens, its owner or mode, or its service", socket)
 	}
 	rootCmd := false
 	for _, l := range lines {
@@ -2541,9 +2559,10 @@ func execProgs(v string) []string {
 // control, the refusal wanted.
 type unitRecords struct {
 	Units []struct {
-		Unit  string `json:"unit"`
-		Alone bool   `json:"alone"`
-		Files []struct {
+		Unit    string `json:"unit"`
+		Alone   bool   `json:"alone"`
+		Package bool   `json:"package"`
+		Files   []struct {
 			Path string `json:"path"`
 			Ours bool   `json:"ours"`
 			Text string `json:"text"`
@@ -2573,7 +2592,10 @@ func builtUnits(recs unitRecords, dir string) error {
 		}
 		return f, os.WriteFile(f, []byte(text), 0o644)
 	}
-	c := &unitCheck{root: dir, seen: map[string]bool{}}
+	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}}
+	for _, u := range recs.Units {
+		c.pkgSockets[u.Unit] = c.pkgSockets[u.Unit] || u.Package
+	}
 	// Every refusal is reported, so one does not hide the rest of the
 	// tree (#4821 Security R3).
 	var errs []error

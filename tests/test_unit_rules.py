@@ -191,7 +191,7 @@ def shown(units):
     for n, (state, frag, drops, *more) in units.items():
         names = [n] + (more[0] if more else [])
         out[n] = {"Id": n, "Names": " ".join(names), "LoadState": state, "FragmentPath": frag,
-                  "DropInPaths": " ".join(drops)}
+                  "DropInPaths": " ".join(drops), "Triggers": "", "TriggeredBy": ""}
         for a in names[1:]:
             out[a] = dict(out[n])
     return out
@@ -273,6 +273,27 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual([(u["unit"], u["alone"]) for u in got["units"]
                               if u["unit"].startswith("t@foo")], [("t@fooagentos-unit-lint.service", False)])
 
+    def test_a_socket_feeding_a_packages_service_is_a_packages(self):
+        # #5072 Security 1: by its name (an /etc fragment of ours hiding a package's), by the service it
+        # activates (Service=, or a template's), or by a package's service taking it (Sockets=)
+        files = {LIB + "u.socket": "p", ETC + "u.socket": "o", LIB + "u.service": "p", ETC + "a.socket": "o",
+                 ETC + "b.socket": "o", ETC + "c.socket": "o", ETC + "c.service": "o", LIB + "t@.service": "p",
+                 ETC + "t@1.socket": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({n: ("loaded", f, []) for n, f in (
+                ("u.socket", ETC + "u.socket"), ("u.service", LIB + "u.service"), ("a.socket", ETC + "a.socket"),
+                ("b.socket", ETC + "b.socket"), ("c.socket", ETC + "c.socket"), ("c.service", ETC + "c.service"),
+                ("t@1.socket", ETC + "t@1.socket"))})
+            units["a.socket"]["Triggers"] = "u.service"
+            units["u.service"]["TriggeredBy"] = "u.socket b.socket"
+            units["c.socket"]["Triggers"] = "c.service"
+            units["t@1.socket"]["Triggers"] = "t@1.service"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["package"]),
+                             ["a.socket", "b.socket", "t@1.socket", "u.socket"])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
@@ -282,7 +303,8 @@ class RecordsTest(unittest.TestCase):
             dirs = r.unit_dirs(v)
             n = "a\\x2db.service"
             got = r.records(v, {n: {"Id": n, "Names": "'%s'" % n, "LoadState": "loaded", "FragmentPath": LIB + n,
-                                    "DropInPaths": "'%s'" % (ETC + n + ".d/q.conf")}},
+                                    "DropInPaths": "'%s'" % (ETC + n + ".d/q.conf"), "Triggers": "",
+                                    "TriggeredBy": ""}},
                             dirs, r.Provenance(v, dirs, lambda p: False))
             self.assertEqual([(u["unit"], u["alone"], [f["path"] for f in u["files"]]) for u in got["units"]],
                              [(n, False, [LIB + n, ETC + n + ".d/q.conf"])])
@@ -323,7 +345,7 @@ class ShowTest(unittest.TestCase):
         return m.show(units, r.PROPS)
 
     def block(self, n, **kw):
-        p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="")
+        p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="", Triggers="", TriggeredBy="")
         p.update(kw)
         return "\n".join("%s=%s" % (k, p[k]) for k in r.PROPS) + "\n"
 
