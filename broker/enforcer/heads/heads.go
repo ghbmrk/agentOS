@@ -153,8 +153,13 @@ type Store struct {
 	// force but whose journal write failed, so a retry writes it again.
 	unsaved map[string]bool
 	// size is the journal's length after its last good append, so a
-	// failed append is cut back and leaves no fragment.
-	size int
+	// failed append is cut back and leaves no fragment. dirty is set
+	// while a failed append's cut-back failed too, so the journal may be
+	// longer than size: no record is appended until a cut-back succeeds,
+	// so none sits glued to a fragment or past size, where a later
+	// cut-back would remove it.
+	size  int
+	dirty bool
 
 	revokedSub  map[string]bool // ed25519 keys: the owner's sub-key revocations
 	revokedEdge map[string]bool
@@ -224,8 +229,16 @@ func (s *Store) write(r record) error {
 		return err
 	}
 	b = append(b, '\n')
+	if s.dirty {
+		if err := s.cfg.Journal.Truncate(s.size); err != nil {
+			return fmt.Errorf("journal not cut back after a failed append: %w", err)
+		}
+		s.dirty = false
+	}
 	if err := s.cfg.Journal.Append(b); err != nil {
-		_ = s.cfg.Journal.Truncate(s.size) // a short write leaves no fragment
+		// A short write leaves no fragment; a cut-back that fails too
+		// is tried again before the next append.
+		s.dirty = s.cfg.Journal.Truncate(s.size) != nil
 		return err
 	}
 	s.size += len(b)

@@ -13,6 +13,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -22,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +34,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
-	"github.com/ghbmrk/agentos/broker/enforcer/heads"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -939,18 +941,18 @@ func TestLifecycle(t *testing.T) {
 	// page's status says the core is down; a hello brings it up.
 	t.Run("core down", func(t *testing.T) {
 		x, _ := enrolled(t, true)
-		if !x.d.alerts.Status().CoreDown {
+		if !x.d.alerts.Status().CoreDown || x.page("Core") != "down" {
 			t.Fatal("a core that never connected counts as up")
 		}
 		rules := x.enforced()
 		c, _ := x.dial(x.serve(), x.core)
 		c.read()
 		x.advance(time.Second)
-		if x.d.alerts.Status().CoreDown {
+		if x.d.alerts.Status().CoreDown || x.page("Core") != "up" {
 			t.Fatal("a connected core counts as down")
 		}
 		x.advance(Silence)
-		if !x.d.alerts.Status().CoreDown {
+		if !x.d.alerts.Status().CoreDown || x.page("Core") != "down" {
 			t.Fatal("a core silent for two beats counts as up")
 		}
 		if x.enforced() != rules || x.current().Device("tv") == nil {
@@ -958,7 +960,7 @@ func TestLifecycle(t *testing.T) {
 		}
 		x.restart()
 		x.advance(time.Second)
-		if !x.d.alerts.Status().CoreDown || x.enforced() != rules {
+		if !x.d.alerts.Status().CoreDown || x.page("Core") != "down" || x.enforced() != rules {
 			t.Fatal("after a restart with the core silent the policy or the status changed")
 		}
 	})
@@ -967,7 +969,7 @@ func TestLifecycle(t *testing.T) {
 	// open is offered to the next session that authenticates, though the
 	// page never showed the core down (UX fix-list on #4754).
 	t.Run("core reconnects", func(t *testing.T) {
-		x, _ := enrolled(t, true)
+		x, a := enrolled(t, true)
 		addr := x.serve()
 		c1, _ := x.dial(addr, x.core)
 		c1.read()
@@ -991,6 +993,27 @@ func TestLifecycle(t *testing.T) {
 		if c2.alerts == 0 {
 			t.Fatal("the alert raised between sessions was never offered to the next one")
 		}
+		// The page is the record (#4750): it shows the alert until the
+		// owner's passkey clears it there, and a stranger's cannot.
+		words, _ := alert.Words(alert.HeadFork, "")
+		if h := x.home(); !strings.Contains(h, html.EscapeString(words)) || !strings.Contains(h, `href="#revoke"`) {
+			t.Fatal("the page does not show the open alert, or its choice to revoke the core's key")
+		}
+		var id string
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind == alert.HeadFork {
+				id = strconv.FormatUint(r.ID, 10)
+			}
+		}
+		if w := x.b.act(newAuthenticator(t), "clear", id); w.Code == http.StatusOK || !x.opened(alert.HeadFork) {
+			t.Fatal("a stranger's passkey cleared an alert")
+		}
+		if w := x.b.act(a, "clear", id); w.Code != http.StatusOK || x.opened(alert.HeadFork) {
+			t.Fatalf("clear: %d %s", w.Code, w.Body)
+		}
+		if strings.Contains(x.home(), html.EscapeString(words)) {
+			t.Fatal("the page still shows a cleared alert")
+		}
 	})
 
 	// Channel burst: the core is cut, the channel paused, the light red;
@@ -1009,8 +1032,14 @@ func TestLifecycle(t *testing.T) {
 			t.Fatalf("a request after the trip: %v", code)
 		}
 		x.advance(time.Minute)
-		if !x.opened(alert.ChannelPaused) || !x.opened(alert.Trip) || x.light.c != alert.Red {
+		if !x.opened(alert.ChannelPaused) || !x.opened(alert.Trip) || x.light.c != alert.Red || x.page("Light") != "red" {
 			t.Fatalf("the trip does not show: %+v light %d", x.d.alerts.Status(), x.light.c)
+		}
+		for _, r := range x.d.alerts.Status().Open {
+			// A paused channel's alert clears only by resuming (#4750).
+			if clear := strings.Contains(x.home(), fmt.Sprintf(`data-action="clear" data-target="%d"`, r.ID)); clear == (r.Kind == alert.ChannelPaused) {
+				t.Fatalf("alert %d (kind %d): clear offered %v", r.ID, r.Kind, clear)
+			}
 		}
 		x.restart()
 		x.advance(time.Second)
@@ -1028,7 +1057,7 @@ func TestLifecycle(t *testing.T) {
 			t.Fatalf("resume: %d %s", w.Code, w.Body)
 		}
 		x.advance(time.Minute)
-		if x.d.cut.Stage() != channel.Open || x.opened(alert.ChannelPaused) || x.opened(alert.Trip) || x.light.c != alert.Off {
+		if x.d.cut.Stage() != channel.Open || x.opened(alert.ChannelPaused) || x.opened(alert.Trip) || x.light.c != alert.Off || x.page("Light") != "off" {
 			t.Fatalf("the resume did not lift the cut: %+v", x.d.alerts.Status())
 		}
 		x.mu.Lock()
@@ -1152,29 +1181,54 @@ func TestLifecycle(t *testing.T) {
 		}
 	})
 
-	// Core key revoked (KEY-7): the channel refuses the revoked sub-key's
-	// hello, and the head copies keep the revocation across a restart.
+	// Core key revoked (KEY-7, #4751): the owner revokes the core's
+	// sub-key on the page, at home, without the core; the channel refuses
+	// the revoked sub-key's hello and an open session's next frame, and
+	// the head copies keep the revocation across a restart.
 	t.Run("core key revoked", func(t *testing.T) {
 		x, a := enrolled(t, true)
 		addr := x.serve()
-		if _, ok := x.dial(addr, x.core); !ok {
+		open, ok := x.dial(addr, x.core)
+		if !ok {
 			t.Fatal("the pinned core was refused before any revocation")
 		}
-		sub := x.core.Public().(ed25519.PublicKey)
-		if err := x.d.RevokeCore(sub, newAuthenticator(t).sign(key.RootMsg(heads.SubKeyRoot(a.Public(), sub)))); err == nil {
+		if x.page("Key") != "live" {
+			t.Fatal("the page offers no revocation")
+		}
+		if w := x.b.act(newAuthenticator(t), "revoke-core", ""); w.Code == http.StatusOK || x.d.heads.Revoked(x.core.Public().(ed25519.PublicKey)) {
 			t.Fatal("a stranger's passkey revoked the core's sub-key")
 		}
-		if err := x.d.RevokeCore(sub, a.sign(key.RootMsg(heads.SubKeyRoot(a.Public(), sub)))); err != nil {
-			t.Fatal(err)
+		if w := x.b.act(a, "revoke-core", ""); w.Code != http.StatusOK {
+			t.Fatalf("revoke: %d %s", w.Code, w.Body)
 		}
 		if _, ok := x.dial(addr, x.core); ok {
 			t.Fatal("the revoked sub-key's hello was answered")
 		}
+		open.id++
+		open.send(wire.Read{ID: open.id, What: wire.ReadExport})
+		for m, err := open.recv(); err == nil; m, err = open.recv() {
+			if r, ok := m.(wire.ReadReply); ok {
+				t.Fatalf("a session open before the revocation was still answered: %v", r)
+			}
+		}
+		if x.page("Key") != "revoked" {
+			t.Fatal("the page does not show the key revoked")
+		}
 		x.restart()
-		if _, ok := x.dial(x.serve(), x.core); ok {
+		if _, ok := x.dial(x.serve(), x.core); ok || x.page("Key") != "revoked" {
 			t.Fatal("the revocation did not survive a restart")
 		}
 	})
+}
+
+// home is the page's home screen.
+func (x *box) home() string {
+	x.t.Helper()
+	w := x.b.do(http.MethodGet, "/", nil)
+	if w.Code != http.StatusOK {
+		x.t.Fatalf("home: %d", w.Code)
+	}
+	return w.Body.String()
 }
 
 // page is one field of the page's home screen, read from its HTML.
@@ -1184,10 +1238,27 @@ func (x *box) page(field string) string {
 	if w.Code != http.StatusOK {
 		x.t.Fatalf("home: %d", w.Code)
 	}
+	body := w.Body.String()
 	switch field {
 	case "Channel":
-		if m := regexp.MustCompile(`The channel is ([a-z ]+)\.`).FindStringSubmatch(w.Body.String()); m != nil {
+		if m := regexp.MustCompile(`The channel is ([a-z ]+)\.`).FindStringSubmatch(body); m != nil {
 			return m[1]
+		}
+	case "Core":
+		if strings.Contains(body, "The core is down") {
+			return "down"
+		}
+		return "up"
+	case "Light":
+		if m := regexp.MustCompile(`The light is ([a-z]+)`).FindStringSubmatch(body); m != nil {
+			return m[1]
+		}
+	case "Key":
+		switch {
+		case strings.Contains(body, "key is revoked"):
+			return "revoked"
+		case strings.Contains(body, `data-action="revoke-core"`):
+			return "live"
 		}
 	}
 	x.t.Fatalf("home shows no %s:\n%s", field, w.Body)

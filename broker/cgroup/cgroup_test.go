@@ -1,13 +1,17 @@
 package cgroup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -184,41 +188,100 @@ func TestRES1RES2RealCgroupV2(t *testing.T) {
 
 	// The process cap holds: a shell in the group cannot fork past it
 	// (RES-2, security review 2 finding 4).
+	var out bytes.Buffer
 	bomb := exec.Command("/bin/sh", "-c", "echo $$ > "+filepath.Join(c.Path, "cgroup.procs")+"; for i in 1 2 3 4 5 6 7 8; do sleep 1 & done; wait")
-	out, _ := bomb.CombinedOutput()
+	bomb.Stdout, bomb.Stderr = &out, &out
+	must(t, bomb.Start())
+	waitBounded(t, c, bomb, 30*time.Second, "the fork bomb")
 	if got := read(t, filepath.Join(c.Path, "pids.events")); strings.HasPrefix(got+"\n", "max 0\n") {
-		t.Fatalf("pids.max never refused a fork: pids.events %q, output %q", got, out)
+		t.Fatalf("pids.max never refused a fork: pids.events %q, output %q", got, out.String())
 	}
-	t.Logf("fork past pids.max: %q", strings.TrimSpace(string(out)))
+	t.Logf("fork past pids.max: %q", strings.TrimSpace(out.String()))
+	kill(t, c)
 
-	// A shell in the group that allocates past the budget is throttled and
-	// then killed by the kernel or by us; it never takes host memory.
-	cmd := exec.Command("/bin/sh", "-c", "echo $$ > "+filepath.Join(c.Path, "cgroup.procs")+"; exec sleep 600")
-	must(t, cmd.Start())
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if p, _ := c.Populated(); p {
-			break
+	// Freeze, thaw and Kill a process in the group, many times over:
+	// Kill must leave nothing running, and a process that outlives it
+	// fails here within seconds, not at the package timeout.
+	var slowest [2]time.Duration
+	for i := 0; i < killCycles; i++ {
+		cmd := exec.Command("/bin/sh", "-c", "echo $$ > "+filepath.Join(c.Path, "cgroup.procs")+"; exec sleep 600")
+		must(t, cmd.Start())
+		joined(t, c, cmd)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		t0 := time.Now()
+		must(t, c.Freeze(ctx))
+		cancel()
+		slowest[0] = max(slowest[0], time.Since(t0))
+		must(t, c.Thaw())
+		slowest[1] = max(slowest[1], kill(t, c))
+		st := waitBounded(t, c, cmd, 10*time.Second, "Kill")
+		if ws, ok := st.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+			t.Fatalf("cycle %d: the process ended with %v, not by Kill's SIGKILL", i, st)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("process never joined the group")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	t0 := time.Now()
-	must(t, c.Freeze(ctx))
-	t.Logf("freeze took %v", time.Since(t0))
-	must(t, c.Thaw())
-	t0 = time.Now()
-	must(t, c.Kill(ctx))
-	t.Logf("kill to empty took %v", time.Since(t0))
-	cmd.Wait()
+	t.Logf("%d cycles: slowest freeze %v, slowest kill to empty %v", killCycles, slowest[0], slowest[1])
 	if cur := read(t, filepath.Join(c.Path, "memory.current")); cur != "0" {
 		t.Logf("memory.current after kill = %s (page cache may stay charged)", cur)
 	}
 	if _, err := c.Pressure(); err != nil {
 		t.Fatalf("per-group PSI unreadable: %v", err)
 	}
+}
+
+// killCycles is how many times TestRES1RES2RealCgroupV2 kills a process
+// in the group per run, so a rare race shows in CI, not once a month.
+const killCycles = 50
+
+// joined waits until cmd's own pid is in c. Waiting for the group to be
+// populated is not enough: a member of an earlier step that is still
+// exiting keeps it populated (its pipe closes before it leaves the
+// group), Kill then empties the group before cmd joins, and cmd runs on
+// outside every bound (#5134).
+func joined(t *testing.T, c *Group, cmd *exec.Cmd) {
+	t.Helper()
+	pid := strconv.Itoa(cmd.Process.Pid)
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if slices.Contains(strings.Fields(read(t, filepath.Join(c.Path, "cgroup.procs"))), pid) {
+			return
+		}
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			cmd.Wait()
+			t.Fatalf("pid %s never joined %s", pid, c.Path)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// kill runs c.Kill bounded by 5 s and returns how long it took.
+func kill(t *testing.T, c *Group) time.Duration {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	must(t, c.Kill(ctx))
+	return time.Since(t0)
+}
+
+// waitBounded waits for cmd for at most d. A process still running then is
+// killed and the test fails, naming what is left in the group.
+func waitBounded(t *testing.T, c *Group, cmd *exec.Cmd, d time.Duration, after string) *os.ProcessState {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+		return cmd.ProcessState
+	case <-time.After(d):
+	}
+	procs, _ := os.ReadFile(filepath.Join(c.Path, "cgroup.procs"))
+	events, _ := os.ReadFile(filepath.Join(c.Path, "cgroup.events"))
+	cmd.Process.Kill()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+	t.Fatalf("pid %d still running %v after %s; the group holds pids %q, cgroup.events %q",
+		cmd.Process.Pid, d, after, strings.Fields(string(procs)), strings.TrimSpace(string(events)))
+	return nil
 }
