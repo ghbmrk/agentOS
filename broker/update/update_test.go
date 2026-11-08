@@ -921,8 +921,13 @@ func TestInitStoreRefusesBeforeCreating(t *testing.T) {
 		f.must(os.Mkdir(ro, 0o500))
 		box := filepath.Join(ro, "a", "box")
 		_, err := InitStore(box, root, 1)
-		if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), "update store "+box+":") {
+		if !errors.Is(err, os.ErrPermission) || !strings.HasPrefix(err.Error(), "create update store "+box+":") {
 			t.Fatalf("InitStore under an unwritable parent: %v, want a permission error naming %s", err, box)
+		}
+		// The kernel's refusal is not a store refusal (#5059 items 1, 2):
+		// the path passed its checks, so the directory is what to change.
+		if errors.Is(err, ErrUnsafeStore) {
+			t.Fatalf("InitStore under an unwritable parent: %v, want no ErrUnsafeStore", err)
 		}
 	}
 
@@ -931,6 +936,42 @@ func TestInitStoreRefusesBeforeCreating(t *testing.T) {
 	f.must(os.WriteFile(file, nil, 0o600))
 	if _, err := InitStore(filepath.Join(file, "box"), root, 1); !errors.Is(err, ErrUnsafeStore) || !strings.HasPrefix(err.Error(), "update store:") {
 		t.Fatalf("InitStore through a file: %v, want an update store refusal", err)
+	}
+}
+
+// InitStore reads the root it is given as the root's own fault, not the
+// repository's (#5059 items 3, 4): bytes that are not root metadata are a
+// malformed root, and a root its own keys did not sign is a signature
+// failure. Neither leaves a store behind.
+func TestInitStoreNamesABadRoot(t *testing.T) {
+	f := newFixture(t)
+	root, err := readFile(f.store.p("root.json"))
+	f.must(err)
+	unsigned, err := metadata.Root().FromBytes(root)
+	f.must(err)
+	unsigned.ClearSignatures()
+	unsignedBytes, err := unsigned.ToBytes(false)
+	f.must(err)
+	for _, c := range []struct {
+		name string
+		root []byte
+		want error
+	}{
+		{"not root metadata", []byte(`{"signed":{}}`), ErrBadRoot},
+		{"not json", []byte("root"), ErrBadRoot},
+		{"not self-signed", unsignedBytes, ErrSignatures},
+	} {
+		dir := filepath.Join(t.TempDir(), "box")
+		_, err := InitStore(dir, c.root, 1)
+		if !errors.Is(err, c.want) || errors.Is(err, ErrBadRepository) {
+			t.Errorf("%s: %v, want %v and not %v", c.name, err, c.want, ErrBadRepository)
+		}
+		if c.want == ErrSignatures && errors.Is(err, ErrBadRoot) {
+			t.Errorf("%s: %v, want a signature failure, not a malformed root", c.name, err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: a refused root left a store: %v", c.name, err)
+		}
 	}
 }
 
