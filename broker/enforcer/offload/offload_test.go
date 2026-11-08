@@ -130,6 +130,9 @@ func nlmsg(typ uint16, body []byte) []byte {
 // request the kernel refuses would read as success; a forged link dump
 // queued before the kernel's would replace the kernel's links.
 func TestForgedReplyRefused(t *testing.T) {
+	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
+		return
+	}
 	c, err := open(unix.NETLINK_GENERIC)
 	if err != nil {
 		t.Skipf("no netlink socket here: %v", err)
@@ -191,6 +194,9 @@ func TestWalkFailsClosed(t *testing.T) {
 // keep arriving do not hold a request past replyWait: it fails (and the
 // daemon holds the port at its caps) rather than stall the reading.
 func TestFloodEndsRequest(t *testing.T) {
+	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
+		return
+	}
 	defer func(w time.Duration) { replyWait = w }(replyWait)
 	replyWait = 300 * time.Millisecond
 	c, err := open(unix.NETLINK_ROUTE)

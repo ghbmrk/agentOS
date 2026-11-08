@@ -5,6 +5,8 @@ package confine
 import (
 	"encoding/binary"
 	"errors"
+	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -14,6 +16,9 @@ import (
 // an acknowledgement another process sends to the link socket's port is
 // dropped unread, so a link the kernel refused never reads as made.
 func TestLinkAckOnlyFromKernel(t *testing.T) {
+	if !inUserNetns(t) {
+		return
+	}
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
 		t.Skipf("no netlink socket here: %v", err)
@@ -52,6 +57,9 @@ func TestLinkAckOnlyFromKernel(t *testing.T) {
 // TestLinkAckFloodEnds: datagrams from another sender that keep arriving
 // do not hold the wait for an acknowledgement past ackWait.
 func TestLinkAckFloodEnds(t *testing.T) {
+	if !inUserNetns(t) {
+		return
+	}
 	defer func(w time.Duration) { ackWait = w }(ackWait)
 	ackWait = 300 * time.Millisecond
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
@@ -102,4 +110,32 @@ func TestLinkAckFloodEnds(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a flood of other datagrams held the wait past ackWait")
 	}
+}
+
+const netnsEnv = "AGENTOS_CONFINE_LINKS_NETNS"
+
+// inUserNetns runs the calling test again in a fresh user and network
+// namespace (unshare -rn) and reports whether this is that run. Sending to
+// another netlink socket's port needs CAP_NET_ADMIN, as a forger would;
+// CI fails rather than skips when the namespace cannot be made.
+func inUserNetns(t *testing.T) bool {
+	t.Helper()
+	if os.Getenv(netnsEnv) == "1" {
+		return true
+	}
+	required := os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1"
+	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
+		if required {
+			t.Fatalf("no unprivileged user namespaces: %v", err)
+		}
+		t.Skipf("no unprivileged user namespaces: %v", err)
+	}
+	cmd := exec.Command("unshare", "-rn", "--", os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), netnsEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("in a fresh namespace:\n%s", out)
+	if err != nil {
+		t.Fatalf("netns run failed: %v", err)
+	}
+	return false
 }
