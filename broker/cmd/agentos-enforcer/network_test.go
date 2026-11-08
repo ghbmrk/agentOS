@@ -988,6 +988,31 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	}
 }
 
+// TestMergingPortSpentOnANewDay (ENF-l-16): a quota a reading starts
+// while a port merges (a new day, a merge of groups) starts spent too, not
+// only the ones a full load starts.
+func TestMergingPortSpentOnANewDay(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.d.Close()
+	x.merges(x.cfg.Layout.Core, errors.New("offload: core0: rx-gro on"))
+	x.start()
+	x.setListing(listing(t, x, doc, 7, 10))
+	x.advance(24 * time.Hour)
+	x.fire.mu.Lock()
+	var last string
+	if n := len(x.fire.updates); n > 0 {
+		last = x.fire.updates[n-1]
+	}
+	x.fire.mu.Unlock()
+	m := quotaLine.FindStringSubmatch(last)
+	if m == nil || m[1] != "q" {
+		t.Fatalf("no new group quota at the next day's reading:\n%s", last)
+	}
+	if m[2] != m[3] {
+		t.Fatalf("the core's new-day quota starts at %s of %s bytes while its port merges", m[3], m[2])
+	}
+}
+
 // TestMergingKeptOffAtEachReading (ENF-cap-gro): before each reading the
 // counted ports are asked again, so a port whose device was made again
 // does not stay merging; a failure is logged once while it lasts, and its

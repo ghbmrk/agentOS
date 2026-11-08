@@ -4,6 +4,8 @@ package offload
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -83,45 +85,103 @@ func TestAttributes(t *testing.T) {
 	}
 }
 
-// TestForgedReplyRefused (ENF-gro-4): a reply that does not come from the
-// kernel is refused, so a local process that finds the daemon's netlink
-// port cannot answer "nothing merges" for it.
-func TestForgedReplyRefused(t *testing.T) {
-	c := &conn{seq: 7}
-	var err error
-	if c.fd, err = syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, unix.NETLINK_GENERIC); err != nil {
-		t.Skipf("no netlink socket here: %v", err)
-	}
-	defer c.close()
-	if err := syscall.Bind(c.fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.SetsockoptTimeval(c.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 5}); err != nil {
-		t.Fatal(err)
-	}
+// forge sends msgs, each with sequence seq, to c's port from another
+// netlink socket of protocol proto: a local process, not the kernel.
+func forge(t *testing.T, c *conn, proto int, seq uint32, msgs ...[]byte) {
+	t.Helper()
 	sa, err := syscall.Getsockname(c.fd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	port := sa.(*syscall.SockaddrNetlink).Pid
-	forger, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, unix.NETLINK_GENERIC)
+	f, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer syscall.Close(forger)
-	if err := syscall.Bind(forger, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	defer syscall.Close(f)
+	if err := syscall.Bind(f, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		t.Fatal(err)
 	}
-	// An acknowledgement of request 7 with no error: read as the kernel's,
-	// it would end the request with no replies.
-	ack := make([]byte, unix.NLMSG_HDRLEN+4+unix.NLMSG_HDRLEN)
-	ne.PutUint32(ack[0:], uint32(len(ack)))
-	ne.PutUint16(ack[4:], syscall.NLMSG_ERROR)
-	ne.PutUint32(ack[8:], 7)
-	if err := syscall.Sendto(forger, ack, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Pid: port}); err != nil {
+	var b []byte
+	for _, m := range msgs {
+		ne.PutUint32(m[0:], uint32(len(m)))
+		ne.PutUint32(m[8:], seq)
+		ne.PutUint32(m[12:], port)
+		b = append(b, m...)
+	}
+	if err := syscall.Sendto(f, b, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Pid: port}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := c.recv(0x20); !errors.Is(err, errNotKernel) {
+}
+
+// nlmsg is a netlink message of type typ with body, its length and
+// sequence filled by forge.
+func nlmsg(typ uint16, body []byte) []byte {
+	m := make([]byte, unix.NLMSG_HDRLEN, unix.NLMSG_HDRLEN+len(body))
+	ne.PutUint16(m[4:], typ)
+	return append(m, body...)
+}
+
+// TestForgedReplyRefused (ENF-gro-4): a datagram that does not come from
+// the kernel is dropped unread, on both requests offload makes, so a
+// local process that finds a socket's port can neither answer for the
+// kernel nor end the request. A forged acknowledgement queued before a
+// request the kernel refuses would read as success; a forged link dump
+// queued before the kernel's would replace the kernel's links.
+func TestForgedReplyRefused(t *testing.T) {
+	c, err := open(unix.NETLINK_GENERIC)
+	if err != nil {
+		t.Skipf("no netlink socket here: %v", err)
+	}
+	defer c.close()
+	forge(t, c, unix.NETLINK_GENERIC, c.seq+1, nlmsg(syscall.NLMSG_ERROR, make([]byte, 4+unix.NLMSG_HDRLEN)))
+	got, err := c.do(unix.GENL_ID_CTRL, unix.CTRL_CMD_GETFAMILY, attr(unix.CTRL_ATTR_FAMILY_NAME, cstr("agentos-none")))
+	if !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("a forged acknowledgement read as the kernel's: %v %v", got, err)
+	}
+
+	r, err := open(unix.NETLINK_ROUTE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.close()
+	fake := make([]byte, syscall.SizeofIfInfomsg)
+	ne.PutUint32(fake[4:], 999)
+	fake = append(fake, attr(unix.IFLA_IFNAME, cstr("forged0"))...)
+	forge(t, r, unix.NETLINK_ROUTE, r.seq+1, nlmsg(syscall.RTM_NEWLINK, fake), nlmsg(syscall.NLMSG_DONE, make([]byte, 4)))
+	msgs, err := r.request(syscall.RTM_GETLINK, syscall.NLM_F_DUMP, make([]byte, syscall.SizeofIfInfomsg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("the kernel's links were not read")
+	}
+	for _, m := range msgs {
+		if ne.Uint32(m[4:8]) == 999 {
+			t.Fatal("a forged link read as the kernel's")
+		}
+	}
+}
+
+// TestWalkFailsClosed (ENF-gro-3): a parent that is no link here, which
+// only a dump the kernel did not send could hold, and a parent in
+// another namespace other than a veth's peer are errors, never a port
+// passed with its lower device unwalked; lower devices come first.
+func TestWalkFailsClosed(t *testing.T) {
+	links := []link{
+		{index: 2, name: "eth0"},
+		{index: 3, name: "mv0", kind: "macvlan", parent: 2},
+		{index: 4, name: "vl0", kind: "vlan", parent: 9},
+		{index: 5, name: "vc", kind: "veth", parent: 2, elsewhere: true},
+		{index: 6, name: "mv1", kind: "macvlan", parent: 7, elsewhere: true},
+	}
+	if got, err := walk(links, []string{"mv0", "vc"}); err != nil || !slices.Equal(got, []string{"eth0", "mv0", "vc"}) {
+		t.Fatalf("walk: %v %v", got, err)
+	}
+	if _, err := walk(links, []string{"vl0"}); err == nil || !strings.Contains(err.Error(), "vl0: its parent 9 is not a link here") {
+		t.Fatalf("an unresolved parent: %v", err)
+	}
+	if _, err := walk(links, []string{"mv1"}); err == nil || !strings.Contains(err.Error(), "mv1: its parent is in another namespace") {
+		t.Fatalf("a parent in another namespace: %v", err)
 	}
 }

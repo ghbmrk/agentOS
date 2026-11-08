@@ -64,7 +64,8 @@ func attr(b []byte, typ uint16, data []byte) []byte {
 	return b
 }
 
-// request sends msg with sequence seq and waits for its acknowledgement.
+// request sends msg with sequence seq and waits for the kernel's
+// acknowledgement.
 func request(fd int, seq uint32, msg []byte) error {
 	binary.NativeEndian.PutUint32(msg[8:], seq)
 	if err := syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
@@ -72,9 +73,14 @@ func request(fd int, seq uint32, msg []byte) error {
 	}
 	buf := make([]byte, 4096)
 	for {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
 		if err != nil {
 			return err
+		}
+		// Only the kernel answers: a datagram from any other sender (a
+		// process that found this socket's port) is dropped unread.
+		if sa, ok := from.(*syscall.SockaddrNetlink); !ok || sa.Pid != 0 {
+			continue
 		}
 		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
 		if err != nil {

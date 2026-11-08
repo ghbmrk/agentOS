@@ -29,12 +29,18 @@ type link struct {
 // the upper one reads back still on (ASSUMPTIONS ENF-gro-3). A veth's
 // peer in another namespace is not under it: its packets are the other
 // namespace's sends. Any other parent in another namespace is an error,
-// since it cannot be reached from here; so is a port that does not exist.
+// since it cannot be reached from here; so is a parent that is no link
+// here, and a port that does not exist.
 func under(ports []string) ([]string, error) {
 	links, err := readLinks()
 	if err != nil {
 		return nil, err
 	}
+	return walk(links, ports)
+}
+
+// walk is under over links, the namespace's links in index order.
+func walk(links []link, ports []string) ([]string, error) {
 	byName := map[string]link{}
 	byIndex := map[int32]link{}
 	for _, l := range links {
@@ -43,8 +49,8 @@ func under(ports []string) ([]string, error) {
 	var out []string
 	var errs []error
 	seen := map[int32]bool{}
-	var walk func(l link)
-	walk = func(l link) {
+	var down func(l link)
+	down = func(l link) {
 		if seen[l.index] {
 			return
 		}
@@ -55,12 +61,14 @@ func under(ports []string) ([]string, error) {
 		case l.elsewhere:
 		case l.parent != 0 && l.parent != l.index:
 			if p, ok := byIndex[l.parent]; ok {
-				walk(p)
+				down(p)
+			} else {
+				errs = append(errs, fmt.Errorf("offload: %s: its parent %d is not a link here", l.name, l.parent))
 			}
 		}
 		for _, m := range links {
 			if m.master == l.index {
-				walk(m)
+				down(m)
 			}
 		}
 		out = append(out, l.name)
@@ -70,7 +78,7 @@ func under(ports []string) ([]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("offload: port %s: no such device", p)
 		}
-		walk(l)
+		down(l)
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -78,26 +86,25 @@ func under(ports []string) ([]string, error) {
 	return out, nil
 }
 
-// readLinks dumps the calling thread's namespace's links (RTM_GETLINK).
+// readLinks dumps the calling thread's namespace's links (RTM_GETLINK) on
+// a route socket of its own, reading only the kernel's replies.
 func readLinks() ([]link, error) {
-	b, err := syscall.NetlinkRIB(syscall.RTM_GETLINK, syscall.AF_UNSPEC)
+	c, err := open(unix.NETLINK_ROUTE)
 	if err != nil {
 		return nil, fmt.Errorf("offload: links: %w", err)
 	}
-	msgs, err := syscall.ParseNetlinkMessage(b)
+	defer c.close()
+	msgs, err := c.request(syscall.RTM_GETLINK, syscall.NLM_F_DUMP, make([]byte, syscall.SizeofIfInfomsg))
 	if err != nil {
 		return nil, fmt.Errorf("offload: links: %w", err)
 	}
 	var links []link
-	for _, m := range msgs {
-		if m.Header.Type != syscall.RTM_NEWLINK {
-			continue
-		}
-		if len(m.Data) < syscall.SizeofIfInfomsg {
+	for _, b := range msgs {
+		if len(b) < syscall.SizeofIfInfomsg {
 			return nil, fmt.Errorf("offload: links: short message")
 		}
-		l := link{index: int32(ne.Uint32(m.Data[4:8]))}
-		each(m.Data[syscall.SizeofIfInfomsg:], func(t uint16, d []byte) {
+		l := link{index: int32(ne.Uint32(b[4:8]))}
+		each(b[syscall.SizeofIfInfomsg:], func(t uint16, d []byte) {
 			switch {
 			case t == unix.IFLA_IFNAME && len(d) > 0:
 				l.name = string(d[:len(d)-1])

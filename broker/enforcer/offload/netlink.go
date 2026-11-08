@@ -18,16 +18,18 @@ const nlaTypeMask = ^uint16(unix.NLA_F_NESTED | unix.NLA_F_NET_BYTEORDER)
 
 var ne = binary.NativeEndian
 
-// conn is one generic netlink socket, opened in the calling thread's
-// network namespace, with the ethtool family resolved.
+// conn is one netlink socket, opened in the calling thread's network
+// namespace: a generic one with the ethtool family resolved (dial), or a
+// route one (open) for the links.
 type conn struct {
 	fd     int
 	seq    uint32
 	family uint16
 }
 
-func dial() (*conn, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, unix.NETLINK_GENERIC)
+// open is a netlink socket of protocol proto, bound to a port of its own.
+func open(proto int) (*conn, error) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
 		return nil, fmt.Errorf("netlink socket: %w", err)
 	}
@@ -40,6 +42,14 @@ func dial() (*conn, error) {
 	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 5}); err != nil {
 		c.close()
 		return nil, fmt.Errorf("netlink timeout: %w", err)
+	}
+	return c, nil
+}
+
+func dial() (*conn, error) {
+	c, err := open(unix.NETLINK_GENERIC)
+	if err != nil {
+		return nil, err
 	}
 	replies, err := c.do(unix.GENL_ID_CTRL, unix.CTRL_CMD_GETFAMILY, attr(unix.CTRL_ATTR_FAMILY_NAME, cstr(unix.ETHTOOL_GENL_NAME)))
 	if err != nil {
@@ -103,28 +113,50 @@ func header(dev string) []byte {
 	return attr(unix.ETHTOOL_A_FEATURES_HEADER|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_HEADER_DEV_NAME, cstr(dev)))
 }
 
-// do sends one request and returns the attributes of each reply up to
-// the kernel's acknowledgement.
+// do sends one generic netlink request and returns the attributes of
+// each reply up to the kernel's acknowledgement.
 func (c *conn) do(family uint16, cmd uint8, attrs []byte) ([][]byte, error) {
+	body := append([]byte{cmd, 1 /* version */, 0, 0}, attrs...)
+	replies, err := c.request(family, syscall.NLM_F_ACK, body)
+	if err != nil {
+		return nil, err
+	}
+	for i, r := range replies {
+		if len(r) < unix.GENL_HDRLEN {
+			return nil, errors.New("short generic netlink reply")
+		}
+		replies[i] = r[unix.GENL_HDRLEN:]
+	}
+	return replies, nil
+}
+
+// request sends one message of type typ with body and returns the body of
+// each reply of that type (RTM_NEWLINK answers RTM_GETLINK) up to the
+// kernel's acknowledgement or a dump's end.
+func (c *conn) request(typ, flags uint16, body []byte) ([][]byte, error) {
 	c.seq++
-	msg := make([]byte, unix.NLMSG_HDRLEN+unix.GENL_HDRLEN, unix.NLMSG_HDRLEN+unix.GENL_HDRLEN+len(attrs))
-	ne.PutUint32(msg[0:], uint32(unix.NLMSG_HDRLEN+unix.GENL_HDRLEN+len(attrs)))
-	ne.PutUint16(msg[4:], family)
-	ne.PutUint16(msg[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK)
+	msg := make([]byte, unix.NLMSG_HDRLEN, unix.NLMSG_HDRLEN+len(body))
+	ne.PutUint32(msg[0:], uint32(unix.NLMSG_HDRLEN+len(body)))
+	ne.PutUint16(msg[4:], typ)
+	ne.PutUint16(msg[6:], syscall.NLM_F_REQUEST|flags)
 	ne.PutUint32(msg[8:], c.seq)
-	msg[16] = cmd
-	msg[17] = 1 // version
-	msg = append(msg, attrs...)
+	msg = append(msg, body...)
 	if err := syscall.Sendto(c.fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, err
 	}
-	return c.recv(family)
+	want := typ
+	if typ == syscall.RTM_GETLINK {
+		want = syscall.RTM_NEWLINK
+	}
+	return c.recv(want)
 }
 
-// recv reads the replies to request c.seq up to the acknowledgement. Only
-// the kernel's are read: a datagram from any other sender (a process
-// that found this socket's port) is refused, never taken for an answer.
-func (c *conn) recv(family uint16) ([][]byte, error) {
+// recv reads the replies of type want to request c.seq up to the
+// acknowledgement or a dump's end. Only the kernel's datagrams are read:
+// one from any other sender (a process that found this socket's port) is
+// dropped unread, so it can neither answer for the kernel nor end the
+// request.
+func (c *conn) recv(want uint16) ([][]byte, error) {
 	var replies [][]byte
 	buf := make([]byte, 1<<16)
 	for {
@@ -132,8 +164,8 @@ func (c *conn) recv(family uint16) ([][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if sa, ok := from.(*syscall.SockaddrNetlink); !ok || sa.Pid != 0 {
-			return nil, errNotKernel
+		if !fromKernel(from) {
+			continue
 		}
 		if n < unix.NLMSG_HDRLEN {
 			return nil, errors.New("short netlink message")
@@ -157,17 +189,18 @@ func (c *conn) recv(family uint16) ([][]byte, error) {
 				return replies, nil
 			case syscall.NLMSG_DONE:
 				return replies, nil
-			case family:
-				if len(m.Data) < unix.GENL_HDRLEN {
-					return nil, errors.New("short generic netlink reply")
-				}
-				replies = append(replies, append([]byte(nil), m.Data[unix.GENL_HDRLEN:]...)) // buf is read into again
+			case want:
+				replies = append(replies, append([]byte(nil), m.Data...)) // buf is read into again
 			}
 		}
 	}
 }
 
-var errNotKernel = errors.New("a netlink reply not from the kernel")
+// fromKernel is whether a datagram's sender is the kernel (port 0).
+func fromKernel(from syscall.Sockaddr) bool {
+	sa, ok := from.(*syscall.SockaddrNetlink)
+	return ok && sa.Pid == 0
+}
 
 // bitset reads a verbose bitset: the names of the bits that are set. A
 // list (NOMASK) holds only the set bits; a value and mask pair marks each
