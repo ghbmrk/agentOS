@@ -55,9 +55,14 @@ type network struct {
 	edgeMu  sync.Mutex
 	edgeDay uint32 // the day the edge's overrun was last logged
 
-	// offloadErr is the last failure to keep the counted ports from
-	// merging, logged once while it lasts ("" while they merge nothing).
-	offloadErr string
+	// merging is each counted port that merges segments, or could not be
+	// read: its error, logged when it starts or changes. Its caps are
+	// held spent while it lasts (ENF-l-16). d.fwMu guards it and reload.
+	merging map[string]string
+	// reload asks syncFirewall for a full load of the policy in force,
+	// so the quotas start again from the counts with merging's caps
+	// spent or no longer spent: a running quota keeps its own count.
+	reload bool
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -76,12 +81,9 @@ type network struct {
 // filter, the Wake-on-LAN relay and the byte caps restored from disk.
 func (d *Enforcer) openNetwork() error {
 	// The byte caps count each packet as the port received it: one that
-	// merges segments counts one IP header for several, so the daemon
-	// does not start while the core's or the edge's port merges
-	// (ASSUMPTIONS ENF-l-16).
-	if err := d.dp.Offload(d.counted()...); err != nil {
-		return fmt.Errorf("byte caps: %w", err)
-	}
+	// merges segments counts one IP header for several, so its caps are
+	// loaded spent while it does (ASSUMPTIONS ENF-l-16).
+	d.offloads()
 	d.net.filter = mdns.NewFilter()
 	ms, err := d.cfg.machines()
 	if err != nil {
@@ -271,7 +273,22 @@ func (d *Enforcer) drop(caps traffic.Caps) nft.Drop {
 		p.EdgeCount = p.EdgeCap
 	}
 	p.Past = d.net.past
+	d.spendMerging(&p)
 	return p
+}
+
+// spendMerging holds the caps of each counted port that merges segments
+// spent in p: every capped send it carries is dropped (ENF-l-16).
+// d.fwMu is held.
+func (d *Enforcer) spendMerging(p *nft.Drop) {
+	if _, ok := d.net.merging[d.cfg.Layout.Core]; ok {
+		for i := range p.Groups {
+			p.Groups[i].Count = max(p.Groups[i].Count, p.Groups[i].Cap)
+		}
+	}
+	if _, ok := d.net.merging[d.cfg.Layout.Edge]; ok {
+		p.EdgeCount = max(p.EdgeCount, p.EdgeCap)
+	}
 }
 
 // startMDNS runs the pair relay on plan, stopping the one before it.
@@ -319,7 +336,11 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 		return
 	}
 	d.net.lastRead = now
-	d.keepOffloadsOff()
+	if d.offloads() {
+		if err := d.syncFirewall(ctx); err != nil {
+			d.dp.Logf("firewall: " + err.Error())
+		}
+	}
 	if err := d.readCaps(ctx); err != nil {
 		d.dp.Logf("byte caps: " + err.Error())
 	}
@@ -365,24 +386,36 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 // core's and the edge's.
 func (d *Enforcer) counted() []string { return []string{d.cfg.Layout.Core, d.cfg.Layout.Edge} }
 
-// keepOffloadsOff turns merging off again on the counted ports before each
-// reading, since a port whose device is made again (a VLAN added back)
-// starts with its driver's defaults. A failure is logged when it starts
-// or changes, and the end of one once.
-func (d *Enforcer) keepOffloadsOff() {
-	msg := ""
-	if err := d.dp.Offload(d.counted()...); err != nil {
-		msg = err.Error()
+// offloads turns merging off on each counted port, at start and again
+// before each reading, since a port whose device is made again (a VLAN
+// added back) starts with its driver's defaults. A port where it fails
+// has its caps held spent until it reads clean; the rest of the daemon
+// runs on (ENF-l-16). Each start and end of a failure is logged once. It
+// reports whether a port changed, and asks for a full load if one did.
+func (d *Enforcer) offloads() bool {
+	now := map[string]string{}
+	for _, port := range d.counted() {
+		if err := d.dp.Offload(port); err != nil {
+			now[port] = err.Error()
+		}
 	}
-	if msg == d.net.offloadErr {
-		return
+	d.fwMu.Lock()
+	defer d.fwMu.Unlock()
+	changed := false
+	for _, port := range d.counted() {
+		was, bad := d.net.merging[port]
+		msg, still := now[port]
+		switch {
+		case still && (!bad || msg != was):
+			d.dp.Logf("byte caps: " + port + " merges segments, every capped send it carries is dropped until it stops: " + msg)
+		case bad && !still:
+			d.dp.Logf("byte caps: " + port + " merges no segments again, its caps count again")
+		}
+		changed = changed || bad != still
 	}
-	if msg != "" {
-		d.dp.Logf("byte caps: a counted port merges segments, its bytes count short: " + msg)
-	} else {
-		d.dp.Logf("byte caps: the counted ports merge no segments again")
-	}
-	d.net.offloadErr = msg
+	d.net.merging = now
+	d.net.reload = d.net.reload || changed
+	return changed
 }
 
 // readCaps takes one reading of the byte caps' counters (#4376 wiring
@@ -417,6 +450,7 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
+	d.spendMerging(&p)
 	running, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
 		return over, fmt.Errorf("drop: %w", err)

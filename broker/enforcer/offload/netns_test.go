@@ -29,7 +29,7 @@ func inNetns(t *testing.T) bool {
 	if os.Getenv(childEnv) == "1" {
 		return true
 	}
-	for _, tool := range []string{"unshare", "ip"} {
+	for _, tool := range []string{"unshare", "nsenter", "ip"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			if required() {
 				t.Fatalf("%s missing", tool)
@@ -62,7 +62,7 @@ func ip(t *testing.T, args ...string) {
 
 func merging(t *testing.T, dev string) []string {
 	t.Helper()
-	a, err := Active(dev)
+	a, err := features(dev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,34 +76,50 @@ func merging(t *testing.T, dev string) []string {
 }
 
 // TestOffTurnsMergingOff (ENF-cap-gro, #4610; NET-2 Byte caps): Off turns
-// GRO off on a port and on every device under it, a bridge's member and a
-// VLAN's parent, reads them back, and a repeat changes nothing. A missing
-// port and a feature the device holds fixed are errors, so the daemon
-// refuses to start on them. A veth's peer in another namespace is not
-// under the port and is left as it is.
+// GRO off on a port and on every device under it, a bridge's member, a
+// VLAN's parent and a macvlan's lower device, reads them back, and a
+// repeat changes nothing. A lower device is set before the device on it,
+// so the first Off over a macvlan and its lower device succeeds. A
+// missing port and a feature the device holds fixed are errors, so the
+// daemon holds that port at its caps. A veth's peer in another namespace
+// is not under the port and is left as it is, even where its index is a
+// local device's; any other parent in another namespace is an error.
+//
+// The test sets features with CAP_NET_ADMIN in its own namespace. The
+// daemon has it only once ENF-m-b's unit gives it, in the namespace that
+// holds the enforcer's ports; until then the placeholder unit has no
+// network and no capability (ASSUMPTIONS ENF-gro-4).
 func TestOffTurnsMergingOff(t *testing.T) {
 	if !inNetns(t) {
 		return
 	}
+	on := func(devs ...string) {
+		t.Helper()
+		for _, d := range devs {
+			if err := Set(d, map[string]bool{"rx-gro": true}); err != nil {
+				t.Fatal(err)
+			}
+			if len(merging(t, d)) == 0 {
+				t.Fatalf("%s: GRO did not turn on", d)
+			}
+		}
+	}
+	off := func(what string, devs ...string) {
+		t.Helper()
+		for _, d := range devs {
+			if on := merging(t, d); len(on) > 0 {
+				t.Errorf("%s still merging after %s: %v", d, what, on)
+			}
+		}
+	}
 	ip(t, "link", "add", "va", "type", "veth", "peer", "name", "vb")
 	ip(t, "link", "add", "br0", "type", "bridge")
 	ip(t, "link", "set", "va", "master", "br0")
-	for _, d := range []string{"va", "vb", "br0"} {
-		if err := Set(d, map[string]bool{"rx-gro": true}); err != nil {
-			t.Fatal(err)
-		}
-		if on := merging(t, d); len(on) == 0 {
-			t.Fatalf("%s: GRO did not turn on", d)
-		}
-	}
+	on("va", "vb", "br0")
 	if err := Off("br0"); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{"br0", "va", "vb"} { // vb is va's peer, in this namespace
-		if on := merging(t, d); len(on) > 0 {
-			t.Errorf("%s still merging after Off(br0): %v", d, on)
-		}
-	}
+	off("Off(br0)", "br0", "va", "vb") // vb is va's peer, in this namespace
 	if err := Off("br0"); err != nil {
 		t.Fatalf("a repeat: %v", err)
 	}
@@ -111,28 +127,32 @@ func TestOffTurnsMergingOff(t *testing.T) {
 	vlan := exec.Command("ip", "link", "add", "link", "vb", "name", "vb.10", "type", "vlan", "id", "10").Run() == nil
 	switch {
 	case vlan:
-		if err := Set("vb", map[string]bool{"rx-gro": true}); err != nil {
-			t.Fatal(err)
-		}
+		on("vb")
 		if err := Off("vb.10"); err != nil {
 			t.Fatal(err)
 		}
-		if on := merging(t, "vb"); len(on) > 0 {
-			t.Errorf("a VLAN's parent still merging: %v", on)
-		}
+		off("Off(vb.10)", "vb")
 	case required():
 		t.Fatal("the kernel has no 802.1Q VLAN support")
 	default:
 		t.Log("no 802.1Q support here: the VLAN case is skipped")
 	}
 
+	// A macvlan takes rx-gro from its lower device: set first, the macvlan
+	// would read back still on. Its lower device is on the list too, after it.
+	ip(t, "link", "add", "lw0", "type", "veth", "peer", "name", "lw1")
+	ip(t, "link", "add", "mv0", "link", "lw0", "type", "macvlan")
+	on("lw0", "mv0")
+	if err := Off("mv0", "lw0"); err != nil {
+		t.Fatalf("the first Off over a macvlan: %v", err)
+	}
+	off("Off(mv0, lw0)", "mv0", "lw0")
+
 	if err := Off("nope"); err == nil || !strings.Contains(err.Error(), "port nope: no such device") {
 		t.Fatalf("a missing port: %v", err)
 	}
-	if err := Set("va", map[string]bool{"rx-gro-hw": true}); err == nil {
-		t.Fatal("a feature the veth holds fixed off turned on")
-	} else if !errors.Is(err, ErrStuck) {
-		t.Logf("the kernel refused the change itself: %v", err)
+	if err := Set("va", map[string]bool{"rx-gro-hw": true}); !errors.Is(err, ErrStuck) {
+		t.Fatalf("a feature the veth holds fixed off: %v", err)
 	}
 
 	// A peer in another namespace.
@@ -151,7 +171,16 @@ func TestOffTurnsMergingOff(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	ip(t, "link", "add", "vc", "type", "veth", "peer", "name", "vd", "netns", strconv.Itoa(other.Process.Pid))
+	// vc's IFLA_LINK is vd's index in the other namespace, 77, which is
+	// also lx's here: read as a local index, Off(vc) would reach lx.
+	ip(t, "link", "add", "lx", "index", "77", "type", "veth", "peer", "name", "ly")
+	// ip sets no index on a peer, so the pair is made there and vc moved here.
+	pid := strconv.Itoa(other.Process.Pid)
+	if out, err := exec.Command("nsenter", "-t", pid, "-n", "ip", "link", "add", "vd", "index", "77", "type", "veth",
+		"peer", "name", "vc", "netns", strconv.Itoa(os.Getpid())).CombinedOutput(); err != nil {
+		t.Fatalf("vd and vc: %v\n%s", err, out)
+	}
+	on("lx", "ly")
 	inOther := func(f func()) {
 		runtime.LockOSThread() // unlocked only once back: a thread left elsewhere exits with this goroutine
 		back, err := os.Open("/proc/thread-self/ns/net")
@@ -173,17 +202,27 @@ func TestOffTurnsMergingOff(t *testing.T) {
 		}
 		runtime.UnlockOSThread()
 	}
-	inOther(func() {
-		if err := Set("vd", map[string]bool{"rx-gro": true}); err != nil {
-			t.Fatal(err)
-		}
-	})
+	inOther(func() { on("vd") })
 	if err := Off("vc"); err != nil {
 		t.Fatal(err)
 	}
+	if len(merging(t, "lx")) == 0 || len(merging(t, "ly")) == 0 {
+		t.Error("Off(vc) read its peer's index in another namespace as a local device's")
+	}
 	inOther(func() {
-		if on := merging(t, "vd"); len(on) == 0 {
+		if len(merging(t, "vd")) == 0 {
 			t.Error("Off(vc) reached its peer in another namespace")
+		}
+	})
+
+	// A macvlan whose lower device stays here once it is moved there: Off
+	// cannot reach the lower device from there, so it is an error, not a
+	// pass.
+	ip(t, "link", "add", "mv1", "link", "vc", "type", "macvlan")
+	ip(t, "link", "set", "mv1", "netns", pid)
+	inOther(func() {
+		if err := Off("mv1"); err == nil || !strings.Contains(err.Error(), "mv1: its parent is in another namespace") {
+			t.Errorf("a macvlan whose lower device is in another namespace: %v", err)
 		}
 	})
 }

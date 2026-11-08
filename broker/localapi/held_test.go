@@ -10,7 +10,7 @@ import (
 
 // The held-text op is a page op, distinct from every other.
 func TestHeldOpIsAPageOp(t *testing.T) {
-	all := slices.Concat(Ops, SetupOps, PasskeyOps, BackupOps, RecoveryOps, CameraOps)
+	all := slices.Concat(Ops, SetupOps, PasskeyOps, BackupOps, RecoveryOps, CameraOps, EraseOps)
 	for _, op := range HeldOps {
 		if !strings.HasPrefix(op, "page_") || slices.Contains(all, op) {
 			t.Fatalf("%s", op)

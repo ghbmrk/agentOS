@@ -48,6 +48,8 @@ jobs:
           cache: false
       - name: Key separation unit tests
         run: python3 image/enforcer/test_finish_image.py -v
+      - name: Tree check unit tests
+        run: python3 image/enforcer/test_finalize.py -v
       - name: Throwaway feeds, and the key separation on them
         run: image/enforcer/throwaway_feeds.sh "$RUNNER_TEMP/feeds"
       - name: Install build and boot tools

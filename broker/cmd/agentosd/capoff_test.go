@@ -399,7 +399,7 @@ func TestModelProbeIsCachedAMinute(t *testing.T) {
 // and its Digest still returns lines then.
 func TestCapabilityLinesBesideTheOldSettings(t *testing.T) {
 	b := newCapBox(t)
-	wireSettings(&b.cfg)
+	wireSettings(&b.cfg, false)
 	b.caps.recallWired(false)
 	b.caps.updateChecks(false)
 	b.run()

@@ -184,7 +184,7 @@ func chatCode(t time.Time) string {
 func TestCH15HelpNamesChatUncut(t *testing.T) {
 	{
 		var dc daemon.Config
-		wireSettings(&dc)
+		wireSettings(&dc, false)
 		r := pacedOwner(t, ownerch.Pacing{}, at23)
 		ch, err := ownerch.New(ownerch.Config{
 			Owner: ownerNum, Modem: r.box, Engine: pacingEngine{}, Store: &ownerch.MemStore{},
