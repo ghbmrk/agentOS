@@ -669,6 +669,13 @@ func fds(t *testing.T) int {
 func TestWriteCaptureHoldsItsModeAndItsDescriptors(t *testing.T) {
 	dir := t.TempDir()
 	path, store := filepath.Join(dir, "first-edge"), filepath.Join(dir, "store")
+	// Warm up first: the runtime opens its poller's descriptors on the
+	// process's first file, which would count against writeCapture when
+	// this test runs alone or first.
+	warm := t.TempDir()
+	if err := writeCapture(filepath.Join(warm, "first-edge"), filepath.Join(warm, "store"), make([]byte, captureLen)); err != nil {
+		t.Fatal(err)
+	}
 	// Mutant capture.go:83, the Chmod dropped: under a umask that clears
 	// owner bits the capture is not 0600.
 	old := syscall.Umask(0o277)
