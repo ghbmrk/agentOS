@@ -134,7 +134,7 @@ func TestPathsFollowTheDocument(t *testing.T) {
 		return strings.Contains(refusedMap.ReplaceAllString(markSet.ReplaceAllString(got, ""), ""), s)
 	}
 	d := fixturePolicy()
-	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept`
+	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4_r accept`
 	edgeTV := `iifname "edge0" oifname "ap0.101"`
 	coreSpk := `iifname "core0" oifname "ap0.102"`
 	pair := `iifname "ap0.106" oifname "ap0.107" accept`

@@ -117,6 +117,14 @@ const ClaimTimeout = 6 * 3600 // seconds
 // never another host's passed.
 func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
+// AnswerTimeout is how long, in seconds, an answer lets a new connection
+// open to its addresses: a Recent set's timeout, counted from the Refresh
+// after the answer, so at least this long from the answer itself. dns
+// keeps it at least twice the longest TTL its resolver hands out, so a
+// device that dials an answer within its TTL, or retries for as long
+// again, is never dropped.
+const AnswerTimeout = 600
+
 const (
 	HostTimeout    = 3600      // seconds
 	HostTCPTimeout = 5 * 86400 // seconds
@@ -453,6 +461,20 @@ func Paths(d policy.Document, l Layout) ([]Path, error) {
 
 // AllowSet is one allow set the ruleset declares and the names whose
 // answers slice f's resolver puts in it.
+//
+// Each holder's answers live in four sets per family (#4453). The resolver
+// puts each answer's addresses in the allow set itself, in the name's own
+// set (Named) and in the fresh set (Fresh). The allow set and the name
+// sets hold every address a listed name answered: the allow set is what
+// an open connection's later packets are checked against (the live
+// chains), and the name sets let a load keep the answers of the names
+// still listed (Reload). A connection's first packet passes only to an
+// address in the fresh set or the recent set (Recent), so an address no
+// answer has returned for AnswerTimeout takes no new connection, while a
+// connection already open to it goes on. The fresh set holds the answers
+// since the last Refresh, with no timeout; Refresh moves them into the
+// recent set with a full AnswerTimeout each, which re-adding to a set
+// with a timeout never gives (dns ASSUMPTIONS ENF-f-3).
 type AllowSet struct {
 	Set4, Set6 string
 	Names      []string
@@ -465,6 +487,14 @@ type AllowSet struct {
 func (a AllowSet) Named(name string, v6 bool) string {
 	return named(a.set(v6), a.holder, name)
 }
+
+// Fresh is the set of the family's answers since the last Refresh, which
+// the resolver fills alongside the allow set.
+func (a AllowSet) Fresh(v6 bool) string { return a.set(v6) + "_f" }
+
+// Recent is the set of the family's addresses some listed name answered in
+// the last AnswerTimeout, each until then (Refresh).
+func (a AllowSet) Recent(v6 bool) string { return a.set(v6) + "_r" }
 
 func (a AllowSet) set(v6 bool) string {
 	if v6 {
@@ -566,6 +596,12 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		for _, v6 := range []bool{false, true} {
 			typ := map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6]
 			w.set(a.set(v6), typ, "timeout", nil)
+			w.set(a.Fresh(v6), typ, "", nil)
+			w.open("set " + a.Recent(v6))
+			w.line("type " + typ + ";")
+			w.line("flags timeout;")
+			w.line("timeout " + secs(AnswerTimeout) + ";")
+			w.close()
 			for _, n := range a.names() {
 				w.set(a.Named(n, v6), typ, "timeout", nil)
 			}
@@ -727,8 +763,19 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// From here on, oifname WAN is the internet.
 	add(q(l.Admin), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
 	add(edge, wan, "accept")
-	add(core, wan, "accept", daddr(false, "@"+CoreSet(false)))
-	add(core, wan, "accept", daddr(true, "@"+CoreSet(true)))
+	// An answer's addresses take new connections while it is fresh or
+	// recent, and an open connection lives while its name is listed
+	// (AllowSet); the second rule's live form would be the first's.
+	answered := func(in string, a AllowSet) {
+		for _, v6 := range []bool{false, true} {
+			f := family(v6)
+			k := "ct original " + f + " daddr @" + a.set(v6)
+			add(in, wan, "accept", match{f + " daddr @" + a.Recent(v6), k})
+			add(in, wan, "accept", match{f + " daddr @" + a.Fresh(v6), k})
+			fwd[len(fwd)-1].twin = true
+		}
+	}
+	answered(core, AllowSet{Set4: CoreSet(false), Set6: CoreSet(true)})
 	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
 	// before any allow set is consulted (NET-3).
 	refused(T, wan, LogDNS, daddr(false, "@doh_4"))
@@ -737,8 +784,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, v := range devs {
 		i := q(v.iface)
 		if v.internet() {
-			add(i, wan, "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
-			add(i, wan, "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
+			answered(i, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true)})
 		}
 		for _, m := range dports(v.d.Control) {
 			if v.online() {

@@ -969,3 +969,64 @@ func TestMergingKeptOffAtEachReading(t *testing.T) {
 		t.Fatalf("the end of a failure logged %d times", c)
 	}
 }
+
+// TestAnswersRefreshed (#4453): every readEvery the daemon runs the
+// resolver's step against the running table, so each answer since the
+// last step takes new connections for nft.AnswerTimeout from then and no
+// longer; nothing is applied when no answer is fresh, and a failing step
+// is logged once while it lasts, and its end once.
+func TestAnswersRefreshed(t *testing.T) {
+	x, doc, _ := capped(t)
+	sets, err := nft.AllowSets(doc, x.cfg.Layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := json.Marshal(map[string]any{"nftables": []any{
+		map[string]any{"set": map[string]any{"family": "inet", "table": nft.Table, "name": sets[0].Fresh(false), "elem": []string{"203.0.113.5"}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := nft.Refresh(doc, x.cfg.Layout, fresh)
+	if err != nil || want == "" {
+		t.Fatalf("fixture: no refresh (%v)", err)
+	}
+	updates := func() []string { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return slices.Clone(x.fire.updates) }
+	refreshes := func() int {
+		n := 0
+		for _, u := range updates() {
+			if u == want {
+				n++
+			}
+		}
+		return n
+	}
+
+	x.setListing(listing(t, x, doc, 7, 10))
+	x.advance(readEvery)
+	if refreshes() != 0 {
+		t.Fatal("a refresh with no fresh answer")
+	}
+	x.setListing(fresh)
+	x.advance(readEvery)
+	if refreshes() != 1 {
+		t.Fatalf("%d refreshes of a fresh answer after one reading interval, want 1", refreshes())
+	}
+
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: gone")
+	x.fire.mu.Unlock()
+	logged := len(x.logText())
+	x.advance(readEvery)
+	x.advance(readEvery)
+	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 {
+		t.Fatalf("a failing step logged %d times over two intervals, want once", got)
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = nil
+	x.fire.mu.Unlock()
+	x.advance(readEvery)
+	if !strings.Contains(x.logText()[logged:], "resolver answers: refreshed again") || refreshes() != 2 {
+		t.Fatal("the step's recovery was not logged or did not refresh")
+	}
+}

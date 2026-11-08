@@ -58,6 +58,9 @@ type network struct {
 	// offloadErr is the last failure to keep the counted ports from
 	// merging, logged once while it lasts ("" while they merge nothing).
 	offloadErr string
+	// refreshErr is the resolver step's last failure, logged once while
+	// it lasts ("" while it works).
+	refreshErr string
 
 	// The byte caps: counter is nil when the saved state did not read
 	// back (spent), and then every capped send is dropped until the
@@ -303,7 +306,8 @@ func (d *Enforcer) stopMDNSLocked() {
 }
 
 // tickNetwork is the network side's clock: the pair relay started again
-// if it ended, and the byte caps read every readEvery.
+// if it ended, and the byte caps read and the resolver's answers
+// refreshed every readEvery.
 func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 	d.net.mdnsMu.Lock()
 	down, plan := d.net.mdnsDown, d.net.mdnsPlan
@@ -319,6 +323,42 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 	if err := d.readCaps(ctx); err != nil {
 		d.dp.Logf("byte caps: " + err.Error())
 	}
+	msg := ""
+	if err := d.refreshAnswers(ctx); err != nil {
+		msg = err.Error()
+	}
+	if msg != d.net.refreshErr {
+		if msg != "" {
+			d.dp.Logf("resolver answers: not refreshed, the answers since the last refresh take new connections until one is: " + msg)
+		} else {
+			d.dp.Logf("resolver answers: refreshed again")
+		}
+		d.net.refreshErr = msg
+	}
+}
+
+// refreshAnswers is the resolver's step (nft.Refresh, #4453): every answer
+// added since the last step takes new connections for nft.AnswerTimeout
+// from now, and no longer unless it is answered again. It holds fwMu, so
+// it never runs between a load's reading of the running table and the
+// load.
+func (d *Enforcer) refreshAnswers(ctx context.Context) error {
+	d.fwMu.Lock()
+	defer d.fwMu.Unlock()
+	if d.loaded == "" {
+		return nil
+	}
+	lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
+	defer cancel()
+	running, err := d.dp.Fire.List(lctx, nft.Table)
+	if err != nil {
+		return err
+	}
+	text, err := nft.Refresh(d.loadedDoc, d.cfg.Layout, running)
+	if err != nil || text == "" {
+		return err
+	}
+	return d.dp.Fire.Update(lctx, text)
 }
 
 // counted are the ports whose received bytes the byte caps count: the

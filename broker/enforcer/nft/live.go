@@ -80,6 +80,7 @@ type rule struct {
 	mark    string  // an accept's connection mark (bind); "" otherwise
 	learn   string  // an accept from a shared segment: the chain that records its host
 	logged  string  // a logged rule: the chain that counts, logs and gives the verdict of its first packet (loggedDecls)
+	twin    bool    // its live form is the rule before it's, so it has none of its own
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -135,6 +136,9 @@ func (r rule) first() string {
 // packet goes on to be counted and accepted; a jump becomes a goto, so the
 // target's return ends the live check too.
 func (r rule) later() []string {
+	if r.twin {
+		return nil
+	}
 	verdict := r.verdict
 	switch {
 	case verdict == "accept":
