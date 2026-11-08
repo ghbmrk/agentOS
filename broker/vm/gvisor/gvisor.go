@@ -64,9 +64,10 @@ type Runtime struct {
 
 	// pending holds, per machine ID, the in-sandbox kills that cancelled
 	// Execs started and that may still run. Kill waits on them, so none
-	// outlives the incarnation it was meant for (GVISOR-stale-kill).
+	// outlives the incarnation it was meant for (GVISOR-stale-kill). A
+	// group leaves the map only when its last kill ends.
 	pendingMu sync.Mutex
-	pending   map[string]*sync.WaitGroup
+	pending   map[string]*killGroup
 
 	// oneShot serialises RunOnce calls per name: a name's runs share one
 	// runsc container ID.
@@ -119,8 +120,14 @@ func (r *Runtime) argv(args ...string) []string {
 var runscEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 
 func (r *Runtime) run(ctx context.Context, args ...string) error {
+	return r.runWait(ctx, 0, args...)
+}
+
+// runWait is run with a bound on the wait for runsc's stderr once runsc
+// has exited or been killed (0: none).
+func (r *Runtime) runWait(ctx context.Context, waitDelay time.Duration, args ...string) error {
 	var stderr bytes.Buffer
-	if err := r.cmd(ctx, childproc.Options{Stderr: &stderr}, args...).Run(); err != nil {
+	if err := r.cmd(ctx, childproc.Options{Stderr: &stderr, WaitDelay: waitDelay}, args...).Run(); err != nil {
 		return fmt.Errorf("runsc %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
@@ -347,11 +354,14 @@ func (r *Runtime) Exec(ctx context.Context, id string, c vm.Command) (vm.ExecRes
 		OnCancel: func() {
 			// Read the pid now: the deferred Remove may run before the kill.
 			b, _ := os.ReadFile(pidFile)
-			wg := r.addPendingKill(id)
-			go func() {
-				defer wg.Done()
+			// Registered here, inside exec.Cmd.Cancel, which os/exec
+			// finishes before Wait returns: the kill is pending before
+			// Exec returns (V37).
+			done := r.addPendingKill(id)
+			goKill(func() {
+				defer done()
 				r.killExec(id, strings.TrimSpace(string(b)))
-			}()
+			})
 		},
 	}, append([]string{"--log=" + logs[0], "--debug-log=" + logs[1], "exec", "--cwd", "/", "--user", "0:0", "--internal-pid-file", pidFile, "--pass-fd", "3:2", cid(id)}, c.Argv...)...)
 	// The guest's stderr is read to its end, but no longer than
@@ -562,51 +572,99 @@ func size(path string) int64 {
 	return fi.Size()
 }
 
+// killExecTimeout bounds each killExec's runsc kill, and
+// killExecWaitDelay the wait for its stderr after that: a child runsc
+// left holding the pipe would otherwise hold killExec, and so Kill, past
+// the timeout. Variables only so a test can shorten them.
+var (
+	killExecTimeout   = 5 * time.Second
+	killExecWaitDelay = time.Second
+)
+
+// goKill starts a cancelled Exec's killExec off Exec's path. A test
+// replaces it to hold the kill back and check what was registered before
+// it was handed over.
+var goKill = func(f func()) { go f() }
+
 // killExec kills the command an Exec started inside the sandbox, by the
-// in-sandbox pid runsc wrote. Best effort and bounded: it runs off the
-// caller's path, and a failure is logged.
+// in-sandbox pid runsc wrote. Best effort and bounded by killExecTimeout
+// plus killExecWaitDelay for a runsc that dies on SIGKILL: it runs off
+// the caller's path, and a failure is logged. A runsc stuck where SIGKILL
+// cannot reach it is not bounded; Kill's context bounds the wait on it.
 func (r *Runtime) killExec(id, pid string) {
 	if pid == "" {
 		log.Printf("gvisor: %s: no pid to kill for a cancelled command", id)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), killExecTimeout)
 	defer cancel()
-	if err := r.run(ctx, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
-		log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
+	if err := r.runWait(ctx, killExecWaitDelay, "kill", "--pid", pid, cid(id), "KILL"); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			log.Printf("gvisor: %s: killing cancelled command %s: runsc kill timed out after %s: %v", id, pid, killExecTimeout, err)
+		} else {
+			log.Printf("gvisor: %s: killing cancelled command %s: %v", id, pid, err)
+		}
 	}
+}
+
+// killGroup is one machine ID's in-sandbox kills still running; done
+// closes when the last of them ends.
+type killGroup struct {
+	n    int
+	done chan struct{}
 }
 
 // addPendingKill registers a killExec about to start for id; the caller
-// calls Done on the result when it ends.
-func (r *Runtime) addPendingKill(id string) *sync.WaitGroup {
+// calls the result once, when it ends. The last kill of a group to end
+// closes it and takes it out of the map, so a kill registered later
+// starts a fresh group.
+func (r *Runtime) addPendingKill(id string) func() {
 	r.pendingMu.Lock()
 	defer r.pendingMu.Unlock()
 	if r.pending == nil {
-		r.pending = map[string]*sync.WaitGroup{}
+		r.pending = map[string]*killGroup{}
 	}
-	wg := r.pending[id]
-	if wg == nil {
-		wg = new(sync.WaitGroup)
-		r.pending[id] = wg
+	g := r.pending[id]
+	if g == nil {
+		g = &killGroup{done: make(chan struct{})}
+		r.pending[id] = g
 	}
-	wg.Add(1)
-	return wg
+	g.n++
+	return func() {
+		r.pendingMu.Lock()
+		defer r.pendingMu.Unlock()
+		if g.n--; g.n == 0 {
+			close(g.done)
+			delete(r.pending, id)
+		}
+	}
 }
 
-// waitPendingKills waits for the killExecs registered for id. The group
-// leaves the map before the wait, so a later Exec's kill joins a fresh
-// group and no Add races this Wait. Each killExec is bounded by its own
-// timeout, so the wait is too.
-func (r *Runtime) waitPendingKills(id string) {
+// waitPendingKills waits for the killExecs registered for id, or for ctx
+// to end. It returns an error if ctx ends first: the group stays in the
+// map, so the next Kill waits on it again.
+func (r *Runtime) waitPendingKills(ctx context.Context, id string) error {
 	r.pendingMu.Lock()
-	wg := r.pending[id]
-	delete(r.pending, id)
+	g := r.pending[id]
 	r.pendingMu.Unlock()
-	if wg != nil {
-		wg.Wait()
+	if g == nil {
+		return nil
+	}
+	start := time.Now()
+	select {
+	case <-g.done:
+		if d := time.Since(start); d >= pendingKillLogAfter {
+			log.Printf("gvisor: %s: waited %s for a cancelled command's kill", id, d.Round(time.Millisecond))
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("gvisor: %s: a cancelled command's kill still runs after %s; not killing the sandbox: %w", id, time.Since(start).Round(time.Millisecond), ctx.Err())
 	}
 }
+
+// pendingKillLogAfter is how long Kill's wait for a cancelled command's
+// kill runs before it is logged, so a slow Rollback can be tied to it.
+const pendingKillLogAfter = time.Second
 
 // capped keeps the first max bytes written (all of them when max is 0).
 // It is safe for concurrent use: after ExecWaitDelay, Exec reads it while
@@ -650,8 +708,13 @@ var _ vm.Execer = (*Runtime)(nil)
 // Exec's in-sandbox kill still running: runsc's container ID is the same
 // for every incarnation of a machine, so a kill let outlive Kill could
 // land in the sandbox a Rollback or Rebuild starts next (GVISOR-stale-kill).
+// If ctx ends before that kill does, Kill fails without touching the
+// sandbox, so the machine is not known dead and nothing restarts it
+// (GVISOR-killwait-ctx).
 func (r *Runtime) Kill(ctx context.Context, l vm.Launch) error {
-	r.waitPendingKills(l.ID)
+	if err := r.waitPendingKills(ctx, l.ID); err != nil {
+		return err
+	}
 	_ = r.run(ctx, "kill", cid(l.ID), "KILL")
 	err := r.run(ctx, "delete", "-force", cid(l.ID))
 	if err != nil && (strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "not found")) {
