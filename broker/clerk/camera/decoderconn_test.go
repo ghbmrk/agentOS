@@ -126,6 +126,7 @@ func TestCloseStopsHungUnitsAtOnce(t *testing.T) {
 	defer ln.Close()
 	const cams = 6
 	opened := make(chan net.Conn, cams)
+	ended := make(chan struct{}, cams)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -139,6 +140,7 @@ func TestCloseStopsHungUnitsAtOnce(t *testing.T) {
 				}
 				opened <- c
 				io.Copy(io.Discard, c) // a hung unit: never closes its side
+				ended <- struct{}{}    // the clerk ended its own
 			}(c)
 		}
 	}()
@@ -175,7 +177,19 @@ func TestCloseStopsHungUnitsAtOnce(t *testing.T) {
 	}()
 	t0 := time.Now()
 	d.Close()
-	if got := time.Since(t0); got >= 3*decoderStop {
+	got := time.Since(t0)
+	if got >= 3*decoderStop {
 		t.Fatalf("Close took %v for %d hung units, each stopped after %v: one after another", got, cams, decoderStop)
+	}
+	// It stopped every session and waited for the units, not returned at once.
+	if got < decoderStop {
+		t.Fatalf("Close returned after %v, before the hung units' %v", got, decoderStop)
+	}
+	for i := range cams {
+		select {
+		case <-ended:
+		case <-time.After(time.Second):
+			t.Fatalf("%d of %d sessions were ended by Close", i, cams)
+		}
 	}
 }

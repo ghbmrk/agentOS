@@ -11,14 +11,15 @@ values cannot hold a newline (unit names, enums, paths), so no unit's text can p
 An earlier version parsed `systemd --test`'s dump, and an Environment= value could write a fake unit
 header into that (#4779 Security round 1).
 
-The container has its own mount, UTS, IPC, PID, network and cgroup namespaces, a read-only /proc/sys
-and a nodev /dev, so PID 1 cannot set the runner's hostname or a global sysctl. It is still real root
-on the runner, as are the generators it runs; the tree is the build's own. Container mode means some
+The container has its own mount, UTS, IPC, PID, network and cgroup namespaces, so its hostname is its
+own, and a read-only /proc/sys and a nodev /dev, so nothing it runs sets a global sysctl or opens a host
+device by accident. That is no bar: PID 1 and the generators it runs are real root on the runner and
+could remount either; the tree is the build's own. Container mode means some
 generators see a different machine than the box: fstab-generator skips fstab entries that name a device
 (callers refuse those in the tree themselves), and gpt-auto-generator finds no disk. A runner booted by
-systemd gives the manager a delegated scope of its own, whose one process outside the container (unshare,
-PID 1's parent) moves to a child group, so PID 1 can give its units controllers. The console is a pty, read for the lines PID 1
-logs (failed generators).
+systemd gives the manager a delegated scope of its own; unshare, PID 1's parent and the one process of
+the scope outside the container, moves to a child group of it, so PID 1 can give its units controllers.
+The console is a pty, read for the lines PID 1 logs (failed generators).
 """
 import os
 import pathlib
@@ -142,17 +143,14 @@ class Manager:
 
     def hold_parent(self, timeout=10):
         """Move unshare, PID 1's parent, from the delegated scope (the container's cgroup root) into a child
-        group of its own, so the root holds no process and PID 1 can enable controllers for its units: cgroup
-        v2 refuses a non-root group that holds a process any (no internal processes; #4392)."""
+        group of its own, so the scope holds no process itself and PID 1 can enable controllers for its units:
+        cgroup v2 lets a group other than the root enable none for its children while a process sits in it (no
+        internal processes; #4392)."""
         own = cgroup_of(os.getpid())
         end = time.monotonic() + timeout
         while time.monotonic() < end and self.proc.poll() is None:
             # Only once unshare has forked: its cgroup namespace, made before the fork, is rooted at the scope.
-            try:
-                with open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)) as f:
-                    forked = bool(f.read().split())
-            except OSError:
-                forked = False
+            forked = bool(children(self.proc.pid))
             cg = cgroup_of(self.proc.pid)
             if forked and cg and cg != own and cg.endswith(".scope"):
                 holder = "/sys/fs/cgroup%s/offline-systemd-parent" % cg
@@ -264,9 +262,12 @@ class Manager:
         return out
 
     def stop(self):
-        if self.pid:
+        # PID 1 by its host pid: known once wait() found it, else unshare's child, which outlives a killed
+        # unshare (no --kill-child), as after a failure between the fork and wait().
+        pids = [self.pid] if self.pid else children(self.proc.pid)
+        for pid in pids:
             try:
-                os.kill(self.pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         self.proc.kill()
@@ -298,6 +299,15 @@ def manager_argv(root, usr, cmdline, plant, console):
     return (["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation", "private",
              "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant), console]
             + words + list(PINNED))
+
+
+def children(pid):
+    """PID's child processes' pids, or [] once it is gone."""
+    try:
+        with open("/proc/%d/task/%d/children" % (pid, pid)) as f:
+            return [int(x) for x in f.read().split()]
+    except OSError:
+        return []
 
 
 def cgroup_of(pid):

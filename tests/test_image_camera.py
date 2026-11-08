@@ -278,7 +278,8 @@ class DecoderUnitTest(unittest.TestCase):
         test = (HOST_CMD / "unit_test.go").read_text()
         self.assertIn("func TestDecoderStartsInItsUnit(", test)
         self.assertIn("os.Getpid(); pid != 1", test)
-        self.assertIn('os.ReadDir("/run")', test)
+        self.assertIn('runHolds(t, "/run")', test)
+        self.assertIn("syscall.Access(p, 1)", test)
 
 
 class DecoderStepTest(unittest.TestCase):

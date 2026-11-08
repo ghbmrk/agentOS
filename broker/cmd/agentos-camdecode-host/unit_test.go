@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -52,25 +54,7 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	if pid := os.Getpid(); pid != 1 {
 		t.Errorf("the session is pid %d, not 1 in a pid namespace of its own", pid)
 	}
-	if es, err := os.ReadDir("/run"); err != nil {
-		t.Errorf("the session's /run: %v", err)
-	} else {
-		for _, e := range es {
-			t.Logf("/run holds %s (%v)", e.Name(), e.Type())
-		}
-	}
-	// Nothing but directories, so no socket or file of the box's: the
-	// mount points systemd leaves under the empty /run hold nothing, or
-	// nothing it can read.
-	filepath.WalkDir("/run", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() {
-			t.Errorf("the session's /run holds %s (%v); want only empty directories", p, d.Type())
-		}
-		return nil
-	})
+	runHolds(t, "/run")
 	conn, err := net.FileConn(os.Stdin)
 	if err != nil {
 		t.Fatalf("standard input is not the session's connection: %v", err)
@@ -131,6 +115,7 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	}
 	line, err := bufio.NewReader(p.Out()).ReadString('\n')
 	if err != nil || line != "frame\n" {
+		p.Stop()
 		<-p.Done()
 		t.Fatalf("decoder answered %q, %v; %s", line, err, why(p, state))
 	}
@@ -170,4 +155,42 @@ func why(p camera.Proc, state string) string {
 		out += "\n-- runsc\n" + string(b)
 	}
 	return out
+}
+
+// runHolds fails t unless the session's /run holds nothing but
+// directories (the mount points systemd leaves under the empty tmpfs), so
+// no socket or file of the box's is there to open. Each entry is logged
+// with its mode. A directory the walk cannot list counts only if the
+// session cannot search it either: a socket in a directory it can search
+// but not list is still open to it by name.
+// logger is what runHolds reports to: a *testing.T.
+type logger interface {
+	Errorf(string, ...any)
+	Logf(string, ...any)
+}
+
+func runHolds(t logger, run string) {
+	err := filepath.WalkDir(run, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && errors.Is(err, fs.ErrPermission) && syscall.Access(p, 1) != nil {
+				t.Logf("/run: %s cannot be listed or searched", p)
+				return fs.SkipDir
+			}
+			t.Errorf("the session's /run: %s: %v", p, err)
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			t.Errorf("the session's /run: %s: %v", p, ierr)
+			return nil
+		}
+		t.Logf("/run holds %s %v", p, info.Mode())
+		if !d.IsDir() {
+			t.Errorf("the session's /run holds %s (%v); want only directories", p, info.Mode())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("the session's /run: %v", err)
+	}
 }
