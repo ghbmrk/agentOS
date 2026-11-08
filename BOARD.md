@@ -445,8 +445,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-confirm | KRN-forget-c-confirm: before a Forget erase the kernel texts a kernel-rendered confirmation naming the look-up and the counts, and erases only on the owner's YES (Mark, option B, 2026-11-08). Kernel half; from #5092 Security finding 1. | #5092, #3414 | queued (release; tier A) |
 | KRN-forget-c-confirm-owner | KRN-forget-c-confirm-owner: the owner side routes the YES reply to the kernel's pending erase and the page shows the waiting state. Sub B half; from #5092 Security finding 1. | #5124 | queued (release; tier A) |
 | TEST-flake-ready-before-clip | TEST-flake-ready-before-clip: TestReadySentenceAlwaysGoesBeforeTheClip flakes under -race (clip first on run 6). From #5115's broker-race. | #5115 | building (release; tier A) |
-| TEST-flake-cgroup-res1res2 | TEST-flake-cgroup-res1res2: TestRES1RES2RealCgroupV2 times out in cmd.Wait (cgroup_test.go:217). Second sighting; from #4799 and #5129. | #4799, #5129 | building (release; tier A) |
-| CGROUP-killed-group-clone3 | CGROUP-killed-group-clone3: a child born by clone3 into a group that was once killed is SIGKILLed at birth on kernel 6.18; supervise restarts into its killed leaf. From #5134. | #5134 | queued (release; tier A) |
+| CGROUP-killed-group-clone3 | CGROUP-killed-group-clone3: a child born by clone3 into a group that was once killed is SIGKILLed at birth on kernel 6.18; supervise restarts into its killed leaf. From #5134. | #5134 | building (release; tier A) |
+| ENF-mut-netns-pkgs | ENF-mut-netns-pkgs: kill the 79 surviving mutants in enforcer/mdns, enforcer/offload and enforcer/radio/confine. Release; from #5129 and #5095 mutgate. | #5129, #5095 | queued (release; tier A) |
+| CALL-mut-survivors | CALL-mut-survivors: kill or prove the 5 old broker/call/call.go survivors (442, 465, 503, 522, 571). Release; from #5132 mutgate. | #5132 | queued (release; tier A) |
+| AGENTOSD-broker-group-fresh | AGENTOSD-broker-group-fresh: agentosd reuses its own broker/ cgroup, so a kill count left by systemd would make every clone3 child die at birth with no cause; infer.go leaf comment stale. From #5141. | #5141 | queued (release; tier A) |
+| INFER-oom-per-service | INFER-oom-per-service: an OOM in vision tags infer's stop oom, since both read the shared inference leaf's count. From #5141. | #5141 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
