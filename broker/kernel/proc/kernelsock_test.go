@@ -475,7 +475,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			if err := k.EdgeCandidate(at, hi.Key, hi.Nonce, hi.Sig); err != nil {
 				return err
 			}
-			return k.OpenTask(at, "t1")
+			return k.OpenTask(at, "t1", 0)
 		}); err != nil {
 			t.Fatal(err)
 		}

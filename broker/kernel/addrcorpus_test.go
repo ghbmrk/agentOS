@@ -44,7 +44,7 @@ func TestDecoyChecksAgreeOnTheAddressCorpus(t *testing.T) {
 	plans := func(text string) bool {
 		n++
 		s, id := fmt.Sprintf("s%d", n), fmt.Sprintf("p%d", n)
-		must(t, r.k.OpenTask(int64(n), s))
+		must(t, r.k.OpenTask(int64(n), s, 0))
 		before := len(r.k.State().Trips())
 		r.plan(id, r.serve(s), st(key.Organize, text))
 		ts := r.k.State().Trips()

@@ -37,7 +37,7 @@ func TestLogOpenIsTheOnlyConstructor(t *testing.T) {
 	r := newRig(t)
 	n := r.k.Log().Len()
 	cp := *r.k.Log()
-	must(t, r.k.OpenTask(1, "t1"))
+	must(t, r.k.OpenTask(1, "t1", 0))
 	if cp.Len() != n+1 || r.k.Log().Len() != n+1 {
 		t.Fatalf("after one append the copy has %d entries and the log %d, want %d", cp.Len(), r.k.Log().Len(), n+1)
 	}

@@ -373,12 +373,7 @@ func cmp(s, def string) string {
 
 // plain reports whether a header value holds no control characters.
 func plain(s string) bool {
-	for _, r := range s {
-		if r < 0x20 && r != '\t' || r == 0x7f {
-			return false
-		}
-	}
-	return true
+	return !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 && r != '\t' || r == 0x7f })
 }
 
 // Facts is the clerk's own reading of a step (KEY-2): the content and labels

@@ -700,7 +700,8 @@ func (s *State) Dispatched(r Request) (Dispatch, bool) {
 	if st == nil || st.Phase != PInflight || st.DispatchSeq == 0 || !reflect.DeepEqual(r.Plan, p.Plan) {
 		return Dispatch{}, false
 	}
-	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel, Approved: st.Approved}, true
+	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel, Approved: st.Approved,
+		Rung: s.Rung(key.TaskOf(p.Plan.Key), st.Approved)}, true
 }
 
 // Unsettled is a step whose effect is uncertain: still being reconciled, or

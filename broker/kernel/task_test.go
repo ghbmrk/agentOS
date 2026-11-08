@@ -44,7 +44,7 @@ func (r *rig) admits(id string, k key.Key, at int64) *kernel.Refusal {
 // a rejected one or a cancel leaves the task open for the next (KRN-5).
 func TestATaskRunsItsPlansAndRePlans(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultFail }
 	r.plan("p1", r.serve("t1"), st(key.Trash, "m1"))
 	must(t, r.tick(1))
@@ -65,7 +65,7 @@ func TestATaskRunsItsPlansAndRePlans(t *testing.T) {
 
 func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	if _, err := key.Derive(r.serve("t1"), r.holder.priv, r.holder.pub, key.LimitTask("t2")); !errors.Is(err, key.ErrLoosens) {
 		t.Fatalf("a key moved to another task: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 		t.Fatalf("a key with no task: %v", rf)
 	}
 	for name, err := range map[string]error{
-		"a second open": r.k.OpenTask(0, "t1"),
-		"an empty id":   r.k.OpenTask(0, ""),
+		"a second open": r.k.OpenTask(0, "t1", 0),
+		"an empty id":   r.k.OpenTask(0, "", 0),
 	} {
 		if err != kernel.ErrTaskOpen {
 			t.Errorf("%s: %v", name, err)
@@ -110,7 +110,7 @@ func TestATaskKeyServesOnlyALiveTask(t *testing.T) {
 		t.Errorf("an approval of a task never opened: %v", err)
 	}
 	must(t, r.k.Stop(1))
-	if err := r.k.OpenTask(2, "t6"); err != kernel.ErrTaskOpen {
+	if err := r.k.OpenTask(2, "t6", 0); err != kernel.ErrTaskOpen {
 		t.Errorf("an open under STOP: %v", err)
 	}
 	r.replays()
@@ -130,7 +130,7 @@ func TestEachEndEndsTheTask(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
-			must(t, r.k.OpenTask(0, "t1"))
+			must(t, r.k.OpenTask(0, "t1", 0))
 			must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, r.owner)))
 			// A revoke of a key the task's plans used ends nothing.
 			must(t, r.k.Revoke(0, r.serve("t1", key.LimitUses(1)).Tip()))
@@ -156,7 +156,7 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
 	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, phone)))
 	must(t, r.k.Unenroll(1, key.Unenroll(r.owner.pass, gen(21).pk)))
 	if tk, _ := r.k.State().Task("t1", 1); len(tk.Approvals) != 1 {
@@ -178,7 +178,7 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 // new plans, not the steps already admitted (KRN-8).
 func TestAnAdmittedPlanOutlivesItsTask(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("p1", r.serve("t1", key.LimitHold(hour, hour)), st(key.Unsubscribe, "m1"))
 	must(t, r.tick(0))
 	must(t, r.k.EndTask(1, "t1"))
@@ -192,7 +192,7 @@ func TestAnAdmittedPlanOutlivesItsTask(t *testing.T) {
 // breaks the log and does not come back after a restart (KRN-7).
 func TestAnUnanchoredTaskApprovalDoesNotSurvive(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	must(t, r.k.Log().Anchor())
 	r.anchor.down = true
 	if err := r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)); err == nil {
@@ -212,7 +212,7 @@ func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
 	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	must(t, r.k.ApproveTask(1, "t1", approval("t1", 0, r.owner)))
 	other := kernel.TaskApproval{Site: "other.example", First: "https://other.example/"}
 	other.N, other.By = 1, key.Approve(r.owner.pass, kernel.TaskHash("t1", 1, other.Site, other.First))
@@ -235,7 +235,7 @@ func TestATaskHoldsOneApprovalPerSite(t *testing.T) {
 // moves its time (CLK-3).
 func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	a := approval("t1", 0, r.owner)
 	must(t, r.k.ApproveTask(1, "t1", a))
 	must(t, r.k.ApproveTask(10, "t1", approval("t1", 1, r.spare)))
@@ -258,8 +258,8 @@ func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 // for another task has its own (KRN-5, LOG-7, #2902).
 func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.OpenTask(0, "t2"))
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	serve := func(task string) key.Key {
 		s, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask(task))
@@ -288,7 +288,7 @@ func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 // (KRN-5, LOG-7, #2927 L3 fix-list 1).
 func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	t1, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask("t1"))
 	must(t, err)
@@ -301,7 +301,7 @@ func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
 	if rf := r.admit(2, "t1", 1); rf == nil || rf.Code != key.RSpendTask {
 		t.Fatalf("the plan's own cap: %v", rf)
 	}
-	if err := r.k.OpenTask(3, key.PlanPrefix+"t1"); err == nil {
+	if err := r.k.OpenTask(3, key.PlanPrefix+"t1", 0); err == nil {
 		t.Fatal("a task opened under the plans' prefix")
 	}
 	r.replays()

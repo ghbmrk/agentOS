@@ -93,8 +93,8 @@ func (r *rig) sessionOnly(stopped, alive string, at int64) {
 func TestHoneyKeyTripStopsNoClaimedSession(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.OpenTask(0, "t2"))
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
 	r.plan("p0", r.serve("t1"), st(key.Trash, "m0"))
 
 	var honey key.Key
@@ -146,8 +146,8 @@ func TestHostilePageDecoyDestinationStopsSessionOnly(t *testing.T) {
 	}
 	for i, dest := range dests {
 		s1, s2 := "a"+string(rune('0'+i)), "b"+string(rune('0'+i))
-		must(t, r.k.OpenTask(int64(i), s1))
-		must(t, r.k.OpenTask(int64(i), s2))
+		must(t, r.k.OpenTask(int64(i), s1, 0))
+		must(t, r.k.OpenTask(int64(i), s2, 0))
 		id := "page" + s1
 		r.plan(id, r.serve(s1), st(key.Organize, dest))
 		if r.k.State().Plans[id].Reject != kernel.CTrip {
@@ -160,7 +160,7 @@ func TestHostilePageDecoyDestinationStopsSessionOnly(t *testing.T) {
 	}
 	// A public address and a name trip nothing: a name is checked where it
 	// is resolved.
-	must(t, r.k.OpenTask(9, "c"))
+	must(t, r.k.OpenTask(9, "c", 0))
 	r.plan("fine", r.serve("c"), st(key.Organize, "https://169.254.169.254.example/"), st(key.Organize, "8.8.8.8"))
 	if r.status("fine") != kernel.SActive || len(r.k.State().Trips()) != len(dests) {
 		t.Fatalf("a public address or a name tripped: %s", r.status("fine"))
@@ -176,7 +176,7 @@ func TestOutboundDecoyPausesScope(t *testing.T) {
 	tb := r.decoys()
 	host := entry(t, tb, decoy.PHostDotfile)
 	ok := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "other"}), 1<<40)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 
 	// A host value, even from a planner session, in the step's content.
 	step := st(key.Send, "x@example.com")
@@ -202,7 +202,7 @@ func TestOutboundDecoyPausesScope(t *testing.T) {
 	if rf := r.admits("p2", ok, 2); rf == nil || rf.Code != kernel.CTripped {
 		t.Fatalf("a plan under another key after a full trip: %v", rf)
 	}
-	if err := r.k.OpenTask(2, "t2"); !errors.Is(err, kernel.ErrTaskOpen) {
+	if err := r.k.OpenTask(2, "t2", 0); !errors.Is(err, kernel.ErrTaskOpen) {
 		t.Fatalf("a task opened after a full trip: %v", err)
 	}
 
@@ -225,8 +225,8 @@ func TestSandboxDecoyFromInjectionStopsSessionOnly(t *testing.T) {
 	vals := []string{entry(t, tb, decoy.PSandboxEnv).Value, entry(t, tb, decoy.PPlannerView).Value}
 	for i, v := range vals {
 		s1, s2 := "a"+string(rune('0'+i)), "b"+string(rune('0'+i))
-		must(t, r.k.OpenTask(int64(i), s1))
-		must(t, r.k.OpenTask(int64(i), s2))
+		must(t, r.k.OpenTask(int64(i), s1, 0))
+		must(t, r.k.OpenTask(int64(i), s2, 0))
 		id := "inj" + s1
 		step := st(key.Send, "x@example.com")
 		step.Args["body"] = "token=" + v
@@ -394,7 +394,7 @@ func TestStrongestDecoyResponseWins(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
 	sandbox, host := entry(t, tb, decoy.PSandboxEnv), entry(t, tb, decoy.PHostDotfile)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("p1", r.serve("t1"), st(key.Trash, sandbox.Value), st(key.Trash, host.Value))
 	if tr := r.trips(1, 1); tr.Response != kernel.RespFull || tr.Entry == entryIndex(t, tb, sandbox) || len(tr.Scopes) == 0 {
 		t.Fatalf("sandbox then host value: trip %+v", tr)
@@ -407,8 +407,8 @@ func TestStrongestDecoyResponseWins(t *testing.T) {
 	for i, value := range []string{host.Value, sandbox.Value} {
 		r := newRig(t)
 		tb := r.decoys()
-		must(t, r.k.OpenTask(0, "t1"))
-		must(t, r.k.OpenTask(0, "t2"))
+		must(t, r.k.OpenTask(0, "t1", 0))
+		must(t, r.k.OpenTask(0, "t2", 0))
 		var honey key.Key
 		must(t, json.Unmarshal([]byte(entry(t, tb, decoy.PPlannerView).Value), &honey))
 		issuer := key.Ed25519Signer(ed25519.NewKeyFromSeed(honeySeed[:ed25519.SeedSize]))
@@ -460,7 +460,7 @@ func honeyKey(t *testing.T, tb decoy.Table, task string) (key.Key, key.Key, pair
 func TestRepeatTripsDuringAPauseKeepTheResume(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("full", r.ck, st(key.Trash, entry(t, tb, decoy.PHostEnv).Value))
 	r.trips(1, 1)
 	n, last, ok := r.k.State().TripResume()
@@ -513,7 +513,7 @@ func TestSecurityTextsCoalesce(t *testing.T) {
 	at := int64(0)
 	inject := func(i int) {
 		task := fmt.Sprintf("s%d", i)
-		must(t, r.k.OpenTask(at, task))
+		must(t, r.k.OpenTask(at, task, 0))
 		step := st(key.Send, "x@example.com")
 		step.Args["body"] = view
 		must(t, r.k.Submit(at, r.sign(kernel.Plan{ID: "inj" + task, Key: r.serve(task), Steps: []kernel.PlanStep{step}})))
@@ -574,7 +574,7 @@ func TestPlanTripIsInItsRejection(t *testing.T) {
 
 	r2 := newRig(t)
 	tb2 := r2.decoys()
-	must(t, r2.k.OpenTask(0, "t1"))
+	must(t, r2.k.OpenTask(0, "t1", 0))
 	r2.plan("ok", r2.serve("t1"), st(key.Trash, "m1"))
 	base := r2.k.Log().Entries()
 	ix := entryIndex(t, tb2, entry(t, tb2, decoy.PHostEnv))
@@ -625,8 +625,8 @@ func forgedTripFoldsNothing(t *testing.T, r *rig, es []kernel.Entry, what string
 func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.OpenTask(0, "t2"))
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
 	step := st(key.Send, "x@example.com")
 	step.Args["body"] = entry(t, tb, decoy.PPlannerView).Value
 	must(t, r.k.Submit(1, kernel.Plan{ID: "unsigned", Key: r.serve("t1"), Steps: []kernel.PlanStep{step}}))
@@ -823,7 +823,7 @@ func honeyEntry(t *testing.T, tb decoy.Table) int {
 func TestSecurityTextsFitOneSegment(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("s", r.serve("t1"), st(key.Trash, entry(t, tb, decoy.PSandboxEnv).Value))
 	must(t, r.k.CallTrip(1, kernel.ExitEgress, decoy.Metadata))
 	r.plan("f", r.ck, st(key.Trash, entry(t, tb, decoy.PHostEnv).Value))
@@ -959,8 +959,8 @@ func TestOnlyAnActivePlanIsHeld(t *testing.T) {
 func TestForgedChainStopsNoClaimedSession(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t1"))
-	must(t, r.k.OpenTask(0, "t2"))
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
 	r.plan("b0", r.serve("t2"), st(key.Trash, "m0"))
 	forged := r.serve("t2")
 	forged.Links = slices.Clone(forged.Links)
@@ -984,8 +984,8 @@ func TestForgedChainStopsNoClaimedSession(t *testing.T) {
 	// A verified session trip, its logged session changed to t2.
 	r2 := newRig(t)
 	tb2 := r2.decoys()
-	must(t, r2.k.OpenTask(0, "t1"))
-	must(t, r2.k.OpenTask(0, "t2"))
+	must(t, r2.k.OpenTask(0, "t1", 0))
+	must(t, r2.k.OpenTask(0, "t2", 0))
 	step.Args["body"] = entry(t, tb2, decoy.PPlannerView).Value
 	r2.plan("a1", r2.serve("t1"), step)
 	if tr := r2.trips(1, 1); tr.Session != "t1" {

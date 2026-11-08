@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"unicode/utf8"
 )
 
@@ -375,13 +376,5 @@ func (l *Log) Len() int { return len(l.Entries()) }
 
 // Same reports whether two logs hold byte-identical histories.
 func Same(a, b []Entry) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Hash() != b[i].Hash() || !bytes.Equal(a[i].Body, b[i].Body) {
-			return false
-		}
-	}
-	return true
+	return slices.EqualFunc(a, b, func(x, y Entry) bool { return x.Hash() == y.Hash() && bytes.Equal(x.Body, y.Body) })
 }

@@ -31,7 +31,7 @@ func (r *rig) logged(id string) (int, map[string]json.RawMessage) {
 // whole names no step; a key that serves no task names no session.
 func TestARejectionNamesItsSessionAndStep(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("step1", r.serve("t1"), st(key.Trash, "m1"), st(key.Send, "m2"), st(key.Trash, "m3"))
 	r.plan("whole", r.serve("t2"), st(key.Trash, "m1"))
 	r.plan("step0", r.ck, st(key.Send, "m1"))
@@ -67,7 +67,7 @@ func TestARejectionNamesItsSessionAndStep(t *testing.T) {
 // same bytes unedited rederive (KRN-1).
 func TestARejectionsSessionAndStepAreRederived(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1"))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("bad", r.serve("t1"), st(key.Trash, "m1"), st(key.Send, "m2"))
 	i, _ := r.logged("bad")
 	es := r.k.Log().Entries()
@@ -100,7 +100,7 @@ func TestARejectionsSessionAndStepAreRederived(t *testing.T) {
 // guest cannot have its rejections logged under another session (PLN-4, HLD-5).
 func TestARejectionNamesNoSessionAnUnverifiedKeyClaims(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "victim"))
+	must(t, r.k.OpenTask(0, "victim", 0))
 	forged := r.serve("victim")
 	forged.Root.Sig = append([]byte(nil), forged.Root.Sig...)
 	forged.Root.Sig[0] ^= 1
