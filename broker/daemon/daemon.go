@@ -232,6 +232,9 @@ type PageSocket struct {
 	// Recovery serves the Recovery key page's ops (REC-4, r4a) with
 	// Passkeys; nil is none.
 	Recovery localsrv.Recovery
+	// Erase serves the Forget page's ops (LOG-4, KRN-forget c, D-284)
+	// with Passkeys: erase by name on a passkey's tap. nil is none.
+	Erase localsrv.Erase
 	// Certify is the kernel's certify, which signs the page's serving key
 	// (CH-9, MIG-4-recovery-f2); nil serves the page over HTTP only.
 	Certify localsrv.Certifier
@@ -492,6 +495,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.Passkeys = cfg.PageSocket.Passkeys
 		lcfg.Backups, lcfg.BackupNotes = cfg.PageSocket.Backups, cfg.PageSocket.BackupNotes
 		lcfg.Recovery = cfg.PageSocket.Recovery
+		lcfg.Erase = cfg.PageSocket.Erase
 		lcfg.Certify = cfg.PageSocket.Certify
 		lcfg.Held = cfg.PageSocket.Held
 		if f := cfg.PageSocket.Forget; f != nil {

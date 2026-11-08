@@ -28,7 +28,7 @@ const ownerNum = "+15550000001"
 // they were.
 func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 	cfg := daemon.Config{}
-	openLearnState(t.TempDir(), &cfg)
+	openLearnState(t.TempDir(), &cfg, false)
 	for msg, want := range map[string]string{
 		"LOOPS OFF": loopsOffText, "LOOP 1 ON": loopsOffText, "LEARNING OFF": loopsOffText, "SECURITY TESTS ON": loopsOffText,
 		"SPARE BUDGET 900": loopsOffText, "HELP LOOPS": loopsOffText, "STOP SHARING": loopsOffText,
@@ -54,9 +54,35 @@ func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 		t.Fatalf("HELP names a setting the box no longer has: %q", cfg.HelpExtra)
 	}
 	// One GSM-7 segment each.
-	for _, l := range []string{loopsOffText, forgetOffText, renewOffText} {
+	for _, l := range []string{loopsOffText, forgetPageText, forgetOffText, renewOffText} {
 		if utf8.RuneCountInString(l) > 153 || len(l) != utf8.RuneCountInString(l) {
 			t.Fatalf("%q is not one plain segment", l)
+		}
+	}
+}
+
+// D-284 (KRN-forget c, #3414): where the page serves the Forget step, a
+// FORGET text is answered by a fixed reply naming it and its passkey
+// tap, never by an erase or a code, and changes nothing.
+func TestForgetTextNamesThePagesForgetStep(t *testing.T) {
+	cfg := daemon.Config{}
+	openLearnState(t.TempDir(), &cfg, true)
+	for _, msg := range []string{"FORGET", "forget 3", "Forget last"} {
+		for _, unlocked := range []bool{true, false} {
+			if got, ok := cfg.Settings(context.Background(), msg, unlocked); !ok || got != forgetPageText {
+				t.Fatalf("%s (unlocked %v): %q %v", msg, unlocked, got, ok)
+			}
+		}
+	}
+	if got, _ := cfg.Settings(context.Background(), "RENEW", true); got != renewOffText {
+		t.Fatalf("RENEW: %q", got)
+	}
+	if cfg.Narrows("FORGET") {
+		t.Fatal("FORGET narrows")
+	}
+	for _, w := range []string{"Forget", "Wi-Fi page", "passkey"} {
+		if !strings.Contains(forgetPageText, w) {
+			t.Fatalf("%q does not name %q", forgetPageText, w)
 		}
 	}
 }
@@ -85,7 +111,7 @@ func TestOpenRemovesTheLearningState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	openLearnState(dir, &daemon.Config{})
+	openLearnState(dir, &daemon.Config{}, false)
 	for _, name := range learnedFiles {
 		if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s left: %v", name, err)
@@ -128,7 +154,7 @@ func TestOpenSweepsCrashLeftTemps(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := daemon.Config{}
-	openLearnState(dir, &cfg)
+	openLearnState(dir, &cfg, false)
 	if _, err := os.Lstat(temp); !os.IsNotExist(err) {
 		t.Fatalf("crash-left temp kept: %v", err)
 	}
@@ -154,14 +180,14 @@ func TestEraseFailureIsToldInStatus(t *testing.T) {
 				sweepTemp = func(string) error { return fail }
 			}
 			cfg := daemon.Config{}
-			openLearnState(dir, &cfg)
+			openLearnState(dir, &cfg, false)
 			sweepTemp, removeAll = sweepLearnTemp, os.RemoveAll
 			if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotErased {
 				t.Fatalf("STATUS notes %q", got)
 			}
 			// The next start tries again, and the line goes.
 			cfg = daemon.Config{}
-			openLearnState(dir, &cfg)
+			openLearnState(dir, &cfg, false)
 			if got := statusNotes(&cfg); len(got) != 0 {
 				t.Fatalf("STATUS notes after the retry %q", got)
 			}
@@ -176,7 +202,7 @@ func TestEraseFailureIsToldInStatus(t *testing.T) {
 // state adds no "not running" line; STATUS's forget lines are forget.go's.
 func TestStatusNoLongerSaysForgetIsNotRunning(t *testing.T) {
 	cfg := daemon.Config{}
-	openLearnState(t.TempDir(), &cfg)
+	openLearnState(t.TempDir(), &cfg, false)
 	if got := statusNotes(&cfg); len(got) != 0 {
 		t.Fatalf("STATUS notes %q", got)
 	}
@@ -214,7 +240,7 @@ func TestMainWiresTheDeletedCapabilities(t *testing.T) {
 	}
 	s := string(src)
 	run := strings.Index(s, "daemon.Run(ctx, cfg)")
-	for _, call := range []string{"caps.recallWired(false)", "registerRetired(&cfg)", "openLearnState(learnDir, &cfg)"} {
+	for _, call := range []string{"caps.recallWired(false)", "registerRetired(&cfg)", "openLearnState(learnDir, &cfg, passkeyRPID != \"\")"} {
 		if i := strings.Index(s, call); i < 0 || run < 0 || i > run {
 			t.Errorf("main.go does not call %s before daemon.Run (%d, %d)", call, i, run)
 		}

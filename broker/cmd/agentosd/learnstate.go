@@ -86,8 +86,8 @@ func removeLearned(dir string) bool {
 
 // openLearnState erases the old learning plane's state in dir and wires
 // the owner's old settings texts, and STATUS's lines about both, into the
-// daemon's configuration.
-func openLearnState(dir string, cfg *daemon.Config) {
+// daemon's configuration; forgetPage is wireSettings'.
+func openLearnState(dir string, cfg *daemon.Config, forgetPage bool) {
 	erased := true
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		log.Printf("learn directory: %v", err)
@@ -95,7 +95,7 @@ func openLearnState(dir string, cfg *daemon.Config) {
 	} else {
 		erased = removeLearned(dir)
 	}
-	wireSettings(cfg)
+	wireSettings(cfg, forgetPage)
 	cfg.Notes = append(cfg.Notes, func() string { return lineIf(!erased, forgetNotErased) })
 }
 
@@ -105,21 +105,28 @@ func openLearnState(dir string, cfg *daemon.Config) {
 // runs no spare-time work in this version (MIG-4-untrusted-learn; HLD-4).
 const loopsOffText = "I don't do spare-time work (learning, self-tests, update checks) in this version, so nothing changes."
 
-// forgetOffText answers FORGET, and renewOffText RENEW: neither runs in
-// this version (#2781), and the box keeps no task texts for FORGET to
-// list.
+// forgetPageText answers FORGET: forgetting is the owner page's Forget
+// step, confirmed with a passkey, never a text (D-284), so a SIM swap
+// cannot erase the owner's data. forgetOffText answers it where the page
+// has no Forget step (no -passkey-rp-id). renewOffText answers RENEW,
+// which does not run in this version (#2781).
 const (
-	forgetOffText = "I can't forget tasks in this version yet. A later box version adds it."
-	renewOffText  = "I don't keep agent memory across tasks in this version, so there is nothing to renew."
+	forgetPageText = "To forget everything named someone or something, open Forget on my Wi-Fi page and confirm with your passkey."
+	forgetOffText  = "I can't forget things by text, and my Wi-Fi page has no Forget step on this box."
+	renewOffText   = "I don't keep agent memory across tasks in this version, so there is nothing to renew."
 )
 
 // wireSettings answers the owner's old settings texts with fixed replies:
 // FORGET, RENEW and the old loop settings. All are answered by the box,
 // locked or not, never sent to the agent as chat, and change nothing, so
-// they run in a locked session.
-func wireSettings(cfg *daemon.Config) {
+// they run in a locked session. forgetPage is whether the page serves the
+// Forget step.
+func wireSettings(cfg *daemon.Config, forgetPage bool) {
 	cfg.Settings = func(ctx context.Context, msg string, unlocked bool) (string, bool) {
 		if r, ok := oldSetting(msg); ok {
+			if r == forgetOffText && forgetPage {
+				r = forgetPageText
+			}
 			return r, true
 		}
 		if _, ok := loops.ParseText(msg); ok {

@@ -104,6 +104,9 @@ type Config struct {
 	// Recovery, when set with Passkeys, serves the recovery-key ops
 	// (REC-4, r4a); nil leaves them unregistered.
 	Recovery Recovery
+	// Erase, when set with Passkeys, serves the erase ops (the Forget
+	// step, KRN-forget c); nil leaves them unregistered.
+	Erase Erase
 	// BackupNotes is the only-copy notice for the status page, in its
 	// fixed words; nil shows none.
 	BackupNotes func() []string
@@ -140,6 +143,7 @@ type Server struct {
 	passkeyBegins   []time.Time // passkey enrolment starts in the last minute
 	backupBegins    []time.Time // backup destination adds begun in the last minute
 	recoveryRotates []time.Time // recovery-key rotations in the last minute
+	eraseFinds      []time.Time // Forget finds in the last minute
 
 	planMu sync.Mutex // one plan sign-in start at a time
 	noPage sync.Once  // the no-authority line, logged once
@@ -160,8 +164,9 @@ func New(cfg Config) *Server {
 // passkey ops (localapi.PasskeyOps) when Config.Passkeys is set, and the
 // backup ops (localapi.BackupOps) when Config.Backups is set with it: the
 // add's tap is a WebAuthn ceremony on the passkey page's name; so are the
-// recovery-key ops (localapi.RecoveryOps) when Config.Recovery is set,
-// and the held-text op (localapi.HeldOps) when Config.Held is set.
+// recovery-key ops (localapi.RecoveryOps) when Config.Recovery is set and
+// the erase ops (localapi.EraseOps) when Config.Erase is, and the
+// held-text op (localapi.HeldOps) when Config.Held is set.
 func (s *Server) Ops() map[string]sockets.Handler {
 	ops := s.ops()
 	if s.cfg.Held != nil {
@@ -174,6 +179,9 @@ func (s *Server) Ops() map[string]sockets.Handler {
 		}
 		if s.cfg.Recovery != nil {
 			maps.Copy(ops, s.recoveryOps())
+		}
+		if s.cfg.Erase != nil {
+			maps.Copy(ops, s.eraseOps())
 		}
 	}
 	return ops
