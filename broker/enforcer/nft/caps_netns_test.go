@@ -513,7 +513,11 @@ func TestCapIdleAddressStillInItsSet(t *testing.T) {
 // cable carries; its IP bytes are its port's transmitted bytes less each
 // frame's Ethernet header and less what it sent anywhere but the server
 // (IPv6 control, counted in its own output chain), with its gateway's
-// neighbour entry fixed so no ARP is in them.
+// neighbour entry fixed so no ARP is in them. The test turns the
+// offloads off with CAP_NET_ADMIN in its own namespace; the daemon can
+// only once ENF-m-b's unit gives it that capability in the namespace of
+// the enforcer's ports (offload ASSUMPTIONS ENF-gro-4), and until then a
+// port it cannot turn off has its caps held spent (daemon ENF-l-16).
 func TestCapCountsEverySegmentHeader(t *testing.T) {
 	if !nft.InNetns(t) {
 		return

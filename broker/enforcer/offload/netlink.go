@@ -6,52 +6,31 @@ import (
 	"fmt"
 	"slices"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-// The kernel's ethtool netlink family (include/uapi/linux/ethtool_netlink.h
-// and genetlink.h). Verbose bitsets only: every bit is read and written by
-// its name, so no table of bit numbers is kept here.
-const (
-	netlinkGeneric = 16 // NETLINK_GENERIC
-	genlIDCtrl     = 0x10
-	ctrlGetFamily  = 3 // CTRL_CMD_GETFAMILY
-	ctrlFamilyID   = 1 // CTRL_ATTR_FAMILY_ID
-	ctrlFamilyName = 2 // CTRL_ATTR_FAMILY_NAME
-
-	featuresGet = 11 // ETHTOOL_MSG_FEATURES_GET
-	featuresSet = 12 // ETHTOOL_MSG_FEATURES_SET
-
-	headerDevName = 2 // ETHTOOL_A_HEADER_DEV_NAME
-
-	featHeader = 1 // ETHTOOL_A_FEATURES_HEADER
-	featWanted = 3 // ETHTOOL_A_FEATURES_WANTED
-	featActive = 4 // ETHTOOL_A_FEATURES_ACTIVE
-
-	bitsetNomask = 1 // ETHTOOL_A_BITSET_NOMASK
-	bitsetBits   = 3 // ETHTOOL_A_BITSET_BITS
-	bitsetValue  = 4 // ETHTOOL_A_BITSET_VALUE (compact form only)
-	bitsBit      = 1 // ETHTOOL_A_BITSET_BITS_BIT
-	bitName      = 2 // ETHTOOL_A_BITSET_BIT_NAME
-	bitValue     = 3 // ETHTOOL_A_BITSET_BIT_VALUE
-
-	nlaNested   = 1 << 15
-	nlaTypeMask = 0x3fff
-	nlmsgHdrLen = 16
-	genlHdrLen  = 4
-)
+// The kernel's ethtool netlink family, by golang.org/x/sys/unix's names
+// for include/uapi/linux/ethtool_netlink.h and genetlink.h. Verbose
+// bitsets only: every bit is read and written by its name, so no table of
+// bit numbers is kept here.
+const nlaTypeMask = ^uint16(unix.NLA_F_NESTED | unix.NLA_F_NET_BYTEORDER)
 
 var ne = binary.NativeEndian
 
-// conn is one generic netlink socket, opened in the calling thread's
-// network namespace, with the ethtool family resolved.
+// conn is one netlink socket, opened in the calling thread's network
+// namespace: a generic one with the ethtool family resolved (dial), or a
+// route one (open) for the links.
 type conn struct {
 	fd     int
 	seq    uint32
 	family uint16
 }
 
-func dial() (*conn, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, netlinkGeneric)
+// open is a netlink socket of protocol proto, bound to a port of its own.
+func open(proto int) (*conn, error) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
 		return nil, fmt.Errorf("netlink socket: %w", err)
 	}
@@ -60,18 +39,21 @@ func dial() (*conn, error) {
 		c.close()
 		return nil, fmt.Errorf("netlink bind: %w", err)
 	}
-	// A kernel that never answers fails the call rather than hang it.
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 5}); err != nil {
-		c.close()
-		return nil, fmt.Errorf("netlink timeout: %w", err)
+	return c, nil
+}
+
+func dial() (*conn, error) {
+	c, err := open(unix.NETLINK_GENERIC)
+	if err != nil {
+		return nil, err
 	}
-	replies, err := c.do(genlIDCtrl, ctrlGetFamily, attr(ctrlFamilyName, cstr("ethtool")))
+	replies, err := c.do(unix.GENL_ID_CTRL, unix.CTRL_CMD_GETFAMILY, attr(unix.CTRL_ATTR_FAMILY_NAME, cstr(unix.ETHTOOL_GENL_NAME)))
 	if err != nil {
 		c.close()
 		return nil, fmt.Errorf("ethtool netlink family: %w", err)
 	}
 	for _, r := range replies {
-		if b := find(r, ctrlFamilyID); len(b) == 2 {
+		if b := find(r, unix.CTRL_ATTR_FAMILY_ID); len(b) == 2 {
 			c.family = ne.Uint16(b)
 		}
 	}
@@ -86,14 +68,14 @@ func (c *conn) close() { syscall.Close(c.fd) }
 
 // active reads dev's active features.
 func (c *conn) active(dev string) (map[string]bool, error) {
-	replies, err := c.do(c.family, featuresGet, header(dev))
+	replies, err := c.do(c.family, unix.ETHTOOL_MSG_FEATURES_GET, header(dev))
 	if err != nil {
 		return nil, fmt.Errorf("features: %w", err)
 	}
 	if len(replies) != 1 {
 		return nil, fmt.Errorf("features: %d replies", len(replies))
 	}
-	b := find(replies[0], featActive)
+	b := find(replies[0], unix.ETHTOOL_A_FEATURES_ACTIVE)
 	if b == nil {
 		return nil, errors.New("features: no active set in the reply")
 	}
@@ -110,46 +92,100 @@ func (c *conn) set(dev string, want map[string]bool) error {
 	slices.Sort(names)
 	var bits []byte
 	for _, f := range names {
-		bit := attr(bitName, cstr(f))
+		bit := attr(unix.ETHTOOL_A_BITSET_BIT_NAME, cstr(f))
 		if want[f] {
-			bit = append(bit, attr(bitValue, nil)...)
+			bit = append(bit, attr(unix.ETHTOOL_A_BITSET_BIT_VALUE, nil)...)
 		}
-		bits = append(bits, attr(bitsBit|nlaNested, bit)...)
+		bits = append(bits, attr(unix.ETHTOOL_A_BITSET_BITS_BIT|unix.NLA_F_NESTED, bit)...)
 	}
-	req := append(header(dev), attr(featWanted|nlaNested, attr(bitsetBits|nlaNested, bits))...)
-	if _, err := c.do(c.family, featuresSet, req); err != nil {
+	req := append(header(dev), attr(unix.ETHTOOL_A_FEATURES_WANTED|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_BITSET_BITS|unix.NLA_F_NESTED, bits))...)
+	if _, err := c.do(c.family, unix.ETHTOOL_MSG_FEATURES_SET, req); err != nil {
 		return fmt.Errorf("features set: %w", err)
 	}
 	return nil
 }
 
 func header(dev string) []byte {
-	return attr(featHeader|nlaNested, attr(headerDevName, cstr(dev)))
+	return attr(unix.ETHTOOL_A_FEATURES_HEADER|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_HEADER_DEV_NAME, cstr(dev)))
 }
 
-// do sends one request and returns the attributes of each reply up to
-// the kernel's acknowledgement.
+// do sends one generic netlink request and returns the attributes of
+// each reply up to the kernel's acknowledgement.
 func (c *conn) do(family uint16, cmd uint8, attrs []byte) ([][]byte, error) {
+	body := append([]byte{cmd, 1 /* version */, 0, 0}, attrs...)
+	replies, err := c.request(family, syscall.NLM_F_ACK, body)
+	if err != nil {
+		return nil, err
+	}
+	for i, r := range replies {
+		if len(r) < unix.GENL_HDRLEN {
+			return nil, errors.New("short generic netlink reply")
+		}
+		replies[i] = r[unix.GENL_HDRLEN:]
+	}
+	return replies, nil
+}
+
+// request sends one message of type typ with body and returns the body of
+// each reply of that type (RTM_NEWLINK answers RTM_GETLINK) up to the
+// kernel's acknowledgement or a dump's end.
+func (c *conn) request(typ, flags uint16, body []byte) ([][]byte, error) {
 	c.seq++
-	msg := make([]byte, nlmsgHdrLen+genlHdrLen, nlmsgHdrLen+genlHdrLen+len(attrs))
-	ne.PutUint32(msg[0:], uint32(nlmsgHdrLen+genlHdrLen+len(attrs)))
-	ne.PutUint16(msg[4:], family)
-	ne.PutUint16(msg[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK)
+	msg := make([]byte, unix.NLMSG_HDRLEN, unix.NLMSG_HDRLEN+len(body))
+	ne.PutUint32(msg[0:], uint32(unix.NLMSG_HDRLEN+len(body)))
+	ne.PutUint16(msg[4:], typ)
+	ne.PutUint16(msg[6:], syscall.NLM_F_REQUEST|flags)
 	ne.PutUint32(msg[8:], c.seq)
-	msg[16] = cmd
-	msg[17] = 1 // version
-	msg = append(msg, attrs...)
+	msg = append(msg, body...)
 	if err := syscall.Sendto(c.fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, err
 	}
+	want := typ
+	if typ == syscall.RTM_GETLINK {
+		want = syscall.RTM_NEWLINK
+	}
+	return c.recv(want)
+}
+
+// replyWait is how long one request may wait for all of the kernel's
+// replies, however many other datagrams arrive meanwhile.
+var replyWait = 5 * time.Second
+
+var errNoReply = errors.New("no reply from the kernel in time")
+
+// recv reads the replies of type want to request c.seq up to the
+// acknowledgement or a dump's end. Only the kernel's datagrams are read:
+// one from any other sender (a process that found this socket's port) is
+// dropped unread, so it can neither answer for the kernel nor end the
+// request. The request fails once replyWait has passed, so neither a
+// silent kernel nor a flood of other datagrams holds it.
+func (c *conn) recv(want uint16) ([][]byte, error) {
 	var replies [][]byte
 	buf := make([]byte, 1<<16)
+	end := time.Now().Add(replyWait)
 	for {
-		n, _, err := syscall.Recvfrom(c.fd, buf, 0)
+		left := time.Until(end)
+		if left <= 0 {
+			return nil, errNoReply
+		}
+		tv := syscall.NsecToTimeval(max(left.Nanoseconds(), int64(time.Microsecond)))
+		if err := syscall.SetsockoptTimeval(c.fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+			return nil, fmt.Errorf("netlink timeout: %w", err)
+		}
+		n, from, err := syscall.Recvfrom(c.fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) { // a signal to this thread (Go's preemption): read on
+			continue
+		}
+		if errors.Is(err, syscall.EAGAIN) {
+			return nil, errNoReply
+		}
 		if err != nil {
 			return nil, err
 		}
-		if n < nlmsgHdrLen {
+		if !fromKernel(from) {
+			continue
+		}
+		if n < unix.NLMSG_HDRLEN {
 			return nil, errors.New("short netlink message")
 		}
 		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
@@ -171,32 +207,47 @@ func (c *conn) do(family uint16, cmd uint8, attrs []byte) ([][]byte, error) {
 				return replies, nil
 			case syscall.NLMSG_DONE:
 				return replies, nil
-			case family:
-				if len(m.Data) < genlHdrLen {
-					return nil, errors.New("short generic netlink reply")
-				}
-				replies = append(replies, append([]byte(nil), m.Data[genlHdrLen:]...)) // buf is read into again
+			case want:
+				replies = append(replies, append([]byte(nil), m.Data...)) // buf is read into again
 			}
 		}
 	}
 }
 
+// fromKernel is whether a datagram's sender is the kernel (port 0).
+func fromKernel(from syscall.Sockaddr) bool {
+	sa, ok := from.(*syscall.SockaddrNetlink)
+	return ok && sa.Pid == 0
+}
+
 // bitset reads a verbose bitset: the names of the bits that are set. A
 // list (NOMASK) holds only the set bits; a value and mask pair marks each
 // set bit with its value flag. A compact bitset is refused, since this
-// package asked for none and could misread it as empty.
+// package asked for none and could misread it as empty, and so is one
+// with bytes that do not parse as attributes, whose bits past them would
+// read as off.
 func bitset(b []byte) (map[string]bool, error) {
-	if find(b, bitsetValue) != nil {
+	if !whole(b) {
+		return nil, errors.New("features: a malformed bitset in the reply")
+	}
+	if find(b, unix.ETHTOOL_A_BITSET_VALUE) != nil {
 		return nil, errors.New("features: compact bitset in the reply")
 	}
-	list := find(b, bitsetNomask) != nil
+	list := find(b, unix.ETHTOOL_A_BITSET_NOMASK) != nil
+	bits := find(b, unix.ETHTOOL_A_BITSET_BITS)
+	if !whole(bits) {
+		return nil, errors.New("features: a malformed bitset in the reply")
+	}
 	on := map[string]bool{}
-	for _, bit := range all(find(b, bitsetBits), bitsBit) {
-		name := find(bit, bitName)
+	for _, bit := range all(bits, unix.ETHTOOL_A_BITSET_BITS_BIT) {
+		if !whole(bit) {
+			return nil, errors.New("features: a malformed bit in the reply")
+		}
+		name := find(bit, unix.ETHTOOL_A_BITSET_BIT_NAME)
 		if len(name) == 0 || name[len(name)-1] != 0 {
 			return nil, errors.New("features: a bit with no name")
 		}
-		if list || find(bit, bitValue) != nil {
+		if list || find(bit, unix.ETHTOOL_A_BITSET_BIT_VALUE) != nil {
 			on[string(name[:len(name)-1])] = true
 		}
 	}
@@ -216,17 +267,21 @@ func attr(typ uint16, data []byte) []byte {
 func cstr(s string) []byte { return append([]byte(s), 0) }
 
 // each calls f with every well-formed attribute in b, in order; it stops
-// at the first malformed one.
-func each(b []byte, f func(typ uint16, data []byte)) {
+// at the first malformed one and reports whether b was read to its end.
+func each(b []byte, f func(typ uint16, data []byte)) bool {
 	for len(b) >= 4 {
 		n := int(ne.Uint16(b[0:]))
 		if n < 4 || n > len(b) {
-			return
+			return false
 		}
 		f(ne.Uint16(b[2:])&nlaTypeMask, b[4:n])
 		b = b[min((n+3)&^3, len(b)):]
 	}
+	return len(b) == 0
 }
+
+// whole is whether b is attributes to its last byte.
+func whole(b []byte) bool { return each(b, func(uint16, []byte) {}) }
 
 // find is the data of b's first attribute of typ (empty but not nil for a
 // flag), or nil.

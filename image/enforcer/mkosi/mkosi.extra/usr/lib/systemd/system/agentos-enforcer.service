@@ -1,7 +1,9 @@
 # Placeholder for the enforcer daemon (broker/cmd/agentos-enforcer, ENF-l): ENF-m-b replaces
 # ExecStart with the daemon and its confinement. Until then it holds the unit's name and order, so
 # the self-check and boot counting are exercised with a unit in the daemon's place. No network, no
-# privileges, nothing written.
+# privileges, nothing written. ENF-m-b's unit runs the daemon in the host network namespace with
+# AF_NETLINK, CAP_NET_ADMIN and Restart=: GRO stays off on the core's and the edge's ports only from
+# then (broker/enforcer/offload ASSUMPTIONS ENF-gro-4).
 [Unit]
 Description=agentOS enforcer (placeholder until ENF-m-b)
 

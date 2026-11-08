@@ -9,12 +9,13 @@
 // the bytes that leave the WAN once the packet is split again: a few
 // percent for full segments, up to about 1.7 times for minimum-size ones.
 // Off turns those offloads off on a port and on every device its packets
-// are received on first, and reads them back; the daemon refuses to start
-// while one stays on (ASSUMPTIONS ENF-gro-1).
+// are received on first, and reads them back; the daemon holds a port
+// whose features stay on at its caps (ASSUMPTIONS ENF-gro-1).
 //
 // It speaks the kernel's ethtool netlink family and reads links with
-// rtnetlink, both through the standard library's syscall package: no
-// process, no third-party code and no unsafe memory.
+// rtnetlink, through the standard library's syscall package with
+// golang.org/x/sys/unix's names for the kernel's numbers: no process and
+// no unsafe memory of its own.
 package offload
 
 import (
@@ -37,9 +38,11 @@ var ErrStuck = errors.New("offload: a feature stays as it was")
 
 // Off turns every Merging feature off on each port and on the devices
 // under it (a VLAN's or macvlan's parent, a bond's or bridge's members,
-// walked down to the hardware), then reads each back. It returns an error
-// naming every port that is missing, unreadable or still merging; a
-// device already off is only read, so a repeat call changes nothing.
+// walked down to the hardware, each lower device before the ones on it),
+// then reads each back. It returns an error naming every port that is
+// missing, unreadable, still merging or on a parent in another
+// namespace; a device already off is only read, so a repeat call changes
+// nothing.
 func Off(ports ...string) error {
 	devs, err := under(ports)
 	if err != nil {
@@ -100,8 +103,8 @@ func Set(dev string, want map[string]bool) error {
 	return nil
 }
 
-// Active is dev's active features, by the kernel's names, each true.
-func Active(dev string) (map[string]bool, error) {
+// features is dev's active features, by the kernel's names, each true.
+func features(dev string) (map[string]bool, error) {
 	c, err := dial()
 	if err != nil {
 		return nil, fmt.Errorf("offload: %s: %w", dev, err)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -909,30 +910,107 @@ func TestDropRefusedRefusesLoad(t *testing.T) {
 	x.start()
 }
 
-// TestMergingPortRefusesStart (ENF-cap-gro, #4610; NET-2 Byte caps): the
-// daemon asks for merging off on the core's and the edge's ports, and
-// does not start while one stays merging, so no cap counts one header
-// for several segments.
-func TestMergingPortRefusesStart(t *testing.T) {
-	x, _ := enrolled(t, false)
+var quotaLine = regexp.MustCompile(`add quota inet \S+ (q|qe)_\S+ \{ over (\d+) bytes used (\d+) bytes; \}`)
+
+// spentIn is whether the last full load starts the core's group quota and
+// the edge's quota spent (used at the limit).
+func spentIn(t *testing.T, x *box) (core, edge bool) {
+	t.Helper()
+	n := 0
+	for _, m := range quotaLine.FindAllStringSubmatch(x.fire.last(), -1) {
+		n++
+		spent := m[2] == m[3]
+		if m[1] == "q" {
+			core = spent
+		} else {
+			edge = spent
+		}
+	}
+	if n != 2 {
+		t.Fatalf("%d quotas in the last load, want the core's group and the edge's:\n%s", n, x.fire.last())
+	}
+	return core, edge
+}
+
+// TestMergingPortHeldAtItsCaps (ENF-cap-gro-fu, #5088; NET-2 Byte caps):
+// the daemon asks for merging off on the core's and the edge's ports, one
+// at a time. A port that stays merging does not stop the start: its caps
+// are loaded spent, so every capped send it carries is dropped, and the
+// other port keeps its count. Once it reads clean at a reading, a full
+// load starts its quotas from the count again.
+func TestMergingPortHeldAtItsCaps(t *testing.T) {
+	x, _, _ := capped(t)
+	core, edge := x.cfg.Layout.Core, x.cfg.Layout.Edge
+	if c, e := spentIn(t, x); c || e {
+		t.Fatalf("caps spent with no port merging: core %v, edge %v", c, e)
+	}
 	x.d.Close()
 	x.mu.Lock()
-	x.offloads, x.offloadErr = nil, errors.New("offload: core0: rx-gro on")
+	x.offloads = nil
 	x.mu.Unlock()
-	if d, err := x.open(); err == nil || !strings.Contains(err.Error(), "byte caps: offload: core0: rx-gro on") {
-		if d != nil {
-			d.Close()
-		}
-		t.Fatalf("a merging port started: %v", err)
-	}
+	x.merges(core, errors.New("offload: a feature stays as it was: core0: rx-gro on"))
+	x.start()
 	x.mu.Lock()
-	got, want := x.offloads, [][]string{{x.cfg.Layout.Core, x.cfg.Layout.Edge}}
-	x.offloadErr = nil
+	got, want := x.offloads, [][]string{{core}, {edge}}
 	x.mu.Unlock()
 	if !slices.EqualFunc(got, want, slices.Equal) {
 		t.Fatalf("asked for merging off on %v, want %v", got, want)
 	}
+	if c, e := spentIn(t, x); !c || e {
+		t.Fatalf("the core's port merging: core spent %v (want true), edge spent %v (want false)", c, e)
+	}
+	if !strings.Contains(x.logText(), "byte caps: "+core+" merges segments, every capped send it carries is dropped until it stops: offload: a feature stays as it was: core0: rx-gro on") {
+		t.Fatalf("not logged:\n%s", x.logText())
+	}
+
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	n := loads()
+	x.merges(core, nil)
+	x.merges(edge, errors.New("offload: edge0: no such device"))
+	x.advance(readEvery)
+	if loads() != n+1 {
+		t.Fatalf("%d full loads when the ports changed, want 1", loads()-n)
+	}
+	if c, e := spentIn(t, x); c || !e {
+		t.Fatalf("the edge's port merging: core spent %v (want false), edge spent %v (want true)", c, e)
+	}
+	x.advance(readEvery)
+	if loads() != n+1 {
+		t.Fatal("a full load with no port changed")
+	}
+	x.merges(edge, nil)
+	x.advance(readEvery)
+	if c, e := spentIn(t, x); c || e {
+		t.Fatalf("caps still spent once both ports read clean: core %v, edge %v", c, e)
+	}
+	if !strings.Contains(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again") {
+		t.Fatalf("the end not logged:\n%s", x.logText())
+	}
+}
+
+// TestMergingPortSpentOnANewDay (ENF-l-16): a quota a reading starts
+// while a port merges (a new day, a merge of groups) starts spent too, not
+// only the ones a full load starts.
+func TestMergingPortSpentOnANewDay(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.d.Close()
+	x.merges(x.cfg.Layout.Core, errors.New("offload: core0: rx-gro on"))
 	x.start()
+	x.setListing(listing(t, x, doc, 7, 10))
+	x.advance(24 * time.Hour)
+	x.fire.mu.Lock()
+	var last string
+	if n := len(x.fire.updates); n > 0 {
+		last = x.fire.updates[n-1]
+	}
+	x.fire.mu.Unlock()
+	m := quotaLine.FindStringSubmatch(last)
+	if m == nil || m[1] != "q" {
+		t.Fatalf("no new group quota at the next day's reading:\n%s", last)
+	}
+	if m[2] != m[3] {
+		t.Fatalf("the core's new-day quota starts at %s of %s bytes while its port merges", m[3], m[2])
+	}
 }
 
 // TestMergingKeptOffAtEachReading (ENF-cap-gro): before each reading the
@@ -944,28 +1022,25 @@ func TestMergingKeptOffAtEachReading(t *testing.T) {
 	calls := func() int { x.mu.Lock(); defer x.mu.Unlock(); return len(x.offloads) }
 	n := calls()
 	x.advance(readEvery)
-	if calls() != n+1 {
-		t.Fatalf("%d calls at a reading, want 1", calls()-n)
+	if calls() != n+2 {
+		t.Fatalf("%d calls at a reading, want one per port", calls()-n)
 	}
 	x.advance(time.Second)
-	if calls() != n+1 {
+	if calls() != n+2 {
 		t.Fatal("asked again within readEvery")
 	}
-	x.mu.Lock()
-	x.offloadErr = errors.New("offload: edge0: rx-lro on")
-	x.mu.Unlock()
+	edge := x.cfg.Layout.Edge
+	x.merges(edge, errors.New("offload: edge0: rx-lro on"))
 	x.advance(readEvery)
 	x.advance(readEvery)
-	const bad = "byte caps: a counted port merges segments, its bytes count short: offload: edge0: rx-lro on"
+	bad := "byte caps: " + edge + " merges segments, every capped send it carries is dropped until it stops: offload: edge0: rx-lro on"
 	if c := strings.Count(x.logText(), bad); c != 1 {
 		t.Fatalf("a lasting failure logged %d times:\n%s", c, x.logText())
 	}
-	x.mu.Lock()
-	x.offloadErr = nil
-	x.mu.Unlock()
+	x.merges(edge, nil)
 	x.advance(readEvery)
 	x.advance(readEvery)
-	if c := strings.Count(x.logText(), "byte caps: the counted ports merge no segments again"); c != 1 {
+	if c := strings.Count(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again"); c != 1 {
 		t.Fatalf("the end of a failure logged %d times", c)
 	}
 }
