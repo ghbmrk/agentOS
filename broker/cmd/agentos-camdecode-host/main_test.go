@@ -33,9 +33,9 @@ func TestParse(t *testing.T) {
 	if _, err := parse([]string{"-runsc", "r", "-runsc-root", "/t", "-decode-root", "/d"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("a relative runsc was taken")
 	}
-	// The flag set's own complaint goes to the stderr it is given.
+	// The flag set's own complaint is the error, and goes to the stderr it is given.
 	var stderr bytes.Buffer
-	if _, err := parse([]string{"-bogus"}, &stderr); err == nil || !strings.Contains(stderr.String(), "-bogus") {
+	if _, err := parse([]string{"-bogus"}, &stderr); err == nil || !strings.Contains(err.Error(), "-bogus") || !strings.Contains(stderr.String(), "-bogus") {
 		t.Fatalf("an unknown flag: %v, stderr %q", err, stderr.String())
 	}
 }
