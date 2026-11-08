@@ -8,6 +8,10 @@
 // machine gets one group. memory.max is its declared budget and memory.high
 // sits below it, so the kernel throttles the machine before the hard limit,
 // where S3 measured a reclaim stall instead of an OOM kill. Swap is off.
+//
+// A group a process is started into with clone3 (CLONE_INTO_CGROUP) comes
+// from Fresh or Child, which never hand back a group cgroup.kill was
+// written to (Fresh says why).
 package cgroup
 
 import (
@@ -96,10 +100,12 @@ func Open(path string) (*Group, error) {
 	return g, nil
 }
 
-// Child creates (or reuses) child name with limits applied.
+// Child makes child name new, as Fresh does, with limits applied. A group
+// an earlier run left under that name is emptied (within leftoverWait) and
+// replaced.
 func (g *Group) Child(name string, l Limits) (*Group, error) {
-	if name == "" || strings.ContainsAny(name, "/.") {
-		return nil, fmt.Errorf("cgroup: bad group name %q", name)
+	if err := checkName(name); err != nil {
+		return nil, err
 	}
 	if l.MaxBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget is required (RES-2)", name)
@@ -115,8 +121,10 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 	if high <= 0 || high > l.MaxBytes {
 		high = l.MaxBytes - l.MaxBytes/16
 	}
-	c := &Group{Path: filepath.Join(g.Path, name)}
-	if err := os.Mkdir(c.Path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+	ctx, cancel := context.WithTimeout(context.Background(), leftoverWait)
+	c, err := g.Fresh(ctx, name)
+	cancel()
+	if err != nil {
 		return nil, err
 	}
 	// memory.max first, so high is never above max while being set.
@@ -133,6 +141,46 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// leftoverWait bounds Child's wait for a leftover group to empty.
+const leftoverWait = 10 * time.Second
+
+// Fresh makes child name of g as a new, empty group, for one run of a
+// process started into it with clone3. It has no limits of its own: g's
+// hold it. A group an earlier run left under that name is killed, waited
+// on until empty and removed first, and Fresh fails rather than reuse it.
+//
+// A killed group is never reused because on Linux 6.18 (measured, #5135)
+// clone3 SIGKILLs a child at birth unless the target group was killed as
+// many times as its parent's own group: the kernel compares the two
+// groups' cgroup.kill counts. Writing cgroup.kill counts for the group and
+// every group then below it; a group made later starts at zero, as does a
+// starter's group never killed (agentosd's own).
+func (g *Group) Fresh(ctx context.Context, name string) (*Group, error) {
+	if err := checkName(name); err != nil {
+		return nil, err
+	}
+	c := &Group{Path: filepath.Join(g.Path, name)}
+	err := makeDir(c.Path, 0o755)
+	if errors.Is(err, os.ErrExist) {
+		if err = c.Kill(ctx); err == nil {
+			if err = removeDir(c.Path); err == nil {
+				err = makeDir(c.Path, 0o755)
+			}
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cgroup: new group %s: %w", c.Path, err)
+	}
+	return c, nil
+}
+
+func checkName(name string) error {
+	if name == "" || strings.ContainsAny(name, "/.") {
+		return fmt.Errorf("cgroup: bad group name %q", name)
+	}
+	return nil
 }
 
 // shares are l's weight, CPU-ceiling and process-cap files, for those
@@ -289,9 +337,10 @@ func PressureSource(path string) (read func() float64, ok bool) {
 	}, true
 }
 
-// writeFile and removeDir are the file system calls tests replace.
+// writeFile, makeDir and removeDir are the file system calls tests replace.
 var (
 	writeFile = os.WriteFile
+	makeDir   = os.Mkdir
 	removeDir = os.Remove
 )
 

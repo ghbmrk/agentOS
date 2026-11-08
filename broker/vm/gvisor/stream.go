@@ -85,10 +85,6 @@ func (r *Runtime) StartStream(ctx context.Context, s Stream) (*StreamRun, error)
 		g.Kill(ctx)
 		g.Remove()
 	})
-	ooms, err := g.OOMKills()
-	if err != nil {
-		return fail(err)
-	}
 	var opts childproc.Options
 	release, err := startIn(g.Path, &opts)
 	if err != nil {
@@ -126,7 +122,8 @@ func (r *Runtime) StartStream(ctx context.Context, s Stream) (*StreamRun, error)
 	go func() {
 		err := cmd.Wait()
 		// The kill takes the whole group (memory.oom.group), runsc too.
-		if n, cerr := g.OOMKills(); cerr != nil || n > ooms {
+		// The group is new, so any count is this run's.
+		if n, cerr := g.OOMKills(); cerr != nil || n > 0 {
 			err = ErrOneShotMemory
 		} else if size(errLog) > 0 {
 			r.logStart(id, "run", err, clipped(errLog))

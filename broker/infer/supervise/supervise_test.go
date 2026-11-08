@@ -601,8 +601,8 @@ func cgroupParent(t *testing.T) *cgroup.Group {
 	return root
 }
 
-// INF-1: the service runs in the inference leaf, whose memory.max is the
-// budget's InferenceMB.
+// INF-1: the service runs in its own group in the inference leaf, whose
+// memory.max is the budget's InferenceMB.
 func TestServiceRunsInInferenceLeaf(t *testing.T) {
 	root := cgroupParent(t)
 	m := budget.Memory{HostMB: 16, InferenceMB: 64, PoolMB: 64, HeadroomMB: 16}
@@ -612,7 +612,7 @@ func TestServiceRunsInInferenceLeaf(t *testing.T) {
 	}
 	_, sock := service(t, Options{Cgroup: g.Inference}, "cgroup")
 	got := ask(t, sock)
-	rel := strings.TrimPrefix(g.Inference.Path, "/sys/fs/cgroup")
+	rel := strings.TrimPrefix(g.Inference.Path, "/sys/fs/cgroup") + "/infer"
 	if strings.TrimSpace(got) != "0::"+rel {
 		t.Fatalf("service cgroup %q, want 0::%s", got, rel)
 	}
@@ -647,6 +647,36 @@ func TestServiceOOMStaysInLeaf(t *testing.T) {
 	n, err := g.Inference.OOMKills()
 	if err != nil || n == 0 {
 		t.Fatalf("leaf oom_kill %d, %v", n, err)
+	}
+}
+
+// INF-4: every restart runs. The leaf's group was killed after each
+// exit, and on Linux 6.18 a child clone3 places in a group that was ever
+// killed dies of SIGKILL at birth (#5135), so a service restarted into it
+// never ran again; each run gets a new group instead.
+func TestServiceRestartsRunInTheLeaf(t *testing.T) {
+	root := cgroupParent(t)
+	g, err := budget.Memory{HostMB: 16, InferenceMB: 64, PoolMB: 64, HeadroomMB: 16}.Apply(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	var mu sync.Mutex
+	s, _ := service(t, Options{Cgroup: g.Inference, Log: lockedWriter{&mu, &buf},
+		Backoff: Backoff{Min: time.Millisecond, Max: time.Millisecond, Reset: time.Hour}}, "exit")
+	deadline := time.Now().Add(30 * time.Second)
+	for s.State().Restarts < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the service stopped only %d times: %+v", s.State().Restarts, s.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "service stopped") && !strings.Contains(l, "service stopped (exited: exit status 3)") {
+			t.Fatalf("a run did not run to its own exit: %q", l)
+		}
 	}
 }
 

@@ -241,7 +241,7 @@ func TestVisionRunsInInferenceLeaf(t *testing.T) {
 	}
 	_, sock := service(t, Options{Cgroup: g.Inference}, "cgroup")
 	got := ask(t, sock)
-	rel := strings.TrimPrefix(g.Inference.Path, "/sys/fs/cgroup")
+	rel := strings.TrimPrefix(g.Inference.Path, "/sys/fs/cgroup") + "/vision"
 	if strings.TrimSpace(got) != "0::"+rel {
 		t.Fatalf("service cgroup %q, want 0::%s", got, rel)
 	}

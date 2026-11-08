@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // fakeStreamRunsc is fakeOneShotRunsc for streams: it logs each call,
@@ -46,20 +44,7 @@ func streamRig(t *testing.T, mode string) (*Runtime, string) {
 	if err := os.WriteFile(filepath.Join(d, "mode"), []byte(mode), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(d, "cg", "stream-t"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for f, v := range map[string]string{"cg/cgroup.controllers": "cpu io memory pids", "cg/cgroup.subtree_control": "",
-		"cg/stream-t/memory.events": "oom_kill 0\n", "cg/stream-t/cgroup.events": "populated 0\n"} {
-		if err := os.WriteFile(filepath.Join(d, f), []byte(v), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	old := startIn
-	startIn = func(path string, _ *childproc.Options) (func(), error) {
-		return func() {}, os.WriteFile(filepath.Join(d, "startedin"), []byte(path), 0o600)
-	}
-	t.Cleanup(func() { startIn = old })
+	fakeCgroups(t, filepath.Join(d, "cg"), filepath.Join(d, "startedin"))
 	return &Runtime{Bin: bin, StateDir: filepath.Join(d, "state")}, d
 }
 
@@ -232,9 +217,15 @@ func TestStreamOneAtATime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fake cannot remove a group holding its plain files, as the
+	// kernel's rmdir does, so the second run's group goes under another
+	// parent; runs of one name take turns whatever their parent.
+	second := streamIn(d)
+	second.Cgroup = filepath.Join(d, "cg2")
+	fakeCgroups(t, second.Cgroup, filepath.Join(d, "startedin"))
 	started := make(chan *StreamRun)
 	go func() {
-		second, err := r.StartStream(context.Background(), streamIn(d))
+		second, err := r.StartStream(context.Background(), second)
 		if err != nil {
 			t.Error(err)
 		}

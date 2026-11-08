@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -86,7 +87,7 @@ func TestRES2ChildSetsWeightsAndAProcessCap(t *testing.T) {
 		}
 	}
 	for _, w := range []int{1, 10000} {
-		if _, err := g.Child("m4", Limits{MaxBytes: 1, Pids: 1, CPUWeight: w, IOWeight: w}); err != nil {
+		if _, err := g.Child("m4-"+strconv.Itoa(w), Limits{MaxBytes: 1, Pids: 1, CPUWeight: w, IOWeight: w}); err != nil {
 			t.Errorf("Child refused weight %d: %v", w, err)
 		}
 	}
@@ -97,20 +98,24 @@ func TestRES2ChildSetsWeightsAndAProcessCap(t *testing.T) {
 // and process cap still hold. Any other failure is fatal.
 func TestRES2ChildToleratesAKernelWithoutIOWeight(t *testing.T) {
 	g := fakeV2(t)
-	p := filepath.Join(g.Path, "m1")
-	must(t, os.Mkdir(p, 0o755))
-	// A dangling link into a missing directory makes the write ENOENT, as
-	// the kernel does for a file it does not provide.
-	must(t, os.Symlink(filepath.Join(t.TempDir(), "absent", "io.weight"), filepath.Join(p, "io.weight")))
+	// The kernel makes a group's files with it: m1 lacks io.weight and m2
+	// pids.max. A dangling link into a missing directory makes the write
+	// ENOENT, as the kernel does for a file it does not provide.
+	absent := map[string]string{"m1": "io.weight", "m2": "pids.max"}
+	makeDir = func(p string, perm os.FileMode) error {
+		if err := os.Mkdir(p, perm); err != nil {
+			return err
+		}
+		f := absent[filepath.Base(p)]
+		return os.Symlink(filepath.Join(t.TempDir(), "absent", f), filepath.Join(p, f))
+	}
+	defer func() { makeDir = os.Mkdir }()
 	c, err := g.Child("m1", Limits{MaxBytes: 1 << 30, CPUWeight: 7, IOWeight: 9, Pids: 512})
 	must(t, err)
 	if got := read(t, filepath.Join(c.Path, "pids.max")); got != "512" {
 		t.Errorf("pids.max = %q", got)
 	}
 	// pids.max cannot be skipped the same way.
-	p = filepath.Join(g.Path, "m2")
-	must(t, os.Mkdir(p, 0o755))
-	must(t, os.Symlink(filepath.Join(t.TempDir(), "absent", "pids.max"), filepath.Join(p, "pids.max")))
 	if _, err := g.Child("m2", Limits{MaxBytes: 1 << 30, CPUWeight: 7, IOWeight: 9, Pids: 512}); err == nil {
 		t.Error("machine started without its process cap")
 	}
