@@ -53,7 +53,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-untrusted-exit-b2b-links | Put -signin-routes on a tmpfs of its own (or require fs.protected_hardlinks=1) before b2b's unit sets -signin-sock (#3282 Security 1). | #2780 b2b | queued (release; tier A) |
 | EDGE-link-core-d | EDGE-link-core-d: the owner page's edge step, the tamper alert and the edge status lines (HW-15, REC-2). | EDGE-link-core-c2 | queued (release; tier A; slice d of #3290) |
 | MIG-4-untrusted-exit-b1-sweep-f2 | MIG-4-untrusted-exit-b1-sweep-f2: vm.load removes a provider or worker machine directory a crash left without meta.json, so no placeholder seed stays at rest (CAP-8). | MIG-4-untrusted-exit-b1-sweep-f1 (#3308) | queued (later; tier A) |
-| KRN-forget-c | The owner's Forget surface: a signed-in owner-page Forget step with a passkey tap (option A), calling KRN-forget's find and confirm (LOG-4, CH-3, CH-26). | #3179; option A picked 2026-11-03 | building (release; sub A; tier A; size M) |
 | MAIL-reader-sock | The mail clerk's quarantined read (inbox.Ask) as a frame to a main-side reader process that calls the model clerk (PLN-2, D-154 rule 4). | MAIL-main, #2780 | queued (release; tier A) |
 | MIG-4-adapters-c | MIG-4-adapters-c: the recall directory at rest is removed only once every held lineage is settled and told; STATUS's unknown line gets an owner step (CAP-3, LOG-4). | agentosd slot | queued (release; tier A; slice c of #2579) |
 | MIG-4-adapters-d | MIG-4-adapters-d: `modelroute` off `journal` and `egress`; router denials become a coalesced log line. | #3402; agentosd slot | queued (tier A; slice d of #2579) |
@@ -304,12 +303,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-q-owner | ENF-q-owner: owner-set relock interval and usual hours in the signed policy (NET-6) | #3675 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-live-vmap | ENF-live-vmap: dispatch the live chain by interface if HW-4 shows its cost | #4238 | queued(later; recheck) |
 | ENF-light-f1 | ENF-light-f1: page and bulb driver use the trip light by name and lift it only on a full cut lift; (KRN-12) | #4165 | queued (release; tier A) |
-| ENF-dns-tidy-3 | ENF-dns-tidy-3: wording; TestGenerateRefuses precision | #4143 | building(tier A; lane primary; brief briefs/ENF.md) |
-| CAM-decoder-later | CAM-decoder-later: the decoder unit's /run view, the clerk's stop bound, PrivatePIDs in CI (CLK-1, NET-2, RES-2) | CAM-decoder-uid (#4134, #4350) | queued (later; from #4350 reviews) |
+| CAM-decoder-later | CAM-decoder-later: the decoder unit's /run view, the clerk's stop bound, PrivatePIDs in CI (CLK-1, NET-2, RES-2) | CAM-decoder-uid (#4134, #4350) | building (later; from #4350 reviews) |
 | REV-LOW-workers | REV-LOW-workers: workers and image findings (llama.cpp missing from vulncheck, Held over 64 KiB, no tail/tee in the OpenClaw image, snapshot compare after destroy) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | IMG-disk-3 | IMG-disk-3: runner disk on AWS-provisioned runners (recheck when an AWS notice appears) | #4416 L3 | queued(tier A; lane primary) |
 | ENF-e-related-2 | ENF-e-related-2: pin the related drop's high-half mark check with a behavioural test | #4407 reviews | queued(tier A; lane primary) |
-| ENF-k2-mnt-d | ENF-k2-mnt-d: radio stacks dump no core, and their directories are cleaned without following symlinks (NET-2) | #4369 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-l-dns-step | ENF-l-dns-step: slice l restarts each listed dnsmasq in step with nft.Reload (NET-2 The core's list) | #4237 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | CTRL-usb4 | [M6 Ultra spike: USB4 networking at line rate](briefs/CTRL-usb4.md) | G1; Mark: hardware (M6 Ultra unit, a USB4 peer) | queued (later; G7, A17, D-104; HW-12; tier C; one sitting with the unit) |
 | SPEC-ch9-csrf-reuse | SPEC-ch9-csrf-reuse: CH-9's anti-forgery clause allows a same-site load to keep a valid value the page issued | #4460 review | queued(release; tier C; lane primary) |
@@ -333,7 +330,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-heartbeat-interval | ENF-heartbeat-interval: set the core's heartbeat interval in the channel's format definition | ENF-l-a | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-exec | UNLOCK-closure-exec: the commands of every unit the unlock step can start are on a closed list, not a word list (#4696 Security R1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | P2-1 | P2-1: the image clears the MOR bit on orderly shutdown so a host PC is left untouched (HW-8) | #4793 | building (release; tier A; from #4793 HOST-1e) |
-| ENF-m-rpf | ENF-m-rpf: the enforcer image holds the WAN's effective rp_filter at 0, checked at boot | #4763 (ENF-wan-dhcp), #3671 (ENF-m) | queued(tier A; lane primary) |
+| ENF-m-rpf | ENF-m-rpf: the enforcer image holds the WAN's effective rp_filter at 0, checked at boot | #4763 (ENF-wan-dhcp), #3671 (ENF-m) | building(tier A; lane primary) |
 | ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | queued (release; tier A; lane primary; brief briefs/ENF.md) |
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | ENF-l-sec-b | ENF-l-sec-b: alert offer single-flight and re-offer on a cut core's reconnect (#4755 items 6, 7) | ENF-l-sec | queued(tier A; lane primary; brief briefs/ENF.md) |
@@ -384,20 +381,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HELPER-c | [Helper app for macOS: same service and pause rules on a Mac](briefs/HELPER-c.md) | HELPER-b, G1 | queued (after G1, D-104; HW-11, HW-7; tier B) |
 | P2-2w c4f l3 | egress-setup logs the real cause when agentos-egress init fails, not "not claimed" for every failure (later; L3 L3 and UX L3 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
 | P2-2w c4f l5 | Pin PrivateNetwork absent on agentos-egress.service, since the vault process is the only path to the model providers (later; L3 L5 and Potency M13 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
-| NETGUARD-watch-events-close | NETGUARD-watch-events-close: when `events` closes before ctx, Watch stops and waits for its full-read goroutine instead of leaving it running until ctx ends (combined L2 on PR #1335) | NETGUARD-watch-race | building (later; tier B; from #1335) |
 | MODEM-notice-slots | Recovery notices leak l.out slots (modemlink.go:179,557-558); only sent and dropLocked clear them. Add a deadline on waiterless items. Failure path: after about 64 incidents outbound is full. Serves modem reliability (later, tier B; external review 12 item 10) | MODEM-notice-slots | queued (later; tier B; external review 12, item 10) |
 | ROUTE-openai-early-error l1 | ROUTE-openai-early-error l1: Sanitise OpenAI's late stream error chunk, test the null-error passthrough, and name the early error chunk in ASSUMPTIONS R6 (later; from #1448 combined review) | ROUTE-openai-early-error (#1448) | queued (later; tier B; from #1448) |
-| NETGUARD-quick-atomic l1 | NETGUARD-quick-atomic follow-ups: test that a quick read with no resolver keeps the learned one on an unchanged gateway (the resolver-merge mutant survives; fails closed), and note that the in-section hook cannot catch a split that re-locks before it. Serves DEV-2 (later, tier A; PR #1502 delta review L1, L2) | NETGUARD-quick-atomic l1 | building (later; tier A; PR #1502 delta review L1, L2) |
-| NETGUARD-silent-gw | NETGUARD-silent-gw: a router that never answers NAT-PMP gets no Sources entry, so every move to it holds public dials until its silent full read. Fix: remember a known-silent gateway. UX (later, recheck; #1537 UX R3) | NETGUARD-silent-gw | queued (later; recheck; from NETGUARD-gw-ext #1537) |
-| NETGUARD-hold-cancel-log | NETGUARD-hold-cancel-log: a dial held on a never-seen gateway whose own context ended is journalled as a netguard refusal. Fix: return ctx.Err() or journal a distinct reason. UX (later; #1537 UX R4) | NETGUARD-hold-cancel-log | building (later; from NETGUARD-gw-ext #1537) |
-| NETGUARD-hold-wording | NETGUARD-hold-wording: the hold refusal says 'on this gateway' when the router behind an unchanged address is new. Fix: say 'this network's router'. UX (later, recheck; #1550 UX) | NETGUARD-hold-wording | building (later; from NETGUARD-gw-ident #1550) |
+| NETGUARD-silent-gw | NETGUARD-silent-gw: a router that never answers NAT-PMP gets no Sources entry, so every move to it holds public dials until its silent full read. Fix: remember a known-silent gateway. UX (later, recheck; #1537 UX R3) | NETGUARD-silent-gw | building (later; recheck; from NETGUARD-gw-ext #1537) |
 | HEALTH-after-inbound | HEALTH-after-inbound: the health unit lacks Wants= and After=agentos-inbound.service. Add both and pin them in a unit test. Serves UPD-1 (later, recheck; tier B; review item 6) | HEALTH-after-inbound | queued (later; tier B; from the external review) |
 | ROUTE-cancel-terminal | ROUTE-cancel-terminal: a meter timeout cancels the ctx but the router keeps trying and cools healthy routes for 1 minute (route.go:589-626, 725-736). try returns terminal on ctx.Err and serve stops. Serves ADP-4; not #1460 (later, recheck; tier B; review item 8) | ROUTE-cancel-terminal | queued (later; tier B; from the external review) |
 | SKILL-keep-notes | SKILL-keep-notes: MCPEffects reads only Content[0] (skill/server.go:277-289), dropping the snapshot warning. Carry the Content[1:] text through to the agent result (later, recheck; tier B; review item 14; Defect: SR2-3s) | SKILL-keep-notes | queued (later; tier B; from the external review) |
 | CI-depaudit-once | CI-depaudit-once: tests/test_depaudit.py test_shipped_registry_passes duplicates the A9 step (assurance.yml:122-123), which already runs it and fails hard. Delete the test (later; tier B; review item 19; not #1096) | CI-depaudit-once | queued (later; tier B; from the external review) |
-| NETGUARD-neigh-churn | NETGUARD-neigh-churn: each NUD transition on the gateway's neighbour entry runs a full read, and that read's packet drives the next transition, so NAT-PMP traffic about doubles. Fix: count only lladdr or validity changes, or skip the kick when the quick read's key is unchanged. Potency/UX (later; #1550 delta R2) | NETGUARD-neigh-churn | building (later; from NETGUARD-gw-ident #1550) |
 | W5-Db-owner-wrap | CodeRecipient proof does not pin the production Owner to *at.Modem (later; tier A; Security 4a L1 on #1581) | #1581 | queued (later; tier A; Security 4a L1 on #1581) |
-| NETGUARD-gw4-chosen-row | NETGUARD-gw4-chosen-row: no test has the lower-metric default row after a higher one, so a gateway4 that keeps the first winner's interface (mutant M19c) passes. Fix: add a table with the best row last. Potency (later; #1550 delta 2 R1) | NETGUARD-gw4-chosen-row | building (later; from NETGUARD-gw-ident #1550) |
 | QUESTION-pace-later | QUESTION-pace-later: pin Tick's post-Now ctx check with a Now-failure case (P1); give back the gate's aged pass when NotifyNow returns ErrPaced after Reserve(true) (P2); settle SPEC CH-15 vs O21 for deadline questions in quiet hours; recheck questions held indefinitely under a restricted clock with quiet hours set. Potency/UX (later; #1574 reviews) | QUESTION-pace-later | building (later; from QUESTION-send-unheld #1563, PR #1574) |
 | Image boot test | Reboot check can miss a truncated agentos-uplink: none console line in the image boot test (later; found building #1457; image CI run 38570617776) | — | queued (later; found building #1457) |
 | CI-SOAK-cap-l1 | CI-SOAK-cap l1: with fuzz at max-parallel 3, a 5h fuzztime dispatch runs ~33h and can skip the next daily run; failure reports land ~18h after start instead of ~9h; no test pins the max-parallel caps (later; tier A; from #1649) | CI-SOAK-cap | queued (later; tier A; from CI-SOAK-cap #1649) |
@@ -449,13 +440,18 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UNIT-RULES-release-3 | UNIT-RULES-release-3: a drop-in of ours masking a package's owner drop-in; builtUnits keeps a refused unit's programs for grantsHeld. Release; from #5072. | #5072 | queued (release) |
 | ENF-c-f3-ux | ENF-c-f3-ux: the new-recovery block moves under "Your passkey" and shows only with an enrol book and no recovery in progress | #5042 | queued (release; tier A; peer lane; from #5042 UX accept) |
 | MIG-4-plan-login-later-fu | MIG-4-plan-login-later-fu: the plan validate check is tested, a refresh's guest headers are pinned or the claim narrowed, Remove clears last, and the S8-live run script keeps no plain user_code and fails with its real cause | #5084, #3110, #3180 | building (release; tier A; from #5084 reviews) |
-| GVISOR-killwait-release | GVISOR-killwait-release: backstop wording, report a wedged machine, deadline on the failed-start Kill, WaitDelay re-read trigger in V37. Release; from #5081. | #5081 | building (release; tier A) |
-| NETGUARD-later-fu | NETGUARD-later-fu: test the neighbour key's interface and the ENOBUFS forget call, and settle a cancelled held dial as not sent. Release; from #5079. | #5079 | queued (release; tier A) |
-| KRN-forget-c-fu | KRN-forget-c-fu: forget notice counts only this erase and shows counts by kind, STOP reaches page sessions, pinned test oracle, probe note, bytes vs letters, brief scope and lane. Release; from #5092. | #5092 | queued (release; tier A) |
-| VM-wedged-status | VM-wedged-status: a wedged machine (vm.ErrWedged) appears in the status the owner reads, with the action (restart the host). Kernel half; release; from #5096. | #5096 | queued (release; tier A) |
+| NETGUARD-later-fu | NETGUARD-later-fu: test the neighbour key's interface and the ENOBUFS forget call, and settle a cancelled held dial as not sent. Release; from #5079. | #5079 | building (release; tier A) |
+| KRN-forget-c-fu | KRN-forget-c-fu: forget notice counts only this erase and shows counts by kind, STOP reaches page sessions, pinned test oracle, probe note, bytes vs letters, brief scope and lane. Release; from #5092. | #5092 | building (release; tier A) |
+| VM-wedged-status | VM-wedged-status: a wedged machine (vm.ErrWedged) appears in the status the owner reads, with the action (restart the host). Kernel half; release; from #5096. | #5096 | building (release; tier A) |
 | VM-wedged-status-owner | VM-wedged-status-owner: STATUS and the owner page say a machine is wedged and the host needs a restart. Sub B half of #5098; release; from #5096. | #5098 | queued (release; tier A) |
 | ENF-mdns-netlink-kernel | ENF-mdns-netlink-kernel: the mDNS relay reads links and addresses on a socket that checks the sender is the kernel, with a per-request deadline. Release; from #5095 (same class as #5088). | #5095, #5088 | building (release; tier A) |
 | ENF-cap-gro-fu2 | ENF-cap-gro-fu2: the link dump reads the DONE code and the interrupted flag, the reload retry is tested, Off has one deadline per call, and the bitset's malformed-bit case is tested. Release; from #5095. | #5095, #5088 | queued (release; tier A) |
+| NETGUARD-later-fu-plan | NETGUARD-later-fu-plan: a held dial cancelled before connect settles as not sent. Release; from #5079. | #5079, #5094 | queued (release; tier A) |
+| NETGUARD-silent-gw-fu | NETGUARD-silent-gw-fu: a gateway is filed silent only on a timeout or refusal, the netlink parse builds for darwin, and the MAC-trust note covers silent keys. Release; from #5109. | #5109, #1539 | queued (release; tier A) |
+| ENF-netns-skip-fu | ENF-netns-skip-fu: a skip inside a namespaced child test fails the parent on CI, so the sender-check and deadline tests cannot go quiet. Release; from #5095 and #5104 (RL3). | #5095, #5104 | queued (release; tier A) |
+| ENF-set-ttl-fu | ENF-set-ttl-fu: elementsOnly bound to the fresh and recent sets, a reason for an expired answer, a failing refresh surfaced and _f bounded, and the first reload's window. Release; from #5115. | #5115, #4453 | queued (release; tier A) |
+| IMG-keeper-reach-fu | IMG-keeper-reach-fu: keeper_reach resolves a bind source in the tree and refuses /proc sources, so /var/run and /proc/self/root binds are caught. Release; from #5117. | #5117, #4392 | queued (release; tier A) |
+| ENF-m-rpf-fu | ENF-m-rpf-fu: /etc/sysctl.conf is scanned, health's rp_filter loop has a committed fake-root test, and the boot-to-ruleset window is stated. Release; from #5118. | #5118, #4810 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -484,7 +480,6 @@ issue #4023: needs exactly one state label of queued, building, in review, merge
 issue #4339: body has no board-row block
 issue #4382: no section 'Tooling and CI' in BOARD.md
 issue #4422: no section 'Tooling and CI' in BOARD.md
-issue #4450: no section 'Tooling and CI' in BOARD.md
 issue #4795: body has no board-row block
 issue #4902: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4911: body has no board-row block
@@ -503,5 +498,4 @@ issue #5047: body has no board-row block
 issue #5053: body has no board-row block
 issue #5055: body has no board-row block
 issue #5062: body has no board-row block
-issue #5069: no section 'Tooling and CI' in BOARD.md
 ```
