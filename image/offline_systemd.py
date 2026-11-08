@@ -16,7 +16,8 @@ and a nodev /dev, so PID 1 cannot set the runner's hostname or a global sysctl. 
 on the runner, as are the generators it runs; the tree is the build's own. Container mode means some
 generators see a different machine than the box: fstab-generator skips fstab entries that name a device
 (callers refuse those in the tree themselves), and gpt-auto-generator finds no disk. A runner booted by
-systemd gives the manager a delegated scope of its own. The console is a pty, read for the lines PID 1
+systemd gives the manager a delegated scope of its own, whose one process outside the container (unshare,
+PID 1's parent) moves to a child group, so PID 1 can give its units controllers. The console is a pty, read for the lines PID 1
 logs (failed generators).
 """
 import os
@@ -126,11 +127,36 @@ class Manager:
                                      stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
         try:
+            if wrap:
+                self.hold_parent()
             self.wait()
         except BaseException:
             self.stop()
             raise
         self.view_root = "/proc/%d/root" % self.pid
+
+    def hold_parent(self, timeout=10):
+        """Move unshare, PID 1's parent, from the delegated scope (the container's cgroup root) into a child
+        group of its own, so the root holds no process and PID 1 can enable controllers for its units: cgroup
+        v2 refuses a non-root group that holds a process any (no internal processes; #4392)."""
+        own = cgroup_of(os.getpid())
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and self.proc.poll() is None:
+            # Only once unshare has forked: its cgroup namespace, made before the fork, is rooted at the scope.
+            try:
+                with open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)) as f:
+                    forked = bool(f.read().split())
+            except OSError:
+                forked = False
+            cg = cgroup_of(self.proc.pid)
+            if forked and cg and cg != own and cg.endswith(".scope"):
+                holder = "/sys/fs/cgroup%s/offline-systemd-parent" % cg
+                os.makedirs(holder, exist_ok=True)
+                with open(holder + "/cgroup.procs", "w") as f:
+                    f.write(str(self.proc.pid))
+                return
+            time.sleep(0.01)
+        raise SystemExit("offline systemd: the manager's scope did not appear: %s" % self.console())
 
     def _drain(self):
         while self._pump(0.2) is not None:
@@ -267,6 +293,19 @@ def manager_argv(root, usr, cmdline, plant, console):
     return (["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation", "private",
              "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant), console]
             + words + list(PINNED))
+
+
+def cgroup_of(pid):
+    """PID's cgroup v2 path, or None once it is gone."""
+    try:
+        with open("/proc/%d/cgroup" % pid) as f:
+            text = f.read()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:]
+    return None
 
 
 def shell_words(value, name):

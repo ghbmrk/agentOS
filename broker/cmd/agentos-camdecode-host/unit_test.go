@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/user"
@@ -51,9 +52,25 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	if pid := os.Getpid(); pid != 1 {
 		t.Errorf("the session is pid %d, not 1 in a pid namespace of its own", pid)
 	}
-	if es, err := os.ReadDir("/run"); err != nil || len(es) != 0 {
-		t.Errorf("the session's /run holds %d entries (%v); want an empty one", len(es), err)
+	if es, err := os.ReadDir("/run"); err != nil {
+		t.Errorf("the session's /run: %v", err)
+	} else {
+		for _, e := range es {
+			t.Logf("/run holds %s (%v)", e.Name(), e.Type())
+		}
 	}
+	// Nothing but directories, so no socket or file of the box's: the
+	// mount points systemd leaves under the empty /run hold nothing, or
+	// nothing it can read.
+	filepath.WalkDir("/run", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			t.Errorf("the session's /run holds %s (%v); want only empty directories", p, d.Type())
+		}
+		return nil
+	})
 	conn, err := net.FileConn(os.Stdin)
 	if err != nil {
 		t.Fatalf("standard input is not the session's connection: %v", err)
