@@ -680,6 +680,46 @@ func TestServiceRestartsRunInTheLeaf(t *testing.T) {
 	}
 }
 
+// RES-2, INF-1: a run whose group cannot be made does not start, so the
+// service never runs outside its leaf.
+func TestNoGroupNoStart(t *testing.T) {
+	leaf := &cgroup.Group{Path: filepath.Join(t.TempDir(), "absent")}
+	s, _ := service(t, Options{Cgroup: leaf, Backoff: Backoff{Min: time.Hour, Max: time.Hour, Reset: time.Hour}}, "exit")
+	deadline := time.Now().Add(10 * time.Second)
+	for s.State().Restarts == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the run never ended: %+v", s.State())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := s.State(); !strings.HasPrefix(st.Cause, "cgroup: ") {
+		t.Fatalf("state %+v, want a cgroup cause: the service started outside its leaf", st)
+	}
+}
+
+// INF-4: a stop is tagged oom only when the leaf's OOM kill count rose
+// during the run.
+func TestOOMCauseCountsOnlyThisRun(t *testing.T) {
+	leaf := &cgroup.Group{Path: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(leaf.Path, "memory.events"), []byte("low 0\noom_kill 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		leaf   *cgroup.Group
+		before int64
+		want   string
+	}{
+		{leaf, 1, "oom: exited"},
+		{leaf, 2, "exited"},
+		{nil, 0, "exited"},
+		{&cgroup.Group{Path: filepath.Join(leaf.Path, "absent")}, 0, "exited"},
+	} {
+		if got := oomCause(c.leaf, c.before, "exited"); got != c.want {
+			t.Errorf("oomCause(%v, %d) = %q, want %q", c.leaf, c.before, got, c.want)
+		}
+	}
+}
+
 // INF-8: the supervisor's own lines carry causes and counts only.
 func TestSupervisorLogIsCauseOnly(t *testing.T) {
 	var buf strings.Builder

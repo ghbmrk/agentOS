@@ -104,9 +104,6 @@ func Open(path string) (*Group, error) {
 // an earlier run left under that name is emptied (within leftoverWait) and
 // replaced.
 func (g *Group) Child(name string, l Limits) (*Group, error) {
-	if err := checkName(name); err != nil {
-		return nil, err
-	}
 	if l.MaxBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget is required (RES-2)", name)
 	}

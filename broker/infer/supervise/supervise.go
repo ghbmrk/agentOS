@@ -303,9 +303,15 @@ func (s *Supervisor) run(ctx context.Context) string {
 	if err != nil {
 		cause = "exited: " + err.Error()
 	}
+	return oomCause(leaf, ooms, cause)
+}
+
+// oomCause is cause tagged "oom: " when the leaf's OOM kill count has
+// risen past before, the count when the run started.
+func oomCause(leaf *cgroup.Group, before int64, cause string) string {
 	if leaf != nil {
-		if n, oerr := leaf.OOMKills(); oerr == nil && n > ooms {
-			cause = "oom: " + cause
+		if n, err := leaf.OOMKills(); err == nil && n > before {
+			return "oom: " + cause
 		}
 	}
 	return cause
