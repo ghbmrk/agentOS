@@ -57,21 +57,21 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 				all = append(all, kept...)
 			}
 			w.elements(a.set(v6), all)
-			kept := map[string]bool{}
+			kept := map[netip.Addr]bool{}
 			for _, e := range all {
-				kept[e.String()] = true
+				kept[e] = true
 			}
 			var fresh []netip.Addr
 			for _, e := range ofFamily(have[a.Fresh(v6)], v6) {
-				if kept[e.String()] {
+				if kept[e] {
 					fresh = append(fresh, e)
 				}
 			}
 			w.elements(a.Fresh(v6), fresh)
 			var rs []string
 			for _, r := range left[a.Recent(v6)] {
-				if kept[r.addr] {
-					rs = append(rs, r.addr+" expires "+secs(int(r.left)))
+				if a, err := netip.ParseAddr(r.addr); err == nil && kept[a] {
+					rs = append(rs, a.String()+" expires "+secs(int(r.left)))
 				}
 			}
 			if len(rs) > 0 {
@@ -149,8 +149,8 @@ func ofFamily(es []netip.Addr, v6 bool) []netip.Addr {
 	return out
 }
 
-// aging is one recent set's element: its address as nft printed it and
-// the seconds it has left.
+// aging is one recent set's element: its value as nft printed it and the
+// seconds it has left.
 type aging struct {
 	addr string
 	left int64
@@ -159,8 +159,9 @@ type aging struct {
 // recent is each listed set's elements that are a value with an expiry
 // and no timeout of their own, as a recent set holds them, each with the
 // time it has left; one with more than AnswerTimeout left, or none, is
-// left out, so it is not kept. Reload keeps only a value that is the
-// printed form of a kept address, so a value in any other form is never
+// left out, so it is not kept. Reload keeps only a value that parses as
+// a kept address (nft and Go print some addresses differently, such as
+// `::1.2.3.4` and `::102:304`), so a value in any other form is never
 // carried.
 func recent(sets []listedSet) map[string][]aging {
 	out := map[string][]aging{}

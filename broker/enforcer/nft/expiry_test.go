@@ -260,7 +260,7 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 	running := listing(map[string][]any{
 		tv.Named("tv.example", false):  {"203.0.113.10", "203.0.113.11", "203.0.113.12", "203.0.113.13", "203.0.113.14"},
 		tv.Named("cdn.example", false): {"203.0.113.20"},
-		tv.Named("tv.example", true):   {"2001:db8::10"},
+		tv.Named("tv.example", true):   {"2001:db8::10", "::1.2.3.4"},
 		tv.Fresh(false):                {"203.0.113.10", "203.0.113.20", "203.0.113.99", "2001:db8::10"},
 		tv.Recent(false): {
 			elem("203.0.113.14", `, "expires": 90`),
@@ -273,7 +273,7 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 			elem("203.0.113.20", `, "expires": 120`),
 			elem("2001:db8::10", `, "expires": 120`),
 		},
-		tv.Recent(true): {elem("2001:db8::10", `, "expires": 600`)},
+		tv.Recent(true): {elem("2001:db8::10", `, "expires": 600`), elem("::1.2.3.4", `, "expires": 100`)},
 	})
 	got, err := Reload(narrow, l, running)
 	if err != nil {
@@ -282,7 +282,8 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 	for _, want := range []string{
 		"add element inet enforcer " + tv.Fresh(false) + " { 203.0.113.10 }\n",
 		"add element inet enforcer " + tv.Recent(false) + " { 203.0.113.11 expires 120s, 203.0.113.14 expires 90s }\n",
-		"add element inet enforcer " + tv.Recent(true) + " { 2001:db8::10 expires 600s }\n",
+		// nft prints an IPv4-compatible address as ::1.2.3.4, Go as ::102:304.
+		"add element inet enforcer " + tv.Recent(true) + " { 2001:db8::10 expires 600s, ::102:304 expires 100s }\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reload lacks %q", want)
