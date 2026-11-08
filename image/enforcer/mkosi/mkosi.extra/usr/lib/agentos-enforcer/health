@@ -71,6 +71,10 @@ esac
 if [ -z "$R" ]; then
 	[ "$(systemctl is-active agentos-enforcer.service)" = active ] || fail "agentos-enforcer.service is not running"
 fi
+# No core dump reaches a file (#4459; sysctl.d/99-enforcer-nodump.conf): a crashed radio stack's
+# memory holds what it guards, and the kernel's default pattern writes into its run directory.
+[ "$(cat "$R/proc/sys/kernel/core_pattern" 2>/dev/null)" = "|/usr/bin/false" ] || fail "core dumps are not discarded"
+[ "$(cat "$R/proc/sys/fs/suid_dumpable" 2>/dev/null)" = 0 ] || fail "fs.suid_dumpable is not 0"
 # No swap: the enforcer's keys and policy stay in memory and on the state partition only.
 [ "$(sed 1d "$R/proc/swaps" 2>/dev/null | grep -c .)" = 0 ] || fail "swap is active"
-echo "enforcer-health: PASS secure_boot=$sb usr=verity wifi=off usb_storage=off usb_default=$usb watchdog=$wd"
+echo "enforcer-health: PASS secure_boot=$sb usr=verity wifi=off usb_storage=off usb_default=$usb dumps=off watchdog=$wd"
