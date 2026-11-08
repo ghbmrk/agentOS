@@ -136,6 +136,13 @@ func TestNetlinkGatewayNeighbourCountsOnlyMACOrValidityChanges(t *testing.T) {
 			t.Fatalf("%s: change %v, want %v", s.what, got, s.want)
 		}
 	}
+	// The same router's MAC on another interface is a change: the gateway
+	// key carries the interface.
+	other := neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwA, reachable, macB)
+	binary.NativeEndian.PutUint32(other[syscall.NLMSG_HDRLEN+4:], 3)
+	if !w.change(other, gateway) {
+		t.Fatal("the gateway's MAC on another interface is not a change")
+	}
 	// A new default gateway's entry is a change even with the same MAC.
 	cur = netip.AddrFrom4([4]byte(gwB))
 	if !w.change(neighmsgAt(syscall.RTM_NEWNEIGH, syscall.AF_INET, gwB, reachable, macB), gateway) {
