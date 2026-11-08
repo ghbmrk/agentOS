@@ -325,6 +325,12 @@ type fakeNetwork struct {
 	replaced int
 }
 
+func (n *fakeNetwork) Replaced() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.replaced > 0
+}
+
 func (n *fakeNetwork) Replace() (enrol.Card, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -359,6 +365,10 @@ type box struct {
 	// failing names the state files whose Save fails (fileStore.fault);
 	// waits replaces the daemon's channel and firewall timeouts.
 	failing map[string]bool
+	// failNth names state files whose k-th Save from now fails alone
+	// (failOn); saves counts the Saves since.
+	failNth map[string]int
+	saves   map[string]int
 	waits   deps
 	// offloads are the ports of each Offload call; offloadErr fails them.
 	offloads   [][]string
@@ -408,7 +418,13 @@ func (x *box) open() (*Enforcer, error) {
 	dp.SaveFault = func(path string) error {
 		x.mu.Lock()
 		defer x.mu.Unlock()
-		if x.failing[filepath.Base(path)] {
+		name := filepath.Base(path)
+		if k := x.failNth[name]; k > 0 {
+			if x.saves[name]++; x.saves[name] == k {
+				return errors.New("disk: no space left")
+			}
+		}
+		if x.failing[name] {
 			return errors.New("disk: no space left")
 		}
 		return nil
@@ -447,6 +463,16 @@ func (x *box) fail(name string, on bool) {
 		x.failing = map[string]bool{}
 	}
 	x.failing[name] = on
+}
+
+// failOn makes only the k-th Save of the state file name from now fail.
+func (x *box) failOn(name string, k int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.failNth == nil {
+		x.failNth, x.saves = map[string]int{}, map[string]int{}
+	}
+	x.failNth[name], x.saves[name] = k, 0
 }
 
 // restart is a power loss and boot: nothing survives but the disk.

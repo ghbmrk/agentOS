@@ -79,7 +79,7 @@ type spec struct {
 var kinds = map[Kind]spec{
 	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
 	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
-	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home now and cancel the replacement there if one is waiting. Clear this there too."},
+	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home within 10 minutes and cancel the replacement there if one is waiting. After 10 minutes a replacement is in force and only a factory reset with the code inside the enforcer's case takes it back. Clear this there too."},
 	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
 	ChannelPaused:    {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
 	SafetyOff:        {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
@@ -91,7 +91,7 @@ var kinds = map[Kind]spec{
 	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
 	RoutineLock:      {LogOnly, true, "%s locked."},
 	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
-	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
+	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window

@@ -12,6 +12,12 @@
 <button class="act" data-action="cancel-recovery" data-target="" data-rp="{{.Name}}">Cancel the recovery with your passkey</button>
 </div>
 {{end}}
+{{if not .Recovery}}
+<div class="pending">
+<p>If you think someone has seen your recovery code, or a recovery did not save, make a new one. The old code stops working and the new one shows once.</p>
+<button class="act" data-action="new-recovery" data-target="" data-rp="{{.Name}}">Make a new recovery code with your passkey</button>
+</div>
+{{end}}
 {{if .Keep}}
 <div class="pending">
 <p>Your rules are still signed by the passkey this one replaced, so nothing can be loosened yet. Sign them as this passkey's to finish. Nothing in them changes.</p>

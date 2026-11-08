@@ -171,6 +171,8 @@ func (unwiredNetwork) Replace() (enrol.Card, error) {
 	return enrol.Card{}, errors.New("access point not wired yet (ENF-l-b)")
 }
 
+func (unwiredNetwork) Replaced() bool { return false }
+
 // noRadio is the radio host until ENF-l-b wires slice k's: every command
 // and state read is refused, so the channel answers Failed.
 type noRadio struct{}
