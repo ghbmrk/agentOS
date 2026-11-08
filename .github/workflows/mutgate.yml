@@ -7,7 +7,7 @@ name: mutgate
 # in the PR body for that site, which the reviewer checks; the body reaches the gate through env as
 # text, read by the base's tool. Gremlins runs only on those packages (`mutgate.py claimed`), and
 # only on their target lines (`run --git`), split into K shards a package, one job each (#4961): the
-# `plan` job counts each package's targets and picks K, so no job runs past its timeout, and measures a
+# `plan` job counts each package's targets, times its suite (#5069) and picks K, so no job runs past its timeout, and measures a
 # test-only package's covered lines once for every shard to read (#4970). Every mutant
 # runs alone with the whole suite, so a shard gives each of its mutants the verdict one job would. Gremlins has no mutator that deletes a
 # statement, so `delete` deletes each statement holding one of those lines alone, on parallel
@@ -221,6 +221,12 @@ jobs:
         run: |
           echo "claimed: $CLAIMED ($PACKAGES); plan: $PLAN; mutants: $MUTANTS"
           [ "$CLAIMED" = success ] || exit 1
+          # This job does not run in a cancelled run, so a cancelled shard is one GitHub stopped at its
+          # timeout-minutes: no verdict, not a survivor (#5069).
+          if [ "$MUTANTS" = cancelled ]; then
+            echo "::error::a mutants shard timed out at its 60-minute limit (the cancelled job in the checks list), so it gave no verdict; no mutant was shown to survive. Rerun the failed jobs; if the same shard times out again, the plan's per-shard budgets in tools/mutgate.py are too large for that package."
+            exit 1
+          fi
           if [ "$PACKAGES" = "[]" ]; then [ "$PLAN$MUTANTS" = skippedskipped ]; else [ "$PLAN$MUTANTS" = successsuccess ]; fi
       # A fresh runner where no PR code has run. The PR tree is read only as data: its diff and file names.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2

@@ -1496,6 +1496,29 @@ class TestOnly(unittest.TestCase):
         (stub / "gremlins").chmod(0o755)
         return {"PATH": f"{stub}:{os.environ['PATH']}"}
 
+    def test_suite_seconds_times_one_whole_run(self):
+        # MUT-kernel-sim-budget (#5069): plan times the package's whole suite, built as delete builds it.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"GOFLAGS": "", "GOWORK": "off"}), \
+                mock.patch.object(mutgate, "BROKER", pathlib.Path(d) / "broker"):
+            self.repo(d, TWO_TEST + "\n// changed\n")
+            pkg, tmp = mutgate.BROKER / "hint", pathlib.Path(d) / "tmp"
+            tmp.mkdir()
+            slow = 'package hint\n\nimport (\n\t"testing"\n\t"time"\n)\n\nfunc TestSlow(t *testing.T) { time.Sleep(time.Second) }\n'
+            (pkg / "slow_test.go").write_text(slow)
+            secs, problem = mutgate.suite_seconds("hint", tmp)
+            self.assertIsNone(problem)
+            self.assertGreaterEqual(secs, 1.0)
+            (pkg / "slow_test.go").write_text(slow.replace("time.Second)", '0); t.Fatal("no")'))
+            self.assertEqual(mutgate.suite_seconds("hint", tmp),
+                             (None, "broker/hint/'s tests fail before any mutant runs, so its shards cannot be sized"))
+            (pkg / "slow_test.go").write_text("package hint\n\nfunc broken(\n")
+            self.assertEqual(mutgate.suite_seconds("hint", tmp), (None, "broker/hint/ does not build its tests"))
+            # A package with no tests costs no suite runs; a stale binary from another package is not timed.
+            (pkg / "slow_test.go").unlink()
+            (pkg / "hint_test.go").unlink()
+            self.assertEqual(mutgate.suite_seconds("hint", tmp), (0.0, None))
+
     def test_test_only_diff_mutates_covered_lines(self):
         # #3607: a test-only diff passed every gate. TestUp still runs Up(20) but no longer checks
         # the clamp, so its guard survives; TestDown is untouched, so Down's line is no target.
@@ -1687,8 +1710,9 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         with tempfile.TemporaryDirectory() as d:
             git = self.repo(d, TWO_TEST + "\n")  # the PR commit needs a change; this one is a blank line
             pkg = pathlib.Path(d) / "broker" / "hint"
-            (pkg / "hint.go").write_text(TWO_SRC.replace("n > 10", "n >= 10").replace("n + 1", "n + 2")
-                                         .replace("n - 1", "n - 2"))
+            # Lines 4, 7 and 11 change and the tests still pass: plan times them (#5069).
+            (pkg / "hint.go").write_text(TWO_SRC.replace("n > 10", "n >= 10").replace("n + 1", "1 + n")
+                                         .replace("n - 1", "-1 + n"))
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qam", "src")
             env = self.line_stub(d)
             target = {"broker/hint/hint.go": {4, 7, 11}}
@@ -1855,13 +1879,59 @@ class Plan(unittest.TestCase):
                 for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
                                     ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: pkgs),
                                     ("diff_targets", lambda added, pkg: {f"broker/{pkg}/x.go": {1}}),
-                                    ("deletion_sites", lambda *a: ([], None)), ("shard_count", lambda t, s: 100)):
+                                    ("deletion_sites", lambda *a: ([], None)), ("suite_seconds", lambda *a: (1.0, None)),
+                                    ("shard_count", lambda *a: 100)):
                     st.enter_context(mock.patch.object(mutgate, name, value))
                 err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
                 st.enter_context(contextlib.redirect_stdout(io.StringIO()))
                 self.assertEqual(mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1")), 1)
                 self.assertIn(f"{len(pkgs) * 100} shards, not 1 to {mutgate.MATRIX_MAX} (GitHub's matrix limit): {fix}",
                               err.getvalue())
+
+    def plan(self, pkg_targets, suite):
+        """cmd_plan's (code, matrix, stderr) with each package's ({path: lines}, sites) given and
+        suite_seconds stubbed to suite ((seconds, problem))."""
+        from unittest import mock
+        import contextlib, io, types
+        with contextlib.ExitStack() as st:
+            for name, value in (("broker_diff", lambda *a: ""), ("added_lines", lambda d: ({}, {})),
+                                ("build_lister", lambda tmp: "lister"), ("claimed", lambda d: sorted(pkg_targets)),
+                                ("diff_targets", lambda added, pkg: pkg_targets[pkg][0]),
+                                ("deletion_sites", lambda pkg, t, lister: (pkg_targets[pkg][1], None)),
+                                ("suite_seconds", lambda pkg, tmp: suite)):
+                st.enter_context(mock.patch.object(mutgate, name, value))
+            err = st.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            out = st.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = mutgate.cmd_plan(types.SimpleNamespace(git="HEAD~1", targets_out=None))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_slow_suite_gets_more_shards(self):
+        # MUT-kernel-sim-budget (#5069): on #5006 kernel/sim (823 target lines, 534 deletion sites, a
+        # 48 s suite) planned 6 shards from its counts alone and 5 of them passed the 60-minute limit.
+        lines = lambda n: {"broker/p/a.go": set(range(1, n + 1))}
+        self.assertEqual(mutgate.shard_count(lines(823), [0] * 534), 6)
+        k = mutgate.shard_count(lines(823), [0] * 534, 48.0)
+        self.assertEqual(k, 20)
+        # Each shard's suite runs fit the budget, which is half the job's 60 minutes.
+        self.assertLessEqual(48.0 * (mutgate.LINE_RUNS * 823 / k + mutgate.SITE_RUNS * 534 / k), mutgate.SHARD_SECONDS)
+        self.assertLessEqual(2 * mutgate.SHARD_SECONDS, 60 * 60)
+        self.assertIn("    timeout-minutes: 60\n", job(WORKFLOW.read_text(), "mutants"))
+        # browser's 7 s suite on #5006 (9 shards in 6 to 14 minutes) and a package with no tests keep
+        # the count budgets: the time term only ever adds shards.
+        self.assertEqual(mutgate.shard_count(lines(1364), [0] * 825, 7.0), 9)
+        self.assertEqual(mutgate.shard_count(lines(1048), [0] * 367, 0.0), 5)
+        self.assertEqual(mutgate.shard_count({}, [], 1000.0), 1)
+
+    def test_plan_sizes_each_package_by_its_suite(self):
+        sim = ({"broker/kernel/sim/a.go": set(range(1, 824))}, [{}] * 534)
+        code, out, err = self.plan({"kernel/sim": sim}, (48.0, None))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), [{"pkg": "kernel/sim", "shard": i, "of": 20} for i in range(20)])
+        self.assertIn("kernel/sim: 823 target lines, 534 deletion sites, a 48 s suite, 20 shard(s)", err)
+        # A suite that does not build or pass cannot be timed: the plan fails and says why.
+        code, out, err = self.plan({"kernel/sim": sim}, (None, "broker/kernel/sim/'s tests fail"))
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("mutgate: broker/kernel/sim/'s tests fail", err)
 
 
 class Summary(unittest.TestCase):
@@ -2080,6 +2150,7 @@ class Workflow(unittest.TestCase):
             ("success", "[]", "skipped", "skipped", 0),
             ("success", '["kernel"]', "success", "success", 0),
             ("success", '["kernel"]', "success", "failure", 1),
+            ("success", '["kernel"]', "success", "cancelled", 1),  # #5069: a shard timed out
             ("success", '["kernel"]', "success", "skipped", 1),
             ("success", '["kernel"]', "failure", "skipped", 1),  # #4961: no plan, no shards
             ("success", '["kernel"]', "skipped", "success", 1),
@@ -2091,6 +2162,9 @@ class Workflow(unittest.TestCase):
             env = {"CLAIMED": claimed, "PACKAGES": pkgs, "PLAN": plan, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
             r = subprocess.run(["sh", "-ec", script], env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, plan, mutants, r.stdout, r.stderr))
+            # #5069: a timed-out shard says so, not a bare "cancelled"; nothing else claims a timeout.
+            self.assertEqual("::error::a mutants shard timed out at its 60-minute limit" in r.stdout,
+                             mutants == "cancelled" and claimed == "success", r.stdout)
         self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
         self.assertIn("needs: [claimed, plan, mutants]", job(self.text, "mutgate"))
 
