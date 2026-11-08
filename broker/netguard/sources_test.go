@@ -508,13 +508,22 @@ func TestInterfaceMoveDuringNATPMPAsksTheEndGateway(t *testing.T) {
 }
 
 // The default route's interface is the chosen row's, not the last default
-// row's.
+// row's, nor the first row that ever won: with the best row last, an
+// interface kept from an earlier winner would pair the right gateway with
+// the wrong device (#1625, mutant M19c).
 func TestGateway4InterfaceIsTheChosenRoutes(t *testing.T) {
-	tbl := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n" +
-		"wlan0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\n" +
-		"eth0\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\n"
-	if g, dev := gateway4(tbl); g != netip.MustParseAddr("192.168.0.1") || dev != "wlan0" {
-		t.Fatalf("gateway4: %v %q, want 192.168.0.1 on wlan0", g, dev)
+	const head = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+	for _, c := range []struct{ tbl, gw, dev string }{
+		{head +
+			"wlan0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\n" +
+			"eth0\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\n", "192.168.0.1", "wlan0"},
+		{head +
+			"eth0\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\n" +
+			"wlan0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\n", "192.168.0.1", "wlan0"},
+	} {
+		if g, dev := gateway4(c.tbl); g != netip.MustParseAddr(c.gw) || dev != c.dev {
+			t.Fatalf("gateway4: %v %q, want %s on %s\n%s", g, dev, c.gw, c.dev, c.tbl)
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -532,5 +533,137 @@ func TestIPv4CompatiblePrefixLeavesIPv4Allowed(t *testing.T) {
 	p.Learn(Network{Prefixes: Prefixes([]net.Addr{&net.IPNet{IP: net.ParseIP("::192.168.1.5"), Mask: net.CIDRMask(96, 128)}})})
 	if err := p.Check(context.Background(), netip.MustParseAddr("8.8.8.8"), 443, "tcp"); err != nil {
 		t.Errorf("8.8.8.8 under ::192.168.1.5/96: %v, want allowed", err)
+	}
+}
+
+// A held dial whose own context ends (the caller cancelled it, or its
+// deadline passed) fails with that context's error and is not journalled as
+// a netguard refusal (#1540); a dial still held when the hold bound ends is
+// refused, journalled, and its reason names this network's router, not
+// "this gateway", since a new router behind an unchanged gateway address
+// also opens the hold (#1555).
+func TestHeldDialContextEndIsNotANetguardRefusal(t *testing.T) {
+	old := externalHold
+	t.Cleanup(func() { externalHold = old })
+	externalHold = time.Hour
+	var mu sync.Mutex
+	var journal []DenyEvent
+	g := &gwSources{answer: make(chan netip.Addr, 1)}
+	g.gw.Store("0101A8C0")
+	s := g.sources()
+	p := New(Config{Source: s.Read, Quick: s.ReadLocal, OnDeny: func(e DenyEvent) {
+		mu.Lock()
+		journal = append(journal, e)
+		mu.Unlock()
+	}})
+	g.answer <- netip.MustParseAddr("8.8.8.8")
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	g.gw.Store("0103A8C0") // a never-seen gateway: public dials are held
+	p.quickLearn()
+	public := netip.MustParseAddr("1.1.1.1")
+	entries := func() int { mu.Lock(); defer mu.Unlock(); return len(journal) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() { got <- p.Check(ctx, public, 443, "tcp") }()
+	time.Sleep(20 * time.Millisecond) // the dial is waiting on the hold
+	cancel()
+	if err := <-got; !errors.Is(err, context.Canceled) || errors.Is(err, ErrDenied) {
+		t.Fatalf("a cancelled held dial: %v, want context.Canceled and no netguard refusal", err)
+	}
+	dctx, dcancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer dcancel()
+	if err := p.Check(dctx, public, 443, "tcp"); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrDenied) {
+		t.Fatalf("a held dial past its own deadline: %v, want context.DeadlineExceeded", err)
+	}
+	if n := entries(); n != 0 {
+		t.Fatalf("a held dial's own context end was journalled %d times: %+v", n, journal)
+	}
+
+	externalHold = 30 * time.Millisecond
+	err := p.Check(context.Background(), public, 443, "tcp")
+	var de *DeniedError
+	if !errors.As(err, &de) {
+		t.Fatalf("a dial held past the bound: %v, want a netguard refusal", err)
+	}
+	for _, r := range []string{de.Reason, err.Error()} {
+		if !strings.Contains(r, "this network's router") || strings.Contains(r, "on this gateway") {
+			t.Fatalf("hold refusal reads %q, want it to name this network's router", r)
+		}
+	}
+	if n := entries(); n != 1 || journal[0].Reason != de.Reason || journal[0].Addr != public {
+		t.Fatalf("the hold-bound refusal journal: %+v, want one entry for %v", journal, public)
+	}
+}
+
+// When events closes before ctx ends, Watch stops its full-read goroutine
+// and returns only after it has, so no full read outlives Watch on either
+// path (#1405).
+func TestWatchEventsCloseWaitsForFullRead(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var reads atomic.Int32
+	p := New(Config{
+		Source: func() (Network, error) {
+			if reads.Add(1) == 1 {
+				close(entered)
+				<-release
+			}
+			return Network{Gateway: netip.MustParseAddr("192.168.1.1")}, nil
+		},
+		Quick: func() (Network, error) { return Network{Gateway: netip.MustParseAddr("192.168.1.1")}, nil },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := make(chan struct{}, 1)
+	watched := make(chan struct{})
+	go func() { p.Watch(ctx, ev); close(watched) }()
+	ev <- struct{}{}
+	<-entered
+	close(ev)
+	select {
+	case <-watched:
+		close(release)
+		t.Fatal("Watch returned while its full read was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-watched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch did not return after events closed and the full read ended")
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("%d full reads, want 1", n)
+	}
+}
+
+// A quick read with no resolver on an unchanged gateway keeps the learned
+// resolver (#1518): without the merge, names stop resolving until the next
+// full read (fail closed, so availability, not security).
+//
+// Seam limit (#1518 L2): quickLockedHook sits at a fixed point inside
+// quickLearn's critical section (TestRefreshInQuickGapKeepsNewerExternal),
+// so it cannot catch a split that reads under RLock, unlocks, then takes the
+// write lock before the hook and stores. No cheap stronger check is known.
+func TestQuickReadWithoutResolverKeepsLearnedResolver(t *testing.T) {
+	gw, rs := netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("192.168.1.53")
+	p := New(Config{
+		Source: func() (Network, error) { return Network{Gateway: gw, GatewayDev: "eth0", Resolver: rs}, nil },
+		Quick:  func() (Network, error) { return Network{Gateway: gw, GatewayDev: "eth0"}, nil },
+	})
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	p.quickLearn()
+	p.mu.RLock()
+	got := p.net.Resolver
+	p.mu.RUnlock()
+	if got != rs {
+		t.Fatalf("resolver after a quick read with none = %v, want the learned %v", got, rs)
+	}
+	if err := p.Check(WithPurpose(context.Background(), PurposeDNS), rs, 53, "udp"); err != nil {
+		t.Fatalf("names stopped resolving after the quick read: %v", err)
 	}
 }
