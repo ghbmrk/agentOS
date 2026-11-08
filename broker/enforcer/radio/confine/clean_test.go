@@ -223,3 +223,37 @@ func TestEmptyFailsWhileWritten(t *testing.T) {
 		t.Errorf("Empty made %d passes, want %d", n, emptyPasses)
 	}
 }
+
+// TestEmptyFailsFastOnADeepWriter: a directory deep in the tree that never
+// empties (a writer inside it, or a name refused, such as EMFILE at depth)
+// fails Empty after one round of passes over it, not a round for every pass
+// of every directory above it (emptyPasses^depth: effectively a hang).
+func TestEmptyFailsFastOnADeepWriter(t *testing.T) {
+	const depth = 6
+	dir := t.TempDir()
+	leaf := dir
+	for i := range depth {
+		leaf = filepath.Join(leaf, "d"+strconv.Itoa(i))
+	}
+	if err := os.MkdirAll(filepath.Join(leaf, "w0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	emptyRace = func(name string) {
+		// A live writer in the deepest directory: each "w" visited, another appears.
+		if name[0] == 'w' {
+			n++
+			if err := os.Mkdir(filepath.Join(leaf, "w"+strconv.Itoa(n)), 0o700); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { emptyRace = nil })
+	err := Empty(dir)
+	if err == nil {
+		t.Fatal("Empty of a tree still being written at depth succeeded")
+	}
+	if n != emptyPasses {
+		t.Errorf("Empty visited the writer %d times, want %d: a failing subdirectory was retried from above", n, emptyPasses)
+	}
+}

@@ -46,7 +46,9 @@ func Empty(dir string) error {
 
 // emptyAt removes every entry of the directory open at fd, and closes fd.
 // It succeeds only on reading the directory empty: a name it could not
-// remove (gone, swapped, or refused) is simply read again next pass.
+// remove (gone, swapped, or refused) is simply read again next pass, but a
+// subdirectory that fails to empty fails it at once, so a deep tree that
+// cannot be emptied costs one try per level, not emptyPasses^depth.
 func emptyAt(fd int) error {
 	f := os.NewFile(uintptr(fd), "")
 	defer f.Close()
@@ -62,7 +64,9 @@ func emptyAt(fd int) error {
 			return nil
 		}
 		for _, n := range names {
-			removeAt(fd, n)
+			if err := removeAt(fd, n); err != nil {
+				return err
+			}
 		}
 	}
 	return fmt.Errorf("entries remain after %d passes", emptyPasses)
@@ -72,17 +76,21 @@ func emptyAt(fd int) error {
 // file, socket, device or link by unlinkat (a link is the link, never its
 // target); a directory by emptying it through a descriptor opened
 // O_NOFOLLOW, then unlinkat AT_REMOVEDIR. A directory swapped for a link
-// between the two steps fails the open and is unlinked next pass.
-func removeAt(fd int, name string) {
+// between the two steps fails the open and is unlinked next pass. Only a
+// subdirectory that fails to empty is an error.
+func removeAt(fd int, name string) error {
 	if unlinkat(fd, name, 0) == syscall.EISDIR {
 		if emptyRace != nil {
 			emptyRace(name)
 		}
 		if sub, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0); err == nil {
-			_ = emptyAt(sub)
+			if err := emptyAt(sub); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
 		}
 		_ = unlinkat(fd, name, atRemovedir)
 	}
+	return nil
 }
 
 // unlinkat is unlinkat(2) with its flags, which syscall.Unlinkat lacks.
