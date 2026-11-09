@@ -113,7 +113,7 @@ func TestBadFrameEndsTheSession(t *testing.T) {
 }
 
 func TestControlCharacterEndsTheSession(t *testing.T) {
-	for _, text := range []string{"press‮1", "hi\x00", "a​b", "line\nbreak", "\u0085"} {
+	for _, text := range []string{"press\u202e1", "hi\x00", "a\u200bb", "line\nbreak", "\u0085"} {
 		c, p := session(t, nil)
 		heard, _ := listen(c)
 		p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Final: true, Text: text}))
@@ -121,7 +121,7 @@ func TestControlCharacterEndsTheSession(t *testing.T) {
 	}
 	// The box refuses to send such a sentence rather than alter it.
 	c, _ := session(t, nil)
-	if _, err := c.Speak(context.Background(), "press‮ 1"); !errors.Is(err, ErrSentence) {
+	if _, err := c.Speak(context.Background(), "press\u202e 1"); !errors.Is(err, ErrSentence) {
 		t.Fatalf("Speak of a sentence with a format character = %v, want ErrSentence", err)
 	}
 }
