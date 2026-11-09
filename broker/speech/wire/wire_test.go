@@ -62,7 +62,7 @@ func TestText(t *testing.T) {
 			t.Errorf("Text(%q) = %q, %v", ok, s, err)
 		}
 	}
-	for _, bad := range []string{"\t", "a\nb", "\x7f", "\u0085", "\u200b", "\u202e", "\ufeff", "\xff", strings.Repeat("a", MaxText+1)} {
+	for _, bad := range []string{"\t", "a\nb", "\x7f", "\u0085", "\u200b", "\u202e", "\ufeff", "\u2028", "\u2029", "\xff", strings.Repeat("a", MaxText+1)} {
 		if _, err := Text([]byte(bad)); !errors.Is(err, ErrFrame) {
 			t.Errorf("Text(%q) = %v, want ErrFrame", bad, err)
 		}

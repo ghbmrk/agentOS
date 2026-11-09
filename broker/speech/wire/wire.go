@@ -84,15 +84,16 @@ func Read(r io.Reader) (byte, []byte, error) {
 }
 
 // Text checks a transcript or sentence: UTF-8, at most MaxText bytes, and
-// no control or format character (C0, C1, bidi overrides, zero-width), so
-// what one end sends is what the other reads.
+// no control, format or line-breaking character (C0, C1, bidi overrides,
+// zero-width, U+2028, U+2029), so what one end sends is what the other
+// reads. The predicate is edgelink's and the kernel's.
 func Text(b []byte) (string, error) {
 	if len(b) > MaxText || !utf8.Valid(b) {
 		return "", bad("text not UTF-8 or over %d bytes", MaxText)
 	}
 	s := string(b)
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return "", bad("control character %U", r)
 		}
 	}

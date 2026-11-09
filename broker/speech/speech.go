@@ -192,6 +192,7 @@ func (c *Client) Listen(ctx context.Context, speech <-chan []byte) <-chan call.H
 }
 
 func (c *Client) forward(ctx context.Context, speech <-chan []byte) {
+	var carry []byte // a chunk's odd last byte, the first half of the next sample
 	for {
 		var pcm []byte
 		var ok bool
@@ -203,7 +204,14 @@ func (c *Client) forward(ctx context.Context, speech <-chan []byte) {
 		case <-c.dead:
 			return
 		}
-		pcm = pcm[:len(pcm)&^1] // the line's audio, in whole samples
+		if len(carry) > 0 {
+			pcm = append(carry, pcm...)
+		}
+		carry = nil
+		if len(pcm)%2 == 1 {
+			carry = []byte{pcm[len(pcm)-1]}
+			pcm = pcm[:len(pcm)-1]
+		}
 		for len(pcm) > 0 {
 			n := min(len(pcm), wire.MaxPayload)
 			c.mu.Lock()

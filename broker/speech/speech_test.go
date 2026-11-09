@@ -113,7 +113,7 @@ func TestBadFrameEndsTheSession(t *testing.T) {
 }
 
 func TestControlCharacterEndsTheSession(t *testing.T) {
-	for _, text := range []string{"press\u202e1", "hi\x00", "a\u200bb", "line\nbreak", "\u0085"} {
+	for _, text := range []string{"press\u202e1", "hi\x00", "a\u200bb", "line\nbreak", "\u0085", "line\u2028break", "para\u2029break"} {
 		c, p := session(t, nil)
 		heard, _ := listen(c)
 		p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Final: true, Text: text}))
@@ -315,4 +315,22 @@ func FuzzClient(f *testing.F) {
 			t.Fatal("transcripts closed while the session ran")
 		}
 	})
+}
+
+func TestOddChunkKeepsSampleAlignment(t *testing.T) {
+	c, p := session(t, nil)
+	_, speech := listen(c)
+	speech <- []byte{1, 2, 3}
+	if got := p.recv(wire.Audio); !bytes.Equal(got, []byte{1, 2}) {
+		t.Fatalf("first frame %v", got)
+	}
+	speech <- []byte{4, 5, 6, 7, 8}
+	if got := p.recv(wire.Audio); !bytes.Equal(got, []byte{3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("second frame %v: the odd byte was not carried", got)
+	}
+	speech <- []byte{9}
+	speech <- []byte{10, 11, 12}
+	if got := p.recv(wire.Audio); !bytes.Equal(got, []byte{9, 10, 11, 12}) {
+		t.Fatalf("third frame %v", got)
+	}
 }
