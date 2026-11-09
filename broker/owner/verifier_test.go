@@ -301,7 +301,7 @@ func TestStopIsNotQueuedBehindAHungVerifier(t *testing.T) {
 	defer cancel()
 	go r.ch.Run(ctx)
 	for i := 0; i < 20; i++ {
-		_ = r.phone.Send(boxNum, "plan my week 123456")
+		_ = r.phone.Send(boxNum, "123456")
 	}
 	for f.calls() == 0 {
 		time.Sleep(time.Millisecond)
@@ -323,7 +323,7 @@ func TestStopIsNotQueuedBehindAHungVerifier(t *testing.T) {
 	f.block = make(chan error)
 	f.mu.Unlock()
 	r.ch.codes.verifyOffUntil = time.Time{}
-	go r.ch.Handle(ctx, ownerNum, "plan my week 123456")
+	go r.ch.Handle(ctx, ownerNum, "123456")
 	for f.calls() == 1 {
 		time.Sleep(time.Millisecond)
 	}

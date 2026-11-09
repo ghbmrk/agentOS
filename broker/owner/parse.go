@@ -42,7 +42,7 @@ func parserGaps(s string) string {
 // parseReply reports whether msg is one of the owner channel's words.
 //
 //	YES [id] [item...] [code]   NO [id] [item...]
-//	UNDO id   MORE id   RUN   RETRY
+//	UNDO id   MORE id   RETRY
 //	RESUME [code]   RESUME token code   UNLOCK [token code]
 //	PAUSE grant   REVOKE grant
 //
@@ -70,7 +70,7 @@ func parseReply(msg string) (reply, bool) {
 			return r, true
 		}
 		return reply{}, false
-	case "RUN", "RETRY":
+	case "RETRY":
 		if len(args) == 0 {
 			return r, true
 		}

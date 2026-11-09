@@ -36,6 +36,8 @@ func (stillOwner) StopGen() int64                                           { re
 func (stillOwner) LocalResume(uint64, int64) (string, error)                { return "", nil }
 func (stillOwner) LocalRequests() []owner.LocalRequest                      { return nil }
 func (stillOwner) LocalWaiting() string                                     { return "" }
+func (stillOwner) LocalHeld() ([]owner.WaitingMsg, int, int)                { return nil, 0, 0 }
+func (stillOwner) LocalRunHeld(_, _ []string) (int, error)                  { return 0, nil }
 func (stillOwner) LocalStatusLines() string                                 { return "" }
 func (stillOwner) UnlockPeriod() time.Duration                              { return 7 * 24 * time.Hour }
 func (stillOwner) LocalAnswer(string, string, bool, string) (string, error) { return "", nil }

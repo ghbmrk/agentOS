@@ -61,6 +61,16 @@ type State struct {
 	// Pacing is the owner's quiet hours and texts-an-hour setting; the
 	// zero value is the default (CH-15).
 	Pacing Pacing `json:"pacing"`
+	// Waiting are owner messages held while the session was locked, for
+	// the owner page (CH-14, waiting.go); WaitingSeq numbers them, and
+	// WaitingDropped and WaitingExpired count those dropped at the size
+	// bound and those that expired, until the owner next runs them.
+	// WaitingTold is set once the locked period's one reply went.
+	Waiting        []WaitingMsg `json:"waiting,omitempty"`
+	WaitingSeq     uint64       `json:"waiting_seq,omitempty"`
+	WaitingDropped int          `json:"waiting_dropped,omitempty"`
+	WaitingExpired int          `json:"waiting_expired,omitempty"`
+	WaitingTold    bool         `json:"waiting_told,omitempty"`
 	// Held are unsolicited texts waiting for quiet hours to end or for
 	// room in the hour, oldest first; HeldDropped counts the oldest ones
 	// dropped past MaxHeld, not yet said to the owner.
@@ -146,6 +156,7 @@ func copyState(s State) State {
 	s.Retired = r
 	s.Pacing.Urgent = append([]Class(nil), s.Pacing.Urgent...)
 	s.Held = append([]HeldText(nil), s.Held...)
+	s.Waiting = append([]WaitingMsg(nil), s.Waiting...)
 	s.Guarded = append([]GuardedMark(nil), s.Guarded...)
 	s.Sent = append([]time.Time(nil), s.Sent...)
 	return s

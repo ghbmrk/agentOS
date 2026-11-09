@@ -164,11 +164,17 @@ func (r *rig) totp() string {
 	return totpAt(testSecrets.TOTPSeed, r.clock().Unix())
 }
 
-// unlock opens the session with a code-generator code.
+// unlock opens the session as the page's sign-in does (LocalSignIn's
+// code check), without the sign-in's texts, which local_test.go covers:
+// no code by text opens one (CH-14, D-311).
 func (r *rig) unlock() {
 	r.t.Helper()
-	if got := r.say(r.totp()); !strings.HasPrefix(got, "Unlocked until") {
-		r.t.Fatalf("unlock: %q", got)
+	code := r.totp()
+	r.ch.mu.Lock()
+	res, _, err := r.ch.codes.checkStrong(code, r.clock(), strongOpts{unlock: r.ch.cfg.UnlockFor, proof: true})
+	r.ch.mu.Unlock()
+	if err != nil || res != strongOK {
+		r.t.Fatalf("unlock: %v %v", res, err)
 	}
 }
 

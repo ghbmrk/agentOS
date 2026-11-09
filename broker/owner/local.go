@@ -427,7 +427,6 @@ func (c *Channel) lockAlertsLocked(locked bool, now time.Time) []string {
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
 		c.floods.challenge++ // for the digest, as floodLocked counts it (L3 N2 on #165)
-		c.held = nil
 		c.alertAt = now
 		alerts = append(alerts, fmt.Sprintf("Too many wrong codes, the last on my Wi-Fi. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
 			c.codes.currentChallenge(now), dur(ChallengeTTL)))

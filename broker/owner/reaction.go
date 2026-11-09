@@ -522,10 +522,15 @@ func (c *Channel) ForgetRecent() int {
 		}
 		dropped = len(s.Held) - len(keep)
 		s.Held = keep
+		// A held reaction may quote a forgotten text: it goes too.
+		wait := s.Waiting[:0:0]
+		for _, m := range s.Waiting {
+			if _, ok := parseReaction(m.Text); !ok {
+				wait = append(wait, m)
+			}
+		}
+		s.Waiting = wait
 	})
-	if c.held != nil && c.held.react != "" {
-		c.held = nil
-	}
 	return dropped
 }
 
@@ -608,9 +613,6 @@ func replyPointer(t sentText) string {
 		}
 		return "A reaction is not a reply. Reply in words, as that text says."
 	}
-	if strings.Contains(t.text, "Reply RUN") {
-		return "A reaction does not send it. Reply RUN to send the held message."
-	}
 	if strings.Contains(t.text, "Reply ") || strings.Contains(t.text, "reply ") {
 		return "A reaction is not a reply. Reply in words, as that text says."
 	}
@@ -634,12 +636,9 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	if unlocked {
 		return route{replies: replies, react: event, reactGen: c.recent.gen()}
 	}
-	if c.held != nil {
-		c.held = nil
-		return route{replies: append([]string{"Locked. A message was already waiting, so both were dropped. " +
-			"Send your message with a code from your code generator at the end."}, replies...), limited: true}
-	}
-	c.held = &heldMsg{text: text, react: event, expires: now.Add(c.cfg.CodeTTL)}
-	return route{replies: append([]string{fmt.Sprintf("Locked. Your reaction is held for %s. %s",
-		dur(c.cfg.CodeTTL), c.unlockPrompt())}, replies...), limited: true}
+	// Held as a task message is (CH-14); the page runs its text again, so
+	// its event is worded then, against the texts recent at that time.
+	rt := c.waitLocked(text, now)
+	rt.replies = append(rt.replies, replies...)
+	return rt
 }
