@@ -348,7 +348,7 @@ def unread(view, shown, dirs, packaged):
                 loads.add(n)
                 if "@" in base:
                     loads.add(base.split("@")[0] + "@" + ext)  # any instance loads its template's files
-    top, out = set(dirs) | {view.resolve(d)[0] for d in UNIT_DIRS}, []  # a listed directory may be gone too
+    top, out = set(dirs) | set(UNIT_DIRS), []  # listed paths are as dpkg laid them out (dpkg_packaged)
     for p in sorted(getattr(packaged, "listed", ())):
         parent, base = os.path.split(p)
         if parent in top and base.endswith(TYPES):
@@ -357,8 +357,10 @@ def unread(view, shown, dirs, packaged):
             name = os.path.basename(parent)[:-2]
         else:
             continue
+        # a link of ours anywhere on it (a unit directory, a parent, a drop-in directory) is a mask too,
+        # since its files then read as ours (#5072 Security round 6)
         final, links = view.resolve(p)
-        if view.lstat(p) is None:
+        if view.lstat(final) is None:  # gone, whatever link led there
             n = name if "." in name else "." + name
             if name not in loads and (parent in top or not shared(n)):
                 continue
@@ -528,7 +530,11 @@ def dpkg_packaged(out):
                 return False
             with open(view.host(p), "rb") as f:
                 return hashlib.md5(f.read()).hexdigest() in want[p]
-        packaged.listed = set(want)  # every path a package installed, whatever it now holds
+        # every path a package installed, whatever its links or bytes now: as dpkg laid it out, through a
+        # merged top link to /usr/<its name> only (#5072 Security round 6: a link of ours took a listed
+        # path out of want, so out of listed too)
+        packaged.listed = {"/usr" + p if p.split("/")[1:2] and "/" + p.split("/")[1] in MERGED
+                           and merged(view, "/" + p.split("/")[1]) else p for p, _ in listed}
         return packaged
     return for_view
 

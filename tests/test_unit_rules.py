@@ -173,6 +173,41 @@ class DpkgTest(unittest.TestCase):
             self.write(out, "%s  lib/systemd/system/bar.service.d/x.conf\n" % md5("x"), "Package: p\n")
             self.assertTrue(r.dpkg_packaged(out)(v)(LIB + "bar.service.d/x.conf"))
 
+    def test_a_link_of_ours_on_a_listed_path_is_a_mask(self):
+        # #5072 Security round 6: a link of ours on a unit directory, a parent of one or a listed drop-in
+        # directory took the listed path out of want and so out of listed, and its files read as ours
+        sock = "systemd-udevd-control.socket"
+        for name, files, want in (
+                ("a link on a parent of a unit directory",
+                 {"/usr/lib/systemd": "-> systemd.real", "/usr/lib/systemd.real/system/" + sock: "open"}, [LIB + sock, LIB + sock + ".d/p.conf"]),
+                ("a link on a unit directory",
+                 {LIB[:-1]: "-> /usr/share/s", "/usr/share/s/" + sock: "open"}, [LIB + sock, LIB + sock + ".d/p.conf"]),
+                ("a link on a listed drop-in directory, its file gone",
+                 {LIB + sock: "kept", LIB + sock + ".d": "-> /etc/agentos-d"}, [LIB + sock + ".d/p.conf"]),
+                ("the control: as dpkg laid it out, through /lib -> usr/lib",
+                 {LIB + sock: "kept", LIB + sock + ".d/p.conf": "drop"}, [])):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(files, **{"/lib": "-> usr/lib"}))
+                out = pathlib.Path(d)
+                self.write(out, "%s  lib/systemd/system/%s\n%s  usr/lib/systemd/system/%s.d/p.conf\n"
+                           % (md5("kept"), sock, md5("drop"), sock), "Package: p\n")
+                packaged = r.dpkg_packaged(out)(v)
+                self.assertEqual(sorted(packaged.listed), [LIB + sock, LIB + sock + ".d/p.conf"])
+                units = shown({sock: ("loaded", LIB + sock, [])})
+                self.assertEqual([m["path"] for m in r.unread(v, units, r.unit_dirs(v), packaged)], want)
+
+    def test_a_listed_path_keeps_a_top_link_that_is_not_merged(self):
+        # #5072 Security round 6: with /lib -> etc, dpkg's lib/systemd/system/x.service is our /etc file,
+        # held as reached by a link, not read as a /usr/lib path that is gone
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/lib": "-> etc", ETC + "x.service": "x"})
+            out = pathlib.Path(d)
+            self.write(out, "%s  lib/systemd/system/x.service\n" % md5("x"), "Package: p\n")
+            packaged = r.dpkg_packaged(out)(v)
+            self.assertEqual(sorted(packaged.listed), ["/lib/systemd/system/x.service"])
+            self.assertEqual([m["path"] for m in r.unread(v, {}, r.unit_dirs(v), packaged)],
+                             ["/lib/systemd/system/x.service"])
+
     def test_no_listed_files_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             self.write(pathlib.Path(d), "", "Package: p\n")
