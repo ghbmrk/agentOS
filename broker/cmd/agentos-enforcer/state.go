@@ -65,9 +65,12 @@ func (p pageCore) Revoke(sig []byte) error {
 	return err
 }
 
-// Revoked is a revocation the head store saved: one in force but not
-// saved is offered again, so the owner's next tap saves it.
-func (p pageCore) Revoked() bool { return p.d.heads.Revoked(p.d.core) && !p.d.revokeUnsaved.Load() }
+// Revoked is the head store's revocation of the pinned key and whether a
+// tap saved it: one in force but not saved is offered again, so the
+// owner's next tap saves it.
+func (p pageCore) Revoked() (revoked, saved bool) {
+	return p.d.heads.Revoked(p.d.core), !p.d.revokeUnsaved.Load()
+}
 
 // The byte caps' fresh day (#5013, ASSUMPTIONS ENF-l-19). While the saved
 // day does not read back (ENF-l-14), traffic.json is also the one record

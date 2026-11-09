@@ -1261,12 +1261,15 @@ func (x *box) page(field string) string {
 			return "down"
 		}
 		return "up"
-	case "Light":
-		if m := regexp.MustCompile(`The light is ([a-z]+)`).FindStringSubmatch(body); m != nil {
-			return m[1]
+	case "Light": // home names only a red light (#5106)
+		if strings.Contains(body, "The light is red") {
+			return "red"
 		}
+		return "off"
 	case "Key":
 		switch {
+		case strings.Contains(body, "the revocation was not saved"):
+			return "unsaved"
 		case strings.Contains(body, "key is revoked"):
 			return "revoked"
 		case strings.Contains(body, `data-action="revoke-core"`):
