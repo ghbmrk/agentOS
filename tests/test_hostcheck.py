@@ -207,11 +207,18 @@ class DiffTest(unittest.TestCase):
                 after = json.loads(json.dumps(b))
                 edit(after)
                 self.assertEqual(flagged(self.check(b, after, flags={"unclean-end"})), {("uefi", MOR, want)})
-        after = json.loads(json.dumps(before))
-        after["uefi"][MOR] = {"attr": 7, "sha256": "01"}
-        after["uefi"][f"{GLOBAL}:MemoryOverwriteRequestControlLock"] = {"attr": 7, "sha256": "1"}
-        self.assertEqual(flagged(self.check(before, after, flags={"unclean-end"})),
-                         {("uefi", f"{GLOBAL}:MemoryOverwriteRequestControlLock", "added")})
+        # Neighbours present before and changed after, so only the rule's key can reject them.
+        neighbours = ["bb983ccf-151d-40e1-a07b-4a17be168292:MemoryOverwriteRequestControlLock",  # MORLock
+                      f"{MOR}Lock", f"{GLOBAL}:MemoryOverwriteRequestControl",
+                      f"x{MOR}"]
+        for key in neighbours:
+            with self.subTest(key):
+                b = json.loads(json.dumps(before))
+                b["uefi"][key] = {"attr": 7, "sha256": "00"}
+                after = json.loads(json.dumps(b))
+                after["uefi"][MOR] = {"attr": 7, "sha256": "01"}
+                after["uefi"][key] = {"attr": 7, "sha256": "01"}
+                self.assertEqual(flagged(self.check(b, after, flags={"unclean-end"})), {("uefi", key, "changed")})
 
 
 class PhaseFlagsTest(unittest.TestCase):
