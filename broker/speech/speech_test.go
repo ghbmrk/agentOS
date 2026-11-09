@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -359,6 +360,8 @@ func TestListenContextEndsTheSession(t *testing.T) {
 	}
 }
 
+var unstarted = regexp.MustCompile(`agentos/broker/speech\.[^\s]*gowrap`)
+
 // gone waits until no goroutine runs any of the Client's functions named.
 func gone(t *testing.T, names ...string) {
 	t.Helper()
@@ -371,6 +374,12 @@ func gone(t *testing.T, names ...string) {
 			if strings.Contains(stacks, "speech.(*Client)."+n) {
 				left = append(left, n)
 			}
+		}
+		// A goroutine that has not run yet shows only its go statement's
+		// wrapper (speech.New.gowrap2, speech.(*Client).Listen.gowrap1), so
+		// one still pending would pass the check before it started.
+		if unstarted.MatchString(stacks) {
+			left = append(left, "unstarted")
 		}
 		if len(left) == 0 {
 			return
@@ -609,7 +618,7 @@ func TestClosedSpeechStopsForward(t *testing.T) {
 	speech := make(chan []byte)
 	heard := c.Listen(context.Background(), speech)
 	close(speech)
-	gone(t, "forward")
+	gone(t, "forward") // waits out the unstarted forward too
 	// The session still answers.
 	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "x"}))
 	if h := <-heard; h.Text != "x" || c.Err() != nil {
@@ -636,6 +645,11 @@ func TestCancelledSentenceLeavesNothingPending(t *testing.T) {
 func TestProcessEndStopsTheReader(t *testing.T) {
 	c, p := session(t, nil)
 	p.w.Close()
+	select {
+	case <-c.dead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session did not end")
+	}
 	gone(t, "read")
 	if !errors.Is(c.Err(), ErrEnded) {
 		t.Fatalf("Err = %v", c.Err())
