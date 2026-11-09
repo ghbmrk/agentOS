@@ -910,6 +910,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a unit of ours propagating reload to a fed service":    {with(udev, etc+"agentos-x.service", "[Unit]\nPropagatesReloadTo=systemd-udevd.service\n"+ourX), ourEtc, `PropagatesReloadTo=systemd-udevd.service: a [Unit] line of ours naming`},
 		"a unit of ours naming a fed template's other instance": {with(inst, lib+"bar@.service", user, etc+"agentos-x.service", "[Unit]\nConflicts=bar@y.service\n"+ourX), ourEtc, `Conflicts=bar@y.service: a [Unit] line of ours naming`},
 		"a unit of ours naming a unit by a specifier":           {with(udev, etc+"agentos-x.service", "[Unit]\nConflicts=%p.socket\n"+ourX), ourEtc, `Conflicts=%p.socket: a [Unit] line of ours naming`},
+		"a unit of ours naming a unit by a bare specifier":      {with(udev, etc+"agentos-x@.service", "[Unit]\nConflicts=%i\n"+ourX, etc+"multi-user.target.wants/agentos-x@systemd-udevd-control.socket.service", "-> ../agentos-x@.service"), ourEtc, `Conflicts=%i: a [Unit] line of ours naming`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -954,7 +955,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"an unfed package service with unit lines of ours": {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Unit]\nJoinsNamespaceOf=agentos-x.service\nConditionPathExists=/run/x\nBindsTo=agentos-x.service\n"}, ourEtc},
 		// A unit of ours may order itself after a package's socket, and
 		// name units of ours or unfed ones in any [Unit] key.
-		"a unit of ours with edges to units not held": {with(udev, lib+"systemd-x.service", user, etc+"agentos-y.service", ourX, etc+"agentos-x.service", "[Unit]\nDescription=x %i\nAfter=systemd-udevd-control.socket\nRequires=systemd-udevd.service\nConflicts=agentos-y.service systemd-x.service\nJoinsNamespaceOf=agentos-y.service\n"+ourX), ourEtc},
+		"a unit of ours with edges to units not held": {with(udev, lib+"systemd-x.service", user, etc+"agentos-y.service", ourX, etc+"agentos-x.service", "[Unit]\nDescription=x %i\nDocumentation=man:x(%p)\nAfter=systemd-udevd-control.socket\nRequires=systemd-udevd.service\nConflicts=agentos-y.service systemd-x.service\nJoinsNamespaceOf=agentos-y.service\nConditionPathExists=/run/x-100%%\n"+ourX), ourEtc},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err != nil {
@@ -2443,15 +2444,23 @@ type unitCheck struct {
 	heldPre []string
 }
 
-// namesHeld returns the first unit a [Unit] value names that is a package's
-// socket or a service it feeds (c.held), or that holds a specifier, which
-// this cannot resolve; "" if none.
-func (c *unitCheck) namesHeld(v string) string {
+// namesHeld returns the first word of a [Unit] line, key k, that names a
+// package's socket or a service it feeds (c.held), or that holds a
+// specifier, which may expand to a whole unit name (Conflicts=%i, #5072 L3
+// round 6) and this cannot resolve; "" if none. Only Description= and
+// Documentation= name no unit.
+func (c *unitCheck) namesHeld(k, v string) string {
+	if k == "Description" || k == "Documentation" {
+		return ""
+	}
 	for _, w := range strings.Fields(v) {
+		if strings.Contains(strings.ReplaceAll(w, "%%", ""), "%") {
+			return w
+		}
 		if path.Ext(w) != ".service" && path.Ext(w) != ".socket" {
 			continue // held holds only sockets and services
 		}
-		if c.held[w] || strings.Contains(w, "%") {
+		if c.held[w] {
 			return w
 		}
 		for _, p := range c.heldPre {
@@ -2533,7 +2542,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			if unitOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] {
 				unitOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
 			}
-			if edgeOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] && c.namesHeld(v) != "" {
+			if edgeOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] && c.namesHeld(k, v) != "" {
 				edgeOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
 			}
 			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {

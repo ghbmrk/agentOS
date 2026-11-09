@@ -184,6 +184,11 @@ class DpkgTest(unittest.TestCase):
                  {LIB[:-1]: "-> /usr/share/s", "/usr/share/s/" + sock: "open"}, [LIB + sock, LIB + sock + ".d/p.conf"]),
                 ("a link on a listed drop-in directory, its file gone",
                  {LIB + sock: "kept", LIB + sock + ".d": "-> /etc/agentos-d"}, [LIB + sock + ".d/p.conf"]),
+                ("a listed fragment replaced by a link of ours",
+                 {LIB + sock: "-> /etc/agentos/" + sock, "/etc/agentos/" + sock: "open", LIB + sock + ".d/p.conf": "drop"},
+                 [LIB + sock]),
+                ("a listed drop-in replaced by a link to /dev/null",
+                 {LIB + sock: "kept", LIB + sock + ".d/p.conf": "-> /dev/null", "/dev/null": ""}, [LIB + sock + ".d/p.conf"]),
                 ("the control: as dpkg laid it out, through /lib -> usr/lib",
                  {LIB + sock: "kept", LIB + sock + ".d/p.conf": "drop"}, [])):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
