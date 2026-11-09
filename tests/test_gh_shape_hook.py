@@ -190,6 +190,20 @@ class GhShapeHookTest(unittest.TestCase):
                 self.assertIn("missing", gh_shape.draft_problem("8", os.path.join(drafts, "8.md")))
                 os.mkdir(os.path.join(drafts, "9.md"))
                 self.assertIsNotNone(gh_shape.draft_problem("9", os.path.join(drafts, "9.md")))
+                # A FIFO goes to the ask without blocking the hook.
+                os.mkfifo(os.path.join(drafts, "10.md"))
+                self.assertIsNotNone(gh_shape.draft_problem("10", os.path.join(drafts, "10.md")))
+
+    def test_an_error_in_the_draft_check_goes_to_the_ask(self):
+        import io
+        c = DRAFT_GOOD[0]
+        out = io.StringIO()
+        with mock.patch.object(gh_shape, "draft_problem", side_effect=RuntimeError("boom")), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(
+                    {"tool_name": "Bash", "tool_input": {"command": c}}))), \
+                mock.patch.object(sys, "stdout", out):
+            gh_shape.main()
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_guarded_calls_off_shape_go_to_the_ask(self):
         for c in BAD + EVASIONS:

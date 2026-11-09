@@ -110,7 +110,9 @@ def draft_problem(pr, path):
     if os.path.realpath(path) != real:
         return "lens draft does not resolve to its own file"
     try:
-        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.lstat(real).st_mode):  # before open: a FIFO would block the open
+            return f"lens draft is not a regular file of at most {MAX_DRAFT} bytes"
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return "lens draft is missing or unreadable"
     try:
