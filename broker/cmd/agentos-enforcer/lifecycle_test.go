@@ -247,6 +247,10 @@ type fakeDNS struct {
 	applied []dns.Files
 	inside  bool // a load ran inside Apply
 	closed  int
+	// running is the files the instances run: an Apply's once its load
+	// is done, and as they were when it is refused (dns/run starts the
+	// ones it stopped again).
+	running dns.Files
 }
 
 func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
@@ -258,7 +262,7 @@ func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
 	defer f.mu.Unlock()
 	f.inside = false
 	if err == nil {
-		f.applied = append(f.applied, files)
+		f.applied, f.running = append(f.applied, files), files
 	}
 	return err
 }
