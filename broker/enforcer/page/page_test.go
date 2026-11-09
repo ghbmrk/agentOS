@@ -827,12 +827,15 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Version":      nil, // the page picks it; it is in the serial, not the diff
 		"Destinations": func(d *policy.Document) { d.Destinations = append(d.Destinations, "z.example") },
 		"Caps":         func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 5} },
-		"EdgeCap":      func(d *policy.Document) { d.EdgeCap = 5 },
-		"Devices":      nil, // the device rows above
-		"Pairs":        func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
-		"Standing":     func(d *policy.Document) { d.Standing[0].ToMS++ },
-		"Holds":        func(d *policy.Document) { d.Holds = append(d.Holds, policy.Hold{Device: "tv", Kind: policy.HoldFix}) },
-		"Drone":        func(d *policy.Document) { d.Drone = strings.Repeat("ab", 32) },
+		"Basis": func(d *policy.Document) {
+			d.Caps, d.Basis = map[string]uint64{"models.example": 5}, map[string]string{"models.example": policy.BasisImage}
+		},
+		"EdgeCap":  func(d *policy.Document) { d.EdgeCap = 5 },
+		"Devices":  nil, // the device rows above
+		"Pairs":    func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
+		"Standing": func(d *policy.Document) { d.Standing[0].ToMS++ },
+		"Holds":    func(d *policy.Document) { d.Holds = append(d.Holds, policy.Hold{Device: "tv", Kind: policy.HoldFix}) },
+		"Drone":    func(d *policy.Document) { d.Drone = strings.Repeat("ab", 32) },
 	}
 	rules := map[string]func(r *policy.StandingRule){
 		"ID": func(r *policy.StandingRule) { r.ID = "other" }, "Device": func(r *policy.StandingRule) { r.Device = "cam" },
@@ -1191,6 +1194,23 @@ func TestCapLines(t *testing.T) {
 			d.Destinations = append(d.Destinations, "moc.\u202eevil")
 			d.Caps["moc.\u202eevil"] = 1000
 		}, `Let agentOS send "moc.\u202eevil" up to 1,000 bytes (about 1.0 kB) a day.`},
+		// #4578: each cap names the signed figure it was sized from.
+		"listed from a backup": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "backup.example")
+			d.Caps["backup.example"] = 64 << 30
+			d.Basis = map[string]string{"backup.example": policy.BasisBackup}
+		}, "Let agentOS send backup.example up to 68,719,476,736 bytes (about 68.7 GB) a day, the next full backup's size."},
+		"raised from a declaration": {func(d *policy.Document) {
+			d.Caps["models.example"] = 2_000_000_001
+			d.Basis = map[string]string{"models.example": policy.BasisDeclared}
+		}, "Change what agentOS may send models.example a day from up to 2,000,000,000 bytes (about 2.0 GB) to up to 2,000,000,001 bytes (about 2.0 GB), the daily bytes its declaration states."},
+		"basis alone": {func(d *policy.Document) { d.Basis = map[string]string{"models.example": policy.BasisImage} },
+			"Size what agentOS may send models.example a day, up to 2,000,000,000 bytes (about 2.0 GB), from the signed image's figure, not a figure set by hand."},
+		"hostile name from an image": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "moc.\u202eevil")
+			d.Caps["moc.\u202eevil"] = 1000
+			d.Basis = map[string]string{"moc.\u202eevil": policy.BasisImage}
+		}, `Let agentOS send "moc.\u202eevil" up to 1,000 bytes (about 1.0 kB) a day, the signed image's figure.`},
 	} {
 		next := clone(base)
 		next.Caps = maps.Clone(base.Caps)
