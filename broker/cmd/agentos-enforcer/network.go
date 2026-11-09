@@ -606,7 +606,7 @@ func addrsOf(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 
 // readAddrs reads one dump: each local and peer address (IFA_LOCAL,
 // IFA_ADDRESS) on index, with the message's prefix length. Any message
-// that does not parse is an error.
+// that does not parse, an end carrying an error, or no end is an error.
 func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 	b, err := dump()
 	if err != nil {
@@ -617,9 +617,17 @@ func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 		return nil, err
 	}
 	var out []netip.Prefix
-	intr := false
+	intr, end := false, false
 	for _, m := range msgs {
 		intr = intr || m.Header.Flags&unix.NLM_F_DUMP_INTR != 0
+		if m.Header.Type == syscall.NLMSG_DONE {
+			// The dump's end carries the kernel's error code: one it ended
+			// in error is not every address (offload's take, #5103).
+			if len(m.Data) < 4 || ne.Uint32(m.Data) != 0 {
+				return nil, fmt.Errorf("the kernel's address dump ended in error (%x)", m.Data)
+			}
+			end = true
+		}
 		if m.Header.Type != syscall.RTM_NEWADDR {
 			continue
 		}
@@ -649,6 +657,9 @@ func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 	}
 	if intr {
 		return nil, errDumpIntr
+	}
+	if !end {
+		return nil, errors.New("the kernel's address dump has no end")
 	}
 	return out, nil
 }

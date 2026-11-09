@@ -1298,7 +1298,8 @@ func TestHold(t *testing.T) {
 // from loopback; a missing interface is an error. From a dump: each local
 // and peer address of the interface's messages, once; a dump marked
 // interrupted (NLM_F_DUMP_INTR) is taken again once, and fails if the
-// second is marked too (#5164 item 8); anything unreadable fails.
+// second is marked too (#5164 item 8); an end carrying an error, a short
+// end, no end, or anything unreadable fails.
 func TestIfaceAddrs(t *testing.T) {
 	got, err := ifaceAddrs("lo")
 	if err != nil {
@@ -1388,11 +1389,14 @@ func TestIfaceAddrs(t *testing.T) {
 		name string
 		dump []byte
 	}{
-		{"a short address message", msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0})},
-		{"a three-byte address", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0}))},
-		{"a prefix longer than the address", addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1")))},
+		{"a short address message", join(msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0}), done(0))},
+		{"a three-byte address", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0})), done(0))},
+		{"a prefix longer than the address", join(addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1"))), done(0))},
 		{"a message cut short", clean[:20]},
-		{"an attribute that does not parse", addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0})},
+		{"an attribute that does not parse", join(addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0}), done(0))},
+		{"an end carrying an error", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, []byte{0xf0, 0xff, 0xff, 0xff}))},
+		{"a short end", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, nil))},
+		{"no end", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")))},
 	} {
 		b := tc.dump
 		if got, err := addrsOf(2, func() ([]byte, error) { return b, nil }); err == nil || got != nil {
