@@ -15,10 +15,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
@@ -1020,11 +1022,17 @@ func (p *Login) Do(ctx context.Context, guest string, r *http.Request, meter Met
 
 // sendModel sends a metered model call. Its answer is read for its usage as
 // it passes to the guest, and the call is settled once it ends; a call that
-// gets no answer to pass is settled at once.
+// gets no answer to pass is settled at once. It was sent once it had a
+// connection: a dial that ends before one (refused, or held and then
+// cancelled or past its deadline) sent nothing (#5108).
 func (p *Login) sendModel(up *http.Request, real string, settle func(Used)) (*http.Response, string) {
+	var connected atomic.Bool
+	up = up.WithContext(httptrace.WithClientTrace(up.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
 	resp, err := p.client.Do(up)
 	if err != nil {
-		settle(Used{Sent: !errors.Is(err, netguard.ErrDenied)})
+		settle(Used{Sent: connected.Load()})
 		return nil, dialDetail(err, up.URL.Hostname())
 	}
 	pool := p.d.Pool.reading(resp.Header)

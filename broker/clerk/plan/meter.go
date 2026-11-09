@@ -27,8 +27,8 @@ type Meter func(body []byte) (settle func(Used), detail string)
 
 // Used is how a model call ended.
 type Used struct {
-	// Sent is false only when no byte of the request left (the dial was
-	// refused by the home-network policy).
+	// Sent is false only when no byte of the request left: the call never
+	// had a connection (its dial was refused, or held and then cancelled).
 	Sent bool
 	// Done is a 2xx event stream read to its end.
 	Done bool

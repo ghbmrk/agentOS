@@ -5,6 +5,7 @@ package plan_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -502,6 +505,84 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 	}
 	if u := rec.settled(); len(u) != 1 || u[0].Sent {
 		t.Fatalf("a refused dial settled %+v, want once, not sent", u)
+	}
+}
+
+// A model call held by the home-network policy and cancelled by its caller
+// before it connects sent nothing, so it settles as not sent; a call
+// cancelled once it is on the provider's connection settles as sent (#5108).
+func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	model := func(q *plan.Login, ctx context.Context, rec *recorder) (*http.Response, string) {
+		g, _ := q.Guest("g")
+		h := map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + g.Tokens["access_token"]}
+		return q.Do(ctx, "g", req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`, h), rec.meter)
+	}
+
+	// A quick read moves to a gateway with no external address read yet, and
+	// its full read waits: every public destination is held.
+	reading, release := make(chan struct{}), make(chan struct{})
+	var connects atomic.Int32
+	d := f.decl(t)
+	guard := netguard.New(netguard.Config{
+		Resolver: resolver(netip.MustParseAddr("8.8.8.8")),
+		Quick: func() (netguard.Network, error) {
+			return netguard.Network{Gateway: netip.MustParseAddr("192.168.7.1")}, nil
+		},
+		Source: func() (netguard.Network, error) {
+			select {
+			case reading <- struct{}{}:
+			default:
+			}
+			<-release
+			return netguard.Network{}, errors.New("no read")
+		},
+		Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			connects.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, f.srv.Listener.Addr().String())
+		},
+	})
+	d.Guard = guard
+	q, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wctx, wstop := context.WithCancel(context.Background())
+	events, watched := make(chan struct{}, 1), make(chan struct{})
+	go func() { guard.Watch(wctx, events); close(watched) }()
+	t.Cleanup(func() { close(release); wstop(); <-watched })
+	events <- struct{}{}
+	<-reading // the quick read has opened the hold
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	rec := &recorder{}
+	if resp, det := model(q, ctx, rec); resp != nil || det == "" {
+		t.Fatalf("a cancelled held call answered: %v %q", resp != nil, det)
+	}
+	if n := connects.Load(); n != 0 {
+		t.Fatalf("a held call connected %d times", n)
+	}
+	if u := rec.settled(); len(u) != 1 || u[0].Sent {
+		t.Fatalf("a held call cancelled before connect settled %+v, want once, not sent", u)
+	}
+
+	// The same cancel once the provider has the call: it was sent.
+	arrived := make(chan struct{})
+	f.stream = func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		<-r.Context().Done()
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() { <-arrived; cancel() }()
+	rec = &recorder{}
+	if resp, det := model(p, ctx, rec); resp != nil || det == "" {
+		t.Fatalf("a call cancelled at the provider answered: %v %q", resp != nil, det)
+	}
+	if u := rec.settled(); len(u) != 1 || !u[0].Sent {
+		t.Fatalf("a call cancelled at the provider settled %+v, want once, sent", u)
 	}
 }
 
