@@ -149,8 +149,8 @@ func TestSpendNeedsAnActivePlanOfAnIssuedKey(t *testing.T) {
 		t.Fatal("a plan on a foreign root must not spend")
 	}
 	modelPlan(r, "t3", k)
-	must(t, r.k.Stop(6))
-	if rf := r.admit(7, "t3", 1); rf == nil || rf.Code != key.RStopped {
+	must(t, r.k.Stop(6)) // the STOP cancels the plan in its fold (KRN-7)
+	if rf := r.admit(7, "t3", 1); rf == nil || rf.Code != kernel.CPlan {
 		t.Fatalf("stop: %v", rf)
 	}
 }

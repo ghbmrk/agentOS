@@ -181,6 +181,10 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
 		return a
 	}
+	if r := s.ended(p, &st, v.Limits.Task, now); r != nil {
+		a.Kind, a.Refusal = ActCancel, r
+		return a
+	}
 	led := s.Ledger()
 	if st.Attempt > 0 {
 		led = s.LedgerBefore(st.DispatchSeq) // a redo is not charged twice
@@ -690,8 +694,12 @@ func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 	}
 	// A redo that Next would refuse now (a STOP, a revoke, an expiry, a
 	// limit) would cancel the plan: refuse the RETRY instead and leave the
-	// step parked. A pause only delays the redo until the key resumes.
-	if r := sendCheck(k.s, p, st, index, now); r != nil && r.Code != key.RPaused {
+	// step parked. A pause only delays the redo until the key resumes. The
+	// redo is checked as the retried step it becomes, which outlives its
+	// task (KRN-5).
+	redo := *st
+	redo.Retried = true
+	if r := sendCheck(k.s, p, &redo, index, now); r != nil && r.Code != key.RPaused {
 		return fmt.Errorf("%w: %s: %s", ErrRetryRefused, r.Code, r.Detail)
 	}
 	if c := p.Plan.Steps[index].Clerk; k.clerks[c] == nil {
@@ -749,10 +757,14 @@ type Call struct {
 }
 
 // Calls runs every active plan as far as now allows without calling a clerk:
-// it logs holds, cancels and dispatches, and returns the calls now due, each
+// it logs the ends of tasks timed out by now first (endDue), then holds,
+// cancels and dispatches, and returns the calls now due, each
 // once until Answer has its answer. A step whose clerk the kernel does not
 // have fails here.
 func (k *Kernel) Calls(now int64) ([]Call, error) {
+	if err := k.endDue(now); err != nil {
+		return nil, err
+	}
 	var out []Call
 	for _, id := range append([]string(nil), k.s.Order...) {
 		for n := 0; n < 4*MaxSteps; n++ {
@@ -833,6 +845,9 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Ref
 	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
 		return &key.Refusal{Code: CKey, Detail: err.Error()}
+	}
+	if r := s.ended(p, st, v.Limits.Task, now); r != nil {
+		return r
 	}
 	sp := p.Plan.Step(i)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved)

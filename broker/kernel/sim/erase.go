@@ -346,6 +346,9 @@ func judgeReads(k *kernel.Kernel, gone map[string]bool, firsts map[[2]string]int
 func judgeErase(k *kernel.Kernel, anchors []key.PublicKey, keys crashKeys, stores map[string]kernel.ContentStore,
 	subs []string, gone map[string]bool, items map[kernel.Hash]simItem) error {
 	es := k.Log().Entries()
+	if err := stopsHold(anchors, es); err != nil {
+		return err
+	}
 	re, err := kernel.Replay(anchors, es)
 	if err != nil {
 		return err

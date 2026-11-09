@@ -383,7 +383,10 @@ func (s *session) verdicts() []verdict {
 	}
 	for i, p := range s.submitted {
 		ps, h := st.Plans[p.ID], kernel.PlanHash(p)
-		if ps == nil || kernel.PlanHash(ps.Plan) != h || ps.Status == kernel.SPending || s.repeat(i, h) {
+		// A plan a STOP or its task's end cancelled before any verdict
+		// (no step was ever set up for it) has none either (KRN-7).
+		undecided := ps != nil && (ps.Status == kernel.SPending || ps.Status == kernel.SCancelled && ps.Steps == nil)
+		if ps == nil || kernel.PlanHash(ps.Plan) != h || undecided || s.repeat(i, h) {
 			continue
 		}
 		named := ps.Status == kernel.SRejected && ps.Reject != ""

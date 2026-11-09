@@ -7,8 +7,10 @@
 (* same shape has completed under the key's root. It dispatches once its    *)
 (* window has passed: the novelty window when novel, the base one when not. *)
 (* The owner can stop it at any point before dispatch (UNDO, STOP or a      *)
-(* revoke). A step of the same shape may complete under the same root while *)
-(* this one is held; that must not shorten this one's hold.                 *)
+(* revoke). A STOP cancels it in the STOP's own transition, so a RESUME     *)
+(* after it, with or without a tick between, never sends it (KRN-7). A step *)
+(* of the same shape may complete under the same root while this one is    *)
+(* held; that must not shorten this one's hold.                             *)
 (*                                                                          *)
 (* The kernel runs Next on every tick, so a step dispatches at the first    *)
 (* tick its rule allows. vectors.py, beside this file, reads the earliest   *)
@@ -33,47 +35,61 @@ VARIABLES
   phase,     \* "queued", "held", "sent" or "cancelled"
   heldAt, novel, sentAt,
   midHold,   \* a step of this shape completed under the root while this one was held
+  stopped,   \* a STOP is in force
+  stopAt,    \* when the owner's STOP folded, or -1
   now
-vars == <<hold, verb, seen, phase, heldAt, novel, sentAt, midHold, now>>
+vars == <<hold, verb, seen, phase, heldAt, novel, sentAt, midHold, stopped, stopAt, now>>
 
 TypeOK ==
   /\ hold \in Holds /\ verb \in Verbs /\ seen \in BOOLEAN /\ midHold \in BOOLEAN
   /\ phase \in {"queued", "held", "sent", "cancelled"}
   /\ heldAt \in -1..MaxNow /\ sentAt \in -1..MaxNow /\ novel \in BOOLEAN
+  /\ stopped \in BOOLEAN /\ stopAt \in -1..MaxNow
   /\ now \in 0..MaxNow
 
 Init ==
   /\ hold \in Holds /\ verb \in Verbs /\ seen \in BOOLEAN
   /\ phase = "queued" /\ heldAt = -1 /\ novel = FALSE /\ sentAt = -1
-  /\ midHold = FALSE /\ now = 0
+  /\ midHold = FALSE /\ stopped = FALSE /\ stopAt = -1 /\ now = 0
 
 Due == heldAt + Window(hold, novel)
 
-\* kernel.Next for the step.
+\* kernel.Next for the step. Under a STOP the key refuses it.
 Kernel ==
-  \/ /\ phase = "queued"
-     /\ IF Irreversible(verb) /\ (hold[1] > 0 \/ hold[2] > 0)
-          THEN /\ phase' = "held" /\ heldAt' = now /\ novel' = ~seen
-               /\ UNCHANGED sentAt
-          ELSE /\ phase' = "sent" /\ sentAt' = now
-               /\ UNCHANGED <<heldAt, novel>>
-     /\ UNCHANGED <<hold, verb, seen, midHold, now>>
-  \/ /\ phase = "held" /\ now >= Due
-     /\ phase' = "sent" /\ sentAt' = now
-     /\ UNCHANGED <<hold, verb, seen, heldAt, novel, midHold, now>>
+  /\ ~stopped
+  /\ \/ /\ phase = "queued"
+        /\ IF Irreversible(verb) /\ (hold[1] > 0 \/ hold[2] > 0)
+             THEN /\ phase' = "held" /\ heldAt' = now /\ novel' = ~seen
+                  /\ UNCHANGED sentAt
+             ELSE /\ phase' = "sent" /\ sentAt' = now
+                  /\ UNCHANGED <<heldAt, novel>>
+        /\ UNCHANGED <<hold, verb, seen, midHold, stopped, stopAt, now>>
+     \/ /\ phase = "held" /\ now >= Due
+        /\ phase' = "sent" /\ sentAt' = now
+        /\ UNCHANGED <<hold, verb, seen, heldAt, novel, midHold, stopped, stopAt, now>>
 
 Tick == now < MaxNow /\ now' = now + 1
-        /\ UNCHANGED <<hold, verb, seen, phase, heldAt, novel, sentAt, midHold>>
+        /\ UNCHANGED <<hold, verb, seen, phase, heldAt, novel, sentAt, midHold, stopped, stopAt>>
 
 \* Another step of the same shape completes under the same root.
 SameShape == phase = "held" /\ ~midHold /\ midHold' = TRUE /\ seen' = TRUE
-             /\ UNCHANGED <<hold, verb, phase, heldAt, novel, sentAt, now>>
+             /\ UNCHANGED <<hold, verb, phase, heldAt, novel, sentAt, stopped, stopAt, now>>
 
-\* UNDO, STOP or a revoke before dispatch.
+\* UNDO or a revoke before dispatch.
 Cancel == phase \in {"queued", "held"} /\ phase' = "cancelled"
-          /\ UNCHANGED <<hold, verb, seen, heldAt, novel, sentAt, midHold, now>>
+          /\ UNCHANGED <<hold, verb, seen, heldAt, novel, sentAt, midHold, stopped, stopAt, now>>
 
-Next == Kernel \/ Tick \/ SameShape \/ Cancel
+\* The owner's STOP before dispatch (one per behaviour): its fold cancels the
+\* step at once, not a later scheduler decision.
+Stop == phase \in {"queued", "held"} /\ stopAt = -1
+        /\ stopped' = TRUE /\ stopAt' = now /\ phase' = "cancelled"
+        /\ UNCHANGED <<hold, verb, seen, heldAt, novel, sentAt, midHold, now>>
+
+\* The owner's RESUME lifts the STOP, at once or after any number of ticks.
+Resume == stopped /\ stopped' = FALSE
+          /\ UNCHANGED <<hold, verb, seen, phase, heldAt, novel, sentAt, midHold, stopAt, now>>
+
+Next == Kernel \/ Tick \/ SameShape \/ Cancel \/ Stop \/ Resume
 
 Spec == Init /\ [][Next]_vars
 
@@ -102,4 +118,8 @@ HoldsNeverShorten == [][phase = "held" => Due' >= Due]_vars
 
 \* KEY-8/KRN-7: a step stopped during its hold never dispatches.
 CancelFinal == [][phase = "cancelled" => phase' = "cancelled"]_vars
+
+\* KRN-7/KEY-8: a step not yet sent when a STOP folded is never sent, a
+\* RESUME after the STOP included.
+StopHolds == stopAt >= 0 => phase # "sent"
 =============================================================================

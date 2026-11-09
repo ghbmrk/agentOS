@@ -488,15 +488,16 @@ func TestUnanchoredWideningIsDroppedButDispatchIsKept(t *testing.T) {
 // to build on it, so no later entry can make a restart keep it (KRN-7).
 func TestFailedResumeHasNoEffectAndDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
-	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.k.Stop(1))
 	r.anchor.down = true
 	if err := r.k.Resume(2, r.k.State().Stops); err == nil {
 		t.Fatal("an unconfirmed resume must report it")
 	}
-	if err := r.tick(3); err == nil { // the broken log refuses the dispatch entry, so the clerk is never called
+	// The broken log refuses the plan, so it is never decided or sent.
+	if err := r.k.Submit(3, r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Trash, "m1")}})); err == nil {
 		t.Fatal("nothing may be appended after an unconfirmed widening")
 	}
+	must(t, r.tick(3))
 	if len(r.mail.Effects()) != 0 {
 		t.Fatal("a failed resume must not let a step run")
 	}

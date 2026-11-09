@@ -388,13 +388,13 @@
    }
   },
   {
-   "id": "novelty-hold-stop",
+   "id": "novelty-hold-undo",
    "clause": "novelty-hold",
-   "says": "A STOP during a first-ever unsubscribe's hold cancels it with no POST sent.",
+   "says": "UNDO of a first-ever unsubscribe during its hold cancels it with no POST sent; the other holds run.",
    "variant": {
     "script": [
      {
-      "owner": "STOP",
+      "owner": "UNDO",
       "mail": "M01",
       "during": "hold"
      }
@@ -410,6 +410,63 @@
     ],
     "no_post": [
      "M01"
+    ]
+   }
+  },
+  {
+   "id": "novelty-hold-stop",
+   "clause": "novelty-hold",
+   "says": "A STOP during a first-ever unsubscribe's hold cancels every hold still running with no POST sent.",
+   "variant": {
+    "script": [
+     {
+      "owner": "STOP",
+      "mail": "M01",
+      "during": "hold"
+     }
+    ]
+   },
+   "expect": {
+    "posts": {},
+    "stopped": [
+     "M01",
+     "M02",
+     "M03"
+    ],
+    "no_post": [
+     "M01",
+     "M02",
+     "M03"
+    ]
+   }
+  },
+  {
+   "id": "novelty-hold-stop-resume",
+   "clause": "novelty-hold",
+   "says": "A STOP during the novelty hold, then RESUME before the next tick: the stopped holds stay stopped and no POST is sent when their windows end.",
+   "variant": {
+    "script": [
+     {
+      "owner": "STOP",
+      "mail": "M01",
+      "during": "hold"
+     },
+     {
+      "owner": "RESUME"
+     }
+    ]
+   },
+   "expect": {
+    "posts": {},
+    "stopped": [
+     "M01",
+     "M02",
+     "M03"
+    ],
+    "no_post": [
+     "M01",
+     "M02",
+     "M03"
     ]
    }
   },

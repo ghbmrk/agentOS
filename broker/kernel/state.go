@@ -343,6 +343,12 @@ type PlanState struct {
 	// Reject is a rejected plan's failing check: its refusal code and step (PLN-4).
 	Reject     string
 	RejectStep *int
+	// Ended is why the plan's task ended (a STOP, or the task's end) while
+	// its current step had been sent, or parked: that step still
+	// reconciles and may be retried, but no step the owner did not retry
+	// is sent again, and the plan is cancelled for the same reason at its
+	// next unsent step (endPlans).
+	Ended, EndedDetail string
 }
 
 // SpendHold is why a plan's spend is stopped. Root is the root of the key the
@@ -386,6 +392,51 @@ func (s *State) cancel(p *PlanState, code, detail string) {
 		return
 	}
 	p.Status, p.Cancel, p.CancelDetail = SCancelled, code, detail
+}
+
+// Why endPlans ends a plan: a STOP in the words key.Verified.Live refuses
+// a step with under it, so a cancel Next logged after a STOP before its fold
+// cancelled is the same cancel (Rederive); a task's end beside CTask.
+const (
+	stopDetail = "stop is in force"
+	endDetail  = "the task ended"
+)
+
+// endPlans ends, in the fold of a STOP or a task's end, every plan pending or
+// active that ends selects, for code and detail: a pending plan, and an
+// active one whose current step nothing has sent, are cancelled at once
+// (cancel). An active plan whose current step was sent or parked keeps
+// reconciling it (KRN-8), and a RETRY of it may still send it (KRN-5), so
+// the plan is marked ended instead, and Next and the send check refuse any
+// other step of it. Either way no step that was unsent at the end is sent
+// after it, whatever the log folds next, a RESUME included (KRN-7).
+func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) {
+	for _, id := range s.Order {
+		p := s.Plans[id]
+		switch {
+		case p.Status != SPending && p.Status != SActive || !ends(p):
+		case p.Status == SPending || sendable(p.Steps[p.Next].Phase):
+			s.cancel(p, code, detail)
+		case p.Ended == "":
+			p.Ended, p.EndedDetail = code, detail
+		}
+	}
+}
+
+// ended is why step st of plan p may not be sent: its plan ended with its
+// task, or the task its key serves is not live at now. A step the owner
+// retried is exempt, since RETRY outlives the task (KRN-5).
+func (s *State) ended(p *PlanState, st *StepState, task string, now int64) *key.Refusal {
+	if st.Retried {
+		return nil
+	}
+	if p.Ended != "" {
+		return &key.Refusal{Code: p.Ended, Detail: p.EndedDetail}
+	}
+	if _, live := s.Task(task, now); !live && task != "" {
+		return &key.Refusal{Code: CTask, Detail: "the key's task is not live"}
+	}
+	return nil
 }
 
 // State is the log folded: the only input to Decide besides the event.
@@ -986,6 +1037,9 @@ func (s *State) Apply(e Entry) error {
 		for _, t := range s.tasks {
 			t.ended = true // an ended task never comes back
 		}
+		// The STOP cancels in its own fold, so a RESUME before the next
+		// tick cannot send what it stopped (KRN-7, KEY-8).
+		s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
 	case TResume:
 		if !s.decoys.held() { // ErrTripResume
 			s.Stopped, s.Changes.Stopped = false, false
