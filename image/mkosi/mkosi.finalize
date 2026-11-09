@@ -1472,9 +1472,14 @@ MANAGER_DIRS = {"StateDirectory": "/var/lib", "RuntimeDirectory": "/run", "Cache
 # The bind settings, whose source is a view of the host's tree made in mount order, so a source
 # above the keeper's state can be bound before the mask is.
 BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
-# The proc filesystem and systemd's links into it under /dev (dev-setup.c): a path through one is a
-# process's view (/proc/self/root, /proc/1/root: the host's tree, unmasked), not the image's (#5119).
-PROC_VIEWS = ("/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/core")
+# Box mounts whose paths are a process's view, not the image's: /proc (/proc/self/root, /proc/1/root:
+# the host's tree, unmasked) and /dev, whose links (dev-setup.c's /dev/fd, udev's) lead into it (#5119).
+# A path setting may name only DEV_SAFE there.
+PROC_VIEWS = ("/proc", "/dev")
+DEV_SAFE = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
+# What systemd unquotes or expands in a path setting (EXTRACT_UNQUOTE, unit_path_printf): the tree check
+# does not model it, so a path holding one is refused (#5153 Security 1).
+UNMODELLED = "\"'%\\"
 # A .path unit's watches (systemd.path): an agentos-keeper .path watches only the keeper's state and
 # starts only a keeper unit (OWN-card-flow decision 6).
 PATH_WATCHES = ("PathExists", "PathExistsGlob", "PathChanged", "PathModified", "DirectoryNotEmpty")
@@ -1662,21 +1667,31 @@ def under(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
 
-def keeper_reach(path, above=False, root=None):
+def keeper_reach(path, above=False):
     """Whether absolute PATH is at or under a KEEPER_PATHS entry, takes a '..' step, or (ABOVE) is a
-    directory holding one. With ROOT (#5119), PATH is judged as written and as the image resolves it
-    (tree_chase: systemd resolves a path when it applies it, so /var/run/x is /run/x); a path that
-    resolves into PROC_VIEWS, or that the tree cannot resolve (a loop), reaches too."""
-    paths = [norm_path(path)]
-    if root is not None:
-        try:
-            paths.append(norm_path(tree_chase(root, path, missing_ok=True)[0]))
-        except OSError:
-            return True
-        if under(paths[1], PROC_VIEWS):
-            return True
-    return any(".." in p.split("/") or under(p, KEEPER_PATHS)
-               or above and any(p == "/" or under(k, (p,)) for k in KEEPER_PATHS) for p in paths)
+    directory holding one."""
+    norm = norm_path(path)
+    return (".." in norm.split("/") or under(norm, KEEPER_PATHS)
+            or above and any(norm == "/" or under(k, (norm,)) for k in KEEPER_PATHS))
+
+
+def path_refusal(root, path, above):
+    """Why keeper_unit_violations refuses a path setting's PATH, or None (#5119). systemd unquotes and
+    expands it, then resolves it when it applies it (so /var/run/x is /run/x), so it is refused if it
+    holds UNMODELLED, if the image at ROOT cannot resolve it (tree_chase: a loop), if it resolves into
+    PROC_VIEWS but DEV_SAFE, or if as written or as resolved it reaches the keeper's state (keeper_reach,
+    ABOVE)."""
+    if any(c in path for c in UNMODELLED):
+        return ": the tree check does not model it"
+    try:
+        got = norm_path(tree_chase(root, path, missing_ok=True)[0])
+    except OSError as e:
+        return ": the image cannot resolve it (%s)" % e.strerror
+    if under(got, PROC_VIEWS) and got not in DEV_SAFE:
+        return ": %s is a process's view, past the mask, which the tree check does not model" % got
+    if keeper_reach(path, above) or keeper_reach(got, above):
+        return " reaches the keeper's state"
+    return None
 
 
 def manager_paths(files):
@@ -1707,7 +1722,8 @@ def keeper_violations(root):
       "-" allowed), and mounts nothing over, under or from one of them, nor
       binds one from above it. The service manager opens no file and makes no directory for it at,
       under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981). Each path is
-      judged as written and as the image resolves it, and none goes through PROC_VIEWS (#5119).
+      judged as written and as the image resolves it, none holds UNMODELLED, and none goes
+      through PROC_VIEWS but to DEV_SAFE (#5119).
     - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
       only TPM_DEVICE under DevicePolicy=closed or strict; every other agentos service but
       NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
@@ -1772,8 +1788,9 @@ def keeper_path_violations(name, files):
     if not watches:
         out.append("%s: watches nothing the tree check reads (D-154)" % name)
     for k, v in watches:
-        norm = "/" + "/".join(x for x in v.split("/") if x not in ("", "."))
-        if not v.startswith("/") or ".." in norm.split("/") or not under(norm, KEEPER_PATHS):
+        norm = norm_path(v)
+        if not v.startswith("/") or ".." in norm.split("/") or not under(norm, KEEPER_PATHS) or any(
+                c in v for c in UNMODELLED):
             out.append("%s: %s=%s is outside the keeper's state (D-154)" % (name, k, v))
     return out
 
@@ -2019,14 +2036,14 @@ def keeper_unit_violations(name, files, root):
         # source above it too.
         for key in NAMESPACE_MOUNTS + ("ReadOnlyPaths", "ExecPaths", "NoExecPaths"):
             for w in ini_words(files, "Service", key):
-                if keeper_reach(w.lstrip("-+").split(":")[0], above=key in BIND_MOUNTS, root=root):
-                    out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, w))
+                why = path_refusal(root, w.lstrip("-+").split(":")[0], key in BIND_MOUNTS)
+                if why:
+                    out.append("%s: %s=%s%s (D-154)" % (name, key, w, why))
         # #2981: what the manager opens or makes as root for the unit, at, under or above it.
         for key, v, p in manager_paths(files):
-            if any(c in p for c in "\"'%\\"):
-                out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
-            elif keeper_reach(p, above=True, root=root):
-                out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
+            why = path_refusal(root, p, True)
+            if why:
+                out.append("%s: %s=%s%s (D-154)" % (name, key, v, why))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.
     if (ini_last(files, "Service", "Type") or "") == "oneshot" and ini_entries(files, "Service", "RuntimeMaxSec"):
