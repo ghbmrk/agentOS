@@ -71,6 +71,12 @@ func TestMain(m *testing.M) {
 			err = exec.Command(unshare, append(ns[1:], "true")...).Run()
 		}
 		if err == nil {
+			// A mutant that allocates without end (mutgate's, padding a
+			// link attribute forever) dies at this bound in its own run
+			// instead of taking the runner's memory, and the runner, with it.
+			err = syscall.Setrlimit(syscall.RLIMIT_DATA, &syscall.Rlimit{Cur: dataLimit, Max: dataLimit})
+		}
+		if err == nil {
 			err = syscall.Exec(unshare, append(ns, os.Args...), os.Environ())
 		}
 		if netnstest.Required() {
@@ -80,6 +86,10 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// dataLimit bounds the namespaced suite's data (its heap): many times
+// what it uses, far below a runner's memory.
+const dataLimit = 1 << 30
 
 // static reports whether this test binary needs no ELF loader.
 func static() bool {
