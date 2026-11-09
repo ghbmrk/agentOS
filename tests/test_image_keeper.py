@@ -439,8 +439,9 @@ class KeeperTreeTest(unittest.TestCase):
         # So is a link to anything but a unit file in a unit directory.
         (self.root / "srv").mkdir(exist_ok=True)
         write(self.root, "srv/c.service", "[Service]\nUser=c\nStateDirectory=c\n")
+        write(self.root, "srv/o.service", "[Service]\nUser=c\nStateDirectory=c\n")
         for target in ("/srv/c.service", "/usr/lib/systemd/system/missing.service", "/usr/lib/systemd/system",
-                       "c.service"):
+                       "c.service", "/srv/o.service"):
             with self.subTest(target):
                 (self.root / "etc/systemd/system/c.service").symlink_to(target)
                 try:
