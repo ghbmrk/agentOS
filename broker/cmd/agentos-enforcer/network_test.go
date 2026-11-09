@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
+	"golang.org/x/sys/unix"
 )
 
 // TestResolverInStep (ENF-l-dns-step, #4464): every firewall load runs
@@ -1082,6 +1085,37 @@ func TestServedInterfacesHeld(t *testing.T) {
 	}
 }
 
+// TestRefusedLoadKeepsResolverStopped (#5164 item 7): with a served
+// interface not as set up, the instances stop before the load, so a
+// refused load, which starts the stopped ones again, brings back none.
+func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.dns.mu.Lock()
+	was := x.dns.running
+	x.dns.mu.Unlock()
+	if len(was.Listed) == 0 {
+		t.Fatal("fixture: no instance runs")
+	}
+	x.mu.Lock()
+	x.servedErr = errors.New("served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24")
+	x.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), home())
+	x.d.fwMu.Unlock()
+	if err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	x.dns.mu.Lock()
+	got := x.dns.running
+	x.dns.mu.Unlock()
+	if len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("a refused load left instances running with the check failing: %v", got)
+	}
+}
+
 // TestHold (ENF-net-ra-off, #4222): hold turns router advertisements and
 // redirects off on each served interface there and on "default", and
 // reads them back; an interface not there yet is passed; every address on
@@ -1093,6 +1127,13 @@ func TestHold(t *testing.T) {
 	keys := []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
 	box := func(v6 bool, ifaces ...string) string {
 		root := t.TempDir()
+		all := filepath.Join(root, "ipv4/conf/all/accept_redirects")
+		if err := os.MkdirAll(filepath.Dir(all), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(all, []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		for _, i := range append([]string{"default"}, ifaces...) {
 			for _, k := range keys {
 				if !v6 && strings.HasPrefix(k, "ipv6") {
@@ -1111,6 +1152,9 @@ func TestHold(t *testing.T) {
 	}
 	set := func(root string, v6 bool, ifaces ...string) {
 		t.Helper()
+		if b, err := os.ReadFile(filepath.Join(root, "ipv4/conf/all/accept_redirects")); err != nil || string(b) != "0\n" {
+			t.Fatalf("all/accept_redirects: %q %v", b, err)
+		}
 		for _, i := range append([]string{"default"}, ifaces...) {
 			for _, k := range keys {
 				if !v6 && strings.HasPrefix(k, "ipv6") {
@@ -1153,6 +1197,36 @@ func TestHold(t *testing.T) {
 		t.Fatalf("no IPv6: %v", err)
 	}
 	set(root, false, "own0", "ap0.101")
+
+	// An interface not served (the WAN) keeps its own settings: its link
+	// configuration sets its router advertisements (ENF-l-21).
+	root = box(true, "own0", "wan0")
+	wan := filepath.Join(root, "ipv6/conf/wan0/accept_ra")
+	if err := os.WriteFile(wan, []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], addrs); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(wan); err != nil || string(b) != "2\n" {
+		t.Fatalf("an interface not served was written: %q %v", b, err)
+	}
+
+	// A setting that takes the write and reads back something else (here
+	// nothing: a link to /dev/null) fails, for "all" and an interface's.
+	for _, key := range []string{"ipv4/conf/all/accept_redirects", "ipv6/conf/own0/accept_ra"} {
+		root = box(true, "own0")
+		path := filepath.Join(root, key)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(os.DevNull, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := hold(root, nets[:1], addrs); err == nil || !strings.Contains(err.Error(), path+` not set to 0 (reads "")`) {
+			t.Errorf("%s linked to %s: %v", key, os.DevNull, err)
+		}
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -1221,7 +1295,10 @@ func TestHold(t *testing.T) {
 }
 
 // TestIfaceAddrs: the kernel's addresses with their prefix lengths, read
-// from loopback; a missing interface is an error.
+// from loopback; a missing interface is an error. From a dump: each local
+// and peer address of the interface's messages, once; a dump marked
+// interrupted (NLM_F_DUMP_INTR) is taken again once, and fails if the
+// second is marked too (#5164 item 8); anything unreadable fails.
 func TestIfaceAddrs(t *testing.T) {
 	got, err := ifaceAddrs("lo")
 	if err != nil {
@@ -1233,17 +1310,93 @@ func TestIfaceAddrs(t *testing.T) {
 	if got, err := ifaceAddrs("agentos-none0"); err == nil {
 		t.Fatalf("a missing interface read: %v", got)
 	}
-	got, err = prefixes([]net.Addr{&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}, &net.IPNet{IP: net.IPv4(10, 1, 0, 1), Mask: net.CIDRMask(24, 32)}})
-	if err != nil || !slices.Equal(got, []netip.Prefix{netip.MustParsePrefix("fe80::1/64"), netip.MustParsePrefix("10.1.0.1/24")}) {
-		t.Fatalf("prefixes: %v %v", got, err)
+
+	ne := binary.NativeEndian
+	attr := func(typ uint16, v []byte) []byte {
+		b := make([]byte, 4, 4+len(v)+3)
+		ne.PutUint16(b, uint16(4+len(v)))
+		ne.PutUint16(b[2:], typ)
+		b = append(b, v...)
+		return append(b, make([]byte, (4-len(b)%4)%4)...)
 	}
-	for _, a := range []net.Addr{
-		&net.IPAddr{IP: net.IPv4(10, 1, 0, 1)},
-		&net.IPNet{IP: net.IP{10, 1, 0}, Mask: net.CIDRMask(24, 32)},
-		&net.IPNet{IP: net.IPv4(10, 1, 0, 1), Mask: net.IPMask{255, 0, 255, 0}},
+	msg := func(typ, flags uint16, body []byte) []byte {
+		b := make([]byte, 16, 16+len(body))
+		ne.PutUint32(b, uint32(16+len(body)))
+		ne.PutUint16(b[4:], typ)
+		ne.PutUint16(b[6:], flags)
+		return append(b, body...)
+	}
+	addr := func(flags uint16, family, bits byte, index uint32, attrs ...[]byte) []byte {
+		b := []byte{family, bits, 0, 0, 0, 0, 0, 0}
+		ne.PutUint32(b[4:], index)
+		for _, a := range attrs {
+			b = append(b, a...)
+		}
+		return msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI|flags, b)
+	}
+	v4 := func(s string) []byte { a := netip.MustParseAddr(s).As4(); return a[:] }
+	v6 := func(s string) []byte { a := netip.MustParseAddr(s).As16(); return a[:] }
+	done := func(flags uint16) []byte { return msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI|flags, make([]byte, 4)) }
+	join := func(ms ...[]byte) []byte { return bytes.Join(ms, nil) }
+	const intr = unix.NLM_F_DUMP_INTR
+	clean := join(
+		addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")), attr(syscall.IFA_LOCAL, v4("10.1.0.1")), attr(syscall.IFA_LABEL, []byte("own0\x00"))),
+		addr(0, syscall.AF_INET, 24, 3, attr(syscall.IFA_ADDRESS, v4("10.99.0.1"))),
+		addr(0, syscall.AF_INET, 32, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.2")), attr(syscall.IFA_ADDRESS, v4("10.9.0.1"))),
+		addr(0, syscall.AF_INET6, 64, 2, attr(syscall.IFA_ADDRESS, v6("fe80::1"))),
+		done(0),
+	)
+	p := netip.MustParsePrefix
+	want := []netip.Prefix{p("10.1.0.1/24"), p("10.1.0.2/32"), p("10.9.0.1/32"), p("fe80::1/64")}
+	dumps := func(ds ...[]byte) (func() ([]byte, error), *int) {
+		n := 0
+		return func() ([]byte, error) {
+			n++
+			if n > len(ds) {
+				t.Fatal("dumped more than twice")
+			}
+			return ds[n-1], nil
+		}, &n
+	}
+	for _, tc := range []struct {
+		name  string
+		ds    [][]byte
+		calls int
+		ok    bool
+	}{
+		{"clean", [][]byte{clean}, 1, true},
+		{"interrupted, then clean", [][]byte{join(addr(intr, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), done(0)), clean}, 2, true},
+		{"its end interrupted, then clean", [][]byte{done(intr), clean}, 2, true},
+		{"interrupted twice", [][]byte{done(intr), join(addr(intr, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), done(0))}, 2, false},
 	} {
-		if got, err := prefixes([]net.Addr{a}); err == nil {
-			t.Errorf("%#v read as %v", a, got)
+		dump, n := dumps(tc.ds...)
+		got, err := addrsOf(2, dump)
+		if *n != tc.calls {
+			t.Errorf("%s: %d dumps, want %d", tc.name, *n, tc.calls)
+		}
+		if tc.ok && (err != nil || !slices.Equal(got, want)) {
+			t.Errorf("%s: %v %v, want %v", tc.name, got, err, want)
+		}
+		if !tc.ok && (!errors.Is(err, errDumpIntr) || got != nil) {
+			t.Errorf("%s: %v %v, want the interrupted dump's error", tc.name, got, err)
+		}
+	}
+	if _, err := addrsOf(2, func() ([]byte, error) { return nil, errors.New("netlink: refused") }); err == nil || err.Error() != "netlink: refused" {
+		t.Errorf("a failed dump: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		dump []byte
+	}{
+		{"a short address message", msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0})},
+		{"a three-byte address", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0}))},
+		{"a prefix longer than the address", addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1")))},
+		{"a message cut short", clean[:20]},
+		{"an attribute that does not parse", addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0})},
+	} {
+		b := tc.dump
+		if got, err := addrsOf(2, func() ([]byte, error) { return b, nil }); err == nil || got != nil {
+			t.Errorf("%s read as %v", tc.name, got)
 		}
 	}
 }
