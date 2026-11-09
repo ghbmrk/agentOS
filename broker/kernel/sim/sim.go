@@ -70,12 +70,20 @@ type Result struct {
 	StopResumed int // a STOP with a RESUME the very next entry, no tick between
 	TasksOpened int
 	TasksEnded  int // task.ended entries, the planner's and the timeout's
+	EndedEarly  int // of those, the planner's: before the task's timeout
 	TaskPlans   int // plans under a key serving a task
 	TaskCancels int // plans their task's end cancelled or ended
 	TimedOut    int // held steps under a hold longer than a task that their task's timeout cancelled
 
 	KeysWithTasks, TaskKeys     int // derived keys drawn while a task was open, and those bound to one
 	ReplayedTask, CancelledTask int // replayed ids and op-12 picks that landed on a plan taskPlan submitted
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // outlives reports whether k holds a novel step longer than any task lives.
@@ -108,6 +116,7 @@ func (r *Result) tally(st *kernel.State, es []kernel.Entry) {
 		case kernel.TTaskEnded:
 			r.TasksEnded++
 			timedOut[b.Task] = e.At >= opened[b.Task]+kernel.TaskTimeout
+			r.EndedEarly += 1 - b2i(timedOut[b.Task])
 		}
 	}
 	for _, id := range st.Order {
@@ -695,34 +704,38 @@ func (s *sim) taskOp() error {
 	switch s.pick(8) {
 	case 0, 1:
 		s.logf("stop")
-		if err := s.k.Stop(s.kt()); err != nil || s.pick(2) == 0 {
-			return err
+		err := s.k.Stop(s.kt())
+		if err == nil && s.pick(2) == 0 {
+			s.logf("resume at once")
+			err = s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
 		}
-		s.logf("resume at once")
-		return s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
+		return err
 	case 2, 3, 4: // a STOP ends every task, so they open often
 		s.ntasks++
 		id := fmt.Sprintf("t%d", s.ntasks)
 		s.logf("open task %s", id)
-		err := s.k.OpenTask(s.kt(), id, key.P0)
-		if errors.Is(err, kernel.ErrTaskOpen) {
-			return nil
+		err := s.k.OpenTask(s.kt(), id, key.P0) // taskOp runs only while no STOP is in force
+		if err == nil {
+			s.tasks = append(s.tasks, id)
+			err = s.taskPlan(id)
 		}
-		if err != nil {
-			return err
-		}
-		s.tasks = append(s.tasks, id)
-		return s.taskPlan(id)
+		return err
 	case 5:
 		if len(s.tasks) > 0 {
 			id := s.tasks[s.pick(len(s.tasks))]
 			s.logf("end task %s", id)
-			if err := s.k.EndTask(s.kt(), id); !errors.Is(err, kernel.ErrTask) {
-				return err
-			}
+			return unless(s.k.EndTask(s.kt(), id), kernel.ErrTask) // an ended task's end is refused
 		}
 	}
 	return nil
+}
+
+// unless is err, or nil when err is not.
+func unless(err, not error) error {
+	if errors.Is(err, not) {
+		return nil
+	}
+	return err
 }
 
 // taskPlan submits the planner's first plan for task id, under a live key
@@ -737,21 +750,19 @@ func (s *sim) taskPlan(id string) error {
 		cav = append(cav, key.LimitHold(hour, 30*hour))
 	}
 	k, err := key.Derive(live[s.pick(len(live))], s.holder.priv, s.planr.pub, cav...)
-	if err != nil {
-		return nil
+	if err == nil {
+		s.submits++
+		p := kernel.Plan{ID: fmt.Sprintf("p%d", s.submits), Key: k, Steps: []kernel.PlanStep{s.step(), s.step()}}
+		s.logf("submit %s for task %s", p.ID, id)
+		if err = s.k.Submit(s.kt(), kernel.SignPlan(p, s.planr.priv)); err == nil {
+			s.plans = append(s.plans, p.ID)
+			if s.taskPlans == nil {
+				s.taskPlans = map[string]int{}
+			}
+			s.taskPlans[p.ID] = 1
+		}
 	}
-	s.submits++
-	p := kernel.Plan{ID: fmt.Sprintf("p%d", s.submits), Key: k, Steps: []kernel.PlanStep{s.step(), s.step()}}
-	s.logf("submit %s for task %s", p.ID, id)
-	if err := s.k.Submit(s.kt(), kernel.SignPlan(p, s.planr.priv)); err != nil {
-		return err
-	}
-	s.plans = append(s.plans, p.ID)
-	if s.taskPlans == nil {
-		s.taskPlans = map[string]int{}
-	}
-	s.taskPlans[p.ID] = 1
-	return nil
+	return err
 }
 
 // phoneOp enrolls a phone, has it renew or narrow a clerk key, or cuts it

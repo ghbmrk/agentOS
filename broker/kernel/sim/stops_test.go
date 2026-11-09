@@ -223,6 +223,21 @@ func TestTheSimsJudgeNarrowingsOutrun(t *testing.T) {
 	}
 }
 
+// A log no narrowing was outrun in, whose plan was accepted under a key the
+// owner never granted, fails the boot check on Rederive (KRN-1).
+func TestTheSimsBootCheckRederives(t *testing.T) {
+	b := newBook(t)
+	b.plan("p1", b.clerk)
+	anchors := []key.PublicKey{b.owner.pk}
+	if err := stopsHold(anchors, b.es); err != nil {
+		t.Fatal(err)
+	}
+	err := (&sim{k: b.booted(), w: &world{anchors: anchors}}).rederive()
+	if err == nil || !strings.Contains(err.Error(), "invariant: rederive") {
+		t.Fatalf("got %v, want Rederive's divergence", err)
+	}
+}
+
 // tally counts what the task and STOP ops left: a STOP with a RESUME as the
 // very next entry at its time, each task's open and end, of the plans
 // serving a task those its end cancelled or ended, and the held steps under
@@ -236,6 +251,8 @@ func TestTallyCountsWhatTheTaskOpsLeft(t *testing.T) {
 		{Type: kernel.TStop, At: 6}, {Type: kernel.TResume, At: 7}, // a tick between
 		{Type: kernel.TTaskOpened, At: 10, Body: body(map[string]string{"id": "t1"})},
 		{Type: kernel.TTaskOpened, At: 10, Body: body(map[string]string{"id": "t2"})},
+		{Type: kernel.TTaskOpened, At: 10, Body: body(map[string]string{"id": "t3"})},
+		{Type: kernel.TTaskEnded, At: 20, Body: body(map[string]string{"task": "t3"})},
 		{Type: kernel.TTaskEnded, At: kernel.TaskTimeout + 5, Body: body(map[string]string{"task": "t2"})},  // before its timeout
 		{Type: kernel.TTaskEnded, At: kernel.TaskTimeout + 10, Body: body(map[string]string{"task": "t1"})}, // at it
 		{Type: kernel.TResume, At: 8}, {Type: kernel.TStop, At: 8}, // a STOP last
@@ -249,7 +266,7 @@ func TestTallyCountsWhatTheTaskOpsLeft(t *testing.T) {
 	long := key.LimitHold(hour, 30*hour) // a hold longer than a task
 	for id, p := range map[string]*kernel.PlanState{
 		"plain":     {Plan: kernel.Plan{Key: b.clerk}, Cancel: kernel.CTask},
-		"cancelled": {Plan: kernel.Plan{Key: b.task("t1", long)}, Cancel: kernel.CTask, Steps: append([]kernel.StepState{held[0]}, held...)},
+		"cancelled": {Plan: kernel.Plan{Key: b.task("t1", long)}, Cancel: kernel.CTask, Steps: append([]kernel.StepState{held[0], held[0]}, held...)},
 		"short":     {Plan: kernel.Plan{Key: b.task("t1", key.LimitHold(hour, hour))}, Cancel: kernel.CTask, Steps: held},
 		"a day":     {Plan: kernel.Plan{Key: b.task("t1", key.LimitHold(hour, kernel.TaskTimeout))}, Cancel: kernel.CTask, Steps: held},
 		"early":     {Plan: kernel.Plan{Key: b.task("t2", long)}, Cancel: kernel.CTask, Steps: held},
@@ -262,7 +279,7 @@ func TestTallyCountsWhatTheTaskOpsLeft(t *testing.T) {
 	}
 	var r Result
 	r.tally(st, es)
-	if r.StopResumed != 2 || r.TasksOpened != 2 || r.TasksEnded != 2 || r.TaskPlans != 7 || r.TaskCancels != 5 || r.TimedOut != 2 {
+	if r.StopResumed != 2 || r.TasksOpened != 3 || r.TasksEnded != 3 || r.EndedEarly != 2 || r.TaskPlans != 7 || r.TaskCancels != 5 || r.TimedOut != 3 {
 		t.Fatalf("tally %+v", r)
 	}
 }

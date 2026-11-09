@@ -43,6 +43,7 @@ var sweep = sync.OnceValues(func() (Result, error) {
 		sum.StopResumed += r.StopResumed
 		sum.TasksOpened += r.TasksOpened
 		sum.TasksEnded += r.TasksEnded
+		sum.EndedEarly += r.EndedEarly
 		sum.TaskPlans += r.TaskPlans
 		sum.TaskCancels += r.TaskCancels
 		sum.TimedOut += r.TimedOut
@@ -124,6 +125,7 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"a STOP with a RESUME right after it":          sum.StopResumed,
 		"tasks opened":                                 sum.TasksOpened,
 		"tasks ended":                                  sum.TasksEnded,
+		"tasks the planner ended before their timeout": sum.EndedEarly,
 		"plans serving a task":                         sum.TaskPlans,
 		"plans their task's end cancelled":             sum.TaskCancels,
 		"held steps their task's timeout cancelled":    sum.TimedOut,
@@ -137,7 +139,13 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		if n <= 0 {
 			t.Errorf("the sweep never reached: %s", name)
 		}
-	} // A third of the keys drawn while a task is open serve one (derived).
+	}
+	// Half the STOPs that land are resumed at once, and each such RESUME is
+	// logged right after its STOP (taskOp).
+	if at, n := traced["resume at once"], traced["stop"]; 4*at < n || 4*at > 3*n || 4*sum.StopResumed < 3*at {
+		t.Errorf("%d of %d STOPs resumed at once, %d logged so, want about half, all logged", at, n, sum.StopResumed)
+	}
+	// A third of the keys drawn while a task is open serve one (derived).
 	if k, n := sum.TaskKeys, sum.KeysWithTasks; 4*k < n || 12*k > 5*n {
 		t.Errorf("%d of %d keys drawn while a task was open serve one, want about a third", k, n)
 	}
