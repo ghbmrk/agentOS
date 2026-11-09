@@ -5,8 +5,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/user"
@@ -19,12 +21,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/camera"
 	"github.com/ghbmrk/agentos/broker/clerk/camera/decodehost"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
+	"golang.org/x/sys/unix"
 )
 
 // TestDecoderStartsInItsUnit runs as one session of the image's own
 // agentos-camdecode@.service, started by the image's agentos-camdecode.socket
-// on a connection from the clerk's user, with only ExecStart= replaced (CI's
-// camera decoder step). Its user is neither root nor the clerk's and it
+// under the image's own systemd on a connection from the clerk's user, with
+// only ExecStart= and its output replaced (CI's camera decoder step,
+// tools/camdecode_unit.py). Its user is neither root nor the clerk's and it
 // tells the step its uid on the connection, so the step can see that two
 // sessions at once have two. It cannot write the clerk's runtime directory,
 // see the clerk's state, or open a session of its own; and a decoder
@@ -44,6 +48,13 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	if uid == 0 || strconv.Itoa(uid) == clerk.Uid || os.Geteuid() != uid {
 		t.Fatalf("the session runs as uid %d (euid %d); the clerk's is %s", uid, os.Geteuid(), clerk.Uid)
 	}
+	// A pid namespace of its own (PrivatePIDs=, systemd 257), where it is
+	// PID 1, so it sees and signals no other session; and an empty /run,
+	// so none of the box's path sockets (#4392).
+	if pid := os.Getpid(); pid != 1 {
+		t.Errorf("the session is pid %d, not 1 in a pid namespace of its own", pid)
+	}
+	runHolds(t, "/run")
 	conn, err := net.FileConn(os.Stdin)
 	if err != nil {
 		t.Fatalf("standard input is not the session's connection: %v", err)
@@ -104,7 +115,9 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 	}
 	line, err := bufio.NewReader(p.Out()).ReadString('\n')
 	if err != nil || line != "frame\n" {
-		t.Fatalf("decoder answered %q, %v", line, err)
+		p.Stop()
+		<-p.Done()
+		t.Fatalf("decoder answered %q, %v; %s", line, err, why(p, state))
 	}
 	p.Stop()
 	<-p.Done()
@@ -128,5 +141,56 @@ func TestDecoderStartsInItsUnit(t *testing.T) {
 		if strings.HasPrefix(l, "iface ") && l != "iface lo" {
 			t.Errorf("the decoder sees %q", l)
 		}
+	}
+}
+
+// why is what ended a sandbox early: its run's error and runsc's own
+// lines, which the runtime keeps in its exec log.
+func why(p camera.Proc, state string) string {
+	out := ""
+	if e, ok := p.(interface{ Err() error }); ok {
+		out = fmt.Sprintf("the run ended: %v", e.Err())
+	}
+	if b, err := os.ReadFile(filepath.Join(state, "exec.log")); err == nil {
+		out += "\n-- runsc\n" + string(b)
+	}
+	return out
+}
+
+// runHolds fails t unless the session's /run holds nothing but
+// directories (the mount points systemd leaves under the empty tmpfs), so
+// no socket or file of the box's is there to open. Each entry is logged
+// with its mode. A directory the walk cannot list counts only if the
+// session cannot search it either: a socket in a directory it can search
+// but not list is still open to it by name.
+// logger is what runHolds reports to: a *testing.T.
+type logger interface {
+	Errorf(string, ...any)
+	Logf(string, ...any)
+}
+
+func runHolds(t logger, run string) {
+	err := filepath.WalkDir(run, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && errors.Is(err, fs.ErrPermission) && errors.Is(unix.Faccessat(unix.AT_FDCWD, p, unix.X_OK, unix.AT_EACCESS), unix.EACCES) {
+				t.Logf("/run: %s cannot be listed or searched", p)
+				return fs.SkipDir
+			}
+			t.Errorf("the session's /run: %s: %v", p, err)
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			t.Errorf("the session's /run: %s: %v", p, ierr)
+			return nil
+		}
+		t.Logf("/run holds %s %v", p, info.Mode())
+		if !d.IsDir() {
+			t.Errorf("the session's /run holds %s (%v); want only directories", p, info.Mode())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("the session's /run: %v", err)
 	}
 }

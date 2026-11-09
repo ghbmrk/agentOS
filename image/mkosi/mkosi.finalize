@@ -1323,14 +1323,20 @@ def root_strict(files):
     return bool(last("DynamicUser", boolean)) or last("ProtectSystem", protect) == "strict"
 
 
-def root_mounts(files):
-    """DEVSLOT-root-guard (#3712): each setting FILES resolve to that puts a mount entry at "/" which
-    systemd 257 keeps in place of TemporaryFileSystem=/ (ROOT_ACCESS, ROOT_TARGETS, root_strict), as
-    KEY=WORD, and every TemporaryFileSystem=/ word past the first, since two entries in one mode sort
+def norm_path(p):
+    """Absolute path P with its empty and "." steps dropped ("/" for none)."""
+    return "/" + "/".join(x for x in p.split("/") if x not in ("", "."))
+
+
+def root_mounts(files, at="/"):
+    """DEVSLOT-root-guard (#3712): each setting FILES resolve to that puts a mount entry at AT which
+    systemd 257 keeps in place of TemporaryFileSystem=AT (ROOT_ACCESS, ROOT_TARGETS, and at "/"
+    root_strict; no other table of systemd's has an entry at a path that holds a keeper path), as
+    KEY=WORD, and every TemporaryFileSystem=AT word past the first, since two entries in one mode sort
     in no set order. ValueError for a word the check does not model."""
     out = []
     for key in ROOT_ACCESS:
-        out += ["%s=/" % key for p in ini_paths(files, "Service", key) if p == "/"]
+        out += ["%s=%s" % (key, at) for p in ini_paths(files, "Service", key) if norm_path(p) == at]
     for key in ROOT_TARGETS:
         for w in ini_words(files, "Service", key):
             if any(c in w for c in "\"'%\\"):
@@ -1339,12 +1345,11 @@ def root_mounts(files):
             target = parts[1] if len(parts) > 1 else parts[0]
             if ".." in target.split("/"):
                 raise ValueError("%s=%s: the tree check does not model it" % (key, w))
-            if not [x for x in target.split("/") if x not in ("", ".")]:
+            if norm_path(target) == at:
                 out.append("%s=%s" % (key, w))
-    if root_strict(files):
+    if at == "/" and root_strict(files):
         out.append("ProtectSystem=strict")
-    tmp = [w for w in ini_words(files, "Service", "TemporaryFileSystem")
-           if not [x for x in w.split(":", 1)[0].split("/") if x not in ("", ".")]]
+    tmp = [w for w in ini_words(files, "Service", "TemporaryFileSystem") if norm_path(w.split(":", 1)[0]) == at]
     return out + ["TemporaryFileSystem=%s" % w for w in tmp[1:]]
 
 
@@ -1686,7 +1691,7 @@ def keeper_violations(root):
     """STO-2c (#2905, D-154): the keeper's units and the main side's.
     - Keeper: every agentos-keeper-* service is in KEEPER_UNITS and in KEEPER_SLICE; no other unit is
       in that slice (tests/test_image_keeper.py checks the image ships them). Every other agentos service but NOEXEC_EXEMPT ends with every KEEPER_PATHS entry
-      in InaccessiblePaths=, none with a "-" (MOR_UNIT: all but MOR_LISTED, which it must not mask, and
+      in InaccessiblePaths= but one below its own empty tmpfs (tmpfs_hides), none with a "-" (MOR_UNIT: all but MOR_LISTED, which it must not mask, and
       "-" allowed), and mounts nothing over, under or from one of them, nor
       binds one from above it. The service manager opens no file and makes no directory for it at,
       under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981).
@@ -1945,6 +1950,21 @@ def driver_root(name, files):
             and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
+def tmpfs_hides(files, path):
+    """#4392: whether FILES' [Service] mounts an empty tmpfs (TemporaryFileSystem=) at a directory above
+    PATH other than "/" (driver_root holds that one), with no other mount entry there that systemd would
+    keep in its place (root_mounts). PATH is then not in the unit's view to mask, and systemd fails a
+    unit whose InaccessiblePaths= entry is missing (226/NAMESPACE). ValueError as root_mounts."""
+    for w in ini_words(files, "Service", "TemporaryFileSystem"):
+        t = w.split(":", 1)[0]
+        if any(c in t for c in "\"'%\\") or not t.startswith("/") or ".." in t.split("/"):
+            continue
+        t = norm_path(t)
+        if t != "/" and path.startswith(t + "/") and not root_mounts(files, t):
+            return True
+    return False
+
+
 def unlock_allowed(key, allowed):
     """What an unlock unit may assign to KEY, for a refusal (#4667)."""
     return " or ".join("%s=%s" % (key, a) for a in allowed) or "no %s= at all" % key
@@ -1972,6 +1992,8 @@ def keeper_unit_violations(name, files):
                 if "/" in hidden or under(p, tuple(hidden)):
                     out.append("%s: InaccessiblePaths holds %s, which the MOR clear lists; masked, it reads as "
                                "empty (HW-8)" % (name, p))
+            elif p not in hidden and tmpfs_hides(files, p):
+                pass
             elif p not in hidden:
                 out.append("%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
                            % (name, p))
