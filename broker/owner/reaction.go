@@ -95,14 +95,14 @@ func shapeForm(text string) (lead, quote string, ok bool) {
 	return "", "", false
 }
 
-// reactionShaped reports whether text has a reaction's form, listed or
-// not, whatever the recent texts are.
-func reactionShaped(text string) bool {
-	if _, ok := parseForm(text); ok {
-		return true
+// heldQuote is the quote of a text in a reaction's form, listed or not,
+// whatever the recent texts are.
+func heldQuote(text string) (string, bool) {
+	if rx, ok := parseForm(text); ok {
+		return rx.quoted, true
 	}
-	_, _, ok := shapeForm(text)
-	return ok
+	_, q, ok := shapeForm(text)
+	return q, ok
 }
 
 // readReaction is parseReaction, plus two cases that need the recent texts:
@@ -234,6 +234,37 @@ func (r *recentWindow) forget(now time.Time) {
 	r.texts = kept
 	r.forgets++
 	r.forgotAt = now
+}
+
+// quotesForgettable reports whether quoted marks a text forget would drop
+// (one not guarded), within the window: the two are equal, the quote is a
+// long enough cut of it, or the quote holds it whole, as a nest does
+// (Liked “Loved “<text>””).
+func (r *recentWindow) quotesForgettable(quoted string, now time.Time) bool {
+	q := normQuote(quoted)
+	if q == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.texts) - 1; i >= 0; i-- {
+		t := r.texts[i]
+		if now.Sub(t.at) > recentMaxAge {
+			break
+		}
+		if t.guarded() || t.restored {
+			continue
+		}
+		n := normQuote(t.text)
+		if n == "" {
+			continue
+		}
+		if n == q || (utf8.RuneCountInString(q) >= minQuote && strings.Contains(n, q)) ||
+			(utf8.RuneCountInString(n) >= minQuote && strings.Contains(q, n)) {
+			return true
+		}
+	}
+	return false
 }
 
 // forgotWithin reports whether a deletion forgot texts that would still be
@@ -514,6 +545,14 @@ func (c *Channel) ForgetRecent() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now()
+	// The held texts that quote a text this deletion removes, decided
+	// before the window is cleared (#5185 Potency, arbitration).
+	forgot := map[string]bool{}
+	for _, m := range c.codes.st.Waiting {
+		if q, ok := heldQuote(m.Text); ok && c.recent.quotesForgettable(q, now) {
+			forgot[m.ID] = true
+		}
+	}
 	c.recent.forget(now)
 	// A failed save still holds for this run; only a restart before the
 	// next save would lose it. The held agent texts go in the same save:
@@ -532,16 +571,16 @@ func (c *Channel) ForgetRecent() int {
 		}
 		dropped = len(s.Held) - len(keep)
 		s.Held = keep
-		// A held reaction may quote a forgotten text: it goes too. So does
-		// any held text in a reaction's shape, since whether it read as
-		// one depended on the recent texts when it arrived, and after
-		// this it would read as one (#5185 L3).
+		// A held text whose quote marks a text this deletion removes goes
+		// too, counted for STATUS and the page (CH-14); the owner's other
+		// quoted messages stay (#5185 L3, Potency).
 		wait := s.Waiting[:0:0]
 		for _, m := range s.Waiting {
-			if !m.React && !reactionShaped(m.Text) {
+			if !forgot[m.ID] {
 				wait = append(wait, m)
 			}
 		}
+		s.WaitingForgot += len(s.Waiting) - len(wait)
 		s.Waiting = wait
 	})
 	return dropped

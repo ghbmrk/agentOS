@@ -77,3 +77,36 @@ func TestTheInboxPageShowsHiddenCharacters(t *testing.T) {
 		}
 	}
 }
+
+// UX fix-list on #5185: the owner's ordinary text (smart punctuation,
+// accents, emoji) shows as written and is not flagged.
+func TestTheInboxPageShowsOrdinaryTextAsWritten(t *testing.T) {
+	r := newRig(t)
+	r.runSetup()
+	r.startChannel(nil)
+	msg := "I’m running late — tell Zoë “sorry” 👍 ❤️ cafe\u0301"
+	r.ch.Handle(context.Background(), ownerNum, msg)
+	r.post("/unlock", url.Values{"code": {r.code()}})
+	page := r.get("/inbox/")
+	if strings.Contains(page, "hidden or unusual characters") || strings.Contains(page, "[U&#43;") {
+		t.Fatalf("ordinary text flagged: %s", page)
+	}
+	for _, want := range []string{"I’m running late — tell Zoë", "👍", "cafe\u0301"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page lacks %q", want)
+		}
+	}
+}
+
+// Characters that draw as nothing, or a mark with nothing under it, are
+// shown and flagged.
+func TestShowHeldFlagsBlankCharacters(t *testing.T) {
+	for _, s := range []string{"a\u3164b", "a\u2800b", "a\u00a0b", "\u0301x", "a\u2028b", "a\ufe0fb", "a\U000F0000b"} {
+		if _, odd := showHeld(s); !odd {
+			t.Errorf("%q not flagged", s)
+		}
+	}
+	if got, odd := showHeld("[U+0041]"); odd || strings.Contains(got, "[U+0041]") {
+		t.Errorf("a typed marker: %q %v", got, odd)
+	}
+}

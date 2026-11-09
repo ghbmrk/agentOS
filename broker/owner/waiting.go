@@ -101,14 +101,15 @@ func (c *Channel) expireWaitingLocked(now time.Time) {
 }
 
 // LocalHeld lists the messages held for the page, in arrival order and in
-// full, with the counts of those dropped at the bound and those expired
+// full, with the counts of those dropped (at the bound, or by a deletion
+// because they quoted a text it forgot) and those expired
 // since the owner last ran or discarded them.
 func (c *Channel) LocalHeld() (msgs []WaitingMsg, dropped, expired int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.expireWaitingLocked(c.cfg.Now())
 	st := c.codes.st
-	return slices.Clone(st.Waiting), st.WaitingDropped, st.WaitingExpired
+	return slices.Clone(st.Waiting), st.WaitingDropped + st.WaitingForgot, st.WaitingExpired
 }
 
 // heldNote is STATUS's line for held messages, "" when there are none.
@@ -129,6 +130,9 @@ func (c *Channel) heldNote() string {
 	}
 	if st.WaitingExpired > 0 {
 		out += fmt.Sprintf(" %d expired unread.", st.WaitingExpired)
+	}
+	if st.WaitingForgot > 0 {
+		out += fmt.Sprintf(" %d removed with a deletion: they quoted what it deleted.", st.WaitingForgot)
 	}
 	if len(out) > 0 && out[0] == ' ' {
 		out = out[1:]
@@ -188,7 +192,7 @@ func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 			}
 		}
 		s.Waiting = keep
-		s.WaitingDropped, s.WaitingExpired = 0, 0
+		s.WaitingDropped, s.WaitingExpired, s.WaitingForgot = 0, 0, 0
 	})
 	c.mu.Unlock()
 	if err != nil {

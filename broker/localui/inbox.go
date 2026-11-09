@@ -3,9 +3,11 @@ package localui
 import (
 	"context"
 	"crypto/hmac"
+	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
@@ -36,15 +38,58 @@ type inboxMsgView struct {
 	Odd bool
 }
 
-// showHeld is showField line by line: line breaks stay line breaks.
+// showHeld returns a held message as the page shows it (CH-14: the owner
+// runs only text they have read). Visible characters show as they are:
+// letters, numbers, punctuation, symbols, U+0020, line breaks, and marks
+// on a visible character. Every invisible or reordering character shows
+// as [U+XXXX] and flags the message: other controls, format characters
+// (bidi controls, zero-width characters, the tag block), private-use and
+// unassigned code points, line and paragraph separators, spaces other
+// than U+0020, and characters drawn blank (Hangul fillers, U+2800). A
+// variation selector shows only on a symbol, as an emoji's style. "[" is
+// escaped too, unflagged, so text cannot fake a marker (#5185 Security,
+// UX).
 func showHeld(s string) (shown string, odd bool) {
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		var o bool
-		lines[i], o = showField(l)
-		odd = odd || o
+	var b strings.Builder
+	prev := rune(-1) // the last character shown as itself, -1 if none
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteRune(r)
+			prev = -1
+			continue
+		case r == '[':
+			b.WriteString("[U+005B]")
+			prev = r
+			continue
+		case heldVisible(r, prev):
+			b.WriteRune(r)
+			prev = r
+			continue
+		}
+		odd = true
+		prev = -1
+		fmt.Fprintf(&b, "[U+%04X]", r)
 	}
-	return strings.Join(lines, "\n"), odd
+	return b.String(), odd
+}
+
+// heldBlank are characters in visible categories that draw as nothing.
+var heldBlank = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true, 0x180E: true}
+
+// heldVisible reports whether r, after prev, shows as itself.
+func heldVisible(r, prev rune) bool {
+	switch {
+	case heldBlank[r]:
+		return false
+	case r == ' ':
+		return true
+	case unicode.In(r, unicode.Variation_Selector):
+		return prev >= 0 && unicode.Is(unicode.S, prev)
+	case unicode.Is(unicode.M, r):
+		return prev >= 0 // on a character shown as itself
+	}
+	return unicode.In(r, unicode.L, unicode.N, unicode.P, unicode.S)
 }
 
 const inboxUnreachable = "I can't show the messages you sent right now. Reload to try again."
@@ -149,7 +194,7 @@ func init() {
 <p class="muted">{{.Date}}</p>{{if .Odd}}<p class="err">This message has hidden or unusual characters, shown as [U+…]. Send it only if you wrote all of it.</p>{{end}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{.Text}}</pre></section>
 {{end}}<p><button type="submit">Send the marked ones, discard the rest</button></p></form>
 {{else}}{{if not .Err}}<p>Nothing is waiting.</p>{{end}}{{end}}
-{{with .Dropped}}<p class="muted">{{.}} more did not fit and were dropped.</p>{{end}}
+{{with .Dropped}}<p class="muted">{{.}} more were dropped unread: the hold was full, or a deletion removed them because they quoted what it deleted.</p>{{end}}
 {{with .Expired}}<p class="muted">{{.}} expired before you read them.</p>{{end}}
 <p><a href="/home">More</a> · <a href="/status">Status</a></p>
 {{template "foot"}}{{end}}`))

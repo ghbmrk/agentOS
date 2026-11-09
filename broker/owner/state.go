@@ -70,7 +70,10 @@ type State struct {
 	WaitingSeq     uint64       `json:"waiting_seq,omitempty"`
 	WaitingDropped int          `json:"waiting_dropped,omitempty"`
 	WaitingExpired int          `json:"waiting_expired,omitempty"`
-	WaitingTold    bool         `json:"waiting_told,omitempty"`
+	// WaitingForgot counts held texts a deletion removed, as they quoted
+	// a text it forgot (CAP-3).
+	WaitingForgot int  `json:"waiting_forgot,omitempty"`
+	WaitingTold   bool `json:"waiting_told,omitempty"`
 	// Held are unsolicited texts waiting for quiet hours to end or for
 	// room in the hour, oldest first; HeldDropped counts the oldest ones
 	// dropped past MaxHeld, not yet said to the owner.

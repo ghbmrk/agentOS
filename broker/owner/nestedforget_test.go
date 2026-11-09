@@ -33,3 +33,25 @@ func TestANestedHeldReactionIsDroppedByAForget(t *testing.T) {
 		t.Fatalf("forgotten text still held on disk after forget")
 	}
 }
+
+// Potency fix-list on #5185: a forget keeps the owner's own quoted
+// messages that quote nothing it deletes, and counts what it removes.
+func TestAForgetKeepsHeldMessagesThatQuoteNothingForgotten(t *testing.T) {
+	r := newRig(t, nil)
+	if err := r.ch.Converse(forgottenReply); err != nil {
+		t.Fatal(err)
+	}
+	r.inbox()
+	r.say(`Remind me to call "Mum" tomorrow at 9`)
+	r.say("Book a table at “Nopi” for two")
+	r.say("check my mail")
+	r.say("Liked “" + forgottenReply + "”")
+	r.ch.ForgetRecent()
+	msgs, dropped, _ := r.ch.LocalHeld()
+	if len(msgs) != 3 || dropped != 1 {
+		t.Fatalf("held %+v, dropped %d", msgs, dropped)
+	}
+	if note := r.ch.heldNote(); !strings.Contains(note, "1 removed with a deletion") {
+		t.Fatalf("STATUS note: %q", note)
+	}
+}
