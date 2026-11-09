@@ -68,19 +68,26 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CLK-7 later consent no longer takes the code-generator code")
         self.assertIn("Consent is a widening (KEY-4) at the high tier (CH-10)", t,
                       f"SPEC.md:{n} CLK-7 no longer names consent's tier")
-        self.assertIn("An unconfirmed route carries the consent reason (LOG-8) until consent stands", t,
+        self.assertIn("An unconfirmed route carries the consent reason (LOG-8) unless consent stands", t,
                       f"SPEC.md:{n} CLK-7 lets an unconfirmed route run before consent")
 
     def check_control(self, t, n):
         self.assertIn("`PLAN <plan> ON` lifts the owner, login and consent reasons at their LOG-8 rungs, "
                       "never a notice", t,
                       f"SPEC.md:{n} CLK-7 PLAN ON no longer lifts consent at its rung, or lifts a notice")
+        self.assertIn("and on an unconfirmed route withdraws consent", t,
+                      f"SPEC.md:{n} CLK-7 PLAN OFF no longer withdraws consent on an unconfirmed route")
         self.assertIn("Consent and its withdrawal are log entries", t,
                       f"SPEC.md:{n} CLK-7 consent is no longer logged")
 
     def check_table(self, t, n):
         self.assertIn("| consent | consent (P3) |", t,
                       f"SPEC.md:{n} LOG-8 lets a rung below P3 lift the consent reason")
+        rows = [r for r in t.splitlines() if r.startswith("| ") and not r.startswith("| Reason ")]
+        consent_rows = [r for r in rows
+                        if "consent" in [x.strip() for x in r.split("|")[1].split(",")]]
+        self.assertEqual(len(consent_rows), 1,
+                         f"SPEC.md:{n} LOG-8 lets another table row lift the consent reason")
         self.assertIn("| notice | an update |", t,
                       f"SPEC.md:{n} LOG-8 lets something other than an update lift a notice")
         self.assertIn("| stop | RESUME with a texted code (P1) |", t,
@@ -132,17 +139,20 @@ class Consent(unittest.TestCase):
             (unconfirmed, self.check_unconfirmed, [
                 ("at the high tier (CH-10)", "at the low tier (CH-10)"),
                 ("never by **Use the defaults**", "or by **Use the defaults**"),
-                ("until consent stands", "until it is used"),
+                ("unless consent stands", "until consent stands"),
+                ("unless consent stands", "until it is used"),
             ]),
             (control, self.check_control, [
                 ("at their LOG-8 rungs", "with a low-tier code"),
                 ("never a notice", "and a notice"),
+                ("withdraws consent", "keeps consent"),
                 ("are log entries", "are kept in memory"),
             ]),
             (log8_table, self.check_table, [
                 ("| consent | consent (P3) |", "| consent | consent (P1) |"),
                 ("| notice | an update |", "| notice | `PLAN … ON` |"),
                 ("RESUME with a texted code (P1)", "RESUME"),
+                ("| owner, login |", "| owner, login, consent |"),
             ]),
             (ch11, self.check_ch11, [
                 ("lifts only the stop reason", "lifts every reason"),
