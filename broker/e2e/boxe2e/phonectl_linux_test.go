@@ -148,6 +148,7 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 		want     string // "" passes
 		notice   bool   // the box's line sends recoveryNotice before its first reply
 		note     string // the step's note, "" for none
+		diag     bool   // a timeout, whose error carries modemDiag; a reply out of order carries none
 	}{
 		{name: "pass", st: owner.State{LastStep: step}, enrolled: true, done: true},
 		{name: "recovery notice passed over, noted and failed", st: owner.State{LastStep: step}, enrolled: true, done: true,
@@ -183,6 +184,20 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 				}
 				return m
 			}, want: "a texted code opened a session"},
+		{name: "code unanswered", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
+				if codeRe.MatchString(m.Text) && m.From == phoneNum {
+					m.Text = "HELP"
+				}
+				return m
+			}, want: "no reply to a fresh code", diag: true},
+		{name: "STATUS unanswered", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
+				if m.Text == "STATUS" && m.From == phoneNum {
+					m.Text = "HELP"
+				}
+				return m
+			}, want: "no locked reply to STATUS", diag: true},
 		{name: "code dropped", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
 				if codeRe.MatchString(m.Text) && m.From == phoneNum {
@@ -261,6 +276,8 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 				t.Fatal(err)
 			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
 				t.Fatalf("%v, want %q", err, c.want)
+			case err != nil && strings.Contains(err.Error(), "diag: units=") != c.diag:
+				t.Fatalf("%v: modem diag %v, want %v", err, !c.diag, c.diag)
 			}
 			if got := strings.Join(notes, "|"); got != c.note {
 				t.Fatalf("notes %q, want %q", got, c.note)

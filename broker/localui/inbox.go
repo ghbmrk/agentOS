@@ -77,8 +77,10 @@ func showHeld(s string) (shown string, odd bool) {
 	return b.String(), odd
 }
 
-// heldBlank are characters in visible categories that draw as nothing.
-var heldBlank = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true, 0x180E: true}
+// heldBlank are characters in visible categories that draw as nothing and
+// are not default-ignorable (the Hangul fillers are, so heldVisible flags
+// them there).
+var heldBlank = map[rune]bool{0x2800: true, 0x180E: true}
 
 // heldVisible reports whether r, after prev, shows as itself.
 func heldVisible(r, prev rune) bool {

@@ -59,6 +59,7 @@ func TestControlErr(t *testing.T) {
 		{"no reply to probes", seq(probe, probe), "after 2 HELP attempt(s)"},
 		{"reply from another number", seq(probe, helpReply, coded,
 			modem.SMS{From: strangerNum, To: phoneNum, Text: "That code is right"}), "no reply to a fresh code"},
+		{"code never sent", seq(probe, helpReply), "the code was not sent"},
 		{"status never sent", seq(probe, helpReply, coded, rightR), "STATUS was not sent"},
 		{"status unanswered", seq(probe, helpReply, coded, rightR, statusQ), "no locked reply"},
 		{"stranger never sent", seq(probe, helpReply, coded, rightR, statusQ, lockedR), "did not text"},

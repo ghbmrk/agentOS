@@ -181,7 +181,6 @@ func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 	}
 	var texts []string
 	err := c.codes.commit(func(s *State) {
-		texts = texts[:0]
 		keep := s.Waiting[:0:0]
 		for _, m := range s.Waiting {
 			switch {
@@ -206,9 +205,6 @@ func (c *Channel) LocalRunHeld(shown, run []string) (int, error) {
 // page opened, and texts the replies to the owner. It runs behind the
 // sends textAfterReply starts (DrainSends bounds it on shutdown).
 func (c *Channel) runHeld(texts []string) {
-	if len(texts) == 0 {
-		return
-	}
 	do := func() {
 		for _, t := range texts {
 			rt, ok := c.route(c.cfg.Owner, t)

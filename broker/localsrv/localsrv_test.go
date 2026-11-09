@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -835,5 +836,29 @@ func TestTheInboxRunsOnlyWellFormedTaps(t *testing.T) {
 	out, _ = r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: []string{"1"}})
 	if a := out.(localapi.Answered); a.Refusal != localapi.RefusedChanged {
 		t.Fatalf("changed %+v", a)
+	}
+}
+
+// REQ: CH-14. The page's run takes a full page and the longest ID, says
+// how many ran, and answers a run without a session as unauthorized
+// (mutgate on #5194).
+func TestTheInboxRunTakesTheBoundsAndNamesTheCount(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	full := make([]string, localapi.MaxInbox)
+	for i := range full {
+		full[i] = strconv.Itoa(i + 1)
+	}
+	full[0] = strings.Repeat("9", localapi.MaxID)
+	out, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: full, Run: full})
+	if a, ok := out.(localapi.Answered); err != nil || !ok || a.Text != "Sent 64 messages." {
+		t.Fatalf("full page %+v, %v", out, err)
+	}
+	if _, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: append(full, "x")}); code(err) != localapi.ErrBadArgs {
+		t.Fatalf("over a page: %v", err)
+	}
+	r.own.runErr = owner.ErrLocked
+	if _, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: []string{"1"}}); code(err) != localapi.ErrUnauthorized {
+		t.Fatalf("locked: %v", err)
 	}
 }

@@ -543,9 +543,8 @@ func (c *Channel) ForgetRecent() int {
 	// Potency, arbitration, Security reject).
 	forgot := map[string]bool{}
 	for _, m := range c.codes.st.Waiting {
-		if q, ok := heldQuote(m.Text); !ok {
-			continue
-		} else if _, ok := c.recent.matchForgettable(q, now); ok {
+		q, ok := heldQuote(m.Text)
+		if _, found := c.recent.matchForgettable(q, now); ok && found {
 			forgot[m.ID] = true
 		}
 	}
