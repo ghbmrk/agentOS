@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -45,7 +46,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // State is the outcome of one check.
@@ -313,6 +314,10 @@ const (
 // Guard keeps the last check and answers time-sensitive callers.
 type Guard struct {
 	cfg Config
+
+	// saveStop, for tests only, ends the state file's write after a step as
+	// a crash would (privfile.WriteAtomic); production leaves it nil.
+	saveStop func(int) bool
 
 	mu      sync.Mutex
 	status  Status
@@ -881,8 +886,9 @@ func (g *Guard) load() {
 	}
 }
 
-// saveLocked writes the state file. A failed write leaves the old file in
-// place.
+// saveLocked writes the state file through privfile.WriteAtomic, so a crash
+// leaves the old file or the new one whole; a directory another uid can
+// write is refused. A failed write leaves the old file in place.
 func (g *Guard) saveLocked() {
 	if g.cfg.StatePath == "" {
 		return
@@ -902,7 +908,7 @@ func (g *Guard) saveLocked() {
 	}
 	b, err := json.Marshal(v)
 	if err == nil {
-		err = durable.WriteFile(g.cfg.StatePath, b, 0o600)
+		err = privfile.WriteAtomic(filepath.Dir(g.cfg.StatePath), filepath.Base(g.cfg.StatePath), b, g.saveStop)
 	}
 	if err != nil {
 		g.cfg.Logf("clock: state not saved: %v", err)
