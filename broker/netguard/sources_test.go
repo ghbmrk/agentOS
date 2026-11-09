@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestGateway4(t *testing.T) {
@@ -592,7 +593,7 @@ func TestSourcesRememberKnownSilentGateways(t *testing.T) {
 	var answer netip.Addr
 	g.ext = func(context.Context) (netip.Addr, error) {
 		if !answer.IsValid() {
-			return netip.Addr{}, errors.New("no NAT-PMP")
+			return netip.Addr{}, context.DeadlineExceeded // a silent router: the request times out
 		}
 		return answer, nil
 	}
@@ -677,5 +678,104 @@ func TestSourcesRememberKnownSilentGateways(t *testing.T) {
 		if k == (gatewayKey{netip.MustParseAddr("192.168.2.1"), "eth0", "02:00:00:00:00:0b"}) {
 			t.Fatal("B is filed both answering and silent")
 		}
+	}
+}
+
+// natpmpErr is the error externalAddr returns from a loopback server that
+// does what reply does with the request (nil reply: it never answers), or
+// from a port with no server when reply is unset and closed is true.
+func natpmpErr(t *testing.T, closed bool, reply []byte) error {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("no loopback")
+	}
+	at := netip.MustParseAddrPort(pc.LocalAddr().String())
+	if closed {
+		pc.Close()
+	} else {
+		defer pc.Close()
+		go func() {
+			buf := make([]byte, 64)
+			_, from, err := pc.ReadFrom(buf)
+			if err == nil && reply != nil {
+				pc.WriteTo(reply, from)
+			}
+		}()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	a, err := externalAddr(ctx, at)
+	if err == nil {
+		t.Fatalf("got %v, want an error", a)
+	}
+	return err
+}
+
+// A gateway is filed silent only when its router does not speak NAT-PMP:
+// the request times out, or the port is refused (#5111). A malformed or
+// refused NAT-PMP answer, or a dial or send error, says nothing about the
+// router, so it files nothing and unfiles a known-silent key, whose next
+// return then holds. The errors are the ones a real request returns.
+func TestSourcesFileSilentOnlyOnTimeoutOrRefusal(t *testing.T) {
+	timeout := natpmpErr(t, false, nil)
+	refused := natpmpErr(t, true, nil)
+	malformed := natpmpErr(t, false, []byte{0, 128, 0})
+	natpmpRefused := natpmpErr(t, false, []byte{0, 128, 0, 2, 0, 0, 0, 1, 9, 9, 9, 2}) // result 2: not authorised
+	_, dialErr := externalAddr(context.Background(), netip.MustParseAddrPort("[fe80::1]:5351"))
+	if dialErr == nil {
+		t.Fatal("a link-local gateway with no zone was dialled")
+	}
+	for _, c := range []struct {
+		name   string
+		err    error
+		silent bool
+	}{
+		{"timeout", timeout, true},
+		{"refused port", refused, true},
+		{"malformed answer", malformed, false},
+		{"refused NAT-PMP answer", natpmpRefused, false},
+		{"dial error", dialErr, false},
+		{"other error", errors.New("synthetic"), false},
+	} {
+		if got := silence(c.err); got != c.silent {
+			t.Errorf("%s (%v): silence %v, want %v", c.name, c.err, got, c.silent)
+		}
+	}
+
+	g := &gwSources{}
+	var next error
+	g.ext = func(context.Context) (netip.Addr, error) { return netip.Addr{}, next }
+	s := g.sources()
+	g.gw.Store("0101A8C0")
+	g.mac.Store("02:00:00:00:00:0a")
+	read := func(err error) bool {
+		t.Helper()
+		next = err
+		n, rerr := s.Read()
+		if rerr != nil || n.External.IsValid() {
+			t.Fatalf("full read on %v: %+v, %v", err, n, rerr)
+		}
+		if q, _ := s.ReadLocal(); q.GatewaySilent != n.GatewaySilent {
+			t.Fatalf("after %v the quick read says silent %v, the full read %v", err, q.GatewaySilent, n.GatewaySilent)
+		}
+		return n.GatewaySilent
+	}
+	for _, err := range []error{malformed, natpmpRefused, dialErr} {
+		if read(err) {
+			t.Fatalf("filed silent on %v", err)
+		}
+	}
+	if !read(timeout) {
+		t.Fatal("a timed-out request did not file the gateway silent")
+	}
+	if read(malformed) {
+		t.Fatal("a malformed answer left the gateway known silent")
+	}
+	if !read(refused) {
+		t.Fatal("a refused port did not file the gateway silent")
+	}
+	if read(dialErr) {
+		t.Fatal("a dial error left the gateway known silent")
 	}
 }

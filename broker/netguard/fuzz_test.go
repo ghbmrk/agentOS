@@ -248,7 +248,7 @@ func (h *fuzzHost) external(_ context.Context, gw netip.Addr) (netip.Addr, error
 		h.attach(h.in.next())
 	}
 	if !a.IsValid() {
-		return netip.Addr{}, errors.New("no answer")
+		return netip.Addr{}, context.DeadlineExceeded // silent: the request times out
 	}
 	return a, nil
 }
