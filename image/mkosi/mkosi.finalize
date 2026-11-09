@@ -1472,6 +1472,9 @@ MANAGER_DIRS = {"StateDirectory": "/var/lib", "RuntimeDirectory": "/run", "Cache
 # The bind settings, whose source is a view of the host's tree made in mount order, so a source
 # above the keeper's state can be bound before the mask is.
 BIND_MOUNTS = ("BindPaths", "BindReadOnlyPaths")
+# The proc filesystem and systemd's links into it under /dev (dev-setup.c): a path through one is a
+# process's view (/proc/self/root, /proc/1/root: the host's tree, unmasked), not the image's (#5119).
+PROC_VIEWS = ("/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/core")
 # A .path unit's watches (systemd.path): an agentos-keeper .path watches only the keeper's state and
 # starts only a keeper unit (OWN-card-flow decision 6).
 PATH_WATCHES = ("PathExists", "PathExistsGlob", "PathChanged", "PathModified", "DirectoryNotEmpty")
@@ -1659,12 +1662,21 @@ def under(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
 
-def keeper_reach(path, above=False):
+def keeper_reach(path, above=False, root=None):
     """Whether absolute PATH is at or under a KEEPER_PATHS entry, takes a '..' step, or (ABOVE) is a
-    directory holding one."""
-    norm = "/" + "/".join(x for x in path.split("/") if x not in ("", "."))
-    return (".." in norm.split("/") or under(norm, KEEPER_PATHS)
-            or above and any(norm == "/" or under(k, (norm,)) for k in KEEPER_PATHS))
+    directory holding one. With ROOT (#5119), PATH is judged as written and as the image resolves it
+    (tree_chase: systemd resolves a path when it applies it, so /var/run/x is /run/x); a path that
+    resolves into PROC_VIEWS, or that the tree cannot resolve (a loop), reaches too."""
+    paths = [norm_path(path)]
+    if root is not None:
+        try:
+            paths.append(norm_path(tree_chase(root, path, missing_ok=True)[0]))
+        except OSError:
+            return True
+        if under(paths[1], PROC_VIEWS):
+            return True
+    return any(".." in p.split("/") or under(p, KEEPER_PATHS)
+               or above and any(p == "/" or under(k, (p,)) for k in KEEPER_PATHS) for p in paths)
 
 
 def manager_paths(files):
@@ -1694,7 +1706,8 @@ def keeper_violations(root):
       in InaccessiblePaths= but one below its own empty tmpfs (tmpfs_hides), none with a "-" (MOR_UNIT: all but MOR_LISTED, which it must not mask, and
       "-" allowed), and mounts nothing over, under or from one of them, nor
       binds one from above it. The service manager opens no file and makes no directory for it at,
-      under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981).
+      under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981). Each path is
+      judged as written and as the image resolves it, and none goes through PROC_VIEWS (#5119).
     - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
       only TPM_DEVICE under DevicePolicy=closed or strict; every other agentos service but
       NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
@@ -1725,7 +1738,7 @@ def keeper_violations(root):
     for name in sorted(names):
         files = unit_with_dropins(root, dirs, name)
         try:
-            out += keeper_unit_violations(name, files)
+            out += keeper_unit_violations(name, files, root)
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
     for n in sorted(set(sockets)):
@@ -1970,8 +1983,9 @@ def unlock_allowed(key, allowed):
     return " or ".join("%s=%s" % (key, a) for a in allowed) or "no %s= at all" % key
 
 
-def keeper_unit_violations(name, files):
-    """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins)."""
+def keeper_unit_violations(name, files, root):
+    """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins), its
+    paths resolved in the image at ROOT."""
     out = []
     keeper = name in KEEPER_UNITS
     if name.startswith(KEEPER_PREFIX) and not keeper:
@@ -2005,13 +2019,13 @@ def keeper_unit_violations(name, files):
         # source above it too.
         for key in NAMESPACE_MOUNTS + ("ReadOnlyPaths", "ExecPaths", "NoExecPaths"):
             for w in ini_words(files, "Service", key):
-                if keeper_reach(w.lstrip("-+").split(":")[0], above=key in BIND_MOUNTS):
+                if keeper_reach(w.lstrip("-+").split(":")[0], above=key in BIND_MOUNTS, root=root):
                     out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, w))
         # #2981: what the manager opens or makes as root for the unit, at, under or above it.
         for key, v, p in manager_paths(files):
             if any(c in p for c in "\"'%\\"):
                 out.append("%s: %s=%s: the tree check does not model it (D-154)" % (name, key, v))
-            elif keeper_reach(p, above=True):
+            elif keeper_reach(p, above=True, root=root):
                 out.append("%s: %s=%s reaches the keeper's state (D-154)" % (name, key, v))
     # #3477: a oneshot is starting until it exits, so RuntimeMaxSec= bounds nothing there (systemd
     # ignores it); its bound is TimeoutStartSec=.

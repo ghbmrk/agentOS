@@ -148,6 +148,35 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(self.v(), ["agentos-modem.service: BindPaths=/var/lib/agentos-store:/x reaches the keeper's "
                                     "state (D-154)"])
 
+    def test_a_path_is_judged_as_the_image_resolves_it(self):
+        # #5119 (Security on #5117): systemd resolves a path when it applies it, so /var/run/x is /run/x,
+        # and a /proc path (or a /dev link into /proc) is a process's view of the host's tree, past the mask.
+        (self.root / "var").mkdir(exist_ok=True)
+        (self.root / "var/run").symlink_to("../run")
+        (self.root / "srv").mkdir(exist_ok=True)
+        (self.root / "srv/loop").symlink_to("loop")
+        (self.root / "srv/a").mkdir()
+        reach = ["BindReadOnlyPaths=/var/run/agentos-setup:/mnt", "BindReadOnlyPaths=/proc/self/root/run/agentos-setup:/mnt",
+                 "BindPaths=-/proc/1/root/var/lib/agentos-store", "BindReadOnlyPaths=/var/run:/srv/run",
+                 "BindReadOnlyPaths=/proc:/srv/p", "ReadWritePaths=/var/run/agentos-link-capture",
+                 "OpenFile=/var/run/agentos-setup/passphrase", "EnvironmentFile=/proc/self/root/var/lib/agentos-kernel/env",
+                 "BindReadOnlyPaths=/srv/loop:/x"]
+        reach += ["BindReadOnlyPaths=%s/3:/x" % p for p in check.PROC_VIEWS[1:]]
+        for line in reach:
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                key, val = line.split("=", 1)
+                self.assertEqual(self.v(), ["agentos-boot-report.service: %s=%s reaches the keeper's state (D-154)"
+                                            % (key, val)])
+                d.unlink()
+        # An ordinary source outside the keeper's state, linked or not, is still allowed.
+        for line in ("BindReadOnlyPaths=/var/run/agentos-e2e/share:/x", "BindReadOnlyPaths=/srv/a:/x",
+                     "BindPaths=/srv/a/missing:/x", "ReadWritePaths=-/sys/class/leds/x", "OpenFile=/var/run/agentos-e2e/f"):
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                self.assertEqual(self.v(), [])
+                d.unlink()
+
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
