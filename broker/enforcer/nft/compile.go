@@ -119,7 +119,10 @@ func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 // AnswerTimeout is how long, in seconds, an answer lets a new connection
 // open to its addresses: a Recent set's timeout, counted from the Refresh
-// after the answer, so at least this long from the answer itself. dns
+// after the answer, so at least this long from the answer itself. It is
+// the Fresh set's timeout too, counted from the answer's first add since
+// the last Refresh that moved it, so an answer no Refresh moves (the step
+// keeps failing) takes new connections for no longer than this. dns
 // keeps it at least twice the longest TTL its resolver hands out, so a
 // device that dials an answer within its TTL, or retries for as long
 // again, is never dropped.
@@ -197,6 +200,7 @@ const (
 	GuestsConns = "guests_conns"
 	Inbound     = "inbound"      // new connections from the internet
 	Blocked     = "blocked"      // forwarded traffic no rule allowed
+	Expired     = "expired"      // new connections to an address a listed name answered, but not within AnswerTimeout
 	CoreDevice  = "core_device"  // connections the core starts to a device's control port
 	CoreStream  = "core_stream"  // connections the core starts to a camera's or microphone's stream port
 	EdgeDevice  = "edge_device"  // connections the edge starts to a device
@@ -225,6 +229,7 @@ const (
 	LogCoreEdge   = "enf core-edge "
 	LogDNS        = "enf dns "
 	LogDrop       = "enf drop "
+	LogExpired    = "enf expired "
 	LogEdgeDevice = "enf edge-dev "
 	LogCoreDevice = "enf core-dev "
 	LogCoreStream = "enf core-stream "
@@ -239,7 +244,7 @@ type prefix struct{ prefix, counter, verdict string }
 var (
 	refusals = []prefix{
 		{LogInbound, Inbound, "drop"}, {LogAPAdmin, APAdminDrop, "drop"}, {LogISP, ISPDrop, "drop"}, {LogNonGlobal, Blocked, "drop"},
-		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogCap, CapDrop, "drop"},
+		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogExpired, Expired, "drop"}, {LogCap, CapDrop, "drop"},
 	}
 	accepts = []prefix{{LogEdgeDevice, EdgeDevice, "accept"}, {LogCoreDevice, CoreDevice, "accept"}, {LogCoreStream, CoreStream, "accept"}}
 )
@@ -269,7 +274,7 @@ func logged(p string) string { return "log_" + slug(p) }
 func lines(p string) string  { return "lines_" + slug(p) }
 func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, LogLines}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, LogLines}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -472,9 +477,11 @@ func Paths(d policy.Document, l Layout) ([]Path, error) {
 // address in the fresh set or the recent set (Recent), so an address no
 // answer has returned for AnswerTimeout takes no new connection, while a
 // connection already open to it goes on. The fresh set holds the answers
-// since the last Refresh, with no timeout; Refresh moves them into the
-// recent set with a full AnswerTimeout each, which re-adding to a set
-// with a timeout never gives (dns ASSUMPTIONS ENF-f-3).
+// since the last Refresh; Refresh moves them into the recent set with a
+// full AnswerTimeout each, which re-adding to a set with a timeout never
+// gives (dns ASSUMPTIONS ENF-f-3). The fresh set's own AnswerTimeout,
+// which a re-added answer does not restart, ends an answer's first-packet
+// admission when no Refresh moves it (#5116).
 type AllowSet struct {
 	Set4, Set6 string
 	Names      []string
@@ -489,7 +496,8 @@ func (a AllowSet) Named(name string, v6 bool) string {
 }
 
 // Fresh is the set of the family's answers since the last Refresh, which
-// the resolver fills alongside the allow set.
+// the resolver fills alongside the allow set, each for at most
+// AnswerTimeout from when it was first added.
 func (a AllowSet) Fresh(v6 bool) string { return a.set(v6) + "_f" }
 
 // Recent is the set of the family's addresses some listed name answered in
@@ -596,12 +604,13 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		for _, v6 := range []bool{false, true} {
 			typ := map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6]
 			w.set(a.set(v6), typ, "timeout", nil)
-			w.set(a.Fresh(v6), typ, "", nil)
-			w.open("set " + a.Recent(v6))
-			w.line("type " + typ + ";")
-			w.line("flags timeout;")
-			w.line("timeout " + secs(AnswerTimeout) + ";")
-			w.close()
+			for _, s := range []string{a.Fresh(v6), a.Recent(v6)} {
+				w.open("set " + s)
+				w.line("type " + typ + ";")
+				w.line("flags timeout;")
+				w.line("timeout " + secs(AnswerTimeout) + ";")
+				w.close()
+			}
 			for _, n := range a.names() {
 				w.set(a.Named(n, v6), typ, "timeout", nil)
 			}
@@ -765,14 +774,19 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	add(edge, wan, "accept")
 	// An answer's addresses take new connections while it is fresh or
 	// recent, and an open connection lives while its name is listed
-	// (AllowSet); the second rule's live form would be the first's.
+	// (AllowSet); the second rule's live form would be the first's. A new
+	// connection to an address a listed name answered, but not within
+	// AnswerTimeout, is refused with its own reason (LogExpired, #5116);
+	// it judges first packets only, so the live chains are as before.
 	answered := func(in string, a AllowSet) {
 		for _, v6 := range []bool{false, true} {
 			f := family(v6)
 			k := "ct original " + f + " daddr @" + a.set(v6)
 			add(in, wan, "accept", match{f + " daddr @" + a.Recent(v6), k})
 			add(in, wan, "accept", match{f + " daddr @" + a.Fresh(v6), k})
-			fwd[len(fwd)-1].twin = true
+			fwd[len(fwd)-1].firstOnly = true
+			refused(in, wan, LogExpired, daddr(v6, "@"+a.set(v6)))
+			fwd[len(fwd)-1].firstOnly = true
 		}
 	}
 	answered(core, AllowSet{Set4: CoreSet(false), Set6: CoreSet(true)})

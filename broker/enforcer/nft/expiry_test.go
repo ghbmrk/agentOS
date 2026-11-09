@@ -72,7 +72,7 @@ func (h *home) expiries(set string) map[string]int64 {
 	return out
 }
 
-// age leaves addr in the recent set set with only secs seconds left, as
+// age leaves addr in the fresh or recent set set with only n seconds left, as
 // if its answer's AnswerTimeout had nearly run (n seconds left): the clock the test cannot
 // wait out.
 func (h *home) age(set, addr string, n int) {
@@ -108,8 +108,15 @@ func TestAnswersExpire(t *testing.T) {
 		h.expect(probe{from: "101", addr: netAllow, port: 80, want: want, why: why})
 	}
 
+	expired := h.counter(Expired)
 	dial(silent, "a device dials an address before any answer")
+	if n := h.counter(Expired) - expired; n != 0 {
+		t.Errorf("a dial to an address no answer returned moved the expired counter by %d", n)
+	}
 	h.answer(d, DeviceSet(101, false), "tv.example", netAllow)
+	if left, ok := h.expiries(fresh)[netAllow]; !ok || left < AnswerTimeout-5 || left > AnswerTimeout {
+		t.Errorf("a fresh answer has %ds left (held %v), want about %d", left, ok, AnswerTimeout)
+	}
 	dial(connected, "a device dials its answer before any refresh")
 	busy := h.hold("a connection that stays busy", "101", "isp", netAllow, 9251)
 
@@ -129,7 +136,11 @@ func TestAnswersExpire(t *testing.T) {
 	if _, ok := h.expiries(recent)[netAllow]; ok {
 		t.Fatal("an answer past its time is still in the recent set")
 	}
+	expired = h.counter(Expired)
 	dial(silent, "a device dials an address no answer returned for longer than AnswerTimeout")
+	if h.counter(Expired) == expired {
+		t.Error("a dial to an expired answer was not refused with its reason (the expired counter, LogExpired)")
+	}
 	h.expectOpen(true, busy)
 
 	// The device resolves again while its last refresh is about to run
@@ -156,8 +167,28 @@ func TestAnswersExpire(t *testing.T) {
 	if left := h.expiries(recent)[netAllow]; left < 290 || left > 300 {
 		t.Errorf("a load carried the recent answer with %ds left, want about 300", left)
 	}
-	if _, ok := h.expiries(fresh)[netAllow]; !ok {
-		t.Error("a load dropped a fresh answer of a kept name")
+	if left, ok := h.expiries(fresh)[netAllow]; !ok || left > AnswerTimeout {
+		t.Errorf("a load carried a fresh answer of a kept name with %ds left (held %v)", left, ok)
+	}
+	h.expectOpen(true, busy)
+
+	// #5116: no refresh runs (the step keeps failing). A fresh answer
+	// takes new connections for AnswerTimeout from its first add, which
+	// answering again does not restart, and then none.
+	h.age(recent, netAllow, 1)
+	h.age(fresh, netAllow, 2)
+	h.answer(d, DeviceSet(101, false), "tv.example", netAllow)
+	if left := h.expiries(fresh)[netAllow]; left > 2 {
+		t.Errorf("answering again restarted a fresh answer's time: %ds left", left)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if _, ok := h.expiries(fresh)[netAllow]; ok {
+		t.Fatal("a fresh answer past AnswerTimeout is still in the fresh set")
+	}
+	expired = h.counter(Expired)
+	dial(silent, "a device dials a fresh answer no refresh moved for AnswerTimeout")
+	if h.counter(Expired) == expired {
+		t.Error("a dial to a fresh answer past its time was not refused as expired")
 	}
 	h.expectOpen(true, busy)
 }
@@ -173,13 +204,21 @@ func TestRefreshMovesFreshAnswers(t *testing.T) {
 	d := twoNames()
 	tv, _ := allowSetOf(t, d, DeviceSet(101, false))
 	core, _ := allowSetOf(t, d, CoreSet(false))
+	aged := func(addr string) raw { return raw{`{"elem": {"val": "` + addr + `", "expires": 30}}`} }
 	running := listing(map[string][]any{
-		tv.Fresh(false):                    {"203.0.113.20", "203.0.113.10", "203.0.113.10", "2001:db8::1", "fe80::1%eth0", "::ffff:203.0.113.60", raw{`{"prefix": {"addr": "203.0.113.0", "len": 24}}`}},
-		tv.Fresh(true):                     {"2001:db8::10"},
+		// A fresh answer is listed with the time its own timeout has left
+		// (#5116); a plain one, as a fresh set without a timeout held it,
+		// one with no time left, more than AnswerTimeout, or a timeout of
+		// its own, is not one.
+		tv.Fresh(false): {aged("203.0.113.20"), aged("203.0.113.10"), aged("203.0.113.10"), aged("2001:db8::1"), aged("fe80::1%eth0"), aged("::ffff:203.0.113.60"),
+			raw{`{"elem": {"val": {"prefix": {"addr": "203.0.113.0", "len": 24}}, "expires": 30}}`}, "203.0.113.70",
+			raw{`{"elem": {"val": "203.0.113.71", "expires": 0}}`}, raw{`{"elem": {"val": "203.0.113.72", "expires": 601}}`},
+			raw{`{"elem": {"val": "203.0.113.73", "timeout": 60, "expires": 30}}`}},
+		tv.Fresh(true):                     {aged("2001:db8::10")},
 		tv.Recent(false):                   {raw{`{"elem": {"val": "203.0.113.30", "expires": 20}}`}},
 		core.Recent(false):                 {raw{`{"elem": {"val": "203.0.113.40", "expires": 20}}`}},
-		"ip/enforcer/" + core.Fresh(false): {"203.0.113.91"},
-		"inet/other/" + core.Fresh(false):  {"203.0.113.92"},
+		"ip/enforcer/" + core.Fresh(false): {aged("203.0.113.91")},
+		"inet/other/" + core.Fresh(false):  {aged("203.0.113.92")},
 	})
 	got, err := Refresh(d, l, running)
 	if err != nil {
@@ -211,9 +250,10 @@ func TestRefreshMovesFreshAnswers(t *testing.T) {
 	}
 }
 
-// The loader's Update takes an element-only text (Refresh) and nothing
-// that could change a rule, a set or a chain, or carry a second statement
-// on an element line.
+// The loader's Update takes an element-only text (Refresh) in the fresh
+// and recent sets only, and nothing that could change a rule, a set or a
+// chain, another set's elements (#5116: a delete from a deny set would
+// open it), or carry a second statement on an element line.
 func TestUpdateTakesOnlyElementChanges(t *testing.T) {
 	l := load.Loader{Bin: "/nonexistent/nft"}
 	for _, text := range []string{
@@ -232,26 +272,55 @@ func TestUpdateTakesOnlyElementChanges(t *testing.T) {
 		"add element inet enforcer { 203.0.113.10 }\n",
 		"add element inet enforcer d101_4_r {  }\n",
 		"add element inet enforcer d101_4_r { 203.0.113.10 }\r\n",
+		// Only the fresh and recent sets (#5116): not a deny set, an allow
+		// set, a name's set, a byte cap's or a shared segment's.
+		"delete element inet enforcer doh_4 { 1.1.1.1 }\n",
+		"delete element inet enforcer nonglobal_4 { 10.0.0.0 }\n",
+		"add element inet enforcer d101_4 { 203.0.113.10 }\n",
+		"add element inet enforcer core_6 { 2001:db8::1 }\n",
+		"add element inet enforcer " + named(DeviceSet(101, false), "tv", "tv.example") + " { 203.0.113.10 }\n",
+		"add element inet enforcer capd_4 { 203.0.113.10 }\n",
+		"add element inet enforcer ap_4 { 192.0.2.1 }\n",
+		"add element inet enforcer d101_4_r { 203.0.113.10 }\ndelete element inet enforcer doh_4 { 1.1.1.1 }\n",
+		"add element inet enforcer d101_4_x { 203.0.113.10 }\n",
+		"add element inet enforcer d0101_4_r { 203.0.113.10 }\n",
+		"add element inet enforcer xd101_4_r { 203.0.113.10 }\n",
+		"add element inet enforcer core_4_fr { 203.0.113.10 }\n",
 	} {
 		if err := l.Update(context.Background(), text); err == nil || !strings.Contains(err.Error(), "not a byte-cap drop update or an answer refresh") {
 			t.Errorf("Update(%q): %v, want refused for its form", text, err)
 		}
 	}
-	for _, text := range []string{
+	ok := []string{
 		"add element inet " + Table + " d101_4_r { 203.0.113.10, 2001:db8::1 }\n",
 		"delete element inet " + Table + " core_6_f { 2001:db8::1 }\nadd element inet " + Table + " core_6_r { ::1 }\n",
-	} {
+	}
+	// Every fresh and recent set the ruleset declares, which keeps the
+	// loader's pattern equal to AllowSet's names.
+	sets, err := AllowSets(fixturePolicy(), fixtureLayout())
+	if err != nil || len(sets) < 2 {
+		t.Fatalf("fixture allow sets: %v, %v", sets, err)
+	}
+	for _, a := range sets {
+		for _, v6 := range []bool{false, true} {
+			for _, s := range []string{a.Fresh(v6), a.Recent(v6)} {
+				ok = append(ok, "add element inet "+Table+" "+s+" { 203.0.113.10 }\n")
+			}
+		}
+	}
+	for _, text := range ok {
 		if err := l.Update(context.Background(), text); err == nil || strings.Contains(err.Error(), "not a byte-cap drop update") {
 			t.Errorf("Update(%q) refused for its form: %v", text, err)
 		}
 	}
 }
 
-// NET-2 The core's list (#4453): a load carries a kept name's fresh
-// answers, and its recent ones each with the time it has left, and nothing
-// else: not an address only a dropped name answered, not a recent element
-// with more than AnswerTimeout or no time left, or with a timeout of its
-// own, not one of the wrong family.
+// NET-2 The core's list (#4453, #5116): a load carries a kept name's
+// fresh and recent answers, each with the time it has left, and nothing
+// else: not an address only a dropped name answered, not an element with
+// more than AnswerTimeout or no time left, or with a timeout of its own,
+// or with no expiry (a fresh set from before it had a timeout), not one
+// of the wrong family.
 func TestReloadCarriesFreshAndRecent(t *testing.T) {
 	l := fixtureLayout()
 	wide, narrow := twoNames(), cutPolicy()
@@ -261,7 +330,7 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 		tv.Named("tv.example", false):  {"203.0.113.10", "203.0.113.11", "203.0.113.12", "203.0.113.13", "203.0.113.14"},
 		tv.Named("cdn.example", false): {"203.0.113.20"},
 		tv.Named("tv.example", true):   {"2001:db8::10", "::1.2.3.4"},
-		tv.Fresh(false):                {"203.0.113.10", "203.0.113.20", "203.0.113.99", "2001:db8::10"},
+		tv.Fresh(false):                {elem("203.0.113.10", `, "expires": 500`), elem("203.0.113.20", `, "expires": 500`), elem("203.0.113.99", `, "expires": 500`), elem("2001:db8::10", `, "expires": 500`), "203.0.113.11", elem("203.0.113.14", `, "expires": 0`)},
 		tv.Recent(false): {
 			elem("203.0.113.14", `, "expires": 90`),
 			elem("203.0.113.11", `, "expires": 120`),
@@ -280,7 +349,7 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"add element inet enforcer " + tv.Fresh(false) + " { 203.0.113.10 }\n",
+		"add element inet enforcer " + tv.Fresh(false) + " { 203.0.113.10 expires 500s }\n",
 		"add element inet enforcer " + tv.Recent(false) + " { 203.0.113.11 expires 120s, 203.0.113.14 expires 90s }\n",
 		// nft prints an IPv4-compatible address as ::1.2.3.4, Go as ::102:304.
 		"add element inet enforcer " + tv.Recent(true) + " { 2001:db8::10 expires 600s, ::102:304 expires 100s }\n",
@@ -289,7 +358,7 @@ func TestReloadCarriesFreshAndRecent(t *testing.T) {
 			t.Errorf("reload lacks %q", want)
 		}
 	}
-	for _, bad := range []string{"203.0.113.20", "203.0.113.99", "203.0.113.12 expires", "203.0.113.13 expires", "203.0.113.10 expires", "203.0.113.010"} {
+	for _, bad := range []string{"203.0.113.20", "203.0.113.99", "203.0.113.12 expires", "203.0.113.13 expires", "203.0.113.10 expires 60s", "203.0.113.010"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("reload carried %s", bad)
 		}

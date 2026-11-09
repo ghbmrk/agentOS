@@ -129,6 +129,41 @@ func TestEveryAcceptBound(t *testing.T) {
 			}
 		}
 	}
+	// NET-1, NET-3 (#4113, #4444): the logged related drop at the end of
+	// forward_live excludes every connection with a Guests, Owner or
+	// Household end, on either half of its mark, and an unbound one (mark
+	// 0). The numbers are ENF-ct-bind-1's, written out here rather than
+	// read from the compiler. No accept has such an egress today, so only
+	// this check fails when the high half's exclusion goes; a later
+	// device-to-person path would then log a forged error with that
+	// person's tuple.
+	for _, d := range []policy.Document{fixturePolicy(), more} {
+		var rel []string
+		for _, l := range chains(mustCompile(t, d))["forward_live"] {
+			if strings.HasPrefix(l, "ct state related ") {
+				rel = append(rel, l)
+			}
+		}
+		if len(rel) != 1 || !strings.HasSuffix(rel[0], " goto "+logged(LogDrop)) || !strings.Contains(rel[0], " ct mark != 0x00000000 ") {
+			t.Fatalf("forward_live's logged related drop: %q", rel)
+		}
+		// Owner, Household and Guests are 0x1002, 0x1003 and 0x1004.
+		for mask, want := range map[string][]string{
+			"0x0000ffff": {"0x00001002", "0x00001003", "0x00001004"},
+			"0xffff0000": {"0x10020000", "0x10030000", "0x10040000"},
+		} {
+			m := regexp.MustCompile(`ct mark and ` + mask + ` != \{ ([^}]*) \}`).FindStringSubmatch(rel[0])
+			if m == nil {
+				t.Errorf("the related drop does not exclude the unobserved networks on mark half %s: %s", mask, rel[0])
+				continue
+			}
+			got := strings.Split(m[1], ", ")
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("the related drop excludes %v on mark half %s, want %v", got, mask, want)
+			}
+		}
+	}
 	// NET-1, NET-3 (#4324, #4480): each shared segment has its own host
 	// chains, which log and count nothing, and each reads the same record
 	// from the packet into its own segment's sets.

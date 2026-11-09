@@ -71,6 +71,28 @@ func TestManifestCarriesPageCAOnly(t *testing.T) {
 		}
 	}
 
+	// Size is what Write puts on the target, the content object and the
+	// key table, byte for byte (#4578), across a chunk's edge too.
+	if n, err := Size(in); err != nil || n != uint64(len(obj)+len(tobj)) {
+		t.Errorf("Size = %d, %v; the backup is %d bytes", n, err, len(obj)+len(tobj))
+	}
+	for _, extra := range []int{chunkSize, chunkSize + 1} {
+		big := r.input(rcp)
+		big.Sections = append(big.Sections[:1], src("content/mail", make([]byte, extra)))
+		var buf bytes.Buffer
+		tg := &MemTarget{}
+		rec, err := Write(&buf, tg, big)
+		must(t, err)
+		tobj, err := tg.GetTable(rec.BackupID, rec.Generation)
+		must(t, err)
+		if n, err := Size(big); err != nil || n != uint64(buf.Len()+len(tobj)) {
+			t.Errorf("a %d-byte section: Size = %d, %v; the backup is %d bytes", extra, n, err, buf.Len()+len(tobj))
+		}
+	}
+	if _, err := Size(Input{Recipient: rcp, Keys: r.keys, State: r.k.State(), Sections: []Source{src("keys", nil)}}); !errors.Is(err, ErrSection) {
+		t.Errorf("Size of a refused backup: %v, want ErrSection", err)
+	}
+
 	// Sections outside log and content/<store> are refused, as is a store
 	// name the kernel refuses.
 	for _, bad := range [][]string{{"keys"}, {"content/"}, {"content/key-table"}, {"log", "log"}, {"holder"},

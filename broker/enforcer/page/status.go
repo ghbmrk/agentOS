@@ -3,6 +3,7 @@ package page
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -52,7 +53,10 @@ type Core interface {
 	// Revoke revokes it on that signature; an error after which it is
 	// revoked for this run only says so.
 	Revoke(sig []byte) error
-	Revoked() bool
+	// Revoked is whether the revocation is in force, and whether the
+	// disk keeps it: one in force but not saved lasts only until the
+	// enforcer restarts, so the page offers it again.
+	Revoked() (revoked, saved bool)
 }
 
 // Caps is the byte caps' day when it does not read back (traffic
@@ -120,10 +124,10 @@ func (s *Server) stateChallenge(action, target string) (ok bool, code int, err e
 		}
 		return true, http.StatusNotFound, errNoAlert
 	case ActRevokeCore:
-		switch {
-		case s.cfg.Core == nil || target != "":
+		if s.cfg.Core == nil || target != "" {
 			return true, http.StatusNotFound, errMalformed
-		case s.cfg.Core.Revoked():
+		}
+		if revoked, saved := s.cfg.Core.Revoked(); revoked && saved {
 			return true, http.StatusConflict, errRevoked
 		}
 		return true, http.StatusOK, nil
@@ -176,9 +180,11 @@ func (s *Server) status() map[string]any {
 	if s.cfg.Alerts != nil {
 		st := s.cfg.Alerts.Status()
 		out["Alerts"], out["CoreDown"], out["Red"], out["Shown"] = st.Open, st.CoreDown, st.Red, true
+		out["Fork"] = slices.ContainsFunc(st.Open, func(a Alert) bool { return a.Revoke })
 	}
 	if s.cfg.Core != nil {
-		out["Core"], out["Revoked"] = true, s.cfg.Core.Revoked()
+		revoked, saved := s.cfg.Core.Revoked()
+		out["Core"], out["Revoked"], out["RevokeUnsaved"] = true, revoked && saved, revoked && !saved
 	}
 	if s.cfg.Caps != nil {
 		if day := s.cfg.Caps.Day(); day.Spent {

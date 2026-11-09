@@ -74,13 +74,13 @@ func bind(idx map[string]uint32, in, out string) (string, bool) {
 
 // rule is one rule of the forward or people chain.
 type rule struct {
-	in, out string  // iifname and oifname operands; "" matches any
-	m       []match // further matches
-	verdict string  // accept, drop, or jump <chain>
-	mark    string  // an accept's connection mark (bind); "" otherwise
-	learn   string  // an accept from a shared segment: the chain that records its host
-	logged  string  // a logged rule: the chain that counts, logs and gives the verdict of its first packet (loggedDecls)
-	twin    bool    // its live form is the rule before it's, so it has none of its own
+	in, out   string  // iifname and oifname operands; "" matches any
+	m         []match // further matches
+	verdict   string  // accept, drop, or jump <chain>
+	mark      string  // an accept's connection mark (bind); "" otherwise
+	learn     string  // an accept from a shared segment: the chain that records its host
+	logged    string  // a logged rule: the chain that counts, logs and gives the verdict of its first packet (loggedDecls)
+	firstOnly bool    // it has no live form: an accept the rule before it covers, or a refusal of a first packet only
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -136,7 +136,7 @@ func (r rule) first() string {
 // packet goes on to be counted and accepted; a jump becomes a goto, so the
 // target's return ends the live check too.
 func (r rule) later() []string {
-	if r.twin {
+	if r.firstOnly {
 		return nil
 	}
 	verdict := r.verdict

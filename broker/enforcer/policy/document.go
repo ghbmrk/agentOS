@@ -40,6 +40,16 @@ const (
 
 var networks = []string{NetCore, NetDevices, NetEdge, NetGuests, NetHousehold, NetOwner}
 
+// The figures a byte cap is sized from (NET-2 Byte caps): the daily bytes
+// a destination's declaration states (CLK-14), the signed image's figure
+// for the kernel's own destinations, and a backup target's next full
+// backup's size.
+const (
+	BasisDeclared = "declared"
+	BasisImage    = "image"
+	BasisBackup   = "backup"
+)
+
 // Hold kinds (NET-4 Loosening: holding back a security fix, freezing
 // firmware).
 const (
@@ -78,6 +88,11 @@ type Document struct {
 	// nothing, so a cap left out fails safe; a cap of 0 is written by
 	// leaving it out, so one cap has one encoding.
 	Caps map[string]uint64 `json:"caps,omitempty"`
+	// Basis is the figure each cap was sized from when the owner signed
+	// it (NET-2 Byte caps, #4578), by its name on Caps, from the closed
+	// list below, so the signed screen names it from the signed document,
+	// never from link text. A cap with none was set by hand.
+	Basis map[string]string `json:"basis,omitempty"`
 	// EdgeCap is the edge segment's one daily byte cap on what it sends
 	// to the internet (NET-2 Byte caps); 0 lets it send nothing.
 	EdgeCap  uint64         `json:"edge_cap,omitempty"`
@@ -362,6 +377,11 @@ func (d Document) normal() Document {
 	} else {
 		d.Caps = maps.Clone(d.Caps)
 	}
+	if len(d.Basis) == 0 {
+		d.Basis = nil // omitted, as Decode reads it
+	} else {
+		d.Basis = maps.Clone(d.Basis)
+	}
 	devs := make([]Device, len(d.Devices))
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
@@ -492,7 +512,8 @@ func sorted(s []string) []string {
 // drone reference that is not a hash, a pair, rule or hold naming no device,
 // an empty window, an mDNS name that is not one, or a byte cap that is 0,
 // is for no destination, or makes the caps sum past 2^64-1 (so no group's
-// cap, a sum of some of them, overflows); with ErrNameHeld one mDNS name
+// cap, a sum of some of them, overflows), or a cap basis off the closed
+// list or for no cap; with ErrNameHeld one mDNS name
 // pinned twice; and with ErrTooManyNames a device with more than MaxMDNS.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
@@ -583,6 +604,11 @@ func (d Document) check() error {
 			return bad("byte caps sum past 2^64-1")
 		}
 		total += n
+	}
+	for _, h := range slices.Sorted(maps.Keys(d.Basis)) {
+		if b := d.Basis[h]; d.Caps[h] == 0 || (b != BasisDeclared && b != BasisImage && b != BasisBackup) {
+			return bad("byte cap basis %q for %q", b, h)
+		}
 	}
 	for _, p := range d.Pairs {
 		if p.A == p.B || d.Device(p.A) == nil || d.Device(p.B) == nil {

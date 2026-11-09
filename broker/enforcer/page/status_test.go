@@ -25,9 +25,9 @@ func (f *fakeAlerts) Resolve(id uint64) error {
 }
 
 type fakeCore struct {
-	revoked bool
-	sigs    [][]byte
-	err     error
+	revoked, unsaved bool
+	sigs             [][]byte
+	err              error
 }
 
 func (f *fakeCore) RevokeMsg(owner key.PublicKey) []byte {
@@ -36,11 +36,11 @@ func (f *fakeCore) RevokeMsg(owner key.PublicKey) []byte {
 func (f *fakeCore) Revoke(sig []byte) error {
 	f.sigs = append(f.sigs, sig)
 	if f.err == nil {
-		f.revoked = true
+		f.revoked, f.unsaved = true, false
 	}
 	return f.err
 }
-func (f *fakeCore) Revoked() bool { return f.revoked }
+func (f *fakeCore) Revoked() (bool, bool) { return f.revoked, !f.unsaved }
 
 // stateRig is newRig's page with the enforcer's state wired in: two open
 // alerts (a trip, sent; a paused channel, not), the core silent and the
@@ -112,13 +112,39 @@ func TestHomeShowsStatus(t *testing.T) {
 	if strings.Count(h, `href="#revoke"`) != 1 || !strings.Contains(h, `id="revoke"`) || !strings.Contains(h, "if you trust the core, clear this and keep it") {
 		t.Error("the forked log's card does not name the choice to revoke the core's key")
 	}
+	if strings.Contains(h, "No core is set up") || !strings.Contains(h, `<details id="revoke" open>`) {
+		t.Error("a forked log does not open the revoke step, or a pinned core reads as none")
+	}
+	// #5106 item 3: with nothing open, home has no Alerts section, no
+	// light line and the revoke step closed; with no core pinned, a
+	// silent core is not "down" but has its own words, once.
 	al.st = Status{}
 	h = g.homeHTML()
-	if !strings.Contains(h, "The light is off") || !strings.Contains(h, "No open alerts.") || strings.Contains(h, "The core is down") {
-		t.Errorf("home with nothing open:\n%s", h)
+	for _, gone := range []string{"<h2>Alerts</h2>", "The light is", "No open alerts", "The core is down", "No core is set up", "<details id=\"revoke\" open>"} {
+		if strings.Contains(h, gone) {
+			t.Errorf("home with nothing open shows %q", gone)
+		}
+	}
+	if !strings.Contains(h, `<details id="revoke"><summary>Revoke the core's key</summary>`) {
+		t.Error("the revoke step is not behind a closed details")
+	}
+	al.st = Status{CoreDown: true}
+	cfg := g.s.cfg
+	cfg.Core, cfg.Lock = nil, nil
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h = g.homeHTML()
+	if strings.Contains(h, "<h2>Alerts</h2>") || strings.Contains(h, "The core is down") || strings.Count(h, "No core is set up, so the enforcer's texts cannot reach your phone") != 1 {
+		t.Errorf("home with no core pinned:\n%s", h)
+	}
+	al.st.Red = true
+	if h = g.homeHTML(); !strings.Contains(h, "<h2>Alerts</h2>") || !strings.Contains(h, "The light is red") || strings.Contains(h, "The core is down") {
+		t.Error("a red light with no core pinned is not shown alone")
 	}
 	g = newRig(t)
-	if h := g.homeHTML(); strings.Contains(h, "<h2>Alerts</h2>") || strings.Contains(h, "revoke-core") {
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Alerts</h2>") || strings.Contains(h, "revoke-core") || strings.Contains(h, "No core is set up") {
 		t.Error("home shows state it was not given")
 	}
 }
@@ -185,8 +211,17 @@ func TestRevokeCore(t *testing.T) {
 	if code, res := g.tapState(g.a, ActRevokeCore, ""); code != http.StatusConflict || res["error"] != co.err.Error() {
 		t.Errorf("an unsaved revocation: %d %v", code, res)
 	}
+	// #5106 item 1: a revocation in force but not saved is a third state
+	// on home, never "live" and never "revoked", and is offered again.
+	co.revoked, co.unsaved = true, true
+	h = g.homeHTML()
+	if !strings.Contains(h, "revoked only until the enforcer restarts: the revocation was not saved") ||
+		!strings.Contains(h, `data-action="revoke-core"`) || strings.Contains(h, "If the core box was stolen") ||
+		strings.Contains(h, "key is revoked: the enforcer takes no message") || strings.Contains(h, `href="#revoke"`) {
+		t.Errorf("home with an unsaved revocation:\n%s", h)
+	}
 	co.err = nil
-	if code, _ := g.tapState(g.a, ActRevokeCore, ""); code != http.StatusOK || !co.revoked {
+	if code, _ := g.tapState(g.a, ActRevokeCore, ""); code != http.StatusOK || !co.revoked || co.unsaved {
 		t.Fatalf("revoke: %d", code)
 	}
 	if !g.a.Public().Verify(co.RevokeMsg(g.a.Public()), co.sigs[len(co.sigs)-1]) {
