@@ -101,7 +101,8 @@ func TestTheInboxPageShowsOrdinaryTextAsWritten(t *testing.T) {
 // Characters that draw as nothing, or a mark with nothing under it, are
 // shown and flagged.
 func TestShowHeldFlagsBlankCharacters(t *testing.T) {
-	for _, s := range []string{"a\u3164b", "a\u2800b", "a\u00a0b", "\u0301x", "a\u2028b", "a\ufe0fb", "a\U000F0000b"} {
+	for _, s := range []string{"a\u3164b", "a\u2800b", "a\u00a0b", "\u0301x", "a\u2028b", "a\ufe0fb", "a\U000F0000b",
+		"a\u034f\u034fb", "a\u17b4b", "a\u115fb", "\U0001F600\U000E0141\U000E0142b"} {
 		if _, odd := showHeld(s); !odd {
 			t.Errorf("%q not flagged", s)
 		}

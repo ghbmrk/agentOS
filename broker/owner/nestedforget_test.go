@@ -7,6 +7,7 @@ package owner
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestANestedHeldReactionIsDroppedByAForget(t *testing.T) {
@@ -53,5 +54,37 @@ func TestAForgetKeepsHeldMessagesThatQuoteNothingForgotten(t *testing.T) {
 	}
 	if note := r.ch.heldNote(); !strings.Contains(note, "1 removed with a deletion") {
 		t.Fatalf("STATUS note: %q", note)
+	}
+}
+
+// Delta fix-lists on #5185 (Potency, L3, Security): a forget sees every
+// layer of a held nest, a cut one and one quoting a short text too, and
+// what it keeps never reaches the agent with the forgotten words later.
+func TestAForgetDropsCutAndShortNestedHeldReactions(t *testing.T) {
+	cut := "The Acme contract renews on the third of…"
+	for _, tc := range []struct{ reply, held string }{
+		{forgottenReply, "Pinned “Liked “" + cut},
+		{forgottenReply, "Liked “Loved “" + cut + "”"},
+		{"Ok, booked.", "Liked “Loved “Ok, booked.””"},
+		{"Call Dr Lee", "Liked “Call Dr Lee”"},
+	} {
+		r := newRig(t, nil)
+		if err := r.ch.Converse(tc.reply); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+		r.say(tc.held)
+		r.ch.ForgetRecent()
+		if msgs, dropped, _ := r.ch.LocalHeld(); len(msgs) != 0 || dropped != 1 {
+			t.Fatalf("%q: held %+v, dropped %d", tc.held, msgs, dropped)
+		}
+		r.advance(25 * time.Hour)
+		r.unlock()
+		r.runHeld()
+		for _, s := range r.agent.got() {
+			if strings.Contains(s, "Acme") || strings.Contains(s, "booked") || strings.Contains(s, "Dr Lee") {
+				t.Fatalf("%q: forgotten words reached the agent: %q", tc.held, s)
+			}
+		}
 	}
 }

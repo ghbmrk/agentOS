@@ -236,13 +236,15 @@ func (r *recentWindow) forget(now time.Time) {
 	r.forgotAt = now
 }
 
-// quotesForgettable reports whether quoted marks a text forget would drop
-// (one not guarded), within the window: the two are equal, the quote is a
-// long enough cut of it, or the quote holds it whole, as a nest does
-// (Liked “Loved “<text>””).
+// quotesForgettable reports whether quoted, at any layer of a nest, marks
+// a text forget would drop (one not guarded) within the window. Each
+// layer is what follows a quote mark, so a nest a phone cut short
+// (Pinned “Liked “<cut>…) is seen at its innermost quote (#5185). A layer
+// marks a text when the two are equal, or when a layer of at least
+// minQuote runes is a cut of it or holds it whole.
 func (r *recentWindow) quotesForgettable(quoted string, now time.Time) bool {
-	q := normQuote(quoted)
-	if q == "" {
+	layers := quoteTails(quoted)
+	if len(layers) == 0 {
 		return false
 	}
 	r.mu.Lock()
@@ -259,12 +261,35 @@ func (r *recentWindow) quotesForgettable(quoted string, now time.Time) bool {
 		if n == "" {
 			continue
 		}
-		if n == q || (utf8.RuneCountInString(q) >= minQuote && strings.Contains(n, q)) ||
-			(utf8.RuneCountInString(n) >= minQuote && strings.Contains(q, n)) {
-			return true
+		for _, q := range layers {
+			long := utf8.RuneCountInString(q) >= minQuote
+			if n == q || long && (strings.Contains(n, q) || strings.Contains(q, n)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// quoteTails returns quoted and every tail of it after a quote mark,
+// each normalized with its closing quote marks trimmed. Unlike
+// quoteLayers it needs no layer to parse as a form, so a nest cut short
+// is still peeled.
+func quoteTails(quoted string) []string {
+	var out []string
+	add := func(s string) {
+		s = normQuote(strings.TrimRight(normQuote(s), `"' `))
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	add(quoted)
+	for i, c := range quoted {
+		if strings.ContainsRune(quoteMarks, c) {
+			add(quoted[i+utf8.RuneLen(c):])
+		}
+	}
+	return out
 }
 
 // forgotWithin reports whether a deletion forgot texts that would still be

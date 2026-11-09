@@ -65,6 +65,9 @@ func showHeld(s string) (shown string, odd bool) {
 		case heldVisible(r, prev):
 			b.WriteRune(r)
 			prev = r
+			if unicode.Is(unicode.Variation_Selector, r) {
+				prev = -1 // one selector per symbol
+			}
 			continue
 		}
 		odd = true
@@ -84,8 +87,10 @@ func heldVisible(r, prev rune) bool {
 		return false
 	case r == ' ':
 		return true
-	case unicode.In(r, unicode.Variation_Selector):
+	case unicode.Is(unicode.Variation_Selector, r):
 		return prev >= 0 && unicode.Is(unicode.S, prev)
+	case unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r):
+		return false // drawn as nothing, mark or not (#5185 Security)
 	case unicode.Is(unicode.M, r):
 		return prev >= 0 // on a character shown as itself
 	}
