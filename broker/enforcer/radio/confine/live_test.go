@@ -1,6 +1,7 @@
 package confine
 
 import (
+	"debug/elf"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // REQ: NET-2
@@ -52,7 +55,44 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == liveArg {
 		os.Exit(liveProbe(os.Args[2], os.Args[3]))
 	}
+	// Off root, the whole suite runs again, in place, as root of a fresh
+	// user, mount and network namespace that maps the runner's subordinate
+	// ids, so the root-gated tests start stacks as other users in every
+	// job, mutgate's and the race shards' included, not only in CI's root
+	// step (#5140). The exec keeps the pid and the flags, so the coverage
+	// profile and the exit status are the namespaced run's. CI requires it.
+	// A dynamically linked binary (a -race build) is left as it is: a
+	// stack's view holds no loader, so its stacks could not exec, as root
+	// either, and the root-gated tests skip there as before.
+	if os.Geteuid() != 0 && static() {
+		ns := []string{"unshare", "-r", "--map-auto", "-n", "-m", "--"}
+		unshare, err := exec.LookPath(ns[0])
+		if err == nil {
+			err = exec.Command(unshare, append(ns[1:], "true")...).Run()
+		}
+		if err == nil {
+			err = syscall.Exec(unshare, append(ns, os.Args...), os.Environ())
+		}
+		if netnstest.Required() {
+			fmt.Fprintf(os.Stderr, "confine: no user namespace mapping the subordinate ids (%s): %v\n", strings.Join(ns[:5], " "), err)
+			os.Exit(1)
+		}
+	}
 	os.Exit(m.Run())
+}
+
+// static reports whether this test binary needs no ELF loader.
+func static() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	f, err := elf.Open(exe)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return !slices.ContainsFunc(f.Progs, func(p *elf.Prog) bool { return p.Type == elf.PT_INTERP })
 }
 
 // liveCase is one namespace or mount call the live probe makes. entry names
