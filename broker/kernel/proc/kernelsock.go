@@ -187,10 +187,6 @@ type (
 		Err          string              `json:"err,omitempty"`
 		Is           string              `json:"is,omitempty"` // as kernelAnswer.Is
 	}
-	forgetArgs struct {
-		Label    string   `json:"label"`
-		Subjects []string `json:"subjects"`
-	}
 	// rotateArgs is a rotation an anchor signed: next is the new key's
 	// recipient ID, "" when the card is lost.
 	rotateArgs struct {
@@ -332,11 +328,11 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	// A Forget's YES (D-314): the ask's text, sent unchanged; forgetreply
 	// erases as erase does, only on the owner's YES to it.
 	"askforget": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
-		var a forgetArgs
+		var a labelArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, ErrArgs
 		}
-		return k.AskForget(now, a.Label, a.Subjects)
+		return k.AskForget(now, a.Label)
 	},
 }, procOps: map[string]procOp{
 	"forgetreply": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {

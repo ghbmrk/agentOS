@@ -1286,7 +1286,7 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 	}
 	ask := func() string {
 		var text string
-		if err := o.Call("askforget", forgetArgs{"Alice", []string{sub}}, &text); err != nil {
+		if err := o.Call("askforget", labelArgs{"Alice"}, &text); err != nil {
 			t.Fatal(err)
 		}
 		f := strings.Fields(text)
@@ -1302,10 +1302,10 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 		}
 		return r.Recall.Erased
 	}
-	if err := o.Call("askforget", forgetArgs{"Bob", []string{sub}}, nil); !errors.Is(err, kernel.ErrForgetName) {
+	if err := o.Call("askforget", labelArgs{"Bob"}, nil); !errors.Is(err, kernel.ErrForgetName) {
 		t.Fatalf("a swapped name: %v", err)
 	}
-	if err := o.Call("askforget", forgetArgs{strings.Repeat("a", MaxLabel+1), []string{sub}}, nil); !errors.Is(err, kernel.ErrForgetName) {
+	if err := o.Call("askforget", labelArgs{strings.Repeat("a", MaxLabel+1)}, nil); !errors.Is(err, kernel.ErrForgetName) {
 		t.Fatalf("a long name: %v", err)
 	}
 	if err := o.Call("askforget", 7, nil); !errors.Is(err, ErrArgs) {
