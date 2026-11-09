@@ -24,8 +24,8 @@ const ownerNum = "+15550000001"
 // never go to the agent as chat: the loop settings (LOOPS, LEARNING,
 // SPARE BUDGET, HELP LOOPS) say there is no spare-time work, and FORGET
 // and RENEW, deleted with recall (#2781), say they do not run in this
-// version. Longer texts that start with those words stay task chat, as
-// they were.
+// version. FORGET with anything after it is the setting too (UX 5 on
+// #5092); longer RENEW texts stay task chat.
 func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 	cfg := daemon.Config{}
 	openLearnState(t.TempDir(), &cfg, false)
@@ -33,8 +33,8 @@ func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 		"LOOPS OFF": loopsOffText, "LOOP 1 ON": loopsOffText, "LEARNING OFF": loopsOffText, "SECURITY TESTS ON": loopsOffText,
 		"SPARE BUDGET 900": loopsOffText, "HELP LOOPS": loopsOffText, "STOP SHARING": loopsOffText,
 		"UPDATES FAST": loopsOffText, "UPDATE SOAK 14": loopsOffText, "HELP UPDATES": loopsOffText,
-		"FORGET": forgetOffText, "forget 3": forgetOffText, "Forget last": forgetOffText,
-		"RENEW": renewOffText, "renew 2": renewOffText, "RENEW x": renewOffText,
+		"FORGET": forgetOffText, "forget 3": forgetOffText, "Forget last": forgetOffText, "Forget Alice Smith": forgetOffText,
+		"forget the draft and write it again": forgetOffText, "RENEW": renewOffText, "renew 2": renewOffText, "RENEW x": renewOffText,
 	} {
 		for _, unlocked := range []bool{true, false} {
 			if got, ok := cfg.Settings(context.Background(), msg, unlocked); !ok || got != want {
@@ -42,7 +42,7 @@ func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 			}
 		}
 	}
-	for _, msg := range []string{"book a table", "forget the draft and write it again", "forget it", "renew my passport today"} {
+	for _, msg := range []string{"book a table", "renew my passport today", "please forget it"} {
 		if _, ok := cfg.Settings(context.Background(), msg, true); ok {
 			t.Fatalf("task chat %q taken as a setting", msg)
 		}
@@ -67,7 +67,7 @@ func TestOldSettingsAreAnsweredByTheBox(t *testing.T) {
 func TestForgetTextNamesThePagesForgetStep(t *testing.T) {
 	cfg := daemon.Config{}
 	openLearnState(t.TempDir(), &cfg, true)
-	for _, msg := range []string{"FORGET", "forget 3", "Forget last"} {
+	for _, msg := range []string{"FORGET", "forget 3", "Forget last", "Forget Alice", "FORGET O'Brien please"} {
 		for _, unlocked := range []bool{true, false} {
 			if got, ok := cfg.Settings(context.Background(), msg, unlocked); !ok || got != forgetPageText {
 				t.Fatalf("%s (unlocked %v): %q %v", msg, unlocked, got, ok)
@@ -80,7 +80,7 @@ func TestForgetTextNamesThePagesForgetStep(t *testing.T) {
 	if cfg.Narrows("FORGET") {
 		t.Fatal("FORGET narrows")
 	}
-	for _, w := range []string{"Forget", "Wi-Fi page", "passkey"} {
+	for _, w := range []string{"Forget", "Wi-Fi page", "type the name", "passkey"} {
 		if !strings.Contains(forgetPageText, w) {
 			t.Fatalf("%q does not name %q", forgetPageText, w)
 		}

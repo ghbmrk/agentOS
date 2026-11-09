@@ -24,8 +24,8 @@ type Erase interface {
 	// challenge a passkey signs over exactly what was found.
 	Find(ctx context.Context, session, name string) (localapi.EraseFound, error)
 	// Confirm erases what handle's find showed on a passkey's get()
-	// assertion over its challenge, and answers the result's text.
-	Confirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (string, error)
+	// assertion over its challenge, and answers the result.
+	Confirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (localapi.EraseDone, error)
 }
 
 // EraseFindsPerMinute bounds finds on the socket: each asks the kernel to
@@ -49,23 +49,48 @@ func eraseErr(err error) error {
 }
 
 // eraseName is a name the kernel can look up: in its bound, with no
-// space at either end, and only letters, combining marks (Devanagari,
-// Tamil, Thai names, a decomposed accent), digits, spaces and plain
-// punctuation (an address's '@' and a typographic apostrophe among it).
-// Default-ignorable marks and variation selectors are refused, so no
-// invisible character can pass, so what the page shows is what is looked
-// up (the hostile-text corpus, #3901).
+// space at either end, starting with no mark, and only letters, combining
+// marks (Devanagari, Tamil, Thai names, a decomposed accent), digits,
+// spaces and plain punctuation (an address's '@' and a typographic
+// apostrophe among it). Default-ignorable marks, variation selectors and
+// fillers are refused, so no invisible character can pass, so what the
+// page shows is what is looked up (the hostile-text corpus, #3901). The
+// page sends it in NFC (localui); agentosd links no x/text (ARC-2), and a
+// name in another form only fails to match.
 func eraseName(n string) bool {
 	if n == "" || len(n) > localapi.MaxEraseName || !utf8.ValidString(n) || strings.TrimSpace(n) != n {
 		return false
 	}
+	if first, _ := utf8.DecodeRuneInString(n); unicode.IsMark(first) {
+		return false
+	}
 	for _, r := range n {
-		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) ||
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) || r == khitanFiller ||
 			!(unicode.IsLetter(r) || unicode.IsMark(r) || unicode.IsDigit(r) || r == ' ' || strings.ContainsRune("-_.,()'’/+&@", r)) {
 			return false
 		}
 	}
 	return true
+}
+
+// khitanFiller (U+16FE4) is a mark that shows nothing, outside the
+// default-ignorable set.
+const khitanFiller = '\U00016FE4'
+
+// eraseLive is tok's session if it may reach the erase ops: signed in
+// since the last STOP, and not stopped now. STOP ends every older
+// session's erase ops, so the owner's STOP after a page erase they did not
+// make stops a hacked page's next one (KRN-forget-c-fu).
+func (s *Server) eraseLive(tok string) error {
+	gen := s.cfg.Owner.StopGen()
+	ses, st, ok := s.liveStatus(tok)
+	switch {
+	case !ok:
+		return errUnauthorized
+	case st.Stopped || ses.stops != gen:
+		return sockets.Code(localapi.ErrEraseStopped)
+	}
+	return nil
 }
 
 // eraseHandle is a find's handle: lowercase hex of EraseHandle.
@@ -76,8 +101,8 @@ func eraseHandle(h string) bool {
 func (s *Server) eraseFind(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.EraseFind
 	err := decode(args, &in)
-	if !s.valid(in.Token) {
-		return nil, errUnauthorized
+	if live := s.eraseLive(in.Token); live != nil {
+		return nil, live
 	}
 	if err != nil || !eraseName(in.Name) {
 		return nil, errBadArgs
@@ -98,16 +123,16 @@ func (s *Server) eraseFind(ctx context.Context, _ sockets.Peer, args json.RawMes
 func (s *Server) eraseConfirm(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 	var in localapi.EraseConfirm
 	err := decode(args, &in)
-	if !s.valid(in.Token) {
-		return nil, errUnauthorized
+	if live := s.eraseLive(in.Token); live != nil {
+		return nil, live
 	}
 	if err != nil || !eraseHandle(in.Handle) ||
 		!assertionPart(in.AuthenticatorData) || !assertionPart(in.ClientDataJSON) || !assertionPart(in.Signature) {
 		return nil, errBadArgs
 	}
-	text, err := s.cfg.Erase.Confirm(ctx, sessionID(in.Token), in.Handle, in.AuthenticatorData, in.ClientDataJSON, in.Signature)
+	done, err := s.cfg.Erase.Confirm(ctx, sessionID(in.Token), in.Handle, in.AuthenticatorData, in.ClientDataJSON, in.Signature)
 	if err != nil {
 		return nil, eraseErr(err)
 	}
-	return localapi.Text{Text: text}, nil
+	return done, nil
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -27,9 +28,9 @@ func (f *fakeErase) Find(_ context.Context, session, name string) (localapi.Eras
 	return f.found, f.err
 }
 
-func (f *fakeErase) Confirm(_ context.Context, session, handle string, ad, cd, sig []byte) (string, error) {
+func (f *fakeErase) Confirm(_ context.Context, session, handle string, ad, cd, sig []byte) (localapi.EraseDone, error) {
 	f.calls = append(f.calls, fmt.Sprintf("confirm %s %s %x %x %x", session, handle, ad, cd, sig))
-	return "Forgot everything named Alice (3 items). It can no longer be read.", f.err
+	return localapi.EraseDone{Text: "Forgot everything named Alice (3 items). It can no longer be read.", Kept: true}, f.err
 }
 
 func eraseRig(t *testing.T) (*rig, *fakeErase) {
@@ -71,7 +72,7 @@ func TestEraseOpsNeedALiveSession(t *testing.T) {
 		t.Fatalf("find %+v %v", out, err)
 	}
 	out, err = r.call(localapi.OpEraseConfirm, eraseArgs(tok)[localapi.OpEraseConfirm])
-	if err != nil || out.(localapi.Text).Text != "Forgot everything named Alice (3 items). It can no longer be read." {
+	if done, _ := out.(localapi.EraseDone); err != nil || done.Text != "Forgot everything named Alice (3 items). It can no longer be read." || !done.Kept {
 		t.Fatalf("confirm %+v %v", out, err)
 	}
 	sid := sessionID(tok)
@@ -186,4 +187,62 @@ func TestEraseRefusalsAreTheClosedSet(t *testing.T) {
 	if out, err := r.call(localapi.OpEraseFind, eraseArgs(tok)[localapi.OpEraseFind]); err != nil || out.(localapi.EraseFound).Handle != "" {
 		t.Fatalf("nothing found: %+v %v", out, err)
 	}
+}
+
+// STOP ends the erase ops for every page session signed in before it, and
+// refuses them while stopped, so a hacked page cannot erase again once the
+// owner, told of an erase they did not make, sends STOP (#5097 item 4).
+// A session signed in after RESUME reaches them again.
+func TestStopEndsTheEraseOps(t *testing.T) {
+	r, f := eraseRig(t)
+	old := r.signIn()
+	if err := r.own.LocalStop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	during := r.signIn()
+	for _, tok := range []string{old, during} {
+		for _, op := range localapi.EraseOps {
+			if _, err := r.call(op, eraseArgs(tok)[op]); code(err) != localapi.ErrEraseStopped {
+				t.Errorf("%s while stopped: %v", op, err)
+			}
+		}
+	}
+	r.own.mu.Lock()
+	r.own.stopped = false // RESUME
+	r.own.mu.Unlock()
+	for _, op := range localapi.EraseOps {
+		if _, err := r.call(op, eraseArgs(old)[op]); code(err) != localapi.ErrEraseStopped {
+			t.Errorf("%s signed in before the STOP: %v", op, err)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("reached the owner side: %v", f.calls)
+	}
+	// The session signed in while stopped is after the STOP, as is a new one.
+	for _, tok := range []string{during, r.signIn()} {
+		if _, err := r.call(localapi.OpEraseFind, eraseArgs(tok)[localapi.OpEraseFind]); err != nil {
+			t.Fatalf("after RESUME: %v", err)
+		}
+	}
+	// A STOP counted while a sign-in's code was checked ends that session too.
+	r.own.mu.Lock()
+	r.own.stopped = false
+	r.own.mu.Unlock()
+	r.srv.cfg.Owner = &stopDuringSignIn{fakeOwner: r.own}
+	racing := r.signIn()
+	r.srv.cfg.Owner = r.own
+	r.own.mu.Lock()
+	r.own.stopped = false
+	r.own.mu.Unlock()
+	if _, err := r.call(localapi.OpEraseFind, eraseArgs(racing)[localapi.OpEraseFind]); code(err) != localapi.ErrEraseStopped {
+		t.Fatalf("a sign-in a STOP overtook: %v", err)
+	}
+}
+
+// stopDuringSignIn counts a STOP while the sign-in's code is checked.
+type stopDuringSignIn struct{ *fakeOwner }
+
+func (s *stopDuringSignIn) LocalSignIn(code string) (time.Time, uint64, error) {
+	_ = s.fakeOwner.LocalStop(context.Background())
+	return s.fakeOwner.LocalSignIn(code)
 }

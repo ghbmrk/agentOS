@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +15,8 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
 // forgetPageRig is the Forget step over a real kernel's owner keys (two
@@ -23,16 +28,19 @@ type forgetPageRig struct {
 	m  *rewindMachines
 	b  *forgetBox
 	p  pageForget
-	// told is what the owner was texted.
+	// told is what the owner was texted; done is the last confirm's
+	// answer.
 	told []string
+	done localapi.EraseDone
+	at   time.Time
 }
 
 func newForgetPageRig(t *testing.T) *forgetPageRig {
-	r := &forgetPageRig{t: t, pk: newPasskeyRig(t), k: newFakeKernel(), m: &rewindMachines{}}
+	r := &forgetPageRig{t: t, pk: newPasskeyRig(t), k: newFakeKernel(), m: &rewindMachines{}, at: time.Date(2026, 11, 8, 14, 5, 0, 0, time.Local)}
 	r.k.add("s1", "Alice Smith", 3, map[string]int64{"L1": 1_700_000_000_000})
 	r.k.add("s2", "Bob", 1, nil)
 	r.b = newForgetBox(t, r.k, r.m, t.TempDir())
-	r.p = pageForget{F: r.b.f, K: r.pk.k, Tell: func(text string) error { r.told = append(r.told, text); return nil }}
+	r.p = pageForget{F: r.b.f, K: r.pk.k, Tell: func(text string) { r.told = append(r.told, text) }, Now: func() time.Time { return r.at }}
 	return r
 }
 
@@ -49,7 +57,9 @@ func (r *forgetPageRig) find(session, name string) localapi.EraseFound {
 func (r *forgetPageRig) tap(session string, f localapi.EraseFound, challenge []byte, by *authenticator) (string, error) {
 	r.t.Helper()
 	ad, cd, sig := by.get(r.t, challenge)
-	return r.p.Confirm(context.Background(), session, f.Handle, ad, cd, sig)
+	done, err := r.p.Confirm(context.Background(), session, f.Handle, ad, cd, sig)
+	r.done = done
+	return done.Text, err
 }
 
 // The owner's tap over the list found erases exactly that list, rewinds
@@ -78,11 +88,14 @@ func TestTheForgetTapErasesTheListShown(t *testing.T) {
 	if text != res.Text() || !strings.HasPrefix(text, "Forgot everything named alice smith (3 items). It can no longer be read.") {
 		t.Fatalf("result %q, b's %q", text, res.Text())
 	}
-	// The owner is texted of the page erase by count and the passkey that
-	// tapped, never by the name.
-	note := forgetNotice(forgetResult{Items: 3, Erased: 1}, r.pk.anchors[1].public(t))
-	if !slices.Equal(r.told, []string{note}) || strings.Contains(strings.ToLower(note), "alice") ||
-		!strings.HasPrefix(note, "I forgot 3 items on my Wi-Fi page after a tap by passkey ") || !strings.HasSuffix(note, ". Not you? Text STOP.") {
+	if r.done.Kept {
+		t.Fatal("a whole erase reads as kept")
+	}
+	// The owner is texted of the page erase by count and kind, its time
+	// and the passkey that tapped, never by the name. A hardware key
+	// cannot be cut off on the page, so STOP is the step.
+	note := "I forgot 3 items (message 3) on my Wi-Fi page at 14:05 after a tap by passkey " + noticePrint(r.pk.anchors[1].public(t)) + ". Not you? Text STOP."
+	if !slices.Equal(r.told, []string{note}) || strings.Contains(strings.ToLower(note), "alice") || owner.CodeShaped(note) || owner.SecretShaped(note) {
 		t.Fatalf("told %q", r.told)
 	}
 }
@@ -108,6 +121,10 @@ func TestAPhonePasskeyTapForgetsAndACutOneDoesNot(t *testing.T) {
 	}
 	if _, err := r.tap("sess-a", f, f.Challenge, phone); err != nil || !slices.Equal(r.k.erases, []string{"s2"}) {
 		t.Fatalf("phone: %v, erased %v", err, r.k.erases)
+	}
+	// A phone passkey's notice names the step that cuts it off.
+	if len(r.told) != 1 || !strings.HasSuffix(r.told[0], "by passkey "+noticePrint(phone.public(t))+". Not you? Text STOP, and cut that passkey off on the passkey page.") {
+		t.Fatalf("told %q", r.told)
 	}
 }
 
@@ -233,10 +250,12 @@ func TestAPartialPageEraseIsNotTextedAsWhole(t *testing.T) {
 	r.k.eraseErr["s4"] = errors.New("kernel: unreachable")
 	f := r.find("sess-a", "Carol")
 	text, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0])
-	if err != nil || !strings.HasPrefix(text, "Not finished:") || !slices.Equal(r.k.erases, []string{"s3"}) {
-		t.Fatalf("partial: %q %v, erased %v", text, err, r.k.erases)
+	if err != nil || !strings.HasPrefix(text, "Not finished:") || !slices.Equal(r.k.erases, []string{"s3"}) || !r.done.Kept {
+		t.Fatalf("partial: %q %v %v, erased %v", text, err, r.done.Kept, r.k.erases)
 	}
-	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot some of 3 items, not all, on my Wi-Fi page") {
+	// It counts only what went: s3's one item, not s4's two.
+	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 1 item (message 1) on my Wi-Fi page at 14:05 ") ||
+		!strings.Contains(r.told[0], ". Some others found with them are still kept. Not you?") {
 		t.Fatalf("told %q", r.told)
 	}
 	// Nothing erased texts nothing.
@@ -244,7 +263,192 @@ func TestAPartialPageEraseIsNotTextedAsWhole(t *testing.T) {
 	r.k.erased["s3"] = false
 	r.k.erases = nil
 	f = r.find("sess-a", "Carol")
-	if text, err = r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || !strings.HasPrefix(text, "Nothing was forgotten") || len(r.told) != 0 {
+	if text, err = r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || !strings.HasPrefix(text, "Nothing was forgotten") || len(r.told) != 0 || !r.done.Kept {
 		t.Fatalf("none: %q %v, told %q", text, err, r.told)
+	}
+}
+
+// The notice counts only what this erase took, by kind: subjects erased
+// meanwhile are not counted (Security 4 on #5092), and when every subject
+// went meanwhile nothing is texted, since this erase took nothing
+// (Potency 3 on #5092).
+func TestTheForgetNoticeCountsOnlyThisErase(t *testing.T) {
+	r := newForgetPageRig(t)
+	r.k.add("s3", "Carol", 2, nil)
+	r.k.add("s4", "Carol", 1, nil)
+	r.k.items["s4"] = append(r.k.items["s4"], kernelsock.Item{Store: "photos", Class: "photo"}, kernelsock.Item{Store: "photos", Class: "photo"})
+	f := r.find("sess-a", "Carol")
+	if !strings.HasPrefix(f.Text, "Found 5 items named Carol (message 3, photo 2).") {
+		t.Fatalf("readback %q", f.Text)
+	}
+	r.k.erased["s3"] = true // erased meanwhile
+	if _, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || r.done.Kept {
+		t.Fatalf("%v kept %v", err, r.done.Kept)
+	}
+	if len(r.told) != 1 || !strings.HasPrefix(r.told[0], "I forgot 3 items (message 1, photo 2) on my Wi-Fi page") || strings.Contains(r.told[0], "still kept") {
+		t.Fatalf("told %q", r.told)
+	}
+	r.told = nil
+	r.k.add("s5", "Dan", 1, nil)
+	f = r.find("sess-a", "Dan")
+	r.k.erased["s5"] = true
+	if text, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || len(r.told) != 0 || r.done.Kept {
+		t.Fatalf("all erased meanwhile: %q %v, told %q", text, err, r.told)
+	}
+	// A subject with nothing kept under its name is told without a count.
+	r.k.add("s6", "Eve", 0, nil)
+	f = r.find("sess-a", "Eve")
+	if _, err := r.tap("sess-a", f, f.Challenge, r.pk.anchors[0]); err != nil || len(r.told) != 1 ||
+		!strings.HasPrefix(r.told[0], "I forgot a name with nothing kept under it on my Wi-Fi page") {
+		t.Fatalf("told %q", r.told)
+	}
+}
+
+// A name typed with either apostrophe finds what is kept under both, and
+// each subject once (#5097 item 10).
+func TestForgetFindsBothApostrophes(t *testing.T) {
+	r := newForgetPageRig(t)
+	r.k.add("s3", "O'Brien", 1, nil)
+	r.k.add("s4", "O\u2019Brien", 2, nil)
+	for _, n := range []string{"O'Brien", "O\u2019Brien"} {
+		if f := r.find("sess-a", n); !strings.HasPrefix(f.Text, "Found 3 items named "+n+" (message 3).") {
+			t.Fatalf("%s: %q", n, f.Text)
+		}
+	}
+	if !slices.Equal(spellings("Ann"), []string{"Ann"}) || !slices.Equal(spellings("O'B\u2019x"), []string{"O'B\u2019x", "O'B'x", "O\u2019B\u2019x"}) {
+		t.Fatal("spellings")
+	}
+}
+
+// A notice that cannot be sent is kept on disk and sent in order once the
+// owner can be reached, after a restart too; nothing sent is sent again
+// (Potency 5 on #5092).
+func TestAnUnsentForgetNoticeIsKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), forgetToldFile)
+	var sent []string
+	fail := errors.New("no owner channel")
+	send := func(s string) error {
+		if fail != nil {
+			return fail
+		}
+		sent = append(sent, s)
+		return nil
+	}
+	told := openForgetTold(path, send)
+	told.tell("one")
+	told.tell("two")
+	if len(sent) != 0 {
+		t.Fatalf("sent %q", sent)
+	}
+	// A restart reads them back; run sends them at once.
+	told = openForgetTold(path, send)
+	fail = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { told.run(ctx, time.Hour); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		told.mu.Lock()
+		n := len(told.texts)
+		told.mu.Unlock()
+		if n == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	if !slices.Equal(sent, []string{"one", "two"}) {
+		t.Fatalf("sent %q", sent)
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "[]" {
+		t.Fatalf("the record holds %q: %v", b, err)
+	}
+	told.tell("three")
+	if !slices.Equal(sent, []string{"one", "two", "three"}) {
+		t.Fatalf("sent %q", sent)
+	}
+	// A corrupt record is set aside before anything overwrites it.
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if told = openForgetTold(path, send); len(told.texts) != 0 {
+		t.Fatal("read a bad record")
+	}
+	if b, err := os.ReadFile(path + ".corrupt"); err != nil || string(b) != "{" {
+		t.Fatalf("set aside: %q %v", b, err)
+	}
+}
+
+// The unsent record's edges: a missing one logs nothing; one that cannot
+// be read (a directory) is logged and never copied aside; one of the
+// wrong shape is set aside and read as empty. A failed send is logged,
+// and run keeps trying at its interval until a send goes.
+func TestTheUnsentForgetRecordsEdges(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	dir := t.TempDir()
+	send := func(string) error { return nil }
+	if told := openForgetTold(filepath.Join(dir, "none.json"), send); len(told.texts) != 0 || logged.Len() != 0 {
+		t.Fatalf("missing record: %q, logged %q", told.texts, logged.String())
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	openForgetTold(sub, send)
+	if _, err := os.Stat(sub + ".corrupt"); !errors.Is(err, os.ErrNotExist) || !strings.Contains(logged.String(), "unreadable") {
+		t.Fatalf("unreadable record: %v, logged %q", err, logged.String())
+	}
+	odd := filepath.Join(dir, "odd.json")
+	if err := os.WriteFile(odd, []byte(`["a",1]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if told := openForgetTold(odd, send); len(told.texts) != 0 {
+		t.Fatalf("a wrong-shaped record read as %q", told.texts)
+	}
+	logged.Reset()
+	var tries int
+	var sent []string
+	told := openForgetTold(filepath.Join(dir, "retry.json"), func(s string) error {
+		tries++
+		if tries < 3 {
+			return errors.New("no owner channel")
+		}
+		sent = append(sent, s)
+		return nil
+	})
+	told.tell("one")
+	if !strings.Contains(logged.String(), "could not be told yet: no owner channel") {
+		t.Fatalf("a failed send was not logged: %q", logged.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { told.run(ctx, time.Millisecond); close(done) }()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		told.mu.Lock()
+		n := len(sent)
+		told.mu.Unlock()
+		if n > 0 {
+			break
+		}
+	}
+	cancel()
+	<-done
+	if !slices.Equal(sent, []string{"one"}) {
+		t.Fatalf("sent %q after %d tries", sent, tries)
+	}
+	// A notice is on disk before its send starts, so a crash during the
+	// send does not lose it.
+	saved := filepath.Join(dir, "saved.json")
+	var onDisk string
+	openForgetTold(saved, func(string) error {
+		b, _ := os.ReadFile(saved)
+		onDisk = string(b)
+		return nil
+	}).tell("two")
+	if onDisk != `["two"]` {
+		t.Fatalf("on disk during the send: %q", onDisk)
 	}
 }

@@ -7,14 +7,15 @@ package localapi
 // the owner's passkeys (a hardware key or an enrolled phone passkey)
 // erases exactly the list shown. agentosd serves them only with
 // -passkey-rp-id, as the passkey ops, since the tap is a WebAuthn ceremony
-// on the page's name. Each needs a session; the texts are agentosd's,
-// which the page shows unchanged.
+// on the page's name. Each needs a session signed in since the last STOP,
+// and none runs while stopped; the texts are agentosd's, which the page
+// shows unchanged.
 const (
 	// OpEraseFind (EraseFind) answers an EraseFound.
 	OpEraseFind = "page_erase_find"
 	// OpEraseConfirm (EraseConfirm) erases what the handle's find showed,
-	// on a passkey's get() assertion over its challenge, and answers
-	// Text{} with the result.
+	// on a passkey's get() assertion over its challenge, and answers an
+	// EraseDone.
 	OpEraseConfirm = "page_erase_confirm"
 )
 
@@ -34,14 +35,18 @@ const (
 	// ErrEraseUnavailable: the kernel could not be reached, or answered
 	// something else.
 	ErrEraseUnavailable = "erase unavailable"
+	// ErrEraseStopped: the owner sent STOP, which ends the erase ops for
+	// every session signed in before it and refuses them until RESUME.
+	ErrEraseStopped = "erase stopped"
 )
 
 // EraseCodes is the closed set the erase ops refuse with past the session
 // and argument checks.
-var EraseCodes = []string{ErrEraseBadAssertion, ErrEraseStale, ErrEraseUnavailable}
+var EraseCodes = []string{ErrEraseBadAssertion, ErrEraseStale, ErrEraseUnavailable, ErrEraseStopped}
 
 const (
-	// MaxEraseName bounds the name looked up (the kernel's label bound).
+	// MaxEraseName bounds the name looked up, in UTF-8 bytes (the
+	// kernel's label bound).
 	MaxEraseName = 256
 	// EraseHandle is a find's handle length: 16 random bytes in hex.
 	EraseHandle = 32
@@ -69,4 +74,11 @@ type EraseConfirm struct {
 	AuthenticatorData []byte `json:"authenticator_data"`
 	ClientDataJSON    []byte `json:"client_data_json"`
 	Signature         []byte `json:"signature"`
+}
+
+// EraseDone is a confirm's result: agentosd's text, and whether some of
+// what was found is still kept (nothing erased, or not all of it).
+type EraseDone struct {
+	Text string `json:"text"`
+	Kept bool   `json:"kept,omitempty"`
 }

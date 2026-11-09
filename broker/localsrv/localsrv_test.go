@@ -24,6 +24,7 @@ type fakeOwner struct {
 	now      *time.Time
 	locks    uint64
 	stopped  bool
+	stops    int64
 	signIns  int
 	resumes  int
 	left     int
@@ -61,10 +62,15 @@ func (f *fakeOwner) LocalSignIn(code string) (time.Time, uint64, error) {
 func (f *fakeOwner) LocalStop(context.Context) error {
 	f.mu.Lock()
 	f.stopped = true
+	f.stops++
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeOwner) StopGen() int64 { return 0 }
+func (f *fakeOwner) StopGen() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stops
+}
 func (f *fakeOwner) LocalResume(locks uint64, _ int64) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -533,7 +539,7 @@ func TestFieldsAreBounded(t *testing.T) {
 func TestChannelFailuresAreFixedCodes(t *testing.T) {
 	r := newRig(t)
 	r.srv.cfg.Owner = &failing{fakeOwner: r.own}
-	tok := r.srv.mint(r.now.Add(time.Hour), 0)
+	tok := r.srv.mint(r.now.Add(time.Hour), 0, 0)
 	for op, args := range map[string]any{
 		localapi.OpStop:   struct{}{},
 		localapi.OpResume: localapi.Resume{Token: tok},

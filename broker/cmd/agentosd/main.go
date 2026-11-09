@@ -705,13 +705,16 @@ func main() {
 				cfg.PageSocket.Recovery = recoveryOps{rf, newLostCard(*seat, bs)}
 				go rf.run(ctx, backupCheckEvery)
 				// The Forget page (KRN-forget c, D-284): erase by name on
-				// any of the owner's passkeys' taps, which the owner hears.
-				cfg.PageSocket.Erase = pageForget{F: newForgetFlow(*seat, eraseBack), K: *seat, Tell: alertOwner(func() *owner.Channel {
+				// any of the owner's passkeys' taps, which the owner hears,
+				// each notice kept until it is sent.
+				told := openForgetTold(filepath.Join(stateDir, forgetToldFile), alertOwner(func() *owner.Channel {
 					if d := served.Load(); d != nil {
 						return d.Owner()
 					}
 					return nil
-				})}
+				}))
+				go told.run(ctx, forgetToldEvery)
+				cfg.PageSocket.Erase = pageForget{F: newForgetFlow(*seat, eraseBack), K: *seat, Tell: told.tell}
 			}
 		}
 		go bs.run(ctx, backupCheckEvery)
