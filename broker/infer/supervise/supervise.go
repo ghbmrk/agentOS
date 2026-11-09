@@ -41,9 +41,10 @@ type Options struct {
 	// child gets the listener as fd 3 and never names it.
 	Socket string
 	// Cgroup is the inference leaf, whose memory.max is the budget's
-	// InferenceMB. Each start makes the leaf's child Name new (cgroup.Fresh)
-	// and the child starts in it (CLONE_INTO_CGROUP); nil starts it in the
-	// caller's group, which only tests do.
+	// InferenceMB. Each start opens the leaf for children (cgroup.Open),
+	// makes its child Name new (cgroup.Fresh) and starts the child in it
+	// (CLONE_INTO_CGROUP); nil starts it in the caller's group, which only
+	// tests do.
 	Cgroup *cgroup.Group
 	// UID and GID are the service's user, with no supplementary groups.
 	// UID 0 is refused.
@@ -222,8 +223,14 @@ func (s *Supervisor) loop(ctx context.Context, run func(context.Context) string)
 func (s *Supervisor) run(ctx context.Context) string {
 	leaf := s.o.Cgroup
 	var g *cgroup.Group
-	var ooms int64
 	if leaf != nil {
+		// The leaf holds no process itself, only each service's group, so
+		// it is opened for children: their own memory.events then count
+		// each service's OOM kills apart, while the budget stays on the
+		// leaf (oomCause).
+		if _, err := cgroup.Open(leaf.Path); err != nil {
+			return "cgroup: " + err.Error()
+		}
 		// A new group for each run: one killed after an earlier run may
 		// SIGKILL a child clone3 places in it (#5135). Making it new kills
 		// what a previous broker's service, or this one's children, left
@@ -239,7 +246,6 @@ func (s *Supervisor) run(ctx context.Context) string {
 			cancel()
 			g.Remove()
 		}()
-		ooms, _ = leaf.OOMKills()
 	}
 	lf, err := s.listen(s.o.Socket)
 	if err != nil {
@@ -303,14 +309,16 @@ func (s *Supervisor) run(ctx context.Context) string {
 	if err != nil {
 		cause = "exited: " + err.Error()
 	}
-	return oomCause(leaf, ooms, cause)
+	return oomCause(g, cause)
 }
 
-// oomCause is cause tagged "oom: " when the leaf's OOM kill count has
-// risen past before, the count when the run started.
-func oomCause(leaf *cgroup.Group, before int64, cause string) string {
-	if leaf != nil {
-		if n, err := leaf.OOMKills(); err == nil && n > before {
+// oomCause is cause tagged "oom: " when the kernel OOM-killed a process in
+// g, this run's own group. g is new for each run, so its count is this
+// run's alone; the leaf's would also count another service's kills, since
+// services share it (INF-4: an OOM in vision never tags infer's stop).
+func oomCause(g *cgroup.Group, cause string) string {
+	if g != nil {
+		if n, err := g.OOMKills(); err == nil && n > 0 {
 			return "oom: " + cause
 		}
 	}
