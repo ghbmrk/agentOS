@@ -1,7 +1,6 @@
 package owner
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -23,8 +22,9 @@ func TestTheOwnersNumberAloneNeverApprovesOrUnlocks(t *testing.T) {
 		t.Fatalf("approved with no code: %+v", ds)
 	}
 
-	if got := r.say("book a table for two"); !strings.HasPrefix(got, "Locked.") {
-		t.Fatalf("chat with no code: %q", got)
+	r.say("book a table for two")
+	if msgs, _, _ := r.ch.LocalHeld(); len(msgs) == 0 || msgs[len(msgs)-1].Text != "book a table for two" {
+		t.Fatalf("chat with no code not held for the page: %+v", msgs)
 	}
 	r.say("RUN")
 	r.say("STATUS")

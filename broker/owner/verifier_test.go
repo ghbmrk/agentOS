@@ -286,7 +286,7 @@ func TestChallengeAttemptIsRefundedWhenTheVaultCannotCheck(t *testing.T) {
 		t.Fatalf("attempt or token spent: bound %d", r.ch.codes.st.BoundUsed)
 	}
 	f.fail = nil
-	if got := r.say("UNLOCK " + m[1] + " " + r.totp()); !strings.HasPrefix(got, "Unlocked until") {
+	if got := r.say("UNLOCK " + m[1] + " " + r.totp()); got != "Codes work normally again." || r.ch.codes.st.Challenged {
 		t.Fatalf("kept token: %q", got)
 	}
 }
@@ -345,8 +345,8 @@ func TestStopIsNotQueuedBehindAHungVerifier(t *testing.T) {
 // is still checked as a code-generator code.
 func TestGridAnswerDoesNotReachTheVerifier(t *testing.T) {
 	r, f := newVerifierRig(t)
-	cell := gridRe.FindStringSubmatch(r.say("status"))
-	if cell == nil {
+	cell := r.ch.LocalGridCell()
+	if cell == "" {
 		t.Fatal("no grid challenge")
 	}
 	n := f.calls()
@@ -354,8 +354,8 @@ func TestGridAnswerDoesNotReachTheVerifier(t *testing.T) {
 		t.Fatalf("wrong grid answer: %q, %d calls", got, f.calls()-n)
 	}
 	n = f.calls()
-	if got := r.say(GridCell(testSecrets.GridSeed, cell[1])); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("grid unlock: %q", got)
+	if got := r.say(GridCell(testSecrets.GridSeed, cell)); !strings.Contains(got, "That code is right") {
+		t.Fatalf("grid answer: %q", got)
 	}
 	if f.calls() != n {
 		t.Fatal("grid answer sent to the verifier")

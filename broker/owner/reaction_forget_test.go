@@ -62,21 +62,24 @@ func TestAReactionAfterAForgetDoesNotQuoteTheForgottenReply(t *testing.T) {
 	}
 }
 
-// A reaction held while locked, worded before the deletion, is dropped by
-// it: RUN after the unlock delivers nothing (#2360).
+// A reaction held while locked, quoting a text the deletion forgets, is
+// dropped by it: the page has nothing to run (#2360).
 func TestAHeldReactionIsDroppedByAForget(t *testing.T) {
 	r := newRig(t, nil)
 	if err := r.ch.Converse(forgottenReply); err != nil {
 		t.Fatal(err)
 	}
 	r.inbox()
-	if got := r.say("Liked “The Acme contract renews…”"); !strings.Contains(got, "reaction is held") {
+	if got := r.say("Liked “The Acme contract renews…”"); !strings.HasPrefix(got, "Locked.") {
 		t.Fatalf("locked reaction: %q", got)
 	}
 	r.ch.ForgetRecent()
-	r.say(r.totp())
-	if got := r.say("RUN"); !strings.Contains(got, "Nothing is held.") {
-		t.Fatalf("RUN after a deletion: %q", got)
+	if msgs, _, _ := r.ch.LocalHeld(); len(msgs) != 0 {
+		t.Fatalf("held after a deletion: %+v", msgs)
+	}
+	r.unlock()
+	if n := r.runHeld(); n != 0 {
+		t.Fatalf("ran %d after a deletion", n)
 	}
 	if g := r.agent.got(); len(g) != 0 {
 		t.Fatalf("agent got %q after a deletion", g)
@@ -265,8 +268,8 @@ func TestAnUnlistedFormOnAForgottenReplyIsNotChat(t *testing.T) {
 	noForgottenText(t, got)
 }
 
-// A reaction held after a deletion is worded after it, so RUN still
-// delivers it (#2360).
+// A reaction held after a deletion is worded after it, so the page's run
+// still delivers it (#2360).
 func TestAReactionHeldAfterAForgetIsDeliveredOnRun(t *testing.T) {
 	r := newRig(t, nil)
 	r.ch.ForgetRecent()
@@ -274,29 +277,29 @@ func TestAReactionHeldAfterAForgetIsDeliveredOnRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	if got := r.say("Liked “Lunch is booked for one…”"); !strings.Contains(got, "reaction is held") {
+	if got := r.say("Liked “Lunch is booked for one…”"); !strings.HasPrefix(got, "Locked.") {
 		t.Fatalf("locked reaction: %q", got)
 	}
-	r.say(r.totp())
-	r.say("RUN")
+	r.unlock()
+	r.runHeld()
 	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], "Lunch is booked") {
-		t.Fatalf("RUN delivered %q, want the held reaction", g)
+		t.Fatalf("the run delivered %q, want the held reaction", g)
 	}
 }
 
 // A deletion drops only a held reaction: a held message survives it and
-// RUN delivers it (#2360).
+// the page's run delivers it (#2360).
 func TestAHeldMessageSurvivesAForget(t *testing.T) {
 	r := newRig(t, nil)
 	const msg = "Please book the dentist for Tuesday morning."
-	if got := r.say(msg); !strings.Contains(got, "held") {
+	if got := r.say(msg); got != waitingReply {
 		t.Fatalf("locked message: %q", got)
 	}
 	r.ch.ForgetRecent()
-	r.say(r.totp())
-	r.say("RUN")
+	r.unlock()
+	r.runHeld()
 	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], msg) {
-		t.Fatalf("RUN delivered %q, want the held message", g)
+		t.Fatalf("the run delivered %q, want the held message", g)
 	}
 }
 
