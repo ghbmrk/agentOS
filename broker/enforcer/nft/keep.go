@@ -29,10 +29,12 @@ import (
 // listed again, or a device that takes over another's VLAN, starts empty.
 //
 // The fresh and recent sets (AllowSet) are carried for the kept addresses
-// only, each recent one for the time it has left, so a load neither cuts
-// a device that resolved a kept name a moment ago nor lets an answer it
-// carries take new connections for longer than AnswerTimeout from its
-// last Refresh (#4453).
+// only, each for the time it has left, so a load neither cuts a device
+// that resolved a kept name a moment ago nor lets an answer it carries
+// take new connections for longer than AnswerTimeout from its last
+// Refresh, or from its first add when no Refresh has moved it (#4453,
+// #5116). A running table from before the sets were added, or whose
+// fresh set had no timeout, carries none (ASSUMPTIONS ENF-set-ttl-2).
 func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 	text, devs, err := compile(d, l)
 	if err != nil {
@@ -61,22 +63,17 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 			for _, e := range all {
 				kept[e] = true
 			}
-			var fresh []netip.Addr
-			for _, e := range ofFamily(have[a.Fresh(v6)], v6) {
-				if kept[e] {
-					fresh = append(fresh, e)
+			for _, set := range []string{a.Fresh(v6), a.Recent(v6)} {
+				var rs []string
+				for _, r := range left[set] {
+					if a, err := netip.ParseAddr(r.addr); err == nil && kept[a] {
+						rs = append(rs, a.String()+" expires "+secs(int(r.left)))
+					}
 				}
-			}
-			w.elements(a.Fresh(v6), fresh)
-			var rs []string
-			for _, r := range left[a.Recent(v6)] {
-				if a, err := netip.ParseAddr(r.addr); err == nil && kept[a] {
-					rs = append(rs, a.String()+" expires "+secs(int(r.left)))
+				if len(rs) > 0 {
+					slices.Sort(rs)
+					w.line("add element inet " + Table + " " + set + " { " + strings.Join(rs, ", ") + " }")
 				}
-			}
-			if len(rs) > 0 {
-				slices.Sort(rs)
-				w.line("add element inet " + Table + " " + a.Recent(v6) + " { " + strings.Join(rs, ", ") + " }")
 			}
 		}
 	}
@@ -92,8 +89,9 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 // and takes it out of the fresh set, in one transaction. So an answer
 // takes new connections from the moment the resolver adds it until
 // AnswerTimeout after the next Refresh, and no longer: the daemon runs it
-// on a fixed short interval, never while a load is under way, since a
-// fresh answer never expires on its own. An address re-added to the
+// on a fixed short interval, never while a load is under way. A fresh
+// answer expires on its own only AnswerTimeout after its first add, which
+// bounds it when the step keeps failing (#5116). An address re-added to the
 // recent set is deleted and added again: adding an element a set holds
 // keeps its old expiry. An answer the resolver adds to the fresh set
 // while Refresh runs either stays there for the next one or is refreshed
@@ -110,11 +108,16 @@ func Refresh(d policy.Document, l Layout, running []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	have := elements(sets)
+	left := recent(sets)
 	w := &writer{}
 	for _, a := range allowSets(d, devs) {
 		for _, v6 := range []bool{false, true} {
-			fresh := ofFamily(have[a.Fresh(v6)], v6)
+			var fresh []netip.Addr
+			for _, r := range left[a.Fresh(v6)] {
+				if e, err := netip.ParseAddr(r.addr); err == nil && e.Zone() == "" && !e.Is4In6() && e.Is6() == v6 {
+					fresh = append(fresh, e)
+				}
+			}
 			if len(fresh) == 0 {
 				continue
 			}
@@ -157,7 +160,7 @@ type aging struct {
 }
 
 // recent is each listed set's elements that are a value with an expiry
-// and no timeout of their own, as a recent set holds them, each with the
+// and no timeout of their own, as a fresh or recent set holds them, each with the
 // time it has left; one with more than AnswerTimeout left, or none, is
 // left out, so it is not kept. Reload keeps only a value that parses as
 // a kept address (nft and Go print some addresses differently, such as
