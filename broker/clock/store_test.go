@@ -138,6 +138,20 @@ func TestTIM1SaveCrashLeavesOneWholeForm(t *testing.T) {
 		if want := step < rename; v.Restricted != want {
 			t.Fatalf("step %d: restricted = %v, want %v", step, v.Restricted, want)
 		}
+		// A restart reads the same whole form: the restriction saved before
+		// a write stopped ahead of the rename still restricts.
+		r.mu.Lock()
+		carrier := r.carrier
+		r.carrier = time.Time{}
+		r.mu.Unlock()
+		_, err = r.guard(t, func(c *Config) { c.StatePath = path }).Now(bg)
+		if got := errors.Is(err, ErrRestricted); got != (step < rename) {
+			t.Fatalf("step %d: restart restricted = %v (%v)", step, got, err)
+		}
+		r.mu.Lock()
+		r.carrier = carrier
+		r.mu.Unlock()
+		g = r.guard(t, func(c *Config) { c.StatePath = path })
 		g.saveStop = nil
 		g.Check(bg)
 		raw, err = os.ReadFile(path)
