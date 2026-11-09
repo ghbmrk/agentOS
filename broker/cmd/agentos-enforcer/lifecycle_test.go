@@ -371,7 +371,10 @@ type box struct {
 	// (failOn); saves counts the Saves since.
 	failNth map[string]int
 	saves   map[string]int
-	waits   deps
+	// after, when set, runs once a Save's new file is in place and its
+	// error fails the Save (fileStore.after).
+	after func(path string) error
+	waits deps
 	// offloads are the ports of each Offload call; offloadErr fails a
 	// call that names its port.
 	offloads   [][]string
@@ -431,6 +434,15 @@ func (x *box) open() (*Enforcer, error) {
 			return errors.New("disk: no space left")
 		}
 		return nil
+	}
+	dp.AfterFault = func(path string) error {
+		x.mu.Lock()
+		f := x.after
+		x.mu.Unlock()
+		if f == nil {
+			return nil
+		}
+		return f(path)
 	}
 	dp.HelloWait, dp.IdleWait, dp.FireWait = x.waits.HelloWait, x.waits.IdleWait, x.waits.FireWait
 	return open(x.cfg, x.dir, dp)
