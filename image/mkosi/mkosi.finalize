@@ -1648,7 +1648,7 @@ def unit_owned_dirs(root):
     a link (an alias), the file it names in a unit directory; a mask is never run. Its files are that,
     every drop-in systemd applies to its name, and for a template or an instance every drop-in of its
     template's other names, since each instance reads its own; any assignment counts, whatever a later
-    one sets."""
+    one sets. A value whose step holds a specifier counts the directory above that step."""
     root, dirs, out = str(root), unit_dirs(root)[0], []
     names, dropins = {}, {}
     for d in dirs:
@@ -1686,10 +1686,13 @@ def unit_owned_dirs(root):
                 for w in (w for v in ini_all(files, sec, key) for w in v.split()):
                     for part in w.split(":"):
                         steps = [x for x in part.split("/") if x and x != "."]
-                        if any(c in part for c in UNMODELLED) or ".." in steps:
+                        # A step with a specifier is any name (capsule@.service's capsules/%i), so the
+                        # directory above it counts; the root itself never does.
+                        named = next((k for k, x in enumerate(steps) if "%" in x), len(steps))
+                        if any(c in part for c in UNMODELLED.replace("%", "")) or ".." in steps or named == 0:
                             raise ValueError("%s=%s: the tree check does not model it" % (key, w))
                         if steps:
-                            found.add("/".join([top] + steps))
+                            found.add("/".join([top] + steps[:named]))
         except ValueError as e:
             out.append("%s: %s; the tree check never passes a unit whose directories it cannot read (#5167)" % (n, e))
     return sorted(found), out

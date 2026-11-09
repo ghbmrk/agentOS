@@ -358,6 +358,9 @@ class KeeperTreeTest(unittest.TestCase):
             "t@.service.d/user.conf": "[Service]\nUser=t\n",
             "s@.service": "[Service]\nStateDirectory=s\n",
             "s@a.service.d/user.conf": "[Service]\nDynamicUser=on\n",
+            # Stock systemd 257's capsule@.service: each instance's directory is any name under capsules.
+            "capsule@.service": "[Service]\nUser=c-%i\nDynamicUser=yes\nStateDirectory=capsules/%i\n"
+                                "RuntimeDirectory=capsules/%i/x\n",
         }
         for rel, text in units.items():
             write(self.root, SYSTEM + rel, text)
@@ -373,10 +376,10 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(err, [])
         self.assertEqual(sorted(set(got) - set(base[0])), sorted((
             "var/lib/u1", "var/lib/u1b", "var/lib/u1link", "var/cache/u2/c", "var/log/u2", "run/u3", "run/u4",
-            "run/u5", "run/t", "var/lib/s", "run/a")))
+            "run/u5", "run/t", "var/lib/s", "run/a", "var/lib/capsules", "run/capsules")))
         self.assertEqual(check.service_dirs(str(self.root)), set(check.SERVICE_DIRS) | set(got))
         # What the check does not model is refused, not passed.
-        for text in ("StateDirectory=%i", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b", "CacheDirectory=a\\b"):
+        for text in ("StateDirectory=%i", "StateDirectory=./%i/x", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b", "CacheDirectory=a\\b"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.service", "[Service]\nUser=x\n%s\n" % text)
                 try:
