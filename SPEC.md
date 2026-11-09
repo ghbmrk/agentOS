@@ -173,7 +173,6 @@ The kernel and the log are the trusted centre. Together with the clerks (§6) an
   | trip | the passkey (P3) |
   | limit | its window's end or an extension |
   | lockout | a code-generator unlock |
-  | clock | the clocks agreeing |
   | restore | the passkey, per key or class |
   | box | the box, once its cause clears |
 
@@ -693,7 +692,7 @@ The owner can control the home's software and its data flows, in and out, to the
   - **Trim.** With the owner's one-time approval of a window, such as 90 days, the box trims a provider to it by moving older items to the provider's own trash, only after each is verified in the archive and in both backups; the trash's own delay is the undo. The default is archive on, trim off.
   - **An exit.** The archive keeps standard formats (raw messages and files, with an SQLite index), and a documented recipe opens the backups on any Linux machine with the owner's keys and without agentOS (A8).
   - End-to-end encryption is turned on where a provider offers it, and the graph counts which providers can read each kind of data. STATUS shows, for each provider, what leaving it would take.
-- **TIM-1** Time comes from network time when online, with carrier network time (from the modem) as a cross-check. Large disagreements pause time-sensitive checks (LOG-8).
+- **TIM-1** Time comes from network time when online, cross-checked by the modem's carrier time. Widenings wait until the earliest credible time passes their due; narrowings fire once the latest does (LOG-8).
 
 ---
 
