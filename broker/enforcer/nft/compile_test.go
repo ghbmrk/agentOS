@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/fixture.nft")
@@ -41,9 +42,7 @@ func TestGolden(t *testing.T) {
 	if got != string(want) {
 		t.Fatalf("ruleset differs from testdata/fixture.nft (run with -update and review the diff):\n%s", got)
 	}
-	if !haveNetns(t) {
-		return
-	}
+	netnstest.Ready(t, combined, []string{"-rn"}, "nft")
 	cmd := exec.Command("unshare", "-rn", "nft", "-c", "-f", "-")
 	cmd.Stdin = strings.NewReader(got)
 	if out, err := cmd.CombinedOutput(); err != nil {
