@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/call"
@@ -217,28 +218,33 @@ func TestNoClipAfterAudio(t *testing.T) {
 	r.hangup()
 }
 
-// Repeated, since which of two ready cases a select takes is random.
+// Repeated, since which of two ready cases a select takes is random. Each
+// run is a bubble (synctest), so the sentence is surely waiting on its send
+// when the deadline falls; a sleep only made that likely (#5130).
 func TestReadySentenceAlwaysGoesBeforeTheClip(t *testing.T) {
 	for i := 0; i < 20; i++ {
-		r := newRig(t, fixed("Here it is."))
-		moment := make(chan time.Time, 1)
-		moment <- time.Time{}
-		ready := make(chan struct{})
-		r.cfg.Synthesizer = synthFunc(func(_ context.Context, s string) ([]byte, error) {
-			close(ready)
-			return []byte("S:" + s), nil
+		synctest.Test(t, func(t *testing.T) {
+			r := newRig(t, fixed("Here it is."))
+			r.bubble = true
+			moment := make(chan time.Time, 1)
+			moment <- time.Time{}
+			ready := make(chan struct{})
+			r.cfg.Synthesizer = synthFunc(func(_ context.Context, s string) ([]byte, error) {
+				close(ready)
+				return []byte("S:" + s), nil
+			})
+			r.cfg.After = func(time.Duration) <-chan time.Time {
+				<-ready
+				synctest.Wait() // the sentence is waiting on its send
+				return moment
+			}
+			r.run(call.P2)
+			r.say("q")
+			if got := r.next(); got != "S:Here it is." {
+				t.Fatalf("run %d: first audio %q", i, got)
+			}
+			r.hangup()
 		})
-		r.cfg.After = func(time.Duration) <-chan time.Time {
-			<-ready
-			time.Sleep(5 * time.Millisecond) // the sentence is waiting on its send
-			return moment
-		}
-		r.run(call.P2)
-		r.say("q")
-		if got := r.next(); got != "S:Here it is." {
-			t.Fatalf("run %d: first audio %q", i, got)
-		}
-		r.hangup()
 	}
 }
 
