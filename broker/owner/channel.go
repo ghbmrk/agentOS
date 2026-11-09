@@ -704,7 +704,7 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		case res == strongWrong:
 			return route{replies: []string{"Wrong code." + lockNote(locked)}, limited: true}
 		}
-		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}, limited: true}
+		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}}
 	}
 	return c.waitLocked(rest, now)
 }
