@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -985,6 +987,264 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	}
 	if !strings.Contains(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again") {
 		t.Fatalf("the end not logged:\n%s", x.logText())
+	}
+}
+
+// TestMergingReloadRetried (ENF-l-16, #5103 item 2): a port that starts
+// merging asks for a full load; while that load keeps failing, a reading
+// that finds the ports unchanged keeps the ask, so the load still comes
+// once the firewall takes it, with the port's caps spent.
+func TestMergingReloadRetried(t *testing.T) {
+	x, _, _ := capped(t)
+	core := x.cfg.Layout.Core
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	refuse := func() { x.fire.mu.Lock(); x.fire.fail = true; x.fire.mu.Unlock() }
+	n := loads()
+	x.merges(core, errors.New("offload: core0: rx-gro on"))
+	refuse()
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the load was not refused")
+	}
+	refuse() // the next tick's retry fails too, and the reading after it finds no change
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the retry was not refused")
+	}
+	x.advance(time.Second)
+	if loads() != n+1 {
+		t.Fatalf("%d full loads once the firewall takes one again, want 1: a reading with no change dropped the ask", loads()-n)
+	}
+	if c, _ := spentIn(t, x); !c {
+		t.Fatal("the core's caps are not spent while its port merges")
+	}
+}
+
+// TestServedInterfacesHeld (ENF-net-ra-off, #4222; ENF-l-21): the served
+// interfaces are set up and checked before the first load starts any
+// resolver instance, and again at every reading. While the check fails
+// every instance stops (the firewall still loads), the failure is logged
+// once, and the instances start again on the policy's files once it
+// passes; a start with the check failing runs no instance at all.
+func TestServedInterfacesHeld(t *testing.T) {
+	x, _ := enrolled(t, false)
+	want, err := dns.Generate(home(), x.cfg.Layout, x.cfg.DNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := func() int { x.mu.Lock(); defer x.mu.Unlock(); return x.served }
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	if calls() == 0 || len(x.dns.last().Listed) == 0 {
+		t.Fatalf("%d checks, files %v: the resolver runs unchecked or not at all", calls(), x.dns.last())
+	}
+	n, l := calls(), loads()
+	x.advance(readEvery)
+	if calls() != n+1 || loads() != l {
+		t.Fatalf("a reading made %d checks and %d loads, want 1 and 0", calls()-n, loads()-l)
+	}
+
+	bad := "served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24"
+	x.mu.Lock()
+	x.servedErr = errors.New(bad)
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatalf("%d loads at the reading that found the change, want 1", loads()-l)
+	}
+	if got := x.dns.last(); len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("instances still run with a served interface not as set up: %v", got)
+	}
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatal("a full load with nothing changed")
+	}
+	if c := strings.Count(x.logText(), "dns: a served interface is not as set up, every resolver instance stops until it is: "+bad); c != 1 {
+		t.Fatalf("the failure logged %d times:\n%s", c, x.logText())
+	}
+
+	x.restart()
+	if got := x.dns.last(); len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("a start with the check failing ran instances: %v", got)
+	}
+	x.mu.Lock()
+	x.servedErr = nil
+	x.mu.Unlock()
+	l = loads()
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatalf("%d loads once the interfaces pass again, want 1", loads()-l)
+	}
+	if got := x.dns.last(); !slices.Equal(got.Listed, want.Listed) || got.People != want.People || got.DHCP != want.DHCP {
+		t.Fatal("the resolver did not start again on the policy's files")
+	}
+	if c := strings.Count(x.logText(), "dns: the served interfaces are as set up again, the resolver starts"); c != 1 {
+		t.Fatalf("the end logged %d times:\n%s", c, x.logText())
+	}
+}
+
+// TestHold (ENF-net-ra-off, #4222): hold turns router advertisements and
+// redirects off on each served interface there and on "default", and
+// reads them back; an interface not there yet is passed; every address on
+// a served interface must lie in its Net's prefixes, no wider, or be the
+// kernel's IPv6 link-local one. A kernel with no IPv6 has only the IPv4
+// setting. A name that would reach outside the interface's directory, or
+// set every interface's value, is refused.
+func TestHold(t *testing.T) {
+	keys := []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
+	box := func(v6 bool, ifaces ...string) string {
+		root := t.TempDir()
+		for _, i := range append([]string{"default"}, ifaces...) {
+			for _, k := range keys {
+				if !v6 && strings.HasPrefix(k, "ipv6") {
+					continue
+				}
+				p := filepath.Join(root, fmt.Sprintf(k, i))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("1\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return root
+	}
+	set := func(root string, v6 bool, ifaces ...string) {
+		t.Helper()
+		for _, i := range append([]string{"default"}, ifaces...) {
+			for _, k := range keys {
+				if !v6 && strings.HasPrefix(k, "ipv6") {
+					continue
+				}
+				if b, err := os.ReadFile(filepath.Join(root, fmt.Sprintf(k, i))); err != nil || string(b) != "0\n" {
+					t.Fatalf("%s on %s: %q %v", k, i, b, err)
+				}
+			}
+		}
+	}
+	p := netip.MustParsePrefix
+	nets := []dns.Net{
+		{Iface: "own0", Prefix4: p("10.10.0.0/24"), Prefix6: p("fd00:10::/64"), DHCP: true},
+		{Iface: "ap0.101", Prefix4: p("10.101.0.0/24")},
+		{Iface: "ap0.102", Prefix4: p("10.102.0.0/24")}, // not made yet
+	}
+	have := map[string][]netip.Prefix{
+		"own0":    {p("10.10.0.1/24"), p("fd00:10::1/64"), p("fe80::1/64")},
+		"ap0.101": {p("10.101.0.1/24"), p("10.101.0.9/32")},
+	}
+	addrs := func(i string) ([]netip.Prefix, error) {
+		a, ok := have[i]
+		if !ok {
+			return nil, errors.New("asked for " + i)
+		}
+		return a, nil
+	}
+	root := box(true, "own0", "ap0.101")
+	if err := hold(root, nets, addrs); err != nil {
+		t.Fatal(err)
+	}
+	set(root, true, "own0", "ap0.101")
+	if _, err := os.Stat(filepath.Join(root, "ipv4/conf/ap0.102")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an interface not there yet was made: %v", err)
+	}
+
+	root = box(false, "own0", "ap0.101")
+	if err := hold(root, nets, addrs); err != nil {
+		t.Fatalf("no IPv6: %v", err)
+	}
+	set(root, false, "own0", "ap0.101")
+
+	for _, tc := range []struct {
+		name string
+		addr netip.Prefix
+		want string
+	}{
+		{"another prefix", p("10.99.0.1/24"), "served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24 and fd00:10::/64"},
+		{"a wider prefix", p("10.10.0.1/16"), "holds 10.10.0.1/16"},
+		{"another IPv6 prefix", p("2001:db8::1/64"), "holds 2001:db8::1/64"},
+		{"a wider IPv6 prefix", p("fd00:10::1/48"), "holds fd00:10::1/48"},
+		{"a wider link-local prefix", p("fe80::1/10"), "holds fe80::1/10"},
+		{"a link-local address outside fe80::/64", p("fe80:1::1/64"), "holds fe80:1::1/64"},
+	} {
+		have["own0"] = []netip.Prefix{p("10.10.0.1/24"), tc.addr}
+		if err := hold(box(true, "own0", "ap0.101"), nets, addrs); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+	have["ap0.101"] = []netip.Prefix{p("10.101.0.1/24"), p("10.102.0.1/24")}
+	if err := hold(box(true, "own0", "ap0.101"), nets[1:], addrs); err == nil || !strings.Contains(err.Error(), "served interface ap0.101 holds 10.102.0.1/24, outside 10.101.0.0/24") || strings.Contains(err.Error(), " and ") {
+		t.Errorf("an IPv4-only net: %v", err)
+	}
+	delete(have, "ap0.101")
+	if err := hold(box(true, "own0", "ap0.101"), nets[1:], addrs); err == nil || !strings.Contains(err.Error(), "served interface ap0.101: addresses: asked for ap0.101") {
+		t.Errorf("addresses unreadable: %v", err)
+	}
+	for _, name := range []string{"", ".", "..", "../x", "all", "default", "a/b", "a\x00b"} {
+		if err := hold(box(true), []dns.Net{{Iface: name, Prefix4: p("10.1.0.0/24")}}, addrs); err == nil || !strings.Contains(err.Error(), "not an interface name") {
+			t.Errorf("interface %q: %v", name, err)
+		}
+	}
+	// A setting that cannot be written, and a settings tree that is not
+	// one (ENOTDIR, not "not there yet").
+	root = box(true, "own0")
+	key := filepath.Join(root, "ipv6/conf/own0/accept_ra")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(key, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], func(string) ([]netip.Prefix, error) { return nil, nil }); err == nil || !strings.Contains(err.Error(), "accept_ra") {
+		t.Errorf("an unwritable setting: %v", err)
+	}
+	// An interface's settings that cannot be read (a loop, ELOOP) and an
+	// IPv6 tree that cannot be: each fails, never reads as "not there".
+	root = box(true)
+	loop := filepath.Join(root, "ipv4/conf/own0")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], addrs); err == nil {
+		t.Error("an interface whose settings cannot be read passed")
+	}
+	root = box(true)
+	v6 := filepath.Join(root, "ipv6")
+	if err := os.RemoveAll(v6); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v6, v6); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nil, addrs); err == nil {
+		t.Error("an IPv6 tree that cannot be read passed")
+	}
+}
+
+// TestIfaceAddrs: the kernel's addresses with their prefix lengths, read
+// from loopback; a missing interface is an error.
+func TestIfaceAddrs(t *testing.T) {
+	got, err := ifaceAddrs("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, netip.MustParsePrefix("127.0.0.1/8")) {
+		t.Fatalf("lo: %v", got)
+	}
+	if got, err := ifaceAddrs("agentos-none0"); err == nil {
+		t.Fatalf("a missing interface read: %v", got)
+	}
+	got, err = prefixes([]net.Addr{&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}, &net.IPNet{IP: net.IPv4(10, 1, 0, 1), Mask: net.CIDRMask(24, 32)}})
+	if err != nil || !slices.Equal(got, []netip.Prefix{netip.MustParsePrefix("fe80::1/64"), netip.MustParsePrefix("10.1.0.1/24")}) {
+		t.Fatalf("prefixes: %v %v", got, err)
+	}
+	for _, a := range []net.Addr{
+		&net.IPAddr{IP: net.IPv4(10, 1, 0, 1)},
+		&net.IPNet{IP: net.IP{10, 1, 0}, Mask: net.CIDRMask(24, 32)},
+		&net.IPNet{IP: net.IPv4(10, 1, 0, 1), Mask: net.IPMask{255, 0, 255, 0}},
+	} {
+		if got, err := prefixes([]net.Addr{a}); err == nil {
+			t.Errorf("%#v read as %v", a, got)
+		}
 	}
 }
 
