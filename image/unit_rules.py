@@ -42,7 +42,8 @@ writes are read like any other.
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
 prints them with CONTROL planted, which the lint must refuse; --fixture ROOT PACKAGED prints a fixture
 tree's records under the runner's systemd, with ROOT/usr over the runner's /usr (its unit directories
-hidden) and PACKAGED a file listing, one per line, the tree's files that count as a package's.
+hidden) and PACKAGED a file listing, one per line, the tree's files that count as a package's, and as
+"listed PATH" a path a package lists that the tree no longer holds as installed.
 """
 import hashlib
 import json
@@ -326,7 +327,45 @@ def fed_services(shown, pkgsock):
     # an instance's template is fed too: the lint's manager shows only the lint's instance of it, and
     # files of ours in the template's directories reach every instance (#5072 round 4)
     prefixes |= {u.split("@")[0] + "@" for u in fed if "@" in u}
-    return lambda u: u.endswith(".service") and (u in fed or u.startswith(tuple(prefixes)))
+
+    def is_fed(u):
+        return u.endswith(".service") and (u in fed or u.startswith(tuple(prefixes)))
+    is_fed.names, is_fed.prefixes = {u for u in fed if u.endswith(".service")}, prefixes
+    return is_fed
+
+
+def unread(view, shown, dirs, packaged):
+    """A mask for each unit file or drop-in a package lists (packaged.listed) that systemd does not read as
+    installed: changed, no longer a regular file, reached by a link, or gone while a unit still loads under
+    its name or its directory is shared. Provenance by current bytes alone makes a changed one ours
+    (#5072 round 5), so this holds it from the package's side. A unit removed whole, fragment and
+    drop-ins, with nothing loading under its name (drop.py's dpkg-db-backup), hides nothing."""
+    loads = set()
+    for s in shown.values():
+        if s["LoadState"] in ("loaded", "bad-setting", "error"):
+            for n in words(s, "Names"):
+                base, ext = os.path.splitext(n)
+                loads.add(n)
+                if "@" in base:
+                    loads.add(base.split("@")[0] + "@" + ext)  # any instance loads its template's files
+    top, out = set(dirs) | {view.resolve(d)[0] for d in UNIT_DIRS}, []  # a listed directory may be gone too
+    for p in sorted(getattr(packaged, "listed", ())):
+        parent, base = os.path.split(p)
+        if parent in top and base.endswith(TYPES):
+            name = base
+        elif os.path.dirname(parent) in top and parent.endswith(".d") and base.endswith(".conf"):
+            name = os.path.basename(parent)[:-2]
+        else:
+            continue
+        final, links = view.resolve(p)
+        if view.lstat(p) is None:
+            n = name if "." in name else "." + name
+            if name not in loads and (parent in top or not shared(n)):
+                continue
+        elif not links and view.kind(final) == 0o100000 and packaged(final):
+            continue
+        out.append({"path": p, "hides": p})
+    return out
 
 
 def records(view, shown, dirs, prov):
@@ -381,10 +420,10 @@ def records(view, shown, dirs, prov):
                 if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
-    # A .conf of ours (a /dev/null link, an empty file, any file) named as a package's drop-in of its type,
-    # or at a path a package lists, hides that file's lines, say SocketMode= or User= (#5072 round 4)
+    # A .conf of ours (a /dev/null link, an empty file, any file) named as a package's drop-in of its type
+    # hides that file's lines, say SocketMode= or User= (#5072 round 4); a unit file a package lists and
+    # systemd does not read as installed is unread() below
     masks, pkgdrop, ourdrop = [], {}, []
-    listed = getattr(prov.packaged, "listed", lambda p: False)
     for d in dirs:
         for e in (e for e in view.entries(d) if e.endswith(".d")):
             ext = os.path.splitext(e[:-2])[1] or "." + e[:-2]  # service.d: .service
@@ -393,15 +432,20 @@ def records(view, shown, dirs, prov):
                 final, links = view.resolve(p)
                 if prov.ours(p):
                     ourdrop.append((ext, c, p))
-                    if not links and listed(final):
-                        masks.append({"path": p, "hides": final})
                 elif view.kind(final) == 0o100000:
                     pkgdrop.setdefault((ext, c), []).append(p)
     masks += [{"path": p, "hides": q} for ext, c, p in ourdrop for q in pkgdrop.get((ext, c), [])]
+    masks += unread(view, shown, dirs, prov.packaged)
     fed = fed_services(shown, pkgsock)
     for rec in recs:
         rec["package"] = rec["unit"] in pkgsock
         rec["fed"] = fed(rec["unit"])
+    # every name a package's socket or a service it feeds goes by, for a [Unit] line of ours in any unit
+    # that names one (JoinsNamespaceOf=, Conflicts=: systemd adds the edge on both units, #5072 round 5)
+    held = set(fed.names)
+    for s in shown.values():
+        if s["Id"] in pkgsock:
+            held |= set(words(s, "Names"))
     fstab = None
     final, _ = view.resolve("/etc/fstab")
     if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):
@@ -414,7 +458,8 @@ def records(view, shown, dirs, prov):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks}
+    return {"units": recs, "fstab": fstab, "masks": masks,
+            "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
 
 
 def lint(root, usr, cmdline, packaged, plant_files=None):
@@ -483,7 +528,7 @@ def dpkg_packaged(out):
                 return False
             with open(view.host(p), "rb") as f:
                 return hashlib.md5(f.read()).hexdigest() in want[p]
-        packaged.listed = want.__contains__  # a path a package installed, whatever it now holds
+        packaged.listed = set(want)  # every path a package installed, whatever it now holds
         return packaged
     return for_view
 
@@ -511,12 +556,15 @@ def fixture(root, packaged_list):
               "usr/local/lib/systemd/system-generators"):
         os.setxattr(root / d, "trusted.overlay.opaque", b"y", follow_symlinks=False)
     os.chmod(root, 0o755)
-    listed = {l for l in pathlib.Path(packaged_list).read_text().splitlines() if l}
+    lines = [l for l in pathlib.Path(packaged_list).read_text().splitlines() if l]
+    listed = {l for l in lines if not l.startswith("listed ")}
+    packaged = lambda p: p in listed  # noqa: E731
+    packaged.listed = listed | {l[len("listed "):] for l in lines if l.startswith("listed ")}
     with tempfile.TemporaryDirectory() as m:
         subprocess.run(["mount", "-t", "overlay", "-o", "ro,lowerdir=%s:/usr" % (root / "usr"), "overlay", m],
                        check=True)
         try:
-            return lint(root, m, "", lambda view: lambda p: p in listed)
+            return lint(root, m, "", lambda view: packaged)
         finally:
             subprocess.run(["umount", m], check=False)
 

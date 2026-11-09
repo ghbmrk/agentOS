@@ -902,6 +902,14 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a conflicts line of ours on a fed implicit service":          {with(dbus, etc+"dbus.service.d/z.conf", "[Unit]\nConflicts=agentos-x.service\n"), ourEtc, `Conflicts=agentos-x.service: a [Unit] line of ours`},
 		"a mask of ours on a package socket's drop-in":                {with(udev, lib+"systemd-udevd-control.socket.d/p.conf", "[Socket]\nSocketMode=0600\n", etc+"systemd-udevd-control.socket.d/p.conf", "-> /dev/null"), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd-control.socket.d/p.conf`},
 		"an empty file of ours on a fed service's drop-in":            {with(udev, lib+"systemd-udevd.service.d/p.conf", "[Service]\nUser=systemd-x\n", etc+"systemd-udevd.service.d/p.conf", ""), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd.service.d/p.conf`},
+		// #5072 Security round 5 point 2: systemd adds the edge on both
+		// units, so a unit of ours naming one is the drop-in's route.
+		"a unit of ours joining a fed service's namespace":      {with(dbus, etc+"agentos-x.service", "[Unit]\nJoinsNamespaceOf=dbus.service\n[Service]\nUser=agentos-x\nPrivateTmp=yes\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `JoinsNamespaceOf=dbus.service: a [Unit] line of ours naming a package's socket`},
+		"a unit of ours conflicting with a package's socket":    {with(udev, etc+"agentos-x.service", "[Unit]\nConflicts=systemd-udevd-control.socket\n"+ourX), ourEtc, `Conflicts=systemd-udevd-control.socket: a [Unit] line of ours naming`},
+		"a unit of ours propagating stop to a fed service":      {with(udev, etc+"agentos-x.service", "[Unit]\nPropagatesStopTo=systemd-udevd.service\n"+ourX), ourEtc, `PropagatesStopTo=systemd-udevd.service: a [Unit] line of ours naming`},
+		"a unit of ours propagating reload to a fed service":    {with(udev, etc+"agentos-x.service", "[Unit]\nPropagatesReloadTo=systemd-udevd.service\n"+ourX), ourEtc, `PropagatesReloadTo=systemd-udevd.service: a [Unit] line of ours naming`},
+		"a unit of ours naming a fed template's other instance": {with(inst, lib+"bar@.service", user, etc+"agentos-x.service", "[Unit]\nConflicts=bar@y.service\n"+ourX), ourEtc, `Conflicts=bar@y.service: a [Unit] line of ours naming`},
+		"a unit of ours naming a unit by a specifier":           {with(udev, etc+"agentos-x.service", "[Unit]\nConflicts=%p.socket\n"+ourX), ourEtc, `Conflicts=%p.socket: a [Unit] line of ours naming`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -944,10 +952,44 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a package's implicit service with unit lines of ours":           {with(dbus, etc+"dbus.service.d/z.conf", "[Unit]\nAfter=agentos-x.service\n"), ourEtc},
 		// Any [Unit] line of ours on a service no package's socket feeds.
 		"an unfed package service with unit lines of ours": {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Unit]\nJoinsNamespaceOf=agentos-x.service\nConditionPathExists=/run/x\nBindsTo=agentos-x.service\n"}, ourEtc},
+		// A unit of ours may order itself after a package's socket, and
+		// name units of ours or unfed ones in any [Unit] key.
+		"a unit of ours with edges to units not held": {with(udev, lib+"systemd-x.service", user, etc+"agentos-y.service", ourX, etc+"agentos-x.service", "[Unit]\nDescription=x %i\nAfter=systemd-udevd-control.socket\nRequires=systemd-udevd.service\nConflicts=agentos-y.service systemd-x.service\nJoinsNamespaceOf=agentos-y.service\n"+ourX), ourEtc},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestUnitRulesListedUnderSystemd: a unit file or drop-in a package lists
+// must be read as installed, or its unit gone whole (#5072 round 5:
+// provenance by current bytes made one changed in place ours, and a
+// deleted drop-in left no file of ours to refuse).
+func TestUnitRulesListedUnderSystemd(t *testing.T) {
+	const lib = "/usr/lib/systemd/system/"
+	all := func(string) bool { return true }
+	none := func(string) bool { return false }
+	root := "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n"
+	udev := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0600\n"}
+	open := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"}
+	for name, c := range map[string]struct {
+		files  map[string]string
+		ours   func(string) bool
+		listed []string
+		want   string
+	}{
+		"a package's socket and service replaced in place": {open, all, []string{lib + "systemd-udevd-control.socket", lib + "systemd-udevd.service"}, `systemd-udevd-control.socket: a package's unit file or drop-in that systemd does not read as the package installed it`},
+		"a package socket's drop-in deleted":               {udev, none, []string{lib + "systemd-udevd-control.socket.d/p.conf"}, `systemd-udevd-control.socket.d/p.conf: a package's unit file`},
+		"a package's fragment deleted and supplied again":  {map[string]string{lib + "systemd-udevd.service": root, "/etc/systemd/system/systemd-udevd-control.socket": open[lib+"systemd-udevd-control.socket"]}, func(p string) bool { return strings.HasPrefix(p, "/etc/") }, []string{lib + "systemd-udevd-control.socket"}, `/usr/lib/systemd/system/systemd-udevd-control.socket: a package's unit file`},
+		"a unit removed whole":                             {udev, none, []string{lib + "dpkg-db-backup.service", lib + "dpkg-db-backup.timer"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := underSystemdListed(t, c.files, c.ours, c.listed)
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+				t.Fatalf("got %v, want %q", err, c.want)
 			}
 		})
 	}
@@ -958,6 +1000,14 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 // prints to the unit rules. It skips the test when not root or with no
 // systemd, unless AGENTOS_REQUIRE_SYSTEMD=1.
 func underSystemd(t *testing.T, files map[string]string, ours func(string) bool) error {
+	t.Helper()
+	return underSystemdListed(t, files, ours, nil)
+}
+
+// underSystemdListed is underSystemd with listed, paths a package lists
+// that files does not hold as the package installed them (changed,
+// replaced or gone).
+func underSystemdListed(t *testing.T, files map[string]string, ours func(string) bool, listed []string) error {
 	t.Helper()
 	if os.Geteuid() != 0 || !hasSystemd() {
 		if os.Getenv("AGENTOS_REQUIRE_SYSTEMD") == "1" {
@@ -977,6 +1027,9 @@ func underSystemd(t *testing.T, files map[string]string, ours func(string) bool)
 		}
 	}
 	sort.Strings(packaged)
+	for _, p := range listed {
+		packaged = append(packaged, "listed "+p)
+	}
 	list := filepath.Join(dir, "packaged")
 	if err := os.WriteFile(list, []byte(strings.Join(packaged, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2384,6 +2437,30 @@ type unitCheck struct {
 	pkgSockets map[string]bool
 	// Services a package's socket hands its connections or fds to.
 	pkgFed map[string]bool
+	// Every name of those sockets and services, and the pre@ prefixes of
+	// fed templates (unit_rules.py's held).
+	held    map[string]bool
+	heldPre []string
+}
+
+// namesHeld returns the first unit a [Unit] value names that is a package's
+// socket or a service it feeds (c.held), or that holds a specifier, which
+// this cannot resolve; "" if none.
+func (c *unitCheck) namesHeld(v string) string {
+	for _, w := range strings.Fields(v) {
+		if path.Ext(w) != ".service" && path.Ext(w) != ".socket" {
+			continue // held holds only sockets and services
+		}
+		if c.held[w] || strings.Contains(w, "%") {
+			return w
+		}
+		for _, p := range c.heldPre {
+			if strings.HasPrefix(w, p) && path.Ext(w) == ".service" {
+				return w
+			}
+		}
+	}
+	return ""
 }
 
 // orderKeys are the only [Unit] keys a line of ours may set on a package's
@@ -2435,6 +2512,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	ours := ""                    // the first line of the type's section not trusted
 	takes := ""                   // the first Sockets= line not trusted
 	unitOurs := ""                // the first [Unit] line not trusted, but an ordering one (orderKeys)
+	edgeOurs := ""                // the first such line naming a package's socket or a service it feeds
 	pkgFile := false              // a file in trusted
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
@@ -2454,6 +2532,9 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			}
 			if unitOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] {
 				unitOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
+			if edgeOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] && c.namesHeld(v) != "" {
+				edgeOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
 			}
 			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {
 				takes = filepath.ToSlash(rel) + ": " + k + "=" + v
@@ -2519,6 +2600,13 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	pkgSocket := section == "Socket" && (alone || pkgFile || c.pkgSockets[name])
 	if unitOurs != "" && (pkgSocket || section == "Service" && c.pkgFed[name]) {
 		return fmt.Errorf("%s: a [Unit] line of ours on a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", unitOurs)
+	}
+	// systemd puts an edge on both units (JoinsNamespaceOf= is symmetric,
+	// Conflicts= adds ConflictedBy=, PropagatesStopTo= StopPropagatedFrom=),
+	// so the same keys are held from our side too, in every unit (#5072
+	// Security round 5 point 2).
+	if edgeOurs != "" {
+		return fmt.Errorf("%s: a [Unit] line of ours naming a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", edgeOurs)
 	}
 	if alone && takes != "" {
 		return fmt.Errorf("%s: a file read alone may not make a service take a socket", takes)
@@ -2672,6 +2760,10 @@ type unitRecords struct {
 		Path  string `json:"path"`
 		Hides string `json:"hides"`
 	} `json:"masks"`
+	Held struct {
+		Names    []string `json:"names"`
+		Prefixes []string `json:"prefixes"`
+	} `json:"held"`
 	Want string `json:"want"`
 }
 
@@ -2692,7 +2784,11 @@ func builtUnits(recs unitRecords, dir string) error {
 		}
 		return f, os.WriteFile(f, []byte(text), 0o644)
 	}
-	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}, pkgFed: map[string]bool{}}
+	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}, pkgFed: map[string]bool{},
+		held: map[string]bool{}, heldPre: recs.Held.Prefixes}
+	for _, n := range recs.Held.Names {
+		c.held[n] = true
+	}
 	for _, u := range recs.Units {
 		c.pkgSockets[u.Unit] = c.pkgSockets[u.Unit] || u.Package
 		c.pkgFed[u.Unit] = c.pkgFed[u.Unit] || u.Fed
@@ -2720,9 +2816,15 @@ func builtUnits(recs unitRecords, dir string) error {
 			errs = append(errs, fmt.Errorf("%s: %v", u.Unit, err))
 		}
 	}
-	// A file of ours named as a package's drop-in drops that file's lines,
-	// whatever it holds: a closed form for every unit (#5072 round 4).
+	// A file of ours named as a package's drop-in, or a unit file a package
+	// lists that systemd does not read as installed (changed, replaced or
+	// gone while its unit loads), drops the package's lines: a closed form
+	// for every unit (#5072 rounds 4 and 5).
 	for _, m := range recs.Masks {
+		if m.Path == m.Hides {
+			errs = append(errs, fmt.Errorf("%s: a package's unit file or drop-in that systemd does not read as the package installed it", m.Path))
+			continue
+		}
 		errs = append(errs, fmt.Errorf("%s: a file of ours hides a package's drop-in, %s, and with it the package's lines", m.Path, m.Hides))
 	}
 	if recs.Fstab != nil {

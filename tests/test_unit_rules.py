@@ -366,12 +366,61 @@ class RecordsTest(unittest.TestCase):
             v = tree(d, files)
             dirs = r.unit_dirs(v)
             packaged = lambda p: p.startswith("/usr/") and p != LIB + "z.service.d/e.conf"  # noqa: E731
-            packaged.listed = lambda p: p.startswith("/usr/")
+            packaged.listed = {p for p in files if p.startswith("/usr/")}
             got = r.records(v, {}, dirs, r.Provenance(v, dirs, packaged))
             self.assertEqual(sorted((m["path"], m["hides"]) for m in got["masks"]), [
                 (ETC + "u.socket.d/p.conf", LIB + "u.socket.d/p.conf"),
                 (ETC + "v.service.d/q.conf", LIB + "service.d/q.conf"),
                 (LIB + "z.service.d/e.conf", LIB + "z.service.d/e.conf")])
+
+    def test_a_unit_file_a_package_lists_is_read_as_installed(self):
+        # #5072 round 5 (Security 1, L3 1): provenance by current bytes made a package's unit file changed in
+        # place, or deleted and supplied again, ours, and a deleted drop-in left no file of ours to see.
+        # Every listed unit file and drop-in must be there, a regular file as installed, unless its unit is
+        # gone whole (drop.py's dpkg-db-backup)
+        keep = "kept"
+        for name, files, units, listed, want in (
+                ("a fragment changed in place", {LIB + "u.socket": "edited"}, {"u.socket": LIB + "u.socket"},
+                 [LIB + "u.socket"], [LIB + "u.socket"]),
+                ("a fragment deleted and supplied again", {ETC + "u.service": "ours"}, {"u.service": ETC + "u.service"},
+                 [LIB + "u.service"], [LIB + "u.service"]),
+                ("a template fragment deleted while an instance loads", {ETC + "t@.service": "ours"},
+                 {"t@agentos-unit-lint.service": ETC + "t@.service"}, [LIB + "t@.service"], [LIB + "t@.service"]),
+                ("a drop-in deleted", {LIB + "u.socket": keep}, {"u.socket": LIB + "u.socket"},
+                 [LIB + "u.socket", LIB + "u.socket.d/p.conf"], [LIB + "u.socket.d/p.conf"]),
+                ("a drop-in made a directory", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf/x": ""},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"],
+                 [LIB + "u.socket.d/p.conf"]),
+                ("a drop-in made a link", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf": "-> /dev/null"},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"],
+                 [LIB + "u.socket.d/p.conf"]),
+                ("a shared drop-in deleted", {}, {}, [LIB + "service.d/p.conf"], [LIB + "service.d/p.conf"]),
+                ("a unit removed whole", {}, {}, [LIB + "b.service", LIB + "b.timer", LIB + "b.service.d/p.conf"], []),
+                ("a unit kept as installed", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf": keep},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"], []),
+                ("a path outside the unit directories", {}, {}, ["/usr/lib/systemd/network/80-x.network",
+                                                                 LIB + "a.wants/b.service"], [])):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, files)
+                dirs = r.unit_dirs(v)
+                packaged = lambda p: v.kind(p) == 0o100000 and pathlib.Path(v.host(p)).read_text() == keep  # noqa: E731
+                packaged.listed = set(listed)
+                got = r.records(v, shown({n: ("loaded", f, []) for n, f in units.items()}), dirs,
+                                r.Provenance(v, dirs, packaged))
+                self.assertEqual(sorted(m["path"] for m in got["masks"] if m["path"] == m["hides"]), want)
+
+    def test_held_names_every_package_socket_and_fed_service(self):
+        # #5072 round 5 (Security 2): a [Unit] line of ours in any unit naming one of these adds an edge on it
+        files = {LIB + "s.socket": "p", LIB + "s.service": "p", LIB + "q@.socket": "p", ETC + "o.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"s.socket": ("loaded", LIB + "s.socket", [], ["t.socket"]),
+                           "s.service": ("loaded", LIB + "s.service", []), "o.service": ("loaded", ETC + "o.service", [])})
+            units["s.socket"]["Triggers"] = units["t.socket"]["Triggers"] = "s.service"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(got["held"]["names"], ["s.service", "s.socket", "t.service", "t.socket"])
+            self.assertIn("s@", got["held"]["prefixes"])
 
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
