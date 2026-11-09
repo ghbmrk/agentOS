@@ -1,6 +1,6 @@
 package main
 
-// REQ: RES-2, INF-4
+// REQ: RES-2
 
 import (
 	"os"
