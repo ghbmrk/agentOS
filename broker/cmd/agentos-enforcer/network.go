@@ -480,7 +480,11 @@ var noRedirects = []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept
 
 // allRedirects is the IPv4 redirect setting the kernel combines with
 // each interface's own (either one on, or both with forwarding on), so
-// hold turns it off too (#5164 item 4).
+// hold turns it off too (#5164 item 4). It is the only "all" key: IPv6
+// accept_redirects and accept_ra act per interface, the kernel never
+// combines "all" with them, and some kernels spread a write of an IPv6
+// "all" key to every interface, the WAN included, whose own settings
+// hold never writes (ASSUMPTIONS ENF-l-21).
 const allRedirects = "ipv4/conf/all/accept_redirects"
 
 // hold turns router advertisements and redirects off (noRedirects, under
@@ -576,12 +580,40 @@ func netsOf(n dns.Net) string {
 
 // ifaceAddrs is the addresses the kernel holds on iface, each with its
 // prefix length, from one dump of every address (RTM_GETADDR).
-func ifaceAddrs(iface string) ([]netip.Prefix, error) {
-	i, err := net.InterfaceByName(iface)
+func ifaceAddrs(iface string) ([]netip.Prefix, error) { return addrsOn(iface, ifaceIndex, addrDump) }
+
+// ifaceIndex is the kernel's number for the interface named name.
+func ifaceIndex(name string) (int, error) {
+	i, err := net.InterfaceByName(name)
+	if err != nil {
+		return 0, err
+	}
+	return i.Index, nil
+}
+
+// addrsOn is the addresses on the interface named iface in a dump, its
+// index looked up before the dump and again after it. An interface made
+// again in between has a new index (the kernel numbers each new one past
+// the last), and
+// fails: its new addresses are not in the dump read for the old index, so
+// it is never read as holding none (#5188 item 1).
+func addrsOn(iface string, index func(string) (int, error), dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	i, err := index(iface)
 	if err != nil {
 		return nil, err
 	}
-	return addrsOf(i.Index, addrDump)
+	out, err := addrsOf(i, dump)
+	if err != nil {
+		return nil, err
+	}
+	j, err := index(iface)
+	if err != nil {
+		return nil, err
+	}
+	if j != i {
+		return nil, fmt.Errorf("interface %s was made again while its addresses were read (index %d, then %d)", iface, i, j)
+	}
+	return out, nil
 }
 
 // addrDump is the kernel's dump of every address, as it sent it.
