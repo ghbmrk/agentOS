@@ -727,18 +727,18 @@ RERUN_PIN = [
     '          WAIT: 30',
     '        run: |',
     '          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::error::cannot list open PRs"; exit 1; }',
-    '          failed=0',
+    '          failed=0 reran=0 missed=""',
     '          pending="$prs"',
     '          for round in $(seq 1 "$ROUNDS"); do',
     '            [ -n "$pending" ] || break',
     '            left=""',
     '            while read -r pr sha; do',
     '              [ -n "$pr" ] || continue',
-    '              run=$(gh api "repos/$REPO/actions/workflows/trusted-base.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" --jq \'.workflow_runs[0] | select(. != null) | "\\(.id) \\(.status)"\') || { echo "::warning::#$pr: cannot list runs"; failed=1; continue; }',
+    '              run=$(gh api "repos/$REPO/actions/workflows/trusted-base.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" --jq \'.workflow_runs[0] | select(. != null) | "\\(.id) \\(.status)"\') || { echo "::warning::#$pr: cannot list runs"; failed=1; missed="$missed #$pr"; continue; }',
     '              if [ -z "$run" ]; then',
     '                echo "#$pr: no trusted-base run yet; its first run reads the new main"',
     '              elif [ "${run#* }" = completed ]; then',
-    '                if gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; fi',
+    '                if gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi',
     '              else',
     '                left="$left$pr $sha"$\'\\n\'',
     '              fi',
@@ -746,8 +746,14 @@ RERUN_PIN = [
     '            pending="$left"',
     '            [ -z "$pending" ] || sleep "$WAIT"',
     '          done',
-    '          [ -z "$pending" ] || { echo "::warning::still running, not rerun: $(echo $pending)"; failed=1; }',
-    '          echo "Reran the open PRs\' trusted-base runs (failed=$failed)." >> "$GITHUB_STEP_SUMMARY"',
+    '          while read -r pr sha; do',
+    '            [ -n "$pr" ] || continue',
+    '            echo "::warning::#$pr ($sha): still running after the last round, not rerun"; failed=1; missed="$missed #$pr"',
+    '          done <<< "$pending"',
+    '          total=$(printf \'%s\' "$prs" | grep -c . || true)',
+    '          msg="Reran $reran of $total open PRs\' trusted-base runs."',
+    '          [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."',
+    '          printf \'\\n%s\\n\' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"',
     '          exit "$failed"',
 ]
 
@@ -873,6 +879,7 @@ class RerunScript(unittest.TestCase):
             {"a1": ["11 completed"], "b2": ["22 in_progress", "22 queued", "22 completed"]})
         self.assertEqual((rc, sorted(reran)), (0, ["11", "22"]), out)
         self.assertIn("#3: no trusted-base run yet", out)
+        self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(), "\nReran 2 of 3 open PRs' trusted-base runs.\n")
 
     # REQ: CI-ceiling-fall
     def test_failures_turn_the_job_red(self):
@@ -885,7 +892,9 @@ class RerunScript(unittest.TestCase):
         rc, out, reran = self.run_script([(1, "a1"), (2, "b2")], {"a1": ["11 in_progress"], "b2": ["22 completed"]},
                                          rounds=2)
         self.assertEqual((rc, reran), (1, ["22"]), out)
-        self.assertIn("still running, not rerun: 1 a1", out)
+        self.assertIn("#1 (a1): still running after the last round, not rerun", out)
+        self.assertIn("Reran 1 of 2 open PRs' trusted-base runs. Not rerun: #1 (rerun their trusted-base check by hand",
+                      pathlib.Path(self.tmp, "summary").read_text())
         rc, out, reran = self.run_script(None, {})
         self.assertEqual((rc, reran), (1, []), out)
 
