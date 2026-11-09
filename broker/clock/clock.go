@@ -315,6 +315,10 @@ const (
 type Guard struct {
 	cfg Config
 
+	// saveStop, for tests only, ends the state file's write after a step as
+	// a crash would (privfile.WriteAtomic); production leaves it nil.
+	saveStop func(int) bool
+
 	mu      sync.Mutex
 	status  Status
 	checked bool
@@ -904,7 +908,7 @@ func (g *Guard) saveLocked() {
 	}
 	b, err := json.Marshal(v)
 	if err == nil {
-		err = privfile.WriteAtomic(filepath.Dir(g.cfg.StatePath), filepath.Base(g.cfg.StatePath), b, nil)
+		err = privfile.WriteAtomic(filepath.Dir(g.cfg.StatePath), filepath.Base(g.cfg.StatePath), b, g.saveStop)
 	}
 	if err != nil {
 		g.cfg.Logf("clock: state not saved: %v", err)

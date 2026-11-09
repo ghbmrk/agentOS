@@ -4,6 +4,7 @@ package clock
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"go/build"
 	"os"
@@ -110,4 +111,38 @@ func TestTIM1SaveRefusesSharedDir(t *testing.T) {
 		}
 	}
 	t.Fatalf("failed save not logged: %q", logged)
+}
+
+// TestTIM1SaveCrashLeavesOneWholeForm: a save stopped after any step of
+// the write, as a crash would, leaves the old state or the new one whole,
+// never a torn file, and the next save still lands.
+func TestTIM1SaveCrashLeavesOneWholeForm(t *testing.T) {
+	const rename = 4 // privfile.WriteAtomic's step that installs the new form
+	for step := 0; step <= rename+1; step++ {
+		path := filepath.Join(t.TempDir(), "clock.json")
+		r := restrictedSave(t, path, nil)
+		g := r.guard(t, func(c *Config) { c.StatePath = path })
+		g.saveStop = func(i int) bool { return i == step }
+		r.mu.Lock()
+		r.carrier = r.wall
+		r.mu.Unlock()
+		g.Check(bg) // agrees: lifts the restriction and saves
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("step %d: %v", step, err)
+		}
+		var v saved
+		if err := json.Unmarshal(raw, &v); err != nil {
+			t.Fatalf("step %d: torn state file: %v", step, err)
+		}
+		if want := step < rename; v.Restricted != want {
+			t.Fatalf("step %d: restricted = %v, want %v", step, v.Restricted, want)
+		}
+		g.saveStop = nil
+		g.Check(bg)
+		raw, err = os.ReadFile(path)
+		if err != nil || json.Unmarshal(raw, &v) != nil || v.Restricted {
+			t.Fatalf("step %d: the save after a crash did not land: %v %s", step, err, raw)
+		}
+	}
 }
