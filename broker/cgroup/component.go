@@ -18,8 +18,8 @@ import (
 // to reclaim. Unlike Child, memory.oom.group stays off, because a component
 // holds independent children (the pool holds every machine).
 func (g *Group) Component(name string, l Limits) (*Group, error) {
-	if name == "" || strings.ContainsAny(name, "/.") {
-		return nil, fmt.Errorf("cgroup: bad group name %q", name)
+	if err := checkName(name); err != nil {
+		return nil, err
 	}
 	if l.MaxBytes <= 0 && l.MinBytes <= 0 {
 		return nil, fmt.Errorf("cgroup: %s: a budget or a protection is required (RES-2)", name)

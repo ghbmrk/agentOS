@@ -121,12 +121,6 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 		g.Kill(ctx)
 		g.Remove()
 	}()
-	// The count before the run, so a group a crashed broker left behind
-	// does not report a kill this run did not have.
-	ooms, err := g.OOMKills()
-	if err != nil {
-		return OneShotResult{}, err
-	}
 	var opts childproc.Options
 	release, err := startIn(g.Path, &opts)
 	if err != nil {
@@ -141,8 +135,9 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 	opts.WaitDelay = ExecWaitDelay
 	err = r.cmd(ctx, opts, "--log="+errLog, "run", "--bundle", bundle, id).Run()
 	// The kill takes the whole group (memory.oom.group), runsc too, so its
-	// exit says nothing of the program's.
-	if n, cerr := g.OOMKills(); cerr != nil || n > ooms {
+	// exit says nothing of the program's. The group is new, so any count
+	// is this run's.
+	if n, cerr := g.OOMKills(); cerr != nil || n > 0 {
 		return OneShotResult{}, ErrOneShotMemory
 	}
 	if ctx.Err() != nil {
@@ -172,20 +167,13 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 const SandboxCPU = 1000
 
 // sandboxGroup makes a one-shot or stream sandbox's cgroup, name, under
-// parent, first emptying and removing one an earlier run left. Its
+// parent, new (cgroup.Child replaces one an earlier run left). Its
 // memory.high is its memory.max, so a run over the cap is killed rather
 // than slowed until the deadline, and cpu.max holds it to SandboxCPU.
 func sandboxGroup(parentPath, name string, mem int64) (*cgroup.Group, error) {
 	parent, err := cgroup.Open(parentPath)
 	if err != nil {
 		return nil, err
-	}
-	stale := &cgroup.Group{Path: filepath.Join(parent.Path, name)}
-	if _, err := os.Lstat(stale.Path); err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), oneShotCleanup)
-		stale.Kill(ctx)
-		cancel()
-		stale.Remove()
 	}
 	return parent.Child(name, cgroup.Limits{MaxBytes: mem, HighBytes: mem, CPUWeight: 100, IOWeight: 100, CPUMilli: SandboxCPU, Pids: oneShotPids})
 }
