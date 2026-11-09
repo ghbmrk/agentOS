@@ -436,28 +436,9 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, True)
         if why:
             return why
-    gid = TREE_GROUP
-    for k in range(1, len(parts) + 1):
-        d = "/".join(parts[:k])
-        try:
-            st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
-        except OSError:
-            continue
-        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)
-        if why:
-            return why
-        if st is not None:
-            gid = step_gid(root, d, st, gid)
-        elif not path.startswith("/"):
-            # #1803: the tree lacks this step, so a tmpfiles.d line may make it on the box: a link
-            # (whose target the tree never chased here) or a directory someone else can write. #1829
-            # (security delta 2, combined delta 2): it may take its parent's group (a setgid bit the
-            # tree or a line sets), so the lines that make it are weighed with that gid.
-            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, 0, 0, 0, 0)),
-                                  lacks=True)
-            if made:
-                return ("a link to %s, through /%s, which the tree lacks and %s line %d makes %s; "
-                        "ship the step in the tree (#1803)" % ((target, d) + made))
+    why = chain_refusal(root, parts, target, not path.startswith("/"))
+    if why:
+        return why
     if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):
         # Default deny (#1702 delta 2): the chase stopped at a box mount (tree_chase gives only such a
         # path a leading '/'), and only BOX_LINKS' exact links may end there. A link the tree holds
@@ -467,6 +448,35 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
                 "known at build time; ship the file itself, or, if this link is stock and names a fixed "
                 "root-owned file, add it to BOX_LINKS per I23 (#1702)"
                 % (target, "" if path == target else ", which reaches " + path, path.split("/")[1]))
+    return None
+
+
+def chain_refusal(root, parts, target, held):
+    """#1702, #1803, #1829: why a link to TARGET whose path walks the tree steps PARTS (path_parts) is
+    refused by step_refusal's rules at any step, or None. HELD: the path is the tree's, not under a box
+    mount, so a step the tree lacks is weighed by the tmpfiles.d lines that may make it."""
+    gid = TREE_GROUP
+    for k in range(1, len(parts) + 1):
+        d = "/".join(parts[:k])
+        try:
+            st = None if d in WORLD_WRITABLE or d in SERVICE_DIRS else tree_lstat(root, d)
+        except OSError:
+            continue
+        why = step_refusal(root, d, target, held, st, gid=gid)
+        if why:
+            return why
+        if st is not None:
+            gid = step_gid(root, d, st, gid)
+        elif held:
+            # #1803: the tree lacks this step, so a tmpfiles.d line may make it on the box: a link
+            # (whose target the tree never chased here) or a directory someone else can write. #1829
+            # (security delta 2, combined delta 2): it may take its parent's group (a setgid bit the
+            # tree or a line sets), so the lines that make it are weighed with that gid.
+            made = tmpfiles_maker(root, parts[:k], os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, gid, 0, 0, 0, 0)),
+                                  lacks=True)
+            if made:
+                return ("a link to %s, through /%s, which the tree lacks and %s line %d makes %s; "
+                        "ship the step in the tree (#1803)" % ((target, d) + made))
     return None
 
 
@@ -1679,25 +1689,44 @@ def keeper_reach(path, above=False):
             or above and any(norm == "/" or under(k, (norm,)) for k in KEEPER_PATHS))
 
 
+def box_link_forms(path):
+    """Absolute PATH (norm_path), and where it leads on the box if it is at or under a BOX_LINKS link,
+    which tmpfiles makes at boot, so it counts whether or not the tree holds the link yet."""
+    return [path] + ["/" + "/".join(path_parts(l.rsplit("/", 1)[0] + "/" + t[0])) + path[len(l) + 1:]
+                     for l, t in BOX_LINKS.items() if under(path, ("/" + l,))]
+
+
 def path_refusal(root, path, above):
     """Why keeper_unit_violations refuses a path setting's PATH, or None (#5119). systemd unquotes and
     expands it, then resolves it when it applies it (so /var/run/x is /run/x), so it is refused if it
-    holds UNMODELLED, if the image at ROOT cannot resolve it (tree_chase: a loop), if it resolves into
-    PROC_VIEWS but DEV_SAFE, or if as written or as resolved it reaches the keeper's state (keeper_reach,
-    ABOVE). The box's own links to /run (BOX_LINKS: tmpfiles makes them at boot) count whether or not
-    the tree holds them yet."""
+    holds UNMODELLED, if the image at ROOT cannot resolve it (tree_chase: a loop), if as written or as
+    resolved it goes into PROC_VIEWS but to DEV_SAFE, or if it reaches the keeper's state (keeper_reach,
+    ABOVE). Each form counts through the box's own links (box_link_forms). Resolved when the unit
+    starts, not at build, it is refused too if a directory on its way is one a link in it would be
+    refused through (step_refusal, chain_refusal): whoever can write that directory can put a link
+    there at runtime and decide where the path leads (#5154). Its way is every directory tree_chase
+    steps into (WALKED) and those of the resolved path; the last step is not on it. As for a link, a
+    step under a box mount is held to WORLD_WRITABLE and SERVICE_DIRS only (chain_refusal's HELD)."""
     if any(c in path for c in UNMODELLED):
         return ": the tree check does not model it"
+    walked = [None]
     try:
-        got = norm_path(tree_chase(root, path, missing_ok=True)[0])
+        got = tree_chase(root, path, missing_ok=True, walked=walked)[0]
     except OSError as e:
         return ": the image cannot resolve it (%s)" % e.strerror
-    if under(got, PROC_VIEWS) and got not in DEV_SAFE:
-        return ": %s is under /proc or /dev, which the tree check does not model but at DEV_SAFE" % got
-    seen = [norm_path(path), got]
-    seen += [t[1] + p[len(l) + 1:] for p in seen for l, t in BOX_LINKS.items() if t[1:] and under(p, ("/" + l,))]
+    resolved = box_link_forms(norm_path(got))
+    seen = box_link_forms(norm_path(path)) + resolved
+    for p in seen:
+        if under(p, PROC_VIEWS) and p not in DEV_SAFE:
+            return (": %s is under /proc or /dev, which the tree check does not model (only %s pass)"
+                    % (p, ", ".join(DEV_SAFE)))
     if any(keeper_reach(p, above) for p in seen):
         return " reaches the keeper's state"
+    why = next(filter(None, [step_refusal(root, d, path, True) for d in walked[1:]]
+                      + [chain_refusal(root, path_parts(p)[:-1], path, p.split("/")[1] not in BOX_MOUNTS)
+                         for p in resolved]), None)
+    if why:
+        return ", which the box resolves when the unit starts, so a link to it is held to the link rules (#5154): " + why
     return None
 
 
@@ -1726,11 +1755,13 @@ def keeper_violations(root):
     - Keeper: every agentos-keeper-* service is in KEEPER_UNITS and in KEEPER_SLICE; no other unit is
       in that slice (tests/test_image_keeper.py checks the image ships them). Every other agentos service but NOEXEC_EXEMPT ends with every KEEPER_PATHS entry
       in InaccessiblePaths= but one below its own empty tmpfs (tmpfs_hides), none with a "-" (MOR_UNIT: all but MOR_LISTED, which it must not mask, and
-      "-" allowed), and mounts nothing over, under or from one of them, nor
-      binds one from above it. The service manager opens no file and makes no directory for it at,
+      "-" allowed). No mount's source, nor a path whose access a setting changes, is at or under
+      one of them, and no bind's source is above one; a bind's destination may be one, since a mount
+      there only hides it. The service manager opens no file and makes no directory for it at,
       under or above one, as root past the mask (MANAGER_FILES, MANAGER_DIRS; #2981). Each path is
-      judged as written and as the image resolves it, none holds UNMODELLED, and none goes
-      through PROC_VIEWS but to DEV_SAFE (#5119).
+      judged as written and as the image resolves it, none holds UNMODELLED, none goes
+      through PROC_VIEWS but to DEV_SAFE (#5119), and none passes through a directory a link in it
+      would be refused through (#5154: whoever can write one plants a link there at runtime).
     - TPM (#2889 Security later 2): only TPM_UNITS may name a TPM node in DeviceAllow=, and they name
       only TPM_DEVICE under DevicePolicy=closed or strict; every other agentos service but
       NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
