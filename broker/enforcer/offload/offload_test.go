@@ -57,6 +57,16 @@ func TestBitsetForms(t *testing.T) {
 	if got, err := bitset(append(attr(unix.ETHTOOL_A_BITSET_NOMASK, nil), 1, 2)); err == nil {
 		t.Fatalf("a bitset with bytes past its last attribute was read: %v", got)
 	}
+	// A bit whose own attributes run short of its end (2 stray bytes after
+	// its name): read anyway, a value flag past them would read as off
+	// (#5103 item 4).
+	malformed := attr(unix.ETHTOOL_A_BITSET_BITS|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_BITSET_BITS_BIT|unix.NLA_F_NESTED, append(attr(unix.ETHTOOL_A_BITSET_BIT_NAME, cstr("rx-gro")), 1, 2)))
+	if !whole(malformed) {
+		t.Fatal("fixture: the BITS nest itself is not whole")
+	}
+	if got, err := bitset(append(attr(unix.ETHTOOL_A_BITSET_NOMASK, nil), malformed...)); err == nil {
+		t.Fatalf("a malformed bit was read: %v", got)
+	}
 	unterminated := attr(unix.ETHTOOL_A_BITSET_BITS|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_BITSET_BITS_BIT|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_BITSET_BIT_NAME, []byte("rx-gro"))))
 	if _, err := bitset(append(attr(unix.ETHTOOL_A_BITSET_NOMASK, nil), unterminated...)); err == nil {
 		t.Fatal("a name with no terminator was read")
@@ -133,7 +143,7 @@ func TestForgedReplyRefused(t *testing.T) {
 	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
 		return
 	}
-	c, err := open(unix.NETLINK_GENERIC)
+	c, err := open(unix.NETLINK_GENERIC, time.Now().Add(replyWait))
 	if err != nil {
 		t.Skipf("no netlink socket here: %v", err)
 	}
@@ -144,7 +154,7 @@ func TestForgedReplyRefused(t *testing.T) {
 		t.Fatalf("a forged acknowledgement read as the kernel's: %v %v", got, err)
 	}
 
-	r, err := open(unix.NETLINK_ROUTE)
+	r, err := open(unix.NETLINK_ROUTE, time.Now().Add(replyWait))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +209,7 @@ func TestFloodEndsRequest(t *testing.T) {
 	}
 	defer func(w time.Duration) { replyWait = w }(replyWait)
 	replyWait = 300 * time.Millisecond
-	c, err := open(unix.NETLINK_ROUTE)
+	c, err := open(unix.NETLINK_ROUTE, time.Now().Add(replyWait))
 	if err != nil {
 		t.Skipf("no netlink socket here: %v", err)
 	}
@@ -247,5 +257,166 @@ func TestFloodEndsRequest(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a flood of other datagrams held the request past replyWait")
+	}
+}
+
+// TestDumpEnd (ENF-gro-3, #5103 item 1): a dump ends only on the
+// kernel's NLMSG_DONE for this request, and ends in error when the DONE
+// carries one or when any of its messages is marked NLM_F_DUMP_INTR (the
+// links changed while it was read), so a dump cut short or inconsistent
+// never reads as every link.
+func TestDumpEnd(t *testing.T) {
+	msg := func(typ, flags uint16, seq uint32, data []byte) syscall.NetlinkMessage {
+		return syscall.NetlinkMessage{Header: syscall.NlMsghdr{Type: typ, Flags: flags, Seq: seq}, Data: data}
+	}
+	errno := func(e syscall.Errno) []byte {
+		b := make([]byte, 4)
+		ne.PutUint32(b, uint32(-int32(e)))
+		return b
+	}
+	link := []byte{1, 2, 3, 4}
+	var r reading
+	done, err := r.take([]syscall.NetlinkMessage{msg(syscall.RTM_NEWLINK, syscall.NLM_F_MULTI, 7, link), msg(syscall.RTM_NEWLINK, 0, 6, link)}, 7, syscall.RTM_NEWLINK)
+	if done || err != nil || len(r.replies) != 1 {
+		t.Fatalf("a dump's first datagram: done %v, %v, %d replies (another request's message is not this one's)", done, err, len(r.replies))
+	}
+	if done, err = r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_DONE, 0, 6, errno(syscall.EBUSY)), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 7, make([]byte, 4))}, 7, syscall.RTM_NEWLINK); !done || err != nil || len(r.replies) != 1 {
+		t.Fatalf("a clean end: done %v, %v, %d replies", done, err, len(r.replies))
+	}
+
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.RTM_NEWLINK, syscall.NLM_F_MULTI, 7, link), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 7, errno(syscall.ENOBUFS))}, 7, syscall.RTM_NEWLINK); !done || !errors.Is(err, syscall.ENOBUFS) {
+		t.Fatalf("a dump that ends in error: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.RTM_NEWLINK, syscall.NLM_F_MULTI|unix.NLM_F_DUMP_INTR, 7, link)}, 7, syscall.RTM_NEWLINK); done || err != nil {
+		t.Fatalf("an interrupted dump ended before its end: done %v, %v", done, err)
+	}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 7, make([]byte, 4))}, 7, syscall.RTM_NEWLINK); !done || !errors.Is(err, errDumpIntr) {
+		t.Fatalf("a dump with an interrupted message: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI|unix.NLM_F_DUMP_INTR, 7, make([]byte, 4))}, 7, syscall.RTM_NEWLINK); !done || !errors.Is(err, errDumpIntr) {
+		t.Fatalf("a dump whose end is marked interrupted: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 7, []byte{0, 0, 0})}, 7, syscall.RTM_NEWLINK); !done || err == nil {
+		t.Fatalf("a dump end with no error code: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_ERROR, 0, 7, append(errno(syscall.EPERM), make([]byte, unix.NLMSG_HDRLEN)...))}, 7, syscall.RTM_NEWLINK); !done || !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("a refusal: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_ERROR, 0, 7, make([]byte, 4+unix.NLMSG_HDRLEN))}, 7, syscall.RTM_NEWLINK); !done || err != nil {
+		t.Fatalf("an acknowledgement: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_ERROR, 0, 7, make([]byte, 4))}, 7, syscall.RTM_NEWLINK); !done || err != nil {
+		t.Fatalf("an acknowledgement of its code alone: done %v, %v", done, err)
+	}
+	r = reading{}
+	if done, err := r.take([]syscall.NetlinkMessage{msg(syscall.NLMSG_ERROR, 0, 7, []byte{0, 0})}, 7, syscall.RTM_NEWLINK); !done || err == nil {
+		t.Fatalf("a short error: done %v, %v", done, err)
+	}
+}
+
+// TestOneDeadlinePerCall (ENF-gro-4, #5103 item 3): every request of one
+// call shares one deadline. Under a flood of other datagrams each request
+// on a socket fails once the call's deadline has passed, not replyWait
+// after it began, so three requests end within about one replyWait, not
+// three; and an Off whose deadline has passed sets no device under a
+// port with several, rather than give each request a fresh replyWait.
+func TestOneDeadlinePerCall(t *testing.T) {
+	if !inNetns(t) { // sending to another socket's port needs CAP_NET_ADMIN, as the forger would
+		return
+	}
+	defer func(w time.Duration) { replyWait = w }(replyWait)
+	replyWait = 500 * time.Millisecond
+	start := time.Now()
+	c, err := open(unix.NETLINK_ROUTE, start.Add(replyWait))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	sa, err := syscall.Getsockname(c.fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Pid: sa.(*syscall.SockaddrNetlink).Pid}
+	f, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Close(f)
+	if err := syscall.Bind(f, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		t.Fatal(err)
+	}
+	noop := nlmsg(syscall.NLMSG_NOOP, nil)
+	ne.PutUint32(noop[0:], uint32(len(noop)))
+	stop := make(chan struct{})
+	flooding := make(chan struct{})
+	go func() {
+		defer close(flooding)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			syscall.Sendto(f, noop, 0, to)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		for range 3 {
+			c.seq++
+			if _, err := c.recv(syscall.RTM_NEWLINK); !errors.Is(err, errNoReply) { // replies the kernel never sends
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a request under a flood: %v", err)
+		}
+	case <-time.After(5 * replyWait):
+		t.Fatal("a flood held one call's requests past its deadline") // the flood goes on: the test binary ends here
+	}
+	close(stop)
+	<-flooding
+	if d := time.Since(start); d >= 2*replyWait {
+		t.Fatalf("three flooded requests of one call took %v: each had its own deadline", d)
+	}
+
+	ip(t, "link", "add", "da", "type", "veth", "peer", "name", "db")
+	ip(t, "link", "add", "br1", "type", "bridge")
+	ip(t, "link", "set", "da", "master", "br1")
+	ip(t, "link", "add", "dc", "type", "veth", "peer", "name", "dd")
+	ip(t, "link", "set", "dc", "master", "br1")
+	for _, d := range []string{"da", "db", "dc", "dd", "br1"} {
+		if err := Set(d, map[string]bool{"rx-gro": true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := off(time.Now().Add(-time.Millisecond), "br1"); !errors.Is(err, errNoReply) {
+		t.Fatalf("an Off past its deadline: %v", err)
+	}
+	for _, d := range []string{"da", "dc", "br1"} {
+		if len(merging(t, d)) == 0 {
+			t.Fatalf("%s was set by an Off past its deadline", d)
+		}
+	}
+	if err := off(time.Now().Add(replyWait), "br1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"da", "db", "dc", "dd", "br1"} {
+		if on := merging(t, d); len(on) > 0 {
+			t.Fatalf("%s still merging: %v", d, on)
+		}
 	}
 }

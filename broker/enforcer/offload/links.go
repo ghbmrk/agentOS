@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,8 +32,8 @@ type link struct {
 // namespace's sends. Any other parent in another namespace is an error,
 // since it cannot be reached from here; so is a parent that is no link
 // here, and a port that does not exist.
-func under(ports []string) ([]string, error) {
-	links, err := readLinks()
+func under(ports []string, end time.Time) ([]string, error) {
+	links, err := readLinks(end)
 	if err != nil {
 		return nil, err
 	}
@@ -87,9 +88,11 @@ func walk(links []link, ports []string) ([]string, error) {
 }
 
 // readLinks dumps the calling thread's namespace's links (RTM_GETLINK) on
-// a route socket of its own, reading only the kernel's replies.
-func readLinks() ([]link, error) {
-	c, err := open(unix.NETLINK_ROUTE)
+// a route socket of its own, reading only the kernel's replies, by end.
+// A dump the kernel ends in error or marks interrupted is an error, not
+// retried: the port is held at its caps until the next reading.
+func readLinks(end time.Time) ([]link, error) {
+	c, err := open(unix.NETLINK_ROUTE, end)
 	if err != nil {
 		return nil, fmt.Errorf("offload: links: %w", err)
 	}

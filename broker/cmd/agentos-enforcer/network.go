@@ -4,6 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +69,10 @@ type network struct {
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
 	reload bool
+	// unserved is why the served interfaces are not as set up (served),
+	// "" while they are: no resolver instance runs meanwhile (ENF-l-21).
+	// d.fwMu guards it.
+	unserved string
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -186,6 +196,11 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		// tightening is never held back; every instance stops, so no
 		// list resolves at all until one can be served (ENF-l-11).
 		d.dp.Logf("dns: the policy in force cannot be served, every resolver instance stops: " + err.Error())
+		files = dns.Files{}
+	}
+	if d.servedLocked(); d.net.unserved != "" {
+		// No instance starts on an interface that could hold a prefix or
+		// route the upstream check did not see (ENF-l-21).
 		files = dns.Files{}
 	}
 	caps := traffic.CapsOf(doc)
@@ -336,7 +351,10 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 		return
 	}
 	d.net.lastRead = now
-	if d.offloads() {
+	d.fwMu.Lock()
+	unserved := d.servedLocked()
+	d.fwMu.Unlock()
+	if merging := d.offloads(); merging || unserved {
 		if err := d.syncFirewall(ctx); err != nil {
 			d.dp.Logf("firewall: " + err.Error())
 		}
@@ -416,6 +434,156 @@ func (d *Enforcer) offloads() bool {
 	d.net.merging = now
 	d.net.reload = d.net.reload || changed
 	return changed
+}
+
+// servedLocked sets the served interfaces up again and checks them
+// (deps.Served), at every load and every reading, since an interface made
+// again starts with the kernel's defaults. A failure is logged when it
+// starts or changes, and its end once; it reports whether the result
+// changed, and asks for a full load if it did, which stops or starts the
+// resolver's instances (ENF-l-21). d.fwMu is held.
+func (d *Enforcer) servedLocked() bool {
+	msg := ""
+	if err := d.dp.Served(d.cfg.DNS.Nets); err != nil {
+		msg = err.Error()
+	}
+	changed := msg != d.net.unserved
+	switch {
+	case changed && msg != "":
+		d.dp.Logf("dns: a served interface is not as set up, every resolver instance stops until it is: " + msg)
+	case changed:
+		d.dp.Logf("dns: the served interfaces are as set up again, the resolver starts")
+	}
+	d.net.unserved = msg
+	d.net.reload = d.net.reload || changed
+	return changed
+}
+
+// procNet is the kernel's network settings (sysctl net.*).
+const procNet = "/proc/sys/net"
+
+// served is deps.Served on the box: hold on /proc/sys/net and the
+// kernel's own addresses.
+func served(nets []dns.Net) error { return hold(procNet, nets, ifaceAddrs) }
+
+// noRedirects are the per-interface settings hold turns off, under
+// procNet: IPv4 and IPv6 redirects and IPv6 router advertisements.
+var noRedirects = []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
+
+// hold turns router advertisements and redirects off (noRedirects, under
+// root) on each served interface and on "default", which every interface
+// made later starts from, and reads each back; then it checks that every
+// address on each served interface lies in its Net's prefixes, with a
+// prefix no wider, or is the kernel's IPv6 link-local one. So no prefix
+// or route the upstream check (dns ASSUMPTIONS ENF-f-5) did not see is on
+// a served segment while the resolver runs, with or without a ruleset
+// loaded (#4222). An interface not there yet is passed: it starts from
+// "default", and the next reading sets and checks it. A kernel without
+// IPv6 has no IPv6 settings to turn off.
+func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error)) error {
+	_, err := os.Stat(filepath.Join(root, "ipv6"))
+	v6 := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	ifaces := []string{"default"}
+	for _, n := range nets {
+		if n.Iface == "" || n.Iface == "." || n.Iface == ".." || n.Iface == "all" || n.Iface == "default" || strings.ContainsAny(n.Iface, "/\x00") {
+			return fmt.Errorf("served interface %q: not an interface name", n.Iface)
+		}
+		// Not there yet, it is passed; any other stat error is a there
+		// whose settings then fail to set.
+		if _, err := os.Stat(filepath.Join(root, "ipv4/conf", n.Iface)); !errors.Is(err, fs.ErrNotExist) {
+			ifaces = append(ifaces, n.Iface)
+		}
+	}
+	var errs []error
+	for _, iface := range ifaces {
+		for _, key := range noRedirects {
+			if !v6 && strings.HasPrefix(key, "ipv6/") {
+				continue
+			}
+			path := filepath.Join(root, fmt.Sprintf(key, iface))
+			werr := os.WriteFile(path, []byte("0\n"), 0)
+			b, rerr := os.ReadFile(path)
+			if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
+				errs = append(errs, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err))
+			}
+		}
+	}
+	for _, n := range nets {
+		if !slices.Contains(ifaces, n.Iface) {
+			continue
+		}
+		have, err := addrs(n.Iface) // none on an error
+		if err != nil {
+			errs = append(errs, fmt.Errorf("served interface %s: addresses: %w", n.Iface, err))
+		}
+		for _, p := range have {
+			if !inNet(p, n) {
+				errs = append(errs, fmt.Errorf("served interface %s holds %s, outside %s", n.Iface, p, netsOf(n)))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// inNet is whether the address p, with its prefix, may be on n's
+// interface: inside one of n's prefixes and no wider than it, or the
+// kernel's IPv6 link-local address (fe80::/64).
+func inNet(p netip.Prefix, n dns.Net) bool {
+	a := p.Addr()
+	if a.Is6() && a.IsLinkLocalUnicast() {
+		return p.Bits() == 64 && linkLocal.Contains(a)
+	}
+	for _, q := range []netip.Prefix{n.Prefix4, n.Prefix6} {
+		if q.IsValid() && q.Contains(a) && p.Bits() >= q.Bits() {
+			return true
+		}
+	}
+	return false
+}
+
+var linkLocal = netip.MustParsePrefix("fe80::/64")
+
+func netsOf(n dns.Net) string {
+	if n.Prefix6.IsValid() {
+		return n.Prefix4.String() + " and " + n.Prefix6.String()
+	}
+	return n.Prefix4.String()
+}
+
+// ifaceAddrs is the addresses the kernel holds on iface, each with its
+// prefix length.
+func ifaceAddrs(iface string) ([]netip.Prefix, error) {
+	i, err := net.InterfaceByName(iface)
+	var as []net.Addr
+	if err == nil {
+		as, err = i.Addrs()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return prefixes(as)
+}
+
+// prefixes is each of as, an interface's addresses, with its prefix
+// length; anything but an address with a whole mask is an error.
+func prefixes(as []net.Addr) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, a := range as {
+		n, _ := a.(*net.IPNet)
+		if n == nil {
+			return nil, fmt.Errorf("an address of type %T", a)
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		ones, bits := n.Mask.Size()
+		if !ok || bits == 0 {
+			return nil, fmt.Errorf("an unreadable address %v", n)
+		}
+		out = append(out, netip.PrefixFrom(ip.Unmap(), ones))
+	}
+	return out, nil
 }
 
 // readCaps takes one reading of the byte caps' counters (#4376 wiring

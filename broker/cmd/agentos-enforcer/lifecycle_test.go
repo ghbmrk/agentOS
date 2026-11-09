@@ -379,6 +379,10 @@ type box struct {
 	// call that names its port.
 	offloads   [][]string
 	offloadErr map[string]error
+	// served counts Served calls, each with the setup's Nets; servedErr
+	// fails them.
+	served    int
+	servedErr error
 
 	d *Enforcer
 	b *browser
@@ -458,6 +462,15 @@ func (x *box) deps() deps {
 		DNS:  x.dns, MDNS: x.mdns.serve, Boot: func() (string, error) { return "boot-1", nil },
 		Wake:    func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
 		Offload: x.offload,
+		Served: func(nets []dns.Net) error {
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			if !slices.Equal(nets, x.cfg.DNS.Nets) {
+				x.t.Errorf("Served given %v, not the setup's networks", nets)
+			}
+			x.served++
+			return x.servedErr
+		},
 	}
 }
 
