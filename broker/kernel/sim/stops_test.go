@@ -283,3 +283,11 @@ func TestTallyCountsWhatTheTaskOpsLeft(t *testing.T) {
 		t.Fatalf("tally %+v", r)
 	}
 }
+
+// A task opened while no key is live gets no plan, and no error.
+func TestATaskWithNoLiveKeyGetsNoPlan(t *testing.T) {
+	s := &sim{k: newBook(t).booted()}
+	if err := s.taskPlan("t1"); err != nil || s.submits != 0 {
+		t.Fatalf("got %v after %d submits, want none", err, s.submits)
+	}
+}

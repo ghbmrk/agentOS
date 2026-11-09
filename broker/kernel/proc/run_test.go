@@ -600,6 +600,9 @@ func TestAViewOfAnUnsentStepCarriesNoDispatch(t *testing.T) {
 	if s.Dispatch != nil || len(s.Ledger) != 0 {
 		t.Fatalf("an unsent step's view: dispatch %v, ledger %v", s.Dispatch, s.Ledger)
 	}
+	if _, ok := s.Dispatched(req); ok {
+		t.Fatal("an unsent step's view reports a dispatch")
+	}
 	if !s.covers(anchors, req) {
 		t.Fatal("covers asked a ledger of a view with no dispatch")
 	}

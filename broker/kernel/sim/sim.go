@@ -88,9 +88,14 @@ func b2i(b bool) int {
 
 // outlives reports whether k holds a novel step longer than any task lives.
 func outlives(k key.Key) bool {
+	return carries(k, func(c key.Caveat) bool { return c.Kind == key.KHold && c.M > kernel.TaskTimeout })
+}
+
+// carries reports whether a link of k carries a caveat that is.
+func carries(k key.Key, is func(key.Caveat) bool) bool {
 	for _, l := range k.Links {
 		for _, c := range l.Caveats {
-			if c.Kind == key.KHold && c.M > kernel.TaskTimeout {
+			if is(c) {
 				return true
 			}
 		}
@@ -457,7 +462,6 @@ func (s *sim) derived() (key.Key, bool) {
 		s.keysWithTasks++
 	}
 	if len(s.tasks) > 0 && s.pick(3) == 0 { // a third serve a task the kernel opened, mostly the latest
-		s.taskKeys++
 		cav = append(cav, key.LimitTask(s.tasks[max(0, len(s.tasks)-1-s.pick(3))]))
 	}
 	switch s.pick(5) {
@@ -469,6 +473,7 @@ func (s *sim) derived() (key.Key, bool) {
 		cav = append(cav, key.LimitVerbs(verbs[s.pick(len(verbs))])) // may try to widen: Verify must refuse
 	}
 	k, err := key.Derive(base, s.holder.priv, s.planr.pub, cav...)
+	s.taskKeys += b2i(carries(k, func(c key.Caveat) bool { return c.Kind == key.KTask }))
 	return k, err == nil
 }
 
@@ -703,23 +708,9 @@ func (s *sim) op() error {
 func (s *sim) taskOp() error {
 	switch s.pick(8) {
 	case 0, 1:
-		s.logf("stop")
-		err := s.k.Stop(s.kt())
-		if err == nil && s.pick(2) == 0 {
-			s.logf("resume at once")
-			err = s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
-		}
-		return err
+		return s.stop()
 	case 2, 3, 4: // a STOP ends every task, so they open often
-		s.ntasks++
-		id := fmt.Sprintf("t%d", s.ntasks)
-		s.logf("open task %s", id)
-		err := s.k.OpenTask(s.kt(), id, key.P0) // taskOp runs only while no STOP is in force
-		if err == nil {
-			s.tasks = append(s.tasks, id)
-			err = s.taskPlan(id)
-		}
-		return err
+		return s.openTask()
 	case 5:
 		if len(s.tasks) > 0 {
 			id := s.tasks[s.pick(len(s.tasks))]
@@ -728,6 +719,30 @@ func (s *sim) taskOp() error {
 		}
 	}
 	return nil
+}
+
+// stop sends a STOP, and half the time a RESUME at once.
+func (s *sim) stop() error {
+	s.logf("stop")
+	err := s.k.Stop(s.kt())
+	if err == nil && s.pick(2) == 0 {
+		s.logf("resume at once")
+		err = s.widened(s.k.Resume(s.kt(), s.k.State().Stops))
+	}
+	return err
+}
+
+// openTask opens the next task and submits its first plan.
+func (s *sim) openTask() error {
+	s.ntasks++
+	id := fmt.Sprintf("t%d", s.ntasks)
+	s.logf("open task %s", id)
+	err := s.k.OpenTask(s.kt(), id, key.P0) // taskOp runs only while no STOP is in force
+	if err == nil {
+		s.tasks = append(s.tasks, id)
+		err = s.taskPlan(id)
+	}
+	return err
 }
 
 // unless is err, or nil when err is not.
