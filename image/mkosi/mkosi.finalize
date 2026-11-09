@@ -1480,6 +1480,10 @@ DEV_SAFE = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 # What systemd unquotes or expands in a path setting (EXTRACT_UNQUOTE, unit_path_printf): the tree check
 # does not model it, so a path holding one is refused (#5153 Security 1).
 UNMODELLED = "\"'%\\"
+# The mount settings whose word is SOURCE:DEST[:OPTS] or PATH:OPTS (config_parse_bind_paths,
+# config_parse_temporary_filesystems, config_parse_mount_images). ReadOnlyPaths=, ReadWritePaths=,
+# ExecPaths= and NoExecPaths= take the whole word as one path, ':' and all (#5153 Security R2).
+COLON_MOUNTS = BIND_MOUNTS + ("TemporaryFileSystem", "MountImages")
 # A .path unit's watches (systemd.path): an agentos-keeper .path watches only the keeper's state and
 # starts only a keeper unit (OWN-card-flow decision 6).
 PATH_WATCHES = ("PathExists", "PathExistsGlob", "PathChanged", "PathModified", "DirectoryNotEmpty")
@@ -1680,7 +1684,8 @@ def path_refusal(root, path, above):
     expands it, then resolves it when it applies it (so /var/run/x is /run/x), so it is refused if it
     holds UNMODELLED, if the image at ROOT cannot resolve it (tree_chase: a loop), if it resolves into
     PROC_VIEWS but DEV_SAFE, or if as written or as resolved it reaches the keeper's state (keeper_reach,
-    ABOVE)."""
+    ABOVE). The box's own links to /run (BOX_LINKS: tmpfiles makes them at boot) count whether or not
+    the tree holds them yet."""
     if any(c in path for c in UNMODELLED):
         return ": the tree check does not model it"
     try:
@@ -1688,8 +1693,10 @@ def path_refusal(root, path, above):
     except OSError as e:
         return ": the image cannot resolve it (%s)" % e.strerror
     if under(got, PROC_VIEWS) and got not in DEV_SAFE:
-        return ": %s is a process's view, past the mask, which the tree check does not model" % got
-    if keeper_reach(path, above) or keeper_reach(got, above):
+        return ": %s is under /proc or /dev, which the tree check does not model but at DEV_SAFE" % got
+    seen = [norm_path(path), got]
+    seen += [t[1] + p[len(l) + 1:] for p in seen for l, t in BOX_LINKS.items() if t[1:] and under(p, ("/" + l,))]
+    if any(keeper_reach(p, above) for p in seen):
         return " reaches the keeper's state"
     return None
 
@@ -1710,7 +1717,7 @@ def manager_paths(files):
     for key, top in MANAGER_DIRS.items():
         for w in ini_words(files, "Service", key):
             out += [(key, w, top + "/" + d) for d in w.split(":")]
-    return [(k, v, p) for k, v, p in out if p.startswith("/") or any(c in p for c in "\"'%\\")
+    return [(k, v, p) for k, v, p in out if p.startswith("/") or any(c in p for c in UNMODELLED)
             or k not in ("LoadCredential", "LoadCredentialEncrypted")]
 
 
@@ -2036,7 +2043,8 @@ def keeper_unit_violations(name, files, root):
         # source above it too.
         for key in NAMESPACE_MOUNTS + ("ReadOnlyPaths", "ExecPaths", "NoExecPaths"):
             for w in ini_words(files, "Service", key):
-                why = path_refusal(root, w.lstrip("-+").split(":")[0], key in BIND_MOUNTS)
+                p = w.lstrip("-+")
+                why = path_refusal(root, p.split(":")[0] if key in COLON_MOUNTS else p, key in BIND_MOUNTS)
                 if why:
                     out.append("%s: %s=%s%s (D-154)" % (name, key, w, why))
         # #2981: what the manager opens or makes as root for the unit, at, under or above it.
