@@ -25,6 +25,7 @@ GOOD = [
     f"gh api -X POST {R}/issues/2525/labels -f labels[]=state:building",
     f"gh api -X DELETE {R}/issues/2525/labels/state:queued",
     f"gh api -X POST {R}/issues/7/labels -f labels[]=recheck",
+    f"gh api -X POST {R}/issues/5113/comments -F body=@/mnt/project-files/lens-drafts/5113.md",
 ]
 BAD = [
     f"gh api -X PUT {R}/pulls/1/ccr/auto_merge -f merge_method=merge -F merge_method=squash",
@@ -52,6 +53,10 @@ BAD = [
     f"gh api -X DELETE {R}/issues/1/labels/state:in%20review",
     f"gh api -X PUT {R}/pulls/1/merge -f merge_method=merge -f sha=$(git rev-parse HEAD)",
     f'grep -n "gh api -X DELETE {R}/pulls/.*/ccr/auto_merge" docs/OPERATING.md',
+    f"gh api -X POST {R}/issues/1/comments -F body=@/mnt/project-files/lens-drafts/../x.md",
+    f"gh api -X POST {R}/issues/1/comments -F body=@/mnt/project-files/lens-drafts/1.md -F x=@/etc/passwd",
+    f"gh api -X POST {R}/issues/1/comments -F body=@/mnt/project-files/lens-drafts/1.txt",
+    f"gh api -X POST {R}/issues/1/comments -F body=@/mnt/project-files/lens-drafts/1.md -X PATCH",
 ]
 # Quoting, escaping and case the allow matcher might strip before it matches: still guarded.
 EVASIONS = [

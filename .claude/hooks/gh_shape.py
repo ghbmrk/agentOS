@@ -30,15 +30,19 @@ RULES = [
     f"gh api -X PUT {REPO}/pulls/*/merge -f merge_method=merge -f sha=*",
     f"gh api -X POST {REPO}/issues/*/labels -f labels[]=*",
     f"gh api -X DELETE {REPO}/issues/*/labels/*",
+    f"gh api -X POST {REPO}/issues/*/comments -F body=@/mnt/project-files/lens-drafts/*",
 ]
 
-# The only commands those rules may let through: arm, disarm, pinned merge, label add, label remove.
+# The only commands those rules may let through: arm, disarm, pinned merge, label add, label remove,
+# and a comment whose body is a lens draft file named by its PR number.
 SHAPES = [
     ["gh", "api", "-X", "PUT", f"{REPO}/pulls/{NUM}/ccr/auto_merge", "-f", "merge_method=merge"],
     ["gh", "api", "-X", "DELETE", f"{REPO}/pulls/{NUM}/ccr/auto_merge"],
     ["gh", "api", "-X", "PUT", f"{REPO}/pulls/{NUM}/merge", "-f", "merge_method=merge", "-f", f"sha={SHA}"],
     ["gh", "api", "-X", "POST", f"{REPO}/issues/{NUM}/labels", "-f", rf"labels\[\]={LABEL}"],
     ["gh", "api", "-X", "DELETE", f"{REPO}/issues/{NUM}/labels/{LABEL}"],
+    ["gh", "api", "-X", "POST", f"{REPO}/issues/{NUM}/comments", "-F",
+     rf"body=@/mnt/project-files/lens-drafts/{NUM}\.md"],
 ]
 
 # A space in a rule matches any run of whitespace, in case the matcher normalizes it.
