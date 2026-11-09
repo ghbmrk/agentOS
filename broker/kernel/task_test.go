@@ -174,18 +174,24 @@ func TestCuttingOffTheSignerEndsTheApproval(t *testing.T) {
 	r.replays()
 }
 
-// An admitted plan, and its reconciliation, outlive its task: the end stops
-// new plans, not the steps already admitted (KRN-8).
-func TestAnAdmittedPlanOutlivesItsTask(t *testing.T) {
+// What is bound to a task ends with it: its end cancels a held step of its
+// plans in the end's own fold (KRN-5). A step already sent still reconciles,
+// and the owner may still RETRY a parked one (KRN-8), but no other step of
+// that plan is sent.
+func TestATasksEndCancelsItsPlansUnsentSteps(t *testing.T) {
 	r := newRig(t)
 	must(t, r.k.OpenTask(0, "t1", 0))
 	r.plan("p1", r.serve("t1", key.LimitHold(hour, hour)), st(key.Unsubscribe, "m1"))
 	must(t, r.tick(0))
 	must(t, r.k.EndTask(1, "t1"))
-	must(t, r.tick(2*hour))
-	if r.status("p1") != kernel.SDone {
-		t.Fatalf("the admitted plan: %s", r.status("p1"))
+	if p := r.k.State().Plans["p1"]; p.Status != kernel.SCancelled || p.Cancel != kernel.CTask {
+		t.Fatalf("the held plan at the end's fold: %s %s", p.Status, p.Cancel)
 	}
+	must(t, r.tick(2*hour))
+	if len(r.mail.Effects()) != 0 {
+		t.Fatal("a held step outlived its task")
+	}
+	r.replays()
 }
 
 // A task approval widens, so it anchors at once: one whose anchor failed

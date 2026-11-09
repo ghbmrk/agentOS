@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -119,13 +120,34 @@ func (k *Kernel) ApproveTask(now int64, id string, a TaskApproval) error {
 }
 
 // EndTask ends a live task at its final result, or when the planner's run
-// ends without one.
+// ends without one. Its fold cancels the task's plans' unsent steps.
 func (k *Kernel) EndTask(now int64, id string) error {
 	if _, ok := k.s.Task(id, now); !ok {
 		return ErrTask
 	}
 	_, err := k.emit(now, TTaskEnded, taskEnded{id})
 	return err
+}
+
+// endDue logs the end of each task whose timeout has come, before Calls
+// schedules any step at now (KRN-5), so the end's fold cancels what the task
+// bound before a step of it could be sent. Rederive derives it (taskDue).
+func (k *Kernel) endDue(now int64) error {
+	for _, id := range slices.Sorted(maps.Keys(k.s.tasks)) {
+		if k.s.taskDue(id, now) {
+			if _, err := k.emit(now, TTaskEnded, taskEnded{id}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// taskDue reports whether task id has reached its timeout at now with no end
+// logged yet: an end then is the scheduler's (endDue), not EndTask's.
+func (s *State) taskDue(id string, now int64) bool {
+	t := s.tasks[id]
+	return t != nil && !t.ended && now >= t.Until
 }
 
 // Rung is the highest rung the owner events behind a step of task reached
@@ -232,6 +254,8 @@ func (s *State) applyTask(e Entry) error {
 		}
 		if t := s.tasks[b.Task]; t != nil {
 			t.ended = true
+			// What is bound to the task ends with it: its plans' unsent steps.
+			s.endPlans(func(p *PlanState) bool { return p.Plan.Task() == b.Task }, CTask, endDetail)
 		}
 	}
 	return nil

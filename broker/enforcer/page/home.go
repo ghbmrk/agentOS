@@ -98,7 +98,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, draw func(*http
 // names heard since a device's pair was signed with a link to let or hold
 // them (#4566), each device's label from the signed policy, NET-1's
 // limits, and the enforcer's own state (status.go): open alerts, a silent
-// core, the light and the core's key.
+// core, the light, the core's key and an unreadable byte-cap day.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
@@ -138,6 +138,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"Devices":  devs,
 		"Offers":   offers,
 		"Limits":   Limits,
+		"Wait":     minutes(time.Duration(policy.Wait) * time.Millisecond),
 	})
 	s.render(w, r, "home.html", data)
 }

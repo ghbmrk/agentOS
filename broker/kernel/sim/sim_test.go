@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -19,6 +20,8 @@ func seeds() int {
 
 // sweep runs every seed once, for the tests that read the sweep, and sums
 // their counters; a seed whose invariants fail stops it.
+var traced = map[string]int{}
+
 var sweep = sync.OnceValues(func() (Result, error) {
 	var sum Result
 	for seed := 0; seed < seeds(); seed++ {
@@ -37,6 +40,24 @@ var sweep = sync.OnceValues(func() (Result, error) {
 		sum.HeldByClerk += r.HeldByClerk
 		sum.CutRefused += r.CutRefused
 		sum.CutCancelled += r.CutCancelled
+		sum.StopResumed += r.StopResumed
+		sum.TasksOpened += r.TasksOpened
+		sum.TasksEnded += r.TasksEnded
+		sum.EndedEarly += r.EndedEarly
+		sum.TaskPlans += r.TaskPlans
+		sum.TaskCancels += r.TaskCancels
+		sum.TimedOut += r.TimedOut
+		sum.KeysWithTasks += r.KeysWithTasks
+		sum.TaskKeys += r.TaskKeys
+		sum.ReplayedTask += r.ReplayedTask
+		sum.CancelledTask += r.CancelledTask
+		for _, l := range r.Trace { // the trace names each op it ran
+			for _, op := range []string{"stop", "resume at once", "open task", "end task"} {
+				if _, rest, ok := strings.Cut(l, " "); ok && (rest == op || strings.HasPrefix(rest, op+" ")) {
+					traced[op]++
+				}
+			}
+		}
 	}
 	return sum, nil
 })
@@ -101,10 +122,32 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"holds the clerk kept on its own clock":        sum.HeldByClerk,
 		"grants a cut-off phone signed, refused":       sum.CutRefused,
 		"held grants cancelled with their phone":       sum.CutCancelled,
+		"a STOP with a RESUME right after it":          sum.StopResumed,
+		"tasks opened":                                 sum.TasksOpened,
+		"tasks ended":                                  sum.TasksEnded,
+		"tasks the planner ended before their timeout": sum.EndedEarly,
+		"plans serving a task":                         sum.TaskPlans,
+		"plans their task's end cancelled":             sum.TaskCancels,
+		"held steps their task's timeout cancelled":    sum.TimedOut,
+		"replayed ids of a task plan":                  sum.ReplayedTask,
+		"cancel or undo picks of a task plan":          sum.CancelledTask,
+		"traced STOPs":                                 traced["stop"],
+		"traced RESUMEs at once":                       traced["resume at once"],
+		"traced task opens":                            traced["open task"],
+		"traced task ends":                             traced["end task"],
 	} {
-		if n == 0 {
+		if n <= 0 {
 			t.Errorf("the sweep never reached: %s", name)
 		}
+	}
+	// Half the STOPs that land are resumed at once, and each such RESUME is
+	// logged right after its STOP (taskOp).
+	if at, n := traced["resume at once"], traced["stop"]; 4*at < n || 4*at > 3*n || 4*sum.StopResumed < 3*at {
+		t.Errorf("%d of %d STOPs resumed at once, %d logged so, want about half, all logged", at, n, sum.StopResumed)
+	}
+	// A third of the keys drawn while a task is open serve one (derived).
+	if k, n := sum.TaskKeys, sum.KeysWithTasks; 4*k < n || 12*k > 5*n {
+		t.Errorf("%d of %d keys drawn while a task was open serve one, want about a third", k, n)
 	}
 }
 

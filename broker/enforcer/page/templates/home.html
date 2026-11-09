@@ -19,6 +19,15 @@
 </div>
 {{else}}<p>No open alerts.</p>{{end}}
 {{end}}
+{{with .Caps}}<h2>Byte caps</h2>
+<div class="pending warn">
+<p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
+{{if .Retrying}}<p>The wait is over, but the fresh day could not be saved. The enforcer tries again every second, and every cap stays spent until it is saved.</p>
+{{else if .Starting}}<p>The wait is over and the fresh day is saved. The enforcer restarts to take it up.</p>
+{{else if not .DueMS}}<button class="act" data-action="fresh-day" data-target="" data-rp="{{$.Name}}">Start the day afresh with your passkey</button>{{end}}
+{{if .Unsaved}}<p>Your last step here is in force, but the disk has not confirmed it yet. The enforcer keeps saving it. If the enforcer restarts before then, check this page again.</p>{{end}}
+</div>
+{{end}}
 {{if .Recovery}}
 <div class="pending warn">
 <p>A new passkey is being enrolled with the recovery code. At {{.Recovery}} it replaces your passkey, and your passkey stops working. If this is not you, cancel it now.</p>
@@ -39,13 +48,17 @@
 {{end}}
 
 <h2>Waiting to apply</h2>
-{{if .Pending}}{{range .Pending}}
+{{if .FreshDue}}<div class="pending">
+<p>A fresh byte-cap day starts at {{.FreshDue}} unless you cancel it. Each cap can then be used in full again today.</p>
+<button class="act" data-action="cancel-fresh" data-target="" data-rp="{{.Name}}">Cancel with your passkey</button>
+</div>
+{{end}}{{range .Pending}}
 <div class="pending">
 <p>Applies at {{when .DueMS}} unless you cancel it.</p>
 <ul class="diff">{{range lines .Diff}}<li>{{template "diffline" .}}</li>{{end}}</ul>
 <button class="act" data-action="cancel" data-target="{{.ID}}" data-rp="{{$.Name}}">Cancel with your passkey</button>
 </div>
-{{end}}{{else}}<p>Nothing.</p>{{end}}
+{{end}}{{if not (or .Pending .FreshDue)}}<p>Nothing.</p>{{end}}
 
 <h2>Your passkey</h2>
 {{if not .Sync.Known}}<p>Not known yet: it shows here after your next approval.</p>

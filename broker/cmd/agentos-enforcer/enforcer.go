@@ -101,9 +101,10 @@ type deps struct {
 	Listen bool
 
 	// The lifecycle test's seams; zero in production. SaveFault fails a
-	// state file's Save; the waits replace helloTimeout, idleTimeout and
-	// fireTimeout.
-	SaveFault                     func(path string) error
+	// state file's Save before it writes, AfterFault after the new file
+	// is in place (as a failed directory sync does); the waits replace
+	// helloTimeout, idleTimeout and fireTimeout.
+	SaveFault, AfterFault         func(path string) error
 	HelloWait, IdleWait, FireWait time.Duration
 }
 
@@ -157,6 +158,11 @@ type Enforcer struct {
 	upMu         sync.Mutex
 	toldUp       bool
 	toldRecovery bool
+
+	// fresh is the byte caps' fresh day (state.go); freshStop carries
+	// errFreshDay to the daemon's loop once its day is saved.
+	fresh     freshDay
+	freshStop chan error
 }
 
 var errNoCore = errors.New("no core pinned: the channel is off")
@@ -186,7 +192,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if err := checkStateDir(dir); err != nil {
 		return nil, err
 	}
-	d := &Enforcer{cfg: cfg, dir: dir, dp: dp, changed: make(chan struct{}, 1)}
+	d := &Enforcer{cfg: cfg, dir: dir, dp: dp, changed: make(chan struct{}, 1), freshStop: make(chan error, 1)}
 	at := func(name string) string { return filepath.Join(dir, name) }
 	var err error
 	if d.alerts, err = alert.New(alert.Config{Send: d.send, Light: dp.Light, Journal: fileJournal{at(fileAlerts)}, Now: dp.Now}); err != nil {
@@ -219,6 +225,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if err := d.openNetwork(); err != nil {
 		return nil, err
 	}
+	d.openFresh()
 	d.toldRecovery = d.recoveryPending()
 	d.alerts.Recovery(d.toldRecovery) // the alerts start with the core down (toldUp false)
 	// Nothing is served until the policy in force is loaded: the box may
@@ -238,7 +245,7 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 
 // store is the state file name under the state directory.
 func (d *Enforcer) store(name string) fileStore {
-	return fileStore{path: filepath.Join(d.dir, name), fault: d.dp.SaveFault}
+	return fileStore{path: filepath.Join(d.dir, name), fault: d.dp.SaveFault, after: d.dp.AfterFault}
 }
 
 func (d *Enforcer) openChannel(at func(string) string) error {
@@ -343,8 +350,9 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 }
 
 // Tick is the daemon's clock, run from one goroutine: replacement passkeys and loosenings whose
-// wait is over, the firewall, the core's silence, the light and the
-// page's certificate, and the page rebuilt for the passkey in force.
+// wait is over, the firewall, a fresh byte-cap day whose wait is over,
+// the core's silence, the light and the page's certificate, and the page
+// rebuilt for the passkey in force.
 func (d *Enforcer) Tick(ctx context.Context) {
 	now := d.dp.Now()
 	// The book takes the policy lock itself (enrol ASSUMPTIONS ENF-c-8).
@@ -367,6 +375,7 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
 	}
+	d.tickFresh(ctx, now)
 	d.tickNetwork(ctx, now)
 	d.upMu.Lock()
 	if up := d.coreUp(); up != d.toldUp {
@@ -426,7 +435,7 @@ func (d *Enforcer) rebuildPage() error {
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
 		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
-		Alerts: pageAlerts{d.alerts},
+		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d},
 	}
 	if d.ch != nil {
 		pc.Channel, pc.Core = d.cut, pageCore{d}
@@ -480,6 +489,7 @@ func (d *Enforcer) Close() {
 	}
 	d.pageLns = nil
 	d.pageMu.Unlock()
+	d.closeFresh()
 	d.closeNetwork()
 }
 

@@ -96,7 +96,8 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if c, err := o.Changes(); err != nil || !c.Paused[id] || !c.Stopped {
 		t.Fatalf("changes over the socket: %+v, %v", c, err)
 	}
-	if v, ok, err := o.Plan("o1"); err != nil || !ok || v.Status != kernel.SActive || len(v.Steps) != 1 {
+	// The STOP cancelled the plan in its own fold (KRN-7).
+	if v, ok, err := o.Plan("o1"); err != nil || !ok || v.Status != kernel.SCancelled || len(v.Steps) != 1 {
 		t.Fatalf("plan over the socket: %+v %v %v", v, ok, err)
 	}
 	if _, ok, err := o.Plan("none"); ok || err != nil {
@@ -632,8 +633,8 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "reserve unsigned": true, "reserve one passkey": true, "setup": true, "untarget": true, "retry moved": true, "approvecode": true}
 	served := map[string]bool{}
 	for _, c := range cases {
-		if c.name == "status" {
-			park()
+		if c.name == "stop" {
+			park() // a parked step outlives the STOP, for RETRY (KRN-5)
 		}
 		served[c.op] = true
 		before := sock.entries()

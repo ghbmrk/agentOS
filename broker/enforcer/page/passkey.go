@@ -636,7 +636,7 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Lock.Unlock()
 	case ActResume:
 		err = s.cfg.Channel.Resume()
-	case ActClear, ActRevokeCore:
+	case ActClear, ActRevokeCore, ActFreshDay, ActCancelFresh:
 		var res map[string]any
 		if res, err = s.stateAct(c, sig); err == nil && res != nil {
 			res["done"] = true

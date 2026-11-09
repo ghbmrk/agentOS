@@ -55,17 +55,47 @@ type Core interface {
 	Revoked() bool
 }
 
+// Caps is the byte caps' day when it does not read back (traffic
+// ErrState, NET-2 Byte caps): every cap counts as spent, so nothing
+// capped is reached, until the owner starts the day afresh. That forgets
+// today's bytes, a loosening, so it waits policy.Wait like one and can be
+// cancelled meanwhile (D-255).
+type Caps interface {
+	Day() CapsDay
+	// Fresh approves a fresh day that starts policy.Wait after nowMS and
+	// returns when; CancelFresh cancels one waiting. saved is false for a
+	// step in force for this run that the disk has not yet confirmed: the
+	// enforcer keeps saving it.
+	Fresh(nowMS int64) (dueMS int64, saved bool, err error)
+	CancelFresh() (saved bool, err error)
+}
+
+// CapsDay is the byte caps' day as the page shows it.
+type CapsDay struct {
+	Spent    bool  // the saved day did not read back: every cap counts as spent
+	DueMS    int64 // a fresh day waits until then; 0: none waits
+	Starting bool  // the wait is over: the fresh day is being saved and taken up
+	Retrying bool  // the start's save failed and is tried again every second
+	Unsaved  bool  // the owner's last approval or cancel is in force but not yet confirmed on disk
+}
+
 // Page actions on the enforcer's own state, each after a tap of the
 // passkey in force.
 const (
-	ActClear      = "clear"       // resolve one open alert (target: its ID)
-	ActRevokeCore = "revoke-core" // revoke the core's channel sub-key
+	ActClear       = "clear"        // resolve one open alert (target: its ID)
+	ActRevokeCore  = "revoke-core"  // revoke the core's channel sub-key
+	ActFreshDay    = "fresh-day"    // approve a fresh byte-cap day, after the wait
+	ActCancelFresh = "cancel-fresh" // cancel a fresh day waiting
 )
 
 var (
-	errNoAlert = errors.New("no open alert with that number; open the home page again")
-	errFixed   = errors.New("this alert clears when the channel resumes")
-	errRevoked = errors.New("the core's key is already revoked")
+	errNoAlert    = errors.New("no open alert with that number; open the home page again")
+	errFixed      = errors.New("this alert clears when the channel resumes")
+	errRevoked    = errors.New("the core's key is already revoked")
+	errNotSpent   = errors.New("the byte caps' day reads back; there is nothing to start afresh")
+	errFreshWaits = errors.New("a fresh day is already waiting")
+	errNoFresh    = errors.New("no fresh day is waiting")
+	errStarting   = errors.New("the fresh day is starting, so it can no longer be cancelled")
 )
 
 // stateChallenge checks that action can be drawn on the enforcer's state
@@ -97,6 +127,22 @@ func (s *Server) stateChallenge(action, target string) (ok bool, code int, err e
 			return true, http.StatusConflict, errRevoked
 		}
 		return true, http.StatusOK, nil
+	case ActFreshDay, ActCancelFresh:
+		if s.cfg.Caps == nil || target != "" {
+			return true, http.StatusNotFound, errMalformed
+		}
+		day := s.cfg.Caps.Day()
+		switch {
+		case !day.Spent:
+			return true, http.StatusConflict, errNotSpent
+		case day.Starting:
+			return true, http.StatusConflict, errStarting
+		case action == ActFreshDay && day.DueMS != 0:
+			return true, http.StatusConflict, errFreshWaits
+		case action == ActCancelFresh && day.DueMS == 0:
+			return true, http.StatusNotFound, errNoFresh
+		}
+		return true, http.StatusOK, nil
 	}
 	return false, 0, nil
 }
@@ -110,6 +156,16 @@ func (s *Server) stateAct(c *challenge, sig []byte) (res map[string]any, err err
 		err = s.cfg.Alerts.Resolve(id)
 	case ActRevokeCore:
 		err = s.cfg.Core.Revoke(sig)
+	case ActFreshDay:
+		due, saved, ferr := s.cfg.Caps.Fresh(s.nowMS())
+		if err = ferr; err == nil {
+			res = map[string]any{"due": s.when(due), "saved": saved}
+		}
+	case ActCancelFresh:
+		saved, cerr := s.cfg.Caps.CancelFresh()
+		if err = cerr; err == nil {
+			res = map[string]any{"saved": saved}
+		}
 	}
 	return res, err
 }
@@ -123,6 +179,14 @@ func (s *Server) status() map[string]any {
 	}
 	if s.cfg.Core != nil {
 		out["Core"], out["Revoked"] = true, s.cfg.Core.Revoked()
+	}
+	if s.cfg.Caps != nil {
+		if day := s.cfg.Caps.Day(); day.Spent {
+			out["Caps"] = day
+			if day.DueMS != 0 {
+				out["FreshDue"] = s.when(day.DueMS)
+			}
+		}
 	}
 	return out
 }
