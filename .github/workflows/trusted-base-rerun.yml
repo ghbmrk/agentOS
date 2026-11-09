@@ -1,24 +1,24 @@
 name: trusted-base-rerun
 # CI-ceiling-fall (#5174, D-310 rule 2): a trusted-base check passed against an older main goes
-# stale when main grows. N open PRs that each fit the headroom would all stay green and land main
-# up to (N-1) times it over a ceiling (tools/ceilings.txt), as happened at 58,895. On every push
-# to main this measures main before and after the push (tools/trusted_base.py remeasure, main's
-# own copy). On anything but `held` (a ceiling measure grew, a ceiling dropped, a file the
-# verdict reads changed, or a measurement error) it reruns the newest trusted-base run on every
-# open PR into main; trusted-base.yml checks out the base branch's live tip, so the rerun
-# measures the PR merged onto the new main, and `trusted-base` is a required check. A run still
-# in progress may have read the old main, so it is rerun once it completes. A rerun request that
-# fails marks this job red, so a stale green is visible on main. It runs only on pushes to main,
-# checks out main, and builds or runs no PR code; its token may rerun workflow runs and nothing
-# else. PRs that merge within one rerun's latency can still land together; main is then over the
-# ceiling and the check stops further growth. tests/test_trusted_base.py pins every line below.
+# stale when main changes. N open PRs that each fit the headroom would all stay green and land
+# main up to (N-1) times it over a ceiling (tools/ceilings.txt), as happened at 58,895. On every
+# push to main this reruns the newest trusted-base run on every open PR into main;
+# trusted-base.yml checks out the base branch's live tip, so the rerun measures the PR merged
+# onto the new main, and `trusted-base` is a required check. It reruns on every push rather than
+# only when main's measure grows: a push that shrinks main can still raise another PR's merged
+# measure (an identical cut both make, or a package one drops that the other links; L3 on #5179).
+# A run still in progress may have read the old main, so it is rerun once it completes. A rerun
+# or listing that fails marks this job red, so a stale green is visible on main. With bursts of
+# pushes GitHub cancels a pending run of this group; the run that replaces it reruns everything
+# against a later main, so no push is lost. It checks out nothing and runs no repository or PR
+# code; its token may rerun workflow runs and read PRs, nothing else. PRs that merge within one
+# rerun's latency can still land together; main is then over the ceiling and the check stops
+# further growth. tests/test_trusted_base.py pins every line below and runs the script.
 on:
   push:
     branches: [main]
 permissions:
   contents: read
-env:
-  GOWORK: "off" # tools/trusted_base.py sets it too (test_go_builds_ignore_go_work)
 concurrency:
   group: trusted-base-rerun
   cancel-in-progress: false
@@ -28,49 +28,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: read
       actions: write # rerun trusted-base runs, nothing else
       pull-requests: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-        with:
-          fetch-depth: 0 # the commit before the push
-          persist-credentials: false
-      - name: Go version (main's broker/go.mod toolchain line)
-        id: go
-        run: |
-          v=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
-          echo "$v" | grep -Eqx 'go1\.[0-9]+(\.[0-9]+)?'
-          echo "version=${v#go}" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        with:
-          go-version: ${{ steps.go.outputs.version }}
-          cache: false
-      - name: Did the push shrink an open PR's headroom (main's copy of tools/trusted_base.py)
-        id: measure
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          verdict=rerun
-          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/before" "$BEFORE"
-            git -c core.hooksPath=/dev/null worktree add --detach "$RUNNER_TEMP/after" HEAD
-            out=$(python3 -I tools/trusted_base.py remeasure --base-tree "$RUNNER_TEMP/before" --head-tree "$RUNNER_TEMP/after" --markdown "$GITHUB_STEP_SUMMARY") || true
-            echo "$out"
-            [ "$(printf '%s\n' "$out" | tail -n 1)" = held ] && verdict=held
-          fi
-          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
       - name: Rerun every open PR's newest trusted-base run
-        if: ${{ !cancelled() && steps.measure.outputs.verdict != 'held' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          ROUNDS: 50
+          WAIT: 30
         run: |
-          gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/prs.txt"
+          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | "\(.number) \(.head.sha)"') || { echo "::error::cannot list open PRs"; exit 1; }
           failed=0
-          pending=$(cat "$RUNNER_TEMP/prs.txt")
-          for round in $(seq 1 50); do
+          pending="$prs"
+          for round in $(seq 1 "$ROUNDS"); do
             [ -n "$pending" ] || break
             left=""
             while read -r pr sha; do
@@ -85,7 +57,7 @@ jobs:
               fi
             done <<< "$pending"
             pending="$left"
-            [ -z "$pending" ] || sleep 30
+            [ -z "$pending" ] || sleep "$WAIT"
           done
           [ -z "$pending" ] || { echo "::warning::still running, not rerun: $(echo $pending)"; failed=1; }
           echo "Reran the open PRs' trusted-base runs (failed=$failed)." >> "$GITHUB_STEP_SUMMARY"
