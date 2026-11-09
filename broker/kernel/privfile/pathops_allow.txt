@@ -207,7 +207,8 @@ allow broker/clerk/seal/seal.go syncDir os.Open the store's directory, root's 07
 allow broker/cmd/agentosd/cgroot.go delegatedRoot os.ReadFile /proc/self/cgroup (liveCgroups.ProcSelf), served by the kernel; /proc/self is procfs's own link and no uid plants one in procfs
 allow broker/cmd/agentosd/cgroot.go ioWeightNote os.Stat io.weight of the broker's group in agentosd's delegated cgroup2 group, where no uid can make a link
 allow broker/cmd/agentosd/cgroot.go ioWeightNote os.ReadFile io.cost.qos in the cgroup2 root, /sys/fs/cgroup, where no uid can make a link
-allow broker/cmd/agentosd/main.go openPool os.MkdirAll the broker's group in agentosd's delegated cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cmd/agentosd/main.go removeBrokerDir os.Remove rmdir(2) of the broker's group in agentosd's delegated cgroup2 group; rmdir follows no final link and cgroup2 holds none
+allow broker/cmd/agentosd/main.go newBrokerGroup os.Mkdir the broker's group in agentosd's delegated cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
 allow broker/cmd/agentosd/infer.go inferenceLeaf os.ReadFile memory.max of the inference leaf beside the machine pool, in agentosd's delegated cgroup2 group, where no uid can make a link
 allow broker/cmd/agentosd/main.go main os.ReadFile /proc/meminfo, served by the kernel; no uid plants a link in procfs
 allow broker/cmd/agentosd/lostcard.go bootedAt os.ReadFile /proc/uptime, served by the kernel; no uid plants a link in procfs

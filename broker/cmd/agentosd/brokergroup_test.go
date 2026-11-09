@@ -52,7 +52,7 @@ func TestRES2BrokerGroupLeftoverThatWillNotGoIsAnError(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(old, "held"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newBrokerGroup(own); err == nil || !strings.Contains(err.Error(), "earlier run will not go") {
+	if _, err := newBrokerGroup(own); err == nil || !strings.Contains(err.Error(), "left by an earlier run, cannot be removed") {
 		t.Fatalf("leftover that will not go: %v", err)
 	}
 	mem, err := budget.ForHost(7680, 4, budget.Floor())

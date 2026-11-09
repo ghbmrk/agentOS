@@ -1190,7 +1190,7 @@ var removeBrokerDir = os.Remove
 func newBrokerGroup(root string) (*cgroup.Group, error) {
 	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
 	if err := removeBrokerDir(b.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("the broker's group %s from an earlier run will not go, and reused it may have been killed, which would kill every service and machine at start: %w", b.Path, err)
+		return nil, fmt.Errorf("the broker's group %s, left by an earlier run, cannot be removed because something is still in it; restart the computer to clear it (reused, it could stop every service and machine from starting): %w", b.Path, err)
 	}
 	if err := os.Mkdir(b.Path, 0o755); err != nil {
 		return nil, err
