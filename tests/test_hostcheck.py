@@ -28,6 +28,7 @@ from test_workflows import job_steps  # noqa: E402
 GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 SYSTEMD = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 SHIM = "605dab50-e046-4300-abb6-3dd810dd8b23"
+MOR = "e20939be-32d4-41be-a150-897f85d49829:MemoryOverwriteRequestControl"
 COUNTER_ATTRS = 0x02040014  # authwrite|counter|authread|no_da, as tpmseal makes it
 
 
@@ -180,6 +181,57 @@ class DiffTest(unittest.TestCase):
         del after["tpm-nv"]
         with self.assertRaises(hostcheck.HostcheckError):
             self.check(snap(), after)
+
+    def test_mor_set_disclosed_only_after_an_unclean_end(self):
+        # The EFI stub sets MOR at every boot; an orderly shutdown clears it (#4794).
+        before = snap()
+        before["uefi"][MOR] = {"attr": 7, "sha256": "00"}
+        after = snap()
+        after["uefi"][MOR] = {"attr": 7, "sha256": "01"}
+        self.assertEqual(flagged(self.check(before, after)), {("uefi", MOR, "changed")})
+        self.assertEqual(flagged(self.check(before, after, flags={"owner-boot-order"})),
+                         {("uefi", MOR, "changed")})
+        r = self.check(before, after, flags={"unclean-end"})
+        self.assertTrue(r["pass"], r)
+        self.assertEqual([d["change_id"] for d in r["disclosed"]], ["mor"])
+
+    def test_unclean_end_allows_nothing_but_mor_changed(self):
+        before = snap()
+        before["uefi"][MOR] = {"attr": 7, "sha256": "00"}
+        for name, edit, want in [
+            ("mor created", lambda a: a["uefi"].__setitem__(MOR, {"attr": 7, "sha256": "01"}), "added"),
+            ("mor removed", lambda a: a["uefi"].pop(MOR), "removed"),
+        ]:
+            with self.subTest(name):
+                b = before if want != "added" else snap()
+                after = json.loads(json.dumps(b))
+                edit(after)
+                self.assertEqual(flagged(self.check(b, after, flags={"unclean-end"})), {("uefi", MOR, want)})
+        after = json.loads(json.dumps(before))
+        after["uefi"][MOR] = {"attr": 7, "sha256": "01"}
+        after["uefi"][f"{GLOBAL}:MemoryOverwriteRequestControlLock"] = {"attr": 7, "sha256": "1"}
+        self.assertEqual(flagged(self.check(before, after, flags={"unclean-end"})),
+                         {("uefi", f"{GLOBAL}:MemoryOverwriteRequestControlLock", "added")})
+
+
+class PhaseFlagsTest(unittest.TestCase):
+    def test_only_the_unclean_phase_gets_the_flag(self):
+        phases = hostcheck.standin_phases("")
+        self.assertEqual(hostcheck.phase_flags("task", phases["task"], ["owner-boot-order"]), ["owner-boot-order"])
+        self.assertEqual(hostcheck.phase_flags("restart", phases["restart"], []), [])
+        self.assertEqual(hostcheck.phase_flags("unclean", phases["unclean"], []), ["unclean-end"])
+
+    def test_unclean_phase_must_end_in_a_power_cut(self):
+        orderly = hostcheck.standin_phases("")["task"]
+        for steps in (orderly, [], [("Linux version", "os"), ("HOSTCHECK-READY", "qmp:system_powerdown")]):
+            with self.subTest(steps=steps):
+                with self.assertRaises(hostcheck.HostcheckError):
+                    hostcheck.phase_flags("unclean", steps, [])
+
+    def test_operator_cannot_flag_a_whole_qemu_run_unclean(self):
+        with self.assertRaises(SystemExit):
+            hostcheck.main(["qemu", "--work", "/nonexistent/x", "--kernel", "k", "--initrd", "i",
+                            "--host-disk", "w=/dev/null", "--flag", "unclean-end"])
 
 
 class AllowListTest(unittest.TestCase):
@@ -449,6 +501,17 @@ class QemuTest(unittest.TestCase):
         self.assertTrue(report["baseline"]["tpm-nv"], "the stand-in host has an NV index to keep")
         self.assertEqual(report["stack"], hostcheck.stack_versions(self.tools_root))
         self.assertEqual(before, hostcheck.hash_disk(disk))
+
+    def test_unclean_end_leaves_only_mor_and_the_next_shutdown_clears_it(self):
+        # A power cut leaves MOR as the EFI stub set it, disclosed (HW-8); the
+        # orderly session after it clears it again (#4794).
+        rc, report = self.run_check("unclean", "unclean,task")
+        self.assertEqual(rc, 0, json.dumps(report, indent=1))
+        unclean, task = report["phases"]
+        self.assertTrue(unclean["pass"], unclean)
+        self.assertEqual([(d["change_id"], d["key"]) for d in unclean["disclosed"]], [("mor", MOR)])
+        self.assertTrue(task["pass"], task)
+        self.assertNotIn("mor", [d["change_id"] for d in task["disclosed"]])
 
     def test_planted_writes_flagged(self):
         rc, report = self.run_check("planted", "task", plant="disk,uefi,nv,rtc")

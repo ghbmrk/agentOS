@@ -22,6 +22,9 @@ Subcommands:
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
             stand-in guest (tools/hostcheck_standin.sh) today, P2-1's later.
+            The phase named `unclean` ends in a power cut (QMP quit) and is
+            the only one judged with the unclean-end flag, so MOR may stay
+            set after it alone (HW-8).
 
 Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 2 the check could not be made.
@@ -453,6 +456,19 @@ def qemu_snapshot(args, work):
 # command line from the console. Firmware-only boots end at the UEFI shell or
 # OVMF's "no bootable device" screen and are powered off over QMP.
 FIRMWARE_ONLY = [(r"Shell> |No bootable option or device was found", "qmp:quit")]
+# HW-8 allows MOR left set only after a power cut or forced reset. The phase of this name must end
+# in one, a QMP quit with the guest still running, and only its snapshot is judged with the flag;
+# every orderly phase, including one after it, must find MOR cleared again.
+UNCLEAN_PHASE, UNCLEAN_FLAG, POWER_CUT = "unclean", "unclean-end", "qmp:quit"
+
+
+def phase_flags(name, steps, flags):
+    """The run flags phase NAME is judged with."""
+    if name != UNCLEAN_PHASE:
+        return list(flags)
+    if not steps or steps[-1][1] != POWER_CUT:
+        raise HostcheckError(f"phase {name!r} must end in {POWER_CUT!r}, a power cut")
+    return list(flags) + [UNCLEAN_FLAG]
 
 
 def standin_phases(plant):
@@ -462,6 +478,7 @@ def standin_phases(plant):
                  ("HOSTCHECK-READY", "serial:poweroff\n")],
         "restart": [os_start, ("HOSTCHECK-READY", "serial:reboot\n"),
                     os_start, ("HOSTCHECK-READY", "serial:poweroff\n")],
+        UNCLEAN_PHASE: [os_start, ("HOSTCHECK-READY", POWER_CUT)],
     }
 
 
@@ -530,10 +547,11 @@ def cmd_qemu(args):
             raise HostcheckError(f"unknown phase {phase!r}")
         if not any(action == "os" for _, action in phases[phase]):
             raise HostcheckError(f"phase {phase!r} has no os step, so guest RTC writes could not be told apart")
+        flags = phase_flags(phase, phases[phase], args.flag)
         rtc = [{"phase": phase, "offset": e["data"]["offset"]}
                for e in boot_once(phase, phases[phase], True)]
         after = qemu_snapshot(args, work)
-        r = evaluate(baseline, after, load_allow(), flags=args.flag, noise=noise, rtc_writes=rtc)
+        r = evaluate(baseline, after, load_allow(), flags=flags, noise=noise, rtc_writes=rtc)
         report["phases"].append(dict(r, phase=phase, rtc_writes=rtc, snapshot=after))
     report["pass"] = all(p["pass"] for p in report["phases"])
     (work / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True))
@@ -574,7 +592,8 @@ def main(argv=None):
     d = sub.add_parser("diff")
     d.add_argument("before")
     d.add_argument("after")
-    d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order"])
+    d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order", UNCLEAN_FLAG],
+                   help=f"{UNCLEAN_FLAG}: the session ended in a power cut or forced reset")
     d.add_argument("--rtc-written", action="store_true", help="the operator saw the hardware clock written")
     q = sub.add_parser("qemu")
     q.add_argument("--work", required=True, help="new directory for state, logs and report.json")
@@ -585,7 +604,8 @@ def main(argv=None):
     q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]; "
                    "action os marks the OS's first output in each boot")
     q.add_argument("--host-disk", action="append", required=True, metavar="NAME=PATH[,bus=nvme|virtio|ahci]")
-    q.add_argument("--phases", default="task,restart")
+    q.add_argument("--phases", default="task,restart",
+                   help=f"comma list; {UNCLEAN_PHASE!r} ends in a power cut (stand-in: task,restart,unclean)")
     q.add_argument("--plant", default="", help="stand-in only: disk,uefi,nv,rtc (negative test)")
     q.add_argument("--flag", action="append", default=[], choices=["owner-boot-order"])
     q.add_argument("--tools-root", help="a root holding qemu, swtpm and OVMF from pinned apt sources "
