@@ -86,6 +86,29 @@ func TestAHeldReactionIsDroppedByAForget(t *testing.T) {
 	}
 }
 
+// A listed form whose middle the unlisted-form lead class rejects (a ZWJ
+// emoji, quote marks) is still dropped by a forget: heldQuote takes its quote
+// from parseForm, not shapeForm (#5194 L3).
+func TestAListedFormShapeFormMisreadsIsDroppedByAForget(t *testing.T) {
+	for _, text := range []string{
+		"Reacted 👨‍👩‍👧 to “" + forgottenReply + "”",
+		`Removed a "" from "` + forgottenReply + `"`,
+	} {
+		t.Run(text, func(t *testing.T) {
+			r := newRig(t, nil)
+			if err := r.ch.Converse(forgottenReply); err != nil {
+				t.Fatal(err)
+			}
+			r.inbox()
+			r.say(text)
+			r.ch.ForgetRecent()
+			if msgs, dropped, _ := r.ch.LocalHeld(); len(msgs) != 0 || dropped != 1 {
+				t.Fatalf("held %+v, dropped %d", msgs, dropped)
+			}
+		})
+	}
+}
+
 // An event worded before a deletion and not yet delivered when it ran is
 // never delivered (#2360).
 func TestAReactionWordedBeforeAForgetIsNotDelivered(t *testing.T) {
