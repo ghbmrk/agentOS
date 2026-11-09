@@ -232,6 +232,28 @@ func Write(w io.Writer, t Target, in Input) (Record, error) {
 	return rec, nil
 }
 
+// Size is the next full backup's size: the bytes Write would put on a
+// target for in, its content object and its first key table. The
+// enforcer's daily byte cap on a backup target is sized from it (NET-2
+// Byte caps, #4578). It writes the backup to nowhere, so it reads every
+// section once more and costs a backup's sealing, and the figure is
+// exact, since a sealed backup's length depends only on what it holds.
+func Size(in Input) (uint64, error) {
+	var n counter
+	t := &MemTarget{}
+	rec, err := Write(&n, t, in)
+	if err != nil {
+		return 0, err
+	}
+	tb, err := t.GetTable(rec.BackupID, rec.Generation)
+	return uint64(n) + uint64(len(tb)), err
+}
+
+// counter counts the bytes written to it and keeps none.
+type counter uint64
+
+func (c *counter) Write(p []byte) (int, error) { *c += counter(len(p)); return len(p), nil }
+
 func sumHex(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 
 // Sections reads a content object's sections in manifest order, checking

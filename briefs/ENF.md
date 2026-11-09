@@ -291,6 +291,16 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 3. NET-2: `radio::TestSrpReachesController`: a simulated Thread node's SRP registration is resolvable by the Matter process inside the namespace, with no LAN interface. Catches the spike's one unverified inference.
 **Size:** about 130k; split per stack if larger. **Depends on:** ENF-k, question 3.
 
+### NET-2-cap-sizing (#4578): caps sized at signing (NET-2 Byte caps, CLK-14, KRN-12)
+
+**Scope:** `broker/enforcer/policy/` (the signed `Basis`), the page's cap lines in `broker/enforcer/page/render.go`, `broker/clerk/enflist/` (new), `broker/backup/` (`Size`), `broker/daemon/arc2_test.go` (the core's line for `enforcer/policy`).
+**Builds:** the core's composer: each destination's cap equals its stated figure (a declaration's daily bytes, the image's figure, the next full backup's size), the edge's its declared total, and a destination stating none is refused by name; each cap's basis is signed and named on the confirm screen. Sub B's call site in cmd/agentosd calls the frozen `enflist` seam.
+**Acceptance tests:**
+1. NET-2: `enflist::TestCapsAreTheStatedFigures` and `page::TestCapLines`: a stated figure is the signed cap, shown with its basis.
+2. NET-2: `enflist::TestNoDailyBytesIsRefused`.
+3. NET-2: `enflist::TestCapsAreTheStatedFigures` (backup basis) and `backup::TestManifestCarriesPageCAOnly` (`Size` is the backup's exact size).
+4. NET-2: `enflist::TestCapsAreTheStatedFigures` (the edge's one cap).
+
 ## Questions for Decisions (also on the work items)
 
 1. **Enforcer image base (ENF-m).** A: reuse the core's mkosi pipeline (Debian, dm-verity A/B, Secure Boot) with an enforcer-only signing key and feed (recommended: it already meets NET-2 Hardening and is reviewed; SPEC's "OpenWrt-class" reads as small and router-like). B: an OpenWrt x86 build (literal reading; needs new work for verified boot and A/B). C: Buildroot.

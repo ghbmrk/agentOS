@@ -30,14 +30,22 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	// NET-2 Byte caps: a destination's cap is said when it is listed and
 	// whenever it changes; a cap left out is nothing, so a destination
 	// listed without one is signed knowing agentOS can send it nothing.
+	// Each cap names the figure it was sized from (#4578), from the
+	// signed basis, never from the link.
 	for _, h := range next.Destinations {
+		by := ""
+		if b := next.Basis[h]; b != "" {
+			by = ", " + basisWords(b)
+		}
 		switch was, listed := old.Caps[h], slices.Contains(old.Destinations, h); {
 		case !listed && next.Caps[h] == 0:
 			add("agentOS may send %s nothing: it has no daily byte cap.", h)
 		case !listed:
-			add("Let agentOS send %s %s a day.", h, capWords(next.Caps[h]))
+			add("Let agentOS send %s %s a day%s.", h, capWords(next.Caps[h]), by)
 		case was != next.Caps[h]:
-			add("Change what agentOS may send %s a day from %s to %s.", h, capWords(was), capWords(next.Caps[h]))
+			add("Change what agentOS may send %s a day from %s to %s%s.", h, capWords(was), capWords(next.Caps[h]), by)
+		case old.Basis[h] != next.Basis[h]:
+			add("Size what agentOS may send %s a day, %s, from %s, not %s.", h, capWords(was), basisWords(next.Basis[h]), basisWords(old.Basis[h]))
 		}
 	}
 	if old.EdgeCap != next.EdgeCap {
@@ -164,6 +172,11 @@ func plain(d policy.Document) policy.Document {
 		caps[ascii(h)] = n
 	}
 	d.Caps = caps
+	basis := make(map[string]string, len(d.Basis))
+	for h, b := range d.Basis {
+		basis[ascii(h)] = b
+	}
+	d.Basis = basis
 	for i := range d.Devices {
 		v := &d.Devices[i]
 		v.ID, v.WiFi, v.Class, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Class), ascii(v.Secure)
@@ -231,6 +244,20 @@ func capWords(n uint64) string {
 		f, u = f/1000, u+1
 	}
 	return fmt.Sprintf("%s (about %.1f %s)", w, f, units[u])
+}
+
+// basisWords is the figure a cap was sized from as the owner reads it
+// (policy.Basis*); a cap with none was set by hand.
+func basisWords(b string) string {
+	switch b {
+	case policy.BasisDeclared:
+		return "the daily bytes its declaration states"
+	case policy.BasisImage:
+		return "the signed image's figure"
+	case policy.BasisBackup:
+		return "the next full backup's size"
+	}
+	return "a figure set by hand"
 }
 
 func ascii(s string) string {
