@@ -612,10 +612,9 @@ func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := syscall.ParseNetlinkMessage(b)
-	if err != nil {
-		return nil, err
-	}
+	// A dump with a message that does not parse is read as none, so it
+	// fails below as one with no end, with the parse's error.
+	msgs, perr := syscall.ParseNetlinkMessage(b)
 	var out []netip.Prefix
 	intr, end := false, false
 	for _, m := range msgs {
@@ -659,7 +658,7 @@ func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
 		return nil, errDumpIntr
 	}
 	if !end {
-		return nil, errors.New("the kernel's address dump has no end")
+		return nil, errors.Join(errors.New("the kernel's address dump has no end"), perr)
 	}
 	return out, nil
 }
