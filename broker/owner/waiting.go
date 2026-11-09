@@ -31,6 +31,9 @@ type WaitingMsg struct {
 	ID   string    `json:"id"`
 	At   time.Time `json:"at"`
 	Text string    `json:"text"`
+	// React marks a held reaction, set by the hold itself (reactionLocked)
+	// so a forget drops exactly what was held as one (CAP-3).
+	React bool `json:"react,omitempty"`
 }
 
 // waitingReply is the one reply a locked period gets (CH-14).
@@ -45,7 +48,7 @@ func segs(text string) int {
 // waitLocked keeps text for the page and returns the locked reply, which
 // goes once per locked period (CH-14). A message that would pass the size
 // bound, or that cannot be saved, is dropped and counted.
-func (c *Channel) waitLocked(text string, now time.Time) route {
+func (c *Channel) waitLocked(text string, react bool, now time.Time) route {
 	st := c.codes.st
 	used := 0
 	for _, m := range st.Waiting {
@@ -61,7 +64,7 @@ func (c *Channel) waitLocked(text string, now time.Time) route {
 	}
 	err := c.codes.commit(func(s *State) {
 		s.WaitingSeq++
-		s.Waiting = append(slices.Clone(s.Waiting), WaitingMsg{ID: strconv.FormatUint(s.WaitingSeq, 10), At: now, Text: text})
+		s.Waiting = append(slices.Clone(s.Waiting), WaitingMsg{ID: strconv.FormatUint(s.WaitingSeq, 10), At: now, Text: text, React: react})
 		s.WaitingTold = true
 	})
 	if err != nil {

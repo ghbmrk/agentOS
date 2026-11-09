@@ -30,6 +30,21 @@ type inboxView struct {
 
 type inboxMsgView struct {
 	ID, Date, Text string
+	// Odd marks a message with characters outside printable ASCII, each
+	// shown as [U+XXXX] (showField), so nothing the agent would get is
+	// hidden from the owner (CH-14: they run only what they have read).
+	Odd bool
+}
+
+// showHeld is showField line by line: line breaks stay line breaks.
+func showHeld(s string) (shown string, odd bool) {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		var o bool
+		lines[i], o = showField(l)
+		odd = odd || o
+	}
+	return strings.Join(lines, "\n"), odd
 }
 
 const inboxUnreachable = "I can't show the messages you sent right now. Reload to try again."
@@ -73,7 +88,8 @@ func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	for _, m := range in.Msgs {
 		ids = append(ids, m.ID)
-		v.Msgs = append(v.Msgs, inboxMsgView{ID: m.ID, Date: m.At.Local().Format("2 Jan 2006, 15:04"), Text: m.Text})
+		text, odd := showHeld(m.Text)
+		v.Msgs = append(v.Msgs, inboxMsgView{ID: m.ID, Date: m.At.Local().Format("2 Jan 2006, 15:04"), Text: text, Odd: odd})
 	}
 	v.Shown = strings.Join(ids, ",")
 	v.Tok = s.formToken(sess, "inbox", v.Shown)
@@ -130,7 +146,7 @@ func init() {
 {{if .Msgs}}<form method="post" action="/inbox/">
 <input type="hidden" name="shown" value="{{.Shown}}"><input type="hidden" name="tok" value="{{.Tok}}">
 {{range .Msgs}}<section class="card"><label><input type="checkbox" name="run" value="{{.ID}}"> Send</label>
-<p class="muted">{{.Date}}</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{.Text}}</pre></section>
+<p class="muted">{{.Date}}</p>{{if .Odd}}<p class="err">This message has hidden or unusual characters, shown as [U+…]. Send it only if you wrote all of it.</p>{{end}}<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{.Text}}</pre></section>
 {{end}}<p><button type="submit">Send the marked ones, discard the rest</button></p></form>
 {{else}}{{if not .Err}}<p>Nothing is waiting.</p>{{end}}{{end}}
 {{with .Dropped}}<p class="muted">{{.}} more did not fit and were dropped.</p>{{end}}

@@ -95,6 +95,16 @@ func shapeForm(text string) (lead, quote string, ok bool) {
 	return "", "", false
 }
 
+// reactionShaped reports whether text has a reaction's form, listed or
+// not, whatever the recent texts are.
+func reactionShaped(text string) bool {
+	if _, ok := parseForm(text); ok {
+		return true
+	}
+	_, _, ok := shapeForm(text)
+	return ok
+}
+
 // readReaction is parseReaction, plus two cases that need the recent texts:
 // a listed form whose quote holds quote marks, when the quote marks a recent
 // box text (a request or a RUN offer quotes its own words), and an unlisted
@@ -522,10 +532,13 @@ func (c *Channel) ForgetRecent() int {
 		}
 		dropped = len(s.Held) - len(keep)
 		s.Held = keep
-		// A held reaction may quote a forgotten text: it goes too.
+		// A held reaction may quote a forgotten text: it goes too. So does
+		// any held text in a reaction's shape, since whether it read as
+		// one depended on the recent texts when it arrived, and after
+		// this it would read as one (#5185 L3).
 		wait := s.Waiting[:0:0]
 		for _, m := range s.Waiting {
-			if _, ok := parseReaction(m.Text); !ok {
+			if !m.React && !reactionShaped(m.Text) {
 				wait = append(wait, m)
 			}
 		}
@@ -638,7 +651,7 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	}
 	// Held as a task message is (CH-14); the page runs its text again, so
 	// its event is worded then, against the texts recent at that time.
-	rt := c.waitLocked(text, now)
+	rt := c.waitLocked(text, true, now)
 	rt.replies = append(rt.replies, replies...)
 	return rt
 }

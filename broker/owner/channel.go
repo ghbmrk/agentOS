@@ -706,7 +706,7 @@ func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
 		}
 		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}}
 	}
-	return c.waitLocked(rest, now)
+	return c.waitLocked(rest, false, now)
 }
 
 // AlertEvery is the least time between two challenge-mode alerts by text;
