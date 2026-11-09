@@ -47,6 +47,11 @@ func TestFrameBounds(t *testing.T) {
 			t.Errorf("%s: Read = %v, want ErrFrame", name, err)
 		}
 	}
+	// A whole frame one byte over the cap is refused, not read.
+	over := append([]byte{Audio, 0, 1, 0, 1}, make([]byte, MaxPayload+1)...)
+	if _, _, err := Read(bytes.NewReader(over)); !errors.Is(err, ErrFrame) {
+		t.Fatalf("a whole frame over MaxPayload = %v", err)
+	}
 	// The length is checked before anything is allocated for it.
 	if _, _, err := Read(bytes.NewReader([]byte{Audio, 0xff, 0xff, 0xff, 0xff})); !errors.Is(err, ErrFrame) {
 		t.Fatalf("4 GiB length = %v", err)

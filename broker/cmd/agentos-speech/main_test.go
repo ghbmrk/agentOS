@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/speech"
@@ -120,5 +121,129 @@ func TestNoEngineFailsClosed(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"-x"}, echo{}, in, io.Discard, &errOut); code == 0 {
 		t.Fatal("run took arguments")
+	}
+}
+
+// stuck ignores closed audio and runs until its context ends; its
+// synthesizer takes slow to answer, or waits for the context if slow is 0.
+type stuck struct{ slow time.Duration }
+
+func (stuck) Recognize(ctx context.Context, audio <-chan []byte) <-chan wire.HeardFrame {
+	out := make(chan wire.HeardFrame)
+	go func() { <-ctx.Done(); close(out) }()
+	return out
+}
+
+func (s stuck) Synthesize(ctx context.Context, text string) ([]byte, error) {
+	if s.slow == 0 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	time.Sleep(s.slow)
+	return []byte{1, 2}, nil
+}
+
+func frames(t *testing.T, fs ...[2]any) []byte {
+	var b bytes.Buffer
+	for _, f := range fs {
+		if err := wire.Write(&b, f[0].(byte), f[1].([]byte)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return b.Bytes()
+}
+
+func serveWithin(t *testing.T, ctx context.Context, in io.Reader, out io.Writer, e Engine) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, in, out, e) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return")
+		return nil
+	}
+}
+
+func TestServeEndsTheEngineOnABadFrame(t *testing.T) {
+	// The engine stops only when its context ends, so a bad frame must end it.
+	err := serveWithin(t, context.Background(), bytes.NewReader([]byte{9, 0, 0, 0, 0}), io.Discard, stuck{})
+	if !errors.Is(err, wire.ErrFrame) {
+		t.Fatalf("Serve = %v", err)
+	}
+	// A Speak too short to name its sentence is a bad frame.
+	if err := Serve(context.Background(), bytes.NewReader(frames(t, [2]any{wire.Speak, []byte{0, 0, 1}})), io.Discard, echo{}); !errors.Is(err, wire.ErrFrame) {
+		t.Fatalf("short Speak: Serve = %v", err)
+	}
+	// A read error is returned as it is.
+	if err := Serve(context.Background(), iotest.ErrReader(io.ErrClosedPipe), io.Discard, echo{}); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("read error: Serve = %v", err)
+	}
+}
+
+func TestServeFinishesSentencesBeforeACleanEnd(t *testing.T) {
+	var out bytes.Buffer
+	in := frames(t, [2]any{wire.Speak, wire.EncodeID(3, []byte("Hi."))})
+	if err := Serve(context.Background(), bytes.NewReader(in), &out, stuckDone{stuck{slow: 50 * time.Millisecond}}); err != nil {
+		t.Fatal(err)
+	}
+	want := frames(t, [2]any{wire.Spoken, wire.EncodeID(3, []byte{1, 2})}, [2]any{wire.Done, wire.EncodeID(3, []byte{wire.OK})})
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("Serve wrote %v before returning, want %v", out.Bytes(), want)
+	}
+	// A failed write is Serve's error.
+	if err := Serve(context.Background(), bytes.NewReader(in), errWriter{}, stuckDone{stuck{slow: time.Millisecond}}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("write error: Serve = %v", err)
+	}
+}
+
+// stuckDone's recognizer ends when its audio closes.
+type stuckDone struct{ stuck }
+
+func (stuckDone) Recognize(ctx context.Context, audio <-chan []byte) <-chan wire.HeardFrame {
+	out := make(chan wire.HeardFrame)
+	go func() {
+		for range audio {
+		}
+		close(out)
+	}()
+	return out
+}
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, io.ErrShortWrite }
+
+func TestServeStopsWhenItsContextEnds(t *testing.T) {
+	// Nothing reads the audio and nothing finishes a sentence: more frames
+	// than the queues hold, then the context ends.
+	var fs [][2]any
+	for i := 0; i < 80; i++ {
+		fs = append(fs, [2]any{wire.Audio, []byte{0, 0}})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := serveWithin(t, ctx, bytes.NewReader(frames(t, fs...)), io.Discard, stuck{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("audio: Serve = %v", err)
+	}
+	fs = nil
+	for i := 0; i < 10; i++ {
+		fs = append(fs, [2]any{wire.Speak, wire.EncodeID(uint32(i), []byte("Hi."))})
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if err := serveWithin(t, ctx2, bytes.NewReader(frames(t, fs...)), io.Discard, stuck{}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sentences: Serve = %v", err)
+	}
+}
+
+func TestRunServesWithAnEngine(t *testing.T) {
+	var errOut bytes.Buffer
+	if code := run(context.Background(), nil, echo{}, bytes.NewReader(nil), io.Discard, &errOut); code != 0 {
+		t.Fatalf("run with an engine = %d, %q", code, errOut.String())
+	}
+	if code := run(context.Background(), nil, echo{}, bytes.NewReader([]byte{9, 0, 0, 0, 0}), io.Discard, &errOut); code == 0 {
+		t.Fatal("run served a bad frame")
 	}
 }

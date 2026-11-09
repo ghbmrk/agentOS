@@ -117,6 +117,8 @@ func (c *Client) fail(err error) {
 	c.once.Do(func() {
 		c.mu.Lock()
 		c.err = err
+		// Removed as they are told, so a reply the reader is still
+		// taking finds none to write to.
 		for id, p := range c.pend {
 			p.done <- err
 			delete(c.pend, id)
@@ -359,9 +361,9 @@ func (c *Client) reply(typ byte, id uint32, rest []byte) error {
 		if len(p.pcm)+len(rest) > p.limit {
 			p.done <- ErrTooLong
 			delete(c.pend, id)
-			return nil
+		} else {
+			p.pcm = append(p.pcm, rest...)
 		}
-		p.pcm = append(p.pcm, rest...)
 		return nil
 	}
 	if len(rest) != 1 || rest[0] > wire.Failed {

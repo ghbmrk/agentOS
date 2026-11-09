@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -81,6 +83,9 @@ func ended(t *testing.T, c *Client, heard <-chan call.Heard) {
 	}
 	if _, err := c.Speak(context.Background(), "Hello."); err == nil {
 		t.Fatal("Speak worked after the session ended")
+	}
+	if c.Err() == nil { // and the refusal left the lock free
+		t.Fatal("Err cleared")
 	}
 }
 
@@ -332,5 +337,237 @@ func TestOddChunkKeepsSampleAlignment(t *testing.T) {
 	speech <- []byte{10, 11, 12}
 	if got := p.recv(wire.Audio); !bytes.Equal(got, []byte{9, 10, 11, 12}) {
 		t.Fatalf("third frame %v", got)
+	}
+}
+
+func TestListenContextEndsTheSession(t *testing.T) {
+	c, p := session(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	heard := c.Listen(ctx, make(chan []byte))
+	errc := make(chan error, 1)
+	go func() { _, err := c.Speak(context.Background(), "Hi."); errc <- err }()
+	p.recv(wire.Speak)
+	cancel()
+	if _, ok := <-heard; ok {
+		t.Fatal("a transcript came through after the call's context ended")
+	}
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Fatalf("pending Speak = %v, want the call's end", err)
+	}
+	if !errors.Is(c.Err(), context.Canceled) {
+		t.Fatalf("Err = %v", c.Err())
+	}
+}
+
+// gone waits until no goroutine runs any of the Client's functions named.
+func gone(t *testing.T, names ...string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		stacks := string(buf[:runtime.Stack(buf, true)])
+		var left []string
+		for _, n := range names {
+			if strings.Contains(stacks, "speech.(*Client)."+n) {
+				left = append(left, n)
+			}
+		}
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines left after the session ended: %v", left)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestEndedSessionLeavesNoGoroutine(t *testing.T) {
+	// Idle: the writer waits for frames, forward for speech, Listen's
+	// goroutines for transcripts and the call's end.
+	c, p := session(t, nil)
+	heard, _ := listen(c)
+	p.raw([]byte{9, 0, 0, 0, 0})
+	ended(t, c, heard)
+	gone(t, "write", "read", "forward", "Listen.func1", "Listen.func2")
+
+	// Busy: the process reads nothing, so the queue fills and forward
+	// waits to send; nobody reads transcripts, so the forwarder waits to
+	// deliver one and the reader waits to hand on the next; then the
+	// call's context ends.
+	c, p = session(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	speech := make(chan []byte)
+	c.Listen(ctx, speech)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case speech <- make([]byte, 160):
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+	for {
+		c.mu.Lock()
+		sent := c.sent
+		c.mu.Unlock()
+		if sent >= 80*(queue+2) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "one"}))
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "two"}))
+	cancel()
+	p.r.Close() // the writer's blocked write fails
+	p.w.Close()
+	gone(t, "write", "read", "forward", "Listen.func1", "Listen.func2", "take")
+	if c.Err() == nil {
+		t.Fatalf("Err = %v", c.Err())
+	}
+}
+
+func TestSecondListenGetsNothing(t *testing.T) {
+	c, p := session(t, nil)
+	listen(c)
+	speech := make(chan []byte, 1)
+	speech <- []byte{1, 2}
+	if _, ok := <-c.Listen(context.Background(), speech); ok {
+		t.Fatal("a second Listen delivered")
+	}
+	// Its speech is not forwarded, and the session runs on.
+	go p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "x"}))
+	time.Sleep(20 * time.Millisecond)
+	if len(speech) != 1 || c.Err() != nil {
+		t.Fatalf("second Listen took its speech (%d left) or ended the session (%v)", len(speech), c.Err())
+	}
+}
+
+func TestFullQueueSpeakStillCancels(t *testing.T) {
+	c, _ := session(t, nil) // the process reads nothing
+	for i := 0; i < queue+1; i++ {
+		go c.Speak(context.Background(), "Hi.")
+	}
+	for len(c.out) < queue {
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := c.Speak(ctx, "Late."); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Speak on a full queue = %v", err)
+	}
+	c.mu.Lock()
+	_, left := c.pend[queue+1]
+	n := len(c.pend)
+	c.mu.Unlock()
+	if left || n != queue+1 {
+		t.Fatalf("the refused sentence stayed pending (%v, %d pending)", left, n)
+	}
+}
+
+func TestRepliesAfterTheEndDoNotWedge(t *testing.T) {
+	// The call ends with a sentence pending; the process's Done for it
+	// arrives after: the session must not wedge.
+	c, p := session(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Listen(ctx, make(chan []byte))
+	errc := make(chan error, 1)
+	go func() { _, err := c.Speak(context.Background(), "Hi."); errc <- err }()
+	p.recv(wire.Speak)
+	cancel()
+	<-errc
+	go p.send(wire.Done, wire.EncodeID(0, []byte{wire.OK}))
+	time.Sleep(20 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- c.Err() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session wedged")
+	}
+
+	// Late and repeated replies to a finished or over-long sentence are
+	// dropped, and the next sentence works.
+	c, p = session(t, nil)
+	speak := func(text string, frames ...[2]any) ([]byte, error) {
+		type res struct {
+			pcm []byte
+			err error
+		}
+		r := make(chan res, 1)
+		go func() { pcm, err := c.Speak(context.Background(), text); r <- res{pcm, err} }()
+		id, _, _ := wire.DecodeID(p.recv(wire.Speak))
+		for _, f := range frames {
+			p.send(f[0].(byte), wire.EncodeID(id, f[1].([]byte)))
+		}
+		select {
+		case x := <-r:
+			return x.pcm, x.err
+		case <-time.After(2 * time.Second):
+			t.Fatal("Speak wedged")
+			return nil, nil
+		}
+	}
+	big := make([]byte, AudioLimit(3)+2)
+	if _, err := speak("Hi.", [2]any{wire.Spoken, big}); !errors.Is(err, ErrTooLong) {
+		t.Fatalf("over-long: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		p.send(wire.Spoken, wire.EncodeID(0, big))
+	}
+	if _, err := speak("Hi.", [2]any{wire.Done, []byte{wire.OK}}); err != nil {
+		t.Fatalf("after over-long replies: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		p.send(wire.Done, wire.EncodeID(1, []byte{wire.OK}))
+	}
+	if pcm, err := speak("Hi.", [2]any{wire.Spoken, []byte{5, 5}}, [2]any{wire.Done, []byte{wire.OK}}); err != nil || !bytes.Equal(pcm, []byte{5, 5}) {
+		t.Fatalf("after repeated Done: %v, %v", pcm, err)
+	}
+	// A Spoken or Done too short to name its sentence ends the session.
+	heard, _ := listen(c)
+	go c.Speak(context.Background(), "Hi.")
+	p.recv(wire.Speak)
+	p.send(wire.Spoken, []byte{0, 0})
+	ended(t, c, heard)
+}
+
+func TestMarksAreBoundedAndEndIsNeverLater(t *testing.T) {
+	clk := &clock{t: t0}
+	c, p := session(t, clk.now)
+	heard, speech := listen(c)
+	go func() {
+		for {
+			if _, _, err := wire.Read(p.r); err != nil {
+				return
+			}
+		}
+	}()
+	for i := 0; i < maxMarks+10; i++ {
+		clk.set(t0.Add(time.Duration(i+1) * 10 * time.Millisecond))
+		speech <- make([]byte, 160) // 10 ms
+	}
+	time.Sleep(20 * time.Millisecond)
+	c.mu.Lock()
+	n, sent := len(c.marks), c.sent
+	c.mu.Unlock()
+	if n != maxMarks {
+		t.Fatalf("%d marks kept, want %d", n, maxMarks)
+	}
+	// The box's clock steps back (a test clock; a wall clock can too):
+	// End is never later than the transcript's arrival.
+	clk.set(t0)
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{End: sent, Text: "x"}))
+	if h := <-heard; !h.End.Equal(t0) {
+		t.Fatalf("End %v, later than arrival %v", h.End, t0)
+	}
+	// An end older than the marks kept extrapolates back from the oldest.
+	clk.set(t0.Add(time.Hour))
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{End: 80, Text: "x"}))
+	if h := <-heard; !h.End.Before(t0.Add(11 * time.Second)) {
+		t.Fatalf("an old end mapped to %v", h.End)
 	}
 }
