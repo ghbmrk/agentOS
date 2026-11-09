@@ -221,7 +221,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Scope:** `image/enforcer/` (new), `.github/workflows/enforcer-image.yml` (new).
 **Builds:** the mkosi profile (decision 7), services limited to NET-2 Hardening's list, unused USB ports and the Wi-Fi radio off, hardware watchdog, automatic signed security fixes with rollback on a failed self-check, feature and policy-engine changes only with the owner's key, writable state on its own partition (sealed to the TPM if the V1410's is usable; the builder checks and records it in ASSUMPTIONS), and a QEMU Secure Boot boot in CI.
 **Acceptance tests:**
-1. NET-2 Hardening: `image/enforcer/ci_boot.sh` checks the open-port set equals the list, Wi-Fi and USB storage are off, and a self-check failure rolls back. Catches an extra service or a stuck bad update.
+1. NET-2 Hardening: `image/enforcer/ci_boot.sh` checks the open-port set equals the list, Wi-Fi and USB storage are off, `rp_filter` reads 0 on `all` and a network card (#4810), and a self-check failure rolls back. Catches an extra service, a WAN that never leases, or a stuck bad update.
 2. NET-2 Channel: `image/enforcer/finish_image.py` refuses an image signed with the core's key or carrying any agentOS release key. Catches a shared update source.
 **Size:** about 130k. **Depends on:** ENF-l.
 

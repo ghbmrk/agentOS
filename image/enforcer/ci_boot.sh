@@ -3,9 +3,10 @@
 # with Microsoft keys and Secure Boot on, swtpm TPM 2.0, an i6300esb hardware watchdog, a drive
 # larger than the image (the state partition grows into it). The QEMU harness is the core's
 # (image/ci_boot.sh), cut to what the enforcer has.
-#  1. First boot: a USB stick on an xHCI controller, and a credential drop-in that tries to load the
-#     simulated Wi-Fi driver (mac80211_hwsim) before the self-check. The self-check passes under
-#     Secure Boot with Wi-Fi and USB storage off and the watchdog armed; the entry is blessed; the
+#  1. First boot: a USB stick on an xHCI controller, a network card standing in for the WAN, and a
+#     credential drop-in that tries to load the simulated Wi-Fi driver (mac80211_hwsim) before the
+#     self-check. The self-check passes under Secure Boot with Wi-Fi and USB storage off, the watchdog
+#     armed and rp_filter read back as 0 on "all" and the card (#4810); the entry is blessed; the
 #     state partition grew and is noexec; the stick stayed unauthorised.
 #  2. Rollback: the drive gets a previous release's entry, and the self-check is forced to fail on
 #     counted boots. The new entry's three tries run down and the previous release boots and passes.
@@ -60,7 +61,8 @@ D=$W/drive.raw
 copy "$D"
 truncate -s 64M "$W/stick.raw"
 HWSIM="[Service]\nExecStartPre=-/bin/sh -c 'modprobe mac80211_hwsim radios=1 && echo enforcer-ci: hwsim loaded || echo enforcer-ci: hwsim refused'\n"
-EXTRA="-device qemu-xhci,id=xhci -drive if=none,id=stick,format=raw,file=$W/stick.raw -device usb-storage,bus=xhci.0,drive=stick$(smbios_cred systemd.unit-dropin.enforcer-health.service "$HWSIM")" \
+EXTRA="-device qemu-xhci,id=xhci -drive if=none,id=stick,format=raw,file=$W/stick.raw -device usb-storage,bus=xhci.0,drive=stick \
+-netdev user,id=wan,restrict=on -device virtio-net-pci,netdev=wan$(smbios_cred systemd.unit-dropin.enforcer-health.service "$HWSIM")" \
 	boot "$W/console.log" "$D"
 show "$W/console.log"
 has "$W/console.log" "enforcer-ci: hwsim refused"
@@ -69,6 +71,15 @@ has "$W/console.log" "enforcer-boot: bless=good"
 has "$W/console.log" " root=noexec watchdog_runtime=30s usb_devices=1 usb_unauthorised=1"
 hasnt "$W/console.log" "enforcer-ci: hwsim loaded"
 hasnt "$W/console.log" "enforcer-health: FAIL"
+# #4810: the self-check read rp_filter as 0 on "all", "default" and every interface, among them the
+# card (any name but all, default and lo), so the WAN's DHCP answers reach the ruleset.
+rpf=$(grep -ao 'enforcer-health: PASS .* rp_filter=0:[^ ]*' "$W/console.log" | head -n 1 | tr -d '\r' | sed 's/.* rp_filter=0://' | tr ',' '\n')
+if printf '%s\n' "$rpf" | grep -qx all && printf '%s\n' "$rpf" | grep -qx default &&
+	printf '%s\n' "$rpf" | grep -qvx 'all\|default\|lo'; then
+	echo "ok   rp_filter 0 on $(printf '%s' "$rpf" | tr '\n' ' ')"
+else
+	echo "MISS rp_filter 0 on all, default and the network card (read: $(printf '%s' "$rpf" | tr '\n' ' '))"; fail=1
+fi
 # The state partition grew into the drive's extra 2 GiB.
 rb=$(grep -ao 'root_bytes=[0-9]*' "$W/console.log" | head -n 1 | cut -d= -f2)
 [ "${rb:-0}" -gt $((2 * 1024 * 1024 * 1024)) ] && echo "ok   state partition grew ($rb bytes)" ||

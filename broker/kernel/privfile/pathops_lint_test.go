@@ -1314,7 +1314,12 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a continued line":              {modprobe, "install btusb \\\n/usr/lib/agentos/agentos-side\n", `a backslash`},
 		"a CR":                          {modprobe, "# x\rinstall btusb /usr/lib/agentos/agentos-side\n", `byte 0xd`},
 		"an unlisted install":           {modprobe, "install btusb /usr/lib/agentos/agentos-other\n", `agentos-other", which`},
-		"a glob key":                    {sysctl, "kernel.core_*=|/usr/lib/agentos/agentos-side\n", `plain dotted key`},
+		"a glob key":                    {sysctl, "kernel.core_*=|/usr/lib/agentos/agentos-side\n", `could name kernel.core_pattern`},
+		"a glob component":              {sysctl, "*.modprobe=/usr/lib/agentos/agentos-side\n", `could name kernel.modprobe`},
+		"a negated class":               {sysctl, "kernel.[!x]otplug=/usr/lib/agentos/agentos-side\n", `could name kernel.hotplug`},
+		"a glob under binfmt_misc":      {sysctl, "fs.binfmt_*.register=:x:E::bin::/usr/lib/agentos/agentos-side:\n", `could name fs.binfmt_misc`},
+		"a glob over binfmt_misc":       {sysctl, "f?.*.*=1\n", `could name fs.binfmt_misc`},
+		"a bad glob":                    {sysctl, "kernel.[=1\n", `could name`},
 		"a slash key":                   {sysctl, "kernel/modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
 		"an empty component":            {sysctl, "kernel..modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
 		"a leading dot":                 {sysctl, ".kernel.modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
@@ -3175,9 +3180,44 @@ func modprobePrograms(text string) ([]ruleProgram, error) {
 	return progs, err
 }
 
-// sysctlKey is a dotted sysctl name: systemd-sysctl also takes / separators,
-// empty components and globs, which the reader refuses rather than resolves.
-var sysctlKey = regexp.MustCompile(`^-?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
+// sysctlKey is a dotted sysctl name: systemd-sysctl also takes / separators
+// and empty components, which the reader refuses rather than resolves. A
+// component may be a glob (#4810: net.ipv4.conf.*.rp_filter); sysctlGlobReach
+// refuses one that could name a helper or anything under fs.binfmt_misc.
+var sysctlKey = regexp.MustCompile(`^-?[A-Za-z0-9_*?\[\]!^-]+(\.[A-Za-z0-9_*?\[\]!^-]+)*$`)
+
+// sysctlGlobReach returns the helper sysctl, or fs.binfmt_misc, that the glob
+// key k could name, or "". systemd-sysctl globs /proc/sys one component at a
+// time, as glob(3) does, where "[!" and "[^" both negate a class.
+func sysctlGlobReach(k string) string {
+	if !strings.ContainsAny(k, "*?[") {
+		return ""
+	}
+	g := strings.Split(strings.ReplaceAll(k, "[!", "[^"), ".")
+	matches := func(name string) bool {
+		n := strings.Split(name, ".")
+		if len(n) > len(g) {
+			return false
+		}
+		for i, c := range n {
+			if ok, err := path.Match(g[i], c); !ok || err != nil {
+				return err != nil
+			}
+		}
+		return len(n) == len(g) || name == "fs.binfmt_misc"
+	}
+	names := []string{"fs.binfmt_misc"}
+	for h := range sysctlHelpers {
+		names = append(names, h)
+	}
+	sort.Strings(names)
+	for _, h := range names {
+		if matches(h) {
+			return h
+		}
+	}
+	return ""
+}
 
 // sysctlHelpers are the sysctls that name a program the kernel runs as root:
 // kernel.core_pattern when it starts with |, and the modprobe, uevent and
@@ -3198,6 +3238,8 @@ func sysctlPrograms(text string) ([]ruleProgram, error) {
 			return fmt.Errorf("%d: %q is not a plain dotted key = value", n, line)
 		case strings.HasPrefix(strings.TrimPrefix(k, "-"), "fs.binfmt_misc."):
 			return fmt.Errorf("%d: %s registers an interpreter", n, k)
+		case sysctlGlobReach(strings.TrimPrefix(k, "-")) != "":
+			return fmt.Errorf("%d: the glob %s could name %s", n, k, sysctlGlobReach(strings.TrimPrefix(k, "-")))
 		}
 		if !ok {
 			return nil
