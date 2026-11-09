@@ -109,7 +109,7 @@ func readLoop(ctx context.Context, in io.Reader, audio chan<- []byte, speak chan
 				return ctx.Err()
 			}
 		default:
-			return fmt.Errorf("%w: type %d from the box", wire.ErrFrame, typ)
+			return fmt.Errorf("%w: unknown frame type %d", wire.ErrFrame, typ)
 		}
 	}
 }
