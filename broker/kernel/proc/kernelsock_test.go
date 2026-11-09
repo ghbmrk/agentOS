@@ -1305,8 +1305,11 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 	if err := o.Call("askforget", forgetArgs{"Bob", []string{sub}}, nil); !errors.Is(err, kernel.ErrForgetName) {
 		t.Fatalf("a swapped name: %v", err)
 	}
-	if err := o.Call("askforget", forgetArgs{strings.Repeat("a", MaxLabel+1), []string{sub}}, nil); !errors.Is(err, ErrArgs) {
+	if err := o.Call("askforget", forgetArgs{strings.Repeat("a", MaxLabel+1), []string{sub}}, nil); !errors.Is(err, kernel.ErrForgetName) {
 		t.Fatalf("a long name: %v", err)
+	}
+	if err := o.Call("askforget", 7, nil); !errors.Is(err, ErrArgs) {
+		t.Fatalf("args that are not an ask: %v", err)
 	}
 	code := ask()
 	for _, reply := range []string{"NO", "YES " + code} {

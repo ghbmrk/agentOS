@@ -333,7 +333,7 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	// erases as erase does, only on the owner's YES to it.
 	"askforget": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a forgetArgs
-		if err := json.Unmarshal(raw, &a); err != nil || len(a.Label) > MaxLabel {
+		if err := json.Unmarshal(raw, &a); err != nil {
 			return nil, ErrArgs
 		}
 		return k.AskForget(now, a.Label, a.Subjects)
