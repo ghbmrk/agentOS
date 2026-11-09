@@ -2520,10 +2520,16 @@ class ConfFilesTest(unittest.TestCase):
                     finally:
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
-            "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private", "run/agentos-egress", "run/agentos-localui", "run/agentos-mail",
-            "var/lib/agentos-mail", "run/agentos-link", "run/agentos-camera", "var/lib/agentos-camera",
-            "run/agentos-homekit", "var/lib/agentos-homekit")))
+            "home", "run/user", "var/lib/private", "var/lib/agentos-mail", "var/lib/agentos-camera",
+            "var/lib/agentos-homekit")))
+        # #5167: and every directory the manager makes for a unit that runs as a service user, stock or ours.
+        rel, target = "etc/udev/rules.d/99-x.rules", "/var/lib/systemd/timesync/x.rules"
+        f = link(self.root, rel, target)
+        self.assertEqual([l for l in self.v() if l.startswith(rel)], [])
+        write(self.root, "usr/lib/systemd/system/systemd-timesyncd.service",
+              "[Service]\nStateDirectory=systemd/timesync\nUser=systemd-timesync\n")
+        self.assertIn("%s: a link to %s, inside /var/lib/systemd/timesync," % (rel, target), self.v())
+        f.unlink()
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
@@ -4140,11 +4146,16 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
     def test_every_service_users_directory_is_in_service_dirs(self):
         self.assertIn("agentos-egress.service", [u.name for u in self.UNITS])
         self.assertIn("agentos-localui.service", [u.name for u in self.UNITS])
-        self.assertEqual(self.service_dirs_missing(check.SERVICE_DIRS), [])
+        # #5167: mkosi.finalize reads them from the tree's units (service_dirs); this reads the sources apart.
+        with tempfile.TemporaryDirectory() as t:
+            for u in self.UNITS:
+                write(pathlib.Path(t), "usr/lib/systemd/system/" + u.name, u.read_text())
+            owned = check.service_dirs(t)
+        self.assertEqual(self.service_dirs_missing(owned), [])
         # The check sees a dropped entry.
         for gone in ("var/lib/agentos-egress", "run/agentos-egress", "var/lib/agentos-localui"):
             with self.subTest(gone=gone):
-                self.assertNotEqual(self.service_dirs_missing([s for s in check.SERVICE_DIRS if s != gone]), [])
+                self.assertNotEqual(self.service_dirs_missing([s for s in owned if s != gone]), [])
 
 
 class ReferenceToolTest(unittest.TestCase):

@@ -60,6 +60,14 @@ def unlock_refusal(key, val, why, where=SYSTEM + "agentos-keeper-kernel.service"
     return "agentos-keeper-kernel.service: %s=%s in %s; %s; allowed: %s" % (key, val, where, why, allowed)
 
 
+def owned_dirs(*units):
+    """#5167: the directories the tree check counts as a service user's (service_dirs) in a tree holding UNITS."""
+    with tempfile.TemporaryDirectory() as t:
+        for u in units:
+            write(pathlib.Path(t), SYSTEM + u.name, u.read_text())
+        return check.service_dirs(t)
+
+
 class KeeperTreeTest(unittest.TestCase):
     """mkosi.finalize's keeper check on a tree holding the image's own units."""
 
@@ -292,6 +300,103 @@ class KeeperTreeTest(unittest.TestCase):
                      "BindReadOnlyPaths=/srv/lk/x:/y"):
             with self.subTest(line):
                 self.assertEqual(self.probe(line), [])
+
+    def test_a_path_through_a_stock_service_users_directory_is_refused(self):
+        # #5167: systemd makes and chowns each *Directory= of a unit that runs as a service user, stock or
+        # ours, so systemd-resolved's user can plant a link in /run/systemd/resolve, which /etc/resolv.conf
+        # names, and the binding unit reads where it leads on its next start.
+        probes = {"BindReadOnlyPaths=/etc/resolv.conf:/x": "/run/systemd/resolve",
+                  "BindReadOnlyPaths=/run/systemd/netif/x:/y": "/run/systemd/netif",
+                  "EnvironmentFile=/var/run/systemd/resolve/x": "/run/systemd/resolve",
+                  "ReadOnlyPaths=/var/lib/systemd/timesync/x": "/var/lib/systemd/timesync",
+                  "LoadCredential=c:/run/systemd/timesync/c": "/run/systemd/timesync"}
+        for line in probes:
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+        write(self.root, SYSTEM + "systemd-resolved.service",
+              "[Service]\nRuntimeDirectory=systemd/resolve\nRuntimeDirectoryPreserve=yes\nUser=systemd-resolve\n")
+        write(self.root, SYSTEM + "systemd-networkd.service", "[Service]\nRuntimeDirectory=systemd/netif\nUser=systemd-network\n")
+        write(self.root, SYSTEM + "systemd-timesyncd.service",
+              "[Service]\nRuntimeDirectory=systemd/timesync\nStateDirectory=systemd/timesync\nUser=systemd-timesync\n")
+        self.assertEqual(self.probe("BindReadOnlyPaths=/etc/resolv.conf:/x"), [
+            "agentos-boot-report.service: BindReadOnlyPaths=/etc/resolv.conf:/x, which the box resolves when the unit "
+            "starts, so a link to it is held to the link rules (#5154): a link to /etc/resolv.conf, inside "
+            "/run/systemd/resolve, which anyone on the box can write, or a service user owns; a local user would "
+            "decide what it reads (#1543, #1702) (D-154)"])
+        for line, d in probes.items():
+            with self.subTest(line):
+                got = self.probe(line)
+                self.assertEqual(len(got), 1, got)
+                self.assertIn(", inside %s, which anyone on the box can write, or a service user owns" % d, got[0])
+        # The directory itself, and root's /run/systemd above it, are not on the way; the stock tree passes.
+        for line in ("BindReadOnlyPaths=/run/systemd/resolve:/x", "BindReadOnlyPaths=/run/systemd/notify:/x"):
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+        self.assertEqual(check.violations(self.root), [])
+
+    def test_a_service_users_directories_are_read_from_its_units(self):
+        # #5167: which units run as someone but root, and which directories the manager makes them.
+        base = check.unit_owned_dirs(self.root)
+        self.assertEqual(base, (sorted(set(base[0])), []))
+        self.assertIn("run/agentos-localui", base[0])
+        self.assertIn("var/lib/agentos-egress", base[0])
+        units = {
+            # Run as root: by default, by name or by uid, with DynamicUser= off.
+            "r1.service": "[Service]\nStateDirectory=r1\n",
+            "r2.service": "[Service]\nUser=root\nGroup=0\nDynamicUser=no\nRuntimeDirectory=r2\n",
+            "r3.service": "[Service]\nUser=0\nConfigurationDirectory=r3\n",
+            # A service user, a group, a dynamic user; every *Directory= but ConfigurationDirectory=, each
+            # word, both sides of a symlink form, a nested path, and the [Socket] section.
+            "u1.service": "[Service]\nUser=u1\nStateDirectory=u1 u1b:u1link\nConfigurationDirectory=u1c\n",
+            "u2.service": "[Service]\nGroup=g2\nCacheDirectory=./u2//c/\nLogsDirectory=u2\n",
+            "u3.service": "[Service]\nDynamicUser=yes\nRuntimeDirectory=u3\n",
+            "u4.socket": "[Socket]\nUser=u4\nRuntimeDirectory=u4\n",
+            # Any assignment counts, whatever a later one sets.
+            "u5.service": "[Service]\nUser=u5\nUser=root\nRuntimeDirectory=u5\nRuntimeDirectory=\n",
+            # A template's drop-in, and an instance's, count for the template and every instance.
+            "t@.service": "[Service]\nRuntimeDirectory=t\n",
+            "t@.service.d/user.conf": "[Service]\nUser=t\n",
+            "s@.service": "[Service]\nStateDirectory=s\n",
+            "s@a.service.d/user.conf": "[Service]\nDynamicUser=on\n",
+        }
+        for rel, text in units.items():
+            write(self.root, SYSTEM + rel, text)
+        # A masked unit never runs, and /etc's mask hides /usr's file.
+        write(self.root, SYSTEM + "m.service", "[Service]\nUser=m\nStateDirectory=m\n")
+        (self.root / "etc/systemd/system").mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/systemd/system/m.service").symlink_to("/dev/null")
+        # An alias reads the file it names with its own drop-ins.
+        write(self.root, SYSTEM + "a.service", "[Service]\nRuntimeDirectory=a\n")
+        (self.root / "etc/systemd/system/b.service").symlink_to("/usr/lib/systemd/system/a.service")
+        write(self.root, "etc/systemd/system/b.service.d/user.conf", "[Service]\nUser=b\n")
+        got, err = check.unit_owned_dirs(self.root)
+        self.assertEqual(err, [])
+        self.assertEqual(sorted(set(got) - set(base[0])), sorted((
+            "var/lib/u1", "var/lib/u1b", "var/lib/u1link", "var/cache/u2/c", "var/log/u2", "run/u3", "run/u4",
+            "run/u5", "run/t", "var/lib/s", "run/a")))
+        self.assertEqual(check.service_dirs(str(self.root)), set(check.SERVICE_DIRS) | set(got))
+        # What the check does not model is refused, not passed.
+        for text in ("StateDirectory=%i", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b", "CacheDirectory=a\\b"):
+            with self.subTest(text):
+                d = write(self.root, SYSTEM + "x.service", "[Service]\nUser=x\n%s\n" % text)
+                try:
+                    self.assertEqual(check.unit_owned_dirs(self.root)[1], [
+                        "x.service: %s: the tree check does not model it; the tree check never passes a unit whose "
+                        "directories it cannot read (#5167)" % text])
+                    self.assertIn(check.unit_owned_dirs(self.root)[1][0], check.violations(self.root))
+                finally:
+                    d.unlink()
+        # So is a link to anything but a unit file in a unit directory.
+        (self.root / "srv").mkdir(exist_ok=True)
+        write(self.root, "srv/c.service", "[Service]\nUser=c\nStateDirectory=c\n")
+        for target in ("/srv/c.service", "/usr/lib/systemd/system/missing.service", "/usr/lib/systemd/system"):
+            with self.subTest(target):
+                (self.root / "etc/systemd/system/c.service").symlink_to(target)
+                try:
+                    self.assertEqual(len(check.unit_owned_dirs(self.root)[1]), 1)
+                    self.assertTrue(check.unit_owned_dirs(self.root)[1][0].startswith("c.service: a link to "))
+                finally:
+                    (self.root / "etc/systemd/system/c.service").unlink()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
