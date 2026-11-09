@@ -177,14 +177,14 @@ func TestForgedRelatedDropped(t *testing.T) {
 	}
 	h.load(withDrops(t, cutPolicy(), text))
 	h.fillSets()
-	run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, false), "{ "+netAllow+" }")
+	h.fill(DeviceSet(103, false), "{ "+netAllow+" }")
 	type fam struct {
 		v6                bool
 		allow, wan, cored string
 	}
 	fams := []fam{{false, netAllow, enfWAN, netCore}}
 	if h.v6 {
-		run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, true), "{ "+net6Allow+" }")
+		h.fill(DeviceSet(103, true), "{ "+net6Allow+" }")
 		h.answer(fixturePolicy(), CoreSet(true), "core.example", net6Allow)
 		for _, seg := range []string{"owner", "household", "guest", "core"} {
 			h.seg6(seg)

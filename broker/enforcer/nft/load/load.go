@@ -51,15 +51,46 @@ func (l Loader) apply(ctx context.Context, ruleset string) error {
 }
 
 // Update applies text, a change to the running ruleset that is not a full
-// load: only the byte caps' drop state (nft.Drops), whose first line is
-// nft.DropHeader. Like a load it is one transaction, so a refused text
-// leaves the drop as it was.
+// load: either the byte caps' drop state (nft.Drops), whose first line is
+// nft.DropHeader, or the resolver's step (nft.Refresh), every line of
+// which adds or deletes elements of the enforcer's table. Like a load it
+// is one transaction, so a refused text leaves the ruleset as it was.
 func (l Loader) Update(ctx context.Context, text string) error {
-	if !strings.HasPrefix(text, dropHeader+"\n") {
-		return fmt.Errorf("%w: not a byte-cap drop update", ErrLoad)
+	if !strings.HasPrefix(text, dropHeader+"\n") && !elementsOnly(text) {
+		return fmt.Errorf("%w: not a byte-cap drop update or an answer refresh", ErrLoad)
 	}
 	return l.apply(ctx, text)
 }
+
+// elementsOnly reports whether text is one or more lines, each adding or
+// deleting addresses in one set of the enforcer's table and nothing else:
+// a set name of lower-case letters, digits and underscores, and a list of
+// only the characters addresses are written with, so the text changes no
+// rule, set or chain and carries no second statement.
+func elementsOnly(text string) bool {
+	lines, ok := strings.CutSuffix(text, "\n")
+	if !ok || lines == "" {
+		return false
+	}
+	for _, ln := range strings.Split(lines, "\n") {
+		rest, ok := strings.CutPrefix(ln, "add element inet "+table+" ")
+		if !ok {
+			rest, ok = strings.CutPrefix(ln, "delete element inet "+table+" ")
+		}
+		name, el, ok2 := strings.Cut(rest, " { ")
+		el, ok3 := strings.CutSuffix(el, " }")
+		if !ok || !ok2 || !ok3 || name == "" || el == "" ||
+			strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" ||
+			strings.Trim(el, "0123456789abcdef.:, ") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// table is nft.Table, which this package cannot import either; nft's
+// TestDropHeaderIsTheLoaders keeps them equal.
+const table = "enforcer"
 
 // dropHeader is nft.DropHeader, which this package cannot import (nft's
 // tests import it); nft's TestDropHeaderIsTheLoaders keeps them equal.

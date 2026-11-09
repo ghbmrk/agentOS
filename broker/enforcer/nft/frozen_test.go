@@ -58,7 +58,7 @@ func TestFrozenIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.load(withDrops(t, frozenPolicy(), text))
-	run(t, "nft", "add", "element", "inet", Table, DeviceSet(101, false), "{ "+netAllow+" }")
+	h.fill(DeviceSet(101, false), "{ "+netAllow+" }")
 	h.expect(
 		probe{from: "106", addr: devAddr(107), port: 80, why: "a frozen device's pair"},
 		probe{from: "107", addr: devAddr(106), port: 80, why: "the pair to a frozen device"},
