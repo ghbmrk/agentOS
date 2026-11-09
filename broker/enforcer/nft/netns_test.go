@@ -341,11 +341,11 @@ func (h *home) loadFixture() {
 	// Slice f's resolver fills these from DNS; here they are filled
 	// directly, which is what "the sentences that need no DNS" means. The
 	// DoH address is in the TV's set to show the DNS block comes first.
-	run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, false), "{ "+netAllow+", "+netDoH+" }")
+	h.fill(DeviceSet(101, false), "{ "+netAllow+", "+netDoH+" }")
 	if h.v6 {
-		run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, true), "{ "+net6Allow+" }")
+		h.fill(DeviceSet(101, true), "{ "+net6Allow+" }")
 	}
-	run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(103, false), "{ "+netAllow+" }")
+	h.fill(DeviceSet(103, false), "{ "+netAllow+" }")
 	h.answer(fixturePolicy(), CoreSet(false), "core.example", netCore)
 }
 

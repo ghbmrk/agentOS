@@ -13,14 +13,23 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-// answer adds addr to the allow set set of document d and to name's own
-// set there, as slice f's resolver does with one answer (nftset= lists
-// both; dns.Generate).
+// answer adds addr to the allow set set of document d, to name's own set
+// there and to the fresh set, as slice f's resolver does with one answer
+// (nftset= lists all three; dns.Generate).
 func (h *home) answer(d policy.Document, set, name, addr string) {
 	h.t.Helper()
 	a, v6 := allowSetOf(h.t, d, set)
-	for _, s := range []string{set, a.Named(name, v6)} {
+	for _, s := range []string{set, a.Named(name, v6), a.Fresh(v6)} {
 		run(h.t, "nft", "add", "element", "inet", Table, s, "{ "+addr+" }")
+	}
+}
+
+// fill adds elems, an element list in braces, to the allow set set and
+// its fresh set, as the resolver's answers would, with no name's set.
+func (h *home) fill(set, elems string) {
+	h.t.Helper()
+	for _, s := range []string{set, (AllowSet{Set4: set}).Fresh(false)} {
+		run(h.t, "nft", "add", "element", "inet", Table, s, elems)
 	}
 }
 

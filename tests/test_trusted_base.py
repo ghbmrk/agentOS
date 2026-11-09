@@ -375,7 +375,7 @@ class CoreTree(unittest.TestCase):
         rc, out = self.check(extra_own=1, head_ceil=ceilings(n - 2))
         self.assertEqual(rc, 1, out)
         # The cut is the growth, not the gap to the ceiling: ending at main's measure passes.
-        self.assertIn("cut 1 lines elsewhere in this PR", out)
+        self.assertIn("cut 1 line elsewhere in this PR", out)
 
     def test_two_prs_from_one_main_overshoot_once_then_the_ceiling_holds(self):
         # #4946 L3 7: each PR is checked against main at its last push, so two PRs that each fit
@@ -389,7 +389,48 @@ class CoreTree(unittest.TestCase):
         rc, out = self.check(extra_own=5, head_ceil=ceilings(n + 3))
         self.assertEqual(rc, 1, out)
         self.assertIn(f"trusted-lines {n + 4} -> {n + 5} ends above its ceiling {n + 3}", out)
-        self.assertIn("cut 1 lines", out)
+        self.assertIn("cut 1 line elsewhere", out)
+
+    # REQ: CI-ceiling-fall
+    def test_crossing_from_under_names_the_gap_to_the_ceiling(self):
+        # #4982 item 1: main under the ceiling, the PR over it; the cut is head - ceiling (2),
+        # not head - main (5), and more than one takes the plural (item 2).
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        write(self.base, tb.CEILINGS, ceilings(n + 3))
+        rc, out = self.check(extra_own=5, head_ceil=ceilings(n + 3))
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"trusted-lines {n} -> {n + 5} ends above its ceiling {n + 3} ({tb.CEILINGS}):"
+                      " cut 2 lines elsewhere in this PR (D-310)", out)
+
+    # REQ: CI-ceiling-fall
+    def test_main_that_grows_turns_an_earlier_pass_red(self):
+        # Two PRs each fit 3 lines of headroom; once the first lands (+2), the second (+2),
+        # measured again against the new main as the rerun does, no longer fits.
+        n = tb.measure_core(self.base, tb.parse_core(CORE))["lines"]
+        self.ceil = ceilings(n + 3)
+        write(self.base, tb.CEILINGS, self.ceil)
+        self.assertEqual(self.check(extra_own=2)[0], 0)
+        tree(self.base, extra_own=2)  # the first PR merged
+        rc, out = self.check(extra_own=4)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"trusted-lines {n + 2} -> {n + 4} ends above its ceiling {n + 3}", out)
+
+    # REQ: CI-ceiling-fall
+    def test_main_that_shrinks_can_still_turn_an_earlier_pass_red(self):
+        # L3 on #5179: main is over the spec-words ceiling; PR B cuts paragraph X and adds less, so
+        # it passes. PR A makes the same cut and merges: main shrinks, yet B merged onto the new
+        # main grows it while over the ceiling. Hence a rerun on every push, not only on growth.
+        x = " ".join(["x"] * 11)
+        write(self.base, "SPEC.md", " ".join(["w"] * 101) + "\n" + x + "\n")  # 112 words
+        self.ceil = ceilings(10**6, 100)
+        write(self.base, tb.CEILINGS, self.ceil)
+        b_spec = " ".join(["w"] * 101) + "\n" + " ".join(["b"] * 5) + "\n"  # B: -11 +5 = 106
+        write(self.head, "SPEC.md", b_spec)
+        self.assertEqual(self.check()[0], 0)
+        write(self.base, "SPEC.md", " ".join(["w"] * 101) + "\n")  # A merged: 101
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("spec-words 101 -> 106 ends above its ceiling 100", out)
 
     def test_old_core_lines_count_and_move_into_the_core_at_par(self):
         # A migration step: the core grows by the lines the old core loses, in one PR.
@@ -611,7 +652,7 @@ PIN = [
     "    steps:",
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
     "        with:",
-    "          ref: ${{ github.event.pull_request.base.sha }}",
+    "          ref: ${{ github.event.pull_request.base.ref }} # the live tip, also on a rerun",
     "          fetch-depth: 0 # history for the merge with the PR head",
     "          persist-credentials: false",
     "      - name: Go version (the base's broker/go.mod toolchain line)",
@@ -654,15 +695,79 @@ PIN = [
 ]
 
 
-def pin_problems(text):
+# CI-ceiling-fall (#5174): the rerun workflow runs only on pushes to main, checks out nothing and
+# runs no repository code; its token may rerun runs and read PRs, nothing else. Pinned as
+# trusted-base.yml is, so no edit can add a PR trigger, check out code, widen the token, skip a
+# push, or swallow a refused rerun; RerunScript runs the pinned script against a stub `gh`.
+RERUN_PIN = [
+    'name: trusted-base-rerun',
+    'on:',
+    '  push:',
+    '    branches: [main]',
+    'permissions:',
+    '  contents: read',
+    'concurrency:',
+    '  group: trusted-base-rerun',
+    '  cancel-in-progress: false',
+    'jobs:',
+    '  rerun:',
+    '    name: trusted-base-rerun',
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 30',
+    '    permissions:',
+    '      actions: write # rerun trusted-base runs, nothing else',
+    '      pull-requests: read',
+    '    steps:',
+    "      - name: Rerun every open PR's newest trusted-base run",
+    '        shell: bash',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '          ROUNDS: 50',
+    '          WAIT: 30',
+    '        run: |',
+    '          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::error::cannot list open PRs"; exit 1; }',
+    '          failed=0 reran=0 missed=""',
+    '          pending="$prs"',
+    '          for round in $(seq 1 "$ROUNDS"); do',
+    '            [ -n "$pending" ] || break',
+    '            left=""',
+    '            while read -r pr sha; do',
+    '              [ -n "$pr" ] || continue',
+    '              run=$(gh api "repos/$REPO/actions/workflows/trusted-base.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" --jq \'.workflow_runs[0] | select(. != null) | "\\(.id) \\(.status)"\') || { echo "::warning::#$pr: cannot list runs"; failed=1; missed="$missed #$pr"; continue; }',
+    '              if [ -z "$run" ]; then',
+    '                echo "#$pr: no trusted-base run yet; its first run reads the new main"',
+    '              elif [ "${run#* }" = completed ]; then',
+    '                if gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi',
+    '              else',
+    '                left="$left$pr $sha"$\'\\n\'',
+    '              fi',
+    '            done <<< "$pending"',
+    '            pending="$left"',
+    '            [ -z "$pending" ] || sleep "$WAIT"',
+    '          done',
+    '          while read -r pr sha; do',
+    '            [ -n "$pr" ] || continue',
+    '            echo "::warning::#$pr ($sha): still running after the last round, not rerun"; failed=1; missed="$missed #$pr"',
+    '          done <<< "$pending"',
+    '          total=$(printf \'%s\' "$prs" | grep -c . || true)',
+    '          msg="Reran $reran of $total open PRs\' trusted-base runs."',
+    '          [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."',
+    '          printf \'\\n%s\\n\' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"',
+    '          exit "$failed"',
+]
+
+
+def pin_problems(text, pin=None):
     import re
+    pin = PIN if pin is None else pin
     if re.search(r"[^\x20-\x7e\n]", text):
         return ["a character other than printable ASCII or a newline"]
     code = [l for l in text.split("\n") if l.strip() and not l.lstrip().startswith("#")]
     out = []
-    for i in range(max(len(code), len(PIN))):
+    for i in range(max(len(code), len(pin))):
         got = code[i] if i < len(code) else "<missing>"
-        want = PIN[i] if i < len(PIN) else "<nothing>"
+        want = pin[i] if i < len(pin) else "<nothing>"
         if got != want:
             out.append(f"line {i + 1}: {got!r} != {want!r}")
     return out
@@ -676,7 +781,9 @@ class Workflow(unittest.TestCase):
     def test_pin_catches_mutations(self):
         text = (ROOT / ".github/workflows/trusted-base.yml").read_text()
         for old, new in [("pull_request_target:", "pull_request:"),
-                         ("ref: ${{ github.event.pull_request.base.sha }}", "ref: ${{ github.event.pull_request.head.sha }}"),
+                         ("ref: ${{ github.event.pull_request.base.ref }}", "ref: ${{ github.event.pull_request.head.sha }}"),
+                         # CI-ceiling-fall: the event's base.sha would make a rerun measure the old main.
+                         ("ref: ${{ github.event.pull_request.base.ref }}", "ref: ${{ github.event.pull_request.base.sha }}"),
                          ("python3 -I tools/trusted_base.py", "python3 -I \"$RUNNER_TEMP/head/tools/trusted_base.py\""),
                          ("      contents: read\n    steps:", "      contents: write\n    steps:"),
                          ("--markdown \"$GITHUB_STEP_SUMMARY\"", "--markdown \"$GITHUB_STEP_SUMMARY\" || true"),
@@ -692,6 +799,104 @@ class Workflow(unittest.TestCase):
                          ("--head-tree \"$RUNNER_TEMP/head\" --repo .", "--head-tree \"$RUNNER_TEMP/base\" --repo .")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1)), old)
+
+    # REQ: CI-ceiling-fall
+    def test_rerun_workflow_matches_its_pin(self):
+        text = (ROOT / ".github/workflows/trusted-base-rerun.yml").read_text()
+        self.assertEqual(pin_problems(text, RERUN_PIN), [])
+        for old, new in [("  push:\n    branches: [main]", "  pull_request_target:"),
+                         ("  push:\n    branches: [main]", "  push:"),
+                         ("      actions: write # rerun", "      contents: write\n      actions: write # rerun"),
+                         ("      pull-requests: read", "      pull-requests: write"),
+                         ("    steps:\n", "    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2\n"),
+                         ("        shell: bash\n", "        shell: bash\n        if: github.event.before != ''\n"),
+                         ("          exit \"$failed\"", "          exit 0"),
+                         ("&event=pull_request_target", ""),
+                         ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
+            self.assertIn(old, text)
+            self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
+
+
+def rerun_script():
+    """The rerun step's `run:` block of trusted-base-rerun.yml, as one bash script."""
+    lines = (ROOT / ".github/workflows/trusted-base-rerun.yml").read_text().split("\n")
+    start = next(i for i, l in enumerate(lines) if l.strip() == "run: |") + 1
+    return "\n".join(l[10:] for l in lines[start:] if l.strip()) + "\n"
+
+
+STUB_GH = r"""#!/bin/bash
+# A stand-in for `gh api`: open PRs from $STUB/prs, each head's runs from $STUB/runs/<sha> (one
+# "<id> <status>" line per listing, the last line repeating), reruns logged to $STUB/reran.
+[ "$1" = api ] || exit 9
+shift
+if [ "$1" = -X ]; then
+  id=${3%/rerun}; id=${id##*/}
+  [ -e "$STUB/refuse-$id" ] && exit 1
+  echo "$id" >> "$STUB/reran"; exit 0
+fi
+[ "$1" = --paginate ] && { [ -e "$STUB/prs" ] || exit 1; cat "$STUB/prs"; exit 0; }
+sha=${1#*head_sha=}; sha=${sha%%&*}
+f="$STUB/runs/$sha"
+[ -e "$f" ] || exit 0
+head -n 1 "$f"
+[ "$(wc -l < "$f")" -gt 1 ] && sed -i 1d "$f"
+exit 0
+"""
+
+
+class RerunScript(unittest.TestCase):
+    """CI-ceiling-fall: the pinned rerun script, run against a stub `gh`."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        os.makedirs(os.path.join(self.tmp, "bin"))
+        os.makedirs(os.path.join(self.tmp, "runs"))
+        write(self.tmp, "bin/gh", STUB_GH)
+        os.chmod(os.path.join(self.tmp, "bin/gh"), 0o755)
+
+    def run_script(self, prs, runs, refuse=(), rounds=3):
+        for f in pathlib.Path(self.tmp).glob("*"):
+            if f.is_file():
+                f.unlink()
+        if prs is not None:
+            write(self.tmp, "prs", "".join(f"{n} {sha}\n" for n, sha in prs))
+        for sha, lines in runs.items():
+            write(self.tmp, f"runs/{sha}", "".join(l + "\n" for l in lines))
+        for i in refuse:
+            write(self.tmp, f"refuse-{i}", "")
+        env = {**os.environ, "PATH": os.path.join(self.tmp, "bin") + os.pathsep + os.environ["PATH"],
+               "STUB": self.tmp, "REPO": "o/r", "ROUNDS": str(rounds), "WAIT": "0",
+               "GITHUB_STEP_SUMMARY": os.path.join(self.tmp, "summary")}
+        r = subprocess.run(["bash", "-eo", "pipefail", "-c", rerun_script()], env=env, capture_output=True, text=True)
+        reran = pathlib.Path(self.tmp, "reran")
+        return r.returncode, r.stdout + r.stderr, reran.read_text().split() if reran.exists() else []
+
+    # REQ: CI-ceiling-fall
+    def test_reruns_every_open_pr_waiting_for_one_in_progress(self):
+        rc, out, reran = self.run_script(
+            [(1, "a1"), (2, "b2"), (3, "c3")],
+            {"a1": ["11 completed"], "b2": ["22 in_progress", "22 queued", "22 completed"]})
+        self.assertEqual((rc, sorted(reran)), (0, ["11", "22"]), out)
+        self.assertIn("#3: no trusted-base run yet", out)
+        self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(), "\nReran 2 of 3 open PRs' trusted-base runs.\n")
+
+    # REQ: CI-ceiling-fall
+    def test_failures_turn_the_job_red(self):
+        # A refused rerun, a run still going after the last round, and an unlistable PR list each
+        # exit 1, and the other PRs are still rerun.
+        rc, out, reran = self.run_script([(1, "a1"), (2, "b2")], {"a1": ["11 completed"], "b2": ["22 completed"]},
+                                         refuse=("11",))
+        self.assertEqual((rc, reran), (1, ["22"]), out)
+        self.assertIn("rerun of 11 refused", out)
+        rc, out, reran = self.run_script([(1, "a1"), (2, "b2")], {"a1": ["11 in_progress"], "b2": ["22 completed"]},
+                                         rounds=2)
+        self.assertEqual((rc, reran), (1, ["22"]), out)
+        self.assertIn("#1 (a1): still running after the last round, not rerun", out)
+        self.assertIn("Reran 1 of 2 open PRs' trusted-base runs. Not rerun: #1 (rerun their trusted-base check by hand",
+                      pathlib.Path(self.tmp, "summary").read_text())
+        rc, out, reran = self.run_script(None, {})
+        self.assertEqual((rc, reran), (1, []), out)
 
 
 def merge_steps():

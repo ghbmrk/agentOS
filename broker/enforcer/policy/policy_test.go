@@ -366,7 +366,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// Every field has a row: adding a field to the document without one
 	// fails here.
 	covered := map[string][]string{
-		"Document":     {"Version", "Destinations", "Caps", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
+		"Document":     {"Version", "Destinations", "Caps", "Basis", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
 		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
@@ -1164,6 +1164,58 @@ func TestByteCapsCanonical(t *testing.T) {
 	if _, err := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1} })); err != nil {
 		t.Errorf("caps summing to 2^64-1: %v", err)
 	}
+	// Each cap's basis (#4578) is signed beside it, from the closed list,
+	// only for a cap, with one encoding: none is no field.
+	sized := edit(1, func(d *Document) {
+		d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}
+		d.Basis = map[string]string{"mail.example": BasisDeclared, "models.example": BasisBackup}
+	})
+	b, err = Encode(sized)
+	if err != nil || !strings.Contains(string(b), `"basis":{"mail.example":"declared","models.example":"backup"}`) {
+		t.Errorf("basis encoding %s: %v", b, err)
+	}
+	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, sized.normal()) {
+		t.Errorf("basis round trip: %v", err)
+	}
+	n := sized.normal()
+	n.Basis["mail.example"] = BasisImage
+	if sized.Basis["mail.example"] != BasisDeclared {
+		t.Error("normal shares the basis map")
+	}
+	noBasis, _ := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7}; d.Basis = map[string]string{} }))
+	if strings.Contains(string(noBasis), "basis") {
+		t.Errorf("no basis encodes as %s", noBasis)
+	}
+	for _, b := range []string{BasisImage, BasisDeclared, BasisBackup} {
+		if _, err := Encode(edit(1, func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": b}
+		})); err != nil {
+			t.Errorf("basis %q: %v", b, err)
+		}
+	}
+	for name, f := range map[string]func(d *Document){
+		"a basis off the list": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": "guess"}
+		},
+		"an empty basis": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": ""}
+		},
+		"a basis for no cap": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"models.example": BasisImage}
+		},
+		"a basis with no caps": func(d *Document) { d.Basis = map[string]string{"mail.example": BasisImage} },
+	} {
+		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
+	}
+	if _, err := Decode([]byte(`{"version":1,"destinations":["a"],"caps":{"a":1},"basis":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`)); err == nil {
+		t.Error("an empty basis map decoded")
+	}
 	for name, bad := range map[string][]byte{
 		"explicit zero": []byte(`{"version":1,"destinations":["a"],"caps":{"a":0},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 		"empty caps":    []byte(`{"version":1,"destinations":["a"],"caps":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
@@ -1189,6 +1241,7 @@ func TestCapChangesAreLoosenings(t *testing.T) {
 		"cap another listing":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1} },
 		"raise the edge's cap": func(d *Document) { d.EdgeCap = 101 },
 		"lower the edge's cap": func(d *Document) { d.EdgeCap = 99 },
+		"name a cap's basis":   func(d *Document) { d.Basis = map[string]string{"mail.example": BasisDeclared} },
 	} {
 		next := base.normal()
 		f(&next)

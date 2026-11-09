@@ -21,20 +21,23 @@ var ne = binary.NativeEndian
 
 // conn is one netlink socket, opened in the calling thread's network
 // namespace: a generic one with the ethtool family resolved (dial), or a
-// route one (open) for the links.
+// route one (open) for the links. Every request on it ends by end, one
+// deadline for the whole call that opened it (ASSUMPTIONS ENF-gro-4).
 type conn struct {
 	fd     int
 	seq    uint32
 	family uint16
+	end    time.Time
 }
 
-// open is a netlink socket of protocol proto, bound to a port of its own.
-func open(proto int) (*conn, error) {
+// open is a netlink socket of protocol proto, bound to a port of its own,
+// whose requests end by end.
+func open(proto int, end time.Time) (*conn, error) {
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
 		return nil, fmt.Errorf("netlink socket: %w", err)
 	}
-	c := &conn{fd: fd}
+	c := &conn{fd: fd, end: end}
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		c.close()
 		return nil, fmt.Errorf("netlink bind: %w", err)
@@ -42,8 +45,8 @@ func open(proto int) (*conn, error) {
 	return c, nil
 }
 
-func dial() (*conn, error) {
-	c, err := open(unix.NETLINK_GENERIC)
+func dial(end time.Time) (*conn, error) {
+	c, err := open(unix.NETLINK_GENERIC, end)
 	if err != nil {
 		return nil, err
 	}
@@ -147,24 +150,29 @@ func (c *conn) request(typ, flags uint16, body []byte) ([][]byte, error) {
 	return c.recv(want)
 }
 
-// replyWait is how long one request may wait for all of the kernel's
-// replies, however many other datagrams arrive meanwhile.
+// replyWait is how long one call (Off, Set) may wait for all of the
+// kernel's replies to every request it makes, however many other
+// datagrams arrive meanwhile.
 var replyWait = 5 * time.Second
 
 var errNoReply = errors.New("no reply from the kernel in time")
+
+// errDumpIntr is a dump the kernel marked inconsistent (NLM_F_DUMP_INTR):
+// the links changed while it was read, so one could be missing from it.
+var errDumpIntr = errors.New("the kernel's dump was interrupted by a change")
 
 // recv reads the replies of type want to request c.seq up to the
 // acknowledgement or a dump's end. Only the kernel's datagrams are read:
 // one from any other sender (a process that found this socket's port) is
 // dropped unread, so it can neither answer for the kernel nor end the
-// request. The request fails once replyWait has passed, so neither a
-// silent kernel nor a flood of other datagrams holds it.
+// request. The request fails once c.end has passed, so neither a silent
+// kernel nor a flood of other datagrams holds it, nor the call it is one
+// request of.
 func (c *conn) recv(want uint16) ([][]byte, error) {
-	var replies [][]byte
+	var r reading
 	buf := make([]byte, 1<<16)
-	end := time.Now().Add(replyWait)
 	for {
-		left := time.Until(end)
+		left := time.Until(c.end)
 		if left <= 0 {
 			return nil, errNoReply
 		}
@@ -192,26 +200,57 @@ func (c *conn) recv(want uint16) ([][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, m := range msgs {
-			if m.Header.Seq != c.seq {
-				continue
-			}
-			switch m.Header.Type {
-			case syscall.NLMSG_ERROR:
-				if len(m.Data) < 4 {
-					return nil, errors.New("short netlink error")
-				}
-				if e := int32(ne.Uint32(m.Data)); e != 0 {
-					return nil, syscall.Errno(-e)
-				}
-				return replies, nil
-			case syscall.NLMSG_DONE:
-				return replies, nil
-			case want:
-				replies = append(replies, append([]byte(nil), m.Data...)) // buf is read into again
-			}
+		if done, err := r.take(msgs, c.seq, want); done || err != nil {
+			return r.replies, err
 		}
 	}
+}
+
+// reading is one request's replies so far, and whether any of them was
+// marked NLM_F_DUMP_INTR.
+type reading struct {
+	replies [][]byte
+	intr    bool
+}
+
+// take reads one datagram's messages for request seq: each of type want
+// is kept, and an acknowledgement or a dump's end ends the request. A
+// dump ends in error when its end carries one, or when any of its
+// messages was marked interrupted, so a dump cut short or read while the
+// links changed is never read as all of them (ENF-gro-3).
+func (r *reading) take(msgs []syscall.NetlinkMessage, seq uint32, want uint16) (bool, error) {
+	for _, m := range msgs {
+		if m.Header.Seq != seq {
+			continue
+		}
+		if m.Header.Flags&unix.NLM_F_DUMP_INTR != 0 {
+			r.intr = true
+		}
+		switch m.Header.Type {
+		case syscall.NLMSG_ERROR:
+			if len(m.Data) < 4 {
+				return true, errors.New("short netlink error")
+			}
+			if e := int32(ne.Uint32(m.Data)); e != 0 {
+				return true, syscall.Errno(-e)
+			}
+			return true, nil
+		case syscall.NLMSG_DONE:
+			if len(m.Data) < 4 {
+				return true, errors.New("short netlink dump end")
+			}
+			if e := int32(ne.Uint32(m.Data)); e != 0 {
+				return true, syscall.Errno(-e)
+			}
+			if r.intr {
+				return true, errDumpIntr
+			}
+			return true, nil
+		case want:
+			r.replies = append(r.replies, append([]byte(nil), m.Data...)) // buf is read into again
+		}
+	}
+	return false, nil
 }
 
 // fromKernel is whether a datagram's sender is the kernel (port 0).

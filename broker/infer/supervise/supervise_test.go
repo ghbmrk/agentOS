@@ -697,26 +697,103 @@ func TestNoGroupNoStart(t *testing.T) {
 	}
 }
 
-// INF-4: a stop is tagged oom only when the leaf's OOM kill count rose
-// during the run.
-func TestOOMCauseCountsOnlyThisRun(t *testing.T) {
+// INF-4: a leaf that cannot be opened for children, here one without the
+// memory controller, starts nothing: a run there would have no OOM count
+// of its own.
+func TestLeafNotOpenedNoStart(t *testing.T) {
 	leaf := &cgroup.Group{Path: t.TempDir()}
-	if err := os.WriteFile(filepath.Join(leaf.Path, "memory.events"), []byte("low 0\noom_kill 2\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(leaf.Path, "cgroup.controllers"), []byte("cpu io pids\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	s, _ := service(t, Options{Cgroup: leaf, Backoff: Backoff{Min: time.Hour, Max: time.Hour, Reset: time.Hour}}, "exit")
+	deadline := time.Now().Add(10 * time.Second)
+	for s.State().Restarts == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the run never ended: %+v", s.State())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := s.State(); !strings.HasPrefix(st.Cause, "cgroup: ") || !strings.Contains(st.Cause, "lacks memory") {
+		t.Fatalf("state %+v, want a cgroup cause naming the missing memory controller", st)
+	}
+	if _, err := os.Stat(filepath.Join(leaf.Path, "infer")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the run made its group in a leaf it could not open: %v", err)
+	}
+}
+
+// INF-4: a stop is tagged oom only when this run's own group counts an
+// OOM kill; the group is new for each run, so any count is this run's.
+func TestOOMCauseCountsOnlyThisRun(t *testing.T) {
+	dir := t.TempDir()
 	for _, c := range []struct {
-		leaf   *cgroup.Group
-		before int64
+		events string
 		want   string
 	}{
-		{leaf, 1, "oom: exited"},
-		{leaf, 2, "exited"},
-		{nil, 0, "exited"},
-		{&cgroup.Group{Path: filepath.Join(leaf.Path, "absent")}, 0, "exited"},
+		{"low 0\noom 1\noom_kill 2\n", "oom: exited"},
+		{"low 0\noom 1\noom_kill 0\n", "exited"},
+		{"oom_kill 99999999999999999999\n", "exited"},
+		{"", "exited"},
 	} {
-		if got := oomCause(c.leaf, c.before, "exited"); got != c.want {
-			t.Errorf("oomCause(%v, %d) = %q, want %q", c.leaf, c.before, got, c.want)
+		g := &cgroup.Group{Path: filepath.Join(dir, "absent")}
+		if c.events != "" {
+			g.Path = t.TempDir()
+			if err := os.WriteFile(filepath.Join(g.Path, "memory.events"), []byte(c.events), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
+		if got := oomCause(g, "exited"); got != c.want {
+			t.Errorf("oomCause(%q) = %q, want %q", c.events, got, c.want)
+		}
+	}
+	if got := oomCause(nil, "exited"); got != "exited" {
+		t.Errorf("oomCause(nil) = %q, want exited", got)
+	}
+}
+
+// INF-4: two services share the inference leaf. An OOM kill in vision
+// raises the leaf's count, and infer, stopped afterwards for another
+// reason, is not reported as an OOM stop: each service's count is its own
+// group's.
+func TestOOMInOneServiceDoesNotTagAnother(t *testing.T) {
+	root := cgroupParent(t)
+	g, err := budget.Memory{HostMB: 16, InferenceMB: 32, PoolMB: 64, HeadroomMB: 16}.Apply(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := Backoff{Min: time.Hour, Max: time.Hour, Reset: time.Hour}
+	inf, sock := service(t, Options{Cgroup: g.Inference, Backoff: hold}, "pid")
+	pid, err := strconv.Atoi(ask(t, sock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vis, _ := service(t, Options{Cgroup: g.Inference, Backoff: hold, Name: "vision"}, "alloc")
+	deadline := time.Now().Add(30 * time.Second)
+	for vis.State().Restarts == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the allocating service was never stopped: %+v", vis.State())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := vis.State(); !strings.HasPrefix(st.Cause, "oom: ") {
+		t.Fatalf("vision state %+v, want an oom cause", st)
+	}
+	if n, err := g.Inference.OOMKills(); err != nil || n == 0 {
+		t.Fatalf("leaf oom_kill %d, %v: the leaf never counted vision's kill", n, err)
+	}
+	if st := inf.State(); st.Restarts != 0 {
+		t.Fatalf("infer stopped during vision's OOM: %+v", st)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	for inf.State().Restarts == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("infer never stopped: %+v", inf.State())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := inf.State(); st.Cause != "exited: signal: terminated" {
+		t.Fatalf("infer cause %q, want exited: signal: terminated (vision's OOM is not infer's)", st.Cause)
 	}
 }
 

@@ -148,6 +148,151 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(self.v(), ["agentos-modem.service: BindPaths=/var/lib/agentos-store:/x reaches the keeper's "
                                     "state (D-154)"])
 
+    def test_a_path_is_judged_as_the_image_resolves_it(self):
+        # #5119 (Security on #5117): systemd unquotes and expands a path setting, then resolves it when it
+        # applies it, so /var/run/x is /run/x; a /proc path, or a /dev link into /proc, is a process's view
+        # of the host's tree, past the mask.
+        # The box's /var/run and /var/lock count before the tree holds them: tmpfiles makes them at boot.
+        (self.root / "srv").mkdir(exist_ok=True)
+        (self.root / "srv/vr").symlink_to("/var/run")
+        for line in ("ReadOnlyPaths=/var/run/agentos-setup", "BindPaths=/var/run:/x", "ReadOnlyPaths=/srv/vr/agentos-setup"):
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                key, val = line.split("=", 1)
+                self.assertEqual(self.v(), ["agentos-boot-report.service: %s=%s reaches the keeper's state (D-154)"
+                                            % (key, val)])
+                d.unlink()
+        (self.root / "var").mkdir(exist_ok=True)
+        (self.root / "var/run").symlink_to("../run")
+        # systemd takes ReadOnlyPaths=, ReadWritePaths=, ExecPaths= and NoExecPaths= whole, ':' and all.
+        (self.root / "srv/c:").symlink_to("/")
+        (self.root / "srv/loop").symlink_to("loop")
+        (self.root / "srv/a").mkdir()
+        (self.root / "srv/pr").symlink_to("/proc/self/root")
+        reach = ("BindReadOnlyPaths=/var/run/agentos-setup:/mnt", "BindPaths=-/var/run:/srv/run",
+                 "ReadWritePaths=/var/run/agentos-link-capture", "OpenFile=/var/run/agentos-setup/passphrase",
+                 "ReadOnlyPaths=/srv/c:/run/agentos-setup", "ExecPaths=/srv/c:/var/lib/agentos-store",
+                 "ReadWritePaths=-/srv/c:/var/lib/agentos-kernel", "NoExecPaths=+/srv/c:/var/lib/agentos-mail",
+                 "TemporaryFileSystem=/var/lib/agentos-store:ro", "MountImages=-/var/lib/agentos-kernel:/x",
+                 # A '..' is judged as written: /srv/a/.. resolves to /srv, but systemd resolves it on the box.
+                 "BindPaths=/srv/a/..:/x")
+        view = {"BindReadOnlyPaths=/proc/self/root/run/agentos-setup:/mnt": "/proc/self/root/run/agentos-setup",
+                "BindPaths=-/proc/1/root/var/lib/agentos-store": "/proc/1/root/var/lib/agentos-store",
+                "BindReadOnlyPaths=/proc:/srv/p": "/proc", "ReadOnlyPaths=/proc/sys": "/proc/sys",
+                "BindReadOnlyPaths=/srv/pr/run:/x": "/proc/self/root/run",
+                "EnvironmentFile=/proc/self/root/var/lib/agentos-kernel/env": "/proc/self/root/var/lib/agentos-kernel/env",
+                "BindReadOnlyPaths=/dev:/x": "/dev", "BindReadOnlyPaths=/dev/sda:/x": "/dev/sda",
+                "TTYPath=/dev/tty1": "/dev/tty1", "BindReadOnlyPaths=/dev/nullx:/x": "/dev/nullx",
+                "BindReadOnlyPaths=/dev/null/x:/x": "/dev/null/x", "OpenFile=/dev/urandom/x": "/dev/urandom/x"}
+        for d in ("/dev/fd/3", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/core"):
+            view["BindReadOnlyPaths=%s:/x" % d] = d
+        unmodelled = ("ReadOnlyPaths=%t/agentos-setup", 'ReadOnlyPaths="/var/run/agentos-setup"',
+                      "BindReadOnlyPaths=%S/agentos-store:/x", "BindReadOnlyPaths='/var/lib/agentos-kernel':/x",
+                      "ReadWritePaths=/var/lib/agentos\\x2dstore")
+        want = {l: " reaches the keeper's state" for l in reach}
+        # The box's /etc/mtab is a /proc view before the tree holds it (#5154 (c)).
+        view["BindReadOnlyPaths=/etc/mtab:/x"] = "/proc/self/mounts"
+        want.update({l: ": %s is under /proc or /dev, which the tree check does not model (only /dev/null, "
+                        "/dev/zero, /dev/random, /dev/urandom pass)" % g for l, g in view.items()})
+        want.update({l: ": the tree check does not model it" for l in unmodelled})
+        want["BindReadOnlyPaths=/srv/loop:/x"] = ": the image cannot resolve it (too many levels of links)"
+        for line, why in want.items():
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                key, val = line.split("=", 1)
+                self.assertEqual(self.v(), ["agentos-boot-report.service: %s=%s%s (D-154)" % (key, val, why)])
+                d.unlink()
+        # An ordinary source outside the keeper's state, linked or not, and DEV_SAFE, are still allowed.
+        for line in ("BindReadOnlyPaths=/var/run/agentos-e2e/share:/x", "BindReadOnlyPaths=/srv/a:/x",
+                     "BindPaths=/srv/a/missing:/x", "ReadWritePaths=-/sys/class/leds/x", "OpenFile=/var/run/agentos-e2e/f",
+                     "BindReadOnlyPaths=/dev/null:/x", "StandardInput=file:/dev/null", "BindReadOnlyPaths=/dev/urandom:/x",
+                     "BindReadOnlyPaths=/dev/zero:/x", "BindReadOnlyPaths=/dev/random:/x",
+                     "TemporaryFileSystem=/srv/a:ro", "ReadOnlyPaths=/srv/a:b", "BindReadOnlyPaths=/srv/a:/run/agentos-setup"):
+            with self.subTest(line):
+                d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+                self.assertEqual(self.v(), [])
+                d.unlink()
+
+    def probe(self, line):
+        d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
+        try:
+            return self.v()
+        finally:
+            d.unlink()
+
+    def test_a_path_through_a_directory_a_service_can_write_is_refused(self):
+        # #5154: systemd resolves a path setting when the unit starts, so whoever can write a directory on
+        # its way can plant a link there at runtime (x -> /var/lib/agentos-store) that the build never saw.
+        self.assertEqual(self.probe("BindReadOnlyPaths=/var/lib/agentos-localui/x:/y"), [
+            "agentos-boot-report.service: BindReadOnlyPaths=/var/lib/agentos-localui/x:/y, which the box resolves "
+            "when the unit starts, so a link to it is held to the link rules (#5154): a link to "
+            "/var/lib/agentos-localui/x, inside /var/lib/agentos-localui, which anyone on the box can write, or a "
+            "service user owns; a local user would decide what it reads (#1543, #1702) (D-154)"])
+        (self.root / "srv").mkdir(exist_ok=True)
+        (self.root / "srv/l").symlink_to("/var/lib/agentos-localui")
+        (self.root / "srv/open").mkdir(mode=0o777)
+        (self.root / "srv/open").chmod(0o777)
+        (self.root / "var/lib/agentos-egress").mkdir(parents=True)
+        (self.root / "var/lib/agentos-egress/k").symlink_to("/usr/lib")
+        (self.root / "srv/via").symlink_to("/var/lib/agentos-egress/k")
+        (self.root / "srv/re").mkdir()
+        (self.root / "srv/re/k").symlink_to("/usr/lib")
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", "d /srv/made 1777 root root -\nd /srv/re 1777 root root -\n"
+              "L /srv/lk - - - - /usr/lib\nL /var/run - - - - ../run\n")
+        (self.root / "srv/lk").symlink_to("/usr/lib")
+        # Each line's way runs through the directory named, as written, through an image link, or after one.
+        refused = {"BindPaths=/var/lib/agentos-localui/x": "/var/lib/agentos-localui",
+                   "ReadOnlyPaths=/tmp/x": "/tmp", "ExecPaths=/var/tmp/x": "/var/tmp",
+                   "BindReadOnlyPaths=/home/u/x:/y": "/home", "ReadWritePaths=-/run/user/1000/x": "/run/user",
+                   "BindReadOnlyPaths=/run/agentos-localui/x:/y": "/run/agentos-localui",
+                   "NoExecPaths=/var/run/agentos-localui/x": "/run/agentos-localui",
+                   "BindReadOnlyPaths=/var/lib/private/x:/y": "/var/lib/private",
+                   "TemporaryFileSystem=/var/lib/agentos-localui/x:ro": "/var/lib/agentos-localui",
+                   "MountImages=/run/agentos-mail/i:/y": "/run/agentos-mail",
+                   "EnvironmentFile=-/var/lib/agentos-egress/env": "/var/lib/agentos-egress",
+                   "OpenFile=/run/agentos-egress/f": "/run/agentos-egress",
+                   "LoadCredential=c:/run/agentos-homekit/c": "/run/agentos-homekit",
+                   "StandardInput=file:/run/agentos-link/f": "/run/agentos-link",
+                   "StateDirectory=agentos-localui/s": "/var/lib/agentos-localui",
+                   "BindReadOnlyPaths=/srv/l/x:/y": "/var/lib/agentos-localui",
+                   "BindReadOnlyPaths=/srv/via/x:/y": "/var/lib/agentos-egress",
+                   # The last link the image follows sits in a directory the egress user can write.
+                   "BindReadOnlyPaths=/srv/via:/y": "/var/lib/agentos-egress",
+                   "BindReadOnlyPaths=/srv/open/x:/y": "/srv/open",
+                   # A step before the link, which a tmpfiles.d line remakes for anyone to write.
+                   "BindReadOnlyPaths=/srv/re/k/x:/y": "/srv/re"}
+        for line, d in refused.items():
+            with self.subTest(line):
+                got = self.probe(line)
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith("agentos-boot-report.service: %s, which the box resolves when the "
+                                                  "unit starts, so a link to it is held to the link rules (#5154): "
+                                                  % line), got)
+                self.assertIn(" /%s, which " % d.lstrip("/"), got[0])
+        # A step the tree lacks is weighed by the tmpfiles.d line that makes it.
+        got = self.probe("BindReadOnlyPaths=/srv/made/x:/y")
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("through /srv/made, which the tree lacks and usr/lib/tmpfiles.d/zz-probe.conf line 1 makes", got[0])
+        # The box's /var/run is judged as /run even where the tree's link leads elsewhere (tmpfiles' L+).
+        (self.root / "var/run").symlink_to("/srv/a")
+        (self.root / "srv/a").mkdir()
+        self.assertEqual(self.probe("ReadOnlyPaths=/var/run/agentos-setup"), [
+            "agentos-boot-report.service: ReadOnlyPaths=/var/run/agentos-setup reaches the keeper's state (D-154)"])
+        (self.root / "var/run").unlink()
+        # The directory itself is not on its way: only its parent, root's, holds its name. So is a root-owned way,
+        # and a box path whose directories are root's.
+        for line in ("BindReadOnlyPaths=/var/lib/agentos-localui:/y", "ReadWritePaths=/var/lib/agentos-egress",
+                     "BindReadOnlyPaths=/usr/lib/agentos/agentos-imapconn", "BindReadOnlyPaths=/usr/lib/x/y:/z",
+                     "ReadOnlyPaths=/tmp", "BindReadOnlyPaths=/srv/open:/y",
+                     "BindReadOnlyPaths=/run/agentos-e2e/share:/x", "StateDirectory=agentos-localui",
+                     # Under a box mount a step is held to the named directories only, as a link's is:
+                     # trixie's own L /var/run line names /run.
+                     "RuntimeDirectory=agentos-x",
+                     # A link the tree holds is followed, not taken as a step, though a tmpfiles.d line keeps it.
+                     "BindReadOnlyPaths=/srv/lk/x:/y"):
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
@@ -288,6 +433,8 @@ class KeeperTreeTest(unittest.TestCase):
                  "PathChanged=/run/agentos-setup/../agentos-x is outside the keeper's state (D-154)"),
                 ("PathExists=/run/agentos-setup/recovery", "DirectoryNotEmpty=/run/agentos-setupx",
                  "DirectoryNotEmpty=/run/agentos-setupx is outside the keeper's state (D-154)"),
+                ("PathExists=/run/agentos-setup/recovery", "PathExists=/run/agentos-setup/%I",
+                 "PathExists=/run/agentos-setup/%I is outside the keeper's state (D-154)"),
                 ("PathExists=/run/agentos-setup/recovery\n", "", "watches nothing the tree check reads (D-154)")):
             with self.subTest(new):
                 self.edit("agentos-keeper-enroll.path", old, new)

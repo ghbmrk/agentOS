@@ -3819,8 +3819,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                         if rel == "usr/lib/x/r" else real(root, rel)):
             self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
         self.assertNotIn("etc/udev/rules.d:", self.v())
-        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)\n',
-                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st, gid=gid)\n')
+        m = self.mutant('        why = step_refusal(root, d, target, held, st, gid=gid)\n',
+                        '        why = step_refusal(root, d, target, held and k < len(parts), st, gid=gid)\n')
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
                                         if rel == "usr/lib/x/r" else []):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])

@@ -247,6 +247,10 @@ type fakeDNS struct {
 	applied []dns.Files
 	inside  bool // a load ran inside Apply
 	closed  int
+	// running is the files the instances run: an Apply's once its load
+	// is done, and as they were when it is refused (dns/run starts the
+	// ones it stopped again).
+	running dns.Files
 }
 
 func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
@@ -258,7 +262,7 @@ func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
 	defer f.mu.Unlock()
 	f.inside = false
 	if err == nil {
-		f.applied = append(f.applied, files)
+		f.applied, f.running = append(f.applied, files), files
 	}
 	return err
 }
@@ -379,6 +383,10 @@ type box struct {
 	// call that names its port.
 	offloads   [][]string
 	offloadErr map[string]error
+	// served counts Served calls, each with the setup's Nets; servedErr
+	// fails them.
+	served    int
+	servedErr error
 
 	d *Enforcer
 	b *browser
@@ -458,6 +466,15 @@ func (x *box) deps() deps {
 		DNS:  x.dns, MDNS: x.mdns.serve, Boot: func() (string, error) { return "boot-1", nil },
 		Wake:    func(ctx context.Context, _ *wol.Relay) error { <-ctx.Done(); return nil },
 		Offload: x.offload,
+		Served: func(nets []dns.Net) error {
+			x.mu.Lock()
+			defer x.mu.Unlock()
+			if !slices.Equal(nets, x.cfg.DNS.Nets) {
+				x.t.Errorf("Served given %v, not the setup's networks", nets)
+			}
+			x.served++
+			return x.servedErr
+		},
 	}
 }
 
@@ -1261,12 +1278,15 @@ func (x *box) page(field string) string {
 			return "down"
 		}
 		return "up"
-	case "Light":
-		if m := regexp.MustCompile(`The light is ([a-z]+)`).FindStringSubmatch(body); m != nil {
-			return m[1]
+	case "Light": // home names only a red light (#5106)
+		if strings.Contains(body, "The light is red") {
+			return "red"
 		}
+		return "off"
 	case "Key":
 		switch {
+		case strings.Contains(body, "the revocation was not saved"):
+			return "unsaved"
 		case strings.Contains(body, "key is revoked"):
 			return "revoked"
 		case strings.Contains(body, `data-action="revoke-core"`):

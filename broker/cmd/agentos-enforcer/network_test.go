@@ -5,10 +5,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,6 +31,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
+	"golang.org/x/sys/unix"
 )
 
 // TestResolverInStep (ENF-l-dns-step, #4464): every firewall load runs
@@ -988,6 +993,418 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	}
 }
 
+// TestMergingReloadRetried (ENF-l-16, #5103 item 2): a port that starts
+// merging asks for a full load; while that load keeps failing, a reading
+// that finds the ports unchanged keeps the ask, so the load still comes
+// once the firewall takes it, with the port's caps spent.
+func TestMergingReloadRetried(t *testing.T) {
+	x, _, _ := capped(t)
+	core := x.cfg.Layout.Core
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	refuse := func() { x.fire.mu.Lock(); x.fire.fail = true; x.fire.mu.Unlock() }
+	n := loads()
+	x.merges(core, errors.New("offload: core0: rx-gro on"))
+	refuse()
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the load was not refused")
+	}
+	refuse() // the next tick's retry fails too, and the reading after it finds no change
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the retry was not refused")
+	}
+	x.advance(time.Second)
+	if loads() != n+1 {
+		t.Fatalf("%d full loads once the firewall takes one again, want 1: a reading with no change dropped the ask", loads()-n)
+	}
+	if c, _ := spentIn(t, x); !c {
+		t.Fatal("the core's caps are not spent while its port merges")
+	}
+}
+
+// TestServedInterfacesHeld (ENF-net-ra-off, #4222; ENF-l-21): the served
+// interfaces are set up and checked before the first load starts any
+// resolver instance, and again at every reading. While the check fails
+// every instance stops (the firewall still loads), the failure is logged
+// once, and the instances start again on the policy's files once it
+// passes; a start with the check failing runs no instance at all.
+func TestServedInterfacesHeld(t *testing.T) {
+	x, _ := enrolled(t, false)
+	want, err := dns.Generate(home(), x.cfg.Layout, x.cfg.DNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := func() int { x.mu.Lock(); defer x.mu.Unlock(); return x.served }
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	if calls() == 0 || len(x.dns.last().Listed) == 0 {
+		t.Fatalf("%d checks, files %v: the resolver runs unchecked or not at all", calls(), x.dns.last())
+	}
+	n, l := calls(), loads()
+	x.advance(readEvery)
+	if calls() != n+1 || loads() != l {
+		t.Fatalf("a reading made %d checks and %d loads, want 1 and 0", calls()-n, loads()-l)
+	}
+
+	bad := "served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24"
+	x.mu.Lock()
+	x.servedErr = errors.New(bad)
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatalf("%d loads at the reading that found the change, want 1", loads()-l)
+	}
+	if got := x.dns.last(); len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("instances still run with a served interface not as set up: %v", got)
+	}
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatal("a full load with nothing changed")
+	}
+	if c := strings.Count(x.logText(), "dns: a served interface is not as set up, every resolver instance stops until it is: "+bad); c != 1 {
+		t.Fatalf("the failure logged %d times:\n%s", c, x.logText())
+	}
+
+	x.restart()
+	if got := x.dns.last(); len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("a start with the check failing ran instances: %v", got)
+	}
+	x.mu.Lock()
+	x.servedErr = nil
+	x.mu.Unlock()
+	l = loads()
+	x.advance(readEvery)
+	if loads() != l+1 {
+		t.Fatalf("%d loads once the interfaces pass again, want 1", loads()-l)
+	}
+	if got := x.dns.last(); !slices.Equal(got.Listed, want.Listed) || got.People != want.People || got.DHCP != want.DHCP {
+		t.Fatal("the resolver did not start again on the policy's files")
+	}
+	if c := strings.Count(x.logText(), "dns: the served interfaces are as set up again, the resolver starts"); c != 1 {
+		t.Fatalf("the end logged %d times:\n%s", c, x.logText())
+	}
+}
+
+// TestRefusedLoadKeepsResolverStopped (#5164 item 7): with a served
+// interface not as set up, the instances stop before the load, so a
+// refused load, which starts the stopped ones again, brings back none.
+func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.dns.mu.Lock()
+	was := x.dns.running
+	x.dns.mu.Unlock()
+	if len(was.Listed) == 0 {
+		t.Fatal("fixture: no instance runs")
+	}
+	x.mu.Lock()
+	x.servedErr = errors.New("served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24")
+	x.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), home())
+	x.d.fwMu.Unlock()
+	if err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	x.dns.mu.Lock()
+	got := x.dns.running
+	x.dns.mu.Unlock()
+	if len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("a refused load left instances running with the check failing: %v", got)
+	}
+}
+
+// TestHold (ENF-net-ra-off, #4222): hold turns router advertisements and
+// redirects off on each served interface there and on "default", and
+// reads them back; an interface not there yet is passed; every address on
+// a served interface must lie in its Net's prefixes, no wider, or be the
+// kernel's IPv6 link-local one. A kernel with no IPv6 has only the IPv4
+// setting. A name that would reach outside the interface's directory, or
+// set every interface's value, is refused.
+func TestHold(t *testing.T) {
+	keys := []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
+	box := func(v6 bool, ifaces ...string) string {
+		root := t.TempDir()
+		all := filepath.Join(root, "ipv4/conf/all/accept_redirects")
+		if err := os.MkdirAll(filepath.Dir(all), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(all, []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, i := range append([]string{"default"}, ifaces...) {
+			for _, k := range keys {
+				if !v6 && strings.HasPrefix(k, "ipv6") {
+					continue
+				}
+				p := filepath.Join(root, fmt.Sprintf(k, i))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("1\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return root
+	}
+	set := func(root string, v6 bool, ifaces ...string) {
+		t.Helper()
+		if b, err := os.ReadFile(filepath.Join(root, "ipv4/conf/all/accept_redirects")); err != nil || string(b) != "0\n" {
+			t.Fatalf("all/accept_redirects: %q %v", b, err)
+		}
+		for _, i := range append([]string{"default"}, ifaces...) {
+			for _, k := range keys {
+				if !v6 && strings.HasPrefix(k, "ipv6") {
+					continue
+				}
+				if b, err := os.ReadFile(filepath.Join(root, fmt.Sprintf(k, i))); err != nil || string(b) != "0\n" {
+					t.Fatalf("%s on %s: %q %v", k, i, b, err)
+				}
+			}
+		}
+	}
+	p := netip.MustParsePrefix
+	nets := []dns.Net{
+		{Iface: "own0", Prefix4: p("10.10.0.0/24"), Prefix6: p("fd00:10::/64"), DHCP: true},
+		{Iface: "ap0.101", Prefix4: p("10.101.0.0/24")},
+		{Iface: "ap0.102", Prefix4: p("10.102.0.0/24")}, // not made yet
+	}
+	have := map[string][]netip.Prefix{
+		"own0":    {p("10.10.0.1/24"), p("fd00:10::1/64"), p("fe80::1/64")},
+		"ap0.101": {p("10.101.0.1/24"), p("10.101.0.9/32")},
+	}
+	addrs := func(i string) ([]netip.Prefix, error) {
+		a, ok := have[i]
+		if !ok {
+			return nil, errors.New("asked for " + i)
+		}
+		return a, nil
+	}
+	root := box(true, "own0", "ap0.101")
+	if err := hold(root, nets, addrs); err != nil {
+		t.Fatal(err)
+	}
+	set(root, true, "own0", "ap0.101")
+	if _, err := os.Stat(filepath.Join(root, "ipv4/conf/ap0.102")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an interface not there yet was made: %v", err)
+	}
+
+	root = box(false, "own0", "ap0.101")
+	if err := hold(root, nets, addrs); err != nil {
+		t.Fatalf("no IPv6: %v", err)
+	}
+	set(root, false, "own0", "ap0.101")
+
+	// An interface not served (the WAN) keeps its own settings: its link
+	// configuration sets its router advertisements (ENF-l-21).
+	root = box(true, "own0", "wan0")
+	wan := filepath.Join(root, "ipv6/conf/wan0/accept_ra")
+	if err := os.WriteFile(wan, []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], addrs); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(wan); err != nil || string(b) != "2\n" {
+		t.Fatalf("an interface not served was written: %q %v", b, err)
+	}
+
+	// A setting that takes the write and reads back something else (here
+	// nothing: a link to /dev/null) fails, for "all" and an interface's.
+	for _, key := range []string{"ipv4/conf/all/accept_redirects", "ipv6/conf/own0/accept_ra"} {
+		root = box(true, "own0")
+		path := filepath.Join(root, key)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(os.DevNull, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := hold(root, nets[:1], addrs); err == nil || !strings.Contains(err.Error(), path+` not set to 0 (reads "")`) {
+			t.Errorf("%s linked to %s: %v", key, os.DevNull, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		addr netip.Prefix
+		want string
+	}{
+		{"another prefix", p("10.99.0.1/24"), "served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24 and fd00:10::/64"},
+		{"a wider prefix", p("10.10.0.1/16"), "holds 10.10.0.1/16"},
+		{"another IPv6 prefix", p("2001:db8::1/64"), "holds 2001:db8::1/64"},
+		{"a wider IPv6 prefix", p("fd00:10::1/48"), "holds fd00:10::1/48"},
+		{"a wider link-local prefix", p("fe80::1/10"), "holds fe80::1/10"},
+		{"a link-local address outside fe80::/64", p("fe80:1::1/64"), "holds fe80:1::1/64"},
+	} {
+		have["own0"] = []netip.Prefix{p("10.10.0.1/24"), tc.addr}
+		if err := hold(box(true, "own0", "ap0.101"), nets, addrs); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+	have["ap0.101"] = []netip.Prefix{p("10.101.0.1/24"), p("10.102.0.1/24")}
+	if err := hold(box(true, "own0", "ap0.101"), nets[1:], addrs); err == nil || !strings.Contains(err.Error(), "served interface ap0.101 holds 10.102.0.1/24, outside 10.101.0.0/24") || strings.Contains(err.Error(), " and ") {
+		t.Errorf("an IPv4-only net: %v", err)
+	}
+	delete(have, "ap0.101")
+	if err := hold(box(true, "own0", "ap0.101"), nets[1:], addrs); err == nil || !strings.Contains(err.Error(), "served interface ap0.101: addresses: asked for ap0.101") {
+		t.Errorf("addresses unreadable: %v", err)
+	}
+	for _, name := range []string{"", ".", "..", "../x", "all", "default", "a/b", "a\x00b"} {
+		if err := hold(box(true), []dns.Net{{Iface: name, Prefix4: p("10.1.0.0/24")}}, addrs); err == nil || !strings.Contains(err.Error(), "not an interface name") {
+			t.Errorf("interface %q: %v", name, err)
+		}
+	}
+	// A setting that cannot be written, and a settings tree that is not
+	// one (ENOTDIR, not "not there yet").
+	root = box(true, "own0")
+	key := filepath.Join(root, "ipv6/conf/own0/accept_ra")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(key, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], func(string) ([]netip.Prefix, error) { return nil, nil }); err == nil || !strings.Contains(err.Error(), "accept_ra") {
+		t.Errorf("an unwritable setting: %v", err)
+	}
+	// An interface's settings that cannot be read (a loop, ELOOP) and an
+	// IPv6 tree that cannot be: each fails, never reads as "not there".
+	root = box(true)
+	loop := filepath.Join(root, "ipv4/conf/own0")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nets[:1], addrs); err == nil {
+		t.Error("an interface whose settings cannot be read passed")
+	}
+	root = box(true)
+	v6 := filepath.Join(root, "ipv6")
+	if err := os.RemoveAll(v6); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v6, v6); err != nil {
+		t.Fatal(err)
+	}
+	if err := hold(root, nil, addrs); err == nil {
+		t.Error("an IPv6 tree that cannot be read passed")
+	}
+}
+
+// TestIfaceAddrs: the kernel's addresses with their prefix lengths, read
+// from loopback; a missing interface is an error. From a dump: each local
+// and peer address of the interface's messages, once; a dump marked
+// interrupted (NLM_F_DUMP_INTR) is taken again once, and fails if the
+// second is marked too (#5164 item 8); an end carrying an error, a short
+// end, no end, or anything unreadable fails.
+func TestIfaceAddrs(t *testing.T) {
+	got, err := ifaceAddrs("lo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got, netip.MustParsePrefix("127.0.0.1/8")) {
+		t.Fatalf("lo: %v", got)
+	}
+	if got, err := ifaceAddrs("agentos-none0"); err == nil {
+		t.Fatalf("a missing interface read: %v", got)
+	}
+
+	ne := binary.NativeEndian
+	attr := func(typ uint16, v []byte) []byte {
+		b := make([]byte, 4, 4+len(v)+3)
+		ne.PutUint16(b, uint16(4+len(v)))
+		ne.PutUint16(b[2:], typ)
+		b = append(b, v...)
+		return append(b, make([]byte, (4-len(b)%4)%4)...)
+	}
+	msg := func(typ, flags uint16, body []byte) []byte {
+		b := make([]byte, 16, 16+len(body))
+		ne.PutUint32(b, uint32(16+len(body)))
+		ne.PutUint16(b[4:], typ)
+		ne.PutUint16(b[6:], flags)
+		return append(b, body...)
+	}
+	addr := func(flags uint16, family, bits byte, index uint32, attrs ...[]byte) []byte {
+		b := []byte{family, bits, 0, 0, 0, 0, 0, 0}
+		ne.PutUint32(b[4:], index)
+		for _, a := range attrs {
+			b = append(b, a...)
+		}
+		return msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI|flags, b)
+	}
+	v4 := func(s string) []byte { a := netip.MustParseAddr(s).As4(); return a[:] }
+	v6 := func(s string) []byte { a := netip.MustParseAddr(s).As16(); return a[:] }
+	done := func(flags uint16) []byte { return msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI|flags, make([]byte, 4)) }
+	join := func(ms ...[]byte) []byte { return bytes.Join(ms, nil) }
+	const intr = unix.NLM_F_DUMP_INTR
+	clean := join(
+		addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")), attr(syscall.IFA_LOCAL, v4("10.1.0.1")), attr(syscall.IFA_LABEL, []byte("own0\x00"))),
+		addr(0, syscall.AF_INET, 24, 3, attr(syscall.IFA_ADDRESS, v4("10.99.0.1"))),
+		addr(0, syscall.AF_INET, 32, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.2")), attr(syscall.IFA_ADDRESS, v4("10.9.0.1"))),
+		addr(0, syscall.AF_INET6, 64, 2, attr(syscall.IFA_ADDRESS, v6("fe80::1"))),
+		done(0),
+	)
+	p := netip.MustParsePrefix
+	want := []netip.Prefix{p("10.1.0.1/24"), p("10.1.0.2/32"), p("10.9.0.1/32"), p("fe80::1/64")}
+	dumps := func(ds ...[]byte) (func() ([]byte, error), *int) {
+		n := 0
+		return func() ([]byte, error) {
+			n++
+			if n > len(ds) {
+				t.Fatal("dumped more than twice")
+			}
+			return ds[n-1], nil
+		}, &n
+	}
+	for _, tc := range []struct {
+		name  string
+		ds    [][]byte
+		calls int
+		ok    bool
+	}{
+		{"clean", [][]byte{clean}, 1, true},
+		{"interrupted, then clean", [][]byte{join(addr(intr, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), done(0)), clean}, 2, true},
+		{"its end interrupted, then clean", [][]byte{done(intr), clean}, 2, true},
+		{"interrupted twice", [][]byte{done(intr), join(addr(intr, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), done(0))}, 2, false},
+	} {
+		dump, n := dumps(tc.ds...)
+		got, err := addrsOf(2, dump)
+		if *n != tc.calls {
+			t.Errorf("%s: %d dumps, want %d", tc.name, *n, tc.calls)
+		}
+		if tc.ok && (err != nil || !slices.Equal(got, want)) {
+			t.Errorf("%s: %v %v, want %v", tc.name, got, err, want)
+		}
+		if !tc.ok && (!errors.Is(err, errDumpIntr) || got != nil) {
+			t.Errorf("%s: %v %v, want the interrupted dump's error", tc.name, got, err)
+		}
+	}
+	if _, err := addrsOf(2, func() ([]byte, error) { return nil, errors.New("netlink: refused") }); err == nil || err.Error() != "netlink: refused" {
+		t.Errorf("a failed dump: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		dump []byte
+	}{
+		{"a short address message", join(msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0}), done(0))},
+		{"a three-byte address", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0})), done(0))},
+		{"a prefix longer than the address", join(addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1"))), done(0))},
+		{"a message cut short", clean[:20]},
+		{"an attribute that does not parse", join(addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0}), done(0))},
+		{"an end carrying an error", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, []byte{0xf0, 0xff, 0xff, 0xff}))},
+		{"a short end", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, nil))},
+		{"no end", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")))},
+	} {
+		b := tc.dump
+		if got, err := addrsOf(2, func() ([]byte, error) { return b, nil }); err == nil || got != nil {
+			t.Errorf("%s read as %v", tc.name, got)
+		}
+	}
+}
+
 // TestMergingPortSpentOnANewDay (ENF-l-16): a quota a reading starts
 // while a port merges (a new day, a merge of groups) starts spent too, not
 // only the ones a full load starts.
@@ -1042,5 +1459,83 @@ func TestMergingKeptOffAtEachReading(t *testing.T) {
 	x.advance(readEvery)
 	if c := strings.Count(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again"); c != 1 {
 		t.Fatalf("the end of a failure logged %d times", c)
+	}
+}
+
+// TestAnswersRefreshed (#4453): every readEvery the daemon runs the
+// resolver's step against the running table, so each answer since the
+// last step takes new connections for nft.AnswerTimeout from then and no
+// longer; nothing is applied when no answer is fresh, and a failing step
+// is logged once while it lasts, and its end once.
+func TestAnswersRefreshed(t *testing.T) {
+	x, doc, _ := capped(t)
+	sets, err := nft.AllowSets(doc, x.cfg.Layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := json.Marshal(map[string]any{"nftables": []any{
+		map[string]any{"set": map[string]any{"family": "inet", "table": nft.Table, "name": sets[0].Fresh(false), "elem": []any{map[string]any{"elem": map[string]any{"val": "203.0.113.5", "expires": nft.AnswerTimeout - 10}}}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := nft.Refresh(doc, x.cfg.Layout, fresh)
+	if err != nil || want == "" {
+		t.Fatalf("fixture: no refresh (%v)", err)
+	}
+	updates := func() []string { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return slices.Clone(x.fire.updates) }
+	refreshes := func() int {
+		n := 0
+		for _, u := range updates() {
+			if u == want {
+				n++
+			}
+		}
+		return n
+	}
+
+	x.setListing(listing(t, x, doc, 7, 10))
+	x.advance(readEvery)
+	if refreshes() != 0 {
+		t.Fatal("a refresh with no fresh answer")
+	}
+	x.setListing(fresh)
+	x.advance(readEvery)
+	if refreshes() != 1 {
+		t.Fatalf("%d refreshes of a fresh answer after one reading interval, want 1", refreshes())
+	}
+
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: gone")
+	x.fire.mu.Unlock()
+	logged := len(x.logText())
+	x.advance(readEvery)
+	x.advance(readEvery)
+	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 || !strings.Contains(x.logText()[logged:], "until one is, for at most 600 s from their first answer: nft: gone") {
+		t.Fatalf("a failing step logged %d times over two intervals, want once with its cause:\n%s", got, x.logText()[logged:])
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = nil
+	x.fire.mu.Unlock()
+	x.advance(readEvery)
+	if !strings.Contains(x.logText()[logged:], "resolver answers: refreshed again") || refreshes() != 2 {
+		t.Fatal("the step's recovery was not logged or did not refresh")
+	}
+}
+
+// TestNoRefreshBeforeALoad (#4453): while no ruleset has loaded (each
+// load so far refused) there are no answers to refresh, so the step reads
+// nothing.
+func TestNoRefreshBeforeALoad(t *testing.T) {
+	x := newBox(t, false)
+	x.d.fwMu.Lock()
+	x.d.loaded = ""
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: no table")
+	x.fire.mu.Unlock()
+	n := x.listed()
+	if err := x.d.refreshAnswers(context.Background()); err != nil || x.listed() != n {
+		t.Fatalf("the step ran before any load: %v, %d lists", err, x.listed()-n)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Merging are the features under which one received packet can carry
@@ -42,19 +43,30 @@ var ErrStuck = errors.New("offload: a feature stays as it was")
 // then reads each back. It returns an error naming every port that is
 // missing, unreadable, still merging or on a parent in another
 // namespace; a device already off is only read, so a repeat call changes
-// nothing.
-func Off(ports ...string) error {
-	devs, err := under(ports)
+// nothing. The whole call ends within replyWait, however many devices it
+// sets (ASSUMPTIONS ENF-gro-4).
+func Off(ports ...string) error { return off(time.Now().Add(replyWait), ports...) }
+
+// off is Off with one deadline, end, for every request it makes: one
+// link dump on one route socket, then every device's features on one
+// generic socket.
+func off(end time.Time, ports ...string) error {
+	devs, err := under(ports, end)
 	if err != nil {
 		return err
 	}
-	off := map[string]bool{}
+	c, err := dial(end)
+	if err != nil {
+		return fmt.Errorf("offload: %w", err)
+	}
+	defer c.close()
+	none := map[string]bool{}
 	for _, f := range Merging {
-		off[f] = false
+		none[f] = false
 	}
 	var errs []error
 	for _, d := range devs {
-		if err := Set(d, off); err != nil {
+		if err := c.change(d, none); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -66,11 +78,16 @@ func Off(ports ...string) error {
 // returns ErrStuck, wrapped with the features that did not take, when one
 // stays as it was.
 func Set(dev string, want map[string]bool) error {
-	c, err := dial()
+	c, err := dial(time.Now().Add(replyWait))
 	if err != nil {
 		return fmt.Errorf("offload: %s: %w", dev, err)
 	}
 	defer c.close()
+	return c.change(dev, want)
+}
+
+// change is Set on c.
+func (c *conn) change(dev string, want map[string]bool) error {
 	active, err := c.active(dev)
 	if err != nil {
 		return fmt.Errorf("offload: %s: %w", dev, err)
@@ -105,7 +122,7 @@ func Set(dev string, want map[string]bool) error {
 
 // features is dev's active features, by the kernel's names, each true.
 func features(dev string) (map[string]bool, error) {
-	c, err := dial()
+	c, err := dial(time.Now().Add(replyWait))
 	if err != nil {
 		return nil, fmt.Errorf("offload: %s: %w", dev, err)
 	}

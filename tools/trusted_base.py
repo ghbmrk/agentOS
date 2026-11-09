@@ -34,13 +34,20 @@ The ceilings (D-310) are tools/ceilings.txt: trusted lines (core lines plus the 
 lines, tools/old_core.txt) and SPEC.md's words. A measure fails when it ends above the base's
 ceiling and above the base's measure, and names the cut that passes; raising a ceiling or deleting
 the file needs a line `Ceiling: <decision ID>` naming an active base-tree row that names the PR.
-Each PR is measured against main at its last push, so two PRs can land together above a ceiling;
-main is then over it and may not grow. In CI the base tree is the base branch tip
-and the head tree is the PR head merged onto it, so the budget is what main holds now and the
+In CI the base tree is the base branch's tip when the check runs (not the event's base.sha) and
+the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
 gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
 no core file (one older than the file) is measured, with the head, by the file of the checkout
 the tool runs from, which is the base branch tip in CI.
+
+A check passed against an older main goes stale when main changes (CI-ceiling-fall): N PRs that
+each fit the headroom would all stay green and land main up to (N-1) times it over. On every push
+to main the trusted-base-rerun workflow reruns every open PR's newest trusted-base run, which then
+measures that PR merged onto the new main. It reruns on every push, not only when main's measure
+grows, because a push that shrinks main can still raise another PR's merged measure (an identical
+cut both make, or a package one drops that the other links; L3 on #5179). PRs that merge within one
+rerun's latency can still land together; main is then over the ceiling and may not grow.
 
 A decision that records trusted-core growth under D-159 carries the measure as this tool prints
 it (REV-PROOF-claims, #4909): `measure --sentence BASE HEAD --pr N` prints the one sentence, and
@@ -501,8 +508,9 @@ def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
         if caps[k] is not None and head[k] > caps[k] and head[k] > base[k]:
             # The PR passes once it ends at or under the higher of its ceiling and main's measure.
             cut = head[k] - max(caps[k], base[k])
+            unit = UNITS[k] if cut != 1 else UNITS[k][:-1]  # "cut 1 line" (#4982 item 2)
             problems.append(f"{k} {base[k]} -> {head[k]} ends above its ceiling {caps[k]} ({CEILINGS}):"
-                            f" cut {cut} {UNITS[k]} elsewhere in this PR (D-310)")
+                            f" cut {cut} {unit} elsewhere in this PR (D-310)")
     return problems, caps
 
 

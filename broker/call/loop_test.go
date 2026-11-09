@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/call"
@@ -539,4 +540,45 @@ func count(ds []time.Duration, d time.Duration) int {
 		}
 	}
 	return n
+}
+
+// An answerer that errs is done, even if it also returned a channel: no
+// sentence of that channel is synthesized. Line's Say waits for the test
+// to take the failed clip, so the turn has not yet ended the producer's
+// context and a producer reading on would reach the synthesizer.
+func TestAnswerErrorEndsTheAnswer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		boom := errors.New("boom")
+		r := newRig(t, nil)
+		r.bubble = true
+		r.l.saying = make(chan string)
+		chunks := make(chan string, 1)
+		chunks <- "One. Two."
+		close(chunks)
+		r.cfg.Answerer = answerFunc(func(context.Context, call.Ask) (<-chan string, error) { return chunks, boom })
+		var mu sync.Mutex
+		spoken := 0
+		r.cfg.Synthesizer = synthFunc(func(_ context.Context, s string) ([]byte, error) {
+			mu.Lock()
+			spoken++
+			mu.Unlock()
+			return []byte("S:" + s), nil
+		})
+		r.run(call.P2)
+		r.say("q")
+		synctest.Wait() // the turn is playing the failed clip
+		mu.Lock()
+		n := spoken
+		mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%d sentences synthesized after the answerer erred", n)
+		}
+		if got := r.next(); got != "CLIP:failed" {
+			t.Fatalf("answerer error played %q", got)
+		}
+		rep := r.hangup()
+		if len(rep.Turns) != 1 || !errors.Is(rep.Turns[0].Err, boom) || rep.Turns[0].Sentences != 0 {
+			t.Fatalf("turns = %+v", rep.Turns)
+		}
+	})
 }

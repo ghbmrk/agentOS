@@ -96,6 +96,10 @@ type deps struct {
 	// Offload keeps the receive offloads that merge segments off on the
 	// counted ports and reads them back (offload.Off, ENF-cap-gro).
 	Offload func(ports ...string) error
+	// Served turns router advertisements and redirects off on the
+	// resolver's served interfaces and checks their addresses (served,
+	// ENF-net-ra-off); the resolver runs only while it passes.
+	Served func(nets []dns.Net) error
 	// Listen binds the page's addresses; the lifecycle test drives the
 	// page's handler instead.
 	Listen bool

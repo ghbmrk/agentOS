@@ -113,6 +113,7 @@ func run(args []string) error {
 		Wake:    func(ctx context.Context, r *wol.Relay) error { return r.Serve(ctx) },
 		Boot:    traffic.BootID,
 		Offload: offload.Off,
+		Served:  served,
 		Elapsed: bootTime,
 		Fire:    load.Loader{Bin: cfg.Nft},
 		Network: unwiredNetwork{},

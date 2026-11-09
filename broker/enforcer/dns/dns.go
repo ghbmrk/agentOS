@@ -7,14 +7,16 @@
 //     one each Devices VLAN. Each resolves only its own list's names (the
 //     core's signed list, or that device's allow list), each name exactly
 //     (its subdomains get NXDOMAIN, every other name REFUSED), and puts
-//     each answer's addresses into that list's nft allow set and the
-//     name's own set (nftset=, nft.AllowSet.Named). A
+//     each answer's addresses into that list's nft allow set, the
+//     name's own set and the fresh set (nftset=, nft.AllowSet). A
 //     device so never learns another list's addresses, and its queries for
 //     them never leave the enforcer. Only addresses its own resolver
 //     returned enter an allow set, so a core or device that dials any
-//     other address under a listed name is dropped. None keeps a cache, so
-//     every answer comes from upstream; a ruleset load keeps the answers
-//     of the names still listed (nft.Reload).
+//     other address under a listed name is dropped, and a new connection
+//     to an address no answer returned for nft.AnswerTimeout is dropped
+//     too (nft.Refresh). None keeps a cache, so every answer comes from
+//     upstream; a ruleset load keeps the answers of the names still
+//     listed (nft.Reload).
 //   - People answers Owner, Household, Guests and the admin port with any
 //     name, filling no set: those networks reach the internet anyway.
 //   - DHCP serves addresses, with the enforcer as router and resolver, on
@@ -59,8 +61,12 @@ var ErrConfig = errors.New("dns: configuration refused")
 // MaxTTL caps the TTL the listed instance hands out, so a device asks
 // again within this many seconds, and an answer that missed a ruleset
 // load's carry-over is back in its set by then (ASSUMPTIONS ENF-f-3,
-// nft ENF-set-keep-1).
+// nft ENF-set-keep-1). An answer takes new connections for at least
+// nft.AnswerTimeout, which must be at least twice MaxTTL: the constant
+// below fails to compile when it is not.
 const MaxTTL = 300
+
+const _ uint = nft.AnswerTimeout - 2*MaxTTL
 
 // Net is one network an instance answers on: its interface, the prefixes
 // of the enforcer's addresses there (IPv4, and optionally an IPv6 /64),
@@ -207,10 +213,19 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 		// Exactly the name: its subdomains are answered locally, which
 		// is NXDOMAIN, and never forwarded (ASSUMPTIONS ENF-f-2).
 		w.add("local=/*." + n + "/")
-		// The allow set, and the name's own set that lets a ruleset load
-		// keep the name's answers while it stays listed (nft.Reload).
+		// The allow set, the name's own set that lets a ruleset load
+		// keep the name's answers while it stays listed (nft.Reload), and
+		// the fresh set, from which the answer takes new connections
+		// until nft.AnswerTimeout after the next nft.Refresh.
 		t := "#inet#" + nft.Table + "#"
-		w.add("nftset=/" + n + "/4" + t + set.Set4 + ",4" + t + set.Named(n, false) + ",6" + t + set.Set6 + ",6" + t + set.Named(n, true))
+		var sets []string
+		for _, f := range []struct {
+			fam, all string
+			v6       bool
+		}{{"4", set.Set4, false}, {"6", set.Set6, true}} {
+			sets = append(sets, f.fam+t+f.all, f.fam+t+set.Named(n, f.v6), f.fam+t+set.Fresh(f.v6))
+		}
+		w.add("nftset=/" + n + "/" + strings.Join(sets, ","))
 	}
 	return w.String(), nil
 }

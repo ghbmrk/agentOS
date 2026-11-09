@@ -788,5 +788,9 @@ func TestProcAttr(t *testing.T) {
 		if mapped := len(a.UidMappings) == 1 && a.UidMappings[0].HostID == 1 && a.UidMappings[0].Size == 1; mapped != (c.flags&syscall.CLONE_NEWUSER != 0) {
 			t.Errorf("%s: uid mappings %+v", c.name, a.UidMappings)
 		}
+		// The gid too, with setgroups left on to clear the groups inside (#5140).
+		if mapped := len(a.GidMappings) == 1 && a.GidMappings[0].HostID == 1 && a.GidMappings[0].Size == 1 && a.GidMappingsEnableSetgroups; mapped != (c.flags&syscall.CLONE_NEWUSER != 0) {
+			t.Errorf("%s: gid mappings %+v, setgroups %v", c.name, a.GidMappings, a.GidMappingsEnableSetgroups)
+		}
 	}
 }

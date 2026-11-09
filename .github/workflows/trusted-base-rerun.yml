@@ -1,0 +1,70 @@
+name: trusted-base-rerun
+# CI-ceiling-fall (#5174, D-310 rule 2): a trusted-base check passed against an older main goes
+# stale when main changes. N open PRs that each fit the headroom would all stay green and land
+# main up to (N-1) times it over a ceiling (tools/ceilings.txt), as happened at 58,895. On every
+# push to main this reruns the newest trusted-base run on every open PR into main;
+# trusted-base.yml checks out the base branch's live tip, so the rerun measures the PR merged
+# onto the new main, and `trusted-base` is a required check. It reruns on every push rather than
+# only when main's measure grows: a push that shrinks main can still raise another PR's merged
+# measure (an identical cut both make, or a package one drops that the other links; L3 on #5179).
+# A run still in progress may have read the old main, so it is rerun once it completes. A rerun
+# or listing that fails marks this job red, so a stale green is visible on main. With bursts of
+# pushes GitHub cancels a pending run of this group; the run that replaces it reruns everything
+# against a later main, so no push is lost. It checks out nothing and runs no repository or PR
+# code; its token may rerun workflow runs and read PRs, nothing else. PRs that merge within one
+# rerun's latency can still land together; main is then over the ceiling and the check stops
+# further growth. tests/test_trusted_base.py pins every line below and runs the script.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: trusted-base-rerun
+  cancel-in-progress: false
+jobs:
+  rerun:
+    name: trusted-base-rerun
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: write # rerun trusted-base runs, nothing else
+      pull-requests: read
+    steps:
+      - name: Rerun every open PR's newest trusted-base run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ROUNDS: 50
+          WAIT: 30
+        run: |
+          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | "\(.number) \(.head.sha)"') || { echo "::error::cannot list open PRs"; exit 1; }
+          failed=0 reran=0 missed=""
+          pending="$prs"
+          for round in $(seq 1 "$ROUNDS"); do
+            [ -n "$pending" ] || break
+            left=""
+            while read -r pr sha; do
+              [ -n "$pr" ] || continue
+              run=$(gh api "repos/$REPO/actions/workflows/trusted-base.yml/runs?head_sha=$sha&event=pull_request_target&per_page=1" --jq '.workflow_runs[0] | select(. != null) | "\(.id) \(.status)"') || { echo "::warning::#$pr: cannot list runs"; failed=1; missed="$missed #$pr"; continue; }
+              if [ -z "$run" ]; then
+                echo "#$pr: no trusted-base run yet; its first run reads the new main"
+              elif [ "${run#* }" = completed ]; then
+                if gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi
+              else
+                left="$left$pr $sha"$'\n'
+              fi
+            done <<< "$pending"
+            pending="$left"
+            [ -z "$pending" ] || sleep "$WAIT"
+          done
+          while read -r pr sha; do
+            [ -n "$pr" ] || continue
+            echo "::warning::#$pr ($sha): still running after the last round, not rerun"; failed=1; missed="$missed #$pr"
+          done <<< "$pending"
+          total=$(printf '%s' "$prs" | grep -c . || true)
+          msg="Reran $reran of $total open PRs' trusted-base runs."
+          [ -z "$missed" ] || msg="$msg Not rerun:$missed (rerun their trusted-base check by hand; tools/ASSUMPTIONS.md CI-ceiling-fall)."
+          printf '\n%s\n' "$msg" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$failed"

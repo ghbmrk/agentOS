@@ -27,6 +27,14 @@ import (
 // cuts the connections open to it (#4237; the live form checks the set).
 // A name set is the holder's and the name's alone: a name dropped and
 // listed again, or a device that takes over another's VLAN, starts empty.
+//
+// The fresh and recent sets (AllowSet) are carried for the kept addresses
+// only, each for the time it has left, so a load neither cuts a device
+// that resolved a kept name a moment ago nor lets an answer it carries
+// take new connections for longer than AnswerTimeout from its last
+// Refresh, or from its first add when no Refresh has moved it (#4453,
+// #5116). A running table from before the sets were added, or whose
+// fresh set had no timeout, carries none (ASSUMPTIONS ENF-set-ttl-2).
 func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 	text, devs, err := compile(d, l)
 	if err != nil {
@@ -39,29 +47,143 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	have := elements(sets)
+	have, left := elements(sets), recent(sets)
 	w := &writer{}
 	for _, a := range allowSets(d, devs) {
 		for _, v6 := range []bool{false, true} {
 			var all []netip.Addr
 			for _, n := range a.names() {
 				ns := a.Named(n, v6)
-				var kept []netip.Addr
-				for _, e := range have[ns] {
-					if e.Is6() == v6 {
-						kept = append(kept, e)
-					}
-				}
+				kept := ofFamily(have[ns], v6)
 				w.elements(ns, kept)
 				all = append(all, kept...)
 			}
 			w.elements(a.set(v6), all)
+			kept := map[netip.Addr]bool{}
+			for _, e := range all {
+				kept[e] = true
+			}
+			for _, set := range []string{a.Fresh(v6), a.Recent(v6)} {
+				var rs []string
+				for _, r := range left[set] {
+					if a, err := netip.ParseAddr(r.addr); err == nil && kept[a] {
+						rs = append(rs, a.String()+" expires "+secs(int(r.left)))
+					}
+				}
+				if len(rs) > 0 {
+					slices.Sort(rs)
+					w.line("add element inet " + Table + " " + set + " { " + strings.Join(rs, ", ") + " }")
+				}
+			}
 		}
 	}
 	for _, r := range records(sets, l) {
 		w.line("add element inet " + Table + " " + r.set + " { " + strings.Join(r.elems, ", ") + " }")
 	}
 	return text + w.b.String(), nil
+}
+
+// Refresh is the resolver's step (#4453): it moves every address in each
+// fresh set of running (load.Loader.List of Table, the ruleset Compile or
+// Reload made from d) into its recent set, each with a full AnswerTimeout,
+// and takes it out of the fresh set, in one transaction. So an answer
+// takes new connections from the moment the resolver adds it until
+// AnswerTimeout after the next Refresh, and no longer: the daemon runs it
+// on a fixed short interval, never while a load is under way. A fresh
+// answer expires on its own only AnswerTimeout after its first add, which
+// bounds it when the step keeps failing (#5116). An address re-added to the
+// recent set is deleted and added again: adding an element a set holds
+// keeps its old expiry. An answer the resolver adds to the fresh set
+// while Refresh runs either stays there for the next one or is refreshed
+// by this one, from a later time than its answer; until then it takes
+// new connections from the fresh set. Empty when no set has a fresh
+// answer. The text holds only element changes to Table's sets (the
+// loader's Update refuses anything else).
+func Refresh(d policy.Document, l Layout, running []byte) (string, error) {
+	devs, _, err := compiled(d, l)
+	if err != nil {
+		return "", err
+	}
+	sets, err := listed(running)
+	if err != nil {
+		return "", err
+	}
+	left := recent(sets)
+	w := &writer{}
+	for _, a := range allowSets(d, devs) {
+		for _, v6 := range []bool{false, true} {
+			var fresh []netip.Addr
+			for _, r := range left[a.Fresh(v6)] {
+				if e, err := netip.ParseAddr(r.addr); err == nil && e.Zone() == "" && !e.Is4In6() && e.Is6() == v6 {
+					fresh = append(fresh, e)
+				}
+			}
+			if len(fresh) == 0 {
+				continue
+			}
+			slices.SortFunc(fresh, netip.Addr.Compare)
+			fresh = slices.Compact(fresh)
+			s := make([]string, len(fresh))
+			for i, e := range fresh {
+				s[i] = e.String()
+			}
+			el := " { " + strings.Join(s, ", ") + " }"
+			// Each delete follows an add, so it never names an element
+			// the set lacks, which would refuse the whole transaction.
+			for _, op := range []string{"add", "delete", "add"} {
+				w.line(op + " element inet " + Table + " " + a.Recent(v6) + el)
+			}
+			for _, op := range []string{"add", "delete"} {
+				w.line(op + " element inet " + Table + " " + a.Fresh(v6) + el)
+			}
+		}
+	}
+	return w.b.String(), nil
+}
+
+// ofFamily is the addresses of es of the family v6 picks.
+func ofFamily(es []netip.Addr, v6 bool) []netip.Addr {
+	var out []netip.Addr
+	for _, e := range es {
+		if e.Is6() == v6 {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// aging is one recent set's element: its value as nft printed it and the
+// seconds it has left.
+type aging struct {
+	addr string
+	left int64
+}
+
+// recent is each listed set's elements that are a value with an expiry
+// and no timeout of their own, as a fresh or recent set holds them, each with the
+// time it has left; one with more than AnswerTimeout left, or none, is
+// left out, so it is not kept. Reload keeps only a value that parses as
+// a kept address (nft and Go print some addresses differently, such as
+// `::1.2.3.4` and `::102:304`), so a value in any other form is never
+// carried.
+func recent(sets []listedSet) map[string][]aging {
+	out := map[string][]aging{}
+	for _, s := range sets {
+		for _, raw := range s.Elem {
+			var e struct {
+				Elem *struct {
+					Val     string `json:"val"`
+					Timeout *int64 `json:"timeout"`
+					Expires int64  `json:"expires"`
+				} `json:"elem"`
+			}
+			if json.Unmarshal(raw, &e) != nil || e.Elem == nil || e.Elem.Timeout != nil || e.Elem.Expires <= 0 || e.Elem.Expires > AnswerTimeout {
+				continue
+			}
+			out[s.Name] = append(out[s.Name], aging{e.Elem.Val, e.Elem.Expires})
+		}
+	}
+	return out
 }
 
 // carried is one shared segment's set (HostSet, HeldSet, ClaimSet) with
