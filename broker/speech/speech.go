@@ -144,8 +144,7 @@ func (c *Client) write(w io.Writer) {
 		select {
 		case f := <-c.out:
 			if err := wire.Write(w, f.typ, f.p); err != nil {
-				c.fail(fmt.Errorf("speech: writing to the process: %w", err))
-				return
+				c.fail(fmt.Errorf("speech: writing to the process: %w", err)) // the next pass sees dead
 			}
 		case <-c.dead:
 			return
@@ -182,8 +181,7 @@ func (c *Client) Listen(ctx context.Context, speech <-chan []byte) <-chan call.H
 			case h := <-c.in:
 				select {
 				case heard <- h:
-				case <-c.dead:
-					return
+				case <-c.dead: // the outer select returns
 				}
 			case <-c.dead:
 				return
@@ -206,9 +204,7 @@ func (c *Client) forward(ctx context.Context, speech <-chan []byte) {
 		case <-c.dead:
 			return
 		}
-		if len(carry) > 0 {
-			pcm = append(carry, pcm...)
-		}
+		pcm = append(carry, pcm...) // a copy, so carry never aliases the line's buffer
 		carry = nil
 		if len(pcm)%2 == 1 {
 			carry = []byte{pcm[len(pcm)-1]}
@@ -219,9 +215,7 @@ func (c *Client) forward(ctx context.Context, speech <-chan []byte) {
 			c.mu.Lock()
 			c.sent += uint64(n / 2)
 			c.marks = append(c.marks, mark{end: c.sent, at: c.now()})
-			if len(c.marks) > maxMarks {
-				c.marks = append(c.marks[:0], c.marks[len(c.marks)-maxMarks:]...)
-			}
+			c.marks = c.marks[max(0, len(c.marks)-maxMarks):]
 			c.mu.Unlock()
 			if c.send(ctx, frame{wire.Audio, pcm[:n]}) != nil {
 				return
@@ -274,11 +268,10 @@ func (c *Client) Speak(ctx context.Context, sentence string) ([]byte, error) {
 func (c *Client) read(r io.Reader) {
 	for {
 		typ, p, err := wire.Read(r)
-		if errors.Is(err, io.EOF) {
-			c.fail(ErrEnded)
-			return
-		}
-		if err == nil {
+		switch {
+		case errors.Is(err, io.EOF):
+			err = ErrEnded
+		case err == nil:
 			err = c.take(typ, p)
 		}
 		if err != nil {
@@ -332,11 +325,9 @@ func (c *Client) heard(f wire.HeardFrame) (call.Heard, error) {
 	}
 	// The line's audio is real time, so the frame that ends at m.end
 	// arrived at m.at and sample End was heard (m.end-End)/Rate before it.
-	at := now
-	if i := sort.Search(len(c.marks), func(i int) bool { return c.marks[i].end >= f.End }); i < len(c.marks) {
-		m := c.marks[i]
-		at = m.at.Add(-time.Duration(m.end-f.End) * time.Second / wire.Rate)
-	}
+	// 0 < End <= sent, and the newest mark ends at sent, so one is found.
+	m := c.marks[sort.Search(len(c.marks), func(i int) bool { return c.marks[i].end >= f.End })]
+	at := m.at.Add(-time.Duration(m.end-f.End) * time.Second / wire.Rate)
 	if at.After(now) {
 		at = now
 	}

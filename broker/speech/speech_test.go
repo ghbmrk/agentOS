@@ -571,3 +571,73 @@ func TestMarksAreBoundedAndEndIsNeverLater(t *testing.T) {
 		t.Fatalf("an old end mapped to %v", h.End)
 	}
 }
+
+func TestSessionEndsWhenTheProcessStopsReading(t *testing.T) {
+	c, p := session(t, nil)
+	p.r.Close()
+	errc := make(chan error, 1)
+	go func() { _, err := c.Speak(context.Background(), "Hi."); errc <- err }()
+	select {
+	case err := <-errc:
+		if err == nil || c.Err() == nil {
+			t.Fatalf("Speak = %v, Err = %v", err, c.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Speak waited on a process that reads nothing")
+	}
+}
+
+func TestBadFrameFreesAForwardWaitingOnAFullQueue(t *testing.T) {
+	c, p := session(t, nil) // the process reads nothing
+	speech := make(chan []byte)
+	c.Listen(context.Background(), speech)
+	for i := 0; i < queue+2; i++ {
+		speech <- make([]byte, 160)
+	}
+	go func() {
+		select {
+		case speech <- make([]byte, 160): // forward is blocked in send
+		case <-time.After(time.Second):
+		}
+	}()
+	p.raw([]byte{9, 0, 0, 0, 0})
+	gone(t, "forward", "Listen.func1", "Listen.func2")
+}
+
+func TestClosedSpeechStopsForward(t *testing.T) {
+	c, p := session(t, nil)
+	speech := make(chan []byte)
+	heard := c.Listen(context.Background(), speech)
+	close(speech)
+	gone(t, "forward")
+	// The session still answers.
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "x"}))
+	if h := <-heard; h.Text != "x" || c.Err() != nil {
+		t.Fatalf("heard %+v, Err %v", h, c.Err())
+	}
+}
+
+func TestCancelledSentenceLeavesNothingPending(t *testing.T) {
+	c, p := session(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { _, err := c.Speak(ctx, "Hi."); errc <- err }()
+	p.recv(wire.Speak)
+	cancel()
+	<-errc
+	c.mu.Lock()
+	n := len(c.pend)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d sentences pending after the cancel", n)
+	}
+}
+
+func TestProcessEndStopsTheReader(t *testing.T) {
+	c, p := session(t, nil)
+	p.w.Close()
+	gone(t, "read")
+	if !errors.Is(c.Err(), ErrEnded) {
+		t.Fatalf("Err = %v", c.Err())
+	}
+}

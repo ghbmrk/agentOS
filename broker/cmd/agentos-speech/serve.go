@@ -65,9 +65,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, e Engine) error {
 	}
 	wg.Wait()
 	if err == nil {
-		wmu.Lock()
-		err = werr
-		wmu.Unlock()
+		err = werr // every writer is done: wg.Wait orders this read after theirs
 	}
 	return err
 }

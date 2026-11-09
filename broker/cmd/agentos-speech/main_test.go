@@ -247,3 +247,12 @@ func TestRunServesWithAnEngine(t *testing.T) {
 		t.Fatal("run served a bad frame")
 	}
 }
+
+func TestWriteErrorEndsTheEngine(t *testing.T) {
+	// The recognizer runs until its context ends, so a failed write must
+	// end it, or Serve waits for ever.
+	in := frames(t, [2]any{wire.Speak, wire.EncodeID(0, []byte("Hi."))})
+	if err := serveWithin(t, context.Background(), bytes.NewReader(in), errWriter{}, stuck{slow: time.Millisecond}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Serve = %v", err)
+	}
+}
