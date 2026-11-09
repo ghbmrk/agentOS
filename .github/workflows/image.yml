@@ -44,6 +44,9 @@ on:
       - "broker/clerk/**"
       - "evals/slice-inbox/**"
       - "tests/test_slice_inbox_slice.py"
+      # The image's vulnerability records: image-vulncheck applies them to each build, and fails
+      # on one that accepts no finding, so a change to them alone is scanned here.
+      - "assurance/vulncheck.json"
   push:
     branches: [main]
     paths:
@@ -78,6 +81,9 @@ on:
       - "broker/clerk/**"
       - "evals/slice-inbox/**"
       - "tests/test_slice_inbox_slice.py"
+      # The image's vulnerability records: image-vulncheck applies them to each build, and fails
+      # on one that accepts no finding, so a change to them alone is scanned here.
+      - "assurance/vulncheck.json"
 env:
   GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
 permissions:
