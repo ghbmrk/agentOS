@@ -248,7 +248,7 @@ func (h *fuzzHost) external(_ context.Context, gw netip.Addr) (netip.Addr, error
 		h.attach(h.in.next())
 	}
 	if !a.IsValid() {
-		return netip.Addr{}, errors.New("no answer")
+		return netip.Addr{}, context.DeadlineExceeded // silent: the request times out
 	}
 	return a, nil
 }
@@ -288,6 +288,19 @@ func (h *fuzzHost) checkRead(t fuzzT, s *Sources, op string, m Network, err erro
 	for _, e := range s.exts {
 		if !h.answered[e.key][e.ext] {
 			t.Fatalf("%s: cached %v on gateway %+v, which never answered it", op, e.ext, e.key)
+		}
+	}
+	// A known-silent gateway has a MAC, no address, and its own bound
+	// (#1539).
+	if m.GatewaySilent && m.External.IsValid() {
+		t.Fatalf("%s: known silent with external %v", op, m.External)
+	}
+	if len(s.silent) > maxGatewayExternals {
+		t.Fatalf("%s: %d silent gateways kept, bound %d", op, len(s.silent), maxGatewayExternals)
+	}
+	for _, k := range s.silent {
+		if k.mac == "" || s.externalLocked(k).IsValid() {
+			t.Fatalf("%s: silent gateway %+v has no MAC or an address", op, k)
 		}
 	}
 }

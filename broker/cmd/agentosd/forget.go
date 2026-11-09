@@ -77,7 +77,8 @@ type forgetFlow struct {
 
 type pendingForget struct {
 	found    forgetFound
-	subjects []string // exactly the subjects shown
+	subjects []string                  // exactly the subjects shown
+	kinds    map[string]map[string]int // each subject's items by kind
 	until    time.Time
 }
 
@@ -95,20 +96,39 @@ func newForgetFlow(k eraser, rw *eraseRewind) *forgetFlow {
 	return &forgetFlow{k: k, rw: rw, now: time.Now, pending: map[string]pendingForget{}}
 }
 
-// find looks name up. The subjects it finds are held under a one-time
-// handle for forgetFor; nothing found gives no handle.
+// spellings is name and, when it has an apostrophe, name with each one
+// typed the other way, straight (') or curly (U+2019): a phone keyboard
+// types either, and the kernel matches a label exactly.
+func spellings(name string) []string {
+	out := []string{name}
+	for _, s := range []string{strings.ReplaceAll(name, "’", "'"), strings.ReplaceAll(name, "'", "’")} {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// find looks name up, in each of its spellings. The subjects it finds are
+// held under a one-time handle for forgetFor; nothing found gives no
+// handle.
 func (f *forgetFlow) find(ctx context.Context, name string) (forgetFound, error) {
 	out := forgetFound{Name: name, Kinds: map[string]int{}}
-	found, unread, err := f.k.Named(ctx, name)
-	if errors.Is(err, kernelsock.ErrContentClosed) {
-		out.Closed = true
-		return out, nil
-	}
-	if err != nil {
-		return forgetFound{}, err
+	var found, unread []string
+	for _, n := range spellings(name) {
+		fd, ur, err := f.k.Named(ctx, n)
+		if errors.Is(err, kernelsock.ErrContentClosed) {
+			out.Closed = true
+			return out, nil
+		}
+		if err != nil {
+			return forgetFound{}, err
+		}
+		found, unread = union(found, fd), union(unread, ur)
 	}
 	out.Unread = len(unread) > 0
 	var subjects []string
+	kinds := map[string]map[string]int{}
 	for _, sub := range found {
 		r, ok, err := f.k.Recall(ctx, sub)
 		if err != nil {
@@ -118,8 +138,10 @@ func (f *forgetFlow) find(ctx context.Context, name string) (forgetFound, error)
 			continue
 		}
 		subjects = append(subjects, sub)
+		kinds[sub] = map[string]int{}
 		for _, it := range r.Items {
 			if it.Class != kernelsock.ClassLabel {
+				kinds[sub][it.Class]++
 				out.Kinds[it.Class]++
 				out.Items++
 			}
@@ -146,7 +168,7 @@ func (f *forgetFlow) find(ctx context.Context, name string) (forgetFound, error)
 		}
 		delete(f.pending, oldest)
 	}
-	f.pending[out.Handle] = pendingForget{found: out, subjects: subjects, until: now.Add(forgetFor)}
+	f.pending[out.Handle] = pendingForget{found: out, subjects: subjects, kinds: kinds, until: now.Add(forgetFor)}
 	return out, nil
 }
 
@@ -176,7 +198,7 @@ func (f *forgetFlow) confirm(ctx context.Context, handle string) (forgetResult, 
 	// timeout) cancels neither an erase nor the rewind that must follow it;
 	// each kernel call keeps its own bound.
 	ctx = context.WithoutCancel(ctx)
-	r := forgetResult{Name: p.found.Name, Items: p.found.Items, Unread: p.found.Unread}
+	r := forgetResult{Name: p.found.Name, Items: p.found.Items, Unread: p.found.Unread, ErasedKinds: map[string]int{}}
 	held := map[string]kernelsock.BackupHold{}
 	for _, sub := range p.subjects {
 		c, err := f.k.Erase(ctx, sub)
@@ -184,6 +206,9 @@ func (f *forgetFlow) confirm(ctx context.Context, handle string) (forgetResult, 
 		case c.Subject != "":
 			// Logged: an error is a later step, which the kernel retries.
 			r.Erased++
+			for k, n := range p.kinds[sub] {
+				r.ErasedKinds[k] += n
+			}
 			r.Owed = union(r.Owed, c.Unconfirmed)
 			for _, h := range c.StillHeld {
 				held[h.Backup] = h
@@ -226,9 +251,10 @@ func union(a, b []string) []string {
 type forgetResult struct {
 	Name           string
 	Items          int
-	Erased         int // subjects this confirm erased
-	Already        int // subjects erased meanwhile
-	NotErased      int // subjects whose erase did not go through
+	Erased         int            // subjects this confirm erased
+	ErasedKinds    map[string]int // their items by kind
+	Already        int            // subjects erased meanwhile
+	NotErased      int            // subjects whose erase did not go through
 	Owed           []string
 	StillHeld      []kernelsock.BackupHold
 	BackupsUnknown bool
@@ -303,13 +329,9 @@ func (f forgetFound) Text() string {
 	if f.Handle == "" {
 		out = append(out, fmt.Sprintf("Nothing named %s was found.", f.Name))
 	} else {
-		var kinds []string
-		for _, k := range slices.Sorted(maps.Keys(f.Kinds)) {
-			kinds = append(kinds, fmt.Sprintf("%s %d", k, f.Kinds[k]))
-		}
 		line := fmt.Sprintf("Found %s named %s", plural(f.Items, "item"), f.Name)
-		if len(kinds) > 0 {
-			line += " (" + strings.Join(kinds, ", ") + ")"
+		if len(f.Kinds) > 0 {
+			line += " (" + kindList(f.Kinds) + ")"
 		}
 		out = append(out, line+". Confirm to forget them.")
 	}
@@ -317,6 +339,22 @@ func (f forgetFound) Text() string {
 		out = append(out, fmt.Sprintf("Some things could not be checked, so anything named %s in them is still kept.", f.Name))
 	}
 	return strings.Join(out, " ")
+}
+
+// kindList is counts by kind, as the readback and the page erase's notice
+// show them: "message 3, photo 1".
+func kindList(kinds map[string]int) string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(kinds)) {
+		out = append(out, fmt.Sprintf("%s %d", k, kinds[k]))
+	}
+	return strings.Join(out, ", ")
+}
+
+// kept says the result left some of what was found kept: nothing erased,
+// or some erases that did not go through. The page shows it as a failure.
+func (r forgetResult) kept() bool {
+	return r.Erased == 0 && r.Already == 0 || r.NotErased > 0
 }
 
 // storeName is how the owner reads a store an erase still owes: the key

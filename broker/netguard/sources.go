@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -27,8 +28,9 @@ type Sources struct {
 	// means ExternalAddr (NAT-PMP).
 	External func(ctx context.Context, gateway netip.Addr) (netip.Addr, error)
 
-	mu   sync.Mutex
-	exts []gatewayExternal // most recently read first, at most maxGatewayExternals
+	mu     sync.Mutex
+	exts   []gatewayExternal // most recently read first, at most maxGatewayExternals
+	silent []gatewayKey      // known-silent gateways, most recently read first, at most maxGatewayExternals
 }
 
 // gatewayKey tells gateways apart: the address, the default route's
@@ -53,7 +55,9 @@ type gatewayExternal struct {
 }
 
 // maxGatewayExternals bounds how many gateways' external addresses Sources
-// keeps. A forgotten gateway is read again like a new one.
+// keeps, and separately how many known-silent gateways, so silent networks
+// never push an answering router's address out. A forgotten gateway is read
+// again like a new one.
 const maxGatewayExternals = 8
 
 // externalReadTimeout bounds one NAT-PMP request; a full read makes at most
@@ -86,6 +90,54 @@ func (s *Sources) rememberLocked(k gatewayKey, ext netip.Addr) {
 		}
 	}
 	s.exts = out
+	s.silent = without(s.silent, k)
+}
+
+// silentLocked reports whether k is a known-silent gateway; s.mu is held.
+func (s *Sources) silentLocked(k gatewayKey) bool {
+	for _, q := range s.silent {
+		if q == k {
+			return true
+		}
+	}
+	return false
+}
+
+// rememberSilentLocked records k as a known-silent gateway, the most recent,
+// dropping the least recently read past the bound; s.mu is held. Only a key
+// with a MAC is kept: without one (no entry yet after a flush, or a link
+// with no neighbour table) another router behind the same address and
+// interface cannot be told apart, so such a key keeps the hold.
+func (s *Sources) rememberSilentLocked(k gatewayKey) {
+	if k.mac == "" {
+		return
+	}
+	out := append([]gatewayKey{k}, without(s.silent, k)...)
+	if len(out) > maxGatewayExternals {
+		out = out[:maxGatewayExternals]
+	}
+	s.silent = out
+}
+
+// silence reports whether err from the router request means the router
+// does not speak NAT-PMP: the request timed out, or the gateway refused the
+// port (ICMP port unreachable, ECONNREFUSED on the connected socket). Any
+// other error (a malformed or refused NAT-PMP answer, a dial or send error)
+// says nothing about the router, so the gateway is not filed silent (#5111).
+func silence(err error) bool {
+	var to interface{ Timeout() bool }
+	return errors.As(err, &to) && to.Timeout() || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// without returns ks less k.
+func without(ks []gatewayKey, k gatewayKey) []gatewayKey {
+	var out []gatewayKey
+	for _, q := range ks {
+		if q != k {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // resolvConfs are read in order; the first with a usable nameserver wins.
@@ -97,7 +149,9 @@ var resolvConfs = []string{"/run/systemd/resolve/resolv.conf", "/etc/resolv.conf
 // default gateway from the kernel routing tables, the resolver from the
 // DHCP- or RA-written resolv.conf, and the router's external address from
 // NAT-PMP (when the gateway does not answer, the last address read on that
-// gateway, else none). A read that finds no non-loopback interface
+// gateway, else none; a gateway with a MAC whose request timed out or was
+// refused is then filed as known silent, and any other failure unfiles it,
+// so the next return holds). A read that finds no non-loopback interface
 // prefix fails, so the last learned set stays.
 //
 // The host is read again after each router request (answered or timed
@@ -138,8 +192,13 @@ func (s *Sources) Read() (Network, error) {
 			s.rememberLocked(k, a.Unmap())
 		} else if e := s.externalLocked(k); e.IsValid() {
 			s.rememberLocked(k, e)
+		} else if silence(err) {
+			s.rememberSilentLocked(k)
+		} else {
+			s.silent = without(s.silent, k)
 		}
 		m.External = s.externalLocked(k)
+		m.GatewaySilent = s.silentLocked(k)
 		s.mu.Unlock()
 		return m, nil
 	}
@@ -151,8 +210,9 @@ func (s *Sources) Read() (Network, error) {
 // neighbour table on that interface (IPv4 only: there is no IPv6 neighbour
 // table file), else empty. The external address is the last one read on
 // this gateway (address, interface and MAC), else empty, so a return to a known gateway refuses that router's
-// address at once, and another router behind the same address gets none. A
-// change event applies it before the full Read completes.
+// address at once, and another router behind the same address gets none;
+// GatewaySilent marks a known-silent gateway. A change event applies it
+// before the full Read completes.
 func (s *Sources) ReadLocal() (Network, error) {
 	addrs := s.Addrs
 	if addrs == nil {
@@ -195,6 +255,7 @@ func (s *Sources) ReadLocal() (Network, error) {
 	s.mu.Lock()
 	if n.Gateway.IsValid() {
 		n.External = s.externalLocked(keyOf(n))
+		n.GatewaySilent = s.silentLocked(keyOf(n))
 	}
 	s.mu.Unlock()
 	return n, nil

@@ -28,7 +28,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -217,10 +216,7 @@ func Serve(ctx context.Context, plan Plan, f *Filter) error {
 			}
 			relay(c, func(pkt []byte, port uint16, now time.Time) {
 				out, outs := r.handle(s.name, port, pkt, now)
-				for _, o := range outs {
-					if s.v6 {
-						dst.Zone = o
-					}
+				for _, o := range outs { // o's socket is bound to o: no zone, which the standard library would look up over netlink
 					conns[side{o, s.v6}].WriteToUDP(out, dst)
 				}
 			})
@@ -295,50 +291,50 @@ func (r *relayer) handle(iface string, port uint16, pkt []byte, now time.Time) (
 }
 
 // relay reads c until it closes, handing each packet no larger than
-// maxPacket to handle.
+// maxPacket to handle. It reads through the socket itself, not
+// UDPConn.ReadFrom: the standard library names an IPv6 sender's zone
+// from a netlink dump it does not check came from the kernel, and the
+// relay needs only the sender's port.
 func relay(c *net.UDPConn, handle func(pkt []byte, port uint16, now time.Time)) {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return
+	}
 	buf := make([]byte, maxPacket+1)
 	for {
-		n, from, err := c.ReadFromUDPAddrPort(buf)
+		var n, port int
+		var rerr error
+		err := rc.Read(func(fd uintptr) bool {
+			var from syscall.Sockaddr
+			n, from, rerr = syscall.Recvfrom(int(fd), buf, syscall.MSG_DONTWAIT)
+			if errors.Is(rerr, syscall.EAGAIN) {
+				return false // wait until the socket is readable
+			}
+			switch a := from.(type) {
+			case *syscall.SockaddrInet4:
+				port = a.Port
+			case *syscall.SockaddrInet6:
+				port = a.Port
+			}
+			return true
+		})
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
 			continue
 		}
-		if n <= maxPacket {
-			handle(buf[:n], from.Port(), time.Now())
+		if rerr == nil && n <= maxPacket {
+			handle(buf[:n], uint16(port), time.Now())
 		}
 	}
-}
-
-// prefixes is the enforcer's addresses on iface, each with its prefix;
-// none if they cannot be read, so nothing is the sender's own.
-func prefixes(iface string) []netip.Prefix {
-	ifi, err := net.InterfaceByName(iface)
-	if err != nil {
-		return nil
-	}
-	addrs, err := ifi.Addrs()
-	if err != nil {
-		return nil
-	}
-	var out []netip.Prefix
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok {
-			ip, _ := netip.AddrFromSlice(ipn.IP)
-			ones, _ := ipn.Mask.Size()
-			out = append(out, netip.PrefixFrom(ip.Unmap(), ones))
-		}
-	}
-	return out
 }
 
 // listen opens iface's socket for one family: bound to the device and the
 // group's port, a member of the group on that interface only, sending
 // there with TTL (hop limit) 255 and without looping its sends back.
 func listen(name string, v6 bool) (*net.UDPConn, error) {
-	ifi, err := net.InterfaceByName(name)
+	index, err := ifindex(name)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRelay, err)
 	}
@@ -350,16 +346,16 @@ func listen(name string, v6 bool) (*net.UDPConn, error) {
 				syscall.SetsockoptInt(s, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1),
 				syscall.BindToDevice(s, name))
 			if v6 {
-				mreq := &syscall.IPv6Mreq{Multiaddr: Group6.Addr().As16(), Interface: uint32(ifi.Index)}
+				mreq := &syscall.IPv6Mreq{Multiaddr: Group6.Addr().As16(), Interface: uint32(index)}
 				serr = errors.Join(serr,
 					syscall.SetsockoptInt(s, syscall.IPPROTO_IPV6, ipv6MulticastAll, 0),
 					syscall.SetsockoptInt(s, syscall.IPPROTO_IPV6, syscall.IPV6_MULTICAST_LOOP, 0),
 					syscall.SetsockoptInt(s, syscall.IPPROTO_IPV6, syscall.IPV6_MULTICAST_HOPS, 255),
-					syscall.SetsockoptInt(s, syscall.IPPROTO_IPV6, syscall.IPV6_MULTICAST_IF, ifi.Index),
+					syscall.SetsockoptInt(s, syscall.IPPROTO_IPV6, syscall.IPV6_MULTICAST_IF, index),
 					syscall.SetsockoptIPv6Mreq(s, syscall.IPPROTO_IPV6, syscall.IPV6_JOIN_GROUP, mreq))
 				return
 			}
-			mreq := &syscall.IPMreqn{Multiaddr: Group.Addr().As4(), Ifindex: int32(ifi.Index)}
+			mreq := &syscall.IPMreqn{Multiaddr: Group.Addr().As4(), Ifindex: int32(index)}
 			serr = errors.Join(serr,
 				syscall.SetsockoptInt(s, syscall.IPPROTO_IP, ipMulticastAll, 0),
 				syscall.SetsockoptInt(s, syscall.IPPROTO_IP, syscall.IP_MULTICAST_LOOP, 0),
@@ -371,7 +367,7 @@ func listen(name string, v6 bool) (*net.UDPConn, error) {
 	}}
 	network, addr := "udp4", Group.String()
 	if v6 {
-		network, addr = "udp6", net.JoinHostPort(Group6.Addr().String()+"%"+name, strconv.Itoa(int(Group6.Port())))
+		network, addr = "udp6", Group6.String() // the device binding scopes it, without a zone
 	}
 	pc, err := lc.ListenPacket(context.Background(), network, addr)
 	if err != nil {

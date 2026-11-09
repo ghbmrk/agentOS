@@ -11,13 +11,15 @@ values cannot hold a newline (unit names, enums, paths), so no unit's text can p
 An earlier version parsed `systemd --test`'s dump, and an Environment= value could write a fake unit
 header into that (#4779 Security round 1).
 
-The container has its own mount, UTS, IPC, PID, network and cgroup namespaces, a read-only /proc/sys
-and a nodev /dev, so PID 1 cannot set the runner's hostname or a global sysctl. It is still real root
-on the runner, as are the generators it runs; the tree is the build's own. Container mode means some
+The container has its own mount, UTS, IPC, PID, network and cgroup namespaces, so its hostname is its
+own, and a read-only /proc/sys and a nodev /dev, so nothing it runs sets a global sysctl or opens a host
+device by accident. That is no bar: PID 1 and the generators it runs are real root on the runner and
+could remount either; the tree is the build's own. Container mode means some
 generators see a different machine than the box: fstab-generator skips fstab entries that name a device
 (callers refuse those in the tree themselves), and gpt-auto-generator finds no disk. A runner booted by
-systemd gives the manager a delegated scope of its own. The console is a pty, read for the lines PID 1
-logs (failed generators).
+systemd gives the manager a delegated scope of its own; unshare, PID 1's parent and the one process of
+the scope outside the container, moves to a child group of it, so PID 1 can give its units controllers.
+The console is a pty, read for the lines PID 1 logs (failed generators).
 """
 import os
 import pathlib
@@ -38,7 +40,7 @@ import finish_image  # noqa: E402
 
 # The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
 # a mount over it), its own /usr, a private /proc with /proc/sys read-only, a /sys with only a cgroup2
-# tree in its own cgroup namespace, five character devices and a pty as console, an empty /run, no network. It starts only
+# tree in its own cgroup namespace, five character devices, a devpts of its own, /dev/shm and a pty as console, an empty /run, no network. It starts only
 # -.slice, which every manager has and which starts nothing. Its argv is the boot entry's command line,
 # which systemd in a container reads as the kernel's, then the pinned options (manager_argv).
 MANAGER = r'''set -eu
@@ -59,10 +61,21 @@ mkdir -p "$N/sys/fs/cgroup"
 mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$N/dev"
 for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
+# A devpts of its own, /dev/ptmx and /dev/shm, as on a booted box: a unit's PrivateDevices= binds them into its
+# private /dev and fails (226/NAMESPACE) without them (systemd 257 namespace.c mount_private_dev; #4392).
+mkdir "$N/dev/pts" "$N/dev/shm"
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,nosuid,noexec devpts "$N/dev/pts"
+ln -s pts/ptmx "$N/dev/ptmx"
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$N/dev/shm"
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
 chmod 1777 "$N/tmp"
-exec env -i container=agentos-offline "$(command -v chroot)" "$N" /usr/lib/systemd/systemd "$@"
+# pivot_root, not chroot: the kernel refuses a user namespace to a chrooted process (EPERM), and a unit's
+# sandbox may make one (runsc rootless, #4392). The old root, stacked on the new one, is detached.
+cd "$N"
+pivot_root . .
+umount -l .
+exec env -i container=agentos-offline /usr/lib/systemd/systemd "$@"
 '''
 # The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
 # reaching its private bus through /proc/PID/root.
@@ -120,11 +133,33 @@ class Manager:
                                      stdout=subprocess.DEVNULL, stderr=self.err)
         self.pid = None
         try:
+            if wrap:
+                self.hold_parent()
             self.wait()
         except BaseException:
             self.stop()
             raise
         self.view_root = "/proc/%d/root" % self.pid
+
+    def hold_parent(self, timeout=10):
+        """Move unshare, PID 1's parent, from the delegated scope (the container's cgroup root) into a child
+        group of its own, so the scope holds no process itself and PID 1 can enable controllers for its units:
+        cgroup v2 lets a group other than the root enable none for its children while a process sits in it (no
+        internal processes; #4392)."""
+        own = cgroup_of(os.getpid())
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and self.proc.poll() is None:
+            # Only once unshare has forked: its cgroup namespace, made before the fork, is rooted at the scope.
+            forked = bool(children(self.proc.pid))
+            cg = cgroup_of(self.proc.pid)
+            if forked and cg and cg != own and cg.endswith(".scope"):
+                holder = "/sys/fs/cgroup%s/offline-systemd-parent" % cg
+                os.makedirs(holder, exist_ok=True)
+                with open(holder + "/cgroup.procs", "w") as f:
+                    f.write(str(self.proc.pid))
+                return
+            time.sleep(0.01)
+        raise SystemExit("offline systemd: the manager's scope did not appear: %s" % self.console())
 
     def _drain(self):
         while self._pump(0.2) is not None:
@@ -158,11 +193,7 @@ class Manager:
         while time.monotonic() < end:
             if self.proc.poll() is not None:
                 break
-            try:
-                with open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)) as f:
-                    kids = f.read().split()
-            except OSError:
-                kids = []
+            kids = children(self.proc.pid)
             if kids:
                 self.pid = int(kids[0])
                 r = self.ctl(["show", "-p", "SystemState", "--value"], check=False)
@@ -227,9 +258,13 @@ class Manager:
         return out
 
     def stop(self):
-        if self.pid:
+        # PID 1 by its host pid: known once wait() found it, else unshare's child, which outlives a killed
+        # unshare (no --kill-child), as after a failure between the fork and wait().
+        # unshare's children only while it is unreaped: a reaped pid may be another process's.
+        pids = [self.pid] if self.pid else children(self.proc.pid) if self.proc.poll() is None else []
+        for pid in pids:
             try:
-                os.kill(self.pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         self.proc.kill()
@@ -261,6 +296,28 @@ def manager_argv(root, usr, cmdline, plant, console):
     return (["unshare", "-m", "-u", "-i", "-p", "-f", "-n", "-C", "--propagation", "private",
              "sh", "-c", MANAGER, "offline-systemd", str(root), str(usr), str(plant), console]
             + words + list(PINNED))
+
+
+def children(pid):
+    """PID's child processes' pids, or [] once it is gone."""
+    try:
+        with open("/proc/%d/task/%d/children" % (pid, pid)) as f:
+            return [int(x) for x in f.read().split()]
+    except OSError:
+        return []
+
+
+def cgroup_of(pid):
+    """PID's cgroup v2 path, or None once it is gone."""
+    try:
+        with open("/proc/%d/cgroup" % pid) as f:
+            text = f.read()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:]
+    return None
 
 
 def shell_words(value, name):

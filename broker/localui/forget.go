@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -23,7 +25,7 @@ import (
 // checks. A refusal is a Refused with one of localapi.EraseCodes.
 type Forget interface {
 	ForgetFind(ctx context.Context, session, name string) (localapi.EraseFound, error)
-	ForgetConfirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (string, error)
+	ForgetConfirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (localapi.EraseDone, error)
 }
 
 // The erase ops are agentosd's, on the same socket as its passkey ops,
@@ -39,17 +41,21 @@ func (a AgentosdPasskeys) ForgetFind(ctx context.Context, session, name string) 
 // ForgetConfirm's call is not bounded by callTimeout: the confirm returns
 // only after every agent that read the erased content went back (D-169),
 // and the page's own request bounds the wait.
-func (a AgentosdPasskeys) ForgetConfirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (string, error) {
-	var out localapi.Text
+func (a AgentosdPasskeys) ForgetConfirm(ctx context.Context, session, handle string, authData, clientData, sig []byte) (localapi.EraseDone, error) {
+	var out localapi.EraseDone
 	err := a.Owner.Call(ctx, localapi.OpEraseConfirm, localapi.EraseConfirm{Token: session, Handle: handle,
 		AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig}, &out)
-	return out.Text, err
+	return out, err
 }
 
 // ForgetTapAgainText is the tap step's answer when the tap was not one of
 // the owner's passkeys over this list: the find still stands, so the owner
 // taps again.
 const ForgetTapAgainText = "That tap didn't match one of your passkeys, so nothing was forgotten. Tap again with your passkey."
+
+// ForgetLongText answers a name longer than localapi.MaxEraseName bytes,
+// checked here, so the form never sends one agentosd refuses.
+const ForgetLongText = "That name is too long: a name can be at most 256 bytes, which is fewer letters in some scripts, such as Chinese. Type a shorter one."
 
 // ForgetUnknownText answers a confirm that went out but got no refusal
 // back (a timeout, a dropped socket): it may have erased.
@@ -64,7 +70,7 @@ func forgetRefusedBefore(err error) bool {
 		return false
 	}
 	switch string(r) {
-	case localapi.ErrEraseBadAssertion, localapi.ErrEraseStale, localapi.ErrEraseUnavailable,
+	case localapi.ErrEraseBadAssertion, localapi.ErrEraseStale, localapi.ErrEraseUnavailable, localapi.ErrEraseStopped,
 		localapi.ErrBadArgs, localapi.ErrLimited, localapi.ErrUnauthorized:
 		return true
 	}
@@ -79,11 +85,14 @@ func forgetText(err error) string {
 	errors.As(err, &r)
 	switch string(r) {
 	case localapi.ErrEraseBadAssertion:
-		return ForgetTapAgainText
+		// Off the tap step there is nothing to tap again.
+		return "That tap didn't match one of your passkeys, so nothing was forgotten. Look the name up again."
+	case localapi.ErrEraseStopped:
+		return "I'm stopped, or was since you signed in, so nothing was forgotten. Once you text RESUME, sign in again."
 	case localapi.ErrEraseStale:
 		return "That look-up expired or was already used, so nothing was forgotten. Look the name up again."
 	case localapi.ErrBadArgs:
-		return "Type a shorter name of letters, digits, spaces or plain punctuation, then look it up."
+		return "Type a name of letters, digits, spaces or plain punctuation, then look it up."
 	case localapi.ErrLimited:
 		return "Too many look-ups. Wait a minute, then try again."
 	case localapi.ErrUnauthorized:
@@ -107,6 +116,9 @@ type forgetView struct {
 	// Tok binds the tap step's fields to the phone (forgetToken).
 	Tok       string
 	Err, Done string
+	// Kept is a Done that left some of what was found kept: it shows as
+	// a failure.
+	Kept bool
 }
 
 // forgetToken binds a tap step's handle, challenge, name and readback, as
@@ -158,7 +170,13 @@ func (s *Server) forgetPage(w http.ResponseWriter, r *http.Request) {
 	f := r.PostForm
 	switch f.Get("step") {
 	case "find":
-		v.Name = strings.TrimSpace(f.Get("name"))
+		// In NFC, so a decomposed accent finds the composed name (#5097
+		// item 10): agentosd links no x/text (ARC-2), this process does.
+		v.Name = norm.NFC.String(strings.TrimSpace(f.Get("name")))
+		if len(v.Name) > localapi.MaxEraseName {
+			v.Err = ForgetLongText
+			break
+		}
 		found, err := s.cfg.Forget.ForgetFind(ctx, tok, v.Name)
 		if err != nil {
 			v.Err = forgetText(err)
@@ -176,9 +194,9 @@ func (s *Server) forgetPage(w http.ResponseWriter, r *http.Request) {
 		sig, ok3 := formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
 		var err error = Refused(localapi.ErrEraseBadAssertion)
 		if ok1 && ok2 && ok3 {
-			var text string
-			text, err = s.cfg.Forget.ForgetConfirm(ctx, tok, handle, ad, cd, sig)
-			v.Done = text
+			var done localapi.EraseDone
+			done, err = s.cfg.Forget.ForgetConfirm(ctx, tok, handle, ad, cd, sig)
+			v.Done, v.Kept = done.Text, done.Kept
 		}
 		// A tap that did not match stays on the tap step with the same
 		// find, which the form carries back: only as this UI gave it to
@@ -192,7 +210,7 @@ func (s *Server) forgetPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if err != nil {
-			v.Done, v.Err = "", forgetText(err)
+			v.Done, v.Kept, v.Err = "", false, forgetText(err)
 			if !forgetRefusedBefore(err) {
 				// The confirm went out and no refusal came back: agentosd
 				// may have erased, since its confirm runs to the end on its
@@ -213,7 +231,7 @@ func init() {
 	tmpl.Funcs(template.FuncMap{"passkeyjs": func() template.JS { return template.JS(passkeyJS) }})
 	template.Must(tmpl.Parse(`{{define "forget"}}{{template "head" ""}}
 <h1>Forget</h1>
-{{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Done}}<p class="ok">{{.}}</p>{{end}}
+{{with .Err}}<p class="err">{{.}}</p>{{end}}{{with .Done}}<p class="{{if $.Kept}}err{{else}}ok{{end}}">{{.}}</p>{{end}}
 <p class="err" id="pk-msg"></p>
 {{if eq .Step "tap"}}
 <p>{{.Found}}</p>

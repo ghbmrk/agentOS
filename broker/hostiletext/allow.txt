@@ -5,7 +5,6 @@
 # Refuse every shape today; the test that keeps it so is #5035.
 clerk/clerkkey ValidName ASCII regex; #5035
 clerk/inbox dnsName ASCII DNS labels; #5035
-cmd/agentos-link ifaceName ASCII interface names; #5035
 enforcer/page dnsName ASCII DNS labels; #5035
 enforcer/radio name printable ASCII, no space; #5035
 kernel/proc ValidStoreName ASCII regex; #5035
@@ -16,6 +15,7 @@ vision ValidModelName ASCII model name; #5035
 #
 # Not a check of text a person or another party names.
 attest Shape checks a hardware record's fields, not a name
+cgroup checkName refuses a group name that leaves its parent; names are fixed or already-checked IDs (components, services, machine IDs)
 clerk shape builds a request declaration from an op; its values are checked by regexes inside
 cmd/agentos-camdecode/camdecode shape parses WIDTHxHEIGHT with strconv.Atoi
 cmd/agentos-egress adapterName looks a name up in the fixed adapter list

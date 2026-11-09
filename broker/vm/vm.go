@@ -404,6 +404,9 @@ type machine struct {
 	// killPending counts the machine's Kills in a row that failed on
 	// ErrKillPending (ErrWedged). Under mu, which stopRuntime runs under.
 	killPending int
+	// wedged is killPending >= wedgedAfter, read without the lock so
+	// Wedged never waits behind a kill (#5098). Set only by setKillPending.
+	wedged atomic.Bool
 	// execCancel ends a worker's command in flight (Exec), so erasure,
 	// rollback and destroy never wait behind it for the lock.
 	execCancel atomic.Pointer[context.CancelFunc]
@@ -1136,7 +1139,7 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 		// stopped (a preemption would otherwise report a live guest dead).
 		return m.countKillPending(mc, err)
 	}
-	mc.killPending = 0
+	setKillPending(mc, 0)
 	// Only a guest known dead stops counting against the reserve.
 	m.uncommitDisk(mc)
 	if mc.State == Running {
@@ -1151,11 +1154,11 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 // count: the runtime got past its wait, so no earlier kill held it.
 func (m *Manager) countKillPending(mc *machine, err error) error {
 	if !errors.Is(err, ErrKillPending) {
-		mc.killPending = 0
+		setKillPending(mc, 0)
 		return err
 	}
-	mc.killPending++
-	n := mc.killPending
+	n := mc.killPending + 1
+	setKillPending(mc, n)
 	if n < wedgedAfter {
 		return err
 	}
@@ -1163,6 +1166,32 @@ func (m *Manager) countKillPending(mc *machine, err error) error {
 		log.Printf("vm: %s: wedged: %d kills in a row refused because an earlier kill in it still runs; it stays Running and counted until the host restarts: %v", mc.ID, n, err)
 	}
 	return fmt.Errorf("%w: %w", ErrWedged, err)
+}
+
+// setKillPending sets mc's count of pending-kill refusals in a row and
+// the wedged flag that follows from it, so the two never disagree.
+func setKillPending(mc *machine, n int) {
+	mc.killPending = n
+	mc.wedged.Store(n >= wedgedAfter)
+}
+
+// Wedged lists, sorted, the machines whose last wedgedAfter or more Kills
+// in a row failed on ErrKillPending (ErrWedged): each still reads Running
+// and stays counted (RES-4), and only a host restart frees it. A machine
+// leaves the list when a Kill works or fails another way. This is the
+// fact STATUS and the owner page name, with the action: restart the
+// host (#5098, #5099).
+func (m *Manager) Wedged() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for id, mc := range m.machines {
+		if mc.wedged.Load() {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (m *Manager) get(id string) (*machine, error) {
@@ -2296,8 +2325,9 @@ func (m *Manager) preemptLocked(mc *machine, killed bool) error {
 		return err
 	}
 	// After a failed cleanup the disk stays committed: only the memory is
-	// known released.
+	// known released. A machine not Running is not wedged (#5098).
 	mc.State = Preempted
+	setKillPending(mc, 0)
 	return errors.Join(err, m.saveMachine(mc))
 }
 

@@ -126,6 +126,7 @@ type session struct {
 	until time.Time
 	at    time.Time // the last sign-in: minting, or a code since
 	locks uint64
+	stops int64 // StopGen at sign-in (eraseLive)
 	n     uint64
 }
 
@@ -278,6 +279,9 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	if !s.takeTry() {
 		return nil, errLimited
 	}
+	// Read before the code is checked: a STOP meanwhile ends the session's
+	// erase ops (eraseLive).
+	stops := s.cfg.Owner.StopGen()
 	until, locks, err := s.cfg.Owner.LocalSignIn(in.Code)
 	// Every refused sign-in counts, a refused unlock proof included, which
 	// the channel leaves to the vault process (Security S1 on step a);
@@ -294,7 +298,7 @@ func (s *Server) signIn(_ context.Context, _ sockets.Peer, args json.RawMessage)
 	}
 	// Bound to the count the code was accepted under, never one read
 	// after: a lock while the sign-in was texted kills the token (SR3-1).
-	tok := s.mint(until, locks)
+	tok := s.mint(until, locks, stops)
 	if tok == "" {
 		return nil, errFailed
 	}
@@ -649,9 +653,9 @@ func (s *Server) triesLeft(err error) (refusal, text string) {
 	return localapi.RefusedWrongCode, ""
 }
 
-// mint records a session until until, signed in under locks, and returns
-// its token ("" if no randomness).
-func (s *Server) mint(until time.Time, locks uint64) string {
+// mint records a session until until, signed in under locks and the STOP
+// count stops, and returns its token ("" if no randomness).
+func (s *Server) mint(until time.Time, locks uint64, stops int64) string {
 	var b [localapi.TokenBytes]byte
 	if _, err := io.ReadFull(s.cfg.Rand, b[:]); err != nil {
 		return ""
@@ -660,7 +664,7 @@ func (s *Server) mint(until time.Time, locks uint64) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.minted++
-	s.sessions[sha256.Sum256([]byte(tok))] = session{until: until, at: s.cfg.Now(), locks: locks, n: s.minted}
+	s.sessions[sha256.Sum256([]byte(tok))] = session{until: until, at: s.cfg.Now(), locks: locks, stops: stops, n: s.minted}
 	for len(s.sessions) > MaxSessions {
 		var oldest [sha256.Size]byte
 		var n uint64

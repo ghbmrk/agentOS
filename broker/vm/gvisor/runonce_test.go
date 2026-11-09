@@ -50,25 +50,33 @@ func oneShotRig(t *testing.T, mode string) (*Runtime, string) {
 	if err := os.WriteFile(filepath.Join(d, "mode"), []byte(mode), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A cgroup parent of plain files, and the run's group already in it
-	// holding the files the kernel would give it, which RunOnce reuses.
-	leaf := filepath.Join(d, "cg", "oneshot-t")
-	if err := os.MkdirAll(leaf, 0o700); err != nil {
+	fakeCgroups(t, filepath.Join(d, "cg"), filepath.Join(d, "startedin"))
+	return &Runtime{Bin: bin, StateDir: filepath.Join(d, "state")}, d
+}
+
+// fakeCgroups makes parent a cgroup parent of plain files. The fake's run
+// group is no cgroup to clone3 into: startIn records its path at
+// startedin and gives it the event files the kernel would.
+func fakeCgroups(t *testing.T, parent, startedin string) {
+	t.Helper()
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for f, v := range map[string]string{"cg/cgroup.controllers": "cpu io memory pids", "cg/cgroup.subtree_control": "",
-		"cg/oneshot-t/memory.events": "oom_kill 0\n", "cg/oneshot-t/cgroup.events": "populated 0\n"} {
-		if err := os.WriteFile(filepath.Join(d, f), []byte(v), 0o600); err != nil {
+	for f, v := range map[string]string{"cgroup.controllers": "cpu io memory pids", "cgroup.subtree_control": ""} {
+		if err := os.WriteFile(filepath.Join(parent, f), []byte(v), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// The fake's group is no cgroup to clone3 into; record it instead.
 	old := startIn
 	startIn = func(path string, _ *childproc.Options) (func(), error) {
-		return func() {}, os.WriteFile(filepath.Join(d, "startedin"), []byte(path), 0o600)
+		for f, v := range map[string]string{"memory.events": "oom_kill 0\n", "cgroup.events": "populated 0\n"} {
+			if err := os.WriteFile(filepath.Join(path, f), []byte(v), 0o600); err != nil {
+				return nil, err
+			}
+		}
+		return func() {}, os.WriteFile(startedin, []byte(path), 0o600)
 	}
 	t.Cleanup(func() { startIn = old })
-	return &Runtime{Bin: bin, StateDir: filepath.Join(d, "state")}, d
 }
 
 func oneShot(argv ...string) OneShot {
@@ -221,8 +229,7 @@ func TestRunOnceRemovesSandbox(t *testing.T) {
 // TestRunOnceResults: the program's exit code and output are its own;
 // output past MaxOutput is cut and reported; a runsc failure answers
 // ErrOneShotFailed with none of runsc's text; a kill at the memory cap
-// answers ErrOneShotMemory, but one counted before the run does not; the
-// deadline answers the context's error; a run with no cgroup does not
+// answers ErrOneShotMemory; the deadline answers the context's error; a run with no cgroup does not
 // start.
 func TestRunOnceResults(t *testing.T) {
 	r, d := oneShotRig(t, "exit3")
@@ -248,15 +255,6 @@ func TestRunOnceResults(t *testing.T) {
 		t.Errorf("oom: %+v, %v", res, err)
 	}
 	r, d = oneShotRig(t, "echo")
-	if err := os.WriteFile(filepath.Join(d, "cg", "oneshot-t", "memory.events"), []byte("oom_kill 5\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.RunOnce(context.Background(), oneShotIn(d, "/prog")); err != nil {
-		t.Errorf("earlier kills counted against the run: %v", err)
-	}
-	if err := os.Remove(filepath.Join(d, "startedin")); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := r.RunOnce(context.Background(), oneShot("/prog")); err == nil {
 		t.Error("ran with no usable cgroup")
 	}

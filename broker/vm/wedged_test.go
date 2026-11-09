@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -78,4 +80,126 @@ func TestRepeatedPendingKillReportsWedged(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitState(t, e, "exp", Preempted)
+}
+
+// #5098: the wedged state reaches the status the owner reads. Wedged lists
+// a machine from the wedgedAfter-th pending-kill refusal in a row, while it
+// still reads Running and stays counted (RES-4); a refusal of another kind
+// or a kill that works takes it off, and a destroyed machine is never
+// listed.
+func TestWedgedListsTheMachine(t *testing.T) {
+	log.SetOutput(new(bytes.Buffer))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	e := newEnv(t, 4000)
+	e.create("exp", admission.Experiment, 1500)
+	e.create("other", admission.Experiment, 1500)
+	setRefuse := func(err error) {
+		e.rt.mu.Lock()
+		e.rt.refuseKill = err
+		e.rt.mu.Unlock()
+	}
+	wantWedged := func(step string, want ...string) {
+		t.Helper()
+		// Map order varies between reads: many reads catch an unsorted list.
+		for range 64 {
+			if got := e.m.Wedged(); !slices.Equal(got, want) {
+				t.Fatalf("%s: Wedged() = %q, want %q", step, got, want)
+			}
+		}
+	}
+	refuse := func(id string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := e.m.Preempt(id); !errors.Is(err, ErrKillPending) {
+				t.Fatalf("%s preemption %d: %v, want ErrKillPending", id, i+1, err)
+			}
+		}
+	}
+	pending := fmt.Errorf("fake: %w", ErrKillPending)
+	wantWedged("fresh")
+	setRefuse(pending)
+	refuse("exp", wedgedAfter-1)
+	wantWedged("below the threshold")
+	refuse("exp", 1)
+	wantWedged("at the threshold", "exp")
+	refuse("exp", 1)
+	wantWedged("past the threshold", "exp")
+	// Still Running and counted: only a host restart frees it.
+	if mc, err := e.m.Get("exp"); err != nil || mc.State != Running {
+		t.Fatalf("wedged machine: %+v, %v, want Running", mc, err)
+	}
+	if _, ok := e.adm.Snapshot().Running["exp"]; !ok {
+		t.Fatal("wedged machine no longer counted by admission")
+	}
+	refuse("other", wedgedAfter)
+	wantWedged("two wedged", "exp", "other")
+	// A refusal of another kind: the runtime got past its wait.
+	setRefuse(errors.New("fake: kill refused"))
+	if err := e.m.Preempt("other"); err == nil || errors.Is(err, ErrKillPending) {
+		t.Fatalf("other kill failure: %v", err)
+	}
+	wantWedged("after another failure", "exp")
+	// A kill that works.
+	setRefuse(nil)
+	must(t, e.m.Preempt("exp"))
+	waitState(t, e, "exp", Preempted)
+	wantWedged("after a kill that works")
+	// Wedged again, then destroyed once a kill works: never listed after.
+	setRefuse(pending)
+	refuse("other", wedgedAfter)
+	wantWedged("other wedged", "other")
+	if err := e.m.Destroy(bg, "other"); !errors.Is(err, ErrWedged) {
+		t.Fatalf("destroy of a wedged machine: %v, want ErrWedged", err)
+	}
+	wantWedged("destroy refused", "other")
+	setRefuse(nil)
+	must(t, e.m.Destroy(bg, "other"))
+	wantWedged("destroyed")
+}
+
+// #5098: a preemption that released the machine's memory without its lock
+// records it Preempted even when the runtime's cleanup is then refused on
+// ErrKillPending. It is no longer Running or counted, so it is not wedged,
+// even when that refusal is the wedgedAfter-th in a row.
+func TestPreemptedMachineIsNotWedged(t *testing.T) {
+	log.SetOutput(new(bytes.Buffer))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	e := newEnv(t, 2000)
+	e.create("exp", admission.Experiment, 1500)
+	pending := fmt.Errorf("fake: %w", ErrKillPending)
+	e.rt.mu.Lock()
+	e.rt.refuseKill = pending
+	e.rt.mu.Unlock()
+	for i := 1; i < wedgedAfter; i++ {
+		if err := e.m.Preempt("exp"); !errors.Is(err, ErrKillPending) {
+			t.Fatalf("preemption %d: %v, want ErrKillPending", i, err)
+		}
+	}
+	// Hold the machine's lock, as an operation in flight does, so Preempt
+	// kills without it.
+	mc, err := e.m.get("exp")
+	must(t, err)
+	mc.mu.Lock()
+	// The kill without the lock works; stopRuntime's, under it, is refused.
+	var kills atomic.Int32
+	e.rt.onKill = func(string) {
+		e.rt.mu.Lock()
+		defer e.rt.mu.Unlock()
+		if kills.Add(1) > 1 {
+			e.rt.refuseKill = pending
+		}
+	}
+	e.rt.mu.Lock()
+	e.rt.refuseKill = nil
+	e.rt.mu.Unlock()
+	err = e.m.Preempt("exp")
+	mc.mu.Unlock()
+	must(t, err)
+	waitState(t, e, "exp", Preempted)
+	if n := kills.Load(); n < 2 {
+		t.Fatalf("%d kills, want the lock-free one and stopRuntime's", n)
+	}
+	if got := e.m.Wedged(); len(got) != 0 {
+		t.Fatalf("Wedged() = %q after a preemption released the memory, want none", got)
+	}
 }

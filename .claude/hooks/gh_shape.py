@@ -11,17 +11,29 @@ normalized form contains `gh`, whitespace, then `api` (case ignored) goes to the
 so the rule search never runs past the hook timeout (#2562). Every rule starts with `gh api`,
 and normalization cannot split those tokens, so no longer command can match a rule (#2720).
 Commands no rule matches pass through to the normal permission flow.
+A lens draft comment also passes only when its file is a lens verdict for that PR (`draft_problem`).
 tests/test_gh_shape_hook.py pins RULES to settings.json and every shape to its rule.
 """
+import importlib.util
 import json
+import os
 import re
+import pathlib
 import shlex
+import stat
 import sys
 
 REPO = "repos/ghbmrk/agentOS"
 NUM = r"[1-9][0-9]{0,6}"
 SHA = r"[0-9a-f]{40}"
 LABEL = r"[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?"
+DRAFT = r"body=@/mnt/project-files/lens-drafts/[1-9][0-9]{0,6}\.md"
+# Where /mnt/project-files/lens-drafts really lives; no component of this path or the draft may be a link.
+DRAFTS_REAL = "/mnt/attach/project-files/lens-drafts"
+# GitHub caps a comment at 65536 characters.
+MAX_DRAFT = 60000
+# A lens draft may carry only these record markers, so it cannot pass as an L3, combined or security verdict.
+LENS_MARKERS = {"ux", "potency"}
 
 # The gh allow rules in .claude/settings.json, without the Bash( ) wrapper.
 RULES = [
@@ -30,15 +42,19 @@ RULES = [
     f"gh api -X PUT {REPO}/pulls/*/merge -f merge_method=merge -f sha=*",
     f"gh api -X POST {REPO}/issues/*/labels -f labels[]=*",
     f"gh api -X DELETE {REPO}/issues/*/labels/*",
+    f"gh api -X POST {REPO}/issues/*/comments -F body=@/mnt/project-files/lens-drafts/*",
 ]
 
-# The only commands those rules may let through: arm, disarm, pinned merge, label add, label remove.
+# The only commands those rules may let through: arm, disarm, pinned merge, label add, label remove,
+# and a comment whose body is a lens draft file named by its PR number (plain, or printing only its id).
 SHAPES = [
     ["gh", "api", "-X", "PUT", f"{REPO}/pulls/{NUM}/ccr/auto_merge", "-f", "merge_method=merge"],
     ["gh", "api", "-X", "DELETE", f"{REPO}/pulls/{NUM}/ccr/auto_merge"],
     ["gh", "api", "-X", "PUT", f"{REPO}/pulls/{NUM}/merge", "-f", "merge_method=merge", "-f", f"sha={SHA}"],
     ["gh", "api", "-X", "POST", f"{REPO}/issues/{NUM}/labels", "-f", rf"labels\[\]={LABEL}"],
     ["gh", "api", "-X", "DELETE", f"{REPO}/issues/{NUM}/labels/{LABEL}"],
+    ["gh", "api", "-X", "POST", f"{REPO}/issues/{NUM}/comments", "-F", DRAFT],
+    ["gh", "api", "-X", "POST", f"{REPO}/issues/{NUM}/comments", "-F", DRAFT, "--jq", r"\.id"],
 ]
 
 # A space in a rule matches any run of whitespace, in case the matcher normalizes it.
@@ -71,14 +87,74 @@ def exact(command):
                for s in SHAPES)
 
 
+def _premerge():
+    path = pathlib.Path(__file__).resolve().parents[2] / "tools" / "premerge.py"
+    spec = importlib.util.spec_from_file_location("premerge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def draft_problem(pr, path):
+    """None when `path` is the lens draft for PR `pr`; otherwise why the post goes to the ask.
+
+    gh reads `@file` through links, so the draft must be a regular file at DRAFTS_REAL with no link on the way,
+    and it may record only a UX or Potency verdict for this PR, so no session can post another file or an
+    L3, combined or security verdict without the ask."""
+    real = os.path.join(DRAFTS_REAL, f"{pr}.md")
+    at = "/"
+    for part in real.strip("/").split("/"):
+        at = os.path.join(at, part)
+        if os.path.islink(at):
+            return f"lens draft path has a link at {at}"
+    if os.path.realpath(path) != real:
+        return "lens draft does not resolve to its own file"
+    try:
+        if not stat.S_ISREG(os.lstat(real).st_mode):  # before open: a FIFO would block the open
+            return f"lens draft is not a regular file of at most {MAX_DRAFT} bytes"
+        fd = os.open(real, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return "lens draft is missing or unreadable"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_DRAFT:
+            return f"lens draft is not a regular file of at most {MAX_DRAFT} bytes"
+        data = os.read(fd, MAX_DRAFT + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_DRAFT:
+        return f"lens draft is not a regular file of at most {MAX_DRAFT} bytes"
+    text = data.decode("utf-8", errors="replace")
+    if not text.startswith("Verdict:"):
+        return "lens draft does not start with Verdict:"
+    records = re.findall(r"^Record:.*$", text, re.M)
+    if not records or any(not r.startswith(f"Record: PR #{pr} ") for r in records):
+        return f"lens draft has a Record line for a PR other than #{pr}"
+    markers = re.findall(r"<!--\s*record:\s*([^\s>]*)", text, re.I)
+    if not markers or set(markers) - LENS_MARKERS:
+        return "lens draft may carry only ux and potency record markers"
+    if not _premerge()._record_block(text)[1]:
+        return "lens draft record block is not placed under its Record line"
+    return None
+
+
 def decide(command):
     """None lets the call go on; a string is the reason it goes to the permission ask."""
     if len(command) > MAX_SCAN and _GH_API.search(normalized(command)):
         return f"gh_shape hook: a command over {MAX_SCAN} characters that contains gh api is not scanned"
     if guarded(command) and not exact(command):
         return ("gh allow rule matched but the call is not one of the exact shapes in "
-                ".claude/hooks/gh_shape.py (arm, disarm, pinned merge, label add or remove: "
+                ".claude/hooks/gh_shape.py (arm, disarm, pinned merge, label add or remove, "
+                "lens draft comment `-F body=@/mnt/project-files/lens-drafts/N.md` on issue N: "
                 "numeric number, 40-hex sha, plain lowercase label, no other flags or shell syntax)")
+    tokens = shlex.split(command) if guarded(command) else []
+    if tokens[4:5] and tokens[4].endswith("/comments"):
+        pr, path = tokens[4].split("/")[-2], tokens[6][len("body=@"):]
+        if os.path.basename(path) != f"{pr}.md":
+            return f"lens draft {os.path.basename(path)} is not the draft for issue {pr}"
+        problem = draft_problem(pr, path)
+        if problem:
+            return f"gh_shape hook: {problem}"
     return None
 
 

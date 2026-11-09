@@ -108,6 +108,38 @@ func TestTurnOffAfterRemove(t *testing.T) {
 	}
 }
 
+// TestTurnOffAfterRemoveThenAdd (#4392): a Remove and then an Add of the
+// same camera ID, under the same pin, between a mismatched dial and turnOff
+// make a new node, which the old dial says nothing about. turnOff refuses,
+// so the stream ends errRepinned, and the new node is not off, and no "off"
+// line or key-refused event names it. It fails if turnOff compares IDs (or
+// IDs and keys) rather than the node itself.
+func TestTurnOffAfterRemoveThenAdd(t *testing.T) {
+	r := newRig(t)
+	old := r.c.nodes[testID]
+	pin := old.pin
+	r.c.Remove(testID)
+	if err := r.c.Add(pin); err != nil {
+		t.Fatal(err)
+	}
+	if r.c.turnOff(old, pin) {
+		t.Fatal("turnOff for the removed node turned off the camera added again under its ID")
+	}
+	r.c.mu.Lock()
+	n := r.c.nodes[testID]
+	off := n != nil && n.off
+	r.c.mu.Unlock()
+	if n == nil || n == old || off {
+		t.Fatalf("the camera added again: node %v (the old one: %v), off %v", n != nil, n == old, off)
+	}
+	if ev := r.ev.of(KeyRefused); len(ev) != 0 {
+		t.Fatalf("key-refused events for the camera added again: %v", ev)
+	}
+	if l := r.log.all(); strings.Contains(l, "off:") {
+		t.Fatalf("log for the camera added again: %q", l)
+	}
+}
+
 // TestSilentAfterSilentEvent (#4450): STATUS reads silent only once the
 // silent event is out, the order #4431 set for off. It fails if markSilent
 // sets the flag before it emits.

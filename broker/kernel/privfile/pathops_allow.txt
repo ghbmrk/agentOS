@@ -15,7 +15,7 @@
 # these lines (the lint's bound). cgroup2 (kernfs) has no symlink(2), so no
 # uid, a delegate included, can plant a link among a group's files.
 allow broker/cgroup/cgroup.go Open os.ReadFile cgroup.controllers and cgroup.subtree_control of agentosd's delegated group, in cgroup2, where no uid can make a link
-allow broker/cgroup/cgroup.go Group.Child os.Mkdir a machine's group in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cgroup/cgroup.go writeFile os.Mkdir a new group (Fresh, Child) in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
 allow broker/cgroup/cgroup.go Group.PidsMax os.ReadFile the group's pids.max, in cgroup2, where no uid can make a link
 allow broker/cgroup/cgroup.go ReadPressure os.Open a group's memory.pressure in cgroup2, or /proc/pressure/memory in procfs; neither lets any uid make a link
 allow broker/cgroup/cgroup.go writeFile os.WriteFile a group's control file in cgroup2, where no uid can make a link (and none can be created there)
@@ -214,6 +214,7 @@ allow broker/cmd/agentosd/lostcard.go bootedAt os.ReadFile /proc/uptime, served 
 allow broker/cmd/agentosd/uplink.go routeOnline os.ReadFile /proc/net/route and /proc/net/ipv6_route, served by the kernel; no uid plants a link in procfs
 allow broker/cmd/agentosd/diskquota.go machineQuota os.MkdirAll -machines, /var/lib/agentos/machines, in root-held /var/lib/agentos
 allow broker/cmd/agentosd/forget.go openEraseRewind os.ReadFile erase-rewound.json in -machines, which only root writes (a guest writes only inside its own layer)
+allow broker/cmd/agentosd/forgetpage.go openForgetTold os.ReadFile forget-untold.json in -machines, which only root writes (a guest writes only inside its own layer)
 allow broker/cmd/agentosd/recallheld.go openRecallHeld os.ReadFile recall-settled.json in -machines, which only root writes (a guest writes only inside its own layer)
 allow broker/cmd/agentosd/recallheld.go readRecallHeld os.Stat the old recall directory, /var/lib/agentos/recall, in root-held /var/lib/agentos
 allow broker/cmd/agentosd/recallheld.go recallLines os.ReadFile a recall store file in /var/lib/agentos/recall, root-held

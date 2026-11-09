@@ -41,8 +41,9 @@ type Options struct {
 	// child gets the listener as fd 3 and never names it.
 	Socket string
 	// Cgroup is the inference leaf, whose memory.max is the budget's
-	// InferenceMB. The child starts in it (CLONE_INTO_CGROUP); nil starts
-	// it in the caller's group, which only tests do.
+	// InferenceMB. Each start makes the leaf's child Name new (cgroup.Fresh)
+	// and the child starts in it (CLONE_INTO_CGROUP); nil starts it in the
+	// caller's group, which only tests do.
 	Cgroup *cgroup.Group
 	// UID and GID are the service's user, with no supplementary groups.
 	// UID 0 is refused.
@@ -219,21 +220,26 @@ func (s *Supervisor) loop(ctx context.Context, run func(context.Context) string)
 
 // run starts the service once and waits for it, returning why it stopped.
 func (s *Supervisor) run(ctx context.Context) string {
-	g := s.o.Cgroup
-	if g != nil {
-		// A previous broker's service, or this one's children, still in
-		// the leaf would hold memory against the budget.
-		if pop, err := g.Populated(); err != nil {
-			return "cgroup: " + err.Error()
-		} else if pop {
-			if err := g.Kill(ctx); err != nil {
-				return "cgroup kill: " + err.Error()
-			}
-		}
-	}
+	leaf := s.o.Cgroup
+	var g *cgroup.Group
 	var ooms int64
-	if g != nil {
-		ooms, _ = g.OOMKills()
+	if leaf != nil {
+		// A new group for each run: one killed after an earlier run may
+		// SIGKILL a child clone3 places in it (#5135). Making it new kills
+		// what a previous broker's service, or this one's children, left
+		// there holding memory against the budget.
+		var err error
+		if g, err = leaf.Fresh(ctx, s.o.Name); err != nil {
+			return "cgroup: " + err.Error()
+		}
+		// Anything the service leaves behind goes with its group.
+		defer func() {
+			kctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			g.Kill(kctx)
+			cancel()
+			g.Remove()
+		}()
+		ooms, _ = leaf.OOMKills()
 	}
 	lf, err := s.listen(s.o.Socket)
 	if err != nil {
@@ -297,14 +303,16 @@ func (s *Supervisor) run(ctx context.Context) string {
 	if err != nil {
 		cause = "exited: " + err.Error()
 	}
-	if g != nil {
-		if n, oerr := g.OOMKills(); oerr == nil && n > ooms {
-			cause = "oom: " + cause
+	return oomCause(leaf, ooms, cause)
+}
+
+// oomCause is cause tagged "oom: " when the leaf's OOM kill count has
+// risen past before, the count when the run started.
+func oomCause(leaf *cgroup.Group, before int64, cause string) string {
+	if leaf != nil {
+		if n, err := leaf.OOMKills(); err == nil && n > before {
+			return "oom: " + cause
 		}
-		// Anything the service left behind goes with it.
-		kctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		g.Kill(kctx)
-		cancel()
 	}
 	return cause
 }

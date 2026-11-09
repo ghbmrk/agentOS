@@ -19,6 +19,7 @@ PERMISSIONS = {
         "Bash(gh api -X PUT repos/ghbmrk/agentOS/pulls/*/merge -f merge_method=merge -f sha=*)",
         "Bash(gh api -X POST repos/ghbmrk/agentOS/issues/*/labels -f labels[]=*)",
         "Bash(gh api -X DELETE repos/ghbmrk/agentOS/issues/*/labels/*)",
+        "Bash(gh api -X POST repos/ghbmrk/agentOS/issues/*/comments -F body=@/mnt/project-files/lens-drafts/*)",
     ]
 }
 

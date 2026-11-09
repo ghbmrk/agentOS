@@ -506,15 +506,18 @@ jobs:
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
-      - name: Camera decoder sessions in their own unit (CAM-decoder-uid)
+      - name: Camera decoder sessions in their own unit, under the image's systemd (CAM-decoder-uid, #4392)
         # The image's agentos-camdecode.socket and agentos-camdecode@.service as shipped, with the main side's
-        # mask, under this runner's systemd, with only the service's ExecStart= replaced (the session's start,
-        # as a test) and its output sent to the journal. The step connects twice at once as the clerk's user:
-        # each session is a user of its own, neither root, the clerk's nor the other's, and runs a sandbox
-        # under runsc rootless beside its leaf of its unit's group (CAM-host-11). Another user is refused the
-        # socket. Debian lets an unprivileged user make a user namespace; Ubuntu's AppArmor does not, so the
-        # step lifts that as the box has it. It runs before the root-gated tests: their radio probe's
-        # unconfined control stops PID 1 (ptrace attach).
+        # mask and the unit's lift of it, under the image's own systemd (trixie's, from the image's apt
+        # sources, as PID 1 of a container: image/offline_systemd.py), so PrivatePIDs= (systemd 257), which
+        # the runner's systemd ignores, acts as on the box. Only the service's ExecStart= is replaced (the
+        # session's start, as a test) and its output sent to a file. tools/camdecode_unit.py connects twice
+        # at once as the clerk's user: each session is a user of its own, neither root, the clerk's nor the
+        # other's, is PID 1 of a pid namespace of its own, sees an empty /run, and runs a sandbox under runsc
+        # rootless beside its leaf of its unit's group (CAM-host-11). Another user is refused the socket.
+        # Debian lets an unprivileged user make a user namespace; Ubuntu's AppArmor does not, so the step
+        # lifts that as the box has it. It runs before the root-gated tests: their radio probe's unconfined
+        # control stops PID 1 (ptrace attach).
         working-directory: broker
         run: |
           set -eu
@@ -522,46 +525,49 @@ jobs:
           was=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
           trap 'sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=$was' EXIT
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          T=$RUNNER_TEMP/camdecode-tree
+          # snapshot.debian.org has outages (#4518): four attempts, as the checks job's image tools.
+          for wait in 15 30 60 last; do
+            sudo rm -rf --one-file-system "$T"
+            err=0
+            sudo timeout 240 mmdebstrap --mode=root --variant=essential --include=systemd trixie "$T" \
+              ../image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources || err=$?
+            [ "$err" -ne 0 ] || break
+            [ "$wait" != last ] || exit "$err"
+            echo "::warning::mmdebstrap exited $err (snapshot.debian.org outage?); retrying in ${wait}s"
+            sleep "$wait"
+          done
           L=/usr/local/lib/agentos-ci-camera
           S=../image/mkosi/mkosi.extra/usr/lib/systemd/system
           U=$S/agentos-camdecode@.service
-          G="sudo env PATH=$PATH GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache"
-          sudo mkdir -p $L/root/proc $L/root/dev $L/root/sys
-          $G CGO_ENABLED=0 go build -o $L/root/oneshot ./vm/gvisor/testdata/oneshot
-          $G go test -c -o $L/camdecode.test ./cmd/agentos-camdecode-host
-          # The clerk's user cannot read the runner's checkout.
-          sudo install -m 0644 ../tools/camdecode_sessions.py $L/
-          sudo chmod -R a+rX $L
-          sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentos-camera
-          # The clerk's directories as the image makes them, and every path the main side's mask names.
-          sudo install -d -m 0700 -o agentos-camera -g agentos-camera /var/lib/agentos-camera
-          sudo install -d -m 0755 -o agentos-camera -g agentos-camera /run/agentos-camera
+          E=$S/agentos-camdecode@.service.d/90-empty-run.conf
           M=$S/agentos-.service.d/50-main-side.conf
-          for p in $(sed -n 's/^InaccessiblePaths=//p' $M); do sudo mkdir -p "$p"; done
-          sudo install -m 0644 $U $S/agentos-camdecode.socket /etc/systemd/system/
-          sudo install -D -m 0644 $M /etc/systemd/system/agentos-.service.d/50-main-side.conf
+          D=/etc/systemd/system
+          G="sudo env PATH=$PATH GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache"
+          sudo mkdir -p $T$L/root/proc $T$L/root/dev $T$L/root/sys
+          $G CGO_ENABLED=0 go build -o $T$L/root/oneshot ./vm/gvisor/testdata/oneshot
+          $G CGO_ENABLED=0 go test -c -o $T$L/camdecode.test ./cmd/agentos-camdecode-host
+          sudo install -m 0755 /usr/local/bin/runsc $T/usr/local/bin/runsc
+          sudo cp -a /usr/local/bin/gvisor-bin $T/usr/local/bin/
+          sudo chmod -R a+rX $T$L
+          # The clerk's user, one uid on the runner (the client) and in the tree (SocketUser=).
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentos-camera
+          getent passwd agentos-camera | sudo tee -a $T/etc/passwd
+          getent group agentos-camera | sudo tee -a $T/etc/group
+          # The clerk's state as the image makes it, and every path the unit's mask names.
+          sudo install -d -m 0700 -o agentos-camera -g agentos-camera $T/var/lib/agentos-camera
+          for p in $(sed -n 's/^InaccessiblePaths=\(.\)/\1/p' $E); do sudo mkdir -p "$T$p"; done
+          sudo install -m 0644 $U $S/agentos-camdecode.socket $T$D/
+          sudo install -D -m 0644 $M $T$D/agentos-.service.d/50-main-side.conf
+          sudo install -D -m 0644 $E $T$D/agentos-camdecode@.service.d/90-empty-run.conf
+          sudo install -d -m 0755 $T/var/log/agentos-ci-camdecode
           rr=$(grep -o -- '-runsc-root /[^ ]*' $U | cut -d' ' -f2)
           printf '%s\n' '[Service]' 'ExecStart=' "ExecStart=$L/camdecode.test -test.run=TestDecoderStartsInItsUnit -test.v -test.count=1" \
-            'StandardOutput=journal' \
+            'StandardOutput=append:/var/log/agentos-ci-camdecode/%i.log' 'StandardError=inherit' \
             "Environment=AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_RUNSC_ROOT=$rr AGENTOS_DECODE_ROOT=$L/root AGENTOS_CLERK_USER=agentos-camera" \
-            | sudo install -D -m 0644 /dev/stdin /etc/systemd/system/agentos-camdecode@.service.d/99-ci.conf
-          systemctl --version | head -1
-          sudo systemctl daemon-reload || { sudo journalctl -b --no-pager -n 150 -o short-precise; exit 1; }
-          sudo systemctl start agentos-camdecode.socket
-          rc=0
-          sudo setpriv --reuid=agentos-camera --regid=agentos-camera --clear-groups python3 -I $L/camdecode_sessions.py \
-            /run/agentos-camdecode/conn.sock "$(id -u agentos-camera)" > /tmp/camdecode-sessions.log 2>&1 || rc=$?
-          cat /tmp/camdecode-sessions.log
-          # Another user is refused the socket (an "if", since set -e ignores a "!" command).
-          if sudo setpriv --reuid=nobody --regid=nogroup --clear-groups python3 -I -c \
-            'import socket; socket.socket(socket.AF_UNIX).connect("/run/agentos-camdecode/conn.sock")' 2>/dev/null; then
-            echo "FAIL: nobody opened a decoder session"; exit 1
-          fi
-          sudo journalctl -u 'agentos-camdecode@*' -o cat --no-pager > /tmp/camdecode-unit.log || true
-          tail -n 80 /tmp/camdecode-unit.log
-          [ "$rc" -eq 0 ]
-          [ "$(grep -c -- '^--- PASS: TestDecoderStartsInItsUnit' /tmp/camdecode-unit.log)" -eq 2 ]
-          ! grep -q -- '--- SKIP\|--- FAIL' /tmp/camdecode-unit.log
+            | sudo install -D -m 0644 /dev/stdin $T$D/agentos-camdecode@.service.d/99-ci.conf
+          sudo python3 -I ../tools/camdecode_unit.py "$T" agentos-camera /var/log/agentos-ci-camdecode
       - name: agentosd calls the kernel as the owner side (#2682)
         # As agentosd.service runs: root with no_new_privs. Each call takes the owner side's uid on
         # one thread and gives it back; the tests skip off root, so the step fails unless they ran.

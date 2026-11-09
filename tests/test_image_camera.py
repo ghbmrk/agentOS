@@ -2,10 +2,12 @@
 decoder sessions' socket and unit, in the image, against the kernel's unit and the mains they run
 (broker/cmd/agentos-camera, broker/cmd/agentos-camdecode-host; CAM-host-9, CAM-host-11).
 
-CI's camera decoder step runs the shipped socket and decoder unit on a systemd host, with only the decoder
-unit's ExecStart= replaced by its test, and connects as the clerk's user: each session runs a sandbox under a
-user of its own, neither root nor the clerk's (broker/cmd/agentos-camdecode-host TestDecoderStartsInItsUnit)."""
+CI's camera decoder step runs the shipped socket and decoder unit under the image's own systemd
+(tools/camdecode_unit.py), with only the decoder unit's ExecStart= and output replaced by its test, and connects
+as the clerk's user: each session runs a sandbox under a user of its own, neither root nor the clerk's, in a pid
+namespace of its own and with an empty /run (broker/cmd/agentos-camdecode-host TestDecoderStartsInItsUnit)."""
 # REQ: CLK-1, NET-2, DEV-2, RES-2, UPD-10
+import os
 import pathlib
 import re
 import sys
@@ -246,7 +248,9 @@ class DecoderUnitTest(unittest.TestCase):
                      ("ProtectSystem", "strict"), ("ProtectHome", "yes"), ("PrivateIPC", "yes"),
                      ("PrivateDevices", "yes"), ("DevicePolicy", "closed"), ("ProtectProc", "invisible"),
                      ("NoExecPaths", "/"), ("ExecPaths", "/usr"), ("SystemCallArchitectures", "native"),
-                     ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"), ("RestrictAddressFamilies", "AF_UNIX")):
+                     ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"), ("RestrictAddressFamilies", "AF_UNIX"),
+                     # #4392: no path socket of the box's (the system bus, journald, userdb) is in view.
+                     ("TemporaryFileSystem", "/run:ro,noexec")):
             self.assertEqual(s[k], v, k)
         for key in ("IPAddressAllow", "DeviceAllow", "MemoryDenyWriteExecute"):
             self.assertNotIn(key, s)
@@ -266,8 +270,58 @@ class DecoderUnitTest(unittest.TestCase):
         self.assertIn("U=$S/%s\n" % DECODER.name, ci)
         self.assertIn("$S/%s" % DEC_SOCKET.name, ci)
         self.assertIn("TestDecoderStartsInItsUnit", ci)
+        # #4392: under the image's own systemd, which applies PrivatePIDs= (257), with the unit's lift of the mask.
+        self.assertIn("E=$S/%s.d/90-empty-run.conf\n" % DECODER.name, ci)
+        self.assertIn("$E $T$D/%s.d/90-empty-run.conf\n" % DECODER.name, ci)
+        self.assertIn("sudo python3 -I ../tools/camdecode_unit.py \"$T\" agentos-camera", ci)
+        self.assertIn("offline_systemd.Manager(", (ROOT / "tools/camdecode_unit.py").read_text())
         test = (HOST_CMD / "unit_test.go").read_text()
         self.assertIn("func TestDecoderStartsInItsUnit(", test)
+        self.assertIn("os.Getpid(); pid != 1", test)
+        self.assertIn('runHolds(t, "/run")', test)
+        self.assertIn("unix.AT_EACCESS), unix.EACCES)", test)
+
+
+class DecoderStepTest(unittest.TestCase):
+    """tools/camdecode_unit.py's reading of the sessions' test output (#4392)."""
+
+    # REQ: CLK-1
+    def test_each_session_must_pass_once(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import camdecode_unit
+        ok = "=== RUN   TestDecoderStartsInItsUnit\n--- PASS: TestDecoderStartsInItsUnit (1.00s)\nPASS\n"
+        self.assertEqual(camdecode_unit.check_logs({"a.log": ok, "b.log": ok}), [])
+        self.assertEqual(camdecode_unit.check_logs({"a.log": ok}), ["1 session logs, want 2"])
+        for bad in ("--- SKIP: TestDecoderStartsInItsUnit (0.00s)\n", ok + ok, ok + "--- FAIL: x\n", ""):
+            with self.subTest(bad):
+                self.assertEqual(camdecode_unit.check_logs({"a.log": ok, "b.log": bad}),
+                                 ["b.log: TestDecoderStartsInItsUnit did not pass once"])
+
+
+    # REQ: CLK-1
+    def test_only_eacces_is_a_refusal(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        import camdecode_unit
+        self.assertIsNone(camdecode_unit.refusal_failure(camdecode_unit.REFUSED, "[Errno 13] Permission denied"))
+        self.assertEqual(camdecode_unit.refusal_failure(0, "connected"), "nobody opened a decoder session")
+        # setpriv failing to change user (exit 1), or the probe failing otherwise, is not a refusal.
+        for rc, out in ((1, "setpriv: unknown group nobody"), (1, "[Errno 2] No such file or directory"), (2, "")):
+            with self.subTest(out):
+                self.assertIn("did not run to a refusal", camdecode_unit.refusal_failure(rc, out))
+        # The probe exits REFUSED on EACCES only, run here against a socket no one listens on and one at mode 0.
+        import socket, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = d + "/s"
+            r = subprocess.run([sys.executable, "-I", "-c", camdecode_unit.PROBE, p], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            if os.geteuid() != 0:
+                s = socket.socket(socket.AF_UNIX)
+                s.bind(p)
+                s.listen()
+                os.chmod(p, 0)
+                r = subprocess.run([sys.executable, "-I", "-c", camdecode_unit.PROBE, p], capture_output=True, text=True)
+                s.close()
+                self.assertEqual(r.returncode, camdecode_unit.REFUSED, r.stdout)
 
 
 if __name__ == "__main__":
