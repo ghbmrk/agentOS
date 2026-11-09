@@ -1474,7 +1474,7 @@ func TestAnswersRefreshed(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh, err := json.Marshal(map[string]any{"nftables": []any{
-		map[string]any{"set": map[string]any{"family": "inet", "table": nft.Table, "name": sets[0].Fresh(false), "elem": []string{"203.0.113.5"}}},
+		map[string]any{"set": map[string]any{"family": "inet", "table": nft.Table, "name": sets[0].Fresh(false), "elem": []any{map[string]any{"elem": map[string]any{"val": "203.0.113.5", "expires": nft.AnswerTimeout - 10}}}}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -1511,7 +1511,7 @@ func TestAnswersRefreshed(t *testing.T) {
 	logged := len(x.logText())
 	x.advance(readEvery)
 	x.advance(readEvery)
-	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 || !strings.Contains(x.logText()[logged:], "until one is: nft: gone") {
+	if got := strings.Count(x.logText()[logged:], "resolver answers: not refreshed"); got != 1 || !strings.Contains(x.logText()[logged:], "until one is, for at most 600 s from their first answer: nft: gone") {
 		t.Fatalf("a failing step logged %d times over two intervals, want once with its cause:\n%s", got, x.logText()[logged:])
 	}
 	x.fire.mu.Lock()

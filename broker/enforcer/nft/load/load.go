@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"regexp"
 	"strings"
 	"syscall"
 )
@@ -63,10 +64,11 @@ func (l Loader) Update(ctx context.Context, text string) error {
 }
 
 // elementsOnly reports whether text is one or more lines, each adding or
-// deleting addresses in one set of the enforcer's table and nothing else:
-// a set name of lower-case letters, digits and underscores, and a list of
-// only the characters addresses are written with, so the text changes no
-// rule, set or chain and carries no second statement.
+// deleting addresses in one fresh or recent set of the enforcer's table
+// and nothing else: a set name answerSet matches, and a list of only the
+// characters addresses are written with, so the text changes no rule, set
+// or chain, no other set's elements (a deny set such as doh_4, an allow
+// set, a byte cap's), and carries no second statement.
 func elementsOnly(text string) bool {
 	lines, ok := strings.CutSuffix(text, "\n")
 	if !ok || lines == "" {
@@ -79,14 +81,20 @@ func elementsOnly(text string) bool {
 		}
 		name, el, ok2 := strings.Cut(rest, " { ")
 		el, ok3 := strings.CutSuffix(el, " }")
-		if !ok || !ok2 || !ok3 || name == "" || el == "" ||
-			strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" ||
+		if !ok || !ok2 || !ok3 || el == "" || !answerSet.MatchString(name) ||
 			strings.Trim(el, "0123456789abcdef.:, ") != "" {
 			return false
 		}
 	}
 	return true
 }
+
+// answerSet matches the names of the fresh and recent sets, the only sets
+// an answer refresh changes: nft.AllowSet.Fresh and Recent, each an allow
+// set's name (nft.CoreSet, nft.DeviceSet) with "_f" or "_r". This package
+// cannot import nft; nft's TestUpdateTakesOnlyElementChanges keeps them
+// equal.
+var answerSet = regexp.MustCompile(`^(core|d[1-9][0-9]*)_[46]_[fr]$`)
 
 // table is nft.Table, which this package cannot import either; nft's
 // TestDropHeaderIsTheLoaders keeps them equal.

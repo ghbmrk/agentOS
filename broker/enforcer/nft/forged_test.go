@@ -271,7 +271,13 @@ func TestForgedRelatedDropped(t *testing.T) {
 // forgeries into Household's pair with the printer, sent to Household or
 // to the printer (whose inner header names Household's connection), and
 // into a guest's internet connection, sent back toward the guest (NET-1,
-// NET-3: those networks are never observed, either way). A genuine error
+// NET-3: those networks are never observed, either way). Of these, only
+// the printer case rests on the mark check alone: the error toward the
+// guest leaves on the Guests interface after reverse NAT, which the
+// interface match already keeps out of the log, and Household's arrives
+// there too. No path leads from a device to Guests, Owner or Household,
+// so the mark's high half (their egress) is pinned at compile time by
+// TestEveryAcceptBound (#4444). A genuine error
 // along an allowed path still passes: from the pair's other end, and from
 // the internet router on the TV's own internet connection, so path-MTU
 // discovery keeps working.

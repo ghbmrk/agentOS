@@ -376,7 +376,7 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 	}
 	if msg != d.net.refreshErr {
 		if msg != "" {
-			d.dp.Logf("resolver answers: not refreshed, the answers since the last refresh take new connections until one is: " + msg)
+			d.dp.Logf("resolver answers: not refreshed, the answers since the last refresh take new connections until one is, for at most " + fmt.Sprint(nft.AnswerTimeout) + " s from their first answer: " + msg)
 		} else {
 			d.dp.Logf("resolver answers: refreshed again")
 		}
