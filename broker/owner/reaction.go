@@ -236,62 +236,6 @@ func (r *recentWindow) forget(now time.Time) {
 	r.forgotAt = now
 }
 
-// quotesForgettable reports whether quoted, at any layer of a nest, marks
-// a text forget would drop (one not guarded) within the window. Each
-// layer is what follows a quote mark, so a nest a phone cut short
-// (Pinned “Liked “<cut>…) is seen at its innermost quote (#5185). A layer
-// marks a text when the two are equal, or when a layer of at least
-// minQuote runes is a cut of it or holds it whole.
-func (r *recentWindow) quotesForgettable(quoted string, now time.Time) bool {
-	layers := quoteTails(quoted)
-	if len(layers) == 0 {
-		return false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i := len(r.texts) - 1; i >= 0; i-- {
-		t := r.texts[i]
-		if now.Sub(t.at) > recentMaxAge {
-			break
-		}
-		if t.guarded() || t.restored {
-			continue
-		}
-		n := normQuote(t.text)
-		if n == "" {
-			continue
-		}
-		for _, q := range layers {
-			long := utf8.RuneCountInString(q) >= minQuote
-			if n == q || long && (strings.Contains(n, q) || strings.Contains(q, n)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// quoteTails returns quoted and every tail of it after a quote mark,
-// each normalized with its closing quote marks trimmed. Unlike
-// quoteLayers it needs no layer to parse as a form, so a nest cut short
-// is still peeled.
-func quoteTails(quoted string) []string {
-	var out []string
-	add := func(s string) {
-		s = normQuote(strings.TrimRight(normQuote(s), `"' `))
-		if s != "" && !slices.Contains(out, s) {
-			out = append(out, s)
-		}
-	}
-	add(quoted)
-	for i, c := range quoted {
-		if strings.ContainsRune(quoteMarks, c) {
-			add(quoted[i+utf8.RuneLen(c):])
-		}
-	}
-	return out
-}
-
 // forgotWithin reports whether a deletion forgot texts that would still be
 // in the window at now.
 func (r *recentWindow) forgotWithin(now time.Time) bool {
@@ -352,6 +296,13 @@ func (r *recentWindow) put(t sentText, open func(id string) bool) {
 // for a quote of at least minQuote characters, one that holds it (phones
 // cut long quotes, usually with an ellipsis, and some quote a part).
 func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
+	return r.matchWhere(quoted, now, nil)
+}
+
+// matchWhere is match over only the texts keep accepts (all when keep is
+// nil), so an older text keep wants is not hidden by a newer one it
+// does not.
+func (r *recentWindow) matchWhere(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	q := normQuote(quoted)
 	if q == "" {
 		return sentText{}, false
@@ -368,6 +319,9 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		t := r.texts[i]
 		if now.Sub(t.at) > recentMaxAge {
 			break
+		}
+		if keep != nil && !keep(t) {
+			continue
 		}
 		if !t.restored {
 			n := normQuote(t.text)
@@ -417,20 +371,34 @@ func peelForm(text string) (string, bool) {
 // (quoteLayers), or other words around the whole text. Only guarded texts
 // count, so a nest around the agent's own text stays chat (CH-11).
 func (r *recentWindow) matchGuarded(quoted string, now time.Time) (sentText, bool) {
+	return r.matchLayers(quoted, now, sentText.guarded)
+}
+
+// matchForgettable is matchGuarded for the texts forget drops (not
+// guarded): the one matcher, so a forget sees a held text as quoting a
+// text exactly when the delivery path would read it as marking that text
+// (#5185 Security reject).
+func (r *recentWindow) matchForgettable(quoted string, now time.Time) (sentText, bool) {
+	return r.matchLayers(quoted, now, func(t sentText) bool { return !t.guarded() })
+}
+
+// matchLayers finds the latest text keep accepts that some layer of the
+// quote marks (match), or holds whole (within).
+func (r *recentWindow) matchLayers(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	for _, l := range quoteLayers(quoted) {
-		if t, ok := r.match(l, now); ok && t.guarded() {
+		if t, ok := r.matchWhere(l, now, keep); ok {
 			return t, true
 		}
-		if t, ok := r.within(l, now); ok {
+		if t, ok := r.within(l, now, keep); ok {
 			return t, true
 		}
 	}
 	return sentText{}, false
 }
 
-// within finds the latest guarded text, of at least minQuote characters,
-// that the quote holds whole.
-func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
+// within finds the latest text keep accepts, of at least minQuote
+// characters, that the quote holds whole.
+func (r *recentWindow) within(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	q := normQuote(quoted)
 	mq := maskCodes(q)
 	r.mu.Lock()
@@ -440,7 +408,7 @@ func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
 		if now.Sub(t.at) > recentMaxAge {
 			break
 		}
-		if !t.guarded() {
+		if !keep(t) {
 			continue
 		}
 		n, hay := normQuote(t.text), q
@@ -570,11 +538,14 @@ func (c *Channel) ForgetRecent() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now()
-	// The held texts that quote a text this deletion removes, decided
-	// before the window is cleared (#5185 Potency, arbitration).
+	// The held texts that quote a text this deletion removes, decided by
+	// the delivery path's own matcher before the window is cleared (#5185
+	// Potency, arbitration, Security reject).
 	forgot := map[string]bool{}
 	for _, m := range c.codes.st.Waiting {
-		if q, ok := heldQuote(m.Text); ok && c.recent.quotesForgettable(q, now) {
+		if q, ok := heldQuote(m.Text); !ok {
+			continue
+		} else if _, ok := c.recent.matchForgettable(q, now); ok {
 			forgot[m.ID] = true
 		}
 	}

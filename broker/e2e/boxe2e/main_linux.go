@@ -988,13 +988,14 @@ func (d *driver) planSignIn() error {
 // phoneControl is the owner texting the box after setup (CH-1, CH-3,
 // CH-14; E9). It first checks that setup has finished, since agentosd
 // answers texts only then. The paired phone texts HELP, which needs no
-// code, until it is answered; then one STATUS with a code from a window
-// not used before, which must draw the unlock and then the status reply.
-// Only then does the unpaired number text STATUS with a fresh code, and
+// code, until it is answered; then one code alone from a window not used
+// before, which must draw right-code and open no session, and then
+// STATUS, which must draw the locked reply (CH-14: only the page opens a
+// session). Only then does the unpaired number text a fresh code, and
 // the paired phone texts HELP again as a barrier. Texts are handled in
-// arrival order, but replies are not sent in that order: STATUS and HELP
-// are run routes, each answered from its own goroutine, so a reply the
-// stranger's text drew can land after the barrier's. Once the barrier is
+// arrival order, but replies are not sent in that order: HELP is a run
+// route, answered from its own goroutine, so a reply the stranger's text
+// drew can land after the barrier's. Once the barrier is
 // answered the stranger's text has been handled, and the step keeps
 // reading the log for settle; any reply to either number then fails it.
 // Probing with HELP first means the code is sent only once texts are
@@ -1045,17 +1046,29 @@ func (d *driver) phoneControl() error {
 				attempts, modemDiag())
 		}
 	}
-	if err := phone.Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+	// A right code alone is checked but opens no session (CH-14): only
+	// the page does. STATUS after it is still held as a locked message.
+	if err := phone.Send(boxNum, d.freshCode()); err != nil {
 		return fmt.Errorf("phone send: %w", err)
 	}
-	r := d.await(start, time.Minute, func(r phoneRun) bool { return r.status })
+	r := d.await(start, time.Minute, func(r phoneRun) bool { return r.codeRight })
 	if err := r.failed(); err != nil {
 		return err
 	}
-	if !r.status {
+	if !r.codeRight {
 		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
 	}
-	if err := d.carrier.Line(strangerNum).Send(boxNum, "STATUS "+d.freshCode()); err != nil {
+	if err := phone.Send(boxNum, "STATUS"); err != nil {
+		return fmt.Errorf("phone send: %w", err)
+	}
+	r = d.await(start, time.Minute, func(r phoneRun) bool { return r.locked })
+	if err := r.failed(); err != nil {
+		return err
+	}
+	if !r.locked {
+		return fmt.Errorf("%w; %s", controlErr(d.carrier.Log(), start), modemDiag())
+	}
+	if err := d.carrier.Line(strangerNum).Send(boxNum, d.freshCode()); err != nil {
 		return fmt.Errorf("stranger send: %w", err)
 	}
 	if err := phone.Send(boxNum, "HELP"); err != nil {

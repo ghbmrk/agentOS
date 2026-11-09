@@ -121,12 +121,13 @@ func barrierAnswered(log []modem.SMS) bool {
 	return false
 }
 
-var codeRe = regexp.MustCompile(`^STATUS ([0-9]{6})$`)
+var codeRe = regexp.MustCompile(`^[0-9]{6}$`)
 
 // REQ: CH-1, CH-3, CH-11, CH-14. phoneControl runs against a real owner
 // channel and control handler on the carrier simulator: it passes, and it
 // fails when the box answers the unpaired number, takes its text as the
-// owner's, runs STATUS without a fresh code's unlock (E9), or sent a
+// owner's, answers a fresh code with anything but right-code, opens a
+// session for a texted code so that STATUS runs (E9, CH-14), or sent a
 // recovery notice after setup, which it still notes (#1291, #2170 item 2).
 // Its notes quote only agentosd's lost-send lines, read through output
 // from a journal whose other lines they must not quote (ASSUMPTIONS E8,
@@ -165,23 +166,23 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 					m.From = phoneNum
 				}
 				return m
-			}, want: "unpaired number's text drew status"},
+			}, want: "unpaired number's text drew right-code"},
 		{name: "stranger taken as the owner, reply after the barrier's", st: owner.State{LastStep: step}, enrolled: true, done: true, late: true,
 			mutate: func(_ *modem.Line, c *modem.Carrier, m modem.SMS) modem.SMS {
 				if m.From == strangerNum {
 					m.From = phoneNum
 				}
 				return m
-			}, want: "unpaired number's text drew status"},
+			}, want: "unpaired number's text drew right-code"},
 		{name: "already unlocked (a local sign-in)", st: owner.State{LastStep: step, UnlockedUntil: base.Add(time.Hour)}, enrolled: true, done: true,
-			want: "status reply with no unlock first"},
-		{name: "code only in an unlocked session", st: owner.State{LastStep: step, UnlockedUntil: base.Add(time.Hour)}, enrolled: true, done: true,
-			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
-				if s := codeRe.FindStringSubmatch(m.Text); s != nil && m.From == phoneNum {
-					m.Text = s[1]
+			want: "already unlocked"},
+		{name: "texted code opens a session", st: owner.State{LastStep: step}, enrolled: true, done: true,
+			mutate: func(l *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
+				if m.From == phoneNum && m.Text == "STATUS" {
+					_ = l.Send(phoneNum, "Running.")
 				}
 				return m
-			}, want: "already unlocked"},
+			}, want: "a texted code opened a session"},
 		{name: "code dropped", st: owner.State{LastStep: step}, enrolled: true, done: true,
 			mutate: func(_ *modem.Line, _ *modem.Carrier, m modem.SMS) modem.SMS {
 				if codeRe.MatchString(m.Text) && m.From == phoneNum {
