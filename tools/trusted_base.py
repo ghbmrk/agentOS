@@ -34,13 +34,20 @@ The ceilings (D-310) are tools/ceilings.txt: trusted lines (core lines plus the 
 lines, tools/old_core.txt) and SPEC.md's words. A measure fails when it ends above the base's
 ceiling and above the base's measure, and names the cut that passes; raising a ceiling or deleting
 the file needs a line `Ceiling: <decision ID>` naming an active base-tree row that names the PR.
-Each PR is measured against main at its last push, so two PRs can land together above a ceiling;
-main is then over it and may not grow. In CI the base tree is the base branch tip
-and the head tree is the PR head merged onto it, so the budget is what main holds now and the
+In CI the base tree is the base branch's tip when the check runs (not the event's base.sha) and
+the head tree is the PR head merged onto it, so the budget is what main holds now and the
 measure is exactly what lands: a branch that cherry-picks main's cuts instead of merging main
 gains nothing. It ratchets down on every merge with nothing to keep in step. A base tree with
 no core file (one older than the file) is measured, with the head, by the file of the checkout
 the tool runs from, which is the base branch tip in CI.
+
+A check passed against an older main goes stale when main grows (CI-ceiling-fall): N PRs that each
+fit the headroom would all stay green and land main up to (N-1) times it over. On every push to
+main, `remeasure` compares the trees before and after the push and prints `held`, or `rerun:` with
+the reasons (a ceiling measure grew, a ceiling dropped, a file the verdict reads changed); on
+`rerun` the trusted-base-rerun workflow reruns every open PR's newest trusted-base run, which then
+measures against the new main. PRs that merge within one rerun's latency can still land together;
+main is then over the ceiling and may not grow.
 
 A decision that records trusted-core growth under D-159 carries the measure as this tool prints
 it (REV-PROOF-claims, #4909): `measure --sentence BASE HEAD --pr N` prints the one sentence, and
@@ -62,6 +69,9 @@ Usage:
       check the measure sentences of the D-159 decisions the head adds; each named PR's head is
       refs/remotes/pr/<N> in REPO (fetched from REMOTE's refs/pull/<N>/head with --fetch). Exit 0
       pass, 1 a missing or wrong sentence, 2 a measurement or fetch error.
+  tools/trusted_base.py remeasure --base-tree DIR --head-tree DIR [--markdown FILE]
+      main before and after a push: print each ceiling measure and `held` or `rerun: <reasons>`.
+      Exit 0, or 2 a measurement error (the workflow reruns on anything but `held`).
   tools/trusted_base.py check --base-tree DIR --head-tree DIR --body FILE [--pr N] [--markdown FILE]
       the registry is the head tree's; the base tree's registry is read only to find
       reclassified parsers. Exit 0 pass, 1 growth without a reason or an unclassified
@@ -501,9 +511,39 @@ def compare_ceilings(base_c, head_c, base, head, body, decisions, pr=None):
         if caps[k] is not None and head[k] > caps[k] and head[k] > base[k]:
             # The PR passes once it ends at or under the higher of its ceiling and main's measure.
             cut = head[k] - max(caps[k], base[k])
+            unit = UNITS[k] if cut != 1 else UNITS[k][:-1]  # "cut 1 line" (#4982 item 2)
             problems.append(f"{k} {base[k]} -> {head[k]} ends above its ceiling {caps[k]} ({CEILINGS}):"
-                            f" cut {cut} {UNITS[k]} elsewhere in this PR (D-310)")
+                            f" cut {cut} {unit} elsewhere in this PR (D-310)")
     return problems, caps
+
+
+# Files whose change on main can change an open PR's ceiling verdict without moving a measure.
+RULE_FILES = (CEILINGS, CORE, OLD_CORE, REGISTRY, CORE_LIST, "tools/trusted_base.py")
+
+
+def headroom_change(before, after, fallback_tree=None):
+    """(reasons, measures) for a push to main from tree BEFORE to tree AFTER (CI-ceiling-fall).
+    An open PR passed against BEFORE; it needs measuring again when the push grew a ceiling
+    measure, lowered or deleted a ceiling, or changed a file the verdict is computed from. An
+    empty list means every open PR's verdict still holds."""
+    reasons = []
+    for f in RULE_FILES:
+        a, b = pathlib.Path(before, f), pathlib.Path(after, f)
+        if (a.read_bytes() if a.exists() else None) != (b.read_bytes() if b.exists() else None):
+            reasons.append(f"{f} changed")
+    core_b, core_a = read_core(before), read_core(after)
+    core_b = core_b or core_a or read_core(fallback_tree or FALLBACK)
+    core_a = core_a or core_b
+    dirs = old_core_dirs(before) | old_core_dirs(after)
+    mb = ceiling_measures(before, core_b and measure_core(before, core_b), dirs)
+    ma = ceiling_measures(after, core_a and measure_core(after, core_a), dirs)
+    cb, ca = read_ceilings(before), read_ceilings(after)
+    for k in CEILING_NAMES:
+        if ma[k] > mb[k]:
+            reasons.append(f"{k} grew {mb[k]} -> {ma[k]}")
+        if cb and (ca is None or ca[k] < cb[k]):
+            reasons.append(f"{k} ceiling {cb[k]} -> {'deleted' if ca is None else ca[k]}")
+    return reasons, (mb, ma, ca)
 
 
 def ceilings_table(base, head, caps, problems):
@@ -691,6 +731,10 @@ def main(argv=None):
     k.add_argument("--onto", default="HEAD", help="the base commit a named PR's merge base is taken with")
     k.add_argument("--fetch", help="remote to fetch refs/pull/<N>/head from")
     k.add_argument("--markdown", help="also write the result to this file")
+    r = sub.add_parser("remeasure")
+    r.add_argument("--base-tree", required=True, help="main before the push")
+    r.add_argument("--head-tree", required=True, help="main after the push")
+    r.add_argument("--markdown", help="also write the result to this file")
     c = sub.add_parser("check")
     c.add_argument("--base-tree", required=True)
     c.add_argument("--head-tree", required=True)
@@ -703,6 +747,12 @@ def main(argv=None):
     try:
         if a.cmd == "measure" and a.sentence:
             problems, text = [], sentence(a.tree, *a.sentence, a.pr) + "\n"
+        elif a.cmd == "remeasure":
+            reasons, (mb, ma, ca) = headroom_change(a.base_tree, a.head_tree)
+            problems = []
+            text = "".join(f"{k} {mb[k]} -> {ma[k]}" + (f" (ceiling {ca[k]})" if ca else "") + "\n"
+                           for k in CEILING_NAMES)
+            text += ("rerun: " + "; ".join(reasons) if reasons else "held") + "\n"
         elif a.cmd == "claims":
             problems, text = run_claims(a.base_tree, a.head_tree, a.repo, a.onto, a.fetch)
         elif a.cmd == "measure":
@@ -726,12 +776,12 @@ def main(argv=None):
             problems, text = run_check(a.base_tree, a.head_tree, body, pr=a.pr)
     except (MeasureError, OSError, ValueError) as e:
         print(f"trusted_base: {e}", file=sys.stderr)
-        if a.cmd in ("check", "claims") and a.markdown:
+        if a.cmd in ("check", "claims", "remeasure") and a.markdown:
             with open(a.markdown, "a") as f:
                 f.write(f"\n**Error ({a.cmd}):** {e}\n")
         return 2
     print(text, end="")
-    if a.cmd in ("check", "claims") and a.markdown:
+    if a.cmd in ("check", "claims", "remeasure") and a.markdown:
         with open(a.markdown, "a") as f:
             f.write(text)
     return 1 if problems else 0
