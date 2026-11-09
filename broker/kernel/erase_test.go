@@ -816,12 +816,13 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 		}
 	}
 	// Any other reply ends it too.
-	for _, other := range []string{"NO", "YES", "yes 000000", "", "YES 1 2"} {
+	for _, other := range []string{"NO", "YES", "yes 000000", "", "YES 1 2", "NO CODE", "CODE", "YES YES CODE", "OK CODE"} {
 		text, err := ask(20, "Alice")
 		must(t, err)
 		if other == "yes 000000" && code(text) == "000000" {
 			continue
 		}
+		other = strings.ReplaceAll(other, "CODE", code(text))
 		if subs, err := r.k.ForgetReply(21, other); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
 			t.Fatalf("reply %q: %v, %v", other, subs, err)
 		}

@@ -1312,7 +1312,7 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 		t.Fatalf("args that are not an ask: %v", err)
 	}
 	code := ask()
-	for _, reply := range []string{"NO", "YES " + code} {
+	for _, reply := range []string{"NO " + code, "YES " + code} {
 		if err := o.Call("forgetreply", reply, nil); !errors.Is(err, kernel.ErrForgetReply) || erased() {
 			t.Fatalf("reply %q after NO: %v, erased %v", reply, err, erased())
 		}
