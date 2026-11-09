@@ -5,10 +5,11 @@ package confine
 import (
 	"encoding/binary"
 	"errors"
-	"os"
 	"os/exec"
 	"syscall"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 	"time"
 )
 
@@ -117,25 +118,15 @@ const netnsEnv = "AGENTOS_CONFINE_LINKS_NETNS"
 // inUserNetns runs the calling test again in a fresh user and network
 // namespace (unshare -rn) and reports whether this is that run. Sending to
 // another netlink socket's port needs CAP_NET_ADMIN, as a forger would;
-// CI fails rather than skips when the namespace cannot be made.
+// CI fails rather than skips when the namespace cannot be made or the
+// test skips inside it (#5112).
 func inUserNetns(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv(netnsEnv) == "1" {
-		return true
-	}
-	required := os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1"
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
-		if required {
-			t.Fatalf("no unprivileged user namespaces: %v", err)
-		}
-		t.Skipf("no unprivileged user namespaces: %v", err)
-	}
-	cmd := exec.Command("unshare", "-rn", "--", os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
-	cmd.Env = append(os.Environ(), netnsEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("in a fresh namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("netns run failed: %v", err)
-	}
-	return false
+	return netnstest.Run(t, netnsEnv, combined)
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
