@@ -192,8 +192,9 @@ BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
 # #5167: the directories the service manager makes for a unit and chowns to its User= and Group=
 # (systemd.exec: every *Directory= setting but ConfigurationDirectory=), by setting, under these roots,
 # with the mode its *DirectoryMode= sets. service_dirs counts each such directory of every unit the tree
-# holds that runs as anyone but root, or that the mode lets anyone write, stock or ours, with SERVICE_DIRS: systemd-resolved's run/systemd/resolve, systemd-networkd's
-# run/systemd/netif and systemd-timesyncd's var/lib/systemd/timesync among them.
+# holds that runs as anyone but root, or that the mode lets anyone write, stock or ours, with SERVICE_DIRS:
+# systemd-resolved's run/systemd/resolve, systemd-networkd's run/systemd/netif and systemd-timesyncd's
+# var/lib/systemd/timesync among them.
 UNIT_OWNED_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
                    "LogsDirectory": "var/log"}
 # The unit types that take those settings (systemd.exec), by the section that holds them.
@@ -1644,9 +1645,9 @@ def unit_owned_dirs(root):
     anything but root, or no), or whose matching *DirectoryMode= gives anyone write, whoever runs it;
     one error per unit the check cannot read or whose values it does not model; unit_dirs reports a
     unit directory it cannot read). A unit is read as systemd loads it (unit_file_find_fragment,
-    unit_file_find_dropin_paths): each name's first UNIT_PATHS entry, its own file or, if a link (an
-    alias or an instance), the file it names in a unit directory, and every name whose entry leads to
-    that file is one unit; a mask is never run. Its files are that file and the drop-ins of every one of
+    unit_file_find_dropin_paths, unit_ids_map_get): each name's first UNIT_PATHS entry, its own file
+    or, if a link (an alias or an instance), the first entry of the name it links to, name by name,
+    and every name that leads to that entry is one unit; a mask is never run. Its files are that file and the drop-ins of every one of
     its names (with each name's dash prefixes and the type's .d), and for a template or an instance
     every drop-in of each of its templates' names, since each instance reads its own; any assignment
     counts, whatever a later one sets. A value holding a control or non-ASCII character but tab is
@@ -1662,19 +1663,39 @@ def unit_owned_dirs(root):
             elif n.rsplit(".", 1)[-1] in EXEC_SECTIONS and not hidden_or_backup(n) and n not in names:
                 names[n] = d + "/" + n
     units = {}
-    for n, rel in sorted(names.items()):
-        if stat.S_ISLNK(tree_lstat(root, rel).st_mode):
+    for n in sorted(names):
+        # systemd's unit_ids_map: a link is an alias of its target's name, whose own first entry is read,
+        # name by name, so /etc's file shadows /usr's even under an alias that links to /usr's (#5192
+        # Security delta 1). Each link must still end at a unit file in a unit directory.
+        name, seen, why = n, set(), None
+        while name in names and name not in seen and stat.S_ISLNK(tree_lstat(root, names[name]).st_mode):
+            seen.add(name)
+            link = names[name]
+            target = tree_readlink(root, link)
+            if target == MASK:
+                why = MASK
+                break
+            up, slash, name = target.rpartition("/")
+            here = link.rsplit("/", 1)[0]
+            up = here if not slash else up.lstrip("/") if target.startswith("/") else here + "/" + up
             try:
-                rel, st = tree_chase(root, rel)
+                got = tree_chase(root, up)[0]
             except OSError as e:
-                rel, st = e.strerror, None
-            if rel == MASK:
-                continue
-            if st is None or not stat.S_ISREG(st.st_mode) or rel.rsplit("/", 1)[0] not in dirs:
-                out.append("%s: a link to %s, not a unit file in a unit directory; the tree check never passes a "
-                           "unit whose directories it cannot read (#5167)" % (n, rel))
-                continue
-        units.setdefault(rel, []).append(n)
+                got = e.strerror
+            if got not in dirs:
+                why = "a link to %s, not into a unit directory" % target
+                break
+            if name not in names and re.fullmatch(r"[^@]+@[^@]+\.[a-z]+", name):
+                # unit-file.c: an instance no directory holds is read as its template.
+                name = re.sub(r"@[^@]+\.", "@.", name)
+        if why is None and (name not in names or name in seen):
+            why = "an alias of %s, which no unit directory holds as a unit" % name
+        if why == MASK:
+            continue
+        if why is not None:
+            out.append("%s: %s; the tree check never passes a unit whose directories it cannot read (#5167)" % (n, why))
+            continue
+        units.setdefault(names[name], []).append(n)
     found = set()
     for rel, group in sorted(units.items()):
         n, typ = group[0], rel.rsplit(".", 1)[-1]

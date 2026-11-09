@@ -391,6 +391,17 @@ class KeeperTreeTest(unittest.TestCase):
         write(self.root, SYSTEM + "e.service.d/u.conf", "[Service]\nUser=svc\n")
         (self.root / "etc/systemd/system/f.service").symlink_to("/usr/lib/systemd/system/e.service")
         write(self.root, "etc/systemd/system/f.service.d/d.conf", "[Service]\nRuntimeDirectory=edir\n")
+        # The alias names a.service as systemd resolves it, by name: /etc's file shadows /usr's even when the
+        # link leads to /usr's (#5192 Security delta 1).
+        write(self.root, SYSTEM + "o.service", "[Service]\nExecStart=/usr/bin/true\n")
+        write(self.root, "etc/systemd/system/o.service", "[Service]\nExecStart=/usr/bin/true\n")
+        write(self.root, "etc/systemd/system/o.service.d/u.conf", "[Service]\nUser=svc\n")
+        (self.root / "etc/systemd/system/ob.service").symlink_to("/usr/lib/systemd/system/o.service")
+        write(self.root, "etc/systemd/system/ob.service.d/d.conf", "[Service]\nRuntimeDirectory=odir\n")
+        # An instance link to an instance no directory holds is read as its template; a loop is refused.
+        write(self.root, SYSTEM + "h@.service", "[Service]\nUser=h\n")
+        (self.root / "etc/systemd/system/g@a.service").symlink_to("h@b.service")
+        write(self.root, "etc/systemd/system/g@a.service.d/d.conf", "[Service]\nCacheDirectory=gdir\n")
         write(self.root, SYSTEM + "k@.service", "[Service]\nExecStart=/usr/bin/true\n")
         write(self.root, SYSTEM + "k@.service.d/u.conf", "[Service]\nDynamicUser=yes\n")
         (self.root / "etc/systemd/system/v@.service").symlink_to("/usr/lib/systemd/system/k@.service")
@@ -403,11 +414,11 @@ class KeeperTreeTest(unittest.TestCase):
             "run/wdir", "var/lib/w2dir", "run/sp1", "run/sp2", "var/cache/dc", "var/cache/private/dc", "var/log/dl",
             "var/log/private/dl", "var/lib/ds", "var/lib/private/ds", "run/dr", "run/private/dr", "run/prex", "run/q",
             "run/private/u3", "run/private/capsules", "var/lib/private/capsules", "var/lib/private/s",
-            "var/lib/private/vdir")))
+            "var/lib/private/vdir", "run/odir", "var/cache/gdir")))
         for line in ("BindReadOnlyPaths=/run/edir/x:/y", "BindReadOnlyPaths=/var/lib/vdir/x:/y",
                      "BindReadOnlyPaths=/run/wdir/x:/y", "BindReadOnlyPaths=/var/lib/w2dir/x:/y",
                      "ReadOnlyPaths=/var/cache/private/dc/x", "ReadOnlyPaths=/var/log/private/dl/x",
-                     "ReadOnlyPaths=/run/private/dr/x"):
+                     "ReadOnlyPaths=/run/private/dr/x", "BindReadOnlyPaths=/run/odir/x:/y"):
             with self.subTest(line):
                 self.assertEqual(len(self.probe(line)), 1)
         self.assertEqual(check.service_dirs(str(self.root)), set(check.SERVICE_DIRS) | set(got))
@@ -428,12 +439,13 @@ class KeeperTreeTest(unittest.TestCase):
         # So is a link to anything but a unit file in a unit directory.
         (self.root / "srv").mkdir(exist_ok=True)
         write(self.root, "srv/c.service", "[Service]\nUser=c\nStateDirectory=c\n")
-        for target in ("/srv/c.service", "/usr/lib/systemd/system/missing.service", "/usr/lib/systemd/system"):
+        for target in ("/srv/c.service", "/usr/lib/systemd/system/missing.service", "/usr/lib/systemd/system",
+                       "c.service"):
             with self.subTest(target):
                 (self.root / "etc/systemd/system/c.service").symlink_to(target)
                 try:
                     self.assertEqual(len(check.unit_owned_dirs(self.root)[1]), 1)
-                    self.assertTrue(check.unit_owned_dirs(self.root)[1][0].startswith("c.service: a link to "))
+                    self.assertTrue(check.unit_owned_dirs(self.root)[1][0].startswith("c.service: "))
                 finally:
                     (self.root / "etc/systemd/system/c.service").unlink()
 
