@@ -83,9 +83,10 @@ STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
 # decides nothing.
 # The top links of a merged /usr: the only links a dpkg path may be resolved through.
 MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
-# A drop-in of ours on a packaged root unit: the lint must refuse it, or a pass of the built tree
-# means nothing (#4677 Security R-1's shape).
-CONTROL = {"etc/systemd/system/systemd-journald.service.d/zz-agentos-unit-control.conf":
+# A drop-in of ours on a packaged root unit that no package's socket feeds (systemd's own oneshot), so the
+# Environment= rule refuses it rather than the fed-service one (#5072: journald, fed by its sockets, was
+# refused first): the lint must refuse it, or a pass of the built tree means nothing (#4677 Security R-1).
+CONTROL = {"etc/systemd/system/systemd-tmpfiles-setup.service.d/zz-agentos-unit-control.conf":
            "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"}
 CONTROL_WANT = 'variable "LD_PRELOAD"'
 

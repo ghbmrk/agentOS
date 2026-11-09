@@ -610,7 +610,7 @@ class NamesTest(unittest.TestCase):
 
     def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit(self):
         (p, text), = r.CONTROL.items()
-        self.assertTrue(p.startswith("etc/systemd/system/systemd-journald.service.d/"))
+        self.assertTrue(p.startswith("etc/systemd/system/systemd-tmpfiles-setup.service.d/"))
         self.assertIn("LD_PRELOAD", text)
         self.assertEqual(r.CONTROL_WANT, 'variable "LD_PRELOAD"')
 
