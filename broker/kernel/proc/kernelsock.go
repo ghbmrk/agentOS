@@ -179,11 +179,17 @@ type (
 		Recall *kernel.Recall `json:"recall"` // nil: no such subject
 	}
 	// eraseRead is what an erase reached. Err is set when a step after the
-	// logged erase failed: the subject is erased all the same.
+	// logged erase failed: the subject is erased all the same. A Forget's
+	// YES names each Subject, and its Err when the erase was refused.
 	eraseRead struct {
+		Subject      string              `json:"subject,omitempty"`
 		Confirmation kernel.Confirmation `json:"confirmation"`
 		Err          string              `json:"err,omitempty"`
 		Is           string              `json:"is,omitempty"` // as kernelAnswer.Is
+	}
+	forgetArgs struct {
+		Label    string   `json:"label"`
+		Subjects []string `json:"subjects"`
 	}
 	// rotateArgs is a rotation an anchor signed: next is the new key's
 	// recipient ID, "" when the card is lost.
@@ -323,7 +329,36 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	}),
 	"unerased":    read(func(s *kernel.State, _ int64, _ none) []kernel.Unerased { return s.Unerased() }),
 	"erasedreads": read(func(s *kernel.State, _ int64, _ none) []kernel.ErasedRead { return s.ErasedReads() }),
+	// A Forget's YES (D-314): the ask's text, sent unchanged; forgetreply
+	// erases as erase does, only on the owner's YES to it.
+	"askforget": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a forgetArgs
+		if err := json.Unmarshal(raw, &a); err != nil || len(a.Label) > MaxLabel {
+			return nil, ErrArgs
+		}
+		return k.AskForget(now, a.Label, a.Subjects)
+	},
 }, procOps: map[string]procOp{
+	"forgetreply": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var reply string
+		var subs []string
+		if err := json.Unmarshal(raw, &reply); err != nil {
+			return nil, ErrArgs
+		}
+		if err := h.With(func(k *kernel.Kernel) (err error) { subs, err = k.ForgetReply(now, reply); return }); err != nil {
+			return nil, err
+		}
+		out := []eraseRead{}
+		for _, sub := range subs {
+			c, err := h.Erase(now, sub)
+			r := eraseRead{Subject: sub, Confirmation: c}
+			if err != nil {
+				r.Err, r.Is = err.Error(), wireIs(err)
+			}
+			out = append(out, r)
+		}
+		return out, nil
+	},
 	"backuptarget": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a targetArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -681,7 +716,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrReserveSig, kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel, kernel.ErrForgetName, kernel.ErrForgetReply, kernel.ErrForgetStop,
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
