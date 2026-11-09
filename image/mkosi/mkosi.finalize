@@ -190,9 +190,9 @@ BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
 # and as whatever appears at its target on the box (/var/tmp is world-writable), and any link reaches
 # a file the build may not have read. tmpfiles.d takes no link at all, not even a mask (stock has none).
 # #5167: the directories the service manager makes for a unit and chowns to its User= and Group=
-# (systemd.exec: every *Directory= setting but ConfigurationDirectory=), by setting, under these roots.
-# service_dirs counts each such directory of every unit the tree holds that runs as anyone but root,
-# stock or ours, with SERVICE_DIRS: systemd-resolved's run/systemd/resolve, systemd-networkd's
+# (systemd.exec: every *Directory= setting but ConfigurationDirectory=), by setting, under these roots,
+# with the mode its *DirectoryMode= sets. service_dirs counts each such directory of every unit the tree
+# holds that runs as anyone but root, or that the mode lets anyone write, stock or ours, with SERVICE_DIRS: systemd-resolved's run/systemd/resolve, systemd-networkd's
 # run/systemd/netif and systemd-timesyncd's var/lib/systemd/timesync among them.
 UNIT_OWNED_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
                    "LogsDirectory": "var/log"}
@@ -240,10 +240,8 @@ def violations(root):
 
 
 def once(fn, root):
-    """FN(ROOT), with what cached reads kept for the call when no caller keeps it already."""
+    """FN(ROOT), with what cached reads kept for the call. Called only while nothing keeps it."""
     global _MAKERS
-    if _MAKERS is not None:
-        return fn(str(root))
     _MAKERS = {}
     try:
         return fn(str(root))
@@ -1642,13 +1640,19 @@ def service_dirs(root):
 
 def unit_owned_dirs(root):
     """#5167: (the UNIT_OWNED_DIRS directories, as tree paths, of every EXEC_SECTIONS unit the tree at
-    ROOT holds, stock or ours, whose User=, Group= or DynamicUser= any of its files sets to anything but
-    root, or no; one error per unit the check cannot read or whose directory it does not model; unit_dirs
-    reports a unit directory it cannot read). A unit is its first UNIT_PATHS entry's file, or, if that is
-    a link (an alias), the file it names in a unit directory; a mask is never run. Its files are that,
-    every drop-in systemd applies to its name, and for a template or an instance every drop-in of its
-    template's other names, since each instance reads its own; any assignment counts, whatever a later
-    one sets. A value whose step holds a specifier counts the directory above that step."""
+    ROOT holds, stock or ours, that runs as anyone but root (User=, Group= or DynamicUser= set to
+    anything but root, or no), or whose matching *DirectoryMode= gives anyone write, whoever runs it;
+    one error per unit the check cannot read or whose values it does not model; unit_dirs reports a
+    unit directory it cannot read). A unit is read as systemd loads it (unit_file_find_fragment,
+    unit_file_find_dropin_paths): each name's first UNIT_PATHS entry, its own file or, if a link (an
+    alias or an instance), the file it names in a unit directory, and every name whose entry leads to
+    that file is one unit; a mask is never run. Its files are that file and the drop-ins of every one of
+    its names (with each name's dash prefixes and the type's .d), and for a template or an instance
+    every drop-in of each of its templates' names, since each instance reads its own; any assignment
+    counts, whatever a later one sets. A value holding a control or non-ASCII character but tab is
+    refused, so str.split() splits as systemd's WHITESPACE does (#5192 Security 3). A value whose step
+    holds a specifier counts the directory above that step. A dynamic user's directory counts under
+    <top>/private too."""
     root, dirs, out = str(root), unit_dirs(root)[0], []
     names, dropins = {}, {}
     for d in dirs:
@@ -1657,10 +1661,8 @@ def unit_owned_dirs(root):
                 dropins.setdefault(n.split("@", 1)[0], set()).add(n)
             elif n.rsplit(".", 1)[-1] in EXEC_SECTIONS and not hidden_or_backup(n) and n not in names:
                 names[n] = d + "/" + n
-    found = set()
+    units = {}
     for n, rel in sorted(names.items()):
-        typ = n.rsplit(".", 1)[-1]
-        sec = EXEC_SECTIONS[typ]
         if stat.S_ISLNK(tree_lstat(root, rel).st_mode):
             try:
                 rel, st = tree_chase(root, rel)
@@ -1672,18 +1674,40 @@ def unit_owned_dirs(root):
                 out.append("%s: a link to %s, not a unit file in a unit directory; the tree check never passes a "
                            "unit whose directories it cannot read (#5167)" % (n, rel))
                 continue
-        files = [Conf(root, rel)] + conf_files(root, ["%s/%s.d" % (p, x) for p in UNIT_PATHS
-                                                      for x in unit_dropin_names(n) + [typ]])
-        if "@" in n:
-            files += conf_files(root, ["%s/%s" % (p, x) for p in UNIT_PATHS
-                                       for x in sorted(dropins.get(n.split("@", 1)[0], ()))])
+        units.setdefault(rel, []).append(n)
+    found = set()
+    for rel, group in sorted(units.items()):
+        n, typ = group[0], rel.rsplit(".", 1)[-1]
+        sec = EXEC_SECTIONS.get(typ)
         try:
-            owners = ini_all(files, sec, "User") + ini_all(files, sec, "Group")
-            if all(o in ROOT_NAMES for o in owners) and all(
-                    v.lower() in FALSE_WORDS for v in ini_all(files, sec, "DynamicUser")):
-                continue
+            if sec is None or any(x.rsplit(".", 1)[-1] != typ for x in group):
+                raise ValueError("its names %s are not all of the type of %s" % (", ".join(group), rel))
+            files = [Conf(root, rel)]
+            for x in group:
+                files += conf_files(root, ["%s/%s.d" % (p, y) for p in UNIT_PATHS for y in unit_dropin_names(x) + [typ]])
+                if "@" in x:
+                    files += conf_files(root, ["%s/%s" % (p, y) for p in UNIT_PATHS
+                                               for y in sorted(dropins.get(x.split("@", 1)[0], ()))])
+
+            def values(key):
+                got = ini_all(files, sec, key)
+                bad = next((v for v in got if any(not " " <= c <= "~" and c != "\t" for c in v)), None)
+                if bad is not None:
+                    raise ValueError("%s=%r: the tree check does not model it" % (key, bad))
+                return got
+            owners, dynamic = values("User") + values("Group"), values("DynamicUser")
+            served = any(o not in ROOT_NAMES for o in owners) or any(v.lower() not in FALSE_WORDS for v in dynamic)
             for key, top in UNIT_OWNED_DIRS.items():
-                for w in (w for v in ini_all(files, sec, key) for w in v.split()):
+                modes = values(key + "Mode")
+                bad = next((m for m in modes if not re.fullmatch(r"0*[0-7]{1,4}", m)), None)
+                if bad is not None:
+                    raise ValueError("%sMode=%s: the tree check does not model it" % (key, bad))
+                if not served and not any(int(m, 8) & 0o002 for m in modes):
+                    continue
+                # A dynamic user's directory is made at <top>/private/<path>, with <top>/<path> a link to it
+                # (exec_directory_is_private), so both count (#5192 L3 1).
+                tops = (top, top + "/private") if any(v.lower() not in FALSE_WORDS for v in dynamic) else (top,)
+                for w in (w for v in values(key) for w in v.split()):
                     for part in w.split(":"):
                         steps = [x for x in part.split("/") if x and x != "."]
                         # A step with a specifier is any name (capsule@.service's capsules/%i), so the
@@ -1692,7 +1716,7 @@ def unit_owned_dirs(root):
                         if any(c in part for c in UNMODELLED.replace("%", "")) or ".." in steps or named == 0:
                             raise ValueError("%s=%s: the tree check does not model it" % (key, w))
                         if steps:
-                            found.add("/".join([top] + steps[:named]))
+                            found.update("/".join([t] + steps[:named]) for t in tops)
         except ValueError as e:
             out.append("%s: %s; the tree check never passes a unit whose directories it cannot read (#5167)" % (n, e))
     return sorted(found), out

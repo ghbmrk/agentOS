@@ -361,6 +361,20 @@ class KeeperTreeTest(unittest.TestCase):
             # Stock systemd 257's capsule@.service: each instance's directory is any name under capsules.
             "capsule@.service": "[Service]\nUser=c-%i\nDynamicUser=yes\nStateDirectory=capsules/%i\n"
                                 "RuntimeDirectory=capsules/%i/x\n",
+            # Run as root, but the mode lets anyone write the directory; a mode without o+w does not.
+            "w.service": "[Service]\nRuntimeDirectory=wdir\nRuntimeDirectoryMode=0777\n",
+            "w2.service": "[Service]\nStateDirectory=w2dir\nStateDirectoryMode=1777\nCacheDirectory=w2c\n",
+            "w3.service": "[Service]\nRuntimeDirectory=w3dir\nRuntimeDirectoryMode=0775\n",
+            # A dynamic user's directories are made under <top>/private (#5192 L3 1).
+            "dyn.service": "[Service]\nDynamicUser=yes\nCacheDirectory=dc\nLogsDirectory=dl\nStateDirectory=ds\n"
+                           "RuntimeDirectory=dr\nRuntimeDirectoryPreserve=yes\n",
+            # A User= in a dash-prefix drop-in, and in the type-wide one (#5192 L3 2).
+            "pre-x.service": "[Service]\nRuntimeDirectory=prex\n",
+            "pre-.service.d/user.conf": "[Service]\nUser=pre\n",
+            "q.socket": "[Socket]\nRuntimeDirectory=q\n",
+            "socket.d/user.conf": "[Socket]\nUser=sock\n",
+            # systemd splits on space and tab only.
+            "sp.service": "[Service]\nUser=sp\nRuntimeDirectory=sp1\tsp2\n",
         }
         for rel, text in units.items():
             write(self.root, SYSTEM + rel, text)
@@ -368,24 +382,46 @@ class KeeperTreeTest(unittest.TestCase):
         write(self.root, SYSTEM + "m.service", "[Service]\nUser=m\nStateDirectory=m\n")
         (self.root / "etc/systemd/system").mkdir(parents=True, exist_ok=True)
         (self.root / "etc/systemd/system/m.service").symlink_to("/dev/null")
-        # An alias reads the file it names with its own drop-ins.
+        # An alias reads the file it names with its own drop-ins, and the unit is read once with every
+        # name's drop-ins (#5192 Security 1): User= under one name, the directory under the other.
         write(self.root, SYSTEM + "a.service", "[Service]\nRuntimeDirectory=a\n")
         (self.root / "etc/systemd/system/b.service").symlink_to("/usr/lib/systemd/system/a.service")
         write(self.root, "etc/systemd/system/b.service.d/user.conf", "[Service]\nUser=b\n")
+        write(self.root, SYSTEM + "e.service", "[Service]\nExecStart=/usr/bin/true\n")
+        write(self.root, SYSTEM + "e.service.d/u.conf", "[Service]\nUser=svc\n")
+        (self.root / "etc/systemd/system/f.service").symlink_to("/usr/lib/systemd/system/e.service")
+        write(self.root, "etc/systemd/system/f.service.d/d.conf", "[Service]\nRuntimeDirectory=edir\n")
+        write(self.root, SYSTEM + "k@.service", "[Service]\nExecStart=/usr/bin/true\n")
+        write(self.root, SYSTEM + "k@.service.d/u.conf", "[Service]\nDynamicUser=yes\n")
+        (self.root / "etc/systemd/system/v@.service").symlink_to("/usr/lib/systemd/system/k@.service")
+        write(self.root, "etc/systemd/system/v@.service.d/d.conf", "[Service]\nStateDirectory=vdir\n")
         got, err = check.unit_owned_dirs(self.root)
         self.assertEqual(err, [])
         self.assertEqual(sorted(set(got) - set(base[0])), sorted((
             "var/lib/u1", "var/lib/u1b", "var/lib/u1link", "var/cache/u2/c", "var/log/u2", "run/u3", "run/u4",
-            "run/u5", "run/t", "var/lib/s", "run/a", "var/lib/capsules", "run/capsules")))
+            "run/u5", "run/t", "var/lib/s", "run/a", "var/lib/capsules", "run/capsules", "run/edir", "var/lib/vdir",
+            "run/wdir", "var/lib/w2dir", "run/sp1", "run/sp2", "var/cache/dc", "var/cache/private/dc", "var/log/dl",
+            "var/log/private/dl", "var/lib/ds", "var/lib/private/ds", "run/dr", "run/private/dr", "run/prex", "run/q",
+            "run/private/u3", "run/private/capsules", "var/lib/private/capsules", "var/lib/private/s",
+            "var/lib/private/vdir")))
+        for line in ("BindReadOnlyPaths=/run/edir/x:/y", "BindReadOnlyPaths=/var/lib/vdir/x:/y",
+                     "BindReadOnlyPaths=/run/wdir/x:/y", "BindReadOnlyPaths=/var/lib/w2dir/x:/y",
+                     "ReadOnlyPaths=/var/cache/private/dc/x", "ReadOnlyPaths=/var/log/private/dl/x",
+                     "ReadOnlyPaths=/run/private/dr/x"):
+            with self.subTest(line):
+                self.assertEqual(len(self.probe(line)), 1)
         self.assertEqual(check.service_dirs(str(self.root)), set(check.SERVICE_DIRS) | set(got))
         # What the check does not model is refused, not passed.
-        for text in ("StateDirectory=%i", "StateDirectory=./%i/x", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b", "CacheDirectory=a\\b"):
+        for text in ("StateDirectory=%i", "StateDirectory=./%i/x", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b", "CacheDirectory=a\\b",
+                     "RuntimeDirectory=n\u00a0d", "RuntimeDirectory=n\x0bd", "User=x\u0085", "DynamicUser=no\x0c",
+                     "StateDirectoryMode=u+w", "StateDirectoryMode=17777", "RuntimeDirectoryMode=0o777"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.service", "[Service]\nUser=x\n%s\n" % text)
                 try:
+                    key, val = text.split("=", 1)
                     self.assertEqual(check.unit_owned_dirs(self.root)[1], [
-                        "x.service: %s: the tree check does not model it; the tree check never passes a unit whose "
-                        "directories it cannot read (#5167)" % text])
+                        "x.service: %s=%s: the tree check does not model it; the tree check never passes a unit whose "
+                        "directories it cannot read (#5167)" % (key, val if val.isprintable() else repr(val))])
                     self.assertIn(check.unit_owned_dirs(self.root)[1][0], check.violations(self.root))
                 finally:
                     d.unlink()
