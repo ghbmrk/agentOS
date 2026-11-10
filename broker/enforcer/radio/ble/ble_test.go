@@ -789,7 +789,9 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 // forgets every subscription, ends the stack, so its supervisor restarts
 // it rather than it serving stale state.
 func TestStackEndsWhenBluezRestarts(t *testing.T) {
+	var log bytes.Buffer
 	s := newFuzzStack()
+	s.log = &log
 	b := s.bus
 	s.signal(&Message{Type: typeSignal, Sender: busDriver, Interface: busDriver, Member: "NameOwnerChanged",
 		Sig: "sss", Body: []any{bluez, bluezName, ":1.8"}})
@@ -797,6 +799,9 @@ func TestStackEndsWhenBluezRestarts(t *testing.T) {
 	case <-b.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stack kept serving after BlueZ changed owner")
+	}
+	if !strings.Contains(log.String(), "BlueZ changed owner") {
+		t.Errorf("logged %q", log.String())
 	}
 }
 

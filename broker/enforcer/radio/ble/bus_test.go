@@ -15,26 +15,38 @@ import (
 
 // REQ: NET-2
 
-// scriptedBus listens on a socket in a fresh directory as a bus: it
-// answers AUTH with reply, then serves every method call with an empty
-// return, until the peer goes. A silent bus answers nothing at all.
-// ended is closed when the peer's connection ends.
-func scriptedBus(t *testing.T, reply string, silent bool) (path string, ended chan struct{}) {
+// stubBus is a bus on a socket in a fresh directory, for one peer: it
+// answers AUTH with auth, then each method call with answer's reply (an
+// empty return where answer is nil or gives nil), until the peer goes. A
+// silent stub answers nothing at all. ended is closed when the peer's
+// connection ends.
+type stubBus struct {
+	path  string
+	ended chan struct{}
+
+	mu    sync.Mutex
+	conn  net.Conn
+	calls []call // the methods called, in order
+}
+
+func newStubBus(t *testing.T, auth string, silent bool, answer func(*Message) *Message) *stubBus {
 	t.Helper()
-	path = filepath.Join(t.TempDir(), "bus")
-	ln, err := net.Listen("unix", path)
+	sb := &stubBus{path: filepath.Join(t.TempDir(), "bus"), ended: make(chan struct{})}
+	ln, err := net.Listen("unix", sb.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { ln.Close() })
-	ended = make(chan struct{})
+	t.Cleanup(func() { ln.Close(); sb.drop() })
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		sb.mu.Lock()
+		sb.conn = c
+		sb.mu.Unlock()
+		defer close(sb.ended)
 		defer c.Close()
-		defer close(ended)
 		r := bufio.NewReader(c)
 		if silent {
 			io.Copy(io.Discard, r)
@@ -43,7 +55,7 @@ func scriptedBus(t *testing.T, reply string, silent bool) (path string, ended ch
 		if _, err := r.ReadString('\n'); err != nil {
 			return
 		}
-		io.WriteString(c, reply)
+		io.WriteString(c, auth)
 		for {
 			l, err := r.ReadString('\n')
 			if err != nil {
@@ -62,13 +74,43 @@ func scriptedBus(t *testing.T, reply string, silent bool) (path string, ended ch
 			if err != nil {
 				return
 			}
+			sb.mu.Lock()
+			sb.calls = append(sb.calls, call{m.Path, m.Interface, m.Member, m.Body})
+			sb.mu.Unlock()
+			reply := &Message{Type: typeReturn}
+			if answer != nil {
+				if a := answer(m); a != nil {
+					reply = a
+				}
+			}
 			serial++
-			b, _ := (&Message{Type: typeReturn, Serial: serial, ReplySerial: m.Serial}).Encode()
+			reply.Serial, reply.ReplySerial = serial, m.Serial
+			b, err := reply.Encode()
+			if err != nil {
+				panic(err)
+			}
 			c.Write(b)
 		}
 	}()
-	return path, ended
+	return sb
 }
+
+// drop ends the peer's connection, as a bus that went away.
+func (sb *stubBus) drop() {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if sb.conn != nil {
+		sb.conn.Close()
+	}
+}
+
+func (sb *stubBus) called() []call {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return slices.Clone(sb.calls)
+}
+
+const authOK = "OK 0123456789abcdef0123456789abcdef\r\n"
 
 // TestDialRefusesWhatIsNotABus: a missing socket, and a bus that refuses
 // the authentication even when it then answers like a bus, fail Dial; a
@@ -78,14 +120,12 @@ func TestDialRefusesWhatIsNotABus(t *testing.T) {
 	if _, err := Dial(filepath.Join(t.TempDir(), "none"), allSignals(func(*Message) {})); err == nil {
 		t.Error("dialled a missing socket")
 	}
-	path, _ := scriptedBus(t, "REJECTED EXTERNAL\r\n", false)
-	if b, err := Dial(path, allSignals(func(*Message) {})); err == nil {
+	if b, err := Dial(newStubBus(t, "REJECTED EXTERNAL\r\n", false, nil).path, allSignals(func(*Message) {})); err == nil {
 		b.Close()
 		t.Error("dialled a bus that refused the authentication")
 	}
-	path, _ = scriptedBus(t, "", true)
 	began := time.Now()
-	if b, err := Dial(path, allSignals(func(*Message) {})); err == nil {
+	if b, err := Dial(newStubBus(t, "", true, nil).path, allSignals(func(*Message) {})); err == nil {
 		b.Close()
 		t.Error("dialled a bus that never answered")
 	}
@@ -99,8 +139,8 @@ func TestDialRefusesWhatIsNotABus(t *testing.T) {
 // and Close ends the connection at the bus's end too.
 func TestBusOutlivesItsHandshakeBound(t *testing.T) {
 	t.Parallel()
-	path, ended := scriptedBus(t, "OK 0123456789abcdef0123456789abcdef\r\n", false)
-	b, err := Dial(path, allSignals(func(*Message) {}))
+	sb := newStubBus(t, authOK, false, nil)
+	b, err := Dial(sb.path, allSignals(func(*Message) {}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +150,7 @@ func TestBusOutlivesItsHandshakeBound(t *testing.T) {
 	}
 	b.Close()
 	select {
-	case <-ended:
+	case <-sb.ended:
 	case <-time.After(5 * time.Second):
 		t.Error("the bus still holds the connection after Close")
 	}
