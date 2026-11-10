@@ -16,7 +16,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_image import MK, ROOT, check, exec_args, arg, ini  # noqa: E402
 from test_image_keeper import (KERNEL, PRESET, SYSUSERS, TMPFILES, UNITS, exec_lines, go_flags,  # noqa: E402
-                               slice_cgroup)
+                               owned_dirs, slice_cgroup)
 
 CAMERA = UNITS / "agentos-keeper-camera.service"
 MAIL = UNITS / "agentos-keeper-mail.service"
@@ -112,7 +112,7 @@ class CameraClerkUnitTest(unittest.TestCase):
         self.assertEqual(arg(self.c, "owner-sock").rsplit("/", 1)[0], run)
         self.assertEqual(self.svc["RuntimeDirectoryMode"], "0755")
         self.assertFalse(check.keeper_reach(run))
-        self.assertIn(run[1:], check.SERVICE_DIRS)
+        self.assertIn(run[1:], owned_dirs(CAMERA))
         self.assertNotEqual(ini(DECODER)["Service"]["User"], self.svc["User"])
 
     # REQ: CLK-1, STO-2, UPD-10

@@ -9,6 +9,7 @@ that came up and then failed reboots the box, at most twice an hour (#2998). Eac
 of a refusal is a mutant of the shipped tree that mkosi.finalize must refuse. CI's boot test enrolls
 on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines)."""
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
+import os
 import pathlib
 import re
 import shlex
@@ -58,6 +59,15 @@ def unlock_refusal(key, val, why, where=SYSTEM + "agentos-keeper-kernel.service"
     allowed = {"FileDescriptorStoreMax": "FileDescriptorStoreMax=0"}.get(
         key, key + "=none" if key.endswith("Action") else "no %s= at all" % key)
     return "agentos-keeper-kernel.service: %s=%s in %s; %s; allowed: %s" % (key, val, where, why, allowed)
+
+
+def owned_dirs(*units):
+    """#5167: the directories the tree check counts as a service user's (SERVICE_DIRS and unit_made_dirs) in
+    a tree holding UNITS."""
+    with tempfile.TemporaryDirectory() as t:
+        for u in units:
+            write(pathlib.Path(t), SYSTEM + u.name, u.read_text())
+        return set(check.SERVICE_DIRS) | set(check.unit_made_dirs(t)[0])
 
 
 class KeeperTreeTest(unittest.TestCase):
@@ -226,8 +236,9 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(self.probe("BindReadOnlyPaths=/var/lib/agentos-localui/x:/y"), [
             "agentos-boot-report.service: BindReadOnlyPaths=/var/lib/agentos-localui/x:/y, which the box resolves "
             "when the unit starts, so a link to it is held to the link rules (#5154): a link to "
-            "/var/lib/agentos-localui/x, inside /var/lib/agentos-localui, which anyone on the box can write, or a "
-            "service user owns; a local user would decide what it reads (#1543, #1702) (D-154)"])
+            "/var/lib/agentos-localui/x, inside /var/lib/agentos-localui, a directory systemd makes for a unit at "
+            "runtime (StateDirectory= in usr/lib/systemd/system/agentos-localui.service); that unit's user would "
+            "decide what it reads (#5167) (D-154)"])
         (self.root / "srv").mkdir(exist_ok=True)
         (self.root / "srv/l").symlink_to("/var/lib/agentos-localui")
         (self.root / "srv/open").mkdir(mode=0o777)
@@ -246,7 +257,8 @@ class KeeperTreeTest(unittest.TestCase):
                    "BindReadOnlyPaths=/home/u/x:/y": "/home", "ReadWritePaths=-/run/user/1000/x": "/run/user",
                    "BindReadOnlyPaths=/run/agentos-localui/x:/y": "/run/agentos-localui",
                    "NoExecPaths=/var/run/agentos-localui/x": "/run/agentos-localui",
-                   "BindReadOnlyPaths=/var/lib/private/x:/y": "/var/lib/private",
+                   # #5167: a unit-made directory's dynamic user form; /var/lib/private itself is root's 0700.
+                   "BindReadOnlyPaths=/var/lib/private/agentos-localui/x:/y": "/var/lib/private/agentos-localui",
                    "TemporaryFileSystem=/var/lib/agentos-localui/x:ro": "/var/lib/agentos-localui",
                    "MountImages=/run/agentos-mail/i:/y": "/run/agentos-mail",
                    "EnvironmentFile=-/var/lib/agentos-egress/env": "/var/lib/agentos-egress",
@@ -268,7 +280,7 @@ class KeeperTreeTest(unittest.TestCase):
                 self.assertTrue(got[0].startswith("agentos-boot-report.service: %s, which the box resolves when the "
                                                   "unit starts, so a link to it is held to the link rules (#5154): "
                                                   % line), got)
-                self.assertIn(" /%s, which " % d.lstrip("/"), got[0])
+                self.assertIn(" /%s, " % d.lstrip("/"), got[0])
         # A step the tree lacks is weighed by the tmpfiles.d line that makes it.
         got = self.probe("BindReadOnlyPaths=/srv/made/x:/y")
         self.assertEqual(len(got), 1, got)
@@ -292,6 +304,296 @@ class KeeperTreeTest(unittest.TestCase):
                      "BindReadOnlyPaths=/srv/lk/x:/y"):
             with self.subTest(line):
                 self.assertEqual(self.probe(line), [])
+
+    def test_a_path_through_a_stock_service_users_directory_is_refused(self):
+        # #5167: systemd makes each *Directory= a unit file names, stock or ours, so systemd-resolved's user can
+        # plant a link in /run/systemd/resolve, which /etc/resolv.conf names, and the binding unit reads where
+        # it leads on its next start.
+        probes = {"BindReadOnlyPaths=/etc/resolv.conf:/x": "/run/systemd/resolve",
+                  "BindReadOnlyPaths=/run/systemd/netif/x:/y": "/run/systemd/netif",
+                  "EnvironmentFile=/var/run/systemd/resolve/x": "/run/systemd/resolve",
+                  "ReadOnlyPaths=/var/lib/systemd/timesync/x": "/var/lib/systemd/timesync",
+                  "LoadCredential=c:/run/systemd/timesync/c": "/run/systemd/timesync"}
+        for line in probes:
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+        write(self.root, SYSTEM + "systemd-resolved.service",
+              "[Service]\nRuntimeDirectory=systemd/resolve\nRuntimeDirectoryPreserve=yes\nUser=systemd-resolve\n")
+        write(self.root, SYSTEM + "systemd-networkd.service", "[Service]\nRuntimeDirectory=systemd/netif\nUser=systemd-network\n")
+        write(self.root, SYSTEM + "systemd-timesyncd.service",
+              "[Service]\nRuntimeDirectory=systemd/timesync\nStateDirectory=systemd/timesync\nUser=systemd-timesync\n")
+        self.assertEqual(self.probe("BindReadOnlyPaths=/etc/resolv.conf:/x"), [
+            "agentos-boot-report.service: BindReadOnlyPaths=/etc/resolv.conf:/x, which the box resolves when the unit "
+            "starts, so a link to it is held to the link rules (#5154): a link to /etc/resolv.conf, inside "
+            "/run/systemd/resolve, a directory systemd makes for a unit at runtime (RuntimeDirectory= in "
+            "usr/lib/systemd/system/systemd-resolved.service); that unit's user would decide what it reads (#5167) "
+            "(D-154)"])
+        for line, d in probes.items():
+            with self.subTest(line):
+                got = self.probe(line)
+                self.assertEqual(len(got), 1, got)
+                self.assertIn(", inside %s, a directory systemd makes for a unit at runtime (" % d, got[0])
+        # The directory itself, and root's /run/systemd above it, are not on the way; the stock tree passes.
+        for line in ("BindReadOnlyPaths=/run/systemd/resolve:/x", "BindReadOnlyPaths=/run/systemd/notify:/x"):
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+        self.assertEqual(check.violations(self.root), [])
+
+    def place(self, files):
+        """Write FILES ({tree path: text, or ("link", target)}) and give back what removes them again."""
+        made = []
+        for rel, what in files.items():
+            if isinstance(what, tuple):
+                (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / rel).symlink_to(what[1])
+                made.append(self.root / rel)
+            else:
+                made.append(write(self.root, rel, what))
+
+        def remove():
+            for f in reversed(made):
+                f.unlink()
+        return remove
+
+    def test_every_directory_a_unit_file_names_counts(self):
+        # #5167 re-plan: every file in the unit directories, and every link's target, counts whatever names,
+        # aliases, precedence or users systemd resolves, so each repro of #5192's four fix-lists is refused
+        # under one rule, with no User= line needed.
+        etc = "etc/systemd/system/"
+        if not (self.root / "lib").is_symlink():
+            (self.root / "lib").symlink_to("usr/lib")
+        cases = {
+            # Security 1 and L3 1 (round 1): drop-ins split across a unit and its alias, or a template alias.
+            "alias split": ({SYSTEM + "a.service": "[Service]\nExecStart=/x\n",
+                             etc + "b.service": ("link", "/usr/lib/systemd/system/a.service"),
+                             etc + "b.service.d/d.conf": "[Service]\nRuntimeDirectory=adir\n"}, "run/adir"),
+            "template alias": ({SYSTEM + "t@.service": "[Service]\nExecStart=/x\n", etc + "v@.service": ("link", "/usr/lib/systemd/system/t@.service"),
+                                etc + "v@.service.d/d.conf": "[Service]\nStateDirectory=vdir\n"}, "var/lib/vdir"),
+            # Security 2 (round 1): a root unit whose mode lets anyone write.
+            "root 0777": ({SYSTEM + "w.service": "[Service]\nRuntimeDirectory=wdir\nRuntimeDirectoryMode=0777\n"}, "run/wdir"),
+            "root 1777": ({SYSTEM + "w2.service": "[Service]\nStateDirectory=w2dir\nStateDirectoryMode=1777\n"},
+                          "var/lib/w2dir"),
+            # Rounds 2 and 3: /etc shadowing the alias's target, and a /lib linked unit.
+            "etc shadow": ({SYSTEM + "o.service": "[Service]\nExecStart=/x\n", etc + "o.service": "[Service]\nExecStart=/x\n",
+                            etc + "ob.service": ("link", "/usr/lib/systemd/system/o.service"),
+                            etc + "ob.service.d/d.conf": "[Service]\nRuntimeDirectory=odir\n"}, "run/odir"),
+            "lib linked": ({SYSTEM + "la.service": "[Service]\nRuntimeDirectory=libdir\n",
+                            etc + "la.service": "[Service]\nExecStart=/x\n",
+                            etc + "lb.service": ("link", "/lib/systemd/system/la.service")}, "run/libdir"),
+            # Round 3: links systemd rejects as aliases, so it runs the name's next file.
+            "plain to template": ({SYSTEM + "x.service": "[Service]\nRuntimeDirectory=xdir\n",
+                                   SYSTEM + "y@.service": "[Service]\nExecStart=/x\n",
+                                   etc + "x.service": ("link", "/usr/lib/systemd/system/y@.service")}, "run/xdir"),
+            "plain to instance": ({SYSTEM + "x2.service": "[Service]\nStateDirectory=x2dir\n",
+                                   SYSTEM + "y@.service": "[Service]\nExecStart=/x\n", SYSTEM + "y@i.service": ("link", "y@.service"),
+                                   etc + "x2.service": ("link", "/usr/lib/systemd/system/y@i.service")}, "var/lib/x2dir"),
+            "template to instance": ({SYSTEM + "z@.service": "[Service]\nStateDirectory=zdir\n",
+                                      SYSTEM + "y@.service": "[Service]\nExecStart=/x\n",
+                                      SYSTEM + "y@i.service": ("link", "y@.service"),
+                                      etc + "z@.service": ("link", "/usr/lib/systemd/system/y@i.service")}, "var/lib/zdir"),
+            "mismatched instances": ({SYSTEM + "m@.service": "[Service]\nCacheDirectory=mdir\n",
+                                      SYSTEM + "y@.service": "[Service]\nExecStart=/x\n",
+                                      SYSTEM + "y@b.service": ("link", "y@.service"),
+                                      etc + "m@a.service": ("link", "/usr/lib/systemd/system/y@b.service")}, "var/cache/mdir"),
+            "hidden": ({SYSTEM + ".h.service": "[Service]\nLogsDirectory=hdir\n"}, "var/log/hdir"),
+            "backup": ({SYSTEM + "h.service~": "[Service]\nLogsDirectory=bdir\n"}, "var/log/bdir"),
+            # Monotone: a shadowed file, a masked unit's file, a drop-in with no fragment, another section, a reset.
+            "shadowed": ({SYSTEM + "s.service": "[Service]\nRuntimeDirectory=sdir\n", etc + "s.service": "[Service]\nExecStart=/x\n"},
+                         "run/sdir"),
+            "masked": ({SYSTEM + "mk.service": "[Service]\nStateDirectory=mkdir\n", etc + "mk.service": ("link", "/dev/null")},
+                       "var/lib/mkdir"),
+            "no fragment": ({etc + "nf.service.d/d.conf": "[Service]\nRuntimeDirectory=nfdir\n"}, "run/nfdir"),
+            "unit section": ({SYSTEM + "un.service": "[Unit]\nRuntimeDirectory=undir\n"}, "run/undir"),
+            "reset": ({SYSTEM + "rs.service": "[Service]\nRuntimeDirectory=rdir\nRuntimeDirectory=\n"}, "run/rdir"),
+            "wants link": ({SYSTEM + "multi-user.target.wants/q.service": ("link", "/srv/q.service"),
+                            "srv/q.service": "[Service]\nRuntimeDirectory=qdir\n"}, "run/qdir"),
+            "configuration": ({SYSTEM + "cf.service": "[Service]\nConfigurationDirectory=cdir\n"}, "etc/cdir"),
+            # Parse: each word, both sides of a:b, nested paths, the specifier cuts, a tab.
+            "colon": ({SYSTEM + "c1.service": "[Service]\nStateDirectory=c1 c1b:c1link\n"}, "var/lib/c1link"),
+            "nested": ({SYSTEM + "c2.service": "[Service]\nCacheDirectory=./c2//n/\n"}, "var/cache/c2/n"),
+            # A specifier in the last step keeps it as a glob of what precedes it.
+            "specifier": ({SYSTEM + "capsule@.service": "[Service]\nStateDirectory=capsules/%i\n"}, "var/lib/capsules/*"),
+            "specifier mid-step": ({SYSTEM + "jr@.service": "[Service]\nLogsDirectory=journal/%m.%i\n"},
+                                   "var/log/journal/*"),
+            "specifier suffix": ({SYSTEM + "jn@.service": "[Service]\nRuntimeDirectory=systemd/journal.%i\n"},
+                                 "run/systemd/journal.*"),
+            "tab": ({SYSTEM + "sp.service": "[Service]\nRuntimeDirectory=sp1\tsp2\n"}, "run/sp2"),
+        }
+        base, err = check.unit_made_dirs(self.root)
+        self.assertEqual(err, [])
+        for name, (files, d) in cases.items():
+            with self.subTest(name):
+                self.assertNotIn(d, base)
+                remove = self.place(files)
+                try:
+                    got, err = check.unit_made_dirs(self.root)
+                    self.assertEqual(err, [])
+                    self.assertIn(d, got)
+                    seen = d.replace("*", "x1")
+                    probe = self.probe("ReadOnlyPaths=/%s/x" % seen)
+                    self.assertEqual(len(probe), 1, probe)
+                    self.assertIn(", inside /%s, a directory systemd makes for a unit at runtime (" % seen, probe[0])
+                    # Its dynamic user form counts too, whoever runs the unit; <top>/private itself does not.
+                    top = next(t for t in ("var/lib", "var/cache", "var/log", "run", "etc") if seen.startswith(t + "/"))
+                    private = "%s/private/%s" % (top, seen[len(top) + 1:])
+                    self.assertEqual(check.service_dir(self.root, private), got[d])
+                    self.assertIsNone(check.service_dir(self.root, top + "/private"))
+                    if d.endswith("*"):
+                        self.assertIsNone(check.service_dir(self.root, seen.rsplit("/", 1)[0]))
+                        self.assertIsNone(check.service_dir(self.root, seen + "/deeper"))
+                finally:
+                    remove()
+        # Nothing names a dynamic user's private/ roots on their own.
+        for d in ("var/lib/private", "var/cache/private", "var/log/private", "run/private"):
+            self.assertNotIn(d, check.SERVICE_DIRS)
+        self.assertEqual(check.SERVICE_DIRS, ("home", "run/user", "var/lib/agentos-mail", "var/lib/agentos-camera",
+                                              "var/lib/agentos-homekit"))
+        # Monotone: with every case in the tree at once, removing any one file or link leaves a subset.
+        removes = [self.place({k: v for k, v in files.items() if not (self.root / k).exists()
+                               and not (self.root / k).is_symlink()}) for files, _ in cases.values()]
+        try:
+            full = set(check.unit_made_dirs(self.root)[0])
+            self.assertTrue({d for _, d in cases.values()} <= full)
+            for f in sorted(p for p in (self.root / "etc/systemd/system").rglob("*") if p.is_symlink() or p.is_file()):
+                with self.subTest(remove=str(f)):
+                    keep = f.readlink() if f.is_symlink() else f.read_bytes()
+                    f.unlink()
+                    try:
+                        self.assertTrue(set(check.unit_made_dirs(self.root)[0]) <= full)
+                    finally:
+                        f.symlink_to(keep) if isinstance(keep, pathlib.Path) else f.write_bytes(keep)
+        finally:
+            for r in reversed(removes):
+                r()
+
+    def test_what_a_unit_file_names_that_the_check_cannot_read_is_refused(self):
+        # #5167: a link that ends nowhere the tree holds, and a value the check does not model, fail the build.
+        etc = "etc/systemd/system/"
+        (self.root / "srv").mkdir(exist_ok=True)
+        (self.root / "var/tmp").mkdir(parents=True, exist_ok=True)
+        write(self.root, "var/tmp/t.service", "[Service]\nRuntimeDirectory=t\n")
+        for target in ("/usr/lib/systemd/system/missing.service", "l2.service", "/run/x.service", "/var/tmp/t.service"):
+            with self.subTest(target):
+                remove = self.place({etc + "l1.service": ("link", target), etc + "l2.service": ("link", "l1.service")})
+                try:
+                    err = check.unit_made_dirs(self.root)[1]
+                    self.assertTrue(err and all(e.startswith(etc) and ": a link to " in e for e in err), err)
+                    self.assertIn(err[0], check.violations(self.root))
+                finally:
+                    remove()
+        # A mask is skipped.
+        remove = self.place({etc + "mm.service": ("link", "/dev/null")})
+        self.assertEqual(check.unit_made_dirs(self.root)[1], [])
+        remove()
+        for text in ("StateDirectory=%i", "StateDirectory=./%i/x", "StateDirectory=a/%i/b", "StateDirectory=a/%I",
+                     "RuntimeDirectory=a/%t", "StateDirectory=a/x%%", "CacheDirectory=a*", "CacheDirectory=a/b?",
+                     "LogsDirectory=a/[b]", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b",
+                     "CacheDirectory=a\\b", "StateDirectory=/abs", "StateDirectory=ok x:/abs",
+                     "RuntimeDirectory=n\u00a0d", "RuntimeDirectory=n\x0bd", "RuntimeDirectory=n\u0085d"):
+            with self.subTest(text):
+                d = write(self.root, SYSTEM + "x.service", "[Service]\n%s\n" % text)
+                try:
+                    key, val = text.split("=", 1)
+                    self.assertEqual(check.unit_made_dirs(self.root)[1], [
+                        "%sx.service: %s=%s: the tree check does not model it; the tree check never passes a unit file "
+                        "whose directories it cannot read (#5167)" % (SYSTEM, key, val if val.isprintable() else repr(val))])
+                    self.assertIn(check.unit_made_dirs(self.root)[1][0], check.violations(self.root))
+                finally:
+                    d.unlink()
+
+    def test_a_unit_made_directorys_way_is_roots_alone(self):
+        # #5167 re-plan 2: systemd 257's setup_exec_directory makes the missing steps, then chmods and chowns
+        # what it finds at the last step to the unit's user, following a link at any step, the last included.
+        # So each step, in both forms, is held to the link rules: the tree holds a directory or nothing there,
+        # no tmpfiles.d line may leave anything but a directory at the last step, and no one but root may
+        # write or remake a step above it. Each case is one unit (User=nobody unless set) and its tree.
+        tmpf = "usr/lib/tmpfiles.d/zz.conf"
+        (self.root / "srv/qq").mkdir(parents=True, exist_ok=True)
+        (self.root / "var/lib/owned").mkdir(parents=True, exist_ok=True)
+        os.chown(self.root / "var/lib/owned", 1000, 0)
+        (self.root / "var/cache/private/dz").mkdir(parents=True, exist_ok=True)
+        os.chown(self.root / "var/cache/private/dz", 1000, 0)
+        refused = (
+            # Security 6758176175: a tmpfiles.d link at the directory itself, in each form and under /run.
+            ("StateDirectory=qq", {tmpf: "L /var/lib/qq - - - - /srv/qq\n"}, "/var/lib/qq", "where " + tmpf),
+            ("StateDirectory=dq\nDynamicUser=yes", {tmpf: "L /var/lib/private/dq - - - - /srv/qq\n"},
+             "/var/lib/private/dq", "where " + tmpf),
+            ("RuntimeDirectory=rq", {tmpf: "L /run/rq - - - - /srv/qq\n"}, "/run/rq", "where " + tmpf),
+            # Anything else that is not a directory: a device node, a copy, a file; a specifier the box expands;
+            # a template's directory.
+            ("StateDirectory=cq", {tmpf: "c /var/lib/cq 0600 - - - 8:0\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=cq", {tmpf: "C /var/lib/cq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=cq", {tmpf: "f /var/lib/cq 0644 - - -\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=cq", {tmpf: "L /var/lib/c%Hq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=ca/%i", {tmpf: "L /var/lib/ca/x - - - - /srv/qq\n"}, "/var/lib/ca/*", "where " + tmpf),
+            # A step above: a tmpfiles.d link, or a /run step made for another user.
+            ("StateDirectory=pq/b", {tmpf: "L /var/lib/pq - - - - /srv/qq\n"}, "/var/lib/pq/b", "makes a link"),
+            ("RuntimeDirectory=sq/x", {tmpf: "L /run/sq - - - - /srv/qq\n"}, "/run/sq/x", "makes a link"),
+            ("RuntimeDirectory=sq/x", {tmpf: "d /run/sq 0755 nobody - -\n"}, "/run/sq/x", "for nobody:-"),
+            # The tree: a link or a file at the last step or above, in either form.
+            ("StateDirectory=foo", {"var/lib/foo": ("link", "/srv/qq")}, "/var/lib/foo", "in the tree (/var/lib/foo)"),
+            ("StateDirectory=foo", {"var/lib/foo": ""}, "/var/lib/foo", "in the tree (/var/lib/foo)"),
+            ("StateDirectory=pa/b", {"var/lib/pa": ("link", "/srv/qq")}, "/var/lib/pa/b", "a link or a file in the tree"),
+            ("CacheDirectory=foo", {"var/cache/private/foo": ("link", "/srv/qq")}, "/var/cache/private/foo",
+             "in the tree (/var/cache/private/foo)"),
+            ("RuntimeDirectory=r/s", {"run/private/r": ("link", "/srv/qq")}, "/run/private/r/s", "in the tree"),
+            # A step another user can write: a tree step another uid owns (also below <top>/private), a
+            # world-writable step, a service directory, another unit's directory.
+            ("StateDirectory=owned/x", {}, "/var/lib/owned/x", "through /var/lib/owned, which uid 1000 owns"),
+            ("CacheDirectory=dz/x", {}, "/var/cache/private/dz/x", "through /var/cache/private/dz, which uid 1000 owns"),
+            ("RuntimeDirectory=lock/x", {}, "/run/lock/x", "inside /run/lock, which anyone"),
+            ("StateDirectory=agentos-mail/x", {}, "/var/lib/agentos-mail/x", "inside /var/lib/agentos-mail, which anyone"),
+            ("StateDirectory=na/b", {SYSTEM + "na.service": "[Service]\nStateDirectory=na\nUser=ua\n"}, "/var/lib/na/b",
+             "inside /var/lib/na, a directory systemd makes for a unit at runtime (StateDirectory= in %sna.service)" % SYSTEM),
+            # Stock journald@'s LogsDirectory=journal/%m.%i: tmpfiles.d gives /var/log/journal a group; mkosi.conf
+            # removes the unit.
+            ("LogsDirectory=journal/%m.%i", {tmpf: "z /var/log/journal 2755 root systemd-journal - -\n"},
+             "/var/log/journal/*", "for root:systemd-journal"),
+        )
+        for unit, files, made, why in refused:
+            with self.subTest(unit=unit, files=files):
+                name = "q@.service" if "%i" in unit else "q.service"
+                remove = self.place(dict(files, **{SYSTEM + name: "[Service]\n%s\n%s" % (
+                    unit, "" if "User" in unit else "User=nobody\n")}))
+                try:
+                    # A specifier the box expands (%H) may name any unit's directory, so only this unit's is compared.
+                    got = [g for g in check.unit_made_refusals(self.root) if "%" not in files.get(tmpf, "")
+                           or g.startswith("%s= in %s%s:" % (unit.split("=")[0], SYSTEM, name))]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith("%s= in %s%s: %s, which systemd makes and hands to the unit's "
+                                                      "user following any link on its way, " % (
+                                                          unit.split("=")[0], SYSTEM, name, made)), got)
+                    self.assertIn(why, got[0])
+                    self.assertTrue(got[0].endswith(" (#5167)"), got)
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+        passing = (
+            # Siblings, one unit's nested steps of its own top, and root's tree steps.
+            ("StateDirectory=s1 s2 deep/er\nRuntimeDirectory=r", {}),
+            # A root directory line above; another user's directory line at the directory itself (systemd hands
+            # it to the unit's user anyway); attribute and ACL lines there; and lines below it.
+            ("StateDirectory=rp/x", {tmpf: "d /var/lib/rp 0755 root root -\n"}),
+            ("RuntimeDirectory=nd", {tmpf: "d$ /run/nd 0755 nobody nobody -\nd$ /run/nd/links 0755 nobody nobody -\n"}),
+            ("StateDirectory=ac", {tmpf: "a+ /var/lib/ac - - - - group:adm:r-x\nh /var/lib/ac - - - - +C\n"
+                                         "L /var/lib/ac/x - - - - /srv/qq\n"}),
+            # Stock networkd's shape: its own tmpfiles.d lines, under root's /run/systemd.
+            ("RuntimeDirectory=systemd/netif",
+             {tmpf: "d$ /run/systemd/netif 0755 systemd-network systemd-network -\n"
+                    "d$ /run/systemd/netif/links 0755 systemd-network systemd-network -\n"}),
+            # A tree directory there.
+            ("StateDirectory=foo", {"var/lib/foo/keep": ""}),
+            # /run is the box's own mount: the tree's run/ and the stock /var/run link line naming it (by
+            # systemd-tmpfiles' /var/run rewrite) do not count against a directory under it.
+            ("RuntimeDirectory=systemd/resolve", {"run/keep": "", tmpf: "L /var/run - - - - ../run\n"}),
+        )
+        for unit, files in passing:
+            with self.subTest(unit=unit, files=files):
+                remove = self.place(dict(files, **{SYSTEM + "q.service": "[Service]\n%s\nUser=nobody\n" % unit}))
+                try:
+                    self.assertEqual(check.unit_made_refusals(self.root), [])
+                finally:
+                    remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
@@ -401,7 +703,10 @@ class KeeperTreeTest(unittest.TestCase):
                 if key.endswith("Directory"):
                     want = "agentos-boot-report.service: %s=%s reaches the keeper's state (D-154)" % (
                         key, [w for w in val.split() if w != "agentos"][0])
-                self.assertEqual(self.v(), [want])
+                # #5167: a probe's StateDirectory=agentos also makes /var/lib/agentos a unit-made directory for
+                # every unit, so agentos-modem.service's bind through it is refused too; only the probe's own
+                # lines are compared here.
+                self.assertEqual([l for l in self.v() if l.startswith("agentos-boot-report.service:")], [want])
                 self.assertIn(want, check.violations(self.root))
                 d.unlink()
         for line in ("LoadCredential=x:%S/agentos-store/store", "EnvironmentFile=/var/lib/%i"):
@@ -414,7 +719,7 @@ class KeeperTreeTest(unittest.TestCase):
                      "StandardInput=file:/var/lib/agentos/in"):
             with self.subTest(line):
                 d = write(self.root, SYSTEM + "agentos-boot-report.service.d/99-probe.conf", "[Service]\n%s\n" % line)
-                self.assertEqual(self.v(), [])
+                self.assertEqual([l for l in self.v() if l.startswith("agentos-boot-report.service:")], [])
                 d.unlink()
 
     # REQ: HW-1, STO-2
