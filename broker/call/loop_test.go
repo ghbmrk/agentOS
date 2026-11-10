@@ -870,3 +870,103 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 	}
 	next.hangup()
 }
+
+// A call that reaches MaxCall hears the ending clip EndingNotice before it
+// is hung up, cutting the answer then playing; a call that ends sooner
+// hears none; and the clip plays on the call's ctx, so a clip still playing
+// at MaxCall ends with the call and Serve returns at MaxCall (#5262).
+func TestTheOwnerHearsTheEndBeforeMaxCall(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		played := func(r *rig) string {
+			select {
+			case s := <-r.l.saying:
+				return s
+			default:
+				return ""
+			}
+		}
+		hungUp := func(r *rig) bool {
+			r.l.mu.Lock()
+			defer r.l.mu.Unlock()
+			return r.l.hungUp
+		}
+
+		// Reaches MaxCall (default 30 min) mid-answer.
+		start := time.Now()
+		r := newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.l.setGate(true) // the answer plays until it is stopped
+		r.serve()
+		r.say("q")
+		synctest.Wait()
+		if got := played(r); got != "S:Hi." {
+			t.Fatalf("the answer played %q", got)
+		}
+		time.Sleep(29*time.Minute - time.Nanosecond) // a minute before the end
+		synctest.Wait()
+		if got := played(r); got != "" {
+			t.Fatalf("played %q before the notice was due", got)
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if got := played(r); got != "CLIP:ending" || hungUp(r) {
+			t.Fatalf("a minute before MaxCall: played %q, hung up %v", got, hungUp(r))
+		}
+		r.l.wasCut(t) // the answer stopped for the notice
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		rep, err := r.end()
+		if !errors.Is(err, call.ErrTooLong) || !hungUp(r) || time.Since(start) != 30*time.Minute {
+			t.Fatalf("at MaxCall: err %v, hung up %v, after %v", err, hungUp(r), time.Since(start))
+		}
+		if len(rep.Turns) != 1 || !rep.Turns[0].Stopped {
+			t.Fatalf("turns = %+v", rep.Turns)
+		}
+		if got := r.l.spoken(); len(got) != 1 || got[0] != "CLIP:ending" {
+			t.Fatalf("played in full %q", got)
+		}
+
+		// Ends a moment before the notice is due: no notice.
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.serve()
+		r.say("q")
+		synctest.Wait()
+		time.Sleep(29*time.Minute - time.Nanosecond) // a minute before the end
+		r.hangup()
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if got := r.l.spoken(); len(got) != 1 || got[0] != "S:Hi." {
+			t.Fatalf("a shorter call played %q", got)
+		}
+
+		// A notice still playing at MaxCall (here 10 min) ends there, so
+		// it gives the call no longer life.
+		start = time.Now()
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.MaxCall = 10 * time.Minute
+		r.cfg.Clips.Ending = []byte("S:ending") // held by the gate until stopped
+		r.l.setGate(true)
+		r.serve()
+		time.Sleep(9 * time.Minute)
+		synctest.Wait()
+		if got := played(r); got != "S:ending" {
+			t.Fatalf("a minute before MaxCall: played %q", got)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait() // Serve has returned at MaxCall, not later
+		select {
+		case err := <-r.err:
+			<-r.rep
+			if !errors.Is(err, call.ErrTooLong) || !hungUp(r) || time.Since(start) != 10*time.Minute {
+				t.Fatalf("a notice playing at MaxCall: err %v, hung up %v, after %v", err, hungUp(r), time.Since(start))
+			}
+		default:
+			t.Fatal("a notice playing at MaxCall kept the call")
+		}
+		r.l.wasCut(t)
+	})
+}
