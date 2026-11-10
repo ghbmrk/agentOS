@@ -9,6 +9,7 @@ that came up and then failed reboots the box, at most twice an hour (#2998). Eac
 of a refusal is a mutant of the shipped tree that mkosi.finalize must refuse. CI's boot test enrolls
 on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines)."""
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
+import os
 import pathlib
 import re
 import shlex
@@ -504,6 +505,49 @@ class KeeperTreeTest(unittest.TestCase):
         remove = self.place({SYSTEM + "foo.service": "[Service]\nStateDirectory=foo\n", "var/lib/foo/keep": ""})
         self.assertEqual(check.unit_made_dirs(self.root)[1], [])
         remove()
+        # Security (fix-list 5): another user can plant that link on the box, before the unit starts, in a
+        # step above it they can write: another unit's directory, a world-writable or service directory,
+        # or a tree step another uid owns. The dynamic user form is weighed below <top>/private only.
+        (self.root / "var/lib/owned").mkdir(parents=True, exist_ok=True)
+        os.chown(self.root / "var/lib/owned", 1000, 0)
+        for files, made, step in (
+                ({"na.service": "StateDirectory=na\nUser=ua", "nb.service": "StateDirectory=na/b\nUser=ub"},
+                 "var/lib/na/b", "inside /var/lib/na, a directory systemd makes"),
+                ({"lk.service": "RuntimeDirectory=lock/x\nUser=ux"}, "run/lock/x", "inside /run/lock, which anyone"),
+                ({"cm.service": "StateDirectory=agentos-mail/x\nUser=ux"}, "var/lib/agentos-mail/x",
+                 "inside /var/lib/agentos-mail, which anyone"),
+                ({"ow.service": "StateDirectory=owned/x"}, "var/lib/owned/x", "through /var/lib/owned, which uid 1000 owns"),
+                ({"pv.service": "StateDirectory=pv/x\nDynamicUser=yes", "pw.service": "StateDirectory=pv"},
+                 "var/lib/pv/x", "inside /var/lib/pv, a directory systemd makes")):
+            with self.subTest(made=made):
+                remove = self.place({SYSTEM + n: "[Service]\n%s\n" % t for n, t in files.items()})
+                try:
+                    got = check.unit_made_refusals(self.root)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith("StateDirectory= in " if made.startswith("var/lib") else
+                                                      "RuntimeDirectory= in "), got)
+                    self.assertIn(": /%s, which systemd makes and chowns to the unit's user following a link it "
+                                  "finds there, is below a step another user can write or make: " % made, got[0])
+                    self.assertIn(step, got[0])
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+        # The dynamic user form alone: a step another uid owns below <top>/private.
+        (self.root / "var/cache/private/dz").mkdir(parents=True)
+        os.chown(self.root / "var/cache/private/dz", 1000, 0)
+        remove = self.place({SYSTEM + "dz.service": "[Service]\nCacheDirectory=dz/x\n"})
+        try:
+            self.assertEqual([g.split(": ", 2)[1] for g in check.unit_made_refusals(self.root)],
+                             ["/var/cache/private/dz/x, which systemd makes and chowns to the unit's user following "
+                              "a link it finds there, is below a step another user can write or make"])
+        finally:
+            remove()
+        # Siblings, one unit's nested steps of its own top, and root's tree steps pass.
+        remove = self.place({SYSTEM + "ok.service": "[Service]\nStateDirectory=s1 s2 deep/er\nRuntimeDirectory=r\n"})
+        try:
+            self.assertEqual(check.unit_made_refusals(self.root), [])
+        finally:
+            remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so

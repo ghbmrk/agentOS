@@ -329,7 +329,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + cached(unit_made_dirs, root)[1] + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
+            + cached(unit_made_dirs, root)[1] + unit_made_refusals(root) + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -459,13 +459,21 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
     return None
 
 
-def chain_refusal(root, parts, target, held):
+def chain_refusal(root, parts, target, held, skip=0):
     """#1702, #1803, #1829: why a link to TARGET whose path walks the tree steps PARTS (path_parts) is
     refused by step_refusal's rules at any step, or None. HELD: the path is the tree's, not under a box
-    mount, so a step the tree lacks is weighed by the tmpfiles.d lines that may make it."""
+    mount, so a step the tree lacks is weighed by the tmpfiles.d lines that may make it. The first SKIP
+    steps are walked for their group but not weighed (#5167: a unit-made directory's top)."""
     gid, owned_dirs = TREE_GROUP, service_dirs(root)
     for k in range(1, len(parts) + 1):
         d = "/".join(parts[:k])
+        if k <= skip:
+            try:
+                st = tree_lstat(root, d)
+            except OSError:
+                continue
+            gid = gid if st is None else step_gid(root, d, st, gid)
+            continue
         try:
             st = None if d in WORLD_WRITABLE or d in owned_dirs else tree_lstat(root, d)
         except OSError:
@@ -1719,8 +1727,33 @@ def unit_made_dirs(root):
 
 def made_private(d):
     """#5167: the dynamic user form of unit-made directory D: <top>/private/<rest>."""
-    top = next(t for t in sorted(set(UNIT_MADE_DIRS.values()), key=len, reverse=True) if d.startswith(t + "/"))
+    top = made_top(d)
     return "%s/private/%s" % (top, d[len(top) + 1:])
+
+
+def made_top(d):
+    """#5167: the UNIT_MADE_DIRS top unit-made directory D sits under."""
+    return next(t for t in sorted(set(UNIT_MADE_DIRS.values()), key=len, reverse=True) if d.startswith(t + "/"))
+
+
+def unit_made_refusals(root):
+    """#5167 (Security, fix-list 5): one violation per unit-made directory (unit_made_dirs), or its
+    dynamic user form, below a step another user can write or make: a world-writable or service
+    directory, another unit-made directory, or a tree step the link rules refuse (step_refusal). That
+    user could plant a link there before the unit starts, and systemd chowns what it finds following
+    it (path_chown_recursive, AT_SYMLINK_FOLLOW). Only the steps below the top are weighed, so
+    <top>/private, which SERVICE_DIRS lists, is not held against the dynamic user form."""
+    out = []
+    for d, why in sorted(cached(unit_made_dirs, root)[0].items()):
+        top = made_top(d)
+        for p, t in ((d, top), (made_private(d), top + "/private")):
+            parts = path_parts(p)
+            refused = chain_refusal(root, parts[:-1], "/" + p, parts[0] not in BOX_MOUNTS, skip=len(path_parts(t)))
+            if refused:
+                out.append("%s: /%s, which systemd makes and chowns to the unit's user following a link it finds "
+                           "there, is below a step another user can write or make: %s (#5167)" % (why, p, refused))
+                break
+    return out
 
 
 def made_steps(part):

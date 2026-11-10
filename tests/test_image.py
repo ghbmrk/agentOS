@@ -4129,7 +4129,9 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             for u in self.UNITS:
                 write(pathlib.Path(t), "usr/lib/systemd/system/" + u.name, u.read_text())
             made, out = check.unit_made_dirs(t)
+            refused = check.unit_made_refusals(t)
         self.assertEqual(out, [])
+        self.assertEqual(refused, [])
         # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
         self.assertEqual(sorted(made), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
