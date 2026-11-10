@@ -742,6 +742,10 @@ jobs:
       # dated snapshot, checked by SHA-256, never the runner's archive, whose kernel moves about weekly
       # (EFI stub writes, #4794; built-in virtio-blk/tpm_crb/efivarfs: the stand-in initrd loads no
       # modules, so a Debian kernel does not fit). Moving it = new URL + hash in one reviewed PR.
+      # CI-hostcheck-fetch-retry (#5321): the snapshot answers 503/504 or times out for minutes at
+      # a time. The fetch retries a timeout, a refused connect, 408, 429, 500, 502, 503 or 504 up to
+      # 8 times, waiting 1 s doubling (255 s in all), starts no retry after 600 s, gives each try 180 s
+      # (30 s to connect), then fails with the host's last status. Any other 4xx or 5xx fails at once.
       - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a dated snapshot)
         env:
           KERNEL_URL: https://snapshot.ubuntu.com/ubuntu/20261107T000000Z/pool/main/l/linux-signed/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
@@ -749,7 +753,7 @@ jobs:
           KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic
         run: |
           deb="$RUNNER_TEMP/guest-kernel.deb"
-          curl --proto '=https' -fsSL --retry 3 --retry-delay 5 -o "$deb" "$KERNEL_URL"
+          curl --proto '=https' -fsSL --retry 8 --retry-connrefused --retry-max-time 600 --connect-timeout 30 --max-time 180 -o "$deb" "$KERNEL_URL"
           got=$(sha256sum "$deb" | cut -d' ' -f1)
           echo "guest kernel: $KERNEL_URL sha256 $got (pinned: $KERNEL_SHA256)"
           [ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }

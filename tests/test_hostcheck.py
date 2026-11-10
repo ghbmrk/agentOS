@@ -8,6 +8,7 @@
 # a tool is missing. HOSTCHECK_KERNEL names the guest kernel; HOSTCHECK_TOOLS_ROOT, if set,
 # a root holding qemu, swtpm and OVMF (CI: the image's Debian snapshot, #4906).
 import argparse
+import http.server
 import json
 import os
 import pathlib
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -1012,6 +1014,11 @@ APT = re.compile(r"\b(?:apt|apt-get|aptitude)\s.*\b(?:install|reinstall|download
 DPKG = re.compile(r"\bdpkg\s(?:.*\s)?(?:-[A-Za-z]*i\b|--install\b|--unpack\b)")
 
 
+# CI-hostcheck-fetch-retry (#5321): the hostcheck job's guest-kernel fetch, as ci.yml must hold it.
+KERNEL_FETCH = ("curl --proto '=https' -fsSL --retry 8 --retry-connrefused --retry-max-time 600 "
+                "--connect-timeout 30 --max-time 180 -o \"$deb\" \"$KERNEL_URL\"")
+
+
 class HostcheckJobTest(unittest.TestCase):
     """ci.yml's hostcheck job takes the VM stack and guest kernel from pinned snapshots, not the runner's archive."""
 
@@ -1100,7 +1107,48 @@ class HostcheckJobTest(unittest.TestCase):
             out.append("the guest kernel is not hash-checked before it is unpacked and named")
         if not any(ln.startswith("curl --proto '=https' ") and ln.endswith('-o "$deb" "$KERNEL_URL"') for ln in lines):
             out.append("the guest kernel is not fetched from the pinned URL over HTTPS")
+        if KERNEL_FETCH not in lines:
+            out.append("the guest kernel fetch is not the bounded retry (#5321)")
         return out
+
+    def fetch(self, answers):
+        """Run the job's fetch line against a local server giving ANSWERS in turn: (exit, statuses served)."""
+        served = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                code = answers[min(len(served), len(answers) - 1)]
+                served.append(code)
+                self.send_response(code)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        line = next(ln.strip() for _, b in job_steps(self.ci, "hostcheck") for ln in b.splitlines()
+                     if ln.strip().startswith("curl ") and "$KERNEL_URL" in ln)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p = subprocess.run(["bash", "-c", 'deb="$D/k.deb"; ' + line.replace("'=https'", "'=http'")],
+                                   env={"PATH": os.environ["PATH"], "D": d,
+                                        "KERNEL_URL": f"http://127.0.0.1:{srv.server_port}/k.deb"},
+                                   capture_output=True, text=True, timeout=60)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        return p.returncode, served, p.stderr
+
+    def test_the_kernel_fetch_retries_an_outage_and_not_a_wrong_pin(self):
+        # #5321: snapshot.ubuntu.com's 503/504 runs reddened hostcheck on PRs that never moved the pin.
+        rc, served, err = self.fetch([503, 504, 200])
+        self.assertEqual((rc, served), (0, [503, 504, 200]), err)
+        rc, served, err = self.fetch([404, 200])  # a moved pin is the PR's fault: no retry
+        self.assertEqual((rc, served), (22, [404]), err)
+        self.assertIn("404", err)
 
     def test_vm_stack_comes_from_the_snapshot(self):
         self.assertEqual(self.problems(self.ci), [])
@@ -1141,6 +1189,11 @@ class HostcheckJobTest(unittest.TestCase):
             "other vmlinuz": ("KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic",
                               "KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-150-generic"),
             "plain http": ("curl --proto '=https' ", "curl "),
+            "fewer tries": ("--retry 8 ", "--retry 3 "),
+            "unbounded": ("--retry-max-time 600 ", ""),
+            "fixed delay": ("--retry 8 ", "--retry 8 --retry-delay 5 "),
+            "retry a 404": ("--retry-connrefused ", "--retry-all-errors "),
+            "no try timeout": ("--max-time 180 ", ""),
             "kernel env elsewhere": ('echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"',
                                      'echo "HOSTCHECK_KERNEL=$(ls "$RUNNER_TEMP"/k/boot/vmlinuz-*)" >> "$GITHUB_ENV"'),
         }.items():
