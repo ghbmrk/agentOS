@@ -1594,12 +1594,12 @@ func TestNoRefreshBeforeALoad(t *testing.T) {
 }
 
 // TestStoppedResolverOnPage (#5164 R1; ENF-l-11, ENF-l-21): home shows a
-// stopped resolver while it is stopped, with each stray address and its
-// interface and every other failure of the served check apart, and a
-// policy in force it cannot serve; once the check passes and a servable
-// policy is in force, home shows nothing. A refused load leaves the
-// policy's cause as it was, since the resolver keeps the old policy's
-// files.
+// stopped resolver while no instance runs, with each stray address and
+// its interface and every other failure of the served check apart, a
+// policy in force it cannot serve, and, with none of those, the refused
+// load that keeps it stopped (#5243 L3 item 1); once a load starts the
+// instances, home shows nothing. A refused load leaves the policy's cause
+// as it was, since the resolver keeps the old policy's files.
 func TestStoppedResolverOnPage(t *testing.T) {
 	x, _ := enrolled(t, false)
 	view := func() string { return x.b.do(http.MethodGet, "/", nil).Body.String() }
@@ -1613,7 +1613,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []string{unset.Error()}) || got.Policy != "" {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []string{unset.Error()}) || got.Policy != "" {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
@@ -1626,15 +1626,36 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.servedErr = errors.New("served interface own0: addresses: dump interrupted")
 	x.mu.Unlock()
 	x.advance(readEvery)
-	if got := (pageResolver{x.d}).Stopped(); len(got.Strays) != 0 || !slices.Equal(got.Unset, []string{"served interface own0: addresses: dump interrupted"}) {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays) != 0 || !slices.Equal(got.Unset, []string{"served interface own0: addresses: dump interrupted"}) {
 		t.Fatalf("a failure that is not a stray: %#v", got)
 	}
+	// The check passes but the load that would start the instances is
+	// refused: they stay stopped, and home says why (#5243 L3 item 1).
 	x.mu.Lock()
 	x.servedErr = nil
 	x.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
 	x.advance(readEvery)
-	if got := (pageResolver{x.d}).Stopped(); got.Stopped() || strings.Contains(view(), "Names and addresses") {
-		t.Fatalf("the check passes and home still shows a stopped resolver: %#v", got)
+	x.dns.mu.Lock()
+	stopped := len(x.dns.running.Listed) == 0 && x.dns.running.People == "" && x.dns.running.DHCP == ""
+	x.dns.mu.Unlock()
+	if !stopped {
+		t.Fatal("fixture: a refused load started the instances")
+	}
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != "" || got.Load == "" {
+		t.Fatalf("a refused load after the check passes: %#v", got)
+	}
+	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (") {
+		t.Errorf("home does not show the resolver stopped by a refused load:\n%s", h)
+	}
+	x.fire.mu.Lock()
+	x.fire.fail = false
+	x.fire.mu.Unlock()
+	x.advance(readEvery)
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped || strings.Contains(view(), "Names and addresses") {
+		t.Fatalf("the load is taken and home still shows a stopped resolver: %#v", got)
 	}
 
 	doc := home()
@@ -1654,7 +1675,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Stopped() {
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped {
 		t.Fatalf("a refused load's policy shows as the one in force: %#v", got)
 	}
 	x.fire.mu.Lock()
@@ -1663,7 +1684,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Policy != genErr.Error() || len(got.Strays)+len(got.Unset) != 0 {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != genErr.Error() || got.Load != "" || len(got.Strays)+len(got.Unset) != 0 {
 		t.Fatalf("a policy the resolver cannot serve: %#v", got)
 	}
 	if !strings.Contains(view(), "The policy in force names something the enforcer cannot serve (") {
@@ -1684,7 +1705,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(home()); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Stopped() {
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped {
 		t.Fatalf("a servable policy in force still shows a stopped resolver: %#v", got)
 	}
 }

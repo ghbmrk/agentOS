@@ -98,6 +98,10 @@ type Resolver interface {
 // ResolverStop is the resolver's state as the page shows it; the zero
 // value is a resolver that runs.
 type ResolverStop struct {
+	// Stopped is whether no instance runs. The causes below are shown
+	// only while it is, since a cause that has gone does not start the
+	// instances: the load that does can still be refused.
+	Stopped bool
 	// Strays are the addresses on a served interface outside its
 	// network, each with the interface: the resolver starts again at the
 	// enforcer's next check after the last is gone.
@@ -107,6 +111,9 @@ type ResolverStop struct {
 	Unset []string
 	// Policy is why the policy in force cannot be served; "" when it can.
 	Policy string
+	// Load is the last refused load's error, shown when no cause above
+	// is: the instances stay as they were until a load is taken.
+	Load string
 }
 
 // Stray is one address on a served interface outside its network.
@@ -114,11 +121,6 @@ type Stray struct {
 	Iface string
 	Addr  netip.Prefix // the address, with its prefix length
 	Nets  string       // the network's prefixes it must lie in
-}
-
-// Stopped is whether the resolver is stopped.
-func (r ResolverStop) Stopped() bool {
-	return len(r.Strays) > 0 || len(r.Unset) > 0 || r.Policy != ""
 }
 
 // Page actions on the enforcer's own state, each after a tap of the
@@ -233,7 +235,7 @@ func (s *Server) status() map[string]any {
 		}
 	}
 	if s.cfg.Resolver != nil {
-		if r := s.cfg.Resolver.Stopped(); r.Stopped() {
+		if r := s.cfg.Resolver.Stopped(); r.Stopped {
 			out["Resolver"] = plainStop(r)
 		}
 	}
@@ -243,7 +245,7 @@ func (s *Server) status() map[string]any {
 // plainStop is r in printable ASCII, as plain shows the core's names: a
 // policy's error can quote a name the core chose.
 func plainStop(r ResolverStop) ResolverStop {
-	out := ResolverStop{Policy: sentence(r.Policy)}
+	out := ResolverStop{Stopped: true, Policy: sentence(r.Policy), Load: sentence(r.Load)}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
 	}

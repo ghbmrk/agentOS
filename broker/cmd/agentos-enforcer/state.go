@@ -294,18 +294,22 @@ func (d *Enforcer) closeFresh() {
 	}
 }
 
-// pageResolver is why the resolver is stopped, as the page shows it: each
-// stray address hold found with its interface, every other failure of the
-// served check, and the policy in force's that dns.Generate refused
+// pageResolver is the resolver as the page shows it: stopped while no
+// instance runs, and then why: each stray address hold found with its
+// interface, every other failure of the served check, the policy in
+// force's that dns.Generate refused, and the last refused load's error
 // (ENF-l-11, ENF-l-21; #5164 R1).
 type pageResolver struct{ d *Enforcer }
 
 func (p pageResolver) Stopped() page.ResolverStop {
 	n := &p.d.net
 	n.resMu.Lock()
-	served, why := n.stopServed, n.stopPolicy
+	runs, served, why, load := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad
 	n.resMu.Unlock()
-	out := page.ResolverStop{Policy: why}
+	if runs {
+		return page.ResolverStop{}
+	}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load}
 	errs := []error{served}
 	if j, ok := served.(interface{ Unwrap() []error }); ok {
 		errs = j.Unwrap()

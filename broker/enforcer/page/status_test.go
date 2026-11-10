@@ -358,7 +358,8 @@ func (f *fakeResolver) Stopped() ResolverStop { return f.stop }
 // #5164 R1 (NET-2 Segments, ASSUMPTIONS ENF-l-11 and ENF-l-21 at the
 // daemon): a stopped resolver shows on home with each stray address and
 // its interface, any other setup failure, and a policy it cannot serve;
-// a running one, or none wired, shows nothing. Text the core could have
+// with none of those, the refused load that keeps it stopped; a running
+// one, or none wired, shows nothing. Text the core could have
 // chosen is shown in printable ASCII.
 func TestHomeShowsStoppedResolver(t *testing.T) {
 	g := newRig(t)
@@ -372,7 +373,7 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") || strings.Contains(h, "stopped answering") {
 		t.Fatal("home shows a running resolver as stopped")
 	}
-	res.stop = ResolverStop{Strays: []Stray{
+	res.stop = ResolverStop{Stopped: true, Load: "an older refusal", Strays: []Stray{
 		{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24 and fd00:10::/64"},
 		{Iface: "dev0", Addr: netip.MustParsePrefix("fd00:99::7/64"), Nets: "10.20.0.0/24"},
 	}}
@@ -387,14 +388,24 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 			t.Errorf("home with stray addresses lacks %q", want)
 		}
 	}
-	if strings.Contains(h, "A served interface is not as set up") || strings.Contains(h, "The policy in force names") {
-		t.Error("home shows a cause the resolver does not have")
+	if strings.Contains(h, "A served interface is not as set up") || strings.Contains(h, "The policy in force names") || strings.Contains(h, "an older refusal") {
+		t.Error("home shows a cause the resolver does not have, or a refused load beside a listed cause")
 	}
-	res.stop = ResolverStop{Unset: []string{"/proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\")"}}
+	// With no listed cause, the refused load that keeps it stopped
+	// (#5243 L3 item 1); and a cause while instances run shows nothing.
+	res.stop = ResolverStop{Stopped: true, Load: "nft: load refused \u202e"}
+	if h = g.homeHTML(); !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: load refused \\u202e), and names and addresses come back only with a load it takes.") {
+		t.Errorf("a refused load is not shown, or not in ASCII:\n%s", h)
+	}
+	res.stop = ResolverStop{Strays: []Stray{{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24"}}, Load: "x"}
+	if h = g.homeHTML(); strings.Contains(h, "Names and addresses") {
+		t.Error("home shows a resolver whose instances run as stopped")
+	}
+	res.stop = ResolverStop{Stopped: true, Unset: []string{"/proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\")"}}
 	if h = g.homeHTML(); !strings.Contains(h, "A served interface is not as set up: /proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads &#34;1&#34;).") || strings.Contains(h, "Interface own0 holds") {
 		t.Errorf("a setting that did not take is not shown alone:\n%s", h)
 	}
-	res.stop = ResolverStop{Policy: "device plug: vlan109 is not a served VLAN ‮gro.live"}
+	res.stop = ResolverStop{Stopped: true, Policy: "device plug: vlan109 is not a served VLAN ‮gro.live"}
 	h = g.homeHTML()
 	if !strings.Contains(h, "The policy in force names something the enforcer cannot serve (device plug: vlan109 is not a served VLAN \\u202egro.live).") {
 		t.Errorf("a policy the resolver cannot serve is not shown, or not in ASCII:\n%s", h)
