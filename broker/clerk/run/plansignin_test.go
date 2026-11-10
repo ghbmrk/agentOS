@@ -1021,14 +1021,20 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 			t.Fatalf("begun: %+v", b)
 		}
 		_, guest := cli.started()
-		if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.SignedIn(guest) {
+		// The watcher may forget the guest as soon as the commit lands, so
+		// the stored login is read, not the guest's mark.
+		if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.Signed() {
 			t.Fatalf("the CLI's code exchange: %d", code)
 		}
 	}
 
 	t.Run("after a signed-in sign-in", func(t *testing.T) {
 		cli := newFakeCLI(login, codexPrinted)
-		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		// Wall is an hour, so the sandbox goes within waitStopped's bound
+		// only because the watcher reads the commit, not at the wall.
+		times := quick
+		times.Wall = time.Hour
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
 		signInOnce(h, cli)
 		cli.waitStopped(t)
 		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
