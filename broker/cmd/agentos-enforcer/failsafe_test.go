@@ -491,3 +491,17 @@ func TestHandoverFailureReachesLog(t *testing.T) {
 		t.Fatalf("hand-over failure reached the log %d times: %q", n, x.log)
 	}
 }
+
+// TestSilenceIsTwoHeartbeats (#4753; KRN-12 Silence, D-255): the page
+// shows the core down after two missed beats of the interval the format
+// definition fixes, a minute. Catches a daemon that keeps its own interval
+// or counts some other number of beats; wire's TestHeartbeatIntervalIsAMinute
+// pins the other end.
+func TestSilenceIsTwoHeartbeats(t *testing.T) {
+	if Silence != 2*wire.HeartbeatInterval {
+		t.Errorf("Silence = %v, want two beats of wire.HeartbeatInterval (%v)", Silence, wire.HeartbeatInterval)
+	}
+	if Silence != 2*time.Minute {
+		t.Errorf("Silence = %v, want two minutes", Silence)
+	}
+}
