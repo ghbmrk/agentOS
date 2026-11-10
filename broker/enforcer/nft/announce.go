@@ -35,22 +35,22 @@ func Announces(d policy.Document, l Layout) (map[string][][]string, error) {
 // device's VLAN is not among them: it reaches nothing, the enforcer
 // included. The ruleset admits mDNS from exactly these.
 func Hears(d policy.Document, l Layout) ([]string, error) {
-	devs, paths, err := compiled(d, l)
+	devs, _, err := compiled(d, l)
 	if err != nil {
 		return nil, err
 	}
-	return hears(devs, paths, l), nil
+	return hears(devs, l), nil
 }
 
-func hears(devs []device, paths []Path, l Layout) []string {
+// A signed pair's ends are already here: a path's end is the Owner or
+// Household network or a Linked device's VLAN, and Linked needs it not
+// isolated (pairs).
+func hears(devs []device, l Layout) []string {
 	out := []string{l.Owner, l.Household}
 	for _, v := range devs {
 		if !v.d.Isolated {
 			out = append(out, v.iface)
 		}
-	}
-	for _, p := range paths {
-		out = append(out, p.From, p.To)
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
