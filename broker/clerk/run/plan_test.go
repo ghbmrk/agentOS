@@ -452,6 +452,64 @@ func TestPlanGuestNeedsAContextWindow(t *testing.T) {
 	}
 }
 
+// A guest is answered with the provider's own status, its declared headers
+// and its body, flushed as it arrives; a guest that stops reading ends the
+// provider's answer instead of leaving it open.
+func TestPlanGuestGetsTheProvidersAnswer(t *testing.T) {
+	var calls atomic.Int32
+	var reads atomic.Int32
+	ended, stop := make(chan struct{}, 1), make(chan struct{})
+	tokens := tokenProvider(&calls, nil)
+	login, _ := planLoginAt(t, plan.Permitted, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/models" {
+			tokens.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"slow down"}`)
+		if reads.Add(1) == 1 {
+			return
+		}
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			ended <- struct{}{}
+		case <-stop:
+		}
+	}))
+	t.Cleanup(func() { close(stop) })
+	codeExchange(t, login, "s")
+	login.Forget("s")
+	tok, err := login.Guest("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := PlanGuest{Login: login, Guest: "g"}
+
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, modelsRead(tok.Tokens["access_token"]))
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Body.String() != `{"error":"slow down"}` || !rec.Flushed {
+		t.Fatalf("the answer: %d %v %q, flushed %v", rec.Code, rec.Header(), rec.Body.String(), rec.Flushed)
+	}
+
+	// A guest whose connection is gone: its first write fails.
+	pr, pw := io.Pipe()
+	pr.Close()
+	type answer struct{ http.ResponseWriter }
+	type gone struct {
+		io.Writer
+		answer
+	}
+	g.ServeHTTP(gone{pw, answer{httptest.NewRecorder()}}, modelsRead(tok.Tokens["access_token"]))
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the provider's answer stayed open after the guest stopped reading")
+	}
+}
+
 // A body that is not JSON cannot be searched for an image, so it is
 // admitted at the whole window. meter gets the clerk's own re-encoding, so
 // no call reaches this today; it is the safe default (#3148 item 3).
