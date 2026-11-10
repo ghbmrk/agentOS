@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/importer"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"io/fs"
@@ -36,7 +37,10 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //  1. loop is named once, as the callee of a call in Serve's body outside
 //     any func literal, so only Serve, which answers only the owner's
 //     number, runs a call. check is named only as the callee of calls in
-//     token's body outside any func literal.
+//     token's body, and token, whose ctx is the grant's life, only in
+//     Serve's, both outside any func literal. serving, the lock that serves
+//     one call at a time, is named only in Serve, which takes it, makes
+//     the token's ctx and defers cancel then unlock, in that order.
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -53,8 +57,11 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 // #5229 Security blocker, a keyed literal that left live nil, is now a
 // rule 2 failure, and a zero grant reads P0). What these rules leave to
 // review: what check, token and Serve do with their inputs (the Serve and
-// token tests pin it); //go:linkname and assembly (tools/srclint.py fails
-// them in CI); and a grant from one live call used in another live call.
+// token tests pin it), and //go:linkname and assembly (tools/srclint.py
+// fails them in CI). A grant kept past its call, in a package var, a field
+// or a shared answerer, needs no rule: rule 1 makes Serve the only maker
+// of a live grant and serves one call at a time, so a kept grant reads P0
+// in every other call (TestOneCallIsServedAtATime, #5232).
 // If a refactor keeps the rule but breaks the check, change the check in
 // the same PR as the code, with a probe for the new shape, never on its
 // own.
@@ -128,6 +135,41 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			return nil
 		}
 		serve, loopFn, checkFn := fn("Serve"), fn("loop"), fn("check")
+		serving, _ := pkg.Scope().Lookup("serving").(*types.Var)
+		if serving == nil {
+			t.Fatal("serving is gone: rewrite this check with the code")
+		}
+		var bad []string
+		// Serve takes serving, then makes the token's ctx, then defers its
+		// cancel before the unlock, in that order and before anything can
+		// return: so a call's grant has died before the next call is
+		// served, and every return unlocks (Lens on #5251).
+		var serveBody []string
+		for _, f := range files {
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && info.Defs[fd.Name] == serve {
+					for _, st := range fd.Body.List {
+						var b strings.Builder
+						printer.Fprint(&b, fset, st)
+						serveBody = append(serveBody, strings.Join(strings.Fields(b.String()), " "))
+					}
+				}
+			}
+		}
+		pinned := []string{
+			"if !serving.TryLock() { return Report{}, ErrBusy }",
+			"tctx, cancel := context.WithCancel(ctx)",
+			"defer func() { cancel(); serving.Unlock() }()",
+		}
+		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+3 > len(serveBody) || !slices.Equal(serveBody[i:i+3], pinned) || !slices.Contains(serveBody[i+3:], "go cfg.token(tctx, c, token)") {
+			bad = append(bad, "Serve does not take serving, make tctx and defer cancel then unlock, in that order, before it reads the token with tctx")
+		}
+		for _, st := range serveBody[:max(slices.Index(serveBody, pinned[0]), 0)] {
+			if strings.Contains(st, "return") && st != "if ownerNumber == \"\" || c.Number() != ownerNumber { return Report{}, ErrNotOwner }" {
+				bad = append(bad, "Serve returns before it takes serving other than for ErrNotOwner")
+			}
+		}
+		servingNames := 0
 		gSt, cfgSt := under("grant"), under("Config")
 		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
 		if _, ok := tokenFn.(*types.Func); !ok {
@@ -135,7 +177,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		}
 		// Each guarded call, and the one func that may make it; and the
 		// fields nothing may write.
-		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn}
+		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn, tokenFn: serve}
 		gr, gl, tok := field(gSt, "r"), field(gSt, "live"), field(cfgSt, "Token")
 		guarded := func(t types.Type) string {
 			if p, ok := t.Underlying().(*types.Pointer); ok {
@@ -153,7 +195,6 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		}
 
 		isKey := func(e ast.Expr) bool { _, ok := e.(*ast.KeyValueExpr); return ok }
-		var bad []string
 		at := func(n ast.Node, msg string, a ...any) {
 			bad = append(bad, fset.Position(n.Pos()).String()+": "+fmt.Sprintf(msg, a...))
 		}
@@ -206,9 +247,18 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						}
 					case *ast.Ident:
 						obj := info.Uses[n]
+						if obj == serving {
+							if servingNames++; encl != serve {
+								at(n, "serving is named outside Serve")
+							}
+						}
 						if in, ok := callIn[obj]; ok {
-							call, isCall := parent(1).(*ast.CallExpr)
-							if encl == in && isCall && call.Fun == n && !lit {
+							fun, up := ast.Node(n), parent(1)
+							if sel, ok := up.(*ast.SelectorExpr); ok && sel.Sel == n { // a method
+								fun, up = sel, parent(2)
+							}
+							call, isCall := up.(*ast.CallExpr)
+							if encl == in && isCall && call.Fun == fun && !lit {
 								if obj == loopFn {
 									calls++
 								}
@@ -250,12 +300,15 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if calls != 1 {
 			bad = append(bad, fmt.Sprintf("Serve calls loop %d times", calls))
 		}
+		if servingNames != 2 {
+			bad = append(bad, fmt.Sprintf("serving is named %d times, not 2", servingNames))
+		}
 		return bad
 	}
 
 	if bad := check(probe{}); len(bad) != 0 {
 		t.Errorf("a grant can be made other than by check, or the loop entered other than through Serve:\n%s\n"+
-			"Rule: only check makes a grant, nothing writes one, only token calls check, and only Serve calls loop. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
+			"Rule: only check makes a grant, nothing writes one, only token calls check, only Serve calls token and loop and holds serving. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
 	}
 	const twin = "type twin struct { r Rung; live <-chan struct{} }\n"
 	for _, p := range []probe{
@@ -274,7 +327,25 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// check named outside token, or not as a direct call.
 		{extra: "var Check = check", want: "check is named"},
 		{extra: "func raise(cfg Config, l Incoming) *grant { return check(cfg, nil, l.Number()) }", want: "check is named"},
-		{old: "return check(cfg, ctx.Done(), b.String())\n\t\tcase <-ctx", new: "keepCheck = func(k string) *grant { return check(cfg, nil, k) }\n\t\t\treturn nil\n\t\tcase <-ctx", extra: "var keepCheck func(string) *grant", want: "check is named"},
+		{old: "out <- check(cfg, ctx.Done(), cfg.keys(ctx, l))", new: "keepCheck = func(k string) *grant { return check(cfg, nil, k) }\n\tout <- nil", extra: "var keepCheck func(string) *grant", want: "check is named"},
+		// #5232 R3: token, whose ctx is the grant's life, named outside
+		// Serve or not as a direct call there.
+		{extra: "func raise(cfg Config, l Line, out chan<- *grant) { cfg.token(context.Background(), l, out) }", want: "token is named"},
+		{extra: "var Token = Config.token", want: "token is named"},
+		{extra: "func raise(cfg Config) func(context.Context, Line, chan<- *grant) { return cfg.token }", want: "token is named"},
+		{old: "go cfg.token(tctx, c, token)", new: "go func() { cfg.token(tctx, c, token) }()", want: "token is named"},
+		// #5232 R1: serving is Serve's alone, so one call is served at a time.
+		{extra: "func free() { serving.Unlock() }", want: "serving is named outside Serve"},
+		{extra: "var held = &serving", want: "serving is named outside Serve"},
+		// Lens on #5251: the unlock before the cancel lets the next call
+		// start while this call's grant still reads P2.
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { serving.Unlock(); cancel() }()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer cancel()\n\tdefer serving.Unlock()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer serving.Unlock()\n\tdefer cancel()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { cancel(); serving.Unlock(); serving.Unlock() }()", want: "in that order"},
+		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(ctx, c, token)\n\t_ = tctx", want: "in that order"},
+		{old: "\tif !serving.TryLock() {", new: "\tif c.Number() == \"\" {\n\t\treturn Report{}, nil\n\t}\n\tif !serving.TryLock() {", want: "returns before it takes serving"},
+		{old: "\tif !serving.TryLock() {", new: "\tif !serving.TryLock() && serving.TryLock() {", want: "serving is named 3 times"},
 		// A grant made outside check, or by a fill that names no field;
 		// Security's #5229 blocker first.
 		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},
@@ -335,6 +406,12 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{extra: "func copyOf(g *grant, src *grant) { *g = *src }"},
 		{extra: "func copyAll(dst, src []grant) int { return copy(dst, src) }"},
 		{extra: "func zero(g *grant) { var z grant; *g = z }"},
+		// A grant kept past its call, by a package var (Security's M3 on
+		// #5229) or a field: one call is served at a time and a grant dies
+		// with its call, so it reads P0 in every later one
+		// (TestAKeptGrantIsP0InTheNextCall).
+		{extra: "var hot *grant\nfunc keep(a Ask) { hot = a.rung }\nfunc reuse(t string) Ask { return Ask{Text: t, rung: hot} }"},
+		{extra: "type stash struct{ g *grant }\nvar kept stash\nfunc keep(a Ask) { kept.g = a.rung }"},
 	} {
 		if bad := check(p); len(bad) != 0 {
 			t.Errorf("probe %q flagged: %q", p.extra, bad)

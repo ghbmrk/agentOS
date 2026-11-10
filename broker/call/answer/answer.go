@@ -46,25 +46,21 @@ type Answerer struct {
 
 // Answer reads, admits what the ask's rung may hear, and has the writer word
 // the answer from that alone. A failed read fails the turn. The rung is
-// a.Rung(), read once: only package call can make an Ask above P0.
+// a.Rung(), read once: only package call can make an Ask above P0, and
+// admit is called only here, with it (TestTheRungIsTheAsks).
 func (an Answerer) Answer(ctx context.Context, a call.Ask) (<-chan string, error) {
-	return an.answer(ctx, a, a.Rung())
-}
-
-// answer is Answer at rung r, so this package's tests can try every rung.
-func (an Answerer) answer(ctx context.Context, a call.Ask, r call.Rung) (<-chan string, error) {
 	facts, err := an.Reads.Read(ctx, a)
 	if err != nil {
 		return nil, err
 	}
-	return an.Writer.Write(ctx, a, Admit(r, facts))
+	return an.Writer.Write(ctx, a, admit(a.Rung(), facts))
 }
 
-// Admit returns the facts rung r may hear. P2 hears every fact. Any other
+// admit returns the facts rung r may hear. P2 hears every fact. Any other
 // rung, P1 and a rung this package does not know included, hears only facts
 // whose every label is Status, so an unlabelled fact, or one that mixes the
 // status with anything else, is held back.
-func Admit(r call.Rung, facts []Fact) []Fact {
+func admit(r call.Rung, facts []Fact) []Fact {
 	var out []Fact
 	for _, f := range facts {
 		if r == call.P2 || statusOnly(f.Labels) {
