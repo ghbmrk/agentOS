@@ -21,8 +21,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// Rung is the proof an owner event carries (rearchitecture note §2.1). The
-// call sets it, never the transcript.
+// Rung names what an owner event has proved (rearchitecture note §2.1). It
+// is a label: a Rung value proves nothing. What a call has proved reaches
+// the answerer only through Ask.Rung, which reads the call's grant.
 type Rung int
 
 const (
@@ -68,12 +69,19 @@ type Recognizer interface {
 	Listen(ctx context.Context, speech <-chan []byte) <-chan Heard
 }
 
-// Ask is one owner turn handed to the answerer.
+// Ask is one owner turn handed to the answerer. Its rung is read with
+// Rung; only this package can set it.
 type Ask struct {
 	Text string
-	Rung Rung
 	Turn int
+	rung *grant
 }
+
+// Rung is the rung of the call that asked: P2 if its token checked, until
+// that call's Serve has returned, and P0 otherwise, so an Ask kept from one
+// call never vouches for a later one. An Ask built outside this package is
+// P0.
+func (a Ask) Rung() Rung { return a.rung.level() }
 
 // Answerer writes the answer as text. Wired to read keys only; the rung
 // bounds what it may disclose. The channel closes at the end of the answer.
@@ -137,7 +145,8 @@ type Turn struct {
 	Err     error
 }
 
-// Report is what one call did.
+// Report is what one call did. Rung records the call's rung once the token
+// was read; it is a record, not a proof.
 type Report struct {
 	Rung  Rung
 	Turns []Turn
@@ -169,8 +178,8 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	}
 	cfg = cfg.withDefaults()
 	tctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	token := make(chan Rung, 1)
+	defer cancel() // ends the token read, and with it the call's grant
+	token := make(chan *grant, 1)
 	go func() { token <- cfg.token(tctx, c) }()
 	return loop(ctx, cfg, c, token)
 }
@@ -180,10 +189,10 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 // (flip-phone note §2.1). Keys up to '#', MaxToken keys, or the end of
 // TokenWindow are the token, checked once by cfg.Token; they reach nothing
 // else, and none of them is STOP. A call whose token does not check, or
-// that keys none, stays at P0.
-func (cfg Config) token(ctx context.Context, l Line) Rung {
+// that keys none, stays at P0. A grant lives as long as ctx.
+func (cfg Config) token(ctx context.Context, l Line) *grant {
 	if cfg.Token == nil {
-		return P0
+		return nil
 	}
 	active, keys := l.Active(), l.Keys()
 	var window <-chan time.Time // opens when the call is up
@@ -195,50 +204,77 @@ func (cfg Config) token(ctx context.Context, l Line) Rung {
 			window = cfg.After(cfg.TokenWindow)
 		case k, ok := <-keys:
 			if !ok {
-				return P0
+				return nil
 			}
 			if k == '#' {
-				return cfg.check(b.String())
+				return check(cfg, ctx.Done(), b.String())
 			}
 			b.WriteByte(k)
 		case <-window:
-			return cfg.check(b.String())
+			return check(cfg, ctx.Done(), b.String())
 		case <-ctx.Done(): // Serve's, ended when the call ends
-			return P0
+			return nil
 		}
 	}
-	return cfg.check(b.String())
+	return check(cfg, ctx.Done(), b.String())
 }
 
-func (cfg Config) check(token string) Rung {
-	if token != "" && cfg.Token(token) {
-		return P2
+// check is the one place a grant is made: P2 when the kernel's Token
+// accepts the keys, until live closes. Only token calls it.
+func check(cfg Config, live <-chan struct{}, keys string) *grant {
+	if keys != "" && cfg.Token(keys) {
+		return &grant{r: P2, live: live}
 	}
-	return P0
+	return nil
 }
 
-// callRung is the call's rung as the turns see it: ready closes once it is
-// known, and r is fixed from then on.
+// grant is what a call has proved, and the only thing that lets the
+// answerer hear more than P0. Its type is unexported, so no other package
+// can make one, and in this package only check makes one and nothing
+// writes its fields (TestOnlyServeChoosesTheRung). So every grant is
+// either check's or a zero value, and a copy of either is the same: no
+// write can mint one or stretch its life.
+type grant struct {
+	r    Rung
+	live <-chan struct{} // closed when Serve returns
+}
+
+// level is the grant's rung while its call is live, and P0 otherwise: for
+// no grant, a zero grant (whose live is nil), or once live has closed.
+func (g *grant) level() Rung {
+	if g == nil || g.live == nil {
+		return P0
+	}
+	select {
+	case <-g.live:
+		return P0
+	default:
+		return g.r
+	}
+}
+
+// callRung is the call's grant as the turns see it: ready closes once the
+// token is read, and g is fixed from then on.
 type callRung struct {
 	ready chan struct{}
-	r     Rung
+	g     *grant
 }
 
 // loop holds one call until it ends or ctx is done. Turns are answered one
 // at a time: a new final turn, any speech from the owner, or the 0 key
-// stops the answer being spoken first. The call is at P0 until its rung
-// comes on token, and token is the loop's only rung input. loop is a plain
-// unexported function, not a method, so no interface or type constraint can
-// name it: code reaches it only by naming it, and Serve, which fills token
-// from the speed-dial check, is the one place that does (briefs/VOICE-ro.md
-// rule 4, #4949; TestOnlyServeChoosesTheRung).
+// stops the answer being spoken first. The call is at P0 until its grant
+// comes on token. loop is a plain unexported function, not a method, so no
+// interface or type constraint can name it: code reaches it only by naming
+// it, and Serve, which answers only the owner's number and fills token from
+// the speed-dial check, is the one place that does (briefs/VOICE-ro.md rule
+// 4, #4949; TestOnlyServeChoosesTheRung).
 //
 // It listens from the start, so the owner's first words are heard while
 // the token is read; keys are the token's until it is read. A turn starts
 // as soon as it is heard, whether or not the rung is known yet, so its one
 // clip deadline covers the wait for the rung as well as the answerer and
 // the synthesizer (rule 5; UX on #4944).
-func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, error) {
+func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report, error) {
 	rep := Report{Rung: P0}
 	select {
 	case <-l.Active():
@@ -252,14 +288,14 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, e
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
 	cr := &callRung{ready: make(chan struct{})}
 	var keys <-chan byte // nil while the token is read
-	known := func(r Rung) {
-		cr.r = r
+	known := func(g *grant) {
+		cr.g = g
 		close(cr.ready)
-		rep.Rung, token, keys = r, nil, l.Keys()
+		rep.Rung, token, keys = g.level(), nil, l.Keys()
 	}
-	select { // a rung already on token is known before the first turn can start
-	case r := <-token:
-		known(r)
+	select { // a grant already on token is known before the first turn can start
+	case g := <-token:
+		known(g)
 	default:
 	}
 
@@ -325,8 +361,8 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, e
 			return rep, nil
 		case <-done:
 			finish()
-		case r := <-token:
-			known(r)
+		case g := <-token:
+			known(g)
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop(false)
@@ -408,7 +444,7 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 		rung = nil
 		*asked = true
 		sounds = make(chan sound)
-		go cfg.produce(pctx, Ask{Text: text, Rung: cr.r, Turn: n}, sounds)
+		go cfg.produce(pctx, Ask{Text: text, Turn: n, rung: cr.g}, sounds)
 	}
 	select { // a known rung asks the answerer before the deadline is set
 	case <-rung:

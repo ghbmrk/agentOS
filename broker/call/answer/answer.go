@@ -45,13 +45,19 @@ type Answerer struct {
 }
 
 // Answer reads, admits what the ask's rung may hear, and has the writer word
-// the answer from that alone. A failed read fails the turn.
+// the answer from that alone. A failed read fails the turn. The rung is
+// a.Rung(), read once: only package call can make an Ask above P0.
 func (an Answerer) Answer(ctx context.Context, a call.Ask) (<-chan string, error) {
+	return an.answer(ctx, a, a.Rung())
+}
+
+// answer is Answer at rung r, so this package's tests can try every rung.
+func (an Answerer) answer(ctx context.Context, a call.Ask, r call.Rung) (<-chan string, error) {
 	facts, err := an.Reads.Read(ctx, a)
 	if err != nil {
 		return nil, err
 	}
-	return an.Writer.Write(ctx, a, Admit(a.Rung, facts))
+	return an.Writer.Write(ctx, a, Admit(r, facts))
 }
 
 // Admit returns the facts rung r may hear. P2 hears every fact. Any other
