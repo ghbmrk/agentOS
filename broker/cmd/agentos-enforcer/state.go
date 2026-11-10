@@ -302,8 +302,9 @@ func (d *Enforcer) closeFresh() {
 // (#5284), the policy in
 // force's that dns.Generate refused, and the last refused load's error
 // (ENF-l-11, ENF-l-21; #5164 R1) with the step that refused it (R5 d).
-// While instances run, each that keeps exiting is shown instead (R5 b),
-// read from dns/run, which the page waits on only for its own lock.
+// While instances run, each that keeps exiting or failing to start is
+// shown instead (R5 b), read from dns/run, which the page waits on only
+// for its own lock.
 type pageResolver struct{ d *Enforcer }
 
 func (p pageResolver) Stopped() page.ResolverStop {
@@ -340,8 +341,8 @@ func (p pageResolver) Stopped() page.ResolverStop {
 	return out
 }
 
-// restartOf is one instance that keeps exiting as the page words it, by
-// dns/run's instance names (dnsrun.Names).
+// restartOf is one instance that keeps exiting or failing to start as the
+// page words it, by dns/run's instance names (dnsrun.Names).
 func restartOf(f dnsrun.Flap) page.Restart {
 	r := page.Restart{Exits: f.Exits}
 	if iface, ok := strings.CutPrefix(f.Name, "listed-"); ok {

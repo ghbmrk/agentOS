@@ -116,9 +116,9 @@ type ResolverStop struct {
 	// is the step that refused it (#5164 R5 d).
 	Load   string
 	LoadBy LoadStep
-	// Restarting is each instance that runs on the policy in force but
-	// keeps exiting, shown while Stopped is false: a process that is up
-	// between exits does not make it a resolver that runs (#5164 R5 b).
+	// Restarting is each instance in force that keeps exiting or failing
+	// to start, shown while Stopped is false: a process that is up between
+	// exits does not make it a resolver that runs (#5164 R5 b).
 	Restarting []Restart
 }
 
@@ -400,9 +400,10 @@ func plainUnset(u Unset) string {
 	return "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
 }
 
-// plainRestart is one instance that keeps exiting in the owner's words:
-// what goes missing while it is down, how many times in a row, and that
-// it is started again (dns/run backs off up to 30 seconds).
+// plainRestart is one instance that keeps exiting or failing to start in
+// the owner's words: what goes missing while it is down, how many times
+// in a row, and that it is started again (dns/run backs off up to 30
+// seconds).
 func plainRestart(r Restart) string {
 	what := "Part of the enforcer's name and address service"
 	switch r.Part {
