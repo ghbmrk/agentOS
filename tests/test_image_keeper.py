@@ -626,6 +626,10 @@ class KeeperTreeTest(unittest.TestCase):
                                                             "DirectoryMode=0777\n"},
              "/var/lib/w/x", "below a step PID 1 may make for anyone to write (for /var/lib/w/src, What= in %ssrv-m.mount"
              % SYSTEM),
+            # An overlay's upperdir= is made too; a word holding ',' counts cut there (mount options).
+            ("StateDirectory=ov", {SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
+                                                           "Options=lowerdir=/usr,upperdir=/var/lib/ov,workdir=/srv/w\n"},
+             "/var/lib/ov", "where PID 1 may make, link or mount /var/lib/ov (Options= in %ssrv-o.mount)" % SYSTEM),
             ("StateDirectory=so", {SYSTEM + "so.service": "[Service]\nStandardOutput=file:/var/lib/so\n"}, "/var/lib/so",
              "where PID 1 may make, link or mount /var/lib/so (StandardOutput= in %sso.service)" % SYSTEM),
             # A namespace mount point is made only by root, 0755, so it may sit above the directory, not at it.
@@ -685,10 +689,10 @@ class KeeperTreeTest(unittest.TestCase):
             # names (PID1_NAMES) may name the directory or a step of its way.
             ("StateDirectory=rd", {SYSTEM + "r.service": "[Unit]\nDescription=/var/lib/rd\nDocumentation=file:/var/lib/rd\n"
                                    "RequiresMountsFor=/var/lib/rd\nWantsMountsFor=/var/lib/rd\nConditionPathExists=/var/lib\n"
-                                   "AssertPathExists=/var/lib/rd\n[Service]\nEnvironmentFile=-/var/lib/rd/env\n"
+                                   "AssertPathExists=/var/lib/rd\n[Service]\nEnvironmentFile=-/var/lib/rd\n"
                                    "ReadOnlyPaths=/var/lib/rd\nReadWritePaths=/var/lib\nInaccessiblePaths=/var/lib/rd\n"
-                                   "ExecPaths=/var/lib/rd\nNoExecPaths=/var/lib/rd\nTTYPath=/var/lib/rd/tty\n"
-                                   "UtmpIdentifier=/var/lib/rd\nExecStart=/var/lib/rd/x\nExecStartPre=/var/lib/rd/y\n"
+                                   "ExecPaths=/var/lib/rd\nNoExecPaths=/var/lib/rd\nTTYPath=/var/lib/rd\n"
+                                   "UtmpIdentifier=/var/lib/rd\nExecStart=/var/lib/rd\nExecStartPre=/var/lib/rd\n"
                                    + "".join("%s=/var/lib/rd\n" % k for k in (
                                        "After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "PartOf", "Upholds",
                                        "Conflicts", "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom",
