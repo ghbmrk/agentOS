@@ -264,7 +264,7 @@ func (d *Enforcer) openChannel(at func(string) string) error {
 	d.chCfg = channel.Config{
 		Core: d.core, Key: priv, Revoked: d.heads.Revoked,
 		Policy: lockedPolicy{d}, Radio: d.dp.Radio, Heads: d.heads, Alerts: d.alerts, Cut: d.cut,
-		Log: d.event, Now: d.dp.Now, Elapsed: d.dp.Elapsed,
+		Log: d.event, Connected: d.connected, Now: d.dp.Now, Elapsed: d.dp.Elapsed,
 		Traffic: d.trafficRead, Counts: d.counts,
 	}
 	if d.ch, err = channel.New(d.chCfg); err != nil {
@@ -297,17 +297,21 @@ func (d *Enforcer) event(e channel.Event) {
 		d.coreSeen.Store(int64(d.dp.Elapsed()) + 1)
 	}
 	d.dp.Logf(e.At.In(d.cfg.zone).Format("2006-01-02 15:04 MST") + " channel " + e.Line())
-	if e.Kind == channel.KindHello && e.Code != wire.Refused {
-		// A session the core just authenticated: offer it every alert no
-		// session took, even when Tick never saw the core go down (a
-		// reconnect inside Silence). The log runs outside the channel's
-		// lock, so the offer may use the channel. toldUp records it, so
-		// a tick that then finds the core silent shows it down.
-		d.upMu.Lock()
-		d.toldUp = true
-		d.alerts.Core(true)
-		d.upMu.Unlock()
-	}
+}
+
+// connected is the channel's hook for a session the core just
+// authenticated: the core is seen, and every alert no session took is
+// offered to it, even when Tick never saw the core go down (a reconnect
+// inside Silence) and when a cut core's bucket dropped the hello's log
+// line (#4903). It runs outside the channel's lock, so the offer may use
+// the channel. toldUp records it, so a tick that then finds the core
+// silent shows it down.
+func (d *Enforcer) connected() {
+	d.coreSeen.Store(int64(d.dp.Elapsed()) + 1)
+	d.upMu.Lock()
+	d.toldUp = true
+	d.alerts.Core(true)
+	d.upMu.Unlock()
 }
 
 // coreUp reports whether the core spoke within Silence.

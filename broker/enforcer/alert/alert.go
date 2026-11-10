@@ -180,7 +180,8 @@ type Status struct {
 // required.
 type Config struct {
 	// Send hands a text or call to the kernel for the owner line:
-	// channel.Channel.Alert.
+	// channel.Channel.Alert. It is called under the offer lock, so it
+	// must not raise a text or call itself.
 	Send func(wire.Alert) error
 	// Light is the bulb.
 	Light   Light
@@ -221,6 +222,12 @@ type Alerts struct {
 
 	// lightMu orders light updates so a stale colour never lands last.
 	lightMu sync.Mutex
+
+	// offerMu makes reading whether an alert is unsent and offering it
+	// one step: held from that read until the kernel's answer is
+	// recorded, so two callers (Raise, Core) never offer the same
+	// telling twice (#4903). It is taken before mu, never under it.
+	offerMu sync.Mutex
 }
 
 // New builds the alerts from the journal and shows the light. The core
@@ -326,7 +333,9 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	if d != LogOnly {
 		a.show()
 		if tell {
-			r = a.send(r)
+			a.offerMu.Lock()
+			r = a.offer(r.ID)
+			a.offerMu.Unlock()
 		}
 	}
 	return r, werr
@@ -341,33 +350,37 @@ func (a *Alerts) open(k Kind, device string) int {
 	return -1
 }
 
-// send offers r to the kernel and records whether it took it. A refusal
-// changes nothing else: the alert stays open (a trip's light red), and
-// Core offers it again when the core is back.
-func (a *Alerts) send(r Record) Record {
+// offer offers alert id to the kernel, unless it is resolved or the
+// kernel took its latest telling already, records whether it took it, and returns the alert's latest
+// state. A refusal changes nothing else: the alert
+// stays open (a trip's light red), and Core offers it again when the core
+// is back. The caller holds offerMu, so the unsent state it reads stays
+// unsent until the kernel's answer is recorded.
+func (a *Alerts) offer(id uint64) Record {
+	a.mu.Lock()
+	r := a.log[a.byID[id]]
+	a.mu.Unlock()
+	if !r.Open || r.Sent {
+		return r
+	}
 	d, _ := r.Kind.Delivery()
 	w := wire.Alert{Kind: wire.AlertText, Text: r.Text}
 	if d == Call {
 		w.Kind = wire.AlertCall
 	}
-	if a.cfg.Send(w) != nil {
-		return r
-	}
+	err := a.cfg.Send(w)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	i, ok := a.byID[r.ID]
-	if !ok {
-		return r
-	}
-	if a.log[i].Sent || !a.log[i].Told.Equal(r.Told) {
-		return a.log[i] // already taken, or a newer telling owns the flag
+	i := a.byID[id]
+	if err != nil || !a.log[i].Told.Equal(r.Told) {
+		return a.log[i] // refused, or a Raise's newer telling owns the flag
 	}
 	s := a.log[i]
 	s.Sent = true
 	if a.write(s) == nil {
 		a.put(s)
 	}
-	return a.log[a.byID[r.ID]]
+	return a.log[i]
 }
 
 // SafetyOff is the channel's hook: a channel command turned a heater off
@@ -445,22 +458,29 @@ func (a *Alerts) Lifted(device string) error {
 
 // Core sets whether the core is up (slice l, from the channel and the
 // heartbeat), for the page; the light does not show it (D-254). Coming
-// up, every open alert the kernel never took is offered again.
+// up, every open alert the kernel never took is offered again, under the
+// offer lock, so one a concurrent Raise or Core is offering is not
+// offered twice.
 func (a *Alerts) Core(up bool) {
 	a.mu.Lock()
 	a.coreDown = !up
-	var unsent []Record
-	if up {
-		for _, r := range a.log {
-			if r.Open && !r.Sent {
-				unsent = append(unsent, r)
-			}
+	a.mu.Unlock()
+	a.show()
+	if !up {
+		return
+	}
+	a.offerMu.Lock()
+	defer a.offerMu.Unlock()
+	a.mu.Lock()
+	var unsent []uint64
+	for _, r := range a.log {
+		if r.Open && !r.Sent {
+			unsent = append(unsent, r.ID)
 		}
 	}
 	a.mu.Unlock()
-	a.show()
-	for _, r := range unsent {
-		a.send(r)
+	for _, id := range unsent {
+		a.offer(id)
 	}
 }
 
