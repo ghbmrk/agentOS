@@ -98,15 +98,13 @@ func (m *memStore) Save(b []byte) error {
 
 // fakeAlerts records what enrolment told the owner.
 type fakeAlerts struct {
-	raised   []alert.Kind
-	recovery bool
+	raised []alert.Kind
 }
 
 func (f *fakeAlerts) Raise(k alert.Kind, _ string) (alert.Record, error) {
 	f.raised = append(f.raised, k)
 	return alert.Record{}, nil
 }
-func (f *fakeAlerts) Recovery(p bool) { f.recovery = p }
 
 // accessPoint is slice g's access point as the daemon wires it: the keys
 // and the configuration they render.
@@ -383,8 +381,8 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	if want := g.now.Add(Wait); !res.Due.Equal(want) || len(res.Recovery) != CodeLen || res.Recovery == code {
 		t.Errorf("result %+v, want due %v", res, want)
 	}
-	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeUsed}) || !g.alerts.recovery {
-		t.Errorf("at start: alerts %v, pending %v", g.alerts.raised, g.alerts.recovery)
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeUsed}) {
+		t.Errorf("at start: alerts %v", g.alerts.raised)
 	}
 	if due, ok := g.b.Recovery(); !ok || !due.Equal(res.Due) {
 		t.Error("the page does not show the recovery pending")
@@ -395,9 +393,8 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	}
 	// Not before the wait, across a restart too.
 	g.now = g.now.Add(Wait - time.Millisecond)
-	g.alerts.recovery = false
 	g.reopen()
-	if !g.alerts.recovery {
+	if due, ok := g.b.Recovery(); !ok || !due.Equal(res.Due) {
 		t.Error("the page lost the recovery pending on restart")
 	}
 	if done, err := g.b.Tick(); done || err != nil || g.b.Owner() != a.Public() {
@@ -409,8 +406,11 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.now = g.now.Add(time.Hour)
-	if done, _ := g.b.Tick(); done || g.b.Owner() != a.Public() || g.alerts.recovery {
+	if done, _ := g.b.Tick(); done || g.b.Owner() != a.Public() {
 		t.Fatal("a cancelled recovery applied")
+	}
+	if _, ok := g.b.Recovery(); ok {
+		t.Fatal("a cancelled recovery still shows")
 	}
 	// The code that started it is spent: it cannot start another, and
 	// neither can the code the cancelled replacement was shown.
@@ -437,7 +437,7 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	if done, err := g.b.Tick(); !done || err != nil {
 		t.Fatalf("not applied at Wait: %v", err)
 	}
-	if g.b.Owner() != b.Public() || g.b.Kept() || g.alerts.recovery || g.alerts.raised[len(g.alerts.raised)-1] != alert.Enrolment {
+	if _, ok := g.b.Recovery(); ok || g.b.Owner() != b.Public() || g.b.Kept() || g.alerts.raised[len(g.alerts.raised)-1] != alert.Enrolment {
 		t.Fatalf("after Wait: owner %v kept %v alerts %v", g.b.Owner(), g.b.Kept(), g.alerts.raised)
 	}
 	if len(g.e.Pending()) != 0 {
@@ -557,13 +557,16 @@ func TestFactoryResetKeepsPolicyBlocksLoosening(t *testing.T) {
 
 	// A reset drops a recovery waiting, and the page stops showing it.
 	g3, _, code3 := enrolled(t)
-	if _, err := g3.enrol(newAuthenticator(t), code3); err != nil || !g3.alerts.recovery {
+	if _, err := g3.enrol(newAuthenticator(t), code3); err != nil {
 		t.Fatalf("recovery: %v", err)
+	}
+	if _, ok := g3.b.Recovery(); !ok {
+		t.Fatal("recovery: none waits")
 	}
 	if err := g3.b.FactoryReset(caseCode); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := g3.b.Recovery(); ok || g3.alerts.recovery {
+	if _, ok := g3.b.Recovery(); ok {
 		t.Error("a recovery still shows after the reset")
 	}
 
@@ -767,7 +770,7 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 		t.Errorf("the text names no deadline or way back: %q (want %q)", w, want)
 	}
 	g.reopen()
-	if _, ok := g.b.Recovery(); ok || g.alerts.recovery {
+	if _, ok := g.b.Recovery(); ok {
 		t.Error("a replacement waits after a stop before its save")
 	}
 	// Saved, the raise came first: the store saw it already raised.
@@ -1008,7 +1011,6 @@ func (t *teeAlerts) Raise(k alert.Kind, d string) (alert.Record, error) {
 	t.fake.Raise(k, d)
 	return t.real.Raise(k, d)
 }
-func (t *teeAlerts) Recovery(p bool) { t.fake.Recovery(p); t.real.Recovery(p) }
 
 // TestRetryCardSurvivesRestart (HW-10, ENF-c-7; ENF-c-f3 item 3): whether
 // a failed enrolment is a retry from the Owner network comes from the

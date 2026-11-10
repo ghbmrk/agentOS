@@ -1197,7 +1197,7 @@ func TestLifecycle(t *testing.T) {
 		if r["due"] == nil {
 			t.Fatalf("a recovery that does not wait: %v", r)
 		}
-		if !x.logged(alert.RecoveryCodeUsed) || !x.d.alerts.Status().Recovery {
+		if _, ok := x.d.book.Recovery(); !x.logged(alert.RecoveryCodeUsed) || !ok {
 			t.Fatal("the recovery is neither texted nor on the page")
 		}
 		if x.light.c != alert.Off {
@@ -1209,7 +1209,7 @@ func TestLifecycle(t *testing.T) {
 			t.Fatal("the replacement came into force before its wait")
 		}
 		x.advance(2 * time.Minute)
-		if x.d.book.Owner() != b.Public() || x.d.alerts.Status().Recovery {
+		if _, ok := x.d.book.Recovery(); x.d.book.Owner() != b.Public() || ok {
 			t.Fatal("the replacement did not come into force after its wait")
 		}
 		if w := x.b.approve(a, home()); w.Code == http.StatusOK {

@@ -11,8 +11,8 @@
 // alert: the enforcer's own log and page are the record. The light, a
 // Thread bulb only the enforcer drives, is saved for a known attack
 // (D-254): it shows red only while a trip at the enforcer (KRN-12) is
-// unresolved, whatever happened to its text. Every other alert, a pending
-// recovery and a silent core show on the page.
+// unresolved, whatever happened to its text. Every other alert and a
+// silent core show on the page.
 //
 // It is enforcer code: it imports the standard library and
 // broker/enforcer/wire only (broker/daemon/arc2_test.go). Its assumptions
@@ -172,7 +172,6 @@ type Record struct {
 // Status is the page's view and what the light shows.
 type Status struct {
 	Open     []Record
-	Recovery bool
 	CoreDown bool
 	Colour   Colour
 }
@@ -209,7 +208,6 @@ type Alerts struct {
 	log      []Record
 	byID     map[uint64]int
 	next     uint64
-	recovery bool
 	coreDown bool
 
 	// size is the journal's length after its last good append, so a
@@ -445,15 +443,6 @@ func (a *Alerts) Lifted(device string) error {
 	return err
 }
 
-// Recovery sets whether a recovery is pending (slice c), for the page; the
-// light does not show it (D-254).
-func (a *Alerts) Recovery(pending bool) {
-	a.mu.Lock()
-	a.recovery = pending
-	a.mu.Unlock()
-	a.show()
-}
-
 // Core sets whether the core is up (slice l, from the channel and the
 // heartbeat), for the page; the light does not show it (D-254). Coming
 // up, every open alert the kernel never took is offered again.
@@ -475,12 +464,12 @@ func (a *Alerts) Core(up bool) {
 	}
 }
 
-// Status is what the page shows: open alerts, a pending recovery, the
-// core down, and the light's colour.
+// Status is what the page shows: open alerts, the core down, and the
+// light's colour.
 func (a *Alerts) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Status{Recovery: a.recovery, CoreDown: a.coreDown}
+	s := Status{CoreDown: a.coreDown}
 	for _, r := range a.log {
 		if r.Open {
 			s.Open = append(s.Open, r)
