@@ -2,10 +2,11 @@
 
 The testable content is the spec text itself (D-082). **Use the defaults** never
 records consent; consent is a high-tier widening and a log entry; the low-tier code
-never stands in for it; a notice-paused route refuses `PLAN <plan> ON`.
+never stands in for it; a notice-paused route refuses `PLAN <plan> ON`. Since LOG-8
+the pause reasons and their lifts are one table, so the rung and lift checks read its rows.
 Ported from the CRED-5 consent test when SPEC v1.0 retired CRED-5 (Appendix A).
 """
-# REQ: CLK-7, CH-10, CH-11, ONB-9
+# REQ: CLK-7, CH-10, CH-11, ONB-9, LOG-8
 import pathlib
 import re
 import unittest
@@ -40,6 +41,25 @@ def onb9():
     return find(lambda l: l.startswith("- **ONB-9** "), "'- **ONB-9**' bullet")
 
 
+def log8():
+    return find(lambda l: l.startswith("- **LOG-8** "), "'- **LOG-8**' bullet")
+
+
+def log8_table():
+    lines = (ROOT / "SPEC.md").read_text().splitlines()
+    n = next(i for i, l in enumerate(lines, 1) if l.startswith("- **LOG-8** "))
+    rows = []
+    for l in lines[n:]:
+        if not l.strip():
+            if rows:
+                break
+            continue
+        if not l.lstrip().startswith("|"):
+            break
+        rows.append(re.sub(r"\s+", " ", l.strip()))
+    return n, "\n".join(rows)
+
+
 class Consent(unittest.TestCase):
     def check_unconfirmed(self, t, n):
         self.assertIn("never by **Use the defaults**", t,
@@ -48,29 +68,36 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CLK-7 later consent no longer takes the code-generator code")
         self.assertIn("Consent is a widening (KEY-4) at the high tier (CH-10)", t,
                       f"SPEC.md:{n} CLK-7 no longer names consent's tier")
-        self.assertIn('"ChatGPT plan paused until you say yes; using your other routes meanwhile."', t,
-                      f"SPEC.md:{n} CLK-7 lost the paused-until-yes line")
+        self.assertIn("An unconfirmed route carries the consent reason (LOG-8) unless consent stands", t,
+                      f"SPEC.md:{n} CLK-7 lets an unconfirmed route run before consent")
 
     def check_control(self, t, n):
-        self.assertIn("the low-tier code never stands in for it", t,
-                      f"SPEC.md:{n} CLK-7 lets the low-tier code stand in for consent")
-        self.assertIn("It applies to a route the owner paused, whose consent they withdrew or have not yet given, "
-                      "or whose login was refused", t,
-                      f"SPEC.md:{n} CLK-7 PLAN ON no longer applies to a route awaiting first consent")
-        self.assertIn("A route paused by a terms re-read or a security notice refuses "
-                      "`PLAN <plan> ON` until an update brings it back", t,
-                      f"SPEC.md:{n} CLK-7 lets a notice-paused route be resumed")
-        self.assertIn("Pause, consent and withdrawal take effect before the next run, are log entries", t,
+        self.assertIn("`PLAN <plan> ON` lifts the owner, login and consent reasons at their LOG-8 rungs, "
+                      "never a notice", t,
+                      f"SPEC.md:{n} CLK-7 PLAN ON no longer lifts consent at its rung, or lifts a notice")
+        self.assertIn("and on an unconfirmed route withdraws consent", t,
+                      f"SPEC.md:{n} CLK-7 PLAN OFF no longer withdraws consent on an unconfirmed route")
+        self.assertIn("Consent and its withdrawal are log entries", t,
                       f"SPEC.md:{n} CLK-7 consent is no longer logged")
+
+    def check_table(self, t, n):
+        self.assertIn("| consent | consent (P3) |", t,
+                      f"SPEC.md:{n} LOG-8 lets a rung below P3 lift the consent reason")
+        rows = [r for r in t.splitlines() if r.startswith("| ") and not r.startswith("| Reason ")]
+        consent_rows = [r for r in rows
+                        if "consent" in [x.strip() for x in r.split("|")[1].split(",")]]
+        self.assertEqual(len(consent_rows), 1,
+                         f"SPEC.md:{n} LOG-8 lets another table row lift the consent reason")
+        self.assertIn("| notice | an update |", t,
+                      f"SPEC.md:{n} LOG-8 lets something other than an update lift a notice")
+        self.assertIn("| stop | RESUME with a texted code (P1) |", t,
+                      f"SPEC.md:{n} LOG-8 no longer names RESUME's code")
 
     def check_ch11(self, t, n):
         self.assertIn("`PLAN <plan> OFF` pauses one and `PLAN <plan> ON` is its resume command (CLK-7)", t,
                       f"SPEC.md:{n} CH-11 no longer lists the plan route commands")
-        self.assertIn('("Not stopped. To turn your ChatGPT plan back on, reply PLAN ChatGPT ON.")', t,
-                      f"SPEC.md:{n} CH-11 bare RESUME no longer names the route command")
-        self.assertIn("when the owner paused that route, withdrew or has not yet given its consent, or had its login "
-                      "refused; for a route a security notice paused it replies with that route's STATUS line instead (CLK-7).", t,
-                      f"SPEC.md:{n} CH-11 bare RESUME names PLAN ON for a notice-paused route")
+        self.assertIn("A RESUME lifts only the stop reason, and its reply names any other in force with its lift (LOG-8).", t,
+                      f"SPEC.md:{n} CH-11 RESUME lifts more than STOP, or no longer names the other reasons' lifts")
 
     def check_step6(self, t, n):
         self.assertIn("outside **Use the defaults**, which never records consent", t,
@@ -83,12 +110,10 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} step 6 'plans first' line is not corrected for an unconsented plan")
 
     def check_onb9(self, t, n):
-        self.assertIn('"ChatGPT plan paused until you say yes; using your other routes meanwhile. '
-                      'Reply PLAN ChatGPT ON to agree."', t,
+        self.assertIn('"ChatGPT plan paused until you say yes. Reply PLAN ChatGPT ON to agree."', t,
                       f"SPEC.md:{n} ONB-9 lost the paused-until-yes line")
-        self.assertIn("A plan a security notice paused (CLK-7) offers no reply command; its line says only an update "
-                      "brings it back", t,
-                      f"SPEC.md:{n} ONB-9 offers PLAN ON for a notice-paused plan")
+        self.assertIn("A paused plan's line names its reason and its lift (LOG-8)", t,
+                      f"SPEC.md:{n} ONB-9 no longer names the lift, so a notice-paused plan may offer PLAN ON")
 
     def test_use_the_defaults_never_records_consent(self):
         for get, check in [(step6, self.check_step6), (unconfirmed, self.check_unconfirmed)]:
@@ -98,6 +123,8 @@ class Consent(unittest.TestCase):
     def test_consent_tier_log_and_notice_pause(self):
         n, t = control()
         self.check_control(t, n)
+        n, t = log8_table()
+        self.check_table(t, n)
 
     def test_resume_command_named(self):
         n, t = ch11()
@@ -112,16 +139,24 @@ class Consent(unittest.TestCase):
             (unconfirmed, self.check_unconfirmed, [
                 ("at the high tier (CH-10)", "at the low tier (CH-10)"),
                 ("never by **Use the defaults**", "or by **Use the defaults**"),
+                ("unless consent stands", "until consent stands"),
+                ("unless consent stands", "until it is used"),
             ]),
             (control, self.check_control, [
-                ("the low-tier code never stands in for it", "the low-tier code stands in for it"),
-                ("refuses `PLAN <plan> ON`", "accepts `PLAN <plan> ON`"),
-                ("whose consent they withdrew or have not yet given,", "whose consent they withdrew,"),
+                ("at their LOG-8 rungs", "with a low-tier code"),
+                ("never a notice", "and a notice"),
+                ("withdraws consent", "keeps consent"),
                 ("are log entries", "are kept in memory"),
             ]),
+            (log8_table, self.check_table, [
+                ("| consent | consent (P3) |", "| consent | consent (P1) |"),
+                ("| notice | an update |", "| notice | `PLAN … ON` |"),
+                ("RESUME with a texted code (P1)", "RESUME"),
+                ("| owner, login |", "| owner, login, consent |"),
+            ]),
             (ch11, self.check_ch11, [
-                ("reply PLAN ChatGPT ON.", "reply RESUME."),
-                ("replies with that route's STATUS line instead", "replies with that route's command too"),
+                ("lifts only the stop reason", "lifts every reason"),
+                (" with its lift (LOG-8)", " (LOG-8)"),
             ]),
             (step6, self.check_step6, [
                 ("which never records consent", "which also records consent"),
@@ -129,8 +164,7 @@ class Consent(unittest.TestCase):
             ]),
             (onb9, self.check_onb9, [
                 ("paused until you say yes", "in use"),
-                ("offers no reply command; its line says only an update brings it back",
-                 "says reply PLAN ChatGPT ON"),
+                ("names its reason and its lift", "names its reason"),
             ]),
         ]
         for get, check, muts in cases:
