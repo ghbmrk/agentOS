@@ -406,6 +406,7 @@ class Qemu:
         self.qmp_file.flush()
 
     def _read_qmp(self):
+        self.qmp_error = None
         try:
             for line in self.qmp_file:
                 msg = json.loads(line)
@@ -413,6 +414,15 @@ class Qemu:
                     self.events.append(msg)
         except OSError:
             pass  # QEMU quit
+        except Exception as e:  # noqa: BLE001 - any other end leaves events unread: _qmp_done fails the boot
+            self.qmp_error = e
+
+    def _qmp_done(self):
+        """Once QEMU has exited: fail unless the reader read every event QEMU sent, to EOF."""
+        self.qmp_reader.join(timeout=30)
+        if self.qmp_reader.is_alive() or self.qmp_error is not None:
+            raise HostcheckError(f"{self.label}: QMP events not read to the end "
+                                 f"({'reader still running' if self.qmp_reader.is_alive() else self.qmp_error!r})")
 
     def _read_serial(self):
         with open(self.work / f"console-{self.label}.log", "ab") as log:
@@ -455,11 +465,11 @@ class Qemu:
             raise HostcheckError(f"{self.label}: QEMU did not stop in time")
         finally:
             self.swtpm.wait(timeout=30)
-            self.qmp_reader.join(timeout=30)  # QEMU has exited: every event it sent is read
             shutil.rmtree(self.sock_dir, ignore_errors=True)
         (self.work / f"events-{self.label}.json").write_text(json.dumps(self.events, indent=1))
         stack_done(self.args, self.swtpm)
         stack_done(self.args, self.proc)
+        self._qmp_done()
         if self.proc.returncode:
             raise HostcheckError(f"{self.label}: QEMU exited {self.proc.returncode}")
         return guest_rtc_writes(self.events, self.os_starts)
@@ -578,9 +588,14 @@ def phase_flags(name, steps, flags):
 
 
 def power_cut_only(name, events, os_starts):
-    """Fail unless QEMU saw no orderly end in phase NAME's boot: no shutdown but the QMP quit, and
-    no reset once the OS started (firmware resets before it are the firmware's)."""
+    """Fail unless phase NAME's boot ended in the QMP quit, its last event and only shutdown, with no
+    reset once the OS started (firmware resets before it are the firmware's)."""
     stamp = lambda e: e["timestamp"]["seconds"] + e["timestamp"]["microseconds"] / 1e6
+    last = events[-1] if events else {}
+    if last.get("event") != "SHUTDOWN" or last.get("data", {}).get("reason") != "host-qmp-quit":
+        raise HostcheckError(f"phase {name!r} did not end in the QMP quit's SHUTDOWN, so not in a power cut")
+    if sum(e["event"] == "SHUTDOWN" for e in events) != 1:
+        raise HostcheckError(f"phase {name!r} shut down more than once, so not in a power cut")
     for e in events:
         reason = e.get("data", {}).get("reason")
         if e["event"] == "SHUTDOWN" and reason != "host-qmp-quit" or \

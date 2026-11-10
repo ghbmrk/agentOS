@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -258,10 +259,48 @@ class PhaseFlagsTest(unittest.TestCase):
         hostcheck.power_cut_only("unclean", [ev("RESET", 5, "guest-reset"), cut], [10.0])
         for events in ([ev("SHUTDOWN", 20, "guest-shutdown")], [ev("SHUTDOWN", 20, "guest-shutdown"), cut],
                        [ev("RESET", 20, "guest-reset"), cut], [ev("RESET", 10, "host-qmp-system-reset"), cut],
-                       [ev("SHUTDOWN", 20, "host-signal")]):
+                       [ev("SHUTDOWN", 20, "host-signal")],
+                       # No quit seen (a reader that lost events), a quit not last, or two quits.
+                       [], [ev("RESET", 5, "guest-reset")], [cut, ev("RTC_CHANGE", 31, None)], [cut, cut]):
             with self.subTest(events=events):
                 with self.assertRaisesRegex(hostcheck.HostcheckError, "not in a power cut"):
                     hostcheck.power_cut_only("unclean", events, [10.0])
+
+    def test_a_qmp_reader_that_stops_early_fails_the_boot(self):
+        # A line the reader cannot parse ends it before EOF: later events (a guest shutdown) would be
+        # lost and the phase judged on what came before, so the boot fails instead.
+        def reader(stream):
+            q = hostcheck.Qemu.__new__(hostcheck.Qemu)
+            q.label, q.events, q.qmp_file = "unclean", [], stream
+            q.qmp_reader = unittest.mock.Mock(is_alive=lambda: False)
+            q._read_qmp()
+            return q
+
+        import io
+        quit_ = b'{"event": "SHUTDOWN", "data": {"reason": "host-qmp-quit"}}\n'
+        q = reader(io.BytesIO(b'{"return": {}}\n' + quit_))
+        q._qmp_done()
+        self.assertEqual([e["event"] for e in q.events], ["SHUTDOWN"])
+        q = reader(io.BytesIO(b'not json\n{"event": "SHUTDOWN", "data": {"reason": "guest-shutdown"}}\n' + quit_))
+        self.assertEqual(q.events, [])
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "not read to the end"):
+            q._qmp_done()
+        with tempfile.TemporaryDirectory() as d:  # wait() checks it for every boot
+            q.work, q.sock_dir, q.os_starts = pathlib.Path(d), os.path.join(d, "s"), []
+            q.args = argparse.Namespace(tools_root=None, ld_log=None)
+            q.proc = unittest.mock.Mock(returncode=0)
+            q.swtpm = unittest.mock.Mock()
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "not read to the end"):
+                q.wait(time.monotonic() + 5)
+
+        class Broken(io.BytesIO):
+            def __iter__(self):
+                raise OSError("reset")  # QEMU gone: EOF by another name
+        reader(Broken())._qmp_done()
+        q = reader(io.BytesIO(quit_))
+        q.qmp_reader = unittest.mock.Mock(is_alive=lambda: True)
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "reader still running"):
+            q._qmp_done()
 
     def test_operator_cannot_flag_a_whole_qemu_run_unclean(self):
         with self.assertRaises(SystemExit):
