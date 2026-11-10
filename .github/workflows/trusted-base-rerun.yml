@@ -15,8 +15,10 @@ name: trusted-base-rerun
 # changed since the newest successful run of this workflow (not the push's `before`: a later
 # push's run can replace a pending one), nothing is rerun: no PR's measure can change, and a
 # conflict such a push causes fails the check, which GitHub's merge refuses anyway. A compare
-# that fails or lists 300 files or more reruns as before (#5224). An empty or malformed push time, a rerun or a listing that fails
-# marks this job red, so a stale green is visible on main. With bursts of pushes GitHub cancels a
+# that fails, lists 300 files or more, or is not `ahead` or `identical` (main was reset) reruns
+# as before; grep reads the list without a pipe, so only its "no match" skips (#5224). An empty
+# or malformed push time, a rerun or a listing that fails marks this job red, so a stale green
+# is visible on main. With bursts of pushes GitHub cancels a
 # pending run of this group; the run that replaces it reruns everything against a later main,
 # so no push is lost. It checks out nothing and runs no repository or PR code; its token may
 # rerun workflow runs and read PRs, nothing else. PRs that merge within one rerun's latency can
@@ -52,7 +54,7 @@ jobs:
           since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run's start"; exit 1; }
           measured='^(broker/|decisions/|(SPEC|DECISIONS)\.md$|\.gitattributes$|\.github/workflows/trusted-base\.yml$|tools/(trusted_base\.py|claims\.py|trusted_base_parsers\.txt|trusted_core\.txt|ceilings\.txt|old_core\.txt)$)'
           last=$(gh api "repos/$REPO/actions/workflows/trusted-base-rerun.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""') || { echo "::error::cannot list this workflow's runs"; exit 1; }
-          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq 'if (.files | length) < 300 then .files[] | .filename, (.previous_filename // empty) else "broker/" end') && ! printf '%s\n' "$changed" | grep -Eq "$measured"; then
+          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq 'if (.status == "ahead" or .status == "identical") and (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "broker/" end') && { grep -Eq "$measured" <<< "$changed"; [ $? = 1 ]; }; then
             printf '\n%s\n' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           failed=0 reran=0 missed=""

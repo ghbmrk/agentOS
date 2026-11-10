@@ -734,7 +734,7 @@ RERUN_PIN = [
     '          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run\'s start"; exit 1; }',
     "          measured='^(broker/|decisions/|(SPEC|DECISIONS)\\.md$|\\.gitattributes$|\\.github/workflows/trusted-base\\.yml$|tools/(trusted_base\\.py|claims\\.py|trusted_base_parsers\\.txt|trusted_core\\.txt|ceilings\\.txt|old_core\\.txt)$)'",
     '          last=$(gh api "repos/$REPO/actions/workflows/trusted-base-rerun.yml/runs?branch=main&event=push&status=success&per_page=1" --jq \'.workflow_runs[0].head_sha // ""\') || { echo "::error::cannot list this workflow\'s runs"; exit 1; }',
-    '          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq \'if (.files | length) < 300 then .files[] | .filename, (.previous_filename // empty) else "broker/" end\') && ! printf \'%s\\n\' "$changed" | grep -Eq "$measured"; then',
+    '          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq \'if (.status == "ahead" or .status == "identical") and (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "broker/" end\') && { grep -Eq "$measured" <<< "$changed"; [ $? = 1 ]; }; then',
     '            printf \'\\n%s\\n\' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0',
     '          fi',
     '          failed=0 reran=0 missed=""',
@@ -832,7 +832,8 @@ class Workflow(unittest.TestCase):
                          ("[0-9]{2}Z$ ]]", "[0-9]{2}Z ]]"),
                          ("if .conclusion == \\\"success\\\" then .started_at else null end", ".started_at"),
                          ("measured='^(broker/|", "measured='^("),
-                         ("&& ! printf", "&& printf"),
+                         ("[ $? = 1 ]", "[ $? != 0 ]"),
+                         ("(.status == \"ahead\" or .status == \"identical\") and ", ""),
                          ("&status=success&per_page=1", "&per_page=1"),
                          ("$last...$GITHUB_SHA", "$GITHUB_SHA~1...$GITHUB_SHA"),
                          ("(.files | length) < 300", "(.files | length) < 3000"),
@@ -926,7 +927,8 @@ class RerunScript(unittest.TestCase):
             write(self.tmp, "last", json.dumps(last))
         if compare is not None:
             write(self.tmp, "compare", json.dumps(
-                {"files": [{"filename": f} for f in compare]} if isinstance(compare, list) else compare))
+                {"status": "ahead", "files": [{"filename": f} for f in compare]} if isinstance(compare, list)
+                else compare))
         env = {**os.environ, "PATH": os.path.join(self.tmp, "bin") + os.pathsep + os.environ["PATH"],
                "STUB": self.tmp, "REPO": "o/r", "GITHUB_RUN_ID": "99", "GITHUB_SHA": "f" * 40, "ROUNDS": str(rounds), "WAIT": "0",
                "GITHUB_STEP_SUMMARY": os.path.join(self.tmp, "summary")}
@@ -1028,24 +1030,39 @@ class RerunScript(unittest.TestCase):
         # Nothing is rerun when no path the check reads changed since this workflow's newest
         # successful run (#5223's merge, run 42753132786, and 16 other pushes 11-07 to 11-10).
         prs, runs = [(1, "a1")], {"a1": ["11 completed"]}
-        for changed in ([], ["BOARD.md"], ["docs/OPERATING.md", "tools/ASSUMPTIONS.md", "tests/test_trusted_base.py",
+        for changed in ([], {"status": "identical", "files": []}, ["BOARD.md"], ["docs/OPERATING.md", "tools/ASSUMPTIONS.md", "tests/test_trusted_base.py",
                                            ".github/workflows/trusted-base-rerun.yml", "briefs/broker.md"]):
             rc, out, reran = self.run_script(prs, runs, last=self.LAST, compare=changed)
             self.assertEqual((rc, reran), (0, []), (changed, out))
             self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(),
                              f"\nNo path the check reads changed since {'e' * 40}; nothing rerun.\n")
-        # Any listed path, a rename away from one, 300 files or more, a compare that fails or has
-        # no files, and no earlier successful run (or one that is not a commit id) rerun as before.
+        # Any listed path, a rename away from one, 300 files or more, a compare that fails, has no
+        # files or is not ahead or identical (main reset), and no earlier successful run (or one
+        # that is not a commit id) rerun as before.
         for changed, last in [(["docs/a.md", "broker/x/y.go"], self.LAST), (["SPEC.md"], self.LAST),
                               (["decisions/D-1.md"], self.LAST), ([".gitattributes"], self.LAST),
                               (["tools/old_core.txt"], self.LAST),
-                              ({"files": [{"filename": "docs/b.md", "previous_filename": "DECISIONS.md"}]}, self.LAST),
-                              ({"files": [{"filename": f"docs/{i}.md"} for i in range(300)]}, self.LAST),
+                              ({"status": "ahead", "files": [{"filename": "docs/b.md",
+                                                              "previous_filename": "DECISIONS.md"}]}, self.LAST),
+                              ({"status": "ahead", "files": [{"filename": f"docs/{i}.md"} for i in range(300)]},
+                               self.LAST),
+                              ({"status": "behind", "files": []}, self.LAST),
+                              ({"status": "diverged", "files": [{"filename": "docs/a.md"}]}, self.LAST),
+                              ({"files": [{"filename": "docs/a.md"}]}, self.LAST),
+                              # Security on f4bf05b6: over 64 KB with an early match, a pipe into
+                              # grep -q took SIGPIPE under pipefail and read as no match.
+                              (["broker/x.go"] + [f"docs/{i:0240d}" for i in range(298)], self.LAST),
                               (None, self.LAST), ({"status": "identical"}, self.LAST),
                               (["docs/a.md"], {"workflow_runs": []}),
                               (["docs/a.md"], {"workflow_runs": [{"head_sha": "main"}]})]:
             rc, out, reran = self.run_script(prs, runs, last=last, compare=changed)
             self.assertEqual((rc, reran), (0, ["11"]), (changed, last, out))
+        # Only grep's "no match" (1) skips; an error (2) reruns.
+        write(self.tmp, "bin/grep", '#!/bin/bash\n[ "$1" = -Eq ] && exit 2\nexec /usr/bin/env -S "PATH=/usr/bin:/bin" grep "$@"\n')
+        os.chmod(os.path.join(self.tmp, "bin/grep"), 0o755)
+        rc, out, reran = self.run_script(prs, runs, last=self.LAST, compare=["docs/a.md"])
+        self.assertEqual((rc, reran), (0, ["11"]), out)
+        os.unlink(os.path.join(self.tmp, "bin/grep"))
         rc, out, reran = self.run_script(prs, runs, last=None, compare=[])
         self.assertEqual((rc, reran), (1, []), out)
         self.assertIn("cannot list this workflow's runs", out)
@@ -1066,15 +1083,11 @@ class RerunScript(unittest.TestCase):
         tools = ("tools/trusted_base.py", "tools/claims.py")
         reads = {*tools, ".github/workflows/trusted-base.yml", ".gitattributes"}
         for name in tools:
-            for node in ast.walk(ast.parse((ROOT / name).read_text())):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    s = node.value.strip().lstrip("./")
-                    if not s or re.search(r"\s", s):
-                        continue
-                    if (ROOT / s.split("/")[0]).exists():
-                        reads.add(s)
-                    elif (ROOT / "broker" / s.split("/")[0]).exists():
-                        reads.add("broker/" + s)
+            reads |= path_constants((ROOT / name).read_text())
+        # L3 on f4bf05b6: a dot-entry keeps its dot, bytes count, and "./" is a prefix, not a set.
+        self.assertEqual(path_constants("a = '.github/CODEOWNERS'\nb = b'PLAN.md'\nc = f'{d}/./SPEC.md'\n"
+                                        "e = './go.mod'\nf = 'two words/x'\ng = 'nowhere/x'\n"),
+                         {".github/CODEOWNERS", "PLAN.md", "SPEC.md", "broker/go.mod"})
         self.assertTrue({"SPEC.md", "DECISIONS.md", "decisions", "broker", "broker/go.mod", tb.CORE, tb.REGISTRY,
                          tb.CORE_LIST, tb.CEILINGS, tb.OLD_CORE} <= reads, reads)
         reads |= {l.strip() for l in (ROOT / tb.OLD_CORE).read_text().splitlines()
@@ -1084,6 +1097,26 @@ class RerunScript(unittest.TestCase):
                       (ROOT / ".github/workflows/trusted-base.yml").read_text())
         for name in ("BOARD.md", "METRICS.md", "TRACE.md", "tools/ASSUMPTIONS.md", "docs/SPEC.md", "xbroker/a.go"):
             self.assertFalse(covered(name), name)
+
+def path_constants(source):
+    """Each str or bytes constant in Python `source` (f-string parts too) that reads as a repository
+    path: no whitespace, and its first part, after any "./" or "/" and other than "." or "..",
+    names an entry at the root or, as a broker/-relative path, in broker/."""
+    out = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            s = node.value.decode("utf-8", "replace") if isinstance(node.value, bytes) else node.value
+            s = s.strip()
+            while s.startswith(("./", "/")):
+                s = s.removeprefix("./").removeprefix("/")
+            if s.split("/")[0] in ("", ".", "..") or re.search(r"\s", s):
+                continue
+            if (ROOT / s.split("/")[0]).exists():
+                out.add(s)
+            elif (ROOT / "broker" / s.split("/")[0]).exists():
+                out.add("broker/" + s)
+    return out
+
 
 def merge_steps():
     """The workflow's lines from the merge to the worktrees, as one bash script."""
