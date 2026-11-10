@@ -11,6 +11,7 @@ on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
 import contextlib
 import io
+import itertools
 import os
 import pathlib
 import re
@@ -877,46 +878,6 @@ class KeeperTreeTest(unittest.TestCase):
              "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
             (dict(journald, **sock, **{etc + "jj.service": ("link", "/usr/lib/systemd/system/systemd-journald.service")}),
              "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
-            # The other form is the same directory (#5350 Security 6778501910): a non-root unit's a:b link at the
-            # private form of a root unit's directory, and a root unit's link at a dynamic unit's.
-            ({q: "[Service]\nUser=nobody\nStateDirectory=hqn:private/hq\n", SYSTEM + "r.service": "[Service]\nStateDirectory=hq\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/hq/sock\nSocketUser=nobody\n"},
-             "var/lib/private/hq/sock", "var/lib/private/hq",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %s)" % q,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            ({SYSTEM + "a.service": "[Service]\nStateDirectory=zq:private/zz\n", q: "[Service]\nStateDirectory=zz\nDynamicUser=yes\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/zz/sock\n"},
-             "var/lib/private/zz/sock", "var/lib/private/zz",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            # A root unit's a:b link stands in for no directory another unit makes (#5350 Security 6780012845):
-            # both sides of a word, in both forms, under any top, are one directory, joined transitively.
-            ({SYSTEM + "a.service": "[Service]\nStateDirectory=q:hq\n", SYSTEM + "b.service": "[Service]\nUser=nobody\nStateDirectory=q\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/hq/sock\nSocketUser=nobody\n"},
-             "var/lib/hq/sock", "var/lib/hq",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            ({SYSTEM + "a.service": "[Service]\nStateDirectory=q:private/hq\n", SYSTEM + "b.service": "[Service]\nUser=nobody\nStateDirectory=q\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/hq/sock\n"},
-             "var/lib/private/hq/sock", "var/lib/private/hq",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            ({SYSTEM + "a.service": "[Service]\nStateDirectory=q:hq\n", SYSTEM + "b.service": "[Service]\nDynamicUser=yes\nStateDirectory=q\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/hq/sock\n"},
-             "var/lib/hq/sock", "var/lib/hq",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            ({SYSTEM + "a.service": "[Service]\nRuntimeDirectory=q:hq\n", SYSTEM + "b.service": "[Service]\nUser=nobody\nRuntimeDirectory=q\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/run/hq/sock\n"},
-             "run/hq/sock", "run/hq",
-             "systemd makes for a unit and may hand to a user other than root (RuntimeDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
-            ({SYSTEM + "a.service": "[Service]\nStateDirectory=m:hq\n", SYSTEM + "c.service": "[Service]\nStateDirectory=q:private/m\n",
-              SYSTEM + "d.service": "[Service]\nUser=nobody\nStateDirectory=x q\n",
-              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/hq/sock\n"},
-             "var/lib/hq/sock", "var/lib/hq",
-             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
-             "ListenStream= in %ss.socket" % SYSTEM),
             # A tmpfiles.d or tree link, or a tree file, at the directory a root unit makes.
             ({SYSTEM + "rf.service": "[Service]\nStateDirectory=rf\n", "var/lib/rf": "",
               SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/rf/sock\n"},
@@ -981,9 +942,6 @@ class KeeperTreeTest(unittest.TestCase):
                             SYSTEM + "paths.target.wants/p.path": ("link", "../p.path")}),
             dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathExists=/var/lib/hq/x\nPathExistsGlob=/run/hq/*\n"
                                                "MakeDirectory=yes\n"}),
-            # Root's a:b, both sides root's, in both forms.
-            {SYSTEM + "a.service": "[Service]\nStateDirectory=q:hq q2:private/hq2\n",
-             SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/hq/sock\nListenStream=/var/lib/private/hq2/s\n"},
             # Settings PID 1 only reads, and paths beside the directory, not inside it.
             dict(nobody, **{SYSTEM + "r.service": "[Service]\nReadOnlyPaths=/var/lib/hq/x\nEnvironmentFile=-/run/hq/e\n"
                                                   "ExecStart=/run/hq/x\n[Unit]\nRequiresMountsFor=/var/lib/hq/m\n",
@@ -997,6 +955,79 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(check.unit_made_refusals(self.root), [])
                 finally:
                     remove()
+        # #5350 re-plan: a directory is held by its tree path, so no second name stands in for it. Each case runs
+        # with its units under every order of file names, since no file order may decide what is held.
+        nob, dyn = "User=nobody\n", "DynamicUser=yes\n"
+
+        def orders(units, extra):
+            """{tree path: text} for UNITS ([[Service] lines]) under every order of names, plus EXTRA."""
+            for perm in itertools.permutations(range(len(units))):
+                yield dict(extra, **{SYSTEM + "u%d.service" % perm[i]: "[Service]\n" + u for i, u in enumerate(units)})
+
+        def socket(path):
+            return {SYSTEM + "s.socket": "[Socket]\nListenStream=/%s\nSocketUser=nobody\n" % path}
+        shuffled = (
+            # A non-root unit's a:b at the private form of a root unit's directory, and a root unit's a:b at a
+            # dynamic unit's (Security 6778501910).
+            ([nob + "StateDirectory=hqn:private/hq\n", "StateDirectory=hq\n"], "var/lib/private/hq/sock", "var/lib/private/hq"),
+            # A non-dynamic unit takes a pre-existing <top>/private/<x> over as <top>/<x> (setup_exec_directory), so a
+            # link another user puts at the private form reaches the plain one too.
+            ([nob + "StateDirectory=hqn:private/hq\n", "StateDirectory=hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=zq:private/zz\n", dyn + "StateDirectory=zz\n"], "var/lib/private/zz/sock", "var/lib/private/zz"),
+            # A root unit's a:b link into another user's directory, in either form, under any top, through a chain
+            # (Security 6780012845).
+            (["StateDirectory=q:hq\n", nob + "StateDirectory=q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=q:private/hq\n", nob + "StateDirectory=q\n"], "var/lib/private/hq/sock", "var/lib/private/hq"),
+            (["StateDirectory=q:hq\n", dyn + "StateDirectory=q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["RuntimeDirectory=q:hq\n", nob + "RuntimeDirectory=q\n"], "run/hq/sock", "run/hq"),
+            (["StateDirectory=m:hq\n", "StateDirectory=q:private/m\n", nob + "StateDirectory=x q\n"],
+             "var/lib/hq/sock", "var/lib/hq"),
+            # A name with two private/ steps beside a dynamic or nobody unit's directory (Security 6781649895 1).
+            ([dyn + "StateDirectory=hq\n", "StateDirectory=q:private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([dyn + "StateDirectory=hq\n", "StateDirectory=private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([nob + "StateDirectory=hq\n", "StateDirectory=q:private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([dyn + "RuntimeDirectory=hq\n", "RuntimeDirectory=q:private/private/hq\n"], "run/private/hq/sock",
+             "run/private/hq"),
+            # Another user's directory named again by a root unit's a:b (Security 6781649895 2, L3 6781841386 1).
+            ([dyn + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/q/sock", "var/lib/q"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/x/sock", "var/lib/x"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=hq:q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=hq:q\n"], "var/lib/q/sock", "var/lib/q"),
+            # Another user names the directory first, a root unit's a:b links to it later (Lens, #5350).
+            ([nob + "StateDirectory=hq\n", "StateDirectory=q:hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            # A root unit's link over an ancestor of another user's directory (L3 6781841386 R1).
+            (["StateDirectory=q:x\n", nob + "StateDirectory=q/y\n"], "var/lib/x/y/sock", "var/lib/x"),
+            # Any a:b: systemd links one name to another, so neither side is held, even when both are root's.
+            (["StateDirectory=q:hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=q2:private/hq2\n"], "var/lib/private/hq2/sock", "var/lib/private/hq2"),
+            (["StateDirectory=hq\n", "StateDirectory=hq:x\n"], "var/lib/hq/sock", "var/lib/hq"),
+        )
+        for units, path, d in shuffled:
+            for files in orders(units, socket(path)):
+                with self.subTest(files=files):
+                    remove = self.place(files)
+                    try:
+                        got = check.inside_refusals(self.root)
+                        self.assertEqual(len(got), 1, got)
+                        self.assertTrue(got[0].startswith(
+                            "ListenStream= in %ss.socket: /%s is inside /%s, which systemd makes for a unit and may hand "
+                            "to a user other than root (" % (SYSTEM, path, d)), got)
+                    finally:
+                        remove()
+        # Root units alone, in any order: the same one-field name twice, and two names beside each other.
+        for units, path in (
+                (["StateDirectory=hq\n", "StateDirectory=hq\nRuntimeDirectory=hq\n"], "var/lib/hq/sock"),
+                (["StateDirectory=hq\n", "StateDirectory=hq2\n", nob + "StateDirectory=hq3\n"], "var/lib/hq/sock")):
+            for files in orders(units, socket(path)):
+                with self.subTest(files=files):
+                    remove = self.place(files)
+                    try:
+                        self.assertEqual(check.inside_refusals(self.root), [])
+                    finally:
+                        remove()
         # The stock journald lines, as made.allow lists them, pass the whole check.
         remove = self.place(dict(passing[0]))
         try:

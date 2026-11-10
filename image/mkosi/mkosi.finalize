@@ -1743,20 +1743,15 @@ def made_dir_words(key, v):
             for w in v.split()]
 
 
-def made_dir_files(root):
-    """#5233: [(unit-made directories, in their written form (made_plain), that are one directory on the box;
-    every unit file that names any of them, in either form)]. One word a:b makes <top>/<b> a link to
-    <top>/<a> (systemd 257 create_many_symlinks), and <top>/<x> and <top>/private/<x> are one directory's
-    two forms, so every directory joined to another by a word or a form is weighed with it (#5350 Security
-    6780012845): a root unit's link never stands in for a directory another unit makes. A file or value
-    unit_made_dirs refuses is left out here."""
-    root, parent, files = str(root), {}, {}
-
-    def top(d):
-        while parent.setdefault(d, d) != d:
-            d = parent[d]
-        return d
-    for path in sorted(cached(unit_files, root)[0]):
+def unit_made_words(root):
+    """#5233: [(unit file path, how many fields the word has, every tree path a field may take on the box)]
+    for each word of every *Directory= assignment in every unit_files file. systemd 257 makes a source a at
+    <top>/<a> (for a dynamic user at <top>/private/<a>, linked from <top>/<a>) and a destination b as a link
+    at <top>/<b> (create_many_symlinks); a third field (flags) is taken as a name too. Each field counts in
+    both forms (made_private), a superset of every place systemd puts it. A file or value unit_made_dirs
+    refuses is left out here; violations() refuses it there."""
+    root, out = str(root), []
+    for path in cached(unit_files, root)[0]:
         try:
             lines = config_lines(Conf(root, path).content())
         except (OSError, Unparsable):
@@ -1766,17 +1761,8 @@ def made_dir_files(root):
                 words = made_dir_words(key, v) if key in UNIT_MADE_DIRS and v else []
             except ValueError:
                 continue
-            for w in filter(None, words):
-                w = [top(made_plain(d)) for d in w]
-                for d in w[1:]:
-                    parent[d] = w[0]
-                files.setdefault(w[0], set()).add(path)
-    groups = {}
-    for d in parent:
-        dirs, paths = groups.setdefault(top(d), (set(), set()))
-        dirs.add(d)
-        paths |= files.get(d, set())
-    return list(groups.values())
+            out.extend((path, len(w), {f for d in w for f in (d, made_private(d))}) for w in words if w)
+    return out
 
 
 def unit_merged_files(root, path):
@@ -1813,30 +1799,25 @@ def unit_merged_lines(root, path):
 
 
 def root_made_dirs(root):
-    """#5233: the unit-made directories (unit_made_dirs), in both forms, that only root's units make: every
-    unit file naming one has a merged set the check can read (unit_merged_lines), and none of those
-    files sets User=, Group= or DynamicUser= (an empty reset aside) or a *DirectoryMode= a group or others
-    could write (or one the check cannot read); and nothing hands the directory to anyone else before
-    the unit starts: the tree holds it, if at all, as root's alone (owner, mode, no ACL), and no tmpfiles.d
-    line makes or remakes it for another user (tmpfiles_maker). systemd 257's setup_exec_directory then
-    makes it and chowns it to root:root at most 0755, so no other user can put anything inside it. Stock
-    trixie's systemd-journald.service (RuntimeDirectory=systemd/journal, where its sockets and
-    syslog.socket's live) is one. A directory is weighed with every directory joined to it (made_dir_files:
-    both forms, and both sides of each a:b; #5350 Security 6778501910, 6780012845, L3 6778896704): the
-    files naming any of them all run as root, and the tree and tmpfiles.d hand none of them to anyone."""
-    held = set()
-    for dirs, paths in cached(made_dir_files, root):
-        forms = {f for d in dirs for f in (d, made_private(d))}
-        if all(unit_runs_as_root(root, p) for p in paths) and all(made_roots_alone(root, f) for f in forms):
-            held |= forms
-    return held
-
-
-def made_plain(d):
-    """#5233: unit-made directory D in its written form: <top>/<rest> for <top>/private/<rest>."""
-    top = next(t for t in sorted(set(UNIT_MADE_DIRS.values()), key=len, reverse=True) if d.startswith(t + "/"))
-    rest = d[len(top) + 1:]
-    return "%s/%s" % (top, rest[len("private/"):]) if rest.startswith("private/") else d
+    """#5233: the tree paths of unit-made directories that only root's units make. The rule is keyed by the
+    tree path itself, so no second name can stand in for one (#5350 Security 6778501910, 6780012845,
+    6781649895; L3 6778896704, 6781841386). A word's paths (unit_made_words) are held when:
+    - the word is one field, so systemd makes no link for it (an a:b word is never held);
+    - its file's unit runs as root (unit_runs_as_root: every merged file readable, no User=, Group= or
+      DynamicUser=, no *DirectoryMode= a group or others could write);
+    - the tree and tmpfiles.d hand none of its paths to anyone (made_roots_alone);
+    - no word that fails the first two may take any of its paths (its own included).
+    systemd 257's setup_exec_directory then makes it root:root at most 0755, with no link at it or to it,
+    so no other user can put anything inside it. Stock trixie's systemd-journald.service
+    (RuntimeDirectory=systemd/journal, where its sockets and syslog.socket's live) is one. The sets carry no
+    file order. A directory nested in another is weighed step by step (inside_refusals), and a link over an
+    ancestor comes only from an a:b, whose paths are never held."""
+    words = cached(unit_made_words, root)
+    rooted = {p for p in {w[0] for w in words} if unit_runs_as_root(root, p)}
+    # A word that is not held takes its own paths, so only a one-field root word can pass the next line.
+    taken = {f for path, n, forms in words if n > 1 or path not in rooted for f in forms}
+    return {f for _, _, forms in words if not forms & taken and all(made_roots_alone(root, x) for x in forms)
+            for f in forms}
 
 
 def made_roots_alone(root, made):
@@ -2135,7 +2116,7 @@ def made_way_refusal(root, form):
 def inside_refusals(root):
     """#5233: one violation per path PID 1 may make, link, bind or mount (unit_made_paths, a path it only
     watches aside) inside a directory another user may write: a WORLD_WRITABLE one, a SERVICE_DIRS one, or
-    a unit-made directory in either form that a unit not running as root makes (root_made_dirs). PID 1
+    a unit-made directory in either form that root_made_dirs does not hold for root alone. PID 1
     follows links on the way (mkdir_p_label for a socket's, a mount point's or a path unit's parents) and
     at the path itself (socket_chown's chown, path_chown_recursive below a mount, Symlinks=), and that
     user can swap any entry inside for a link between two of its steps, so the user decides what PID 1
