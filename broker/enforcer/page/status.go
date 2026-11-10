@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -277,9 +278,61 @@ func plainStop(r ResolverStop) ResolverStop {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
 	}
 	for _, u := range r.Unset {
-		out.Unset = append(out.Unset, sentence(u))
+		if p := sentence(plainUnset(u)); !slices.Contains(out.Unset, p) {
+			out.Unset = append(out.Unset, p)
+		}
 	}
 	return out
+}
+
+// The served check's errors, as the enforcer's hold writes them
+// (cmd/agentos-enforcer, network.go). A kernel interface name is at most
+// 15 bytes with no slash, colon or space, so a name the pattern takes
+// cannot carry the rest of the line.
+var (
+	unsetKey   = regexp.MustCompile(`^/proc/sys/net/(ipv4|ipv6)/conf/([^/:\s]{1,15})/(accept_redirects|accept_ra) not set to 0 \(reads `)
+	unsetName  = regexp.MustCompile(`^served interface ("(?:[^"\\]|\\.)*"): not an interface name$`)
+	unsetAddrs = regexp.MustCompile(`(?s)^served interface ([^/:\s]{1,15}): addresses: (.*)$`)
+	madeAgain  = regexp.MustCompile(`^interface [^/:\s]{1,15} was made again while its addresses were read \(`)
+)
+
+// unsetSettings names each setting hold turns off as the owner reads it.
+var unsetSettings = map[string]string{
+	"ipv4 accept_redirects": "IPv4 redirects",
+	"ipv6 accept_redirects": "IPv6 redirects",
+	"ipv6 accept_ra":        "router advertisements",
+}
+
+// plainUnset is one served-check error in the owner's words: what did
+// not happen, what it leaves open, and when it is tried again (#5280).
+// An error it has no words for is one generic line, never the raw text,
+// which reads as the kernel's and not the owner's.
+func plainUnset(u string) string {
+	if m := unsetKey.FindStringSubmatch(u); m != nil {
+		what := unsetSettings[m[1]+" "+m[3]]
+		switch iface := m[2]; {
+		case what == "":
+		case iface == "all":
+			return "The enforcer could not turn off " + what + " for all interfaces at once, so a device on a home network could set a route the enforcer did not check. It tries again every 10 seconds."
+		case iface == "default":
+			return "The enforcer could not turn off " + what + " for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check. It tries again every 10 seconds."
+		default:
+			return "The enforcer could not turn off " + what + " on interface " + ascii(iface) + ", so a device on that network could set a route or address the enforcer did not check. It tries again every 10 seconds."
+		}
+	}
+	if m := unsetName.FindStringSubmatch(u); m != nil {
+		if name, err := strconv.Unquote(m[1]); err == nil {
+			return "The enforcer's setup names " + strconv.QuoteToASCII(name) + " as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected."
+		}
+	}
+	if m := unsetAddrs.FindStringSubmatch(u); m != nil {
+		iface := ascii(m[1])
+		if madeAgain.MatchString(m[2]) || m[2] == "the kernel's address dump was interrupted by a change" {
+			return "The addresses on interface " + iface + " changed while the enforcer read them. It reads them again within 10 seconds."
+		}
+		return "The enforcer could not read the addresses on interface " + iface + ", so it cannot check that each lies in that network. It tries again every 10 seconds."
+	}
+	return "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
 }
 
 // sentence is s with every character outside printable ASCII and the

@@ -1304,6 +1304,11 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	if len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
 		t.Fatalf("a refused load left instances running with the check failing: %v", got)
 	}
+	// The page reads the instances it stopped as stopped, refused load
+	// or not (#5164 R1).
+	if !(pageResolver{x.d}).Stopped().Stopped {
+		t.Fatal("the page shows a resolver as running after its instances stopped")
+	}
 }
 
 // TestHold (ENF-net-ra-off, #4222): hold turns router advertisements and
@@ -1806,7 +1811,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
-	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "A served interface is not as set up: /proc/sys/net/ipv4/conf/default/accept_redirects"} {
+	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "<p>The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network&#39;s interface made again could take a route or address the enforcer did not check. It tries again every 10 seconds.</p>"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("home lacks %q", want)
 		}
