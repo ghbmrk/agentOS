@@ -27,14 +27,24 @@ type line struct {
 	answered      bool
 	number        string
 	// cut gets one value each time speech is stopped mid-sentence.
-	cut       chan struct{}
-	inSay     int
-	overlap   bool
-	sayErr    error
-	empty     bool
-	hungUp    bool
+	cut     chan struct{}
+	inSay   int
+	overlap bool
+	sayErr  error
+	empty   bool
+	hungUp  bool
+	// hangErr and hangLeft are the hang-up ctx's error and the time left
+	// to its deadline (0 with none) as Hangup got it; with hangStuck,
+	// Hangup then waits for that ctx to end.
+	hangStuck bool
+	hangCtx   context.Context
+	hangErr   error
+	hangLeft  time.Duration
 	stuck     bool
 	answerErr error
+	// answerWait delays a failing Answer; answerCtx is the ctx it got.
+	answerWait time.Duration
+	answerCtx  context.Context
 }
 
 func newLine() *line {
@@ -44,18 +54,34 @@ func newLine() *line {
 	return l
 }
 
-func (l *line) Active() <-chan struct{}      { return l.active }
-func (l *line) Ended() <-chan struct{}       { return l.ended }
-func (l *line) Speech() <-chan []byte        { return l.speech }
-func (l *line) Keys() <-chan byte            { return l.keys }
-func (l *line) Hangup(context.Context) error { l.mu.Lock(); l.hungUp = true; l.mu.Unlock(); return nil }
-func (l *line) Number() string               { return l.number }
+func (l *line) Active() <-chan struct{} { return l.active }
+func (l *line) Ended() <-chan struct{}  { return l.ended }
+func (l *line) Speech() <-chan []byte   { return l.speech }
+func (l *line) Keys() <-chan byte       { return l.keys }
+func (l *line) Hangup(ctx context.Context) error {
+	l.mu.Lock()
+	l.hungUp, l.hangCtx, l.hangErr = true, ctx, ctx.Err()
+	if d, ok := ctx.Deadline(); ok {
+		l.hangLeft = time.Until(d)
+	}
+	stuck := l.hangStuck
+	l.mu.Unlock()
+	if stuck {
+		<-ctx.Done()
+	}
+	return nil
+}
+func (l *line) Number() string { return l.number }
 func (l *line) Answer(ctx context.Context) error {
+	l.mu.Lock()
+	l.answerCtx = ctx
+	l.mu.Unlock()
 	if l.stuck { // answers nothing until ctx ends
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	if l.answerErr != nil {
+		time.Sleep(l.answerWait)
 		return l.answerErr
 	}
 	l.answered = true

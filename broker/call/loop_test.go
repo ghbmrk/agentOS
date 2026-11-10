@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -561,14 +562,31 @@ func TestTokenWaitEnds(t *testing.T) {
 // the window's clock until Serve has returned (or 20 ms, since Serve now
 // waits for it); then its window and its ended ctx are both ready. A
 // reader Serve did not wait for picks the window half the time and tries
-// "4071" after the call.
+// "4071" after the call; one it waited for does the same before Serve
+// returns, unless check tries nothing once the call has ended (#5274).
 func TestNoTokenTryFollowsTheCall(t *testing.T) {
 	var mu sync.Mutex
 	var tried []string
 	tries := func() int { mu.Lock(); defer mu.Unlock(); return len(tried) }
 	token := func(k string) bool { mu.Lock(); tried = append(tried, k); mu.Unlock(); return k == "4071" }
 
+	// Keys pressed before an Answer that fails reach no try (#5274).
 	r := newRig(t, fixed("Hi."))
+	r.cfg.Token = token
+	r.l.answerErr = errors.New("no carrier")
+	r.l.answerWait = 50 * time.Millisecond // time for a token read to try
+	for _, k := range []byte("1#") {
+		r.l.keys <- k
+	}
+	r.serve()
+	if _, err := r.end(); !errors.Is(err, r.l.answerErr) || tries() != 0 {
+		t.Fatalf("a failed Answer: err %v, tried %q", err, tried)
+	}
+	if r.l.answerCtx.Err() == nil {
+		t.Fatal("a failed Answer's call ctx outlives Serve")
+	}
+
+	r = newRig(t, fixed("Hi."))
 	r.cfg.Token = token
 	r.serve()
 	for _, k := range []byte("4071#") {
@@ -624,6 +642,9 @@ func TestNoTokenTryFollowsTheCall(t *testing.T) {
 			t.Fatal("Serve did not return")
 		}
 		before := tries()
+		if before != 0 {
+			t.Fatalf("call %d: %d token tries once the call had ended", i, before)
+		}
 		close(served)
 		r.settle()
 		if n := tries(); n != before {
@@ -812,8 +833,21 @@ func TestARedialAfterADropIsAnswered(t *testing.T) {
 
 // A call whose line never reports its end, or never finishes answering, is
 // ended at MaxCall (default 30 min), hung up, and the next owner call is
-// answered (#5252).
+// answered (#5252). The hang-up runs on a live ctx bounded by HangupWait
+// (5 s), though Serve's own ctx has no deadline, so a line that wedges on
+// it frees the next call, and it ends with Serve's ctx (#5274).
 func TestACallEndsAtMaxCall(t *testing.T) {
+	if call.HangupWait != 5*time.Second {
+		t.Fatalf("HangupWait is %v", call.HangupWait)
+	}
+	hungUp := func(r *rig) bool {
+		r.l.mu.Lock()
+		defer r.l.mu.Unlock()
+		if r.l.hungUp && (r.l.hangErr != nil || r.l.hangLeft <= 0 || r.l.hangLeft > call.HangupWait) {
+			t.Fatalf("hung up on a ctx with err %v, %v left", r.l.hangErr, r.l.hangLeft)
+		}
+		return r.l.hungUp
+	}
 	r := newRig(t, fixed("Hi."))
 	deadline := make(chan time.Duration, 1)
 	r.cfg.Answerer = answerFunc(func(ctx context.Context, a call.Ask) (<-chan string, error) {
@@ -833,17 +867,36 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 
 	r = newRig(t, fixed("Hi."))
 	r.cfg.MaxCall = 100 * time.Millisecond
-	r.serve() // the carrier never drops
+	r.l.hangStuck = true // the hang-up waits for its ctx to end
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { // the carrier never drops
+		rep, err := call.Serve(ctx, r.cfg, r.l, "+15550100")
+		r.err <- err
+		r.rep <- rep
+	}()
 	r.say("q")
 	r.next()
+	for i := 0; i < 500 && !hungUp(r); i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if !hungUp(r) {
+		t.Fatal("a call past MaxCall was not hung up")
+	}
+	select { // the hang-up ends with Serve's ctx, not HangupWait later
+	case <-r.err:
+		t.Fatal("Serve returned during the hang-up")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-r.err:
+		r.err <- err
+	case <-time.After(time.Second):
+		t.Fatal("the hang-up outlived Serve's ctx")
+	}
 	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
 		t.Fatalf("a call past MaxCall: err %v", err)
-	}
-	r.l.mu.Lock()
-	hungUp := r.l.hungUp
-	r.l.mu.Unlock()
-	if !hungUp {
-		t.Fatal("a call past MaxCall was not hung up")
 	}
 
 	// An Answer that never completes is bounded the same way (Lens on
@@ -855,11 +908,11 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
 		t.Fatalf("an Answer past MaxCall: err %v", err)
 	}
-	r.l.mu.Lock()
-	hungUp = r.l.hungUp
-	r.l.mu.Unlock()
-	if !hungUp {
+	if !hungUp(r) {
 		t.Fatal("an Answer past MaxCall was not hung up")
+	}
+	if r.l.hangCtx.Err() == nil { // its ctx ends with the hang-up
+		t.Fatal("the hang-up's ctx outlives Serve")
 	}
 
 	next := newRig(t, fixed("All quiet."))
@@ -1026,6 +1079,34 @@ func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
 		}
 		r.hangup()
 
+		// A question the answerer already saw is not asked again after
+		// the notice: only the owner's next words are (#5274).
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.l.setGate(true) // the answer plays until it is stopped
+		r.serve()
+		r.say("what's in my mail")
+		synctest.Wait()
+		if got := <-r.l.saying; got != "S:Hi." {
+			t.Fatalf("the answer played %q", got)
+		}
+		time.Sleep(29 * time.Minute)
+		synctest.Wait()
+		if got := <-r.l.saying; got != "CLIP:ending" {
+			t.Fatalf("a minute before MaxCall: played %q", got)
+		}
+		r.l.wasCut(t)
+		r.say("from today")
+		synctest.Wait()
+		r.ans.mu.Lock()
+		asks = r.ans.asks
+		r.ans.mu.Unlock()
+		if len(asks) != 2 || asks[1].Text != "from today" {
+			t.Fatalf("asks = %+v", asks)
+		}
+		r.hangup()
+
 		// A 0 and a barge-in during the clip wait for it to play.
 		r = newRig(t, fixed("Hi."))
 		r.bubble = true
@@ -1072,4 +1153,99 @@ func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
 			t.Fatalf("a 30 s call: err %v, played %q", err, r.l.spoken())
 		}
 	})
+}
+
+// A panic in Serve frees the line and leaves no token read behind (#5274):
+// a nil ctx panics after the take, and a loop that panics still ends the
+// token read and waits for it before Serve unwinds. Here the loop panics
+// playing the failed clip (the line's Say sends on a closed channel) once
+// the reader is in the token window's clock, which stops the recognizer
+// and holds the reader there 20 ms more, so a Serve that did not wait
+// unwinds first.
+func TestAPanicInServeFreesTheLine(t *testing.T) {
+	recovered := func(f func()) (v any) {
+		defer func() { v = recover() }()
+		f()
+		return nil
+	}
+	answered := func() { // fails within a second if the line is still held
+		next := newRig(t, fixed("All quiet."))
+		next.cfg.After = func(d time.Duration) <-chan time.Time {
+			if d == 10*time.Second { // RingWait
+				return time.After(time.Second)
+			}
+			return nil
+		}
+		next.serve()
+		select {
+		case next.rec.out <- call.Heard{Text: "and now", Final: true}:
+		case err := <-next.err:
+			t.Fatalf("the next call was refused: %v", err)
+		}
+		if got := next.next(); got != "S:All quiet." {
+			t.Fatalf("the next call played %q", got)
+		}
+		next.hangup()
+	}
+
+	r := newRig(t, fixed("Hi."))
+	var none context.Context
+	if v := recovered(func() { call.Serve(none, r.cfg, r.l, "+15550100") }); v == nil {
+		t.Fatal("a nil ctx did not panic")
+	}
+	answered()
+
+	r = newRig(t, fixed("Hi."))
+	r.cfg.Token = func(string) bool { return true }
+	r.cfg.TokenWindow = 7 * time.Second
+	r.l.saying = make(chan string)
+	close(r.l.saying) // Say panics
+	var read atomic.Bool
+	r.cfg.After = func(d time.Duration) <-chan time.Time {
+		if d == 7*time.Second {
+			<-r.rec.ctx      // the loop is listening
+			close(r.rec.out) // so it plays the failed clip
+			time.Sleep(20 * time.Millisecond)
+			read.Store(true)
+		}
+		return nil
+	}
+	unwound := make(chan any, 1)
+	go func() { unwound <- recovered(func() { call.Serve(context.Background(), r.cfg, r.l, "+15550100") }) }()
+	select {
+	case v := <-unwound:
+		if v == nil {
+			t.Fatalf("Serve unwound with %v", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not unwind")
+	}
+	if !read.Load() {
+		t.Fatal("Serve unwound a panic before its token read ended")
+	}
+	r.settle()
+	answered()
+}
+
+// A turn whose sentence fails to play ends its producer first (#5274): the
+// rest of the answer is not synthesized unplayed. A turn that drained its
+// producer before ending it would synthesize all 20 sentences.
+func TestAFailedSayEndsTheAnswer(t *testing.T) {
+	r := newRig(t, fixed(strings.Repeat("A sentence. ", 20)))
+	r.l.sayErr = errors.New("line gone")
+	var spoken atomic.Int32
+	r.cfg.Synthesizer = synthFunc(func(_ context.Context, s string) ([]byte, error) {
+		spoken.Add(1)
+		return []byte("S:" + s), nil
+	})
+	ends := r.records()
+	r.run(call.P2)
+	r.say("q")
+	r.turnEnds(ends, 1)
+	if n := spoken.Load(); n >= 20 {
+		t.Fatalf("%d sentences synthesized after the first failed to play", n)
+	}
+	if rep := r.hangup(); len(rep.Turns) != 1 || !rep.Turns[0].Stopped || rep.Turns[0].Sentences != 0 {
+		t.Fatalf("turns = %+v", rep.Turns)
+	}
 }

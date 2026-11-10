@@ -182,12 +182,16 @@ var ErrNotOwner = errors.New("call: not the owner's number")
 const MaxToken = 32
 
 // ErrBusy is returned for an owner call that rings while another call is
-// served and is still ringing once Config.RingWait has passed. It is left
-// ringing, like any other caller.
+// served, once Config.RingWait has passed with it still ringing or once its
+// caller hangs up first. It is left ringing, like any other caller.
 var ErrBusy = errors.New("call: another call is being served")
 
 // ErrTooLong is returned for a call ended at Config.MaxCall.
 var ErrTooLong = errors.New("call: the call reached its maximum length")
+
+// HangupWait bounds the hang-up of a call ended at Config.MaxCall, so a
+// line that wedges on it holds the next owner call for that long at most.
+const HangupWait = 5 * time.Second
 
 // serving holds a value while Serve runs, so one call is served at a time
 // and a P2 grant is live only while no other call is: a grant kept from one
@@ -204,6 +208,11 @@ var serving = make(chan struct{}, 1)
 // unwound (#5252); one still ringing then gets ErrBusy. A call is ended
 // at MaxCall, so a call end the line never reports frees the next call;
 // the owner hears Clips.Ending EndingNotice before then (#5262).
+//
+// The unlock is deferred first, so a panic after the take (a nil ctx)
+// still frees the line; the token read, started once the call is
+// answered, is ended and awaited in a defer, so a panic in the loop still
+// waits for it (#5274).
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
@@ -222,34 +231,42 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 			return Report{}, ctx.Err()
 		}
 	}
+	defer func() { <-serving }()
 	// The call's ctx: it ends at MaxCall, ends the token read and with it
 	// the call's grant, and is cancelled before the next call can be
 	// served (TestOnlyServeChoosesTheRung pins the order).
 	tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)
-	defer func() { cancel(); <-serving }()
+	defer cancel()
 	if err := c.Answer(tctx); err != nil {
 		return Report{}, overrun(ctx, tctx, c, err)
 	}
+	// The token is read only once the call is answered, so keys pressed
+	// before then reach no try if it never is.
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
-	rep, err := loop(tctx, cfg, c, token)
 	// End the token read and wait for it: token closes token once its one
 	// check is done, so no Config.Token try follows Serve (#5259). The
 	// read ends at tctx's end, and Token is the kernel's, not the line's.
-	cancel()
-	for range token {
-	}
+	defer func() {
+		cancel()
+		for range token {
+		}
+	}()
+	rep, err := loop(tctx, cfg, c, token)
 	return rep, overrun(ctx, tctx, c, err)
 }
 
 // overrun is err, or ErrTooLong once the call's ctx has reached MaxCall:
 // then the line never reported the end, or never finished answering, so
-// overrun hangs it up on Serve's own ctx.
+// overrun hangs it up on a ctx of its own, Serve's bounded by HangupWait
+// (the call's has ended).
 func overrun(ctx, call context.Context, l Line, err error) error {
 	if context.Cause(call) != ErrTooLong {
 		return err
 	}
-	l.Hangup(ctx)
+	hctx, cancel := context.WithTimeout(ctx, HangupWait)
+	defer cancel()
+	l.Hangup(hctx)
 	return ErrTooLong
 }
 
@@ -298,8 +315,15 @@ func (cfg Config) keys(ctx context.Context, l Line) string {
 }
 
 // check is the one place a grant is made: P2 when the kernel's Token
-// accepts the keys, until live closes. Only token calls it.
+// accepts the keys, until live closes. Only token calls it. Once live has
+// closed it tries nothing, so keys read as the call ends are not a try
+// (#5274).
 func check(cfg Config, live <-chan struct{}, keys string) *grant {
+	select {
+	case <-live:
+		return nil
+	default:
+	}
 	if keys != "" && cfg.Token(keys) {
 		return &grant{r: P2, live: live}
 	}
