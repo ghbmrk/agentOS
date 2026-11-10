@@ -912,10 +912,12 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertIn("MISMATCH /usr root hash", r.stdout.splitlines())
         assert_one_line_each(self, r.stdout)
 
-        # Same-PR cancellation by a first attempt only (#5348); main and manual runs are grouped by run id.
-        # Same-PR cancellation; main and manual runs are grouped by run id, so none displaces another.
+    def test_only_a_superseded_pr_run_is_cancelled(self):
+        # Same-PR cancellation by a first attempt only; reruns, main and manual runs are grouped by
+        # run id, so none cancels or displaces another (#5348).
         wf = WORKFLOW.read_text()
         self.assertIn("\nconcurrency:\n  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && "
+                      "github.run_attempt == 1 && "
                       "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}\n"
                       "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}"
                       "\njobs:\n", wf)
