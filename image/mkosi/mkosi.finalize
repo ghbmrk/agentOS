@@ -1518,6 +1518,12 @@ KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service"
 # that enrollment takes (EDGE-link-core c2c), the camera clerk's sealed store and retained capture
 # (CAM-clerk-image), and the HomeKit clerk's sealed store and devices file (DEV-homekit-b2c). No main-side
 # unit sees it; the image makes each at boot (tmpfiles.d).
+# Who each keeper unit runs as, as shipped: its User=, Group= and DynamicUser= ("" unset). PID 1 makes
+# and chowns a unit's *Directory= for that user, so a drop-in that changed it would hand the keeper's
+# state to another (#5288).
+USER_KEYS = ("User", "Group", "DynamicUser")
+KEEPER_USERS = dict({n: ("", "", "") for n in KEEPER_UNITS}, **{
+    "agentos-keeper-%s.service" % n: ("agentos-" + n, "agentos-" + n, "") for n in ("mail", "camera", "homekit")})
 KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup", "/var/lib/agentos-mail",
                 "/run/agentos-link-capture", "/var/lib/agentos-camera", "/var/lib/agentos-homekit")
 # Settings whose files the service manager opens as root and hands to the unit, past its mask and
@@ -2013,13 +2019,19 @@ def ini_all(files, section, key):
 
 def ini_all_in(files, section, key):
     """ini_all's values, each as (the file that sets it, the value), so a refusal can name the file."""
+    return [(f, v) for f, v in ini_every_in(files, section, key) if v]
+
+
+def ini_every_in(files, section, key):
+    """Every assignment of SECTION.KEY across FILES, empty ones included, as (the file, the value).
+    ValueError as ini_words."""
     val = []
     for f in files:
         try:
             lines = config_lines(f.content())
         except (OSError, Unparsable) as e:
             raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
-        val += [(f, v) for s, k, v in lines if (s, k) == (section, key) and v]
+        val += [(f, v) for s, k, v in lines if (s, k) == (section, key)]
     return val
 
 
@@ -2437,6 +2449,15 @@ def keeper_unit_violations(name, files, root):
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
         out.append("%s: in %s but not one of the keeper's units (D-154)" % (name, KEEPER_SLICE))
+    # #5288: every assignment, not only the last, since systemd ignores an empty or invalid one of some.
+    for key, pin in zip(USER_KEYS, KEEPER_USERS.get(name, ())):
+        for f, v in ini_every_in(files, "Service", key):
+            if v != pin:
+                out.append("%s: %s=%s in %s; a keeper unit runs as shipped (%s=%s): PID 1 hands its directories to "
+                           "whoever it runs as (#5288)" % (name, key, v, f.rel, key, pin))
+        if (ini_last(files, "Service", key) or "") != pin:
+            out.append("%s: %s is %s; a keeper unit runs as shipped (%s=%s) (#5288)"
+                       % (name, key, ini_last(files, "Service", key), key, pin))
     if not keeper and name not in NOEXEC_EXEMPT:
         hidden = ini_paths(files, "Service", "InaccessiblePaths")
         words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
