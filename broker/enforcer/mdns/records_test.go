@@ -1088,6 +1088,13 @@ func TestParseCountsEverySection(t *testing.T) {
 		}
 		return rs
 	}
+	// A bare 12-byte header parses and 11 bytes do not (#5152).
+	if _, ok := parse(make([]byte, 12)); !ok {
+		t.Error("a 12-byte header with no sections refused")
+	}
+	if _, ok := parse(make([]byte, 11)); ok {
+		t.Error("11 bytes parsed")
+	}
 	if _, ok := parse((&message{flags: 0x8400, answers: many(maxRecords / 2), additional: many(maxRecords / 2)}).bytes()); !ok {
 		t.Error("maxRecords records refused")
 	}
@@ -1181,6 +1188,24 @@ func TestProveGoodbyes(t *testing.T) {
 	}, nil), t0)
 	if g.proved["ap0.105"].has(dn("Office._ipp._tcp.local").key(), t0) {
 		t.Error("an instance on a host saying goodbye was proved")
+	}
+	// An SRV's goodbye alone ends its instance while its host stays held
+	// (#5152): catches the goodbye loop's SRV test negated.
+	h := NewFilter()
+	ik := dn("Office._ipp._tcp.local").key()
+	h.Prove("ap0.105", printerLink, response([]record{
+		a("Printer.local", "10.13.0.2", 120),
+		srv("Office._ipp._tcp.local", "Printer.local", 120),
+	}, nil), t0)
+	if !h.proved["ap0.105"].has(ik, t0) {
+		t.Fatal("the instance was not proved")
+	}
+	h.Prove("ap0.105", printerLink, response([]record{srv("Office._ipp._tcp.local", "Printer.local", 0)}, nil), t0.Add(time.Second))
+	if _, said := h.said["ap0.105"][ik]; said || h.proved["ap0.105"].has(ik, t0.Add(time.Second)) {
+		t.Errorf("after its SRV's goodbye the instance is held, said %v", said)
+	}
+	if !h.proved["ap0.105"].has(k, t0.Add(time.Second)) {
+		t.Error("the instance's goodbye took its host with it")
 	}
 }
 

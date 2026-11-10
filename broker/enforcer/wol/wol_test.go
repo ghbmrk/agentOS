@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 func fixtureLayout() nft.Layout {
@@ -92,6 +93,8 @@ func TestTarget(t *testing.T) {
 	secureOn := append(magic(gamingPC), 1, 2, 3, 4, 5, 6)
 	mixed := magic(gamingPC)
 	copy(mixed[96:], desktop)
+	// Every case but "again at once" comes a full interval after the last,
+	// so a refusal is its own check's and not the rate limit's (#5152).
 	for _, c := range []struct {
 		why  string
 		pkt  []byte
@@ -108,6 +111,9 @@ func TestTarget(t *testing.T) {
 		{"no sync", append([]byte{0xfe}, magic(desktop)[1:]...), ""},
 		{"empty", nil, ""},
 	} {
+		if c.why != "again at once" {
+			now = now.Add(WakeInterval)
+		}
 		got := ""
 		if m := r.Target(c.pkt); m != nil {
 			got = m.Iface
@@ -116,45 +122,38 @@ func TestTarget(t *testing.T) {
 			t.Errorf("%s: wakes %q, want %q", c.why, got, c.want)
 		}
 	}
+	// The interval is exact: a nanosecond short refuses, the interval
+	// itself wakes (#5152).
 	now = now.Add(WakeInterval)
+	if m := r.Target(magic(gamingPC)); m == nil {
+		t.Fatal("no wake after the cases")
+	}
+	now = now.Add(WakeInterval - time.Nanosecond)
+	if m := r.Target(secureOn); m != nil {
+		t.Errorf("SecureOn a nanosecond inside the interval: %v", m)
+	}
+	now = now.Add(time.Nanosecond)
 	if m := r.Target(secureOn); m == nil || m.Iface != "hh0" {
 		t.Errorf("SecureOn after the interval: %v", m)
 	}
 }
 
-func required() bool { return os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1" }
+func required() bool { return netnstest.Required() }
 
 const childEnv = "AGENTOS_WOL_NETNS"
 
 // inNetns re-runs the calling test as root of a fresh user and network
-// namespace, the enforcer's, as nft's netns tests do.
+// namespace, the enforcer's, as nft's netns tests do; a skip inside that
+// run fails the test in CI (#5152).
 func inNetns(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv(childEnv) == "1" {
-		return true
-	}
-	for _, tool := range []string{"unshare", "nsenter", "ip", "nft"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			if required() {
-				t.Fatalf("%s missing", tool)
-			}
-			t.Skipf("%s missing", tool)
-		}
-	}
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
-		if required() {
-			t.Fatalf("no unprivileged user namespaces: %v", err)
-		}
-		t.Skipf("no unprivileged user namespaces: %v", err)
-	}
-	cmd := exec.Command("unshare", "-rn", "--", os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
-	cmd.Env = append(os.Environ(), childEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("in the enforcer's namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("netns run failed: %v", err)
-	}
-	return false
+	return netnstest.Run(t, childEnv, combined, "nsenter", "ip", "nft")
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 func run(t *testing.T, name string, args ...string) {

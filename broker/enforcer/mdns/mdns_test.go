@@ -18,8 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -27,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 func fixtureLayout() nft.Layout {

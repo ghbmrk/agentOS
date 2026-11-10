@@ -375,9 +375,23 @@ func TestStartReportsNoDescriptors(t *testing.T) {
 		t.Errorf("no descriptor left: %v, want the socket pair's EMFILE", err)
 	}
 	var se *os.SyscallError
+	lowest := func() int {
+		fd, err := syscall.Open("/dev/null", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		syscall.Close(fd)
+		return fd
+	}
+	before := lowest()
 	fdLimit(t, 2, func() { _, _, err = Start(spec) })
 	if !errors.As(err, &se) || se.Syscall != "pipe2" || se.Err != syscall.EMFILE {
 		t.Errorf("two descriptors left: %v, want the pipe's EMFILE", err)
+	}
+	// The failed pipe leaves both ends of the socket pair closed, not
+	// held until a finalizer runs (#5152).
+	if after := lowest(); after != before {
+		t.Errorf("after the pipe's EMFILE the lowest free descriptor is %d, was %d: the socket pair leaked", after, before)
 	}
 	proc, conn, err := Start(spec)
 	if err != nil {
