@@ -73,6 +73,13 @@ func (f fileStore) Save(b []byte) error {
 	return f.after(f.path)
 }
 
+// syncFile is every fsync the state files take: the temporary file and
+// its directory in Save, the journal's file in Append and Truncate. The
+// store tests replace it to see each one taken and to fail it.
+var syncFile = (*os.File).Sync
+
+// writeAtomic writes b beside path and renames it over path. CreateTemp
+// makes the file mode 0600, so no other user reads it meanwhile.
 func writeAtomic(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -81,15 +88,11 @@ func writeAtomic(path string, b []byte) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name) // no-op after the rename
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -108,7 +111,7 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	return syncFile(d)
 }
 
 // fileJournal is an alert.Journal and a heads.Journal: one append-only
@@ -133,7 +136,7 @@ func (j fileJournal) Append(b []byte) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -149,7 +152,7 @@ func (j fileJournal) Truncate(n int) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}

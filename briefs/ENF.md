@@ -239,6 +239,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Acceptance tests:**
 1. DEV-2: `kernel/enforcer::TestOnlyWireKinds`. Catches a core that can send what the enforcer must refuse anyway (defence in depth, and a clean A18 log).
 2. STO-1: `kernel/enforcer::TestEveryHeadSent`. Catches a missing anchor.
+3. KRN-12 Silence: `kernel/enforcer::TestBeatsEachHeartbeatInterval`. The client sends at least one message each `wire.HeartbeatInterval` (#4753, wire ENF-d-w8). Catches a client that beats at another interval, so the enforcer's page shows an honest core down or a silent one up too long.
 **Size:** about 100k. **Depends on:** ENF-d.
 
 ### ENF-p (#3674): wire the client into agentosd (serial slot, D-111)

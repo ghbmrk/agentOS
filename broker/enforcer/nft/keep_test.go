@@ -4,6 +4,7 @@ package nft
 
 import (
 	"context"
+	"net/netip"
 	"os/exec"
 	"slices"
 	"strings"
@@ -300,5 +301,20 @@ func TestNamedSetNames(t *testing.T) {
 	}
 	if !strings.HasPrefix(a.Named("n", false), "d5_4_") || len(a.Named("n", false)) != len("d5_4_")+16 {
 		t.Errorf("name set %q", a.Named("n", false))
+	}
+}
+
+// TestElementsLine: an add element line names each address once, in
+// order, and leaves the caller's list as it was.
+func TestElementsLine(t *testing.T) {
+	a, b := netip.MustParseAddr("203.0.113.2"), netip.MustParseAddr("203.0.113.1")
+	addrs := []netip.Addr{a, b, a}
+	w := &writer{}
+	w.elements("s", addrs)
+	if got, want := w.b.String(), "add element inet "+Table+" s { 203.0.113.1, 203.0.113.2 }\n"; got != want {
+		t.Errorf("wrote %q, want %q", got, want)
+	}
+	if !slices.Equal(addrs, []netip.Addr{a, b, a}) {
+		t.Errorf("the caller's addresses became %v", addrs)
 	}
 }

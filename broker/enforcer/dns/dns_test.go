@@ -17,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/*.conf")
@@ -507,7 +508,7 @@ func TestDnsmasqAccepts(t *testing.T) {
 
 // required is true in CI, where a missing tool or kernel feature fails the
 // test instead of skipping it.
-func required() bool { return os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1" }
+func required() bool { return netnstest.Required() }
 
 func dnsmasq(t *testing.T) string {
 	t.Helper()

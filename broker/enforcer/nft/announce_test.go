@@ -108,3 +108,13 @@ func TestHears(t *testing.T) {
 		t.Error("a name that is not a VLAN has an interface")
 	}
 }
+
+// TestHearsRefusesWhatCompileRefuses: the relay is given no interfaces
+// from a layout the ruleset refuses.
+func TestHearsRefusesWhatCompileRefuses(t *testing.T) {
+	l := fixtureLayout()
+	l.Trunk = ""
+	if got, err := Hears(fixturePolicy(), l); !errors.Is(err, ErrLayout) {
+		t.Errorf("hears %v (err %v)", got, err)
+	}
+}

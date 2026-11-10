@@ -356,6 +356,11 @@ func TestChannelAcceptBackoff(t *testing.T) {
 	if !other.closed.Load() {
 		t.Fatal("a connection off the core's segment was left open")
 	}
+	select {
+	case <-other.read:
+		t.Fatal("a connection off the core's segment was read: a handshake began")
+	case <-time.After(100 * time.Millisecond):
+	}
 	want := []time.Duration{5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 5 * time.Millisecond}
 	var got []string
 	x.mu.Lock()
@@ -489,5 +494,19 @@ func TestHandoverFailureReachesLog(t *testing.T) {
 	}
 	if n := x.logs("enrol: the passkey enrolled, but the policy hand-over failed"); n != 1 {
 		t.Fatalf("hand-over failure reached the log %d times: %q", n, x.log)
+	}
+}
+
+// TestSilenceIsTwoHeartbeats (#4753; KRN-12 Silence, D-255): the page
+// shows the core down after two missed beats of the interval the format
+// definition fixes, a minute. Catches a daemon that keeps its own interval
+// or counts some other number of beats; wire's TestHeartbeatIntervalIsAMinute
+// pins the other end.
+func TestSilenceIsTwoHeartbeats(t *testing.T) {
+	if Silence != 2*wire.HeartbeatInterval {
+		t.Errorf("Silence = %v, want two beats of wire.HeartbeatInterval (%v)", Silence, wire.HeartbeatInterval)
+	}
+	if Silence != 2*time.Minute {
+		t.Errorf("Silence = %v, want two minutes", Silence)
 	}
 }

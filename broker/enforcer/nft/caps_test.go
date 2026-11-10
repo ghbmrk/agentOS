@@ -307,3 +307,24 @@ func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
 		t.Error("the edge's quota name ignores its day or cap")
 	}
 }
+
+// TestDropsRefusesAListing: a reading's or running listing the update
+// cannot read to the byte, or a running verdict map address that is no
+// address, is refused, not read as nothing charged or sent.
+func TestDropsRefusesAListing(t *testing.T) {
+	quota := `{"nftables": [{"quota": {"family": "inet", "table": "enforcer", "name": "q", "used": %s}}]}`
+	vmap := `{"nftables": [{"rule": {"family": "inet", "table": "enforcer", "chain": %q, "expr": [{"vmap": {"key": {"payload": {"protocol": "ip", "field": "daddr"}}, "data": {"set": [["%s", {"goto": {"target": "g_x"}}]]}}}]}}]}`
+	for name, c := range map[string]struct{ read, running string }{
+		"reading":      {`{"nftables": [`, fmt.Sprintf(quota, "1")},
+		"running":      {fmt.Sprintf(quota, "1"), fmt.Sprintf(quota, `"x"`)},
+		"vmap address": {"", fmt.Sprintf(vmap, capDropChain(false), "bogus")},
+	} {
+		p := Drop{Day: 1, Groups: []DropGroup{{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100}}}
+		if c.read != "" {
+			p.Read = []byte(c.read)
+		}
+		if text, err := Drops(twoCaps(), fixtureLayout(), []byte(c.running), p); err == nil {
+			t.Errorf("%s: an update\n%s", name, text)
+		}
+	}
+}

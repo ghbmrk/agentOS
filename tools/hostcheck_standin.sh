@@ -54,8 +54,11 @@ plant() {
 # The kernel's EFI stub sets MOR's ClearMemory bit at boot (RESET_ATTACK_MITIGATION) wherever the
 # firmware has the variable, as Debian's OVMF does (#4906). An orderly shutdown clears it, as the
 # image's agentos-mor.service does (HW-8, #4794): only bit 0, keeping the attributes and other bits.
+# Every way out of the guest (reboot, poweroff, end of input) clears it first: tests/test_hostcheck.py
+# pins those lines and runs this function on a file, since the stub sets the bit again at each boot.
+MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
 mor_clear() {
-	v=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+	v=$1
 	[ -e "$v" ] || return 0
 	set -- $(od -An -tu1 -v "$v")
 	[ $# = 5 ] || { echo "HOSTCHECK-MOR-FAILED size"; return 0; }
@@ -66,7 +69,7 @@ mor_clear() {
 }
 while :; do
 	echo HOSTCHECK-READY
-	read -r cmd arg || { sync; mor_clear; exec poweroff -f; }
+	read -r cmd arg || { sync; mor_clear "$MOR"; exec poweroff -f; }
 	case $cmd in
 	task)
 		dd if=/dev/vda of=/dev/null bs=512 count=34 2>/dev/null
@@ -75,8 +78,8 @@ while :; do
 		fi
 		sync
 		echo HOSTCHECK-DONE ;;
-	reboot) sync; mor_clear; reboot -f ;;
-	poweroff) sync; mor_clear; poweroff -f ;;
+	reboot) sync; mor_clear "$MOR"; reboot -f ;;
+	poweroff) sync; mor_clear "$MOR"; poweroff -f ;;
 	esac
 done
 EOF

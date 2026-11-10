@@ -1049,6 +1049,16 @@ func TestLifecycle(t *testing.T) {
 	// a restart keeps it so, and only the page's passkey resume lifts it.
 	t.Run("channel burst", func(t *testing.T) {
 		x, a := enrolled(t, true)
+		// Clear the enrolment's alert first, so "off" below means no
+		// Alerts section at all (#5162).
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind != alert.Enrolment {
+				t.Fatalf("alert %d (kind %d) open before the burst", r.ID, r.Kind)
+			}
+			if w := x.b.act(a, "clear", strconv.FormatUint(r.ID, 10)); w.Code != http.StatusOK {
+				t.Fatalf("clear the enrolment's alert: %d %s", w.Code, w.Body)
+			}
+		}
 		c, _ := x.dial(x.serve(), x.core)
 		for range wire.Rate(wire.RateRead).Burst {
 			if code := c.read(); code != wire.OK {
@@ -1279,11 +1289,21 @@ func (x *box) page(field string) string {
 		}
 		return "up"
 	case "Light": // home names only a red light (#5106)
-		if strings.Contains(body, "The light is red") {
+		switch {
+		case strings.Contains(body, "The light is red"):
 			return "red"
+		case strings.Contains(body, "<h2>Alerts</h2>"): // not red, yet alerts show (#5162)
+			return "alerts"
 		}
 		return "off"
 	case "Key":
+		// Every revocation button asks the owner to confirm, the re-tap
+		// that saves an unsaved revocation too (ENF-page-status-2, #5162).
+		for _, b := range regexp.MustCompile(`<button[^>]*data-action="revoke-core"[^>]*>`).FindAllString(body, -1) {
+			if !strings.Contains(b, `data-confirm="`) {
+				return "unconfirmed"
+			}
+		}
 		switch {
 		case strings.Contains(body, "the revocation was not saved"):
 			return "unsaved"

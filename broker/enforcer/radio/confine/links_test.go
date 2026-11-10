@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/internal/netnstest"
-	"time"
 )
 
 // TestLinkAckOnlyFromKernel (#5095, the netlink sender check offload has):

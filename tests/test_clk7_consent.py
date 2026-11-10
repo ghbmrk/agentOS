@@ -45,6 +45,17 @@ def log8():
     return find(lambda l: l.startswith("- **LOG-8** "), "'- **LOG-8**' bullet")
 
 
+def clauses(t):
+    """The sentences and semicolon clauses of a bullet, so a check can match one whole."""
+    return re.split(r"(?<=[.;])\s+", re.sub(r"^\s*- \*\*[^*]+\*\*\s*", "", t))
+
+
+def reasons(row):
+    """A table row's reasons: its first cell split on commas and "and", asides dropped."""
+    cell = re.sub(r"\([^)]*\)", "", row.split("|")[1])
+    return [x.strip() for x in re.split(r",|\band\b", cell) if x.strip()]
+
+
 def log8_table():
     lines = (ROOT / "SPEC.md").read_text().splitlines()
     n = next(i for i, l in enumerate(lines, 1) if l.startswith("- **LOG-8** "))
@@ -68,14 +79,15 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CLK-7 later consent no longer takes the code-generator code")
         self.assertIn("Consent is a widening (KEY-4) at the high tier (CH-10)", t,
                       f"SPEC.md:{n} CLK-7 no longer names consent's tier")
-        self.assertIn("An unconfirmed route carries the consent reason (LOG-8) unless consent stands", t,
+        self.assertIn("An unconfirmed route carries the consent reason (LOG-8) unless consent stands.", clauses(t),
                       f"SPEC.md:{n} CLK-7 lets an unconfirmed route run before consent")
 
     def check_control(self, t, n):
-        self.assertIn("`PLAN <plan> ON` lifts the owner, login and consent reasons at their LOG-8 rungs, "
-                      "never a notice", t,
-                      f"SPEC.md:{n} CLK-7 PLAN ON no longer lifts consent at its rung, or lifts a notice")
-        self.assertIn("and on an unconfirmed route withdraws consent", t,
+        self.assertIn("`PLAN <plan> ON` lifts the owner and login reasons (P1), never consent or a notice;",
+                      clauses(t),
+                      f"SPEC.md:{n} CLK-7 PLAN ON lifts consent or a notice, or more than owner and login")
+        self.assertIn("`PLAN <plan> OFF` (CH-11), by text or on the Wi-Fi page, pauses a plan route at any time "
+                      "with no code, and on an unconfirmed route withdraws consent.", clauses(t),
                       f"SPEC.md:{n} CLK-7 PLAN OFF no longer withdraws consent on an unconfirmed route")
         self.assertIn("Consent and its withdrawal are log entries", t,
                       f"SPEC.md:{n} CLK-7 consent is no longer logged")
@@ -84,8 +96,7 @@ class Consent(unittest.TestCase):
         self.assertIn("| consent | consent (P3) |", t,
                       f"SPEC.md:{n} LOG-8 lets a rung below P3 lift the consent reason")
         rows = [r for r in t.splitlines() if r.startswith("| ") and not r.startswith("| Reason ")]
-        consent_rows = [r for r in rows
-                        if "consent" in [x.strip() for x in r.split("|")[1].split(",")]]
+        consent_rows = [r for r in rows if "consent" in reasons(r)]
         self.assertEqual(len(consent_rows), 1,
                          f"SPEC.md:{n} LOG-8 lets another table row lift the consent reason")
         self.assertIn("| notice | an update |", t,
@@ -141,10 +152,13 @@ class Consent(unittest.TestCase):
                 ("never by **Use the defaults**", "or by **Use the defaults**"),
                 ("unless consent stands", "until consent stands"),
                 ("unless consent stands", "until it is used"),
+                ("unless consent stands.", "unless consent stands, and on an unconfirmed route records consent."),
             ]),
             (control, self.check_control, [
-                ("at their LOG-8 rungs", "with a low-tier code"),
-                ("never a notice", "and a notice"),
+                ("owner and login reasons", "owner, login and consent reasons"),
+                ("never consent or a notice", "never a notice"),
+                ("or a notice;", "or a notice, and on an unconfirmed route records consent;"),
+                ("withdraws consent.", "withdraws consent until the next `PLAN <plan> ON`."),
                 ("withdraws consent", "keeps consent"),
                 ("are log entries", "are kept in memory"),
             ]),
@@ -153,6 +167,8 @@ class Consent(unittest.TestCase):
                 ("| notice | an update |", "| notice | `PLAN … ON` |"),
                 ("RESUME with a texted code (P1)", "RESUME"),
                 ("| owner, login |", "| owner, login, consent |"),
+                ("| owner, login |", "| owner, login and consent |"),
+                ("| owner, login |", "| owner, login, consent (P1) |"),
             ]),
             (ch11, self.check_ch11, [
                 ("lifts only the stop reason", "lifts every reason"),

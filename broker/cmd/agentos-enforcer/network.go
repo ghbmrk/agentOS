@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -138,10 +139,8 @@ func (d *Enforcer) openNetwork() error {
 	case b == nil:
 		d.net.counter = traffic.NewCounter(d.dp.Now, caps)
 	default:
+		// Restore's only error is traffic.ErrState: the saved day does not read back.
 		if d.net.counter, err = traffic.Restore(d.dp.Now, caps, b); err != nil {
-			if !errors.Is(err, traffic.ErrState) {
-				return fmt.Errorf("byte caps: %w", err)
-			}
 			d.net.counter, d.net.spent = nil, true
 			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until " + fileTraffic + " is replaced: " + err.Error())
 		}
@@ -181,16 +180,12 @@ func (d *Enforcer) ServeWake(ctx context.Context) error {
 // point 1).
 func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 	l := d.cfg.Layout
+	// One compile check refuses all three: a document that does not
+	// compile touches neither the resolver nor the ruleset.
 	paths, err := nft.Paths(doc, l)
-	if err != nil {
-		return err
-	}
-	ann, err := nft.Announces(doc, l)
-	if err != nil {
-		return err
-	}
-	hears, err := nft.Hears(doc, l)
-	if err != nil {
+	ann, aerr := nft.Announces(doc, l)
+	hears, herr := nft.Hears(doc, l)
+	if err := cmp.Or(err, aerr, herr); err != nil {
 		return err
 	}
 	files, err := dns.Generate(doc, l, d.cfg.DNS)

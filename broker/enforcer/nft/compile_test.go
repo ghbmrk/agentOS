@@ -8,10 +8,12 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/fixture.nft")
@@ -41,9 +43,7 @@ func TestGolden(t *testing.T) {
 	if got != string(want) {
 		t.Fatalf("ruleset differs from testdata/fixture.nft (run with -update and review the diff):\n%s", got)
 	}
-	if !haveNetns(t) {
-		return
-	}
+	netnstest.Ready(t, combined, []string{"-rn"}, "nft")
 	cmd := exec.Command("unshare", "-rn", "nft", "-c", "-f", "-")
 	cmd.Stdin = strings.NewReader(got)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -211,4 +211,132 @@ func stripKeys(text string) string {
 		text = strings.ReplaceAll(text, claimKey(v6), "")
 	}
 	return text
+}
+
+// TestVLANReadsOnlyItsRange: a Wi-Fi identity is a VLAN only as
+// "vlan<N>", N from 2 to 4094 in digits alone, so both ends are devices'
+// and a letter after the digits is no VLAN (P5).
+func TestVLANReadsOnlyItsRange(t *testing.T) {
+	for wifi, want := range map[string]int{"vlan2": 2, "vlan4094": 4094, "vlan109": 109} {
+		if n, ok := VLAN(wifi); !ok || n != want {
+			t.Errorf("VLAN(%q) = %d, %v, want %d", wifi, n, ok, want)
+		}
+	}
+	for _, wifi := range []string{"vlan1", "vlan4095", "vlan1x", "vlan10:", "vlan1/", "vlan", "vlan01", "vlan12345"} {
+		if n, ok := VLAN(wifi); ok {
+			t.Errorf("VLAN(%q) = %d, a VLAN", wifi, n)
+		}
+	}
+}
+
+// TestRulesetFollowsVLANsNotListOrder: the ruleset lists devices by VLAN,
+// whatever order the document lists them in, so one policy has one text.
+func TestRulesetFollowsVLANsNotListOrder(t *testing.T) {
+	d := fixturePolicy()
+	want, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Reverse(d.Devices)
+	got, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Error("the ruleset changes with the order of the document's devices")
+	}
+}
+
+// TestPathsOfThePairs (NET-3): an Owner device's pair is a path from the
+// whole Owner network, the paths come sorted, and a pair with a device on
+// any other network than Owner, Household or Devices is refused at either
+// end, not left without a path.
+func TestPathsOfThePairs(t *testing.T) {
+	d := fixturePolicy()
+	d.Devices = append(d.Devices, policy.Device{ID: "phone", Network: policy.NetOwner})
+	d.Pairs = append(d.Pairs, policy.Pair{A: "phone", B: "tv"})
+	got, err := Paths(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Path{{From: "ap0.106", To: "ap0.107", Both: true}, {From: "hh0", To: "ap0.105"}, {From: "own0", To: "ap0.101"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("paths %v, want %v", got, want)
+	}
+	for _, p := range []policy.Pair{{A: "a-guest", B: "printer"}, {A: "printer", B: "z-guest"}} {
+		d := fixturePolicy()
+		d.Devices = append(d.Devices, policy.Device{ID: "a-guest", Network: policy.NetGuests}, policy.Device{ID: "z-guest", Network: policy.NetGuests})
+		d.Pairs = []policy.Pair{p}
+		if paths, err := Paths(d, fixtureLayout()); !errors.Is(err, ErrPolicy) {
+			t.Errorf("pair %v: paths %v (err %v)", p, paths, err)
+		}
+	}
+}
+
+// TestAllowSetNames: a set's names are each once and sorted, and
+// AllowSets refuses what Compile refuses.
+func TestAllowSetNames(t *testing.T) {
+	if got := (AllowSet{Names: []string{"b.example", "a.example", "b.example"}}).names(); !slices.Equal(got, []string{"a.example", "b.example"}) {
+		t.Errorf("names %v", got)
+	}
+	l := fixtureLayout()
+	l.Trunk = ""
+	if sets, err := AllowSets(fixturePolicy(), l); !errors.Is(err, ErrLayout) {
+		t.Errorf("allow sets %v of a bad layout (err %v)", sets, err)
+	}
+}
+
+// TestNothingCountedNoCountingMap (NET-5): with every device isolated
+// there is no device traffic to count, and the ruleset declares no empty
+// verdict map for it, which nft refuses.
+func TestNothingCountedNoCountingMap(t *testing.T) {
+	d := fixturePolicy()
+	for i := range d.Devices {
+		d.Devices[i].Isolated = true
+	}
+	got, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "vmap {  }") {
+		t.Errorf("an empty verdict map:\n%s", got)
+	}
+}
+
+// TestLayoutCheckBounds: Check takes an interface name of 1 to 15 bytes
+// of [A-Za-z0-9_.-], not starting with a dot or dash, a trunk of up to
+// 10 bytes (so Trunk.4094 fits in 15) and only plain access point
+// addresses, and refuses one byte or character past each.
+func TestLayoutCheckBounds(t *testing.T) {
+	ok := map[string]func(*Layout){
+		"trunk of 10":     func(l *Layout) { l.Trunk = "trunk-port" },
+		"name of 15":      func(l *Layout) { l.APMgmt = "abcdefghijklmno" },
+		"every character": func(l *Layout) { l.APMgmt = "azAZ09_.-" },
+	}
+	for name, mut := range ok {
+		l := fixtureLayout()
+		mut(&l)
+		if err := l.Check(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	bad := map[string]func(*Layout){
+		"name of 16":   func(l *Layout) { l.APMgmt = "abcdefghijklmnop" },
+		"empty name":   func(l *Layout) { l.APMgmt = "" },
+		"leading dot":  func(l *Layout) { l.APMgmt = ".apm" },
+		"leading dash": func(l *Layout) { l.APMgmt = "-apm" },
+		"no address":   func(l *Layout) { l.APAdmin = []netip.Addr{{}} },
+		"mapped":       func(l *Layout) { l.APAdmin = []netip.Addr{netip.MustParseAddr("::ffff:10.70.0.2")} },
+		"zoned":        func(l *Layout) { l.APAdmin = []netip.Addr{netip.MustParseAddr("fe80::2%apm0")} },
+	}
+	for _, c := range "`{@[/: \"" {
+		bad["character "+string(c)] = func(l *Layout) { l.APMgmt = "ap" + string(c) }
+	}
+	for name, mut := range bad {
+		l := fixtureLayout()
+		mut(&l)
+		if err := l.Check(); !errors.Is(err, ErrLayout) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
 }
