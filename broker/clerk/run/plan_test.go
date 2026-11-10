@@ -572,6 +572,9 @@ func TestPlanOwnerSocketCalls(t *testing.T) {
 	if st, err := o.KeyState(); err != nil || len(st) == 0 {
 		t.Fatalf("key state: %+v %v", st, err)
 	}
+	if err := o.Call("apikeyset", "not an object", nil); err == nil || !strings.Contains(err.Error(), "has no call apikeyset") {
+		t.Fatalf("a key call with no arguments: %v", err)
+	}
 	if err := o.Call("planbogus", planArgs{"codex"}, nil); err == nil || !strings.Contains(err.Error(), "has no call planbogus") {
 		t.Fatalf("an unknown call naming a plan: %v", err)
 	}
