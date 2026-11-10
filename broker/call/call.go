@@ -172,7 +172,7 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	defer cancel()
 	token := make(chan Rung, 1)
 	go func() { token <- cfg.token(tctx, c) }()
-	return cfg.run(ctx, c, P0, token)
+	return loop(ctx, cfg, c, token)
 }
 
 // token reads the speed-dial token: the handset's contact holds the box's
@@ -217,15 +217,6 @@ func (cfg Config) check(token string) Rung {
 	return P0
 }
 
-// Run holds one call at rung until it ends or ctx is done. Turns are
-// answered one at a time: a new final turn, any speech from the owner, or
-// the 0 key stops the answer being spoken first.
-func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
-	known := make(chan Rung, 1)
-	known <- rung
-	return cfg.withDefaults().run(ctx, l, rung, known)
-}
-
 // callRung is the call's rung as the turns see it: ready closes once it is
 // known, and r is fixed from then on.
 type callRung struct {
@@ -233,14 +224,22 @@ type callRung struct {
 	r     Rung
 }
 
-// run is Run, with the rung to come on token. It listens from the start,
-// so the owner's first words are heard while the token is read; keys are
-// the token's until it is read. A turn starts as soon as it is heard,
-// whether or not the rung is known yet, so its one clip deadline covers
-// the wait for the rung as well as the answerer and the synthesizer
-// (rule 5; UX on #4944).
-func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung) (Report, error) {
-	rep := Report{Rung: rung}
+// loop holds one call until it ends or ctx is done. Turns are answered one
+// at a time: a new final turn, any speech from the owner, or the 0 key
+// stops the answer being spoken first. The call is at P0 until its rung
+// comes on token, and token is the loop's only rung input. loop is a plain
+// unexported function, not a method, so no interface or type constraint can
+// name it: code reaches it only by naming it, and Serve, which fills token
+// from the speed-dial check, is the one place that does (briefs/VOICE-ro.md
+// rule 4, #4949; TestOnlyServeChoosesTheRung).
+//
+// It listens from the start, so the owner's first words are heard while
+// the token is read; keys are the token's until it is read. A turn starts
+// as soon as it is heard, whether or not the rung is known yet, so its one
+// clip deadline covers the wait for the rung as well as the answerer and
+// the synthesizer (rule 5; UX on #4944).
+func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, error) {
+	rep := Report{Rung: P0}
 	select {
 	case <-l.Active():
 	case <-l.Ended():
@@ -258,7 +257,7 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 		close(cr.ready)
 		rep.Rung, token, keys = r, nil, l.Keys()
 	}
-	select { // Run's rung is known before the first turn can start
+	select { // a rung already on token is known before the first turn can start
 	case r := <-token:
 		known(r)
 	default:
