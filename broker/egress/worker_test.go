@@ -15,8 +15,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/clerk/header"
-	"github.com/ghbmrk/agentos/broker/hostiletext"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -972,52 +970,14 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-// A plan route passes only the names the plan clerk passes, byte for byte,
-// on its request, sign-in and response lists, and only its prefixes
-// (#5278): the header corpus's credential, request-reshaping, hop-by-hop
-// and broken names, in any case, are refused. Catches the old denylist,
-// which took X-Original-Url, X-Api-Key and Forwarded, and a list that drifts
-// from the clerk's.
-func TestPlanRouteHeadersRefuseTheCorpus(t *testing.T) {
-	takes := func(edit func(*PlanRoute)) error {
-		r := Codex()
-		edit(&r)
-		return r.validate()
-	}
-	want := hostiletext.Exactly(t, header.PassHeaders,
-		"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
-		"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
-		"Retry-After", "X-Request-Id", "Openai-Model")
-	for name, set := range map[string]func(r *PlanRoute, h string){
-		"request":  func(r *PlanRoute, h string) { r.RequestHeaders = []string{h} },
-		"sign-in":  func(r *PlanRoute, h string) { r.SignInHeaders = []string{h} },
-		"response": func(r *PlanRoute, h string) { r.ResponseHeaders = []string{h} },
-	} {
-		t.Run(name, func(t *testing.T) {
-			hostiletext.RunHeaders(t, func(h string) bool {
-				return takes(func(r *PlanRoute) { set(r, h) }) == nil
-			}, want...)
-		})
-	}
-	if err := takes(func(r *PlanRoute) { r.RequestHeaders = []string{"X-Original-Url"} }); err == nil || err.Error() != `plan route codex: may not forward header "X-Original-Url"` {
-		t.Errorf("X-Original-Url: got %v", err)
-	}
-	// An answer header a prefix matches is on no list: one naming a
-	// credential, the broker or an encoding is dropped, the rest pass.
-	w := &workerRoute{c: WorkerRouteConfig{Route: Codex()}}
-	got := w.responseHeaders(http.Header{
-		"X-Codex-Primary-Used-Percent": {"1"}, "X-Codex-Session-Token": {"t"}, "X-Codex-Auth": {"t"},
-		"X-Codex-Agentos-Denied": {"1"}, "X-Other": {"1"},
-	})
-	if strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-Primary-Used-Percent" {
-		t.Errorf("answer headers passed: %q", got)
-	}
-	if err := takes(func(r *PlanRoute) { r.ResponsePrefixes = []string{"X-Codex-"} }); err != nil {
-		t.Errorf(`the prefix "X-Codex-" was refused: %v`, err)
-	}
-	for _, pre := range []string{"X-", "x-codex-", "X-Codex", "Set-", "Proxy-Auth", ""} {
-		if err := takes(func(r *PlanRoute) { r.ResponsePrefixes = []string{pre} }); err == nil || err.Error() != `plan route codex: response prefix "`+pre+`"` {
-			t.Errorf("the prefix %q: got %v", pre, err)
-		}
+// Egress's plan route and key check use clerk/header's list and value check,
+// and a prefixed answer header naming a credential is dropped (#5278); the
+// corpus runs through egress in clerk/header's tests.
+func TestEgressUsesTheSharedHeaderChecks(t *testing.T) {
+	r, p, a := Codex(), Codex(), Anthropic("a")
+	r.SignInHeaders, p.ResponsePrefixes, a.KeyCheck.Headers = []string{"X-Api-Key"}, []string{"X-"}, map[string]string{"Anthropic-Version": " v"}
+	got := (&workerRoute{c: WorkerRouteConfig{Route: r}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}})
+	if r.validate() == nil || p.validate() == nil || a.Validate() == nil || strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A" {
+		t.Errorf("a shared header check is not applied: %v, %v, %v, %q", r.validate(), p.validate(), a.Validate(), got)
 	}
 }

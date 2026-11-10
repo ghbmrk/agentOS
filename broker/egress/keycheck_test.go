@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // REQ: ONB-3, CRED-5, CRED-1
@@ -156,28 +154,6 @@ func TestKeyCheckIsNotAnOperation(t *testing.T) {
 	for _, a := range []Adapter{OpenAI("openai"), Anthropic("anthropic")} {
 		if _, ok := a.Match(http.MethodGet, a.KeyCheck.Path); ok {
 			t.Fatalf("%s: key check path is an operation", a.Name)
-		}
-	}
-}
-
-// A key check's declared header value refuses the header-value corpus, an
-// empty value and padding, and the refusal names the rule (#5278): no line
-// break or control character reaches the provider beside the key.
-func TestKeyCheckHeaderValuesRefuseTheCorpus(t *testing.T) {
-	declare := func(v string) error {
-		a := Anthropic("anthropic")
-		a.KeyCheck = &KeyCheck{Path: "/v1/models", Headers: map[string]string{"Anthropic-Version": v}}
-		return a.Validate()
-	}
-	hostiletext.RunHeaderValues(t, func(v string) bool { return declare(v) == nil })
-	for v, rule := range map[string]string{
-		"":    "the value is empty",
-		" v":  "the value begins or ends with a space",
-		"v ":  "the value begins or ends with a space",
-		"v\t": "the value holds a control character or a byte outside visible ASCII",
-	} {
-		if err := declare(v); err == nil || err.Error() != "adapter anthropic: key check header Anthropic-Version: "+rule {
-			t.Errorf("the value %q: got %v, want %q", v, err, rule)
 		}
 	}
 }
