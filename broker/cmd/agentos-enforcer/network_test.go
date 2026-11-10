@@ -1299,7 +1299,10 @@ func TestHold(t *testing.T) {
 // and peer address of the interface's messages, once; a dump marked
 // interrupted (NLM_F_DUMP_INTR) is taken again once, and fails if the
 // second is marked too (#5164 item 8); an end carrying an error, a short
-// end, no end, or anything unreadable fails.
+// end, no end, or anything unreadable fails, each with its own check's
+// error (#5188 item 2). The index is looked up before the dump and again
+// after it, and an interface made again in between, or gone, fails
+// (#5188 item 1).
 func TestIfaceAddrs(t *testing.T) {
 	got, err := ifaceAddrs("lo")
 	if err != nil {
@@ -1386,22 +1389,65 @@ func TestIfaceAddrs(t *testing.T) {
 		t.Errorf("a failed dump: %v", err)
 	}
 	for _, tc := range []struct {
-		name string
-		dump []byte
+		name, want string
+		dump       []byte
 	}{
-		{"a short address message", join(msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0}), done(0))},
-		{"a three-byte address", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0})), done(0))},
-		{"a prefix longer than the address", join(addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1"))), done(0))},
-		{"a message cut short", clean[:20]},
-		{"an attribute that does not parse", join(addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0}), done(0))},
-		{"an end carrying an error", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, []byte{0xf0, 0xff, 0xff, 0xff}))},
-		{"a short end", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, nil))},
-		{"no end", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")))},
+		{"a short address message", "a short address message", join(msg(syscall.RTM_NEWADDR, syscall.NLM_F_MULTI, []byte{syscall.AF_INET, 24, 0, 0}), done(0))},
+		{"a three-byte address", "an unreadable address 0a0100/24", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, []byte{10, 1, 0})), done(0))},
+		{"a prefix longer than the address", "an unreadable address 0a010001/33", join(addr(0, syscall.AF_INET, 33, 2, attr(syscall.IFA_LOCAL, v4("10.1.0.1"))), done(0))},
+		{"a message cut short", "the kernel's address dump has no end\n" + syscall.EINVAL.Error(), clean[:20]},
+		{"an attribute that does not parse", syscall.EINVAL.Error(), join(addr(0, syscall.AF_INET, 24, 2, []byte{0xff, 0, 1, 0}), done(0))},
+		{"an end carrying an error", "the kernel's address dump ended in error (f0ffffff)", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, []byte{0xf0, 0xff, 0xff, 0xff}))},
+		{"a short end", "the kernel's address dump ended in error ()", join(addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1"))), msg(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, nil))},
+		{"no end", "the kernel's address dump has no end", addr(0, syscall.AF_INET, 24, 2, attr(syscall.IFA_ADDRESS, v4("10.1.0.1")))},
 	} {
 		b := tc.dump
-		if got, err := addrsOf(2, func() ([]byte, error) { return b, nil }); err == nil || got != nil {
-			t.Errorf("%s read as %v", tc.name, got)
+		if got, err := addrsOf(2, func() ([]byte, error) { return b, nil }); err == nil || err.Error() != tc.want || got != nil {
+			t.Errorf("%s read as %v, %v; want the error %q", tc.name, got, err, tc.want)
 		}
+	}
+
+	// The index before the dump and after it: the same reads the dump;
+	// another, or none, fails.
+	gone := errors.New("route ip+net: no such network interface")
+	for _, tc := range []struct {
+		name  string
+		after func() (int, error)
+		want  string
+	}{
+		{"the same", func() (int, error) { return 2, nil }, ""},
+		{"made again", func() (int, error) { return 7, nil }, "interface own0 was made again while its addresses were read (index 2, then 7)"},
+		{"gone", func() (int, error) { return 0, gone }, gone.Error()},
+	} {
+		var asked []string
+		index := func(name string) (int, error) {
+			asked = append(asked, name)
+			if len(asked) == 1 {
+				return 2, nil
+			}
+			return tc.after()
+		}
+		dumped := 0
+		got, err := addrsOn("own0", index, func() ([]byte, error) { dumped++; return clean, nil })
+		if !slices.Equal(asked, []string{"own0", "own0"}) || dumped != 1 {
+			t.Errorf("%s: looked up %q, dumped %d times; want own0 before and after one dump", tc.name, asked, dumped)
+		}
+		if tc.want == "" && (err != nil || !slices.Equal(got, want)) {
+			t.Errorf("%s: %v %v, want %v", tc.name, got, err, want)
+		}
+		if tc.want != "" && (err == nil || err.Error() != tc.want || got != nil) {
+			t.Errorf("%s: %v %v, want the error %q", tc.name, got, err, tc.want)
+		}
+	}
+	// No index: no dump. A failed dump: its error, without the second look.
+	n := 0
+	if got, err := addrsOn("own0", func(string) (int, error) { n++; return 0, gone }, func() ([]byte, error) { t.Fatal("dumped with no index"); return nil, nil }); err != gone || got != nil || n != 1 {
+		t.Errorf("no index: %v %v after %d lookups", got, err, n)
+	}
+	n = 0
+	refused := errors.New("netlink: refused")
+	if got, err := addrsOn("own0", func(string) (int, error) { n++; return 2, nil }, func() ([]byte, error) { return nil, refused }); err != refused || got != nil || n != 1 {
+		t.Errorf("a failed dump: %v %v after %d lookups", got, err, n)
 	}
 }
 
