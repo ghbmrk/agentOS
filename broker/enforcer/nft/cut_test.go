@@ -1,15 +1,18 @@
 package nft
 
-// REQ: NET-3, NET-7
+// REQ: NET-3, NET-7, NET-2, KRN-12
 
 import (
+	"context"
 	"net"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
@@ -240,4 +243,90 @@ func TestFirstLoadCutsOnce(t *testing.T) {
 	if h.counter(Blocked) == before {
 		t.Error("the connection on no path was not counted as refused")
 	}
+}
+
+// NET-2 Byte caps, KRN-12 (#5014): a cut edge reaches nothing through the
+// enforcer. The drop's text on its own cuts the edge's open connections,
+// to a device and to the internet, both ways, and refuses new ones, while
+// the core's go on; a full load that carries the cut (a restart) keeps it;
+// a text without it lifts it, and the edge's paths open again.
+func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	d, l := cutPolicy(), fixtureLayout()
+	text, err := Compile(d, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.load(withDrops(t, d, text))
+	h.fillSets()
+	nftBin, err := exec.LookPath("nft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := load.Loader{Bin: nftBin}
+	drop := func(cut bool) Drop { p := fresh(d); p.EdgeCut = cut; return p }
+	update := func(cut bool) {
+		t.Helper()
+		running, err := loader.List(context.Background(), Table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := Drops(d, l, running, drop(cut))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := loader.Update(context.Background(), u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// refused: a new connection from the edge gets no answer.
+	refused := func(why, to, addr string, port int) {
+		t.Helper()
+		var ln net.Listener
+		within(t, h.hosts[to], func() {
+			if ln, err = net.Listen("tcp", net.JoinHostPort(addr, strconv.Itoa(port))); err != nil {
+				t.Fatalf("%s: listen: %v", why, err)
+			}
+		})
+		defer ln.Close()
+		within(t, h.hosts["edge"], func() {
+			if c, err := net.DialTimeout("tcp", net.JoinHostPort(addr, strconv.Itoa(port)), probeWait); err == nil {
+				c.Close()
+				t.Errorf("%s: a new connection passed while the edge is cut", why)
+			}
+		})
+	}
+	device := h.hold("the edge to an online device", "edge", "101", devAddr(101), 9100)
+	internet := h.hold("the edge to the internet", "edge", "isp", netOther, 9210)
+	core := h.hold("the core to its list", "core", "isp", netCore, 9211)
+	h.expectOpen(true, device, internet, core)
+
+	update(true)
+	before := h.counter(EdgeCut)
+	h.expectOpen(false, device, internet)
+	h.expectOpen(true, core)
+	if h.counter(EdgeCut) == before {
+		t.Error("the cut dropped nothing it counted")
+	}
+	refused("a new connection to a device", "101", devAddr(101), 9100)
+	refused("a new connection to the internet", "isp", netOther, 9212)
+
+	// A restart's first load carries the cut in the same transaction.
+	u, err := Drops(d, l, nil, drop(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.load(text + u)
+	h.fillSets()
+	h.expectOpen(false, device, internet)
+	refused("a new connection to a device, after a full load", "101", devAddr(101), 9100)
+
+	update(false)
+	h.expectOpen(true,
+		h.hold("the edge to an online device, lifted", "edge", "101", devAddr(101), 9100),
+		h.hold("the edge to the internet, lifted", "edge", "isp", netOther, 9213),
+	)
 }

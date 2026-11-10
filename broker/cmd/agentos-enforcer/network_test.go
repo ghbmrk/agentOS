@@ -1,6 +1,6 @@
 package main
 
-// REQ: NET-2, NET-3, NET-5
+// REQ: NET-2, NET-3, NET-5, KRN-12
 
 import (
 	"bytes"
@@ -473,34 +473,223 @@ func TestUnresolvedBytesTrip(t *testing.T) {
 	}
 }
 
-// TestEdgeOverrun (ENF-l-15; UX 6656586767): the edge past its cap is
-// held by the drop and logged once a day; it raises no alert, whose text
-// would name steps the edge does not have and which nothing would clear,
-// and it leaves the core's channel open and the light as it was.
-func TestEdgeOverrun(t *testing.T) {
-	x, doc, _ := capped(t)
+// TestByteCapTripsTheEdge (#5014, ENF-l-15, KRN-12): the edge past its
+// cap is cut: the record says so and why, a trip alert names the edge
+// and turns the light red, and the drop written at once carries the cut
+// chain's drop, while the core's channel stays open. The cut survives a
+// restart (the first load carries it) and further readings that day; only
+// the owner's passkey on the page lifts it, which clears the trip and
+// writes the drop without the cut, and the rest of that day's overrun
+// does not cut again. The next day's overrun cuts again.
+func TestByteCapTripsTheEdge(t *testing.T) {
+	const cutRule = `add rule inet enforcer cut_edge counter name "edge_cut" drop`
+	x, doc, a := capped(t)
+	lastUpdate := func() string {
+		x.fire.mu.Lock()
+		defer x.fire.mu.Unlock()
+		return x.fire.updates[len(x.fire.updates)-1]
+	}
+	edgeTrips := func() int {
+		n := 0
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind == alert.Trip && r.Device == edgeDevice {
+				n++
+			}
+		}
+		return n
+	}
+	x.setListing(listingOf(t, x, doc, 7, 10, 5000, true))
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) {
+		t.Fatal("the edge was cut at its cap, not past it")
+	}
+	x.fail(fileEdgeCut, true) // the disk refuses the trip's record
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
 	x.advance(readEvery)
+	cut, why := x.d.edge.Cut()
+	if !cut || !strings.Contains(why, "byte cap passed: 6000 of 5000") {
+		t.Fatalf("an edge overrun: cut %v, reason %q", cut, why)
+	}
+	x.advance(time.Second)
+	if cut, _ := x.d.edge.Cut(); !cut || x.logs("edge cut: trip not saved, ") != 1 || x.logs("edge cut: trip still not saved: ") == 0 {
+		t.Fatal("a trip the disk refused is not in force, or its refusals are not logged")
+	}
+	x.fail(fileEdgeCut, false)
+	x.advance(time.Second)
+	if x.logs("edge cut: trip saved") != 1 {
+		t.Fatal("the tick did not save the unsaved trip")
+	}
+	if !strings.Contains(lastUpdate(), cutRule) {
+		t.Fatal("the cut is not in the drop written after the trip")
+	}
+	if edgeTrips() != 1 || x.d.alerts.Status().Colour != alert.Red {
+		t.Fatal("the edge's cut raised no trip naming the edge, or the light is not red")
+	}
 	if x.d.cut.Stage() != channel.Open {
 		t.Fatal("an edge overrun cut the core")
 	}
-	if slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool { return r.Kind == alert.Trip }) {
-		t.Fatal("an edge overrun raised a trip nothing can clear")
+	if _, err := os.Stat(filepath.Join(x.dir, fileEdgeCut)); err != nil {
+		t.Fatalf("the cut was not saved: %v", err)
 	}
-	const line = "byte caps: edge: byte cap passed: 6000 of 5000"
-	if !strings.Contains(x.logText(), line) {
-		t.Fatal("the edge's overrun was not logged")
+
+	// A restart's first load is already cut, in the same transaction.
+	x.restart()
+	x.fire.mu.Lock()
+	first := x.fire.loads[len(x.fire.loads)-1]
+	x.fire.mu.Unlock()
+	if !strings.Contains(first, cutRule) {
+		t.Fatal("the first load after a restart lifted the edge's cut")
 	}
-	x.setListing(listingOf(t, x, doc, 7, 10, 7000, true))
+	x.setListing(listingOf(t, x, doc, 8, 10, 0, true))
 	x.advance(readEvery)
-	if n := strings.Count(x.logText(), "byte caps: edge:"); n != 1 {
-		t.Fatalf("the edge's overrun logged %d times in one day", n)
+	if cut, _ := x.d.edge.Cut(); !cut || !strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 1 || x.logs("byte caps: edge: ") != 1 {
+		t.Fatal("a reading after the restart lifted the cut or tripped again")
 	}
+
+	// Nothing but the owner's passkey lifts it.
+	if w := x.b.act(newAuthenticator(t), page.ActLiftEdge, ""); w.Code == http.StatusOK {
+		t.Fatal("a stranger's passkey lifted the edge's cut")
+	}
+	x.fail(fileEdgeCut, true)
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code == http.StatusOK {
+		t.Fatal("a lift the disk refused was answered as done")
+	}
+	if cut, _ := x.d.edge.Cut(); !cut || !strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 1 {
+		t.Fatal("a lift the disk refused lifted the cut")
+	}
+	x.fail(fileEdgeCut, false)
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 0 {
+		t.Fatal("the owner's lift left the edge cut, in the record, the firewall or the alerts")
+	}
+	if err := (pageEdge{x.d}).LiftEdge(); err != nil { // a second lift changes nothing
+		t.Fatal(err)
+	}
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the rest of the lifted day's overrun cut the edge again")
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a restart brought back a lifted cut")
+	}
+
 	x.advance(24 * time.Hour)
-	x.setListing(listingOf(t, x, doc, 7, 10, 13000, true)) // 6000 more on the new day
+	x.setListing(listingOf(t, x, doc, 9, 10, 6000, true))
 	x.advance(readEvery)
-	if n := strings.Count(x.logText(), "byte caps: edge:"); n != 2 {
-		t.Fatalf("the edge's overrun on a new day logged %d lines in all, want 2", n)
+	if cut, _ := x.d.edge.Cut(); !cut {
+		t.Fatal("the next day's overrun did not cut the edge")
+	}
+
+	// A lift on a later day than the overrun holds only for that one:
+	// the day it is lifted on counts from nothing, so its overrun cuts.
+	x.advance(24 * time.Hour)
+	// The firewall cannot be read at this lift: the record lifts, and
+	// the next tick's full load carries the lift.
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: busy")
+	loads := len(x.fire.loads)
+	x.fire.mu.Unlock()
+	if err := (pageEdge{x.d}).LiftEdge(); err != nil {
+		t.Fatal(err)
+	}
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a lift a day after the overrun left the edge cut")
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = nil
+	x.fire.mu.Unlock()
+	x.advance(time.Second)
+	x.fire.mu.Lock()
+	reloaded := len(x.fire.loads) > loads && !strings.Contains(x.fire.loads[len(x.fire.loads)-1], cutRule)
+	x.fire.mu.Unlock()
+	if !reloaded || x.logs("edge cut: firewall not updated, a full load follows at the next tick: ") != 1 {
+		t.Fatal("a lift the firewall did not take was not logged, or not loaded in full at the next tick")
+	}
+	x.setListing(listingOf(t, x, doc, 9, 10, 12000, true)) // 6000 more on the lift's day
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); !cut {
+		t.Fatal("an overrun on the day of a later lift did not cut the edge")
+	}
+}
+
+// TestEdgeCutRecordUnreadable (#5014): a record of the edge's cut that
+// does not read back fails closed: the edge starts cut, the log says so,
+// and the owner's lift writes the record whole again.
+func TestEdgeCutRecordUnreadable(t *testing.T) {
+	x, _, a := capped(t)
+	if err := os.WriteFile(filepath.Join(x.dir, fileEdgeCut), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); !cut || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" unreadable") {
+		t.Fatal("an unreadable record did not start the edge cut, or was not logged")
+	}
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the lift did not write the record whole again")
+	}
+	// A record that cannot be read at all (not a file) fails the start.
+	x.d.Close()
+	path := filepath.Join(x.dir, fileEdgeCut)
+	if err := os.Remove(path); err != nil || os.Mkdir(path, 0o700) != nil {
+		t.Fatal("fixture: the record not made a directory")
+	}
+	if d, err := x.open(); err == nil {
+		d.Close()
+		t.Fatal("the daemon started on an edge cut record it could not read")
+	}
+	os.Remove(path)
+	x.start()
+}
+
+// TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
+// saved at a clean stop, so the restart finds the edge cut; and the cut
+// is never written to the firewall before its first load.
+func TestEdgeCutSavedAtClose(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.fail(fileEdgeCut, true)
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
+	x.fail(fileEdgeCut, false)
+	x.restart()
+	// The restart's first reading still finds the edge past its cap: a
+	// second trip there would mean the record was not on disk.
+	if cut, _ := x.d.edge.Cut(); !cut || x.logs("byte caps: edge: ") != 1 {
+		t.Fatal("an unsaved trip was not saved at close")
+	}
+	// A running table the drop cannot be read against (nft.Drops refuses
+	// it): the cut is not written, so the next tick loads in full with it.
+	x.fire.mu.Lock()
+	good, loads := x.fire.listing, len(x.fire.loads)
+	x.fire.listing = []byte(`{"nftables": [{"quota": "unreadable"}]}`)
+	x.fire.mu.Unlock()
+	x.d.loadCut()
+	x.d.fwMu.Lock()
+	reload := x.d.net.reload
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.listing = good
+	x.fire.mu.Unlock()
+	if !reload {
+		t.Fatal("a drop that could not be built asked for no full load")
+	}
+	x.advance(time.Second)
+	x.fire.mu.Lock()
+	carried := len(x.fire.loads) > loads && strings.Contains(x.fire.loads[len(x.fire.loads)-1], `add rule inet enforcer cut_edge counter name "edge_cut" drop`)
+	x.fire.mu.Unlock()
+	if !carried {
+		t.Fatal("the full load after a drop that could not be built does not carry the cut")
+	}
+	d := &Enforcer{edge: x.d.edge}
+	d.loadCut() // no first load yet: nothing to write, and no firewall reached
+	if d.net.reload {
+		t.Fatal("a cut before the first load asked for a load")
 	}
 }
 

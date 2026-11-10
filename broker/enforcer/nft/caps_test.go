@@ -328,3 +328,38 @@ func TestDropsRefusesAListing(t *testing.T) {
 		}
 	}
 }
+
+// TestDropsCarryTheEdgeCut (#5014, KRN-12): every Drops text empties the
+// cut chain first, and fills it with a counted drop only while the edge
+// is cut, so a text on its own or appended to a full load sets the cut
+// to exactly p's; the forward chain sends the edge's every packet, both
+// ways, through it before any other rule.
+func TestDropsCarryTheEdgeCut(t *testing.T) {
+	d := fixturePolicy()
+	rule := `add rule inet enforcer cut_edge counter name "edge_cut" drop`
+	for _, running := range [][]byte{nil, []byte(`{"nftables": []}`)} {
+		for _, cut := range []bool{false, true} {
+			p := fresh(d)
+			p.EdgeCut = cut
+			text := mustDrops(t, d, running, p)
+			if !strings.HasPrefix(text, DropHeader+"\n") || !strings.Contains(text, "flush chain inet enforcer cut_edge\n") {
+				t.Errorf("cut %v: the cut chain is not emptied first:\n%s", cut, text)
+			}
+			if got := strings.Count(text, rule); got != map[bool]int{false: 0, true: 1}[cut] {
+				t.Errorf("cut %v: %d cut rules:\n%s", cut, got, text)
+			}
+		}
+	}
+	text, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fwd := text[strings.Index(text, "chain forward {"):]
+	want := "type filter hook forward priority filter; policy drop;\n\t\tiifname \"edge0\" jump cut_edge\n\t\toifname \"edge0\" jump cut_edge\n"
+	if !strings.Contains(fwd, want) {
+		t.Errorf("the forward chain does not start with the cut:\n%s", fwd[:400])
+	}
+	if !strings.Contains(text, "\tchain cut_edge {\n\t}\n") {
+		t.Error("the cut chain is not declared empty")
+	}
+}

@@ -18,6 +18,13 @@
 </div>
 {{end}}
 {{end}}
+{{with .EdgeCut}}<h2>Edge box</h2>
+<div class="pending warn">
+<p>The edge box is cut off: {{.}}. It reaches nothing through the enforcer, neither the internet nor your devices, and stays cut after a restart until you lift the cut here.</p>
+<p>Lift it once you trust the edge again. It gets back what your rules give it, and its internet bytes stay held at its cap for the rest of the day.</p>
+<button class="act" data-action="lift-edge" data-target="" data-rp="{{$.Name}}">Lift the edge's cut with your passkey</button>
+</div>
+{{end}}
 {{with .Caps}}<h2>Byte caps</h2>
 <div class="pending warn">
 <p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
