@@ -1376,6 +1376,26 @@ class MadeAllowTest(unittest.TestCase):
         with unittest.mock.patch.object(check, "driver_entries", return_value=([{"name": "scale"}], [])):
             self.assertEqual(self.refused(), [])
 
+    def test_a_manager_environment_is_refused(self):
+        # Security 6766645273 (#5270): ManagerEnvironment=SYSTEMD_UNIT_PATH moves PID 1's unit search to a
+        # directory the check never walks, so an ancestor bind and a unit-made directory there passed.
+        write(self.root, "usr/share/zz/srv-v.mount", "[Mount]\nWhat=/var/lib\nWhere=/srv/v\nOptions=bind\n")
+        write(self.root, "usr/share/zz/zz.service", "[Service]\nStateDirectory=zq\nUser=nobody\n")
+        for rel in ("usr/lib/systemd/system.conf.d/60-zz.conf", "etc/systemd/system.conf"):
+            for text in ("[Manager]\nManagerEnvironment=SYSTEMD_UNIT_PATH=/usr/share/zz:\n",
+                         "[Manager]\nManagerEnvironment=A=1\n", "[X]\nManagerEnvironment=A=1\n"):
+                with self.subTest(rel=rel, text=text):
+                    f = write(self.root, rel, text)
+                    want = ("%s: sets ManagerEnvironment=, which PID 1 applies to itself (SYSTEMD_UNIT_PATH moves "
+                            "where it loads units from); the tree check never passes one (#5167)" % rel)
+                    self.assertEqual(check.manager_environment_violations(self.root), [want])
+                    self.assertIn(want, check.violations(self.root))
+                    f.unlink()
+        write(self.root, "usr/lib/systemd/system.conf.d/60-zz.conf", "[Manager]\nDefaultEnvironment=A=1\n")
+        self.assertEqual(check.manager_environment_violations(self.root), [])
+        write(self.root, "usr/lib/systemd/system.conf.d/60-zz.conf", "[Manager]\nA=\0\n")
+        self.assertIn("unreadable", " ".join(check.manager_environment_violations(self.root)))
+
     def test_regenerate_and_missing(self):
         write(self.root, SYSTEM + "zz.socket", "[Socket]\nListenStream=/run/zz\n")
         text = check.made_allowlist_text(self.root)

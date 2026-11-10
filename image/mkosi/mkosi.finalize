@@ -362,6 +362,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
+            + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
@@ -1718,6 +1719,29 @@ def unit_made_dirs(root):
                 if steps:
                     made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
     return made, out
+
+
+def manager_environment_violations(root):
+    """#5167 (Security 6766645273): PID 1 applies a system.conf ManagerEnvironment= to its own environment
+    before it builds its unit search path, which reads SYSTEMD_UNIT_PATH (and other SYSTEMD_* variables)
+    from it (v257 main.c setenv_manager_environment, path-lookup.c get_paths_from_environ). One line there
+    would load units from a directory unit_files never walks. Stock sets none, so any ManagerEnvironment=, in
+    any section of any system.conf main file or drop-in, is refused, and so is a file that cannot be read."""
+    out = []
+    files = [Conf(str(root), rel) for rel in conf_paths("systemd/system.conf")]
+    for f in files + conf_files(root, conf_paths("systemd/system.conf.d")):
+        try:
+            if f.rel in conf_paths("systemd/system.conf") and tree_lstat(root, f.rel) is None:
+                continue
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a manager configuration file it cannot "
+                       "read (#5167)" % (f.rel, e.strerror if isinstance(e, OSError) else e))
+            continue
+        if any(k == "ManagerEnvironment" for _, k, _ in lines):
+            out.append("%s: sets ManagerEnvironment=, which PID 1 applies to itself (SYSTEMD_UNIT_PATH moves where "
+                       "it loads units from); the tree check never passes one (#5167)" % f.rel)
+    return out
 
 
 def unit_files(root):
