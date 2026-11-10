@@ -2,7 +2,8 @@
 """Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening): a Wi-Fi
 package, a missing module block or a blocked module installed. Refuse one that
 enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
-dump to a file (#4459), or that leaves the kernel's reverse-path filter on anywhere (#4810). mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
+dump to a file (#4459), or that leaves the kernel's reverse-path filter (#4810) or ICMP redirects
+(#5164) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
 build log. The running box checks the same
 (agentos-enforcer/health); this catches it before an image exists."""
 import fnmatch
@@ -25,8 +26,12 @@ WANTS_DIRS = ("etc/systemd/system",)
 NODUMP = {"kernel/core_pattern": "|/usr/bin/false", "fs/suid_dumpable": "0"}
 # #4810: the reverse-path filter is off on every interface (usr/lib/sysctl.d/99-enforcer-rpfilter.conf),
 # since the ruleset's rpf chain replaces it and, on, it drops the WAN's DHCP answers. These three must
-# be 0, and so must every other key that names or globs an interface's rp_filter (rp_filter_key).
+# be 0, and so must every other key that names or globs an interface's rp_filter (iface_key).
 RPF = ("net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter", "net/ipv4/conf/*/rp_filter")
+# #5164 R3: no interface takes an ICMP redirect, IPv4 or IPv6, before the daemon starts or while it is
+# down (usr/lib/sysctl.d/99-enforcer-redirects.conf). These must be 0, and so must every other key
+# that names or globs an interface's accept_redirects in either family (iface_key).
+REDIRECTS = tuple("net/%s/conf/%s/accept_redirects" % (f, i) for f in ("ipv4", "ipv6") for i in ("all", "default", "*"))
 # Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
 # name lower down, and the files are read in name order.
 SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
@@ -71,11 +76,12 @@ def globmatch(name, pattern):
     return fnmatch.fnmatchcase(name, pattern.replace("[^", "[!"))
 
 
-def rp_filter_key(key):
-    """True when key (sysctl_key form) names or globs some interface's rp_filter. systemd globs
-    /proc/sys one component at a time, and any fourth component matches some interface's name."""
+def iface_key(key, family, leaf):
+    """True when key (sysctl_key form) names or globs some interface's net.<family>.conf.<leaf>.
+    systemd globs /proc/sys one component at a time, and any fourth component matches some
+    interface's name."""
     c = key.split("/")
-    return len(c) == 5 and all(globmatch(w, p) for p, w in zip(c[:3] + c[4:], ("net", "ipv4", "conf", "rp_filter")))
+    return len(c) == 5 and all(globmatch(w, p) for p, w in zip(c[:3] + c[4:], ("net", family, "conf", leaf)))
 
 
 def sysctls(root):
@@ -143,7 +149,10 @@ def violations(root):
     # systemd applies a name over any glob that matches it, and a glob replaces only the same glob
     # from an earlier file, so a non-zero rp_filter key anywhere in the final set leaves one on.
     out += ["sysctl.d sets %s to %s; rp_filter must be 0" % (k.replace("/", "."), vals.get(k))
-            for k in sorted(set(RPF) | {k for k in vals if rp_filter_key(k)}) if vals.get(k) != "0"]
+            for k in sorted(set(RPF) | {k for k in vals if iface_key(k, "ipv4", "rp_filter")}) if vals.get(k) != "0"]
+    out += ["sysctl.d sets %s to %s; accept_redirects must be 0" % (k.replace("/", "."), vals.get(k))
+            for k in sorted(set(REDIRECTS) | {k for k in vals if any(iface_key(k, f, "accept_redirects") for f in ("ipv4", "ipv6"))})
+            if vals.get(k) != "0"]
     return out
 
 

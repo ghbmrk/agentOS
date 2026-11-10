@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the enforcer's tree check (mkosi/mkosi.finalize): the core dump settings (#4459), the
-reverse-path filter and the blocked modules left out of the image (#4810)."""
+reverse-path filter and the blocked modules left out of the image (#4810), and ICMP redirects (#5164)."""
 import importlib.machinery
 import importlib.util
 import pathlib
@@ -16,6 +16,7 @@ _loader.exec_module(fin)
 
 NODUMP = "usr/lib/sysctl.d/99-enforcer-nodump.conf"
 RPF = "usr/lib/sysctl.d/99-enforcer-rpfilter.conf"
+REDIR = "usr/lib/sysctl.d/99-enforcer-redirects.conf"
 # What systemd's own sysctl.d/50-default.conf says about rp_filter (upstream, as Debian ships it).
 DEFAULT_50 = ("net.ipv4.conf.default.rp_filter = 2\nnet.ipv4.conf.*.rp_filter = 2\n"
               "-net.ipv4.conf.all.rp_filter\n")
@@ -29,7 +30,7 @@ class Tree(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root)
         (self.root / "var/lib/dpkg").mkdir(parents=True)
         (self.root / "var/lib/dpkg/status").write_text("")
-        for rel in ("usr/lib/systemd/system-preset/50-enforcer.preset", "usr/lib/modprobe.d/enforcer-off.conf", NODUMP, RPF):
+        for rel in ("usr/lib/systemd/system-preset/50-enforcer.preset", "usr/lib/modprobe.d/enforcer-off.conf", NODUMP, RPF, REDIR):
             (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(MK / "mkosi.extra" / rel, self.root / rel)
         self.put("usr/lib/sysctl.d/50-default.conf", DEFAULT_50)
@@ -142,6 +143,56 @@ class RpFilter(Tree):
         self.put("usr/lib/sysctl.d/10-early.conf", "net.ipv4.conf.*.rp_filter=2\n")
         self.put("etc/sysctl.d/zz-x.conf", "# net.ipv4.conf.all.rp_filter=1\nnet.ipv4.conf.all.forwarding=1\n"
                  "net.ipv6.conf.all.rp_filter=1\nnet.ipv4.conf.all.arp_filter=1\n")
+        self.assertEqual(self.refusals(), [])
+
+
+class Redirects(Tree):
+    """REQ: NET-2. No interface takes an ICMP redirect, IPv4 or IPv6, from boot and while the daemon
+    is down (#5164 R3): accept_redirects is 0 on "all", "default" and every interface in both families
+    once systemd-sysctl has read sysctl.d in its order, and the tree check refuses anything else."""
+
+    def refusals(self):
+        return [v for v in fin.violations(self.root) if "accept_redirects" in v]
+
+    def test_shipped_tree_passes(self):
+        self.assertEqual(fin.violations(self.root), [])
+        vals, _ = fin.sysctls(self.root)
+        self.assertEqual(len(fin.REDIRECTS), 6)
+        for k in fin.REDIRECTS:
+            self.assertEqual(vals[k], "0", k)
+
+    def test_unset_refused(self):
+        # The kernel's own default is 1 on every key: without the image's file, all six are refused.
+        (self.root / REDIR).unlink()
+        self.assertEqual(self.refusals(), ["sysctl.d sets %s to None; accept_redirects must be 0" % k.replace("/", ".")
+                                           for k in sorted(fin.REDIRECTS)])
+
+    def test_override_refused(self):
+        for name, line, n in (("zz-late.conf", "net.ipv4.conf.all.accept_redirects=1\n", 1),
+                              ("zz-late.conf", "net.ipv6.conf.default.accept_redirects = 1\n", 1),
+                              ("zz-late.conf", "net/ipv6/conf/*/accept_redirects=1\n", 1),
+                              ("zz-late.conf", "-net.ipv4.conf.default.accept_redirects\n", 1),
+                              ("zz-late.conf", "net.ipv4.conf.wan0.accept_redirects=1\n", 1),
+                              ("zz-late.conf", "net.ipv6.conf.en*.accept_redirects=1\n", 1),
+                              ("zz-late.conf", "net.*.conf.*.accept_redirects=1\n", 1),
+                              ("zz-late.conf", "net.ipv[46].conf.all.accept_*=1\n", 1),
+                              ("zz-late.conf", "x=1\rnet.ipv6.conf.wan0.accept_redirects=1\n", 1),
+                              ("00-early.conf", "net.ipv6.conf.wan0.accept_redirects=1\n", 1),
+                              ("zz-late.conf", "net.ipv4.conf.*.accept_redirects=1\nnet.ipv6.conf.*.accept_redirects=1\n", 2)):
+            with self.subTest(name=name, line=line):
+                self.put("usr/lib/sysctl.d/" + name, line)
+                self.assertEqual(len(self.refusals()), n, self.refusals())
+                (self.root / "usr/lib/sysctl.d" / name).unlink()
+
+    def test_masked_in_etc_refused(self):
+        self.put("etc/sysctl.d/99-enforcer-redirects.conf", "")
+        self.assertEqual(len(self.refusals()), 6)
+
+    def test_replaced_and_unrelated_keys_pass(self):
+        # An earlier file's same key is replaced; neighbouring keys are not accept_redirects.
+        self.put("usr/lib/sysctl.d/10-early.conf", "net.ipv6.conf.*.accept_redirects=1\nnet.ipv4.conf.all.accept_redirects=1\n")
+        self.put("etc/sysctl.d/zz-x.conf", "# net.ipv4.conf.all.accept_redirects=1\nnet.ipv4.conf.all.secure_redirects=1\n"
+                 "net.ipv4.conf.all.send_redirects=1\nnet.ipv6.conf.all.accept_ra=1\nnet.ipv4.conf.all.forwarding=1\n")
         self.assertEqual(self.refusals(), [])
 
 
