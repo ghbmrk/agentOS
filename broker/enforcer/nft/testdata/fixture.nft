@@ -542,23 +542,23 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 3600s;
 	}
-	set held_guests_4 {
-		typeof ip saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
-	set claim_guests_4 {
-		typeof ip saddr . ether saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
 	set host_guests_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 3600s;
+	}
+	set lease_guests_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leased_guests {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
 	}
 	set held_guests_6 {
 		typeof ip6 saddr;
@@ -572,29 +572,35 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 21600s;
 	}
+	set mac6_guests {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
 	set host_owner_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 3600s;
 	}
-	set held_owner_4 {
-		typeof ip saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
-	set claim_owner_4 {
-		typeof ip saddr . ether saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
 	set host_owner_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 3600s;
+	}
+	set lease_owner_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leased_owner {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
 	}
 	set held_owner_6 {
 		typeof ip6 saddr;
@@ -608,29 +614,35 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 21600s;
 	}
+	set mac6_owner {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
 	set host_household_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 3600s;
 	}
-	set held_household_4 {
-		typeof ip saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
-	set claim_household_4 {
-		typeof ip saddr . ether saddr;
-		size 65535;
-		flags dynamic,timeout;
-		timeout 21600s;
-	}
 	set host_household_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 3600s;
+	}
+	set lease_household_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leased_household {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
 	}
 	set held_household_6 {
 		typeof ip6 saddr;
@@ -640,6 +652,12 @@ table inet enforcer {
 	}
 	set claim_household_6 {
 		typeof ip6 saddr . ether saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set mac6_household {
+		typeof @ll,48,48;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 21600s;
@@ -873,12 +891,12 @@ table inet enforcer {
 		drop
 	}
 	chain claim_guests {
-		meta nfproto ipv4 ip saddr . ether saddr @claim_guests_4 update @claim_guests_4 { ip saddr . ether saddr } update @held_guests_4 { ip saddr } return
-		meta nfproto ipv4 ip saddr @held_guests_4 drop
-		meta nfproto ipv4 add @claim_guests_4 { ip saddr . ether saddr } add @held_guests_4 { ip saddr } return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_guests_6 update @claim_guests_6 { ip6 saddr . ether saddr } update @held_guests_6 { ip6 saddr } return
+		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_guests_4 return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_guests_6 update @claim_guests_6 { ip6 saddr . ether saddr } update @held_guests_6 { ip6 saddr } update @mac6_guests { @ll,48,48 } return
 		meta nfproto ipv6 ip6 saddr @held_guests_6 drop
-		meta nfproto ipv6 add @claim_guests_6 { ip6 saddr . ether saddr } add @held_guests_6 { ip6 saddr } return
+		meta nfproto ipv6 @ll,48,48 != @leased_guests drop
+		meta nfproto ipv6 @ll,48,48 @mac6_guests drop
+		meta nfproto ipv6 add @claim_guests_6 { ip6 saddr . ether saddr } add @held_guests_6 { ip6 saddr } add @mac6_guests { @ll,48,48 } return
 		drop
 	}
 	chain learn_owner {
@@ -895,12 +913,12 @@ table inet enforcer {
 		drop
 	}
 	chain claim_owner {
-		meta nfproto ipv4 ip saddr . ether saddr @claim_owner_4 update @claim_owner_4 { ip saddr . ether saddr } update @held_owner_4 { ip saddr } return
-		meta nfproto ipv4 ip saddr @held_owner_4 drop
-		meta nfproto ipv4 add @claim_owner_4 { ip saddr . ether saddr } add @held_owner_4 { ip saddr } return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_owner_6 update @claim_owner_6 { ip6 saddr . ether saddr } update @held_owner_6 { ip6 saddr } return
+		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_owner_4 return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_owner_6 update @claim_owner_6 { ip6 saddr . ether saddr } update @held_owner_6 { ip6 saddr } update @mac6_owner { @ll,48,48 } return
 		meta nfproto ipv6 ip6 saddr @held_owner_6 drop
-		meta nfproto ipv6 add @claim_owner_6 { ip6 saddr . ether saddr } add @held_owner_6 { ip6 saddr } return
+		meta nfproto ipv6 @ll,48,48 != @leased_owner drop
+		meta nfproto ipv6 @ll,48,48 @mac6_owner drop
+		meta nfproto ipv6 add @claim_owner_6 { ip6 saddr . ether saddr } add @held_owner_6 { ip6 saddr } add @mac6_owner { @ll,48,48 } return
 		drop
 	}
 	chain learn_household {
@@ -917,12 +935,12 @@ table inet enforcer {
 		drop
 	}
 	chain claim_household {
-		meta nfproto ipv4 ip saddr . ether saddr @claim_household_4 update @claim_household_4 { ip saddr . ether saddr } update @held_household_4 { ip saddr } return
-		meta nfproto ipv4 ip saddr @held_household_4 drop
-		meta nfproto ipv4 add @claim_household_4 { ip saddr . ether saddr } add @held_household_4 { ip saddr } return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_household_6 update @claim_household_6 { ip6 saddr . ether saddr } update @held_household_6 { ip6 saddr } return
+		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_household_4 return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_household_6 update @claim_household_6 { ip6 saddr . ether saddr } update @held_household_6 { ip6 saddr } update @mac6_household { @ll,48,48 } return
 		meta nfproto ipv6 ip6 saddr @held_household_6 drop
-		meta nfproto ipv6 add @claim_household_6 { ip6 saddr . ether saddr } add @held_household_6 { ip6 saddr } return
+		meta nfproto ipv6 @ll,48,48 != @leased_household drop
+		meta nfproto ipv6 @ll,48,48 @mac6_household drop
+		meta nfproto ipv6 add @claim_household_6 { ip6 saddr . ether saddr } add @held_household_6 { ip6 saddr } add @mac6_household { @ll,48,48 } return
 		drop
 	}
 	chain forward_live {
@@ -1134,6 +1152,9 @@ table inet enforcer {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "edge0" drop
+		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,48 0x33040000a8c0 update @lease_guests_4 { @th,192,32 . @th,288,48 } update @leased_guests { @th,288,48 }
+		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,48 0x33040000a8c0 update @lease_owner_4 { @th,192,32 . @th,288,48 } update @leased_owner { @th,288,48 }
+		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,48 0x33040000a8c0 update @lease_household_4 { @th,192,32 . @th,288,48 } update @leased_household { @th,288,48 }
 	}
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;

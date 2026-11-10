@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -59,6 +61,37 @@ func (h *home) share(seg string) {
 			h.in(x, "ip", "addr", "add", seg6Addr(seg, i)+"/64", "dev", "eth0", "nodad")
 			h.in(x, "ip", "-6", "route", "add", "default", "via", seg6Net(seg)+"1")
 		}
+	}
+	if !h.unleased {
+		h.lease()
+	}
+}
+
+// leases is a full lease for each host on a shared segment (seg's host
+// and seg+"2"'s), of its address there.
+func (h *home) leases() []Lease {
+	var out []Lease
+	for _, seg := range []string{"owner", "household", "guest"} {
+		for i, name := range []string{seg, seg + "2"} {
+			if x := h.hosts[name]; x != nil {
+				hw, err := net.ParseMAC(h.mac(x, "eth0"))
+				if err != nil {
+					h.t.Fatal(err)
+				}
+				out = append(out, Lease{segIfc(seg), netip.MustParseAddr(segAddr(seg, i)), hw, LeaseTimeout})
+			}
+		}
+	}
+	return out
+}
+
+// lease seeds the running table with every shared host's lease (leases).
+func (h *home) lease() {
+	h.t.Helper()
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(Seed(fixtureLayout(), h.leases()))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Fatalf("seeding the leases: %v\n%s", err, out)
 	}
 }
 

@@ -42,16 +42,16 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-// LeaseHours is the lease every dhcp-range offers, in hours. A shared
-// segment's address hold (nft.ClaimTimeout) must be at most half of it, so
-// a departed host's hold has run out before its address can be leased
-// again (ENF-shared-src-1, #4702): the constant below fails to compile when
+// LeaseHours is the lease every dhcp-range offers, in hours. It must be
+// nft.LeaseTimeout, the only lease whose ACK a shared segment's IPv4 holds
+// follow, and which nft keeps at least twice its IPv6 hold (nft.ClaimTimeout)
+// (ENF-shared-src-1, #4702, #5294): the constant below fails to compile when
 // it is not, and TestLeaseCoversHold reads the lines written. A client may
 // still request a shorter lease, which dnsmasq grants down to 120 s; that
 // case is ENF-shared-src-1's residual.
 const LeaseHours = 12
 
-const _ uint = LeaseHours*3600 - 2*nft.ClaimTimeout
+const _ = uint(LeaseHours*3600-nft.LeaseTimeout) + uint(nft.LeaseTimeout-LeaseHours*3600)
 
 // lease is LeaseHours as dnsmasq's lease field.
 var lease = strconv.Itoa(LeaseHours) + "h"
