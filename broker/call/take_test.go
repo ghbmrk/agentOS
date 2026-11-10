@@ -5,30 +5,37 @@ package call
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 )
 
 // RunAt lets the package's own tests hold a call at a chosen rung. It is in
 // a _test.go file, so no importer of the package can reach it (#4949).
-var RunAt = runAt
+func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
+	token := make(chan Rung, 1)
+	token <- rung
+	return loop(ctx, cfg.withDefaults(), l, token)
+}
 
 // The rung is the call's, read from the token by Serve, never the caller's
-// to choose (briefs/VOICE-ro.md rule 4, #4949). Every way into the loop
-// goes through runAt, which takes a rung, or the Config.run method, which
-// takes the rung and the token channel. So the package's non-test files
-// are type-checked and the test fails if runAt is referenced anywhere in
-// them, or Config.run anywhere but in Serve and runAt. Whatever shape a new
-// entry takes (an exported func, method, var, getter, alias, generic or
-// interface, or none, at a fixed rung), it has to reference one of the two.
-// The probes are such entries, Lens's and Security's on #5211 among them:
-// each must fail the check, so the check is shown to bite.
+// to choose (briefs/VOICE-ro.md rule 4, #4949). loop is the call, and its
+// one rung input is the token channel. It is a plain unexported function,
+// so no importer can name it, and no interface, constraint, method value or
+// embedding inside the package reaches it: Go code gets a func only by
+// naming it. So the package's non-test files are type-checked and the test
+// fails unless loop is named exactly once, as the callee of a call in
+// Serve's own body, outside any func literal. Any other entry, whatever its
+// shape or rung, has to name loop somewhere else. What Serve passes loop is
+// review's, and the Serve tests pin it. Each probe must fail the check, so
+// the check is shown to bite.
 func TestOnlyServeChoosesTheRung(t *testing.T) {
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil) // one importer: dependencies are read once
@@ -59,55 +66,65 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runAt := pkg.Scope().Lookup("runAt")
-		run, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "run")
-		if runAt == nil || run == nil {
-			t.Fatal("runAt or Config.run is gone: rewrite this check for the new entry")
-		}
 		var bad []string
+		loopFn := pkg.Scope().Lookup("loop")
+		if _, ok := loopFn.(*types.Func); !ok {
+			t.Fatal("loop is gone or not a plain func: rewrite this check for the new loop")
+		}
+		calls := 0
 		for _, f := range files {
 			for _, d := range f.Decls {
-				in := "" // the top-level func d is, if it is one
-				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
-					in = fd.Name.Name
-				}
+				fd, ok := d.(*ast.FuncDecl)
+				serve := ok && fd.Recv == nil && fd.Name.Name == "Serve"
+				var stack []ast.Node
 				ast.Inspect(d, func(n ast.Node) bool {
-					id, ok := n.(*ast.Ident)
-					if !ok {
+					if n == nil {
+						stack = stack[:len(stack)-1]
 						return true
 					}
-					switch o := info.Uses[id]; {
-					case o == runAt:
-						bad = append(bad, fset.Position(id.Pos()).String()+": runAt")
-					case o == run && in != "Serve" && in != "runAt":
-						bad = append(bad, fset.Position(id.Pos()).String()+": Config.run")
+					stack = append(stack, n)
+					id, ok := n.(*ast.Ident)
+					if !ok || info.Uses[id] != loopFn {
+						return true
+					}
+					call, ok := stack[len(stack)-2].(*ast.CallExpr)
+					lit := slices.ContainsFunc(stack, func(n ast.Node) bool { _, ok := n.(*ast.FuncLit); return ok })
+					if serve && ok && call.Fun == id && !lit {
+						calls++
+					} else {
+						bad = append(bad, fset.Position(id.Pos()).String()+": loop")
 					}
 					return true
 				})
 			}
 		}
+		if calls != 1 {
+			bad = append(bad, fmt.Sprintf("Serve calls loop %d times", calls))
+		}
 		return bad
 	}
 
 	if bad := check(""); len(bad) != 0 {
-		t.Errorf("the loop is entered other than through Serve: %v", bad)
+		t.Errorf("the loop is entered other than through Serve:\n%s", strings.Join(bad, "\n"))
 	}
 	for _, probe := range []string{
-		// Lens on #5211, and main's old Run.
-		"var Run = runAt",
-		"func RunP(ctx context.Context, cfg Config, l Line, r *Rung) (Report, error) { return runAt(ctx, cfg, l, *r) }",
-		"func Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { return runAt(ctx, cfg, l, r) }",
-		"func RunU(ctx context.Context, cfg Config, l Line, u interface{ R() Rung }) (Report, error) { return runAt(ctx, cfg, l, u.R()) }",
-		// Security on #5211.
-		"type Rs = []Rung\nfunc RunS(ctx context.Context, cfg Config, l Line, r Rs) (Report, error) { return runAt(ctx, cfg, l, r[0]) }",
-		"func RunG[T ~int](ctx context.Context, cfg Config, l Line, r T) (Report, error) { return runAt(ctx, cfg, l, Rung(r)) }",
-		"func RunI(ctx context.Context, cfg Config, l Line, r int) (Report, error) { return runAt(ctx, cfg, l, Rung(r)) }",
-		"func RunAny(ctx context.Context, cfg Config, l Line, x any) (Report, error) { return runAt(ctx, cfg, l, x.(Rung)) }",
-		"func ServeTrusted(ctx context.Context, cfg Config, l Line) (Report, error) { return runAt(ctx, cfg, l, P2) }",
-		"func Runner() func(context.Context, Config, Line, Rung) (Report, error) { return runAt }",
-		"type ctl struct{}\nfunc (ctl) Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { return runAt(ctx, cfg, l, r) }\nfunc Ctl() ctl { return ctl{} }",
-		"func RunC(ctx context.Context, cfg Config, l Line) (Report, error) { c := make(chan Rung, 1); c <- P2; return cfg.run(ctx, l, P2, c) }",
-		"var hook = Config.run",
+		// Lens and Security on #5211, and main's old Run.
+		"var Run = loop",
+		"func Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { c := make(chan Rung, 1); c <- r; return loop(ctx, cfg, l, c) }",
+		"func RunP(ctx context.Context, cfg Config, l Line, r *Rung) (Report, error) { c := make(chan Rung, 1); c <- *r; return loop(ctx, cfg, l, c) }",
+		"func RunU(ctx context.Context, cfg Config, l Line, u interface{ R() Rung }) (Report, error) { c := make(chan Rung, 1); c <- u.R(); return loop(ctx, cfg, l, c) }",
+		"type Rs = []Rung\nfunc RunS(ctx context.Context, cfg Config, l Line, r Rs) (Report, error) { c := make(chan Rung, 1); c <- r[0]; return loop(ctx, cfg, l, c) }",
+		"func RunG[T ~int](ctx context.Context, cfg Config, l Line, r T) (Report, error) { c := make(chan Rung, 1); c <- Rung(r); return loop(ctx, cfg, l, c) }",
+		"func Runner() func(context.Context, Config, Line, <-chan Rung) (Report, error) { return loop }",
+		"type ctl struct{}\nfunc (ctl) Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { c := make(chan Rung, 1); c <- r; return loop(ctx, cfg, l, c) }\nfunc Ctl() ctl { return ctl{} }",
+		// Security on #5211 at e104cea: the interface and constraint routes
+		// to a method. loop is a func, so each has to name it.
+		"type runner func(context.Context, Config, Line, <-chan Rung) (Report, error)\nfunc (f runner) run(ctx context.Context, cfg Config, l Line, c <-chan Rung) (Report, error) { return f(ctx, cfg, l, c) }\ntype runs interface{ run(context.Context, Config, Line, <-chan Rung) (Report, error) }\nfunc ServeAt(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { var x runs = runner(loop); c := make(chan Rung, 1); c <- r; return x.run(ctx, cfg, l, c) }",
+		"func serveGen[T ~func(context.Context, Config, Line, <-chan Rung) (Report, error)](ctx context.Context, f T, cfg Config, l Line, r Rung) (Report, error) { c := make(chan Rung, 1); c <- r; return f(ctx, cfg, l, c) }\nfunc ServeGen(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { return serveGen(ctx, loop, cfg, l, r) }",
+		// No new export, but loop named outside Serve's body.
+		"var hook = loop",
+		"func init() { go loop(context.Background(), Config{}, nil, nil) }",
+		"func (cfg Config) Serve(ctx context.Context, l Line, r Rung) (Report, error) { c := make(chan Rung, 1); c <- r; return loop(ctx, cfg, l, c) }",
 	} {
 		if len(check(probe)) == 0 {
 			t.Errorf("the check passes an entry to the loop: %s", probe)
@@ -116,7 +133,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 }
 
 // An error that reaches the turn after it was stopped is a stop, not a
-// failure: no error recorded and no failed clip. Through runAt the stop must
+// failure: no error recorded and no failed clip. Through RunAt the stop must
 // land between the turn's receive and its check, which no test can order,
 // so this calls take directly with the call's context already done.
 func TestErrorAfterAStopIsNotAFailure(t *testing.T) {
