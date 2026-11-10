@@ -406,24 +406,47 @@ func TestSpeedDialTokenRaisesTheCallToP2(t *testing.T) {
 }
 
 // A wrong token is tried once and the call stays P0; its 0 is not STOP.
+// The token's keys arrive while turn 1 is live: it is heard first, waits
+// for the rung while "1000" is keyed, and its sentence plays (gated) across
+// the '#'. A '0' that leaked past the token reader, before or after the
+// check, would stop that turn. A sentence cannot play before the rung is
+// known, since the turn asks the answerer only then. A '0' keyed after the
+// token does stop it, so the keys do reach the loop by then.
 func TestWrongTokenStaysP0AndIsTriedOnce(t *testing.T) {
 	r := newRig(t, fixed("All quiet."))
+	r.l.gate = true
 	tries := 0
 	r.cfg.Token = func(string) bool { tries++; return false }
 	ends := r.records()
 	r.serve()
-	for _, k := range []byte("1000#") {
+	r.say("how are things")
+	for _, k := range []byte("1000") {
 		r.l.keys <- k
 	}
-	r.say("how are things")
-	r.next()
-	r.turnEnds(ends, 1)
+	select {
+	case tu := <-ends:
+		t.Fatalf("a token key stopped the turn waiting for the rung: %+v", tu)
+	case <-time.After(50 * time.Millisecond):
+	}
+	r.l.keys <- '#'
+	if s := r.next(); s != "S:All quiet." {
+		t.Fatalf("played %q", s)
+	}
+	select {
+	case <-r.l.cut:
+		t.Fatal("a token key acted as STOP")
+	case tu := <-ends:
+		t.Fatalf("a token key ended the playing turn: %+v", tu)
+	case <-time.After(50 * time.Millisecond):
+	}
+	r.l.keys <- '0'
+	r.l.wasCut(t)
 	rep := r.hangup()
 	if rep.Rung != call.P0 || r.ans.asks[0].Rung != call.P0 || tries != 1 {
 		t.Fatalf("rung %v, asks %+v, tries %d", rep.Rung, r.ans.asks, tries)
 	}
-	if len(rep.Turns) != 1 || rep.Turns[0].Stopped {
-		t.Fatalf("a token key acted as STOP: %+v", rep.Turns)
+	if len(rep.Turns) != 1 || !rep.Turns[0].Stopped {
+		t.Fatalf("turns = %+v", rep.Turns)
 	}
 }
 
