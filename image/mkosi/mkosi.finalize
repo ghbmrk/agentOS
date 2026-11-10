@@ -150,13 +150,14 @@ BOX_MOUNTS = ("dev", "proc", "sys", "run", "tmp")
 # systemd mounts /tmp, /dev/shm and /dev/mqueue 1777, and tmpfiles' tmp.conf and legacy.conf make
 # /var/tmp and /run/lock 1777 at boot. Any directory the tree itself gives o+w counts too.
 WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
-# #1702: directories a service user or a login user owns on the box that no unit's own settings make
-# (service_dirs adds those, #5167): DynamicUser services live under var/lib/private, and people under
-# home and run/user; the clerks' users own var/lib/agentos-mail (MAIL-unit), var/lib/agentos-camera
-# (CAM-clerk-image) and var/lib/agentos-homekit (DEV-homekit-b2c), which tmpfiles.d makes.
+# #1702: directories a service user or a login user owns on the box that no unit file names (service_dirs
+# adds those, #5167): people live under home and run/user; the clerks' users own var/lib/agentos-mail
+# (MAIL-unit), var/lib/agentos-camera (CAM-clerk-image) and var/lib/agentos-homekit (DEV-homekit-b2c),
+# which tmpfiles.d makes; and a DynamicUser= unit's directories are made under each root's private/
+# (systemd's exec_directory_is_private), so those count whatever any unit sets.
 # A link into one is refused like one into WORLD_WRITABLE.
-SERVICE_DIRS = ("home", "run/user", "var/lib/private", "var/lib/agentos-mail", "var/lib/agentos-camera",
-                "var/lib/agentos-homekit")
+SERVICE_DIRS = ("home", "run/user", "var/lib/agentos-mail", "var/lib/agentos-camera", "var/lib/agentos-homekit",
+                "var/lib/private", "var/cache/private", "var/log/private", "run/private")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
 # makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
@@ -189,17 +190,12 @@ BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
 # to usr/lib. Any other link is refused, wherever it points: a dangling link reads as nothing at build
 # and as whatever appears at its target on the box (/var/tmp is world-writable), and any link reaches
 # a file the build may not have read. tmpfiles.d takes no link at all, not even a mask (stock has none).
-# #5167: the directories the service manager makes for a unit and chowns to its User= and Group=
-# (systemd.exec: every *Directory= setting but ConfigurationDirectory=), by setting, under these roots,
-# with the mode its *DirectoryMode= sets. service_dirs counts each such directory of every unit the tree
-# holds that runs as anyone but root, or that the mode lets anyone write, stock or ours, with SERVICE_DIRS:
-# systemd-resolved's run/systemd/resolve, systemd-networkd's run/systemd/netif and systemd-timesyncd's
-# var/lib/systemd/timesync among them.
-UNIT_OWNED_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
-                   "LogsDirectory": "var/log"}
-# The unit types that take those settings (systemd.exec), by the section that holds them.
-EXEC_SECTIONS = {"service": "Service", "socket": "Socket", "mount": "Mount", "swap": "Swap"}
-ROOT_NAMES = ("root", "0")
+# #5167: the directories the service manager makes for a unit at runtime (systemd.exec), by setting,
+# under these roots. unit_made_dirs counts each one any file in the unit directories names, whoever
+# runs the unit: systemd-resolved's run/systemd/resolve, systemd-networkd's run/systemd/netif and
+# systemd-timesyncd's var/lib/systemd/timesync among them.
+UNIT_MADE_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
+                  "LogsDirectory": "var/log", "ConfigurationDirectory": "etc"}
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
@@ -232,7 +228,7 @@ POLICY_DIRS = ("etc/polkit-1/rules.d", "usr/local/share/polkit-1/rules.d", "usr/
 POLICY_FILES = ("usr/share/dbus-1/system.conf",)
 POLICY_RUN = ("run/polkit-1/rules.d",)
 
-_MAKERS = None  # #1829: tmpfiles_makers, tmpfiles_removers and unit_owned_dirs by root inside once(), else None
+_MAKERS = None  # #1829: tmpfiles_makers, tmpfiles_removers and unit_made_dirs by root inside once(), else None
 
 
 def violations(root):
@@ -333,7 +329,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + cached(unit_owned_dirs, root)[1] + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
+            + cached(unit_made_dirs, root)[1] + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
 
@@ -513,6 +509,9 @@ def step_refusal(root, d, target, held, st=False, via="through", gid=None):
             st = None if d in WORLD_WRITABLE or d in owned_dirs else tree_lstat(root, d)
         except OSError:
             return None
+    if st is None and owned_dirs.get(d):
+        return ("a link to %s, inside /%s, a directory systemd makes for a unit at runtime (%s); that unit's "
+                "user would decide what it reads (#5167)" % (target, d, owned_dirs[d]))
     if st is None and (d in WORLD_WRITABLE or d in owned_dirs) \
             or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
         return ("a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
@@ -1633,114 +1632,88 @@ def unit_with_dropins(root, dirs, name):
 
 
 def service_dirs(root):
-    """#1702, #5167: the directories a service user or a login user owns on the box: SERVICE_DIRS, and
-    every UNIT_OWNED_DIRS directory of a unit in the tree at ROOT that runs as anyone but root
-    (unit_owned_dirs). Inside violations() the units are read once per root."""
-    return set(SERVICE_DIRS) | set(cached(unit_owned_dirs, root)[0])
+    """#1702, #5167: {directory: why} for every directory a service user or a login user may own on the
+    box: SERVICE_DIRS, and every directory a unit file names (unit_made_dirs). Inside once() the unit
+    files are read once per root."""
+    made = dict(cached(unit_made_dirs, root)[0])
+    made.update((d, None) for d in SERVICE_DIRS)
+    return made
 
 
-def unit_owned_dirs(root):
-    """#5167: (the UNIT_OWNED_DIRS directories, as tree paths, of every EXEC_SECTIONS unit the tree at
-    ROOT holds, stock or ours, that runs as anyone but root (User=, Group= or DynamicUser= set to
-    anything but root, or no), or whose matching *DirectoryMode= gives anyone write, whoever runs it;
-    one error per unit the check cannot read or whose values it does not model; unit_dirs reports a
-    unit directory it cannot read). A unit is read as systemd loads it (unit_file_find_fragment,
-    unit_file_find_dropin_paths, unit_ids_map_get): each name's first UNIT_PATHS entry, its own file
-    or, if a link (an alias or an instance), the first entry of the name it links to, name by name,
-    and every name that leads to that entry is one unit; a mask is never run. Its files are that file and the drop-ins of every one of
-    its names (with each name's dash prefixes and the type's .d), and for a template or an instance
-    every drop-in of each of its templates' names, since each instance reads its own; any assignment
-    counts, whatever a later one sets. A value holding a control or non-ASCII character but tab is
-    refused, so str.split() splits as systemd's WHITESPACE does (#5192 Security 3). A value whose step
-    holds a specifier counts the directory above that step. A dynamic user's directory counts under
-    <top>/private too."""
-    root, dirs, out = str(root), unit_dirs(root)[0], []
-    names, dropins = {}, {}
-    for d in dirs:
-        for n in sorted(tree_listdir(root, d)):
-            if n.endswith(".d") and "@" in n:
-                dropins.setdefault(n.split("@", 1)[0], set()).add(n)
-            elif n.rsplit(".", 1)[-1] in EXEC_SECTIONS and not hidden_or_backup(n) and n not in names:
-                names[n] = d + "/" + n
-    units = {}
-    for n in sorted(names):
-        # systemd's unit_ids_map: a link is an alias of its target's name, whose own first entry is read,
-        # name by name, so /etc's file shadows /usr's even under an alias that links to /usr's (#5192
-        # Security delta 1). Each link must still end at a unit file in a unit directory.
-        name, seen, why = n, set(), None
-        while name in names and name not in seen and stat.S_ISLNK(tree_lstat(root, names[name]).st_mode):
-            seen.add(name)
-            link = names[name]
-            target = tree_readlink(root, link)
-            if target == MASK:
-                why = MASK
-                break
-            up, slash, name = target.rpartition("/")
-            here = link.rsplit("/", 1)[0]
-            up = here if not slash else up.lstrip("/") if target.startswith("/") else here + "/" + up
-            try:
-                got = tree_chase(root, up)[0]
-            except OSError as e:
-                got = e.strerror
-            if got not in dirs:
-                why = "a link to %s, not into a unit directory" % target
-                break
-            if name not in names and re.fullmatch(r"[^@]+@[^@]+\.[a-z]+", name):
-                # unit-file.c: an instance no directory holds is read as its template.
-                name = re.sub(r"@[^@]+\.", "@.", name)
-        if why is None and (name not in names or name in seen):
-            why = "an alias of %s, which no unit directory holds as a unit" % name
-        if why == MASK:
-            continue
-        if why is not None:
-            out.append("%s: %s; the tree check never passes a unit whose directories it cannot read (#5167)" % (n, why))
-            continue
-        units.setdefault(names[name], []).append(n)
-    found = set()
-    for rel, group in sorted(units.items()):
-        n, typ = group[0], rel.rsplit(".", 1)[-1]
-        sec = EXEC_SECTIONS.get(typ)
+def unit_made_dirs(root):
+    """#5167: ({tree path: "<key>= in <file>"} for every UNIT_MADE_DIRS directory any file under the unit
+    directories at ROOT names, and one error per file or link the check cannot read). Every file counts,
+    top level or in any subdirectory, hidden or not, and so does the regular file each link there leads
+    to; a mask is skipped. Every assignment of each key counts, in any section, whatever a later one
+    sets, and whoever runs the unit. No name, alias, precedence or user is resolved: for any name
+    systemd loads, every file it reads is one of these, so its directories are a subset of these, and
+    adding a file or link only adds to them (the re-plan on #5167; generators' and transient units
+    are not covered). A value holding a byte outside printable ASCII but tab, a quote, a backslash, a
+    '..' step, an absolute path or a specifier in its first step is refused; each word, and each side
+    of a:b, counts, cut at the first step holding a specifier (capsules/%i is capsules)."""
+    root, out, files, todo = str(root), [], {}, list(dict.fromkeys(unit_dirs(root)[0]))
+    while todo:
+        d = todo.pop()
         try:
-            if sec is None or any(x.rsplit(".", 1)[-1] != typ for x in group):
-                raise ValueError("its names %s are not all of the type of %s" % (", ".join(group), rel))
-            files = [Conf(root, rel)]
-            for x in group:
-                files += conf_files(root, ["%s/%s.d" % (p, y) for p in UNIT_PATHS for y in unit_dropin_names(x) + [typ]])
-                if "@" in x:
-                    files += conf_files(root, ["%s/%s" % (p, y) for p in UNIT_PATHS
-                                               for y in sorted(dropins.get(x.split("@", 1)[0], ()))])
+            listed = sorted(tree_listdir(root, d))
+        except OSError as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit directory it cannot read (#5167)"
+                       % (d, e.strerror))
+            continue
+        for n in listed:
+            rel = d + "/" + n
+            st = tree_lstat(root, rel)
+            if stat.S_ISDIR(st.st_mode):
+                todo.append(rel)
+            elif stat.S_ISREG(st.st_mode):
+                files.setdefault(rel, rel)
+            elif stat.S_ISLNK(st.st_mode) and tree_readlink(root, rel) != MASK:
+                try:
+                    got, end = tree_chase(root, rel)
+                except OSError as e:
+                    got, end = e.strerror, None
+                if end is None or not stat.S_ISREG(end.st_mode) or under("/" + got, tuple("/" + w for w in WORLD_WRITABLE)):
+                    out.append("%s: a link to %s, not a file the tree holds; the tree check never passes a link in "
+                               "a unit directory it cannot read (#5167)" % (rel, tree_readlink(root, rel)))
+                else:
+                    files.setdefault(got, rel)
+    made = {}
+    for path, rel in sorted(files.items()):
+        try:
+            lines = config_lines(Conf(root, path).content())
+        except (OSError, Unparsable) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit file it cannot read (#5167)"
+                       % (rel, e.strerror if isinstance(e, OSError) else e))
+            continue
+        for _, key, v in lines:
+            if key not in UNIT_MADE_DIRS or not v:
+                continue
+            try:
+                # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so
+                # split() splits as systemd does once every other byte outside printable ASCII is refused.
+                if any(not " " <= c <= "~" and c != "\t" for c in v):
+                    raise ValueError(v)
+                got = [made_steps(p) for w in v.split() for p in w.split(":")]
+            except ValueError:
+                out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
+                           "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                continue
+            for steps in got:
+                if steps:
+                    made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
+    return made, out
 
-            def values(key):
-                got = ini_all(files, sec, key)
-                bad = next((v for v in got if any(not " " <= c <= "~" and c != "\t" for c in v)), None)
-                if bad is not None:
-                    raise ValueError("%s=%r: the tree check does not model it" % (key, bad))
-                return got
-            owners, dynamic = values("User") + values("Group"), values("DynamicUser")
-            served = any(o not in ROOT_NAMES for o in owners) or any(v.lower() not in FALSE_WORDS for v in dynamic)
-            for key, top in UNIT_OWNED_DIRS.items():
-                modes = values(key + "Mode")
-                bad = next((m for m in modes if not re.fullmatch(r"0*[0-7]{1,4}", m)), None)
-                if bad is not None:
-                    raise ValueError("%sMode=%s: the tree check does not model it" % (key, bad))
-                if not served and not any(int(m, 8) & 0o002 for m in modes):
-                    continue
-                # A dynamic user's directory is made at <top>/private/<path>, with <top>/<path> a link to it
-                # (exec_directory_is_private), so both count (#5192 L3 1).
-                tops = (top, top + "/private") if any(v.lower() not in FALSE_WORDS for v in dynamic) else (top,)
-                for w in (w for v in values(key) for w in v.split()):
-                    for part in w.split(":"):
-                        steps = [x for x in part.split("/") if x and x != "."]
-                        # A step with a specifier is any name (capsule@.service's capsules/%i), so the
-                        # directory above it counts; the root itself never does.
-                        named = next((k for k, x in enumerate(steps) if "%" in x), len(steps))
-                        if any(c in part for c in UNMODELLED.replace("%", "")) or ".." in steps or named == 0:
-                            raise ValueError("%s=%s: the tree check does not model it" % (key, w))
-                        if steps:
-                            found.update("/".join([t] + steps[:named]) for t in tops)
-        except ValueError as e:
-            out.append("%s: %s; the tree check never passes a unit whose directories it cannot read (#5167)" % (n, e))
-    return sorted(found), out
+
+def made_steps(part):
+    """#5167: the steps of one *Directory= path PART (unit_made_dirs), cut before the first that holds
+    a specifier (any name: capsules/%i is capsules). ValueError for what the check does not model: a
+    byte outside printable ASCII, a quote, a backslash, a '..' step, an absolute path, or a specifier
+    in the first step."""
+    steps = [x for x in part.split("/") if x and x != "."]
+    if any(not " " < c <= "~" or c in "\"'\\" for c in part) or ".." in steps or part.startswith("/") \
+            or steps and "%" in steps[0]:
+        raise ValueError(part)
+    return steps[:next((k for k, x in enumerate(steps) if "%" in x), len(steps))]
 
 
 def ini_all(files, section, key):

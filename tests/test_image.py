@@ -2520,8 +2520,8 @@ class ConfFilesTest(unittest.TestCase):
                     finally:
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
-            "home", "run/user", "var/lib/private", "var/lib/agentos-mail", "var/lib/agentos-camera",
-            "var/lib/agentos-homekit")))
+            "home", "run/user", "var/lib/agentos-mail", "var/lib/agentos-camera", "var/lib/agentos-homekit",
+            "var/lib/private", "var/cache/private", "var/log/private", "run/private")))
         # #5167: and every directory the manager makes for a unit that runs as a service user, stock or ours.
         rel, target = "etc/udev/rules.d/99-x.rules", "/var/lib/systemd/timesync/x.rules"
         f = link(self.root, rel, target)
@@ -4115,47 +4115,26 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             self.assertGreater(makers.call_count, 2)
         self.assertIsNone(check._MAKERS)
 
-    # SERVICE_DIRS lists every directory a unit's service user owns.
+    # #5167: every directory a shipped unit file names counts, whoever runs the unit.
 
     # The image's units and those build.sh installs from their commands' directories.
     UNITS = sorted(list((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
                    + [u for u in (ROOT / "broker/cmd").glob("*/*.service")
                       if '"$REPO/%s"' % u.relative_to(ROOT) in (IMG / "build.sh").read_text()])
-    UNIT_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
-                 "LogsDirectory": "var/log"}
 
-    def service_dirs_missing(self, service_dirs):
-        out = []
-        for u in self.UNITS:
-            keys = {}
-            for ln in u.read_text().split("\n"):
-                k, _, val = ln.strip().partition("=")
-                keys.setdefault(k.strip(), []).append(val.strip())
-            dyn = (keys.get("DynamicUser") or ["no"])[-1].lower() in ("yes", "true", "1", "on")
-            user = (keys.get("User") or ["root"])[-1]
-            if not dyn and user in ("", "root", "0"):
-                continue
-            for key, top in self.UNIT_DIRS.items():
-                for val in keys.get(key, []):
-                    for d in val.split():
-                        d = top + "/" + d.split(":")[0].strip("/")
-                        if not any(d == s or d.startswith(s + "/") for s in service_dirs):
-                            out.append("%s: %s" % (u.name, d))
-        return out
-
-    def test_every_service_users_directory_is_in_service_dirs(self):
+    def test_every_directory_a_shipped_unit_names_is_unit_made(self):
         self.assertIn("agentos-egress.service", [u.name for u in self.UNITS])
         self.assertIn("agentos-localui.service", [u.name for u in self.UNITS])
-        # #5167: mkosi.finalize reads them from the tree's units (service_dirs); this reads the sources apart.
         with tempfile.TemporaryDirectory() as t:
             for u in self.UNITS:
                 write(pathlib.Path(t), "usr/lib/systemd/system/" + u.name, u.read_text())
-            owned = check.service_dirs(t)
-        self.assertEqual(self.service_dirs_missing(owned), [])
-        # The check sees a dropped entry.
-        for gone in ("var/lib/agentos-egress", "run/agentos-egress", "var/lib/agentos-localui"):
-            with self.subTest(gone=gone):
-                self.assertNotEqual(self.service_dirs_missing([s for s in owned if s != gone]), [])
+            made, out = check.unit_made_dirs(t)
+        self.assertEqual(out, [])
+        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
+        self.assertEqual(sorted(made), sorted((
+            "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
+            "run/agentos-mail", "run/agentos-link", "run/agentos-camera", "run/agentos-homekit",
+            "var/lib/agentos-store", "var/lib/agentos/modem")))
 
 
 class ReferenceToolTest(unittest.TestCase):
