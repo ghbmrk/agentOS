@@ -9,13 +9,14 @@
 #     armed, rp_filter read back as 0 on "all" and the card (#4810) and accept_redirects as 0 on "all",
 #     "default" and the card in both families (#5164); the entry is blessed; the
 #     state partition grew and is noexec; the stick stayed unauthorised; the card, standing in for
-#     the WAN, has its router-advertisement handling set (#5189).
+#     the WAN, has its router-advertisement handling set (#5189, ci_wan.sh).
 #  2. Rollback: the drive gets a previous release's entry, and the self-check is forced to fail on
 #     counted boots. The new entry's three tries run down and the previous release boots and passes.
 # ENF-m-b adds the open-port set and an update whose self-check fails (briefs/ENF.md acceptance 1).
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-fallback.log.
 set -eu
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/enforcer-boot}"); mkdir -p "$W"
+HERE=$(dirname "$(realpath "$0")")
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
 copy() { cp --sparse=always "$IMG" "$1"; truncate -s +2G "$1"; }
@@ -58,27 +59,10 @@ fail=0
 has() { grep -aqF "$2" "$1" && echo "ok   $2" || { echo "MISS $2"; fail=1; }; }
 hasnt() { grep -aqF "$2" "$1" && { echo "UNEXPECTED $2"; fail=1; } || echo "ok   no \"$2\""; }
 
-# #5189 (ENF-l-21): with forwarding on the kernel ignores accept_ra=1, and the daemon holds
-# default.accept_ra=0, so the WAN takes router advertisements only when its link configuration says
-# so: sysctl.d accept_ra=2 on it, or networkd's IPv6AcceptRA= (networkd then handles them itself and
-# the WAN gets an IPv6 default route from QEMU's). Before the boot report, the probe waits up to 60 s
-# for either on the network card and prints what it read. A link left down passes only while the
-# daemon unit is the placeholder, when nothing configures any interface (ENF-m-7).
-WANRA=$(cat <<'EOS' | base64 -w0
-n=none; i=0
-for d in /sys/class/net/*; do [ -e "$d/device" ] && { n=${d##*/}; break; }; done
-daemon=real; grep -q '^Description=.*placeholder' /usr/lib/systemd/system/agentos-enforcer.service && daemon=placeholder
-while :; do
-	up=$(cat "/sys/class/net/$n/operstate"); ra=$(cat "/proc/sys/net/ipv6/conf/$n/accept_ra")
-	fw=$(cat "/proc/sys/net/ipv6/conf/$n/forwarding")
-	route=no; grep -q "^0\{32\} 00 .* $n\$" /proc/net/ipv6_route && route=yes
-	[ "$ra" = 2 ] || [ $route = yes ] || [ $i -ge 60 ] || { [ $daemon = placeholder ] && [ "$up" != up ]; } && break
-	i=$((i + 1)); sleep 1
-done
-echo "enforcer-ci: wan=$n operstate=$up accept_ra=$ra forwarding=$fw ipv6_default=$route daemon=$daemon"
-EOS
-)
-WANRA_UNIT="[Service]\nExecStartPre=-/bin/sh -c 'echo $WANRA | base64 -d | sh'\n"
+# #5189, #5330 (ENF-l-21): the WAN's router-advertisement handling, checked by ci_wan.sh. Its probe
+# runs before the boot report and prints what it read on the network card.
+WANRA=$(sed "/^#/d" "$HERE/ci_wan.sh" | base64 -w0)
+WANRA_UNIT="[Service]\nExecStartPre=-/bin/sh -c 'echo $WANRA | base64 -d | sh -s probe'\n"
 
 # 1. First boot.
 D=$W/drive.raw
@@ -116,15 +100,7 @@ else
 	echo "MISS accept_redirects 0 on all, default and the network card, IPv4 and IPv6 (read: $(printf '%s' "$red" | tr '\n' ' '))"; fail=1
 fi
 # #5189: the WAN's router-advertisement handling is set: accept_ra=2 on it, or an IPv6 default route.
-wan=$(grep -ao 'enforcer-ci: wan=[^ ]* operstate=[^ ]* accept_ra=[^ ]* forwarding=[^ ]* ipv6_default=[^ ]* daemon=[a-z]*' \
-	"$W/console.log" | head -n 1 | sed 's/^enforcer-ci: //')
-case " $wan " in
-"  " | " wan=none "*) echo "MISS the WAN probe's line on a network card ($wan)"; fail=1 ;;
-*" accept_ra=2 "* | *" ipv6_default=yes "*) echo "ok   WAN router advertisements handled ($wan)" ;;
-*" operstate=up "*) echo "MISS WAN router advertisements handled: accept_ra=2 or an IPv6 default route ($wan)"; fail=1 ;;
-*" daemon=placeholder ") echo "ok   no WAN link configured until ENF-m-b ($wan)" ;;
-*) echo "MISS WAN router advertisements handled: the WAN is down ($wan)"; fail=1 ;;
-esac
+sh "$HERE/ci_wan.sh" verdict "$W/console.log" || fail=1
 # The state partition grew into the drive's extra 2 GiB.
 rb=$(grep -ao 'root_bytes=[0-9]*' "$W/console.log" | head -n 1 | cut -d= -f2)
 [ "${rb:-0}" -gt $((2 * 1024 * 1024 * 1024)) ] && echo "ok   state partition grew ($rb bytes)" ||
