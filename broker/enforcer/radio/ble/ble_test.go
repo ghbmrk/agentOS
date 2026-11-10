@@ -59,7 +59,15 @@ func TestMain(m *testing.M) {
 	// A mutant that allocates without end (an encoder padding forever, a
 	// signature parsed without depth) dies at this bound in its own run
 	// instead of taking the runner's memory, and the runner, with it.
-	if err := syscall.Setrlimit(syscall.RLIMIT_DATA, &syscall.Rlimit{Cur: dataLimit, Max: dataLimit}); err != nil {
+	// An inherited hard limit below it stays: only root may raise one.
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_DATA, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "ble: data limit: %v\n", err)
+		os.Exit(1)
+	}
+	lim.Max = min(lim.Max, dataLimit)
+	lim.Cur = lim.Max
+	if err := syscall.Setrlimit(syscall.RLIMIT_DATA, &lim); err != nil {
 		fmt.Fprintf(os.Stderr, "ble: data limit: %v\n", err)
 		os.Exit(1)
 	}
