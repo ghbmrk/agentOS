@@ -20,15 +20,15 @@ import (
 var RunAt = runAt
 
 // The rung is the call's, read from the token by Serve, never the caller's
-// to choose (briefs/VOICE-ro.md rule 4, #4949). The package is type-checked
-// and nothing an importer can reach may hand the loop a Rung: no parameter
-// of an exported func, method or func-typed var, no exported var, and no
-// field of Config (the one input wiring fills), whose type mentions Rung
-// anywhere it flows in: behind a pointer, slice, map or chan, in a struct's
-// fields, or as a result of a func or interface method the package calls.
-// Values flowing out (a callback's parameters, a receiver such as Report's,
-// the constants P0 and P2) are not inputs. The probes are regressions the
-// check must catch, Lens's on #5211 among them, so it is shown to bite.
+// to choose (briefs/VOICE-ro.md rule 4, #4949). Every way into the loop
+// goes through runAt, which takes a rung, or the Config.run method, which
+// takes the rung and the token channel. So the package's non-test files
+// are type-checked and the test fails if runAt is referenced anywhere in
+// them, or Config.run anywhere but in Serve and runAt. Whatever shape a new
+// entry takes (an exported func, method, var, getter, alias, generic or
+// interface, or none, at a fixed rung), it has to reference one of the two.
+// The probes are such entries, Lens's and Security's on #5211 among them:
+// each must fail the check, so the check is shown to bite.
 func TestOnlyServeChoosesTheRung(t *testing.T) {
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil) // one importer: dependencies are read once
@@ -54,105 +54,63 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			}
 			files = append(files, f)
 		}
-		conf := types.Config{Importer: imp}
-		pkg, err := conf.Check("call", fset, files, nil)
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+		pkg, err := (&types.Config{Importer: imp}).Check("call", fset, files, info)
 		if err != nil {
 			t.Fatal(err)
 		}
-		rung := pkg.Scope().Lookup("Rung").Type()
-		seen := map[types.Type]bool{}
-		var in func(types.Type) bool // does a value of this type carry a Rung in?
-		in = func(ty types.Type) bool {
-			if types.Identical(ty, rung) {
-				return true
-			}
-			if seen[ty] {
-				return false
-			}
-			seen[ty] = true
-			switch u := ty.(type) {
-			case *types.Named:
-				if i, ok := u.Underlying().(*types.Interface); ok {
-					for m := range i.Methods() { // the package calls them: results flow in
-						if in(m.Type().(*types.Signature).Results()) {
-							return true
-						}
-					}
-					return false
-				}
-				return in(u.Underlying())
-			case *types.Pointer:
-				return in(u.Elem())
-			case *types.Slice:
-				return in(u.Elem())
-			case *types.Array:
-				return in(u.Elem())
-			case *types.Chan:
-				return in(u.Elem())
-			case *types.Map:
-				return in(u.Key()) || in(u.Elem())
-			case *types.Struct:
-				for f := range u.Fields() {
-					if in(f.Type()) {
-						return true
-					}
-				}
-			case *types.Signature: // a func handed in: the package calls it
-				return in(u.Results())
-			case *types.Tuple:
-				for v := range u.Variables() {
-					if in(v.Type()) {
-						return true
-					}
-				}
-			}
-			return false
+		runAt := pkg.Scope().Lookup("runAt")
+		run, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "run")
+		if runAt == nil || run == nil {
+			t.Fatal("runAt or Config.run is gone: rewrite this check for the new entry")
 		}
-		takes := func(sig *types.Signature) bool { return in(sig.Params()) }
 		var bad []string
-		for _, name := range pkg.Scope().Names() {
-			switch o := pkg.Scope().Lookup(name).(type) {
-			case *types.Func:
-				if o.Exported() && takes(o.Type().(*types.Signature)) {
-					bad = append(bad, "func "+name)
+		for _, f := range files {
+			for _, d := range f.Decls {
+				in := "" // the top-level func d is, if it is one
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
+					in = fd.Name.Name
 				}
-			case *types.Var:
-				if sig, ok := o.Type().Underlying().(*types.Signature); o.Exported() && (in(o.Type()) || ok && takes(sig)) {
-					bad = append(bad, "var "+name)
-				}
-			case *types.TypeName:
-				if !o.Exported() || types.IsInterface(o.Type()) {
-					continue
-				}
-				ms := types.NewMethodSet(types.NewPointer(o.Type()))
-				for sel := range ms.Methods() {
-					if sel.Obj().Exported() && takes(sel.Type().(*types.Signature)) {
-						bad = append(bad, "method "+name+"."+sel.Obj().Name())
+				ast.Inspect(d, func(n ast.Node) bool {
+					id, ok := n.(*ast.Ident)
+					if !ok {
+						return true
 					}
-				}
+					switch o := info.Uses[id]; {
+					case o == runAt:
+						bad = append(bad, fset.Position(id.Pos()).String()+": runAt")
+					case o == run && in != "Serve" && in != "runAt":
+						bad = append(bad, fset.Position(id.Pos()).String()+": Config.run")
+					}
+					return true
+				})
 			}
-		}
-		if in(pkg.Scope().Lookup("Config").Type()) {
-			bad = append(bad, "Config")
 		}
 		return bad
 	}
 
 	if bad := check(""); len(bad) != 0 {
-		t.Errorf("an importer can hand the loop a rung through %v", bad)
+		t.Errorf("the loop is entered other than through Serve: %v", bad)
 	}
 	for _, probe := range []string{
+		// Lens on #5211, and main's old Run.
 		"var Run = runAt",
 		"func RunP(ctx context.Context, cfg Config, l Line, r *Rung) (Report, error) { return runAt(ctx, cfg, l, *r) }",
 		"func Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { return runAt(ctx, cfg, l, r) }",
-		"func (c Config) At(r []Rung) {}",
-		"type Hold struct{ R Rung }\nfunc RunH(h map[string]Hold) {}",
-		"var Pick func() Rung",
-		"var Floor Rung",
-		"type Up interface{ Rung() Rung }\nfunc RunU(u Up) {}",
+		"func RunU(ctx context.Context, cfg Config, l Line, u interface{ R() Rung }) (Report, error) { return runAt(ctx, cfg, l, u.R()) }",
+		// Security on #5211.
+		"type Rs = []Rung\nfunc RunS(ctx context.Context, cfg Config, l Line, r Rs) (Report, error) { return runAt(ctx, cfg, l, r[0]) }",
+		"func RunG[T ~int](ctx context.Context, cfg Config, l Line, r T) (Report, error) { return runAt(ctx, cfg, l, Rung(r)) }",
+		"func RunI(ctx context.Context, cfg Config, l Line, r int) (Report, error) { return runAt(ctx, cfg, l, Rung(r)) }",
+		"func RunAny(ctx context.Context, cfg Config, l Line, x any) (Report, error) { return runAt(ctx, cfg, l, x.(Rung)) }",
+		"func ServeTrusted(ctx context.Context, cfg Config, l Line) (Report, error) { return runAt(ctx, cfg, l, P2) }",
+		"func Runner() func(context.Context, Config, Line, Rung) (Report, error) { return runAt }",
+		"type ctl struct{}\nfunc (ctl) Run(ctx context.Context, cfg Config, l Line, r Rung) (Report, error) { return runAt(ctx, cfg, l, r) }\nfunc Ctl() ctl { return ctl{} }",
+		"func RunC(ctx context.Context, cfg Config, l Line) (Report, error) { c := make(chan Rung, 1); c <- P2; return cfg.run(ctx, l, P2, c) }",
+		"var hook = Config.run",
 	} {
 		if len(check(probe)) == 0 {
-			t.Errorf("the check passes a rung input: %s", probe)
+			t.Errorf("the check passes an entry to the loop: %s", probe)
 		}
 	}
 }
