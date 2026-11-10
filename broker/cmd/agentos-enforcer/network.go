@@ -21,6 +21,7 @@ import (
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
@@ -509,6 +510,17 @@ func (s strayAddr) Error() string {
 	return fmt.Sprintf("served interface %s holds %s, outside %s", s.iface, s.addr, s.nets)
 }
 
+// unsetErr is any other failure hold finds: its cause typed for the page
+// (#5284), so the page's words never hang on this error's text, and the
+// error as the log shows it.
+type unsetErr struct {
+	cause page.Unset
+	err   error
+}
+
+func (u unsetErr) Error() string { return u.err.Error() }
+func (u unsetErr) Unwrap() error { return u.err }
+
 // procNet is the kernel's network settings (sysctl net.*).
 const procNet = "/proc/sys/net"
 
@@ -517,8 +529,12 @@ const procNet = "/proc/sys/net"
 func served(nets []dns.Net) error { return hold(procNet, nets, ifaceAddrs) }
 
 // noRedirects are the per-interface settings hold turns off, under
-// procNet: IPv4 and IPv6 redirects and IPv6 router advertisements.
-var noRedirects = []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
+// procNet: IPv4 and IPv6 redirects and IPv6 router advertisements, each
+// with the setting the page names.
+var noRedirects = []struct {
+	key string
+	set page.Setting
+}{{"ipv4/conf/%s/accept_redirects", page.Redirects4}, {"ipv6/conf/%s/accept_redirects", page.Redirects6}, {"ipv6/conf/%s/accept_ra", page.RouterAds}}
 
 // allRedirects is the IPv4 redirect setting the kernel combines with
 // each interface's own (either one on, or both with forwarding on), so
@@ -551,7 +567,7 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 	ifaces := []string{"default"}
 	for _, n := range nets {
 		if n.Iface == "" || n.Iface == "." || n.Iface == ".." || n.Iface == "all" || n.Iface == "default" || strings.ContainsAny(n.Iface, "/\x00") {
-			return fmt.Errorf("served interface %q: not an interface name", n.Iface)
+			return unsetErr{page.Unset{Kind: page.UnsetName, Iface: n.Iface}, fmt.Errorf("served interface %q: not an interface name", n.Iface)}
 		}
 		// Not there yet, it is passed; any other stat error is a there
 		// whose settings then fail to set.
@@ -559,23 +575,27 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 			ifaces = append(ifaces, n.Iface)
 		}
 	}
-	keys := []string{allRedirects}
+	type setting struct {
+		key   string
+		cause page.Unset
+	}
+	keys := []setting{{allRedirects, page.Unset{Kind: page.UnsetSetting, Iface: "all", Setting: page.Redirects4}}}
 	for _, iface := range ifaces {
-		for _, key := range noRedirects {
-			if v6 || !strings.HasPrefix(key, "ipv6/") {
-				keys = append(keys, fmt.Sprintf(key, iface))
+		for _, k := range noRedirects {
+			if v6 || !strings.HasPrefix(k.key, "ipv6/") {
+				keys = append(keys, setting{fmt.Sprintf(k.key, iface), page.Unset{Kind: page.UnsetSetting, Iface: iface, Setting: k.set}})
 			}
 		}
 	}
 	var errs []error
-	for _, key := range keys {
+	for _, k := range keys {
 		// The value read back must be the one written: a setting that
 		// takes the write and reads back anything else fails.
-		path := filepath.Join(root, key)
+		path := filepath.Join(root, k.key)
 		werr := os.WriteFile(path, []byte("0\n"), 0)
 		b, rerr := os.ReadFile(path)
 		if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
-			errs = append(errs, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err))
+			errs = append(errs, unsetErr{k.cause, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err)})
 		}
 	}
 	for _, n := range nets {
@@ -584,7 +604,13 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 		}
 		have, err := addrs(n.Iface) // none on an error
 		if err != nil {
-			errs = append(errs, fmt.Errorf("served interface %s: addresses: %w", n.Iface, err))
+			// Addresses that changed while read are read again at the
+			// next reading; any other failure may last.
+			kind := page.UnsetAddrs
+			if errors.Is(err, errDumpIntr) || errors.As(err, new(madeAgain)) {
+				kind = page.UnsetChanged
+			}
+			errs = append(errs, unsetErr{page.Unset{Kind: kind, Iface: n.Iface}, fmt.Errorf("served interface %s: addresses: %w", n.Iface, err)})
 		}
 		for _, p := range have {
 			if !inNet(p, n) {
@@ -653,9 +679,20 @@ func addrsOn(iface string, index func(string) (int, error), dump func() ([]byte,
 		return nil, err
 	}
 	if j != i {
-		return nil, fmt.Errorf("interface %s was made again while its addresses were read (index %d, then %d)", iface, i, j)
+		return nil, madeAgain{iface, i, j}
 	}
 	return out, nil
+}
+
+// madeAgain is an interface made again while its addresses were read:
+// its old index, then its new one.
+type madeAgain struct {
+	iface string
+	i, j  int
+}
+
+func (m madeAgain) Error() string {
+	return fmt.Sprintf("interface %s was made again while its addresses were read (index %d, then %d)", m.iface, m.i, m.j)
 }
 
 // addrDump is the kernel's dump of every address, as it sent it.

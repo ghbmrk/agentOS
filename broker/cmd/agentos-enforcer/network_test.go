@@ -1408,8 +1408,30 @@ func TestHold(t *testing.T) {
 	}
 
 	// A setting that takes the write and reads back something else (here
-	// nothing: a link to /dev/null) fails, for "all" and an interface's.
-	for _, key := range []string{"ipv4/conf/all/accept_redirects", "ipv6/conf/own0/accept_ra"} {
+	// nothing: a link to /dev/null) fails, for every key hold writes, and
+	// carries the setting and interface the page names (#5284).
+	causes := func(err error) (out []page.Unset) {
+		errs := []error{err}
+		if j, ok := err.(interface{ Unwrap() []error }); ok {
+			errs = j.Unwrap()
+		}
+		for _, e := range errs {
+			var u unsetErr
+			if !errors.As(e, &u) {
+				t.Errorf("an untyped failure: %v", e)
+			}
+			out = append(out, u.cause)
+		}
+		return out
+	}
+	set6 := map[string]page.Setting{"ipv4/conf/%s/accept_redirects": page.Redirects4, "ipv6/conf/%s/accept_redirects": page.Redirects6, "ipv6/conf/%s/accept_ra": page.RouterAds}
+	want := map[string]page.Unset{"ipv4/conf/all/accept_redirects": {Kind: page.UnsetSetting, Iface: "all", Setting: page.Redirects4}}
+	for k, set := range set6 {
+		for _, i := range []string{"default", "own0"} {
+			want[fmt.Sprintf(k, i)] = page.Unset{Kind: page.UnsetSetting, Iface: i, Setting: set}
+		}
+	}
+	for key, cause := range want {
 		root = box(true, "own0")
 		path := filepath.Join(root, key)
 		if err := os.Remove(path); err != nil {
@@ -1418,8 +1440,24 @@ func TestHold(t *testing.T) {
 		if err := os.Symlink(os.DevNull, path); err != nil {
 			t.Fatal(err)
 		}
-		if err := hold(root, nets[:1], addrs); err == nil || !strings.Contains(err.Error(), path+` not set to 0 (reads "")`) {
+		err := hold(root, nets[:1], addrs)
+		if err == nil || !strings.Contains(err.Error(), path+` not set to 0 (reads "")`) {
 			t.Errorf("%s linked to %s: %v", key, os.DevNull, err)
+		}
+		if got := causes(err); !slices.Equal(got, []page.Unset{cause}) {
+			t.Errorf("%s linked to %s: causes %+v, want %+v", key, os.DevNull, got, cause)
+		}
+	}
+	// Addresses that changed while read (a dump marked interrupted, or
+	// the interface made again) and any other read failure.
+	for rerr, kind := range map[error]page.UnsetKind{
+		fmt.Errorf("x: %w", errDumpIntr): page.UnsetChanged,
+		madeAgain{"own0", 4, 9}:          page.UnsetChanged,
+		errors.New("asked for own0"):     page.UnsetAddrs,
+	} {
+		err := hold(box(true, "own0"), nets[:1], func(string) ([]netip.Prefix, error) { return nil, rerr })
+		if got := causes(err); !slices.Equal(got, []page.Unset{{Kind: kind, Iface: "own0"}}) || !errors.Is(err, rerr) {
+			t.Errorf("addresses failing with %v: %v, causes %+v", rerr, err, got)
 		}
 	}
 
@@ -1455,7 +1493,8 @@ func TestHold(t *testing.T) {
 		t.Errorf("addresses unreadable: %v", err)
 	}
 	for _, name := range []string{"", ".", "..", "../x", "all", "default", "a/b", "a\x00b"} {
-		if err := hold(box(true), []dns.Net{{Iface: name, Prefix4: p("10.1.0.0/24")}}, addrs); err == nil || !strings.Contains(err.Error(), "not an interface name") {
+		err := hold(box(true), []dns.Net{{Iface: name, Prefix4: p("10.1.0.0/24")}}, addrs)
+		if err == nil || !strings.Contains(err.Error(), "not an interface name") || !slices.Equal(causes(err), []page.Unset{{Kind: page.UnsetName, Iface: name}}) {
 			t.Errorf("interface %q: %v", name, err)
 		}
 	}
@@ -1469,7 +1508,7 @@ func TestHold(t *testing.T) {
 	if err := os.Mkdir(key, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := hold(root, nets[:1], func(string) ([]netip.Prefix, error) { return nil, nil }); err == nil || !strings.Contains(err.Error(), "accept_ra") {
+	if err := hold(root, nets[:1], func(string) ([]netip.Prefix, error) { return nil, nil }); err == nil || !strings.Contains(err.Error(), "accept_ra") || !slices.Equal(causes(err), []page.Unset{{Kind: page.UnsetSetting, Iface: "own0", Setting: page.RouterAds}}) {
 		t.Errorf("an unwritable setting: %v", err)
 	}
 	// An interface's settings that cannot be read (a loop, ELOOP) and an
@@ -1801,13 +1840,13 @@ func TestStoppedResolverOnPage(t *testing.T) {
 		t.Fatal("home shows a running resolver as stopped")
 	}
 	stray := strayAddr{"own0", netip.MustParsePrefix("10.99.0.1/24"), "10.10.0.0/24"}
-	unset := errors.New("/proc/sys/net/ipv4/conf/default/accept_redirects not set to 0 (reads \"1\")")
+	unset := unsetErr{page.Unset{Kind: page.UnsetSetting, Iface: "default", Setting: page.Redirects4}, errors.New("reworded, so the page cannot read it")}
 	x.mu.Lock()
 	x.servedErr = errors.Join(stray, unset)
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []string{unset.Error()}) || got.Policy != "" {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != "" {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
@@ -1820,8 +1859,20 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.servedErr = errors.New("served interface own0: addresses: dump interrupted")
 	x.mu.Unlock()
 	x.advance(readEvery)
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays) != 0 || !slices.Equal(got.Unset, []string{"served interface own0: addresses: dump interrupted"}) {
-		t.Fatalf("a failure that is not a stray: %#v", got)
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays) != 0 || !slices.Equal(got.Unset, []page.Unset{{}}) {
+		t.Fatalf("an untyped failure is not the page's untyped cause: %#v", got)
+	}
+	if h := view(); !strings.Contains(h, "in a way this page has no words for") || strings.Contains(h, "dump interrupted") {
+		t.Errorf("an untyped failure is not the generic line, or shows its text:\n%s", h)
+	}
+	// hold's own failure reaches the page by its typed cause, whatever
+	// its text says (#5284).
+	x.mu.Lock()
+	x.servedErr = hold(t.TempDir(), []dns.Net{{Iface: "own\u202e0/x"}}, nil)
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if h := view(); !strings.Contains(h, "The enforcer&#39;s setup names &#34;own\\u202e0/x&#34; as a home network&#39;s interface") {
+		t.Errorf("hold's failure is not in the page's words:\n%s", h)
 	}
 	// The check passes but the load that would start the instances is
 	// refused: they stay stopped, and home says why (#5243 L3 item 1).

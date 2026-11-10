@@ -296,7 +296,8 @@ func (d *Enforcer) closeFresh() {
 
 // pageResolver is the resolver as the page shows it: stopped while no
 // instance runs, and then why: each stray address hold found with its
-// interface, every other failure of the served check, the policy in
+// interface, every other failure of the served check by its typed cause
+// (#5284), the policy in
 // force's that dns.Generate refused, and the last refused load's error
 // (ENF-l-11, ENF-l-21; #5164 R1).
 type pageResolver struct{ d *Enforcer }
@@ -316,12 +317,16 @@ func (p pageResolver) Stopped() page.ResolverStop {
 	}
 	for _, err := range errs {
 		var s strayAddr
+		var u unsetErr
 		switch {
 		case err == nil:
 		case errors.As(err, &s):
 			out.Strays = append(out.Strays, page.Stray{Iface: s.iface, Addr: s.addr, Nets: s.nets})
+		case errors.As(err, &u):
+			out.Unset = append(out.Unset, u.cause)
 		default:
-			out.Unset = append(out.Unset, err.Error())
+			// Untyped: the page's generic line; the log has the text.
+			out.Unset = append(out.Unset, page.Unset{})
 		}
 	}
 	return out

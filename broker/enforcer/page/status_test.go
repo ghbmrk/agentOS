@@ -409,8 +409,8 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	}
 	// A setting that did not take shows in plain words, never the raw
 	// error, and an error said twice shows once (#5280).
-	ra := "/proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\"): <nil>"
-	res.stop = ResolverStop{Stopped: true, Unset: []string{ra, ra}}
+	ra := Unset{Kind: UnsetSetting, Iface: "own0", Setting: RouterAds}
+	res.stop = ResolverStop{Stopped: true, Unset: []Unset{ra, ra}}
 	h = g.homeHTML()
 	if !strings.Contains(h, "<p>The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check. It tries again every 10 seconds.</p>") || strings.Contains(h, "Interface own0 holds") {
 		t.Errorf("a setting that did not take is not shown alone:\n%s", h)
@@ -435,47 +435,41 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	}
 }
 
-// #5280 (NET-2 Segments; split from #5164 R4): each error the served
-// check writes reads in the owner's words, with any name in printable
-// ASCII; an error with no words is one generic line, never its text.
+// #5280, #5284 (NET-2 Segments; split from #5164 R4): each typed cause
+// of the served check reads in the owner's words, with any name in
+// printable ASCII; a cause with no words is one generic line.
 func TestPlainUnset(t *testing.T) {
 	const again = " It tries again every 10 seconds."
-	for raw, want := range map[string]string{
-		"/proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\\n\"): <nil>":                                                                    "The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check." + again,
-		"/proc/sys/net/ipv4/conf/dev0/accept_redirects not set to 0 (reads \"\"): open /proc/sys/net/ipv4/conf/dev0/accept_redirects: permission denied": "The enforcer could not turn off IPv4 redirects on interface dev0, so a device on that network could set a route or address the enforcer did not check." + again,
-		"/proc/sys/net/ipv6/conf/gst0/accept_redirects not set to 0 (reads \"1\\n\"): <nil>":                                                             "The enforcer could not turn off IPv6 redirects on interface gst0, so a device on that network could set a route or address the enforcer did not check." + again,
-		"/proc/sys/net/ipv6/conf/default/accept_ra not set to 0 (reads \"2\\n\"): <nil>":                                                                 "The enforcer could not turn off router advertisements for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check." + again,
-		"/proc/sys/net/ipv4/conf/all/accept_redirects not set to 0 (reads \"1\\n\"): <nil>":                                                              "The enforcer could not turn off IPv4 redirects for all interfaces at once, so a device on a home network could set a route the enforcer did not check." + again,
-		`served interface "own\u202e0": not an interface name`:                                                                                           `The enforcer's setup names "own\u202e0" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
-		"served interface own0: addresses: interface own0 was made again while its addresses were read (index 4, then 9)":                                "The addresses on interface own0 changed while the enforcer read them. It reads them again within 10 seconds.",
-		"served interface dev0: addresses: the kernel's address dump was interrupted by a change":                                                        "The addresses on interface dev0 changed while the enforcer read them. It reads them again within 10 seconds.",
-		"served interface dev0: addresses: the kernel's address dump has no end\nnetlink: short":                                                         "The enforcer could not read the addresses on interface dev0, so it cannot check that each lies in that network." + again,
-		`served interface "": not an interface name`:                                                                                                     `The enforcer's setup names "" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
-		`served interface "..": not an interface name`:                                                                                                   `The enforcer's setup names ".." as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+	for u, want := range map[Unset]string{
+		{Kind: UnsetSetting, Iface: "own0", Setting: RouterAds}:    "The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "dev0", Setting: Redirects4}:   "The enforcer could not turn off IPv4 redirects on interface dev0, so a device on that network could set a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "gst0", Setting: Redirects6}:   "The enforcer could not turn off IPv6 redirects on interface gst0, so a device on that network could set a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "default", Setting: RouterAds}: "The enforcer could not turn off router advertisements for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "all", Setting: Redirects4}:    "The enforcer could not turn off IPv4 redirects for all interfaces at once, so a device on a home network could set a route the enforcer did not check." + again,
+		{Kind: UnsetName, Iface: "own\u202e0"}:                     `The enforcer's setup names "own\u202e0" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetName, Iface: ""}:                               `The enforcer's setup names "" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetName, Iface: ".."}:                             `The enforcer's setup names ".." as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetChanged, Iface: "own0"}:                        "The addresses on interface own0 changed while the enforcer read them. It reads them again within 10 seconds.",
+		{Kind: UnsetAddrs, Iface: "dev0"}:                          "The enforcer could not read the addresses on interface dev0, so it cannot check that each lies in that network." + again,
 		// A name past ASCII is quoted and escaped (ascii), never bare.
-		"/proc/sys/net/ipv6/conf/own\u00e9/accept_ra not set to 0 (reads \"1\\n\"): <nil>": `The enforcer could not turn off router advertisements on interface "own\u00e9", so a device on that network could set a route or address the enforcer did not check.` + again,
-		"served interface own\u00e9: addresses: x":                                         `The enforcer could not read the addresses on interface "own\u00e9", so it cannot check that each lies in that network.` + again,
-		// A name past the kernel's 15 bytes is no kernel's: no words.
-		"/proc/sys/net/ipv6/conf/own456789abcdefg/accept_ra not set to 0 (reads \"1\"): <nil>": "",
-		"served interface own456789abcdefg: addresses: x":                                      "",
-		// No words: an unknown error, a key hold never writes, a path
-		// outside /proc/sys/net, a name no kernel gives, a bad quote.
-		"stat /proc/sys/net/ipv6: input/output error \u202e":                                                "",
-		"/proc/sys/net/ipv4/conf/own0/accept_ra not set to 0 (reads \"1\"): <nil>":                          "",
-		"/tmp/x/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\"): <nil>":                                 "",
-		"/proc/sys/net/ipv6/conf/own0 x/accept_ra not set to 0 (reads \"1\"): <nil>":                        "",
-		"/proc/sys/net/ipv6/conf/own0/accept_ra not set to 1 (reads \"1\"): <nil>":                          "",
-		`served interface "own0\x": not an interface name`:                                                  "",
-		`served interface "own0": not an interface name, and more`:                                          "",
-		"served interface own0 own1: addresses: x":                                                          "",
-		"x served interface own0: addresses: x":                                                             "",
-		"served interface own0: addresses: interface own1 x was made again while its addresses were read (": "The enforcer could not read the addresses on interface own0, so it cannot check that each lies in that network." + again,
+		{Kind: UnsetSetting, Iface: "own\u00e9", Setting: RouterAds}: `The enforcer could not turn off router advertisements on interface "own\u00e9", so a device on that network could set a route or address the enforcer did not check.` + again,
+		{Kind: UnsetAddrs, Iface: "own\u00e9"}:                       `The enforcer could not read the addresses on interface "own\u00e9", so it cannot check that each lies in that network.` + again,
+		{Kind: UnsetChanged, Iface: "own \u202e0"}:                   `The addresses on interface "own \u202e0" changed while the enforcer read them. It reads them again within 10 seconds.`,
+		// No words: an untyped failure, a setting the page does not
+		// know, a kind past the last.
+		{}:                                           "",
+		{Iface: "own0", Setting: RouterAds}:          "",
+		{Kind: UnsetSetting, Iface: "own0"}:          "",
+		{Kind: UnsetSetting, Iface: "all"}:           "",
+		{Kind: UnsetSetting, Iface: "default"}:       "",
+		{Kind: UnsetSetting, Setting: RouterAds + 1}: "",
+		{Kind: UnsetChanged + 1, Iface: "own0"}:      "",
 	} {
 		if want == "" {
 			want = "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
 		}
-		if got := plainUnset(raw); got != want {
-			t.Errorf("plainUnset(%q)\n = %q\nwant %q", raw, got, want)
+		if got := plainUnset(u); got != want {
+			t.Errorf("plainUnset(%+v)\n = %q\nwant %q", u, got, want)
 		}
 	}
 }
