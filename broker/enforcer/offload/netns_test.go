@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // These tests run against the kernel in a fresh user and network

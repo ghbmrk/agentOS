@@ -8,11 +8,17 @@ name: trusted-base-rerun
 # only when main's measure grows: a push that shrinks main can still raise another PR's merged
 # measure (an identical cut both make, or a package one drops that the other links; L3 on #5179).
 # A run whose job started before this push may have read the old main, so it is rerun once it
-# completes. One whose job started later checked out the new main and stands: rerunning it too
-# kept armed PRs pending while the queue outlasted the gap between pushes (CI-rerun-fresh, #5222;
-# #5203, attempts 1 to 11). Pushes of only BOARD.md, METRICS.md or TRACE.md run nothing: only
-# their bot workflows write them and no measure reads them. A rerun or listing that fails marks
-# this job red, so a stale green is visible on main. With bursts of pushes GitHub cancels a
+# completes. One whose job started later and passed checked out the new main and stands:
+# rerunning it too kept armed PRs pending while the queue outlasted the gap between pushes
+# (CI-rerun-fresh, #5222; #5203, attempts 1 to 11). A later one that failed, timed out or was
+# cancelled is rerun as well. When no path matching `measured` (every path the check reads)
+# changed since the newest successful run of this workflow (not the push's `before`: a later
+# push's run can replace a pending one), nothing is rerun: no PR's measure can change, and a
+# conflict such a push causes fails the check, which GitHub's merge refuses anyway. A compare
+# that fails, lists 300 files or more, or is not `ahead` or `identical` (main was reset) reruns
+# as before; grep reads the list without a pipe, so only its "no match" skips (#5224). An empty
+# or malformed push time, a rerun or a listing that fails marks this job red, so a stale green
+# is visible on main. With bursts of pushes GitHub cancels a
 # pending run of this group; the run that replaces it reruns everything against a later main,
 # so no push is lost. It checks out nothing and runs no repository or PR code; its token may
 # rerun workflow runs and read PRs, nothing else. PRs that merge within one rerun's latency can
@@ -21,7 +27,6 @@ name: trusted-base-rerun
 on:
   push:
     branches: [main]
-    paths-ignore: [BOARD.md, METRICS.md, TRACE.md]
 permissions:
   contents: read
 concurrency:
@@ -34,6 +39,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       actions: write # rerun trusted-base runs, nothing else
+      contents: read # compare main's commits
       pull-requests: read
     steps:
       - name: Rerun every open PR's newest trusted-base run
@@ -45,7 +51,12 @@ jobs:
           WAIT: 30
         run: |
           prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | "\(.number) \(.head.sha)"') || { echo "::error::cannot list open PRs"; exit 1; }
-          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) || { echo "::error::cannot read this run's start"; exit 1; }
+          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run's start"; exit 1; }
+          measured='^(broker/|decisions/|(SPEC|DECISIONS)\.md$|\.gitattributes$|\.github/workflows/trusted-base\.yml$|tools/(trusted_base\.py|claims\.py|trusted_base_parsers\.txt|trusted_core\.txt|ceilings\.txt|old_core\.txt)$)'
+          last=$(gh api "repos/$REPO/actions/workflows/trusted-base-rerun.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""') || { echo "::error::cannot list this workflow's runs"; exit 1; }
+          if [[ $last =~ ^[0-9a-f]{40}$ ]] && changed=$(gh api "repos/$REPO/compare/$last...$GITHUB_SHA" --jq 'if (.status == "ahead" or .status == "identical") and (.files | length) < 300 then (.files[] | .filename, (.previous_filename // empty)) else "broker/" end') && { grep -Eq "$measured" <<< "$changed"; [ $? = 1 ]; }; then
+            printf '\n%s\n' "No path the check reads changed since $last; nothing rerun." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
           failed=0 reran=0 missed=""
           pending="$prs"
           for round in $(seq 1 "$ROUNDS"); do
@@ -57,8 +68,8 @@ jobs:
               if [ -z "$run" ]; then
                 echo "#$pr: no trusted-base run yet; its first run reads the new main"
               elif [ "${run#* }" = completed ]; then
-                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[].started_at] | min) > \"$since\" then \"fresh\" else \"\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }
-                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push, so it measured the new main"
+                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[] | if .conclusion == \"success\" then .started_at else null end] | min) > \"$since\" then \"fresh\" else \"\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }
+                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push and passed, so it measured the new main"
                 elif gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi
               else
                 left="$left$pr $sha"$'\n'
