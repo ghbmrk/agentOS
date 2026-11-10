@@ -452,6 +452,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-wan-ra | ENF-m-wan-ra: the WAN's router-advertisement handling is set by its link configuration (networkd IPv6AcceptRA= or sysctl.d accept_ra=2 on the WAN) and checked by ci_boot.sh; named in the ENF-m-b brief. Release; from #5165 (L3 R-a). | #5165 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
 | IMG-keeper-reach-tmpfiles-run | IMG-keeper-reach-tmpfiles-run: the link rules and the keeper check count a directory a tmpfiles.d line makes under a box mount for a non-root user as service-owned. Release; from #5167. | #5167 | queued (release; tier A) |
+| ENF-mut-cmd-pkgs | ENF-mut-cmd-pkgs: kill the 87 surviving mutants in cmd/agentos-enforcer (boottime, config, cut, enforcer, keys, network, state, store). Release; from #5203 mutgate. | #5203 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
