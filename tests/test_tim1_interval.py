@@ -16,8 +16,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TIM1 = [
     "Time is an interval from network time, cross-checked against modem carrier time, "
     "widened by drift and disagreement.",
-    "A time-due move that widens (a hold's or limit's end) waits until the interval's start passes it, "
-    "and one that narrows (an expiry, a permitting window's end) fires at its end, "
+    "A time-due move that widens (a hold's or limit's end, a default on timeout) waits until the interval's "
+    "start passes it, and one that narrows fires at its end, "
     "each logged before steps due then (LOG-8).",
 ]
 READER = "the kernel sends only while its interval (TIM-1) lies the margin inside a window"
@@ -68,6 +68,8 @@ class Interval(unittest.TestCase):
 
     def check_status(self, t, n):
         self.assertIn(LOG8_STATUS, t, f"SPEC.md:{n} STATUS no longer shows a move a wide interval delays")
+        self.assertIn("pending (with an expiry and what expiry does, TIM-1)", t,
+                      f"SPEC.md:{n} LOG-8 no longer sends an expiry's direction to TIM-1")
 
     def check_reader(self, t, n):
         self.assertIn(READER, t, f"SPEC.md:{n} outside readers no longer send by the whole time interval")
@@ -94,8 +96,14 @@ class Interval(unittest.TestCase):
                 ("interval's start passes", "interval's end passes"),
                 ("fires at its end", "fires at its start"),
                 ("move that widens", "move that narrows"),
-                ("(a hold's or limit's end) waits until the interval's start passes it, and one that narrows (an expiry,",
-                 "(a hold's end) waits until the interval's start passes it, and one that narrows (an expiry, a limit's end,"),
+                ("(a hold's or limit's end, a default on timeout) waits until the interval's start passes it, "
+                 "and one that narrows fires",
+                 "(a hold's end, a default on timeout) waits until the interval's start passes it, "
+                 "and one that narrows (a limit's end) fires"),
+                ("(a hold's or limit's end, a default on timeout) waits until the interval's start passes it, "
+                 "and one that narrows fires",
+                 "(a hold's or limit's end) waits until the interval's start passes it, "
+                 "and one that narrows (an expiry, a default on timeout) fires"),
                 ("widened by drift and disagreement", "paused by large disagreements"),
                 ("each logged before steps due then", "each logged after the step"),
                 ("(LOG-8).", "(LOG-8). Large disagreements pause time-sensitive checks."),
@@ -108,6 +116,7 @@ class Interval(unittest.TestCase):
             (lambda: bullet("- **LOG-8** "), self.check_status, [
                 (", and each move a wide interval (TIM-1) delays,", ""),
                 ("each move a wide interval", "each hold a wide interval"),
+                ("what expiry does, TIM-1)", "what expiry does)"),
             ]),
             (lambda: bullet("- **Outside readers**"), self.check_reader, [
                 ("only while its interval (TIM-1) lies", "while its clock (TIM-1) lies"),
