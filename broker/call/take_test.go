@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/importer"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"io/fs"
@@ -38,7 +39,8 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     number, runs a call. check is named only as the callee of calls in
 //     token's body, and token, whose ctx is the grant's life, only in
 //     Serve's, both outside any func literal. serving, the lock that serves
-//     one call at a time, is named only in Serve's body.
+//     one call at a time, is named only in Serve, which takes it, makes
+//     the token's ctx and defers cancel then unlock, in that order.
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -137,6 +139,37 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if serving == nil {
 			t.Fatal("serving is gone: rewrite this check with the code")
 		}
+		var bad []string
+		// Serve takes serving, then makes the token's ctx, then defers its
+		// cancel before the unlock, in that order and before anything can
+		// return: so a call's grant has died before the next call is
+		// served, and every return unlocks (Lens on #5251).
+		var serveBody []string
+		for _, f := range files {
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && info.Defs[fd.Name] == serve {
+					for _, st := range fd.Body.List {
+						var b strings.Builder
+						printer.Fprint(&b, fset, st)
+						serveBody = append(serveBody, strings.Join(strings.Fields(b.String()), " "))
+					}
+				}
+			}
+		}
+		pinned := []string{
+			"if !serving.TryLock() { return Report{}, ErrBusy }",
+			"tctx, cancel := context.WithCancel(ctx)",
+			"defer func() { cancel(); serving.Unlock() }()",
+		}
+		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+3 > len(serveBody) || !slices.Equal(serveBody[i:i+3], pinned) || !slices.Contains(serveBody[i+3:], "go cfg.token(tctx, c, token)") {
+			bad = append(bad, "Serve does not take serving, make tctx and defer cancel then unlock, in that order, before it reads the token with tctx")
+		}
+		for _, st := range serveBody[:max(slices.Index(serveBody, pinned[0]), 0)] {
+			if strings.Contains(st, "return") && st != "if ownerNumber == \"\" || c.Number() != ownerNumber { return Report{}, ErrNotOwner }" {
+				bad = append(bad, "Serve returns before it takes serving other than for ErrNotOwner")
+			}
+		}
+		servingNames := 0
 		gSt, cfgSt := under("grant"), under("Config")
 		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
 		if _, ok := tokenFn.(*types.Func); !ok {
@@ -162,7 +195,6 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		}
 
 		isKey := func(e ast.Expr) bool { _, ok := e.(*ast.KeyValueExpr); return ok }
-		var bad []string
 		at := func(n ast.Node, msg string, a ...any) {
 			bad = append(bad, fset.Position(n.Pos()).String()+": "+fmt.Sprintf(msg, a...))
 		}
@@ -215,8 +247,10 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						}
 					case *ast.Ident:
 						obj := info.Uses[n]
-						if obj == serving && (encl != serve || lit) {
-							at(n, "serving is named outside Serve")
+						if obj == serving {
+							if servingNames++; encl != serve {
+								at(n, "serving is named outside Serve")
+							}
 						}
 						if in, ok := callIn[obj]; ok {
 							fun, up := ast.Node(n), parent(1)
@@ -266,6 +300,9 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if calls != 1 {
 			bad = append(bad, fmt.Sprintf("Serve calls loop %d times", calls))
 		}
+		if servingNames != 2 {
+			bad = append(bad, fmt.Sprintf("serving is named %d times, not 2", servingNames))
+		}
 		return bad
 	}
 
@@ -300,7 +337,15 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// #5232 R1: serving is Serve's alone, so one call is served at a time.
 		{extra: "func free() { serving.Unlock() }", want: "serving is named outside Serve"},
 		{extra: "var held = &serving", want: "serving is named outside Serve"},
-		{old: "defer serving.Unlock()", new: "defer func() { serving.Unlock() }()", want: "serving is named outside Serve"},
+		// Lens on #5251: the unlock before the cancel lets the next call
+		// start while this call's grant still reads P2.
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { serving.Unlock(); cancel() }()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer cancel()\n\tdefer serving.Unlock()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer serving.Unlock()\n\tdefer cancel()", want: "in that order"},
+		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { cancel(); serving.Unlock(); serving.Unlock() }()", want: "in that order"},
+		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(ctx, c, token)\n\t_ = tctx", want: "in that order"},
+		{old: "\tif !serving.TryLock() {", new: "\tif c.Number() == \"\" {\n\t\treturn Report{}, nil\n\t}\n\tif !serving.TryLock() {", want: "returns before it takes serving"},
+		{old: "\tif !serving.TryLock() {", new: "\tif !serving.TryLock() && serving.TryLock() {", want: "serving is named 3 times"},
 		// A grant made outside check, or by a fill that names no field;
 		// Security's #5229 blocker first.
 		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},

@@ -188,13 +188,14 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	if !serving.TryLock() {
 		return Report{}, ErrBusy
 	}
-	defer serving.Unlock() // runs after cancel below: the grant has died first
+	tctx, cancel := context.WithCancel(ctx)
+	// Ends the token read, and with it the call's grant, before the next
+	// call can be served (TestOnlyServeChoosesTheRung pins the order).
+	defer func() { cancel(); serving.Unlock() }()
 	if err := c.Answer(ctx); err != nil {
 		return Report{}, err
 	}
 	cfg = cfg.withDefaults()
-	tctx, cancel := context.WithCancel(ctx)
-	defer cancel() // ends the token read, and with it the call's grant
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
 	return loop(ctx, cfg, c, token)
