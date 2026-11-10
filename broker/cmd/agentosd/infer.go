@@ -97,9 +97,9 @@ func inferenceLeaf(machines func() (*cgroup.Group, error), inferenceMB int64) fu
 		if err != nil {
 			return nil, err
 		}
-		// The leaf takes the service itself, so it is not opened for
-		// children (cgroup.Open would enable its subtree controllers, and
-		// a group with those holds no process). It must carry the budget.
+		// The leaf carries the budget. The service runs in a group made
+		// new below it each run, <leaf>/infer (INF-1, infer/supervise),
+		// so the leaf itself holds no process.
 		g := &cgroup.Group{Path: filepath.Join(filepath.Dir(m.Path), "inference")}
 		b, err := os.ReadFile(filepath.Join(g.Path, "memory.max"))
 		if err != nil {

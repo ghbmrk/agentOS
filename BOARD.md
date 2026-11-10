@@ -323,19 +323,18 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-d | ENF-m-d: enforcer state partition sealed to the V1410's TPM | #3671; the device | queued(tier A; lane primary; brief briefs/ENF.md) |
 | SPEC-core-join-f1 | SPEC-core-join-f1: core-join wording follow-ups from #4744 reviews (NET-4, NET-2 channel, risk 30, §12.1 step 4) | #4744 | queued (release; tier B; lane primary) |
 | ENF-core-pair | ENF-core-pair: pin the core's and the enforcer's channel keys at set-up on the page | ENF-l-a | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-heartbeat-interval | ENF-heartbeat-interval: set the core's heartbeat interval in the channel's format definition | ENF-l-a | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-exec | UNLOCK-closure-exec: the commands of every unit the unlock step can start are on a closed list, not a word list (#4696 Security R1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
-| P2-1 | P2-1: the image clears the MOR bit on orderly shutdown so a host PC is left untouched (HW-8) | #4793 | building (release; tier A; from #4793 HOST-1e) |
 | ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | queued (release; tier A; lane primary; brief briefs/ENF.md) |
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | ENF-l-sec-b | ENF-l-sec-b: alert offer single-flight and re-offer on a cut core's reconnect (#4755 items 6, 7) | ENF-l-sec | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
-| ENF-edge-cut | ENF-edge-cut: cut the edge on its byte cap (NET-2 Byte caps) | #3670 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-edge-cut | ENF-edge-cut: cut the edge on its byte cap (NET-2 Byte caps) | #3670 | in review(tier A; lane primary; brief briefs/ENF.md) |
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
-| HOST-1e | HOST-1e: hostcheck potency follow-ups (unclean phase shape, flag wiring, rule keys) | #5173 | queued (release; tier A; from #5173 Potency) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
+| HOST-1g | HOST-1g: power_cut_only misses a guest halt (no QEMU event) and compares QEMU and serial timestamps in a way that can race. Release; from #5254. | #5254, #5193 | in review (release; tier A) |
+| HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -422,7 +421,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
-| VOICE-ro-d-serve | VOICE-ro-d-serve: modem wiring reaches the call loop only through call.Serve, never Run with a chosen rung; a test holds it (briefs/VOICE-ro.md rule 4). Release; from #4944. | #4944 | building (release; tier A) |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
 | REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
@@ -437,20 +435,27 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | AGENTOSD-broker-group-fresh | AGENTOSD-broker-group-fresh: agentosd reuses its own broker/ cgroup, so a kill count left by systemd would make every clone3 child die at birth with no cause; infer.go leaf comment stale. From #5141. | #5141 | building (release; tier A) |
 | ENF-restart-unit | ENF-restart-unit: the real agentos-enforcer.service sets Restart= with a start limit one fresh-day exit cannot hit, and its acceptance test covers the restart. Release; from #5133 (R1). | #5133, ENF-m (#3671) | queued (release; tier A) |
 | OWN-resume-says-cancelled | OWN-resume-says-cancelled: RESUME's reply says what STOP cancelled stays cancelled, and the owner lines for the task and stopped codes are checked. Release; from #5138 (R1, R2). | #5138 | queued (release; tier A; sub B) |
-| ENF-netns-helper-fu | ENF-netns-helper-fu: netnstest ignores an empty PATH entry, a test pins that only test files import it, three test files group the import, and nft, dns, wol and radio/ble use the helper. Release; from #5129. | #5129, #5140 | building (release; tier A) |
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
-| ENF-netns-m0 | ENF-netns-m0: the enforcer's main thread can stay parked in a stopped stack's network namespace (inNetns on m0). Release; from #5140. | #5140 | queued (release; tier A) |
-| ENF-page-status-fu2 | ENF-page-status-fu2: the page's re-revoke button confirms (or the row says why not), and the lifecycle Light helper asserts the Alerts section is absent. Release; from #5158. | #5158, #5106 | building (release; tier A) |
+| ENF-netns-m0 | ENF-netns-m0: the enforcer's main thread can stay parked in a stopped stack's network namespace (inNetns on m0). Release; from #5140. | #5140 | building (release; tier A) |
 | KRN-forget-c-confirm-words | KRN-forget-c-confirm-words: the Forget ask names kinds in household words (2 messages, 1 photo), not raw class names like wrap-key. From #5156 Lens R1. | #5124, #5156 | queued (release; tier A) |
 | ENF-net-ra-fu | ENF-net-ra-fu: a stopped resolver shows on the enforcer page; accept_ra=0 does not reach later uplinks; an image sysctl.d line holds accept_redirects=0 outside the daemon. Release; from #5161 (R1 to R3). | #5161 | queued (release; tier A) |
-| IMG-keeper-reach-sysd | IMG-keeper-reach-sysd: the keeper check and the link rules count the directories systemd's own service users write (/run/systemd/resolve, /run/systemd/netif, /var/lib/systemd/timesync) as service-owned. Release; from #5154. | #5154 | building (release; tier A) |
-| TEST-flake-cap-segment-header | TEST-flake-cap-segment-header: TestCapCountsEverySegmentHeader counts 96 IP bytes short with merging off; find the uncounted packets (2nd sighting, #5115 then #5156). | #5156 | queued (release; flake) |
+| IMG-keeper-reach-sysd | IMG-keeper-reach-sysd: the keeper check and the link rules count the directories systemd's own service users write (/run/systemd/resolve, /run/systemd/netif, /var/lib/systemd/timesync) as service-owned. Release; from #5154. | #5154 | escalated (release; tier A) |
 | AGENTOSD-broker-group-status | AGENTOSD-broker-group-status: a leftover broker/ group that will not go shows STATUS 'update needed', not 'restart'. From #5172. | #5172 | queued (release; tier A) |
 | ENF-m-wan-ra | ENF-m-wan-ra: the WAN's router-advertisement handling is set by its link configuration (networkd IPv6AcceptRA= or sysctl.d accept_ra=2 on the WAN) and checked by ci_boot.sh; named in the ENF-m-b brief. Release; from #5165 (L3 R-a). | #5165 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
 | IMG-keeper-reach-tmpfiles-run | IMG-keeper-reach-tmpfiles-run: the link rules and the keeper check count a directory a tmpfiles.d line makes under a box mount for a non-root user as service-owned. Release; from #5167. | #5167 | queued (release; tier A) |
-| ENF-mut-cmd-pkgs | ENF-mut-cmd-pkgs: kill the 87 surviving mutants in cmd/agentos-enforcer (boottime, config, cut, enforcer, keys, network, state, store). Release; from #5203 mutgate. | #5203 | queued (release; tier A) |
+| CI-image-tool-loader | CI-image-tool-loader: the image's systemd and kmod in the differential tests fail on any library loaded from outside the reference root (loader --library-path falls back to the host's directories). Release; from #5055. | #5230, #4776 | queued (release; tier A) |
+| IMG-keeper-reach-sysd-fu | IMG-keeper-reach-sysd-fu: PID 1 acts on no path inside a directory it hands to another user (SocketUser= chown follows a link at the socket path). Release; from #5228. | #5228, #5167 | queued (release; tier A) |
+| IMG-keeper-reach-sysd-what | IMG-keeper-reach-sysd-what: a bind mount's What= and overlay upperdir/workdir count as paths PID 1 makes. Release; from #5228 Security 6760938141. | #5167 | in review (release; tier A) |
+| ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
+| ENF-netns-ble-fu | ENF-netns-ble-fu: the ble tests dial the host system bus and set a hard RLIMIT_DATA above a lower inherited limit. Release; from #5240. | #5240, #5212 | building (release; tier A) |
+| VOICE-ro-d-busy-fu | VOICE-ro-d-busy-fu: an owner redial right after a dropped call hears ringing until voicemail because Serve's TryLock refuses with ErrBusy. Release; from #5251. | #5251, #5232 | in review (release; tier A) |
+| IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
+| VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
+| VOICE-ro-d-maxcall-notice | VOICE-ro-d-maxcall-notice: the owner hears a spoken notice before the 30-minute maximum-call hang-up. Release (UX); from #5258. | #5258, #5252 | queued (release; tier A) |
+| TEST-flake-plan-reading-signal | TEST-flake-plan-reading-signal: TestPlanHeldModelCallCancelledBeforeConnectIsNotSent drops its non-blocking reading signal and hangs 25 minutes under -race; buffer the channel and bound the wait. Release; flake, 2nd sighting (#5240 twice). | #5240, #5128 | in review (release; tier A) |
+| TEST-flake-run-reading-signal | TEST-flake-run-reading-signal: broker/clerk/run/plansignin_test.go signals reading through an unbuffered channel, so the test can hang as clerk/plan's did. Release; from #5265. | #5265, #5264 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -485,15 +490,14 @@ issue #4911: body has no board-row block
 issue #4914: body has no board-row block
 issue #4916: body has no board-row block
 issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
-issue #4948: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #5041: body has no board-row block
 issue #5047: body has no board-row block
 issue #5053: body has no board-row block
-issue #5055: body has no board-row block
 issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
+issue #5216: body has no board-row block
 ```

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -165,34 +166,57 @@ var ErrNotOwner = errors.New("call: not the owner's number")
 // MaxToken caps the keys read as the speed-dial token.
 const MaxToken = 32
 
+// ErrBusy is returned for a call that rings while another is served. It is
+// left ringing, like any other caller.
+var ErrBusy = errors.New("call: another call is being served")
+
+// serving is held while Serve runs, so one call is served at a time and a
+// P2 grant is live only while no other call is: a grant kept from one call,
+// by a package var or a shared answerer, reads P0 in every later call
+// (#5232). Only Serve names it (TestOnlyServeChoosesTheRung).
+var serving sync.Mutex
+
 // Serve answers a ringing call from the owner's number, reads the
 // speed-dial token, and runs the loop at P2 if the token checks and at P0
-// otherwise (briefs/VOICE-ro.md rule 4). Any other caller is left ringing
-// for the line's own rules; nothing here answers it.
+// otherwise (briefs/VOICE-ro.md rule 4). Any other caller, and an owner
+// call that rings while another call is served, is left ringing for the
+// line's own rules; nothing here answers it.
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
 	}
+	if !serving.TryLock() {
+		return Report{}, ErrBusy
+	}
+	tctx, cancel := context.WithCancel(ctx)
+	// Ends the token read, and with it the call's grant, before the next
+	// call can be served (TestOnlyServeChoosesTheRung pins the order).
+	defer func() { cancel(); serving.Unlock() }()
 	if err := c.Answer(ctx); err != nil {
 		return Report{}, err
 	}
 	cfg = cfg.withDefaults()
-	tctx, cancel := context.WithCancel(ctx)
-	defer cancel() // ends the token read, and with it the call's grant
 	token := make(chan *grant, 1)
-	go func() { token <- cfg.token(tctx, c) }()
+	go cfg.token(tctx, c, token)
 	return loop(ctx, cfg, c, token)
 }
 
-// token reads the speed-dial token: the handset's contact holds the box's
+// token sends the call's grant on out: check's verdict on the speed-dial
+// keys, live as long as ctx. Only Serve calls it, with a ctx it ends when
+// the call ends, so no grant outlives its call.
+func (cfg Config) token(ctx context.Context, l Line, out chan<- *grant) {
+	out <- check(cfg, ctx.Done(), cfg.keys(ctx, l))
+}
+
+// keys reads the speed-dial token: the handset's contact holds the box's
 // number, a pause and the token, so the phone keys it once the call is up
 // (flip-phone note §2.1). Keys up to '#', MaxToken keys, or the end of
-// TokenWindow are the token, checked once by cfg.Token; they reach nothing
-// else, and none of them is STOP. A call whose token does not check, or
-// that keys none, stays at P0. A grant lives as long as ctx.
-func (cfg Config) token(ctx context.Context, l Line) *grant {
+// TokenWindow are the token, checked once by check; they reach nothing
+// else, and none of them is STOP. With no Token, or a call that ends or
+// keys none, it is "", which stays at P0.
+func (cfg Config) keys(ctx context.Context, l Line) string {
 	if cfg.Token == nil {
-		return nil
+		return ""
 	}
 	active, keys := l.Active(), l.Keys()
 	var window <-chan time.Time // opens when the call is up
@@ -204,19 +228,19 @@ func (cfg Config) token(ctx context.Context, l Line) *grant {
 			window = cfg.After(cfg.TokenWindow)
 		case k, ok := <-keys:
 			if !ok {
-				return nil
+				return ""
 			}
 			if k == '#' {
-				return check(cfg, ctx.Done(), b.String())
+				return b.String()
 			}
 			b.WriteByte(k)
 		case <-window:
-			return check(cfg, ctx.Done(), b.String())
+			return b.String()
 		case <-ctx.Done(): // Serve's, ended when the call ends
-			return nil
+			return ""
 		}
 	}
-	return check(cfg, ctx.Done(), b.String())
+	return b.String()
 }
 
 // check is the one place a grant is made: P2 when the kernel's Token

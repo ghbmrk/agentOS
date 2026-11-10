@@ -129,6 +129,7 @@ type Enforcer struct {
 	ch     *channel.Channel
 	chCfg  channel.Config
 	cut    *cut
+	edge   *edgeCut
 	core   ed25519.PublicKey
 	coreCA []byte
 
@@ -209,6 +210,9 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		return nil, fmt.Errorf("policy: %w", err)
 	}
 	if d.cut, err = openCut(d.store(fileCut), d.alerts, dp.Logf); err != nil {
+		return nil, err
+	}
+	if d.edge, err = openEdgeCut(d.store(fileEdgeCut), d.alerts, dp.Logf); err != nil {
 		return nil, err
 	}
 	if d.cert, err = pageCert(d.store(fileCert), cfg.Name, dp.Now()); err != nil {
@@ -367,6 +371,9 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
 	}
+	if err := d.edge.Persist(); err != nil {
+		d.dp.Logf("edge cut: trip still not saved: " + err.Error())
+	}
 	d.tickFresh(ctx, now)
 	d.tickNetwork(ctx, now)
 	d.upMu.Lock()
@@ -426,7 +433,7 @@ func (d *Enforcer) rebuildPage() error {
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
 		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
-		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d}, Resolver: pageResolver{d},
+		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d}, Resolver: pageResolver{d}, Edge: pageEdge{d},
 	}
 	if d.ch != nil {
 		pc.Channel, pc.Core = d.cut, pageCore{d}
@@ -473,6 +480,9 @@ func (d *Enforcer) Page() *page.Server {
 func (d *Enforcer) Close() {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip not saved at close: " + err.Error())
+	}
+	if err := d.edge.Persist(); err != nil {
+		d.dp.Logf("edge cut: trip not saved at close: " + err.Error())
 	}
 	d.pageMu.Lock()
 	for _, ln := range d.pageLns {

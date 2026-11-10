@@ -20,6 +20,7 @@ table inet enforcer {
 	counter core_edge { }
 	counter edge_out { }
 	counter cap_drop { }
+	counter edge_cut { }
 	counter log_lines { }
 	counter t101_out { }
 	counter t101_in { }
@@ -776,6 +777,8 @@ table inet enforcer {
 	}
 	chain forward {
 		type filter hook forward priority filter; policy drop;
+		iifname "edge0" jump cut_edge
+		oifname "edge0" jump cut_edge
 		iifname "gst0" counter name "guests_out"
 		oifname "gst0" counter name "guests_in"
 		iifname "gst0" ct state new counter name "guests_conns"
@@ -1125,6 +1128,8 @@ table inet enforcer {
 	}
 	chain capd_edge {
 		drop
+	}
+	chain cut_edge {
 	}
 	chain output {
 		type filter hook output priority filter; policy accept;

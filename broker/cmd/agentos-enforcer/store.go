@@ -16,6 +16,7 @@ const (
 	fileEnrol      = "enrol.json"    // enrol.Book: passkey, codes' verifiers, phase
 	filePolicy     = "policy.json"   // policy.Engine: signed versions, steps, pending
 	fileCut        = "cut.json"      // the core trip (cut.go)
+	fileEdgeCut    = "edgecut.json"  // the edge's cut (edgecut.go)
 	fileCert       = "page-tls.json" // the page's root and leaf (page.Cert)
 	fileChannelKey = "channel.key"   // the enforcer's Ed25519 channel key
 	fileCoreKey    = "core.pub"      // the kernel's channel sub-key, pinned at set-up
