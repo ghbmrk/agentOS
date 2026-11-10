@@ -2,11 +2,6 @@
 # one per line: directory (under broker/), check, reason. A line whose check
 # now runs its corpus, or no longer exists, fails the lint: delete it.
 #
-# Fail the corpus today; the fix is the named release item.
-clerk/model forbiddenHeader a denylist that accepts reshaping and credential names (X-Http-Method-Override, X-Signature); #4914
-clerk/plan forbiddenHeader a denylist that accepts reshaping and credential names (X-Original-Url, X-Api-Key); #4914
-clerk/plan Login.answerHeader passes a response header forbiddenHeader allows; #4914
-#
 # Reached through a check that runs the corpus.
 netguard Policy.check called only by Policy.Check, which runs the address corpus
 netguard Policy.checkOnce called only through Policy.Check, which runs the address corpus

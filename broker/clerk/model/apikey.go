@@ -168,10 +168,9 @@ const (
 )
 
 var (
-	nameRE   = regexp.MustCompile(`\A[a-z0-9][a-z0-9.-]{0,63}\z`)
-	hostRE   = regexp.MustCompile(`\A[a-z0-9.-]+(?::[0-9]{1,5})?\z`)
-	pathRE   = regexp.MustCompile(`\A(?:/[A-Za-z0-9._-]+)+\z`)
-	headerRE = regexp.MustCompile(`\A[A-Z][A-Za-z0-9-]{0,63}\z`)
+	nameRE = regexp.MustCompile(`\A[a-z0-9][a-z0-9.-]{0,63}\z`)
+	hostRE = regexp.MustCompile(`\A[a-z0-9.-]+(?::[0-9]{1,5})?\z`)
+	pathRE = regexp.MustCompile(`\A(?:/[A-Za-z0-9._-]+)+\z`)
 	// A key is letters, digits and ._~+/=:- only, so the clerk's own JSON
 	// encoding of an answer, HTML escaping included, spells it unescaped.
 	keyRE = regexp.MustCompile(`\A[A-Za-z0-9._~+/=:-]{8,512}\z`)
@@ -185,20 +184,12 @@ var keyHeaders = []string{"Authorization", "X-Api-Key"}
 // stream an answer this clerk meters whole.
 var hostedKeys = []string{"stream", "background", "prompt", "conversation", "previous_response_id", "mcp_servers", "container", "web_search_options"}
 
-// forbiddenHeader names a header a declaration may not set: the clerk's
-// own, framing, or one whose name says it carries a credential.
-func forbiddenHeader(h string) bool {
-	l := strings.ToLower(h)
-	if l == "host" || strings.HasPrefix(l, "content-") || l == "accept-encoding" || l == "connection" || l == "transfer-encoding" {
-		return true
-	}
-	for _, w := range []string{"auth", "key", "token", "session", "cookie", "secret", "password", "beta"} {
-		if strings.Contains(l, w) {
-			return true
-		}
-	}
-	return false
-}
+// declHeaders are the words a declaration's own headers may be named,
+// each after its provider's name and canonical, as a provider's API
+// version header is (#4914). No other name is set: none that carries a
+// credential, frames or reshapes the request, or ends at the next hop. The
+// clerk sets its own, and the providers stay data (CLK-14).
+var declHeaders = []string{"Version"}
 
 func (d *APIDeclaration) validate() error {
 	switch {
@@ -212,7 +203,10 @@ func (d *APIDeclaration) validate() error {
 		return fmt.Errorf("model: %s: needs operations, models and usage fields", d.Provider)
 	}
 	for h, v := range d.Headers {
-		if !headerRE.MatchString(h) || forbiddenHeader(h) || h == d.Header || strings.ContainsAny(v, "\r\n") {
+		named := slices.ContainsFunc(declHeaders, func(w string) bool { return h == http.CanonicalHeaderKey(d.Provider+"-"+w) })
+		// A value is visible ASCII and spaces, unpadded: no line break or
+		// control character adds a header line or reaches the remote.
+		if !named || v == "" || v != strings.TrimSpace(v) || strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r > '~' }) {
 			return fmt.Errorf("model: %s: header %q", d.Provider, h)
 		}
 	}

@@ -430,18 +430,18 @@ func (p *Login) validate() error {
 		}
 	}
 	for k, v := range d.RefreshHeaders {
-		if c := http.CanonicalHeaderKey(k); c != k || forbiddenHeader(c) || c == "Content-Type" || !headerValue(v) {
+		if !contains(passHeaders, k) || k == "Content-Type" || !headerValue(v) {
 			return fmt.Errorf("clerk: refresh header %q may not be declared", k)
 		}
 	}
 	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
-		if forbiddenHeader(http.CanonicalHeaderKey(h)) {
+		if !contains(passHeaders, h) {
 			return fmt.Errorf("clerk: header %q may not pass", h)
 		}
 	}
 	for _, pre := range d.ResponsePrefixes {
-		if forbiddenPrefix(http.CanonicalHeaderKey(pre)) {
-			return fmt.Errorf("clerk: header prefix %q may pass a forbidden header", pre)
+		if !contains(passPrefixes, pre) {
+			return fmt.Errorf("clerk: header prefix %q may not pass", pre)
 		}
 	}
 	return nil
@@ -493,31 +493,20 @@ func headerValue(v string) bool {
 	return v != "" && v == strings.TrimSpace(v) && !strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r > '~' })
 }
 
-// forbiddenHeader is a header no plan route passes: credentials, framing,
-// hop-by-hop and request-reshaping headers. The clerk sets its own.
-func forbiddenHeader(c string) bool {
-	if contains(forbiddenNames, c) {
-		return true
-	}
-	return strings.HasPrefix(c, "X-Forwarded-") || strings.HasPrefix(c, "Proxy-")
+// passHeaders are the names a plan route may pass, each exactly as the
+// shipped declaration's CLI sends or reads it (#4914). None carries a
+// credential, reshapes the request or ends at the next hop, and only
+// Content-Type frames it, which a refresh may not declare: the clerk sets
+// its own.
+var passHeaders = []string{
+	"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
+	"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
+	"Retry-After", "X-Request-Id", "Openai-Model",
 }
 
-var forbiddenNames = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "Host", "Content-Length",
-	"Transfer-Encoding", "Connection", "Upgrade", "Te", "Trailer", "Keep-Alive", "Content-Encoding", "Accept-Encoding"}
-
-// forbiddenPrefix reports whether a response prefix could pass a forbidden
-// header: one it begins, or one that begins it.
-func forbiddenPrefix(c string) bool {
-	if c == "" || forbiddenHeader(c) {
-		return true
-	}
-	for _, n := range append(append([]string{}, forbiddenNames...), "X-Forwarded-", "Proxy-") {
-		if strings.HasPrefix(n, c) {
-			return true
-		}
-	}
-	return false
-}
+// passPrefixes are the answer-header prefixes a plan route may pass; no
+// name the header corpus holds begins with one.
+var passPrefixes = []string{"X-Codex-"}
 
 func (p *Login) load() (planState, error) {
 	var st planState
@@ -1124,17 +1113,15 @@ func (p *Login) answer(resp *http.Response, real string) *http.Response {
 	return out
 }
 
+// answerHeader reports whether the guest gets the answer header k: a
+// declared name or prefix, exactly as New checked it against passHeaders
+// and passPrefixes.
 func (p *Login) answerHeader(k string) bool {
-	if forbiddenHeader(k) {
-		return false
-	}
-	for _, n := range p.d.ResponseHeaders {
-		if http.CanonicalHeaderKey(n) == k {
-			return true
-		}
+	if contains(p.d.ResponseHeaders, k) {
+		return true
 	}
 	for _, pre := range p.d.ResponsePrefixes {
-		if strings.HasPrefix(k, http.CanonicalHeaderKey(pre)) {
+		if strings.HasPrefix(k, pre) {
 			return true
 		}
 	}
