@@ -27,12 +27,19 @@ func (j *journal) Truncate(n int) error  { j.b = j.b[:n]; return nil }
 type bulb struct {
 	mu    sync.Mutex
 	shown []Colour
+	// hook, if set, runs after each Show is recorded, with the count of
+	// colours shown so far, outside mu.
+	hook func(n int)
 }
 
 func (b *bulb) Show(c Colour) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.shown = append(b.shown, c)
+	n, hook := len(b.shown), b.hook
+	b.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 	return nil
 }
 
@@ -664,7 +671,11 @@ func TestFailedCutBackKeepsSavedRecord(t *testing.T) {
 // that find the same alert unsent, two Core(true) calls or a Raise and a
 // Core, offer it once between them. The kernel's first Send blocks until
 // the second caller has had time to reach Send too; it still takes one
-// copy, and an alert resolved before the kernel took it is not offered.
+// copy, and an alert resolved before the kernel took it is not offered,
+// even when it is resolved after Core collected it. A Core that offers a
+// Raise's new telling before the Raise reaches the offer lock leaves the
+// Raise nothing to send; a telling raised again while Core offers the
+// older one is still offered; a core going down offers nothing.
 // Catches collecting an unsent alert outside the offer lock.
 func TestOneOfferPerTelling(t *testing.T) {
 	type gate struct {
@@ -674,6 +685,8 @@ func TestOneOfferPerTelling(t *testing.T) {
 		got     int
 		entered chan struct{}
 		release chan struct{}
+		light   Light            // nil is a plain bulb
+		now     func() time.Time // nil is time.Now
 	}
 	newAlerts := func(g *gate) *Alerts {
 		g.entered, g.release = make(chan struct{}), make(chan struct{})
@@ -693,7 +706,11 @@ func TestOneOfferPerTelling(t *testing.T) {
 			}
 			return nil
 		}
-		a, err := New(Config{Send: send, Light: &bulb{}, Journal: &journal{}})
+		light := g.light
+		if light == nil {
+			light = &bulb{}
+		}
+		a, err := New(Config{Send: send, Light: light, Journal: &journal{}, Now: g.now})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -753,5 +770,128 @@ func TestOneOfferPerTelling(t *testing.T) {
 	a.Core(true)
 	if g.got != 0 {
 		t.Fatalf("a resolved alert was offered %d times", g.got)
+	}
+
+	// Resolved while Core offers the alert before it: Core collected both,
+	// and offers only the one still open.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	_, _ = a.Raise(HeadFork, "")
+	r, _ = a.Raise(UnusualUnlock, "front-door")
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	done := make(chan struct{})
+	go func() { a.Core(true); close(done) }()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first offer never reached Send")
+	}
+	if err := a.Resolve(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(g.release)
+	<-done
+	g.mu.Lock()
+	if g.got != 1 {
+		t.Fatalf("the kernel took %d texts, want only the open alert's", g.got)
+	}
+	g.mu.Unlock()
+
+	wait := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("waiting for " + what)
+		}
+	}
+	until := func(a *Alerts, ok func(Record) bool, what string) {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); !slices.ContainsFunc(a.Log(), ok); {
+			if time.Now().After(end) {
+				t.Fatal("waiting for " + what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Core sends a Raise's new telling first: Core's light is held until
+	// the Raise has put its record, and the Raise's light until Core has
+	// returned, so Core collects and offers the record before the Raise
+	// takes the offer lock. The Raise then finds it taken.
+	b := &bulb{}
+	g = &gate{light: b}
+	a = newAlerts(g)
+	coreShown, releaseCore, coreDone, raised := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	b.mu.Lock()
+	base := len(b.shown)
+	b.hook = func(n int) {
+		switch n - base {
+		case 1: // Core's
+			close(coreShown)
+			<-releaseCore
+		case 2: // the Raise's
+			<-coreDone
+		}
+	}
+	b.mu.Unlock()
+	go func() { a.Core(true); close(coreDone) }()
+	wait(coreShown, "Core's light")
+	go func() { _, _ = a.Raise(DoorForced, "front-door"); close(raised) }()
+	until(a, func(r Record) bool { return r.Kind == DoorForced }, "the Raise's record")
+	close(releaseCore)
+	wait(raised, "the Raise")
+	g.mu.Lock()
+	if g.got != 1 {
+		t.Fatalf("Core offered a Raise's telling first, and the kernel took %d copies, want 1", g.got)
+	}
+	g.mu.Unlock()
+
+	// A newer telling lands while Core offers the older one: the older
+	// offer does not mark it sent, so the Raise offers it too.
+	var clockMu sync.Mutex
+	clock := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	g = &gate{refuse: true, now: func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }}
+	a = newAlerts(g)
+	_, _ = a.Raise(DoorForced, "front-door")
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	coreDone, raised = make(chan struct{}), make(chan struct{})
+	go func() { a.Core(true); close(coreDone) }()
+	wait(g.entered, "Core's offer")
+	clockMu.Lock()
+	clock = clock.Add(FoldCall)
+	clockMu.Unlock()
+	go func() { _, _ = a.Raise(DoorForced, "front-door"); close(raised) }()
+	until(a, func(r Record) bool { return r.Kind == DoorForced && r.Count == 2 }, "the newer telling")
+	close(g.release)
+	wait(coreDone, "Core")
+	wait(raised, "the Raise")
+	g.mu.Lock()
+	if g.got != 2 {
+		t.Fatalf("the kernel took %d calls for two tellings, want 2", g.got)
+	}
+	g.mu.Unlock()
+	if r := a.Status().Open; len(r) != 1 || !r[0].Sent || r[0].Count != 2 {
+		t.Fatalf("the re-told alert: %+v", r)
+	}
+
+	// A core going down offers nothing; coming up offers the unsent alert.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	_, _ = a.Raise(HeadFork, "")
+	g.mu.Lock()
+	g.refuse = false
+	g.mu.Unlock()
+	a.Core(false)
+	if g.got != 0 {
+		t.Fatalf("a core going down was offered %d texts", g.got)
+	}
+	a.Core(true)
+	if g.got != 1 {
+		t.Fatalf("a core coming up was offered %d texts, want 1", g.got)
 	}
 }

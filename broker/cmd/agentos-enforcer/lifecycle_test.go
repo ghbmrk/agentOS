@@ -1331,9 +1331,10 @@ func waitFor(t *testing.T, f func() bool) {
 // TestCutCoreReconnectGetsUnsentAlert (NET-2 Texts and calls; #4903): a
 // core cut by a burst sends past KindPaused's bucket, so the next
 // hello's log line is dropped; an alert raised while no session was open
-// is still offered to the session that reconnects, and the kernel's
-// taking it is recorded. Catches the re-offer riding on the hello's log
-// line (#4755 item 7).
+// is still offered to the session that reconnects, the kernel's taking
+// it is recorded, and the core counts as up a Silence after its last line
+// logged, since the reconnect itself counts it seen. Catches the re-offer
+// or the core's seen time riding on the hello's log line (#4755 item 7).
 func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
 	x, _ := enrolled(t, true)
 	addr := x.serve()
@@ -1359,11 +1360,18 @@ func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
 	if !unsent() {
 		t.Fatal("an alert counted as sent with no session open")
 	}
+	x.advance(30 * time.Second) // under a minute: the paused bucket stays empty
 	c, _ = x.dial(addr, x.core)
 	if code := c.read(); code != wire.Paused {
 		t.Fatalf("a request from the reconnected cut core: %v", code)
 	}
 	if c.alerts == 0 || unsent() {
 		t.Fatalf("the alert raised while the cut core was gone was not offered on its reconnect (%d alerts read)", c.alerts)
+	}
+	// Past Silence since the core's last line logged, inside it since the
+	// reconnect: the core is up.
+	x.advance(Silence - 15*time.Second)
+	if x.d.alerts.Status().CoreDown || x.page("Core") != "up" {
+		t.Fatal("a cut core that reconnected inside Silence counts as down: its dropped hello did not count it seen")
 	}
 }

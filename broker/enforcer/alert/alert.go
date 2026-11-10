@@ -350,8 +350,8 @@ func (a *Alerts) open(k Kind, device string) int {
 	return -1
 }
 
-// offer offers alert id to the kernel, unless it took its latest telling
-// already, records whether it took it, and returns the alert's latest
+// offer offers alert id to the kernel, unless it is resolved or the
+// kernel took its latest telling already, records whether it took it, and returns the alert's latest
 // state. A refusal changes nothing else: the alert
 // stays open (a trip's light red), and Core offers it again when the core
 // is back. The caller holds offerMu, so the unsent state it reads stays
@@ -360,7 +360,7 @@ func (a *Alerts) offer(id uint64) Record {
 	a.mu.Lock()
 	r := a.log[a.byID[id]]
 	a.mu.Unlock()
-	if r.Sent {
+	if !r.Open || r.Sent {
 		return r
 	}
 	d, _ := r.Kind.Delivery()
