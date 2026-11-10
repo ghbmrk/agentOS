@@ -213,13 +213,15 @@ PID1_READS = ("Description", "Documentation", "EnvironmentFile", "InaccessiblePa
               "TTYPath", "UtmpIdentifier")
 PID1_READ_PREFIXES = ("Condition", "Assert", "Exec")
 # #5167 (Security 6760938141): settings whose values are only names or numbers (units, users, groups, a slice,
-# credentials, a log identifier, a task limit): PID 1 makes no host path for them, so their specifiers and
-# escapes (User=camdec-%i, After=...agentos\x2dlink.device) need no reading. Every other setting off
-# PID1_READS is read as written or refused (unit_made_paths).
+# credentials, a log identifier, cgroup limits that take a percentage): PID 1 makes no host path for them, so
+# their specifiers, escapes and '%' (User=camdec-%i, After=...agentos\x2dlink.device, CPUQuota=25%) need no
+# reading. Every other setting off PID1_READS is read as written or refused (unit_made_paths).
 PID1_NAMES = ("After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "PartOf", "Upholds", "Conflicts",
               "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom", "PropagatesStopTo",
               "StopPropagatedFrom", "JoinsNamespaceOf", "WantedBy", "RequiredBy", "UpheldBy", "Also", "Slice",
-              "User", "Group", "SupplementaryGroups", "SyslogIdentifier", "ImportCredential", "TasksMax")
+              "User", "Group", "SupplementaryGroups", "SyslogIdentifier", "ImportCredential", "TasksMax", "CPUQuota",
+              "MemoryMin", "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "MemoryZSwapMax",
+              "ManagedOOMMemoryPressureLimit")
 # #5167: settings that mount in the unit's own namespace and, on the host, make only root's 0755 directories
 # on the way (namespace.c mkdir_p_label, mkdir_parents) and at the mount point a directory or an empty file
 # (make_mount_point_inode_from_path). Strictly above a unit-made directory that is root's alone; at it, a

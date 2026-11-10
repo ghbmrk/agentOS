@@ -520,7 +520,7 @@ class KeeperTreeTest(unittest.TestCase):
         # (stock tmp.mount's size=50%%); PID 1 only opens a TTYPath=.
         d = write(self.root, SYSTEM + "x@.service", "[Service]\nUser=camdec-%I\nAfter=%i.mount %n.socket\n"
                                                     "TTYPath=/dev/%I\nUtmpIdentifier=%I\nWants=%I\nSlice=user-%i.slice\n"
-                                                    "TasksMax=33%\nWantedBy=sys-subsystem-net-devices-a\\x2db.device\n"
+                                                    "TasksMax=33%\nCPUQuota=25%\nMemoryHigh=80%\nWantedBy=sys-subsystem-net-devices-a\\x2db.device\n"
                                                     "[Mount]\nOptions=mode=1777,size=50%%\n")
         try:
             self.assertEqual(check.unit_made_paths(self.root)[2], [])
@@ -698,7 +698,9 @@ class KeeperTreeTest(unittest.TestCase):
                                        "Conflicts", "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom",
                                        "PropagatesStopTo", "StopPropagatedFrom", "JoinsNamespaceOf", "WantedBy",
                                        "RequiredBy", "UpheldBy", "Also", "Slice", "User", "Group", "SupplementaryGroups",
-                                       "SyslogIdentifier", "ImportCredential", "TasksMax"))}),
+                                       "SyslogIdentifier", "ImportCredential", "TasksMax", "CPUQuota", "MemoryMin",
+                                       "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "MemoryZSwapMax",
+                                       "ManagedOOMMemoryPressureLimit"))}),
             ("StateDirectory=bq/x", {SYSTEM + "b.service": "[Service]\nTemporaryFileSystem=/var/lib/bq:ro\n"
                                                            "BindPaths=/var/lib/bq/x /srv/s:/var/lib/bq/x/y\n"}),
         )
