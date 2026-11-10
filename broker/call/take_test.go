@@ -36,7 +36,9 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //  1. loop is named once, as the callee of a call in Serve's body outside
 //     any func literal, so only Serve, which answers only the owner's
 //     number, runs a call. check is named only as the callee of calls in
-//     token's body outside any func literal.
+//     token's body, and token, whose ctx is the grant's life, only in
+//     Serve's, both outside any func literal. serving, the lock that serves
+//     one call at a time, is named only in Serve's body.
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -53,8 +55,11 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 // #5229 Security blocker, a keyed literal that left live nil, is now a
 // rule 2 failure, and a zero grant reads P0). What these rules leave to
 // review: what check, token and Serve do with their inputs (the Serve and
-// token tests pin it); //go:linkname and assembly (tools/srclint.py fails
-// them in CI); and a grant from one live call used in another live call.
+// token tests pin it), and //go:linkname and assembly (tools/srclint.py
+// fails them in CI). A grant kept past its call, in a package var, a field
+// or a shared answerer, needs no rule: rule 1 makes Serve the only maker
+// of a live grant and serves one call at a time, so a kept grant reads P0
+// in every other call (TestOneCallIsServedAtATime, #5232).
 // If a refactor keeps the rule but breaks the check, change the check in
 // the same PR as the code, with a probe for the new shape, never on its
 // own.
@@ -128,6 +133,10 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			return nil
 		}
 		serve, loopFn, checkFn := fn("Serve"), fn("loop"), fn("check")
+		serving, _ := pkg.Scope().Lookup("serving").(*types.Var)
+		if serving == nil {
+			t.Fatal("serving is gone: rewrite this check with the code")
+		}
 		gSt, cfgSt := under("grant"), under("Config")
 		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
 		if _, ok := tokenFn.(*types.Func); !ok {
@@ -135,7 +144,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		}
 		// Each guarded call, and the one func that may make it; and the
 		// fields nothing may write.
-		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn}
+		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn, tokenFn: serve}
 		gr, gl, tok := field(gSt, "r"), field(gSt, "live"), field(cfgSt, "Token")
 		guarded := func(t types.Type) string {
 			if p, ok := t.Underlying().(*types.Pointer); ok {
@@ -206,9 +215,16 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						}
 					case *ast.Ident:
 						obj := info.Uses[n]
+						if obj == serving && (encl != serve || lit) {
+							at(n, "serving is named outside Serve")
+						}
 						if in, ok := callIn[obj]; ok {
-							call, isCall := parent(1).(*ast.CallExpr)
-							if encl == in && isCall && call.Fun == n && !lit {
+							fun, up := ast.Node(n), parent(1)
+							if sel, ok := up.(*ast.SelectorExpr); ok && sel.Sel == n { // a method
+								fun, up = sel, parent(2)
+							}
+							call, isCall := up.(*ast.CallExpr)
+							if encl == in && isCall && call.Fun == fun && !lit {
 								if obj == loopFn {
 									calls++
 								}
@@ -255,7 +271,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 
 	if bad := check(probe{}); len(bad) != 0 {
 		t.Errorf("a grant can be made other than by check, or the loop entered other than through Serve:\n%s\n"+
-			"Rule: only check makes a grant, nothing writes one, only token calls check, and only Serve calls loop. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
+			"Rule: only check makes a grant, nothing writes one, only token calls check, only Serve calls token and loop and holds serving. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
 	}
 	const twin = "type twin struct { r Rung; live <-chan struct{} }\n"
 	for _, p := range []probe{
@@ -274,7 +290,17 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// check named outside token, or not as a direct call.
 		{extra: "var Check = check", want: "check is named"},
 		{extra: "func raise(cfg Config, l Incoming) *grant { return check(cfg, nil, l.Number()) }", want: "check is named"},
-		{old: "return check(cfg, ctx.Done(), b.String())\n\t\tcase <-ctx", new: "keepCheck = func(k string) *grant { return check(cfg, nil, k) }\n\t\t\treturn nil\n\t\tcase <-ctx", extra: "var keepCheck func(string) *grant", want: "check is named"},
+		{old: "out <- check(cfg, ctx.Done(), cfg.keys(ctx, l))", new: "keepCheck = func(k string) *grant { return check(cfg, nil, k) }\n\tout <- nil", extra: "var keepCheck func(string) *grant", want: "check is named"},
+		// #5232 R3: token, whose ctx is the grant's life, named outside
+		// Serve or not as a direct call there.
+		{extra: "func raise(cfg Config, l Line, out chan<- *grant) { cfg.token(context.Background(), l, out) }", want: "token is named"},
+		{extra: "var Token = Config.token", want: "token is named"},
+		{extra: "func raise(cfg Config) func(context.Context, Line, chan<- *grant) { return cfg.token }", want: "token is named"},
+		{old: "go cfg.token(tctx, c, token)", new: "go func() { cfg.token(tctx, c, token) }()", want: "token is named"},
+		// #5232 R1: serving is Serve's alone, so one call is served at a time.
+		{extra: "func free() { serving.Unlock() }", want: "serving is named outside Serve"},
+		{extra: "var held = &serving", want: "serving is named outside Serve"},
+		{old: "defer serving.Unlock()", new: "defer func() { serving.Unlock() }()", want: "serving is named outside Serve"},
 		// A grant made outside check, or by a fill that names no field;
 		// Security's #5229 blocker first.
 		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},
@@ -335,6 +361,12 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{extra: "func copyOf(g *grant, src *grant) { *g = *src }"},
 		{extra: "func copyAll(dst, src []grant) int { return copy(dst, src) }"},
 		{extra: "func zero(g *grant) { var z grant; *g = z }"},
+		// A grant kept past its call, by a package var (Security's M3 on
+		// #5229) or a field: one call is served at a time and a grant dies
+		// with its call, so it reads P0 in every later one
+		// (TestAKeptGrantIsP0InTheNextCall).
+		{extra: "var hot *grant\nfunc keep(a Ask) { hot = a.rung }\nfunc reuse(t string) Ask { return Ask{Text: t, rung: hot} }"},
+		{extra: "type stash struct{ g *grant }\nvar kept stash\nfunc keep(a Ask) { kept.g = a.rung }"},
 	} {
 		if bad := check(p); len(bad) != 0 {
 			t.Errorf("probe %q flagged: %q", p.extra, bad)

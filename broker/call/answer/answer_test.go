@@ -5,6 +5,15 @@ package answer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"io/fs"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -66,11 +75,15 @@ func everyRead() []Fact {
 	}
 }
 
+// ask answers text at rung r as Answer does at that rung: the reads, then
+// the writer given admit's facts. Only package call makes an Ask above P0,
+// so this tries each rung on admit, and TestTheRungIsTheAsks holds that
+// Answer calls admit with the Ask's own rung.
 func ask(t *testing.T, r call.Rung, text string) (string, *writer) {
 	t.Helper()
 	w := &writer{}
-	a := Answerer{Reads: &reads{facts: everyRead()}, Writer: w}
-	ch, err := a.answer(context.Background(), call.Ask{Text: text, Turn: 1}, r)
+	a := call.Ask{Text: text, Turn: 1}
+	ch, err := w.Write(context.Background(), a, admit(r, everyRead()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,11 +162,11 @@ func TestUnlabelledAndMixedFactsArePrivate(t *testing.T) {
 		{Text: "CANARY-CAL case", Labels: []string{"Status"}},
 		{Text: statusLine, Labels: []string{Status, Status}},
 	}
-	got := Admit(call.P0, facts)
+	got := admit(call.P0, facts)
 	if len(got) != 1 || got[0].Text != statusLine {
 		t.Fatalf("P0 admitted %+v; want only the status line", got)
 	}
-	if got := Admit(call.P2, facts); len(got) != len(facts) {
+	if got := admit(call.P2, facts); len(got) != len(facts) {
 		t.Fatalf("P2 admitted %d of %d facts", len(got), len(facts))
 	}
 }
@@ -189,3 +202,136 @@ func TestFailedReadFailsTheTurn(t *testing.T) {
 }
 
 var _ call.Answerer = Answerer{}
+
+// The rung a call hears by is its Ask's, never one this package picks
+// (#5232 R2, briefs/VOICE-ro.md rule 4). admit is the one place a rung
+// decides what is heard, so over the type-checked non-test files: admit is
+// named once, as the callee of a direct call in Answer's body outside any
+// func literal, and that call's rung is a.Rung() on Answer's own Ask. A
+// literal call.P2, an Ask kept in a var, or an exported wrapper fails. A
+// kept Ask assigned to a would pass, and reads P0 in any other call, since
+// call serves one at a time. //go:linkname and assembly fail
+// tools/srclint.py in CI.
+func TestTheRungIsTheAsks(t *testing.T) {
+	fset := token.NewFileSet()
+	imp := importer.ForCompiler(fset, "source", nil)
+	type probe struct{ extra, old, new, want string }
+	check := func(p probe) []string {
+		pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var files []*ast.File
+		edited := 0
+		for name, f := range pkgs["answer"].Files {
+			if p.old != "" {
+				b, err := os.ReadFile(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n := strings.Count(string(b), p.old); n > 0 {
+					edited += n
+					if f, err = parser.ParseFile(fset, name, strings.Replace(string(b), p.old, p.new, 1), 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			files = append(files, f)
+		}
+		if p.old != "" && edited != 1 {
+			t.Fatalf("probe edit %q occurs %d times, not once", p.old, edited)
+		}
+		if p.extra != "" {
+			f, err := parser.ParseFile(fset, "probe.go", "package answer\nimport \"github.com/ghbmrk/agentos/broker/call\"\nvar _ call.Rung\n"+p.extra, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, f)
+		}
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+		pkg, err := (&types.Config{Importer: imp}).Check("answer", fset, files, info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		admitFn, _ := pkg.Scope().Lookup("admit").(*types.Func)
+		answer, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Answerer").Type(), false, pkg, "Answer")
+		if admitFn == nil || answer == nil {
+			t.Fatal("admit or Answerer.Answer is gone: rewrite this check with the code")
+		}
+		sig := answer.Type().(*types.Signature)
+		ask := sig.Params().At(1) // Answer(ctx, a call.Ask)
+		rung, _, _ := types.LookupFieldOrMethod(ask.Type(), false, ask.Pkg(), "Rung")
+		// asksRung is e exactly a.Rung(), with a Answer's own Ask.
+		asksRung := func(e ast.Expr) bool {
+			c, ok := e.(*ast.CallExpr)
+			if !ok || len(c.Args) != 0 {
+				return false
+			}
+			sel, ok := c.Fun.(*ast.SelectorExpr)
+			if !ok || info.Uses[sel.Sel] != rung {
+				return false
+			}
+			x, ok := sel.X.(*ast.Ident)
+			return ok && info.Uses[x] == ask
+		}
+		var bad []string
+		calls := 0
+		for _, f := range files {
+			for _, d := range f.Decls {
+				var encl types.Object
+				if fd, ok := d.(*ast.FuncDecl); ok {
+					encl = info.Defs[fd.Name]
+				}
+				var stack []ast.Node
+				ast.Inspect(d, func(n ast.Node) bool {
+					if n == nil {
+						stack = stack[:len(stack)-1]
+						return true
+					}
+					stack = append(stack, n)
+					id, ok := n.(*ast.Ident)
+					if !ok || info.Uses[id] != admitFn {
+						return true
+					}
+					lit := slices.ContainsFunc(stack, func(n ast.Node) bool { _, ok := n.(*ast.FuncLit); return ok })
+					call, isCall := stack[len(stack)-2].(*ast.CallExpr)
+					if encl != answer || lit || !isCall || call.Fun != id {
+						bad = append(bad, fmt.Sprintf("%s: admit is named other than as a direct call in Answer", fset.Position(id.Pos())))
+						return true
+					}
+					calls++
+					if !asksRung(call.Args[0]) {
+						bad = append(bad, fmt.Sprintf("%s: admit takes its rung other than from a.Rung()", fset.Position(id.Pos())))
+					}
+					return true
+				})
+			}
+		}
+		if calls != 1 {
+			bad = append(bad, fmt.Sprintf("Answer calls admit %d times", calls))
+		}
+		return bad
+	}
+
+	if bad := check(probe{}); len(bad) != 0 {
+		t.Errorf("a rung other than the Ask's decides what a call hears:\n%s", strings.Join(bad, "\n"))
+	}
+	const at = "admit(a.Rung(), facts)"
+	for _, p := range []probe{
+		{extra: "var Admit = admit", want: "admit is named"},
+		{extra: "func Admit(r call.Rung, facts []Fact) []Fact { return admit(r, facts) }", want: "admit is named"},
+		{extra: "func init() { _ = admit(call.P2, nil) }", want: "admit is named"},
+		{old: at, new: "admit(call.P2, facts)", want: "takes its rung"},
+		{old: at, new: "admit(a.Rung()+2, facts)", want: "takes its rung"},
+		{old: at, new: "admit(call.Ask{}.Rung(), facts)", want: "takes its rung"},
+		{old: at, new: "admit(kept.Rung(), facts)", extra: "var kept call.Ask", want: "takes its rung"},
+		{old: at, new: "func() []Fact { return admit(a.Rung(), facts) }()", want: "admit is named"},
+		{old: at, new: "id(admit)(a.Rung(), facts)", extra: "func id[T any](t T) T { return t }", want: "admit is named"},
+		{old: at, new: "append(admit(a.Rung(), facts), admit(a.Rung(), nil)...)", want: "Answer calls admit 2 times"},
+	} {
+		bad := check(p)
+		if !slices.ContainsFunc(bad, func(b string) bool { return strings.Contains(b, p.want) }) {
+			t.Errorf("probe %q %q -> %q: want %q, got %q", p.extra, p.old, p.new, p.want, bad)
+		}
+	}
+}

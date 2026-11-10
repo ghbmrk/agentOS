@@ -605,3 +605,50 @@ func TestAnswerErrorEndsTheAnswer(t *testing.T) {
 		}
 	})
 }
+
+// One call is served at a time (#5232 R1): an owner call that rings while
+// another is served is left ringing, so a grant kept from the call being
+// served, by a package var or an answerer shared by both, never answers
+// another live call; once that call ends its grant reads P0 in the next.
+func TestOneCallIsServedAtATime(t *testing.T) {
+	a := newRig(t, fixed("Two new mails."))
+	a.cfg.Token = func(k string) bool { return k == "4071" }
+	a.serve()
+	for _, k := range []byte("4071#") {
+		a.l.keys <- k
+	}
+	a.say("what's in my mail")
+	a.next()
+
+	b := newRig(t, fixed("All quiet."))
+	b.cfg.Answerer = a.ans // one answerer wired to both calls
+	busy := make(chan error, 1)
+	go func() { _, err := call.Serve(context.Background(), b.cfg, b.l, "+15550100"); busy <- err }()
+	select {
+	case err := <-busy:
+		if !errors.Is(err, call.ErrBusy) {
+			t.Fatalf("a second call while one is served: err %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second call was served while one is")
+	}
+	if b.l.answered {
+		t.Fatal("answered a second call while one is served")
+	}
+	if rep := a.hangup(); rep.Rung != call.P2 {
+		t.Fatalf("the first call ran at %v", rep.Rung)
+	}
+
+	b.serve()
+	b.say("and now")
+	b.next()
+	rep := b.hangup()
+	if !b.l.answered || rep.Rung != call.P0 || len(a.ans.kept) != 2 {
+		t.Fatalf("the next call: answered %v, rung %v, asks %d", b.l.answered, rep.Rung, len(a.ans.kept))
+	}
+	for i, q := range a.ans.kept {
+		if q.Rung() != call.P0 {
+			t.Fatalf("ask %d kept by the shared answerer says %v once its call ended", i, q.Rung())
+		}
+	}
+}
