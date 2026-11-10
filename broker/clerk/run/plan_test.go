@@ -536,3 +536,65 @@ func TestPlanStatusFromDetail(t *testing.T) {
 		}
 	}
 }
+
+// The owner socket sends the key calls to the API keys and each plan call
+// to its plan, answers no other call, passes a refused Resume's error on,
+// and answers a Remove with no result (MIG-4-exit m1).
+func TestPlanOwnerSocketCalls(t *testing.T) {
+	var calls atomic.Int32
+	var refuse, failing atomic.Bool
+	login, _ := planLoginWrite(t, plan.Permitted, refusedRefresh(&calls, &refuse), func([]byte) error {
+		if failing.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	k := make([]byte, 32)
+	rand.Read(k)
+	sealer, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apis, err := model.NewAPIs(model.Shipped, model.NewKeys(sealer, nil), netguard.New(netguard.Config{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(shortDir(t), "owner.sock")
+	ln, err := ListenPlanOwner(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	h := &PlanHost{Plan: "codex", Login: login, Prompt: CodexSignIn(), Workers: newFakeCLI(login, codexPrinted), Times: quick}
+	go ServePlanOwner(ln, apis, h)
+	o := PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}
+
+	if st, err := o.KeyState(); err != nil || len(st) == 0 {
+		t.Fatalf("key state: %+v %v", st, err)
+	}
+	if err := o.Call("planbogus", planArgs{"codex"}, nil); err == nil || !strings.Contains(err.Error(), "has no call planbogus") {
+		t.Fatalf("an unknown call naming a plan: %v", err)
+	}
+
+	tok := signedIn(t, login, "g")
+	refuse.Store(true)
+	serve(PlanGuest{Login: login, Guest: "g"}, refreshRequest(tok.Tokens["refresh_token"]))
+	if login.Stopped() != plan.StopRefused {
+		t.Fatalf("stopped: %q", login.Stopped())
+	}
+	failing.Store(true)
+	if d, err := o.Resume("codex"); err == nil || d != "" {
+		t.Fatalf("a resume whose write failed: %q %v", d, err)
+	}
+	failing.Store(false)
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, `{"op":"planremove","args":{"plan":"codex"}}`+"\n")
+	if line, err := io.ReadAll(conn); err != nil || strings.TrimSpace(string(line)) != "{}" {
+		t.Fatalf("remove answered %q %v, want no result", line, err)
+	}
+}

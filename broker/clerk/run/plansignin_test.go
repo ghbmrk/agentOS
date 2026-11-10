@@ -1074,6 +1074,25 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 			t.Fatalf("after the remove: %+v", st)
 		}
 	})
+	t.Run("a failed remove ending an uncommitted sign-in", func(t *testing.T) {
+		cli := newFakeCLI(login, codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		failing.Store(true)
+		if err := h.Remove(); err == nil {
+			t.Fatal("a Remove whose delete failed answered nil")
+		}
+		cli.waitStopped(t)
+		if st := h.State(); st.Last != DSignInStopped || st.Signing {
+			t.Fatalf("after a failed remove: %+v", st)
+		}
+		failing.Store(false)
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("a failed remove does not hold off the next sign-in", func(t *testing.T) {
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: newFakeCLI(login, codexPrinted), Times: quick}
 		failing.Store(true)
