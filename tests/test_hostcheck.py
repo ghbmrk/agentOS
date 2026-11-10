@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -275,9 +276,10 @@ class SourcesTest(unittest.TestCase):
             self.assertEqual(v[f"{GLOBAL}:BootOrder"]["attr"], 7)
 
 
-# CI-hostcheck-image-tools (#4906): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes from a
-# root installed from the image's pinned Debian snapshot, never the runner's archive, so a runner
-# package update cannot change a hostcheck result.
+# CI-hostcheck-image-tools (#4906, #5055): the VM stack hostcheck boots (qemu, swtpm, OVMF) comes
+# from a root installed from the image's pinned Debian snapshot, never the runner's archive, and a
+# shared object it looks for or loads outside that root fails the run, so a runner package update
+# cannot change a result.
 PINNED = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 
 
@@ -297,10 +299,17 @@ def fake_root(d, versions=None, skip=()):
     return d
 
 
+def qemu_argv(work, root, kernel="k", initrd="i"):
+    return ["qemu", "--work", str(work), "--kernel", kernel, "--initrd", initrd,
+            "--host-disk", "w=/dev/null", "--tools-root", root]
+
+
 class ToolsRootTest(unittest.TestCase):
     def test_no_root_runs_the_path_tools(self):
         self.assertEqual(hostcheck.tool_argv(None, "swtpm"), ["swtpm"])
-        self.assertEqual(hostcheck.qemu_data_args(None), ([], None))
+        self.assertEqual(hostcheck.qemu_data_args(None), [])
+        self.assertIsNone(hostcheck.tool_env(None, "/x/ld"))
+        hostcheck.audit_loads(None, "/nonexistent/ld", 1)  # the runner's own tools: nothing to audit
 
     def test_root_tools_run_on_the_roots_loader_and_libraries(self):
         with tempfile.TemporaryDirectory() as d:
@@ -311,9 +320,14 @@ class ToolsRootTest(unittest.TestCase):
                 self.assertEqual(argv[-3:], ["--argv0", name, os.path.join(d, rel)])
                 libs = argv[argv.index("--library-path") + 1].split(":")
                 self.assertTrue(libs and all(lib.startswith(d + os.sep) for lib in libs), libs)
-            args, env = hostcheck.qemu_data_args(d)
-            self.assertEqual(args, ["-L", os.path.join(d, "usr/share/qemu")])
-            self.assertEqual(env["QEMU_MODULE_DIR"], os.path.join(d, "usr/lib/x86_64-linux-gnu/qemu"))
+            self.assertEqual(hostcheck.qemu_data_args(d), ["-L", os.path.join(d, "usr/share/qemu")])
+
+    def test_the_stack_gets_none_of_the_hosts_environment(self):
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.dict(
+                os.environ, {"LD_PRELOAD": "/x/evil.so", "LD_DEBUG": "", "QEMU_MODULE_DIR": "/usr/lib"}):
+            self.assertEqual(hostcheck.tool_env(d, "/w/ld/stack"), {
+                "PATH": "/usr/sbin:/usr/bin", "QEMU_MODULE_DIR": os.path.join(d, "usr/lib/x86_64-linux-gnu/qemu"),
+                "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": "/w/ld/stack"})
 
     def test_missing_or_linked_tool_is_an_error_not_the_runners(self):
         for rel in (hostcheck.TOOLS_LOADER, hostcheck.TOOLS["swtpm"]):
@@ -325,6 +339,24 @@ class ToolsRootTest(unittest.TestCase):
                 os.symlink("/usr/bin/true", os.path.join(d, rel))  # an absolute link reads the runner's
                 with self.assertRaises(hostcheck.HostcheckError):
                     hostcheck.tool_argv(d, "swtpm")
+
+    def test_qemu_rom_directories_outside_the_root_must_not_exist(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as host:
+            mine = os.path.join(d, "usr/share/qemu")
+            os.makedirs(mine)
+            listing = f"{mine}\n{d}/usr/lib/share/qemu\n/nonexistent/share/qemu\n{host}\n"
+            self.assertEqual(hostcheck.foreign_data_dirs(d, listing), [host])
+            os.symlink(host, os.path.join(d, "usr/share/seabios"))  # a link in the root out to the host
+            self.assertEqual(hostcheck.foreign_data_dirs(d, f"{d}/usr/share/seabios\n"), [f"{d}/usr/share/seabios"])
+            self.assertEqual(hostcheck.foreign_data_dirs(d, f"{mine}\n/nonexistent\n"), [])
+
+    def test_tools_are_checked_before_any_state_is_made(self):
+        for name, rel in hostcheck.TOOLS.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                fake_root(d, skip=(rel,))
+                work = pathlib.Path(d, "work")
+                self.assertEqual(hostcheck.main(qemu_argv(work, d)), 2)
+                self.assertFalse(work.exists())
 
     def test_ovmf_defaults_follow_the_root(self):
         with tempfile.TemporaryDirectory() as d:
@@ -351,6 +383,227 @@ class ToolsRootTest(unittest.TestCase):
                 hostcheck.stack_versions(d)
         self.assertEqual(hostcheck.stack_versions(None), "runner")
 
+    def test_only_installed_packages_count(self):
+        # A package removed with its config files kept stays in dpkg's status, not installed.
+        with tempfile.TemporaryDirectory() as d:
+            fake_root(d)
+            status = pathlib.Path(d, "var/lib/dpkg/status")
+            text = status.read_text().replace("Package: ovmf\nStatus: install ok installed",
+                                              "Package: ovmf\nStatus: deinstall ok config-files")
+            self.assertIn("config-files", text)
+            status.write_text(text)
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "ovmf"):
+                hostcheck.stack_versions(d)
+
+    def test_a_root_without_dpkg_status_names_the_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(hostcheck.HostcheckError, re.escape(os.path.join(d, "var/lib/dpkg/status"))):
+                hostcheck.stack_versions(d)
+            self.assertEqual(hostcheck.main(qemu_argv(pathlib.Path(d, "work"), d)), 2)
+
+
+class LoaderAuditTest(unittest.TestCase):
+    """#5055: run through the root's loader with --library-path, a library the root lacks still loads
+    from the host's directories, so the loader's record of every search and load is checked. The
+    probe is the host's ls, which links more than libc (libselinux on Ubuntu), in a root that holds
+    the host's loader and libc (and, for the control, every library ls needs)."""
+
+    PROBE = "/usr/bin/ls"
+
+    def root(self, d, with_deps):
+        out = subprocess.run(["ldd", self.PROBE], capture_output=True, text=True, check=True).stdout
+        libs = [a or b for a, b in re.findall(r"=> (/\S+)|^\s*(/\S+)", out, re.M)]
+        keep = [lib for lib in libs if with_deps or re.search(r"/(ld-linux-x86-64\.so\.2|libc\.so\.6)$", lib)]
+        self.assertGreater(len(libs), len(keep) if not with_deps else 2, libs)
+        for lib in keep:
+            dst = pathlib.Path(d, "usr/lib/x86_64-linux-gnu", os.path.basename(lib))
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(os.path.realpath(lib), dst)
+        pathlib.Path(d, "usr/bin").mkdir(parents=True)
+        shutil.copy(self.PROBE, pathlib.Path(d, hostcheck.TOOLS["swtpm"]))
+        return libs
+
+    def run_probe(self, d, ld_log):
+        args = argparse.Namespace(tools_root=d, ld_log=ld_log)
+        p = hostcheck.stack_popen(args, "swtpm", [d], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = p.communicate(timeout=60)
+        self.assertEqual(p.returncode, 0, err)  # it starts: the run would have passed without the record
+        hostcheck.stack_done(args, p)
+
+    def test_the_root_alone_serves_the_stack(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            self.root(d, with_deps=True)
+            self.run_probe(d, os.path.join(log, "stack"))
+
+    def test_a_library_the_root_lacks_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            self.root(d, with_deps=False)
+            with self.assertRaisesRegex(hostcheck.HostcheckError, r"outside the tools root.*libselinux"):
+                self.run_probe(d, os.path.join(log, "stack"))
+
+    def test_a_link_out_of_the_root_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            libs = self.root(d, with_deps=True)
+            sel = next(lib for lib in libs if "libselinux" in lib)
+            dst = pathlib.Path(d, "usr/lib/x86_64-linux-gnu", os.path.basename(sel))
+            dst.unlink()
+            dst.symlink_to(os.path.realpath(sel))  # absolute: the host's copy
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                self.run_probe(d, os.path.join(log, "stack"))
+
+    def test_a_missing_or_empty_record_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
+            pathlib.Path(d, "stack.42").write_text("     42:\t\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
+
+    def test_a_child_the_stack_starts_is_audited(self):
+        # The probe is the host's dash in the root (libc alone); it runs the host's true, whose own
+        # loader and libc are the runner's. Only the child's record shows it.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            libs = self.root(d, with_deps=True)
+            dash = os.path.realpath("/bin/sh")
+            self.assertIn("libc.so.6", subprocess.run(["ldd", dash], capture_output=True, text=True).stdout)
+            shutil.copy(dash, pathlib.Path(d, hostcheck.TOOLS["swtpm"]))
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", ["-c", "/usr/bin/true; exit 0"])
+            self.assertEqual(p.wait(timeout=60), 0)
+            self.assertEqual(len(os.listdir(log)), 2, os.listdir(log))
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.stack_done(args, p)
+            self.assertTrue(libs)
+
+    def test_unread_or_odd_loader_lines_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            for line in ("file=/usr/lib/x86_64 linux/libx.so [0];  dynamically loaded by /r/swtpm [0]",  # a space
+                         "file=./libx.so [0];  dynamically loaded by /r/swtpm [0]",  # relative to the cwd
+                         "trying file=libx.so"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # A relative name is the stack process's cwd, unknown here: even read from inside the root it fails.
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n"
+                                                  "      7:\tfile=./libx.so [0];  dynamically loaded by /r/swtpm [0]\n")
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                    hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            finally:
+                os.chdir(cwd)
+            for line in ("file=/usr/lib/libx.so needed by swtpm", "trying  file=/usr/lib/libx.so", "file=x"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # A child's record beside the parent's is read too.
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.8").write_text("      8:\ttrying file=/lib/x86_64-linux-gnu/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.8").write_text("      8:\topening file= [0]; direct_opencount=2\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+    def test_preloads_and_dlopens_by_path_are_seen(self):
+        with tempfile.TemporaryDirectory() as d:
+            for line in ("file=/usr/lib/x86_64-linux-gnu/libfoo.so.1 [0];  needed by (null) [0]",
+                         "file=/opt/x/qemu/accel-tcg-x86_64.so [0];  dynamically loaded by /r/qemu [0]",
+                         "trying file=/lib/x86_64-linux-gnu/libbar.so.2"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.7").write_text(f"      7:\tfile=libc.so.6 [0];  needed by {d}/usr/bin/x [0]\n"
+                                                  f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+
+class StandinTest(unittest.TestCase):
+    """The stand-in guest clears MOR's ClearMemory bit, and only it, on every way out (#4794, #5055).
+    The EFI stub sets the bit again at each boot and a later poweroff clears it too, so a QEMU run
+    cannot see a reboot that skips the clear: the script's lines are pinned and the function runs here."""
+
+    def setUp(self):
+        src = (ROOT / "tools" / "hostcheck_standin.sh").read_text()
+        self.init = re.search(r"^cat >\"\$root/init\" <<'EOF'\n(.*?)^EOF$", src, re.S | re.M).group(1)
+        self.func = re.search(r"^mor_clear\(\) \{\n.*?^\}\n", self.init, re.S | re.M).group(0)
+
+    def exits(self, init):
+        return [ln.strip() for ln in init.splitlines() if re.search(r"\b(reboot|poweroff)\b.*-f\b", ln)]
+
+    def test_every_exit_clears_mor_first(self):
+        self.assertEqual(self.exits(self.init), [
+            'read -r cmd arg || { sync; mor_clear "$MOR"; exec poweroff -f; }',
+            'reboot) sync; mor_clear "$MOR"; reboot -f ;;',
+            'poweroff) sync; mor_clear "$MOR"; poweroff -f ;;'])
+        self.assertIn("\nMOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-"
+                      "e20939be-32d4-41be-a150-897f85d49829\n", self.init)
+        for old, new in (('reboot) sync; mor_clear "$MOR"; ', "reboot) sync; "),
+                         ('poweroff) sync; mor_clear "$MOR"; ', "poweroff) sync; "),
+                         ('{ sync; mor_clear "$MOR"; exec', "{ sync; exec")):
+            with self.subTest(old):
+                self.assertNotEqual(self.exits(self.init.replace(old, new)), self.exits(self.init))
+
+    def clear(self, data, failing=()):
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d, "bin")
+            stubs.mkdir()
+            for tool, rc in (("chattr", 0), *((t, 1) for t in failing)):  # efivarfs's immutable flag
+                pathlib.Path(stubs, tool).write_text(f"#!/bin/sh\nexit {rc}\n")
+                pathlib.Path(stubs, tool).chmod(0o755)
+            var = pathlib.Path(d, "mor")
+            if data is not None:
+                var.write_bytes(data)
+            p = subprocess.run(["sh", "-c", self.func + 'mor_clear "$1"', "sh", str(var)], capture_output=True,
+                               text=True, env={"PATH": f"{stubs}:/usr/bin:/bin"})
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return (var.read_bytes() if data is not None else None), p.stdout.strip()
+
+    def test_only_the_clear_memory_bit_is_cleared(self):
+        attrs = b"\x07\x00\x00\x00"
+        for before, after in ((0x01, 0x00), (0x03, 0x02), (0xff, 0xfe), (0x02, 0x02), (0x00, 0x00)):
+            with self.subTest(before=before):
+                self.assertEqual(self.clear(attrs + bytes([before])), (attrs + bytes([after]), ""))
+        self.assertEqual(self.clear(None), (None, ""))  # firmware without the variable
+
+    def test_a_failed_clear_says_so(self):
+        self.assertEqual(self.clear(b"\x07\x00\x00\x00"), (b"\x07\x00\x00\x00", "HOSTCHECK-MOR-FAILED size"))
+        self.assertEqual(self.clear(b"\x07\x00\x00\x00\x01", failing=("dd",))[1], "HOSTCHECK-MOR-FAILED write")
+
+    def test_hostcheck_shows_a_guest_failure(self):
+        console = b"HOSTCHECK-READY\r\nHOSTCHECK-MOR-FAILED write\r\nHOSTCHECK-PLANT-FAILED nv\r\nHOSTCHECK-DONE\r\n"
+        self.assertEqual(hostcheck.guest_errors(console), ["HOSTCHECK-MOR-FAILED write", "HOSTCHECK-PLANT-FAILED nv"])
+        self.assertEqual(hostcheck.guest_errors(b"HOSTCHECK-READY\r\nHOSTCHECK-DONE\r\n"), [])
+        ok = {"pass": True, "flagged": []}
+        self.assertEqual(hostcheck.with_guest_errors(ok, []), dict(ok, guest_errors=[]))
+        self.assertEqual(hostcheck.with_guest_errors(ok, ["HOSTCHECK-MOR-FAILED write"]),
+                         {"pass": False, "flagged": [], "guest_errors": ["HOSTCHECK-MOR-FAILED write"]})
+        self.assertFalse(hostcheck.with_guest_errors({"pass": False}, [])["pass"])
+
+
+# The tools root step, line for line (blank and comment lines aside): the image's snapshot stanza
+# alone, selected by its snapshot URI, exactly one of it, and the four stack packages from it (#5055).
+ROOT_STEP = [
+    "- name: QEMU, OVMF and swtpm, from the image's Debian snapshot",
+    "run: |",
+    'src="$RUNNER_TEMP/snapshot.sources"',
+    "awk -v RS= -v ORS='\\n\\n' '/\\nURIs: https:\\/\\/snapshot\\.debian\\.org\\//' \\",
+    'image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources > "$src"',
+    '[ "$(grep -c \'^URIs:\' "$src")" = 1 ] || { echo "want one snapshot stanza, got:" >&2; cat "$src" >&2; exit 1; }',
+    'cat "$src"',
+    "sudo mmdebstrap --mode=root --variant=essential --include=qemu-system-x86,ovmf,swtpm,swtpm-tools trixie \\",
+    '"$RUNNER_TEMP/hostcheck-tools" "$src"',
+    'sudo chroot "$RUNNER_TEMP/hostcheck-tools" dpkg-query -W qemu-system-x86 ovmf swtpm swtpm-tools',
+]
+# A command that installs or fetches packages for the runner: apt, apt-get or aptitude, or dpkg.
+APT = re.compile(r"\b(?:apt|apt-get|aptitude)\s.*\b(?:install|reinstall|download)\b")
+DPKG = re.compile(r"\bdpkg\s(?:.*\s)?(?:-[A-Za-z]*i\b|--install\b|--unpack\b)")
+
 
 class HostcheckJobTest(unittest.TestCase):
     """ci.yml's hostcheck job takes the VM stack and guest kernel from pinned snapshots, not the runner's archive."""
@@ -361,28 +614,53 @@ class HostcheckJobTest(unittest.TestCase):
     def problems(self, text):
         out = []
         steps = job_steps(text, "hostcheck")
-        # Every runner apt-get install or download command, its continuation lines joined.
-        runner_apt = "\n".join(line for _, b in steps for line in b.replace("\\\n", " ").splitlines()
-                               if re.search(r"apt-get\s.*\b(install|download)\b", line))
+        # Every runner package command, its continuation lines joined.
+        lines = [line for _, b in steps for line in b.replace("\\\n", " ").splitlines()
+                 if not line.strip().startswith("#")]
+        runner_apt = "\n".join(line for line in lines if APT.search(line))
         for pkg in PINNED:
             if re.search(rf"(?<![\w.+-]){re.escape(pkg)}(?![\w.+-])", runner_apt):
                 out.append(f"{pkg} installed from the runner's archive")
-        root = [b for _, b in steps if "sudo mmdebstrap" in b]
+        if any(DPKG.search(line) for line in lines):
+            out.append("the job installs a package file with dpkg")
+        root = [b for _, b in steps if re.search(r"(?m)^\s*(?:run:\s*)?(?:sudo\s+)?mmdebstrap\s", b)]
         if len(root) != 1:
             out.append("no single mmdebstrap step builds the tools root")
-        else:
-            inc = re.search(r"--include=(\S+)", root[0])
-            if not inc or set(inc.group(1).split(",")) != set(PINNED):
-                out.append("the tools root does not include exactly the pinned stack")
-            if "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources" not in root[0] or "security" in root[0]:
-                out.append("the tools root is not read from the image's snapshot alone")
-            if re.search(r'"deb\s', root[0]):  # #4996: a one-line entry drops the stanza's Signed-By
-                out.append("the tools root's sources are not the snapshot stanza verbatim")
+        elif [ln.strip() for ln in root[0].splitlines() if ln.strip() and not ln.strip().startswith("#")] != ROOT_STEP:
+            out.append("the tools root step is not the pinned one (the image's snapshot stanza alone, the stack from it)")
         out += self.kernel_problems(steps, runner_apt)
         run = [b for _, b in steps if "tests.test_hostcheck" in b]
         if len(run) != 1 or not re.search(r"HOSTCHECK_TOOLS_ROOT: \$\{\{ runner\.temp \}\}/hostcheck-tools", run[0]):
             out.append("the hostcheck run does not name the tools root")
         return out
+
+    def select(self, sources):
+        """Run the pinned step's selection and guard on SOURCES: (exit status, selected stanzas)."""
+        with tempfile.TemporaryDirectory() as d:
+            src = pathlib.Path(d, "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources")
+            src.parent.mkdir(parents=True)
+            src.write_text(sources)
+            script = "\n".join(ROOT_STEP[2:6]).replace("\\\n", " ")
+            p = subprocess.run(["bash", "-e", "-c", script], cwd=d, capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"], "RUNNER_TEMP": d})
+            return p.returncode, pathlib.Path(d, "snapshot.sources").read_text()
+
+    def test_the_root_reads_the_images_snapshot_stanza_alone(self):
+        sources = (ROOT / "image/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources").read_text()
+        rc, got = self.select(sources)
+        self.assertEqual(rc, 0, got)
+        fields = [ln for ln in got.splitlines() if ln and not ln.startswith("#")]
+        uris = [ln for ln in fields if ln.startswith("URIs:")]
+        self.assertEqual(len(uris), 1, got)
+        self.assertRegex(uris[0], r"\AURIs: https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/\Z")  # one, dated
+        self.assertFalse([ln for ln in fields if "security" in ln], got)
+        self.assertIn("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg", fields)
+        # A second stanza on the snapshot (its security archive, say) joins the selection: the guard stops it.
+        two = sources.replace("URIs: http://security.debian.org/debian-security",
+                              "URIs: https://snapshot.debian.org/archive/debian-security/20261001T000000Z/")
+        self.assertNotEqual(two, sources)
+        self.assertNotEqual(self.select(two)[0], 0)
+        self.assertNotEqual(self.select(sources.replace("snapshot.debian.org", "deb.debian.org"))[0], 0)
 
     def kernel_problems(self, steps, runner_apt):
         """#4994: the guest kernel is one exact package from a dated Ubuntu snapshot, hash-checked."""
@@ -421,13 +699,30 @@ class HostcheckJobTest(unittest.TestCase):
         self.assertEqual(self.problems(self.ci), [])
 
     def test_check_catches_mutants(self):
+        KEYRING = "python3-virt-firmware mmdebstrap debian-archive-keyring\n"  # the hostcheck job's install
+        awk = "'/\\nURIs: https:\\/\\/snapshot\\.debian\\.org\\//'"
         for name, (old, new) in {
             "runner qemu": ("qemu-utils ", "qemu-utils qemu-system-x86 "),
             "runner ovmf": ("qemu-utils ", "qemu-utils ovmf "),
             "runner swtpm": ("qemu-utils ", "qemu-utils swtpm "),
+            "runner apt": (KEYRING, KEYRING + "          sudo apt install -yq swtpm\n"),
+            "runner apt-get": (KEYRING, KEYRING + "          sudo apt-get -yq install ovmf\n"),
+            "runner aptitude": (KEYRING, KEYRING + "          sudo aptitude install -y qemu-system-x86\n"),
+            "runner dpkg -i": (KEYRING, KEYRING + '          sudo dpkg -i "$RUNNER_TEMP"/*.deb\n'),
+            "runner dpkg --install": (KEYRING, KEYRING + "          sudo dpkg --install q.deb\n"),
             "root without ovmf": ("--include=qemu-system-x86,ovmf,", "--include=qemu-system-x86,"),
+            "root with more": ("--include=qemu-system-x86,", "--include=qemu-utils,qemu-system-x86,"),
             "one-line entry": ('"$RUNNER_TEMP/hostcheck-tools" "$src"',
                                '"$RUNNER_TEMP/hostcheck-tools" "deb [check-valid-until=no] $uri trixie main"'),
+            "live security mirror": ('"$RUNNER_TEMP/hostcheck-tools" "$src"',
+                                     '"$RUNNER_TEMP/hostcheck-tools" "$src" http://security.debian.org/debian-security'),
+            "live archive mirror": ('"$RUNNER_TEMP/hostcheck-tools" "$src"',
+                                    '"$RUNNER_TEMP/hostcheck-tools" "$src" http://deb.debian.org/debian'),
+            "widened stanza pattern": (awk, "'/\\nURIs: /'"),
+            "no stanza guard": ('[ "$(grep -c \'^URIs:\' "$src")" = 1 ] ||', "true ||"),
+            "guard dropped": ("          [ \"$(grep -c '^URIs:' \"$src\")\" = 1 ]", "          # [ \"$(grep -c '^URIs:' \"$src\")\" = 1 ]"),
+            "extra source line": ('          cat "$src"\n', '          cat "$src"\n          echo "deb http://deb.debian.org/debian trixie main" >> "$src"\n'),
+            "second root step": ("      - name: KVM for the runner user", "      - name: more\n        run: mmdebstrap trixie /x\n      - name: KVM for the runner user"),
             "no root env": ("HOSTCHECK_TOOLS_ROOT: ${{ runner.temp }}/hostcheck-tools", "HOSTCHECK_X: x"),
             "runner kernel": ('dpkg-deb -x "$deb" "$RUNNER_TEMP/k"',
                               'apt-get download linux-image-generic && dpkg-deb -x "$deb" "$RUNNER_TEMP/k"'),
@@ -445,6 +740,17 @@ class HostcheckJobTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(old, self.ci)
                 self.assertNotEqual(self.problems(self.ci.replace(old, new, 1)), [])
+
+    def test_runner_package_commands_are_told_apart(self):
+        for line in ("sudo apt install -yq swtpm", "apt-get -yq install x", "sudo aptitude install y",
+                     "apt download z", "sudo apt-get reinstall q"):
+            self.assertRegex(line, APT)
+        for line in ("sudo dpkg -i a.deb", "dpkg --install a.deb", "dpkg -Ei a.deb", "dpkg --unpack a.deb"):
+            self.assertRegex(line, DPKG)
+        for line in ('dpkg-deb -x "$deb" "$RUNNER_TEMP/k"', "dpkg-query -W swtpm", "sudo apt-get update -q",
+                     "sudo chroot r dpkg-query -W qemu-system-x86 ovmf swtpm swtpm-tools"):
+            self.assertNotRegex(line, APT)
+            self.assertNotRegex(line, DPKG)
 
 
 QEMU = os.environ.get("HOSTCHECK_QEMU") == "1"
@@ -505,9 +811,30 @@ class QemuTest(unittest.TestCase):
         for p in report["phases"]:
             self.assertTrue(p["pass"], p)
             self.assertEqual(p["rtc_writes"], [])
+            self.assertEqual(p["guest_errors"], [])
         self.assertTrue(report["baseline"]["tpm-nv"], "the stand-in host has an NV index to keep")
         self.assertEqual(report["stack"], hostcheck.stack_versions(self.tools_root))
         self.assertEqual(before, hostcheck.hash_disk(disk))
+
+    def test_the_stack_loads_from_the_root_alone(self):
+        # #5055: each tool starts on TOOLS_LIBS alone, and dropping swtpm's private library directory
+        # fails the run rather than loading a copy from the runner's directories.
+        if not self.tools_root:
+            self.skipTest("the runner's own tools: nothing to audit")
+
+        def start(name, log):
+            args = argparse.Namespace(tools_root=self.tools_root, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, name, ["--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.communicate(timeout=60)
+            hostcheck.stack_done(args, p)
+            return p.returncode
+
+        with tempfile.TemporaryDirectory() as log:
+            for name in hostcheck.TOOLS:
+                self.assertEqual(start(name, log), 0, name)
+            with unittest.mock.patch.object(hostcheck, "TOOLS_LIBS", ("usr/lib/x86_64-linux-gnu",)):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root.*libswtpm_libtpms"):
+                    start("swtpm", log)
 
     def test_unclean_end_leaves_only_mor_and_the_next_shutdown_clears_it(self):
         # A power cut leaves MOR as the EFI stub set it, disclosed (HW-8); the

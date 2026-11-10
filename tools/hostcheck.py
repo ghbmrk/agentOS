@@ -56,18 +56,29 @@ class HostcheckError(Exception):
     pass
 
 
-# ---- the VM stack (CI-hostcheck-image-tools, #4906) ----
+# ---- the VM stack (CI-hostcheck-image-tools, #4906, #5055) ----
 # With --tools-root, qemu, swtpm and OVMF come from a root installed from pinned apt sources (CI
 # builds it from the image's Debian snapshot with mmdebstrap), never the host's own packages, so a
 # runner package update cannot change what hostcheck boots. The root's own loader runs each
 # binary on the root's own libraries (--inhibit-cache: not the host's ld.so.cache), as
 # tests/test_image.py image_tool does for systemd and kmod (#4776); paths stay the host's.
+# --library-path still falls back to the loader's built-in host directories, so the loader also
+# records every shared object it looks for or loads (LD_DEBUG), and a path outside the root, from
+# a search, a dlopen or a preload, fails the run (#5055).
 TOOLS_LOADER = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
 TOOLS_LIBS = ("usr/lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu/swtpm")
 TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/swtpm",
          "swtpm_ioctl": "usr/bin/swtpm_ioctl"}
 TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
 STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
+# glibc's LD_DEBUG lines: "PID:\ttrying file=PATH" for each search candidate, and
+# "PID:\tfile=NAME [NS];  ..." for each object mapped, NAME a path when given as one (a soname
+# is searched, so its candidates are trying lines). Any other line naming a file= fails the
+# audit, so a loader whose format differs cannot pass by being unread.
+LOADER_LINE = re.compile(r"\s*\d+:\s+(.*)")
+LOADER_TRYING = re.compile(r"trying file=(.+)")
+LOADER_FILE = re.compile(r"file=(.*?) \[\d+\];")
+LOADER_REOPEN = ("opening file=", "closing file=")  # an object already mapped, or let go
 
 
 def _root_file(root, rel):
@@ -82,17 +93,80 @@ def tool_argv(root, name):
     if not root:
         return [name]
     return [_root_file(root, TOOLS_LOADER), "--inhibit-cache",
-            "--library-path", ":".join(os.path.join(root, d) for d in TOOLS_LIBS),
+            "--library-path", ":".join(os.path.join(os.path.abspath(root), d) for d in TOOLS_LIBS),
             "--argv0", name, _root_file(root, TOOLS[name])]
 
 
-def qemu_data_args(root):
-    """QEMU's firmware/ROM directory and module directory in the root: run through the loader,
-    QEMU would look for them relative to the loader's path."""
+def tool_env(root, ld_log):
+    """The stack's environment: the host's without a root. With one, nothing of the host's but PATH:
+    QEMU's module directory in the root (run through the loader, QEMU would look beside the loader),
+    and the loader's record of what it loads, in LD_LOG.PID (a child the process starts writes its own)."""
     if not root:
-        return [], None
-    env = dict(os.environ, QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))
-    return ["-L", os.path.join(root, "usr/share/qemu")], env
+        return None
+    return {"PATH": "/usr/sbin:/usr/bin", "QEMU_MODULE_DIR": os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"),
+            "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
+
+
+def loader_paths(text):
+    """The paths in one LD_DEBUG record that the loader looked for or mapped, or the first line it
+    could not read as either."""
+    paths = []
+    for line in text.splitlines():
+        m = LOADER_LINE.fullmatch(line)
+        body = m.group(1) if m else line.strip()
+        if "file=" not in body or body.startswith(LOADER_REOPEN):
+            continue
+        if t := LOADER_TRYING.fullmatch(body):
+            paths.append(t.group(1))
+        elif f := LOADER_FILE.match(body):
+            if "/" in f.group(1):
+                paths.append(f.group(1))
+        else:
+            raise HostcheckError(f"unreadable loader record line: {line.strip()!r}")
+    return paths
+
+
+def audit_loads(root, ld_log, pid):
+    """Fail unless stack process PID left a record, and every record in its directory (PID's and
+    any child's) names only paths in ROOT, at least one each."""
+    if not root:
+        return
+    path = pathlib.Path(f"{ld_log}.{pid}")
+    if not path.is_file():
+        raise HostcheckError(f"the loader kept no record of what it loaded ({path})")
+    base = os.path.realpath(root) + os.sep
+    outside = set()
+    for rec in sorted(path.parent.glob(pathlib.Path(ld_log).name + ".*")):
+        seen = loader_paths(rec.read_text(errors="replace"))
+        if not seen:
+            raise HostcheckError(f"the loader's record {rec} names no shared object")
+        outside |= {p for p in seen if not os.path.isabs(p) or not os.path.realpath(p).startswith(base)}
+    if outside:
+        raise HostcheckError(f"a stack binary looked for or loaded shared objects outside the tools root {root} "
+                             f"(add the directory to TOOLS_LIBS, or the package to the root): {sorted(outside)[:5]}")
+
+
+def qemu_data_args(root):
+    """QEMU's firmware/ROM directory in the root: run through the loader, QEMU would look for it
+    relative to the loader's path."""
+    return ["-L", os.path.join(root, "usr/share/qemu")] if root else []
+
+
+def foreign_data_dirs(root, listing):
+    """The directories in QEMU's `-L help` LISTING outside ROOT that exist on the host: QEMU would
+    take a ROM the root lacks from them."""
+    base = os.path.realpath(root) + os.sep
+    return [d for d in listing.splitlines()
+            if d.strip() and not os.path.realpath(d).startswith(base) and os.path.exists(d)]
+
+
+def stack_popen(args, name, argv, **kw):
+    """Start stack tool NAME with ARGV; stack_done checks what its loader loaded once it ends."""
+    return subprocess.Popen(tool_argv(args.tools_root, name) + argv, env=tool_env(args.tools_root, args.ld_log), **kw)
+
+
+def stack_done(args, proc):
+    audit_loads(args.tools_root, args.ld_log, proc.pid)
 
 
 def resolve_tools(args):
@@ -108,7 +182,11 @@ def stack_versions(root):
     """The installed version of each STACK package in ROOT's dpkg status, for the report."""
     if not root:
         return "runner"
-    status = pathlib.Path(root, "var/lib/dpkg/status").read_text(errors="replace")
+    path = pathlib.Path(root, "var/lib/dpkg/status")
+    try:
+        status = path.read_text(errors="replace")
+    except OSError as e:
+        raise HostcheckError(f"the tools root {root} has no dpkg status ({path}): {e.strerror}")
     found = {}
     for stanza in status.split("\n\n"):
         f = dict(re.findall(r"^([A-Za-z-]+): (.*)$", stanza, re.M))
@@ -285,13 +363,13 @@ class Qemu:
         sock_dir = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # unix socket paths stay short
         self.sock_dir = sock_dir
         tpm_sock = os.path.join(sock_dir, "tpm")
-        self.swtpm = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
-                                       "--ctrl", f"type=unixio,path={tpm_sock}", "--terminate"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.args = args
+        self.swtpm = stack_popen(args, "swtpm", ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+                                                 "--ctrl", f"type=unixio,path={tpm_sock}", "--terminate"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _wait_path(tpm_sock)
         accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
-        data, env = qemu_data_args(args.tools_root)
-        cmd = tool_argv(args.tools_root, "qemu-system-x86_64") + data + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
+        cmd = qemu_data_args(args.tools_root) + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
                "-smp", "2", "-m", "1024", "-nodefaults", "-display", "none", "-nic", "none",
                "-rtc", "base=utc,clock=host",
                "-global", "driver=cfi.pflash01,property=secure,value=on",
@@ -311,8 +389,8 @@ class Qemu:
                     "ahci": ["-device", f"ide-hd,drive=hd{i},bus=ide.{i}"]}[bus]
         if boot:
             cmd += boot
-        self.proc = subprocess.Popen(cmd, stdout=open(work / f"qemu-{label}.log", "wb"), stderr=subprocess.STDOUT,
-                                     env=env)
+        self.proc = stack_popen(args, "qemu-system-x86_64", cmd, stdout=open(work / f"qemu-{label}.log", "wb"),
+                                stderr=subprocess.STDOUT)
         self.qmp = _connect(f"{sock_dir}/qmp", self.proc)
         self.serial = _connect(f"{sock_dir}/serial", self.proc)  # QEMU starts once both are connected
         self.qmp_file = self.qmp.makefile("rwb")
@@ -377,6 +455,8 @@ class Qemu:
             self.swtpm.wait(timeout=30)
             shutil.rmtree(self.sock_dir, ignore_errors=True)
         (self.work / f"events-{self.label}.json").write_text(json.dumps(self.events, indent=1))
+        stack_done(self.args, self.swtpm)
+        stack_done(self.args, self.proc)
         if self.proc.returncode:
             raise HostcheckError(f"{self.label}: QEMU exited {self.proc.returncode}")
         return guest_rtc_writes(self.events, self.os_starts)
@@ -404,6 +484,20 @@ def _connect(path, proc, timeout=60):
             time.sleep(0.05)
 
 
+# A guest that could not do what a phase asked of it (the stand-in's mor_clear or a planted write)
+# says so on its console; the phase does not pass, and the line is shown with its result.
+GUEST_ERROR = re.compile(rb"HOSTCHECK-[A-Z]+-FAILED[^\r\n]*")
+
+
+def guest_errors(console):
+    return [m.group().decode(errors="replace") for m in GUEST_ERROR.finditer(console)]
+
+
+def with_guest_errors(result, errors):
+    """A phase's result with the guest's own failures: a phase whose guest failed does not pass."""
+    return dict(result, guest_errors=errors, **{"pass": result["pass"] and not errors})
+
+
 def guest_rtc_writes(events, os_starts):
     """The RTC_CHANGE events after an OS start and before the next reset. The
     firmware sets the clock's registers on every power-on self-test, before
@@ -425,21 +519,24 @@ def guest_rtc_writes(events, os_starts):
 
 def qemu_tpm(args, work):
     """Read the host TPM from outside the guest: swtpm on the same state."""
-    ioctl = tool_argv(args.tools_root, "swtpm_ioctl")
     d = tempfile.mkdtemp(prefix="hc", dir="/tmp")
     sock = os.path.join(d, "s")
-    p = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
-                          "--server", f"type=unixio,path={sock}", "--ctrl", f"type=unixio,path={sock}.ctrl",
-                          "--flags", "not-need-init,startup-clear"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = stack_popen(args, "swtpm", ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+                                    "--server", f"type=unixio,path={sock}", "--ctrl", f"type=unixio,path={sock}.ctrl",
+                                    "--flags", "not-need-init,startup-clear"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         _wait_path(sock)
         _wait_path(sock + ".ctrl")
         yield f"swtpm:path={sock}"
     finally:
-        subprocess.run(ioctl + ["--unix", sock + ".ctrl", "-s"], capture_output=True)
+        stop = stack_popen(args, "swtpm_ioctl", ["--unix", sock + ".ctrl", "-s"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stop.wait(timeout=30)
         p.wait(timeout=30)
         shutil.rmtree(d, ignore_errors=True)
+    stack_done(args, stop)
+    stack_done(args, p)
 
 
 def qemu_snapshot(args, work):
@@ -501,6 +598,17 @@ def cmd_qemu(args):
         tool_argv(args.tools_root, name)  # a missing root tool fails before any state is made
     work = pathlib.Path(args.work)
     work.mkdir(parents=True, exist_ok=False)
+    (work / "ld").mkdir()
+    args.ld_log = work / "ld" / "stack"
+    if args.tools_root:
+        listing = stack_popen(args, "qemu-system-x86_64", qemu_data_args(args.tools_root) + ["-L", "help"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out = listing.communicate(timeout=60)[0]
+        stack_done(args, listing)
+        if listing.returncode or not out.strip():
+            raise HostcheckError(f"qemu-system-x86_64 -L help failed ({listing.returncode})")
+        if foreign := foreign_data_dirs(args.tools_root, out):
+            raise HostcheckError(f"QEMU would take a ROM the tools root lacks from the host's {foreign}: remove them")
     (work / "disks").mkdir()
     (work / "tpm").mkdir()
     args.host_disks_bus = []
@@ -526,7 +634,7 @@ def cmd_qemu(args):
         q = Qemu(args, work, label, boot if with_drive else None)
         try:
             q.drive(steps, deadline)
-            return q.wait(deadline)
+            return q.wait(deadline), guest_errors(q.console)
         except BaseException:
             q.proc.kill()
             raise
@@ -548,15 +656,17 @@ def cmd_qemu(args):
         if not any(action == "os" for _, action in phases[phase]):
             raise HostcheckError(f"phase {phase!r} has no os step, so guest RTC writes could not be told apart")
         flags = phase_flags(phase, phases[phase], args.flag)
-        rtc = [{"phase": phase, "offset": e["data"]["offset"]}
-               for e in boot_once(phase, phases[phase], True)]
+        writes, errors = boot_once(phase, phases[phase], True)
+        rtc = [{"phase": phase, "offset": e["data"]["offset"]} for e in writes]
         after = qemu_snapshot(args, work)
         r = evaluate(baseline, after, load_allow(), flags=flags, noise=noise, rtc_writes=rtc)
-        report["phases"].append(dict(r, phase=phase, rtc_writes=rtc, snapshot=after))
+        report["phases"].append(dict(with_guest_errors(r, errors), phase=phase, rtc_writes=rtc, snapshot=after))
     report["pass"] = all(p["pass"] for p in report["phases"])
     (work / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True))
     for p in report["phases"]:
         print(f"{p['phase']}: {'PASS' if p['pass'] else 'FAIL'}", file=sys.stderr)
+        for e in p["guest_errors"]:
+            print(f"  guest {e}", file=sys.stderr)
         for f in p["flagged"]:
             print(f"  flagged {f['kind']} {f['key']} {f['change']}", file=sys.stderr)
         for f in p["disclosed"]:
