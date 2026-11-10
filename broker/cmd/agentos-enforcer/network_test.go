@@ -1333,11 +1333,11 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 		t.Fatalf("a refused load with the stray gone started instances: %v", got)
 	}
 	stop := (pageResolver{x.d}).Stopped()
-	if !stop.Stopped || len(stop.Strays)+len(stop.Unset) != 0 || stop.Load != "nft: refused" || stop.LoadBy != page.LoadFirewall {
+	if !stop.Stopped || len(stop.Strays)+len(stop.Unset) != 0 || stop.Load != page.LoadFirewall {
 		t.Fatalf("the page after the stray went and the load was refused: %#v", stop)
 	}
 	h := x.b.do(http.MethodGet, "/", nil).Body.String()
-	if !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: refused)") || strings.Contains(h, "Interface own0 holds") {
+	if !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules; the enforcer&#39;s log has the detail.") || strings.Contains(h, "nft: refused") || strings.Contains(h, "Interface own0 holds") {
 		t.Fatalf("home does not show the refused load in place of the stray:\n%s", h)
 	}
 	x.d.fwMu.Lock()
@@ -1352,7 +1352,7 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	if !slices.Equal(got.Listed, was.Listed) || got.People != was.People || got.DHCP != was.DHCP {
 		t.Fatalf("the load taken did not start the instances: %v", got)
 	}
-	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || stop.Load != "" || strings.Contains(x.b.do(http.MethodGet, "/", nil).Body.String(), "Names and addresses") {
+	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || stop.Load != page.LoadTaken || strings.Contains(x.b.do(http.MethodGet, "/", nil).Body.String(), "Names and addresses") {
 		t.Fatalf("the load is taken and home still shows the stop: %#v", stop)
 	}
 }
@@ -1386,7 +1386,7 @@ func TestLoadStepOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadFirewall {
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.Load != page.LoadFirewall {
 		t.Fatalf("the firewall's refusal on the page: %#v", stop)
 	}
 	bad := home()
@@ -1404,11 +1404,11 @@ func TestLoadStepOnPage(t *testing.T) {
 	if reached {
 		t.Fatal("a document that does not compile reached the firewall")
 	}
-	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadCompile || stop.Load != err.Error() {
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.Load != page.LoadCompile {
 		t.Fatalf("a compile refusal on the page: %#v", stop)
 	}
 	h := x.b.do(http.MethodGet, "/", nil).Body.String()
-	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force (") || strings.Contains(h, "The firewall refused") {
+	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force, so it loaded nothing;") || strings.Contains(h, "The firewall refused") || strings.Contains(h, "not-a-vlan") {
 		t.Fatalf("home words a compile refusal as the firewall's:\n%s", h)
 	}
 	// A running table the firewall returned that does not parse is no
@@ -1420,10 +1420,10 @@ func TestLoadStepOnPage(t *testing.T) {
 	if err == nil || errors.Is(err, nft.ErrPolicy) {
 		t.Fatalf("fixture: an unreadable running table: %v", err)
 	}
-	if stop := (pageResolver{x.d}).Stopped(); stop.LoadBy != page.LoadUntyped || stop.Load != err.Error() {
+	if stop := (pageResolver{x.d}).Stopped(); stop.Load != page.LoadUntyped {
 		t.Fatalf("an unreadable running table on the page: %#v", stop)
 	}
-	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer's last load of your rules failed (") || strings.Contains(h, "could not make firewall rules") {
+	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer&#39;s last load of your rules failed; its log has the detail.") || strings.Contains(h, "could not make firewall rules") || strings.Contains(h, "not json") {
 		t.Fatalf("home words an unreadable running table as a compile refusal:\n%s", h)
 	}
 	for _, tc := range []struct {
@@ -1686,7 +1686,8 @@ func TestHold(t *testing.T) {
 		t.Errorf("an unwritable setting: %v", err)
 	}
 	// An interface's settings that cannot be read (a loop, ELOOP) and an
-	// IPv6 tree that cannot be: each fails, never reads as "not there".
+	// IPv6 tree that cannot be: each fails, never reads as "not there",
+	// and the IPv6 tree's by its typed cause (#5307).
 	root = box(true)
 	loop := filepath.Join(root, "ipv4/conf/own0")
 	if err := os.Symlink(loop, loop); err != nil {
@@ -1703,8 +1704,8 @@ func TestHold(t *testing.T) {
 	if err := os.Symlink(v6, v6); err != nil {
 		t.Fatal(err)
 	}
-	if err := hold(root, nil, addrs); err == nil {
-		t.Error("an IPv6 tree that cannot be read passed")
+	if err := hold(root, nil, addrs); err == nil || !slices.Equal(causes(err), []page.Unset{{Kind: page.UnsetIPv6}}) || !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("an IPv6 tree that cannot be read: %v", err)
 	}
 }
 
@@ -2020,11 +2021,11 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != "" {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != (page.PolicyCause{}) {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
-	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "<p>The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network&#39;s interface made again could take a route or address the enforcer did not check. It tries again every 10 seconds.</p>"} {
+	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "<p>The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network&#39;s interface made again could take a route the enforcer did not check. It tries again every 10 seconds.</p>"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("home lacks %q", want)
 		}
@@ -2063,10 +2064,10 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if !stopped {
 		t.Fatal("fixture: a refused load started the instances")
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != "" || got.Load == "" {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != (page.PolicyCause{}) || got.Load != page.LoadFirewall {
 		t.Fatalf("a refused load after the check passes: %#v", got)
 	}
-	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (") {
+	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules;") {
 		t.Errorf("home does not show the resolver stopped by a refused load:\n%s", h)
 	}
 	x.fire.mu.Lock()
@@ -2083,6 +2084,8 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if genErr == nil {
 		t.Fatal("fixture: the resolver serves vlan109")
 	}
+	// The page has the refusal's typed cause, never its text (#5307).
+	vlan := page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}
 	load := func(doc policy.Document) error {
 		x.d.fwMu.Lock()
 		defer x.d.fwMu.Unlock()
@@ -2103,10 +2106,10 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != genErr.Error() || got.Load != "" || len(got.Strays)+len(got.Unset) != 0 {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != vlan || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
 		t.Fatalf("a policy the resolver cannot serve: %#v", got)
 	}
-	if !strings.Contains(view(), "The policy in force names something the enforcer cannot serve (") {
+	if h := view(); !strings.Contains(h, "The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.") || strings.Contains(h, "ap0.109") {
 		t.Error("home does not show the policy the resolver cannot serve")
 	}
 	x.fire.mu.Lock()
@@ -2115,7 +2118,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Policy != genErr.Error() {
+	if got := (pageResolver{x.d}).Stopped(); got.Policy != vlan {
 		t.Fatalf("a refused load cleared the cause in force: %#v", got)
 	}
 	x.fire.mu.Lock()
@@ -2126,5 +2129,50 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	}
 	if got := (pageResolver{x.d}).Stopped(); got.Stopped {
 		t.Fatalf("a servable policy in force still shows a stopped resolver: %#v", got)
+	}
+}
+
+// TestUnservable (#5307): dns.Generate's refusal of a compiled document
+// reaches the page by its typed cause: a device on a Wi-Fi network the
+// setup serves no network for, or a listed name that is not a DNS host
+// name; any other refusal is untyped, whatever its text.
+func TestUnservable(t *testing.T) {
+	x := newBox(t, false)
+	l, s := x.cfg.Layout, x.cfg.DNS
+	vlan := home()
+	vlan.Devices = append(vlan.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
+	name := home()
+	name.Destinations = []string{"updates.example", "Upper.example"}
+	for _, tc := range []struct {
+		doc  policy.Document
+		want page.PolicyCause
+	}{
+		{vlan, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}},
+		{name, page.PolicyCause{Kind: page.PolicyName, Name: "Upper.example"}},
+	} {
+		if _, err := nft.Paths(tc.doc, l); err != nil {
+			t.Fatalf("fixture: %v", err)
+		}
+		_, err := dns.Generate(tc.doc, l, s)
+		if !errors.Is(err, dns.ErrConfig) {
+			t.Fatalf("fixture: %v", err)
+		}
+		if got := unservable(err, tc.doc, l, s); got != tc.want {
+			t.Errorf("unservable(%v) = %+v, want %+v", err, got, tc.want)
+		}
+	}
+	// A device off the device network, or with no VLAN, needs none.
+	off := home()
+	off.Devices = append(off.Devices, policy.Device{ID: "plug", Network: policy.NetOwner, WiFi: "vlan109"}, policy.Device{ID: "lamp", Network: policy.NetDevices})
+	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
+	for _, err := range []error{fmt.Errorf("%w: x", dns.ErrConfig), errors.New("vlan109 Upper.example")} {
+		for _, doc := range []policy.Document{home(), off} {
+			if got := unservable(err, doc, l, s); got != untyped {
+				t.Errorf("unservable(%v) on a servable document = %+v", err, got)
+			}
+		}
+		if err := error(errors.New("other")); unservable(err, vlan, l, s) != untyped || unservable(err, name, l, s) != untyped {
+			t.Error("a refusal other than the setup's is typed")
+		}
 	}
 }
