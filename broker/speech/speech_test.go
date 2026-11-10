@@ -655,3 +655,20 @@ func TestProcessEndStopsTheReader(t *testing.T) {
 		t.Fatalf("Err = %v", c.Err())
 	}
 }
+
+func TestTranscriptAfterTheEndDoesNotWedgeTheReader(t *testing.T) {
+	// The call's context ends, so Listen's forwarder is gone; a transcript
+	// the process sends after that must not hold the reader, or the
+	// process's end would never be read.
+	c, p := session(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Listen(ctx, make(chan []byte))
+	cancel()
+	gone(t, "Listen.func1", "Listen.func2")
+	p.send(wire.Heard, wire.EncodeHeard(wire.HeardFrame{Text: "late"}))
+	p.w.Close()
+	gone(t, "read", "take")
+	if !errors.Is(c.Err(), context.Canceled) {
+		t.Fatalf("Err = %v, want the call's context error", c.Err())
+	}
+}
