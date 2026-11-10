@@ -113,13 +113,13 @@ func missing(t *testing.T, format string, args ...any) {
 	t.Skipf(format, args...)
 }
 
-// onPath reports whether name is an executable file in a directory of
-// PATH. Unlike exec.LookPath it skips an empty entry, which POSIX reads as
-// the current directory: a test's working directory is not where its
-// tools come from.
+// onPath reports whether name is an executable file in an absolute
+// directory of PATH. Unlike exec.LookPath it skips an empty entry, which
+// POSIX reads as the current directory, and a relative one ("." or
+// "bin"): a test's working directory is not where its tools come from.
 func onPath(name string) bool {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
+		if !filepath.IsAbs(dir) {
 			continue
 		}
 		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
