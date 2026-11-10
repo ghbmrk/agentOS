@@ -202,7 +202,7 @@ func (l *countLight) Show(alert.Colour) error { l.mu.Lock(); l.n++; l.mu.Unlock(
 // and at the minute's Refresh, never on every tick, and logLight logs
 // only a change of colour (L3 fix-list item 1 on #4754: 121 light lines
 // a minute buried the channel's record, P6). Catches a Tick that tells
-// the alerts the core's or the recovery's state when it has not changed.
+// the alerts the core's state when it has not changed.
 func TestIdleTickQuiet(t *testing.T) {
 	x := newBox(t, true)
 	x.d.Close()
