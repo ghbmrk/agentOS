@@ -5292,7 +5292,8 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     self.assertRegex(failed[0], want)
                 else:
                     self.assertEqual(failed, [])
-        # systemd finds no generator to run: the runner's would run on the runner's loader (#5312).
+        # No runner environment, and systemd finds no generator to run: the runner's would run on the
+        # runner's loader (#5312).
         with tempfile.TemporaryDirectory() as root:
             for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
@@ -5305,6 +5306,7 @@ class ImageToolTest(MustRun, unittest.TestCase):
 
             with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
                 Argv("test_tool").run(unittest.TestResult())
+            self.assertEqual(seen[:2], ["/usr/bin/env", "-i"])  # none of the runner's environment
             for var in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH"):
                 path = next(a.split("=", 1)[1] for a in seen if a.startswith(var + "="))
                 self.assertTrue(os.path.isabs(path) and ":" not in path, path)

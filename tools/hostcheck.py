@@ -99,7 +99,8 @@ def tool_argv(root, name):
 def tool_env(root, ld_log):
     """The stack's environment: the host's without a root. With one, nothing of the host's but PATH:
     QEMU's module directory in the root (run through the loader, QEMU would look beside the loader),
-    and the loader's record of what it loads, in LD_LOG.PID (a child the process starts writes its own)."""
+    and the loader's record of what it looks for and maps, in LD_LOG.PID (a child it execs writes its own,
+    one it forks appends to its parent's)."""
     if not root:
         return None
     return dict(loader_env(ld_log), QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))

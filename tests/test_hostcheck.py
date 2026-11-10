@@ -758,6 +758,10 @@ class LoaderAuditTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
+            pathlib.Path(d, "stack.43").write_bytes(os.fsencode(f"{d}/libc.so.6\0"))  # another process's only
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
+            os.unlink(os.path.join(d, "stack.43"))
             for data, why in ((b"", "names no shared object"), (b"\0linux-vdso.so.1\0libc.so.6\0", "names no shared object"),
                               (os.fsencode(d) + b"/libc.so.6", "ends inside a name")):
                 with self.subTest(data):
@@ -897,10 +901,16 @@ class LoaderAuditTest(unittest.TestCase):
             self.assertEqual(p.wait(timeout=60), 0)
             hostcheck.stack_done(args, p)
             # The module stops a process that has no record to write to, rather than run it unrecorded.
-            env = hostcheck.tool_env(d, os.path.join(log, "other"))
-            del env["AGENTOS_LOADER_RECORD"]
-            p = subprocess.run(hostcheck.tool_argv(d, "swtpm") + ["-c", "exit 0"], env=env)
-            self.assertEqual(p.returncode, 127)
+            # Nor one whose record path is relative or cannot be written.
+            for record in (None, "stack", os.path.join(log, "absent", "stack")):
+                with self.subTest(record=record):
+                    env = hostcheck.tool_env(d, os.path.join(log, "other"))
+                    if record is None:
+                        del env["AGENTOS_LOADER_RECORD"]
+                    else:
+                        env["AGENTOS_LOADER_RECORD"] = record
+                    p = subprocess.run(hostcheck.tool_argv(d, "swtpm") + ["-c", "exit 0"], env=env, cwd=log)
+                    self.assertEqual(p.returncode, 127)
 
     def test_records_alone_need_one_and_read_every_one(self):
         # #5231: audit_records, for tools with no PID to name (tests/test_image.py image_tool), needs a record.
