@@ -53,8 +53,15 @@ func openChannel(t *testing.T, number string, seed []byte, store owner.Store, no
 	return c
 }
 
+// advance moves the clock once the channel's async sends, which read it,
+// have finished.
+func (c *channel) advance(d time.Duration) {
+	c.ch.WaitSends()
+	c.now = c.now.Add(d)
+}
+
 func (c *channel) say(from, text string) string {
-	c.now = c.now.Add(31 * time.Second)
+	c.advance(31 * time.Second)
 	return strings.Join(c.ch.Handle(context.Background(), from, text), " | ")
 }
 
@@ -101,11 +108,11 @@ func TestLostPhoneReEnrollsTheCodeGeneratorWithTheRecoveryKey(t *testing.T) {
 		t.Fatalf("session survived re-enrollment: %q", got)
 	}
 	// Sessions open on the page (CH-14, D-311).
-	c.now = c.now.Add(31 * time.Second)
+	c.advance(31 * time.Second)
 	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err == nil {
 		t.Fatal("the lost phone's code opened a session")
 	}
-	c.now = c.now.Add(31 * time.Second)
+	c.advance(31 * time.Second)
 	if _, _, err := c.ch.LocalSignIn(totp(seed, c.now)); err != nil {
 		t.Fatalf("new seed: %v", err)
 	}
@@ -167,7 +174,7 @@ func TestLostNumberMovesWithTheRecoveryKeyAndTheOldNumberCanDoNothing(t *testing
 	if got := c.say(newNum, totp(x.seed, c.now)); c.ch.SessionUnlocked(c.now) {
 		t.Fatalf("a texted code opened a session: %q", got)
 	}
-	c.now = c.now.Add(31 * time.Second)
+	c.advance(31 * time.Second)
 	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err != nil || !c.ch.SessionUnlocked(c.now) {
 		t.Fatalf("new number unlock on the page: %v", err)
 	}

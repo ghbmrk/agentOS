@@ -335,16 +335,13 @@ func TestOnlyTripsLight(t *testing.T) {
 	}
 	r.a.Paused()
 	off("paused channel")
-	r.a.Recovery(true)
-	off("recovery pending")
 	r.a.Core(false)
 	off("core silent")
 	st := r.a.Status()
-	if len(st.Open) != 12 || !st.Recovery || !st.CoreDown {
-		t.Fatalf("not on the page: %d open, recovery %v, core down %v", len(st.Open), st.Recovery, st.CoreDown)
+	if len(st.Open) != 12 || !st.CoreDown {
+		t.Fatalf("not on the page: %d open, core down %v", len(st.Open), st.CoreDown)
 	}
 	r.a.Core(true)
-	r.a.Recovery(false)
 
 	red := func(what string) {
 		t.Helper()

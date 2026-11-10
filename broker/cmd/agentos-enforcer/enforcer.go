@@ -158,8 +158,7 @@ type Enforcer struct {
 	// only a change, since each call re-shows the light and coming up
 	// re-offers every unsent alert (ENF-h-a5). upMu holds toldUp, which a
 	// hello also writes, so a core shown up by a hello is shown down by
-	// the next tick that finds it silent (#4755 item 8). The recovery's
-	// state the book tells the alerts itself, at open and at each change.
+	// the next tick that finds it silent (#4755 item 8).
 	upMu   sync.Mutex
 	toldUp bool
 
@@ -427,7 +426,7 @@ func (d *Enforcer) rebuildPage() error {
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
 		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
-		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d},
+		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d}, Resolver: pageResolver{d},
 	}
 	if d.ch != nil {
 		pc.Channel, pc.Core = d.cut, pageCore{d}

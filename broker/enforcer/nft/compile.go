@@ -719,14 +719,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// passing them on (NET-2, NET-3, D-266, #4411).
 	w.line("iifname " + core + " udp dport " + strconv.Itoa(WoLPort) + " accept")
 	var ends []string
-	for _, e := range hears(devs, paths, l) {
+	for _, e := range hears(devs, l) {
 		ends = append(ends, q(e))
 	}
-	if len(ends) > 0 {
-		slices.Sort(ends)
-		w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
-		w.line("iifname { " + strings.Join(ends, ", ") + " } ip6 daddr " + MDNSGroup6 + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
-	}
+	w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
+	w.line("iifname { " + strings.Join(ends, ", ") + " } ip6 daddr " + MDNSGroup6 + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
 	w.close()
 
 	// A device's DNS to anywhere is answered by the enforcer's own

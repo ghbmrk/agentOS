@@ -101,14 +101,24 @@ func (r recognizer) Listen(ctx context.Context, _ <-chan []byte) <-chan call.Hea
 
 // answerer returns the scripted chunks for each turn's text.
 type answerer struct {
-	mu     sync.Mutex
-	asks   []call.Ask
+	mu   sync.Mutex
+	asks []asked
+	// kept are the Asks as given, to read once the call is over.
+	kept   []call.Ask
 	script func(call.Ask) []string
+}
+
+// asked is an Ask as the answerer read it, rung and all, during the call.
+type asked struct {
+	Text string
+	Rung call.Rung
+	Turn int
 }
 
 func (a *answerer) Answer(ctx context.Context, q call.Ask) (<-chan string, error) {
 	a.mu.Lock()
-	a.asks = append(a.asks, q)
+	a.asks = append(a.asks, asked{q.Text, q.Rung(), q.Turn})
+	a.kept = append(a.kept, q)
 	a.mu.Unlock()
 	out := make(chan string)
 	go func() {
@@ -424,7 +434,7 @@ func TestRunKnowsItsRungBeforeTheFirstTurn(t *testing.T) {
 		r.turnEnds(ends, 2)
 		r.hangup()
 		r.ans.mu.Lock()
-		asks := append([]call.Ask(nil), r.ans.asks...)
+		asks := append([]asked(nil), r.ans.asks...)
 		r.ans.mu.Unlock()
 		for _, a := range asks {
 			if a.Rung != call.P2 || (a.Text != "first" && a.Text != "second") {

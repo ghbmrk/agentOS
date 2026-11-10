@@ -3,8 +3,10 @@ package page
 import (
 	"errors"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -81,6 +83,44 @@ type CapsDay struct {
 	Starting bool  // the wait is over: the fresh day is being saved and taken up
 	Retrying bool  // the start's save failed and is tried again every second
 	Unsaved  bool  // the owner's last approval or cancel is in force but not yet confirmed on disk
+}
+
+// Resolver is why the enforcer's resolver, its DNS and DHCP on every
+// served network, is stopped: a served interface not as set up
+// (ASSUMPTIONS ENF-l-21 at the daemon) or a policy in force it cannot
+// serve (ENF-l-11). Every instance stops while either lasts, so home
+// shows it (#5164 R1); the log alone would leave the owner a house
+// without names or new addresses and no reason.
+type Resolver interface {
+	Stopped() ResolverStop
+}
+
+// ResolverStop is the resolver's state as the page shows it; the zero
+// value is a resolver that runs.
+type ResolverStop struct {
+	// Stopped is whether no instance runs. The causes below are shown
+	// only while it is, since a cause that has gone does not start the
+	// instances: the load that does can still be refused.
+	Stopped bool
+	// Strays are the addresses on a served interface outside its
+	// network, each with the interface: the resolver starts again at the
+	// enforcer's next check after the last is gone.
+	Strays []Stray
+	// Unset is every other way the served interfaces are not as set up:
+	// a setting that did not take, or addresses that could not be read.
+	Unset []string
+	// Policy is why the policy in force cannot be served; "" when it can.
+	Policy string
+	// Load is the last refused load's error, shown when no cause above
+	// is: the instances stay as they were until a load is taken.
+	Load string
+}
+
+// Stray is one address on a served interface outside its network.
+type Stray struct {
+	Iface string
+	Addr  netip.Prefix // the address, with its prefix length
+	Nets  string       // the network's prefixes it must lie in
 }
 
 // Page actions on the enforcer's own state, each after a tap of the
@@ -194,5 +234,39 @@ func (s *Server) status() map[string]any {
 			}
 		}
 	}
+	if s.cfg.Resolver != nil {
+		if r := s.cfg.Resolver.Stopped(); r.Stopped {
+			out["Resolver"] = plainStop(r)
+		}
+	}
 	return out
+}
+
+// plainStop is r in printable ASCII, as plain shows the core's names: a
+// policy's error can quote a name the core chose.
+func plainStop(r ResolverStop) ResolverStop {
+	out := ResolverStop{Stopped: true, Policy: sentence(r.Policy), Load: sentence(r.Load)}
+	for _, x := range r.Strays {
+		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
+	}
+	for _, u := range r.Unset {
+		out.Unset = append(out.Unset, sentence(u))
+	}
+	return out
+}
+
+// sentence is s with every character outside printable ASCII and the
+// space escaped (U+202E reads \u202e), so no line it is in can read
+// backwards or hide a word.
+func sentence(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		if c < 0x20 || c > 0x7e {
+			q := strconv.QuoteRuneToASCII(c)
+			b.WriteString(q[1 : len(q)-1])
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
