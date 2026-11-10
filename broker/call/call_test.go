@@ -27,13 +27,14 @@ type line struct {
 	answered      bool
 	number        string
 	// cut gets one value each time speech is stopped mid-sentence.
-	cut     chan struct{}
-	inSay   int
-	overlap bool
-	sayErr  error
-	empty   bool
-	hungUp  bool
-	stuck   bool
+	cut       chan struct{}
+	inSay     int
+	overlap   bool
+	sayErr    error
+	empty     bool
+	hungUp    bool
+	stuck     bool
+	answerErr error
 }
 
 func newLine() *line {
@@ -53,6 +54,9 @@ func (l *line) Answer(ctx context.Context) error {
 	if l.stuck { // answers nothing until ctx ends
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if l.answerErr != nil {
+		return l.answerErr
 	}
 	l.answered = true
 	return nil
@@ -548,6 +552,28 @@ func TestOtherCallerIsNotAnswered(t *testing.T) {
 	}
 	if r.l.answered {
 		t.Fatal("answered a call that is not the owner's")
+	}
+}
+
+// A call the line fails to answer ends there with the line's error: nothing
+// listens and no turn runs.
+func TestAFailedAnswerEndsTheCall(t *testing.T) {
+	r := newRig(t, fixed("x"))
+	boom := errors.New("ATA failed")
+	r.l.answerErr = boom
+	r.serve()
+	select {
+	case err := <-r.err:
+		if rep := <-r.rep; !errors.Is(err, boom) || len(rep.Turns) != 0 {
+			t.Fatalf("err %v, turns %+v", err, rep.Turns)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a call the line failed to answer went on")
+	}
+	select {
+	case <-r.rec.ctx:
+		t.Fatal("listened on a call that was not answered")
+	default:
 	}
 }
 
