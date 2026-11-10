@@ -973,6 +973,37 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
+// The worker gets an answer header only by a declared exact name (#5320, CLK-1): an upstream answer carrying every declared name plus X-Codex-Bearer, X-Codex-Session-Token and each corpus credential name after X-Codex- reaches the worker with the declared names alone.
+func TestWorkerRouteAnswersOnlyDeclaredHeaders(t *testing.T) {
+	r := newWorkerRig(t, false)
+	extra := []string{"X-Codex-Bearer", "X-Codex-Session-Token", "X-Codex-A"}
+	for _, e := range hostiletext.HeaderNames() {
+		if strings.HasPrefix(e.Name, "credential ") {
+			extra = append(extra, "X-Codex-"+e.Text)
+		}
+	}
+	r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
+		for _, h := range append(Codex().ResponseHeaders, extra...) {
+			w.Header().Set(h, "1")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	got, declared := r.do(responses(codexBody(clientTools))).Header(), map[string]bool{}
+	for _, h := range Codex().ResponseHeaders {
+		declared[h] = true
+	}
+	for k := range got {
+		if !declared[k] {
+			t.Errorf("the undeclared answer header %q reached the worker", k)
+		}
+	}
+	for _, h := range Codex().ResponseHeaders {
+		if got.Get(h) == "" {
+			t.Errorf("the declared answer header %q did not reach the worker", h)
+		}
+	}
+}
+
 // Egress uses clerk/header (#5278, #5291, #5320): a plan route's names refuse the name corpus, an answer name also a credential word, a key check's values the value corpus, each refusal names its rule, and forbiddenHeader refuses every corpus credential name by the clerks' word list.
 func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
 	route := func(set func(*PlanRoute, []string), h ...string) error { r := Codex(); set(&r, h); return r.validate() }
