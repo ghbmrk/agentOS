@@ -122,9 +122,36 @@ def _flatten(suite):
             yield t
 
 
+class _Streamed(unittest.TextTestResult):
+    """A worker's result that also puts each failed test's verdict on the shared stdout as the test
+    ends, in one write so the line stays whole: the worker's buffered report reaches the parent only
+    when the worker ends, and a run strace cuts before then must still show the failure (#5358)."""
+
+    def _now(self, test, verdict):
+        os.write(1, f"\n{test.id()} ... {verdict}\n".encode("utf-8", "replace"))
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self._now(test, "FAIL")
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self._now(test, "ERROR")
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self._now(test, "unexpected success")
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self._now(subtest, "FAIL" if issubclass(err[0], test.failureException) else "ERROR")
+
+
 def _worker(tests, counter, conn):
     out, ran, parts = io.StringIO(), [], {}
-    ok = unittest.TextTestRunner(stream=out, verbosity=2).run(_Claimed(tests, counter, ran, parts)).wasSuccessful()
+    runner = unittest.TextTestRunner(stream=out, verbosity=2, resultclass=_Streamed)
+    ok = runner.run(_Claimed(tests, counter, ran, parts)).wasSuccessful()
     conn.send((ran, ok, out.getvalue(), parts))
     conn.close()
 
@@ -176,10 +203,15 @@ def split(module, workers, write=sys.stdout.write):
 # strace's own failure, not a test's: "strace: ptrace(PTRACE_LISTEN,pid:N,sig:0): Input/output
 # error" (#5258, #5355; tools/depaudit.py's STRACE_FAULT). strace then stops tracing, the run is cut
 # and its trace is partial, so the attempt has no verdict, whatever strace's exit status. Unanchored:
-# the module's output shares the stream, so the message can follow a partial line.
+# the module's output shares the stream, so the message can follow a partial line. Both sightings
+# cut test_mutgate in or after a test whose code kills a traced process group (tools/mutgate.py
+# watch(): os.killpg SIGKILL), the likely trigger of strace's race.
 STRACE_FAULT = re.compile(r"strace: .*(?:Input/output error|PTRACE_)")
-# A test's own failure in the output so far: its -v verdict line, or the run's failure summary.
-TEST_FAILED = re.compile(r"(?m)(?: \.\.\. (?:FAIL|ERROR)$|^(?:FAIL|ERROR): |^FAILED \()")
+# A failed test in the output so far, failing closed: a match only stops a rerun. unittest's -v
+# verdict can land on a bare line or after a child's partial line, so any line ending FAIL or ERROR
+# counts, as do an unexpected success and the run's failure summary.
+TEST_FAILED = re.compile(r"(?m)(?:FAIL|ERROR)$|unexpected success|^(?:FAIL|ERROR): |^FAILED \(")
+RERAN = "the module reruns whole into a fresh trace"
 STRACE_ATTEMPTS = 2  # a module strace faults on runs once more, whole, into a fresh trace
 
 
@@ -202,7 +234,7 @@ def run_one(module, trace_dir, root=ROOT):
         outs.append(f"{out}\nunit_tests: strace failed itself on attempt {attempt} of {STRACE_ATTEMPTS}, so the "
                     f"run and its trace are cut short; "
                     + ("a test had already failed, so the module fails without a rerun\n" if failed else
-                       "the module fails\n" if last else "the module reruns whole into a fresh trace\n"))
+                       "the module fails\n" if last else RERAN + "\n"))
         if last:
             break
     return module, rc, time.monotonic() - start, "".join(outs)
@@ -304,6 +336,9 @@ def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, 
         write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT), but its run gave no slowest part "
               f"(it stopped before its last line: see its log above), so its whole time counts: {pole[1]:.0f}s, "
               f"over {LONG_POLE} times the step's ideal {pole[2]:.0f}s\n")
+    elif pole and RERAN in results[pole[0]][2]:
+        write(f"::error::{pole[0]} took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s, "
+              f"counting the run strace cut short and its rerun (see its log above)\n")
     elif pole:
         write(f"::error::{pole[0]} took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s: "
               f"split it (tools/unit_tests.py SPLIT)\n")

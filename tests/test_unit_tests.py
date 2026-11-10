@@ -325,7 +325,9 @@ class StraceFaultTest(unittest.TestCase):
            "cut": (f"test_a ... ok\ncoverage: 100.0% of statements\n{CUT}\n", 1),
            "cut-exit-0": (f"test_a ... ok\ntest_b ... {CUT}\n", 0),
            "fail-then-cut": (f"test_a ... FAIL\ntest_b ... {CUT}\n", 1),
-           "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", 1)}
+           "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", 1),
+           # #5355's shape: a child's PASS and coverage lines, then unittest's verdict on a bare line.
+           "bare-fail-then-cut": (f"test_a ... PASS\ncoverage: 100.0% of statements\nFAIL\ntest_b ... {CUT}\n", 1)}
 
     def run_plan(self, *plan):
         """run_one under a fake strace that plays plan's steps in order, one per call, writing
@@ -335,27 +337,31 @@ class StraceFaultTest(unittest.TestCase):
         (d / "plan").write_text("\n".join(plan))
         fake = d / "strace"
         fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
-            import pathlib, sys
+            import pathlib, sys, time
             say = {self.SAY!r}
             plan = pathlib.Path({str(d / "plan")!r})
             steps = plan.read_text().split("\\n")
             plan.write_text("\\n".join(steps[1:]))
             pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(steps[0])
+            time.sleep(0.2)
             sys.stdout.write(say[steps[0]][0])
             sys.exit(say[steps[0]][1])
             """))
         fake.chmod(0o755)
         with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
-            module, rc, _, out = unit_tests.run_one("test_x", str(d))
+            module, rc, secs, out = unit_tests.run_one("test_x", str(d))
         self.assertEqual(module, "test_x")
         left = [s for s in (d / "plan").read_text().split("\n") if s]
-        return rc, out, (d / "test_x.trace").read_text(), len(plan) - len(left)
+        calls = len(plan) - len(left)
+        self.assertGreaterEqual(secs, 0.2 * calls)  # every attempt's time counts
+        return rc, out, (d / "test_x.trace").read_text(), calls
 
     def test_a_cut_run_reruns_whole_and_keeps_the_passing_runs_trace(self):
         rc, out, trace, calls = self.run_plan("cut", "ok")
         self.assertEqual((rc, trace, calls), (0, "ok", 2))
         self.assertIn("strace failed itself on attempt 1 of 2", out)
         self.assertIn("the module reruns whole into a fresh trace", out)
+        self.assertTrue(out.startswith(self.SAY["cut"][0]), out)  # the cut attempt's own log stays
         self.assertTrue(out.endswith(self.SAY["ok"][0]), out)
 
     def test_a_cut_run_is_no_pass_even_when_strace_exits_zero(self):
@@ -375,6 +381,63 @@ class StraceFaultTest(unittest.TestCase):
         self.assertIn("a test had already failed, so the module fails without a rerun", out)
         rc, out, _, calls = self.run_plan("fail", "ok")
         self.assertEqual((rc, out, calls), (1, self.SAY["fail"][0], 1))
+        rc, out, _, calls = self.run_plan("bare-fail-then-cut", "ok")
+        self.assertEqual((rc, calls), (1, 1))
+        self.assertIn("a test had already failed", out)
+
+    def test_a_split_module_cut_after_a_failed_test_is_not_rerun(self):
+        # A SPLIT module's workers buffer their reports until they end; a failed test's verdict
+        # still reaches the shared stdout as the test ends, so a cut after it stops the rerun.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(textwrap.dedent("""\
+            import os, time, unittest
+            class A(unittest.TestCase):
+                def test_a(self): self.fail("x")
+                def test_z_slow(self):  # last, so one worker reaches the others first
+                    for _ in range(100):
+                        time.sleep(0.1)
+                def test_c(self):
+                    with self.subTest(i=1): raise OSError("y")
+                @unittest.expectedFailure
+                def test_d(self): pass
+            """))
+        fake = root / "strace"
+        # Runs the command in its own group, then fails as strace does once the verdicts are out:
+        # its fault line, then the group killed (strace's cleanup), exit 1. Later calls pass.
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import os, pathlib, signal, subprocess, sys, time
+            calls = pathlib.Path({str(root / "calls")!r})
+            calls.write_text(calls.read_text() + "x" if calls.exists() else "x")
+            if len(calls.read_text()) > 1:
+                print("OK"); sys.exit(0)
+            p = subprocess.Popen(sys.argv[sys.argv.index("-o") + 2:], start_new_session=True)
+            time.sleep(3)
+            sys.stdout.write("{self.CUT}\\n"); sys.stdout.flush()
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            sys.exit(1)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.SPLIT, {"test_fake": "#5358"}), \
+             mock.patch.dict(unit_tests.ENV, {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
+        self.assertEqual((rc, (root / "calls").read_text()), (1, "x"), out)
+        self.assertIn("test_fake.A.test_a ... FAIL\n", out)
+        self.assertIn("test_fake.A.test_c (i=1) ... ERROR\n", out)
+        self.assertIn("test_fake.A.test_d ... unexpected success\n", out)
+        self.assertNotIn("test_z_slow ... ok", out)  # the cut came first
+        self.assertIn("a test had already failed, so the module fails without a rerun", out)
+
+    def test_a_long_pole_after_a_rerun_says_so_instead_of_split_it(self):
+        out = []
+        cut = f"x\n{self.CUT}\nunit_tests: ...; {unit_tests.RERAN}\nOK\n"
+        results = {"test_a": (0, 300.0, cut), "test_b": (0, 10.0, ""), "test_c": (0, 10.0, "")}
+        self.assertEqual(unit_tests.report(list(results), results, out.append, jobs=3), 1)
+        text = "".join(out)
+        self.assertIn("counting the run strace cut short and its rerun", text)
+        self.assertNotIn("split it", text)
 
     def test_the_runners_own_strace_lines_are_faults_and_test_output_is_not(self):
         # #5258's line followed a test's partial line; #5355's stood alone.
@@ -383,7 +446,9 @@ class StraceFaultTest(unittest.TestCase):
         for line in ("test_x (m.T.test_x) ... skipped 'needs user+net namespaces and strace'",
                      "test_a_tracee_cannot_erase_strace_fault_message (m.T.test_a) ... ok"):
             self.assertFalse(unit_tests.STRACE_FAULT.search(line), line)
-        for line in ("t (m.T.t) ... FAIL", "t (m.T.t) ... ERROR", "ERROR: setUpClass (m.T)", "FAILED (errors=1)"):
+        for line in ("t (m.T.t) ... FAIL", "t (m.T.t) ... ERROR", "ERROR: setUpClass (m.T)", "FAILED (errors=1)",
+                     "FAIL", "t (m.T.t) ... partialFAIL", "t (m.T.t) ... unexpected success",
+                     "  t (m.T.t) (i=1) ... ERROR"):
             self.assertTrue(unit_tests.TEST_FAILED.search(line), line)
         for line in ("t (m.T.t) ... ok", "t (m.T.t) ... expected failure", "OK (skipped=2)"):
             self.assertFalse(unit_tests.TEST_FAILED.search(line), line)
