@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/header"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -430,17 +431,20 @@ func (p *Login) validate() error {
 		}
 	}
 	for k, v := range d.RefreshHeaders {
-		if !contains(passHeaders, k) || k == "Content-Type" || !headerValue(v) {
+		if !contains(header.PassHeaders, k) || k == "Content-Type" {
 			return fmt.Errorf("clerk: refresh header %q may not be declared", k)
+		}
+		if err := header.Value(v); err != nil {
+			return fmt.Errorf("clerk: refresh header %q: %w", k, err)
 		}
 	}
 	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
-		if !contains(passHeaders, h) {
+		if !contains(header.PassHeaders, h) {
 			return fmt.Errorf("clerk: header %q may not pass", h)
 		}
 	}
 	for _, pre := range d.ResponsePrefixes {
-		if !contains(passPrefixes, pre) {
+		if !contains(header.PassPrefixes, pre) {
 			return fmt.Errorf("clerk: header prefix %q may not pass", pre)
 		}
 	}
@@ -486,27 +490,6 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
-
-// headerValue reports whether v is a non-empty header value of visible
-// ASCII and spaces, unpadded.
-func headerValue(v string) bool {
-	return v != "" && v == strings.TrimSpace(v) && !strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r > '~' })
-}
-
-// passHeaders are the names a plan route may pass, each exactly as the
-// shipped declaration's CLI sends or reads it (#4914). None carries a
-// credential, reshapes the request or ends at the next hop, and only
-// Content-Type frames it, which a refresh may not declare: the clerk sets
-// its own.
-var passHeaders = []string{
-	"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
-	"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
-	"Retry-After", "X-Request-Id", "Openai-Model",
-}
-
-// passPrefixes are the answer-header prefixes a plan route may pass; no
-// name the header corpus holds begins with one.
-var passPrefixes = []string{"X-Codex-"}
 
 func (p *Login) load() (planState, error) {
 	var st planState
@@ -1114,8 +1097,8 @@ func (p *Login) answer(resp *http.Response, real string) *http.Response {
 }
 
 // answerHeader reports whether the guest gets the answer header k: a
-// declared name or prefix, exactly as New checked it against passHeaders
-// and passPrefixes.
+// declared name or prefix, exactly as New checked it against header.PassHeaders
+// and header.PassPrefixes.
 func (p *Login) answerHeader(k string) bool {
 	if contains(p.d.ResponseHeaders, k) {
 		return true
