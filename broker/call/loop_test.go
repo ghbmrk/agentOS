@@ -970,3 +970,106 @@ func TestTheOwnerHearsTheEndBeforeMaxCall(t *testing.T) {
 		r.l.wasCut(t)
 	})
 }
+
+// The ending notice leaves the call's state as it was (#5262): with no
+// Ending clip set nothing is cut and nothing empty plays; a question the
+// answerer has not yet seen is asked with the owner's next words; and a 0
+// or a barge-in during the clip acts once the clip has played. A call
+// shorter than EndingNotice hears none.
+func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// No Ending clip: the answer playing a minute before MaxCall plays on.
+		r := newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.l.setGate(true)
+		r.serve()
+		r.say("q")
+		synctest.Wait()
+		<-r.l.saying
+		time.Sleep(29 * time.Minute)
+		synctest.Wait()
+		select {
+		case <-r.l.cut:
+			t.Fatal("the answer was cut a minute before MaxCall with no Ending clip")
+		default:
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
+			t.Fatalf("no Ending clip: err %v", err)
+		}
+
+		// A question asked while the token is read, so not yet asked, is
+		// carried past the notice into the owner's next words.
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.cfg.Token = func(string) bool { return false }
+		r.serve()
+		r.say("what's in my mail")
+		time.Sleep(29 * time.Minute)
+		synctest.Wait()
+		if got := <-r.l.saying; got != "CLIP:ending" {
+			t.Fatalf("a minute before MaxCall: played %q", got)
+		}
+		r.l.keys <- '#' // the token read ends: P0
+		r.say("from today")
+		synctest.Wait()
+		if got := <-r.l.saying; got != "S:Hi." {
+			t.Fatalf("after the notice: played %q", got)
+		}
+		r.ans.mu.Lock()
+		asks := r.ans.asks
+		r.ans.mu.Unlock()
+		if len(asks) != 1 || asks[0].Text != "what's in my mail from today" {
+			t.Fatalf("asks = %+v", asks)
+		}
+		r.hangup()
+
+		// A 0 and a barge-in during the clip wait for it to play.
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.l.saying = make(chan string) // Say waits for the test to take each sound
+		r.serve()
+		time.Sleep(29 * time.Minute)
+		synctest.Wait() // the loop is playing the clip
+		r.l.keys <- '0'
+		heard := make(chan struct{})
+		go func() { r.rec.out <- call.Heard{Text: "wait"}; close(heard) }()
+		synctest.Wait()
+		select {
+		case <-heard:
+			t.Fatal("speech was read while the clip played")
+		default:
+		}
+		if len(r.l.keys) != 1 {
+			t.Fatal("a key was read while the clip played")
+		}
+		if got := <-r.l.saying; got != "CLIP:ending" {
+			t.Fatalf("a minute before MaxCall: played %q", got)
+		}
+		synctest.Wait()
+		select {
+		case <-heard:
+		default:
+			t.Fatal("speech was not read once the clip played")
+		}
+		if len(r.l.keys) != 0 {
+			t.Fatal("the key was not read once the clip played")
+		}
+		r.hangup()
+
+		// A call shorter than EndingNotice has no notice at all.
+		r = newRig(t, fixed("Hi."))
+		r.bubble = true
+		r.cfg.MaxCall = 30 * time.Second
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.serve()
+		time.Sleep(time.Hour)
+		synctest.Wait()
+		if _, err := r.end(); !errors.Is(err, call.ErrTooLong) || len(r.l.spoken()) != 0 {
+			t.Fatalf("a 30 s call: err %v, played %q", err, r.l.spoken())
+		}
+	})
+}

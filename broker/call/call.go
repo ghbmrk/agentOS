@@ -363,9 +363,10 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	}
 	// The ending notice falls EndingNotice before ctx's deadline (Serve's
 	// MaxCall) and plays on ctx, so it never outlasts the call (#5262). A
-	// call up with less time left than that has none.
+	// call up with less time left than that, or with no Ending clip, has
+	// none: an unset clip neither cuts the answer nor plays empty audio.
 	var ending <-chan time.Time
-	if d, ok := ctx.Deadline(); ok {
+	if d, ok := ctx.Deadline(); ok && len(cfg.Clips.Ending) > 0 {
 		if w := time.Until(d) - EndingNotice; w > 0 {
 			ending = time.After(w) // the wall clock, as ctx's deadline is
 		}
