@@ -127,6 +127,28 @@ func TestClipIsNotContent(t *testing.T) {
 // What the owner says while the token is read is heard, and answered once
 // the rung is known, at that rung.
 func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
+	// Every hand-off is bounded, so a call that never takes what it is
+	// handed (a line left held, a failed Answer read as success) fails
+	// here, naming the wait, not at the package timeout (#5316).
+	const wait = 5 * time.Second
+	say := func(r *rig, text string) {
+		t.Helper()
+		select {
+		case r.rec.out <- call.Heard{Text: text, Final: true}:
+		case <-time.After(wait):
+			t.Fatalf("%q was not heard within %v: the call is not served", text, wait)
+		}
+	}
+	key := func(r *rig, keys string) {
+		t.Helper()
+		for _, k := range []byte(keys) {
+			select {
+			case r.l.keys <- k:
+			case <-time.After(wait):
+				t.Fatalf("key %q of %q was not read within %v: the token is not read", k, keys, wait)
+			}
+		}
+	}
 	for _, c := range []struct {
 		keys string
 		want call.Rung
@@ -142,12 +164,10 @@ func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
 		r.cfg.Token = func(k string) bool { return k == "4071" }
 		r.l.keys = make(chan byte)
 		r.serve()
-		r.say("hi there")
-		r.say("what's new")
+		say(r, "hi there")
+		say(r, "what's new")
 		r.quiet() // no answer before the rung is known
-		for _, k := range []byte(c.keys) {
-			r.l.keys <- k
-		}
+		key(r, c.keys)
 		if c.keys == "" {
 			window <- time.Time{}
 		}
@@ -171,11 +191,9 @@ func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
 	r.cfg.Token = func(string) bool { return true }
 	r.l.keys = make(chan byte)
 	r.serve()
-	r.say("read my mail")
-	r.say("stop")
-	for _, k := range []byte("1#") {
-		r.l.keys <- k
-	}
+	say(r, "read my mail")
+	say(r, "stop")
+	key(r, "1#")
 	r.quiet()
 	r.hangup()
 	if len(r.ans.asks) != 0 {
