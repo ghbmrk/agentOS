@@ -72,8 +72,13 @@ TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/s
 TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
 STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 # glibc's LD_DEBUG lines: "PID:\ttrying file=PATH" for each search candidate, and
-# "PID:\tfile=NAME [NS];  ..." for each object mapped, NAME a path when given as one.
-LOADER_SEEN = re.compile(r"^\s*\d+:\s+(?:trying file=(.+)$|file=(/[^ ]*) \[\d+\];)", re.M)
+# "PID:\tfile=NAME [NS];  ..." for each object mapped, NAME a path when given as one (a soname
+# is searched, so its candidates are trying lines). Any other line naming a file= fails the
+# audit, so a loader whose format differs cannot pass by being unread.
+LOADER_LINE = re.compile(r"\s*\d+:\s+(.*)")
+LOADER_TRYING = re.compile(r"trying file=(.+)")
+LOADER_FILE = re.compile(r"file=(.*?) \[\d+\];")
+LOADER_REOPEN = ("opening file=", "closing file=")  # an object already mapped, or let go
 
 
 def _root_file(root, rel):
@@ -88,37 +93,57 @@ def tool_argv(root, name):
     if not root:
         return [name]
     return [_root_file(root, TOOLS_LOADER), "--inhibit-cache",
-            "--library-path", ":".join(os.path.join(root, d) for d in TOOLS_LIBS),
+            "--library-path", ":".join(os.path.join(os.path.abspath(root), d) for d in TOOLS_LIBS),
             "--argv0", name, _root_file(root, TOOLS[name])]
 
 
 def tool_env(root, ld_log):
     """The stack's environment: the host's without a root. With one, nothing of the host's but PATH:
     QEMU's module directory in the root (run through the loader, QEMU would look beside the loader),
-    and the loader's record of what it loads, in LD_LOG.PID."""
+    and the loader's record of what it loads, in LD_LOG.PID (a child the process starts writes its own)."""
     if not root:
         return None
     return {"PATH": "/usr/sbin:/usr/bin", "QEMU_MODULE_DIR": os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"),
             "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
 
 
+def loader_paths(text):
+    """The paths in one LD_DEBUG record that the loader looked for or mapped, or the first line it
+    could not read as either."""
+    paths = []
+    for line in text.splitlines():
+        m = LOADER_LINE.fullmatch(line)
+        body = m.group(1) if m else line.strip()
+        if "file=" not in body or body.startswith(LOADER_REOPEN):
+            continue
+        if t := LOADER_TRYING.fullmatch(body):
+            paths.append(t.group(1))
+        elif f := LOADER_FILE.match(body):
+            if "/" in f.group(1):
+                paths.append(f.group(1))
+        else:
+            raise HostcheckError(f"unreadable loader record line: {line.strip()!r}")
+    return paths
+
+
 def audit_loads(root, ld_log, pid):
-    """Fail unless the loader of stack process PID looked for and loaded shared objects in ROOT alone."""
+    """Fail unless stack process PID left a record, and every record in its directory (PID's and
+    any child's) names only paths in ROOT, at least one each."""
     if not root:
         return
-    path = f"{ld_log}.{pid}"
-    try:
-        text = pathlib.Path(path).read_text(errors="replace")
-    except OSError as e:
-        raise HostcheckError(f"the loader kept no record of what it loaded ({path}): {e.strerror}")
-    seen = {a or b for a, b in LOADER_SEEN.findall(text)}
-    if not seen:
-        raise HostcheckError(f"the loader's record {path} names no shared object")
+    path = pathlib.Path(f"{ld_log}.{pid}")
+    if not path.is_file():
+        raise HostcheckError(f"the loader kept no record of what it loaded ({path})")
     base = os.path.realpath(root) + os.sep
-    outside = sorted(p for p in seen if not os.path.realpath(p).startswith(base))
+    outside = set()
+    for rec in sorted(path.parent.glob(pathlib.Path(ld_log).name + ".*")):
+        seen = loader_paths(rec.read_text(errors="replace"))
+        if not seen:
+            raise HostcheckError(f"the loader's record {rec} names no shared object")
+        outside |= {p for p in seen if not os.path.isabs(p) or not os.path.realpath(p).startswith(base)}
     if outside:
         raise HostcheckError(f"a stack binary looked for or loaded shared objects outside the tools root {root} "
-                             f"(add the directory to TOOLS_LIBS, or the package to the root): {outside[:5]}")
+                             f"(add the directory to TOOLS_LIBS, or the package to the root): {sorted(outside)[:5]}")
 
 
 def qemu_data_args(root):

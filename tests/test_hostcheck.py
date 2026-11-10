@@ -459,6 +459,56 @@ class LoaderAuditTest(unittest.TestCase):
             with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
 
+    def test_a_child_the_stack_starts_is_audited(self):
+        # The probe is the host's dash in the root (libc alone); it runs the host's true, whose own
+        # loader and libc are the runner's. Only the child's record shows it.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            libs = self.root(d, with_deps=True)
+            dash = os.path.realpath("/bin/sh")
+            self.assertIn("libc.so.6", subprocess.run(["ldd", dash], capture_output=True, text=True).stdout)
+            shutil.copy(dash, pathlib.Path(d, hostcheck.TOOLS["swtpm"]))
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", ["-c", "/usr/bin/true; exit 0"])
+            self.assertEqual(p.wait(timeout=60), 0)
+            self.assertEqual(len(os.listdir(log)), 2, os.listdir(log))
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.stack_done(args, p)
+            self.assertTrue(libs)
+
+    def test_unread_or_odd_loader_lines_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            for line in ("file=/usr/lib/x86_64 linux/libx.so [0];  dynamically loaded by /r/swtpm [0]",  # a space
+                         "file=./libx.so [0];  dynamically loaded by /r/swtpm [0]",  # relative to the cwd
+                         "trying file=libx.so"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # A relative name is the stack process's cwd, unknown here: even read from inside the root it fails.
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n"
+                                                  "      7:\tfile=./libx.so [0];  dynamically loaded by /r/swtpm [0]\n")
+            cwd = os.getcwd()
+            try:
+                os.chdir(d)
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                    hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            finally:
+                os.chdir(cwd)
+            for line in ("file=/usr/lib/libx.so needed by swtpm", "trying  file=/usr/lib/libx.so", "file=x"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # A child's record beside the parent's is read too.
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.8").write_text("      8:\ttrying file=/lib/x86_64-linux-gnu/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.8").write_text("      8:\topening file= [0]; direct_opencount=2\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
     def test_preloads_and_dlopens_by_path_are_seen(self):
         with tempfile.TemporaryDirectory() as d:
             for line in ("file=/usr/lib/x86_64-linux-gnu/libfoo.so.1 [0];  needed by (null) [0]",
