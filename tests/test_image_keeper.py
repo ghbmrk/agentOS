@@ -503,7 +503,12 @@ class KeeperTreeTest(unittest.TestCase):
                      "ListenFIFO=%i/run/sy", 'Symlinks="/run/sy"', "Symlinks='/run/sy'", "Symlinks=\\/run/sy",
                      "Symlinks=/run/s\\x79", "Symlinks=%%%i/run/sy", "ListenStream=/run/a%%b", "Options=size=1%",
                      "Symlinks=%t", "Symlinks=/run/a\x0b/run/sy", "StandardOutput=file:%i/var/lib/so",
-                     "StandardOutput=file:%R/var/lib/so"):
+                     "StandardOutput=file:%R/var/lib/so",
+                     # Security 6762243927, L3 6762274629: a '/' that opens no absolute path is a relative path PID 1
+                     # makes from / (What=, overlay dirs), or text the check does not read; a '..' step is not followed.
+                     "What=var/lib/w/src", "What=./var/lib/w/src", "What=~/x",
+                     "Options=lowerdir=/usr,upperdir=var/lib/w/up,workdir=var/lib/w/wk", "What=/var/lib/a=b/src",
+                     "Symlinks=/run/a/../b", "StandardOutput=file:x/var/lib/so"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.socket", "[Socket]\n%s\n" % text)
                 try:
@@ -520,7 +525,8 @@ class KeeperTreeTest(unittest.TestCase):
         # (stock tmp.mount's size=50%%); PID 1 only opens a TTYPath=.
         d = write(self.root, SYSTEM + "x@.service", "[Service]\nUser=camdec-%I\nAfter=%i.mount %n.socket\n"
                                                     "TTYPath=/dev/%I\nUtmpIdentifier=%I\nWants=%I\nSlice=user-%i.slice\n"
-                                                    "TasksMax=33%\nCPUQuota=25%\nMemoryHigh=80%\nWantedBy=sys-subsystem-net-devices-a\\x2db.device\n"
+                                                    "TasksMax=33%\nCPUQuota=25%\nMemoryHigh=80%\nIPAddressAllow=10.0.0.0/8 fc00::/7\n"
+                                                    "DeviceAllow=char-/dev/console rw\nWantedBy=sys-subsystem-net-devices-a\\x2db.device\n"
                                                     "[Mount]\nOptions=mode=1777,size=50%%\n")
         try:
             self.assertEqual(check.unit_made_paths(self.root)[2], [])
@@ -630,6 +636,15 @@ class KeeperTreeTest(unittest.TestCase):
             ("StateDirectory=ov", {SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
                                                            "Options=lowerdir=/usr,upperdir=/var/lib/ov,workdir=/srv/w\n"},
              "/var/lib/ov", "where PID 1 may make, link or mount /var/lib/ov (Options= in %ssrv-o.mount)" % SYSTEM),
+            # What= is not split at '=' or ':', so a path word also counts run on to the next whitespace.
+            ("StateDirectory=eq=x", {SYSTEM + "srv-e.mount": "[Mount]\nWhat=/var/lib/eq=x\nWhere=/srv/e\nOptions=bind\n"},
+             "/var/lib/eq=x", "where PID 1 may make, link or mount /var/lib/eq=x (What= in %ssrv-e.mount)" % SYSTEM),
+            # PID 1 follows a link on the way it makes (mkdir_p_label), so a path counts as the tree resolves it too.
+            ("StateDirectory=w/x", {"srv/l": ("link", "/var/lib"),
+                                    SYSTEM + "srv-m.mount": "[Mount]\nWhat=/srv/l/w/src\nWhere=/srv/m\nOptions=bind\n"
+                                                            "DirectoryMode=0777\n"},
+             "/var/lib/w/x", "below a step PID 1 may make for anyone to write (for /var/lib/w/src, What= in %ssrv-m.mount"
+             % SYSTEM),
             ("StateDirectory=so", {SYSTEM + "so.service": "[Service]\nStandardOutput=file:/var/lib/so\n"}, "/var/lib/so",
              "where PID 1 may make, link or mount /var/lib/so (StandardOutput= in %sso.service)" % SYSTEM),
             # A namespace mount point is made only by root, 0755, so it may sit above the directory, not at it.
@@ -727,15 +742,23 @@ class KeeperTreeTest(unittest.TestCase):
                 with self.subTest(point):
                     line = "tmpfs %s tmpfs mode=0755,noexec,nosuid,nodev 0 0" % point
                     fstab.write_text(kept + line + "\n")
-                    want = ("etc/fstab: %s: a line that is not plain text with a mount point opening with '/': the tree "
-                            "check does not model it; the tree check never passes an fstab line whose paths it cannot "
-                            "read (#5167)" % line)
+                    want = ("etc/fstab: %s: a line that is not plain text with a mount point opening with '/' and no '..': "
+                            "the tree check does not model it; the tree check never passes an fstab line whose paths it "
+                            "cannot read (#5167)" % line)
                     self.assertEqual(check.unit_made_paths(self.root)[2], [want])
                     self.assertIn(want, check.violations(self.root))
             fstab.write_text(kept + "tmpfs\n")
             self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
-            fstab.write_text(kept + "/var/lib/f\\040q /srv/b none bind 0 0\n")
-            self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
+            # A relative bind source or overlay dir (PID 1 makes it from /), and a '..' step, are refused too.
+            for line in ("/var/lib/f\\040q /srv/b none bind 0 0", "var/lib/fq /srv/b none bind 0 0",
+                         "overlay /srv/o overlay lowerdir=/usr,upperdir=var/lib/fq,workdir=/srv/w 0 0",
+                         "/var/lib/x/../fq /srv/b none bind 0 0", "tmpfs /var/lib/x/../fq tmpfs noexec 0 0"):
+                with self.subTest(line):
+                    fstab.write_text(kept + line + "\n")
+                    got = check.unit_made_paths(self.root)[2]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith("etc/fstab: %s: " % line), got)
+                    self.assertIn(got[0], check.violations(self.root))
             # A bind source and an overlay dir are paths PID 1 makes (L3 6761389633).
             for line in ("/var/lib/fq /srv/b none bind 0 0", "overlay /srv/o overlay lowerdir=/usr,upperdir=/var/lib/fq,workdir=/srv/w 0 0"):
                 with self.subTest(line):
@@ -746,14 +769,15 @@ class KeeperTreeTest(unittest.TestCase):
         finally:
             fstab.write_text(kept)
             remove()
-        # A mount unit's name is read only when it holds no escape (\x2d is '-').
-        remove = self.place({SYSTEM + "var-lib-fq\\x2dm.mount": "[Mount]\nWhat=tmpfs\n"})
-        try:
-            self.assertEqual(check.unit_made_paths(self.root)[2], [
-                "%svar-lib-fq\\x2dm.mount: a mount unit name with an escape: the tree check does not model it; the tree "
-                "check never passes a unit file whose paths it cannot read (#5167)" % SYSTEM])
-        finally:
-            remove()
+        # A mount unit's name is read only when it holds no escape (\x2d is '-') and no '..' step.
+        for name in ("var-lib-fq\\x2dm.mount", "var-..-lib-fq.mount"):
+            remove = self.place({SYSTEM + name: "[Mount]\nWhat=tmpfs\n"})
+            try:
+                self.assertEqual(check.unit_made_paths(self.root)[2], [
+                    "%s%s: a mount unit name with an escape or a '..': the tree check does not model it; the tree "
+                    "check never passes a unit file whose paths it cannot read (#5167)" % (SYSTEM, name)])
+            finally:
+                remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so

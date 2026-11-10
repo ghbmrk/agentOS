@@ -205,23 +205,25 @@ MADE_LAST_TYPES = frozenset("dDevqQzZxXrRaAhHtT")
 # (config_parse_unit_string_printf; utmp_put_init_process writes only /run/utmp); Documentation is URLs;
 # EnvironmentFile is read (exec_context_load_environment); the four *Paths= access lists are remounts in the
 # unit's namespace (config_parse_namespace_path_strv); Requires/WantsMountsFor add dependencies
-# (unit_add_mounts_for); TTYPath is opened, never created (acquire_terminal, open_terminal_as). What= is not
+# (unit_add_mounts_for); TTYPath is opened, never created (acquire_terminal, open_terminal_as); DeviceAllow
+# only stats a node for its number (bpf_devices_allow_list_device; "char-/dev/console"). What= is not
 # here: mount_enter_mounting makes a bind mount's source (mkdir_p_label(p->what, m->directory_mode)). Any
 # other setting naming a path there is refused (default deny), so a setting systemd adds later is too.
 PID1_READS = ("Description", "Documentation", "EnvironmentFile", "InaccessiblePaths", "ReadOnlyPaths",
               "ReadWritePaths", "ExecPaths", "NoExecPaths", "RequiresMountsFor", "WantsMountsFor",
-              "TTYPath", "UtmpIdentifier")
+              "TTYPath", "UtmpIdentifier", "DeviceAllow")
 PID1_READ_PREFIXES = ("Condition", "Assert", "Exec")
 # #5167 (Security 6760938141): settings whose values are only names or numbers (units, users, groups, a slice,
-# credentials, a log identifier, cgroup limits that take a percentage): PID 1 makes no host path for them, so
-# their specifiers, escapes and '%' (User=camdec-%i, After=...agentos\x2dlink.device, CPUQuota=25%) need no
-# reading. Every other setting off PID1_READS is read as written or refused (unit_made_paths).
+# credentials, a log identifier, cgroup limits that take a percentage, address prefixes): PID 1 makes no host
+# path for them, so their specifiers, escapes, '%' and '/' (User=camdec-%i, After=...agentos\x2dlink.device,
+# CPUQuota=25%, IPAddressAllow=10.0.0.0/8) need no reading. Every other setting off PID1_READS is read as
+# written or refused (unit_made_paths).
 PID1_NAMES = ("After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "PartOf", "Upholds", "Conflicts",
               "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom", "PropagatesStopTo",
               "StopPropagatedFrom", "JoinsNamespaceOf", "WantedBy", "RequiredBy", "UpheldBy", "Also", "Slice",
               "User", "Group", "SupplementaryGroups", "SyslogIdentifier", "ImportCredential", "TasksMax", "CPUQuota",
               "MemoryMin", "MemoryLow", "MemoryHigh", "MemoryMax", "MemorySwapMax", "MemoryZSwapMax",
-              "ManagedOOMMemoryPressureLimit")
+              "ManagedOOMMemoryPressureLimit", "IPAddressAllow", "IPAddressDeny")
 # #5167: settings that mount in the unit's own namespace and, on the host, make only root's 0755 directories
 # on the way (namespace.c mkdir_p_label, mkdir_parents) and at the mount point a directory or an empty file
 # (make_mount_point_inode_from_path). Strictly above a unit-made directory that is root's alone; at it, a
@@ -1775,8 +1777,8 @@ def unit_made_paths(root):
         loose |= any(not re.fullmatch(r"[0-7]{1,4}", v) or int(v, 8) & 0o002 for _, k, v in lines if k == "DirectoryMode")
         name = path.rsplit("/", 1)[-1]
         if re.fullmatch(r"[^@]+\.(auto)?mount", name):
-            if "\\" in name:
-                out.append("%s: a mount unit name with an escape: the tree check does not model it; the tree check "
+            if "\\" in name or ".." in name.split("-"):
+                out.append("%s: a mount unit name with an escape or a '..': the tree check does not model it; the tree check "
                            "never passes a unit file whose paths it cannot read (#5167)" % rel)
             else:
                 paths.append((path_parts(name.rsplit(".", 1)[0].replace("-", "/")), "the name of %s" % rel, "mount"))
@@ -1792,11 +1794,16 @@ def unit_made_paths(root):
                 # nothing), TemporaryFileSystem=PATH:OPTS's PATH.
                 made = " ".join(f[0 if key == "TemporaryFileSystem" else 1] for f in (w.split(":") for w in v.split())
                                 if len(f) > 1 or key == "TemporaryFileSystem")
-            # Every '/' that no name character leads opens a path word, so a prefix (-+!@), a "file:" or
-            # an "upperdir=" is passed over; a word with a ',' counts cut there too (mount options).
-            words = re.findall(r"(?<![\w./])/[^\s:=]*", made if key in PID1_NAMESPACE_MAKES else v)
-            for w in words + [w.split(",", 1)[0] for w in words if "," in w]:
-                if "%" in w:
+            words = path_words(v)
+            if words is not None and key in PID1_NAMESPACE_MAKES:
+                words = path_words(made)
+            if words is None:
+                out.append("%s: %s=%s: a '/' that opens no absolute path (PID 1 makes a relative path from /): the "
+                           "tree check does not model it; the tree check never passes a unit file whose paths it "
+                           "cannot read (#5167)" % (rel, key, v))
+                continue
+            for w in words:
+                if "%" in w or ".." in w.split("/"):
                     out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                                "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                     break
@@ -1810,16 +1817,50 @@ def unit_made_paths(root):
         f = ln.split()
         if not f or f[0].startswith("#"):
             continue
-        if len(f) < 2 or not f[1].startswith("/") or any(not " " <= c <= "~" and c != "\t" or c == "\\" for c in ln):
-            out.append("etc/fstab: %s: a line that is not plain text with a mount point opening with '/': the tree "
-                       "check does not model it; the tree check never passes an fstab line whose paths it cannot "
-                       "read (#5167)" % (ln if ln.isprintable() else repr(ln)))
+        if (len(f) < 2 or not f[1].startswith("/") or re.search(r"(^|[\s/,=:])\.\.($|[\s/,=:])", ln)
+                or any(not " " <= c <= "~" and c != "\t" or c == "\\" for c in ln)):
+            out.append("etc/fstab: %s: a line that is not plain text with a mount point opening with '/' and no '..': "
+                       "the tree check does not model it; the tree check never passes an fstab line whose paths it "
+                       "cannot read (#5167)" % (ln if ln.isprintable() else repr(ln)))
         else:
             paths.append((path_parts(f[1]), "etc/fstab", "mount"))
             # A bind source and overlay dirs PID 1 makes too (mount_enter_mounting), read as unit values are.
-            words = re.findall(r"(?<![\w./])/[^\s:=]*", " ".join([f[0]] + f[3:4]))
-            paths += [(path_parts(w), "etc/fstab", "") for w in words + [w.split(",", 1)[0] for w in words if "," in w]]
+            words = path_words(" ".join([f[0]] + f[3:4]))
+            if words is None:
+                out.append("etc/fstab: %s: a '/' that opens no absolute path (PID 1 makes a relative path from /): "
+                           "the tree check does not model it; the tree check never passes an fstab line whose paths "
+                           "it cannot read (#5167)" % ln)
+            else:
+                paths += [(path_parts(w), "etc/fstab", "") for w in words]
+    # PID 1 makes each path following the links on its way (mkdir_p_label), so each counts as written and as
+    # the tree resolves it ('..' steps are refused above, so as written is never popped past a link).
+    for steps, where, kind in list(paths):
+        try:
+            got = tree_resolve(root, steps)
+        except OSError:
+            out.append("%s: /%s: a link on its way the tree check cannot follow; the tree check never passes a path it "
+                       "cannot read (#5167)" % (where, "/".join(steps)))
+            continue
+        if got != steps:
+            paths.append((got, where, kind))
     return paths, loose, out
+
+
+def path_words(text):
+    """#5167 (Security 6762243927, L3 6762274629): the absolute path words in plain TEXT, or None when a
+    '/' in it opens none. A word opens with '/' at the start, after whitespace, ':', '=' or ',' (a "file:",
+    an "upperdir=", a mount option), past any -+!@ prefix, and runs to the next whitespace, ':' or '='.
+    Each word also counts cut at its first ',' and run on to the next whitespace, so a reader that splits
+    on fewer characters names no path the check misses. Any other '/' (var/lib/x, ./x, ~/x, 10.0.0.0/8) is
+    a relative path PID 1 would make from its working directory /, or text the check does not read; None
+    refuses it whole rather than modelling which."""
+    found = list(re.finditer(r"(?:^|(?<=[\s:=,]))[-+!@]*(/[^\s:=]*)", text))
+    held = {i for m in found for i in range(m.start(1), m.end(1))}
+    if any(c == "/" and i not in held for i, c in enumerate(text)):
+        return None
+    words = [m.group(1) for m in found]
+    return (words + [w.split(",", 1)[0] for w in words if "," in w]
+            + [text[m.start(1):].split(None, 1)[0] for m in found])
 
 
 def made_private(d):
