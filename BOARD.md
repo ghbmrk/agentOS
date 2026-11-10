@@ -332,9 +332,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-edge-cut | ENF-edge-cut: cut the edge on its byte cap (NET-2 Byte caps) | #3670 | in review(tier A; lane primary; brief briefs/ENF.md) |
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
-| HOST-1e | HOST-1e: hostcheck potency follow-ups (unclean phase shape, flag wiring, rule keys) | #5173 | in review (release; tier A; from #5173 Potency) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
-| HOST-1f-assumptions | HOST-1f-assumptions: record power_cut_only's QEMU SHUTDOWN-reason and firmware-reset-ordering assumptions in tools/ASSUMPTIONS.md. Release; from #5254. | #5254, #5193 | queued (release; tier A) |
 | HOST-1g | HOST-1g: power_cut_only misses a guest halt (no QEMU event) and compares QEMU and serial timestamps in a way that can race. Release; from #5254. | #5254, #5193 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
@@ -455,6 +453,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VOICE-ro-d-busy-fu | VOICE-ro-d-busy-fu: an owner redial right after a dropped call hears ringing until voicemail because Serve's TryLock refuses with ErrBusy. Release; from #5251. | #5251, #5232 | in review (release; tier A) |
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
 | VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
+| VOICE-ro-d-maxcall-notice | VOICE-ro-d-maxcall-notice: the owner hears a spoken notice before the 30-minute maximum-call hang-up. Release (UX); from #5258. | #5258, #5252 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
