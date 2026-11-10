@@ -82,7 +82,7 @@ STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 # a name may hold " [N];  " itself, so every split before a whole TAIL is a candidate (#5231).
 LOADER_LINE = re.compile(r"\s*\d+:\s+(.*)")
 LOADER_TRYING = re.compile(r"trying file=(.+)")
-LOADER_SPLIT = re.compile(r" \[\d+\];  ")
+LOADER_SPLIT = re.compile(r"(?=( \[\d+\];  ))")  # a lookahead: a split may overlap the one before it
 LOADER_TAIL = re.compile(r"(?:needed by|dynamically loaded by) .* \[\d+\](?: \(relocation dependency\))?"
                          r"|generating link map|destroying link map")
 LOADER_REOPEN = ("opening file=", "closing file=")  # an object already mapped, or let go
@@ -137,7 +137,7 @@ def loader_paths(text):
             paths.append(t.group(1))
             continue
         rest = body[len("file="):] if body.startswith("file=") else ""
-        names = [rest[:s.start()] for s in LOADER_SPLIT.finditer(rest) if LOADER_TAIL.fullmatch(rest, s.end())]
+        names = [rest[:s.start()] for s in LOADER_SPLIT.finditer(rest) if LOADER_TAIL.fullmatch(rest, s.end(1))]
         if not names:
             raise HostcheckError(f"unreadable loader record line: {line!r}")
         paths += [n for n in names if "/" in n]

@@ -833,7 +833,9 @@ class LoaderAuditTest(unittest.TestCase):
             up = "/.." * 12
             for line in (f"file={d}/a [0];  needed by /x{up}/lib/libc.so.6 [0];  dynamically loaded by /r/swtpm [0]",
                          f"file={d}/a [0];  generating link map{up}/lib/libc.so.6 [0];  destroying link map",
-                         f"trying file={d}/a [0];  needed by x [0]{up}/lib/libc.so.6"):
+                         f"trying file={d}/a [0];  needed by x [0]{up}/lib/libc.so.6",
+                         # A name ending in "[N]; " overlaps its own split by a space (#5310 review).
+                         f"file=/usr/lib/x [0];  [0];  needed by {up}{d}/ok [0];  needed by /r/swtpm [0]"):
                 with self.subTest(line):
                     pathlib.Path(d, "stack.7").write_text(f"      7:\t{line}\n")
                     with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
@@ -843,7 +845,8 @@ class LoaderAuditTest(unittest.TestCase):
                 f"      7:\tfile={d}/odd [3];  lib/libx.so [0];  dynamically loaded by /r/swtpm [0]\n"
                 f"      7:\tfile={d}/b.so [0];  needed by /r/swtpm [0] (relocation dependency)\n"
                 f"      7:\tfile={d}/b.so [1];  generating link map\n      7:\t\n"
-                f"      7:\tfile={d}/b.so [0];  destroying link map\n")
+                f"      7:\tfile={d}/b.so [0];  destroying link map\n"
+                f"      7:\tfile={d}/a [0];  [0];  needed by /r/swtpm [0]\n")
             hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
             self.assertEqual(hostcheck.loader_paths(pathlib.Path(d, "stack.7").read_text())[:2],
                              [f"{d}/odd [3];  lib/libx.so", f"{d}/b.so"])  # "odd" is no name: no tail follows it
