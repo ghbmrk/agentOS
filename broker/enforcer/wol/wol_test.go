@@ -122,7 +122,17 @@ func TestTarget(t *testing.T) {
 			t.Errorf("%s: wakes %q, want %q", c.why, got, c.want)
 		}
 	}
+	// The interval is exact: a nanosecond short refuses, the interval
+	// itself wakes (#5152).
 	now = now.Add(WakeInterval)
+	if m := r.Target(magic(gamingPC)); m == nil {
+		t.Fatal("no wake after the cases")
+	}
+	now = now.Add(WakeInterval - time.Nanosecond)
+	if m := r.Target(secureOn); m != nil {
+		t.Errorf("SecureOn a nanosecond inside the interval: %v", m)
+	}
+	now = now.Add(time.Nanosecond)
 	if m := r.Target(secureOn); m == nil || m.Iface != "hh0" {
 		t.Errorf("SecureOn after the interval: %v", m)
 	}
