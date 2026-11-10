@@ -158,6 +158,13 @@ func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
 		if rep.Rung != c.want || len(r.ans.asks) != 1 || r.ans.asks[0].Rung != c.want || r.ans.asks[0].Text != "hi there what's new" {
 			t.Fatalf("%q: rung %v, asks %+v", c.keys, rep.Rung, r.ans.asks)
 		}
+		// The Ask outlives the call, but its rung does not (#5225 re-plan).
+		if got := r.ans.kept[0].Rung(); got != call.P0 {
+			t.Fatalf("%q: an Ask kept from an ended call says %v", c.keys, got)
+		}
+	}
+	if got := (call.Ask{Text: "hi"}).Rung(); got != call.P0 {
+		t.Fatalf("an Ask built outside the package says %v", got)
 	}
 	// "Stop" while the token is read drops what was asked.
 	r := newRig(t, fixed("Hello."))

@@ -21,8 +21,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// Rung is the proof an owner event carries (rearchitecture note §2.1). The
-// call sets it, never the transcript.
+// Rung names what an owner event has proved (rearchitecture note §2.1). It
+// is a label: a Rung value proves nothing. What a call has proved reaches
+// the answerer only through Ask.Rung, which reads the call's callRung.
 type Rung int
 
 const (
@@ -68,12 +69,19 @@ type Recognizer interface {
 	Listen(ctx context.Context, speech <-chan []byte) <-chan Heard
 }
 
-// Ask is one owner turn handed to the answerer.
+// Ask is one owner turn handed to the answerer. Its rung is read with
+// Rung; only this package can set it.
 type Ask struct {
 	Text string
-	Rung Rung
 	Turn int
+	rung *callRung
 }
+
+// Rung is the rung of the call that asked: P0 until the call's token has
+// checked, and P0 again once the call has ended, so an Ask kept from one
+// call never vouches for a later one. An Ask built outside this package is
+// P0.
+func (a Ask) Rung() Rung { return a.rung.level() }
 
 // Answerer writes the answer as text. Wired to read keys only; the rung
 // bounds what it may disclose. The channel closes at the end of the answer.
@@ -137,7 +145,8 @@ type Turn struct {
 	Err     error
 }
 
-// Report is what one call did.
+// Report is what one call did. Rung records what Ask.Rung read once the
+// token was read; it is a record, not a proof.
 type Report struct {
 	Rung  Rung
 	Turns []Turn
@@ -169,10 +178,13 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	}
 	cfg = cfg.withDefaults()
 	tctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	token := make(chan Rung, 1)
-	go func() { token <- cfg.token(tctx, c) }()
-	return loop(ctx, cfg, c, token)
+	defer cancel() // ends the token read, and with it the call's rung
+	cr := &callRung{ready: make(chan struct{}), live: tctx.Done()}
+	go func() {
+		cfg.token(tctx, c, cr)
+		close(cr.ready)
+	}()
+	return loop(ctx, cfg, c, cr)
 }
 
 // token reads the speed-dial token: the handset's contact holds the box's
@@ -181,9 +193,9 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 // TokenWindow are the token, checked once by cfg.Token; they reach nothing
 // else, and none of them is STOP. A call whose token does not check, or
 // that keys none, stays at P0.
-func (cfg Config) token(ctx context.Context, l Line) Rung {
+func (cfg Config) token(ctx context.Context, l Line, cr *callRung) {
 	if cfg.Token == nil {
-		return P0
+		return
 	}
 	active, keys := l.Active(), l.Keys()
 	var window <-chan time.Time // opens when the call is up
@@ -195,50 +207,74 @@ func (cfg Config) token(ctx context.Context, l Line) Rung {
 			window = cfg.After(cfg.TokenWindow)
 		case k, ok := <-keys:
 			if !ok {
-				return P0
+				return
 			}
 			if k == '#' {
-				return cfg.check(b.String())
+				check(cfg, cr, b.String())
+				return
 			}
 			b.WriteByte(k)
 		case <-window:
-			return cfg.check(b.String())
+			check(cfg, cr, b.String())
+			return
 		case <-ctx.Done(): // Serve's, ended when the call ends
-			return P0
+			return
 		}
 	}
-	return cfg.check(b.String())
+	check(cfg, cr, b.String())
 }
 
-func (cfg Config) check(token string) Rung {
-	if token != "" && cfg.Token(token) {
-		return P2
+// check is the one place a call's rung is set above P0: P2 when the
+// kernel's Token accepts the keys. Only token calls it.
+func check(cfg Config, cr *callRung, keys string) {
+	if keys != "" && cfg.Token(keys) {
+		cr.r = P2
 	}
-	return P0
 }
 
-// callRung is the call's rung as the turns see it: ready closes once it is
-// known, and r is fixed from then on.
+// callRung is one call's rung, and the only thing that lets the answerer
+// hear more than P0. Its type is unexported, so no other package can make
+// one; in this package only check sets r and only Serve sets live
+// (TestOnlyServeChoosesTheRung).
 type callRung struct {
-	ready chan struct{}
-	r     Rung
+	ready chan struct{}   // closed once the token is read
+	r     Rung            // set by check before ready closes
+	live  <-chan struct{} // closed when Serve returns; nil never closes
+}
+
+// level is the rung: P0 until ready, and P0 once the call is over.
+func (cr *callRung) level() Rung {
+	if cr == nil {
+		return P0
+	}
+	select {
+	case <-cr.live:
+		return P0
+	default:
+	}
+	select {
+	case <-cr.ready:
+		return cr.r
+	default:
+		return P0
+	}
 }
 
 // loop holds one call until it ends or ctx is done. Turns are answered one
 // at a time: a new final turn, any speech from the owner, or the 0 key
-// stops the answer being spoken first. The call is at P0 until its rung
-// comes on token, and token is the loop's only rung input. loop is a plain
-// unexported function, not a method, so no interface or type constraint can
-// name it: code reaches it only by naming it, and Serve, which fills token
-// from the speed-dial check, is the one place that does (briefs/VOICE-ro.md
-// rule 4, #4949; TestOnlyServeChoosesTheRung).
+// stops the answer being spoken first. The call is at P0 until cr is ready,
+// and cr is the loop's only rung input. loop is a plain unexported function,
+// not a method, so no interface or type constraint can name it: code
+// reaches it only by naming it, and Serve, which answers only the owner's
+// number and has check set cr from the speed-dial token, is the one place
+// that does (briefs/VOICE-ro.md rule 4, #4949; TestOnlyServeChoosesTheRung).
 //
 // It listens from the start, so the owner's first words are heard while
 // the token is read; keys are the token's until it is read. A turn starts
 // as soon as it is heard, whether or not the rung is known yet, so its one
 // clip deadline covers the wait for the rung as well as the answerer and
 // the synthesizer (rule 5; UX on #4944).
-func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, error) {
+func loop(ctx context.Context, cfg Config, l Line, cr *callRung) (Report, error) {
 	rep := Report{Rung: P0}
 	select {
 	case <-l.Active():
@@ -250,16 +286,17 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, e
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
-	cr := &callRung{ready: make(chan struct{})}
+	// The turns learn the rung from the loop, not from cr, so a stop the
+	// loop has taken comes before the rung in every turn.
+	ready, known := cr.ready, make(chan struct{})
 	var keys <-chan byte // nil while the token is read
-	known := func(r Rung) {
-		cr.r = r
-		close(cr.ready)
-		rep.Rung, token, keys = r, nil, l.Keys()
+	rungKnown := func() {
+		close(known)
+		rep.Rung, ready, keys = cr.level(), nil, l.Keys()
 	}
-	select { // a rung already on token is known before the first turn can start
-	case r := <-token:
-		known(r)
+	select { // a rung already known is known before the first turn can start
+	case <-ready:
+		rungKnown()
 	default:
 	}
 
@@ -308,7 +345,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, e
 		}
 		go func() {
 			defer close(r.done)
-			cfg.turn(tctx, l, text, n, cr, end, r.turn, &r.asked)
+			cfg.turn(tctx, l, text, n, cr, known, end, r.turn, &r.asked)
 		}()
 	}
 	for {
@@ -325,8 +362,8 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan Rung) (Report, e
 			return rep, nil
 		case <-done:
 			finish()
-		case r := <-token:
-			known(r)
+		case <-ready:
+			rungKnown()
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop(false)
@@ -394,7 +431,7 @@ type sound struct {
 // Once the rung is known a producer writes, checks and synthesizes the
 // sentences while the one before plays; this loop plays them one at a
 // time, and a sentence ready when the deadline falls goes before the clip.
-func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool) {
+func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, known <-chan struct{}, end time.Time, t *Turn, asked *bool) {
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer func() {
@@ -402,13 +439,13 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 			t.Stopped = true
 		}
 	}()
-	rung := cr.ready
+	rung := known
 	var sounds chan sound // nil until the rung is known
 	ask := func() {
 		rung = nil
 		*asked = true
 		sounds = make(chan sound)
-		go cfg.produce(pctx, Ask{Text: text, Rung: cr.r, Turn: n}, sounds)
+		go cfg.produce(pctx, Ask{Text: text, Turn: n, rung: cr}, sounds)
 	}
 	select { // a known rung asks the answerer before the deadline is set
 	case <-rung:

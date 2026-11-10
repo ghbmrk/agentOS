@@ -70,7 +70,7 @@ func ask(t *testing.T, r call.Rung, text string) (string, *writer) {
 	t.Helper()
 	w := &writer{}
 	a := Answerer{Reads: &reads{facts: everyRead()}, Writer: w}
-	ch, err := a.Answer(context.Background(), call.Ask{Text: text, Rung: r, Turn: 1})
+	ch, err := a.answer(context.Background(), call.Ask{Text: text, Turn: 1}, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,14 @@ func TestP0AskForMailOrCalendarGetsNoPrivateContent(t *testing.T) {
 			t.Errorf("%q: the box's status was not spoken:\n%s", text, out)
 		}
 	}
+	// Answer takes the rung from the Ask, and an Ask made outside package
+	// call is P0.
+	w := &writer{}
+	ch, err := Answerer{Reads: &reads{facts: everyRead()}, Writer: w}.Answer(context.Background(), call.Ask{Text: "read me my mail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noPrivate(t, spoken(t, ch), w)
 }
 
 // The token call hears its mail and calendar in full.
@@ -155,7 +163,7 @@ func TestUnlabelledAndMixedFactsArePrivate(t *testing.T) {
 func TestReadsSeeTheAsk(t *testing.T) {
 	r := &reads{facts: everyRead()}
 	a := Answerer{Reads: r, Writer: &writer{}}
-	want := call.Ask{Text: "read me my mail", Rung: call.P0, Turn: 3}
+	want := call.Ask{Text: "read me my mail", Turn: 3}
 	ch, err := a.Answer(context.Background(), want)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +180,7 @@ func TestFailedReadFailsTheTurn(t *testing.T) {
 	boom := errors.New("read failed")
 	w := &writer{}
 	a := Answerer{Reads: &reads{err: boom}, Writer: w}
-	if _, err := a.Answer(context.Background(), call.Ask{Text: "status", Rung: call.P2}); !errors.Is(err, boom) {
+	if _, err := a.Answer(context.Background(), call.Ask{Text: "status"}); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want %v", err, boom)
 	}
 	if len(w.got) != 0 {
