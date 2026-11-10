@@ -117,6 +117,13 @@ def sysctls(root):
     return vals, out
 
 
+def said(key, value):
+    """What the final sysctl.d set does with key: a value, or none when no line sets it or the last
+    one is a bare "-key" (#5309: the log said "None")."""
+    name = key.replace("/", ".")
+    return "sysctl.d leaves %s unset" % name if value is None else "sysctl.d sets %s to %s" % (name, value)
+
+
 def violations(root):
     root = pathlib.Path(root)
     out = ["package %s could turn Wi-Fi on" % p for p in installed(root) if WIFI_PACKAGES.fullmatch(p)]
@@ -144,13 +151,12 @@ def violations(root):
                     out.append("%s/%s is enabled but not in the enforcer preset" % (w.relative_to(root), u.name))
     vals, bad = sysctls(root)
     out += ["sysctl.d: " + b for b in bad]
-    out += ["sysctl.d sets %s to %s; must be %s" % (k.replace("/", "."), vals.get(k), v)
-            for k, v in NODUMP.items() if vals.get(k) != v]
+    out += ["%s; must be %s" % (said(k, vals.get(k)), v) for k, v in NODUMP.items() if vals.get(k) != v]
     # systemd applies a name over any glob that matches it, and a glob replaces only the same glob
     # from an earlier file, so a non-zero rp_filter key anywhere in the final set leaves one on.
-    out += ["sysctl.d sets %s to %s; rp_filter must be 0" % (k.replace("/", "."), vals.get(k))
+    out += ["%s; rp_filter must be 0" % said(k, vals.get(k))
             for k in sorted(set(RPF) | {k for k in vals if iface_key(k, "ipv4", "rp_filter")}) if vals.get(k) != "0"]
-    out += ["sysctl.d sets %s to %s; accept_redirects must be 0" % (k.replace("/", "."), vals.get(k))
+    out += ["%s; accept_redirects must be 0" % said(k, vals.get(k))
             for k in sorted(set(REDIRECTS) | {k for k in vals if any(iface_key(k, f, "accept_redirects") for f in ("ipv4", "ipv6"))})
             if vals.get(k) != "0"]
     return out
