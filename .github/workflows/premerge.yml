@@ -145,8 +145,11 @@ jobs:
             runs "head_sha=$HEAD_SHA" jobs > "$RUNNER_TEMP/head-runs.json" || exit 1
             runs "head_sha=$onto&event=push" attempts/1/jobs > "$RUNNER_TEMP/push-runs.json" || exit 1
             runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$RUNNER_TEMP/schedule-runs.json" || exit 1
+            # The PR's number, head repository and branch bind each head run to this PR (another PR can share the commit).
             jq -n --slurpfile h "$RUNNER_TEMP/head-runs.json" --slurpfile p "$RUNNER_TEMP/push-runs.json" \
-              --slurpfile s "$RUNNER_TEMP/schedule-runs.json" '{head: $h[0], base: ($p[0] + $s[0])}' > "$RUNNER_TEMP/runs.json" || exit 1
+              --slurpfile s "$RUNNER_TEMP/schedule-runs.json" --slurpfile pr "$RUNNER_TEMP/pr.json" --arg repo "$REPO" \
+              '{repo: $repo, pr: {number: $pr[0].number, repo: $pr[0].head.repo.full_name, branch: $pr[0].head.ref},
+                head: $h[0], base: ($p[0] + $s[0])}' > "$RUNNER_TEMP/runs.json" || exit 1
             exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \
               --base refs/remotes/pr/base "$HEAD_SHA"
           ) && state=success

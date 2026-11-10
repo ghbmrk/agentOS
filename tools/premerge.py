@@ -584,21 +584,21 @@ def _block(lines, at):
     return out
 
 
-def pr_paths(text):
-    """The globs a workflow's pull_request or pull_request_target trigger is filtered by: None with neither trigger,
-    [] when it runs on every PR. Read from this repository's block style only; any other form (a flow-style `on:`,
+def pr_paths(text, event="pull_request"):
+    """The globs a workflow's `event` trigger (pull_request or pull_request_target) is filtered by: None without that
+    trigger, [] when it runs on every PR. Read from this repository's block style only; any other form (a flow-style `on:`,
     `paths-ignore`, a negated or unusual glob) reads as [], so the run is owed and an absent one holds the merge."""
     lines = text.splitlines()
     at = next((i for i, line in enumerate(lines) if re.fullmatch(r"on:\s*(?:#.*)?", line)), None)
     if at is None:
-        return [] if "pull_request" in text else None
+        return [] if re.search(rf"\b{event}\b", text) else None
     on = _block(lines, at)
     found, globs = False, []
     for i, line in enumerate(on):
         key = re.fullmatch(r"(\s*)(pull_request(?:_target)?):\s*(#.*)?", line)
         if not key and re.match(r"\s*pull_request", line):
             return []  # `pull_request: {...}` and the like
-        if not key or _indent(line) != _indent(on[0]):
+        if not key or key.group(2) != event or _indent(line) != _indent(on[0]):
             continue
         found, sub = True, _block(on, i)
         if any(re.match(r"\s*(?:paths-ignore|branches-ignore)\s*:", s) for s in sub):
@@ -624,15 +624,28 @@ def _glob_re(glob):
     return re.compile(out.replace("\0", "(?:.*/)?"), re.DOTALL)
 
 
-def _owed(cwd, head, path, files):
-    """Whether a pull_request run of workflow `path` at `head` is expected for a PR changing `files`."""
-    shown = subprocess.run(["git", "show", f"{head}:{path}"], cwd=cwd, capture_output=True)
-    if shown.returncode:
-        return False  # no such workflow at the head, so no run of it
-    globs = pr_paths(shown.stdout.decode(errors="replace"))
-    if globs is None:
+def _owed(cwd, head, base, path, files):
+    """Whether a run of workflow `path` is expected for a PR from `head` into `base` changing `files`: GitHub reads a
+    pull_request trigger from the head's copy of the workflow and a pull_request_target trigger from the base's."""
+    for ref, event in ((head, "pull_request"), (base, "pull_request_target")):
+        shown = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=cwd, capture_output=True)
+        globs = None if shown.returncode else pr_paths(shown.stdout.decode(errors="replace"), event)
+        if globs is not None and (not globs or any(_glob_re(g).fullmatch(f) for g in globs for f in files)):
+            return True
+    return False
+
+
+def _ours(run, pr, repo):
+    """Whether a head run is this PR's (#5380 review): another PR, a fork's included, can carry the same head commit,
+    so a run binds by its head repository and branch, and a same-repository run also by naming only this PR into main.
+    A fork PR's runs name no PR, so a fork's head repository and branch are the binding there."""
+    if (run.get("head_repository") or {}).get("full_name") != pr["repo"] or run.get("head_branch") != pr["branch"]:
         return False
-    return not globs or any(_glob_re(g).fullmatch(f) for g in globs for f in files)
+    if pr["repo"] != repo:
+        return True
+    prs = run.get("pull_requests")
+    return bool(prs) and isinstance(prs, list) and all(
+        p.get("number") == pr["number"] and (p.get("base") or {}).get("ref") == "main" for p in prs)
 
 
 def _jobs(run, attempt):
@@ -644,11 +657,11 @@ def _jobs(run, attempt):
     return [(j.get("name"), j.get("conclusion")) for j in mine] if len(mine) == len(jobs) else None
 
 
-def _base_failed(runs, path, onto):
+def _base_failed(runs, path, onto, repo):
     """Job names that failed in main's own first-attempt push or scheduled run of `path` on the merge base
     (PREMERGE-inherited, #3532): a pusher can rerun a base run, so only attempt 1 counts."""
     mine = [r for r in runs if r.get("path") == path and r.get("head_sha") == onto and r.get("head_branch") == "main"
-            and r.get("event") in ("push", "schedule")]
+            and r.get("event") in ("push", "schedule") and (r.get("head_repository") or {}).get("full_name") == repo]
     if not mine:
         return set()
     r = max(mine, key=lambda r: r.get("id") or 0)
@@ -660,12 +673,15 @@ def _base_failed(runs, path, onto):
 def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
 
-    `runs` is {"head": [...], "base": [...]}: the Actions runs (API JSON) on the head and on the merge base, each
-    failed one with a `jobs` list (the head's latest attempt, the base's first). A run passes on `success` or
+    `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
+    number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
+    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_ours`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
     A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes."""
-    if not isinstance(runs, dict) or not all(isinstance(runs.get(k), list) for k in ("head", "base")):
-        raise ValueError("runs must be {\"head\": [...], \"base\": [...]}")
+    pr = runs.get("pr") if isinstance(runs, dict) else None
+    if not (isinstance(pr, dict) and isinstance(pr.get("number"), int) and all(isinstance(pr.get(k), str) for k in ("repo", "branch"))
+            and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base"))):
+        raise ValueError("runs must be {\"repo\": str, \"pr\": {\"number\": int, \"repo\": str, \"branch\": str}, \"head\": [...], \"base\": [...]}")
     sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
@@ -673,9 +689,9 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     for name, exempt in HELD.items():
         path = f".github/workflows/{name}.yml"
         mine = [r for r in runs["head"] if r.get("path") == path and r.get("head_sha") == sha
-                and r.get("event") in ("pull_request", "pull_request_target")]
+                and r.get("event") in ("pull_request", "pull_request_target") and _ours(r, pr, runs["repo"])]
         if not mine:
-            if _owed(cwd, sha, path, files):
+            if _owed(cwd, sha, base, path, files):
                 held.append(f"{name}:missing")
             continue
         r = max(mine, key=lambda r: r.get("id") or 0)
@@ -684,7 +700,7 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
             continue
         if state == "failure":
             jobs = _jobs(r, r.get("run_attempt"))
-            excused = set(exempt) | _base_failed(runs["base"], path, onto)
+            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
             bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
             if bad and all(c == "failure" and n in excused for n, c in bad):
                 continue

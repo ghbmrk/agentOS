@@ -28,6 +28,14 @@ UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head
     *"resolves to no single commit here, post a new verdict naming the reviewed head".split()]
 
 
+REPO = "o/agentOS"
+
+
+def bundle(head=(), base=(), pr=7, repo=REPO, branch="pr"):
+    """A --runs document for PR `pr` from `repo`'s `branch` into this repository."""
+    return {"repo": REPO, "pr": {"number": pr, "repo": repo, "branch": branch}, "head": list(head), "base": list(base)}
+
+
 class PremergeTest(unittest.TestCase):
     def setUp(self):
         self._d = tempfile.TemporaryDirectory()
@@ -58,7 +66,7 @@ class PremergeTest(unittest.TestCase):
         import json
         f = pathlib.Path(self._d.name + ".runs.json")
         self.addCleanup(lambda: f.unlink(missing_ok=True))
-        f.write_text(json.dumps({"head": list(head), "base": list(base)}))
+        f.write_text(json.dumps(bundle(head, base)))
         return str(f)
 
     def check(self, reviewed, head="HEAD"):
@@ -988,10 +996,12 @@ class PremergeTest(unittest.TestCase):
         return onto, self.commit("code")
 
     @staticmethod
-    def wf(id, name, conclusion, sha, status="completed", event="pull_request", attempt=1, jobs=None, branch="pr"):
+    def wf(id, name, conclusion, sha, status="completed", event="pull_request", attempt=1, jobs=None, branch="pr",
+           repo=REPO, prs=((7, "main"),)):
         r = {"id": id, "name": name, "path": f".github/workflows/{name}.yml", "head_sha": sha, "head_branch": branch,
              "event": event, "status": status, "conclusion": conclusion if status == "completed" else None,
-             "run_attempt": attempt}
+             "run_attempt": attempt, "head_repository": {"full_name": repo},
+             "pull_requests": [{"number": n, "base": {"ref": b}} for n, b in prs]}
         if jobs is not None:
             r["jobs"] = [{"run_id": id, "run_attempt": attempt, "name": n, "conclusion": c} for n, c in jobs]
         return r
@@ -1000,7 +1010,7 @@ class PremergeTest(unittest.TestCase):
         # PREMERGE-cancelled-checks (#5366): GitHub merges an armed PR past a cancelled non-required check, so
         # --check holds each HELD workflow's newest pull_request run on the head to success or skipped.
         onto, sha = self.held_repo()
-        held = lambda head=(), base=(): premerge.checks_held(self.r, {"head": list(head), "base": list(base)}, "HEAD", "main")
+        held = lambda head=(), base=(): premerge.checks_held(self.r, bundle(head, base), "HEAD", "main")
         wf = self.wf
         self.assertEqual(held(), ["vulncheck:missing"])  # formal's paths miss b.md, so no formal run is owed
         for ok in ("success", "skipped"):
@@ -1028,7 +1038,7 @@ class PremergeTest(unittest.TestCase):
         (self.r / "broker/kernel/key").mkdir(parents=True)
         self.write("broker/kernel/key/k.go", "package key\n")
         sha = self.commit("kernel")
-        held = lambda head=(): premerge.checks_held(self.r, {"head": list(head), "base": []}, "HEAD", "main")
+        held = lambda head=(): premerge.checks_held(self.r, bundle(head), "HEAD", "main")
         self.assertEqual(held(), ["vulncheck:missing", "formal:missing"])
         self.assertEqual(held([self.wf(1, "vulncheck", "success", sha), self.wf(2, "formal", "success", sha)]), [])
         # a workflow the head deletes owes no run
@@ -1036,9 +1046,55 @@ class PremergeTest(unittest.TestCase):
         sha = self.commit("drop")
         self.assertEqual(held([self.wf(2, "formal", "success", sha)]), [])
 
+    def test_held_checks_count_only_this_prs_runs(self):
+        # #5380 review: anyone can open a PR (from a fork, or into another base) whose head is this PR's commit, and
+        # its runs share the head sha, so a run counts only when its head repository, branch and PR are this PR's.
+        onto, sha = self.held_repo()
+        wf = lambda id, c, **k: self.wf(id, "vulncheck", c, sha, **k)
+        held = lambda *runs, **k: premerge.checks_held(self.r, bundle(runs, **k), "HEAD", "main")
+        foreign = ({"repo": "outsider/agentOS", "prs": ()}, {"branch": "other"}, {"prs": ((8, "main"),)},
+                   {"prs": ((7, "pkg/old"),)}, {"prs": ((7, "main"), (8, "pkg/old"))}, {"prs": ()})
+        for k in foreign:
+            # a newer foreign run neither holds this PR's pass nor clears its cancel
+            self.assertEqual(held(wf(1, "success"), wf(2, "action_required", **k)), [], k)
+            self.assertEqual(held(wf(1, "cancelled"), wf(2, "success", **k)), ["vulncheck:cancelled"], k)
+            self.assertEqual(held(wf(2, "success", **k)), ["vulncheck:missing"], k)
+        missing = {**wf(1, "success"), "head_repository": None}
+        self.assertEqual(held(missing), ["vulncheck:missing"])
+        # a fork PR's runs name no PR: its head repository and branch bind them
+        fork = dict(repo="outsider/agentOS", branch="topic")
+        self.assertEqual(held(wf(1, "success", repo="outsider/agentOS", branch="topic", prs=()), **fork), [])
+        self.assertEqual(held(wf(1, "success", repo="outsider/agentOS", branch="topic", prs=()),
+                              wf(2, "failure", repo="else/agentOS", branch="topic", prs=()), **fork), [])
+        self.assertEqual(held(wf(1, "success", prs=()), **fork), ["vulncheck:missing"])
+        for bad in ({"pr": None}, {"repo": 1}, {"pr": {"number": "7", "repo": REPO, "branch": "pr"}},
+                    {"pr": {"number": 7, "repo": None, "branch": "pr"}}):
+            with self.assertRaises(ValueError):
+                premerge.checks_held(self.r, {**bundle(), **bad}, "HEAD", "main")
+
+    def test_held_checks_read_a_target_trigger_from_the_base(self):
+        # #5380 review: GitHub runs a pull_request_target workflow from the base's copy, so its filter comes from there.
+        onto, sha = self.held_repo()
+        git(self.r, "checkout", "-q", "main")
+        self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request_target:\n    paths:\n      - 'b.md'\n")
+        self.commit("lane-gate on main")
+        git(self.r, "checkout", "-q", "pr")
+        ok = [self.wf(1, "vulncheck", "success", sha)]
+        held = lambda: premerge.checks_held(self.r, bundle(ok), "HEAD", "main")
+        self.assertEqual(held(), ["lane-gate:missing"])  # not on the head at all, owed by the base's copy
+        self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request_target:\n    paths:\n      - 'nothing'\n")
+        sha = self.commit("head narrows it")
+        ok = [self.wf(1, "vulncheck", "success", sha)]
+        self.assertEqual(held(), ["lane-gate:missing"])  # the head's copy does not decide
+        git(self.r, "checkout", "-q", "main")
+        self.write(".github/workflows/lane-gate.yml", "on:\n  pull_request_target:\n    paths:\n      - 'nothing'\n")
+        self.commit("main narrows it")
+        git(self.r, "checkout", "-q", "pr")
+        self.assertEqual(held(), [])
+
     def test_held_check_failure_passes_only_on_exempt_or_inherited_jobs(self):
         onto, sha = self.held_repo()
-        held = lambda head=(), base=(): premerge.checks_held(self.r, {"head": list(head), "base": list(base)}, "HEAD", "main")
+        held = lambda head=(), base=(): premerge.checks_held(self.r, bundle(head, base), "HEAD", "main")
         wf = self.wf
         failed = lambda jobs, attempt=1: wf(5, "vulncheck", "failure", sha, attempt=attempt, jobs=jobs)
         mainrun = lambda **k: wf(9, "vulncheck", "failure", onto, event=k.pop("event", "push"), branch=k.pop("branch", "main"),
@@ -1052,7 +1108,7 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(held([failed([("vulncheck", "failure"), ("other", "success")], attempt=2)], [mainrun()]), [])
         rerun = mainrun(attempt=2)
         rerun["jobs"][0]["run_attempt"] = 1  # attempt 1's jobs, fetched as the workflow does, of a run a pusher reran
-        for base in (rerun, mainrun(event="pull_request"), mainrun(branch="pr"),
+        for base in (rerun, {**mainrun(), "head_repository": {"full_name": "outsider/agentOS"}}, mainrun(event="pull_request"), mainrun(branch="pr"),
                      {**mainrun(), "head_sha": sha}, {**mainrun(), "jobs": [{"run_id": 8, "run_attempt": 1, "name": "vulncheck",
                                                                            "conclusion": "failure"}]},
                      [mainrun(), wf(10, "vulncheck", "success", onto, event="schedule", branch="main")][1]):
@@ -1077,7 +1133,7 @@ class PremergeTest(unittest.TestCase):
         self.write(".github/workflows/image.yml", "on:\n  pull_request:\n")
         sha = self.commit("image")
         img = lambda jobs, c="failure": self.wf(3, "image", c, sha, jobs=jobs)
-        held = lambda *runs: premerge.checks_held(self.r, {"head": [self.wf(1, "vulncheck", "success", sha), *runs], "base": []},
+        held = lambda *runs: premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha), *runs]),
                                                   "HEAD", "main")
         self.assertEqual(held(img([("build (a)", "success"), ("image-vulncheck", "failure")])), [])
         self.assertEqual(held(img([("build (a)", "failure"), ("image-vulncheck", "failure")])), ["image:failure"])
@@ -1089,16 +1145,21 @@ class PremergeTest(unittest.TestCase):
         p = premerge.pr_paths
         self.assertIsNone(p("on:\n  push:\n    paths:\n      - 'a/**'\n  schedule:\n    - cron: '1 1 * * *'\n"))
         self.assertEqual(p("on:\n  pull_request:\n    types: [opened]\n"), [])
-        self.assertEqual(p("on:\n  pull_request_target:\n    types: [opened, edited]\n# x\npermissions: {}\n"), [])
+        target = "on:\n  pull_request_target:\n    types: [opened, edited]\n# x\npermissions: {}\n"
+        self.assertIsNone(p(target))  # each event reads only its own trigger
+        self.assertEqual(p(target, "pull_request_target"), [])
+        self.assertIsNone(p("on: [pull_request_target]\n"))
+        self.assertEqual(p("on: [pull_request_target]\n", "pull_request_target"), [])
         self.assertEqual(p("on:\n  pull_request:\n    paths:\n      - a/**\n      # skip\n      - \"b.txt\"\n  push:\n"),
                          ["a/**", "b.txt"])
-        self.assertEqual(p("on:\n  pull_request:\n    paths:\n      - a/**\n  pull_request_target:\n"), [])
+        both = "on:\n  pull_request:\n    paths:\n      - a/**\n  pull_request_target:\n"
+        self.assertEqual((p(both), p(both, "pull_request_target")), (["a/**"], []))
         # anything else reads as unfiltered, so the run is owed (fail closed)
         for text in ("on: [push, pull_request]\n", "on: pull_request\n", "\"on\":\n  pull_request:\n    paths: [a]\n",
                      "on:\n  pull_request: {paths: [a]}\n", "on:\n  pull_request:\n    paths: [a]\n",
                      "on:\n  pull_request:\n    paths:\n      - '!a/**'\n", "on:\n  pull_request:\n    paths:\n      - 'a/?'\n",
                      "on:\n  pull_request:\n    paths-ignore:\n      - a\n", "on:\n  pull_request:\n    paths:\n  push:\n",
-                     "on:\n  pull_request:\n    paths:\n      - a/**\n  pull_request_target:\n    paths:\n"):
+                     "on:\n  pull_request_target:\n    paths:\n  pull_request:\n    paths:\n"):
             self.assertEqual(p(text), [], text)
         g = lambda glob, f: bool(premerge._glob_re(glob).fullmatch(f))
         self.assertTrue(g("a/**", "a/b/c.go") and g("a/*", "a/b") and g("**/x.go", "x.go") and g("**/x.go", "a/b/x.go"))
