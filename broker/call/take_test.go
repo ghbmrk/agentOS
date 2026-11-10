@@ -42,7 +42,9 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     serving, the lock that serves one call at a time, is named only in
 //     Serve, which takes it (waiting up to RingWait), makes the token's
 //     ctx and defers cancel then unlock, in that order; nothing writes
-//     tctx or cancel after that.
+//     tctx or cancel after that. Serve ends by reading the token on tctx,
+//     running the loop, cancelling tctx and waiting for the token read to
+//     close, so no Config.Token try follows the call (#5259).
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -170,6 +172,18 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// tctx and cancel are set once, by the pinned statement, and
 		// never written after it (#5251 reviews).
 		var tctx, cancel types.Object
+		// The end: the token read on tctx, the loop, then the read ended
+		// and awaited before Serve returns (#5259).
+		tail := []string{
+			"go cfg.token(tctx, c, token)",
+			"rep, err := loop(tctx, cfg, c, token)",
+			"cancel()",
+			"for range token { }",
+			"return rep, overrun(ctx, tctx, c, err)",
+		}
+		if len(serveBody) < len(tail) || !slices.Equal(serveBody[len(serveBody)-len(tail):], tail) {
+			bad = append(bad, "Serve does not end by reading the token with tctx, running the loop, then cancelling tctx and waiting for the token read")
+		}
 		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+3 > len(serveBody) || !slices.Equal(serveBody[i:i+3], pinned) || !slices.Contains(serveBody[i+3:], "go cfg.token(tctx, c, token)") {
 			bad = append(bad, "Serve does not take serving, make tctx and defer cancel then unlock, in that order, before it reads the token with tctx")
 		} else {
@@ -369,6 +383,12 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// #5251 reviews: a second token read, on a ctx the call does not
 		// end, makes a grant that outlives the call.
 		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(tctx, c, token)\n\tgo cfg.token(ctx, c, token)", want: "Serve calls token 2 times"},
+		// #5259: Serve returns only once the token read has ended, so no
+		// Config.Token try follows the call.
+		{old: "\tfor range token {\n\t}\n", new: "", want: "waiting for the token read"},
+		{old: "\tcancel()\n\tfor range token {", new: "\tfor range token {", want: "waiting for the token read"},
+		{old: "\tcancel()\n\tfor range token {\n\t}\n", new: "\tfor range token {\n\t}\n\tcancel()\n", want: "waiting for the token read"},
+		{old: "\tfor range token {\n\t}\n", new: "\tgo func() {\n\t\tfor range token {\n\t\t}\n\t}()\n", want: "waiting for the token read"},
 		// #5232 R1: serving is Serve's alone, so one call is served at a time.
 		{extra: "func free() { <-serving }", want: "serving is named outside Serve"},
 		{extra: "var held = &serving", want: "serving is named outside Serve"},

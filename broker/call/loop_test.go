@@ -555,6 +555,83 @@ func TestTokenWaitEnds(t *testing.T) {
 	}
 }
 
+// A token try happens while the call is live, and never after Serve
+// returns: Serve ends the token read and waits for it (#5259). In the
+// second part the reader holds "4071" when the call ends and is held in
+// the window's clock until Serve has returned (or 20 ms, since Serve now
+// waits for it); then its window and its ended ctx are both ready. A
+// reader Serve did not wait for picks the window half the time and tries
+// "4071" after the call.
+func TestNoTokenTryFollowsTheCall(t *testing.T) {
+	var mu sync.Mutex
+	var tried []string
+	tries := func() int { mu.Lock(); defer mu.Unlock(); return len(tried) }
+	token := func(k string) bool { mu.Lock(); tried = append(tried, k); mu.Unlock(); return k == "4071" }
+
+	r := newRig(t, fixed("Hi."))
+	r.cfg.Token = token
+	r.serve()
+	for _, k := range []byte("4071#") {
+		r.l.keys <- k
+	}
+	for i := 0; i < 500 && tries() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if n := tries(); n != 1 {
+		t.Fatalf("live call: %d tries before the end", n)
+	}
+	if rep := r.hangup(); rep.Rung != call.P2 || tries() != 1 {
+		t.Fatalf("live call: rung %v, tried %q", rep.Rung, tried)
+	}
+
+	for i := range 20 {
+		mu.Lock()
+		tried = nil
+		mu.Unlock()
+		r := newRig(t, fixed("Hi."))
+		r.cfg.Token = token
+		r.cfg.TokenWindow = 7 * time.Second
+		r.l.active = make(chan struct{})
+		served, opened := make(chan struct{}), make(chan struct{})
+		r.cfg.After = func(d time.Duration) <-chan time.Time {
+			if d != 7*time.Second {
+				return nil
+			}
+			close(opened)
+			<-r.l.ended
+			select {
+			case <-served:
+			case <-time.After(20 * time.Millisecond):
+			}
+			w := make(chan time.Time)
+			close(w)
+			return w
+		}
+		r.serve()
+		for _, k := range []byte("4071") {
+			r.l.keys <- k
+		}
+		for j := 0; j < 500 && len(r.l.keys) > 0; j++ {
+			time.Sleep(time.Millisecond)
+		}
+		close(r.l.active)
+		<-opened
+		close(r.l.ended)
+		select {
+		case <-r.err:
+			<-r.rep
+		case <-time.After(5 * time.Second):
+			t.Fatal("Serve did not return")
+		}
+		before := tries()
+		close(served)
+		r.settle()
+		if n := tries(); n != before {
+			t.Fatalf("call %d: %d token tries after Serve returned", i, n-before)
+		}
+	}
+}
+
 func count(ds []time.Duration, d time.Duration) int {
 	n := 0
 	for _, x := range ds {
