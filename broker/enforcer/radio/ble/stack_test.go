@@ -335,3 +335,23 @@ func TestConfigNamesOnce(t *testing.T) {
 		t.Errorf("two devices: %v", err)
 	}
 }
+
+// TestWantsNothingBeforeStart: until start has learned BlueZ's unique
+// name, the stack takes no signal, not even the bus driver's, nor one
+// whose sender is as empty as the owner not yet learned.
+func TestWantsNothingBeforeStart(t *testing.T) {
+	s := newFuzzStack()
+	s.owner = ""
+	for _, m := range []*Message{
+		{Type: typeSignal, Sender: busDriver, Interface: busDriver, Member: "NameOwnerChanged", Sig: "sss"},
+		propsChanged(1, "", measurePath, []byte{1}),
+	} {
+		if s.wants(m) {
+			t.Errorf("before start the stack wants %s from %q", m.Member, m.Sender)
+		}
+	}
+	s.owner = bluezName
+	if !s.wants(propsChanged(1, bluezName, measurePath, []byte{1})) {
+		t.Error("after start the stack does not want BlueZ's PropertiesChanged")
+	}
+}
