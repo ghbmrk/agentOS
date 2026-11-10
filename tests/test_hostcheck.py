@@ -236,10 +236,98 @@ class PhaseFlagsTest(unittest.TestCase):
                 with self.assertRaises(hostcheck.HostcheckError):
                     hostcheck.phase_flags("unclean", steps, [])
 
+    def test_unclean_phase_holds_no_orderly_end(self):
+        # M12: an unclean phase that shuts down or reboots in order before its quit would leave MOR
+        # cleared yet be judged unclean, so a later MOR left set would pass as disclosed.
+        os_start, cut = ("Linux version", "os"), ("HOSTCHECK-READY", "qmp:quit")
+        hostcheck.phase_flags("unclean", [os_start, ("HOSTCHECK-READY", "serial:task -\n"), ("DONE", None), cut], [])
+        for steps in ([os_start, ("HOSTCHECK-READY", "qmp:system_powerdown"), cut],
+                      [os_start, ("HOSTCHECK-READY", "qmp:system_reset"), cut],
+                      [os_start, ("HOSTCHECK-READY", "serial:reboot\n"), os_start, cut],
+                      [("HOSTCHECK-READY", "serial:reboot\n"), os_start, cut],
+                      [cut]):
+            with self.subTest(steps=steps):
+                with self.assertRaises(hostcheck.HostcheckError):
+                    hostcheck.phase_flags("unclean", steps, [])
+
+    def test_an_orderly_end_the_guest_makes_fails_the_unclean_phase(self):
+        # The guest can shut down or reboot on its own; QEMU's events show it.
+        ev = lambda name, t, reason: {"event": name, "timestamp": {"seconds": t, "microseconds": 0},
+                                      "data": {"guest": reason != "host-qmp-quit", "reason": reason}}
+        cut = ev("SHUTDOWN", 30, "host-qmp-quit")
+        hostcheck.power_cut_only("unclean", [ev("RESET", 5, "guest-reset"), cut], [10.0])
+        for events in ([ev("SHUTDOWN", 20, "guest-shutdown")], [ev("SHUTDOWN", 20, "guest-shutdown"), cut],
+                       [ev("RESET", 20, "guest-reset"), cut], [ev("RESET", 10, "host-qmp-system-reset"), cut],
+                       [ev("SHUTDOWN", 20, "host-signal")]):
+            with self.subTest(events=events):
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "not in a power cut"):
+                    hostcheck.power_cut_only("unclean", events, [10.0])
+
     def test_operator_cannot_flag_a_whole_qemu_run_unclean(self):
         with self.assertRaises(SystemExit):
             hostcheck.main(["qemu", "--work", "/nonexistent/x", "--kernel", "k", "--initrd", "i",
                             "--host-disk", "w=/dev/null", "--flag", "unclean-end"])
+
+
+class CmdQemuTest(unittest.TestCase):
+    """cmd_qemu's own wiring, with QEMU and the snapshots stubbed (M9)."""
+
+    def run_qemu(self, phases, file_phases, events, flags=()):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "vars.fd").write_bytes(b"")
+            (d / "phases.json").write_text(json.dumps(file_phases))
+            seen, judged = [], []
+
+            def boot_once(args, work, label, steps, boot):
+                seen.append((label, steps, boot))
+                os_starts = [10.0] if boot else []
+                return {"rtc": [], "errors": [], "events": events.get(label, []), "os_starts": os_starts}
+
+            evaluate = hostcheck.evaluate
+
+            def spy(before, after, allow, flags=(), **kw):
+                judged.append(list(flags))
+                return evaluate(before, after, allow, flags=flags, **kw)
+
+            argv = ["qemu", "--work", str(d / "work"), "--image", "/x/agentos.img", "--phases-file",
+                    str(d / "phases.json"), "--host-disk", "w=/dev/null", "--ovmf-vars", str(d / "vars.fd"),
+                    "--phases", phases] + [a for f in flags for a in ("--flag", f)]
+            with unittest.mock.patch.multiple(hostcheck, boot_once=boot_once, seed_tpm=lambda a, w: None,
+                                              qemu_snapshot=lambda a, w: snap(), evaluate=spy):
+                rc = hostcheck.main(argv)
+            report = d / "work" / "report.json"
+            return rc, seen, judged, json.loads(report.read_text()) if report.exists() else None
+
+    PHASES = {"task": [["Linux version", "os"], ["READY", "serial:task\n"], ["READY", "serial:poweroff\n"]],
+              "unclean": [["Linux version", "os"], ["READY", "qmp:quit"]]}
+    CUT = {"event": "SHUTDOWN", "timestamp": {"seconds": 30, "microseconds": 0},
+           "data": {"guest": False, "reason": "host-qmp-quit"}}
+
+    def test_flags_reach_each_phase_and_unclean_end_the_unclean_phase_alone(self):
+        rc, seen, judged, report = self.run_qemu("task,unclean,task", self.PHASES, {"unclean": [self.CUT]},
+                                                 flags=["owner-boot-order"])
+        self.assertEqual(rc, 0, report)
+        self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2", "task", "unclean", "task"])
+        self.assertEqual([s[2] for s in seen[:2]], [None, None])  # firmware-only boots have no drive
+        self.assertTrue(all(s[2] for s in seen[2:]))
+        self.assertEqual(seen[3][1], [tuple(x) for x in self.PHASES["unclean"]])
+        self.assertEqual(judged, [["owner-boot-order"], ["owner-boot-order", "unclean-end"], ["owner-boot-order"]])
+        rc, _, judged, _ = self.run_qemu("unclean", self.PHASES, {"unclean": [self.CUT]})
+        self.assertEqual((rc, judged), (0, [["unclean-end"]]))
+
+    def test_an_unclean_phase_from_a_phases_file_with_an_orderly_end_is_refused(self):
+        # The row's failure path: a phases file whose unclean phase powers off in order before the quit.
+        shaped = dict(self.PHASES, unclean=[["Linux version", "os"], ["READY", "qmp:system_powerdown"],
+                                            ["X", "qmp:quit"]])
+        rc, seen, judged, report = self.run_qemu("unclean", shaped, {})
+        self.assertEqual((rc, judged, report), (2, [], None))
+        self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2"])  # refused before it boots
+        # A guest that powers off on its own, told by the console alone, is caught by QEMU's events.
+        off = {"event": "SHUTDOWN", "timestamp": {"seconds": 20, "microseconds": 0},
+               "data": {"guest": True, "reason": "guest-shutdown"}}
+        rc, _, judged, report = self.run_qemu("unclean", self.PHASES, {"unclean": [off, self.CUT]})
+        self.assertEqual((rc, judged, report), (2, [], None))
 
 
 class AllowListTest(unittest.TestCase):
@@ -254,6 +342,41 @@ class AllowListTest(unittest.TestCase):
         ids = {r["change"] for r in allow}
         self.assertLessEqual(ids, set(guide))
         self.assertEqual(ids, {i for i, k in guide.items() if k in ("UEFI", "TPM")})
+
+    # Keys each keyed rule must disclose; a rule added without one fails the test below.
+    EXAMPLES = {"boot-order": [f"{GLOBAL}:BootOrder", f"{GLOBAL}:Boot0000", f"{GLOBAL}:Boot00FF"],
+                "loader-system-token": [f"{SYSTEMD}:LoaderSystemToken"],
+                "sbat-level": [f"{SHIM}:SbatLevel"],
+                "mor": [MOR],
+                "tpm-srk": ["0x81000001"],
+                "tpm-lockout": ["lockoutAuthSet", "TPM2_PT_MAX_AUTH_FAIL", "TPM2_PT_LOCKOUT_INTERVAL",
+                                "TPM2_PT_LOCKOUT_RECOVERY"]}
+
+    def test_every_rule_key_is_anchored_and_flags_its_neighbours(self):
+        # An unanchored or loosened key would disclose a variable or setting next to the one HW-8 names.
+        allow = hostcheck.load_allow()
+        flags = {"owner-boot-order", "unclean-end"}
+        keyed = [r for r in allow if "key" in r]
+        self.assertEqual({r["change"] for r in keyed}, set(self.EXAMPLES))
+        self.assertTrue(all("range" in r for r in allow if "key" not in r))
+        empty = {k: {} for k in hostcheck.KINDS}
+        for rule in keyed:
+            self.assertTrue(rule["key"].startswith("^") and rule["key"].endswith("$"), rule["key"])
+            for key in self.EXAMPLES[rule["change"]]:
+                guid, sep, name = key.rpartition(":")
+                near = [f"x{key}", f"{key}x", f" {key}", f"{key}\n", key.lower() if key != key.lower() else key.upper()]
+                if sep:
+                    near += [f"{SYSTEMD if guid != SYSTEMD else SHIM}:{name}", f"{guid}:{name}x", f"{guid}:x{name}"]
+                for change in rule["changes"]:
+                    for k, want in [(key, "disclosed")] + [(n, "flagged") for n in near]:
+                        with self.subTest(rule=rule["change"], key=k, change=change):
+                            b, a = json.loads(json.dumps(empty)), json.loads(json.dumps(empty))
+                            if change != "added":
+                                b[rule["kind"]][k] = 0
+                            if change != "removed":
+                                a[rule["kind"]][k] = 1
+                            r = hostcheck.evaluate(b, a, allow, flags=flags)
+                            self.assertEqual([f["key"] for f in r[want]], [k], r)
 
 
 class SourcesTest(unittest.TestCase):
