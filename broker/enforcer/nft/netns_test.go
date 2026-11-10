@@ -64,6 +64,10 @@ type home struct {
 	vlans bool // device links are real VLANs on a trunk
 	v6    bool // the kernel has IPv6
 	procs []*exec.Cmd
+	// unleased: a load seeds no lease, nor does share; by default every
+	// host on a shared segment holds a full lease of its address there,
+	// as the daemon seeds them at every load (Seed, #5295).
+	unleased bool
 }
 
 func run(t *testing.T, name string, args ...string) string {
@@ -322,6 +326,9 @@ func (h *home) load(text string) {
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {
 		h.t.Fatal(err)
+	}
+	if !h.unleased && strings.Contains(text, "table inet "+Table+" {") {
+		text += Seed(fixtureLayout(), h.leases())
 	}
 	if err := (load.Loader{Bin: nftBin}).Load(context.Background(), text); err != nil {
 		h.t.Fatal(err)

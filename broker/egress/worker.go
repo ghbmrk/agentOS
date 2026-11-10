@@ -99,9 +99,9 @@ type PlanRoute struct {
 	// RequestHeaders a run worker may send; SignInHeaders a sign-in
 	// worker. Authorization is never on either: the route writes it.
 	RequestHeaders, SignInHeaders []string
-	// ResponseHeaders and ResponsePrefixes are returned to the worker,
-	// redacted.
-	ResponseHeaders, ResponsePrefixes []string
+	// ResponseHeaders are returned to the worker, redacted, each by its
+	// exact name.
+	ResponseHeaders []string
 }
 
 // DeclaredTool is one tool a plan route allows. Namespace is the namespace
@@ -184,9 +184,8 @@ func Codex() PlanRoute {
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
 		},
-		SignInHeaders:    []string{"Accept", "Content-Type", "User-Agent", "Originator"},
-		ResponseHeaders:  []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model"},
-		ResponsePrefixes: []string{"X-Codex-"},
+		SignInHeaders:   []string{"Accept", "Content-Type", "User-Agent", "Originator"},
+		ResponseHeaders: []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model", "X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At", "X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At", "X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance", "X-Codex-Rate-Limit-Reached-Type"},
 	}
 }
 
@@ -369,14 +368,14 @@ func (r PlanRoute) validate() error {
 			}
 		}
 	}
-	for _, h := range append(append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...), r.ResponseHeaders...) {
+	for _, h := range append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...) {
 		if err := header.Name(h); err != nil {
 			return fmt.Errorf("plan route %s: %w", r.Provider, err)
 		}
 	}
-	for _, p := range r.ResponsePrefixes {
-		if err := header.Prefix(p); err != nil {
-			return fmt.Errorf("plan route %s: %w", r.Provider, err)
+	for _, h := range r.ResponseHeaders {
+		if err := header.Answer(h); err != nil {
+			return fmt.Errorf("plan route %s: answer %w", r.Provider, err)
 		}
 	}
 	return nil
@@ -623,7 +622,7 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	red := vault.NewRedactor(injected)
-	for _, h := range w.responseHeaders(resp.Header) {
+	for _, h := range w.c.Route.ResponseHeaders {
 		for _, v := range resp.Header.Values(h) {
 			rw.Header().Add(h, string(red.Redact([]byte(v))))
 		}
@@ -1160,25 +1159,6 @@ func headerHasToken(h http.Header, name, token string) bool {
 		}
 	}
 	return false
-}
-
-func (w *workerRoute) responseHeaders(h http.Header) []string {
-	var names []string
-	for _, n := range w.c.Route.ResponseHeaders {
-		names = append(names, http.CanonicalHeaderKey(n))
-	}
-	for k := range h {
-		if forbiddenHeader(k) {
-			continue
-		}
-		for _, p := range w.c.Route.ResponsePrefixes {
-			if strings.HasPrefix(k, http.CanonicalHeaderKey(p)) {
-				names = append(names, k)
-				break
-			}
-		}
-	}
-	return names
 }
 
 // readQuota turns the provider's quota headers into one reading per pool.

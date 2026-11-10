@@ -51,7 +51,8 @@ import (
 // direction passes only when its connection and its own source and
 // hardware addresses give that same record (bound). Every packet from a
 // shared segment also passes only from the hardware address that holds
-// its source address (claim, ClaimSet). So another host on the segment
+// its source address (claim: its IPv4 lease, LeaseSet, or its IPv6 hold,
+// ClaimSet). So another host on the segment
 // cannot send into a host's connection, an ICMP error or a datagram from
 // the host's address and port, unless it copies both that host's address
 // and its hardware address, nor open a connection first on an address
