@@ -287,6 +287,25 @@ func TestKeepingARegistrationNeedsASealer(t *testing.T) {
 	}
 }
 
+// The registration's plaintext, client secret and all, is wiped once
+// saveReg has sealed it and once loadReg has read it.
+func TestTheRegistrationsPlaintextIsWiped(t *testing.T) {
+	dir := shortDir(t)
+	k := &gmailtest.Kept{Sealer: testSealer()}
+	if err := saveReg(dir, k, *fakeClient, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("saveReg left %d plaintexts, wiped %v", n, wiped)
+	}
+	if r, ok := loadReg(dir, k); !ok || r != *fakeClient {
+		t.Fatalf("loadReg = %v, %v", r.ID, ok)
+	}
+	if n, wiped := k.Wiped(); n != 2 || !wiped {
+		t.Fatalf("loadReg left %d plaintexts, wiped %v", n, wiped)
+	}
+}
+
 // sealReg replaces path with plain sealed as a registration.
 func sealReg(t *testing.T, path, plain string) {
 	t.Helper()

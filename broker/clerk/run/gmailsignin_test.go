@@ -550,6 +550,21 @@ func TestAChangeOfAccountStartsTheWorldOver(t *testing.T) {
 	}
 }
 
+// The record of read mail's plaintext, which names senders, is wiped once
+// saveSeen has sealed it.
+func TestTheSeenRecordsPlaintextIsWiped(t *testing.T) {
+	dir := shortDir(t)
+	k := &gmailtest.Kept{Sealer: testSealer()}
+	var rec sealedSeen
+	rec.Log.Since = "2026-10-21"
+	if err := saveSeen(dir, k, GmailSlot(gmailtest.User), rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("saveSeen left %d plaintexts, wiped %v", n, wiped)
+	}
+}
+
 // A sign-in again, with the registration sealed in the account's grant,
 // clears the reconnect stop: steps and reads run again, and the account
 // keeps its record (#3009, the #3011 UX point).
