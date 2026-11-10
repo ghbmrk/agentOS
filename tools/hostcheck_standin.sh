@@ -7,7 +7,11 @@
 #     task PLANTS   the session's task; PLANTS is "-" (read the host disk,
 #                   write nothing) or a comma list of planted writes for the
 #                   harness's negative test: disk, uefi, nv, rtc
+#     alive NONCE   print HOSTCHECK-ALIVE NONCE: hostcheck's power cut waits
+#                   for it, so the guest was running when QEMU quit
 #     reboot | poweroff
+#     halt          the negative test's halting guest: stops the CPUs with no
+#                   QEMU event and no MOR clear, so MOR stays set as after a cut
 # windows.img: a GPT disk laid out like a Windows install (ESP, MSR, NTFS),
 #   all synthetic.
 set -eu
@@ -19,7 +23,7 @@ trap 'rm -rf "$tmp"' EXIT
 root=$tmp/root
 mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/usr/bin"
 cp "$(command -v busybox)" "$root/bin/busybox"
-for app in sh mount echo printf dd sync reboot poweroff hwclock read cat sleep ln mkdir od; do
+for app in sh mount echo printf dd sync reboot poweroff halt hwclock read cat sleep ln mkdir od; do
 	ln -s busybox "$root/bin/$app"
 done
 tpm2=$(readlink -f "$(command -v tpm2)")
@@ -78,8 +82,10 @@ while :; do
 		fi
 		sync
 		echo HOSTCHECK-DONE ;;
+	alive) echo "HOSTCHECK-ALIVE $arg" ;;
 	reboot) sync; mor_clear "$MOR"; reboot -f ;;
 	poweroff) sync; mor_clear "$MOR"; poweroff -f ;;
+	halt) sync; halt -f ;;
 	esac
 done
 EOF

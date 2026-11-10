@@ -23,7 +23,8 @@ Subcommands:
             process, a snapshot after each. The image is an input: the
             stand-in guest (tools/hostcheck_standin.sh) today, P2-1's later.
             The phase named `unclean` is one boot cut off by a power cut (QMP
-            quit) with no orderly shutdown or reboot in it, and is the only
+            quit as soon as the guest answers a fresh liveness check on its
+            console) with no orderly shutdown or reboot in it, and is the only
             one judged with the unclean-end flag, so MOR may stay set after it
             alone (HW-8).
 
@@ -36,6 +37,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -355,12 +357,13 @@ def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
 
 class Qemu:
     """One QEMU process with OVMF, swtpm and the host's disks, driven through
-    QMP (events: RTC_CHANGE, SHUTDOWN) and its serial console."""
+    QMP (events: RTC_CHANGE, RESET, SHUTDOWN, and the STOP that marks each OS
+    start) and its serial console."""
 
     def __init__(self, args, work, label, boot=None):
         self.work, self.label = work, label
         self.events, self.console = [], bytearray()
-        self.chunks, self.os_starts = [], []  # (console offset, arrival time); OS start times
+        self.os_marks = 0  # STOP events the os steps asked for
         sock_dir = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # unix socket paths stay short
         self.sock_dir = sock_dir
         tpm_sock = os.path.join(sock_dir, "tpm")
@@ -428,32 +431,43 @@ class Qemu:
         with open(self.work / f"console-{self.label}.log", "ab") as log:
             try:
                 while b := self.serial.recv(4096):
-                    self.chunks.append((len(self.console), time.time()))
                     self.console += b
                     log.write(b)
                     log.flush()
             except OSError:
                 pass
 
+    def _await(self, pattern, pos, deadline):
+        rx = re.compile(pattern.encode())
+        while not (m := rx.search(self.console, pos)):
+            if self.proc.poll() is not None:
+                raise HostcheckError(f"{self.label}: QEMU exited before {pattern!r}")
+            if time.monotonic() > deadline:
+                raise HostcheckError(f"{self.label}: no {pattern!r} on the console in time")
+            time.sleep(POLL)
+        return m.end()
+
     def drive(self, steps, deadline):
         """Steps are (regex, action): wait for the regex on the console after
-        the previous match, then send `serial:TEXT` or `qmp:COMMAND`, or for
-        `os` note the time the OS started: RTC writes from then until the
-        next reset are the guest's. Its regex is the OS's first output."""
+        the previous match, then send `serial:TEXT` or `qmp:COMMAND`; for
+        `os`, mark the OS's start in QEMU's own event stream (a STOP, then
+        cont): RTC writes from then until the next reset are the guest's, and
+        its regex is the OS's first output. POWER_CUT quits QEMU as soon as
+        the guest has answered a liveness check sent after the regex matched."""
         pos = 0
         for pattern, action in steps:
-            rx = re.compile(pattern.encode())
-            while not (m := rx.search(self.console, pos)):
-                if self.proc.poll() is not None:
-                    raise HostcheckError(f"{self.label}: QEMU exited before {pattern!r}")
-                if time.monotonic() > deadline:
-                    raise HostcheckError(f"{self.label}: no {pattern!r} on the console in time")
-                time.sleep(0.2)
-            pos = m.end()
+            pos = self._await(pattern, pos, deadline)
             if action and action.startswith("serial:"):
                 self.serial.sendall(action[7:].encode())
             elif action == "os":
-                self.os_starts.append(max(t for off, t in self.chunks if off <= m.start()))
+                self.os_marks += 1
+                self._qmp_send({"execute": "stop"})
+                self._qmp_send({"execute": "cont"})
+            elif action == POWER_CUT:
+                nonce = secrets.token_hex(8)
+                self.serial.sendall(f"alive {nonce}\n".encode())
+                pos = self._await(f"{ALIVE} {nonce}", pos, min(deadline, time.monotonic() + ALIVE_WAIT))
+                self._qmp_send({"execute": "quit"})
             elif action:
                 self._qmp_send({"execute": action[4:]})
 
@@ -472,7 +486,10 @@ class Qemu:
         self._qmp_done()
         if self.proc.returncode:
             raise HostcheckError(f"{self.label}: QEMU exited {self.proc.returncode}")
-        return guest_rtc_writes(self.events, self.os_starts)
+        if (stops := sum(e["event"] == "STOP" for e in self.events)) != self.os_marks:
+            raise HostcheckError(f"{self.label}: {stops} STOP events for {self.os_marks} OS starts, "
+                                 "so the OS starts cannot be told from them")
+        return guest_rtc_writes(self.events)
 
 
 def _wait_path(path, timeout=30):
@@ -511,17 +528,16 @@ def with_guest_errors(result, errors):
     return dict(result, guest_errors=errors, **{"pass": result["pass"] and not errors})
 
 
-def guest_rtc_writes(events, os_starts):
-    """The RTC_CHANGE events after an OS start and before the next reset. The
-    firmware sets the clock's registers on every power-on self-test, before
-    the OS starts. QEMU throttles the event to one a second but keeps the
-    last write's timestamp, so a guest write is never dated before it."""
+def guest_rtc_writes(events):
+    """The RTC_CHANGE events after an OS start (the STOP its os step asked for)
+    and before the next reset. The firmware sets the clock's registers on
+    every power-on self-test, before the OS starts. QEMU throttles the event
+    to one a second, so it can arrive after a later event, but it keeps the
+    last write's timestamp: every stamp here is QEMU's own clock."""
     stamp = lambda e: e["timestamp"]["seconds"] + e["timestamp"]["microseconds"] / 1e6
-    timeline = sorted([(t, 0, None) for t in os_starts] + [(stamp(e), 1, e) for e in events],
-                      key=lambda x: x[:2])
     out, guest = [], False
-    for _, kind, e in timeline:
-        if kind == 0:
+    for e in sorted(events, key=stamp):  # stable: a tie keeps QEMU's order
+        if e["event"] == "STOP":
             guest = True
         elif e["event"] == "RESET":
             guest = False
@@ -570,7 +586,10 @@ FIRMWARE_ONLY = [(r"Shell> |No bootable option or device was found", "qmp:quit")
 # boot cut off by a QMP quit with the guest still running, and only its snapshot is judged with the
 # flag; every orderly phase, including one after it, must find MOR cleared again. Its steps may send
 # the guest text, but the guest's own shutdown or reboot shows in QEMU's events, and any fails it.
-UNCLEAN_PHASE, UNCLEAN_FLAG, POWER_CUT = "unclean", "unclean-end", "qmp:quit"
+# A halt shows in no event, so the cut sends `alive NONCE` and quits only once the guest has printed
+# ALIVE NONCE: a guest that halted or hung never answers, and the run fails naming the line.
+UNCLEAN_PHASE, UNCLEAN_FLAG, POWER_CUT = "unclean", "unclean-end", "power-cut"
+ALIVE, ALIVE_WAIT, POLL = "HOSTCHECK-ALIVE", 30, 0.02
 
 
 def phase_flags(name, steps, flags):
@@ -579,7 +598,8 @@ def phase_flags(name, steps, flags):
         return list(flags)
     actions = [action for _, action in steps]
     if not actions or actions[-1] != POWER_CUT:
-        raise HostcheckError(f"phase {name!r} must end in {POWER_CUT!r}, a power cut")
+        raise HostcheckError(f"phase {name!r} must end in {POWER_CUT!r}, a power cut of a guest that "
+                             f"answers {ALIVE}")
     if actions[0] != "os" or actions.count("os") != 1:
         raise HostcheckError(f"phase {name!r} must be one boot: its first step os and no other")
     if bad := [a for a in actions[1:-1] if a and not a.startswith("serial:")]:
@@ -587,17 +607,20 @@ def phase_flags(name, steps, flags):
     return list(flags) + [UNCLEAN_FLAG]
 
 
-def power_cut_only(name, events, os_starts):
+def power_cut_only(name, events):
     """Fail unless phase NAME's boot ended in the QMP quit, its last event and only shutdown, with no
-    reset once the OS started (firmware resets before it are the firmware's)."""
-    stamp = lambda e: e["timestamp"]["seconds"] + e["timestamp"]["microseconds"] / 1e6
+    reset after the OS started (firmware resets before it are the firmware's). The OS start is the
+    STOP its os step asked for, and QEMU sends RESET, STOP and SHUTDOWN unthrottled, in the order they
+    happen: their order in the stream is the order, with no clock read."""
     last = events[-1] if events else {}
     if last.get("event") != "SHUTDOWN" or last.get("data", {}).get("reason") != "host-qmp-quit":
         raise HostcheckError(f"phase {name!r} did not end in the QMP quit's SHUTDOWN, so not in a power cut")
     if sum(e["event"] == "SHUTDOWN" for e in events) != 1:
         raise HostcheckError(f"phase {name!r} shut down more than once, so not in a power cut")
+    started = False
     for e in events:
-        if e["event"] == "RESET" and any(stamp(e) >= t for t in os_starts):
+        started = started or e["event"] == "STOP"
+        if e["event"] == "RESET" and started:
             reason = e.get("data", {}).get("reason")
             raise HostcheckError(f"phase {name!r} rebooted ({reason}), so not in a power cut")
 
@@ -626,8 +649,7 @@ def seed_tpm(args, work):
 
 
 def boot_once(args, work, label, steps, boot):
-    """One QEMU process driven through STEPS: its guest RTC writes, guest errors, QMP events and
-    OS start times."""
+    """One QEMU process driven through STEPS: its guest RTC writes, guest errors and QMP events."""
     deadline = time.monotonic() + args.timeout
     q = Qemu(args, work, label, boot)
     try:
@@ -636,7 +658,7 @@ def boot_once(args, work, label, steps, boot):
     except BaseException:
         q.proc.kill()
         raise
-    return {"rtc": rtc, "errors": guest_errors(q.console), "events": q.events, "os_starts": q.os_starts}
+    return {"rtc": rtc, "errors": guest_errors(q.console), "events": q.events}
 
 
 def cmd_qemu(args):
@@ -670,11 +692,13 @@ def cmd_qemu(args):
     seed_tpm(args, work)
     if args.kernel:
         boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
-        phases = standin_phases(args.plant)
     else:
         boot = ["-drive", f"if=none,id=agentos,format=raw,file={args.image}",
                 "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+    if args.phases_file:
         phases = {k: [tuple(s) for s in v] for k, v in json.loads(pathlib.Path(args.phases_file).read_text()).items()}
+    else:
+        phases = standin_phases(args.plant)
     snaps = {}
     for label in ("firmware-1", "firmware-2"):
         boot_once(args, work, label, FIRMWARE_ONLY, None)
@@ -694,7 +718,7 @@ def cmd_qemu(args):
         flags = phase_flags(phase, phases[phase], args.flag)
         ran = boot_once(args, work, phase, phases[phase], boot)
         if phase == UNCLEAN_PHASE:
-            power_cut_only(phase, ran["events"], ran["os_starts"])
+            power_cut_only(phase, ran["events"])
         rtc = [{"phase": phase, "offset": e["data"]["offset"]} for e in ran["rtc"]]
         after = qemu_snapshot(args, work)
         r = evaluate(baseline, after, load_allow(), flags=flags, noise=noise, rtc_writes=rtc)
@@ -749,8 +773,8 @@ def main(argv=None):
     src.add_argument("--kernel", help="stand-in guest kernel (with --initrd)")
     src.add_argument("--image", help="a raw agentOS drive image, attached as a USB disk (with --phases-file)")
     q.add_argument("--initrd")
-    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]; "
-                   "action os marks the OS's first output in each boot")
+    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...], in place of the stand-in's; "
+                   f"action os marks the OS's first output in each boot, {POWER_CUT} ends the unclean phase")
     q.add_argument("--host-disk", action="append", required=True, metavar="NAME=PATH[,bus=nvme|virtio|ahci]")
     q.add_argument("--phases", default="task,restart",
                    help=f"comma list; {UNCLEAN_PHASE!r} ends in a power cut (stand-in: task,restart,unclean)")
