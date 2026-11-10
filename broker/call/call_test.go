@@ -33,6 +33,7 @@ type line struct {
 	sayErr  error
 	empty   bool
 	hungUp  bool
+	stuck   bool
 }
 
 func newLine() *line {
@@ -48,7 +49,14 @@ func (l *line) Speech() <-chan []byte        { return l.speech }
 func (l *line) Keys() <-chan byte            { return l.keys }
 func (l *line) Hangup(context.Context) error { l.mu.Lock(); l.hungUp = true; l.mu.Unlock(); return nil }
 func (l *line) Number() string               { return l.number }
-func (l *line) Answer(context.Context) error { l.answered = true; return nil }
+func (l *line) Answer(ctx context.Context) error {
+	if l.stuck { // answers nothing until ctx ends
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	l.answered = true
+	return nil
+}
 func (l *line) Say(ctx context.Context, pcm []byte) error {
 	l.mu.Lock()
 	gate, err := l.gate, l.sayErr

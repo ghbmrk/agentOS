@@ -218,16 +218,23 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)
 	defer func() { cancel(); <-serving }()
 	if err := c.Answer(tctx); err != nil {
-		return Report{}, err
+		return Report{}, overrun(ctx, tctx, c, err)
 	}
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
 	rep, err := loop(tctx, cfg, c, token)
-	if context.Cause(tctx) == ErrTooLong { // the line never reported the end
-		c.Hangup(ctx)
-		return rep, ErrTooLong
+	return rep, overrun(ctx, tctx, c, err)
+}
+
+// overrun is err, or ErrTooLong once the call's ctx has reached MaxCall:
+// then the line never reported the end, or never finished answering, so
+// overrun hangs it up on Serve's own ctx.
+func overrun(ctx, call context.Context, l Line, err error) error {
+	if context.Cause(call) != ErrTooLong {
+		return err
 	}
-	return rep, err
+	l.Hangup(ctx)
+	return ErrTooLong
 }
 
 // token sends the call's grant on out: check's verdict on the speed-dial

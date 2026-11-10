@@ -733,8 +733,9 @@ func TestARedialAfterADropIsAnswered(t *testing.T) {
 	b.hangup()
 }
 
-// A call whose line never reports its end is ended at MaxCall (default 30
-// min), hung up, and the next owner call is answered (#5252).
+// A call whose line never reports its end, or never finishes answering, is
+// ended at MaxCall (default 30 min), hung up, and the next owner call is
+// answered (#5252).
 func TestACallEndsAtMaxCall(t *testing.T) {
 	r := newRig(t, fixed("Hi."))
 	deadline := make(chan time.Duration, 1)
@@ -766,6 +767,22 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 	r.l.mu.Unlock()
 	if !hungUp {
 		t.Fatal("a call past MaxCall was not hung up")
+	}
+
+	// An Answer that never completes is bounded the same way (Lens on
+	// #5258).
+	r = newRig(t, fixed("Hi."))
+	r.cfg.MaxCall = 100 * time.Millisecond
+	r.l.stuck = true
+	r.serve()
+	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
+		t.Fatalf("an Answer past MaxCall: err %v", err)
+	}
+	r.l.mu.Lock()
+	hungUp = r.l.hungUp
+	r.l.mu.Unlock()
+	if !hungUp {
+		t.Fatal("an Answer past MaxCall was not hung up")
 	}
 
 	next := newRig(t, fixed("All quiet."))
