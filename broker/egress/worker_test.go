@@ -1002,6 +1002,16 @@ func TestPlanRouteHeadersRefuseTheCorpus(t *testing.T) {
 	if err := takes(func(r *PlanRoute) { r.RequestHeaders = []string{"X-Original-Url"} }); err == nil || err.Error() != `plan route codex: may not forward header "X-Original-Url"` {
 		t.Errorf("X-Original-Url: got %v", err)
 	}
+	// An answer header a prefix matches is on no list: one naming a
+	// credential, the broker or an encoding is dropped, the rest pass.
+	w := &workerRoute{c: WorkerRouteConfig{Route: Codex()}}
+	got := w.responseHeaders(http.Header{
+		"X-Codex-Primary-Used-Percent": {"1"}, "X-Codex-Session-Token": {"t"}, "X-Codex-Auth": {"t"},
+		"X-Codex-Agentos-Denied": {"1"}, "X-Other": {"1"},
+	})
+	if strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-Primary-Used-Percent" {
+		t.Errorf("answer headers passed: %q", got)
+	}
 	if err := takes(func(r *PlanRoute) { r.ResponsePrefixes = []string{"X-Codex-"} }); err != nil {
 		t.Errorf(`the prefix "X-Codex-" was refused: %v`, err)
 	}
