@@ -217,10 +217,13 @@ func (cfg Config) check(token string) Rung {
 	return P0
 }
 
-// Run holds one call at rung until it ends or ctx is done. Turns are
+// runAt holds one call at rung until it ends or ctx is done. Turns are
 // answered one at a time: a new final turn, any speech from the owner, or
-// the 0 key stops the answer being spoken first.
-func Run(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
+// the 0 key stops the answer being spoken first. It is unexported so that
+// Serve, which takes the rung from the token and never from the caller, is
+// the package's only way into the loop: wiring cannot run a caller-ID call
+// above P0 (briefs/VOICE-ro.md rule 4, #4949).
+func runAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 	known := make(chan Rung, 1)
 	known <- rung
 	return cfg.withDefaults().run(ctx, l, rung, known)
@@ -233,7 +236,7 @@ type callRung struct {
 	r     Rung
 }
 
-// run is Run, with the rung to come on token. It listens from the start,
+// run is runAt, with the rung to come on token. It listens from the start,
 // so the owner's first words are heard while the token is read; keys are
 // the token's until it is read. A turn starts as soon as it is heard,
 // whether or not the rung is known yet, so its one clip deadline covers
@@ -258,7 +261,7 @@ func (cfg Config) run(ctx context.Context, l Line, rung Rung, token <-chan Rung)
 		close(cr.ready)
 		rep.Rung, token, keys = r, nil, l.Keys()
 	}
-	select { // Run's rung is known before the first turn can start
+	select { // runAt's rung is known before the first turn can start
 	case r := <-token:
 		known(r)
 	default:

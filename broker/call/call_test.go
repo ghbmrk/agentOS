@@ -163,7 +163,7 @@ func (r *rig) run(rung call.Rung) { r.runCtx(context.Background(), rung) }
 
 func (r *rig) runCtx(ctx context.Context, rung call.Rung) {
 	go func() {
-		rep, err := call.Run(ctx, r.cfg, r.l, rung)
+		rep, err := call.RunAt(ctx, r.cfg, r.l, rung)
 		r.err <- err
 		r.rep <- rep
 	}()
@@ -396,7 +396,7 @@ func TestZeroStopsSpeech(t *testing.T) {
 	}
 }
 
-// Run's rung is known before its first turn starts, so every turn asks the
+// runAt's rung is known before its first turn starts, so every turn asks the
 // answerer at once and a barge-in carries nothing: carry is only for a
 // question stopped while a speed-dial token is still read. The owner's
 // words are already waiting when the loop starts, the case where a loop
