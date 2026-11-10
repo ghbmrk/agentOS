@@ -333,7 +333,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
-| HOST-1g | HOST-1g: power_cut_only misses a guest halt (no QEMU event) and compares QEMU and serial timestamps in a way that can race. Release; from #5254. | #5254, #5193 | queued (release; tier A) |
+| HOST-1g | HOST-1g: power_cut_only misses a guest halt (no QEMU event) and compares QEMU and serial timestamps in a way that can race. Release; from #5254. | #5254, #5193 | in review (release; tier A) |
+| HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -439,21 +440,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-netns-m0 | ENF-netns-m0: the enforcer's main thread can stay parked in a stopped stack's network namespace (inNetns on m0). Release; from #5140. | #5140 | building (release; tier A) |
 | KRN-forget-c-confirm-words | KRN-forget-c-confirm-words: the Forget ask names kinds in household words (2 messages, 1 photo), not raw class names like wrap-key. From #5156 Lens R1. | #5124, #5156 | queued (release; tier A) |
 | ENF-net-ra-fu | ENF-net-ra-fu: a stopped resolver shows on the enforcer page; accept_ra=0 does not reach later uplinks; an image sysctl.d line holds accept_redirects=0 outside the daemon. Release; from #5161 (R1 to R3). | #5161 | queued (release; tier A) |
-| IMG-keeper-reach-sysd | IMG-keeper-reach-sysd: the keeper check and the link rules count the directories systemd's own service users write (/run/systemd/resolve, /run/systemd/netif, /var/lib/systemd/timesync) as service-owned. Release; from #5154. | #5154 | in review (release; tier A) |
+| IMG-keeper-reach-sysd | IMG-keeper-reach-sysd: the keeper check and the link rules count the directories systemd's own service users write (/run/systemd/resolve, /run/systemd/netif, /var/lib/systemd/timesync) as service-owned. Release; from #5154. | #5154 | escalated (release; tier A) |
 | AGENTOSD-broker-group-status | AGENTOSD-broker-group-status: a leftover broker/ group that will not go shows STATUS 'update needed', not 'restart'. From #5172. | #5172 | queued (release; tier A) |
 | ENF-m-wan-ra | ENF-m-wan-ra: the WAN's router-advertisement handling is set by its link configuration (networkd IPv6AcceptRA= or sysctl.d accept_ra=2 on the WAN) and checked by ci_boot.sh; named in the ENF-m-b brief. Release; from #5165 (L3 R-a). | #5165 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
 | IMG-keeper-reach-tmpfiles-run | IMG-keeper-reach-tmpfiles-run: the link rules and the keeper check count a directory a tmpfiles.d line makes under a box mount for a non-root user as service-owned. Release; from #5167. | #5167 | queued (release; tier A) |
-| ENF-netns-ble | ENF-netns-ble: radio/ble's namespaced harness uses netnstest, so a child skip fails CI, and its 114 old mutgate survivors are killed. Release; from #5152. | #5152, #5197 | in review (release; tier A) |
 | CI-image-tool-loader | CI-image-tool-loader: the image's systemd and kmod in the differential tests fail on any library loaded from outside the reference root (loader --library-path falls back to the host's directories). Release; from #5055. | #5230, #4776 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-fu | IMG-keeper-reach-sysd-fu: PID 1 acts on no path inside a directory it hands to another user (SocketUser= chown follows a link at the socket path). Release; from #5228. | #5228, #5167 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-what | IMG-keeper-reach-sysd-what: a bind mount's What= and overlay upperdir/workdir count as paths PID 1 makes. Release; from #5228 Security 6760938141. | #5167 | in review (release; tier A) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
-| ENF-netns-ble-fu | ENF-netns-ble-fu: the ble tests dial the host system bus and set a hard RLIMIT_DATA above a lower inherited limit. Release; from #5240. | #5240, #5212 | queued (release; tier A) |
+| ENF-netns-ble-fu | ENF-netns-ble-fu: the ble tests dial the host system bus and set a hard RLIMIT_DATA above a lower inherited limit. Release; from #5240. | #5240, #5212 | building (release; tier A) |
 | VOICE-ro-d-busy-fu | VOICE-ro-d-busy-fu: an owner redial right after a dropped call hears ringing until voicemail because Serve's TryLock refuses with ErrBusy. Release; from #5251. | #5251, #5232 | in review (release; tier A) |
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
 | VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
 | VOICE-ro-d-maxcall-notice | VOICE-ro-d-maxcall-notice: the owner hears a spoken notice before the 30-minute maximum-call hang-up. Release (UX); from #5258. | #5258, #5252 | queued (release; tier A) |
+| TEST-flake-plan-reading-signal | TEST-flake-plan-reading-signal: TestPlanHeldModelCallCancelledBeforeConnectIsNotSent drops its non-blocking reading signal and hangs 25 minutes under -race; buffer the channel and bound the wait. Release; flake, 2nd sighting (#5240 twice). | #5240, #5128 | in review (release; tier A) |
+| TEST-flake-run-reading-signal | TEST-flake-run-reading-signal: broker/clerk/run/plansignin_test.go signals reading through an unbuffered channel, so the test can hang as clerk/plan's did. Release; from #5265. | #5265, #5264 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
