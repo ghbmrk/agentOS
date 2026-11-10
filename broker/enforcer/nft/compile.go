@@ -237,20 +237,24 @@ func snoop(seg, iface string) []string {
 // MinLease is the shortest lease dnsmasq grants, in seconds.
 const MinLease = 120
 
+// leaseFloors are the floors of the lease bands, in seconds, from
+// MinLease to LeaseTimeout: each the least that keeps the band below it
+// under one and a half times its floor. A table, not a loop, so no change
+// to it can spin; TestLeaseBandsCoverEveryLease checks it.
+var leaseFloors = []int{MinLease, 149, 223, 334, 500, 750, 1125, 1687, 2530, 3794, 5690, 8534, 12800, 19200, 28800, LeaseTimeout}
+
 // leaseBands are the lease times, in seconds, each snoop rule reads: each
-// band is its floor and its top (both included), from MinLease to
-// LeaseTimeout, every top below one and a half times its floor, and the
-// last band LeaseTimeout alone. They are laid from the top down, each
-// floor the least that keeps its top under one and a half times it, and
-// the lowest floor MinLease, which ends the loop.
+// band is its floor and its top (both included), every top below one and
+// a half times its floor, and the last band LeaseTimeout alone.
 func leaseBands() [][2]int {
-	out := [][2]int{{LeaseTimeout, LeaseTimeout}}
-	for top := LeaseTimeout - 1; top != MinLease-1; {
-		lo := max(MinLease, (2*(top+1)+2)/3)
-		out = append(out, [2]int{lo, top})
-		top = lo - 1
+	out := make([][2]int, len(leaseFloors))
+	for i, lo := range leaseFloors {
+		top := LeaseTimeout
+		if i+1 < len(leaseFloors) {
+			top = leaseFloors[i+1] - 1
+		}
+		out[i] = [2]int{lo, top}
 	}
-	slices.Reverse(out)
 	return out
 }
 
