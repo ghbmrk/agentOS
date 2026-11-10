@@ -1327,3 +1327,43 @@ func waitFor(t *testing.T, f func() bool) {
 	}
 	t.Fatal("timed out")
 }
+
+// TestCutCoreReconnectGetsUnsentAlert (NET-2 Texts and calls; #4903): a
+// core cut by a burst sends past KindPaused's bucket, so the next
+// hello's log line is dropped; an alert raised while no session was open
+// is still offered to the session that reconnects, and the kernel's
+// taking it is recorded. Catches the re-offer riding on the hello's log
+// line (#4755 item 7).
+func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
+	x, _ := enrolled(t, true)
+	addr := x.serve()
+	c, _ := x.dial(addr, x.core)
+	for range wire.Rate(wire.RateRead).Burst {
+		if code := c.read(); code != wire.OK {
+			t.Fatalf("a read inside the rate: %v", code)
+		}
+	}
+	c.read() // past the rate: a burst
+	waitFor(t, func() bool { return x.d.cut.Stage() == channel.Tripped })
+	for range channel.DefaultLimit(channel.KindPaused).Burst + 1 {
+		if code := c.read(); code != wire.Paused {
+			t.Fatalf("a request after the trip: %v", code)
+		}
+	}
+	c.conn.Close()
+	waitFor(t, func() bool { return x.d.conns.Load() == 0 })
+	unsent := func() bool {
+		return slices.ContainsFunc(x.d.alerts.Log(), func(r alert.Record) bool { return r.Kind == alert.HeadFork && !r.Sent })
+	}
+	x.d.alerts.Raise(alert.HeadFork, "")
+	if !unsent() {
+		t.Fatal("an alert counted as sent with no session open")
+	}
+	c, _ = x.dial(addr, x.core)
+	if code := c.read(); code != wire.Paused {
+		t.Fatalf("a request from the reconnected cut core: %v", code)
+	}
+	if c.alerts == 0 || unsent() {
+		t.Fatalf("the alert raised while the cut core was gone was not offered on its reconnect (%d alerts read)", c.alerts)
+	}
+}

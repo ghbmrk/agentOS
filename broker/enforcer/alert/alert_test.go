@@ -659,3 +659,99 @@ func TestFailedCutBackKeepsSavedRecord(t *testing.T) {
 		t.Fatalf("a saved record was lost to a later cut-back: %+v", b.Log())
 	}
 }
+
+// TestOneOfferPerTelling (NET-2 Texts and calls; #4903): two callers
+// that find the same alert unsent, two Core(true) calls or a Raise and a
+// Core, offer it once between them. The kernel's first Send blocks until
+// the second caller has had time to reach Send too; it still takes one
+// copy, and an alert resolved before the kernel took it is not offered.
+// Catches collecting an unsent alert outside the offer lock.
+func TestOneOfferPerTelling(t *testing.T) {
+	type gate struct {
+		mu      sync.Mutex
+		refuse  bool
+		block   bool
+		got     int
+		entered chan struct{}
+		release chan struct{}
+	}
+	newAlerts := func(g *gate) *Alerts {
+		g.entered, g.release = make(chan struct{}), make(chan struct{})
+		send := func(wire.Alert) error {
+			g.mu.Lock()
+			if g.refuse {
+				g.mu.Unlock()
+				return channel.ErrNoSession
+			}
+			g.got++
+			first := g.block
+			g.block = false
+			g.mu.Unlock()
+			if first {
+				close(g.entered)
+				<-g.release
+			}
+			return nil
+		}
+		a, err := New(Config{Send: send, Light: &bulb{}, Journal: &journal{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	race := func(g *gate, first, second func()) {
+		t.Helper()
+		var wg sync.WaitGroup
+		wg.Go(first)
+		select {
+		case <-g.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the first offer never reached Send")
+		}
+		wg.Go(second)
+		time.Sleep(100 * time.Millisecond) // the second caller reaches Send or the offer lock
+		close(g.release)
+		wg.Wait()
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.got != 1 {
+			t.Fatalf("the kernel took %d copies of one alert, want 1", g.got)
+		}
+	}
+
+	// Two Core(true) calls, as a hello and a tick, for an alert the
+	// kernel refused while the core was gone.
+	g := &gate{refuse: true}
+	a := newAlerts(g)
+	if r, _ := a.Raise(HeadFork, ""); r.Sent {
+		t.Fatal("a refused text counts as sent")
+	}
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	race(g, func() { a.Core(true) }, func() { a.Core(true) })
+
+	// A Raise offering a new alert and a Core coming up.
+	g = &gate{block: true}
+	a = newAlerts(g)
+	race(g, func() { _, _ = a.Raise(DoorForced, "front-door") }, func() { a.Core(true) })
+	if r := a.Status().Open; len(r) != 1 || !r[0].Sent {
+		t.Fatalf("the offered alert: %+v", r)
+	}
+
+	// An alert the owner resolved before the kernel took it is not
+	// offered when the core comes back: there is nothing left to act on.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	r, _ := a.Raise(HeadFork, "")
+	if err := a.Resolve(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	g.refuse = false
+	g.mu.Unlock()
+	a.Core(true)
+	if g.got != 0 {
+		t.Fatalf("a resolved alert was offered %d times", g.got)
+	}
+}
