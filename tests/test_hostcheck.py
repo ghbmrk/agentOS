@@ -159,15 +159,27 @@ class DiffTest(unittest.TestCase):
         # OVMF sets the clock's registers on every power-on self-test, and
         # QEMU throttles RTC_CHANGE to one event a second, so how many events
         # the firmware's writes make varies (CI saw 1 and 2). A write is the
-        # guest's when it comes after the OS started on the console and
-        # before the next reset.
+        # guest's when it comes after the OS started (the STOP its os step
+        # asks QEMU for) and before the next reset.
         ev = lambda t, name, **d: {"event": name, "timestamp": {"seconds": t, "microseconds": 0}, "data": d}
         events = [ev(1, "RTC_CHANGE", offset=0), ev(2, "RTC_CHANGE", offset=-1), ev(6, "RESET"),
                   ev(7, "RTC_CHANGE", offset=0), ev(12, "RTC_CHANGE", offset=0), ev(20, "SHUTDOWN")]
-        self.assertEqual(hostcheck.guest_rtc_writes(events, [3.0, 8.0]), [events[4]])
-        self.assertEqual(hostcheck.guest_rtc_writes(events, [3.0, 13.0]), [])
-        self.assertEqual(hostcheck.guest_rtc_writes(events, []), [])
-        self.assertEqual(hostcheck.guest_rtc_writes(events, [0.5]), [events[0], events[1]])
+        marked = lambda *ts: sorted(events + [ev(t, "STOP") for t in ts], key=lambda e: e["timestamp"]["seconds"])
+        self.assertEqual(hostcheck.guest_rtc_writes(marked(3, 8)), [events[4]])
+        self.assertEqual(hostcheck.guest_rtc_writes(marked(3, 13)), [])
+        self.assertEqual(hostcheck.guest_rtc_writes(events), [])
+        self.assertEqual(hostcheck.guest_rtc_writes(marked(0.5)), [events[0], events[1]])
+
+    def test_a_throttled_rtc_event_counts_where_its_timestamp_puts_it(self):
+        # #5256 item 2: QEMU holds back an RTC_CHANGE within a second of the last one and sends it
+        # later with its write's timestamp, so it can arrive after the reboot that followed the
+        # write. Ordered by arrival it would fall in the firmware's window and pass; by QEMU's one
+        # clock it is the guest's. The same holds for a firmware write sent after the OS's mark.
+        ev = lambda t, name, **d: {"event": name, "timestamp": {"seconds": t, "microseconds": 0}, "data": d}
+        write = ev(9, "RTC_CHANGE", offset=5)
+        self.assertEqual(hostcheck.guest_rtc_writes([ev(3, "STOP"), ev(10, "RESET"), write]), [write])
+        firmware = ev(2, "RTC_CHANGE", offset=0)
+        self.assertEqual(hostcheck.guest_rtc_writes([ev(3, "STOP"), firmware, ev(20, "SHUTDOWN")]), [])
 
     def test_firmware_noise_excluded_for_uefi_only(self):
         noisy = f"eb704011-1402-11d3-8e77-00a0c969723b:MTC"
@@ -232,7 +244,10 @@ class PhaseFlagsTest(unittest.TestCase):
 
     def test_unclean_phase_must_end_in_a_power_cut(self):
         orderly = hostcheck.standin_phases("")["task"]
-        for steps in (orderly, [], [("Linux version", "os"), ("HOSTCHECK-READY", "qmp:system_powerdown")]):
+        # #5256 item 3: a bare QMP quit could fire after the guest halted or before it ran anything;
+        # only the power cut, which waits for the guest's fresh answer, ends the phase.
+        for steps in (orderly, [], [("Linux version", "os"), ("HOSTCHECK-READY", "qmp:system_powerdown")],
+                      [("Linux version", "os"), ("HOSTCHECK-READY", "qmp:quit")]):
             with self.subTest(steps=steps):
                 with self.assertRaises(hostcheck.HostcheckError):
                     hostcheck.phase_flags("unclean", steps, [])
@@ -240,7 +255,7 @@ class PhaseFlagsTest(unittest.TestCase):
     def test_unclean_phase_holds_no_orderly_end(self):
         # M12: an unclean phase that shuts down or reboots in order before its quit would leave MOR
         # cleared yet be judged unclean, so a later MOR left set would pass as disclosed.
-        os_start, cut = ("Linux version", "os"), ("HOSTCHECK-READY", "qmp:quit")
+        os_start, cut = ("Linux version", "os"), ("HOSTCHECK-READY", "power-cut")
         hostcheck.phase_flags("unclean", [os_start, ("HOSTCHECK-READY", "serial:task -\n"), ("DONE", None), cut], [])
         for steps in ([os_start, ("HOSTCHECK-READY", "qmp:system_powerdown"), cut],
                       [os_start, ("HOSTCHECK-READY", "qmp:system_reset"), cut],
@@ -255,16 +270,28 @@ class PhaseFlagsTest(unittest.TestCase):
         # The guest can shut down or reboot on its own; QEMU's events show it.
         ev = lambda name, t, reason: {"event": name, "timestamp": {"seconds": t, "microseconds": 0},
                                       "data": {"guest": reason != "host-qmp-quit", "reason": reason}}
-        cut = ev("SHUTDOWN", 30, "host-qmp-quit")
-        hostcheck.power_cut_only("unclean", [ev("RESET", 5, "guest-reset"), cut], [10.0])
-        for events in ([ev("SHUTDOWN", 20, "guest-shutdown")], [ev("SHUTDOWN", 20, "guest-shutdown"), cut],
-                       [ev("RESET", 20, "guest-reset"), cut], [ev("RESET", 10, "host-qmp-system-reset"), cut],
+        cut, os_mark = ev("SHUTDOWN", 30, "host-qmp-quit"), {"event": "STOP", "timestamp": {"seconds": 10,
+                                                                                            "microseconds": 0}}
+        hostcheck.power_cut_only("unclean", [ev("RESET", 5, "guest-reset"), os_mark, cut])
+        for events in ([os_mark, ev("SHUTDOWN", 20, "guest-shutdown")],
+                       [os_mark, ev("SHUTDOWN", 20, "guest-shutdown"), cut],
+                       [os_mark, ev("RESET", 20, "guest-reset"), cut],
+                       [os_mark, ev("RESET", 10, "host-qmp-system-reset"), cut],
                        [ev("SHUTDOWN", 20, "host-signal")],
                        # No quit seen (a reader that lost events), a quit not last, or two quits.
                        [], [ev("RESET", 5, "guest-reset")], [cut, ev("RTC_CHANGE", 31, None)], [cut, cut]):
             with self.subTest(events=events):
                 with self.assertRaisesRegex(hostcheck.HostcheckError, "not in a power cut"):
-                    hostcheck.power_cut_only("unclean", events, [10.0])
+                    hostcheck.power_cut_only("unclean", [os_mark] + events if events[:1] != [os_mark] else events)
+
+    def test_a_reset_is_placed_by_its_place_in_qemus_stream_not_by_a_clock(self):
+        # #5256 item 2: RESET, STOP and SHUTDOWN reach QMP unthrottled, in the order they happen, so
+        # their order decides; a timestamp that says otherwise (a stepped clock) changes nothing.
+        ev = lambda name, t, **d: {"event": name, "timestamp": {"seconds": t, "microseconds": 0}, "data": d}
+        cut = ev("SHUTDOWN", 30, reason="host-qmp-quit")
+        hostcheck.power_cut_only("unclean", [ev("RESET", 50, reason="guest-reset"), ev("STOP", 10), cut])
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "rebooted"):
+            hostcheck.power_cut_only("unclean", [ev("STOP", 10), ev("RESET", 5, reason="guest-reset"), cut])
 
     def test_a_qmp_reader_that_stops_early_fails_the_boot(self):
         # A line the reader cannot parse ends it before EOF: later events (a guest shutdown) would be
@@ -286,7 +313,7 @@ class PhaseFlagsTest(unittest.TestCase):
         with self.assertRaisesRegex(hostcheck.HostcheckError, "not read to the end"):
             q._qmp_done()
         with tempfile.TemporaryDirectory() as d:  # wait() checks it for every boot
-            q.work, q.sock_dir, q.os_starts = pathlib.Path(d), os.path.join(d, "s"), []
+            q.work, q.sock_dir, q.os_marks = pathlib.Path(d), os.path.join(d, "s"), 0
             q.args = argparse.Namespace(tools_root=None, ld_log=None)
             q.proc = unittest.mock.Mock(returncode=0)
             q.swtpm = unittest.mock.Mock()
@@ -311,7 +338,7 @@ class PhaseFlagsTest(unittest.TestCase):
 class CmdQemuTest(unittest.TestCase):
     """cmd_qemu's own wiring, with QEMU and the snapshots stubbed (M9)."""
 
-    def run_qemu(self, phases, file_phases, events, flags=()):
+    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img")):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "vars.fd").write_bytes(b"")
@@ -320,8 +347,7 @@ class CmdQemuTest(unittest.TestCase):
 
             def boot_once(args, work, label, steps, boot):
                 seen.append((label, steps, boot))
-                os_starts = [10.0] if boot else []
-                return {"rtc": [], "errors": [], "events": events.get(label, []), "os_starts": os_starts}
+                return {"rtc": [], "errors": [], "events": events.get(label, [])}
 
             evaluate = hostcheck.evaluate
 
@@ -329,7 +355,7 @@ class CmdQemuTest(unittest.TestCase):
                 judged.append(list(flags))
                 return evaluate(before, after, allow, flags=flags, **kw)
 
-            argv = ["qemu", "--work", str(d / "work"), "--image", "/x/agentos.img", "--phases-file",
+            argv = ["qemu", "--work", str(d / "work"), *source, "--phases-file",
                     str(d / "phases.json"), "--host-disk", "w=/dev/null", "--ovmf-vars", str(d / "vars.fd"),
                     "--phases", phases] + [a for f in flags for a in ("--flag", f)]
             with unittest.mock.patch.multiple(hostcheck, boot_once=boot_once, seed_tpm=lambda a, w: None,
@@ -339,7 +365,7 @@ class CmdQemuTest(unittest.TestCase):
             return rc, seen, judged, json.loads(report.read_text()) if report.exists() else None
 
     PHASES = {"task": [["Linux version", "os"], ["READY", "serial:task\n"], ["READY", "serial:poweroff\n"]],
-              "unclean": [["Linux version", "os"], ["READY", "qmp:quit"]]}
+              "unclean": [["Linux version", "os"], ["READY", "power-cut"]]}
     CUT = {"event": "SHUTDOWN", "timestamp": {"seconds": 30, "microseconds": 0},
            "data": {"guest": False, "reason": "host-qmp-quit"}}
 
@@ -355,10 +381,17 @@ class CmdQemuTest(unittest.TestCase):
         rc, _, judged, _ = self.run_qemu("unclean", self.PHASES, {"unclean": [self.CUT]})
         self.assertEqual((rc, judged), (0, [["unclean-end"]]))
 
+    def test_a_phases_file_replaces_the_stand_ins_phases(self):
+        # The halting-guest QEMU test boots the stand-in with its own unclean phase (#5256).
+        _, seen, _, _ = self.run_qemu("unclean", self.PHASES, {"unclean": [self.CUT]},
+                                      source=("--kernel", "k", "--initrd", "i"))
+        self.assertEqual(seen[2][1], [tuple(x) for x in self.PHASES["unclean"]])
+        self.assertEqual(seen[2][2][:2], ["-kernel", "k"])
+
     def test_an_unclean_phase_from_a_phases_file_with_an_orderly_end_is_refused(self):
         # The row's failure path: a phases file whose unclean phase powers off in order before the quit.
         shaped = dict(self.PHASES, unclean=[["Linux version", "os"], ["READY", "qmp:system_powerdown"],
-                                            ["X", "qmp:quit"]])
+                                            ["X", "power-cut"]])
         rc, seen, judged, report = self.run_qemu("unclean", shaped, {})
         self.assertEqual((rc, judged, report), (2, [], None))
         self.assertEqual([s[0] for s in seen], ["firmware-1", "firmware-2"])  # refused before it boots
@@ -367,6 +400,89 @@ class CmdQemuTest(unittest.TestCase):
                "data": {"guest": True, "reason": "guest-shutdown"}}
         rc, _, judged, report = self.run_qemu("unclean", self.PHASES, {"unclean": [off, self.CUT]})
         self.assertEqual((rc, judged, report), (2, [], None))
+
+
+class DriveTest(unittest.TestCase):
+    """Qemu.drive against a scripted console: the OS mark and the power cut's liveness check (#5256)."""
+
+    def qemu(self, answer):
+        q = hostcheck.Qemu.__new__(hostcheck.Qemu)
+        q.label, q.console, q.os_marks, q.sent = "unclean", bytearray(b"Linux version 6\r\nHOSTCHECK-READY\r\n"), 0, []
+        q.proc = unittest.mock.Mock(poll=lambda: None)
+        q._qmp_send = lambda msg: q.sent.append(("qmp", msg["execute"]))
+
+        def sendall(data):
+            q.sent.append(("serial", data))
+            if reply := answer(data.decode()):
+                q.console += reply.encode()
+        q.serial = unittest.mock.Mock(sendall=sendall)
+        return q
+
+    def drive(self, q, steps=(("Linux version", "os"), ("HOSTCHECK-READY", "power-cut"))):
+        with unittest.mock.patch.object(hostcheck, "ALIVE_WAIT", 0.2):
+            q.drive(list(steps), time.monotonic() + 60)
+
+    def test_the_os_start_is_a_stop_in_qemus_own_stream(self):
+        q = self.qemu(lambda line: f"{line.replace('alive', 'HOSTCHECK-ALIVE')}\r\n")
+        self.drive(q)
+        self.assertEqual(q.os_marks, 1)
+        self.assertEqual(q.sent[:2], [("qmp", "stop"), ("qmp", "cont")])
+
+    def test_the_power_cut_quits_only_after_a_fresh_answer(self):
+        q = self.qemu(lambda line: f"echo {line}HOSTCHECK-ALIVE {line.split()[1]}\r\n")
+        self.drive(q)
+        (kind, challenge), quit_ = q.sent[2:]
+        self.assertEqual(kind, "serial")
+        self.assertRegex(challenge, rb"^alive [0-9a-f]{16}\n$")
+        self.assertEqual(quit_, ("qmp", "quit"))
+        nonces = set()
+        for _ in range(3):
+            q = self.qemu(lambda line: f"HOSTCHECK-ALIVE {line.split()[1]}\r\n")
+            self.drive(q)
+            nonces.add(q.sent[2][1])
+        self.assertEqual(len(nonces), 3)
+
+    def test_a_guest_that_does_not_answer_is_not_cut_and_fails_naming_the_line(self):
+        # A halted guest prints nothing; the kernel's echo of the challenge, an answer printed before
+        # it, or one with another nonce are not answers.
+        for name, console, answer in [
+                ("halted", b"", lambda line: None),
+                ("tty echo", b"", lambda line: line),
+                ("stale", b"HOSTCHECK-ALIVE 0123456789abcdef\r\n", lambda line: None),
+                ("wrong nonce", b"", lambda line: "HOSTCHECK-ALIVE 0123456789abcdef\r\n")]:
+            with self.subTest(name):
+                q = self.qemu(answer)
+                q.console += console
+                start = time.monotonic()
+                with self.assertRaisesRegex(hostcheck.HostcheckError, r"unclean: no 'HOSTCHECK-ALIVE [0-9a-f]{16}'"):
+                    self.drive(q)
+                self.assertNotIn(("qmp", "quit"), q.sent)
+                self.assertLess(time.monotonic() - start, 30)  # ALIVE_WAIT bounds it, not the run's deadline
+
+    def test_each_step_waits_for_a_match_after_the_last(self):
+        # The restart phase waits for the OS's first line twice; one boot's line must not serve both.
+        q = self.qemu(lambda line: None)
+        with self.assertRaisesRegex(hostcheck.HostcheckError, "no 'Linux version' on the console in time"):
+            q.drive([("Linux version", "os"), ("Linux version", "os")], time.monotonic() + 0.3)
+        self.assertEqual(q.os_marks, 1)
+
+    def test_stop_events_must_match_the_os_marks(self):
+        # A STOP QEMU sent on its own (a disk error) would pass for an OS start.
+        with tempfile.TemporaryDirectory() as d:
+            for marks, events, ok in ((1, [{"event": "STOP"}], True), (1, [], False),
+                                      (1, [{"event": "STOP"}, {"event": "STOP"}], False)):
+                with self.subTest(marks=marks, events=events):
+                    q = hostcheck.Qemu.__new__(hostcheck.Qemu)
+                    q.label, q.work, q.sock_dir, q.os_marks = "task", pathlib.Path(d), os.path.join(d, "s"), marks
+                    q.events = [dict(e, timestamp={"seconds": 1, "microseconds": 0}) for e in events]
+                    q.args = argparse.Namespace(tools_root=None, ld_log=None)
+                    q.proc, q.swtpm = unittest.mock.Mock(returncode=0), unittest.mock.Mock()
+                    q.qmp_reader, q.qmp_error = unittest.mock.Mock(is_alive=lambda: False), None
+                    if ok:
+                        self.assertEqual(q.wait(time.monotonic() + 5), [])
+                    else:
+                        with self.assertRaisesRegex(hostcheck.HostcheckError, "STOP events for 1 OS starts"):
+                            q.wait(time.monotonic() + 5)
 
 
 class AllowListTest(unittest.TestCase):
@@ -686,7 +802,8 @@ class LoaderAuditTest(unittest.TestCase):
 
 
 class StandinTest(unittest.TestCase):
-    """The stand-in guest clears MOR's ClearMemory bit, and only it, on every way out (#4794, #5055).
+    """The stand-in guest clears MOR's ClearMemory bit, and only it, on every way out but the negative
+    test's halt (#4794, #5055, #5256).
     The EFI stub sets the bit again at each boot and a later poweroff clears it too, so a QEMU run
     cannot see a reboot that skips the clear: the script's lines are pinned and the function runs here."""
 
@@ -696,13 +813,14 @@ class StandinTest(unittest.TestCase):
         self.func = re.search(r"^mor_clear\(\) \{\n.*?^\}\n", self.init, re.S | re.M).group(0)
 
     def exits(self, init):
-        return [ln.strip() for ln in init.splitlines() if re.search(r"\b(reboot|poweroff)\b.*-f\b", ln)]
+        return [ln.strip() for ln in init.splitlines() if re.search(r"\b(reboot|poweroff|halt)\b.*-f\b", ln)]
 
     def test_every_exit_clears_mor_first(self):
         self.assertEqual(self.exits(self.init), [
             'read -r cmd arg || { sync; mor_clear "$MOR"; exec poweroff -f; }',
             'reboot) sync; mor_clear "$MOR"; reboot -f ;;',
-            'poweroff) sync; mor_clear "$MOR"; poweroff -f ;;'])
+            'poweroff) sync; mor_clear "$MOR"; poweroff -f ;;',
+            'halt) sync; halt -f ;;'])  # the halting guest's: it must leave MOR set (#5256)
         self.assertIn("\nMOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-"
                       "e20939be-32d4-41be-a150-897f85d49829\n", self.init)
         for old, new in (('reboot) sync; mor_clear "$MOR"; ', "reboot) sync; "),
@@ -1008,6 +1126,25 @@ class QemuTest(unittest.TestCase):
         self.assertEqual([(d["change_id"], d["key"]) for d in unclean["disclosed"]], [("mor", MOR)])
         self.assertTrue(task["pass"], task)
         self.assertNotIn("mor", [d["change_id"] for d in task["disclosed"]])
+
+    def test_a_guest_that_halts_before_the_cut_fails_the_run(self):
+        # #5256 item 1: a halt (CPUs stopped, no ACPI power-off) sends QEMU no event, and this one
+        # skips the MOR clear, so a quit after it would pass as a power cut with MOR disclosed.
+        phases = self.dir / "halt.json"
+        phases.write_text(json.dumps({"unclean": [["Linux version", "os"], ["HOSTCHECK-READY", "serial:halt\n"],
+                                                  ["System halted", "power-cut"]]}))
+        work = self.dir / "halt"
+        cmd = [sys.executable, str(ROOT / "tools" / "hostcheck.py"), "qemu", "--work", str(work),
+               "--kernel", self.kernel, "--initrd", str(self.dir / "standin" / "initrd.cpio"),
+               "--host-disk", f"windows={self.dir / 'standin' / 'windows.img'},bus=virtio",
+               "--phases", "unclean", "--phases-file", str(phases)]
+        if self.tools_root:
+            cmd += ["--tools-root", self.tools_root]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        self.assertEqual(p.returncode, 2, p.stderr[-3000:])
+        self.assertRegex(p.stderr, r"unclean: no 'HOSTCHECK-ALIVE [0-9a-f]{16}' on the console in time")
+        self.assertFalse((work / "report.json").exists())
+        self.assertIn(b"System halted", (work / "console-unclean.log").read_bytes())
 
     def test_planted_writes_flagged(self):
         rc, report = self.run_check("planted", "task", plant="disk,uefi,nv,rtc")
