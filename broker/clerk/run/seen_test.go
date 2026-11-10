@@ -175,7 +175,7 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 		t.Fatalf("after an altered record, status %v does not say the record started over", st.Lines)
 	}
 	// Past its bound the record is refused before it is read or opened.
-	if err := os.Truncate(path, maxSeen+1); err != nil {
+	if err := os.Truncate(path, int64(maxSeen)+1); err != nil {
 		t.Fatal(err)
 	}
 	o := &opens{Sealer: testSealer()}
@@ -186,8 +186,44 @@ func TestTheSeenRecordIsSealedAndBoundToItsAccount(t *testing.T) {
 	if st != seenBad || o.n != 0 {
 		t.Fatalf("a record past its bound loads or is opened (%d opens)", o.n)
 	}
-	if read := after.TotalAlloc - before.TotalAlloc; read > maxSeen/8 {
+	if read := after.TotalAlloc - before.TotalAlloc; read > uint64(maxSeen/8) {
 		t.Fatalf("refusing a record past its bound took %d bytes: it was read", read)
+	}
+}
+
+// The bound holds when the record is saved too: a record whose sealed bytes
+// pass maxSeen is not written, and the record before it stays, so the clerk
+// never writes a record it would refuse to read. One at the bound saves and
+// loads (#2698 item 12).
+func TestARecordPastItsBoundIsNotSaved(t *testing.T) {
+	dir, s, slot := shortDir(t), testSealer(), "slot"
+	if err := saveSeen(dir, s, slot, sealedSeen{Log: inbox.SeenLog{Since: today}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := sealedSeen{Log: inbox.SeenLog{Since: today, Seen: []inbox.Seen{{From: "pat@example.test", ID: fmt.Sprintf("%032x", 1), Date: today}}}, Told: true}
+	var plain bytes.Buffer
+	if err := gob.NewEncoder(&plain).Encode(r); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := s.Seal(plain.Bytes(), seenAAD(slot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := maxSeen
+	t.Cleanup(func() { maxSeen = m })
+	maxSeen = len(blob) - 1
+	if err := saveSeen(dir, s, slot, r, nil); err == nil {
+		t.Fatal("a record one byte past its bound was saved")
+	}
+	if got, st := loadSeen(dir, s, slot); st != seenLoaded || got.Told || len(got.Log.Seen) != 0 {
+		t.Fatalf("a refused save replaced the record: %+v (%v)", got, st)
+	}
+	maxSeen = len(blob)
+	if err := saveSeen(dir, s, slot, r, nil); err != nil {
+		t.Fatalf("a record at its bound was refused: %v", err)
+	}
+	if got, st := loadSeen(dir, s, slot); st != seenLoaded || !got.Told || len(got.Log.Seen) != 1 {
+		t.Fatalf("a record at its bound does not load: %+v (%v)", got, st)
 	}
 }
 
