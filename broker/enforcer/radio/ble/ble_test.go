@@ -56,8 +56,19 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == stackArg {
 		os.Exit(testStack(os.Args[2], os.Args[3]))
 	}
+	// A mutant that allocates without end (an encoder padding forever, a
+	// signature parsed without depth) dies at this bound in its own run
+	// instead of taking the runner's memory, and the runner, with it.
+	if err := syscall.Setrlimit(syscall.RLIMIT_DATA, &syscall.Rlimit{Cur: dataLimit, Max: dataLimit}); err != nil {
+		fmt.Fprintf(os.Stderr, "ble: data limit: %v\n", err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }
+
+// dataLimit bounds the suite's data (its heap): many times what it uses,
+// far below a runner's memory.
+const dataLimit = 1 << 30
 
 // testStack is the stack as the enforcer runs it, after probes of what an
 // exploit inside it would try first: a raw HCI socket, and, by probe, its
