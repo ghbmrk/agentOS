@@ -422,6 +422,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-keys-print | ENF-keys-print: enforcer/channel.Key and the page RootKey print no key (DECOY-b-8, CLK-1) | #4833 | queued (tier A; sub B directories; split from #4833) |
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
+| VOICE-ro-d-serve | VOICE-ro-d-serve: modem wiring reaches the call loop only through call.Serve, never Run with a chosen rung; a test holds it (briefs/VOICE-ro.md rule 4). Release; from #4944. | #4944 | building (release; tier A) |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
 | REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
@@ -485,11 +486,9 @@ issue #4914: body has no board-row block
 issue #4916: body has no board-row block
 issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4948: board-row block: Expecting value: line 1 column 1 (char 0)
-issue #4949: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
 issue #4954: body has no board-row block
 issue #4982: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4984: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #5041: body has no board-row block
 issue #5047: body has no board-row block
 issue #5053: body has no board-row block
