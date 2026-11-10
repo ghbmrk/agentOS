@@ -13,7 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/retrieve"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/vision/faces"
 )
 
 var errDown = errors.New("store down")
@@ -756,7 +758,7 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 	r.seal(bob, "mail", "message", "yo")
 	// Kinds read as the household says them; any other is an "other item".
 	r.seal(dana, "notes", kernel.ClassLabel, "Dana")
-	for _, c := range []string{"vision-wrap-key", "retrieve-vectors", "retrieve-vectors", "message", "x-novel", "photo-raw"} {
+	for _, c := range []string{faces.WrapClass, retrieve.VectorClass, retrieve.VectorClass, "message", "x-novel", "a-novel"} {
 		r.seal(dana, "notes", c, "z")
 	}
 	r.seal(bare, "notes", kernel.ClassLabel, "Carol")
@@ -797,7 +799,7 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 		" to forget it. Any other reply, or none within 10 minutes, forgets nothing."; bobText != want {
 		t.Fatalf("ask renders %q, want %q", bobText, want)
 	}
-	if text, err := ask(10, "Dana"); err != nil || !strings.HasPrefix(text, "Forget everything under “Dana”, 1 face, 1 message, 2 other items, 2 search entries? Reply YES ") {
+	if text, err := ask(10, "Dana"); err != nil || !strings.HasPrefix(text, "Forget everything under “Dana”, 1 face, 1 message, 2 search entries, 2 other items? Reply YES ") {
 		t.Fatalf("ask renders %q, %v", text, err)
 	}
 	// A refused ask ends the one waiting too.

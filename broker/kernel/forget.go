@@ -59,18 +59,24 @@ func (k *Kernel) AskForget(now int64, label string) (string, error) {
 	if len(unread) > 0 {
 		all = "everything I can read" // a label that cannot be read may name it too
 	}
-	kinds := map[[2]string]int{}
+	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
 	for _, s := range subjects {
 		for _, it := range k.s.subjects[s].items {
 			if w, ok := kindWords[it.Class]; ok {
 				kinds[w]++
 			} else if it.Class != ClassLabel {
-				kinds[[2]string{"other item", "other items"}]++
+				kinds[other]++
 			}
 		}
 	}
+	rank := func(w [2]string) string { // by word, other items last
+		if w == other {
+			return "\x7f"
+		}
+		return w[0]
+	}
 	var list []string
-	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(a[0], b[0]) }) {
+	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
 		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
 	}
 	items := "nothing but the name"
