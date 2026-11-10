@@ -605,8 +605,8 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	x.fire.mu.Lock()
 	reloaded := len(x.fire.loads) > loads && !strings.Contains(x.fire.loads[len(x.fire.loads)-1], cutRule)
 	x.fire.mu.Unlock()
-	if !reloaded {
-		t.Fatal("a lift the firewall did not take was not loaded in full at the next tick")
+	if !reloaded || x.logs("edge cut: firewall not updated, a full load follows at the next tick: ") != 1 {
+		t.Fatal("a lift the firewall did not take was not logged, or not loaded in full at the next tick")
 	}
 	x.setListing(listingOf(t, x, doc, 9, 10, 12000, true)) // 6000 more on the lift's day
 	x.advance(readEvery)
@@ -633,6 +633,40 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	x.restart()
 	if cut, _ := x.d.edge.Cut(); cut {
 		t.Fatal("the lift did not write the record whole again")
+	}
+	// A record that cannot be read at all (not a file) fails the start.
+	x.d.Close()
+	path := filepath.Join(x.dir, fileEdgeCut)
+	if err := os.Remove(path); err != nil || os.Mkdir(path, 0o700) != nil {
+		t.Fatal("fixture: the record not made a directory")
+	}
+	if d, err := x.open(); err == nil {
+		d.Close()
+		t.Fatal("the daemon started on an edge cut record it could not read")
+	}
+	os.Remove(path)
+	x.start()
+}
+
+// TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
+// saved at a clean stop, so the restart finds the edge cut; and the cut
+// is never written to the firewall before its first load.
+func TestEdgeCutSavedAtClose(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.fail(fileEdgeCut, true)
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
+	x.fail(fileEdgeCut, false)
+	x.restart()
+	// The restart's first reading still finds the edge past its cap: a
+	// second trip there would mean the record was not on disk.
+	if cut, _ := x.d.edge.Cut(); !cut || x.logs("byte caps: edge: ") != 1 {
+		t.Fatal("an unsaved trip was not saved at close")
+	}
+	d := &Enforcer{edge: x.d.edge}
+	d.loadCut() // no first load yet: nothing to write, and no firewall reached
+	if d.net.reload {
+		t.Fatal("a cut before the first load asked for a load")
 	}
 }
 
