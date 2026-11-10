@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
@@ -1278,6 +1279,9 @@ func TestServedInterfacesHeld(t *testing.T) {
 // TestRefusedLoadKeepsResolverStopped (#5164 item 7): with a served
 // interface not as set up, the instances stop before the load, so a
 // refused load, which starts the stopped ones again, brings back none.
+// Then (R5 a) the stray goes and the next load is refused too: at the
+// Apply seam still none runs, and home still shows the stop, now by the
+// firewall's refusal; once a load is taken they run and home clears.
 func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	x, _ := enrolled(t, false)
 	x.dns.mu.Lock()
@@ -1308,6 +1312,176 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	// or not (#5164 R1).
 	if !(pageResolver{x.d}).Stopped().Stopped {
 		t.Fatal("the page shows a resolver as running after its instances stopped")
+	}
+
+	x.mu.Lock()
+	x.servedErr = nil
+	x.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	x.d.fwMu.Lock()
+	err = x.d.loadNetwork(context.Background(), home())
+	x.d.fwMu.Unlock()
+	if err == nil {
+		t.Fatal("fixture: the second load was not refused")
+	}
+	x.dns.mu.Lock()
+	got = x.dns.running
+	x.dns.mu.Unlock()
+	if len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
+		t.Fatalf("a refused load with the stray gone started instances: %v", got)
+	}
+	stop := (pageResolver{x.d}).Stopped()
+	if !stop.Stopped || len(stop.Strays)+len(stop.Unset) != 0 || stop.Load != "nft: refused" || stop.LoadBy != page.LoadFirewall {
+		t.Fatalf("the page after the stray went and the load was refused: %#v", stop)
+	}
+	h := x.b.do(http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: refused)") || strings.Contains(h, "Interface own0 holds") {
+		t.Fatalf("home does not show the refused load in place of the stray:\n%s", h)
+	}
+	x.d.fwMu.Lock()
+	err = x.d.loadNetwork(context.Background(), home())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.dns.mu.Lock()
+	got = x.dns.running
+	x.dns.mu.Unlock()
+	if !slices.Equal(got.Listed, was.Listed) || got.People != was.People || got.DHCP != was.DHCP {
+		t.Fatalf("the load taken did not start the instances: %v", got)
+	}
+	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || stop.Load != "" || strings.Contains(x.b.do(http.MethodGet, "/", nil).Body.String(), "Names and addresses") {
+		t.Fatalf("the load is taken and home still shows the stop: %#v", stop)
+	}
+}
+
+// TestLoadStepOnPage (#5164 R5 d): a load refused because the document
+// does not compile reads as that, not as the firewall's refusal, and
+// one the firewall refuses as the firewall's; an error of neither kind
+// is untyped. A document that does not compile never reaches the
+// firewall.
+func TestLoadStepOnPage(t *testing.T) {
+	x, _ := enrolled(t, false)
+	load := func(doc policy.Document) error {
+		x.d.fwMu.Lock()
+		defer x.d.fwMu.Unlock()
+		return x.d.loadNetwork(context.Background(), doc)
+	}
+	// Stop the instances first, so the page shows the load's cause: a
+	// stray, then a load the firewall refuses once the stray is gone.
+	x.mu.Lock()
+	x.servedErr = errors.New("served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24")
+	x.mu.Unlock()
+	if err := load(home()); err != nil {
+		t.Fatal(err)
+	}
+	x.mu.Lock()
+	x.servedErr = nil
+	x.mu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	if err := load(home()); err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadFirewall {
+		t.Fatalf("the firewall's refusal on the page: %#v", stop)
+	}
+	bad := home()
+	bad.Devices = append(bad.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "not-a-vlan", Everyday: true})
+	x.fire.mu.Lock()
+	n := len(x.fire.ctxs)
+	x.fire.mu.Unlock()
+	err := load(bad)
+	if !errors.Is(err, nft.ErrPolicy) {
+		t.Fatalf("fixture: the document compiled (%v)", err)
+	}
+	x.fire.mu.Lock()
+	reached := len(x.fire.ctxs) != n
+	x.fire.mu.Unlock()
+	if reached {
+		t.Fatal("a document that does not compile reached the firewall")
+	}
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadCompile || stop.Load != err.Error() {
+		t.Fatalf("a compile refusal on the page: %#v", stop)
+	}
+	h := x.b.do(http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force (") || strings.Contains(h, "The firewall refused") {
+		t.Fatalf("home words a compile refusal as the firewall's:\n%s", h)
+	}
+	// A running table the firewall returned that does not parse is no
+	// policy that failed to compile: untyped.
+	x.fire.mu.Lock()
+	x.fire.listing = []byte("{not json")
+	x.fire.mu.Unlock()
+	err = load(home())
+	if err == nil || errors.Is(err, nft.ErrPolicy) {
+		t.Fatalf("fixture: an unreadable running table: %v", err)
+	}
+	if stop := (pageResolver{x.d}).Stopped(); stop.LoadBy != page.LoadUntyped || stop.Load != err.Error() {
+		t.Fatalf("an unreadable running table on the page: %#v", stop)
+	}
+	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer's last load of your rules failed (") || strings.Contains(h, "could not make firewall rules") {
+		t.Fatalf("home words an unreadable running table as a compile refusal:\n%s", h)
+	}
+	for _, tc := range []struct {
+		err  error
+		want page.LoadStep
+	}{
+		{compileErr{nft.ErrPolicy}, page.LoadCompile},
+		{compiled(fmt.Errorf("%w: device", nft.ErrPolicy)), page.LoadCompile},
+		{compiled(nft.ErrLayout), page.LoadUntyped},
+		{fmt.Errorf("wrapped: %w", fireErr{errors.New("nft: refused")}), page.LoadFirewall},
+		{errors.New("dns/run: refused: closed"), page.LoadUntyped},
+	} {
+		if got := loadStep(tc.err); got != tc.want {
+			t.Errorf("loadStep(%v) = %d, want %d", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestRestartingResolverOnPage (#5164 R5 b): while the instances run,
+// each that keeps exiting shows on home by what it serves, with its
+// exits in a row, from dns/run's Flapping; every instance name dns/run
+// gives the policy's files maps to a part the page words.
+func TestRestartingResolverOnPage(t *testing.T) {
+	x, _ := enrolled(t, false)
+	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || len(stop.Restarting) != 0 {
+		t.Fatalf("fixture: %#v", stop)
+	}
+	x.dns.mu.Lock()
+	running := x.dns.running
+	x.dns.flaps = []dnsrun.Flap{{Name: "listed-" + running.Listed[0].Iface, Exits: 3}, {Name: "dhcp", Exits: 1}}
+	x.dns.mu.Unlock()
+	stop := (pageResolver{x.d}).Stopped()
+	want := []page.Restart{{Part: page.PartListed, Iface: running.Listed[0].Iface, Exits: 3}, {Part: page.PartDHCP, Exits: 1}}
+	if stop.Stopped || !slices.Equal(stop.Restarting, want) {
+		t.Fatalf("restarting instances on the page: %#v", stop)
+	}
+	h := x.b.do(http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(h, "on interface "+running.Listed[0].Iface+", which only a listed name gets, stopped or could not start 3 times in a row") || !strings.Contains(h, "The enforcer&#39;s address service, which hands out addresses on the home networks, stopped or could not start and") {
+		t.Fatalf("home does not show the restarting instances:\n%s", h)
+	}
+	for name := range dnsrun.Names(running) {
+		if restartOf(dnsrun.Flap{Name: name}).Part == page.PartUntyped {
+			t.Errorf("instance %q has no part the page words", name)
+		}
+	}
+	if r := restartOf(dnsrun.Flap{Name: "people", Exits: 2}); r != (page.Restart{Part: page.PartPeople, Exits: 2}) {
+		t.Errorf("people: %#v", r)
+	}
+	if r := restartOf(dnsrun.Flap{Name: "other"}); r != (page.Restart{}) {
+		t.Errorf("an unknown instance: %#v", r)
+	}
+	// Stopped, the stop alone shows: no instance runs to restart.
+	x.mu.Lock()
+	x.servedErr = errors.New("served interface own0 holds 10.99.0.1/24, outside 10.10.0.0/24")
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || len(stop.Restarting) != 0 {
+		t.Fatalf("a stopped resolver with restarts: %#v", stop)
 	}
 }
 

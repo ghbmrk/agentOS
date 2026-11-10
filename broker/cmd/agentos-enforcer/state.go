@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
@@ -299,18 +301,25 @@ func (d *Enforcer) closeFresh() {
 // interface, every other failure of the served check by its typed cause
 // (#5284), the policy in
 // force's that dns.Generate refused, and the last refused load's error
-// (ENF-l-11, ENF-l-21; #5164 R1).
+// (ENF-l-11, ENF-l-21; #5164 R1) with the step that refused it (R5 d).
+// While instances run, each that keeps exiting or failing to start is
+// shown instead (R5 b), read from dns/run, which the page waits on only
+// for its own lock.
 type pageResolver struct{ d *Enforcer }
 
 func (p pageResolver) Stopped() page.ResolverStop {
 	n := &p.d.net
 	n.resMu.Lock()
-	runs, served, why, load := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad
+	runs, served, why, load, by := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.stopBy
 	n.resMu.Unlock()
 	if runs {
-		return page.ResolverStop{}
+		var out page.ResolverStop
+		for _, f := range p.d.dp.DNS.Flapping() {
+			out.Restarting = append(out.Restarting, restartOf(f))
+		}
+		return out
 	}
-	out := page.ResolverStop{Stopped: true, Policy: why, Load: load}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, LoadBy: by}
 	errs := []error{served}
 	if j, ok := served.(interface{ Unwrap() []error }); ok {
 		errs = j.Unwrap()
@@ -330,4 +339,18 @@ func (p pageResolver) Stopped() page.ResolverStop {
 		}
 	}
 	return out
+}
+
+// restartOf is one instance that keeps exiting or failing to start as the
+// page words it, by dns/run's instance names (dnsrun.Names).
+func restartOf(f dnsrun.Flap) page.Restart {
+	r := page.Restart{Exits: f.Exits}
+	if iface, ok := strings.CutPrefix(f.Name, "listed-"); ok {
+		r.Part, r.Iface = page.PartListed, iface
+	} else if f.Name == "people" {
+		r.Part = page.PartPeople
+	} else if f.Name == "dhcp" {
+		r.Part = page.PartDHCP
+	}
+	return r
 }

@@ -40,8 +40,15 @@
 {{range .Strays}}<p>Interface {{.Iface}} holds the address {{.Addr}}, outside its network {{.Nets}}. Nothing in your rules put it there. The enforcer serves names and addresses again within 10 seconds of the last such address being removed.</p>
 {{end}}{{range .Unset}}<p>{{.}}</p>
 {{end}}{{with .Policy}}<p>The policy in force names something the enforcer cannot serve ({{.}}). It still applies; names and addresses come back with the next policy the enforcer can serve.</p>
-{{end}}{{if not (or .Strays .Unset .Policy)}}{{with .Load}}<p>The firewall refused the enforcer's last load of your rules ({{.}}), and names and addresses come back only with a load it takes. The enforcer keeps trying.</p>
-{{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within a few seconds.</p>
+{{end}}{{if not (or .Strays .Unset .Policy)}}{{with .Load}}{{if $.Resolver.Compile}}<p>The enforcer could not make firewall rules of the policy in force ({{.}}), so it loaded nothing. The firewall keeps the rules it had, and names and addresses come back only with a policy it can load. The enforcer keeps trying.</p>
+{{else if $.Resolver.Firewall}}<p>The firewall refused the enforcer's last load of your rules ({{.}}), and names and addresses come back only with a load it takes. The enforcer keeps trying.</p>
+{{else}}<p>The enforcer's last load of your rules failed ({{.}}), and names and addresses come back only with a load that works. The enforcer keeps trying.</p>
+{{end}}{{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
+{{end}}</div>
+{{end}}
+{{with .Restarting}}<h2>Names and addresses</h2>
+<div class="pending warn">
+{{range .}}<p>{{.}}</p>
 {{end}}</div>
 {{end}}
 {{if .Recovery}}

@@ -393,19 +393,54 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	}
 	// With no listed cause, the refused load that keeps it stopped
 	// (#5243 L3 item 1); and a cause while instances run shows nothing.
-	res.stop = ResolverStop{Stopped: true, Load: "nft: load refused \u202e"}
-	if h = g.homeHTML(); !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: load refused \\u202e), and names and addresses come back only with a load it takes.") {
+	res.stop = ResolverStop{Stopped: true, Load: "nft: load refused \u202e", LoadBy: LoadFirewall}
+	if h = g.homeHTML(); !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: load refused \\u202e), and names and addresses come back only with a load it takes.") || strings.Contains(h, "could not make firewall rules") {
 		t.Errorf("a refused load is not shown, or not in ASCII:\n%s", h)
+	}
+	// Each step that refused the load in its own words (#5164 R5 d): a
+	// policy that did not compile is no refusal by the firewall, and an
+	// untyped failure claims neither.
+	res.stop = ResolverStop{Stopped: true, Load: "nft: policy cannot be compiled", LoadBy: LoadCompile}
+	if h = g.homeHTML(); !strings.Contains(h, "<p>The enforcer could not make firewall rules of the policy in force (nft: policy cannot be compiled), so it loaded nothing. The firewall keeps the rules it had,") || strings.Contains(h, "The firewall refused") {
+		t.Errorf("a compile refusal is not in its own words:\n%s", h)
+	}
+	res.stop = ResolverStop{Stopped: true, Load: "dns/run: refused: closed"}
+	if h = g.homeHTML(); !strings.Contains(h, "<p>The enforcer's last load of your rules failed (dns/run: refused: closed), and names and addresses come back only with a load that works.") || strings.Contains(h, "The firewall refused") || strings.Contains(h, "could not make firewall rules") {
+		t.Errorf("an untyped load failure is not the generic line:\n%s", h)
 	}
 	// Stopped with no cause recorded (between a check that passes and
 	// the next load): the card still says when it ends (Lens on #5243).
 	res.stop = ResolverStop{Stopped: true}
-	if h = g.homeHTML(); !strings.Contains(h, "The enforcer serves names and addresses again with its next load of your rules, within a few seconds.") {
+	if h = g.homeHTML(); !strings.Contains(h, "The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.") || strings.Contains(h, "a few seconds") {
 		t.Errorf("a stop with no cause gives no reason:\n%s", h)
 	}
 	res.stop = ResolverStop{Strays: []Stray{{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24"}}, Load: "x"}
 	if h = g.homeHTML(); strings.Contains(h, "Names and addresses") {
 		t.Error("home shows a resolver whose instances run as stopped")
+	}
+	// Instances that run but keep exiting show, each in its words with
+	// its count, and not as a stop (#5164 R5 b); with the resolver
+	// stopped, the stop alone shows.
+	res.stop = ResolverStop{Restarting: []Restart{{Part: PartListed, Iface: "vlan10\u202e", Exits: 3}, {Part: PartPeople, Exits: 1}, {Part: PartDHCP, Exits: 2}, {Exits: 4}}}
+	h = g.homeHTML()
+	for _, want := range []string{
+		"<h2>Names and addresses</h2>",
+		"<p>The enforcer&#39;s name answers on interface &#34;vlan10\\u202e&#34;, which only a listed name gets, stopped or could not start 3 times in a row and has not stayed up since.",
+		"<p>The enforcer&#39;s name answers on the Owner, Household and Guests networks stopped or could not start and has not stayed up since.",
+		"<p>The enforcer&#39;s address service, which hands out addresses on the home networks, stopped or could not start 2 times in a row",
+		"<p>Part of the enforcer&#39;s name and address service stopped or could not start 4 times in a row",
+		"up to 30 seconds",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("home with restarting instances lacks %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "stopped answering name lookups") || strings.ContainsRune(h, '\u202e') {
+		t.Error("restarting instances show as a stopped resolver, or carry an override")
+	}
+	res.stop.Stopped = true
+	if h = g.homeHTML(); strings.Contains(h, "stopped or could not start") || !strings.Contains(h, "stopped answering name lookups") {
+		t.Error("a stopped resolver shows restarts beside the stop")
 	}
 	// A setting that did not take shows in plain words, never the raw
 	// error, and an error said twice shows once (#5280).

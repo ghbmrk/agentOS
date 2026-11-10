@@ -33,6 +33,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
@@ -251,6 +252,8 @@ type fakeDNS struct {
 	// is done, and as they were when it is refused (dns/run starts the
 	// ones it stopped again).
 	running dns.Files
+	// flaps is what Flapping reports: the instances that keep exiting.
+	flaps []dnsrun.Flap
 }
 
 func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
@@ -268,6 +271,8 @@ func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
 }
 
 func (f *fakeDNS) Close() { f.mu.Lock(); f.closed++; f.mu.Unlock() }
+
+func (f *fakeDNS) Flapping() []dnsrun.Flap { f.mu.Lock(); defer f.mu.Unlock(); return f.flaps }
 
 func (f *fakeDNS) last() dns.Files {
 	f.mu.Lock()

@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
@@ -72,6 +73,7 @@ type firewall interface {
 // resolver is the dnsmasq instances (broker/enforcer/dns/run.Set).
 type resolver interface {
 	Apply(f dns.Files, load func() error) error
+	Flapping() []dnsrun.Flap
 	Close()
 }
 
