@@ -174,7 +174,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	dhcp.add("dhcp-option=option:dns-server,0.0.0.0")
 	v6 := false
 	for _, n := range leased {
-		first, last := hosts4(n.Prefix4)
+		first, last := Hosts4(n.Prefix4)
 		// dnsmasq serves a range on the interface whose address is in it.
 		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + "," + lease)
 		if n.Prefix6.IsValid() {
@@ -335,9 +335,9 @@ func upstream(u netip.AddrPort) string {
 	return u.Addr().String() + "#" + strconv.Itoa(int(u.Port()))
 }
 
-// hosts4 is the lease range of p: its tenth host to its last before the
-// broadcast address.
-func hosts4(p netip.Prefix) (first, last netip.Addr) {
+// Hosts4 is the lease range of p, the only addresses DHCP leases there:
+// its tenth host to its last before the broadcast address.
+func Hosts4(p netip.Prefix) (first, last netip.Addr) {
 	b := p.Addr().As4()
 	n := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 	size := uint32(1) << (32 - p.Bits())

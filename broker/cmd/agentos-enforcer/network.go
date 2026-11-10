@@ -390,17 +390,15 @@ func (d *Enforcer) leases() []nft.Lease {
 // left at now, each on the shared segment (Guests, Owner, Household)
 // whose DHCP subnet in nets holds its address. A line seeds nothing when
 // its address is in no subnet, in more than one, in a subnet that is not
-// a shared segment's, or is that subnet's network, broadcast or the
-// enforcer's own address; nor does a line that is not exactly five
-// fields, a hardware address that is not Ethernet, an infinite lease
-// (expiry 0), one run out, or a last line with no newline, which dnsmasq
-// may be rewriting as it is read. Seed drops what is left of more than
-// nft.LeaseTimeout.
+// a DHCP-served shared segment's, or outside that subnet's lease range
+// (dns.Hosts4, which the network, broadcast and enforcer's own addresses
+// are outside); nor does a line that is not exactly five fields, a
+// hardware address that is not Ethernet, an infinite lease (expiry 0) or
+// one run out. Seed drops what is left of more than nft.LeaseTimeout.
 func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
 	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
 	var out []nft.Lease
-	lines := strings.Split(string(b), "\n")
-	for _, line := range lines[:len(lines)-1] {
+	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) != 5 {
 			continue
@@ -417,12 +415,10 @@ func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
 				in = append(in, n)
 			}
 		}
-		if len(in) != 1 || !in[0].DHCP || !shared[in[0].Iface] || a == in[0].Prefix4.Addr() {
+		if len(in) != 1 || !in[0].DHCP || !shared[in[0].Iface] {
 			continue
 		}
-		// Not the subnet's network or broadcast address.
-		v := binary.BigEndian.Uint32(a.AsSlice())
-		if host := v &^ (^uint32(0) << (32 - in[0].Prefix4.Bits())); host == 0 || host == ^uint32(0)>>in[0].Prefix4.Bits() {
+		if first, last := dns.Hosts4(in[0].Prefix4); a.Less(first) || last.Less(a) {
 			continue
 		}
 		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: hw, Left: expiry - now})

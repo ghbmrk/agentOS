@@ -334,8 +334,7 @@ func TestRunningTableUnreadable(t *testing.T) {
 // segment's subnet, on that segment; a line for another segment's subnet
 // seeds that segment. Out-of-subnet, admin, core and device-VLAN
 // addresses, a segment's network, broadcast or own address, malformed,
-// truncated, IPv6, non-Ethernet, infinite (expiry 0) and run-out lines
-// seed nothing.
+// IPv6, non-Ethernet, infinite (expiry 0) and run-out lines seed nothing.
 func TestLoadSeedsLeases(t *testing.T) {
 	x, _ := enrolled(t, false)
 	x.mu.Lock()
@@ -351,6 +350,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		exp(100) + " 02:00:00:00:00:06 10.50.0.20 * *",       // core
 		exp(100) + " 02:00:00:00:00:07 10.101.0.20 * *",      // device VLAN
 		exp(100) + " 02:00:00:00:00:08 10.30.0.0 * *",        // network
+		exp(100) + " 02:00:00:00:00:15 10.30.0.9 * *",        // below the lease range
 		exp(100) + " 02:00:00:00:00:09 10.30.0.255 * *",      // broadcast
 		exp(100) + " 02:00:00:00:00:0a 10.30.0.21 *",         // four fields
 		exp(100) + " 02:00:00:00:00:0b 10.30.0.22 * * extra", // six fields
@@ -364,7 +364,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		"duid 00:01:00:01:00:00:00:00:02:00:00:00:00:12",
 		exp(100) + " 1234 fd00:30::20 * 00:01",
 		exp(100) + " 02:00:00:00:00:13 ::ffff:10.30.0.29 * *",
-		exp(100) + " 02:00:00:00:00:14 10.30.0.3", // cut short as dnsmasq rewrites the file
+		exp(100) + " 02:00:00:00:00:14 10.30.0.1 * *", // the enforcer's
 	}, "\n")
 	path := filepath.Join(t.TempDir(), "dhcp.leases")
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
@@ -402,47 +402,54 @@ func TestLoadSeedsLeases(t *testing.T) {
 	}
 }
 
-// TestLeasesOf (ENF-l-23, #5295): a lease seeds only a host address of
-// one shared segment's DHCP subnet, never the enforcer's own address there,
-// a subnet two networks claim, or a shared interface DHCP does not serve;
-// prefixes holding the enforcer's address (not masked) read the same.
+// TestLeasesOf (ENF-l-23, #5295): a lease seeds only an address in its
+// one shared segment's DHCP lease range (dns.Hosts4), never the subnet's
+// network, broadcast or enforcer's own address (its first host), an
+// address two networks claim, or one on a shared interface DHCP does not
+// serve. The fixture is a setup the daemon accepts.
 func TestLeasesOf(t *testing.T) {
-	l := nft.Layout{Guests: "gst0", Owner: "own0", Household: "hh0"}
-	p := netip.MustParsePrefix
-	nets := []dns.Net{
-		{Iface: "gst0", Prefix4: p("10.30.0.1/24"), DHCP: true},
-		{Iface: "own0", Prefix4: p("10.10.0.1/24"), DHCP: false},
-		{Iface: "hh0", Prefix4: p("10.20.0.1/24"), DHCP: true},
-		{Iface: "ap0.101", Prefix4: p("10.20.0.128/25")}, // overlaps hh0's upper half
-		{Iface: "hh0", Prefix4: p("10.21.0.1/31"), DHCP: true},
+	c := testConfig(t)
+	s := c.DNS
+	for i, n := range s.Nets {
+		switch n.Iface {
+		case "own0":
+			s.Nets[i].DHCP = false
+		case "ap0.101":
+			s.Nets[i].Prefix4 = netip.MustParsePrefix("10.20.0.128/25") // hh0's upper half
+		}
+	}
+	if _, err := dns.Generate(policy.Document{}, c.Layout, s); err != nil {
+		t.Fatalf("fixture: setup refused: %v", err)
 	}
 	file := strings.Join([]string{
-		"1100 02:00:00:00:00:01 10.30.0.2 * *",
-		"1100 02:00:00:00:00:02 10.30.0.1 * *",   // the enforcer's
-		"1100 02:00:00:00:00:03 10.30.0.254 * *", // last host
-		"1100 02:00:00:00:00:04 10.10.0.2 * *",   // DHCP off
-		"1100 02:00:00:00:00:05 10.20.0.2 * *",
-		"1100 02:00:00:00:00:06 10.20.0.130 * *", // two subnets
-		"1100 02:00:00:00:00:07 10.21.0.0 * *",   // a /31 holds no host
-		"1100 02:00:00:00:00:08 10.21.0.1 * *",
-		"1001 02:00:00:00:00:09 10.30.0.3 * *",
-		"1000 02:00:00:00:00:0a 10.30.0.4 * *",
-		"",
+		"1100 02:00:00:00:00:01 10.30.0.10 * *", // first in range
+		"1100 02:00:00:00:00:02 10.30.0.9 * *",
+		"1100 02:00:00:00:00:03 10.30.0.1 * *", // the enforcer's
+		"1100 02:00:00:00:00:04 10.30.0.0 * *",
+		"1100 02:00:00:00:00:05 10.30.0.254 * *", // last in range
+		"1100 02:00:00:00:00:06 10.30.0.255 * *",
+		"1100 02:00:00:00:00:07 10.10.0.20 * *", // DHCP off
+		"1100 02:00:00:00:00:08 10.20.0.20 * *",
+		"1100 02:00:00:00:00:09 10.20.0.130 * *", // two subnets
+		"1001 02:00:00:00:00:0a 10.30.0.11 * *",
+		"1000 02:00:00:00:00:0b 10.30.0.12 * *",
+		"1100 02:00:00:00:00:0c 10.30.0.13 * *", // last line, no newline
 	}, "\n")
 	hw := func(s string) net.HardwareAddr { m, _ := net.ParseMAC(s); return m }
 	want := []nft.Lease{
-		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.2"), HW: hw("02:00:00:00:00:01"), Left: 100},
-		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.254"), HW: hw("02:00:00:00:00:03"), Left: 100},
-		{Iface: "hh0", Addr: netip.MustParseAddr("10.20.0.2"), HW: hw("02:00:00:00:00:05"), Left: 100},
-		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.3"), HW: hw("02:00:00:00:00:09"), Left: 1},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.254"), HW: hw("02:00:00:00:00:05"), Left: 100},
+		{Iface: "hh0", Addr: netip.MustParseAddr("10.20.0.20"), HW: hw("02:00:00:00:00:08"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.11"), HW: hw("02:00:00:00:00:0a"), Left: 1},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.13"), HW: hw("02:00:00:00:00:0c"), Left: 100},
 	}
-	got := leasesOf([]byte(file), nets, l, 1000)
+	got := leasesOf([]byte(file), s.Nets, c.Layout, 1000)
 	if !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
 		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
 	}) {
 		t.Fatalf("leases %+v, want %+v", got, want)
 	}
-	if got := leasesOf(nil, nets, l, 1000); len(got) != 0 {
+	if got := leasesOf(nil, s.Nets, c.Layout, 1000); len(got) != 0 {
 		t.Fatalf("no file: leases %+v", got)
 	}
 }
