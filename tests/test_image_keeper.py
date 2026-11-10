@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_image import MK, ROOT, check, clean_tree, exec_args, arg, ini, write  # noqa: E402
@@ -509,10 +510,19 @@ class KeeperTreeTest(unittest.TestCase):
         # write or remake a step above it. Each case is one unit (User=nobody unless set) and its tree.
         tmpf = "usr/lib/tmpfiles.d/zz.conf"
         (self.root / "srv/qq").mkdir(parents=True, exist_ok=True)
+        # Two tree steps another uid owns, as tree_lstat reports them (CI does not run as root).
         (self.root / "var/lib/owned").mkdir(parents=True, exist_ok=True)
-        os.chown(self.root / "var/lib/owned", 1000, 0)
         (self.root / "var/cache/private/dz").mkdir(parents=True, exist_ok=True)
-        os.chown(self.root / "var/cache/private/dz", 1000, 0)
+        other, real = check.TREE_OWNER + 1000, check.tree_lstat
+
+        def lstat(root, rel):
+            st = real(root, rel)
+            if rel not in ("var/lib/owned", "var/cache/private/dz") or st is None:
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, other) + tuple(st)[5:])
+        patcher = unittest.mock.patch.object(check, "tree_lstat", lstat)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         refused = (
             # Security 6758176175: a tmpfiles.d link at the directory itself, in each form and under /run.
             ("StateDirectory=qq", {tmpf: "L /var/lib/qq - - - - /srv/qq\n"}, "/var/lib/qq", "where " + tmpf),
@@ -539,8 +549,9 @@ class KeeperTreeTest(unittest.TestCase):
             ("RuntimeDirectory=r/s", {"run/private/r": ("link", "/srv/qq")}, "/run/private/r/s", "in the tree"),
             # A step another user can write: a tree step another uid owns (also below <top>/private), a
             # world-writable step, a service directory, another unit's directory.
-            ("StateDirectory=owned/x", {}, "/var/lib/owned/x", "through /var/lib/owned, which uid 1000 owns"),
-            ("CacheDirectory=dz/x", {}, "/var/cache/private/dz/x", "through /var/cache/private/dz, which uid 1000 owns"),
+            ("StateDirectory=owned/x", {}, "/var/lib/owned/x", "through /var/lib/owned, which uid %d owns" % other),
+            ("CacheDirectory=dz/x", {}, "/var/cache/private/dz/x",
+             "through /var/cache/private/dz, which uid %d owns" % other),
             ("RuntimeDirectory=lock/x", {}, "/run/lock/x", "inside /run/lock, which anyone"),
             ("StateDirectory=agentos-mail/x", {}, "/var/lib/agentos-mail/x", "inside /var/lib/agentos-mail, which anyone"),
             ("StateDirectory=na/b", {SYSTEM + "na.service": "[Service]\nStateDirectory=na\nUser=ua\n"}, "/var/lib/na/b",
