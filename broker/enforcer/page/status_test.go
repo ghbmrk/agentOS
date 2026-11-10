@@ -5,6 +5,7 @@ package page
 import (
 	"errors"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -347,5 +348,65 @@ func TestFreshDayPage(t *testing.T) {
 	ca.day, ca.err = CapsDay{Spent: true, DueMS: 1}, errors.New("byte caps: no")
 	if code, res := g.tapState(g.a, ActCancelFresh, ""); code != http.StatusConflict || res["error"] != "byte caps: no" {
 		t.Errorf("a refused cancel: %d %v", code, res)
+	}
+}
+
+type fakeResolver struct{ stop ResolverStop }
+
+func (f *fakeResolver) Stopped() ResolverStop { return f.stop }
+
+// #5164 R1 (NET-2 Segments, ASSUMPTIONS ENF-l-11 and ENF-l-21 at the
+// daemon): a stopped resolver shows on home with each stray address and
+// its interface, any other setup failure, and a policy it cannot serve;
+// a running one, or none wired, shows nothing. Text the core could have
+// chosen is shown in printable ASCII.
+func TestHomeShowsStoppedResolver(t *testing.T) {
+	g := newRig(t)
+	res := &fakeResolver{}
+	cfg := g.s.cfg
+	cfg.Resolver = res
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") || strings.Contains(h, "stopped answering") {
+		t.Fatal("home shows a running resolver as stopped")
+	}
+	res.stop = ResolverStop{Strays: []Stray{
+		{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24 and fd00:10::/64"},
+		{Iface: "dev0", Addr: netip.MustParsePrefix("fd00:99::7/64"), Nets: "10.20.0.0/24"},
+	}}
+	h := g.homeHTML()
+	for _, want := range []string{
+		"<h2>Names and addresses</h2>", "stopped answering name lookups and handing out addresses on every home network",
+		"Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24 and fd00:10::/64.",
+		"Interface dev0 holds the address fd00:99::7/64, outside its network 10.20.0.0/24.",
+		"within 10 seconds of the last such address being removed",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("home with stray addresses lacks %q", want)
+		}
+	}
+	if strings.Contains(h, "A served interface is not as set up") || strings.Contains(h, "The policy in force names") {
+		t.Error("home shows a cause the resolver does not have")
+	}
+	res.stop = ResolverStop{Unset: []string{"/proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads \"1\")"}}
+	if h = g.homeHTML(); !strings.Contains(h, "A served interface is not as set up: /proc/sys/net/ipv6/conf/own0/accept_ra not set to 0 (reads &#34;1&#34;).") || strings.Contains(h, "Interface own0 holds") {
+		t.Errorf("a setting that did not take is not shown alone:\n%s", h)
+	}
+	res.stop = ResolverStop{Policy: "device plug: vlan109 is not a served VLAN ‮gro.live"}
+	h = g.homeHTML()
+	if !strings.Contains(h, "The policy in force names something the enforcer cannot serve (device plug: vlan109 is not a served VLAN \\u202egro.live).") {
+		t.Errorf("a policy the resolver cannot serve is not shown, or not in ASCII:\n%s", h)
+	}
+	if strings.ContainsRune(h, '‮') {
+		t.Error("home carries a right-to-left override from the policy's error")
+	}
+	if got := sentence("a\tb\x00c é"); got != `a\tb\x00c \u00e9` {
+		t.Errorf("sentence = %q", got)
+	}
+	g = newRig(t)
+	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") {
+		t.Error("home shows a resolver it was not given")
 	}
 }

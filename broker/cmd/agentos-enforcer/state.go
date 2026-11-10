@@ -293,3 +293,32 @@ func (d *Enforcer) closeFresh() {
 		d.saveFresh(f.unsaved)
 	}
 }
+
+// pageResolver is why the resolver is stopped, as the page shows it: each
+// stray address hold found with its interface, every other failure of the
+// served check, and the policy in force's that dns.Generate refused
+// (ENF-l-11, ENF-l-21; #5164 R1).
+type pageResolver struct{ d *Enforcer }
+
+func (p pageResolver) Stopped() page.ResolverStop {
+	n := &p.d.net
+	n.resMu.Lock()
+	served, why := n.stopServed, n.stopPolicy
+	n.resMu.Unlock()
+	out := page.ResolverStop{Policy: why}
+	errs := []error{served}
+	if j, ok := served.(interface{ Unwrap() []error }); ok {
+		errs = j.Unwrap()
+	}
+	for _, err := range errs {
+		var s strayAddr
+		switch {
+		case err == nil:
+		case errors.As(err, &s):
+			out.Strays = append(out.Strays, page.Stray{Iface: s.iface, Addr: s.addr, Nets: s.nets})
+		default:
+			out.Unset = append(out.Unset, err.Error())
+		}
+	}
+	return out
+}

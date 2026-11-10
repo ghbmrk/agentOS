@@ -28,6 +28,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
@@ -1241,8 +1242,14 @@ func TestHold(t *testing.T) {
 		{"a link-local address outside fe80::/64", p("fe80:1::1/64"), "holds fe80:1::1/64"},
 	} {
 		have["own0"] = []netip.Prefix{p("10.10.0.1/24"), tc.addr}
-		if err := hold(box(true, "own0", "ap0.101"), nets, addrs); err == nil || !strings.Contains(err.Error(), tc.want) {
+		err := hold(box(true, "own0", "ap0.101"), nets, addrs)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %v", tc.name, err)
+		}
+		// The page names the interface and the address (#5164 R1).
+		var s strayAddr
+		if !errors.As(err, &s) || s != (strayAddr{"own0", tc.addr, "10.10.0.0/24 and fd00:10::/64"}) {
+			t.Errorf("%s: the stray is not one the page can name: %#v", tc.name, s)
 		}
 	}
 	have["ap0.101"] = []netip.Prefix{p("10.101.0.1/24"), p("10.102.0.1/24")}
@@ -1583,5 +1590,101 @@ func TestNoRefreshBeforeALoad(t *testing.T) {
 	n := x.listed()
 	if err := x.d.refreshAnswers(context.Background()); err != nil || x.listed() != n {
 		t.Fatalf("the step ran before any load: %v, %d lists", err, x.listed()-n)
+	}
+}
+
+// TestStoppedResolverOnPage (#5164 R1; ENF-l-11, ENF-l-21): home shows a
+// stopped resolver while it is stopped, with each stray address and its
+// interface and every other failure of the served check apart, and a
+// policy in force it cannot serve; once the check passes and a servable
+// policy is in force, home shows nothing. A refused load leaves the
+// policy's cause as it was, since the resolver keeps the old policy's
+// files.
+func TestStoppedResolverOnPage(t *testing.T) {
+	x, _ := enrolled(t, false)
+	view := func() string { return x.b.do(http.MethodGet, "/", nil).Body.String() }
+	if h := view(); strings.Contains(h, "Names and addresses") {
+		t.Fatal("home shows a running resolver as stopped")
+	}
+	stray := strayAddr{"own0", netip.MustParsePrefix("10.99.0.1/24"), "10.10.0.0/24"}
+	unset := errors.New("/proc/sys/net/ipv4/conf/default/accept_redirects not set to 0 (reads \"1\")")
+	x.mu.Lock()
+	x.servedErr = errors.Join(stray, unset)
+	x.mu.Unlock()
+	x.advance(readEvery)
+	got := (pageResolver{x.d}).Stopped()
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []string{unset.Error()}) || got.Policy != "" {
+		t.Fatalf("stopped resolver: %#v", got)
+	}
+	h := view()
+	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "A served interface is not as set up: /proc/sys/net/ipv4/conf/default/accept_redirects"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("home lacks %q", want)
+		}
+	}
+	x.mu.Lock()
+	x.servedErr = errors.New("served interface own0: addresses: dump interrupted")
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if got := (pageResolver{x.d}).Stopped(); len(got.Strays) != 0 || !slices.Equal(got.Unset, []string{"served interface own0: addresses: dump interrupted"}) {
+		t.Fatalf("a failure that is not a stray: %#v", got)
+	}
+	x.mu.Lock()
+	x.servedErr = nil
+	x.mu.Unlock()
+	x.advance(readEvery)
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped() || strings.Contains(view(), "Names and addresses") {
+		t.Fatalf("the check passes and home still shows a stopped resolver: %#v", got)
+	}
+
+	doc := home()
+	doc.Devices = append(doc.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
+	_, genErr := dns.Generate(doc, x.cfg.Layout, x.cfg.DNS)
+	if genErr == nil {
+		t.Fatal("fixture: the resolver serves vlan109")
+	}
+	load := func(doc policy.Document) error {
+		x.d.fwMu.Lock()
+		defer x.d.fwMu.Unlock()
+		return x.d.loadNetwork(context.Background(), doc)
+	}
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	if err := load(doc); err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped() {
+		t.Fatalf("a refused load's policy shows as the one in force: %#v", got)
+	}
+	x.fire.mu.Lock()
+	x.fire.fail = false
+	x.fire.mu.Unlock()
+	if err := load(doc); err != nil {
+		t.Fatal(err)
+	}
+	if got := (pageResolver{x.d}).Stopped(); got.Policy != genErr.Error() || len(got.Strays)+len(got.Unset) != 0 {
+		t.Fatalf("a policy the resolver cannot serve: %#v", got)
+	}
+	if !strings.Contains(view(), "The policy in force names something the enforcer cannot serve (") {
+		t.Error("home does not show the policy the resolver cannot serve")
+	}
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	if err := load(home()); err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	if got := (pageResolver{x.d}).Stopped(); got.Policy != genErr.Error() {
+		t.Fatalf("a refused load cleared the cause in force: %#v", got)
+	}
+	x.fire.mu.Lock()
+	x.fire.fail = false
+	x.fire.mu.Unlock()
+	if err := load(home()); err != nil {
+		t.Fatal(err)
+	}
+	if got := (pageResolver{x.d}).Stopped(); got.Stopped() {
+		t.Fatalf("a servable policy in force still shows a stopped resolver: %#v", got)
 	}
 }
