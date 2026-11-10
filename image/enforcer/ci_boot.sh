@@ -6,7 +6,8 @@
 #  1. First boot: a USB stick on an xHCI controller, a network card standing in for the WAN, and a
 #     credential drop-in that tries to load the simulated Wi-Fi driver (mac80211_hwsim) before the
 #     self-check. The self-check passes under Secure Boot with Wi-Fi and USB storage off, the watchdog
-#     armed and rp_filter read back as 0 on "all" and the card (#4810); the entry is blessed; the
+#     armed, rp_filter read back as 0 on "all" and the card (#4810) and accept_redirects as 0 on "all",
+#     "default" and the card in both families (#5164); the entry is blessed; the
 #     state partition grew and is noexec; the stick stayed unauthorised.
 #  2. Rollback: the drive gets a previous release's entry, and the self-check is forced to fail on
 #     counted boots. The new entry's three tries run down and the previous release boots and passes.
@@ -79,6 +80,16 @@ if printf '%s\n' "$rpf" | grep -qx all && printf '%s\n' "$rpf" | grep -qx defaul
 	echo "ok   rp_filter 0 on $(printf '%s' "$rpf" | tr '\n' ' ')"
 else
 	echo "MISS rp_filter 0 on all, default and the network card (read: $(printf '%s' "$rpf" | tr '\n' ' '))"; fail=1
+fi
+# #5164 R3: the self-check read accept_redirects as 0 on "all" and "default" in both families and on
+# the card in both, so no interface took a redirect from boot, before agentos-enforcer runs.
+red=$(grep -ao 'enforcer-health: PASS .* redirects=0:[^ ]*' "$W/console.log" | head -n 1 | tr -d '\r' | sed 's/.* redirects=0://' | tr ',' '\n')
+card=$(printf '%s\n' "$red" | sed -n 's#^ipv4/##p' | grep -vx 'all\|default\|lo' | head -n 1)
+if [ -n "$card" ] && (for k in ipv4/all ipv4/default ipv6/all ipv6/default "ipv4/$card" "ipv6/$card"; do
+	printf '%s\n' "$red" | grep -qxF "$k" || exit 1; done); then
+	echo "ok   accept_redirects 0 on $(printf '%s' "$red" | tr '\n' ' ')"
+else
+	echo "MISS accept_redirects 0 on all, default and the network card, IPv4 and IPv6 (read: $(printf '%s' "$red" | tr '\n' ' '))"; fail=1
 fi
 # The state partition grew into the drive's extra 2 GiB.
 rb=$(grep -ao 'root_bytes=[0-9]*' "$W/console.log" | head -n 1 | cut -d= -f2)
