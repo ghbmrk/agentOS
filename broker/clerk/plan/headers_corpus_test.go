@@ -84,7 +84,7 @@ func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 		// quota headers among them, and no other: a credential name the old
 		// X-Codex- prefix passed is dropped (#5291, #5320, CLK-1).
 		p := &Login{d: Codex(nil)}
-		hostiletext.RunHeaders(t, p.answerHeader, hostiletext.Exactly(t, Codex(nil).ResponseHeaders,
+		hostiletext.RunHeaders(t, (&Login{d: Codex(nil)}).answerHeader, hostiletext.Exactly(t, Codex(nil).ResponseHeaders,
 			"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model",
 			"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
 			"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
