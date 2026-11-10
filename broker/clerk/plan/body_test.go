@@ -573,11 +573,15 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 		t.Fatalf("a held call cancelled before connect settled %+v, want once, not sent", u)
 	}
 
-	// The same cancel once the provider has the call: it was sent.
+	// The same cancel once the provider has the call: it was sent. The
+	// provider never answers: it drops the connection once the caller has
+	// gone, since an answer written then can still reach the transport ahead
+	// of its own close and be returned as the call's answer (#5381).
 	arrived := make(chan struct{})
 	f.stream = func(w http.ResponseWriter, r *http.Request) {
 		close(arrived)
 		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
 	}
 	ctx, cancel = context.WithCancel(context.Background())
 	go func() { <-arrived; cancel() }()
