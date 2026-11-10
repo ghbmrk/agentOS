@@ -303,6 +303,26 @@ func TestBusCallFaults(t *testing.T) {
 	}
 }
 
+// TestBusCallFailedWriteIgnoresReply: a call whose write fails returns
+// ErrBusClosed even when a peer, having read only the call's header (the
+// serial is in it), already answered it: a reply to a call never fully
+// sent is not taken as its result.
+func TestBusCallFailedWriteIgnoresReply(t *testing.T) {
+	us, them := net.Pipe()
+	b := memBus(us)
+	go b.readLoop(bufio.NewReader(us))
+	go func() {
+		io.ReadFull(them, make([]byte, 16))
+		them.Write(mustEncode(t, &Message{Type: typeReturn, Serial: 1, ReplySerial: 1, Sig: "s", Body: []any{"forged"}}))
+		time.Sleep(300 * time.Millisecond)
+		them.Close()
+	}()
+	body, err := b.Call(bluez, "/", ifaceObjMgr, "GetManagedObjects", "s", 3*time.Second, "arg")
+	if !errors.Is(err, ErrBusClosed) {
+		t.Errorf("a call whose write failed: %v, %v", body, err)
+	}
+}
+
 // TestBusReadLoop: the read loop hands a reply to its call once, so a
 // second reply with the same serial is read past and the loop goes on,
 // and the stream's end ends the bus.
