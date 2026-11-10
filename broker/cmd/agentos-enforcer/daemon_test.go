@@ -152,7 +152,7 @@ func TestConfigRefused(t *testing.T) {
 		f    func(*Config)
 	}{
 		{"name is required", func(c *Config) { c.Name = "" }},
-		{"layout: ", func(c *Config) { c.Layout.ISP = nil }},
+		{"config: layout: ", func(c *Config) { c.Layout.ISP = nil }},
 		{"page and page_allow are required", func(c *Config) { c.Page = nil }},
 		{"page and page_allow are required", func(c *Config) { c.PageAllow = nil }},
 	} {

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -140,6 +141,27 @@ func TestTickLogsFailures(t *testing.T) {
 	}
 }
 
+// TestRenewalNotSaved: a renewed leaf whose save fails is logged and not
+// taken; the next tick after a saved one renews nothing.
+func TestRenewalNotSaved(t *testing.T) {
+	x := newBox(t, false)
+	page := x.d.Page()
+	x.fail(fileCert, true)
+	x.advance(397 * 24 * time.Hour)
+	if x.logs("page certificate: ") == 0 || x.d.Page() != page {
+		t.Fatal("a renewal that was not saved was not logged, or rebuilt the page")
+	}
+	x.fail(fileCert, false)
+	x.advance(time.Second)
+	if page = x.d.Page(); page == nil {
+		t.Fatal("no page")
+	}
+	x.advance(time.Second)
+	if x.d.Page() != page {
+		t.Fatal("a tick after the renewal renewed again")
+	}
+}
+
 // TestRenewOnlyNearEnd: a tick with the leaf far from its end keeps the
 // page as it is; one near its end renews the leaf and rebuilds the page.
 func TestRenewOnlyNearEnd(t *testing.T) {
@@ -207,12 +229,39 @@ func TestPageListeners(t *testing.T) {
 		t.Fatal("the old page's listener still accepts")
 	}
 	cur := x.d.pageLns[0].Addr().String()
+	// The listener is served: a permanent accept failure ends Serve,
+	// which logs it.
+	f, err := x.d.pageLns[0].(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Shutdown(int(f.Fd()), syscall.SHUT_RD); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return x.logs("page: ") > 0 })
+	if err := x.d.rebuildPage(); err != nil {
+		t.Fatal(err)
+	}
+	cur = x.d.pageLns[0].Addr().String()
 	x.d.Close()
 	if c, err := net.Dial("tcp", cur); err == nil {
 		c.Close()
 		t.Fatal("the page's listener accepts after Close")
 	}
 	x.start()
+}
+
+// TestPageListenRefused: an address the page cannot listen on is the
+// rebuild's error.
+func TestPageListenRefused(t *testing.T) {
+	x := newBox(t, false)
+	x.d.dp.Listen = true
+	x.d.cfg.Page = []netip.AddrPort{netip.MustParseAddrPort("192.0.2.1:0")}
+	x.d.cfg.PageAllow = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
+	if err := x.d.rebuildPage(); err == nil {
+		t.Fatal("a page address not on this host was listened on")
+	}
 }
 
 // TestRebuildPageRefused: a page the configuration cannot build is an
@@ -384,7 +433,7 @@ func TestLoadRefusesUncompiled(t *testing.T) {
 		defer x.dns.mu.Unlock()
 		x.fire.mu.Lock()
 		defer x.fire.mu.Unlock()
-		return len(x.dns.applied), len(x.fire.loads) + len(x.fire.ctxs)
+		return len(x.dns.applied), len(x.fire.loads) + len(x.fire.ctxs) + x.fire.listed
 	}
 	applies, loads := touched()
 	x.d.fwMu.Lock()

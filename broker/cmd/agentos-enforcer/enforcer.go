@@ -401,9 +401,8 @@ func (d *Enforcer) renewCert(now time.Time) bool {
 	r, err := d.cert.Renew(d.cfg.Name, now)
 	if err != nil {
 		d.dp.Logf("page certificate: " + err.Error())
-		return false
 	}
-	if leafEqual(r, d.cert) {
+	if err != nil || leafEqual(r, d.cert) {
 		return false
 	}
 	if err := saveCert(d.store(fileCert), r); err != nil {

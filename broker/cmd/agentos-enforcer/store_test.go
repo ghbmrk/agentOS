@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,6 +42,8 @@ func openUnder(t *testing.T, dir string) []string {
 	return open
 }
 
+var errSync = errors.New("disk: sync failed")
+
 // syncs records each fsync's file for the test, failing those fail names.
 func syncs(t *testing.T, fail func(name string) bool) *[]string {
 	var got []string
@@ -48,7 +51,7 @@ func syncs(t *testing.T, fail func(name string) bool) *[]string {
 	syncFile = func(f *os.File) error {
 		got = append(got, f.Name())
 		if fail != nil && fail(f.Name()) {
-			return errors.New("disk: sync failed")
+			return errSync
 		}
 		return f.Sync()
 	}
@@ -98,8 +101,8 @@ func TestSaveFailureKeepsOldFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			syncs(t, func(name string) bool { return c.fail(dir, name) })
-			if err := (fileStore{path: path}).Save([]byte("new")); err == nil {
-				t.Fatal("a failed sync was taken as saved")
+			if err := (fileStore{path: path}).Save([]byte("new")); !errors.Is(err, errSync) {
+				t.Fatalf("a failed sync: %v", err)
 			}
 			if b, _ := os.ReadFile(path); (string(b) == "old") != c.old {
 				t.Fatalf("after the failure the file holds %q", b)
@@ -157,11 +160,11 @@ func TestJournalSyncsAndTruncates(t *testing.T) {
 		t.Fatalf("syncs %q: want the journal's file for Append and for Truncate", *got)
 	}
 	fail = true
-	if err := j.Append([]byte("x\n")); err == nil {
-		t.Fatal("an Append whose sync failed was taken as durable")
+	if err := j.Append([]byte("x\n")); !errors.Is(err, errSync) {
+		t.Fatalf("an Append whose sync failed: %v", err)
 	}
-	if err := j.Truncate(0); err == nil {
-		t.Fatal("a Truncate whose sync failed was taken as durable")
+	if err := j.Truncate(0); !errors.Is(err, errSync) {
+		t.Fatalf("a Truncate whose sync failed: %v", err)
 	}
 	if open := openUnder(t, dir); len(open) != 0 {
 		t.Fatalf("left open: %q", open)
@@ -192,8 +195,8 @@ func (failReader) Read([]byte) (int, error) { return 0, errors.New("entropy: non
 // TestKeyFilesRefused: an unreadable key file, or one that does not
 // hold a key, stops the start; nothing makes a new key over it.
 func TestKeyFilesRefused(t *testing.T) {
-	if _, err := channelKey(unreadable(t), rand.Reader); err == nil {
-		t.Error("channelKey took an unreadable file")
+	if _, err := channelKey(unreadable(t), rand.Reader); !errors.Is(err, syscall.EISDIR) {
+		t.Errorf("channelKey of an unreadable file: %v", err)
 	}
 	if _, err := coreKey(unreadable(t)); err == nil {
 		t.Error("coreKey took an unreadable file")
@@ -250,8 +253,8 @@ func TestPageCertFile(t *testing.T) {
 	if _, err := pageCert(fileStore{path: filepath.Join(t.TempDir(), fileCert), fault: failing.fault}, rp, now); err == nil {
 		t.Error("a made certificate that was not saved was taken")
 	}
-	if _, err := pageCert(unreadable(t), rp, now); err == nil {
-		t.Error("pageCert took an unreadable file")
+	if _, err := pageCert(unreadable(t), rp, now); !errors.Is(err, syscall.EISDIR) {
+		t.Errorf("pageCert of an unreadable file: %v", err)
 	}
 	// A leaf that does not parse cannot be renewed.
 	var f certFile
@@ -334,8 +337,8 @@ type otherSigner struct{ ed25519.PrivateKey }
 // already cut takes no second write, and one not cut no resume's write;
 // a lift that is not saved does not happen.
 func TestCutStateFile(t *testing.T) {
-	if _, err := openCut(unreadable(t), nil, func(string) {}); err == nil {
-		t.Error("openCut took an unreadable file")
+	if _, err := openCut(unreadable(t), nil, func(string) {}); !errors.Is(err, syscall.EISDIR) {
+		t.Errorf("openCut of an unreadable file: %v", err)
 	}
 	x := newBox(t, true)
 	x.fail(fileCut, true)
