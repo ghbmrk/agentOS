@@ -89,7 +89,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| KRN-clock | KRN-clock: the kernel reads time through the TIM-1 guard and never backward, so a clock step neither revives an expired key nor ends a hold early (TIM-1, KEY-7, KEY-8) | #5138 (D-111), `clock` off `durable` | building (tier A; Opus; Defect: STO-2b) |
+| KRN-clock | KRN-clock: the kernel reads time through the TIM-1 guard and never backward, so a clock step neither revives an expired key nor ends a hold early (TIM-1, KEY-7, KEY-8) | #5138 (D-111), `clock` off `durable` | queued (tier A; Opus; Defect: STO-2b) |
 | KRN-clock-one-writer | KRN-clock-one-writer: the TIM-1 guard's state file keeps one writer when #5147 b wires the guard into the kernel (TIM-1) | #5147 b | queued (tier A; Opus) |
 
 ## Harness and operating model
@@ -329,7 +329,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-l-sec-b | ENF-l-sec-b: alert offer single-flight and re-offer on a cut core's reconnect (#4755 items 6, 7) | ENF-l-sec | queued(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
-| ENF-edge-cut | ENF-edge-cut: cut the edge on its byte cap (NET-2 Byte caps) | #3670 | in review(tier A; lane primary; brief briefs/ENF.md) |
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
@@ -432,7 +431,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-m-rpf-fu | ENF-m-rpf-fu: /etc/sysctl.conf is scanned, health's rp_filter loop has a committed fake-root test, and the boot-to-ruleset window is stated. Release; from #5118. | #5118, #4810 | queued (release; tier A) |
 | KRN-forget-c-confirm | KRN-forget-c-confirm: before a Forget erase the kernel texts a kernel-rendered confirmation naming the look-up and the counts, and erases only on the owner's YES (Mark, option B, 2026-11-08). Kernel half; from #5092 Security finding 1. | #5092, #3414 | building (release; tier A) |
 | KRN-forget-c-confirm-owner | KRN-forget-c-confirm-owner: the owner side routes the YES reply to the kernel's pending erase and the page shows the waiting state. Sub B half; from #5092 Security finding 1. | #5124 | queued (release; tier A) |
-| AGENTOSD-broker-group-fresh | AGENTOSD-broker-group-fresh: agentosd reuses its own broker/ cgroup, so a kill count left by systemd would make every clone3 child die at birth with no cause; infer.go leaf comment stale. From #5141. | #5141 | building (release; tier A) |
 | ENF-restart-unit | ENF-restart-unit: the real agentos-enforcer.service sets Restart= with a start limit one fresh-day exit cannot hit, and its acceptance test covers the restart. Release; from #5133 (R1). | #5133, ENF-m (#3671) | queued (release; tier A) |
 | OWN-resume-says-cancelled | OWN-resume-says-cancelled: RESUME's reply says what STOP cancelled stays cancelled, and the owner lines for the task and stopped codes are checked. Release; from #5138 (R1, R2). | #5138 | queued (release; tier A; sub B) |
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
@@ -454,8 +452,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
 | VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
 | VOICE-ro-d-maxcall-notice | VOICE-ro-d-maxcall-notice: the owner hears a spoken notice before the 30-minute maximum-call hang-up. Release (UX); from #5258. | #5258, #5252 | queued (release; tier A) |
-| TEST-flake-plan-reading-signal | TEST-flake-plan-reading-signal: TestPlanHeldModelCallCancelledBeforeConnectIsNotSent drops its non-blocking reading signal and hangs 25 minutes under -race; buffer the channel and bound the wait. Release; flake, 2nd sighting (#5240 twice). | #5240, #5128 | in review (release; tier A) |
-| TEST-flake-run-reading-signal | TEST-flake-run-reading-signal: broker/clerk/run/plansignin_test.go signals reading through an unbuffered channel, so the test can hang as clerk/plan's did. Release; from #5265. | #5265, #5264 | building (release; tier A) |
+| TEST-flake-run-waits-bounded | TEST-flake-run-waits-bounded: the run sign-in test's bare <-begun and <-removed waits are unbounded, so a hang there is a package timeout. Release; from #5269. | #5269, #5268 | queued (release; tier A) |
+| KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
+| VOICE-ro-d-hangup-fu | VOICE-ro-d-hangup-fu: a bounded hang-up ctx, a nil ctx that cannot hold the lock, C2/C8 and ErrBusy wording, and two surviving mutants killed. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
+| CLK-run-mut | CLK-run-mut: kill the 14 old mutgate survivors in broker/clerk/run (plan.go, plansignin.go) that #5269's test-only edit made the gate target. Release; from #5269. | #5269 | building (release; tier A) |
+| REV-PROOF-corpus-deny-fu | REV-PROOF-corpus-deny-fu: egress's planForbiddenHeader as an exact allowlist, one shared header-value check, and a reason in the model clerk's refusal. Release; from #5277. | #5277, #4914 | queued (release; tier A) |
+| TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
