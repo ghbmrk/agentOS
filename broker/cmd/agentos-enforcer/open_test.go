@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
@@ -395,4 +396,82 @@ func TestLoadRefusesUncompiled(t *testing.T) {
 	if a, l := touched(); a != applies || l != loads {
 		t.Fatal("a refused document touched the resolver or the ruleset")
 	}
+}
+
+// TestFailedListingBytesDropped: a running table that does not read is
+// taken as empty, whatever bytes came with the error, so the load is
+// the document's own.
+func TestFailedListingBytesDropped(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.fire.mu.Lock()
+	x.fire.listAt = func(int) ([]byte, error, bool) {
+		return []byte(`{"nftables": [`), errors.New("nft: list failed"), true
+	}
+	x.fire.mu.Unlock()
+	doc := home()
+	doc.Devices[0].Allow = []string{"tv.example", "tv2.example"}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), doc)
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x.fire.last() != x.fullLoad(doc) {
+		t.Fatal("the load read the bytes of a failed listing")
+	}
+	if x.logs("firewall: running table unreadable") == 0 {
+		t.Fatal("the unreadable running table was not logged")
+	}
+}
+
+// TestMergingReloadFailureLogged: a reload a port's merging asks for
+// that fails is logged at the reading.
+func TestMergingReloadFailureLogged(t *testing.T) {
+	x, _, _ := capped(t)
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	x.merges(x.cfg.Layout.Core, errors.New("offload: core0: rx-gro on"))
+	x.advance(readEvery)
+	if x.logs("firewall: nft: refused") == 0 {
+		t.Fatal("a refused reload at the reading was not logged")
+	}
+}
+
+// TestChannelCountsRead: the channel's counts read trips a cap it finds
+// passed, fails when the running table does not read, and, as the fresh
+// day's reading does, ends its listing's context when it returns.
+func TestChannelCountsRead(t *testing.T) {
+	x, doc, _ := capped(t)
+	x.setListing(listing(t, x, doc, 7, 600))
+	x.advance(readEvery)
+	x.fire.mu.Lock()
+	x.fire.listErr = errors.New("nft: list failed")
+	x.fire.mu.Unlock()
+	if _, err := x.d.counts(); err == nil {
+		t.Fatal("a counts read whose listing failed answered")
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = nil
+	x.fire.mu.Unlock()
+	x.d.fwMu.Lock()
+	_, err := x.d.freshState(context.Background(), x.d.dp.Now())
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	ctx := x.fire.listCtx
+	x.fire.mu.Unlock()
+	if err != nil || ctx.Err() == nil {
+		t.Fatalf("the fresh day's reading left its listing's context running: %v", err)
+	}
+	x.setListing(listing(t, x, doc, 7, 1100))
+	if _, err := x.d.counts(); err != nil {
+		t.Fatal(err)
+	}
+	x.fire.mu.Lock()
+	ctx = x.fire.listCtx
+	x.fire.mu.Unlock()
+	if ctx.Err() == nil {
+		t.Fatal("the counts read left its listing's context running")
+	}
+	waitFor(t, func() bool { return x.d.cut.Stage() == channel.Tripped })
 }
