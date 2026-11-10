@@ -322,7 +322,7 @@ func plainUnset(u string) string {
 	}
 	if m := unsetName.FindStringSubmatch(u); m != nil {
 		if name, err := strconv.Unquote(m[1]); err == nil {
-			return "The enforcer's setup names " + ascii(name) + " as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected."
+			return "The enforcer's setup names " + strconv.QuoteToASCII(name) + " as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected."
 		}
 	}
 	if m := unsetAddrs.FindStringSubmatch(u); m != nil {
