@@ -184,14 +184,8 @@ func Codex() PlanRoute {
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
 		},
-		SignInHeaders: []string{"Accept", "Content-Type", "User-Agent", "Originator"},
-		ResponseHeaders: []string{
-			"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model",
-			"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
-			"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
-			"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
-			"X-Codex-Rate-Limit-Reached-Type",
-		},
+		SignInHeaders:   []string{"Accept", "Content-Type", "User-Agent", "Originator"},
+		ResponseHeaders: []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model", "X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At", "X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At", "X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance", "X-Codex-Rate-Limit-Reached-Type"},
 	}
 }
 

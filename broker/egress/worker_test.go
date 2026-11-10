@@ -973,34 +973,22 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-// The worker gets an answer header only by a declared exact name (#5320, CLK-1): an upstream answer carrying every declared name plus X-Codex-Bearer, X-Codex-Session-Token and each corpus credential name after X-Codex- reaches the worker with the declared names alone.
+// The worker gets an answer header only by a declared exact name (#5320, CLK-1): an upstream answer carrying every declared name plus X-Codex-Bearer, X-Codex-Session-Token and each corpus name after X-Codex- reaches the worker with the declared names alone.
 func TestWorkerRouteAnswersOnlyDeclaredHeaders(t *testing.T) {
-	r := newWorkerRig(t, false)
-	extra := []string{"X-Codex-Bearer", "X-Codex-Session-Token", "X-Codex-A"}
+	r, want, extra := newWorkerRig(t, false), http.Header{}, []string{"X-Codex-Bearer", "X-Codex-Session-Token", "X-Codex-A"}
 	for _, e := range hostiletext.HeaderNames() {
-		if strings.HasPrefix(e.Name, "credential ") {
-			extra = append(extra, "X-Codex-"+e.Text)
-		}
+		extra = append(extra, "X-Codex-"+e.Text)
+	}
+	for _, h := range Codex().ResponseHeaders {
+		want.Set(h, "1")
 	}
 	r.up.reply = func(w http.ResponseWriter, _ *http.Request) {
 		for _, h := range append(Codex().ResponseHeaders, extra...) {
 			w.Header().Set(h, "1")
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
 	}
-	got, declared := r.do(responses(codexBody(clientTools))).Header(), map[string]bool{}
-	for _, h := range Codex().ResponseHeaders {
-		declared[h] = true
-	}
-	for k := range got {
-		if !declared[k] {
-			t.Errorf("the undeclared answer header %q reached the worker", k)
-		}
-	}
-	for _, h := range Codex().ResponseHeaders {
-		if got.Get(h) == "" {
-			t.Errorf("the declared answer header %q did not reach the worker", h)
-		}
+	if got := r.do(responses(codexBody(clientTools))).Header(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the worker got the answer headers %v, want %v", got, want)
 	}
 }
 
@@ -1012,13 +1000,7 @@ func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
 	for _, set := range []func(*PlanRoute, []string){func(r *PlanRoute, h []string) { r.RequestHeaders = h }, signIn} {
 		hostiletext.RunHeaders(t, func(h string) bool { return route(set, h) == nil }, header.Names()...)
 	}
-	var answers []string
-	for _, h := range header.Names() {
-		if h != "Session_id" {
-			answers = append(answers, h)
-		}
-	}
-	hostiletext.RunHeaders(t, func(h string) bool { return route(answer, h) == nil }, answers...)
+	hostiletext.RunHeaders(t, func(h string) bool { return route(answer, h) == nil || h == "Session_id" }, header.Names()...)
 	hostiletext.RunHeaderValues(t, func(v string) bool { return value(v) == nil })
 	for _, e := range hostiletext.HeaderNames() {
 		if strings.HasPrefix(e.Name, "credential ") && !forbiddenHeader(http.CanonicalHeaderKey("X-Codex-"+e.Text)) {
