@@ -201,12 +201,23 @@ MADE_SPECIFIERS = "bijmnNp"
 # without the file types, and the attribute and ACL types). Any other line at a unit-made directory may
 # leave a link, a copy, a file or a device node there, which systemd would chmod and chown.
 MADE_LAST_TYPES = frozenset("dDevqQzZxXrRaAhHtT")
-# #5167 (Security 6759084501): the settings for which PID 1 itself makes a path for a unit, other than
-# *Directory=: a socket's file-system listen paths and Symlinks=, a path unit's watched paths (MakeDirectory=),
-# a mount or automount point; each makes the missing parents with the file's DirectoryMode= (umask 0).
-PID1_PATHS = ("ListenStream", "ListenDatagram", "ListenSequentialPacket", "ListenFIFO", "ListenSpecial",
-              "ListenUSBFunction", "Symlinks", "PathExists", "PathExistsGlob", "PathChanged", "PathModified",
-              "DirectoryNotEmpty", "Where")
+# #5167 (Security 6759084501, 6759651094): the only settings whose paths may sit on a unit-made directory's
+# way: ones PID 1 reads, passes to a command, or applies inside the unit's own mount namespace, never making,
+# linking, mounting, chmodding or chowning a host path for them. Any other setting naming a path there is
+# refused, whatever it is (default deny), so a setting systemd adds later is refused too.
+PID1_READS = ("Description", "Documentation", "EnvironmentFile", "InaccessiblePaths", "ReadOnlyPaths",
+              "ReadWritePaths", "ExecPaths", "NoExecPaths", "RequiresMountsFor", "WantsMountsFor", "What",
+              "TTYPath", "UtmpIdentifier")
+PID1_READ_PREFIXES = ("Condition", "Assert", "Exec")
+# #5167: the specifiers that may expand to an absolute path (systemd.unit(5)): roots, home, shell, the
+# fragment's path, and the unescaped instance and prefix forms, where "-" unescapes to "/". A word opening
+# with one of these is a path word; one opening with another (%i, %n, ...) is a name.
+PATH_SPECIFIERS = "CdEfhIJLPsStTVyY"
+# #5167: settings that mount in the unit's own namespace and, on the host, make only root's 0755 directories
+# on the way (namespace.c mkdir_p_label, mkdir_parents) and at the mount point a directory or an empty file
+# (make_mount_point_inode_from_path). Strictly above a unit-made directory that is root's alone; at it, a
+# file is what the chown would hand over, so there they count like any other setting.
+PID1_NAMESPACE_MAKES = ("BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem", "MountImages")
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
@@ -340,7 +351,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[1] + unit_made_refusals(root)
+            + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
@@ -1739,38 +1750,50 @@ def unit_files(root):
 
 
 def unit_made_paths(root):
-    """#5167 (Security 6759084501): ([(tree path steps, what, "<key>= in <file>", open)] for every path PID 1
-    makes or mounts for a unit at a PID1_PATHS setting, in any file unit_files reads and any section, and
-    for each *.mount and *.automount file name; and one error per value the check does not model). WHAT is
-    "mount" for a mount point, else "path"; OPEN: the file sets a DirectoryMode= that lets others write
-    (o+w), or one the check cannot read, for the parents PID 1 makes. A value that is not a path (a port,
-    an address, an abstract socket) is skipped; one with a specifier, a quote or a backslash, or a byte
-    outside printable ASCII, is refused."""
-    root, out, paths = str(root), [], []
+    """#5167 (Security 6759084501, 6759651094): ([(tree path steps, "<key>= in <file>", kind)] for every
+    path word (absolute or a specifier's) any unit file names (unit_files: drop-ins, any section) at a
+    setting off PID1_READS, each *.mount and *.automount file name's path, and each etc/fstab mount point;
+    loose, whether any unit file sets a DirectoryMode= others can write (o+w) or one the check cannot read,
+    for the parents PID 1 makes (umask 0); and one error per such word holding a specifier, a quote or a
+    backslash, or a byte outside printable ASCII). KIND is "mount" for a mount point, "namespace" for
+    PID1_NAMESPACE_MAKES, else "". *Directory= values are unit_made_dirs'."""
+    root, out, paths, loose = str(root), [], [], False
     files, _ = cached(unit_files, root)
     for path, rel in sorted(files.items()):
         try:
             lines = config_lines(Conf(root, path).content())
         except (OSError, Unparsable):
             continue  # unit_made_dirs refuses it
-        modes = [v for _, k, v in lines if k == "DirectoryMode"]
-        loose = any(not re.fullmatch(r"[0-7]{1,4}", m) or int(m, 8) & 0o002 for m in modes)
+        loose |= any(not re.fullmatch(r"[0-7]{1,4}", v) or int(v, 8) & 0o002 for _, k, v in lines if k == "DirectoryMode")
         name = path.rsplit("/", 1)[-1]
-        named = []
         if re.fullmatch(r"[^@]+\.(auto)?mount", name):
             unit = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), name.rsplit(".", 1)[0].replace("-", "/"))
-            named.append(("Where", "/" + unit.strip("/") if unit != "/" else "/"))
-        named += [(k, w) for _, k, v in lines if k in PID1_PATHS for w in (v.split() if k == "Symlinks" else [v])]
-        for key, v in named:
-            if not v.startswith(("/", "%")):
+            paths.append((path_parts(unit), "the name of %s" % rel, "mount"))
+        for _, key, v in lines:
+            if key in PID1_READS or key in UNIT_MADE_DIRS or key.startswith(PID1_READ_PREFIXES):
                 continue
-            if any(not " " < c <= "~" or c in "%\"'\\" for c in v):
-                out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                           "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
-                continue
-            what = "mount" if key == "Where" else "path"
-            paths.append((path_parts(v), what, "%s= in %s" % (key, rel), loose))
-    return paths, out
+            if key in PID1_NAMESPACE_MAKES:
+                # Only the mount point is made: BindPaths=SRC:DST's DST (SRC alone mounts on itself and makes
+                # nothing), TemporaryFileSystem=PATH:OPTS's PATH.
+                made = " ".join(f[0 if key == "TemporaryFileSystem" else 1] for f in (w.split(":") for w in v.split())
+                                if len(f) > 1 or key == "TemporaryFileSystem")
+            for w in re.findall(r"(?:^|(?<=[\s:=]))[-+!@]*(/[^\s:=]*|%%[%s][^\s:=]*)" % PATH_SPECIFIERS,
+                                made if key in PID1_NAMESPACE_MAKES else v):
+                if any(not " " < c <= "~" or c in "%\"'\\" for c in w):
+                    out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
+                               "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                    break
+                kind = "mount" if key == "Where" else "namespace" if key in PID1_NAMESPACE_MAKES else ""
+                paths.append((path_parts(w), "%s= in %s" % (key, rel), kind))
+    try:
+        text = Conf(root, "etc/fstab").text()
+    except OSError:
+        text = ""  # fstab_noexec_violations refuses an unreadable one
+    for ln in text.splitlines():
+        f = ln.split()
+        if len(f) >= 2 and not f[0].startswith("#") and f[1].startswith("/"):
+            paths.append((path_parts(f[1]), "etc/fstab", "mount"))
+    return paths, loose, out
 
 
 def made_private(d):
@@ -1795,9 +1818,10 @@ def unit_made_refusals(root):
        tree owner, group, ACL or tmpfiles.d line that gives it to another user or makes it a link.
        Under a box mount (/run) the mount point is the box's and every step below it is weighed by
        the tmpfiles.d lines alone, since the mount hides the tree's;
-    4. PID 1 itself (unit_made_paths) makes no socket, link or mount point at a step, mounts nothing
-       below the last (path_chown_recursive descends into it), and makes no parent on the way with a
-       DirectoryMode= others can write (it runs with umask 0).
+    4. no setting PID 1 may act on (any off PID1_READS: a socket, Symlinks=, a path unit, a mount point,
+       StandardOutput=file:, and any setting systemd adds later) names a step of the way; nothing is
+       mounted below the last (path_chown_recursive descends into it); and, if any unit file sets a
+       DirectoryMode= others can write, no named path has a parent PID 1 may make (umask 0) on the way.
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
     service user's. Generators and transient units are not covered (unit_made_dirs)."""
@@ -1832,22 +1856,22 @@ def made_way_refusal(root, form):
         for m in tmpfiles_paths(root, words[1], words[0][:1] == "L"):
             if len(m) == len(parts) and all(step_may_name(c, t) for c, t in zip(m, parts)):
                 return "where %s line %d (%s) may leave something other than a directory" % (rel, n, ln[:80])
-    for steps, what, where, loose in cached(unit_made_paths, root)[0]:
-        # 4. PID 1 makes nothing else at a step of the way (a socket, a link, a mount point), mounts nothing
-        #    below it (the chown descends into a mount), and makes no step above it others can write.
+    named, loose, _ = cached(unit_made_paths, root)
+    for steps, where, kind in named:
+        # 4. No setting off PID1_READS names a step of the way (PID 1 may make, link or mount it there), no
+        #    mount sits below the last step (the chown descends into it), and, when any unit file sets a
+        #    loose DirectoryMode=, no named path has a parent PID 1 may make on the way above the last.
         def meets(n, steps=steps):
             return all(step_may_name(c, t) or step_may_name(t, c) for c, t in zip(steps[:n], parts[:n]))
-        if steps and "/".join(steps) not in BOX_MOUNTS and len(steps) <= len(parts) and meets(len(steps)):
-            return "where PID 1 makes or mounts /%s (%s)" % ("/".join(steps), where)
-        if what == "mount" and len(steps) > len(parts) and meets(len(parts)):
-            return "above /%s, which PID 1 mounts (%s) and the chown descends into" % ("/".join(steps), where)
-        # A parent PID 1 may make for STEPS with a DirectoryMode= others can write, on the way above the last
-        # step: one the box lacks when the unit starts (under a box mount, missing from the tree, or one a
-        # tmpfiles.d line can remove), never a box mount point.
+        if (steps and "/".join(steps) not in BOX_MOUNTS and len(steps) <= len(parts) and meets(len(steps))
+                and (kind != "namespace" or len(steps) == len(parts))):
+            return "where PID 1 may make, link or mount /%s (%s)" % ("/".join(steps), where)
+        if kind == "mount" and len(steps) > len(parts) and meets(len(parts)):
+            return "above /%s, which is mounted (%s) and the chown descends into" % ("/".join(steps), where)
         if loose and any(meets(k) and "/".join(steps[:k]) not in BOX_MOUNTS and pid1_may_make(root, steps[:k])
                          for k in range(1, min(len(steps), len(parts)))):
-            return ("below a step PID 1 may make for anyone to write (%s, with its file's DirectoryMode=, for /%s)"
-                    % (where, "/".join(steps)))
+            return ("below a step PID 1 may make for anyone to write (for /%s, %s; a unit file sets a DirectoryMode= "
+                    "others can write)" % ("/".join(steps), where))
     why = chain_refusal(root, up, "/" + form, True, mounted=up[0] in BOX_MOUNTS)
     return None if why is None else "below a step another user can write or remake: " + why
 

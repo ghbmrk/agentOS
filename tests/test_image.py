@@ -5300,7 +5300,9 @@ class UplinkTest(unittest.TestCase):
         for unit in ("systemd-journald@.service", "systemd-journald@.socket", "systemd-journald-varlink@.socket",
                      "systemd-journald-sync@.service", "capsule@.service"):
             self.assertIn("/usr/lib/systemd/system/" + unit, removed)
-        for f in list(MK.glob("mkosi.extra/**/*.service")) + list(MK.glob("mkosi.extra/**/*.conf")):
+        # build.sh installs the broker's units beside mkosi.extra's.
+        for f in (list(MK.glob("mkosi.extra/**/*.service")) + list(MK.glob("mkosi.extra/**/*.conf"))
+                  + list((ROOT / "broker/cmd").glob("*/*.service"))):
             self.assertNotIn("LogNamespace", f.read_text(errors="replace"), f)
 
     def test_uplink_tells_the_lan_nothing_about_the_box(self):

@@ -504,12 +504,13 @@ class KeeperTreeTest(unittest.TestCase):
                 finally:
                     d.unlink()
         # A path PID 1 makes from a value with a specifier, or a byte it does not model, is refused too.
-        for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'"):
+        for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'",
+                     "StandardError=truncate:%S/x", "Wants=%I"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.socket", "[Socket]\n%s\n" % text)
                 try:
                     key, val = text.split("=", 1)
-                    got = check.unit_made_paths(self.root)[1]
+                    got = check.unit_made_paths(self.root)[2]
                     self.assertEqual(len(got), 1, got)
                     self.assertTrue(got[0].startswith("%sx.socket: %s=" % (SYSTEM, key)), got)
                     self.assertTrue(got[0].endswith(": the tree check does not model it; the tree check never passes a "
@@ -517,6 +518,13 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
+        # A word opening with a name's specifier (%i, %n) is no path; PID 1 only opens a TTYPath=.
+        d = write(self.root, SYSTEM + "x@.service", "[Service]\nUser=camdec-%I\nAfter=%i.mount %n.socket\n"
+                                                    "TTYPath=/dev/%I\nUtmpIdentifier=%I\n")
+        try:
+            self.assertEqual(check.unit_made_paths(self.root)[2], [])
+        finally:
+            d.unlink()
 
     def test_a_unit_made_directorys_way_is_roots_alone(self):
         # #5167 re-plan 2: systemd 257's setup_exec_directory makes the missing steps, then chmods and chowns
@@ -548,6 +556,11 @@ class KeeperTreeTest(unittest.TestCase):
             # Anything else that is not a directory: a device node, a copy, a file; a specifier the box expands;
             # a template's directory.
             ("StateDirectory=cq", {tmpf: "c /var/lib/cq 0600 - - - 8:0\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=cq", {tmpf: "b /var/lib/cq 0600 - - - 8:0\n"}, "/var/lib/cq", "where " + tmpf),
+            ("StateDirectory=cq", {tmpf: "p /var/lib/cq 0600 - - -\n"}, "/var/lib/cq", "where " + tmpf),
+            # A line that reaches the directory through a link the tree holds.
+            ("StateDirectory=cq", {"srv/al": ("link", "/var/lib"), tmpf: "f /srv/al/cq 0644 - - -\n"}, "/var/lib/cq",
+             "where " + tmpf),
             ("StateDirectory=cq", {tmpf: "C /var/lib/cq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
             ("StateDirectory=cq", {tmpf: "f /var/lib/cq 0644 - - -\n"}, "/var/lib/cq", "where " + tmpf),
             ("StateDirectory=cq", {tmpf: "L /var/lib/c%Hq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
@@ -576,30 +589,50 @@ class KeeperTreeTest(unittest.TestCase):
             # at a step, a socket's parents with a loose DirectoryMode=, a socket or its Symlinks= at the
             # directory, a mount point at a step (with DirectoryMode=0777), and a mount below the directory.
             ("RuntimeDirectory=pp/x", {SYSTEM + "p.path": "[Path]\nDirectoryNotEmpty=/run/pp\nMakeDirectory=yes\n"
-                                                         "DirectoryMode=0777\n"}, "/run/pp/x", "where PID 1 makes or mounts /run/pp"),
+                                                         "DirectoryMode=0777\n"}, "/run/pp/x", "where PID 1 may make, link or mount /run/pp"),
             ("RuntimeDirectory=ss/b", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ss/a/sock\nDirectoryMode=0777\n"},
-             "/run/ss/b", "below a step PID 1 may make for anyone to write (ListenStream= in %ss.socket" % SYSTEM),
+             "/run/ss/b", "below a step PID 1 may make for anyone to write (for /run/ss/a/sock, ListenStream= in %ss.socket" % SYSTEM),
             # The same under /run with the tree holding the step: the box's tmpfs hides it, so PID 1 makes it.
             ("RuntimeDirectory=ss/b", {"run/ss/keep": "", SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ss/a/sock\n"
                                                                               "DirectoryMode=0777\n"},
-             "/run/ss/b", "below a step PID 1 may make for anyone to write (ListenStream= in %ss.socket" % SYSTEM),
+             "/run/ss/b", "below a step PID 1 may make for anyone to write (for /run/ss/a/sock, ListenStream= in %ss.socket" % SYSTEM),
             ("RuntimeDirectory=sy", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/x.sock\nSymlinks=/run/sy\n"},
-             "/run/sy", "where PID 1 makes or mounts /run/sy (Symlinks= in %ss.socket)" % SYSTEM),
+             "/run/sy", "where PID 1 may make, link or mount /run/sy (Symlinks= in %ss.socket)" % SYSTEM),
             ("RuntimeDirectory=sy", {SYSTEM + "s.socket": "[Socket]\nListenFIFO=/run/sy\n"}, "/run/sy",
-             "where PID 1 makes or mounts /run/sy (ListenFIFO="),
+             "where PID 1 may make, link or mount /run/sy (ListenFIFO="),
             ("StateDirectory=mm/x", {SYSTEM + "var-lib-mm.mount": "[Mount]\nWhat=tmpfs\nDirectoryMode=0777\n"},
-             "/var/lib/mm/x", "where PID 1 makes or mounts /var/lib/mm (Where= in %svar-lib-mm.mount)" % SYSTEM),
+             "/var/lib/mm/x", "where PID 1 may make, link or mount /var/lib/mm (the name of %svar-lib-mm.mount)" % SYSTEM),
             ("StateDirectory=mq/e", {SYSTEM + "m.mount": "[Mount]\nWhat=tmpfs\nWhere=/var/lib/mq/d\nDirectoryMode=0777\n"},
-             "/var/lib/mq/e", "below a step PID 1 may make for anyone to write (Where= in %sm.mount" % SYSTEM),
+             "/var/lib/mq/e", "below a step PID 1 may make for anyone to write (for /var/lib/mq/d, Where= in %sm.mount" % SYSTEM),
             ("StateDirectory=mb", {SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=/var/lib/mb/in\n"}, "/var/lib/mb",
-             "above /var/lib/mb/in, which PID 1 mounts (Where= in %sm.mount) and the chown descends into" % SYSTEM),
+             "above /var/lib/mb/in, which is mounted (Where= in %sm.mount) and the chown descends into" % SYSTEM),
+            # Security 6759651094: a loose DirectoryMode= counts from any unit file (systemd merges drop-ins: the
+            # unit's own, and the type-wide socket.d/ and path.d/), and any setting off PID1_READS counts by
+            # default, StandardOutput=file: among them.
+            ("StateDirectory=sd/x", {SYSTEM + "sd.socket": "[Socket]\nListenStream=/var/lib/sd/sock\n",
+                                     SYSTEM + "sd.socket.d/m.conf": "[Socket]\nDirectoryMode=0777\n"},
+             "/var/lib/sd/x", "below a step PID 1 may make for anyone to write (for /var/lib/sd/sock, ListenStream="),
+            ("StateDirectory=sd/x", {SYSTEM + "sd.socket": "[Socket]\nListenStream=/var/lib/sd/sock\n",
+                                     "etc/systemd/system/socket.d/m.conf": "[Socket]\nDirectoryMode=0777\n"},
+             "/var/lib/sd/x", "below a step PID 1 may make for anyone to write (for /var/lib/sd/sock, ListenStream="),
+            # A mode the check cannot read counts as one others can write.
+            ("StateDirectory=sd/x", {SYSTEM + "sd.socket": "[Socket]\nListenStream=/var/lib/sd/sock\nDirectoryMode=0o770\n"},
+             "/var/lib/sd/x", "below a step PID 1 may make for anyone to write (for /var/lib/sd/sock, ListenStream="),
+            ("StateDirectory=pp/x", {SYSTEM + "pp.path": "[Path]\nDirectoryNotEmpty=/var/lib/pp/w\nMakeDirectory=yes\n",
+                                     SYSTEM + "pp.path.d/m.conf": "[Path]\nDirectoryMode=0777\n"},
+             "/var/lib/pp/x", "below a step PID 1 may make for anyone to write (for /var/lib/pp/w, DirectoryNotEmpty="),
+            ("StateDirectory=so", {SYSTEM + "so.service": "[Service]\nStandardOutput=file:/var/lib/so\n"}, "/var/lib/so",
+             "where PID 1 may make, link or mount /var/lib/so (StandardOutput= in %sso.service)" % SYSTEM),
+            # A namespace mount point is made only by root, 0755, so it may sit above the directory, not at it.
+            ("StateDirectory=bp", {SYSTEM + "b.service": "[Service]\nBindReadOnlyPaths=/etc/hostname:/var/lib/bp\n"},
+             "/var/lib/bp", "where PID 1 may make, link or mount /var/lib/bp (BindReadOnlyPaths= in %sb.service)" % SYSTEM),
             # Stock journald@'s LogsDirectory=journal/%m.%i: tmpfiles.d gives /var/log/journal a group; mkosi.conf
             # removes the unit.
             ("LogsDirectory=journal/%m.%i", {tmpf: "z /var/log/journal 2755 root systemd-journal - -\n"},
              "/var/log/journal/*", "for root:systemd-journal"),
         )
         wired = ("where " + tmpf, "in the tree (/var/lib/foo)", "makes a link",
-                 "where PID 1 makes or mounts /run/sy (Symlinks= in %ss.socket)" % SYSTEM)
+                 "where PID 1 may make, link or mount /run/sy (Symlinks= in %ss.socket)" % SYSTEM)
         for unit, files, made, why in refused:
             with self.subTest(unit=unit, files=files):
                 name = "q@.service" if "%i" in unit else "q.service"
@@ -642,6 +675,8 @@ class KeeperTreeTest(unittest.TestCase):
             ("RuntimeDirectory=systemd/journal", {SYSTEM + "j.socket": "[Socket]\nListenStream=/run/systemd/journal/stdout\n"
                                                                        "DirectoryMode=0755\n"}),
             ("RuntimeDirectory=ok", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ok2/sock\nDirectoryMode=0777\n"}),
+            ("StateDirectory=bq/x", {SYSTEM + "b.service": "[Service]\nTemporaryFileSystem=/var/lib/bq:ro\n"
+                                                           "BindPaths=/var/lib/bq/x /srv/s:/var/lib/bq/x/y\n"}),
         )
         for unit, files in passing:
             with self.subTest(unit=unit, files=files):
@@ -650,6 +685,19 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(check.unit_made_refusals(self.root), [])
                 finally:
                     remove()
+        # Security 6759651094 (c): an etc/fstab mount point below the directory (systemd-fstab-generator).
+        fstab = self.root / "etc/fstab"
+        kept = fstab.read_text()
+        remove = self.place({SYSTEM + "q.service": "[Service]\nStateDirectory=fq\nUser=nobody\n"})
+        try:
+            fstab.write_text(kept + "tmpfs /var/lib/fq/m tmpfs mode=0755,noexec,nosuid,nodev 0 0\n")
+            self.assertEqual(check.unit_made_refusals(self.root), [
+                "StateDirectory= in %sq.service: /var/lib/fq, which systemd makes and hands to the unit's user following "
+                "any link on its way, above /var/lib/fq/m, which is mounted (etc/fstab) and the chown descends into "
+                "(#5167)" % SYSTEM])
+        finally:
+            fstab.write_text(kept)
+            remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
