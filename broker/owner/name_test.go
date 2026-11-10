@@ -25,6 +25,7 @@ func TestNameAloneRepliesWithTheCurrentName(t *testing.T) {
 	if got := r.say("name"); got != "I have no name yet. To give me one, send NAME and the name." {
 		t.Fatalf("no name: %q", got)
 	}
+	r.unlock()
 	if got := r.say("NAME Dave Smith " + r.totp()); got != `Done. My name is now "Dave Smith".` {
 		t.Fatalf("rename: %q", got)
 	}
@@ -44,11 +45,24 @@ func TestNameAloneRepliesWithTheCurrentName(t *testing.T) {
 	}
 }
 
-// TestNameWithCodeGeneratorCodeRenamesAtOnce: a code-generator code in
-// the NAME message proves the owner wrote it, so the rename takes effect,
-// confirmed in fixed wording; a wrong one renames nothing and counts.
+// TestNameWithCodeGeneratorCodeRenamesAtOnce: in a session the page
+// opened, a code-generator code in the NAME message proves the owner wrote
+// it, so the rename takes effect, confirmed in fixed wording; a wrong one
+// renames nothing and counts. While locked, the code opens no session: the
+// NAME waits for the page without its code (CH-14).
 func TestNameWithCodeGeneratorCodeRenamesAtOnce(t *testing.T) {
 	r := named(t)
+	code := r.totp()
+	if got := r.say("NAME Dave Smith " + code); !strings.HasPrefix(got, "Locked.") {
+		t.Fatalf("locked: %q", got)
+	}
+	if msgs, _, _ := r.ch.LocalHeld(); len(msgs) != 1 || msgs[0].Text != "NAME Dave Smith" {
+		t.Fatalf("held %+v", msgs)
+	}
+	if n := r.ch.Name(); n != "" || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatalf("locked NAME with a code renamed (%q) or opened a session", n)
+	}
+	r.unlock()
 	if got := r.say("NAME Evil Twin 000000"); !strings.HasPrefix(got, "Wrong code. Nothing changed.") {
 		t.Fatalf("wrong code: %q", got)
 	}
@@ -57,9 +71,6 @@ func TestNameWithCodeGeneratorCodeRenamesAtOnce(t *testing.T) {
 	}
 	if got := r.say("NAME  Mary-Jane O'Neil. " + r.totp()); got != `Done. My name is now "Mary-Jane O'Neil".` {
 		t.Fatalf("rename: %q", got)
-	}
-	if !r.ch.SessionUnlocked(r.clock()) {
-		t.Fatal("a code-generator code did not unlock the session")
 	}
 }
 
@@ -97,7 +108,8 @@ func TestNameInUnlockedSessionNeedsTheTextedConfirmation(t *testing.T) {
 // TestSpoofedNameRenamesNothing (A14): a spoofer on the owner's number
 // never sees the replies, so a NAME it sends in an unlocked session waits
 // on a code it cannot read; guesses count and void it after three. In a
-// locked session it is held and renames nothing, and RUN does not run it.
+// locked session it is held for the page and renames nothing, and RUN does
+// not run it.
 func TestSpoofedNameRenamesNothing(t *testing.T) {
 	r := named(t)
 	r.unlock()
@@ -116,12 +128,10 @@ func TestSpoofedNameRenamesNothing(t *testing.T) {
 
 	// Locked: held, not renamed; RUN and code guesses do nothing.
 	r2 := named(t)
-	if got := r2.say("NAME Evil Twin"); !strings.HasPrefix(got, "Locked. Your message is held for 15 min.") {
+	if got := r2.say("NAME Evil Twin"); got != waitingReply {
 		t.Fatalf("locked: %q", got)
 	}
-	if got := r2.say("RUN"); got != "Nothing is held." {
-		t.Fatalf("RUN: %q", got)
-	}
+	r2.say("RUN")
 	if got := r2.say("NAME 123456"); got != "No rename is waiting. Send NAME and the new name." {
 		t.Fatalf("guess while locked: %q", got)
 	}
@@ -133,20 +143,23 @@ func TestSpoofedNameRenamesNothing(t *testing.T) {
 	}
 }
 
-// TestHeldNameAsksForConfirmationAfterUnlock: NAME in a locked session is
-// held for the unlock (CH-14); a code-only unlock does not run it but
-// turns it into the fixed-wording confirmation, since the code proves the
-// owner, not who wrote the held text.
-func TestHeldNameAsksForConfirmationAfterUnlock(t *testing.T) {
+// TestHeldNameAsksForConfirmationWhenRunFromThePage: NAME in a locked
+// session is held for the page (CH-14); a code by text does not run it;
+// the owner's run on the page turns it into the fixed-wording
+// confirmation, since a session proves the owner, not who wrote the held
+// text.
+func TestHeldNameAsksForConfirmationWhenRunFromThePage(t *testing.T) {
 	r := named(t)
 	r.say("NAME Dave Smith")
-	got := r.say(r.totp())
-	m := nameCodeRe.FindStringSubmatch(got)
-	if m == nil || !strings.HasPrefix(got, "Unlocked until ") || !strings.Contains(got, `Change my name to "Dave Smith"? `) {
-		t.Fatalf("unlock: %q", got)
+	if got := r.say(r.totp()); !strings.Contains(got, "no code by text opens a session") {
+		t.Fatalf("code by text: %q", got)
 	}
-	if got := r.say("RUN"); got != "Nothing is held." {
-		t.Fatalf("RUN: %q", got)
+	r.unlock()
+	r.runHeld()
+	got := r.inbox()
+	m := nameCodeRe.FindStringSubmatch(got)
+	if m == nil || !strings.HasPrefix(got, `Change my name to "Dave Smith"? `) {
+		t.Fatalf("run: %q", got)
 	}
 	if n := r.ch.Name(); n != "" {
 		t.Fatalf("renamed before confirmation: %q", n)
@@ -214,8 +227,8 @@ func TestNameCheckRefusesBeforeAnyCode(t *testing.T) {
 			t.Errorf("%s: %q", in, got)
 		}
 	}
-	if got := r.say(r.totp()); got != "Unlocked until Oct 11 12:00." {
-		t.Fatalf("something was held: %q", got)
+	if msgs, _, _ := r.ch.LocalHeld(); len(msgs) != 0 {
+		t.Fatalf("something was held: %+v", msgs)
 	}
 }
 
@@ -238,6 +251,7 @@ func TestNameWorksWithModelsDown(t *testing.T) {
 	r := named(t)
 	r.down = true
 	r.ch = r.open()
+	r.unlock()
 	if got := r.say("NAME Dave Smith " + r.totp()); got != `Done. My name is now "Dave Smith".` {
 		t.Fatalf("rename: %q", got)
 	}

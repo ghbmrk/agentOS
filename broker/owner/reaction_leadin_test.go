@@ -49,7 +49,7 @@ func TestLockedUnlistedReactionTellsTheOwner(t *testing.T) {
 	r := newRig(t, nil)
 	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
 	got := r.say("Cancel “Your sign-in code is 482913.”")
-	if !strings.Contains(got, "held for") || !strings.Contains(got, readAsReaction) || strings.Contains(got, "482913") {
+	if !strings.Contains(got, waitingReply) || !strings.Contains(got, readAsReaction) || strings.Contains(got, "482913") {
 		t.Fatalf("locked unlisted form replied %q, want held plus %q", got, readAsReaction)
 	}
 }

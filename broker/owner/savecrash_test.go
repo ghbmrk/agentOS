@@ -22,11 +22,12 @@ import (
 func stopAt(step int) func(int) bool { return func(i int) bool { return i == step } }
 
 // REQ: CH-18
-// A code-generator unlock whose save is stopped is refused with stateErr
-// and leaves memory locked with the code unspent. Stopped before the
-// rename, a restart is as before the code, so the same code then unlocks;
+// A texted code-generator code whose save is stopped is refused with
+// stateErr and leaves memory with the code unspent. Stopped before the
+// rename, a restart is as before the code, so the same code is then taken;
 // stopped after it, a restart holds the whole new state: the code is
-// spent and the session unlocked, so the code cannot be used again.
+// spent, so it cannot be used again. No code by text opens a session
+// (D-311), so none is open at any step.
 func TestOwnerStateSaveCrashDuringTheFileWrite(t *testing.T) {
 	for step := range 6 {
 		path := filepath.Join(t.TempDir(), "owner.json")
@@ -62,21 +63,21 @@ func TestOwnerStateSaveCrashDuringTheFileWrite(t *testing.T) {
 			if disk.LastStep != before.LastStep || !disk.UnlockedUntil.Equal(before.UnlockedUntil) {
 				t.Fatalf("step %d: the file changed before the rename: %+v", step, disk)
 			}
-			if got := r.say(code); !strings.HasPrefix(got, "Unlocked until") {
+			if got := r.say(code); !strings.Contains(got, "That code is right") || r.ch.codes.unlocked(r.clock()) {
 				t.Fatalf("step %d: the unspent code after a restart: %q", step, got)
 			}
 			continue
 		}
-		if disk.LastStep <= before.LastStep || !r.ch.codes.unlocked(r.clock()) {
+		if disk.LastStep <= before.LastStep || r.ch.codes.unlocked(r.clock()) {
 			t.Fatalf("step %d: the renamed file is not the whole new state: %+v", step, disk)
 		}
-		// Locked again, with the spent step still in the accepted window,
-		// the code must be refused (an unlocked session never checks it).
+		// Locked, with the spent step still in the accepted window, the
+		// code must be refused.
 		if err := r.ch.codes.lock(); err != nil {
 			t.Fatalf("step %d: lock: %v", step, err)
 		}
 		r.advance(30 * time.Second)
-		if got := r.say(code); strings.HasPrefix(got, "Unlocked until") || r.ch.codes.unlocked(r.clock()) {
+		if got := r.say(code); !strings.HasPrefix(got, "Wrong code") || r.ch.codes.unlocked(r.clock()) {
 			t.Fatalf("step %d: the spent code was taken again: %q", step, got)
 		}
 	}
@@ -94,16 +95,17 @@ func (u unsyncedStore) Save(s State) error {
 }
 
 // REQ: CH-18
-// A code-generator unlock whose save fails only at the directory sync
-// (#4971) renamed the new state into place, so it counts: the session
-// unlocks, memory equals the file, the same code is not accepted again,
-// and the next commit does not write the old step back over the file.
+// A texted code-generator code whose save fails only at the directory
+// sync (#4971) renamed the new state into place, so it counts: the code is
+// spent (opening no session, D-311), memory equals the file, the same code
+// is not accepted again, and the next commit does not write the old step
+// back over the file.
 func TestOwnerStateSaveUnsyncedKeepsMemoryEqualToTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "owner.json")
 	r := newRig(t, unsyncedStore{FileStore{Path: path}})
 	code := r.totp()
-	if got := r.say(code); !strings.HasPrefix(got, "Unlocked until") {
-		t.Fatalf("unsynced unlock replied %q", got)
+	if got := r.say(code); !strings.Contains(got, "That code is right") {
+		t.Fatalf("unsynced code replied %q", got)
 	}
 	disk, err := FileStore{Path: path}.Load()
 	if err != nil {
@@ -121,7 +123,7 @@ func TestOwnerStateSaveUnsyncedKeepsMemoryEqualToTheFile(t *testing.T) {
 		t.Fatalf("the next commit wrote step %d back over %d", after.LastStep, disk.LastStep)
 	}
 	r.advance(30 * time.Second) // the spent step is still in the accepted window
-	if got := r.say(code); strings.HasPrefix(got, "Unlocked until") || r.ch.codes.unlocked(r.clock()) {
+	if got := r.say(code); !strings.HasPrefix(got, "Wrong code") || r.ch.codes.unlocked(r.clock()) {
 		t.Fatalf("the spent code was taken again: %q", got)
 	}
 }

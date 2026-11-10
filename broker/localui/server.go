@@ -312,6 +312,7 @@ func (s *Server) routes() {
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
 	s.Mount("/held", "Held messages", http.HandlerFunc(s.held))
+	s.Mount("/inbox", "Messages you sent", http.HandlerFunc(s.inbox))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}

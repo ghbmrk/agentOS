@@ -1,11 +1,11 @@
 // Package owner is the owner channel (SPEC §6.1, PLAN P1-5): the box's own
 // number as the conversational address, CH-3's command tiers, two-tier
-// approval codes (CH-4, CH-10), batch replies (CH-13), inline session
-// unlock (CH-14), code hygiene (CH-18), disclosure filtering (CH-19), and
+// approval codes (CH-4, CH-10), batch replies (CH-13), messages held for
+// the page while the session is locked (CH-14), code hygiene (CH-18), disclosure filtering (CH-19), and
 // queued context-scoped auto-replies with their commitment filter (ADP-11).
 //
 // Channel sits in front of control.Handler. It owns every word that carries
-// or checks a code (RESUME, YES, NO, UNDO, MORE, RUN, and session unlock)
+// or checks a code (RESUME, YES, NO, UNDO, MORE, UNLOCK)
 // and passes STOP, STATUS, HELP and task chat to the control handler, which
 // asks Channel (as its control.Auth) whether the session is unlocked.
 // Nothing here reaches a model, a guest, or the network (ARC-2); the agent
@@ -24,7 +24,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -68,8 +67,11 @@ type Config struct {
 	Commitments Commitments
 	// UnlockFor is CH-14's N (default 7 days).
 	UnlockFor time.Duration
-	// CodeTTL bounds texted codes and held messages (default 15 min).
+	// CodeTTL bounds texted codes (default 15 min).
 	CodeTTL time.Duration
+	// HoldSegments bounds the text held for the page while the session
+	// is locked, in SMS segments (CH-14; DefaultHoldSegments when zero).
+	HoldSegments int
 	// UndoWindow delays queued auto-replies (default 10 min).
 	UndoWindow time.Duration
 	// ReplyLimit is DefaultReplyLimit when zero.
@@ -190,7 +192,6 @@ type Channel struct {
 	// owner's over a line that was down (security B1(a) on PW3).
 	lineFailed  atomic.Int64
 	resumeTexts []time.Time
-	held        *heldMsg
 	recent      recentWindow // texts to the owner a reaction may mark (CH-11)
 	// sinceOwner are the agent texts checkAgent let through since the
 	// owner's last message, oldest first, at most maxSinceOwner: the
@@ -271,16 +272,6 @@ type resumeCode struct {
 	wrong   int
 }
 
-// heldMsg is the one message held while the session is locked (CH-14).
-// ready is set when a code-only unlock arrived: the message then runs only
-// on RUN, because the code proves the unlock, not who wrote the held text.
-type heldMsg struct {
-	text    string
-	react   string // a held reaction's event, delivered in place of text (CH-11)
-	expires time.Time
-	ready   bool
-}
-
 // New returns a Channel, loading its durable state.
 func New(cfg Config) (*Channel, error) {
 	if cfg.Owner == "" || cfg.Engine == nil || cfg.Store == nil {
@@ -291,6 +282,9 @@ func New(cfg Config) (*Channel, error) {
 	}
 	if cfg.CodeTTL == 0 {
 		cfg.CodeTTL = DefaultCodeTTL
+	}
+	if cfg.HoldSegments == 0 {
+		cfg.HoldSegments = DefaultHoldSegments
 	}
 	if cfg.UndoWindow == 0 {
 		cfg.UndoWindow = DefaultUndoWindow
@@ -333,7 +327,7 @@ func New(cfg Config) (*Channel, error) {
 	}
 	// The page-only requests' line is STATUS's first note, so the texted
 	// reply, which leaves out notes that do not fit, always keeps it.
-	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append([]func() string{c.LocalWaiting}, cfg.Notes...), Now: cfg.Now,
+	c.ctrl = &control.Handler{Engine: cfg.Engine, Auth: c, Agent: agent, Machines: cfg.Machines, Notes: append([]func() string{c.LocalWaiting, c.heldNote}, cfg.Notes...), Now: cfg.Now,
 		Settings: c.settings, HelpExtra: strings.TrimSpace(cfg.HelpExtra + " " + pacingHelp), Answer: cfg.Answer}
 	return c, nil
 }
@@ -357,12 +351,11 @@ func (c *Channel) SessionUnlocked(now time.Time) bool {
 	return c.codes.unlocked(now)
 }
 
-// RequireUnlock ends the session unlock, as after a boot on an unknown host
-// (CH-14).
+// RequireUnlock ends the session, as after a boot on an unknown host
+// (CH-14); messages held for the page stay held.
 func (c *Channel) RequireUnlock() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.held = nil
 	return c.codes.lock()
 }
 
@@ -525,7 +518,6 @@ func (c *Channel) route(from, text string) (route, bool) {
 	flood := c.floodLocked(now)
 	if c.codes.justChallenged {
 		c.codes.justChallenged = false
-		c.held = nil
 		c.alertAt = now
 		rt.alerts = append(rt.alerts, fmt.Sprintf("Too many wrong codes. Codes by text now need a challenge: reply UNLOCK %s and a code from your code generator within %s.",
 			c.codes.currentChallenge(now), dur(ChallengeTTL))+flood)
@@ -604,7 +596,7 @@ func (c *Channel) limit(out []string, now time.Time) []string {
 // routeLocked answers the channel's own words and decides what reaches the
 // control handler.
 func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) route {
-	// A reaction is read first: never a control word, a code, RUN or an
+	// A reaction is read first: never a control word, a code or an
 	// approval, whatever it quotes (CH-11).
 	if rx, ok := c.readReaction(text); ok {
 		return c.reactionLocked(text, rx, now, c.codes.unlocked(now))
@@ -634,18 +626,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		case "MORE":
 			return route{replies: []string{c.moreLocked(r.id)}, limited: !unlocked}
 		case "UNLOCK":
-			return route{replies: []string{"Codes are not locked. To unlock a session, send a code from your code generator."}, limited: !unlocked}
+			return route{replies: []string{"Codes are not locked."}, limited: !unlocked}
 		case "RETRY":
 			return route{retry: true, limited: !unlocked}
-		case "RUN":
-			if h := c.held; h != nil && h.ready && unlocked {
-				c.held = nil
-				if h.react != "" {
-					return route{react: h.react, reactGen: c.recent.gen()}
-				}
-				return route{delegate: h.text, run: true}
-			}
-			return route{replies: []string{"Nothing is held."}, limited: !unlocked}
 		default: // YES, NO
 			if len(c.open) > 0 || r.id != "" {
 				out, accepted, wrong := c.answerLocked(r, now, decided, false)
@@ -707,53 +690,23 @@ func (c *Channel) unlockedChatLocked(text, rest, code string, now time.Time) rou
 	return route{delegate: text, run: true}
 }
 
-// lockedLocked handles STATUS and chat while the session is locked: a code
-// unlocks; a message is held, one at a time (CH-3, CH-14).
+// lockedLocked handles chat while the session is locked: it is held for
+// the page, which alone opens a session (CH-3, CH-14). A code by text
+// never opens one: a code sent alone is checked as a reply code (CH-11,
+// CH-18) and a code at the end of a message is stripped before the
+// message is held, so it never reaches a model.
 func (c *Channel) lockedLocked(rest, code string, now time.Time) route {
-	if code == "" {
-		if c.held != nil {
-			c.held = nil
-			return route{replies: []string{"Locked. A message was already waiting, so both were dropped. " +
-				"Send your message with a code from your code generator at the end."}, limited: true}
+	if code != "" && rest == "" {
+		res, locked, err := c.codes.checkStrong(code, now, strongOpts{clear: true, count: true})
+		switch {
+		case err != nil:
+			return route{replies: []string{c.codeErr(err)}, limited: true}
+		case res == strongWrong:
+			return route{replies: []string{"Wrong code." + lockNote(locked)}, limited: true}
 		}
-		c.held = &heldMsg{text: rest, expires: now.Add(c.cfg.CodeTTL)}
-		return route{replies: []string{fmt.Sprintf("Locked. Your message is held for %s. %s",
-			dur(c.cfg.CodeTTL), c.unlockPrompt())}, limited: true}
+		return route{replies: []string{"That code is right, but no code by text opens a session. Sign in on my Wi-Fi page at home to open one."}}
 	}
-	res, locked, err := c.codes.checkStrong(code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
-	switch {
-	case err != nil:
-		return route{replies: []string{c.codeErr(err)}, limited: true}
-	case res == strongWrong:
-		dropped := ""
-		if c.held != nil || rest != "" {
-			dropped = "Your message was dropped. "
-		}
-		c.held = nil
-		return route{replies: []string{"Wrong code. " + dropped + c.unlockPrompt() + lockNote(locked)}, limited: true}
-	}
-	msg := "Unlocked until " + c.untilText() + "."
-	if rest != "" {
-		// The code came with this message, so this message is the
-		// owner's: it runs. Anything held earlier is dropped.
-		c.held = nil
-		return route{replies: []string{msg}, delegate: rest, run: true}
-	}
-	if h := c.held; h != nil && now.Before(h.expires) {
-		if n, ok := parseName(h.text); ok && h.react == "" && n.name != "" && n.code == "" {
-			// A held NAME is not run by RUN: the unlock code proves
-			// the owner, not who wrote it, so it gets the texted
-			// confirmation instead. Its name passed the check when held.
-			c.held = nil
-			name, _ := boxname.Check(n.name, c.cfg.OwnerName)
-			return route{replies: []string{msg + " " + c.askRenameLocked(name, now)}, limited: true}
-		}
-		h.ready = true
-		h.expires = now.Add(c.cfg.CodeTTL)
-		return route{replies: []string{fmt.Sprintf("%s Held: \"%s\". Reply RUN to send it.", msg, field(h.text, 40))}}
-	}
-	c.held = nil
-	return route{replies: []string{msg}}
+	return c.waitLocked(rest, false, now)
 }
 
 // AlertEvery is the least time between two challenge-mode alerts by text;
@@ -793,7 +746,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		case !ok:
 			return c.dropLocked(now), true
 		}
-		res, _, err := c.codes.checkStrong(r.code, now, strongOpts{unlock: c.cfg.UnlockFor})
+		res, _, err := c.codes.checkStrong(r.code, now, strongOpts{clear: true})
 		if err != nil {
 			var ve *VerifyError
 			if errors.As(err, &ve) {
@@ -807,8 +760,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			return c.challengeText(now, fmt.Sprintf("Wrong code. New challenge: reply %s %s and a code from your code generator.",
 				r.word, c.codes.currentChallenge(now))), true
 		}
-		c.held = nil
-		msg := "Unlocked until " + c.untilText() + ". Codes work normally again."
+		msg := "Codes work normally again."
 		if r.word == "RESUME" {
 			c.resume = nil
 			switch err := c.resumeUnlessStopped(gen); {
@@ -970,15 +922,6 @@ func (c *Channel) untilText() string {
 	return c.codes.st.UnlockedUntil.In(c.cfg.Location).Format("Jan 2 15:04")
 }
 
-// unlockPrompt asks for a high-tier code; a texted code never unlocks a
-// session (CH-14, CH-19).
-func (c *Channel) unlockPrompt() string {
-	if c.codes.st.Challenged {
-		return "Codes are locked after too many wrong ones; reply UNLOCK for a one-time challenge."
-	}
-	return "Send a code from your code generator" + c.gridOr() + "."
-}
-
 func (c *Channel) gridOr() string {
 	if cell := c.codes.gridChallenge(); cell != "" {
 		return ", or grid cell " + cell
@@ -1061,14 +1004,15 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 
 // checkLocked checks a reply code against a texted code, or against the
 // code generator and grid when texted is "" or the low tier is locked. A
-// strong code also extends the session unlock and approves acts (Item.Act)
+// strong code also lifts the code locks (never opening a session, CH-14)
+// and approves acts (Item.Act)
 // at the checker: a code-generator code through the Verifier, a grid cell
 // or a texted code as allowed approvals (AllowActs), and allowed reports
 // those. msg is set when no check could run or the checker did not record
 // an allow; the reply then approved nothing and counted as no try.
 func (c *Channel) checkLocked(texted, got string, now time.Time, acts []CheckerAct) (ok, allowed, locked bool, msg string) {
 	if texted == "" || c.codes.st.LowLocked {
-		res, locked, err := c.codes.checkStrong(got, now, strongOpts{unlock: c.cfg.UnlockFor, count: true, acts: acts})
+		res, locked, err := c.codes.checkStrong(got, now, strongOpts{clear: true, count: true, acts: acts})
 		switch {
 		case err != nil:
 			return false, false, false, c.codeErr(err)

@@ -120,8 +120,13 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: "agent"})
 	b := &broker{plane: plane}
 
+	// The session opens on the page (CH-14, D-311); task chat then goes
+	// by text. A code in unlocked chat is stripped (owner's own tests).
 	code := totp(seed, time.Now())
-	phone.Send(box.Number(), "plan my week "+code)
+	if _, _, err := d.Owner().LocalSignIn(code); err != nil {
+		t.Fatalf("page sign-in: %v", err)
+	}
+	phone.Send(box.Number(), "plan my week")
 	var msg struct{ ID, Text string }
 	deadline := time.Now().Add(10 * time.Second)
 	for msg.ID == "" && time.Now().Before(deadline) {
@@ -141,14 +146,14 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 			t.Fatalf("reply: %d %s", st, body)
 		}
 	}
-	// The session-unlock confirmation races the guest's answers; skip it.
+	// The page sign-in's alert races the guest's answers; skip it.
 	next := func() string {
 		for {
 			got := recv(t, phone)
 			if strings.Contains(got, "482913") {
 				t.Fatalf("a secret-shaped guest reply went out: %q", got)
 			}
-			if !strings.HasPrefix(got, "Unlocked") {
+			if !strings.Contains(got, "signed in on my Wi-Fi") {
 				return got
 			}
 		}

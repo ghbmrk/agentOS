@@ -69,7 +69,7 @@ func (c *Channel) Name() string {
 // code in the same message, or in an unlocked session on NAME and a code
 // texted to the owner's number in fixed wording: an unlocked session
 // proves the owner was here, not who sent this NAME, and a spoofer never
-// sees the texted code. In a locked session NAME is held for the unlock.
+// sees the texted code. In a locked session NAME is held for the page (CH-14).
 func (c *Channel) nameLocked(text string, n nameCmd, now time.Time, unlocked bool) route {
 	if n.ask {
 		reply := "I have no name yet. To give me one, send NAME and the name."
@@ -85,15 +85,19 @@ func (c *Channel) nameLocked(text string, n nameCmd, now time.Time, unlocked boo
 	if err != nil {
 		return route{replies: []string{"I can't take that name: " + err.Error() + ". Nothing changed."}, limited: true}
 	}
+	if n.code != "" && !unlocked {
+		// A code by text opens no session (CH-14): the rename waits for
+		// the page like any locked message, without its code.
+		return c.lockedLocked("NAME "+name, "", now)
+	}
 	if n.code != "" {
-		res, locked, err := c.codes.checkStrong(n.code, now, strongOpts{unlock: c.cfg.UnlockFor, count: true})
+		res, locked, err := c.codes.checkStrong(n.code, now, strongOpts{clear: true, count: true})
 		switch {
 		case err != nil:
 			return route{replies: []string{c.codeErr(err)}, limited: true}
 		case res != strongOK:
 			return route{replies: []string{"Wrong code. Nothing changed." + lockNote(locked)}, limited: true}
 		}
-		c.held = nil
 		return route{replies: []string{c.renameLocked(name)}}
 	}
 	if !unlocked {

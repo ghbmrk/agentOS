@@ -86,7 +86,7 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 				r.eng.mu.Unlock()
 				gen, sent := r.ch.stops.Load(), len(r.agent.got())
 				st := r.ch.codes.st
-				wrong, held := len(st.Wrong), r.ch.held
+				wrong, held := len(st.Wrong), len(st.Waiting)
 				got := r.say(text)
 				if got != bare || !r.eng.Stopped() {
 					t.Fatalf("%q: %q (bare STOP: %q), stopped %v", text, got, bare, r.eng.Stopped())
@@ -101,10 +101,10 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 				}
 				now := r.ch.codes.st
 				if len(r.agent.got()) != sent || len(now.Wrong) != wrong || !now.UnlockedUntil.Equal(st.UnlockedUntil) ||
-					now.LastStep != st.LastStep || now.Challenged != st.Challenged || r.ch.held != held {
+					now.LastStep != st.LastStep || now.Challenged != st.Challenged || len(now.Waiting) != held {
 					t.Fatalf("%q: a code was checked or passed on: agent %v, wrong %d->%d, unlocked until %v->%v, step %d->%d, challenged %v->%v, held changed %v",
 						text, r.agent.got(), wrong, len(now.Wrong), st.UnlockedUntil, now.UnlockedUntil,
-						st.LastStep, now.LastStep, st.Challenged, now.Challenged, r.ch.held != held)
+						st.LastStep, now.LastStep, st.Challenged, now.Challenged, len(now.Waiting) != held)
 				}
 				// Challenge mode ignores codes outright, so leave it to
 				// show the RESUME code itself is void.

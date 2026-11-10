@@ -19,51 +19,52 @@ import (
 var (
 	probe     = modem.SMS{From: phoneNum, To: boxNum, Text: "HELP"}
 	helpReply = modem.SMS{From: boxNum, To: phoneNum, Text: "Commands: STOP pauses all actions."}
-	coded     = modem.SMS{From: phoneNum, To: boxNum, Text: "STATUS 123456"}
-	unlockR   = modem.SMS{From: boxNum, To: phoneNum, Text: "Unlocked until 14:05."}
-	statusR   = modem.SMS{From: boxNum, To: phoneNum, Text: "Running. Nothing open."}
-	stranger  = modem.SMS{From: strangerNum, To: boxNum, Text: "STATUS 654321"}
+	coded     = modem.SMS{From: phoneNum, To: boxNum, Text: "123456"}
+	rightR    = modem.SMS{From: boxNum, To: phoneNum, Text: "That code is right, but no code by text opens a session."}
+	statusQ   = modem.SMS{From: phoneNum, To: boxNum, Text: "STATUS"}
+	lockedR   = modem.SMS{From: boxNum, To: phoneNum, Text: "Locked. I kept your message for my Wi-Fi page."}
+	stranger  = modem.SMS{From: strangerNum, To: boxNum, Text: "654321"}
 )
 
 func seq(ms ...modem.SMS) []modem.SMS { return ms }
 
 // REQ: CH-1, CH-3, CH-11, CH-14. The phone-control verdict reads the log in
-// order: HELP answered, then STATUS with a fresh code drew the unlock and
-// then the status reply, then the unpaired number's text drew nothing
-// before the barrier HELP's answer and nothing at all to itself. A failure
-// names reply kinds, never a text.
+// order: HELP answered, then a fresh code drew right-code and STATUS the
+// locked reply (a texted code opens no session), then the unpaired
+// number's text drew nothing before the barrier HELP's answer and nothing
+// at all to itself. A failure names reply kinds, never a text.
 func TestControlErr(t *testing.T) {
 	const secret = "canary-e2e-7f3a held"
 	canary := func(prefix string) modem.SMS { return modem.SMS{From: boxNum, To: phoneNum, Text: prefix + secret} }
-	pass := seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply)
+	pass := seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply)
 	cases := []struct {
 		name string
 		log  []modem.SMS
 		want string // "" passes; otherwise a substring of the error
 	}{
 		{"in order", pass, ""},
-		{"stopped counts as status", seq(probe, helpReply, coded, unlockR,
-			modem.SMS{From: boxNum, To: phoneNum, Text: "Stopped. Reply RESUME to restart."}, stranger, probe, helpReply), ""},
-		{"unanswered probes before one answered", seq(probe, probe, probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply), ""},
-		{"a late probe answer between unlock and status", seq(probe, probe, helpReply, coded, unlockR, helpReply, statusR, stranger, probe, helpReply), ""},
-		{"stranger answered", append(seq(probe, helpReply, coded, unlockR, statusR, stranger,
-			modem.SMS{From: boxNum, To: strangerNum, Text: "Running. " + secret}), probe, helpReply), "went to the unpaired number"},
-		{"stranger's text drew a reply to the paired phone", seq(probe, helpReply, coded, unlockR, statusR, stranger,
-			canary("Running. "), probe, helpReply), "unpaired number's text drew status"},
-		{"status with no unlock first", seq(probe, helpReply, coded, canary("Running. ")), "no unlock first"},
-		{"status before unlock", seq(probe, helpReply, coded, statusR, unlockR), "no unlock first"},
+		{"unanswered probes before one answered", seq(probe, probe, probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply), ""},
+		{"a late probe answer between code and status", seq(probe, probe, helpReply, coded, rightR, helpReply, statusQ, lockedR, stranger, probe, helpReply), ""},
+		{"stranger answered", append(seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger,
+			modem.SMS{From: boxNum, To: strangerNum, Text: "That code is right " + secret}), probe, helpReply), "went to the unpaired number"},
+		{"stranger's text drew a reply to the paired phone", seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger,
+			canary("That code is right "), probe, helpReply), "unpaired number's text drew right-code"},
+		{"status reply to the code", seq(probe, helpReply, coded, canary("Running. ")), "the session was not locked"},
 		{"already unlocked", seq(probe, helpReply, coded, canary("You are already unlocked until 14:05. ")), "already unlocked"},
-		{"locked", seq(probe, helpReply, coded, canary("Locked. ")), "drew locked"},
+		{"code held as a message", seq(probe, helpReply, coded, canary("Locked. ")), "drew locked"},
 		{"wrong code", seq(probe, helpReply, coded, canary("Wrong code. ")), "drew wrong-code"},
-		{"unlock then other", seq(probe, helpReply, coded, unlockR, canary("Something ")), "after the unlock, other"},
+		{"texted code opened a session", seq(probe, helpReply, coded, rightR, statusQ, canary("Running. ")), "a texted code opened a session"},
+		{"right-code then other", seq(probe, helpReply, coded, rightR, statusQ, canary("Something ")), "after right-code, other"},
 		{"probe drew other", seq(probe, canary("Locked. ")), "HELP drew locked"},
 		{"no reply to probes", seq(probe, probe), "after 2 HELP attempt(s)"},
-		{"status from another number", seq(probe, helpReply, coded,
-			modem.SMS{From: strangerNum, To: phoneNum, Text: "Running."}), "no reply to STATUS"},
-		{"unlock alone", seq(probe, helpReply, coded, unlockR), "no status reply"},
-		{"stranger never sent", seq(probe, helpReply, coded, unlockR, statusR), "did not text"},
-		{"barrier unanswered", seq(probe, helpReply, coded, unlockR, statusR, stranger, probe), "no reply to HELP after"},
-		{"help before the barrier was sent", seq(probe, helpReply, coded, unlockR, statusR, stranger, helpReply, probe), "drew help"},
+		{"reply from another number", seq(probe, helpReply, coded,
+			modem.SMS{From: strangerNum, To: phoneNum, Text: "That code is right"}), "no reply to a fresh code"},
+		{"code never sent", seq(probe, helpReply), "the code was not sent"},
+		{"status never sent", seq(probe, helpReply, coded, rightR), "STATUS was not sent"},
+		{"status unanswered", seq(probe, helpReply, coded, rightR, statusQ), "no locked reply"},
+		{"stranger never sent", seq(probe, helpReply, coded, rightR, statusQ, lockedR), "did not text"},
+		{"barrier unanswered", seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe), "no reply to HELP after"},
+		{"help before the barrier was sent", seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, helpReply, probe), "drew help"},
 	}
 	before := modem.SMS{From: boxNum, To: phoneNum, Text: "Commands: earlier"}
 	for _, c := range cases {
@@ -161,13 +162,14 @@ func TestOutageNoticeIsNotAReply(t *testing.T) {
 		t.Fatalf("replyKind(recovery text) = %q, want outage", k)
 	}
 	passes := [][]modem.SMS{
-		seq(n, probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, n, helpReply, coded, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, n, unlockR, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, unlockR, n, statusR, stranger, probe, helpReply),
-		seq(probe, helpReply, coded, unlockR, statusR, stranger, n, probe, helpReply),
-		seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, n, helpReply),
-		seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply, n),
+		seq(n, probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply),
+		seq(probe, n, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, n, rightR, statusQ, lockedR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, rightR, n, statusQ, lockedR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, rightR, statusQ, n, lockedR, stranger, probe, helpReply),
+		seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, n, probe, helpReply),
+		seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, n, helpReply),
+		seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply, n),
 	}
 	for i, log := range passes {
 		if err := controlErr(log, 0); err != nil {
@@ -179,8 +181,8 @@ func TestOutageNoticeIsNotAReply(t *testing.T) {
 		want string
 	}{
 		{seq(probe, n), "after 1 HELP attempt(s)"},
-		{seq(probe, helpReply, coded, n, statusR), "no unlock first"},
-		{seq(probe, helpReply, coded, unlockR, statusR, stranger, n, statusR, probe, helpReply), "unpaired number's text drew status"},
+		{seq(probe, helpReply, coded, n, lockedR), "drew locked"},
+		{seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, n, rightR, probe, helpReply), "unpaired number's text drew right-code"},
 		{seq(probe, n, modem.SMS{From: boxNum, To: strangerNum, Text: n.Text}), "went to the unpaired number"},
 		{seq(probe, modem.SMS{From: boxNum, To: phoneNum, Text: "I couldn't text you from 12:00 canary-e2e-7f3a"}), `HELP drew other ("I couldn't text")`},
 	}
@@ -197,7 +199,7 @@ func TestOutageNoticeIsNotAReply(t *testing.T) {
 // modemlink's own wording; the note carries those counts only, never a
 // time or a text, and a run with no notice has none.
 func TestPassedOverNoticesAreCounted(t *testing.T) {
-	ok := seq(probe, helpReply, coded, unlockR, statusR, stranger, probe, helpReply)
+	ok := seq(probe, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply)
 	if n := readPhoneRun(ok, 0).noticeNote(); n != "" {
 		t.Fatalf("a run with no notice noted %q", n)
 	}
@@ -211,7 +213,7 @@ func TestPassedOverNoticesAreCounted(t *testing.T) {
 		{2, 2, "passed-over recovery notices=1 texts=4 requests=2"},
 	} {
 		n := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, c.texts, c.requests)}
-		log := seq(probe, n, helpReply, coded, unlockR, statusR, stranger, probe, helpReply)
+		log := seq(probe, n, helpReply, coded, rightR, statusQ, lockedR, stranger, probe, helpReply)
 		r := readPhoneRun(log, 0)
 		if err := controlErr(log, 0); err != nil {
 			t.Fatal(err)
@@ -222,7 +224,7 @@ func TestPassedOverNoticesAreCounted(t *testing.T) {
 	}
 	a := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, 1, 0)}
 	b := modem.SMS{From: boxNum, To: phoneNum, Text: outageNoticeOf(t, 1, 1)}
-	log := seq(a, probe, helpReply, coded, unlockR, b, statusR, stranger, probe, helpReply)
+	log := seq(a, probe, helpReply, coded, rightR, b, statusQ, lockedR, stranger, probe, helpReply)
 	if got, want := readPhoneRun(log, 0).noticeNote(), "passed-over recovery notices=2 texts=3 requests=1"; got != want {
 		t.Errorf("two notices: %q, want %q", got, want)
 	}

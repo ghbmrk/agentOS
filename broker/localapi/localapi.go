@@ -38,6 +38,10 @@ const (
 	OpRequests = "page_requests"
 	OpAnswer   = "page_answer"
 	OpWaiting  = "page_waiting"
+	// OpInbox lists the owner messages held while the session was locked,
+	// in full; OpRunInbox runs the ones the owner marks (CH-14, D-311).
+	OpInbox    = "page_inbox"
+	OpRunInbox = "page_run_inbox"
 	// OpFollowRoot shows what following a root the owner brought would
 	// mean; agentosd holds the root under the summary's digest.
 	OpFollowRoot = "page_follow_root"
@@ -103,7 +107,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpAccountPlan, OpCertify}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpInbox, OpRunInbox, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpAccountPlan, OpCertify}
 
 // Fixed refusals, sent as sockets codes.
 const (
@@ -326,6 +330,28 @@ const (
 	// RefusedCodeNeeded: a RESUME past FreshFor came without a code.
 	RefusedCodeNeeded = "code needed"
 )
+
+// Inbox is what the owner channel held for the page while the session
+// was locked (owner.LocalHeld): each message in full, oldest first, and
+// the counts dropped at the size bound and expired.
+type Inbox struct {
+	Msgs    []owner.WaitingMsg `json:"msgs"`
+	Dropped int                `json:"dropped,omitempty"`
+	Expired int                `json:"expired,omitempty"`
+}
+
+// RunInbox is the owner's tap: of the IDs the page showed, Run are sent
+// and the rest discarded (owner.LocalRunHeld). Each list holds at most
+// MaxInbox IDs of at most MaxID bytes.
+type RunInbox struct {
+	Token string   `json:"token"`
+	Shown []string `json:"shown"`
+	Run   []string `json:"run,omitempty"`
+}
+
+// MaxInbox bounds RunInbox's lists: the hold is bounded by segments
+// (owner.DefaultHoldSegments), and every message takes one.
+const MaxInbox = 64
 
 // Requests are the open requests, as the owner channel lists them.
 type Requests struct {

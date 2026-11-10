@@ -95,6 +95,16 @@ func shapeForm(text string) (lead, quote string, ok bool) {
 	return "", "", false
 }
 
+// heldQuote is the quote of a text in a reaction's form, listed or not,
+// whatever the recent texts are.
+func heldQuote(text string) (string, bool) {
+	if rx, ok := parseForm(text); ok {
+		return rx.quoted, true
+	}
+	_, q, ok := shapeForm(text)
+	return q, ok
+}
+
 // readReaction is parseReaction, plus two cases that need the recent texts:
 // a listed form whose quote holds quote marks, when the quote marks a recent
 // box text (a request or a RUN offer quotes its own words), and an unlisted
@@ -286,6 +296,13 @@ func (r *recentWindow) put(t sentText, open func(id string) bool) {
 // for a quote of at least minQuote characters, one that holds it (phones
 // cut long quotes, usually with an ellipsis, and some quote a part).
 func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
+	return r.matchWhere(quoted, now, nil)
+}
+
+// matchWhere is match over only the texts keep accepts (all when keep is
+// nil), so an older text keep wants is not hidden by a newer one it
+// does not.
+func (r *recentWindow) matchWhere(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	q := normQuote(quoted)
 	if q == "" {
 		return sentText{}, false
@@ -302,6 +319,9 @@ func (r *recentWindow) match(quoted string, now time.Time) (sentText, bool) {
 		t := r.texts[i]
 		if now.Sub(t.at) > recentMaxAge {
 			break
+		}
+		if keep != nil && !keep(t) {
+			continue
 		}
 		if !t.restored {
 			n := normQuote(t.text)
@@ -351,20 +371,34 @@ func peelForm(text string) (string, bool) {
 // (quoteLayers), or other words around the whole text. Only guarded texts
 // count, so a nest around the agent's own text stays chat (CH-11).
 func (r *recentWindow) matchGuarded(quoted string, now time.Time) (sentText, bool) {
+	return r.matchLayers(quoted, now, sentText.guarded)
+}
+
+// matchForgettable is matchGuarded for the texts forget drops (not
+// guarded): the one matcher, so a forget sees a held text as quoting a
+// text exactly when the delivery path would read it as marking that text
+// (#5185 Security reject).
+func (r *recentWindow) matchForgettable(quoted string, now time.Time) (sentText, bool) {
+	return r.matchLayers(quoted, now, func(t sentText) bool { return !t.guarded() })
+}
+
+// matchLayers finds the latest text keep accepts that some layer of the
+// quote marks (match), or holds whole (within).
+func (r *recentWindow) matchLayers(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	for _, l := range quoteLayers(quoted) {
-		if t, ok := r.match(l, now); ok && t.guarded() {
+		if t, ok := r.matchWhere(l, now, keep); ok {
 			return t, true
 		}
-		if t, ok := r.within(l, now); ok {
+		if t, ok := r.within(l, now, keep); ok {
 			return t, true
 		}
 	}
 	return sentText{}, false
 }
 
-// within finds the latest guarded text, of at least minQuote characters,
-// that the quote holds whole.
-func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
+// within finds the latest text keep accepts, of at least minQuote
+// characters, that the quote holds whole.
+func (r *recentWindow) within(quoted string, now time.Time, keep func(sentText) bool) (sentText, bool) {
 	q := normQuote(quoted)
 	mq := maskCodes(q)
 	r.mu.Lock()
@@ -374,7 +408,7 @@ func (r *recentWindow) within(quoted string, now time.Time) (sentText, bool) {
 		if now.Sub(t.at) > recentMaxAge {
 			break
 		}
-		if !t.guarded() {
+		if !keep(t) {
 			continue
 		}
 		n, hay := normQuote(t.text), q
@@ -504,6 +538,16 @@ func (c *Channel) ForgetRecent() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now()
+	// The held texts that quote a text this deletion removes, decided by
+	// the delivery path's own matcher before the window is cleared (#5185
+	// Potency, arbitration, Security reject).
+	forgot := map[string]bool{}
+	for _, m := range c.codes.st.Waiting {
+		q, ok := heldQuote(m.Text)
+		if _, found := c.recent.matchForgettable(q, now); ok && found {
+			forgot[m.ID] = true
+		}
+	}
 	c.recent.forget(now)
 	// A failed save still holds for this run; only a restart before the
 	// next save would lose it. The held agent texts go in the same save:
@@ -522,10 +566,18 @@ func (c *Channel) ForgetRecent() int {
 		}
 		dropped = len(s.Held) - len(keep)
 		s.Held = keep
+		// A held text whose quote marks a text this deletion removes goes
+		// too, counted for STATUS and the page (CH-14); the owner's other
+		// quoted messages stay (#5185 L3, Potency).
+		wait := s.Waiting[:0:0]
+		for _, m := range s.Waiting {
+			if !forgot[m.ID] {
+				wait = append(wait, m)
+			}
+		}
+		s.WaitingForgot += len(s.Waiting) - len(wait)
+		s.Waiting = wait
 	})
-	if c.held != nil && c.held.react != "" {
-		c.held = nil
-	}
 	return dropped
 }
 
@@ -608,9 +660,6 @@ func replyPointer(t sentText) string {
 		}
 		return "A reaction is not a reply. Reply in words, as that text says."
 	}
-	if strings.Contains(t.text, "Reply RUN") {
-		return "A reaction does not send it. Reply RUN to send the held message."
-	}
 	if strings.Contains(t.text, "Reply ") || strings.Contains(t.text, "reply ") {
 		return "A reaction is not a reply. Reply in words, as that text says."
 	}
@@ -634,12 +683,9 @@ func (c *Channel) reactionLocked(text string, rx reaction, now time.Time, unlock
 	if unlocked {
 		return route{replies: replies, react: event, reactGen: c.recent.gen()}
 	}
-	if c.held != nil {
-		c.held = nil
-		return route{replies: append([]string{"Locked. A message was already waiting, so both were dropped. " +
-			"Send your message with a code from your code generator at the end."}, replies...), limited: true}
-	}
-	c.held = &heldMsg{text: text, react: event, expires: now.Add(c.cfg.CodeTTL)}
-	return route{replies: append([]string{fmt.Sprintf("Locked. Your reaction is held for %s. %s",
-		dur(c.cfg.CodeTTL), c.unlockPrompt())}, replies...), limited: true}
+	// Held as a task message is (CH-14); the page runs its text again, so
+	// its event is worded then, against the texts recent at that time.
+	rt := c.waitLocked(text, true, now)
+	rt.replies = append(rt.replies, replies...)
+	return rt
 }
