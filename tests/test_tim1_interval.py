@@ -1,9 +1,10 @@
 """TIM-1: SPEC.md reads time as an interval, never as a mode.
 
-The testable content is the spec text itself (D-082). A hold's end waits on the
-interval's start, a narrowing fires on its end, and LOG-8 has no clock reason, so a
+The testable content is the spec text itself (D-082). A time-due widening (a hold's
+or a limit's end) waits on the interval's start, a narrowing fires on its end, and LOG-8 has no clock reason, so a
 wrong clock can only make the box more cautious. Outside readers send only while the
-whole interval sits the margin inside a slot window.
+whole interval sits the margin inside a slot window, and STATUS shows each move a wide
+interval delays.
 """
 # REQ: TIM-1, LOG-8
 import pathlib
@@ -13,12 +14,14 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 TIM1 = [
-    "Time is an interval from network time when online, cross-checked against the modem's carrier time;",
-    "drift and disagreement widen it.",
-    "A hold's end waits until the interval's start passes it, and an expiry, timeout or window's end "
-    "fires once its end does, each logged before any step due then (LOG-8).",
+    "Time is an interval from network time, cross-checked against modem carrier time, "
+    "widened by drift and disagreement.",
+    "A time-due move that widens (a hold's or limit's end) waits until the interval's start passes it, "
+    "and one that narrows (an expiry, a permitting window's end) fires at its end, "
+    "each logged before steps due then (LOG-8).",
 ]
-READER = "the kernel sends only while its time interval (TIM-1) lies the margin inside a window"
+READER = "the kernel sends only while its interval (TIM-1) lies the margin inside a window"
+LOG8_STATUS = "STATUS lists each reason in force, and each move a wide interval (TIM-1) delays, with its scope and lift"
 
 
 def lines():
@@ -63,6 +66,9 @@ class Interval(unittest.TestCase):
         self.assertFalse([x for x in reasons if "clock" in x],
                          f"SPEC.md:{n} LOG-8 has a clock pause reason again; TIM-1's interval replaces it")
 
+    def check_status(self, t, n):
+        self.assertIn(LOG8_STATUS, t, f"SPEC.md:{n} STATUS no longer shows a move a wide interval delays")
+
     def check_reader(self, t, n):
         self.assertIn(READER, t, f"SPEC.md:{n} outside readers no longer send by the whole time interval")
 
@@ -74,6 +80,10 @@ class Interval(unittest.TestCase):
         n, t = log8_table()
         self.check_table(t, n)
 
+    def test_status_shows_delays(self):
+        n, t = bullet("- **LOG-8** ")
+        self.check_status(t, n)
+
     def test_reader_uses_interval(self):
         n, t = bullet("- **Outside readers**")
         self.check_reader(t, n)
@@ -82,9 +92,12 @@ class Interval(unittest.TestCase):
         cases = [
             (lambda: bullet("- **TIM-1** "), self.check_tim1, [
                 ("interval's start passes", "interval's end passes"),
-                ("once its end does", "once its start does"),
-                ("drift and disagreement widen it", "disagreement pauses time-sensitive checks"),
-                ("each logged before any step due then", "each logged after the step"),
+                ("fires at its end", "fires at its start"),
+                ("move that widens", "move that narrows"),
+                ("(a hold's or limit's end) waits until the interval's start passes it, and one that narrows (an expiry,",
+                 "(a hold's end) waits until the interval's start passes it, and one that narrows (an expiry, a limit's end,"),
+                ("widened by drift and disagreement", "paused by large disagreements"),
+                ("each logged before steps due then", "each logged after the step"),
                 ("(LOG-8).", "(LOG-8). Large disagreements pause time-sensitive checks."),
             ]),
             (log8_table, self.check_table, [
@@ -92,8 +105,12 @@ class Interval(unittest.TestCase):
                 ("| lockout |", "| lockout, clock |"),
                 ("| lockout |", "| lockout and clock skew |"),
             ]),
+            (lambda: bullet("- **LOG-8** "), self.check_status, [
+                (", and each move a wide interval (TIM-1) delays,", ""),
+                ("each move a wide interval", "each hold a wide interval"),
+            ]),
             (lambda: bullet("- **Outside readers**"), self.check_reader, [
-                ("only while its time interval (TIM-1) lies", "while its clock (TIM-1) lies"),
+                ("only while its interval (TIM-1) lies", "while its clock (TIM-1) lies"),
             ]),
         ]
         for get, check, muts in cases:

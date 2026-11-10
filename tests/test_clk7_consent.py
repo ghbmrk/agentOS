@@ -83,7 +83,7 @@ class Consent(unittest.TestCase):
                       f"SPEC.md:{n} CLK-7 lets an unconfirmed route run before consent")
 
     def check_control(self, t, n):
-        self.assertIn("`PLAN <plan> ON` lifts the owner and login reasons (P1, LOG-8), never consent or a notice;",
+        self.assertIn("`PLAN <plan> ON` lifts the owner and login reasons (P1), never consent or a notice;",
                       clauses(t),
                       f"SPEC.md:{n} CLK-7 PLAN ON lifts consent or a notice, or more than owner and login")
         self.assertIn("`PLAN <plan> OFF` (CH-11), by text or on the Wi-Fi page, pauses a plan route at any time "
