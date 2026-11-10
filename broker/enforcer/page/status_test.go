@@ -388,7 +388,7 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 			t.Errorf("home with stray addresses lacks %q", want)
 		}
 	}
-	if strings.Contains(h, "A served interface is not as set up") || strings.Contains(h, "The policy in force names") || strings.Contains(h, "an older refusal") {
+	if strings.Contains(h, "A served interface is not as set up") || strings.Contains(h, "The policy in force names") || strings.Contains(h, "an older refusal") || strings.Contains(h, "with its next load of your rules") {
 		t.Error("home shows a cause the resolver does not have, or a refused load beside a listed cause")
 	}
 	// With no listed cause, the refused load that keeps it stopped
@@ -396,6 +396,12 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	res.stop = ResolverStop{Stopped: true, Load: "nft: load refused \u202e"}
 	if h = g.homeHTML(); !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: load refused \\u202e), and names and addresses come back only with a load it takes.") {
 		t.Errorf("a refused load is not shown, or not in ASCII:\n%s", h)
+	}
+	// Stopped with no cause recorded (between a check that passes and
+	// the next load): the card still says when it ends (Lens on #5243).
+	res.stop = ResolverStop{Stopped: true}
+	if h = g.homeHTML(); !strings.Contains(h, "The enforcer serves names and addresses again with its next load of your rules, within a few seconds.") {
+		t.Errorf("a stop with no cause gives no reason:\n%s", h)
 	}
 	res.stop = ResolverStop{Strays: []Stray{{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24"}}, Load: "x"}
 	if h = g.homeHTML(); strings.Contains(h, "Names and addresses") {
