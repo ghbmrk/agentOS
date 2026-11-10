@@ -78,9 +78,10 @@ STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 # "PID:\tfile=NAME [NS];  TAIL" for each object mapped, NAME a path when given as one (a soname
 # is searched, so its candidates are trying lines). Any other line naming a file= fails the
 # audit, so a loader whose format differs cannot pass by being unread. The loader prints a name
-# as it is, so a line without the PID prefix is the rest of a name holding a newline, and fails;
-# a name may hold " [N];  " itself, so every split before a whole TAIL is a candidate (#5231).
-LOADER_LINE = re.compile(r"\s*\d+:\s+(.*)")
+# as it is, so a line without the PID of the record's own suffix is the rest of a name holding a
+# newline, and fails; a name may hold " [N];  " itself, so every split before a whole TAIL is a
+# candidate (#5231).
+LOADER_LINE = re.compile(r"\s*(\d+):\s+(.*)")
 LOADER_TRYING = re.compile(r"trying file=(.+)")
 LOADER_SPLIT = re.compile(r"(?=( \[\d+\];  ))")  # a lookahead: a split may overlap the one before it
 LOADER_TAIL = re.compile(r"(?:needed by|dynamically loaded by) .* \[\d+\](?: \(relocation dependency\))?"
@@ -120,17 +121,17 @@ def loader_env(ld_log):
     return {"PATH": "/usr/sbin:/usr/bin", "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
 
 
-def loader_paths(text):
-    """The paths in one LD_DEBUG record that the loader looked for or mapped, or the first line it
-    could not read as either."""
+def loader_paths(text, pid):
+    """The paths in process PID's LD_DEBUG record that the loader looked for or mapped, or the first
+    line it could not read as either."""
     paths = []
     for line in text.split("\n"):
         m = LOADER_LINE.fullmatch(line)
-        if not m:
+        if not m or m.group(1) != pid:
             if line.strip(" \t"):
                 raise HostcheckError(f"unreadable loader record line: {line!r}")
             continue
-        body = m.group(1)
+        body = m.group(2)
         if "file=" not in body or body.startswith(LOADER_REOPEN):
             continue
         if t := LOADER_TRYING.fullmatch(body):
@@ -166,7 +167,10 @@ def audit_records(root, ld_log):
     base = os.path.realpath(root) + os.sep
     outside = set()
     for rec in recs:
-        seen = loader_paths(rec.read_bytes().decode(errors="surrogateescape"))  # realpath gets the bytes back
+        pid = rec.name[len(log.name) + 1:]
+        if not pid.isdigit():
+            raise HostcheckError(f"{rec} is no loader record: its suffix is not a PID")
+        seen = loader_paths(rec.read_bytes().decode(errors="surrogateescape"), pid)  # realpath gets the bytes back
         if not seen:
             raise HostcheckError(f"the loader's record {rec} names no shared object")
         outside |= {p for p in seen if not os.path.isabs(p) or not os.path.realpath(p).startswith(base)}

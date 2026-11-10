@@ -848,7 +848,7 @@ class LoaderAuditTest(unittest.TestCase):
                 f"      7:\tfile={d}/b.so [0];  destroying link map\n"
                 f"      7:\tfile={d}/a [0];  [0];  needed by /r/swtpm [0]\n")
             hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            self.assertEqual(hostcheck.loader_paths(pathlib.Path(d, "stack.7").read_text())[:2],
+            self.assertEqual(hostcheck.loader_paths(pathlib.Path(d, "stack.7").read_text(), "7")[:2],
                              [f"{d}/odd [3];  lib/libx.so", f"{d}/b.so"])  # "odd" is no name: no tail follows it
             for line in (f"file={d}/b.so [0];  needed by", f"file={d}/b.so [0];  found it",
                          f"file={d}/b.so [0]; generating link map", f"file={d}/b.so [0];  generating link map now"):
@@ -865,6 +865,18 @@ class LoaderAuditTest(unittest.TestCase):
             pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n{up}/lib/libc.so.6\n")
             with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # The rest of the name shaped as a record line carries a PID, but not the record's own (#5310).
+            for forged in (f"      1:\topening file=q [0]; direct_opencount=1{up}/lib/libc.so.6",
+                           f"      8:\ttrying file={d}/b"):
+                with self.subTest(forged):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n{forged}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n")
+            pathlib.Path(d, "stack.x").write_text(f"      7:\ttrying file={d}/a\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "suffix is not a PID"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            os.unlink(os.path.join(d, "stack.x"))
             # Blank lines with no PID are not names (the file's end); a carriage return is part of a line.
             pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\r\n\n \t\n")
             hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)

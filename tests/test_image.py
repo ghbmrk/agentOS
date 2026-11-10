@@ -5288,6 +5288,16 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     self.assertRegex(failed[0], want)
                 else:
                     self.assertEqual(failed, [])
+        # A root holding "=" would be read by env as a variable, not run: refused by name (#5310).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "a=b")
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root,
+                                                       "AGENTOS_REQUIRE_REFERENCE_TOOLS": ""}):
+                with self.assertRaisesRegex(unittest.SkipTest, "holds '='"):
+                    image_tool(self, "systemd-analyze")
 
 
 class UplinkTest(unittest.TestCase):
