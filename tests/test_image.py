@@ -2538,13 +2538,10 @@ class ConfFilesTest(unittest.TestCase):
                       "for a unit at runtime (StateDirectory= in usr/lib/systemd/system/systemd-timesyncd.service); "
                       "that unit's user would decide what it reads (#5167)" % rel, self.v())
         f.unlink()
-        # The template form: a link held in an instance's directory, and not in the directory above it.
+        # A template's directory is not expanded: its specifier fails the build (Security 6760938141).
         write(self.root, "usr/lib/systemd/system/cap@.service", "[Service]\nStateDirectory=capsules/c-%i\n")
-        for rel, refused in (("var/lib/capsules/c-1/held", True), ("var/lib/capsules/held", False)):
-            with self.subTest(rel=rel):
-                f = link(self.root, rel, "/usr/lib/os-release")
-                self.assertEqual(any(l.startswith(rel + ": ") for l in check.violations(self.root)), refused, self.v())
-                f.unlink()
+        self.assertIn("usr/lib/systemd/system/cap@.service: StateDirectory=capsules/c-%i: the tree check does not model "
+                      "it; the tree check never passes a unit file whose directories it cannot read (#5167)", self.v())
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is

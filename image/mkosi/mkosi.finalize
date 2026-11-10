@@ -194,9 +194,6 @@ BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
 # systemd-timesyncd's var/lib/systemd/timesync among them.
 UNIT_MADE_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
                   "LogsDirectory": "var/log", "ConfigurationDirectory": "etc"}
-# #5167: the unit specifiers a *Directory= value's last step may hold: each expands to a name with no '/'
-# (a unit name's parts, the machine and boot IDs), so the step stays one step (systemd.unit(5)).
-MADE_SPECIFIERS = "bijmnNp"
 # #5167: the tmpfiles.d types that leave a directory, or nothing, at the path they name (TMPFILES_STEP_TYPES
 # without the file types, and the attribute and ACL types). Any other line at a unit-made directory may
 # leave a link, a copy, a file or a device node there, which systemd would chmod and chown.
@@ -209,10 +206,14 @@ PID1_READS = ("Description", "Documentation", "EnvironmentFile", "InaccessiblePa
               "ReadWritePaths", "ExecPaths", "NoExecPaths", "RequiresMountsFor", "WantsMountsFor", "What",
               "TTYPath", "UtmpIdentifier")
 PID1_READ_PREFIXES = ("Condition", "Assert", "Exec")
-# #5167: the specifiers that may expand to an absolute path (systemd.unit(5)): roots, home, shell, the
-# fragment's path, and the unescaped instance and prefix forms, where "-" unescapes to "/". A word opening
-# with one of these is a path word; one opening with another (%i, %n, ...) is a name.
-PATH_SPECIFIERS = "CdEfhIJLPsStTVyY"
+# #5167 (Security 6760938141): settings whose values are only names or numbers (units, users, groups, a slice,
+# credentials, a log identifier, a task limit): PID 1 makes no host path for them, so their specifiers and
+# escapes (User=camdec-%i, After=...agentos\x2dlink.device) need no reading. Every other setting off
+# PID1_READS is read as written or refused (unit_made_paths).
+PID1_NAMES = ("After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "PartOf", "Upholds", "Conflicts",
+              "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom", "PropagatesStopTo",
+              "StopPropagatedFrom", "JoinsNamespaceOf", "WantedBy", "RequiredBy", "UpheldBy", "Also", "Slice",
+              "User", "Group", "SupplementaryGroups", "SyslogIdentifier", "ImportCredential", "TasksMax")
 # #5167: settings that mount in the unit's own namespace and, on the host, make only root's 0755 directories
 # on the way (namespace.c mkdir_p_label, mkdir_parents) and at the mount point a directory or an empty file
 # (make_mount_point_inode_from_path). Strictly above a unit-made directory that is root's alone; at it, a
@@ -1660,16 +1661,13 @@ def unit_with_dropins(root, dirs, name):
 def service_dir(root, d):
     """#1702, #5167: why tree path D may be a directory a service user or a login user owns on the box, or
     None: "" for SERVICE_DIRS, else "<key>= in <file>" when D is a directory a unit file names
-    (unit_made_dirs), as written or in its dynamic user form (made_private), its last step matched as a
-    glob. Inside once() the unit files are read once per root."""
+    (unit_made_dirs), as written or in its dynamic user form (made_private). Inside once() the unit files are
+    read once per root."""
     if d in SERVICE_DIRS:
         return ""
-    parts = d.split("/")
     for made, why in cached(unit_made_dirs, root)[0].items():
-        for form in (made, made_private(made)):
-            steps = form.split("/")
-            if len(steps) == len(parts) and steps[:-1] == parts[:-1] and fnmatch.fnmatchcase(parts[-1], steps[-1]):
-                return why
+        if d in (made, made_private(made)):
+            return why
     return None
 
 
@@ -1681,8 +1679,8 @@ def unit_made_dirs(root):
     sets, and whoever runs the unit. No name, alias, precedence or user is resolved: for any name
     systemd loads, every file it reads is one of these, so its directories are a subset of these, and
     adding a file or link only adds to them (the re-plan on #5167; generators' and transient units
-    are not covered). Each word, and each side of a:b, counts (made_steps); a last step with a
-    specifier is kept as a glob (capsules/%i is capsules/*)."""
+    are not covered). Each word, and each side of a:b, counts (made_steps); a value holding a specifier
+    is refused, not expanded (Security 6760938141)."""
     root = str(root)
     files, out = cached(unit_files, root)
     out, made = list(out), {}
@@ -1702,10 +1700,6 @@ def unit_made_dirs(root):
                 if any(not " " <= c <= "~" and c != "\t" for c in v):
                     raise ValueError(v)
                 got = [made_steps(p) for w in v.split() for p in w.split(":")]
-                # A last step of specifiers alone may expand to "" or "." (%j of a plain name, an instance
-                # "."), which systemd simplifies away, so its parent counts too.
-                got += [made_steps(p)[:-1] for w in v.split() for p in w.split(":")
-                        if re.fullmatch(r"(%.)+", ([x for x in p.split("/") if x and x != "."] or [""])[-1])]
             except ValueError:
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                            "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
@@ -1750,13 +1744,18 @@ def unit_files(root):
 
 
 def unit_made_paths(root):
-    """#5167 (Security 6759084501, 6759651094): ([(tree path steps, "<key>= in <file>", kind)] for every
-    path word (absolute or a specifier's) any unit file names (unit_files: drop-ins, any section) at a
-    setting off PID1_READS, each *.mount and *.automount file name's path, and each etc/fstab mount point;
+    """#5167 (Security 6759084501, 6759651094, 6760938141): ([(tree path steps, "<key>= in <file>", kind)] for
+    every absolute path word any unit file names (unit_files: drop-ins, any section) at a setting off
+    PID1_READS and PID1_NAMES, each *.mount and *.automount file name's path, and each etc/fstab mount point;
     loose, whether any unit file sets a DirectoryMode= others can write (o+w) or one the check cannot read,
-    for the parents PID 1 makes (umask 0); and one error per such word holding a specifier, a quote or a
-    backslash, or a byte outside printable ASCII). KIND is "mount" for a mount point, "namespace" for
-    PID1_NAMESPACE_MAKES, else "". *Directory= values are unit_made_dirs'."""
+    for the parents PID 1 makes (umask 0); and one error per value, unit name or fstab line the check would
+    have to decode to read). systemd and libmount decode values before they act on them: specifiers (some
+    expand to "" or to a path), quotes, C and octal escapes. The check models none of that: a value off the
+    two lists holding a '%' (bar a literal "%%" outside any path word), a quote, a backslash or a byte outside
+    printable ASCII, a mount unit name holding a backslash, and an fstab mount point that is not plain
+    printable text opening with '/' are refused, so every path left is read exactly as systemd reads it.
+    KIND is "mount" for a mount point, "namespace" for PID1_NAMESPACE_MAKES, else "". *Directory= values
+    are unit_made_dirs'."""
     root, out, paths, loose = str(root), [], [], False
     files, _ = cached(unit_files, root)
     for path, rel in sorted(files.items()):
@@ -1767,19 +1766,28 @@ def unit_made_paths(root):
         loose |= any(not re.fullmatch(r"[0-7]{1,4}", v) or int(v, 8) & 0o002 for _, k, v in lines if k == "DirectoryMode")
         name = path.rsplit("/", 1)[-1]
         if re.fullmatch(r"[^@]+\.(auto)?mount", name):
-            unit = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), name.rsplit(".", 1)[0].replace("-", "/"))
-            paths.append((path_parts(unit), "the name of %s" % rel, "mount"))
+            if "\\" in name:
+                out.append("%s: a mount unit name with an escape: the tree check does not model it; the tree check "
+                           "never passes a unit file whose paths it cannot read (#5167)" % rel)
+            else:
+                paths.append((path_parts(name.rsplit(".", 1)[0].replace("-", "/")), "the name of %s" % rel, "mount"))
         for _, key, v in lines:
-            if key in PID1_READS or key in UNIT_MADE_DIRS or key.startswith(PID1_READ_PREFIXES):
+            if key in PID1_READS or key in PID1_NAMES or key in UNIT_MADE_DIRS or key.startswith(PID1_READ_PREFIXES):
+                continue
+            if any(not " " <= c <= "~" and c != "\t" or c in "\"'\\" for c in v) or "%" in v.replace("%%", ""):
+                out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
+                           "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                 continue
             if key in PID1_NAMESPACE_MAKES:
                 # Only the mount point is made: BindPaths=SRC:DST's DST (SRC alone mounts on itself and makes
                 # nothing), TemporaryFileSystem=PATH:OPTS's PATH.
                 made = " ".join(f[0 if key == "TemporaryFileSystem" else 1] for f in (w.split(":") for w in v.split())
                                 if len(f) > 1 or key == "TemporaryFileSystem")
-            for w in re.findall(r"(?:^|(?<=[\s:=]))[-+!@]*(/[^\s:=]*|%%[%s][^\s:=]*)" % PATH_SPECIFIERS,
-                                made if key in PID1_NAMESPACE_MAKES else v):
-                if any(not " " < c <= "~" or c in "%\"'\\" for c in w):
+            # Every '/' that no name character leads opens a path word, so a prefix (-+!@), a "file:" or
+            # an "upperdir=" is passed over; a word with a ',' counts cut there too (mount options).
+            words = re.findall(r"(?<![\w./])/[^\s:=]*", made if key in PID1_NAMESPACE_MAKES else v)
+            for w in words + [w.split(",", 1)[0] for w in words if "," in w]:
+                if "%" in w:
                     out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                                "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                     break
@@ -1791,7 +1799,13 @@ def unit_made_paths(root):
         text = ""  # fstab_noexec_violations refuses an unreadable one
     for ln in text.splitlines():
         f = ln.split()
-        if len(f) >= 2 and not f[0].startswith("#") and f[1].startswith("/"):
+        if not f or f[0].startswith("#"):
+            continue
+        if len(f) < 2 or not re.fullmatch(r"/[!-\[\]-~]*", f[1]) or any(not " " <= c <= "~" and c != "\t" for c in ln):
+            out.append("etc/fstab: %s: a mount point that is not plain text opening with '/': the tree check does "
+                       "not model it; the tree check never passes an fstab line whose paths it cannot read (#5167)"
+                       % (ln if ln.isprintable() else repr(ln)))
+        else:
             paths.append((path_parts(f[1]), "etc/fstab", "mount"))
     return paths, loose, out
 
@@ -1840,13 +1854,12 @@ def made_way_refusal(root, form):
     """#5167: why the way to unit-made directory FORM (a tree path whose last step may be a glob) is not
     root's alone (unit_made_refusals' rules 1 to 4), or None."""
     parts = form.split("/")
-    up, last = parts[:-1], parts[-1]
+    up = parts[:-1]
     try:
-        # tree_lstat refuses a link or a file above the last step; tree_listdir one at the step above it.
-        st = tree_lstat(root, "/".join(up))
-        for n in sorted(tree_listdir(root, "/".join(up))) if st is not None else ():
-            if fnmatch.fnmatchcase(n, last) and not stat.S_ISDIR(tree_lstat(root, "/".join(up + [n])).st_mode):
-                raise OSError(errno.ENOTDIR, "/".join(up + [n]))
+        # tree_lstat refuses a link or a file above the last step; a link or a file at it is refused here.
+        st = tree_lstat(root, form)
+        if st is not None and not stat.S_ISDIR(st.st_mode):
+            raise OSError(errno.ENOTDIR, form)
     except OSError as e:
         return "is or sits under a link or a file in the tree (/%s)" % (e.filename or e.strerror)
     for rel, n, ln in tmpfiles_entries(root):
@@ -1889,29 +1902,18 @@ def pid1_may_make(root, steps):
 
 
 def step_may_name(c, t):
-    """#5167: whether tmpfiles.d path component C (a glob, specifiers but path ones unexpanded) may name a
-    step that unit-made step T (a name, or a glob with one trailing '*') names: always for a brace or a
-    specifier, which the box expands."""
-    if "{" in c or "%" in c:
-        return True
-    if t.endswith("*"):
-        return bool(GLOB.search(c)) or fnmatch.fnmatchcase(c, t)
-    return fnmatch.fnmatchcase(t, c)
+    """#5167: whether tmpfiles.d path component C (a glob, specifiers but path ones unexpanded) may name
+    step T: always for a brace or a specifier, which the box expands."""
+    return "{" in c or "%" in c or fnmatch.fnmatchcase(t, c)
 
 
 def made_steps(part):
-    """#5167: the steps of one *Directory= path PART (unit_made_dirs), a last step holding a specifier
-    kept as a glob of what precedes the first one (journal.%i is journal.*). ValueError for what the
-    check does not model: a byte outside printable ASCII, a quote, a backslash, a glob character, a
-    '..' step, an absolute path, a specifier in any step but the last or in the first, or one whose
-    expansion may hold a '/' (off MADE_SPECIFIERS)."""
+    """#5167: the steps of one *Directory= path PART (unit_made_dirs). ValueError for what the check would
+    have to decode or expand: a byte outside printable ASCII, a quote, a backslash, a specifier, a glob
+    character, a '..' step or an absolute path (Security 6760938141)."""
     steps = [x for x in part.split("/") if x and x != "."]
-    if any(not " " < c <= "~" or c in "\"'\\*?[" for c in part) or ".." in steps or part.startswith("/") \
-            or any("%" in x for x in steps[:-1]) or steps and "%" in steps[0] \
-            or any(s not in MADE_SPECIFIERS for s in re.findall(r"%(.?)", steps[-1] if steps else "")):
+    if any(not " " < c <= "~" or c in "\"'\\%*?[" for c in part) or ".." in steps or part.startswith("/"):
         raise ValueError(part)
-    if steps and "%" in steps[-1]:
-        steps[-1] = steps[-1].split("%", 1)[0] + "*"
     return steps
 
 

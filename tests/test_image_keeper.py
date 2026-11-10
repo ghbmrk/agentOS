@@ -409,17 +409,9 @@ class KeeperTreeTest(unittest.TestCase):
             "wants link": ({SYSTEM + "multi-user.target.wants/q.service": ("link", "/srv/q.service"),
                             "srv/q.service": "[Service]\nRuntimeDirectory=qdir\n"}, "run/qdir"),
             "configuration": ({SYSTEM + "cf.service": "[Service]\nConfigurationDirectory=cdir\n"}, "etc/cdir"),
-            # Parse: each word, both sides of a:b, nested paths, the specifier cuts, a tab.
+            # Parse: each word, both sides of a:b, nested paths, a tab.
             "colon": ({SYSTEM + "c1.service": "[Service]\nStateDirectory=c1 c1b:c1link\n"}, "var/lib/c1link"),
             "nested": ({SYSTEM + "c2.service": "[Service]\nCacheDirectory=./c2//n/\n"}, "var/cache/c2/n"),
-            # A specifier in the last step keeps it as a glob of what precedes it.
-            "specifier": ({SYSTEM + "cap@.service": "[Service]\nStateDirectory=caps/c-%i\n"}, "var/lib/caps/c-*"),
-            # Security 6759084501 (release): a step of specifiers alone may simplify away, so its parent counts.
-            "specifier alone": ({SYSTEM + "qc@.service": "[Service]\nStateDirectory=qc/%i\n"}, "var/lib/qc"),
-            "specifier mid-step": ({SYSTEM + "jr@.service": "[Service]\nLogsDirectory=journal/%m.%i\n"},
-                                   "var/log/journal/*"),
-            "specifier suffix": ({SYSTEM + "jn@.service": "[Service]\nRuntimeDirectory=systemd/journal.%i\n"},
-                                 "run/systemd/journal.*"),
             "tab": ({SYSTEM + "sp.service": "[Service]\nRuntimeDirectory=sp1\tsp2\n"}, "run/sp2"),
         }
         base, err = check.unit_made_dirs(self.root)
@@ -432,7 +424,7 @@ class KeeperTreeTest(unittest.TestCase):
                     got, err = check.unit_made_dirs(self.root)
                     self.assertEqual(err, [])
                     self.assertIn(d, got)
-                    seen = d.replace("*", "x1")
+                    seen = d
                     probe = self.probe("ReadOnlyPaths=/%s/x" % seen)
                     self.assertEqual(len(probe), 1, probe)
                     self.assertIn(", inside /%s, a directory systemd makes for a unit at runtime (" % seen, probe[0])
@@ -441,9 +433,7 @@ class KeeperTreeTest(unittest.TestCase):
                     private = "%s/private/%s" % (top, seen[len(top) + 1:])
                     self.assertEqual(check.service_dir(self.root, private), got[d])
                     self.assertIsNone(check.service_dir(self.root, top + "/private"))
-                    if d.endswith("*"):
-                        self.assertIsNone(check.service_dir(self.root, seen.rsplit("/", 1)[0]))
-                        self.assertIsNone(check.service_dir(self.root, seen + "/deeper"))
+                    self.assertIsNone(check.service_dir(self.root, seen + "/deeper"))
                 finally:
                     remove()
         # Nothing names a dynamic user's private/ roots on their own.
@@ -488,8 +478,10 @@ class KeeperTreeTest(unittest.TestCase):
         remove = self.place({etc + "mm.service": ("link", "/dev/null")})
         self.assertEqual(check.unit_made_dirs(self.root)[1], [])
         remove()
+        # Security 6760938141: a specifier is refused wherever it sits, never expanded (%i may be "", %j ".").
         for text in ("StateDirectory=%i", "StateDirectory=./%i/x", "StateDirectory=a/%i/b", "StateDirectory=a/%I",
-                     "RuntimeDirectory=a/%t", "StateDirectory=a/x%%", "CacheDirectory=a*", "CacheDirectory=a/b?",
+                     "RuntimeDirectory=a/%t", "StateDirectory=a/x%%", "StateDirectory=caps/c-%i", "StateDirectory=qc/%i",
+                     "LogsDirectory=journal/%m.%i", "RuntimeDirectory=systemd/journal.%j", "CacheDirectory=a*", "CacheDirectory=a/b?",
                      "LogsDirectory=a/[b]", "RuntimeDirectory=\"q\"", "LogsDirectory=a/../b",
                      "CacheDirectory=a\\b", "StateDirectory=/abs", "StateDirectory=ok x:/abs",
                      "RuntimeDirectory=n\u00a0d", "RuntimeDirectory=n\x0bd", "RuntimeDirectory=n\u0085d"):
@@ -503,9 +495,14 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(check.unit_made_dirs(self.root)[1][0], check.violations(self.root))
                 finally:
                     d.unlink()
-        # A path PID 1 makes from a value with a specifier, or a byte it does not model, is refused too.
+        # A value PID 1 acts on that holds a specifier, a quote, a backslash or a byte it does not model is
+        # refused whole, wherever it sits in a word (Security 6760938141: %i, %R and %B may expand to "", and
+        # systemd unquotes and unescapes words before it makes the path).
         for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'",
-                     "StandardError=truncate:%S/x", "Wants=%I"):
+                     "StandardError=truncate:%S/x", "Symlinks=%i/run/sy", "Symlinks=%R/run/sy", "Symlinks=%B/run/sy",
+                     "ListenFIFO=%i/run/sy", 'Symlinks="/run/sy"', "Symlinks='/run/sy'", "Symlinks=\\/run/sy",
+                     "Symlinks=/run/s\\x79", "Symlinks=%%%i/run/sy", "ListenStream=/run/a%%b", "Options=size=1%",
+                     "Symlinks=%t", "Symlinks=/run/a\x0b/run/sy"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.socket", "[Socket]\n%s\n" % text)
                 try:
@@ -518,9 +515,12 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
-        # A word opening with a name's specifier (%i, %n) is no path; PID 1 only opens a TTYPath=.
+        # Names and numbers (PID1_NAMES) are not read for paths, nor is a literal %% outside a path word
+        # (stock tmp.mount's size=50%%); PID 1 only opens a TTYPath=.
         d = write(self.root, SYSTEM + "x@.service", "[Service]\nUser=camdec-%I\nAfter=%i.mount %n.socket\n"
-                                                    "TTYPath=/dev/%I\nUtmpIdentifier=%I\n")
+                                                    "TTYPath=/dev/%I\nUtmpIdentifier=%I\nWants=%I\nSlice=user-%i.slice\n"
+                                                    "TasksMax=33%\nWantedBy=sys-subsystem-net-devices-a\\x2db.device\n"
+                                                    "[Mount]\nOptions=mode=1777,size=50%%\n")
         try:
             self.assertEqual(check.unit_made_paths(self.root)[2], [])
         finally:
@@ -564,7 +564,6 @@ class KeeperTreeTest(unittest.TestCase):
             ("StateDirectory=cq", {tmpf: "C /var/lib/cq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
             ("StateDirectory=cq", {tmpf: "f /var/lib/cq 0644 - - -\n"}, "/var/lib/cq", "where " + tmpf),
             ("StateDirectory=cq", {tmpf: "L /var/lib/c%Hq - - - - /srv/qq\n"}, "/var/lib/cq", "where " + tmpf),
-            ("StateDirectory=ca/%i", {tmpf: "L /var/lib/ca/x - - - - /srv/qq\n"}, "/var/lib/ca/*", "where " + tmpf),
             # A step above: a tmpfiles.d link, or a /run step made for another user.
             ("StateDirectory=pq/b", {tmpf: "L /var/lib/pq - - - - /srv/qq\n"}, "/var/lib/pq/b", "makes a link"),
             ("RuntimeDirectory=sq/x", {tmpf: "L /run/sq - - - - /srv/qq\n"}, "/run/sq/x", "makes a link"),
@@ -626,16 +625,15 @@ class KeeperTreeTest(unittest.TestCase):
             # A namespace mount point is made only by root, 0755, so it may sit above the directory, not at it.
             ("StateDirectory=bp", {SYSTEM + "b.service": "[Service]\nBindReadOnlyPaths=/etc/hostname:/var/lib/bp\n"},
              "/var/lib/bp", "where PID 1 may make, link or mount /var/lib/bp (BindReadOnlyPaths= in %sb.service)" % SYSTEM),
-            # Stock journald@'s LogsDirectory=journal/%m.%i: tmpfiles.d gives /var/log/journal a group; mkosi.conf
-            # removes the unit.
-            ("LogsDirectory=journal/%m.%i", {tmpf: "z /var/log/journal 2755 root systemd-journal - -\n"},
-             "/var/log/journal/*", "for root:systemd-journal"),
+            # tmpfiles.d gives stock /var/log/journal a group (why mkosi.conf removes journald@'s units).
+            ("LogsDirectory=journal/x", {tmpf: "z /var/log/journal 2755 root systemd-journal - -\n"},
+             "/var/log/journal/x", "for root:systemd-journal"),
         )
         wired = ("where " + tmpf, "in the tree (/var/lib/foo)", "makes a link",
                  "where PID 1 may make, link or mount /run/sy (Symlinks= in %ss.socket)" % SYSTEM)
         for unit, files, made, why in refused:
             with self.subTest(unit=unit, files=files):
-                name = "q@.service" if "%i" in unit else "q.service"
+                name = "q.service"
                 remove = self.place(dict(files, **{SYSTEM + name: "[Service]\n%s\n%s" % (
                     unit, "" if "User" in unit else "User=nobody\n")}))
                 try:
@@ -695,8 +693,28 @@ class KeeperTreeTest(unittest.TestCase):
                 "StateDirectory= in %sq.service: /var/lib/fq, which systemd makes and hands to the unit's user following "
                 "any link on its way, above /var/lib/fq/m, which is mounted (etc/fstab) and the chown descends into "
                 "(#5167)" % SYSTEM])
+            # Security 6760938141: libmount decodes octal escapes (\057 is '/'), so a mount point that is not plain
+            # text opening with '/' is refused, not decoded.
+            for point in ("/var/lib/fq\\057m", "\\057var/lib/fq/m", "/var/lib/fq\\040m", "var/lib/fq/m", "/var/lib/f\u00e9"):
+                with self.subTest(point):
+                    line = "tmpfs %s tmpfs mode=0755,noexec,nosuid,nodev 0 0" % point
+                    fstab.write_text(kept + line + "\n")
+                    want = ("etc/fstab: %s: a mount point that is not plain text opening with '/': the tree check does not "
+                            "model it; the tree check never passes an fstab line whose paths it cannot read (#5167)" % line)
+                    self.assertEqual(check.unit_made_paths(self.root)[2], [want])
+                    self.assertIn(want, check.violations(self.root))
+            fstab.write_text(kept + "tmpfs\n")
+            self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
         finally:
             fstab.write_text(kept)
+            remove()
+        # A mount unit's name is read only when it holds no escape (\x2d is '-').
+        remove = self.place({SYSTEM + "var-lib-fq\\x2dm.mount": "[Mount]\nWhat=tmpfs\n"})
+        try:
+            self.assertEqual(check.unit_made_paths(self.root)[2], [
+                "%svar-lib-fq\\x2dm.mount: a mount unit name with an escape: the tree check does not model it; the tree "
+                "check never passes a unit file whose paths it cannot read (#5167)" % SYSTEM])
+        finally:
             remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
