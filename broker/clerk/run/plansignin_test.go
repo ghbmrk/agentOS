@@ -42,6 +42,7 @@ type fakeCLI struct {
 	guest   string
 	stopped chan struct{}
 	err     error
+	read    context.Context // the context of the last Read
 }
 
 func newFakeCLI(login *plan.Login, printed string) *fakeCLI {
@@ -69,9 +70,10 @@ func usercodeRequest() *http.Request {
 	return r
 }
 
-func (f *fakeCLI) Read(context.Context) (string, bool) {
+func (f *fakeCLI) Read(ctx context.Context) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.read = ctx
 	return f.printed, f.exited
 }
 
@@ -1038,6 +1040,14 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 		signInOnce(h, cli)
 		cli.waitStopped(t)
 		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
+		// The watcher's reads end with the sign-in, so nothing the sandbox
+		// started on them outlives it.
+		cli.mu.Lock()
+		read := cli.read
+		cli.mu.Unlock()
+		if read == nil || read.Err() == nil {
+			t.Fatal("the watcher's read context outlived the sign-in")
+		}
 		if st := h.State(); st.Last != DSignedIn || !st.SignedIn {
 			t.Fatalf("signed in: %+v", st)
 		}
