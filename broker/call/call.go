@@ -103,6 +103,11 @@ type Clips struct {
 	// Failed tells the owner a turn failed (the answerer or synthesizer
 	// erred, or the recognizer stopped), so a failure is never silence.
 	Failed []byte
+	// Ending tells the owner the call ends in a minute and they can call
+	// again ("This call ends in one minute. Call again to carry on."), so
+	// the hang-up at MaxCall is never a silent drop. It plays EndingNotice
+	// before the call's end, and stops an answer then playing.
+	Ending []byte
 }
 
 // Config wires one call loop.
@@ -159,6 +164,10 @@ type Report struct {
 	Turns []Turn
 }
 
+// EndingNotice is how long before the end of a call (Config.MaxCall)
+// Clips.Ending plays.
+const EndingNotice = time.Minute
+
 // MaxSentence caps a sentence that has no end mark, in runes.
 const MaxSentence = 300
 
@@ -193,7 +202,8 @@ var serving = make(chan struct{}, 1)
 // rings while another is served waits for it to end, up to RingWait, so a
 // redial right after a dropped call is answered once the dropped call has
 // unwound (#5252); one still ringing then gets ErrBusy. A call is ended
-// at MaxCall, so a call end the line never reports frees the next call.
+// at MaxCall, so a call end the line never reports frees the next call;
+// the owner hears Clips.Ending EndingNotice before then (#5262).
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
@@ -351,6 +361,16 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	case <-ctx.Done():
 		return rep, ctx.Err()
 	}
+	// The ending notice falls EndingNotice before ctx's deadline (Serve's
+	// MaxCall) and plays on ctx, so it never outlasts the call (#5262). A
+	// call up with less time left than that, or with no Ending clip, has
+	// none: an unset clip neither cuts the answer nor plays empty audio.
+	var ending <-chan time.Time
+	if d, ok := ctx.Deadline(); ok && len(cfg.Clips.Ending) > 0 {
+		if w := time.Until(d) - EndingNotice; w > 0 {
+			ending = time.After(w) // the wall clock, as ctx's deadline is
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	heard := cfg.Recognizer.Listen(ctx, l.Speech())
@@ -431,6 +451,9 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			finish()
 		case g := <-token:
 			known(g)
+		case <-ending: // one sound at a time: the notice stops the answer
+			stop(true)
+			l.Say(ctx, cfg.Clips.Ending)
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop(false)
