@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -120,9 +121,17 @@ func TestDialRefusesWhatIsNotABus(t *testing.T) {
 	if _, err := Dial(filepath.Join(t.TempDir(), "none"), allSignals(func(*Message) {})); err == nil {
 		t.Error("dialled a missing socket")
 	}
-	if b, err := Dial(newStubBus(t, "REJECTED EXTERNAL\r\n", false, nil).path, allSignals(func(*Message) {})); err == nil {
-		b.Close()
-		t.Error("dialled a bus that refused the authentication")
+	refused := newStubBus(t, "REJECTED EXTERNAL\r\n", false, nil)
+	if b, err := Dial(refused.path, allSignals(func(*Message) {})); err == nil || !strings.Contains(err.Error(), "refused authentication") {
+		if b != nil {
+			b.Close()
+		}
+		t.Errorf("a bus that refused the authentication: %v", err)
+	}
+	select {
+	case <-refused.ended:
+	case <-time.After(5 * time.Second):
+		t.Error("Dial kept the connection the bus refused")
 	}
 	began := time.Now()
 	if b, err := Dial(newStubBus(t, "", true, nil).path, allSignals(func(*Message) {})); err == nil {

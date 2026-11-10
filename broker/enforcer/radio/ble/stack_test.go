@@ -190,9 +190,13 @@ func TestRunRefusesWhatCannotServe(t *testing.T) {
 			}
 			return asBluez(nil)(m)
 		})
-		err, _ := runStack(t, testConfig(sb.path), 5*time.Second)
+		err, host := runStack(t, testConfig(sb.path), 5*time.Second)
 		if err == nil || err.Error() == "Run still serving" {
 			t.Errorf("%s: %v", name, err)
+		}
+		host.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, rerr := host.Read(make([]byte, 1)); rerr == nil || errors.Is(rerr, os.ErrDeadlineExceeded) {
+			t.Errorf("%s left the host's link open: %v", name, rerr)
 		}
 		if ce := (*CallError)(nil); name == "no owner" && !errors.As(err, &ce) {
 			t.Errorf("no owner: %v is not BlueZ's error", err)
@@ -295,6 +299,19 @@ func TestSignalTakesOnlyCharacteristicValues(t *testing.T) {
 	s.signal(m)
 	if out.Len() != 0 || log.Len() != 0 {
 		t.Errorf("sent %q, logged %q", out.String(), log.String())
+	}
+}
+
+// TestBusPolicyNamesAUser: the policy is written only for a user name, so
+// no name can carry markup into the bus daemon's configuration.
+func TestBusPolicyNamesAUser(t *testing.T) {
+	for _, u := range []string{"", "Nobody", "1ble", `a"/><allow send_destination="*`, strings.Repeat("a", 33)} {
+		if p, err := BusPolicy(u); err == nil {
+			t.Errorf("a policy for %q:\n%s", u, p)
+		}
+	}
+	if _, err := BusPolicy("ble_stack-1"); err != nil {
+		t.Errorf("ble_stack-1: %v", err)
 	}
 }
 
