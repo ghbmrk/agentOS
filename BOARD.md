@@ -332,7 +332,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
-| HOST-1g | HOST-1g: power_cut_only misses a guest halt (no QEMU event) and compares QEMU and serial timestamps in a way that can race. Release; from #5254. | #5254, #5193 | in review (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
@@ -435,7 +434,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-resume-says-cancelled | OWN-resume-says-cancelled: RESUME's reply says what STOP cancelled stays cancelled, and the owner lines for the task and stopped codes are checked. Release; from #5138 (R1, R2). | #5138 | queued (release; tier A; sub B) |
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
-| ENF-netns-m0 | ENF-netns-m0: the enforcer's main thread can stay parked in a stopped stack's network namespace (inNetns on m0). Release; from #5140. | #5140 | building (release; tier A) |
+| ENF-netns-m0 | ENF-netns-m0: the enforcer's main thread can stay parked in a stopped stack's network namespace (inNetns on m0). Release; from #5140. | #5140 | in review (release; tier A) |
 | KRN-forget-c-confirm-words | KRN-forget-c-confirm-words: the Forget ask names kinds in household words (2 messages, 1 photo), not raw class names like wrap-key. From #5156 Lens R1. | #5124, #5156 | queued (release; tier A) |
 | ENF-net-ra-fu | ENF-net-ra-fu: a stopped resolver shows on the enforcer page; accept_ra=0 does not reach later uplinks; an image sysctl.d line holds accept_redirects=0 outside the daemon. Release; from #5161 (R1 to R3). | #5161 | queued (release; tier A) |
 | IMG-keeper-reach-sysd | IMG-keeper-reach-sysd: the keeper check and the link rules count the directories systemd's own service users write (/run/systemd/resolve, /run/systemd/netif, /var/lib/systemd/timesync) as service-owned. Release; from #5154. | #5154 | escalated (release; tier A) |
@@ -448,16 +447,22 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keeper-reach-sysd-what | IMG-keeper-reach-sysd-what: a bind mount's What= and overlay upperdir/workdir count as paths PID 1 makes. Release; from #5228 Security 6760938141. | #5167 | in review (release; tier A) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | ENF-netns-ble-fu | ENF-netns-ble-fu: the ble tests dial the host system bus and set a hard RLIMIT_DATA above a lower inherited limit. Release; from #5240. | #5240, #5212 | building (release; tier A) |
-| VOICE-ro-d-busy-fu | VOICE-ro-d-busy-fu: an owner redial right after a dropped call hears ringing until voicemail because Serve's TryLock refuses with ErrBusy. Release; from #5251. | #5251, #5232 | in review (release; tier A) |
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
-| VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
+| VOICE-ro-d-token-await | VOICE-ro-d-token-await: the call's token goroutine is not awaited, so a Config.Token try can follow the end of the call. Release; from #5258. | #5258, #5252 | in review (release; tier A) |
 | VOICE-ro-d-maxcall-notice | VOICE-ro-d-maxcall-notice: the owner hears a spoken notice before the 30-minute maximum-call hang-up. Release (UX); from #5258. | #5258, #5252 | queued (release; tier A) |
 | TEST-flake-run-waits-bounded | TEST-flake-run-waits-bounded: the run sign-in test's bare <-begun and <-removed waits are unbounded, so a hang there is a package timeout. Release; from #5269. | #5269, #5268 | queued (release; tier A) |
 | KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
 | VOICE-ro-d-hangup-fu | VOICE-ro-d-hangup-fu: a bounded hang-up ctx, a nil ctx that cannot hold the lock, C2/C8 and ErrBusy wording, and two surviving mutants killed. Release; from #5258. | #5258, #5252 | queued (release; tier A) |
 | CLK-run-mut | CLK-run-mut: kill the 14 old mutgate survivors in broker/clerk/run (plan.go, plansignin.go) that #5269's test-only edit made the gate target. Release; from #5269. | #5269 | building (release; tier A) |
-| REV-PROOF-corpus-deny-fu | REV-PROOF-corpus-deny-fu: egress's planForbiddenHeader as an exact allowlist, one shared header-value check, and a reason in the model clerk's refusal. Release; from #5277. | #5277, #4914 | queued (release; tier A) |
+| REV-PROOF-corpus-deny-fu | REV-PROOF-corpus-deny-fu: egress's planForbiddenHeader as an exact allowlist, one shared header-value check, and a reason in the model clerk's refusal. Release; from #5277. | #5277, #4914 | building (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
+| ENF-net-ra-fu-r4 | ENF-net-ra-fu-r4: the enforcer page's Unset line shows plain words, not raw error text. Release (UX); split from #5164 R4. | #5164, #5243 | building (release; tier A) |
+| ENF-edge-cut-fu | ENF-edge-cut-fu: a failed firewall write after an edge trip fails closed, a missing edgecut.json reads as cut, the Trip alert's covert bit is noted, and an IPv6 netns test. Release; from #5257. | #5257, #5014 | queued (release; tier A) |
+| ENF-net-ra-fu-r5 | ENF-net-ra-fu-r5: the page's plain Unset words are pinned to the daemon's served-check errors (typed causes, not text). Release; from #5280. | #5280 | queued (release; tier A) |
+| ENF-netns-m0-fu | ENF-netns-m0-fu: confine refuses a step on the main thread in any binary, a regression test for the live_test init, and the links.go:106 equivalence note corrected. Release; from #5281. | #5281, #5159 | queued (release; tier A) |
+| IMG-keeper-user-pin | IMG-keeper-user-pin: every keeper unit's effective User=/Group=/DynamicUser=, drop-ins included, is the shipped one. Release; from #5270. | #5270, #5167 | queued (release; tier A) |
+| IMG-keeper-reach-gen | IMG-keeper-reach-gen: no generator or credential adds a unit or mount the tree check does not read (gpt-auto, systemd.extra-unit.*, fstab.extra, systemd.mount-extra). Release; from #5270. | #5270, #5167 | queued (release; tier A) |
+| REV-PROOF-corpus-deny-fu2 | REV-PROOF-corpus-deny-fu2: the plan clerk drops a prefix-matched answer header that names a credential. Release; from #5278. | #5278 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -489,7 +494,6 @@ issue #4422: no section 'Tooling and CI' in BOARD.md
 issue #4795: body has no board-row block
 issue #4902: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4911: body has no board-row block
-issue #4914: body has no board-row block
 issue #4916: body has no board-row block
 issue #4934: board-row block: Expecting value: line 1 column 1 (char 0)
 issue #4950: body has no board-row block
