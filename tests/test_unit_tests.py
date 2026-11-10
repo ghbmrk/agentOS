@@ -27,7 +27,7 @@ import records_audit  # noqa: E402
 class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_x", "/r")
-        self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e",
+        self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
                                                   "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
                                                   "-e", "signal=none"])
         self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
@@ -354,11 +354,13 @@ class StraceFaultTest(unittest.TestCase):
         left = [s for s in (d / "plan").read_text().split("\n") if s]
         calls = len(plan) - len(left)
         self.assertGreaterEqual(secs, 0.2 * calls)  # every attempt's time counts
+        self.cut = (d / "test_x.trace.cut").read_text() if (d / "test_x.trace.cut").exists() else None
         return rc, out, (d / "test_x.trace").read_text(), calls
 
     def test_a_cut_run_reruns_whole_and_keeps_the_passing_runs_trace(self):
         rc, out, trace, calls = self.run_plan("cut", "ok")
         self.assertEqual((rc, trace, calls), (0, "ok", 2))
+        self.assertEqual(self.cut, "cut")  # #5364: the cut attempt's trace stays, for records_audit
         self.assertIn("strace failed itself on attempt 1 of 2", out)
         self.assertIn("the module reruns whole into a fresh trace", out)
         self.assertTrue(out.startswith(self.SAY["cut"][0]), out)  # the cut attempt's own log stays
@@ -369,6 +371,50 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual((rc, calls), (1, 2))
         self.assertIn("strace failed itself on attempt 2 of 2", out)
         self.assertIn("the module fails\n", out)
+        self.assertEqual(self.cut, "cut-exit-0")  # attempt 1's; attempt 2's is the module's trace
+        rc, _, _, _ = self.run_plan("ok")
+        self.assertEqual((rc, self.cut), (0, None))
+
+    def test_a_stale_cut_trace_is_not_this_runs(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "test_x.trace.cut").write_text("an earlier run's")
+        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n")):
+            self.assertEqual(unit_tests.run_one("test_x", str(d))[1], 0)
+        self.assertFalse((d / "test_x.trace.cut").exists())
+
+    def test_nothing_of_a_cut_attempt_runs_on_into_the_rerun(self):
+        # #5364: a fake strace that, cut, exits and leaves two children of the run behind, one that
+        # keeps the run's output open and one that does not, both ignoring SIGTERM. The rerun
+        # finds both gone, and the first does not hold the run open until it ends.
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        left = d / "left"
+        fake = d / "strace"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import os, pathlib, signal, subprocess, sys, time
+            left = pathlib.Path({str(left)!r})
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("x")
+            def alive(pid):
+                try:
+                    return pathlib.Path(f"/proc/{{pid}}/stat").read_text().split(") ")[1][0] != "Z"
+                except OSError:
+                    return False
+            if left.exists():
+                print("left alive:", [alive(int(p)) for p in left.read_text().split()])
+                sys.exit(0)
+            stay = [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"]
+            ps = [subprocess.Popen(stay), subprocess.Popen(stay, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
+            left.write_text(" ".join(str(p.pid) for p in ps))
+            print("{self.CUT}")
+            sys.exit(1)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            _, rc, secs, out = unit_tests.run_one("test_x", str(d))
+        self.assertIn("left alive: [False, False]\n", out)
+        self.assertEqual(rc, 0, out)
+        self.assertLess(secs, 30)
 
     def test_a_module_strace_cuts_every_time_fails(self):
         rc, out, _, calls = self.run_plan("cut", "cut", "ok")
@@ -481,6 +527,28 @@ class RecordsAuditTest(unittest.TestCase):
         # The asked path decodes as the reached one does.
         asked = f'6 openat(AT_FDCWD<{R}>, "LEDGER\\x2emd", O_RDONLY <unfinished ...>\n'
         self.assertIn(("LEDGER.md", False), records_audit.opened(asked))
+
+    def test_a_record_only_a_cut_attempt_opened_counts(self):
+        # #5364: tools/unit_tests.py keeps a cut attempt's trace as <module>.trace.cut. Its opens
+        # count for the record check; partial, it needs neither the module's file nor an exit.
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        rerun = own + "1 +++ exited with 0 +++\n"
+        cut = f'7 openat(AT_FDCWD<{R}>, "LEDGER.md", O_RDONLY) = 3<{R}/LEDGER.md>\n'
+        self.assertEqual(records_audit.problems({"test_m": rerun}, [], cut={"test_m": cut}),
+                         ["tests.test_m\tLEDGER.md"])
+        self.assertEqual(records_audit.problems({"test_m": rerun}, ["tests.test_m"], cut={"test_m": cut}), [])
+        self.assertEqual(records_audit.problems({"test_m": rerun}, [], cut={"test_m": "7 openat(AT_FDCWD</tmp>, \"y\", O_RDONLY) = 3</tmp/y>\n"}), [])
+        # main reads it from the trace directory, under unit_tests' name for it.
+        self.assertEqual(unit_tests.CUT, ".trace.cut")
+        with tempfile.TemporaryDirectory() as d:
+            for stem in unit_tests.modules():
+                pathlib.Path(d, f"{stem}.trace").write_text(rerun.replace("test_m", stem))
+            pathlib.Path(d, "test_unit_tests.trace.cut").write_text(cut)
+            out = []
+            with mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))), \
+                 mock.patch.object(records_audit, "records_run_tests", return_value=[]):
+                self.assertEqual(records_audit.main(["records_audit.py", d]), 1)
+            self.assertIn("tests.test_unit_tests\tLEDGER.md", out)
 
     def test_an_escaped_resumed_path_and_an_escaped_directory_fd_decode(self):
         # Each _decode call keeps one escaped name from reading as another (#4538): the file a
@@ -761,6 +829,10 @@ class ClashTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), "::error::test_a and test_b both write /tmp/agentos-x\n")
             self.assertIn("SERIAL", err.getvalue())
             pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
+            with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
+                self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
+            # A cut attempt's trace (tools/unit_tests.py CUT) is not a unit: it ran before its rerun.
+            pathlib.Path(d, "test_b" + unit_tests.CUT).write_text(w(9, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
             # A module with no trace fails: an empty directory never passes.
