@@ -469,7 +469,9 @@ func step(ns *os.File, fn func() error, keep <-chan struct{}, errc chan<- error)
 // process's main thread, whose id is the process's.
 var onMainThread = func() bool { return syscall.Gettid() == syscall.Getpid() }
 
-func setns(f *os.File, kind int) error {
+// setns moves the calling thread into f's namespace of kind; a variable
+// so a test can see which thread enters.
+var setns = func(f *os.File, kind int) error {
 	if _, _, e := syscall.RawSyscall(sysSetns, f.Fd(), uintptr(kind), 0); e != 0 {
 		return e
 	}

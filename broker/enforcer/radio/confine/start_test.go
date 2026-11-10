@@ -203,26 +203,38 @@ func strayThreads(t *testing.T) []string {
 }
 
 // TestStepLeavesTheMainThread (NET-2 Confined radio stacks; #5286): a
-// step that finds itself on the main thread runs on another thread, and
+// step that finds itself on the main thread runs on another thread, which
+// enters the stack's namespace, runs fn and stays until keep closes, and
 // the main thread is freed for the runtime to keep, so confine needs no
 // lock on the main thread in the binary that links it. A locked thread
 // other than the main one stands in for it, since the runtime never ends
-// the real one. Catches a step run on the main thread, which would park
-// it in the stack's namespace for good (#5159), and a main thread left
-// locked, which the runtime would end (here) or park (there) as its
-// goroutine exits.
+// the real one, and the setns hook records which thread enters. Catches a
+// step run on the main thread, which would park it in the stack's
+// namespace for good (#5159); a moved fn that skips the namespace or runs
+// on a thread other than the one that entered it; a moved step that
+// drops keep, whose thread would end under a running stack; and a main
+// thread left locked, which the runtime would end (here) or park (there)
+// as its goroutine exits.
 func TestStepLeavesTheMainThread(t *testing.T) {
 	defer func(f func() bool) { onMainThread = f }(onMainThread)
+	defer func(f func(*os.File, int) error) { setns = f }(setns)
+	ns, err := os.Open(os.DevNull) // the hook never reads it
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ns.Close()
 	var held int
-	onMainThread = func() bool { return syscall.Gettid() == held }
+	isMain := onMainThread // a moved step that lands on the real main thread moves again
+	onMainThread = func() bool { return syscall.Gettid() == held || isMain() }
 	type result struct {
-		held, ran int
-		err       error
+		held, entered, ran int
+		err                error
 	}
 	parked := make(chan struct{})
 	defer close(parked)
 	for range 10 {
 		got := make(chan result, 1)
+		keep := make(chan struct{})
 		go func() {
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
@@ -232,21 +244,40 @@ func TestStepLeavesTheMainThread(t *testing.T) {
 				return
 			}
 			held = syscall.Gettid()
-			ran, errc := 0, make(chan error, 1)
-			step(nil, func() error { ran = syscall.Gettid(); return nil }, nil, errc)
+			entered, ran, errc := 0, 0, make(chan error, 1)
+			setns = func(f *os.File, kind int) error {
+				if f == ns && kind == syscall.CLONE_NEWNET {
+					entered = syscall.Gettid()
+				}
+				return nil
+			}
+			step(ns, func() error { ran = syscall.Gettid(); return nil }, keep, errc)
 			err := <-errc
-			got <- result{held, ran, err}
+			got <- result{held, entered, ran, err}
 		}()
 		r := <-got
 		if r.held == syscall.Getpid() {
+			close(keep)
 			continue
 		}
-		if r.err != nil || r.ran == 0 || r.ran == r.held {
-			t.Fatalf("step on thread %d, held thread %d (%v): want it off the held thread", r.ran, r.held, r.err)
+		if r.err != nil || r.ran == 0 || r.ran == r.held || r.entered != r.ran {
+			close(keep)
+			t.Fatalf("step on thread %d, entered on %d, held thread %d (%v): want it entered and run on one thread off the held one", r.ran, r.entered, r.held, r.err)
 		}
 		time.Sleep(500 * time.Millisecond) // a thread whose goroutine exits locked ends at once
-		if _, err := os.Stat(fmt.Sprintf("/proc/self/task/%d", r.held)); err != nil {
-			t.Errorf("the held thread ended: %v", err)
+		for _, tid := range []int{r.held, r.ran} {
+			if _, err := os.Stat(fmt.Sprintf("/proc/self/task/%d", tid)); err != nil {
+				t.Errorf("thread %d (held %d, step %d) ended before keep closed: %v", tid, r.held, r.ran, err)
+			}
+		}
+		close(keep)
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(fmt.Sprintf("/proc/self/task/%d", r.ran)); err != nil {
+				break
+			}
+			if time.Now().After(end) {
+				t.Fatalf("the step's thread %d outlived keep: it was not locked", r.ran)
+			}
 		}
 		return
 	}
