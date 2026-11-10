@@ -231,10 +231,11 @@ type callRung struct {
 // at a time: a new final turn, any speech from the owner, or the 0 key
 // stops the answer being spoken first. The call is at P0 until its rung
 // comes on token, and token is the loop's only rung input: no other
-// parameter's type carries a Rung. loop is a plain unexported function, not a method, so no interface
-// or type constraint can name it: code reaches it only by naming it, and
-// Serve, which fills token from the speed-dial check, is the one place that
-// does (briefs/VOICE-ro.md rule 4, #4949; TestOnlyServeChoosesTheRung).
+// parameter, and no package variable, has a type that carries a Rung. loop
+// is a plain unexported function, not a method, so no interface or type
+// constraint can name it: code reaches it only by naming it, and Serve,
+// which fills token from the speed-dial check, is the one place that does
+// (briefs/VOICE-ro.md rule 4, #4949; TestOnlyServeChoosesTheRung).
 //
 // It listens from the start, so the owner's first words are heard while
 // the token is read; keys are the token's until it is read. A turn starts
