@@ -10,8 +10,10 @@ real broker, so a package that enters a trusted process unclassified fails here 
 # REQ: KRN-2
 import contextlib
 import io
+import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -704,6 +706,7 @@ RERUN_PIN = [
     'on:',
     '  push:',
     '    branches: [main]',
+    '    paths-ignore: [BOARD.md, METRICS.md, TRACE.md]',
     'permissions:',
     '  contents: read',
     'concurrency:',
@@ -727,6 +730,7 @@ RERUN_PIN = [
     '          WAIT: 30',
     '        run: |',
     '          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq \'.[] | "\\(.number) \\(.head.sha)"\') || { echo "::error::cannot list open PRs"; exit 1; }',
+    '          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) || { echo "::error::cannot read this run\'s start"; exit 1; }',
     '          failed=0 reran=0 missed=""',
     '          pending="$prs"',
     '          for round in $(seq 1 "$ROUNDS"); do',
@@ -738,7 +742,9 @@ RERUN_PIN = [
     '              if [ -z "$run" ]; then',
     '                echo "#$pr: no trusted-base run yet; its first run reads the new main"',
     '              elif [ "${run#* }" = completed ]; then',
-    '                if gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi',
+    '                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[].started_at] | min) > \\"$since\\" then \\"fresh\\" else \\"\\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }',
+    '                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push, so it measured the new main"',
+    '                elif gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi',
     '              else',
     '                left="$left$pr $sha"$\'\\n\'',
     '              fi',
@@ -759,7 +765,6 @@ RERUN_PIN = [
 
 
 def pin_problems(text, pin=None):
-    import re
     pin = PIN if pin is None else pin
     if re.search(r"[^\x20-\x7e\n]", text):
         return ["a character other than printable ASCII or a newline"]
@@ -812,6 +817,10 @@ class Workflow(unittest.TestCase):
                          ("        shell: bash\n", "        shell: bash\n        if: github.event.before != ''\n"),
                          ("          exit \"$failed\"", "          exit 0"),
                          ("&event=pull_request_target", ""),
+                         # CI-rerun-fresh (#5222): only bot-written files are ignored; a run that
+                         # started before the push is rerun, so a later start is the only skip.
+                         ("TRACE.md]", "TRACE.md, SPEC.md]"),
+                         ("min) > \\\"$since", "min) < \\\"$since"),
                          ("    runs-on: ubuntu-24.04", "    continue-on-error: true\n    runs-on: ubuntu-24.04")]:
             self.assertIn(old, text)
             self.assertTrue(pin_problems(text.replace(old, new, 1), RERUN_PIN), old)
@@ -826,7 +835,9 @@ def rerun_script():
 
 STUB_GH = r"""#!/bin/bash
 # A stand-in for `gh api`: open PRs from $STUB/prs, each head's runs from $STUB/runs/<sha> (one
-# "<id> <status>" line per listing, the last line repeating), reruns logged to $STUB/reran.
+# "<id> <status>" line per listing, the last line repeating), reruns logged to $STUB/reran. This
+# run's record and each run's jobs are JSON in $STUB/run and $STUB/jobs/<id>, read with the
+# script's own --jq expression by jq.
 [ "$1" = api ] || exit 9
 shift
 if [ "$1" = -X ]; then
@@ -834,6 +845,10 @@ if [ "$1" = -X ]; then
   [ -e "$STUB/refuse-$id" ] && exit 1
   echo "$id" >> "$STUB/reran"; exit 0
 fi
+case "$1" in
+  */actions/runs/*/jobs) id=${1%/jobs}; f="$STUB/jobs/${id##*/}"; [ -e "$f" ] && exec jq -r "$3" "$f"; exit 1 ;;
+  */actions/runs/"$GITHUB_RUN_ID") [ -e "$STUB/run" ] && exec jq -r "$3" "$STUB/run"; exit 1 ;;
+esac
 [ "$1" = --paginate ] && { [ -e "$STUB/prs" ] || exit 1; cat "$STUB/prs"; exit 0; }
 sha=${1#*head_sha=}; sha=${sha%%&*}
 f="$STUB/runs/$sha"
@@ -852,21 +867,33 @@ class RerunScript(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         os.makedirs(os.path.join(self.tmp, "bin"))
         os.makedirs(os.path.join(self.tmp, "runs"))
+        os.makedirs(os.path.join(self.tmp, "jobs"))
         write(self.tmp, "bin/gh", STUB_GH)
         os.chmod(os.path.join(self.tmp, "bin/gh"), 0o755)
 
-    def run_script(self, prs, runs, refuse=(), rounds=3):
-        for f in pathlib.Path(self.tmp).glob("*"):
-            if f.is_file():
+    PUSH = "2026-11-10T03:05:49Z"  # this rerun run's created_at, no earlier than the push
+
+    def run_script(self, prs, runs, refuse=(), rounds=3, started=None, push=PUSH):
+        # started: {run id: [job started_at, ...]}; a run left out has one job started before the push.
+        for f in pathlib.Path(self.tmp).glob("**/*"):
+            if f.is_file() and f.parent.name != "bin":
                 f.unlink()
         if prs is not None:
             write(self.tmp, "prs", "".join(f"{n} {sha}\n" for n, sha in prs))
+        if push is not None:
+            write(self.tmp, "run", json.dumps({"id": 99, "created_at": push}))
+        ids = {l.split()[0] for lines in runs.values() for l in lines}
         for sha, lines in runs.items():
             write(self.tmp, f"runs/{sha}", "".join(l + "\n" for l in lines))
+        for i in ids:
+            starts = (started or {}).get(i, ["2026-11-10T02:55:35Z"])
+            if starts is not None:
+                write(self.tmp, f"jobs/{i}", json.dumps({"total_count": len(starts),
+                                                         "jobs": [{"started_at": s} for s in starts]}))
         for i in refuse:
             write(self.tmp, f"refuse-{i}", "")
         env = {**os.environ, "PATH": os.path.join(self.tmp, "bin") + os.pathsep + os.environ["PATH"],
-               "STUB": self.tmp, "REPO": "o/r", "ROUNDS": str(rounds), "WAIT": "0",
+               "STUB": self.tmp, "REPO": "o/r", "GITHUB_RUN_ID": "99", "ROUNDS": str(rounds), "WAIT": "0",
                "GITHUB_STEP_SUMMARY": os.path.join(self.tmp, "summary")}
         r = subprocess.run(["bash", "-eo", "pipefail", "-c", rerun_script()], env=env, capture_output=True, text=True)
         reran = pathlib.Path(self.tmp, "reran")
@@ -897,6 +924,46 @@ class RerunScript(unittest.TestCase):
                       pathlib.Path(self.tmp, "summary").read_text())
         rc, out, reran = self.run_script(None, {})
         self.assertEqual((rc, reran), (1, []), out)
+        # CI-rerun-fresh: this run's start or a run's jobs that cannot be read fail closed too.
+        rc, out, reran = self.run_script([(1, "a1")], {"a1": ["11 completed"]}, push=None)
+        self.assertEqual((rc, reran), (1, []), out)
+        self.assertIn("cannot read this run's start", out)
+        rc, out, reran = self.run_script([(1, "a1"), (2, "b2")], {"a1": ["11 completed"], "b2": ["22 completed"]},
+                                         started={"11": None})
+        self.assertEqual((rc, reran), (1, ["22"]), out)
+        self.assertIn("#1: cannot list the jobs of 11", out)
+        self.assertIn("Not rerun: #1 (", pathlib.Path(self.tmp, "summary").read_text())
+
+    # REQ: CI-rerun-fresh
+    def test_skips_a_run_that_started_after_the_push(self):
+        # #5203: attempt 10 of run 42727562333 was queued before push 7bceb9d7 (03:05:49Z), started
+        # at 03:28:42Z, so it checked out the new main, and was rerun 8 s after it passed. It stands
+        # now. A run whose job started before the push, at the push's second, or not at all is still
+        # rerun, and so is a run with any job that started before it.
+        rc, out, reran = self.run_script(
+            [(1, "a1"), (2, "b2"), (3, "c3"), (4, "d4"), (5, "e5"), (6, "f6")],
+            {"a1": ["11 queued", "11 in_progress", "11 completed"], "b2": ["22 in_progress", "22 completed"],
+             "c3": ["33 completed"], "d4": ["44 completed"], "e5": ["55 completed"], "f6": ["66 completed"]},
+            started={"11": ["2026-11-10T03:28:42Z"], "22": ["2026-11-10T02:55:35Z"],
+                     "33": [self.PUSH], "44": [], "55": [None], "66": ["2026-11-10T03:28:42Z", "2026-11-10T03:00:00Z"]})
+        self.assertEqual((rc, sorted(reran)), (0, ["22", "33", "44", "55", "66"]), out)
+        self.assertIn("#1: 11 started after this push, so it measured the new main", out)
+        self.assertEqual(pathlib.Path(self.tmp, "summary").read_text(), "\nReran 5 of 6 open PRs' trusted-base runs.\n")
+
+    # REQ: CI-rerun-fresh
+    def test_ignores_only_bot_written_files_no_measure_reads(self):
+        # A push of only these files skips the rerun, so each must be written by its bot workflow
+        # alone (a commit of that one file, after a check that nothing else changed) and must be
+        # read by neither tool the trusted-base check runs.
+        text = (ROOT / ".github/workflows/trusted-base-rerun.yml").read_text()
+        ignored = re.search(r"^    paths-ignore: \[(.*)\]$", text, re.M).group(1).split(", ")
+        self.assertEqual(ignored, ["BOARD.md", "METRICS.md", "TRACE.md"])
+        tools = (ROOT / "tools/trusted_base.py").read_text() + (ROOT / "tools/claims.py").read_text()
+        for name in ignored:
+            self.assertNotIn(name.split(".")[0], tools, name)
+            bot = (ROOT / f".github/workflows/{name.split('.')[0].lower()}.yml").read_text()
+            self.assertIn(f"test -z \"$(git status --porcelain | grep -v ' {name}$')\"", bot)
+            self.assertRegex(bot, rf"git commit -qm .* -- {re.escape(name)}\n")
 
 
 def merge_steps():
