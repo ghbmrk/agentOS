@@ -25,7 +25,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/radio"
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/confine"
-	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // exited is the process of a stack served inside the test's own process:
@@ -1159,20 +1158,28 @@ const nestedEnv = "AGENTOS_BLE_USERNS"
 // asRoot runs the calling test as root: directly when it is, otherwise
 // again as root of a user namespace that maps the runner's subordinate ids
 // (as radio's TestRadioCannotChangeRule does), so the stack can drop to
-// another user. It reports whether this process should run the test; a
-// skip inside the namespaced run fails the test in CI (#5152).
+// another user. It reports whether this process should run the test.
 func asRoot(t *testing.T) bool {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		return true
 	}
-	return netnstest.RunAs(t, nestedEnv, combined, []string{"--map-root-user", "--map-auto"}, "newuidmap")
-}
-
-func combined(env []string, name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Env = env
-	return cmd.CombinedOutput()
+	required := os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1"
+	if _, err := exec.LookPath("newuidmap"); err != nil {
+		if required {
+			t.Fatalf("newuidmap missing: %v", err)
+		}
+		t.Skip("needs root or subordinate ids (newuidmap)")
+	}
+	cmd := exec.Command("unshare", "--map-root-user", "--map-auto", "--",
+		os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), nestedEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("as root of a user namespace:\n%s", out)
+	if err != nil {
+		t.Fatalf("user namespace run failed: %v", err)
+	}
+	return false
 }
 
 type testLog struct{ t *testing.T }

@@ -576,34 +576,16 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 			c.SetDeadline(time.Now().Add(5 * time.Second))
 			io.Copy(io.Discard, c)
 		})
-		// sentAndOther reads the box's IP bytes sent and its other counter
-		// as one: a packet elsewhere (an MLD report, at a time the kernel
-		// picks) sent between two lone reads counts in one and not the
-		// other, which once read as 76 bytes the port never counted. So
-		// other is read on both sides of TxIP until it holds still.
-		sentAndOther := func() (tx, o uint64) {
-			for range 20 {
-				a := other()
-				tx = r.h.TxIP(tc.box)
-				if o = other(); o == a {
-					return tx, o
-				}
-			}
-			t.Fatalf("%s: its other counter never held still across a reading", tc.box)
-			return 0, 0
-		}
 		send := func() (counted, sent uint64) {
 			r.read()
-			before := tc.count(r.c.Counts())
-			tx, o := sentAndOther()
+			before, tx, o := tc.count(r.c.Counts()), r.h.TxIP(tc.box), other()
 			r.h.Dial(tc.box, tc.to, port, 5*time.Second, func(c net.Conn) int {
 				n, _ := c.Write(make([]byte, 8<<20))
 				return n
 			})
 			time.Sleep(100 * time.Millisecond) // the last segments cross the enforcer
-			tx2, o2 := sentAndOther()
-			rest := o2 - o
-			sent = tx2 - tx - rest
+			rest := other() - o
+			sent = r.h.TxIP(tc.box) - tx - rest
 			t.Logf("%s sent %d IP bytes elsewhere in the window", tc.box, rest)
 			r.read()
 			return tc.count(r.c.Counts()) - before, sent

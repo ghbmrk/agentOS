@@ -93,6 +93,8 @@ func TestTarget(t *testing.T) {
 	secureOn := append(magic(gamingPC), 1, 2, 3, 4, 5, 6)
 	mixed := magic(gamingPC)
 	copy(mixed[96:], desktop)
+	// Every case but "again at once" comes a full interval after the last,
+	// so a refusal is its own check's and not the rate limit's (#5152).
 	for _, c := range []struct {
 		why  string
 		pkt  []byte
@@ -109,6 +111,9 @@ func TestTarget(t *testing.T) {
 		{"no sync", append([]byte{0xfe}, magic(desktop)[1:]...), ""},
 		{"empty", nil, ""},
 	} {
+		if c.why != "again at once" {
+			now = now.Add(WakeInterval)
+		}
 		got := ""
 		if m := r.Target(c.pkt); m != nil {
 			got = m.Iface

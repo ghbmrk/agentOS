@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -74,7 +75,11 @@ func TestFixture(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	if !Run(t, childEnv, combined) {
+	var tools []string
+	if mode == "missing" {
+		tools = []string{"agentos-no-such-tool"}
+	}
+	if !Run(t, childEnv, combined, tools...) {
 		return
 	}
 	if mode == "skip" {
@@ -102,10 +107,12 @@ func TestChildSkipFailsParent(t *testing.T) {
 		mode, ci string
 		fails    bool
 		want     string
+		at       string // what the failure or skip says, named at the fixture's own line
 	}{
-		{"skip", "CI=1", true, "--- FAIL: TestFixture"},
-		{"skip", "", false, "--- SKIP: TestFixture"},
-		{"pass", "CI=1", false, "--- PASS: TestFixture"},
+		{"skip", "CI=1", true, "--- FAIL: TestFixture", "the namespaced run skipped"},
+		{"skip", "", false, "--- SKIP: TestFixture", "skipped in the namespace"},
+		{"pass", "CI=1", false, "--- PASS: TestFixture", ""},
+		{"missing", "", false, "--- SKIP: TestFixture", "agentos-no-such-tool missing"},
 	} {
 		env := append(append([]string{}, base...), fixtureEnv+"="+c.mode)
 		if c.ci != "" {
@@ -118,6 +125,14 @@ func TestChildSkipFailsParent(t *testing.T) {
 		}
 		if !strings.Contains(string(out), c.want) {
 			t.Errorf("%s %q: output lacks %q\n%s", c.mode, c.ci, c.want, out)
+		}
+		// The parent logs the namespaced run's own output, and a failure or
+		// skip names the calling test's line, not the helper's (#5152).
+		if c.mode != "missing" && !strings.Contains(string(out), "in a fresh namespace (unshare -rn):") {
+			t.Errorf("%s %q: the namespaced run's output is not logged\n%s", c.mode, c.ci, out)
+		}
+		if c.at != "" && !regexp.MustCompile(`netnstest_test\.go:\d+: `+regexp.QuoteMeta(c.at)).Match(out) {
+			t.Errorf("%s %q: %q is not named at the fixture's line\n%s", c.mode, c.ci, c.at, out)
 		}
 		if c.fails && !strings.Contains(string(out), "CI requires them") {
 			t.Errorf("%s %q: the failure does not say why\n%s", c.mode, c.ci, out)
