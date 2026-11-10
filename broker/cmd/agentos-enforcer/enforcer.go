@@ -33,9 +33,9 @@ import (
 )
 
 // Silence is how long the core may send the enforcer nothing before the
-// page shows it down: two missed beats of a heartbeat sent each summary
-// interval (KRN-12 Silence; ASSUMPTIONS ENF-l-7).
-const Silence = 2 * wire.SummaryInterval
+// page shows it down: two missed beats of the heartbeat the format
+// definition fixes (KRN-12 Silence; ASSUMPTIONS ENF-l-7).
+const Silence = 2 * wire.HeartbeatInterval
 
 // MaxCoreConns is how many channel connections may be open at once: the
 // one in use and a reconnect that replaces it. Any more is closed before
@@ -50,7 +50,7 @@ const helloTimeout = 10 * time.Second
 // idleTimeout ends an authenticated session that sent nothing for two
 // heartbeats and a margin, so a half-open or superseded connection frees
 // its slot (#4755 items 2 and 4). An honest core speaks each
-// wire.SummaryInterval.
+// wire.HeartbeatInterval.
 const idleTimeout = Silence + helloTimeout
 
 // fireTimeout bounds one firewall load, so a hung nft cannot stall the
