@@ -8,11 +8,13 @@ name: trusted-base-rerun
 # only when main's measure grows: a push that shrinks main can still raise another PR's merged
 # measure (an identical cut both make, or a package one drops that the other links; L3 on #5179).
 # A run whose job started before this push may have read the old main, so it is rerun once it
-# completes. One whose job started later checked out the new main and stands: rerunning it too
-# kept armed PRs pending while the queue outlasted the gap between pushes (CI-rerun-fresh, #5222;
-# #5203, attempts 1 to 11). Pushes of only BOARD.md, METRICS.md or TRACE.md run nothing: only
-# their bot workflows write them and no measure reads them. A rerun or listing that fails marks
-# this job red, so a stale green is visible on main. With bursts of pushes GitHub cancels a
+# completes. One whose job started later and passed checked out the new main and stands:
+# rerunning it too kept armed PRs pending while the queue outlasted the gap between pushes
+# (CI-rerun-fresh, #5222; #5203, attempts 1 to 11). A later one that failed, timed out or was
+# cancelled is rerun as well (#5224). A push that changes no path under `paths` runs nothing:
+# the check reads nothing else, and such a push changes a PR's merged tree only outside them
+# (#5224). An empty or malformed push time, a rerun or a listing that fails
+# marks this job red, so a stale green is visible on main. With bursts of pushes GitHub cancels a
 # pending run of this group; the run that replaces it reruns everything against a later main,
 # so no push is lost. It checks out nothing and runs no repository or PR code; its token may
 # rerun workflow runs and read PRs, nothing else. PRs that merge within one rerun's latency can
@@ -21,7 +23,7 @@ name: trusted-base-rerun
 on:
   push:
     branches: [main]
-    paths-ignore: [BOARD.md, METRICS.md, TRACE.md]
+    paths: [broker/**, SPEC.md, DECISIONS.md, decisions/**, tools/trusted_base.py, tools/claims.py, tools/trusted_base_parsers.txt, tools/trusted_core.txt, tools/ceilings.txt, tools/old_core.txt, .github/workflows/trusted-base.yml]
 permissions:
   contents: read
 concurrency:
@@ -45,7 +47,7 @@ jobs:
           WAIT: 30
         run: |
           prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | "\(.number) \(.head.sha)"') || { echo "::error::cannot list open PRs"; exit 1; }
-          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) || { echo "::error::cannot read this run's start"; exit 1; }
+          since=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at) && [[ $since =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "::error::cannot read this run's start"; exit 1; }
           failed=0 reran=0 missed=""
           pending="$prs"
           for round in $(seq 1 "$ROUNDS"); do
@@ -57,8 +59,8 @@ jobs:
               if [ -z "$run" ]; then
                 echo "#$pr: no trusted-base run yet; its first run reads the new main"
               elif [ "${run#* }" = completed ]; then
-                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[].started_at] | min) > \"$since\" then \"fresh\" else \"\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }
-                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push, so it measured the new main"
+                fresh=$(gh api "repos/$REPO/actions/runs/${run% *}/jobs" --jq "if ([.jobs[] | if .conclusion == \"success\" then .started_at else null end] | min) > \"$since\" then \"fresh\" else \"\" end") || { echo "::warning::#$pr: cannot list the jobs of ${run% *}"; failed=1; missed="$missed #$pr"; continue; }
+                if [ -n "$fresh" ]; then echo "#$pr: ${run% *} started after this push and passed, so it measured the new main"
                 elif gh api -X POST "repos/$REPO/actions/runs/${run% *}/rerun" > /dev/null; then echo "#$pr: reran ${run% *}"; reran=$((reran + 1)); else echo "::warning::#$pr: rerun of ${run% *} refused"; failed=1; missed="$missed #$pr"; fi
               else
                 left="$left$pr $sha"$'\n'
