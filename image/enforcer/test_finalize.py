@@ -57,7 +57,8 @@ class NoDump(Tree):
     def test_kernel_default_refused(self):
         # No file: the kernel keeps its relative "core", written into the stack's run directory.
         (self.root / NODUMP).unlink()
-        self.assertEqual(len(self.refusals()), 2)
+        self.assertEqual(self.refusals(), ["sysctl.d leaves kernel.core_pattern unset; must be |/usr/bin/false",
+                                           "sysctl.d leaves fs.suid_dumpable unset; must be 0"])
 
     def test_override_refused(self):
         for name, line in (("zz-late.conf", "kernel.core_pattern = core\n"),
@@ -108,7 +109,7 @@ class RpFilter(Tree):
         (self.root / RPF).unlink()
         self.assertEqual(self.refusals(), [
             "sysctl.d sets net.ipv4.conf.*.rp_filter to 2; rp_filter must be 0",
-            "sysctl.d sets net.ipv4.conf.all.rp_filter to None; rp_filter must be 0",
+            "sysctl.d leaves net.ipv4.conf.all.rp_filter unset; rp_filter must be 0",
             "sysctl.d sets net.ipv4.conf.default.rp_filter to 2; rp_filter must be 0"])
 
     def test_unset_refused(self):
@@ -133,6 +134,11 @@ class RpFilter(Tree):
                 self.put("usr/lib/sysctl.d/" + name, line)
                 self.assertEqual(len(self.refusals()), 1, self.refusals())
                 (self.root / "usr/lib/sysctl.d" / name).unlink()
+
+    def test_bare_minus_says_unset(self):
+        # #5309: a bare "-key" leaves the key unset, and the build log says so, not "None".
+        self.put("usr/lib/sysctl.d/zz-late.conf", "-net.ipv4.conf.default.rp_filter\n")
+        self.assertEqual(self.refusals(), ["sysctl.d leaves net.ipv4.conf.default.rp_filter unset; rp_filter must be 0"])
 
     def test_masked_in_etc_refused(self):
         self.put("etc/sysctl.d/99-enforcer-rpfilter.conf", "")
@@ -164,7 +170,7 @@ class Redirects(Tree):
     def test_unset_refused(self):
         # The kernel's own default is 1 on every key: without the image's file, all six are refused.
         (self.root / REDIR).unlink()
-        self.assertEqual(self.refusals(), ["sysctl.d sets %s to None; accept_redirects must be 0" % k.replace("/", ".")
+        self.assertEqual(self.refusals(), ["sysctl.d leaves %s unset; accept_redirects must be 0" % k.replace("/", ".")
                                            for k in sorted(fin.REDIRECTS)])
 
     def test_override_refused(self):
@@ -183,6 +189,11 @@ class Redirects(Tree):
                 self.put("usr/lib/sysctl.d/" + name, line)
                 self.assertEqual(len(self.refusals()), n, self.refusals())
                 (self.root / "usr/lib/sysctl.d" / name).unlink()
+
+    def test_bare_minus_says_unset(self):
+        # #5309: a bare "-key" leaves the key unset, and the build log says so, not "None".
+        self.put("usr/lib/sysctl.d/zz-late.conf", "-net.ipv6.conf.all.accept_redirects\n")
+        self.assertEqual(self.refusals(), ["sysctl.d leaves net.ipv6.conf.all.accept_redirects unset; accept_redirects must be 0"])
 
     def test_masked_in_etc_refused(self):
         self.put("etc/sysctl.d/99-enforcer-redirects.conf", "")
