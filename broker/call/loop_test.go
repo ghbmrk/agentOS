@@ -582,6 +582,9 @@ func TestNoTokenTryFollowsTheCall(t *testing.T) {
 	if _, err := r.end(); !errors.Is(err, r.l.answerErr) || tries() != 0 {
 		t.Fatalf("a failed Answer: err %v, tried %q", err, tried)
 	}
+	if r.l.answerCtx.Err() == nil {
+		t.Fatal("a failed Answer's call ctx outlives Serve")
+	}
 
 	r = newRig(t, fixed("Hi."))
 	r.cfg.Token = token
@@ -907,6 +910,9 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 	}
 	if !hungUp(r) {
 		t.Fatal("an Answer past MaxCall was not hung up")
+	}
+	if r.l.hangCtx.Err() == nil { // its ctx ends with the hang-up
+		t.Fatal("the hang-up's ctx outlives Serve")
 	}
 
 	next := newRig(t, fixed("All quiet."))

@@ -253,7 +253,6 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 		}
 	}()
 	rep, err := loop(tctx, cfg, c, token)
-	cancel() // the call is over: its grant ends before the hang-up
 	return rep, overrun(ctx, tctx, c, err)
 }
 

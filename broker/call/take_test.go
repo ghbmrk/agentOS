@@ -46,9 +46,9 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     token read, in that order, so keys pressed before a failed answer
 //     reach no try, and on any return or panic the grant has died and no
 //     Config.Token try is left before the line is free; nothing writes
-//     tctx or cancel after that. token
-//     defers closing out first, so the wait ends. Serve ends by running
-//     the loop, then cancelling tctx (#5259, #5274).
+//     tctx or cancel after that. token defers closing out first, so the
+//     wait ends. Serve ends by running the loop and returning (#5259,
+//     #5274).
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -192,22 +192,20 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// tctx, so keys pressed before an Answer that fails reach no try;
 		// its end and await in a defer that runs before the unlock, so on
 		// every return or panic the grant has died and no Config.Token try
-		// is left; the loop; then tctx cancelled before the hang-up
-		// (#5259, #5274).
+		// is left; then the loop and the return (#5259, #5274).
 		tail := []string{
 			"if err := c.Answer(tctx); err != nil { return Report{}, overrun(ctx, tctx, c, err) }",
 			"token := make(chan *grant, 1)",
 			"go cfg.token(tctx, c, token)",
 			"defer func() { cancel() for range token { } }()",
 			"rep, err := loop(tctx, cfg, c, token)",
-			"cancel()",
 			"return rep, overrun(ctx, tctx, c, err)",
 		}
 		i := slices.Index(serveBody, pinned[0])
 		if i < 0 || i+len(pinned) > len(serveBody) || !slices.Equal(serveBody[i:i+len(pinned)], pinned) {
 			bad = append(bad, "Serve does not take serving, defer the unlock, make tctx and defer its cancel, in that order")
 		} else if !slices.Equal(serveBody[i+len(pinned):], tail) {
-			bad = append(bad, "Serve does not then answer, then read the token with tctx and defer cancelling tctx and waiting for the token read, then run the loop, then cancelling tctx")
+			bad = append(bad, "Serve does not then answer, then read the token with tctx and defer cancelling tctx and waiting for the token read, then run the loop and return")
 		}
 		if i >= 0 && i+3 <= len(serveBody) && serveBody[i+2] == pinned[2] {
 			lhs := serveStmts[i+2].(*ast.AssignStmt).Lhs
@@ -416,8 +414,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{old: "\t\tcancel()\n\t\tfor range token {\n\t\t}\n", new: "\t\tfor range token {\n\t\t}\n\t\tcancel()\n", want: "waiting for the token read"},
 		{old: "\t\tfor range token {\n\t\t}\n", new: "\t\tgo func() {\n\t\t\tfor range token {\n\t\t\t}\n\t\t}()\n", want: "waiting for the token read"},
 		{old: "\tdefer func() {\n\t\tcancel()\n\t\tfor range token {\n\t\t}\n\t}()\n", new: "", want: "waiting for the token read"},
-		{old: "\trep, err := loop(tctx, cfg, c, token)\n", new: "\trep, err := loop(tctx, cfg, c, token)\n\tfor range token {\n\t}\n", want: "then cancelling tctx"},
-		{old: "\tcancel() // the call is over", new: "\t_ = 0 // the call is over", want: "then cancelling tctx"},
+		{old: "\trep, err := loop(tctx, cfg, c, token)\n", new: "\trep, err := loop(tctx, cfg, c, token)\n\tfor range token {\n\t}\n", want: "then run the loop and return"},
 		// #5274: deleting token's close of out leaves Serve's await hung.
 		{old: "\tdefer close(out)\n\tout <- check", new: "\tout <- check", want: "token does not defer closing out first"},
 		{old: "\tdefer close(out)\n\tout <- check", new: "\tdefer func() { close(out) }()\n\tout <- check", want: "token does not defer closing out first"},
