@@ -65,6 +65,7 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 // #2670 item 5).
 func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 	r := newRig(t)
+	limited := r.grant(trashRoot(r, "r3", r.owner), 10, key.LimitUses(3), key.LimitHold(hour, hour))
 	at := 10 * hour
 	renew := func(name string, holder pair, spendDay, life int64, c ...key.Caveat) key.Key {
 		t.Helper()
@@ -94,7 +95,6 @@ func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 		}
 	}
 	// A renewal that drops or loosens a limit of the old key waits the hold.
-	limited := r.grant(trashRoot(r, "r3", r.owner), 10, key.LimitUses(3), key.LimitHold(hour, hour))
 	for name, c := range map[string]struct {
 		cs   []key.Caveat
 		live bool
@@ -326,8 +326,8 @@ func TestARenewalOfARevokedKeyWaits(t *testing.T) {
 func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	old := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 15)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	at := 10 * hour
 	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.pass, r.holder.pub, at, 15)
 	must(t, err)

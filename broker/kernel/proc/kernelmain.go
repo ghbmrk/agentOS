@@ -345,14 +345,18 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err != nil {
 		return err
 	}
-	clock := func() int64 { return time.Now().UnixMilli() }
+	// The kernel reads the box clock at each decision; OpenKernel floors it
+	// at the log and carries it forward on the monotonic clock (onLog), so
+	// its time never goes back (TIM-1, #5147).
+	read := func() kernel.Reading { return kernel.At(time.Now().UnixMilli()) }
+	clock := func() int64 { return read().Earliest }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log.Get(),
 		Pub: keys.Head.Get().Public().(ed25519.PublicKey), Sign: keys.Head.Get(),
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA.Get(),
-		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: clock,
+		FirstEdge: first, LinkKey: keys.LinkKey.Get(), Checker: checker, Clock: read,
 	}, clock())
 	if err != nil {
 		return err

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -63,10 +64,11 @@ type KernelConfig struct {
 	// LinkKey is the core's link key (handoff.KernelKeys.LinkKey), which
 	// only the kernel holds (HW-15); none on a box enrolled before it.
 	LinkKey ed25519.PrivateKey
-	// Clock is the kernel process's clock, read when a backup re-seal
-	// finishes, so a failure backs off from then (#3339); nil reads the
-	// time it was handed out.
-	Clock func() int64
+	// Clock is the kernel process's TIM-1 reading, which the kernel reads at
+	// each decision (kernel.BootClock) and when a backup re-seal finishes,
+	// so a failure backs off from then (#3339); nil reads only the time
+	// each call is handed.
+	Clock kernel.Clock
 }
 
 // Format prints a KernelConfig as its type alone, never the log key or the
@@ -107,7 +109,7 @@ type Kernel struct {
 	// address in every verb and at any depth (DECOY-b-8, #4719).
 	firstEdge ed25519.PublicKey
 	link      **ed25519.PrivateKey
-	clock     func() int64 // KernelConfig's
+	clock     kernel.Clock // KernelConfig's
 	// head is KernelConfig's Sign, the store's head key: it signs the
 	// recovery-key approvals the root steps verify (handoff.Approval).
 	// Set at open and never changed.
@@ -146,6 +148,9 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
+	if cfg.Clock != nil {
+		cfg.Clock = onLog(l, cfg.Clock)
+	}
 	// A clerk's view is verified against the state's anchors, which setup
 	// may log after boot.
 	var k *kernel.Kernel
@@ -155,7 +160,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		clerks[name] = remote{r, anchors, cfg.Pinned}
 		kc[name] = clerks[name]
 	}
-	if k, err = kernel.Boot(l, cfg.Anchors, kc, now, cfg.Pinned...); err != nil {
+	if k, err = kernel.BootClock(l, cfg.Anchors, kc, cfg.Clock, now, cfg.Pinned...); err != nil {
 		st.Close()
 		return nil, err
 	}
@@ -286,7 +291,7 @@ func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
 			r.Run()
 			end := now
 			if h.clock != nil {
-				end = max(now, h.clock())
+				end = max(now, h.clock().Earliest)
 			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -409,4 +414,22 @@ func (h *Kernel) Close() error {
 	defer h.mu.Unlock()
 	h.k = nil
 	return h.store.Close()
+}
+
+// onLog is c floored at the log's last time as the process opened it, carried
+// forward on the monotonic clock. So a start whose wall clock is behind the
+// log (a flat CMOS battery, an RTC kept in local time) neither stops the
+// kernel's time at the log, which would keep a task or key past its end, nor
+// takes it back below (TIM-1, KEY-7). It rests on the kernel's floor: true
+// time was at least each entry's when the kernel wrote it.
+func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
+	es := l.Entries()
+	if len(es) == 0 {
+		return c
+	}
+	base, start := es[len(es)-1].At, time.Now()
+	return func() kernel.Reading {
+		r, f := c(), base+time.Since(start).Milliseconds()
+		return kernel.Reading{Earliest: max(r.Earliest, f), Latest: max(r.Latest, f)}
+	}
 }

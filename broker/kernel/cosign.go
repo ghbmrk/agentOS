@@ -205,11 +205,15 @@ func (s *State) lineOK(b lineSet) error {
 // OneOffLine is the most a one-off under root may spend without a second
 // passkey: the line times the largest daily cap of a live clerk key under
 // it, so with none, any spend needs one.
-func (s *State) OneOffLine(root key.ID, now int64) int64 {
+func (s *State) OneOffLine(root key.ID, now int64) int64 { return s.oneOffLine(root, At(now)) }
+
+// oneOffLine is OneOffLine at a reading: a grant counts once Earliest is past
+// its hold and until Latest reaches its expiry.
+func (s *State) oneOffLine(root key.ID, now Reading) int64 {
 	day := int64(0)
 	for id, g := range s.Grants {
-		if len(g.Key.Links) == 1 && rootOf(g.Key) == root && g.From <= now && !s.Changes.Revoked[id] && !s.Changes.Revoked[root] {
-			if exp := lapse(g.Key.Links[0].Caveats); exp != nil && *exp > now {
+		if len(g.Key.Links) == 1 && rootOf(g.Key) == root && g.From <= now.Earliest && !s.Changes.Revoked[id] && !s.Changes.Revoked[root] {
+			if exp := lapse(g.Key.Links[0].Caveats); exp != nil && *exp > now.Latest {
 				day = max(day, spendDay(g.Key.Links[0].Caveats))
 			}
 		}
@@ -223,6 +227,11 @@ func (s *State) OneOffLine(root key.ID, now int64) int64 {
 // OneOff refuses a one-off under a bare root whose spend is past the line
 // unless a second passkey, one of the two an anchor, co-signed it.
 func OneOff(v View, owners, anchors []key.PublicKey, p Plan, now int64) *key.Refusal {
+	return oneOff(v.OneOffLine(p.Key.Tip(), now), owners, anchors, p)
+}
+
+// oneOff is OneOff against line, the root's OneOffLine.
+func oneOff(line int64, owners, anchors []key.PublicKey, p Plan) *key.Refusal {
 	if len(p.Key.Links) > 0 {
 		return nil
 	}
@@ -230,7 +239,7 @@ func OneOff(v View, owners, anchors []key.PublicKey, p Plan, now int64) *key.Ref
 	for i := range p.Steps {
 		total = min(total+min(max(p.Step(i).Amount, 0), math.MaxInt64/2), math.MaxInt64/2) // both halves, so no wrap
 	}
-	if total <= v.OneOffLine(p.Key.Tip(), now) {
+	if total <= line {
 		return nil
 	}
 	signer := key.UseSigner(p.Key, owners, p.use(), p.Sig)

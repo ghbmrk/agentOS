@@ -166,17 +166,19 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(3-kernel.GrantHold, cosigned(root, env), root, env); err != nil { // granted at setup
+	// Granted now and live a hold later: the kernel's time never goes back
+	// below its log (TIM-1), so a grant is not logged in the past.
+	if err := k.Issue(3, cosigned(root, env), root, env); err != nil {
 		t.Fatal(err)
 	}
 	ext, err := key.Derive(env, hpriv, hpub, key.LimitSpendTask(200))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Extend(4, ext, "t"); err != nil {
+	if err := k.Extend(4+kernel.GrantHold, ext, "t"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(5, "t", "api", "hi", 50); err != nil {
+	if _, err := c.Call(5+kernel.GrantHold, "t", "api", "hi", 50); err != nil {
 		t.Fatalf("extended plan runs: %v", err)
 	}
 }
@@ -535,17 +537,17 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Issue(-kernel.GrantHold, cosigned(root, ky), root, ky); err != nil {
+	if err := k.Issue(0, cosigned(root, ky), root, ky); err != nil { // live a hold later (TIM-1: no grant in the past)
 		t.Fatal(err)
 	}
 	step := kernel.PlanStep{Verb: key.Trash, Clerk: "mail", Args: map[string]string{"target": "m1"}}
-	if err := k.Submit(0, kernel.SignPlan(kernel.Plan{ID: "mailplan", Key: ky, Steps: []kernel.PlanStep{step}}, hpriv)); err != nil {
+	if err := k.Submit(kernel.GrantHold, kernel.SignPlan(kernel.Plan{ID: "mailplan", Key: ky, Steps: []kernel.PlanStep{step}}, hpriv)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Call(1, "mailplan", "api", "hi", 50); err != nil {
+	if _, err := c.Call(kernel.GrantHold+1, "mailplan", "api", "hi", 50); err != nil {
 		t.Fatalf("a mail key's spend cap funds a model call: %v", err)
 	}
-	if _, err := c.Call(2, "mailplan", "api", "hi", 50); err == nil || f.calls != 1 {
+	if _, err := c.Call(kernel.GrantHold+2, "mailplan", "api", "hi", 50); err == nil || f.calls != 1 {
 		t.Fatalf("its cap holds: %v calls=%d", err, f.calls)
 	}
 }

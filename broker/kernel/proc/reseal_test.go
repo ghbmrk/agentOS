@@ -301,7 +301,7 @@ func TestCloseLeavesAHungResealToTheNextStart(t *testing.T) {
 func TestASlowFailedResealBacksOffFromItsFinish(t *testing.T) {
 	b, gone, _, _, id, h := hungBox(t)
 	var clock atomic.Int64
-	b.h.clock = clock.Load
+	b.h.clock = func() kernel.Reading { return kernel.At(clock.Load()) }
 	h.fail.Store(true)
 	tickHung(t, b, gone, h)
 	end := b.now + 10*kernel.RetryMin

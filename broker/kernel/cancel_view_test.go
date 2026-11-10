@@ -25,6 +25,10 @@ import (
 // view that omits the code or carries the cancel's detail.
 func TestACancelledPlanLeavesHeldAndItsViewNamesTheCode(t *testing.T) {
 	r := newRig(t)
+	keys := map[string]key.Key{}
+	for _, id := range []string{"agent/erased", "owner", "live"} {
+		keys[id] = modelKey(r, "m-"+id, key.LimitSpendTask(100)) // granted a hold before the log's first time
+	}
 	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +40,7 @@ func TestACancelledPlanLeavesHeldAndItsViewNamesTheCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"agent/erased", "owner", "live"} {
-		modelPlan(r, id, modelKey(r, "m-"+id, key.LimitSpendTask(100)))
+		modelPlan(r, id, keys[id])
 		exhaust(r, id, 100)
 	}
 	must(t, r.k.Cancel(3, "owner"))

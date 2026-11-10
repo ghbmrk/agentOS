@@ -453,3 +453,36 @@ func ownDir(t *testing.T) string {
 	}
 	return d
 }
+
+// A start whose wall clock is behind the log reads the log's last time,
+// carried forward on the monotonic clock, so the kernel's time neither stops
+// at the log nor goes below it; a clock ahead of that reads as itself
+// (TIM-1, KEY-7, #5147).
+//
+// REQ: TIM-1, KEY-7
+func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wall := kernel.At(0) // a flat CMOS battery: the clock restarted in the past
+	if c := onLog(l, func() kernel.Reading { return wall }); c() != wall {
+		t.Fatalf("an empty log moved the reading: %+v", c())
+	}
+	const last = int64(1_000_000_000_000)
+	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	c := onLog(l, func() kernel.Reading { return wall })
+	if r := c(); r.Earliest < last || r.Latest < last {
+		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
+	}
+	// The monotonic clock carries it on: a stopped time spins to the test's timeout.
+	for r := c(); r.Earliest == last || r.Latest == last; r = c() {
+	}
+	wall = kernel.Reading{Earliest: 2 * last, Latest: 3 * last}
+	if r := c(); r != wall {
+		t.Fatalf("a clock ahead of the log read %+v, want %+v", r, wall)
+	}
+}

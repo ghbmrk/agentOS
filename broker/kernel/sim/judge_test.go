@@ -88,7 +88,7 @@ func TestTheHostileClockJumpsPastEveryHold(t *testing.T) {
 		s := &sim{rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed), now: key.DayMS}
 		s.disk = &Disk{rng: rng}
 		s.owner, s.holder, s.head, s.spare = gen(rng), gen(rng), gen(rng), gen(rng)
-		s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, rng: rng, now: &s.now, done: map[string]bool{}, dead: map[key.ID]bool{}}
+		s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, rng: rng, now: &s.now, reads: &[2]int64{math.MinInt64, math.MinInt64}, done: map[string]bool{}, dead: map[key.ID]bool{}}
 		s.w.mail = s.w.newMail()
 		if err := s.boot(); err != nil {
 			t.Fatal(err)

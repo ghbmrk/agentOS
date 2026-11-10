@@ -245,8 +245,8 @@ func TestAVeryLargeOneOffNeedsASecondPasskey(t *testing.T) {
 func TestNewRootsAddToTheBudgetTheLineMeasures(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 100)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	at := 10 * hour
 	root := func(serial string) []key.Key {
 		root := key.Issue(phone.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: serial})

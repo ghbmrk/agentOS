@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"unicode/utf8"
 )
@@ -46,6 +47,7 @@ var (
 	ErrBroken    = errors.New("log: a write failed; reopen")
 	ErrNoSigner  = errors.New("log: no head signer")
 	ErrNoLog     = errors.New("log: not opened; Open is the only constructor")
+	ErrBackward  = errors.New("log: an entry's time is before the entry before it")
 )
 
 // Hash is the chain link.
@@ -65,9 +67,12 @@ func (h *Hash) UnmarshalText(b []byte) error {
 // Entry is one typed, versioned log record (LOG-5). Hash covers every field,
 // so one change anywhere breaks every later link (LOG-2).
 type Entry struct {
-	Seq  uint64          `json:"seq"`
-	Prev Hash            `json:"prev"`
-	At   int64           `json:"at"` // unix ms, the kernel's clock
+	Seq  uint64 `json:"seq"`
+	Prev Hash   `json:"prev"`
+	At   int64  `json:"at"` // unix ms: the kernel's reading's Earliest, never below the entry before
+	// Late is the reading's Latest when it is past At (TIM-1), so Rederive
+	// checks a move that time decided from the log alone.
+	Late int64           `json:"late,omitempty"`
 	Type string          `json:"type"`
 	V    int             `json:"v"`
 	Body json.RawMessage `json:"body"`
@@ -305,6 +310,21 @@ func (f *logFields) dropUnconfirmed(ends []int) error {
 // everything until reopened, so a torn frame is trimmed by Open and never
 // built on.
 func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
+	return l.append(At(at), typ, v, body)
+}
+
+// lastAt is the last entry's time; an empty or unopened log floors nothing.
+func (l *Log) lastAt() int64 {
+	f, err := l.fields()
+	if err != nil || len(f.entries) == 0 {
+		return math.MinInt64
+	}
+	return f.entries[len(f.entries)-1].At
+}
+
+// append logs body at reading r. A reading before the last entry is
+// refused, so the log's times never decrease (TIM-1).
+func (l *Log) append(r Reading, typ string, v int, body any) (Entry, error) {
 	f, err := l.fields()
 	if err != nil {
 		return Entry{}, err
@@ -325,9 +345,16 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 	if bytes.Contains(bytes.ReplaceAll(bb, []byte(`\\`), nil), []byte(`\ufffd`)) || !utf8.Valid(bb) {
 		return Entry{}, ErrNotText
 	}
-	e := Entry{Seq: uint64(len(f.entries) + 1), At: at, Type: typ, V: v, Body: bb}
+	e := Entry{Seq: uint64(len(f.entries) + 1), At: r.Earliest, Type: typ, V: v, Body: bb}
+	if r.Latest > r.Earliest {
+		e.Late = r.Latest
+	}
 	if len(f.entries) > 0 {
-		e.Prev = f.entries[len(f.entries)-1].Hash()
+		last := f.entries[len(f.entries)-1]
+		if e.At < last.At {
+			return Entry{}, ErrBackward
+		}
+		e.Prev = last.Hash()
 	}
 	pt, _ := json.Marshal(e)
 	nonce := make([]byte, f.aead.NonceSize())

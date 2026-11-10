@@ -264,9 +264,9 @@ func TestATaskApprovalCannotBeReplayed(t *testing.T) {
 // for another task has its own (KRN-5, LOG-7, #2902).
 func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 	r := newRig(t)
+	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	must(t, r.k.OpenTask(0, "t1", 0))
 	must(t, r.k.OpenTask(0, "t2", 0))
-	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	serve := func(task string) key.Key {
 		s, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask(task))
 		must(t, err)
@@ -294,8 +294,8 @@ func TestATasksSpendCapSpansItsRePlans(t *testing.T) {
 // (KRN-5, LOG-7, #2927 L3 fix-list 1).
 func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
 	r := newRig(t)
-	must(t, r.k.OpenTask(0, "t1", 0))
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
+	must(t, r.k.OpenTask(0, "t1", 0))
 	t1, err := key.Derive(k, r.holder.priv, r.holder.pub, key.LimitTask("t1"))
 	must(t, err)
 	modelPlan(r, "t1", k)

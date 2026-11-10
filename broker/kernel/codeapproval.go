@@ -69,14 +69,14 @@ func (k *Kernel) PinChecker(pub ed25519.PublicKey) {
 
 // ApproveCode logs a's approval of its steps, signed by the pinned checker.
 // It anchors, like every widening (KRN-7).
-func (k *Kernel) ApproveCode(now int64, a CodeApproval) error {
+func (k *Kernel) ApproveCode(at int64, a CodeApproval) error {
 	if len(k.checker) != ed25519.PublicKeySize {
 		return ErrNoChecker
 	}
 	if !k.checker.Equal(a.By) || !k.s.codeOK(a) {
 		return ErrCodeApproval
 	}
-	return k.owner(now, TCodeApproved, a)
+	return k.owner(k.read(at), TCodeApproved, a)
 }
 
 // codeOK checks a against the state: each step held, named once, of an

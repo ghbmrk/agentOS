@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -38,7 +39,7 @@ type derived struct {
 func (d derived) String() string { return d.typ + " " + string(d.body) }
 
 // Rederive folds es from empty and, before each decision in it, derives that
-// decision again from the state so far at the entry's own time, with the same
+// decision again from the state so far at the entry's own reading, with the same
 // pure functions the live kernel used (Admit, Next, the send check, WindowDue,
 // a task's timeout),
 // and compares bytes. Inputs (owner actions, plans, clerk answers and probes,
@@ -57,8 +58,15 @@ func Rederive(anchors []key.PublicKey, head ed25519.PublicKey, es []Entry, pinne
 		return Rederived{}, err
 	}
 	out := Rederived{Checked: map[string]int{}, Recorded: map[string]int{}}
-	var refused *derived // the cancel a refused send may log next
+	var refused *derived         // the cancel a refused send may log next
+	last := int64(math.MinInt64) // the time of the entry before
 	for _, e := range es {
+		// The kernel's time never runs backward (TIM-1): an entry before the
+		// one before it was not written by the kernel's floor.
+		if e.At < last {
+			return out, &Divergence{Seq: e.Seq, Type: e.Type, Logged: fmt.Sprintf("%s at %d", e.Type, e.At), Derived: fmt.Sprintf("a time no earlier than %d", last)}
+		}
+		last = e.At
 		cands, decision := derive(s, e, head, refused)
 		if decision {
 			if !matches(cands, e) {
@@ -89,7 +97,8 @@ func entry(typ string, body any) derived {
 	return derived{typ, b}
 }
 
-// derive gives the entries the kernel could log in e's place from s at e.At,
+// derive gives the entries the kernel could log in e's place from s at e's
+// reading (Entry.Late),
 // and whether e is a decision at all.
 func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]derived, bool) {
 	var ref struct {
@@ -101,16 +110,16 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 	switch e.Type {
 	case TPlanAccepted, TPlanRejected:
 		_ = json.Unmarshal(e.Body, &ref)
-		return decision(s, ref.Plan, e.At), true
+		return decision(s, ref.Plan, e.reading()), true
 	case TStepHeld, TStepDispatch:
 		_ = json.Unmarshal(e.Body, &ref)
-		return scheduled(s, ref.Plan, e.At), true
+		return scheduled(s, ref.Plan, e.reading()), true
 	case TPlanCancel:
 		_ = json.Unmarshal(e.Body, &ref)
 		if ref.Code == "owner" {
 			return nil, false // Cancel: the owner's
 		}
-		cands := scheduled(s, ref.Plan, e.At)
+		cands := scheduled(s, ref.Plan, e.reading())
 		if refused != nil {
 			cands = append(cands, *refused)
 		}
@@ -127,10 +136,10 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		if json.Unmarshal(e.Body, &b) != nil {
 			return nil, false // the fold refuses it
 		}
-		if s.taskDue(b.Task, e.At) {
+		if s.taskDue(b.Task, e.reading().Latest) {
 			return []derived{entry(TTaskEnded, taskEnded{b.Task})}, true
 		}
-		_, live := s.Task(b.Task, e.At)
+		_, live := s.Task(b.Task, e.reading().Latest)
 		return nil, !live
 	case TPoolReset:
 		_ = json.Unmarshal(e.Body, &ref)
@@ -181,12 +190,12 @@ var recorded = map[string]bool{
 }
 
 // decision is decide's entry for a pending plan.
-func decision(s *State, id string, now int64) []derived {
+func decision(s *State, id string, now Reading) []derived {
 	p := s.Plans[id]
 	if p == nil || p.Status != SPending {
 		return nil
 	}
-	root, scopes, r := Admit(s, p.Plan, now)
+	root, scopes, r := admit(s, p.Plan, now)
 	if r != nil {
 		return []derived{entry(TPlanRejected, s.rejection(p, r))}
 	}
@@ -196,8 +205,8 @@ func decision(s *State, id string, now int64) []derived {
 // scheduled is act's entry for what Next gives. A dispatch whose clerk the
 // kernel was not booted with is cancelled instead; the log does not name
 // the booted clerks, so either is a derivation of the same Act.
-func scheduled(s *State, id string, now int64) []derived {
-	a := Next(s, id, now)
+func scheduled(s *State, id string, now Reading) []derived {
+	a := next(s, id, now)
 	ref := stepRef{a.Plan, a.Index}
 	switch a.Kind {
 	case ActCancel:
@@ -230,7 +239,7 @@ func refusedSend(s *State, e Entry) *derived {
 	if st == nil || st.Phase != PInflight || p.Status != SActive {
 		return nil
 	}
-	r := sendCheck(s, p, st, b.Index, e.At)
+	r := sendCheck(s, p, st, b.Index, e.reading())
 	if r == nil || r.Code == key.RPaused {
 		return nil
 	}

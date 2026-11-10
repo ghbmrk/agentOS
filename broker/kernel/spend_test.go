@@ -36,8 +36,8 @@ func exhaust(r *rig, plan string, cap int64) {
 
 func TestExhaustedPlanIsHeldUntilExtended(t *testing.T) {
 	r := newRig(t)
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	env := envelope(r, 500, 800)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	exhaust(r, "t1", 100)
 	h, ok := r.k.State().SpendHeld["t1"]
 	if !ok || h.Code != key.RSpendTask {
@@ -79,11 +79,11 @@ func TestTaskIsThePlanNotAString(t *testing.T) {
 
 func TestExtensionsShareTheEnvelopeCeilings(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	for _, id := range []string{"t1", "t2", "t3"} {
 		modelPlan(r, id, k)
 	}
-	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(300)), "t1"))
 	must(t, r.meter(4, "t1", "api", 300, "provider"))
@@ -112,9 +112,9 @@ func TestExtensionsShareTheEnvelopeCeilings(t *testing.T) {
 
 func TestExtendRefusals(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", k)
-	env := envelope(r, 500, 800)
 	if err := r.k.Extend(1, extension(r, env, key.LimitSpendTask(5)), "t1"); err == nil {
 		t.Fatal("a plan that is not held cannot be extended")
 	}
@@ -162,10 +162,10 @@ func TestHoldOnlyForSpendRefusals(t *testing.T) {
 
 func TestHoldAndExtensionSurviveReplay(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", k)
 	modelPlan(r, "t2", k)
-	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	exhaust(r, "t2", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(5)), "t2"))
@@ -184,8 +184,8 @@ func TestHoldAndExtensionSurviveReplay(t *testing.T) {
 // refused and gone after a restart, and the hold is back (KRN-7).
 func TestUnanchoredExtensionIsDroppedAndTheHoldReturns(t *testing.T) {
 	r := newRig(t)
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	env := envelope(r, 500, 800)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	exhaust(r, "t1", 10)
 	must(t, r.k.Log().Anchor())
 	if !kernel.Widening(kernel.TSpendExtend) {
@@ -213,9 +213,9 @@ func TestUnanchoredExtensionIsDroppedAndTheHoldReturns(t *testing.T) {
 // Pausing the key a plan cites stops its spend, extended or not (KEY-6).
 func TestPausingTheCitedKeyStopsAnExtendedPlan(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	cited := modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", cited)
-	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(50)), "t1"))
 	if rf := r.admit(4, "t1", 1); rf != nil {
@@ -302,8 +302,8 @@ func TestReadingAfterTheResetTimeReopensThenReads(t *testing.T) {
 // by: the key that was funding the plan when it was held is barred too.
 func TestAnExtensionCannotReleaseItsOwnHold(t *testing.T) {
 	r := newRig(t)
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	env := envelope(r, 500, 800)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	exhaust(r, "t1", 10)
 	e1 := extension(r, env, key.LimitSpendTask(20))
 	must(t, r.k.Extend(3, e1, "t1"))
@@ -328,9 +328,9 @@ func TestAnExtensionCannotReleaseItsOwnHold(t *testing.T) {
 // a refused cap holds the plan, but the key behind it may be only part used.
 func TestHeldKeysWithRoomLeftStillCannotReleaseThePlan(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", k)
-	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	e1 := extension(r, env, key.LimitSpendTask(100))
 	must(t, r.k.Extend(3, e1, "t1"))
@@ -378,8 +378,8 @@ func TestPoolClosedByTheReserveAloneLogsNothingWhenRefusing(t *testing.T) {
 // An extension needs room for one more under the envelope's ceilings.
 func TestExtensionNeedsRoomUnderTheEnvelope(t *testing.T) {
 	r := newRig(t)
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	env := envelope(r, 15, 800)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(10)))
 	exhaust(r, "t1", 10)
 	e1 := extension(r, env, key.LimitSpendTask(15))
 	must(t, r.k.Extend(3, e1, "t1"))
@@ -509,10 +509,10 @@ func TestAnUnanchoredReserveDropBreaksTheLogAndAdmitsNoSpend(t *testing.T) {
 // #2613 items 9, 12).
 func TestARevokedEnvelopeFundsNothingAndAPausedKeysPlanIsNotExtended(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", k)
 	modelPlan(r, "t2", k)
-	env := envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	must(t, r.k.Extend(3, extension(r, env, key.LimitSpendTask(100)), "t1"))
 	must(t, r.k.Revoke(4, key.Key{Root: env.Root}.Tip()))
@@ -520,9 +520,9 @@ func TestARevokedEnvelopeFundsNothingAndAPausedKeysPlanIsNotExtended(t *testing.
 		t.Fatalf("a revoked envelope still funds the plan: %v", rf)
 	}
 	r = newRig(t)
+	env = envelope(r, 500, 800)
 	k = modelKey(r, "m1", key.LimitSpendTask(10))
 	modelPlan(r, "t1", k)
-	env = envelope(r, 500, 800)
 	exhaust(r, "t1", 10)
 	must(t, r.k.Pause(3, k.Tip()))
 	if err := r.k.Extend(4, extension(r, env, key.LimitSpendTask(100)), "t1"); err == nil {
@@ -856,7 +856,9 @@ func TestAFullWindowInTheLogWithNoResetTimeIsNeverDue(t *testing.T) {
 // A model.used logged at a time near the int64 floor replays without a
 // panic and keeps no spend (L3 delta on d1e27c8c).
 func TestSpendAtTheInt64FloorReplays(t *testing.T) {
-	r := newRig(t)
+	// The log's first entry: an entry before another is refused (TIM-1).
+	r := &rig{t: t, owner: gen(1), spare: gen(12), holder: gen(2), head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
+	r.boot(0)
 	body := map[string]any{"task": "t1", "route": "api", "amount": 3, "source": "provider"}
 	_, err := r.k.Log().Append(math.MinInt64+5, kernel.TModelUsed, 1, body)
 	must(t, err)

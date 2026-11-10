@@ -702,22 +702,23 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	}
 	_, opriv := seedKey(1)
 	hpub, _ := seedKey(2)
-	root2, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), key.Ed25519Signer(opriv), hpub, 3-kernel.GrantHold, 1<<40)
+	root2, err := key.ClerkKey(key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "web", Verbs: []key.Verb{key.Read, key.Post}, Serial: "r2"}), key.Ed25519Signer(opriv), hpub, 3, 1<<40)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, bpriv := seedKey(12)
 	batch := []key.Key{{Root: root2.Root}, root2}
 	cosign := []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}
-	if err := r.k.Issue(3-kernel.GrantHold, cosign, batch...); err != nil {
+	// Issued now and live a hold later: nothing is logged in the past (TIM-1).
+	if err := r.k.Issue(3, cosign, batch...); err != nil {
 		t.Fatal(err)
 	}
 	k2, err := key.Narrow(root2, key.Ed25519Signer(r.phone), key.LimitVerbs(key.Post), key.LimitContent(a.Print), key.LimitUses(1),
-		key.LimitExpires(MaxApproval/2))
+		key.LimitExpires(kernel.GrantHold+MaxApproval/2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.run(t, 4, "again", k2, submitStep(a, pressOrder))
+	r.run(t, 4+kernel.GrantHold, "again", k2, submitStep(a, pressOrder))
 	if s := r.step("again"); s.Phase == kernel.PDone || !strings.Contains(s.Detail, "already_sent") {
 		t.Fatalf("second task: phase %s (%s)", s.Phase, s.Detail)
 	}

@@ -217,8 +217,9 @@ func TestAStoreThatCannotDeleteStaysListed(t *testing.T) {
 		t.Fatalf("unerased after restart %+v", got)
 	}
 	r.notes.failDelete = false
-	must(t, r.k.Tick(kernel.RetryMin))
-	must(t, r.k.Tick(kernel.RetryMin+1))
+	// The restart's retry failed at the kernel's time, the erase's (TIM-1).
+	must(t, r.k.Tick(3+kernel.RetryMin))
+	must(t, r.k.Tick(3+kernel.RetryMin+1))
 	if got := r.k.State().Unerased(); got != nil {
 		t.Fatalf("still unerased %+v", got)
 	}
@@ -543,8 +544,10 @@ func TestARetriedDeleteBacksOff(t *testing.T) {
 	r.replays()
 }
 
-// A delete that failed while the wall clock was ahead is retried once the
-// clock steps back, not held until the clock catches up (L3 on #3182).
+// A delete that failed while the wall clock was ahead waits only its
+// backoff (L3 on #3182): the kernel's time never steps back below the
+// erase it logged (TIM-1), and the kernel process advances it from there on
+// the monotonic clock (proc), so no day passes before the retry.
 func TestARetryAfterTheClockStepsBack(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
@@ -553,8 +556,12 @@ func TestARetryAfterTheClockStepsBack(t *testing.T) {
 	r.k.Erase(86_400_000, s) // a day ahead
 	r.notes.failDelete = false
 	must(t, r.k.Tick(10))
+	if u := r.k.State().Unerased(); u == nil {
+		t.Fatal("retried before its backoff on a clock stepped back")
+	}
+	must(t, r.k.Tick(86_400_000+kernel.RetryMin))
 	if u := r.k.State().Unerased(); u != nil {
-		t.Fatalf("held after the clock stepped back: %+v", u)
+		t.Fatalf("held past its backoff after the clock stepped back: %+v", u)
 	}
 	r.replays()
 }
