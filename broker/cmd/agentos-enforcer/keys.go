@@ -106,10 +106,7 @@ func saveCert(store fileStore, c page.Cert) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(certFile{Root: c.Root, RootKey: rk, Leaf: c.Leaf.Certificate, LeafKey: lk})
-	if err != nil {
-		return err
-	}
+	b, _ := json.Marshal(certFile{Root: c.Root, RootKey: rk, Leaf: c.Leaf.Certificate, LeafKey: lk}) // byte slices only
 	return store.Save(b)
 }
 
