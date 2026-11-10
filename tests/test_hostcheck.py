@@ -338,7 +338,7 @@ class PhaseFlagsTest(unittest.TestCase):
 class CmdQemuTest(unittest.TestCase):
     """cmd_qemu's own wiring, with QEMU and the snapshots stubbed (M9)."""
 
-    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img")):
+    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img"), on_boot=None, stubs=None):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "vars.fd").write_bytes(b"")
@@ -347,6 +347,8 @@ class CmdQemuTest(unittest.TestCase):
 
             def boot_once(args, work, label, steps, boot):
                 seen.append((label, steps, boot))
+                if on_boot:
+                    on_boot(args, label)
                 return {"rtc": [], "errors": [], "events": events.get(label, [])}
 
             evaluate = hostcheck.evaluate
@@ -359,7 +361,7 @@ class CmdQemuTest(unittest.TestCase):
                     str(d / "phases.json"), "--host-disk", "w=/dev/null", "--ovmf-vars", str(d / "vars.fd"),
                     "--phases", phases] + [a for f in flags for a in ("--flag", f)]
             with unittest.mock.patch.multiple(hostcheck, boot_once=boot_once, seed_tpm=lambda a, w: None,
-                                              qemu_snapshot=lambda a, w: snap(), evaluate=spy):
+                                              qemu_snapshot=lambda a, w: snap(), evaluate=spy, **(stubs or {})):
                 rc = hostcheck.main(argv)
             report = d / "work" / "report.json"
             return rc, seen, judged, json.loads(report.read_text()) if report.exists() else None
@@ -400,6 +402,29 @@ class CmdQemuTest(unittest.TestCase):
                "data": {"guest": True, "reason": "guest-shutdown"}}
         rc, _, judged, report = self.run_qemu("unclean", self.PHASES, {"unclean": [off, self.CUT]})
         self.assertEqual((rc, judged, report), (2, [], None))
+
+
+    def test_a_record_written_after_its_process_was_checked_fails_the_run(self):
+        # #5231: stack_done checks the records as each stack process ends; one written after that (by a
+        # child still running) is caught by one more sweep before report.json is written.
+        class Listing:
+            pid, returncode = 1, 0
+
+            def communicate(self, timeout=None):
+                return os.path.join(root, "usr/share/qemu") + "\n", None
+
+        with tempfile.TemporaryDirectory() as root:
+            fake_root(root)
+            for where, want in ((root, 0), ("/lib/x86_64-linux-gnu", 2)):
+                def late(args, label):
+                    if label == "unclean":
+                        pathlib.Path(f"{args.ld_log}.9").write_text(f"      9:\ttrying file={where}/libc.so.6\n")
+                with self.subTest(where):
+                    rc, _, _, report = self.run_qemu(
+                        "unclean", self.PHASES, {"unclean": [self.CUT]}, on_boot=late,
+                        source=("--image", "/x/agentos.img", "--tools-root", root),
+                        stubs=dict(stack_popen=lambda *a, **kw: Listing(), stack_done=lambda a, p: None))
+                    self.assertEqual((rc, report is None), (want, want == 2))
 
 
 class DriveTest(unittest.TestCase):
@@ -799,6 +824,67 @@ class LoaderAuditTest(unittest.TestCase):
             pathlib.Path(d, "stack.7").write_text(f"      7:\tfile=libc.so.6 [0];  needed by {d}/usr/bin/x [0]\n"
                                                   f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
             hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+
+    def test_a_name_holding_its_own_split_is_read_whole(self):
+        # #5231: a name may hold " [N];  " itself; read only up to the first one, a name that leaves the
+        # root by its later part passed as its first part, which is in the root.
+        with tempfile.TemporaryDirectory() as d:
+            up = "/.." * 12
+            for line in (f"file={d}/a [0];  needed by /x{up}/lib/libc.so.6 [0];  dynamically loaded by /r/swtpm [0]",
+                         f"file={d}/a [0];  generating link map{up}/lib/libc.so.6 [0];  destroying link map",
+                         f"trying file={d}/a [0];  needed by x [0]{up}/lib/libc.so.6"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # In the root, every way it splits is in the root; each tail glibc prints is read.
+            pathlib.Path(d, "stack.7").write_text(
+                f"      7:\tfile={d}/odd [3];  lib/libx.so [0];  dynamically loaded by /r/swtpm [0]\n"
+                f"      7:\tfile={d}/b.so [0];  needed by /r/swtpm [0] (relocation dependency)\n"
+                f"      7:\tfile={d}/b.so [1];  generating link map\n      7:\t\n"
+                f"      7:\tfile={d}/b.so [0];  destroying link map\n")
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            self.assertEqual(hostcheck.loader_paths(pathlib.Path(d, "stack.7").read_text())[:2],
+                             [f"{d}/odd [3];  lib/libx.so", f"{d}/b.so"])  # "odd" is no name: no tail follows it
+            for line in (f"file={d}/b.so [0];  needed by", f"file={d}/b.so [0];  found it",
+                         f"file={d}/b.so [0]; generating link map", f"file={d}/b.so [0];  generating link map now"):
+                with self.subTest(line):
+                    pathlib.Path(d, "stack.7").write_text(f"      7:\t{line}\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+    def test_a_name_holding_a_newline_or_other_bytes_is_not_cut(self):
+        # #5231: the loader prints a name as it is. After a newline the rest of the name is a line with no
+        # PID; read as a line of its own, the path was its first line, in the root, and the rest unread.
+        with tempfile.TemporaryDirectory() as d:
+            up = "/.." * 12
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n{up}/lib/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # Blank lines with no PID are not names (the file's end); a carriage return is part of a line.
+            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\r\n\n \t\n")
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            # A name that is not UTF-8 reaches realpath as its own bytes: here a link out of the root.
+            os.symlink("/usr/lib", os.path.join(os.fsencode(d), b"\xff"))
+            pathlib.Path(d, "stack.7").write_bytes(b"      7:\ttrying file=" + os.fsencode(d) + b"/\xff/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+    def test_records_alone_need_one_and_read_every_one(self):
+        # #5231: audit_records, for tools with no PID to name (tests/test_image.py image_tool), needs a record.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "toolbox.3").write_text(f"      3:\ttrying file={d}/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):  # another prefix's
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "tool.3").write_text(f"      3:\ttrying file={d}/libc.so.6\n")
+            hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "tool.4").write_text("      4:\ttrying file=/lib/x86_64-linux-gnu/libc.so.6\n")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+        hostcheck.audit_records(None, "/nonexistent/tool")
 
 
 class StandinTest(unittest.TestCase):

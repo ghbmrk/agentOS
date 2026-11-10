@@ -75,12 +75,16 @@ TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/s
 TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
 STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 # glibc's LD_DEBUG lines: "PID:\ttrying file=PATH" for each search candidate, and
-# "PID:\tfile=NAME [NS];  ..." for each object mapped, NAME a path when given as one (a soname
+# "PID:\tfile=NAME [NS];  TAIL" for each object mapped, NAME a path when given as one (a soname
 # is searched, so its candidates are trying lines). Any other line naming a file= fails the
-# audit, so a loader whose format differs cannot pass by being unread.
+# audit, so a loader whose format differs cannot pass by being unread. The loader prints a name
+# as it is, so a line without the PID prefix is the rest of a name holding a newline, and fails;
+# a name may hold " [N];  " itself, so every split before a whole TAIL is a candidate (#5231).
 LOADER_LINE = re.compile(r"\s*\d+:\s+(.*)")
 LOADER_TRYING = re.compile(r"trying file=(.+)")
-LOADER_FILE = re.compile(r"file=(.*?) \[\d+\];")
+LOADER_SPLIT = re.compile(r" \[\d+\];  ")
+LOADER_TAIL = re.compile(r"(?:needed by|dynamically loaded by) .* \[\d+\](?: \(relocation dependency\))?"
+                         r"|generating link map|destroying link map")
 LOADER_REOPEN = ("opening file=", "closing file=")  # an object already mapped, or let go
 
 
@@ -106,47 +110,70 @@ def tool_env(root, ld_log):
     and the loader's record of what it loads, in LD_LOG.PID (a child the process starts writes its own)."""
     if not root:
         return None
-    return {"PATH": "/usr/sbin:/usr/bin", "QEMU_MODULE_DIR": os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"),
-            "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
+    return dict(loader_env(ld_log), QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))
+
+
+def loader_env(ld_log):
+    """PATH alone of the host's, and the loader's record of what it loads, in LD_LOG.PID: the
+    environment of any tool run from a root that audit_records then checks (tests/test_image.py's
+    image_tool too)."""
+    return {"PATH": "/usr/sbin:/usr/bin", "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
 
 
 def loader_paths(text):
     """The paths in one LD_DEBUG record that the loader looked for or mapped, or the first line it
     could not read as either."""
     paths = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         m = LOADER_LINE.fullmatch(line)
-        body = m.group(1) if m else line.strip()
+        if not m:
+            if line.strip(" \t"):
+                raise HostcheckError(f"unreadable loader record line: {line!r}")
+            continue
+        body = m.group(1)
         if "file=" not in body or body.startswith(LOADER_REOPEN):
             continue
         if t := LOADER_TRYING.fullmatch(body):
             paths.append(t.group(1))
-        elif f := LOADER_FILE.match(body):
-            if "/" in f.group(1):
-                paths.append(f.group(1))
-        else:
-            raise HostcheckError(f"unreadable loader record line: {line.strip()!r}")
+            continue
+        rest = body[len("file="):] if body.startswith("file=") else ""
+        names = [rest[:s.start()] for s in LOADER_SPLIT.finditer(rest) if LOADER_TAIL.fullmatch(rest, s.end())]
+        if not names:
+            raise HostcheckError(f"unreadable loader record line: {line!r}")
+        paths += [n for n in names if "/" in n]
     return paths
 
 
 def audit_loads(root, ld_log, pid):
-    """Fail unless stack process PID left a record, and every record in its directory (PID's and
-    any child's) names only paths in ROOT, at least one each."""
+    """Fail unless stack process PID left a record, and audit_records passes."""
     if not root:
         return
     path = pathlib.Path(f"{ld_log}.{pid}")
     if not path.is_file():
         raise HostcheckError(f"the loader kept no record of what it loaded ({path})")
+    audit_records(root, ld_log)
+
+
+def audit_records(root, ld_log):
+    """Fail unless there is a record LD_LOG.*, and every one (each process's and any child's) names
+    only paths in ROOT, at least one each."""
+    if not root:
+        return
+    log = pathlib.Path(ld_log)
+    recs = sorted(p for p in log.parent.iterdir() if p.name.startswith(log.name + "."))
+    if not recs:
+        raise HostcheckError(f"the loader kept no record of what it loaded ({log}.*)")
     base = os.path.realpath(root) + os.sep
     outside = set()
-    for rec in sorted(path.parent.glob(pathlib.Path(ld_log).name + ".*")):
-        seen = loader_paths(rec.read_text(errors="replace"))
+    for rec in recs:
+        seen = loader_paths(rec.read_bytes().decode(errors="surrogateescape"))  # realpath gets the bytes back
         if not seen:
             raise HostcheckError(f"the loader's record {rec} names no shared object")
         outside |= {p for p in seen if not os.path.isabs(p) or not os.path.realpath(p).startswith(base)}
     if outside:
-        raise HostcheckError(f"a stack binary looked for or loaded shared objects outside the tools root {root} "
-                             f"(add the directory to TOOLS_LIBS, or the package to the root): {sorted(outside)[:5]}")
+        raise HostcheckError(f"a binary run from the tools root {root} looked for or loaded shared objects outside the "
+                             f"tools root (add the directory to its library path, or the package to the root): "
+                             f"{sorted(outside)[:5]}")
 
 
 def qemu_data_args(root):
@@ -723,6 +750,7 @@ def cmd_qemu(args):
         after = qemu_snapshot(args, work)
         r = evaluate(baseline, after, load_allow(), flags=flags, noise=noise, rtc_writes=rtc)
         report["phases"].append(dict(with_guest_errors(r, ran["errors"]), phase=phase, rtc_writes=rtc, snapshot=after))
+    audit_records(args.tools_root, args.ld_log)  # once more, for a record written after its process was checked
     report["pass"] = all(p["pass"] for p in report["phases"])
     (work / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True))
     for p in report["phases"]:
