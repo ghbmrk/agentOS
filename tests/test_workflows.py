@@ -65,6 +65,9 @@ LANE_GATE_LINES = [
     "on:",
     "  pull_request_target:",
     "    types: [opened, synchronize, reopened, edited]",
+    "concurrency:",
+    "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
     "permissions:",
     "  contents: read",
     "jobs:",
@@ -509,7 +512,72 @@ def cache_key_problems(text):
     return problems
 
 
+# CI-cancel-superseded (#5345): a push to a PR leaves the old head's runs holding the Actions
+# queue unless the workflow has a concurrency group per PR that cancels them. The five gates
+# below carry this exact block: the PR's newest first-attempt run cancels its older runs, a rerun
+# (attempt 2 or later) cancels nothing, so rerunning an old head (trusted-base-rerun.yml lists
+# heads before it reruns) cannot cancel the current head's required check, and every push,
+# schedule or dispatch run is a group of its own, so main's runs are never cancelled.
+SUPERSEDE_LINES = [
+    "concurrency:",
+    "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && "
+    "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
+]
+SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml"]
+# premerge.yml queues its runs on purpose (its record handling) and never cancels one.
+KEEPS_EVERY_RUN = {"premerge.yml"}
+
+
+def supersede_problems(name, text):
+    """Return why a workflow can leave a superseded PR head's runs queued; empty when it cannot."""
+    top = text.split("\njobs:\n", 1)[0].split("\n")
+    on_pr = re.search(r"^on:.*?(?=^\S)", text + "\nend", re.M | re.S)
+    if not (on_pr and re.search(r"\bpull_request(_target)?\b", on_pr.group(0))) or name in KEEPS_EVERY_RUN:
+        return []
+    if name in SUPERSEDE:
+        at = top.index("concurrency:") if "concurrency:" in top else len(top)
+        return [] if top[at:at + 3] == SUPERSEDE_LINES else ["no per-PR concurrency block as pinned"]
+    cancel = [l for l in top if l.startswith("  cancel-in-progress:")]
+    if "concurrency:" not in top or not cancel or cancel[0].endswith(" false"):
+        return ["a PR run never cancels the runs of the PR's older heads"]
+    return []
+
+
 class WorkflowTest(unittest.TestCase):
+    def test_a_pr_push_cancels_the_older_heads_runs(self):
+        # CI-cancel-superseded (#5345): every PR-triggered workflow but premerge cancels a
+        # superseded head's runs; the five gates carry the pinned block.
+        names = [f.name for f in self.files()]
+        self.assertTrue(set(SUPERSEDE) | KEEPS_EVERY_RUN <= set(names))
+        for f in self.files():
+            with self.subTest(f.name):
+                self.assertEqual(supersede_problems(f.name, f.read_text()), [])
+        self.assertIn("  cancel-in-progress: false", (WORKFLOWS / "premerge.yml").read_text())
+
+    def test_supersede_check_catches_each_edit(self):
+        # CI-cancel-superseded (#5345): a rerun that cancels, a cancelled main push, one group
+        # for every PR, a dropped block and a new PR workflow without one all fail.
+        group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
+        edits = {
+            "rerun cancels": (cancel, "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') }}"),
+            "always cancels": (cancel, "  cancel-in-progress: true"),
+            "push group by sha": (group, group.replace("format('run-{0}', github.run_id)", "github.sha")),
+            "one group": (group, "  group: ${{ github.workflow }}"),
+            "no block": ("\n".join(SUPERSEDE_LINES) + "\n", ""),
+        }
+        for name in SUPERSEDE:
+            text = (WORKFLOWS / name).read_text()
+            for edit, (old, new) in edits.items():
+                with self.subTest(name, edit=edit):
+                    self.assertIn(old, text)
+                    self.assertTrue(supersede_problems(name, text.replace(old, new, 1)), edit)
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        self.assertTrue(supersede_problems("x.yml", plain))
+        self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", "concurrency:\n  group: x\n"
+                                                                   "  cancel-in-progress: false\njobs:")))
+        self.assertEqual(supersede_problems("x.yml", plain.replace("pull_request", "push")), [])
+
     def test_cache_keys_name_the_runner_image(self):
         seen = 0
         for wf in self.files():
