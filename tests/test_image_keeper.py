@@ -962,6 +962,41 @@ class KeeperTreeTest(unittest.TestCase):
         # The keeper's drop-in reaches it by name, so it is in the slice and unmasked: refused too.
         self.assertIn("agentos-keeper-extra.service: in agentos-keeper.slice but not one of the keeper's units (D-154)", v)
 
+    # REQ: STO-2
+    def test_a_drop_in_cannot_change_who_a_keeper_unit_runs_as(self):
+        """#5288: PID 1 chowns a unit's *Directory= to whoever it runs as, so every assignment of a keeper
+        unit's User=, Group= and DynamicUser=, in its file and every drop-in systemd applies, resets
+        included, is the shipped one, and so is the value systemd ends with."""
+        shipped = {n: tuple(ini(UNITS / n)["Service"].get(k, "") for k in check.USER_KEYS)
+                   for n in check.KEEPER_UNITS}
+        self.assertEqual(check.KEEPER_USERS, shipped)
+        mail = check.KEEPER_USERS["agentos-keeper-mail.service"]
+        for rel, line, unit in (
+                (SYSTEM + "agentos-keeper-enroll.service.d/b.conf", "User=nobody", "enroll"),
+                ("etc/systemd/system/agentos-keeper-enroll.service.d/b.conf", "DynamicUser=yes", "enroll"),
+                ("etc/systemd/system/service.d/b.conf", "Group=nogroup", "kernel"),
+                (SYSTEM + "agentos-keeper-.service.d/b.conf", "User=agentos-camera", "mail"),
+                # A reset runs the unit as root; an empty DynamicUser= leaves an earlier yes in place.
+                (SYSTEM + "agentos-keeper-mail.service.d/b.conf", "User=", "mail"),
+                (SYSTEM + "agentos-keeper-rotate@.service.d/b.conf", "DynamicUser=no", "rotate@")):
+            with self.subTest(rel=rel, line=line):
+                write(self.root, rel, "[Service]\n%s\n" % line)
+                name = "agentos-keeper-%s.service" % unit
+                key, val = line.split("=", 1)
+                pin = check.KEEPER_USERS[name][check.USER_KEYS.index(key)]
+                self.assertIn("%s: %s=%s in %s; a keeper unit runs as shipped (%s=%s): PID 1 hands its "
+                              "directories to whoever it runs as (#5288)" % (name, key, val, rel, key, pin), self.v())
+                (self.root / rel).unlink()
+        self.assertEqual(self.v(), [])
+        # The shipped value again passes; an override file that leaves it out ends as root.
+        write(self.root, SYSTEM + "agentos-keeper-mail.service.d/b.conf", "[Service]\nUser=%s\n" % mail[0])
+        self.assertEqual(self.v(), [])
+        (self.root / SYSTEM / "agentos-keeper-mail.service.d/b.conf").unlink()
+        write(self.root, "etc/systemd/system/agentos-keeper-mail.service",
+              MAIL.read_text().replace("User=%s\n" % mail[0], ""))
+        self.assertIn("agentos-keeper-mail.service: User is None; a keeper unit runs as shipped (User=%s) (#5288)"
+                      % mail[0], self.v())
+
     def test_a_keeper_unit_outside_the_slice_is_refused(self):
         (self.root / SYSTEM / "agentos-keeper-.service.d/90-keeper.conf").unlink()
         v = self.v()
