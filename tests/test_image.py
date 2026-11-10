@@ -4396,7 +4396,9 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
                        "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
-            for argv, ok in [(missing, False)] + [(["/bin/sh", "-c", "exit %d" % n, "sh"], n in self.STATUSES)
+            # The oracle is written out, not read from STATUSES, so a status added there fails here.
+            self.assertEqual(self.STATUSES, (0, 1, 65, 73))
+            for argv, ok in [(missing, False)] + [(["/bin/sh", "-c", "exit %d" % n, "sh"], n in (0, 1, 65, 73))
                                                   for n in (0, 1, 2, 65, 73, 126, 127, 255)] + [
                     (["/bin/sh", "-c", "kill -SEGV $$", "sh"], False)]:
                 with self.subTest(argv=argv):
@@ -5342,7 +5344,7 @@ class ImageToolTest(MustRun, unittest.TestCase):
             for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 shutil.copy("/usr/bin/ls", os.path.join(root, rel))
-            seen, dirs, refused = [], [], {}
+            seen, dirs, refused = [], [], []
 
             class Argv(unittest.TestCase):
                 def test_tool(case):
@@ -5353,6 +5355,7 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     # runner's generators, another case's empty directory, a link out of the case's, a
                     # directory that holds a generator) fails.
                     path = dirs[-1]
+                    refused.append({})
                     with tempfile.TemporaryDirectory() as other:
                         os.symlink(other, path + "-link")
                         for name, to in (("runner", "/usr/lib/systemd/system-environment-generators"),
@@ -5362,15 +5365,15 @@ class ImageToolTest(MustRun, unittest.TestCase):
                             mutant = [a.replace("=" + path, "=" + to) if a.startswith("SYSTEMD_") else a for a in argv]
                             try:
                                 own_generator_dirs(case, mutant)
-                                refused[name] = False
+                                refused[-1][name] = False
                             except AssertionError:
-                                refused[name] = True
+                                refused[-1][name] = True
 
             for _ in range(2):
                 with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
                     Argv("test_tool").run(unittest.TestResult())
             self.assertEqual([argv[:2] for argv in seen], [["/usr/bin/env", "-i"]] * 2)  # none of the runner's environment
-            self.assertEqual(refused, dict.fromkeys(("runner", "other case", "link", "held"), True))
+            self.assertEqual(refused, [dict.fromkeys(("runner", "other case", "link", "held"), True)] * 2)
             self.assertEqual(len(dirs), 2)
             self.assertNotEqual(dirs[0], dirs[1])  # each case its own
             for path in dirs:
