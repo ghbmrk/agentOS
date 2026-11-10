@@ -223,6 +223,12 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
 	rep, err := loop(tctx, cfg, c, token)
+	// End the token read and wait for it: token closes token once its one
+	// check is done, so no Config.Token try follows Serve (#5259). The
+	// read ends at tctx's end, and Token is the kernel's, not the line's.
+	cancel()
+	for range token {
+	}
 	return rep, overrun(ctx, tctx, c, err)
 }
 
@@ -238,9 +244,11 @@ func overrun(ctx, call context.Context, l Line, err error) error {
 }
 
 // token sends the call's grant on out: check's verdict on the speed-dial
-// keys, live as long as ctx. Only Serve calls it, with a ctx it ends when
-// the call ends, so no grant outlives its call.
+// keys, live as long as ctx. Then it closes out, so Serve can wait for it.
+// Only Serve calls it, with a ctx it ends when the call ends, so no grant
+// outlives its call.
 func (cfg Config) token(ctx context.Context, l Line, out chan<- *grant) {
+	defer close(out)
 	out <- check(cfg, ctx.Done(), cfg.keys(ctx, l))
 }
 
