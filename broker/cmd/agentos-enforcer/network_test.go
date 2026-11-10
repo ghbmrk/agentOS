@@ -663,6 +663,29 @@ func TestEdgeCutSavedAtClose(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || x.logs("byte caps: edge: ") != 1 {
 		t.Fatal("an unsaved trip was not saved at close")
 	}
+	// A running table the drop cannot be read against (nft.Drops refuses
+	// it): the cut is not written, so the next tick loads in full with it.
+	x.fire.mu.Lock()
+	good, loads := x.fire.listing, len(x.fire.loads)
+	x.fire.listing = []byte(`{"nftables": [{"quota": "unreadable"}]}`)
+	x.fire.mu.Unlock()
+	x.d.loadCut()
+	x.d.fwMu.Lock()
+	reload := x.d.net.reload
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.listing = good
+	x.fire.mu.Unlock()
+	if !reload {
+		t.Fatal("a drop that could not be built asked for no full load")
+	}
+	x.advance(time.Second)
+	x.fire.mu.Lock()
+	carried := len(x.fire.loads) > loads && strings.Contains(x.fire.loads[len(x.fire.loads)-1], `add rule inet enforcer cut_edge counter name "edge_cut" drop`)
+	x.fire.mu.Unlock()
+	if !carried {
+		t.Fatal("the full load after a drop that could not be built does not carry the cut")
+	}
 	d := &Enforcer{edge: x.d.edge}
 	d.loadCut() // no first load yet: nothing to write, and no firewall reached
 	if d.net.reload {
