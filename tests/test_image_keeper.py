@@ -9,6 +9,8 @@ that came up and then failed reboots the box, at most twice an hour (#2998). Eac
 of a refusal is a mutant of the shipped tree that mkosi.finalize must refuse. CI's boot test enrolls
 on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines)."""
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
+import contextlib
+import io
 import os
 import pathlib
 import re
@@ -1384,9 +1386,11 @@ class MadeAllowTest(unittest.TestCase):
             allowed = check.made_allowed(str(p))
             self.assertEqual(allowed, set(check.made_entries(self.root)))
             self.assertEqual(check.made_allow_violations(self.root, allowed), [])
-            out = subprocess.run([sys.executable, str(MK / "mkosi.finalize"), "--made-allowlist", str(self.root)],
-                                 capture_output=True, text=True, check=True).stdout
-            self.assertEqual(out, text)
+            out = io.StringIO()
+            with unittest.mock.patch.object(sys, "argv", ["mkosi.finalize", "--made-allowlist", str(self.root)]), \
+                    contextlib.redirect_stdout(out):
+                check.main()
+            self.assertEqual(out.getvalue(), text)
         with unittest.mock.patch.object(check, "made_allowed", return_value=None):
             self.assertEqual(check.made_allow_violations(self.root),
                              ["made.allow: missing; every unit-file and fstab line for which PID 1 makes, links or "
