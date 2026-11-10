@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // The netns tests run the compiled ruleset in network namespaces: the test
@@ -33,52 +34,20 @@ const childEnv = "AGENTOS_NFT_NETNS"
 
 // required is true in CI, where a missing tool or kernel feature fails the
 // test instead of skipping it.
-func required() bool { return os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1" }
-
-func haveNetns(t *testing.T) bool {
-	t.Helper()
-	for _, tool := range []string{"unshare", "nsenter", "ip", "nft"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			if required() {
-				t.Fatalf("%s missing", tool)
-			}
-			t.Skipf("%s missing", tool)
-			return false
-		}
-	}
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
-		if required() {
-			t.Fatalf("no unprivileged user namespaces: %v", err)
-		}
-		t.Skipf("no unprivileged user namespaces: %v", err)
-		return false
-	}
-	return true
-}
+func required() bool { return netnstest.Required() }
 
 // inNetns runs the calling test inside a fresh user and network namespace
 // and reports whether this process is that child. The parent returns false
-// after relaying the child's result.
+// after judging the child's run; a skip in it fails the test in CI (#5152).
 func inNetns(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv(childEnv) == "1" {
-		return true
-	}
-	if !haveNetns(t) {
-		return false
-	}
-	args := []string{"-rn", "--", os.Args[0], "-test.run", "^" + t.Name() + "$", "-test.count=1"}
-	if testing.Verbose() {
-		args = append(args, "-test.v")
-	}
-	cmd := exec.Command("unshare", args...)
-	cmd.Env = append(os.Environ(), childEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("in the enforcer's namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("netns run failed: %v", err)
-	}
-	return false
+	return netnstest.Run(t, childEnv, combined, "nsenter", "ip", "nft")
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 // host is one namespace: a box, a segment's stand-in host, or a device.
