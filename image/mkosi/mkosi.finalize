@@ -1798,12 +1798,25 @@ def root_made_dirs(root):
     line makes or remakes it for another user (tmpfiles_maker). systemd 257's setup_exec_directory then
     makes it and chowns it to root:root at most 0755, so no other user can put anything inside it. Stock
     trixie's systemd-journald.service (RuntimeDirectory=systemd/journal, where its sockets and
-    syslog.socket's live) is one."""
-    held = set()
+    syslog.socket's live) is one. A directory is weighed in both forms at once (#5350 Security 6778501910,
+    L3 6778896704): the files naming either form (a:b may name <top>/private/<x> as its link) all run as
+    root, and the tree and tmpfiles.d hand neither form to anyone."""
+    named = {}
     for made, paths in cached(made_dir_files, root).items():
-        if all(unit_runs_as_root(root, p) for p in paths) and made_roots_alone(root, made):
-            held |= {made, made_private(made)}
+        named.setdefault(made_plain(made), set()).update(paths)
+    held = set()
+    for plain, paths in named.items():
+        forms = (plain, made_private(plain))
+        if all(unit_runs_as_root(root, p) for p in paths) and all(made_roots_alone(root, f) for f in forms):
+            held |= set(forms)
     return held
+
+
+def made_plain(d):
+    """#5233: unit-made directory D in its written form: <top>/<rest> for <top>/private/<rest>."""
+    top = next(t for t in sorted(set(UNIT_MADE_DIRS.values()), key=len, reverse=True) if d.startswith(t + "/"))
+    rest = d[len(top) + 1:]
+    return "%s/%s" % (top, rest[len("private/"):]) if rest.startswith("private/") else d
 
 
 def made_roots_alone(root, made):
@@ -2123,10 +2136,11 @@ def inside_refusals(root):
                 owner = "systemd makes for a unit and may hand to a user other than root (%s)" % made
             else:
                 continue
+            # A mount option word may run on past its ',' (path_words); name the path as cut there.
             out.append("%s: /%s is inside /%s, which %s; PID 1 makes, links, binds or chowns it following any link "
                        "that user puts on its way, so that user decides what PID 1 acts on; name a path only root "
                        "can write, or make the directory in a unit that runs as root (#5233)"
-                       % (where, "/".join(steps), d, owner))
+                       % (where, "/".join(steps).split(",", 1)[0], d, owner))
             refused.add(where)
             break
     return out

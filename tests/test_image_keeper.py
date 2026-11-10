@@ -822,6 +822,10 @@ class KeeperTreeTest(unittest.TestCase):
             (dict(nobody, **{SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
                                                       "Options=lowerdir=/usr,upperdir=/srv/u,workdir=/var/lib/hq/w\n"}),
              "var/lib/hq/w", "var/lib/hq", hq % "StateDirectory", "Options= in %ssrv-o.mount" % SYSTEM),
+            # Not the last option: the path is named as cut at its ','.
+            (dict(nobody, **{SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
+                                                      "Options=workdir=/var/lib/hq/w,lowerdir=/usr,upperdir=/srv/u\n"}),
+             "var/lib/hq/w", "var/lib/hq", hq % "StateDirectory", "Options= in %ssrv-o.mount" % SYSTEM),
             # A path unit's directory: MakeDirectory= in the unit, its drop-in or a type-wide drop-in.
             (dict(nobody, **{SYSTEM + "p.path": "[Path]\nDirectoryNotEmpty=/run/hq/in\nMakeDirectory=yes\n"}),
              "run/hq/in", "run/hq", hq % "RuntimeDirectory", "DirectoryNotEmpty= in %sp.path" % SYSTEM),
@@ -873,6 +877,18 @@ class KeeperTreeTest(unittest.TestCase):
              "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
             (dict(journald, **sock, **{etc + "jj.service": ("link", "/usr/lib/systemd/system/systemd-journald.service")}),
              "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # The other form is the same directory (#5350 Security 6778501910): a non-root unit's a:b link at the
+            # private form of a root unit's directory, and a root unit's link at a dynamic unit's.
+            ({q: "[Service]\nUser=nobody\nStateDirectory=hqn:private/hq\n", SYSTEM + "r.service": "[Service]\nStateDirectory=hq\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/hq/sock\nSocketUser=nobody\n"},
+             "var/lib/private/hq/sock", "var/lib/private/hq",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %s)" % q,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "a.service": "[Service]\nStateDirectory=zq:private/zz\n", q: "[Service]\nStateDirectory=zz\nDynamicUser=yes\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/zz/sock\n"},
+             "var/lib/private/zz/sock", "var/lib/private/zz",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
             # A tmpfiles.d line that makes it for another user before the unit starts.
             (dict(journald, **sock, **{"usr/lib/tmpfiles.d/zz.conf": "d /run/systemd/journal 0755 nobody - -\n"}),
              "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
@@ -954,6 +970,39 @@ class KeeperTreeTest(unittest.TestCase):
                 "(StateDirectory= in %srh.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
         finally:
             remove()
+        # The tree may hand a root unit's directory, in either form, to another uid, group or ACL before the unit
+        # starts (#5350 Security 6778501910, L3 6778896704); CI does not run as root, so tree_lstat and tree_xattrs
+        # report them. A group the tree gives counts once a tmpfiles.d line lets it write.
+        real_lstat, real_xattrs = check.tree_lstat, check.tree_xattrs
+        for form in ("var/lib/tr", "var/lib/private/tr"):
+            for what, uid, gid, acl, tmpf in (
+                    ("uid", check.TREE_OWNER + 1000, check.TREE_GROUP, None, ""),
+                    ("gid", check.TREE_OWNER, check.TREE_GROUP + 4, None, "z /%s 0775 - - -\n" % form),
+                    ("gid alone", check.TREE_OWNER, check.TREE_GROUP + 4, None, ""),
+                    ("access ACL", check.TREE_OWNER, check.TREE_GROUP, "system.posix_acl_access", ""),
+                    ("default ACL", check.TREE_OWNER, check.TREE_GROUP, "system.posix_acl_default", "")):
+
+                def lstat(root, rel, form=form, uid=uid, gid=gid):
+                    st = real_lstat(root, rel)
+                    if rel != form or st is None:
+                        return st
+                    return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, uid, gid) + tuple(st)[6:])
+
+                def xattrs(root, rel, form=form, acl=acl):
+                    return [acl] if rel == form and acl else real_xattrs(root, rel)
+                with self.subTest(form=form, what=what), unittest.mock.patch.object(check, "tree_lstat", lstat), \
+                        unittest.mock.patch.object(check, "tree_xattrs", xattrs):
+                    files = {SYSTEM + "tr.service": "[Service]\nStateDirectory=tr\n", form + "/keep": "",
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/%s/sock\n" % form}
+                    if tmpf:
+                        files["usr/lib/tmpfiles.d/zz.conf"] = tmpf
+                    remove = self.place(files)
+                    try:
+                        self.assertEqual(check.inside_refusals(self.root), [inside(
+                            form + "/sock", form, "systemd makes for a unit and may hand to a user other than root "
+                            "(StateDirectory= in %str.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
+                    finally:
+                        remove()
         # A mount point inside a unit-made directory is refused once, by unit_made_refusals (the chown descends).
         remove = self.place(dict(nobody, **{SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=/var/lib/hq/in\n"}))
         try:
