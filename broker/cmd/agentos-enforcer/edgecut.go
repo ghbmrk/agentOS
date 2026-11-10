@@ -155,11 +155,11 @@ func (p pageEdge) Cut() (bool, string) { return p.d.edge.Cut() }
 // then the firewall.
 func (p pageEdge) LiftEdge() error {
 	d := p.d
-	if err := d.edge.Lift(traffic.Day(d.dp.Now())); err != nil {
-		return err
+	err := d.edge.Lift(traffic.Day(d.dp.Now()))
+	if cut, _ := d.edge.Cut(); !cut {
+		d.loadCut() // lifted, though resolving its trips may have failed
 	}
-	d.loadCut()
-	return nil
+	return err
 }
 
 // holdDrop holds in p what the counts do not say: the caps of a port that
