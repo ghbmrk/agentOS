@@ -3,7 +3,7 @@
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
   tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
-  tools/premerge.py --check <comments.json> <pr-number> [--base origin/main] [head]
+  tools/premerge.py --check <comments.json> <pr-number> [--runs runs.json] [--base origin/main] [head]
   tools/premerge.py --bot <head-ref> --run <run.json> --output <artifact.zip> [--base origin/main] [head]
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
@@ -44,6 +44,10 @@ its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105
 it. Likewise a verdict comment whose `Record:` line does not parse (a package ID with spaces, a missing line;
 #3611) prints `unparsed-record <kind>` until a newer comment supersedes it. An accept whose Record head names no commit here prints
 `unresolved-record <kind>` the same way (#3856). Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+Last, every verdict being in, it holds the checks main's ruleset does not require (HELD, #5366), since GitHub merges
+an armed PR past a cancelled one: `--runs` is the head's and merge base's Actions runs (`checks_held`), and each held
+workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
+exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread.
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -554,6 +558,140 @@ def _named(v, kind, pr):
     return None
 
 
+# PREMERGE-cancelled-checks (#5366): workflows main's ruleset does not require, so GitHub merges past a cancelled or
+# missing run of them; --check holds each to its latest PR run on the head, less the jobs named here (image-vulncheck
+# waits on Mark's #2919 paste).
+HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
+        "formal": (), "keycheck": ()}
+PASSED = ("success", "skipped")
+NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (premerge.yml builds it) to read the held checks"
+_GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
+_ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block(lines, at):
+    """The lines indented under lines[at], skipping blank and comment lines."""
+    out = []
+    for line in lines[at + 1:]:
+        if line.strip() and not line.strip().startswith("#"):
+            if _indent(line) <= _indent(lines[at]):
+                break
+            out.append(line)
+    return out
+
+
+def pr_paths(text):
+    """The globs a workflow's pull_request or pull_request_target trigger is filtered by: None with neither trigger,
+    [] when it runs on every PR. Read from this repository's block style only; any other form (a flow-style `on:`,
+    `paths-ignore`, a negated or unusual glob) reads as [], so the run is owed and an absent one holds the merge."""
+    lines = text.splitlines()
+    at = next((i for i, line in enumerate(lines) if re.fullmatch(r"on:\s*(?:#.*)?", line)), None)
+    if at is None:
+        return [] if "pull_request" in text else None
+    on = _block(lines, at)
+    found, globs = False, []
+    for i, line in enumerate(on):
+        key = re.fullmatch(r"(\s*)(pull_request(?:_target)?):\s*(#.*)?", line)
+        if not key and re.match(r"\s*pull_request", line):
+            return []  # `pull_request: {...}` and the like
+        if not key or _indent(line) != _indent(on[0]):
+            continue
+        found, sub = True, _block(on, i)
+        if any(re.match(r"\s*(?:paths-ignore|branches-ignore)\s*:", s) for s in sub):
+            return []
+        p = next((j for j, s in enumerate(sub) if re.match(r"\s*paths\s*:", s)), None)
+        if p is None or not re.fullmatch(r"\s*paths:\s*(?:#.*)?", sub[p]):
+            return []
+        items = _block(sub, p)
+        for item in items:
+            m = _ITEM.fullmatch(item)
+            glob = m and next(g for g in m.groups() if g is not None)
+            if not glob or not _GLOB.fullmatch(glob):
+                return []
+            globs.append(glob)
+        if not items:
+            return []
+    return globs if found else None
+
+
+def _glob_re(glob):
+    """GitHub's path filter syntax for the characters `pr_paths` lets through: `**` crosses `/`, `*` does not."""
+    out = re.escape(glob).replace(r"\*\*/", "\0").replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
+    return re.compile(out.replace("\0", "(?:.*/)?"), re.DOTALL)
+
+
+def _owed(cwd, head, path, files):
+    """Whether a pull_request run of workflow `path` at `head` is expected for a PR changing `files`."""
+    shown = subprocess.run(["git", "show", f"{head}:{path}"], cwd=cwd, capture_output=True)
+    if shown.returncode:
+        return False  # no such workflow at the head, so no run of it
+    globs = pr_paths(shown.stdout.decode(errors="replace"))
+    if globs is None:
+        return False
+    return not globs or any(_glob_re(g).fullmatch(f) for g in globs for f in files)
+
+
+def _jobs(run, attempt):
+    """The run's jobs of `attempt` as (name, conclusion), or None when they were not supplied."""
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    mine = [j for j in jobs if j.get("run_id") == run.get("id") and j.get("run_attempt") == attempt]
+    return [(j.get("name"), j.get("conclusion")) for j in mine] if len(mine) == len(jobs) else None
+
+
+def _base_failed(runs, path, onto):
+    """Job names that failed in main's own first-attempt push or scheduled run of `path` on the merge base
+    (PREMERGE-inherited, #3532): a pusher can rerun a base run, so only attempt 1 counts."""
+    mine = [r for r in runs if r.get("path") == path and r.get("head_sha") == onto and r.get("head_branch") == "main"
+            and r.get("event") in ("push", "schedule")]
+    if not mine:
+        return set()
+    r = max(mine, key=lambda r: r.get("id") or 0)
+    if r.get("run_attempt") != 1 or r.get("conclusion") != "failure":
+        return set()
+    return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
+
+
+def checks_held(cwd, runs, head="HEAD", base="origin/main"):
+    """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
+
+    `runs` is {"head": [...], "base": [...]}: the Actions runs (API JSON) on the head and on the merge base, each
+    failed one with a `jobs` list (the head's latest attempt, the base's first). A run passes on `success` or
+    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
+    A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes."""
+    if not isinstance(runs, dict) or not all(isinstance(runs.get(k), list) for k in ("head", "base")):
+        raise ValueError("runs must be {\"head\": [...], \"base\": [...]}")
+    sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
+    held = []
+    for name, exempt in HELD.items():
+        path = f".github/workflows/{name}.yml"
+        mine = [r for r in runs["head"] if r.get("path") == path and r.get("head_sha") == sha
+                and r.get("event") in ("pull_request", "pull_request_target")]
+        if not mine:
+            if _owed(cwd, sha, path, files):
+                held.append(f"{name}:missing")
+            continue
+        r = max(mine, key=lambda r: r.get("id") or 0)
+        state = r.get("conclusion") if r.get("status") == "completed" else r.get("status")
+        if state in PASSED:
+            continue
+        if state == "failure":
+            jobs = _jobs(r, r.get("run_attempt"))
+            excused = set(exempt) | _base_failed(runs["base"], path, onto)
+            bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
+            if bad and all(c == "failure" and n in excused for n, c in bad):
+                continue
+        held.append(f"{name}:{state or 'unknown'}")
+    return held
+
+
 def main(argv):
     args, base = argv[1:], "origin/main"
     needs_mark = "--needs-mark" in args  # in any position
@@ -562,9 +700,13 @@ def main(argv):
         if len(args) < 3:
             print(__doc__)
             return 2
-        comments, pr, args = json.load(open(args[1])), args[2], args[3:]
-        if args[:1] == ["--base"]:
-            base, args = args[1], args[2:]
+        comments, pr, args, runs = json.load(open(args[1])), args[2], args[3:], None
+        while args[:1] in (["--base"], ["--runs"]) and len(args) > 1:
+            if args[0] == "--base":
+                base = args[1]
+            else:
+                runs = json.load(open(args[1]))
+            args = args[2:]
         v = verdict(comments, pr)
         if v is None or v[0] != "accept" or _named(v, "l3", pr):
             print("no-verdict" if v is None else _named(v, "l3", pr) or "not-accepted")
@@ -594,6 +736,13 @@ def main(argv):
         sec = verdict(comments, pr, security=True)
         if owed and not _accepted(sec, head, base):
             print(_named(sec, "security", pr) or "needs-security " + " ".join(owed))
+            return 1
+        if runs is None:
+            print(NO_RUNS)
+            return 1
+        held = checks_held(".", runs, head, base)
+        if held:
+            print("needs-check " + " ".join(held))
             return 1
         print("same")
         return 0
