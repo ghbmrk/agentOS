@@ -8,6 +8,8 @@ changes. A module's output is buffered and printed whole, in name order, so logs
 interleave; a line per finished module shows progress meanwhile. The longest modules start
 first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
+A run strace itself cut short (STRACE_FAULT) has no verdict and reruns whole, once, into a
+fresh trace; a run that already showed a failed test is never rerun (#5358).
 Exit 1 if any module failed or did not run, or if the longest unit runs over FLOOR seconds and
 over LONG_POLE times the ideal: that one unit then sets the step's length. A unit is a module, so
 split it (SPLIT), or for a module already split, its slowest part (one test with any class or
@@ -171,11 +173,39 @@ def split(module, workers, write=sys.stdout.write):
     return 0 if not lost and ran == list(range(len(tests))) and all(r[1] for r in reports) else 1
 
 
+# strace's own failure, not a test's: "strace: ptrace(PTRACE_LISTEN,pid:N,sig:0): Input/output
+# error" (#5258, #5355; tools/depaudit.py's STRACE_FAULT). strace then stops tracing, the run is cut
+# and its trace is partial, so the attempt has no verdict, whatever strace's exit status. Unanchored:
+# the module's output shares the stream, so the message can follow a partial line.
+STRACE_FAULT = re.compile(r"strace: .*(?:Input/output error|PTRACE_)")
+# A test's own failure in the output so far: its -v verdict line, or the run's failure summary.
+TEST_FAILED = re.compile(r"(?m)(?: \.\.\. (?:FAIL|ERROR)$|^(?:FAIL|ERROR): |^FAILED \()")
+STRACE_ATTEMPTS = 2  # a module strace faults on runs once more, whole, into a fresh trace
+
+
 def run_one(module, trace_dir, root=ROOT):
-    start = time.monotonic()
-    p = subprocess.run(command(module, trace_dir), cwd=root, stdin=subprocess.DEVNULL, env=ENV,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return module, p.returncode, time.monotonic() - start, p.stdout.decode("utf-8", "replace")
+    """(module, rc, seconds, output). An attempt that strace cut short (STRACE_FAULT) reruns the
+    module whole, and strace -o rewrites its trace, so the trace kept is the passing attempt's. A
+    cut attempt that already showed a failing test fails the module and is not rerun, and a module
+    strace cuts on every attempt fails."""
+    start, outs = time.monotonic(), []
+    for attempt in range(1, STRACE_ATTEMPTS + 1):
+        p = subprocess.run(command(module, trace_dir), cwd=root, stdin=subprocess.DEVNULL, env=ENV,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out, rc = p.stdout.decode("utf-8", "replace"), p.returncode
+        if not STRACE_FAULT.search(out):
+            outs.append(out)
+            break
+        rc = rc or 1
+        failed = TEST_FAILED.search(out)
+        last = failed or attempt == STRACE_ATTEMPTS
+        outs.append(f"{out}\nunit_tests: strace failed itself on attempt {attempt} of {STRACE_ATTEMPTS}, so the "
+                    f"run and its trace are cut short; "
+                    + ("a test had already failed, so the module fails without a rerun\n" if failed else
+                       "the module fails\n" if last else "the module reruns whole into a fresh trace\n"))
+        if last:
+            break
+    return module, rc, time.monotonic() - start, "".join(outs)
 
 
 def size(module, root=ROOT):

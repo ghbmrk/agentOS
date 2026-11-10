@@ -315,6 +315,80 @@ class SplitTest(unittest.TestCase):
 
 
 
+class StraceFaultTest(unittest.TestCase):
+    """#5358: strace failing itself (PTRACE_LISTEN EIO on the runner) cuts the run and its trace, so
+    the module reruns whole into a fresh trace; it never reruns past a failed test, and a module
+    strace cuts every time fails."""
+    # REQ: CI-PATHS
+    CUT = "strace: ptrace(PTRACE_LISTEN,pid:24103,sig:0): Input/output error"
+    SAY = {"ok": ("test_a ... ok\n\nOK\n", 0),
+           "cut": (f"test_a ... ok\ncoverage: 100.0% of statements\n{CUT}\n", 1),
+           "cut-exit-0": (f"test_a ... ok\ntest_b ... {CUT}\n", 0),
+           "fail-then-cut": (f"test_a ... FAIL\ntest_b ... {CUT}\n", 1),
+           "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", 1)}
+
+    def run_plan(self, *plan):
+        """run_one under a fake strace that plays plan's steps in order, one per call, writing
+        each step's name as its trace. (rc, output, the trace kept, calls made)."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "plan").write_text("\n".join(plan))
+        fake = d / "strace"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import pathlib, sys
+            say = {self.SAY!r}
+            plan = pathlib.Path({str(d / "plan")!r})
+            steps = plan.read_text().split("\\n")
+            plan.write_text("\\n".join(steps[1:]))
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(steps[0])
+            sys.stdout.write(say[steps[0]][0])
+            sys.exit(say[steps[0]][1])
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            module, rc, _, out = unit_tests.run_one("test_x", str(d))
+        self.assertEqual(module, "test_x")
+        left = [s for s in (d / "plan").read_text().split("\n") if s]
+        return rc, out, (d / "test_x.trace").read_text(), len(plan) - len(left)
+
+    def test_a_cut_run_reruns_whole_and_keeps_the_passing_runs_trace(self):
+        rc, out, trace, calls = self.run_plan("cut", "ok")
+        self.assertEqual((rc, trace, calls), (0, "ok", 2))
+        self.assertIn("strace failed itself on attempt 1 of 2", out)
+        self.assertIn("the module reruns whole into a fresh trace", out)
+        self.assertTrue(out.endswith(self.SAY["ok"][0]), out)
+
+    def test_a_cut_run_is_no_pass_even_when_strace_exits_zero(self):
+        rc, out, _, calls = self.run_plan("cut-exit-0", "cut-exit-0")
+        self.assertEqual((rc, calls), (1, 2))
+        self.assertIn("strace failed itself on attempt 2 of 2", out)
+        self.assertIn("the module fails\n", out)
+
+    def test_a_module_strace_cuts_every_time_fails(self):
+        rc, out, _, calls = self.run_plan("cut", "cut", "ok")
+        self.assertEqual((rc, calls), (1, unit_tests.STRACE_ATTEMPTS))
+        self.assertEqual(unit_tests.STRACE_ATTEMPTS, 2)
+
+    def test_a_failed_test_is_never_rerun(self):
+        rc, out, trace, calls = self.run_plan("fail-then-cut", "ok")
+        self.assertEqual((rc, trace, calls), (1, "fail-then-cut", 1))
+        self.assertIn("a test had already failed, so the module fails without a rerun", out)
+        rc, out, _, calls = self.run_plan("fail", "ok")
+        self.assertEqual((rc, out, calls), (1, self.SAY["fail"][0], 1))
+
+    def test_the_runners_own_strace_lines_are_faults_and_test_output_is_not(self):
+        # #5258's line followed a test's partial line; #5355's stood alone.
+        for line in ("test_a_guard (test_mutgate.Deletion.test_a_guard) ... " + self.CUT, self.CUT):
+            self.assertTrue(unit_tests.STRACE_FAULT.search(line), line)
+        for line in ("test_x (m.T.test_x) ... skipped 'needs user+net namespaces and strace'",
+                     "test_a_tracee_cannot_erase_strace_fault_message (m.T.test_a) ... ok"):
+            self.assertFalse(unit_tests.STRACE_FAULT.search(line), line)
+        for line in ("t (m.T.t) ... FAIL", "t (m.T.t) ... ERROR", "ERROR: setUpClass (m.T)", "FAILED (errors=1)"):
+            self.assertTrue(unit_tests.TEST_FAILED.search(line), line)
+        for line in ("t (m.T.t) ... ok", "t (m.T.t) ... expected failure", "OK (skipped=2)"):
+            self.assertFalse(unit_tests.TEST_FAILED.search(line), line)
+
+
 R = str(unit_tests.ROOT)
 
 
