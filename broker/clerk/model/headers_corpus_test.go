@@ -35,6 +35,11 @@ func TestDeclaredHeadersRefuseTheCorpus(t *testing.T) {
 	hostiletext.RunHeaders(t, func(h string) bool { return declares(h, "2023-06-01") },
 		"Anthropic-"+hostiletext.Exactly(t, declHeaders, "Version")[0])
 	hostiletext.RunHeaderValues(t, func(v string) bool { return declares("Anthropic-Version", v) })
+	for _, v := range []string{"", " v", "v ", "v\t"} {
+		if declares("Anthropic-Version", v) {
+			t.Errorf("the value %q was taken", v)
+		}
+	}
 	for _, h := range []string{"Openai-Version", "Version", "Anthropic-Beta"} {
 		if declares(h, "v") {
 			t.Errorf("the anthropic declaration may set %q", h)

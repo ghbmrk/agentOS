@@ -14,6 +14,11 @@ import (
 // reaches a refresh as a header the clerk sets itself.
 func TestRefreshHeaderValuesRefuseTheCorpus(t *testing.T) {
 	hostiletext.RunHeaderValues(t, headerValue)
+	for _, v := range []string{"", " v", "v ", "v\t"} {
+		if headerValue(v) {
+			t.Errorf("the value %q was taken", v)
+		}
+	}
 }
 
 // Each header a plan declaration passes is a name passHeaders holds
