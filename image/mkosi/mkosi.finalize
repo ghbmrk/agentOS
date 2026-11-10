@@ -201,6 +201,12 @@ MADE_SPECIFIERS = "bijmnNp"
 # without the file types, and the attribute and ACL types). Any other line at a unit-made directory may
 # leave a link, a copy, a file or a device node there, which systemd would chmod and chown.
 MADE_LAST_TYPES = frozenset("dDevqQzZxXrRaAhHtT")
+# #5167 (Security 6759084501): the settings for which PID 1 itself makes a path for a unit, other than
+# *Directory=: a socket's file-system listen paths and Symlinks=, a path unit's watched paths (MakeDirectory=),
+# a mount or automount point; each makes the missing parents with the file's DirectoryMode= (umask 0).
+PID1_PATHS = ("ListenStream", "ListenDatagram", "ListenSequentialPacket", "ListenFIFO", "ListenSpecial",
+              "ListenUSBFunction", "Symlinks", "PathExists", "PathExistsGlob", "PathChanged", "PathModified",
+              "DirectoryNotEmpty", "Where")
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
@@ -334,7 +340,8 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + cached(unit_made_dirs, root)[1] + unit_made_refusals(root) + noexec_violations(root)
+            + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[1] + unit_made_refusals(root)
+            + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
 
@@ -1665,6 +1672,43 @@ def unit_made_dirs(root):
     adding a file or link only adds to them (the re-plan on #5167; generators' and transient units
     are not covered). Each word, and each side of a:b, counts (made_steps); a last step with a
     specifier is kept as a glob (capsules/%i is capsules/*)."""
+    root = str(root)
+    files, out = cached(unit_files, root)
+    out, made = list(out), {}
+    for path, rel in sorted(files.items()):
+        try:
+            lines = config_lines(Conf(root, path).content())
+        except (OSError, Unparsable) as e:
+            out.append("%s: unreadable (%s); the tree check never passes a unit file it cannot read (#5167)"
+                       % (rel, e.strerror if isinstance(e, OSError) else e))
+            continue
+        for _, key, v in lines:
+            if key not in UNIT_MADE_DIRS or not v:
+                continue
+            try:
+                # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so
+                # split() splits as systemd does once every other byte outside printable ASCII is refused.
+                if any(not " " <= c <= "~" and c != "\t" for c in v):
+                    raise ValueError(v)
+                got = [made_steps(p) for w in v.split() for p in w.split(":")]
+                # A last step of specifiers alone may expand to "" or "." (%j of a plain name, an instance
+                # "."), which systemd simplifies away, so its parent counts too.
+                got += [made_steps(p)[:-1] for w in v.split() for p in w.split(":")
+                        if re.fullmatch(r"(%.)+", ([x for x in p.split("/") if x and x != "."] or [""])[-1])]
+            except ValueError:
+                out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
+                           "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                continue
+            for steps in got:
+                if steps:
+                    made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
+    return made, out
+
+
+def unit_files(root):
+    """#5167: ({tree path: the unit-directory entry that reaches it} for every regular file under the unit
+    directories at ROOT, top level or in any subdirectory, hidden or not, and the regular file each link
+    there leads to, a mask skipped; and one error per directory or link the check cannot read)."""
     root, out, files, todo = str(root), [], {}, list(dict.fromkeys(unit_dirs(root)[0]))
     while todo:
         d = todo.pop()
@@ -1691,31 +1735,42 @@ def unit_made_dirs(root):
                                "a unit directory it cannot read (#5167)" % (rel, tree_readlink(root, rel)))
                 else:
                     files.setdefault(got, rel)
-    made = {}
+    return files, out
+
+
+def unit_made_paths(root):
+    """#5167 (Security 6759084501): ([(tree path steps, what, "<key>= in <file>", open)] for every path PID 1
+    makes or mounts for a unit at a PID1_PATHS setting, in any file unit_files reads and any section, and
+    for each *.mount and *.automount file name; and one error per value the check does not model). WHAT is
+    "mount" for a mount point, else "path"; OPEN: the file sets a DirectoryMode= that lets others write
+    (o+w), or one the check cannot read, for the parents PID 1 makes. A value that is not a path (a port,
+    an address, an abstract socket) is skipped; one with a specifier, a quote or a backslash, or a byte
+    outside printable ASCII, is refused."""
+    root, out, paths = str(root), [], []
+    files, _ = cached(unit_files, root)
     for path, rel in sorted(files.items()):
         try:
             lines = config_lines(Conf(root, path).content())
-        except (OSError, Unparsable) as e:
-            out.append("%s: unreadable (%s); the tree check never passes a unit file it cannot read (#5167)"
-                       % (rel, e.strerror if isinstance(e, OSError) else e))
-            continue
-        for _, key, v in lines:
-            if key not in UNIT_MADE_DIRS or not v:
+        except (OSError, Unparsable):
+            continue  # unit_made_dirs refuses it
+        modes = [v for _, k, v in lines if k == "DirectoryMode"]
+        loose = any(not re.fullmatch(r"[0-7]{1,4}", m) or int(m, 8) & 0o002 for m in modes)
+        name = path.rsplit("/", 1)[-1]
+        named = []
+        if re.fullmatch(r"[^@]+\.(auto)?mount", name):
+            unit = re.sub(r"\\x([0-9a-f]{2})", lambda m: chr(int(m.group(1), 16)), name.rsplit(".", 1)[0].replace("-", "/"))
+            named.append(("Where", "/" + unit.strip("/") if unit != "/" else "/"))
+        named += [(k, w) for _, k, v in lines if k in PID1_PATHS for w in (v.split() if k == "Symlinks" else [v])]
+        for key, v in named:
+            if not v.startswith(("/", "%")):
                 continue
-            try:
-                # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so
-                # split() splits as systemd does once every other byte outside printable ASCII is refused.
-                if any(not " " <= c <= "~" and c != "\t" for c in v):
-                    raise ValueError(v)
-                got = [made_steps(p) for w in v.split() for p in w.split(":")]
-            except ValueError:
+            if any(not " " < c <= "~" or c in "%\"'\\" for c in v):
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                           "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                           "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                 continue
-            for steps in got:
-                if steps:
-                    made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
-    return made, out
+            what = "mount" if key == "Where" else "path"
+            paths.append((path_parts(v), what, "%s= in %s" % (key, rel), loose))
+    return paths, out
 
 
 def made_private(d):
@@ -1739,7 +1794,10 @@ def unit_made_refusals(root):
        world-writable or service directory, not another unit-made directory (service_dir), and no
        tree owner, group, ACL or tmpfiles.d line that gives it to another user or makes it a link.
        Under a box mount (/run) the mount point is the box's and every step below it is weighed by
-       the tmpfiles.d lines alone, since the mount hides the tree's.
+       the tmpfiles.d lines alone, since the mount hides the tree's;
+    4. PID 1 itself (unit_made_paths) makes no socket, link or mount point at a step, mounts nothing
+       below the last (path_chown_recursive descends into it), and makes no parent on the way with a
+       DirectoryMode= others can write (it runs with umask 0).
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
     service user's. Generators and transient units are not covered (unit_made_dirs)."""
@@ -1756,7 +1814,7 @@ def unit_made_refusals(root):
 
 def made_way_refusal(root, form):
     """#5167: why the way to unit-made directory FORM (a tree path whose last step may be a glob) is not
-    root's alone (unit_made_refusals' rules 1 to 3), or None."""
+    root's alone (unit_made_refusals' rules 1 to 4), or None."""
     parts = form.split("/")
     up, last = parts[:-1], parts[-1]
     try:
@@ -1774,8 +1832,36 @@ def made_way_refusal(root, form):
         for m in tmpfiles_paths(root, words[1], words[0][:1] == "L"):
             if len(m) == len(parts) and all(step_may_name(c, t) for c, t in zip(m, parts)):
                 return "where %s line %d (%s) may leave something other than a directory" % (rel, n, ln[:80])
+    for steps, what, where, loose in cached(unit_made_paths, root)[0]:
+        # 4. PID 1 makes nothing else at a step of the way (a socket, a link, a mount point), mounts nothing
+        #    below it (the chown descends into a mount), and makes no step above it others can write.
+        def meets(n, steps=steps):
+            return all(step_may_name(c, t) or step_may_name(t, c) for c, t in zip(steps[:n], parts[:n]))
+        if steps and "/".join(steps) not in BOX_MOUNTS and len(steps) <= len(parts) and meets(len(steps)):
+            return "where PID 1 makes or mounts /%s (%s)" % ("/".join(steps), where)
+        if what == "mount" and len(steps) > len(parts) and meets(len(parts)):
+            return "above /%s, which PID 1 mounts (%s) and the chown descends into" % ("/".join(steps), where)
+        # A parent PID 1 may make for STEPS with a DirectoryMode= others can write, on the way above the last
+        # step: one the box lacks when the unit starts (under a box mount, missing from the tree, or one a
+        # tmpfiles.d line can remove), never a box mount point.
+        if loose and any(meets(k) and "/".join(steps[:k]) not in BOX_MOUNTS and pid1_may_make(root, steps[:k])
+                         for k in range(1, min(len(steps), len(parts)))):
+            return ("below a step PID 1 may make for anyone to write (%s, with its file's DirectoryMode=, for /%s)"
+                    % (where, "/".join(steps)))
     why = chain_refusal(root, up, "/" + form, True, mounted=up[0] in BOX_MOUNTS)
     return None if why is None else "below a step another user can write or remake: " + why
+
+
+def pid1_may_make(root, steps):
+    """#5167: whether the box may lack directory STEPS when PID 1 makes a unit's path through it: it is
+    under a box mount, the tree does not hold it as a directory, or a tmpfiles.d line can remove it."""
+    if steps[0] in BOX_MOUNTS:
+        return True
+    try:
+        st = tree_lstat(root, "/".join(steps))
+    except OSError:
+        return True
+    return st is None or not stat.S_ISDIR(st.st_mode) or tmpfiles_remover(root, steps) is not None
 
 
 def step_may_name(c, t):

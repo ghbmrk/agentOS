@@ -413,7 +413,9 @@ class KeeperTreeTest(unittest.TestCase):
             "colon": ({SYSTEM + "c1.service": "[Service]\nStateDirectory=c1 c1b:c1link\n"}, "var/lib/c1link"),
             "nested": ({SYSTEM + "c2.service": "[Service]\nCacheDirectory=./c2//n/\n"}, "var/cache/c2/n"),
             # A specifier in the last step keeps it as a glob of what precedes it.
-            "specifier": ({SYSTEM + "capsule@.service": "[Service]\nStateDirectory=capsules/%i\n"}, "var/lib/capsules/*"),
+            "specifier": ({SYSTEM + "cap@.service": "[Service]\nStateDirectory=caps/c-%i\n"}, "var/lib/caps/c-*"),
+            # Security 6759084501 (release): a step of specifiers alone may simplify away, so its parent counts.
+            "specifier alone": ({SYSTEM + "qc@.service": "[Service]\nStateDirectory=qc/%i\n"}, "var/lib/qc"),
             "specifier mid-step": ({SYSTEM + "jr@.service": "[Service]\nLogsDirectory=journal/%m.%i\n"},
                                    "var/log/journal/*"),
             "specifier suffix": ({SYSTEM + "jn@.service": "[Service]\nRuntimeDirectory=systemd/journal.%i\n"},
@@ -501,6 +503,20 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(check.unit_made_dirs(self.root)[1][0], check.violations(self.root))
                 finally:
                     d.unlink()
+        # A path PID 1 makes from a value with a specifier, or a byte it does not model, is refused too.
+        for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'"):
+            with self.subTest(text):
+                d = write(self.root, SYSTEM + "x.socket", "[Socket]\n%s\n" % text)
+                try:
+                    key, val = text.split("=", 1)
+                    got = check.unit_made_paths(self.root)[1]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith("%sx.socket: %s=" % (SYSTEM, key)), got)
+                    self.assertTrue(got[0].endswith(": the tree check does not model it; the tree check never passes a "
+                                                    "unit file whose paths it cannot read (#5167)"), got)
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    d.unlink()
 
     def test_a_unit_made_directorys_way_is_roots_alone(self):
         # #5167 re-plan 2: systemd 257's setup_exec_directory makes the missing steps, then chmods and chowns
@@ -556,11 +572,34 @@ class KeeperTreeTest(unittest.TestCase):
             ("StateDirectory=agentos-mail/x", {}, "/var/lib/agentos-mail/x", "inside /var/lib/agentos-mail, which anyone"),
             ("StateDirectory=na/b", {SYSTEM + "na.service": "[Service]\nStateDirectory=na\nUser=ua\n"}, "/var/lib/na/b",
              "inside /var/lib/na, a directory systemd makes for a unit at runtime (StateDirectory= in %sna.service)" % SYSTEM),
+            # Security 6759084501: what PID 1 itself makes for other settings (umask 0): a path unit's directory
+            # at a step, a socket's parents with a loose DirectoryMode=, a socket or its Symlinks= at the
+            # directory, a mount point at a step (with DirectoryMode=0777), and a mount below the directory.
+            ("RuntimeDirectory=pp/x", {SYSTEM + "p.path": "[Path]\nDirectoryNotEmpty=/run/pp\nMakeDirectory=yes\n"
+                                                         "DirectoryMode=0777\n"}, "/run/pp/x", "where PID 1 makes or mounts /run/pp"),
+            ("RuntimeDirectory=ss/b", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ss/a/sock\nDirectoryMode=0777\n"},
+             "/run/ss/b", "below a step PID 1 may make for anyone to write (ListenStream= in %ss.socket" % SYSTEM),
+            # The same under /run with the tree holding the step: the box's tmpfs hides it, so PID 1 makes it.
+            ("RuntimeDirectory=ss/b", {"run/ss/keep": "", SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ss/a/sock\n"
+                                                                              "DirectoryMode=0777\n"},
+             "/run/ss/b", "below a step PID 1 may make for anyone to write (ListenStream= in %ss.socket" % SYSTEM),
+            ("RuntimeDirectory=sy", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/x.sock\nSymlinks=/run/sy\n"},
+             "/run/sy", "where PID 1 makes or mounts /run/sy (Symlinks= in %ss.socket)" % SYSTEM),
+            ("RuntimeDirectory=sy", {SYSTEM + "s.socket": "[Socket]\nListenFIFO=/run/sy\n"}, "/run/sy",
+             "where PID 1 makes or mounts /run/sy (ListenFIFO="),
+            ("StateDirectory=mm/x", {SYSTEM + "var-lib-mm.mount": "[Mount]\nWhat=tmpfs\nDirectoryMode=0777\n"},
+             "/var/lib/mm/x", "where PID 1 makes or mounts /var/lib/mm (Where= in %svar-lib-mm.mount)" % SYSTEM),
+            ("StateDirectory=mq/e", {SYSTEM + "m.mount": "[Mount]\nWhat=tmpfs\nWhere=/var/lib/mq/d\nDirectoryMode=0777\n"},
+             "/var/lib/mq/e", "below a step PID 1 may make for anyone to write (Where= in %sm.mount" % SYSTEM),
+            ("StateDirectory=mb", {SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=/var/lib/mb/in\n"}, "/var/lib/mb",
+             "above /var/lib/mb/in, which PID 1 mounts (Where= in %sm.mount) and the chown descends into" % SYSTEM),
             # Stock journald@'s LogsDirectory=journal/%m.%i: tmpfiles.d gives /var/log/journal a group; mkosi.conf
             # removes the unit.
             ("LogsDirectory=journal/%m.%i", {tmpf: "z /var/log/journal 2755 root systemd-journal - -\n"},
              "/var/log/journal/*", "for root:systemd-journal"),
         )
+        wired = ("where " + tmpf, "in the tree (/var/lib/foo)", "makes a link",
+                 "where PID 1 makes or mounts /run/sy (Symlinks= in %ss.socket)" % SYSTEM)
         for unit, files, made, why in refused:
             with self.subTest(unit=unit, files=files):
                 name = "q@.service" if "%i" in unit else "q.service"
@@ -576,7 +615,8 @@ class KeeperTreeTest(unittest.TestCase):
                                                           unit.split("=")[0], SYSTEM, name, made)), got)
                     self.assertIn(why, got[0])
                     self.assertTrue(got[0].endswith(" (#5167)"), got)
-                    self.assertIn(got[0], check.violations(self.root))
+                    if why in wired:  # one case per clause through the whole check; the rest by the rule alone
+                        self.assertIn(got[0], check.violations(self.root))
                 finally:
                     remove()
         passing = (
@@ -597,6 +637,11 @@ class KeeperTreeTest(unittest.TestCase):
             # /run is the box's own mount: the tree's run/ and the stock /var/run link line naming it (by
             # systemd-tmpfiles' /var/run rewrite) do not count against a directory under it.
             ("RuntimeDirectory=systemd/resolve", {"run/keep": "", tmpf: "L /var/run - - - - ../run\n"}),
+            # PID 1's own paths below the directory, or beside it with a mode only root can write: stock journald's
+            # sockets in /run/systemd/journal, and the shipped sockets' DirectoryMode=0755.
+            ("RuntimeDirectory=systemd/journal", {SYSTEM + "j.socket": "[Socket]\nListenStream=/run/systemd/journal/stdout\n"
+                                                                       "DirectoryMode=0755\n"}),
+            ("RuntimeDirectory=ok", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ok2/sock\nDirectoryMode=0777\n"}),
         )
         for unit, files in passing:
             with self.subTest(unit=unit, files=files):

@@ -2539,8 +2539,8 @@ class ConfFilesTest(unittest.TestCase):
                       "that unit's user would decide what it reads (#5167)" % rel, self.v())
         f.unlink()
         # The template form: a link held in an instance's directory, and not in the directory above it.
-        write(self.root, "usr/lib/systemd/system/capsule@.service", "[Service]\nStateDirectory=capsules/%i\n")
-        for rel, refused in (("var/lib/capsules/c1/held", True), ("var/lib/capsules/held", False)):
+        write(self.root, "usr/lib/systemd/system/cap@.service", "[Service]\nStateDirectory=capsules/c-%i\n")
+        for rel, refused in (("var/lib/capsules/c-1/held", True), ("var/lib/capsules/held", False)):
             with self.subTest(rel=rel):
                 f = link(self.root, rel, "/usr/lib/os-release")
                 self.assertEqual(any(l.startswith(rel + ": ") for l in check.violations(self.root)), refused, self.v())
@@ -5294,10 +5294,11 @@ class UplinkTest(unittest.TestCase):
     def test_journal_namespace_units_are_removed_from_the_image(self):
         # REQ: STO-2 (#5167): stock journald@.service's LogsDirectory=journal/%m.%i sits under /var/log/journal,
         # which tmpfiles.d gives group systemd-journal and an ACL, so the tree check refuses its way as not
-        # root's alone; no unit sets LogNamespace=, so its four units go.
+        # root's alone; no unit sets LogNamespace=, so its four units go. capsule@.service's capsules/%i may
+        # simplify to capsules, above every other capsule's directory; the box runs no capsules.
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         for unit in ("systemd-journald@.service", "systemd-journald@.socket", "systemd-journald-varlink@.socket",
-                     "systemd-journald-sync@.service"):
+                     "systemd-journald-sync@.service", "capsule@.service"):
             self.assertIn("/usr/lib/systemd/system/" + unit, removed)
         for f in list(MK.glob("mkosi.extra/**/*.service")) + list(MK.glob("mkosi.extra/**/*.conf")):
             self.assertNotIn("LogNamespace", f.read_text(errors="replace"), f)
