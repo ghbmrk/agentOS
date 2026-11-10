@@ -1,0 +1,47 @@
+name: strace-listen-eio-repro
+on:
+  push:
+    branches: [claude/project-thread-0rqofi]
+permissions: {}
+jobs:
+  repro:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Reproduce strace PTRACE_LISTEN EIO (#5364)
+        run: |
+          set -u
+          command -v strace >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q strace; }
+          uname -a; strace -V | head -1; cat /etc/os-release | grep PRETTY
+          cat > listen_eio.py <<'PY'
+          #!/usr/bin/env python3
+          """Reproduce strace's ptrace(PTRACE_LISTEN) EIO: a seized tracee in a signal-delivery-stop is
+          SIGKILLed before strace's PTRACE_GETSIGINFO, so strace takes the stop for a group-stop and
+          restarts it with PTRACE_LISTEN, which the kernel refuses with EIO (the tracee is then in its
+          PTRACE_EVENT_EXIT stop, not an event stop). strace stops tracing and exits 1.
+          
+              strace -f -qq -o /dev/null python3 listen_eio.py [ROUNDS]
+          """
+          import os, signal, subprocess, sys, time
+          
+          CHILD = ("import os, signal\nsignal.signal(signal.SIGUSR1, lambda *a: None)\n"
+                   "p = os.getpid()\nwhile True: os.kill(p, signal.SIGUSR1)\n")
+          rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
+          for i in range(1, rounds + 1):
+              ps = [subprocess.Popen([sys.executable, "-S", "-c", CHILD], start_new_session=True) for _ in range(4)]
+              time.sleep(0.03)
+              for p in ps:
+                  os.killpg(p.pid, signal.SIGKILL)
+              for p in ps:
+                  p.wait()
+              sys.stderr.write(f"round {i}\n") if i % 250 == 0 else None
+          print(f"no fault in {rounds} rounds", file=sys.stderr)
+          PY
+          for flags in "--seccomp-bpf" "--kill-on-exit --seccomp-bpf" ""; do
+            for r in 1 2 3; do
+              s=$(date +%s)
+              timeout 300 strace -f $flags -q -y -e trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir -e signal=none -o /dev/null python3 listen_eio.py 1500 2>err.txt; rc=$?
+              grep -v '^round' err.txt | head -2
+              echo "flags='$flags' try $r: rc=$rc after $(( $(date +%s)-s ))s"
+            done
+          done
