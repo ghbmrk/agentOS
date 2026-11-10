@@ -497,7 +497,7 @@ func TestApprovalGoesInQuietHoursAndCounts(t *testing.T) {
 func TestPacingSettingsNeedUnlock(t *testing.T) {
 	r := newRig(t, nil)
 	at23 := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
-	if got := r.say("QUIET 22-7"); !strings.Contains(got, "Send a code from your code generator") {
+	if got := r.say("QUIET 22-7"); got != waitingReply {
 		t.Fatalf("locked QUIET: %q", got)
 	}
 	if r.ch.Quiet(at23) {
@@ -506,11 +506,13 @@ func TestPacingSettingsNeedUnlock(t *testing.T) {
 	if a := r.agent.got(); len(a) != 0 {
 		t.Fatalf("setting reached the agent: %q", a)
 	}
-	// The code unlocks; RUN then applies the held setting.
+	// The page opens a session; the owner's run there applies the held
+	// setting.
 	r.unlock()
 	const quietSet = "Quiet hours set: 22:00 to 07:00. Texts wait until then, except security alerts, approval requests and the agent's questions. Reply QUIET OFF to end them."
-	if got := r.say("RUN"); got != quietSet {
-		t.Fatalf("QUIET after unlock: %q", got)
+	r.runHeld()
+	if got := r.inbox(); got != quietSet {
+		t.Fatalf("QUIET run from the page: %q", got)
 	}
 	if got := r.say("quiet 22-7."); got != quietSet {
 		t.Fatalf("QUIET: %q", got)

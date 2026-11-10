@@ -22,7 +22,7 @@ func replyKind(text string) string {
 	for _, k := range []struct{ prefix, kind string }{
 		{"Running.", "status"},
 		{"Stopped.", "status"},
-		{"Unlocked until ", "unlocked"},
+		{"That code is right", "right-code"},
 		{"You are already unlocked", "already-unlocked"},
 		{"Locked.", "locked"},
 		{"Wrong code.", "wrong-code"},
@@ -101,15 +101,16 @@ func kindLead(text string) string {
 
 // phoneRun is how far phone-control got, read from the carrier's log in
 // the order the texts went (E9). The step's texts, in order: the paired
-// phone's HELP probes until one is answered; one STATUS with a fresh code;
-// once its status reply is in, the stranger's STATUS with a fresh code;
-// then the paired phone's HELP, the barrier.
+// phone's HELP probes until one is answered; one fresh code alone; once
+// its reply is in, one STATUS; once that is answered, the stranger's fresh
+// code; then the paired phone's HELP, the barrier.
 type phoneRun struct {
-	probes       int  // HELP texts the paired phone sent before STATUS
-	probed       bool // a help reply came before STATUS was sent
+	probes       int  // HELP texts the paired phone sent before the code
+	probed       bool // a help reply came before the code was sent
+	codeSent     bool
+	codeRight    bool // the first reply to the code was right-code
 	statusSent   bool
-	unlocked     bool // the first reply to STATUS was the unlock
-	status       bool // and the status reply followed it
+	locked       bool // and STATUS then drew the locked reply
 	strangerSent bool // the stranger has texted
 	barrierSent  bool
 	barrier      bool // a help reply came after the stranger's text
@@ -122,11 +123,12 @@ type phoneRun struct {
 	err error
 }
 
-// readPhoneRun reads the log from index from onward. Before STATUS, a
+// readPhoneRun reads the log from index from onward. Before the code, a
 // help reply is a probe's answer. After it, help replies are skipped (a
 // late answer to an earlier probe) until the stranger has texted, and the
-// first other reply must be the unlock and the next the status: so the
-// session was locked and the fresh code unlocked it (CH-14). After the
+// first other reply must be right-code and the next, to STATUS, the
+// locked reply: so the session was locked, the code was checked, and a
+// right code by text opened no session (CH-11, CH-14). After the
 // stranger's text, the first reply to the paired phone must be help: the
 // box reads in arrival order, so a reply drawn by the stranger's text
 // comes before the barrier's (CH-1, CH-3). The owner line's recovery
@@ -145,9 +147,11 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 			switch {
 			case r.strangerSent:
 				r.barrierSent = true
-			case strings.HasPrefix(m.Text, "STATUS "):
+			case m.Text == "STATUS":
 				r.statusSent = true
-			case !r.statusSent:
+			case codeText.MatchString(m.Text):
+				r.codeSent = true
+			case !r.codeSent:
 				r.probes++
 			}
 		case m.From == strangerNum && m.To == boxNum:
@@ -161,6 +165,9 @@ func readPhoneRun(log []modem.SMS, from int) phoneRun {
 	return r
 }
 
+// codeText is a code alone, as the paired phone and the stranger text it.
+var codeText = regexp.MustCompile(`^[0-9]{6}$`)
+
 func (r *phoneRun) reply(text string) {
 	k := replyKind(text)
 	switch {
@@ -173,7 +180,7 @@ func (r *phoneRun) reply(text string) {
 		}
 		r.noticeTexts += texts
 		r.noticeRequests += requests
-	case !r.statusSent:
+	case !r.codeSent:
 		if k == "help" {
 			r.probed = true
 			return
@@ -187,18 +194,20 @@ func (r *phoneRun) reply(text string) {
 		r.barrier = true
 	case k == "help":
 		// A late answer to an earlier probe.
-	case !r.unlocked && k == "unlocked":
-		r.unlocked = true
-	case !r.unlocked && k == "status":
-		r.err = errors.New("status reply with no unlock first: the session was not locked")
-	case !r.unlocked && k == "already-unlocked":
-		r.err = errors.New("already unlocked: the code unlocked nothing")
-	case !r.unlocked:
-		r.err = fmt.Errorf("STATUS with a fresh code drew %s, not the unlock", kindLead(text))
-	case !r.status && k == "status":
-		r.status = true
+	case !r.codeRight && k == "right-code":
+		r.codeRight = true
+	case !r.codeRight && k == "status":
+		r.err = errors.New("status reply to a code: the session was not locked")
+	case !r.codeRight && k == "already-unlocked":
+		r.err = errors.New("already unlocked: the session was not locked")
+	case !r.codeRight:
+		r.err = fmt.Errorf("a fresh code drew %s, not right-code", kindLead(text))
+	case !r.locked && k == "locked":
+		r.locked = true
+	case !r.locked && k == "status":
+		r.err = errors.New("status reply after the code: a texted code opened a session")
 	default:
-		r.err = fmt.Errorf("after the unlock, %s instead of the status reply", kindLead(text))
+		r.err = fmt.Errorf("after right-code, %s instead of the locked reply", kindLead(text))
 	}
 }
 
@@ -301,12 +310,14 @@ func controlErr(log []modem.SMS, from int) error {
 	switch {
 	case !r.probed:
 		return fmt.Errorf("no reply to the paired number after %d HELP attempt(s)", r.probes)
+	case !r.codeSent:
+		return errors.New("the code was not sent")
+	case !r.codeRight:
+		return errors.New("no reply to a fresh code")
 	case !r.statusSent:
 		return errors.New("STATUS was not sent")
-	case !r.unlocked:
-		return errors.New("no reply to STATUS with a fresh code")
-	case !r.status:
-		return errors.New("the unlock came with no status reply")
+	case !r.locked:
+		return errors.New("no locked reply to STATUS")
 	case !r.strangerSent:
 		return errors.New("the unpaired number did not text")
 	case !r.barrier:

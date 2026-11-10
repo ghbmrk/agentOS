@@ -96,6 +96,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -609,6 +610,21 @@ def planned_targets(planned, pkg, added, tests):
     return (None, f"the plan {problem}") if problem else (targets, None)
 
 
+# What gremlins v0.6.0 prints, exiting 0 and writing no -o file, when it finds no mutant (#5173).
+NO_RESULTS = "No results to report."
+
+
+def unleash(cmd, **kw):
+    """Run gremlins with its output shown as it runs; (.returncode, .none: it printed NO_RESULTS)."""
+    none = False
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw) as p:
+        for line in p.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            none = none or line.strip() == NO_RESULTS
+    return types.SimpleNamespace(returncode=p.returncode, none=none)
+
+
 def cmd_run(args):
     pkgs = args.pkg or gated_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
@@ -659,15 +675,18 @@ def cmd_run(args):
             marked = record or args.of > 1
             try:
                 with marked_base(pkg, mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
-                    r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
-                                        *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+                    r = unleash(["gremlins", "unleash", str(BROKER / pkg), "-D", base, "--config", str(cfg),
+                                 *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
             except RuntimeError as e:
                 print(f"mutgate: no marked base for broker/{pkg}/: {e}", file=sys.stderr)
                 bad += 1
                 continue
         else:
-            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
-                               cwd=BROKER, env=env)
+            r = unleash(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
+                        cwd=BROKER, env=env)
+        if r.returncode == 0 and r.none and not dest.exists():
+            # Gremlins found no mutant, not even a SKIPPED one, and wrote no -o file (#5173): its zero.
+            dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0}))
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1

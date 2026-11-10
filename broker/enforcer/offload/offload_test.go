@@ -420,3 +420,14 @@ func TestOneDeadlinePerCall(t *testing.T) {
 		}
 	}
 }
+
+// TestBitsetRefusesAMalformedBit (#5140): a bit with bytes past its
+// last attribute is refused, not read by the name before them. Catches a
+// bitset that reads a bit it did not parse whole.
+func TestBitsetRefusesAMalformedBit(t *testing.T) {
+	trailing := attr(unix.ETHTOOL_A_BITSET_BITS|unix.NLA_F_NESTED, attr(unix.ETHTOOL_A_BITSET_BITS_BIT|unix.NLA_F_NESTED,
+		append(attr(unix.ETHTOOL_A_BITSET_BIT_NAME, []byte("rx-gro\x00")), 1, 2)))
+	if got, err := bitset(append(attr(unix.ETHTOOL_A_BITSET_NOMASK, nil), trailing...)); err == nil {
+		t.Fatalf("a bit with bytes past its attributes was read: %v", got)
+	}
+}

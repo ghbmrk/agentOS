@@ -97,14 +97,17 @@ func TestLostPhoneReEnrollsTheCodeGeneratorWithTheRecoveryKey(t *testing.T) {
 	must(t, store.Save(owner.State{UnlockedUntil: t0.Add(24 * time.Hour)}))
 	must(t, EndSession(store, false))
 	c := openChannel(t, ownerNum, seed, store, t0)
-	if got := c.say(ownerNum, "STATUS"); !strings.Contains(got, "code generator") {
+	if got := c.say(ownerNum, "STATUS"); !strings.HasPrefix(got, "Locked.") {
 		t.Fatalf("session survived re-enrollment: %q", got)
 	}
-	if got := c.say(ownerNum, totp(x.seed, c.now)); strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("the lost phone's code unlocked: %q", got)
+	// Sessions open on the page (CH-14, D-311).
+	c.now = c.now.Add(31 * time.Second)
+	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err == nil {
+		t.Fatal("the lost phone's code opened a session")
 	}
-	if got := c.say(ownerNum, totp(seed, c.now)); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("new seed: %q", got)
+	c.now = c.now.Add(31 * time.Second)
+	if _, _, err := c.ch.LocalSignIn(totp(seed, c.now)); err != nil {
+		t.Fatalf("new seed: %v", err)
 	}
 }
 
@@ -157,11 +160,16 @@ func TestLostNumberMovesWithTheRecoveryKeyAndTheOldNumberCanDoNothing(t *testing
 	if c.eng.stopped || len(c.agent.got) != 0 {
 		t.Fatal("the old number had an effect")
 	}
-	if got := c.say(newNum, "STATUS"); !strings.Contains(got, "code generator") {
+	if got := c.say(newNum, "STATUS"); !strings.HasPrefix(got, "Locked.") {
 		t.Fatalf("new number unlocked without a code: %q", got)
 	}
-	if got := c.say(newNum, totp(x.seed, c.now)); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("new number unlock: %q", got)
+	// The new number's session still opens only on the page (CH-14).
+	if got := c.say(newNum, totp(x.seed, c.now)); c.ch.SessionUnlocked(c.now) {
+		t.Fatalf("a texted code opened a session: %q", got)
+	}
+	c.now = c.now.Add(31 * time.Second)
+	if _, _, err := c.ch.LocalSignIn(totp(x.seed, c.now)); err != nil || !c.ch.SessionUnlocked(c.now) {
+		t.Fatalf("new number unlock on the page: %v", err)
 	}
 }
 

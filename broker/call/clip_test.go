@@ -344,3 +344,41 @@ func TestTokenReadEndsWithTheLoop(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// The turn reads its clip deadline once: a clock whose channel has a
+// second value (Config.After is injected) does not fire the deadline
+// again, so the loop never spins on a spent deadline.
+func TestTheClipDeadlineFiresOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newRig(t, nil)
+		r.bubble = true
+		r.cfg.Answerer = answerFunc(func(ctx context.Context, _ call.Ask) (<-chan string, error) {
+			<-ctx.Done() // slow: the clip covers it
+			return nil, ctx.Err()
+		})
+		moment := make(chan time.Time)
+		r.cfg.After = func(time.Duration) <-chan time.Time { return moment }
+		r.run(call.P2)
+		r.say("q")
+		moment <- time.Time{}
+		if got := r.next(); got != "CLIP:moment" {
+			t.Fatalf("first audio %q", got)
+		}
+		again, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			select {
+			case moment <- time.Time{}:
+				close(again)
+			case <-done:
+			}
+		}()
+		synctest.Wait()
+		select {
+		case <-again:
+			t.Fatal("the turn read its deadline a second time")
+		default:
+		}
+		close(done)
+		r.hangup()
+	})
+}

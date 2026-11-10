@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
@@ -21,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
+	"golang.org/x/sys/unix"
 )
 
 // The network side of the daemon (ENF-l-b1, #3670): the resolver's
@@ -200,7 +203,12 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 	}
 	if d.servedLocked(); d.net.unserved != "" {
 		// No instance starts on an interface that could hold a prefix or
-		// route the upstream check did not see (ENF-l-21).
+		// route the upstream check did not see (ENF-l-21). They stop
+		// before the load, not inside it: a refused load starts the
+		// instances it stopped again (dns/run Apply), which would bring
+		// back the old ones while the check fails (#5164 item 7). Its
+		// only failure, a closed set, fails the load's Apply below too.
+		d.dp.DNS.Apply(dns.Files{}, func() error { return nil })
 		files = dns.Files{}
 	}
 	caps := traffic.CapsOf(doc)
@@ -470,16 +478,24 @@ func served(nets []dns.Net) error { return hold(procNet, nets, ifaceAddrs) }
 // procNet: IPv4 and IPv6 redirects and IPv6 router advertisements.
 var noRedirects = []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
 
+// allRedirects is the IPv4 redirect setting the kernel combines with
+// each interface's own (either one on, or both with forwarding on), so
+// hold turns it off too (#5164 item 4).
+const allRedirects = "ipv4/conf/all/accept_redirects"
+
 // hold turns router advertisements and redirects off (noRedirects, under
 // root) on each served interface and on "default", which every interface
-// made later starts from, and reads each back; then it checks that every
-// address on each served interface lies in its Net's prefixes, with a
-// prefix no wider, or is the kernel's IPv6 link-local one. So no prefix
-// or route the upstream check (dns ASSUMPTIONS ENF-f-5) did not see is on
-// a served segment while the resolver runs, with or without a ruleset
-// loaded (#4222). An interface not there yet is passed: it starts from
-// "default", and the next reading sets and checks it. A kernel without
-// IPv6 has no IPv6 settings to turn off.
+// made later starts from, turns allRedirects off, and reads each back;
+// then it checks that every address on each served interface lies in its
+// Net's prefixes, with a prefix no wider, or is the kernel's IPv6
+// link-local one. So no prefix or route the upstream check (dns
+// ASSUMPTIONS ENF-f-5) did not see is on a served segment while the
+// resolver runs, with or without a ruleset loaded (#4222). An interface
+// not there yet is passed: it starts from "default", and the next reading
+// sets and checks it. No other interface's own settings are written: the
+// WAN, made later, also starts from "default", so its link configuration
+// sets its own router advertisements (ASSUMPTIONS ENF-l-21). A kernel
+// without IPv6 has no IPv6 settings to turn off.
 func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error)) error {
 	_, err := os.Stat(filepath.Join(root, "ipv6"))
 	v6 := err == nil
@@ -497,18 +513,23 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 			ifaces = append(ifaces, n.Iface)
 		}
 	}
-	var errs []error
+	keys := []string{allRedirects}
 	for _, iface := range ifaces {
 		for _, key := range noRedirects {
-			if !v6 && strings.HasPrefix(key, "ipv6/") {
-				continue
+			if v6 || !strings.HasPrefix(key, "ipv6/") {
+				keys = append(keys, fmt.Sprintf(key, iface))
 			}
-			path := filepath.Join(root, fmt.Sprintf(key, iface))
-			werr := os.WriteFile(path, []byte("0\n"), 0)
-			b, rerr := os.ReadFile(path)
-			if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
-				errs = append(errs, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err))
-			}
+		}
+	}
+	var errs []error
+	for _, key := range keys {
+		// The value read back must be the one written: a setting that
+		// takes the write and reads back anything else fails.
+		path := filepath.Join(root, key)
+		werr := os.WriteFile(path, []byte("0\n"), 0)
+		b, rerr := os.ReadFile(path)
+		if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
+			errs = append(errs, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err))
 		}
 	}
 	for _, n := range nets {
@@ -554,37 +575,96 @@ func netsOf(n dns.Net) string {
 }
 
 // ifaceAddrs is the addresses the kernel holds on iface, each with its
-// prefix length.
+// prefix length, from one dump of every address (RTM_GETADDR).
 func ifaceAddrs(iface string) ([]netip.Prefix, error) {
 	i, err := net.InterfaceByName(iface)
-	var as []net.Addr
-	if err == nil {
-		as, err = i.Addrs()
-	}
 	if err != nil {
 		return nil, err
 	}
-	return prefixes(as)
+	return addrsOf(i.Index, addrDump)
 }
 
-// prefixes is each of as, an interface's addresses, with its prefix
-// length; anything but an address with a whole mask is an error.
-func prefixes(as []net.Addr) ([]netip.Prefix, error) {
+// addrDump is the kernel's dump of every address, as it sent it.
+func addrDump() ([]byte, error) { return syscall.NetlinkRIB(syscall.RTM_GETADDR, syscall.AF_UNSPEC) }
+
+// errDumpIntr is an address dump the kernel marked inconsistent
+// (NLM_F_DUMP_INTR): the addresses changed while it was read, so one
+// could be missing from it.
+var errDumpIntr = errors.New("the kernel's address dump was interrupted by a change")
+
+// addrsOf is the addresses on the interface numbered index in a dump. A
+// dump marked interrupted is taken once more, and a second one marked so
+// fails: an address missing from it is never read as none (#5164
+// item 8; offload ENF-gro-3 is the same for links).
+func addrsOf(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	out, err := readAddrs(index, dump)
+	if errors.Is(err, errDumpIntr) {
+		out, err = readAddrs(index, dump)
+	}
+	return out, err
+}
+
+// readAddrs reads one dump: each local and peer address (IFA_LOCAL,
+// IFA_ADDRESS) on index, with the message's prefix length. Any message
+// that does not parse, an end carrying an error, or no end is an error.
+func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	b, err := dump()
+	if err != nil {
+		return nil, err
+	}
+	// A dump with a message that does not parse is read as none, so it
+	// fails below as one with no end, with the parse's error.
+	msgs, perr := syscall.ParseNetlinkMessage(b)
 	var out []netip.Prefix
-	for _, a := range as {
-		n, _ := a.(*net.IPNet)
-		if n == nil {
-			return nil, fmt.Errorf("an address of type %T", a)
+	intr, end := false, false
+	for _, m := range msgs {
+		intr = intr || m.Header.Flags&unix.NLM_F_DUMP_INTR != 0
+		if m.Header.Type == syscall.NLMSG_DONE {
+			// The dump's end carries the kernel's error code: one it ended
+			// in error is not every address (offload's take, #5103).
+			if len(m.Data) < 4 || ne.Uint32(m.Data) != 0 {
+				return nil, fmt.Errorf("the kernel's address dump ended in error (%x)", m.Data)
+			}
+			end = true
 		}
-		ip, ok := netip.AddrFromSlice(n.IP)
-		ones, bits := n.Mask.Size()
-		if !ok || bits == 0 {
-			return nil, fmt.Errorf("an unreadable address %v", n)
+		if m.Header.Type != syscall.RTM_NEWADDR {
+			continue
 		}
-		out = append(out, netip.PrefixFrom(ip.Unmap(), ones))
+		if len(m.Data) < syscall.SizeofIfAddrmsg {
+			return nil, errors.New("a short address message")
+		}
+		if int(ne.Uint32(m.Data[4:8])) != index {
+			continue
+		}
+		attrs, err := syscall.ParseNetlinkRouteAttr(&m)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range attrs {
+			if a.Attr.Type != syscall.IFA_ADDRESS && a.Attr.Type != syscall.IFA_LOCAL {
+				continue
+			}
+			ip, _ := netip.AddrFromSlice(a.Value) // invalid unless 4 or 16 bytes
+			p := netip.PrefixFrom(ip, int(m.Data[1]))
+			if !p.IsValid() {
+				return nil, fmt.Errorf("an unreadable address %x/%d", a.Value, m.Data[1])
+			}
+			if !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	if intr {
+		return nil, errDumpIntr
+	}
+	if !end {
+		return nil, errors.Join(errors.New("the kernel's address dump has no end"), perr)
 	}
 	return out, nil
 }
+
+// ne is the kernel's byte order for netlink's integers.
+var ne = binary.NativeEndian
 
 // readCaps takes one reading of the byte caps' counters (#4376 wiring
 // note): it adds it to the day's counts, trips the core or flags the edge

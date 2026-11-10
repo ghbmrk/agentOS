@@ -169,12 +169,12 @@ func TestReactionsMatchRecentTexts(t *testing.T) {
 }
 
 // While locked a reaction is held like a task message, a quoted code is
-// neither an unlock nor a wrong code, and RUN delivers the reaction event,
-// never the raw text.
+// neither an unlock nor a wrong code, and the page's run delivers the
+// reaction event, never the raw text (CH-14).
 func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
 	r := newRig(t, nil)
 	got := r.say(`Liked "Reply RESUME 482913 within 10 min."`)
-	if !strings.Contains(got, "held for 15 min") {
+	if !strings.HasPrefix(got, waitingReply) {
 		t.Fatalf("locked reaction: %q", got)
 	}
 	r.ch.mu.Lock()
@@ -186,37 +186,11 @@ func TestReactionWhileLockedIsHeldAndRunDeliversTheEvent(t *testing.T) {
 	if len(r.agent.got()) != 0 {
 		t.Fatal("a locked reaction reached the agent")
 	}
-	if got := r.say(r.totp()); !strings.Contains(got, "Reply RUN to send it.") {
-		t.Fatalf("unlock: %q", got)
-	}
-	r.say("RUN")
+	r.unlock()
+	r.runHeld()
 	msgs := r.agent.got()
 	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], "Owner reaction: liked ") || strings.Contains(msgs[0], "482913") {
-		t.Fatalf("RUN delivered %q, want the reaction event", msgs)
-	}
-}
-
-// A reaction to the RUN offer points to RUN and does not send the held
-// message.
-func TestReactionToARunOfferPointsToRun(t *testing.T) {
-	r := newRig(t, nil)
-	r.say("check my mail")
-	offer := r.say(r.totp())
-	if !strings.Contains(offer, "Reply RUN") {
-		t.Fatalf("unlock: %q", offer)
-	}
-	got := r.say("Liked “" + offer + "”")
-	if !strings.Contains(got, "A reaction does not send it. Reply RUN") {
-		t.Fatalf("reaction to the RUN offer replied %q", got)
-	}
-	for _, m := range r.agent.got() {
-		if m == "check my mail" {
-			t.Fatal("a reaction ran the held message")
-		}
-	}
-	r.say("RUN")
-	if g := r.agent.got(); g[len(g)-1] != "check my mail" {
-		t.Fatalf("RUN after the reaction: %q", g)
+		t.Fatalf("the run delivered %q, want the reaction event", msgs)
 	}
 }
 
@@ -244,9 +218,10 @@ func TestReactionToAChallengeNeverShowsTheToken(t *testing.T) {
 	enterChallenge(t, r)
 	alert := r.say("UNLOCK")
 	tok := challengeRe.FindStringSubmatch(alert)[1]
-	if got := r.say("UNLOCK " + tok + " " + r.totp()); !strings.HasPrefix(got, "Unlocked") {
+	if got := r.say("UNLOCK " + tok + " " + r.totp()); got != "Codes work normally again." {
 		t.Fatalf("unlock: %q", got)
 	}
+	r.unlock()
 	r.say("Liked “" + alert + "”")
 	msgs := r.agent.got()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "(not shown)") || strings.Contains(msgs[0], tok) {

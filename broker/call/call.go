@@ -433,28 +433,7 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 		}
 		return true
 	}
-	// take plays s and reports whether the answer goes on.
-	take := func(s sound, ok bool) bool {
-		switch {
-		case !ok:
-			return false
-		case s.err != nil:
-			if ctx.Err() != nil { // stopped, not failed
-				return false
-			}
-			t.Err = s.err
-			play(cfg.Clips.Failed, false)
-			return false
-		case s.held:
-			t.Held = true
-			play(cfg.Clips.Held, false)
-			return false
-		case !play(s.pcm, true):
-			return false
-		}
-		t.Sentences++
-		return true
-	}
+	take := func(s sound, ok bool) bool { return cfg.take(ctx, s, ok, t, play) }
 	for {
 		select {
 		case <-ctx.Done():
@@ -484,6 +463,33 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 	}
 }
 
+// take plays s, one sound from the producer, into t and reports whether
+// the answer goes on. An error that arrives once ctx is done is a stop, not
+// a failure. The turn receives an error only before ctx ends (a send loses
+// to ctx.Done after), so that case is a stop landing between the receive
+// and the check here; it is tested on take itself.
+func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func([]byte, bool) bool) bool {
+	switch {
+	case !ok:
+		return false
+	case s.err != nil:
+		if ctx.Err() != nil { // stopped, not failed
+			return false
+		}
+		t.Err = s.err
+		play(cfg.Clips.Failed, false)
+		return false
+	case s.held:
+		t.Held = true
+		play(cfg.Clips.Held, false)
+		return false
+	case !play(s.pcm, true):
+		return false
+	}
+	t.Sentences++
+	return true
+}
+
 // produce writes the answer's sentences to out, each checked and
 // synthesized, and closes out at the end of the answer. It stops at the
 // first hold or error, which it sends.
@@ -496,6 +502,11 @@ func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 		case <-ctx.Done():
 			return false
 		}
+	}
+	// last sends s, a hold or an error, which ends the answer.
+	last := func(s sound) bool {
+		send(s)
+		return false
 	}
 	chunks, err := cfg.Answerer.Answer(ctx, a)
 	if err != nil {
@@ -513,13 +524,11 @@ func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 		// answer has said, so nothing straddles a cut, however many
 		// sentences it spans (rule 1; Security on #4944).
 		if cfg.held(s) || (said != "" && cfg.held(said+" "+s)) {
-			send(sound{held: true})
-			return false
+			return last(sound{held: true})
 		}
 		pcm, err := cfg.Synthesizer.Speak(ctx, s)
 		if err != nil {
-			send(sound{err: err})
-			return false
+			return last(sound{err: err})
 		}
 		said = strings.TrimSpace(said + " " + s)
 		return send(sound{pcm: pcm})
@@ -567,11 +576,10 @@ func Cut(s string) (sentence, rest string, cut bool) {
 		case '\n':
 			return s[:i], s[i+1:], true
 		case '.', '!', '?':
+			// At the end of s, s[j:] is "", which decodes as RuneError, not space.
 			j := i + utf8.RuneLen(r)
-			if j < len(s) {
-				if n, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(n) {
-					return s[:j], s[j:], true
-				}
+			if n, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(n) {
+				return s[:j], s[j:], true
 			}
 		}
 	}

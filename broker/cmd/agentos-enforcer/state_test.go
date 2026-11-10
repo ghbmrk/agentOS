@@ -26,6 +26,9 @@ func TestRevokeUnsaved(t *testing.T) {
 		!strings.Contains(x.logText(), "revocation is in force but not saved") {
 		t.Fatalf("an unsaved revocation: %d %s", w.Code, w.Body)
 	}
+	if x.page("Key") != "unsaved" { // #5106: neither live nor saved after a reload
+		t.Fatal("home does not show the revocation in force but not saved")
+	}
 	if _, ok := x.dial(addr, x.core); ok {
 		t.Fatal("an unsaved revocation is not in force for the run")
 	}

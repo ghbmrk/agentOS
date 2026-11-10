@@ -41,10 +41,11 @@ func TestQuestionAnswersReachTheHookUnlockedAndStripped(t *testing.T) {
 	}
 }
 
-// W9a (UX R1 on #95): the two-step locked path. A reply to a question
-// sent while locked is held; a code-only unlock offers it; RUN sends it to
-// the answer hook, never to the agent.
-func TestALockedQuestionAnswerRunsOnlyThroughTheTwoSteps(t *testing.T) {
+// W9a (UX R1 on #95): the locked path. A reply to a question sent while
+// locked is held for the page (CH-14); neither RUN nor a code by text
+// sends it; the owner's run on the page sends it to the answer hook, never
+// to the agent.
+func TestALockedQuestionAnswerRunsOnlyFromThePage(t *testing.T) {
 	var got []string
 	r := newRig(t, nil)
 	r.edit = func(c *Config) {
@@ -58,19 +59,29 @@ func TestALockedQuestionAnswerRunsOnlyThroughTheTwoSteps(t *testing.T) {
 		t.Fatalf("locked: %q", out)
 	}
 	if out := r.say("RUN"); len(got) != 0 {
-		t.Fatalf("RUN before the unlock: %q, hook got %q", out, got)
+		t.Fatalf("RUN while locked: %q, hook got %q", out, got)
 	}
-	if out := r.say(r.totp()); !strings.Contains(out, `Held: "Q104 yes". Reply RUN to send it.`) || len(got) != 0 {
-		t.Fatalf("unlock: %q, hook got %q", out, got)
+	if out := r.say(r.totp()); !strings.Contains(out, "no code by text opens a session") || len(got) != 0 {
+		t.Fatalf("code by text: %q, hook got %q", out, got)
 	}
-	if out := r.say("RUN"); out != "Thanks. Q104 answered." {
-		t.Fatalf("RUN: %q", out)
+	r.unlock()
+	msgs, _, _ := r.ch.LocalHeld()
+	var q string
+	var shown []string
+	for _, m := range msgs {
+		shown = append(shown, m.ID)
+		if m.Text == "Q104 yes" {
+			q = m.ID
+		}
+	}
+	if q == "" {
+		t.Fatalf("answer not held: %+v", msgs)
+	}
+	if n, err := r.ch.LocalRunHeld(shown, []string{q}); n != 1 || err != nil {
+		t.Fatalf("run: %d %v", n, err)
 	}
 	if len(got) != 1 || got[0] != "Q104 yes" {
 		t.Fatalf("hook got %q", got)
-	}
-	if out := r.say("RUN"); out != "Nothing is held." || len(got) != 1 {
-		t.Fatalf("RUN twice: %q, hook got %q", out, got)
 	}
 	if n := len(r.agent.got()); n != 0 {
 		t.Fatalf("an answer reached the agent: %d", n)

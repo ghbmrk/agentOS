@@ -104,6 +104,15 @@ class ProvenanceTest(unittest.TestCase):
             self.assertTrue(p.ours("/etc/agentos/z.conf"))
             self.assertFalse(p.ours("/usr/share/p/z.conf"))
 
+    def test_an_alias_named_through_a_linked_unit_directory_is_an_alias(self):
+        # #4779 L3 release 1: p's own directory is resolved in the tree before it is matched to a unit
+        # directory, so /lib/systemd/system/a.service, an alias of b, keeps b's provenance
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prov(d, {"/lib": "-> usr/lib", LIB + "a.service": "-> b.service", LIB + "b.service": "b"},
+                          {LIB + "b.service"})
+            self.assertEqual(p.alias_target("/lib/systemd/system/a.service"), LIB + "b.service")
+            self.assertFalse(p.ours("/lib/systemd/system/a.service"))
+
     def test_a_file_not_listed_as_a_packages_is_ours(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.prov(d, {LIB + "y.service": "y", LIB + "z.service": "z"}, {LIB + "y.service"})
@@ -141,6 +150,69 @@ class DpkgTest(unittest.TestCase):
             self.assertFalse(packaged(ETC + "bar.service.d/x.conf"))
             self.assertFalse(packaged("/etc/real.conf"))
 
+    def test_a_merged_link_counts_only_to_usr_of_its_own_name(self):
+        # #4779 Security R-b: /lib -> etc made our /etc/systemd/system/bar.service.d/x.conf the package's
+        # lib/systemd/system/bar.service.d/x.conf; and a link of ours before a merged one (#4779 L3 release 1)
+        for name, files, listed, mine in (
+                ("a top link to /etc", {"/lib": "-> etc"}, "lib/systemd/system/bar.service.d/x.conf",
+                 ETC + "bar.service.d/x.conf"),
+                ("a top link to another /usr name", {"/lib": "-> usr/share"}, "lib/systemd/system/bar.service.d/x.conf",
+                 "/usr/share/systemd/system/bar.service.d/x.conf"),
+                ("a top link through a link of ours", {"/lib": "-> l", "/l": "-> usr/lib"},
+                 "lib/systemd/system/bar.service.d/x.conf", LIB + "bar.service.d/x.conf"),
+                ("a link of ours before a merged one", {"/etc/l": "-> /lib", "/lib": "-> usr/lib"},
+                 "etc/l/systemd/system/bar.service.d/x.conf", LIB + "bar.service.d/x.conf")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(files, **{mine: "x"}))
+                out = pathlib.Path(d)
+                self.write(out, "%s  %s\n" % (md5("x"), listed), "Package: p\n")
+                self.assertFalse(r.dpkg_packaged(out)(v)(mine))
+        with tempfile.TemporaryDirectory() as d:  # the control: /lib -> usr/lib as the package laid it out
+            v = tree(d, {"/lib": "-> usr/lib", LIB + "bar.service.d/x.conf": "x"})
+            out = pathlib.Path(d)
+            self.write(out, "%s  lib/systemd/system/bar.service.d/x.conf\n" % md5("x"), "Package: p\n")
+            self.assertTrue(r.dpkg_packaged(out)(v)(LIB + "bar.service.d/x.conf"))
+
+    def test_a_link_of_ours_on_a_listed_path_is_a_mask(self):
+        # #5072 Security round 6: a link of ours on a unit directory, a parent of one or a listed drop-in
+        # directory took the listed path out of want and so out of listed, and its files read as ours
+        sock = "systemd-udevd-control.socket"
+        for name, files, want in (
+                ("a link on a parent of a unit directory",
+                 {"/usr/lib/systemd": "-> systemd.real", "/usr/lib/systemd.real/system/" + sock: "open"}, [LIB + sock, LIB + sock + ".d/p.conf"]),
+                ("a link on a unit directory",
+                 {LIB[:-1]: "-> /usr/share/s", "/usr/share/s/" + sock: "open"}, [LIB + sock, LIB + sock + ".d/p.conf"]),
+                ("a link on a listed drop-in directory, its file gone",
+                 {LIB + sock: "kept", LIB + sock + ".d": "-> /etc/agentos-d"}, [LIB + sock + ".d/p.conf"]),
+                ("a listed fragment replaced by a link of ours",
+                 {LIB + sock: "-> /etc/agentos/" + sock, "/etc/agentos/" + sock: "open", LIB + sock + ".d/p.conf": "drop"},
+                 [LIB + sock]),
+                ("a listed drop-in replaced by a link to /dev/null",
+                 {LIB + sock: "kept", LIB + sock + ".d/p.conf": "-> /dev/null", "/dev/null": ""}, [LIB + sock + ".d/p.conf"]),
+                ("the control: as dpkg laid it out, through /lib -> usr/lib",
+                 {LIB + sock: "kept", LIB + sock + ".d/p.conf": "drop"}, [])):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, dict(files, **{"/lib": "-> usr/lib"}))
+                out = pathlib.Path(d)
+                self.write(out, "%s  lib/systemd/system/%s\n%s  usr/lib/systemd/system/%s.d/p.conf\n"
+                           % (md5("kept"), sock, md5("drop"), sock), "Package: p\n")
+                packaged = r.dpkg_packaged(out)(v)
+                self.assertEqual(sorted(packaged.listed), [LIB + sock, LIB + sock + ".d/p.conf"])
+                units = shown({sock: ("loaded", LIB + sock, [])})
+                self.assertEqual([m["path"] for m in r.unread(v, units, r.unit_dirs(v), packaged)], want)
+
+    def test_a_listed_path_keeps_a_top_link_that_is_not_merged(self):
+        # #5072 Security round 6: with /lib -> etc, dpkg's lib/systemd/system/x.service is our /etc file,
+        # held as reached by a link, not read as a /usr/lib path that is gone
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/lib": "-> etc", ETC + "x.service": "x"})
+            out = pathlib.Path(d)
+            self.write(out, "%s  lib/systemd/system/x.service\n" % md5("x"), "Package: p\n")
+            packaged = r.dpkg_packaged(out)(v)
+            self.assertEqual(sorted(packaged.listed), ["/lib/systemd/system/x.service"])
+            self.assertEqual([m["path"] for m in r.unread(v, {}, r.unit_dirs(v), packaged)],
+                             ["/lib/systemd/system/x.service"])
+
     def test_no_listed_files_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             self.write(pathlib.Path(d), "", "Package: p\n")
@@ -159,7 +231,7 @@ def shown(units):
     for n, (state, frag, drops, *more) in units.items():
         names = [n] + (more[0] if more else [])
         out[n] = {"Id": n, "Names": " ".join(names), "LoadState": state, "FragmentPath": frag,
-                  "DropInPaths": " ".join(drops)}
+                  "DropInPaths": " ".join(drops), "Triggers": "", "TriggeredBy": ""}
         for a in names[1:]:
             out[a] = dict(out[n])
     return out
@@ -210,6 +282,186 @@ class RecordsTest(unittest.TestCase):
                 ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])
             self.assertIsNone(got["fstab"])
 
+    def test_a_loaded_unit_with_no_fragment_reads_only_its_files_of_ours_alone(self):
+        # #4779 L3 release 1: usr.mount from mountinfo loads with no fragment; a package's drop-in on it
+        # is not printed, one of ours is, alone
+        files = {"/usr/lib/systemd/system/usr.mount.d/p.conf": "p", ETC + "usr.mount.d/z.conf": "z"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            got = r.records(v, shown({"usr.mount": ("loaded", "", [ETC + "usr.mount.d/z.conf",
+                                                                "/usr/lib/systemd/system/usr.mount.d/p.conf"])}),
+                            dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual([(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]],
+                             [("usr.mount", True, [(ETC + "usr.mount.d/z.conf", True)])])
+
+    def test_the_lint_instance_in_error_fails_the_run(self):
+        # #4821 Security R1: its template's files were not read, so a drop-in of ours that masks a
+        # package's User= line in a shared directory, and what the package's lines run, go unseen
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "t@agentos-unit-lint.service: load state error"):
+                self.recs(d, {"t@agentos-unit-lint.service": ("error", "", [])})
+        with tempfile.TemporaryDirectory() as d:  # another instance in error is judged as itself
+            got = self.recs(d, {"t@x.service": ("error", LIB + "t@.service", [])})["units"]
+            self.assertEqual([u["alone"] for u in got if u["unit"] == "t@x.service"], [False])
+
+    def test_only_the_lint_instance_itself_is_read_as_it(self):
+        # #4779 round 4 M5: x@fooagentos-unit-lint is an instance of its own, judged as itself
+        with tempfile.TemporaryDirectory() as d:
+            got = self.recs(d, {"t@fooagentos-unit-lint.service": ("bad-setting", LIB + "t@.service", []),
+                                "t@fooagentos-unit-lint.socket": ("error", "", [])})
+            self.assertEqual([(u["unit"], u["alone"]) for u in got["units"]
+                              if u["unit"].startswith("t@foo")], [("t@fooagentos-unit-lint.service", False)])
+
+    def test_a_socket_feeding_a_packages_service_is_a_packages(self):
+        # #5072 Security 1: by its name (an /etc fragment of ours hiding a package's), by the service it
+        # activates (Service=, or a template's), or by a package's service taking it (Sockets=)
+        files = {LIB + "u.socket": "p", ETC + "u.socket": "o", LIB + "u.service": "p", ETC + "a.socket": "o",
+                 ETC + "b.socket": "o", ETC + "c.socket": "o", ETC + "c.service": "o", LIB + "t@.service": "p",
+                 ETC + "t@1.socket": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({n: ("loaded", f, []) for n, f in (
+                ("u.socket", ETC + "u.socket"), ("u.service", LIB + "u.service"), ("a.socket", ETC + "a.socket"),
+                ("b.socket", ETC + "b.socket"), ("c.socket", ETC + "c.socket"), ("c.service", ETC + "c.service"),
+                ("t@1.socket", ETC + "t@1.socket"))})
+            units["a.socket"]["Triggers"] = "u.service"
+            units["u.service"]["TriggeredBy"] = "u.socket b.socket"
+            units["c.socket"]["Triggers"] = "c.service"
+            units["t@1.socket"]["Triggers"] = "t@1.service"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["package"]),
+                             ["a.socket", "b.socket", "t@1.socket", "u.socket"])
+
+    def test_a_hidden_package_socket_by_its_name_alone_and_the_service_it_feeds(self):
+        # #5072 L3 round 2: a package's name hidden by a fragment of ours, with no Triggers or TriggeredBy,
+        # and a package's name reached only through an alias in Names; and a service of ours fed by such a
+        # socket (Security round 2)
+        files = {LIB + "u.socket": "p", ETC + "u.socket": "o", LIB + "w.socket": "p", ETC + "x.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"u.socket": ("loaded", ETC + "u.socket", []), "v.socket": ("loaded", ETC + "u.socket", [], ["w.socket"]),
+                           "x.service": ("loaded", ETC + "x.service", [])})
+            units["x.service"]["TriggeredBy"] = "u.socket"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted((u["unit"], u["package"], u["fed"]) for u in got["units"]),
+                             [("u.socket", True, False), ("v.socket", True, False), ("x.service", False, True)])
+
+    def test_a_service_a_packages_socket_feeds_is_read_from_the_socket_side(self):
+        # #5072 Security round 3: the lint's manager drops an inactive service between show calls, so its
+        # TriggeredBy is empty for a socket's Service=, implicit name or Accept=yes template. Each route
+        # alone marks its service: Triggers (t), implicit name (i), template (a@...), TriggeredBy (s), alias (v)
+        files = {LIB + n: "p" for n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket")}
+        files.update({ETC + n: "o" for n in ("tt.service", "i.service", "a@.service", "x.service", "vv.service",
+                                             "o.socket", "o.service")})
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({n: ("loaded", (LIB if n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket")
+                                           else ETC) + n.replace("@agentos-unit-lint", "@").replace("@x.", "@."), [])
+                           for n in ("t.socket", "i.socket", "a.socket", "s.socket", "v.socket", "tt.service",
+                                     "i.service", "a@agentos-unit-lint.service", "a@x.service", "x.service",
+                                     "vv.service", "o.socket", "o.service")})
+            units["vv.service"]["Names"] = "vv.service valias.service"
+            units["t.socket"]["Triggers"] = "tt.service"
+            units["v.socket"]["Triggers"] = "valias.service"
+            units["x.service"]["TriggeredBy"] = "s.socket"
+            units["o.socket"]["Triggers"] = "o.service"  # a socket of ours feeding a service of ours
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["fed"]),
+                             ["a@agentos-unit-lint.service", "a@x.service", "i.service", "tt.service",
+                              "vv.service", "x.service"])
+
+    def test_an_instance_a_packages_socket_names_feeds_its_template(self):
+        # #5072 round 4: Service=b@x.service names an instance the lint's manager never shows; the template,
+        # its lint instance and its alone records are fed, by Triggers and by TriggeredBy alike
+        files = {LIB + "f.socket": "p", LIB + "g.socket": "p", ETC + "b@.service": "o", ETC + "c@.service": "o",
+                 ETC + "d@.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"f.socket": ("loaded", LIB + "f.socket", []), "g.socket": ("loaded", LIB + "g.socket", []),
+                           "b@agentos-unit-lint.service": ("loaded", ETC + "b@.service", []),
+                           "c@agentos-unit-lint.service": ("loaded", ETC + "c@.service", []),
+                           "c@y.service": ("loaded", ETC + "c@.service", []),
+                           "d@agentos-unit-lint.service": ("loaded", ETC + "d@.service", [])})
+            units["f.socket"]["Triggers"] = "b@x.service"
+            units["c@y.service"]["TriggeredBy"] = "g.socket"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(sorted(u["unit"] for u in got["units"] if u["fed"]),
+                             ["b@agentos-unit-lint.service", "c@agentos-unit-lint.service", "c@y.service"])
+            fed = r.fed_services(units, {"f.socket", "g.socket"})
+            self.assertTrue(fed("b@.service") and fed("c@.service") and not fed("d@.service"))
+
+    def test_a_file_of_ours_named_as_a_packages_drop_in_is_a_mask(self):
+        # #5072 round 4: a /dev/null link, an empty file or any file of ours, by name in a drop-in directory
+        # of the same type (a more specific one overrides a shared one), or at the path a package lists
+        files = {LIB + "u.socket.d/p.conf": "SocketMode=0600", ETC + "u.socket.d/p.conf": "-> /dev/null",
+                 LIB + "service.d/q.conf": "User=x", ETC + "v.service.d/q.conf": "",
+                 LIB + "w.service.d/r.conf": "User=x", ETC + "w.socket.d/r.conf": "", ETC + "w.service.d/o.conf": "",
+                 LIB + "z.service.d/e.conf": "edited"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            packaged = lambda p: p.startswith("/usr/") and p != LIB + "z.service.d/e.conf"  # noqa: E731
+            packaged.listed = {p for p in files if p.startswith("/usr/")}
+            got = r.records(v, {}, dirs, r.Provenance(v, dirs, packaged))
+            self.assertEqual(sorted((m["path"], m["hides"]) for m in got["masks"]), [
+                (ETC + "u.socket.d/p.conf", LIB + "u.socket.d/p.conf"),
+                (ETC + "v.service.d/q.conf", LIB + "service.d/q.conf"),
+                (LIB + "z.service.d/e.conf", LIB + "z.service.d/e.conf")])
+
+    def test_a_unit_file_a_package_lists_is_read_as_installed(self):
+        # #5072 round 5 (Security 1, L3 1): provenance by current bytes made a package's unit file changed in
+        # place, or deleted and supplied again, ours, and a deleted drop-in left no file of ours to see.
+        # Every listed unit file and drop-in must be there, a regular file as installed, unless its unit is
+        # gone whole (drop.py's dpkg-db-backup)
+        keep = "kept"
+        for name, files, units, listed, want in (
+                ("a fragment changed in place", {LIB + "u.socket": "edited"}, {"u.socket": LIB + "u.socket"},
+                 [LIB + "u.socket"], [LIB + "u.socket"]),
+                ("a fragment deleted and supplied again", {ETC + "u.service": "ours"}, {"u.service": ETC + "u.service"},
+                 [LIB + "u.service"], [LIB + "u.service"]),
+                ("a template fragment deleted while an instance loads", {ETC + "t@.service": "ours"},
+                 {"t@agentos-unit-lint.service": ETC + "t@.service"}, [LIB + "t@.service"], [LIB + "t@.service"]),
+                ("a drop-in deleted", {LIB + "u.socket": keep}, {"u.socket": LIB + "u.socket"},
+                 [LIB + "u.socket", LIB + "u.socket.d/p.conf"], [LIB + "u.socket.d/p.conf"]),
+                ("a drop-in made a directory", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf/x": ""},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"],
+                 [LIB + "u.socket.d/p.conf"]),
+                ("a drop-in made a link", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf": "-> /dev/null"},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"],
+                 [LIB + "u.socket.d/p.conf"]),
+                ("a shared drop-in deleted", {}, {}, [LIB + "service.d/p.conf"], [LIB + "service.d/p.conf"]),
+                ("a unit removed whole", {}, {}, [LIB + "b.service", LIB + "b.timer", LIB + "b.service.d/p.conf"], []),
+                ("a unit kept as installed", {LIB + "u.socket": keep, LIB + "u.socket.d/p.conf": keep},
+                 {"u.socket": LIB + "u.socket"}, [LIB + "u.socket", LIB + "u.socket.d/p.conf"], []),
+                ("a path outside the unit directories", {}, {}, ["/usr/lib/systemd/network/80-x.network",
+                                                                 LIB + "a.wants/b.service"], [])):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                v = tree(d, files)
+                dirs = r.unit_dirs(v)
+                packaged = lambda p: v.kind(p) == 0o100000 and pathlib.Path(v.host(p)).read_text() == keep  # noqa: E731
+                packaged.listed = set(listed)
+                got = r.records(v, shown({n: ("loaded", f, []) for n, f in units.items()}), dirs,
+                                r.Provenance(v, dirs, packaged))
+                self.assertEqual(sorted(m["path"] for m in got["masks"] if m["path"] == m["hides"]), want)
+
+    def test_held_names_every_package_socket_and_fed_service(self):
+        # #5072 round 5 (Security 2): a [Unit] line of ours in any unit naming one of these adds an edge on it
+        files = {LIB + "s.socket": "p", LIB + "s.service": "p", LIB + "q@.socket": "p", ETC + "o.service": "o"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            units = shown({"s.socket": ("loaded", LIB + "s.socket", [], ["t.socket"]),
+                           "s.service": ("loaded", LIB + "s.service", []), "o.service": ("loaded", ETC + "o.service", [])})
+            units["s.socket"]["Triggers"] = units["t.socket"]["Triggers"] = "s.service"
+            got = r.records(v, units, dirs, r.Provenance(v, dirs, lambda p: p.startswith("/usr/")))
+            self.assertEqual(got["held"]["names"], ["s.service", "s.socket", "t.service", "t.socket"])
+            self.assertIn("s@", got["held"]["prefixes"])
+
     def test_a_quoted_list_entry_is_one_name(self):
         # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
         # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
@@ -219,7 +471,8 @@ class RecordsTest(unittest.TestCase):
             dirs = r.unit_dirs(v)
             n = "a\\x2db.service"
             got = r.records(v, {n: {"Id": n, "Names": "'%s'" % n, "LoadState": "loaded", "FragmentPath": LIB + n,
-                                    "DropInPaths": "'%s'" % (ETC + n + ".d/q.conf")}},
+                                    "DropInPaths": "'%s'" % (ETC + n + ".d/q.conf"), "Triggers": "",
+                                    "TriggeredBy": ""}},
                             dirs, r.Provenance(v, dirs, lambda p: False))
             self.assertEqual([(u["unit"], u["alone"], [f["path"] for f in u["files"]]) for u in got["units"]],
                              [(n, False, [LIB + n, ETC + n + ".d/q.conf"])])
@@ -260,7 +513,7 @@ class ShowTest(unittest.TestCase):
         return m.show(units, r.PROPS)
 
     def block(self, n, **kw):
-        p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="")
+        p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="", Triggers="", TriggeredBy="")
         p.update(kw)
         return "\n".join("%s=%s" % (k, p[k]) for k in r.PROPS) + "\n"
 
@@ -275,10 +528,49 @@ class ShowTest(unittest.TestCase):
                 ("a missing block", a, "blocks"),
                 ("a block for another name", a + "\n" + self.block("c.service"), "systemctl gave"),
                 ("an extra line", a + "\n" + self.block("b.service") + "Alias=a\n", "systemctl line"),
-                ("a repeated key", a + "\n" + self.block("b.service") + "Id=b.service\n", "systemctl line")):
+                ("a repeated key", a + "\n" + self.block("b.service") + "Id=b.service\n", "systemctl line"),
+                # #4779 L3 release 1: a missing key fails by name, not through a KeyError
+                ("a missing key", a + "\n" + self.block("b.service").replace("LoadState=loaded\n", ""),
+                 "systemctl gave")):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(SystemExit, want):
                     self.show(reply, ["a.service", "b.service"])
+
+
+class LintTest(unittest.TestCase):
+    """lint() refuses a run in which a generator failed (#4817, from #4767's harness)."""
+
+    def test_a_failed_generator_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {ETC + "a.service": "[Service]\n"})  # View(view_root): no separate /usr
+            stopped = []
+
+            class Fake:
+                def __init__(self, root, usr, cmdline, plant):
+                    self.view_root = v.root
+
+                def show(self, units, props):
+                    return shown({u: ("loaded", ETC + "a.service", []) for u in units})
+
+                def failed_generators(self):
+                    return self.failed
+
+                def stop(self):
+                    stopped.append(1)
+            real = offline_systemd.Manager
+            offline_systemd.Manager = Fake
+            try:
+                for failed in ({"x-generator"}, {offline_systemd.GENERATOR_TIMEOUT}):
+                    with self.subTest(failed=failed):
+                        Fake.failed = failed
+                        with self.assertRaisesRegex(SystemExit, "generators failed"):
+                            r.lint(d, d, "", lambda view: lambda p: False)
+                Fake.failed = set()
+                self.assertEqual([u["unit"] for u in r.lint(d, d, "", lambda view: lambda p: False)["units"]],
+                                 ["a.service"])
+            finally:
+                offline_systemd.Manager = real
+            self.assertEqual(len(stopped), 3)
 
 
 class NamesTest(unittest.TestCase):
@@ -318,7 +610,7 @@ class NamesTest(unittest.TestCase):
 
     def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit(self):
         (p, text), = r.CONTROL.items()
-        self.assertTrue(p.startswith("etc/systemd/system/systemd-journald.service.d/"))
+        self.assertTrue(p.startswith("etc/systemd/system/systemd-tmpfiles-setup.service.d/"))
         self.assertIn("LD_PRELOAD", text)
         self.assertEqual(r.CONTROL_WANT, 'variable "LD_PRELOAD"')
 

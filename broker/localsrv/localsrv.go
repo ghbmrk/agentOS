@@ -43,6 +43,10 @@ type Owner interface {
 	LocalRequests() []owner.LocalRequest
 	LocalAnswer(id, sum string, approve bool, code string) (string, error)
 	LocalWaiting() string
+	// LocalHeld and LocalRunHeld are the messages held while the session
+	// was locked, and the owner's tap that runs the marked ones (CH-14).
+	LocalHeld() (msgs []owner.WaitingMsg, dropped, expired int)
+	LocalRunHeld(shown, run []string) (int, error)
 	// LocalStatusLines is STATUS's text with every note, for the signed-in
 	// page; the texted STATUS leaves out notes that do not fit one reply.
 	LocalStatusLines() string
@@ -202,6 +206,8 @@ func (s *Server) ops() map[string]sockets.Handler {
 		localapi.OpRequests: s.authed(s.requests),
 		localapi.OpWaiting:  s.authed(s.waiting),
 		localapi.OpAnswer:   s.answer,
+		localapi.OpInbox:    s.authed(s.inbox),
+		localapi.OpRunInbox: s.runInbox,
 		// Changing where updates come from needs a session (WF3).
 		localapi.OpFollowRoot: s.followRoot,
 		localapi.OpFollow:     s.follow,
@@ -467,6 +473,43 @@ func (s *Server) requests(context.Context) (any, error) {
 
 func (s *Server) waiting(context.Context) (any, error) {
 	return localapi.Text{Text: s.cfg.Owner.LocalWaiting()}, nil
+}
+
+func (s *Server) inbox(context.Context) (any, error) {
+	msgs, dropped, expired := s.cfg.Owner.LocalHeld()
+	return localapi.Inbox{Msgs: msgs, Dropped: dropped, Expired: expired}, nil
+}
+
+// runInbox runs the held messages the owner marked on the page (CH-14).
+func (s *Server) runInbox(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.RunInbox
+	err := decode(args, &in)
+	// The token first, so no field check answers an unsigned-in client.
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || len(in.Shown) == 0 || len(in.Shown) > localapi.MaxInbox || len(in.Run) > len(in.Shown) {
+		return nil, errBadArgs
+	}
+	for _, id := range append(append([]string(nil), in.Shown...), in.Run...) {
+		if id == "" || len(id) > localapi.MaxID {
+			return nil, errBadArgs
+		}
+	}
+	n, err := s.cfg.Owner.LocalRunHeld(in.Shown, in.Run)
+	switch {
+	case err == nil && n == 1:
+		return localapi.Answered{Text: "Sent 1 message."}, nil
+	case err == nil && n > 0:
+		return localapi.Answered{Text: fmt.Sprintf("Sent %d messages.", n)}, nil
+	case err == nil:
+		return localapi.Answered{Text: "Discarded."}, nil
+	case errors.Is(err, owner.ErrHeldChanged):
+		return localapi.Answered{Refusal: localapi.RefusedChanged}, nil
+	case errors.Is(err, owner.ErrLocked):
+		return nil, errUnauthorized
+	}
+	return nil, errFailed
 }
 
 func (s *Server) answer(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {

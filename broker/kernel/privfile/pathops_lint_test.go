@@ -63,6 +63,7 @@ package privfile
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -713,6 +714,23 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 	user := "[Service]\nUser=systemd-x\nExecStart=/usr/lib/systemd/systemd-x\n"
 	bad := "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 	badRoot := "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
+	udevSocket := "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0600\n"
+	udev := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket}
+	dbus := map[string]string{lib + "dbus.socket": "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", lib + "dbus.service": "[Service]\nUser=messagebus\nExecStart=/usr/bin/dbus-daemon --system\n"}
+	foo := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nIPAddressDeny=any\nPrivateNetwork=yes\n", lib + "foo.service": root}
+	inst := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nService=bar@x.service\n"}
+	ssh := map[string]string{lib + "ssh.socket": "[Socket]\nListenStream=2222\nAccept=yes\n", lib + "ssh@.service": "[Service]\nExecStart=-/usr/sbin/sshd -i\nStandardInput=socket\n"}
+	with := func(base map[string]string, more ...string) map[string]string {
+		out := map[string]string{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for i := 0; i+1 < len(more); i += 2 {
+			out[more[i]] = more[i+1]
+		}
+		return out
+	}
+	ourX := "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/x\n"
 	for name, c := range map[string]struct {
 		files map[string]string
 		ours  func(string) bool
@@ -726,7 +744,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a prefix drop-in":                                       {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins, `path "/tmp"`},
 		"a prefix drop-in no unit reads":                         {map[string]string{etc + "agentos-.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins, `path "/tmp"`},
 		"a type-wide drop-in":                                    {map[string]string{etc + "service.d/z.conf": "[Service]\nStandardOutput=file:/tmp/o\n"}, ourDropins, `path "/tmp/o"`},
-		"a socket's drop-in":                                     {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\n", etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nExecStartPre=/bin/sh -c ${X}\n"}, ourDropins, `holds a $ substitution`},
+		"a socket's drop-in":                                     {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x\n", etc + "agentos-x.socket.d/z.conf": "[Socket]\nExecStartPre=/bin/sh -c ${X}\n"}, ourEtc, `holds a $ substitution`},
 		"a drop-in for a unit not in the tree":                   {map[string]string{etc + "agentos-gone.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
 		"a root command a drop-in adds to a user unit":           {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Service]\nExecStartPre=+/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"}, ourDropins, `variable "LD_PRELOAD"`},
 		"a packaged user unit's directory, granted":              {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Service]\nRuntimeDirectory=systemd\n"}, ourDropins, `the unit's user owns /run/systemd, in or above /run/systemd`},
@@ -789,11 +807,14 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #4779 round 3: no instance but the lint's own, loaded, stands for its template's drop-ins
 		"a template drop-in beside a bad-setting lint instance": {map[string]string{lib + "x@.service": "[Service]\nExecStart=%I\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
 		"a template drop-in beside a bad-setting template":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nUser=a:b\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an error lint instance":      {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nDescription=" + strings.Repeat("a", 1100*1024) + "\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an instance's own drop-in":   {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside an instance's own fragment":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a template drop-in beside a non-root instance":         {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
-		"a file of the lint's own instance":                     {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
+		// #4821 Security R1: a lint instance systemd cannot load (a line
+		// over its 1 MiB limit) hides which drop-ins its instances read and
+		// what a package's lines run, so the run fails.
+		"a template drop-in beside an error lint instance":     {map[string]string{lib + "x@.service": "[Service]\nExecStart=/bin/true\nDescription=" + strings.Repeat("a", 1100*1024) + "\n", etc + "x@.service.d/z.conf": bad}, ourEtc, `x@agentos-unit-lint.service: load state error`},
+		"a template drop-in beside an instance's own drop-in":  {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside an instance's own fragment": {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n", etc + "getty@.service.d/z.conf": bad, etc + "getty@tty1.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a template drop-in beside a non-root instance":        {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad, etc + "systemd-cryptsetup@foo.service": "[Service]\nUser=nobody\nExecStart=/bin/true\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a file of the lint's own instance":                    {map[string]string{lib + "getty@.service": "[Service]\nExecStart=/bin/true\n", etc + "getty@agentos-unit-lint.service.d/u.conf": "[Service]\nUser=nobody\n"}, ourEtc, `lint's own instance`},
 		// #4779 re-plan (L3 6592951044 P1): a template's drop-in directory is
 		// read by the instances of every template whose name it prefixes, so a
 		// shared directory's drop-ins of ours are read alone whatever loaded.
@@ -815,6 +836,81 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a group line in a shared drop-in":             {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "service.d/g.conf": "[Service]\nGroup=agentos-x\n"}, ourEtc, `may not set a directory's owner`},
 		"a mode of ours on a package's 0770 directory": {map[string]string{lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\nStateDirectoryMode=0770\n", lib + "bar.service": "[Service]\nExecStart=/var/lib/foo/run\n", etc + "foo.service.d/g.conf": "[Service]\nStateDirectoryMode=0777\n"}, ourEtc, `in or above /var/lib/foo/run`},
 		"a mode of ours on a package's directory":      {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
+		// #4821 Security R4, L3 R3: who may connect to a package's socket.
+		"a socket mode of ours on a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketMode=0666\n"}, ourEtc, `may not set any [Socket] setting`},
+		"a socket group of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSocketGroup=agentos-x\nSocketMode=0660\n"}, ourEtc, `SocketGroup=agentos-x: a line of ours on a package's socket`},
+		"a socket owner in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nSocketUser=agentos-x\n"}, ourEtc, `may not set any [Socket] setting`},
+		// #5072 Security 1: a package's socket by its name or its service.
+		"a fragment of ours hiding a package's socket":     {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"}, ourEtc, `a line of ours on a package's socket`},
+		"a socket of ours feeding a package's service":     {map[string]string{lib + "systemd-udevd.service": root, etc + "agentos-x.socket": "[Socket]\nService=systemd-udevd.service\nListenStream=/run/agentos-x\nSocketMode=0666\n"}, ourEtc, `a line of ours on a package's socket`},
+		"a socket of ours a package's service takes":       {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/s.conf": "[Service]\nSockets=agentos-x.socket\n", etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x\n"}, ourEtc, `ListenStream=/run/agentos-x: a line of ours on a package's socket`},
+		"a socket of ours activating a package's template": {map[string]string{lib + "systemd-x@.service": root, etc + "systemd-x.socket": "[Socket]\nListenStream=/run/agentos-x\nAccept=yes\n"}, ourEtc, `a line of ours on a package's socket`},
+		// #5072 Security 2: where a package's socket listens.
+		"a listen line of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nListenStream=0.0.0.0:7777\n"}, ourEtc, `ListenStream=0.0.0.0:7777: a line of ours`},
+		"a listen line in a shared drop-in":           {map[string]string{etc + "socket.d/z.conf": "[Socket]\nListenStream=0.0.0.0:7777\n"}, ourEtc, `ListenStream=0.0.0.0:7777: a line of ours`},
+		// #5072 L3 round 2: each criterion and key refused on its own.
+		"a package's socket by its name alone":         {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "agentos-x.service": user, etc + "systemd-udevd-control.socket": "[Socket]\nService=agentos-x.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"}, ourEtc, `a line of ours on a package's socket`},
+		"a service line of ours on a package's socket": {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "agentos-x.service": user, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nService=agentos-x.service\n"}, ourEtc, `Service=agentos-x.service: a line of ours`},
+		"a symlink of ours on a package's socket":      {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nSymlinks=/run/open/control\n"}, ourEtc, `Symlinks=/run/open/control: a line of ours`},
+		// #5072 Security round 2: Accept= hands each connection to a
+		// template of ours; a fd name tells a daemon's endpoints apart; a
+		// service of ours with Sockets= takes the package's listening fd.
+		"an accept line of ours on a package's socket": {map[string]string{lib + "dbus.socket": "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", lib + "dbus.service": "[Service]\nExecStart=/usr/bin/dbus-daemon --system\n", etc + "dbus.socket.d/z.conf": "[Socket]\nAccept=yes\n", etc + "dbus@.service": "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/x\nStandardInput=socket\n"}, ourEtc, `Accept=yes: a line of ours`},
+		"a fd name of ours on a package's socket":      {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nFileDescriptorName=varlink\n"}, ourEtc, `FileDescriptorName=varlink: a line of ours`},
+		"a service of ours taking a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "agentos-x.service": "[Service]\nUser=agentos-x\nSockets=systemd-udevd-control.socket\nExecStart=/usr/lib/agentos/x\n"}, ourEtc, `a line of ours on a service a package's socket feeds`},
+		"a sockets line in a shared drop-in":           {map[string]string{etc + "service.d/z.conf": "[Service]\nSockets=systemd-udevd-control.socket\n"}, ourEtc, `may not make a service take a socket`},
+		"a device bind of ours on a package's socket":  {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nBindToDevice=eth0\n"}, ourEtc, `BindToDevice=eth0: a line of ours`},
+		"a socket directory mode of ours":              {map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket, etc + "systemd-udevd-control.socket.d/z.conf": "[Socket]\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a line of ours`},
+		// #5072 Security round 3, 3: every [Socket] line of ours on a
+		// package's socket, not a key list.
+		"a reuse-port line of ours on a package's socket":  {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nReusePort=yes\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=0.0.0.0:2222\nReusePort=yes\n"), ourEtc, `ReusePort=yes: a line of ours on a package's socket`},
+		"an address reset of ours on a package's socket":   {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nIPAddressDeny=\n"), ourEtc, `IPAddressDeny=: a line of ours on a package's socket`},
+		"a network line of ours on a package's socket":     {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nPrivateNetwork=no\n"), ourEtc, `PrivateNetwork=no: a line of ours on a package's socket`},
+		"a netns line of ours on a package's socket":       {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nNetworkNamespacePath=/run/netns/x\n"), ourEtc, `NetworkNamespacePath=/run/netns/x: a line of ours`},
+		"a free bind of ours on a package's socket":        {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nFreeBind=yes\nBindIPv6Only=both\n"), ourEtc, `FreeBind=yes: a line of ours on a package's socket`},
+		"a command of ours on a package's socket":          {with(udev, etc+"systemd-udevd-control.socket.d/z.conf", "[Socket]\nExecStartPost=/usr/bin/chmod 0666 /run/udev/control\n"), ourEtc, `ExecStartPost=/usr/bin/chmod 0666 /run/udev/control: a line of ours on a package's socket`},
+		"a remove line of ours on a package's socket":      {with(udev, etc+"systemd-udevd-control.socket.d/z.conf", "[Socket]\nRemoveOnStop=yes\n"), ourEtc, `RemoveOnStop=yes: a line of ours`},
+		"a credentials line of ours on a package's socket": {with(udev, etc+"systemd-udevd-control.socket.d/z.conf", "[Socket]\nPassCredentials=no\nPassSecurity=no\n"), ourEtc, `PassCredentials=no: a line of ours`},
+		"a mark of ours on a package's socket":             {with(foo, etc+"foo.socket.d/z.conf", "[Socket]\nMark=7\n"), ourEtc, `Mark=7: a line of ours on a package's socket`},
+		"a reuse-port line in a shared drop-in":            {map[string]string{etc + "socket.d/z.conf": "[Socket]\nReusePort=yes\n"}, ourEtc, `ReusePort=yes: a line of ours`},
+		// #5072 Security round 3, 1: a service a package's socket feeds,
+		// read from the socket's side (Service=, implicit name, Accept=
+		// template), since the lint's manager forgets its TriggeredBy.
+		"a fragment of ours on a service a package's socket names":  {with(udev, etc+"systemd-udevd.service", ourX), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a fragment of ours on a package socket's implicit service": {with(dbus, etc+"dbus.service", ourX), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a fragment of ours hiding a package's accept template":     {with(ssh, etc+"ssh@.service", ourX+"StandardInput=socket\n"), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a template of ours for a package's accept socket":          {map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nAccept=yes\n", etc + "foo@.service": ourX + "StandardInput=socket\n"}, ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		// #5072 Security round 3, 2: every [Service] line of ours on a fed
+		// service, in a drop-in as well as a fragment.
+		"a command and user of ours on a fed package service": {with(udev, etc+"systemd-udevd.service.d/z.conf", "[Service]\nUser=agentos-x\nExecStart=\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a root command of ours on a fed package service":     {with(udev, etc+"systemd-udevd.service.d/z.conf", "[Service]\nExecStart=\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `ExecStart=: a line of ours on a service a package's socket feeds`},
+		"a user of ours on a fed package service":             {with(udev, etc+"systemd-udevd.service.d/z.conf", "[Service]\nUser=agentos-x\n"), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a preload of ours on a fed user service":             {with(dbus, etc+"dbus.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/usr/lib/agentos/x.so\n"), ourEtc, `Environment=LD_PRELOAD=/usr/lib/agentos/x.so: a line of ours on a service a package's socket feeds`},
+		"a bind of ours on a fed user service":                {with(dbus, etc+"dbus.service.d/z.conf", "[Service]\nBindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/dbus-daemon\n"), ourEtc, `BindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/dbus-daemon: a line of ours on a service`},
+		"a command of ours on a fed implicit service":         {with(dbus, etc+"dbus.service.d/z.conf", "[Service]\nExecStart=\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `ExecStart=: a line of ours on a service a package's socket feeds`},
+		"a user of ours on a package's accept template":       {with(ssh, etc+"ssh@.service.d/z.conf", "[Service]\nUser=agentos-x\n"), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		// #5072 round 4: a package's socket naming an instance feeds its
+		// template, whose files reach the lint's instance; a [Unit] line
+		// of ours but an ordering one; a file of ours hiding a package's
+		// drop-in of the same name.
+		"a template of ours for an instance a package's socket names": {with(inst, etc+"bar@.service", ourX+"StandardInput=socket\n"), ourEtc, `User=agentos-x: a line of ours on a service a package's socket feeds`},
+		"a drop-in of ours on that template":                          {with(inst, lib+"bar@.service", root, etc+"bar@.service.d/z.conf", "[Service]\nExecStart=\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `ExecStart=: a line of ours on a service a package's socket feeds`},
+		"a type-wide drop-in of ours reaching that template":          {with(inst, lib+"bar@.service", root, etc+"service.d/z.conf", "[Service]\nBindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/bar\n"), ourEtc, `BindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/bar: a line of ours on a service`},
+		"a namespace line of ours on a fed service":                   {with(udev, etc+"systemd-udevd.service.d/z.conf", "[Unit]\nJoinsNamespaceOf=agentos-x.service\n"), ourEtc, `JoinsNamespaceOf=agentos-x.service: a [Unit] line of ours`},
+		"a binds line of ours on a fed template":                      {with(ssh, etc+"ssh@.service.d/z.conf", "[Unit]\nBindsTo=agentos-x.service\n"), ourEtc, `BindsTo=agentos-x.service: a [Unit] line of ours`},
+		"a condition of ours on a package's socket":                   {with(udev, etc+"systemd-udevd-control.socket.d/z.conf", "[Unit]\nConditionPathExists=/run/agentos-x\n"), ourEtc, `ConditionPathExists=/run/agentos-x: a [Unit] line of ours`},
+		"a conflicts line of ours on a fed implicit service":          {with(dbus, etc+"dbus.service.d/z.conf", "[Unit]\nConflicts=agentos-x.service\n"), ourEtc, `Conflicts=agentos-x.service: a [Unit] line of ours`},
+		"a mask of ours on a package socket's drop-in":                {with(udev, lib+"systemd-udevd-control.socket.d/p.conf", "[Socket]\nSocketMode=0600\n", etc+"systemd-udevd-control.socket.d/p.conf", "-> /dev/null"), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd-control.socket.d/p.conf`},
+		"an empty file of ours on a fed service's drop-in":            {with(udev, lib+"systemd-udevd.service.d/p.conf", "[Service]\nUser=systemd-x\n", etc+"systemd-udevd.service.d/p.conf", ""), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd.service.d/p.conf`},
+		// #5072 Security round 5 point 2: systemd adds the edge on both
+		// units, so a unit of ours naming one is the drop-in's route.
+		"a unit of ours joining a fed service's namespace":      {with(dbus, etc+"agentos-x.service", "[Unit]\nJoinsNamespaceOf=dbus.service\n[Service]\nUser=agentos-x\nPrivateTmp=yes\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `JoinsNamespaceOf=dbus.service: a [Unit] line of ours naming a package's socket`},
+		"a unit of ours conflicting with a package's socket":    {with(udev, etc+"agentos-x.service", "[Unit]\nConflicts=systemd-udevd-control.socket\n"+ourX), ourEtc, `Conflicts=systemd-udevd-control.socket: a [Unit] line of ours naming`},
+		"a unit of ours propagating stop to a fed service":      {with(udev, etc+"agentos-x.service", "[Unit]\nPropagatesStopTo=systemd-udevd.service\n"+ourX), ourEtc, `PropagatesStopTo=systemd-udevd.service: a [Unit] line of ours naming`},
+		"a unit of ours propagating reload to a fed service":    {with(udev, etc+"agentos-x.service", "[Unit]\nPropagatesReloadTo=systemd-udevd.service\n"+ourX), ourEtc, `PropagatesReloadTo=systemd-udevd.service: a [Unit] line of ours naming`},
+		"a unit of ours naming a fed template's other instance": {with(inst, lib+"bar@.service", user, etc+"agentos-x.service", "[Unit]\nConflicts=bar@y.service\n"+ourX), ourEtc, `Conflicts=bar@y.service: a [Unit] line of ours naming`},
+		"a unit of ours naming a unit by a specifier":           {with(udev, etc+"agentos-x.service", "[Unit]\nConflicts=%p.socket\n"+ourX), ourEtc, `Conflicts=%p.socket: a [Unit] line of ours naming`},
+		"a unit of ours naming a unit by a bare specifier":      {with(udev, etc+"agentos-x@.service", "[Unit]\nConflicts=%i\n"+ourX, etc+"multi-user.target.wants/agentos-x@systemd-udevd-control.socket.service", "-> ../agentos-x@.service"), ourEtc, `Conflicts=%i: a [Unit] line of ours naming`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -847,10 +943,54 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #4737 Security 6588498486 R1: a package's own grant the reader
 		// cannot read, on a unit none of ours touches.
 		"a package's specifier directory": {map[string]string{lib + "foo@.service": "[Service]\nExecStart=/usr/bin/foo\nDynamicUser=yes\nStateDirectory=foo/%i\n"}, pkg},
+		// A socket all of whose files are ours sets its own owner and mode.
+		"a socket of ours with its owner": {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nSocketUser=root\nSocketGroup=agentos-x\nSocketMode=0660\nDirectoryMode=0755\nReusePort=yes\nFreeBind=yes\n"}, ourEtc},
+		// A package's socket feeding a package's service, with the package's
+		// own [Service] drop-in and [Unit]-only drop-ins of ours (as the
+		// image's networkd and resolved ones are).
+		"a package's socket and fed service with unit lines of ours":     {with(udev, lib+"systemd-udevd.service.d/p.conf", "[Service]\nEnvironment=X=1\n", etc+"systemd-udevd.service.d/z.conf", "[Unit]\nAfter=agentos-x.service\n", etc+"systemd-udevd-control.socket.d/z.conf", "[Unit]\nAfter=agentos-x.service\n"), ourEtc},
+		"a package's accept socket and template with unit lines of ours": {with(ssh, etc+"ssh@.service.d/z.conf", "[Unit]\nAfter=agentos-x.service\n"), ourEtc},
+		"a package's implicit service with unit lines of ours":           {with(dbus, etc+"dbus.service.d/z.conf", "[Unit]\nAfter=agentos-x.service\n"), ourEtc},
+		// Any [Unit] line of ours on a service no package's socket feeds.
+		"an unfed package service with unit lines of ours": {map[string]string{lib + "systemd-x.service": user, etc + "systemd-x.service.d/z.conf": "[Unit]\nJoinsNamespaceOf=agentos-x.service\nConditionPathExists=/run/x\nBindsTo=agentos-x.service\n"}, ourEtc},
+		// A unit of ours may order itself after a package's socket, and
+		// name units of ours or unfed ones in any [Unit] key.
+		"a unit of ours with edges to units not held": {with(udev, lib+"systemd-x.service", user, etc+"agentos-y.service", ourX, etc+"agentos-x.service", "[Unit]\nDescription=x %i\nDocumentation=man:x(%p)\nAfter=systemd-udevd-control.socket\nRequires=systemd-udevd.service\nConflicts=agentos-y.service systemd-x.service\nJoinsNamespaceOf=agentos-y.service\nConditionPathExists=/run/x-100%%\n"+ourX), ourEtc},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := underSystemd(t, c.files, c.ours); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestUnitRulesListedUnderSystemd: a unit file or drop-in a package lists
+// must be read as installed, or its unit gone whole (#5072 round 5:
+// provenance by current bytes made one changed in place ours, and a
+// deleted drop-in left no file of ours to refuse).
+func TestUnitRulesListedUnderSystemd(t *testing.T) {
+	const lib = "/usr/lib/systemd/system/"
+	all := func(string) bool { return true }
+	none := func(string) bool { return false }
+	root := "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n"
+	udev := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0600\n"}
+	open := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"}
+	for name, c := range map[string]struct {
+		files  map[string]string
+		ours   func(string) bool
+		listed []string
+		want   string
+	}{
+		"a package's socket and service replaced in place": {open, all, []string{lib + "systemd-udevd-control.socket", lib + "systemd-udevd.service"}, `systemd-udevd-control.socket: a package's unit file or drop-in that systemd does not read as the package installed it`},
+		"a package socket's drop-in deleted":               {udev, none, []string{lib + "systemd-udevd-control.socket.d/p.conf"}, `systemd-udevd-control.socket.d/p.conf: a package's unit file`},
+		"a package's fragment deleted and supplied again":  {map[string]string{lib + "systemd-udevd.service": root, "/etc/systemd/system/systemd-udevd-control.socket": open[lib+"systemd-udevd-control.socket"]}, func(p string) bool { return strings.HasPrefix(p, "/etc/") }, []string{lib + "systemd-udevd-control.socket"}, `/usr/lib/systemd/system/systemd-udevd-control.socket: a package's unit file`},
+		"a unit removed whole":                             {udev, none, []string{lib + "dpkg-db-backup.service", lib + "dpkg-db-backup.timer"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := underSystemdListed(t, c.files, c.ours, c.listed)
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+				t.Fatalf("got %v, want %q", err, c.want)
 			}
 		})
 	}
@@ -861,6 +1001,14 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 // prints to the unit rules. It skips the test when not root or with no
 // systemd, unless AGENTOS_REQUIRE_SYSTEMD=1.
 func underSystemd(t *testing.T, files map[string]string, ours func(string) bool) error {
+	t.Helper()
+	return underSystemdListed(t, files, ours, nil)
+}
+
+// underSystemdListed is underSystemd with listed, paths a package lists
+// that files does not hold as the package installed them (changed,
+// replaced or gone).
+func underSystemdListed(t *testing.T, files map[string]string, ours func(string) bool, listed []string) error {
 	t.Helper()
 	if os.Geteuid() != 0 || !hasSystemd() {
 		if os.Getenv("AGENTOS_REQUIRE_SYSTEMD") == "1" {
@@ -880,6 +1028,9 @@ func underSystemd(t *testing.T, files map[string]string, ours func(string) bool)
 		}
 	}
 	sort.Strings(packaged)
+	for _, p := range listed {
+		packaged = append(packaged, "listed "+p)
+	}
 	list := filepath.Join(dir, "packaged")
 	if err := os.WriteFile(list, []byte(strings.Join(packaged, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2288,7 +2439,50 @@ type unitCheck struct {
 	// What trusted lines alone run as root or let another uid write.
 	pkgProgs  []string
 	pkgGrants []grant
+	// Sockets whose endpoint is a package's (unit_rules.py's package).
+	pkgSockets map[string]bool
+	// Services a package's socket hands its connections or fds to.
+	pkgFed map[string]bool
+	// Every name of those sockets and services, and the pre@ prefixes of
+	// fed templates (unit_rules.py's held).
+	held    map[string]bool
+	heldPre []string
 }
+
+// namesHeld returns the first word of a [Unit] line, key k, that names a
+// package's socket or a service it feeds (c.held), or that holds a
+// specifier, which may expand to a whole unit name (Conflicts=%i, #5072 L3
+// round 6) and this cannot resolve; "" if none. Only Description= and
+// Documentation= name no unit.
+func (c *unitCheck) namesHeld(k, v string) string {
+	if k == "Description" || k == "Documentation" {
+		return ""
+	}
+	for _, w := range strings.Fields(v) {
+		if strings.Contains(strings.ReplaceAll(w, "%%", ""), "%") {
+			return w
+		}
+		if path.Ext(w) != ".service" && path.Ext(w) != ".socket" {
+			continue // held holds only sockets and services
+		}
+		if c.held[w] {
+			return w
+		}
+		for _, p := range c.heldPre {
+			if strings.HasPrefix(w, p) && path.Ext(w) == ".service" {
+				return w
+			}
+		}
+	}
+	return ""
+}
+
+// orderKeys are the only [Unit] keys a line of ours may set on a package's
+// socket or a service it feeds: what starts with it and in what order. Any
+// other (JoinsNamespaceOf=, BindsTo=, Condition*=, Conflicts=) changes where
+// or whether the package's lines run (#5072 round 4); the image's networkd
+// and resolved drop-ins set Requires= and After=.
+var orderKeys = map[string]bool{"After": true, "Before": true, "Requires": true, "Wants": true}
 
 // owners are the keys that set the owner systemd gives a unit's *Directory=
 // trees (setup_exec_directory chowns them to the unit's uid and gid): with
@@ -2329,6 +2523,11 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	userOurs := false             // an owner line (owners) not trusted
 	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
 	reread := ""                  // the first such line, which changes how a package's lines read
+	ours := ""                    // the first line of the type's section not trusted
+	takes := ""                   // the first Sockets= line not trusted
+	unitOurs := ""                // the first [Unit] line not trusted, but an ordering one (orderKeys)
+	edgeOurs := ""                // the first such line naming a package's socket or a service it feeds
+	pkgFile := false              // a file in trusted
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -2339,8 +2538,21 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		if err != nil {
 			return fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
 		}
+		pkgFile = pkgFile || trusted[f]
 		for _, line := range ul {
 			k, v := line.key, line.value
+			if ours == "" && line.section == section && !trusted[f] {
+				ours = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
+			if unitOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] {
+				unitOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
+			if edgeOurs == "" && line.section == "Unit" && !trusted[f] && !orderKeys[k] && c.namesHeld(k, v) != "" {
+				edgeOurs = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
+			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {
+				takes = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
 			if line.section == section && !trusted[f] {
 				userOurs = userOurs || owners[k]
 				key, mode := strings.CutSuffix(k, "Mode")
@@ -2385,6 +2597,33 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	// alone is the worst context only without one (#4779 re-plan).
 	if alone && reread != "" {
 		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread)
+	}
+	// A package's socket and what it activates are the package's: no
+	// [Socket] line of ours on a socket one of whose files, its name or the
+	// service it feeds is a package's (pkgSockets), or in a file read alone,
+	// and no [Service] line of ours, fragment or drop-in, on a service such
+	// a socket hands its connections or listening fds to (pkgFed). A closed
+	// form: each key list before it missed a route (#5072 Security rounds
+	// 1-3). Our own sockets, all of whose files are ours, set their own.
+	if section == "Socket" && ours != "" && (alone || pkgFile || c.pkgSockets[name]) {
+		return fmt.Errorf("%s: a line of ours on a package's socket (by a file, its name or the service it feeds), or in a file read alone, may not set any [Socket] setting", ours)
+	}
+	if section == "Service" && ours != "" && c.pkgFed[name] {
+		return fmt.Errorf("%s: a line of ours on a service a package's socket feeds (its connections or listening fds) may not set any [Service] setting", ours)
+	}
+	pkgSocket := section == "Socket" && (alone || pkgFile || c.pkgSockets[name])
+	if unitOurs != "" && (pkgSocket || section == "Service" && c.pkgFed[name]) {
+		return fmt.Errorf("%s: a [Unit] line of ours on a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", unitOurs)
+	}
+	// systemd puts an edge on both units (JoinsNamespaceOf= is symmetric,
+	// Conflicts= adds ConflictedBy=, PropagatesStopTo= StopPropagatedFrom=),
+	// so the same keys are held from our side too, in every unit (#5072
+	// Security round 5 point 2).
+	if edgeOurs != "" {
+		return fmt.Errorf("%s: a [Unit] line of ours naming a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", edgeOurs)
+	}
+	if alone && takes != "" {
+		return fmt.Errorf("%s: a file read alone may not make a service take a socket", takes)
 	}
 	rootCmd := false
 	for _, l := range lines {
@@ -2517,9 +2756,11 @@ func execProgs(v string) []string {
 // control, the refusal wanted.
 type unitRecords struct {
 	Units []struct {
-		Unit  string `json:"unit"`
-		Alone bool   `json:"alone"`
-		Files []struct {
+		Unit    string `json:"unit"`
+		Alone   bool   `json:"alone"`
+		Package bool   `json:"package"`
+		Fed     bool   `json:"fed"`
+		Files   []struct {
 			Path string `json:"path"`
 			Ours bool   `json:"ours"`
 			Text string `json:"text"`
@@ -2529,6 +2770,14 @@ type unitRecords struct {
 		Path string `json:"path"`
 		Text string `json:"text"`
 	} `json:"fstab"`
+	Masks []struct {
+		Path  string `json:"path"`
+		Hides string `json:"hides"`
+	} `json:"masks"`
+	Held struct {
+		Names    []string `json:"names"`
+		Prefixes []string `json:"prefixes"`
+	} `json:"held"`
 	Want string `json:"want"`
 }
 
@@ -2549,7 +2798,18 @@ func builtUnits(recs unitRecords, dir string) error {
 		}
 		return f, os.WriteFile(f, []byte(text), 0o644)
 	}
-	c := &unitCheck{root: dir, seen: map[string]bool{}}
+	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}, pkgFed: map[string]bool{},
+		held: map[string]bool{}, heldPre: recs.Held.Prefixes}
+	for _, n := range recs.Held.Names {
+		c.held[n] = true
+	}
+	for _, u := range recs.Units {
+		c.pkgSockets[u.Unit] = c.pkgSockets[u.Unit] || u.Package
+		c.pkgFed[u.Unit] = c.pkgFed[u.Unit] || u.Fed
+	}
+	// Every refusal is reported, so one does not hide the rest of the
+	// tree (#4821 Security R3).
+	var errs []error
 	for _, u := range recs.Units {
 		var paths []string
 		trusted := map[string]bool{}
@@ -2567,8 +2827,19 @@ func builtUnits(recs unitRecords, dir string) error {
 			continue
 		}
 		if err := c.unit(u.Unit, paths, u.Alone, trusted); err != nil {
-			return fmt.Errorf("%s: %v", u.Unit, err)
+			errs = append(errs, fmt.Errorf("%s: %v", u.Unit, err))
 		}
+	}
+	// A file of ours named as a package's drop-in, or a unit file a package
+	// lists that systemd does not read as installed (changed, replaced or
+	// gone while its unit loads), drops the package's lines: a closed form
+	// for every unit (#5072 rounds 4 and 5).
+	for _, m := range recs.Masks {
+		if m.Path == m.Hides {
+			errs = append(errs, fmt.Errorf("%s: a package's unit file or drop-in that systemd does not read as the package installed it", m.Path))
+			continue
+		}
+		errs = append(errs, fmt.Errorf("%s: a file of ours hides a package's drop-in, %s, and with it the package's lines", m.Path, m.Hides))
 	}
 	if recs.Fstab != nil {
 		f, err := write(recs.Fstab.Path, recs.Fstab.Text)
@@ -2576,24 +2847,97 @@ func builtUnits(recs unitRecords, dir string) error {
 			return err
 		}
 		if err := fstabLines(dir, f); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	if err := grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)); err != nil {
-		return err
-	}
-	return grantsHeld(c.pkgGrants, c.progs)
+	errs = append(errs, grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)))
+	errs = append(errs, grantsHeld(c.pkgGrants, c.progs))
+	return errors.Join(errs...)
 }
 
-// grantsHeld fails on a grant in or above held, a tree or program root
-// reads or runs.
-func grantsHeld(grants []grant, held []string) error {
-	for _, g := range grants {
-		if h, ok := inOrAbove(g.path, held); ok {
-			return fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h)
+// TestBuiltUnitsEveryRefusal: builtUnits reports every refusal in one
+// pass, so the first does not hide the rest of the tree (#4821 Security R3).
+func TestBuiltUnitsEveryRefusal(t *testing.T) {
+	var recs unitRecords
+	b := `{"units": [
+		{"unit": "a.service", "alone": true, "files": [{"path": "/etc/systemd/system/a.service.d/z.conf", "ours": true, "text": "[Service]\nEnvironment=LD_PRELOAD=/tmp/a.so\n"}]},
+		{"unit": "b.service", "alone": true, "files": [{"path": "/etc/systemd/system/b.service.d/z.conf", "ours": true, "text": "[Service]\nWorkingDirectory=/tmp/b\n"}]},
+		{"unit": "c.service", "alone": false, "files": [{"path": "/etc/systemd/system/c.service", "ours": true, "text": "[Service]\nUser=c\nExecStart=/usr/bin/c\nStateDirectory=c\nStateDirectoryMode=0777\n"}]},
+		{"unit": "d.service", "alone": false, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nExecStart=/var/lib/c/run\n"}]}]}`
+	if err := json.Unmarshal([]byte(b), &recs); err != nil {
+		t.Fatal(err)
+	}
+	err := builtUnits(recs, t.TempDir())
+	for _, want := range []string{`a.service: `, `variable "LD_PRELOAD"`, `b.service: `, `path "/tmp/b"`, `in or above /var/lib/c/run`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("got %v, want every refusal, with %q", err, want)
 		}
 	}
-	return nil
+}
+
+// TestBuiltUnitsPackageSocketsAndFed: every [Socket] line of ours on a
+// package's socket (by the package mark, a package's file, or read alone)
+// and every [Service] line of ours on a fed service is refused; ordering
+// [Unit] lines of ours and our own sockets pass (#5072 Security round 3).
+func TestBuiltUnitsPackageSocketsAndFed(t *testing.T) {
+	const lib, etc = "/usr/lib/systemd/system/", "/etc/systemd/system/"
+	type file struct {
+		path, text string
+		ours       bool
+	}
+	pkgSock := file{lib + "s.socket", "[Socket]\nListenStream=/run/s\n", false}
+	pkgSvc := file{lib + "f.service", "[Service]\nUser=f\nExecStart=/usr/bin/f\n", false}
+	ourSock := file{etc + "s.socket", "[Socket]\nListenStream=/run/s\nReusePort=yes\n", true}
+	for name, c := range map[string]struct {
+		unit                 string
+		alone, package_, fed bool
+		files                []file
+		want                 string // "" passes
+	}{
+		"socket by mark":        {"s.socket", false, true, false, []file{ourSock}, `ListenStream=/run/s: a line of ours on a package's socket`},
+		"socket by a file":      {"s.socket", false, false, false, []file{pkgSock, {etc + "s.socket.d/z.conf", "[Socket]\nReusePort=yes\n", true}}, `ReusePort=yes: a line of ours on a package's socket`},
+		"socket alone":          {".socket", true, false, false, []file{{etc + "socket.d/z.conf", "[Socket]\nMark=7\n", true}}, `Mark=7: a line of ours`},
+		"socket of ours":        {"s.socket", false, false, false, []file{ourSock}, ""},
+		"socket unit lines":     {"s.socket", false, true, false, []file{pkgSock, {etc + "s.socket.d/z.conf", "[Unit]\nAfter=x.service\n", true}}, ""},
+		"fed exec drop-in":      {"f.service", false, false, true, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Service]\nExecStart=\nExecStart=/usr/lib/agentos/x\n", true}}, `ExecStart=: a line of ours on a service a package's socket feeds`},
+		"fed user drop-in":      {"f.service", false, false, true, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Service]\nUser=agentos-x\n", true}}, `User=agentos-x: a line of ours on a service`},
+		"fed preload drop-in":   {"f.service", false, false, true, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/usr/lib/agentos/x.so\n", true}}, `LD_PRELOAD=/usr/lib/agentos/x.so: a line of ours on a service`},
+		"fed bind drop-in":      {"f.service", false, false, true, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Service]\nBindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/f\n", true}}, `BindReadOnlyPaths=/usr/lib/agentos/x:/usr/bin/f: a line of ours on a service`},
+		"fed fragment of ours":  {"f.service", false, false, true, []file{{etc + "f.service", "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/x\n", true}}, `User=agentos-x: a line of ours on a service`},
+		"fed alone":             {"f@.service", true, false, true, []file{{etc + "f@.service.d/z.conf", "[Service]\nNice=1\n", true}}, `Nice=1: a line of ours on a service`},
+		"fed unit lines":        {"f.service", false, false, true, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Unit]\nAfter=x.service\n", true}}, ""},
+		"not fed, user drop-in": {"f.service", false, false, false, []file{pkgSvc, {etc + "f.service.d/z.conf", "[Service]\nUser=agentos-x\n", true}}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			u := map[string]any{"unit": c.unit, "alone": c.alone, "package": c.package_, "fed": c.fed}
+			var fs []map[string]any
+			for _, f := range c.files {
+				fs = append(fs, map[string]any{"path": f.path, "ours": f.ours, "text": f.text})
+			}
+			u["files"] = fs
+			b, _ := json.Marshal(map[string]any{"units": []any{u}})
+			var recs unitRecords
+			if err := json.Unmarshal(b, &recs); err != nil {
+				t.Fatal(err)
+			}
+			err := builtUnits(recs, t.TempDir())
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+				t.Fatalf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// grantsHeld fails on each grant in or above held, a tree or program root
+// reads or runs.
+func grantsHeld(grants []grant, held []string) error {
+	var errs []error
+	for _, g := range grants {
+		if h, ok := inOrAbove(g.path, held); ok {
+			errs = append(errs, fmt.Errorf("%s: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.where, g.how, g.path, h))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // plainFS are the file system types a mount may name: in-kernel types
