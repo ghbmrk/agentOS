@@ -1395,7 +1395,8 @@ class MadeAllowTest(unittest.TestCase):
         # directory the check never walks, so an ancestor bind and a unit-made directory there passed.
         write(self.root, "usr/share/zz/srv-v.mount", "[Mount]\nWhat=/var/lib\nWhere=/srv/v\nOptions=bind\n")
         write(self.root, "usr/share/zz/zz.service", "[Service]\nStateDirectory=zq\nUser=nobody\n")
-        for rel in ("usr/lib/systemd/system.conf.d/60-zz.conf", "etc/systemd/system.conf"):
+        for rel in ("usr/lib/systemd/system.conf.d/60-zz.conf", "etc/systemd/system.conf",
+                    "usr/local/lib/systemd/system.conf", "usr/lib/systemd/system.conf"):
             for text in ("[Manager]\nManagerEnvironment=SYSTEMD_UNIT_PATH=/usr/share/zz:\n",
                          "[Manager]\nManagerEnvironment=A=1\n", "[X]\nManagerEnvironment=A=1\n"):
                 with self.subTest(rel=rel, text=text):
