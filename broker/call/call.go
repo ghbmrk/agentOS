@@ -210,8 +210,9 @@ var serving = make(chan struct{}, 1)
 // the owner hears Clips.Ending EndingNotice before then (#5262).
 //
 // The unlock is deferred first, so a panic after the take (a nil ctx)
-// still frees the line; the token read's end and await are deferred once
-// it starts, so a panic in the loop still waits for it (#5274).
+// still frees the line; the token read, started once the call is
+// answered, is ended and awaited in a defer, so a panic in the loop still
+// waits for it (#5274).
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
@@ -233,9 +234,14 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 	defer func() { <-serving }()
 	// The call's ctx: it ends at MaxCall, ends the token read and with it
 	// the call's grant, and is cancelled before the next call can be
-	// served (TestOnlyServeChoosesTheRung pins the order). The token read
-	// waits for the call to be up.
+	// served (TestOnlyServeChoosesTheRung pins the order).
 	tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)
+	defer cancel()
+	if err := c.Answer(tctx); err != nil {
+		return Report{}, overrun(ctx, tctx, c, err)
+	}
+	// The token is read only once the call is answered, so keys pressed
+	// before then reach no try if it never is.
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
 	// End the token read and wait for it: token closes token once its one
@@ -246,9 +252,6 @@ func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Rep
 		for range token {
 		}
 	}()
-	if err := c.Answer(tctx); err != nil {
-		return Report{}, overrun(ctx, tctx, c, err)
-	}
 	rep, err := loop(tctx, cfg, c, token)
 	cancel() // the call is over: its grant ends before the hang-up
 	return rep, overrun(ctx, tctx, c, err)

@@ -34,11 +34,15 @@ type line struct {
 	empty   bool
 	hungUp  bool
 	// hangErr and hangLeft are the hang-up ctx's error and the time left
-	// to its deadline (0 with none) as Hangup got it.
+	// to its deadline (0 with none) as Hangup got it; with hangStuck,
+	// Hangup then waits for that ctx to end.
+	hangStuck bool
 	hangErr   error
 	hangLeft  time.Duration
 	stuck     bool
 	answerErr error
+	// answerWait delays a failing Answer.
+	answerWait time.Duration
 }
 
 func newLine() *line {
@@ -54,10 +58,14 @@ func (l *line) Speech() <-chan []byte   { return l.speech }
 func (l *line) Keys() <-chan byte       { return l.keys }
 func (l *line) Hangup(ctx context.Context) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.hungUp, l.hangErr = true, ctx.Err()
 	if d, ok := ctx.Deadline(); ok {
 		l.hangLeft = time.Until(d)
+	}
+	stuck := l.hangStuck
+	l.mu.Unlock()
+	if stuck {
+		<-ctx.Done()
 	}
 	return nil
 }
@@ -68,6 +76,7 @@ func (l *line) Answer(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if l.answerErr != nil {
+		time.Sleep(l.answerWait)
 		return l.answerErr
 	}
 	l.answered = true

@@ -570,7 +570,20 @@ func TestNoTokenTryFollowsTheCall(t *testing.T) {
 	tries := func() int { mu.Lock(); defer mu.Unlock(); return len(tried) }
 	token := func(k string) bool { mu.Lock(); tried = append(tried, k); mu.Unlock(); return k == "4071" }
 
+	// Keys pressed before an Answer that fails reach no try (#5274).
 	r := newRig(t, fixed("Hi."))
+	r.cfg.Token = token
+	r.l.answerErr = errors.New("no carrier")
+	r.l.answerWait = 50 * time.Millisecond // time for a token read to try
+	for _, k := range []byte("1#") {
+		r.l.keys <- k
+	}
+	r.serve()
+	if _, err := r.end(); !errors.Is(err, r.l.answerErr) || tries() != 0 {
+		t.Fatalf("a failed Answer: err %v, tried %q", err, tried)
+	}
+
+	r = newRig(t, fixed("Hi."))
 	r.cfg.Token = token
 	r.serve()
 	for _, k := range []byte("4071#") {
@@ -817,10 +830,13 @@ func TestARedialAfterADropIsAnswered(t *testing.T) {
 
 // A call whose line never reports its end, or never finishes answering, is
 // ended at MaxCall (default 30 min), hung up, and the next owner call is
-// answered (#5252). The hang-up runs on a live ctx bounded by HangupWait,
-// though Serve's own ctx has no deadline, so a line that wedges on it
-// frees the next call (#5274).
+// answered (#5252). The hang-up runs on a live ctx bounded by HangupWait
+// (5 s), though Serve's own ctx has no deadline, so a line that wedges on
+// it frees the next call, and it ends with Serve's ctx (#5274).
 func TestACallEndsAtMaxCall(t *testing.T) {
+	if call.HangupWait != 5*time.Second {
+		t.Fatalf("HangupWait is %v", call.HangupWait)
+	}
 	hungUp := func(r *rig) bool {
 		r.l.mu.Lock()
 		defer r.l.mu.Unlock()
@@ -848,14 +864,36 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 
 	r = newRig(t, fixed("Hi."))
 	r.cfg.MaxCall = 100 * time.Millisecond
-	r.serve() // the carrier never drops
+	r.l.hangStuck = true // the hang-up waits for its ctx to end
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { // the carrier never drops
+		rep, err := call.Serve(ctx, r.cfg, r.l, "+15550100")
+		r.err <- err
+		r.rep <- rep
+	}()
 	r.say("q")
 	r.next()
-	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
-		t.Fatalf("a call past MaxCall: err %v", err)
+	for i := 0; i < 500 && !hungUp(r); i++ {
+		time.Sleep(time.Millisecond)
 	}
 	if !hungUp(r) {
 		t.Fatal("a call past MaxCall was not hung up")
+	}
+	select { // the hang-up ends with Serve's ctx, not HangupWait later
+	case <-r.err:
+		t.Fatal("Serve returned during the hang-up")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-r.err:
+		r.err <- err
+	case <-time.After(time.Second):
+		t.Fatal("the hang-up outlived Serve's ctx")
+	}
+	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
+		t.Fatalf("a call past MaxCall: err %v", err)
 	}
 
 	// An Answer that never completes is bounded the same way (Lens on
@@ -1124,10 +1162,20 @@ func TestAPanicInServeFreesTheLine(t *testing.T) {
 		f()
 		return nil
 	}
-	answered := func() {
+	answered := func() { // fails within a second if the line is still held
 		next := newRig(t, fixed("All quiet."))
+		next.cfg.After = func(d time.Duration) <-chan time.Time {
+			if d == 10*time.Second { // RingWait
+				return time.After(time.Second)
+			}
+			return nil
+		}
 		next.serve()
-		next.say("and now")
+		select {
+		case next.rec.out <- call.Heard{Text: "and now", Final: true}:
+		case err := <-next.err:
+			t.Fatalf("the next call was refused: %v", err)
+		}
 		if got := next.next(); got != "S:All quiet." {
 			t.Fatalf("the next call played %q", got)
 		}
