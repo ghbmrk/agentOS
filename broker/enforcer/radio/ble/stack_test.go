@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/radio"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // REQ: NET-2
@@ -154,8 +156,7 @@ func runStack(t *testing.T, cfg Config, d time.Duration) (error, net.Conn) {
 // TestRunRefusesWhatCannotServe: Run returns an error, and closes the
 // host's link, for a configuration that does not check (before dialling
 // the bus), a bus it cannot reach, and a BlueZ it cannot name: an error
-// reply, no answer, an empty or non-string name. An empty bus path is
-// the system bus.
+// reply, no answer, an empty or non-string name.
 func TestRunRefusesWhatCannotServe(t *testing.T) {
 	sb := newStubBus(t, authOK, false, asBluez(nil))
 	bad := testConfig(sb.path)
@@ -202,11 +203,48 @@ func TestRunRefusesWhatCannotServe(t *testing.T) {
 			t.Errorf("no owner: %v is not BlueZ's error", err)
 		}
 	}
-	// The system bus: Run reaches it, or names it in its error.
-	sys := testConfig("")
-	err, _ = runStack(t, sys, 20*time.Second)
-	if err == nil || !(strings.Contains(err.Error(), SystemBus) || strings.Contains(err.Error(), "BlueZ not on the bus")) {
-		t.Errorf("an empty bus path: %v", err)
+}
+
+// TestRunDefaultsToTheSystemBus (NET-2): an empty bus path is SystemBus,
+// the one socket confine.BLE's view shows. The run is in a fresh user and
+// mount namespace whose /run is a private tmpfs with a stub bus linked at
+// SystemBus, so the host's own bus (and a BlueZ on it) is never dialled.
+// Run must reach the stub and serve until the host's link ends. Catches a
+// stack that dials nothing, or another socket, when the path is empty.
+func TestRunDefaultsToTheSystemBus(t *testing.T) {
+	if !netnstest.RunAs(t, nestedEnv, combined, []string{"--map-root-user", "--mount"}) {
+		return
+	}
+	if err := syscall.Mount("tmpfs", "/run", "tmpfs", syscall.MS_NOSUID|syscall.MS_NODEV, "mode=0755"); err != nil {
+		t.Fatalf("a private /run: %v", err)
+	}
+	sb := newStubBus(t, authOK, false, asBluez(nil))
+	if err := os.MkdirAll(filepath.Dir(SystemBus), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sb.path, SystemBus); err != nil {
+		t.Fatal(err)
+	}
+	hostEnd, stackEnd := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Run(testConfig(""), stackEnd, testLog{t}) }()
+	for deadline := time.Now().Add(5 * time.Second); len(sb.called()) < 4; time.Sleep(time.Millisecond) { // Hello, GetNameOwner and two AddMatch
+		select {
+		case err := <-done:
+			t.Fatalf("an empty bus path ended Run before the stub at %s served it: %v", SystemBus, err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			hostEnd.Close()
+			<-done
+			t.Fatalf("the stub at %s saw %v, want Hello, GetNameOwner and two AddMatch", SystemBus, sb.called())
+		}
+	}
+	hostEnd.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stack outlived its host's link")
 	}
 }
 
