@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -966,6 +968,46 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 		}
 		if n := body.n.Load(); n != 0 {
 			t.Fatalf("authorization %q: %d body bytes read before the placeholder check", auth, n)
+		}
+	}
+}
+
+// A plan route passes only the names the plan clerk passes, byte for byte,
+// on its request, sign-in and response lists, and only its prefixes
+// (#5278): the header corpus's credential, request-reshaping, hop-by-hop
+// and broken names, in any case, are refused. Catches the old denylist,
+// which took X-Original-Url, X-Api-Key and Forwarded, and a list that drifts
+// from the clerk's.
+func TestPlanRouteHeadersRefuseTheCorpus(t *testing.T) {
+	takes := func(edit func(*PlanRoute)) error {
+		r := Codex()
+		edit(&r)
+		return r.validate()
+	}
+	want := hostiletext.Exactly(t, header.PassHeaders,
+		"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
+		"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
+		"Retry-After", "X-Request-Id", "Openai-Model")
+	for name, set := range map[string]func(r *PlanRoute, h string){
+		"request":  func(r *PlanRoute, h string) { r.RequestHeaders = []string{h} },
+		"sign-in":  func(r *PlanRoute, h string) { r.SignInHeaders = []string{h} },
+		"response": func(r *PlanRoute, h string) { r.ResponseHeaders = []string{h} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			hostiletext.RunHeaders(t, func(h string) bool {
+				return takes(func(r *PlanRoute) { set(r, h) }) == nil
+			}, want...)
+		})
+	}
+	if err := takes(func(r *PlanRoute) { r.RequestHeaders = []string{"X-Original-Url"} }); err == nil || err.Error() != `plan route codex: may not forward header "X-Original-Url"` {
+		t.Errorf("X-Original-Url: got %v", err)
+	}
+	if err := takes(func(r *PlanRoute) { r.ResponsePrefixes = []string{"X-Codex-"} }); err != nil {
+		t.Errorf(`the prefix "X-Codex-" was refused: %v`, err)
+	}
+	for _, pre := range []string{"X-", "x-codex-", "X-Codex", "Set-", "Proxy-Auth", ""} {
+		if err := takes(func(r *PlanRoute) { r.ResponsePrefixes = []string{pre} }); err == nil || err.Error() != `plan route codex: response prefix "`+pre+`"` {
+			t.Errorf("the prefix %q: got %v", pre, err)
 		}
 	}
 }

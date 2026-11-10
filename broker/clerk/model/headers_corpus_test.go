@@ -3,6 +3,7 @@ package model
 // REQ: CLK-3
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/hostiletext"
@@ -35,10 +36,28 @@ func TestDeclaredHeadersRefuseTheCorpus(t *testing.T) {
 	hostiletext.RunHeaders(t, func(h string) bool { return declares(h, "2023-06-01") },
 		"Anthropic-"+hostiletext.Exactly(t, declHeaders, "Version")[0])
 	hostiletext.RunHeaderValues(t, func(v string) bool { return declares("Anthropic-Version", v) })
-	for _, v := range []string{"", " v", "v ", "v\t"} {
-		if declares("Anthropic-Version", v) {
-			t.Errorf("the value %q was taken", v)
+	// Each refusal names the rule that fired (#5278).
+	why := func(h, v string) string {
+		d := Shipped[0]
+		d.Headers = map[string]string{h: v}
+		if err := d.validate(); err != nil {
+			return err.Error()
 		}
+		return ""
+	}
+	for v, rule := range map[string]string{
+		"":        "the value is empty",
+		" v":      "the value begins or ends with a space",
+		"v ":      "the value begins or ends with a space",
+		"v\t":     "the value holds a control character",
+		"v\u00e9": "a byte outside visible ASCII",
+	} {
+		if got := why("Anthropic-Version", v); !strings.HasPrefix(got, `model: anthropic: header "Anthropic-Version": `) || !strings.Contains(got, rule) {
+			t.Errorf("the value %q: got %q, want a refusal saying %q", v, got, rule)
+		}
+	}
+	if got := why("X-Signature", "v"); got != `model: anthropic: header "X-Signature" is not on the allowlist: a declaration may set only ["Anthropic-Version"]` {
+		t.Errorf("an unlisted name: got %q", got)
 	}
 	// Inner spaces and every visible byte, '~' included, are a value.
 	for _, v := range []string{"2023-06-01 v", "~v~"} {

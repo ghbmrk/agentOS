@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -202,12 +203,18 @@ func (d *APIDeclaration) validate() error {
 	case len(d.Ops) == 0 || len(d.Models) == 0 || len(d.UsageIn) == 0 || len(d.UsageOut) == 0:
 		return fmt.Errorf("model: %s: needs operations, models and usage fields", d.Provider)
 	}
+	// The names a declaration may set: its provider's name and a word
+	// declHeaders holds, canonical.
+	var named []string
+	for _, w := range declHeaders {
+		named = append(named, http.CanonicalHeaderKey(d.Provider+"-"+w))
+	}
 	for h, v := range d.Headers {
-		named := slices.ContainsFunc(declHeaders, func(w string) bool { return h == http.CanonicalHeaderKey(d.Provider+"-"+w) })
-		// A value is visible ASCII and spaces, unpadded: no line break or
-		// control character adds a header line or reaches the remote.
-		if !named || v == "" || v != strings.TrimSpace(v) || strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r > '~' }) {
-			return fmt.Errorf("model: %s: header %q", d.Provider, h)
+		if !slices.Contains(named, h) {
+			return fmt.Errorf("model: %s: header %q is not on the allowlist: a declaration may set only %q", d.Provider, h, named)
+		}
+		if err := header.Value(v); err != nil {
+			return fmt.Errorf("model: %s: header %q: %w", d.Provider, h, err)
 		}
 	}
 	for _, op := range d.Ops {

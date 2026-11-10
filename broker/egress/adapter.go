@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
 	"github.com/ghbmrk/agentos/broker/verb"
 )
 
@@ -223,9 +224,12 @@ func (a Adapter) validate() error {
 		if _, err := splitPath(kc.Path); err != nil || strings.ContainsAny(kc.Path, "{}") {
 			return fmt.Errorf("adapter %s: key check path %q must be literal", a.Name, kc.Path)
 		}
-		for h := range kc.Headers {
+		for h, v := range kc.Headers {
 			if c := http.CanonicalHeaderKey(h); forbiddenHeader(c) || c == inject {
 				return fmt.Errorf("adapter %s: key check may not send header %s", a.Name, c)
+			}
+			if err := header.Value(v); err != nil {
+				return fmt.Errorf("adapter %s: key check header %s: %w", a.Name, h, err)
 			}
 		}
 	}

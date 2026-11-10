@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -370,38 +372,19 @@ func (r PlanRoute) validate() error {
 			}
 		}
 	}
+	// A route passes only the names the plan clerk passes, byte for byte
+	// (#5278): one list, so the two cannot drift.
 	for _, h := range append(append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...), r.ResponseHeaders...) {
-		if planForbiddenHeader(http.CanonicalHeaderKey(h)) {
-			return fmt.Errorf("plan route %s: may not forward header %s", r.Provider, h)
+		if !slices.Contains(header.PassHeaders, h) {
+			return fmt.Errorf("plan route %s: may not forward header %q", r.Provider, h)
 		}
 	}
 	for _, p := range r.ResponsePrefixes {
-		if p == "" || planForbiddenHeader(http.CanonicalHeaderKey(p)) {
+		if !slices.Contains(header.PassPrefixes, p) {
 			return fmt.Errorf("plan route %s: response prefix %q", r.Provider, p)
 		}
 	}
 	return nil
-}
-
-// planForbiddenHeader names headers no plan route forwards: credentials,
-// cookies, encodings the redactor cannot read, hop-by-hop and framing
-// headers, redirects, and the broker's own signals. It is narrower than
-// forbiddenHeader because the CLI's own session_id names a conversation,
-// not a login.
-func planForbiddenHeader(c string) bool {
-	switch c {
-	case "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "Location",
-		"Accept-Encoding", "Content-Encoding", "Transfer-Encoding", "Content-Length",
-		"Host", "Connection", "Upgrade", "Te", "Trailer", "Keep-Alive":
-		return true
-	}
-	l := strings.ToLower(c)
-	for _, w := range []string{"agentos", "auth", "token", "key", "cookie", "secret", "password"} {
-		if strings.Contains(l, w) {
-			return true
-		}
-	}
-	return false
 }
 
 // SignInLink checks the verification link and code the CLI printed before
@@ -1189,8 +1172,10 @@ func (w *workerRoute) responseHeaders(h http.Header) []string {
 	for _, n := range w.c.Route.ResponseHeaders {
 		names = append(names, http.CanonicalHeaderKey(n))
 	}
+	// A name a prefix matches is not on any list, so one that names a
+	// credential, the broker or an encoding is still dropped.
 	for k := range h {
-		if planForbiddenHeader(k) {
+		if forbiddenHeader(k) {
 			continue
 		}
 		for _, p := range w.c.Route.ResponsePrefixes {
