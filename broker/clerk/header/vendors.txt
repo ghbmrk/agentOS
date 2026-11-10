@@ -1,0 +1,6 @@
+# Vendor header names a plan route may pass (CLK-14), beside the generic
+# names in header.go: one line per vendor, its name, then each name exactly
+# as its pinned CLI sends or reads it. A name ending in * is an answer
+# prefix; a prefixed answer header that names a credential is still dropped.
+# A change here widens what reaches a provider or a guest: review it as code.
+openai Openai-Beta Originator Version Session_id Conversation_id Chatgpt-Account-Id X-Openai-Internal-Codex-Responses-Lite Openai-Model X-Codex-*

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,12 +98,10 @@ type PlanRoute struct {
 	RefusedLogin []string
 	// RequestHeaders a run worker may send; SignInHeaders a sign-in
 	// worker. Authorization is never on either: the route writes it.
-	RequestHeaders []string
-	SignInHeaders  []string
+	RequestHeaders, SignInHeaders []string
 	// ResponseHeaders and ResponsePrefixes are returned to the worker,
 	// redacted.
-	ResponseHeaders  []string
-	ResponsePrefixes []string
+	ResponseHeaders, ResponsePrefixes []string
 }
 
 // DeclaredTool is one tool a plan route allows. Namespace is the namespace
@@ -373,13 +370,13 @@ func (r PlanRoute) validate() error {
 		}
 	}
 	for _, h := range append(append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...), r.ResponseHeaders...) {
-		if !slices.Contains(header.PassHeaders, h) {
-			return fmt.Errorf("plan route %s: may not forward header %q", r.Provider, h)
+		if err := header.Name(h); err != nil {
+			return fmt.Errorf("plan route %s: %w", r.Provider, err)
 		}
 	}
 	for _, p := range r.ResponsePrefixes {
-		if !slices.Contains(header.PassPrefixes, p) {
-			return fmt.Errorf("plan route %s: response prefix %q", r.Provider, p)
+		if err := header.Prefix(p); err != nil {
+			return fmt.Errorf("plan route %s: %w", r.Provider, err)
 		}
 	}
 	return nil
