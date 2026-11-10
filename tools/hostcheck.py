@@ -78,9 +78,9 @@ STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
 # "PID:\tfile=NAME [NS];  TAIL" for each object mapped, NAME a path when given as one (a soname
 # is searched, so its candidates are trying lines). Any other line naming a file= fails the
 # audit, so a loader whose format differs cannot pass by being unread. The loader prints a name
-# as it is, so a line without the PID of the record's own suffix is the rest of a name holding a
-# newline, and fails; a name may hold " [N];  " itself, so every split before a whole TAIL is a
-# candidate (#5231).
+# as it is, so a line after a name that lacks the PID of the record's own suffix is the rest of a
+# name holding a newline, and fails (another PID's line is a forked child's, and may not name a
+# file); a name may hold " [N];  " itself, so every split before a whole TAIL is a candidate (#5231).
 LOADER_LINE = re.compile(r"\s*(\d+):\s+(.*)")
 LOADER_TRYING = re.compile(r"trying file=(.+)")
 LOADER_SPLIT = re.compile(r"(?=( \[\d+\];  ))")  # a lookahead: a split may overlap the one before it
@@ -124,16 +124,25 @@ def loader_env(ld_log):
 def loader_paths(text, pid):
     """The paths in process PID's LD_DEBUG record that the loader looked for or mapped, or the first
     line it could not read as either."""
-    paths = []
+    paths, named = [], False  # named: the line before named a path read here, so it may go on
     for line in text.split("\n"):
         m = LOADER_LINE.fullmatch(line)
-        if not m or m.group(1) != pid:
+        if not m:
             if line.strip(" \t"):
                 raise HostcheckError(f"unreadable loader record line: {line!r}")
+            named = False
             continue
-        body = m.group(2)
+        if m.group(1) != pid:
+            # A child forked without an exec writes into its parent's record under its own PID (its
+            # exit's "calling fini" lines). It may not name a file, nor go on a name read here.
+            if "file=" in m.group(2) or named:
+                raise HostcheckError(f"the loader's record of PID {pid} holds a line of PID {m.group(1)} that names "
+                                     f"a file or follows a name: {line!r}")
+            continue
+        body, named = m.group(2), False
         if "file=" not in body or body.startswith(LOADER_REOPEN):
             continue
+        named = True
         if t := LOADER_TRYING.fullmatch(body):
             paths.append(t.group(1))
             continue

@@ -870,7 +870,7 @@ class LoaderAuditTest(unittest.TestCase):
                            f"      8:\ttrying file={d}/b"):
                 with self.subTest(forged):
                     pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n{forged}\n")
-                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "record of PID 7 holds a line of PID [18] "):
                         hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
             pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/a\n")
             pathlib.Path(d, "stack.x").write_text(f"      7:\ttrying file={d}/a\n")
@@ -885,6 +885,33 @@ class LoaderAuditTest(unittest.TestCase):
             pathlib.Path(d, "stack.7").write_bytes(b"      7:\ttrying file=" + os.fsencode(d) + b"/\xff/libc.so.6\n")
             with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+
+    def test_a_forked_childs_exit_lines_pass_but_never_a_name(self):
+        # #5310: a child forked without an exec writes its exit's lines into its parent's record under its
+        # own PID. The probe is the host's bash in the root with every library it links.
+        bash = os.path.realpath(shutil.which("bash"))
+        out = subprocess.run(["ldd", bash], capture_output=True, text=True, check=True).stdout
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            for lib in [a or b for a, b in re.findall(r"=> (/\S+)|^\s*(/\S+)", out, re.M)]:
+                dst = pathlib.Path(d, "usr/lib/x86_64-linux-gnu", os.path.basename(lib))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(os.path.realpath(lib), dst)
+            pathlib.Path(d, "usr/bin").mkdir(parents=True)
+            shutil.copy(bash, pathlib.Path(d, hostcheck.TOOLS["swtpm"]))
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", ["-c", "( echo sub >/dev/null; ); echo done"],
+                                      stdout=subprocess.DEVNULL)
+            self.assertEqual(p.wait(timeout=60), 0)
+            text = pathlib.Path(log, f"stack.{p.pid}").read_text()
+            self.assertRegex(text, rf"(?m)^\s*(?!{p.pid}:)\d+:\tcalling fini")  # the child's lines are there
+            hostcheck.stack_done(args, p)
+        with tempfile.TemporaryDirectory() as d:
+            for lines in ([f"      7:\ttrying file={d}/a", "      7:\t", "      8:\tfile=/lib/libc.so.6 [0];  generating link map"],
+                          [f"      7:\ttrying file={d}/a", "      8:\t"]):
+                with self.subTest(lines):
+                    pathlib.Path(d, "stack.7").write_text("\n".join(lines) + "\n")
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, "record of PID 7 holds a line of PID 8 "):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
 
     def test_records_alone_need_one_and_read_every_one(self):
         # #5231: audit_records, for tools with no PID to name (tests/test_image.py image_tool), needs a record.
