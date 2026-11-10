@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
@@ -970,14 +972,12 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-// Egress's plan route and key check use clerk/header's list and value check,
-// and a prefixed answer header naming a credential is dropped (#5278); the
-// corpus runs through egress in clerk/header's tests.
-func TestEgressUsesTheSharedHeaderChecks(t *testing.T) {
-	r, p, a := Codex(), Codex(), Anthropic("a")
-	r.SignInHeaders, p.ResponsePrefixes, a.KeyCheck.Headers = []string{"X-Api-Key"}, []string{"X-"}, map[string]string{"Anthropic-Version": " v"}
-	got := (&workerRoute{c: WorkerRouteConfig{Route: r}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}})
-	if r.validate() == nil || p.validate() == nil || a.Validate() == nil || strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A" {
-		t.Errorf("a shared header check is not applied: %v, %v, %v, %q", r.validate(), p.validate(), a.Validate(), got)
+// Egress uses clerk/header (#5278): a plan route's names refuse the name corpus, a key check's values the value corpus; a prefixed credential answer header is dropped.
+func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
+	hostiletext.RunHeaders(t, func(h string) bool { r := Codex(); r.SignInHeaders = []string{h}; return r.validate() == nil }, header.PassHeaders...)
+	hostiletext.RunHeaderValues(t, func(v string) bool { a := Anthropic("a"); a.KeyCheck.Headers["V"] = v; return a.Validate() == nil })
+	prefix := func() error { r := Codex(); r.ResponsePrefixes = []string{"X-"}; return r.validate() }
+	if got := (&workerRoute{c: WorkerRouteConfig{Route: Codex()}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}}); prefix() == nil || strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A" {
+		t.Errorf("prefix %v, answer headers %q", prefix(), got)
 	}
 }

@@ -372,8 +372,6 @@ func (r PlanRoute) validate() error {
 			}
 		}
 	}
-	// A route passes only the names the plan clerk passes, byte for byte
-	// (#5278): one list, so the two cannot drift.
 	for _, h := range append(append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...), r.ResponseHeaders...) {
 		if !slices.Contains(header.PassHeaders, h) {
 			return fmt.Errorf("plan route %s: may not forward header %q", r.Provider, h)
@@ -1172,8 +1170,6 @@ func (w *workerRoute) responseHeaders(h http.Header) []string {
 	for _, n := range w.c.Route.ResponseHeaders {
 		names = append(names, http.CanonicalHeaderKey(n))
 	}
-	// A name a prefix matches is not on any list, so one that names a
-	// credential, the broker or an encoding is still dropped.
 	for k := range h {
 		if forbiddenHeader(k) {
 			continue
