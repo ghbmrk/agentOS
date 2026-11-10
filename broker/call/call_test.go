@@ -32,6 +32,7 @@ type line struct {
 	overlap bool
 	sayErr  error
 	empty   bool
+	hungUp  bool
 }
 
 func newLine() *line {
@@ -45,7 +46,7 @@ func (l *line) Active() <-chan struct{}      { return l.active }
 func (l *line) Ended() <-chan struct{}       { return l.ended }
 func (l *line) Speech() <-chan []byte        { return l.speech }
 func (l *line) Keys() <-chan byte            { return l.keys }
-func (l *line) Hangup(context.Context) error { return nil }
+func (l *line) Hangup(context.Context) error { l.mu.Lock(); l.hungUp = true; l.mu.Unlock(); return nil }
 func (l *line) Number() string               { return l.number }
 func (l *line) Answer(context.Context) error { l.answered = true; return nil }
 func (l *line) Say(ctx context.Context, pcm []byte) error {

@@ -622,8 +622,22 @@ func TestOneCallIsServedAtATime(t *testing.T) {
 
 	b := newRig(t, fixed("All quiet."))
 	b.cfg.Answerer = a.ans // one answerer wired to both calls
+	ring := make(chan time.Time)
+	waited := make(chan time.Duration, 1)
+	b.cfg.After = func(d time.Duration) <-chan time.Time { waited <- d; return ring }
 	busy := make(chan error, 1)
 	go func() { _, err := call.Serve(context.Background(), b.cfg, b.l, "+15550100"); busy <- err }()
+	// It waits, ringing, for the call being served to end (#5252), and
+	// is refused once the ring wait (default 10 s) has passed.
+	if d := <-waited; d != 10*time.Second {
+		t.Fatalf("the ring wait is %v", d)
+	}
+	select {
+	case err := <-busy:
+		t.Fatalf("refused before the ring wait passed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(ring)
 	select {
 	case err := <-busy:
 		if !errors.Is(err, call.ErrBusy) {
@@ -635,10 +649,35 @@ func TestOneCallIsServedAtATime(t *testing.T) {
 	if b.l.answered {
 		t.Fatal("answered a second call while one is served")
 	}
+	// A waiting call whose caller gives up, or whose ctx ends, stops
+	// waiting at once.
+	for _, how := range []string{"hangs up", "ctx ends"} {
+		c := newRig(t, fixed("x"))
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _, err := call.Serve(ctx, c.cfg, c.l, "+15550100"); busy <- err }()
+		time.Sleep(20 * time.Millisecond)
+		want := call.ErrBusy
+		if how == "hangs up" {
+			close(c.l.ended)
+		} else {
+			cancel()
+			want = context.Canceled
+		}
+		select {
+		case err := <-busy:
+			if !errors.Is(err, want) {
+				t.Fatalf("a waiting call whose %s: err %v", how, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("a waiting call whose %s kept waiting", how)
+		}
+		cancel()
+	}
 	if rep := a.hangup(); rep.Rung != call.P2 {
 		t.Fatalf("the first call ran at %v", rep.Rung)
 	}
 
+	b.cfg.After = func(time.Duration) <-chan time.Time { return nil }
 	b.serve()
 	b.say("and now")
 	b.next()
@@ -651,4 +690,89 @@ func TestOneCallIsServedAtATime(t *testing.T) {
 			t.Fatalf("ask %d kept by the shared answerer says %v once its call ended", i, q.Rung())
 		}
 	}
+}
+
+// An owner redial right after a dropped call is answered, not refused while
+// the dropped call unwinds (#5252). Here the old call's turn is held in the
+// check (Hold) as its line drops, so its Serve still holds the lock when
+// the redial rings; the redial waits and is answered once it is let go.
+func TestARedialAfterADropIsAnswered(t *testing.T) {
+	a := newRig(t, fixed("Two new mails."))
+	inHold, release := make(chan struct{}, 1), make(chan struct{})
+	a.cfg.Hold = func(string) bool {
+		select {
+		case inHold <- struct{}{}:
+			<-release
+		default:
+		}
+		return false
+	}
+	a.serve()
+	a.say("what's in my mail")
+	<-inHold
+	close(a.l.ended) // the call drops
+
+	b := newRig(t, fixed("All quiet."))
+	b.cfg.After = func(time.Duration) <-chan time.Time { return nil } // the redial keeps ringing
+	b.serve()
+	select {
+	case err := <-b.err:
+		t.Fatalf("the redial was refused while the dropped call unwound: %v", err)
+	case <-a.err:
+		t.Fatal("the dropped call returned before its turn's producer ended")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-a.err; err != nil { // not a.end: b's call is up
+		t.Fatalf("the dropped call: %v", err)
+	}
+	b.say("and now")
+	if got := b.next(); got != "S:All quiet." {
+		t.Fatalf("the redial played %q", got)
+	}
+	b.hangup()
+}
+
+// A call whose line never reports its end is ended at MaxCall (default 30
+// min), hung up, and the next owner call is answered (#5252).
+func TestACallEndsAtMaxCall(t *testing.T) {
+	r := newRig(t, fixed("Hi."))
+	deadline := make(chan time.Duration, 1)
+	r.cfg.Answerer = answerFunc(func(ctx context.Context, a call.Ask) (<-chan string, error) {
+		d, _ := ctx.Deadline()
+		deadline <- time.Until(d)
+		return r.ans.Answer(ctx, a)
+	})
+	r.serve()
+	r.say("q")
+	r.next()
+	if d := <-deadline; d < 29*time.Minute || d > 30*time.Minute {
+		t.Fatalf("the default call length is %v", d)
+	}
+	if rep := r.hangup(); len(rep.Turns) != 1 {
+		t.Fatalf("turns = %+v", rep.Turns)
+	}
+
+	r = newRig(t, fixed("Hi."))
+	r.cfg.MaxCall = 100 * time.Millisecond
+	r.serve() // the carrier never drops
+	r.say("q")
+	r.next()
+	if _, err := r.end(); !errors.Is(err, call.ErrTooLong) {
+		t.Fatalf("a call past MaxCall: err %v", err)
+	}
+	r.l.mu.Lock()
+	hungUp := r.l.hungUp
+	r.l.mu.Unlock()
+	if !hungUp {
+		t.Fatal("a call past MaxCall was not hung up")
+	}
+
+	next := newRig(t, fixed("All quiet."))
+	next.serve()
+	next.say("and now")
+	if got := next.next(); got != "S:All quiet." {
+		t.Fatalf("the next call played %q", got)
+	}
+	next.hangup()
 }

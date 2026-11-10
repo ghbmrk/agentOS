@@ -38,9 +38,11 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     any func literal, so only Serve, which answers only the owner's
 //     number, runs a call. check is named only as the callee of calls in
 //     token's body, and token, whose ctx is the grant's life, only in
-//     Serve's, both outside any func literal. serving, the lock that serves
-//     one call at a time, is named only in Serve, which takes it, makes
-//     the token's ctx and defers cancel then unlock, in that order.
+//     Serve's, both outside any func literal, and token is called once.
+//     serving, the lock that serves one call at a time, is named only in
+//     Serve, which takes it (waiting up to RingWait), makes the token's
+//     ctx and defers cancel then unlock, in that order; nothing writes
+//     tctx or cancel after that.
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -145,6 +147,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// return: so a call's grant has died before the next call is
 		// served, and every return unlocks (Lens on #5251).
 		var serveBody []string
+		var serveStmts []ast.Stmt
 		for _, f := range files {
 			for _, d := range f.Decls {
 				if fd, ok := d.(*ast.FuncDecl); ok && info.Defs[fd.Name] == serve {
@@ -152,17 +155,26 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						var b strings.Builder
 						printer.Fprint(&b, fset, st)
 						serveBody = append(serveBody, strings.Join(strings.Fields(b.String()), " "))
+						serveStmts = append(serveStmts, st)
 					}
 				}
 			}
 		}
+		// The take: at once if no call is served, else waiting up to
+		// RingWait for the call before to end (#5252).
 		pinned := []string{
-			"if !serving.TryLock() { return Report{}, ErrBusy }",
-			"tctx, cancel := context.WithCancel(ctx)",
-			"defer func() { cancel(); serving.Unlock() }()",
+			"select { case serving <- struct{}{}: default: select { case serving <- struct{}{}: case <-cfg.After(cfg.RingWait): return Report{}, ErrBusy case <-c.Ended(): return Report{}, ErrBusy case <-ctx.Done(): return Report{}, ctx.Err() } }",
+			"tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)",
+			"defer func() { cancel(); <-serving }()",
 		}
+		// tctx and cancel are set once, by the pinned statement, and
+		// never written after it (#5251 reviews).
+		var tctx, cancel types.Object
 		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+3 > len(serveBody) || !slices.Equal(serveBody[i:i+3], pinned) || !slices.Contains(serveBody[i+3:], "go cfg.token(tctx, c, token)") {
 			bad = append(bad, "Serve does not take serving, make tctx and defer cancel then unlock, in that order, before it reads the token with tctx")
+		} else {
+			lhs := serveStmts[i+1].(*ast.AssignStmt).Lhs
+			tctx, cancel = info.Defs[lhs[0].(*ast.Ident)], info.Defs[lhs[1].(*ast.Ident)]
 		}
 		for _, st := range serveBody[:max(slices.Index(serveBody, pinned[0]), 0)] {
 			if strings.Contains(st, "return") && st != "if ownerNumber == \"\" || c.Number() != ownerNumber { return Report{}, ErrNotOwner }" {
@@ -198,7 +210,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		at := func(n ast.Node, msg string, a ...any) {
 			bad = append(bad, fset.Position(n.Pos()).String()+": "+fmt.Sprintf(msg, a...))
 		}
-		calls := 0
+		calls, tokenCalls := 0, 0
 		for _, f := range files {
 			for _, imp := range f.Imports {
 				if p := strings.Trim(imp.Path.Value, `"`); p == "unsafe" || p == "reflect" || p == "C" {
@@ -259,11 +271,28 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 							}
 							call, isCall := up.(*ast.CallExpr)
 							if encl == in && isCall && call.Fun == fun && !lit {
-								if obj == loopFn {
+								switch obj {
+								case loopFn:
 									calls++
+								case tokenFn:
+									tokenCalls++
 								}
 							} else {
 								at(n, "%s is named other than as a direct call in %s", obj.Name(), in.Name())
+							}
+						}
+						if obj != nil && (obj == tctx || obj == cancel) {
+							var write bool
+							switch up := parent(1).(type) {
+							case *ast.AssignStmt:
+								write = slices.ContainsFunc(up.Lhs, func(x ast.Expr) bool { return ast.Unparen(x) == n })
+							case *ast.UnaryExpr:
+								write = up.Op == token.AND
+							case *ast.RangeStmt:
+								write = ast.Unparen(up.Key) == n || ast.Unparen(up.Value) == n
+							}
+							if write {
+								at(n, "writes %s", obj.Name())
 							}
 						}
 						if obj == gr || obj == gl || obj == tok {
@@ -300,8 +329,11 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if calls != 1 {
 			bad = append(bad, fmt.Sprintf("Serve calls loop %d times", calls))
 		}
-		if servingNames != 2 {
-			bad = append(bad, fmt.Sprintf("serving is named %d times, not 2", servingNames))
+		if tokenCalls != 1 {
+			bad = append(bad, fmt.Sprintf("Serve calls token %d times", tokenCalls))
+		}
+		if servingNames != 3 {
+			bad = append(bad, fmt.Sprintf("serving is named %d times, not 3", servingNames))
 		}
 		return bad
 	}
@@ -321,9 +353,9 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{extra: "func init() { go loop(context.Background(), Config{}, nil, nil) }", want: "loop is named"},
 		{extra: "func (cfg Config) Serve(ctx context.Context, l Line) (Report, error) { return loop(ctx, cfg, l, nil) }", want: "loop is named"},
 		// #5219 item 1: inside Serve, but not a direct call.
-		{old: "return loop(ctx, cfg, c, token)", new: "keep = func() { loop(ctx, cfg, c, token) }\n\treturn Report{}, nil", extra: "var keep func()", want: "loop is named"},
-		{old: "return loop(ctx, cfg, c, token)", new: "return id(loop)(ctx, cfg, c, token)", extra: "func id[T any](t T) T { return t }", want: "loop is named"},
-		{old: "return loop(ctx, cfg, c, token)", new: "loop(ctx, cfg, c, token)\n\treturn loop(ctx, cfg, c, token)", want: "Serve calls loop 2 times"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "keep = func() { loop(tctx, cfg, c, token) }\n\trep, err := Report{}, error(nil)", extra: "var keep func()", want: "loop is named"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "rep, err := id(loop)(tctx, cfg, c, token)", extra: "func id[T any](t T) T { return t }", want: "loop is named"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "loop(tctx, cfg, c, token)\n\trep, err := loop(tctx, cfg, c, token)", want: "Serve calls loop 2 times"},
 		// check named outside token, or not as a direct call.
 		{extra: "var Check = check", want: "check is named"},
 		{extra: "func raise(cfg Config, l Incoming) *grant { return check(cfg, nil, l.Number()) }", want: "check is named"},
@@ -334,18 +366,33 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{extra: "var Token = Config.token", want: "token is named"},
 		{extra: "func raise(cfg Config) func(context.Context, Line, chan<- *grant) { return cfg.token }", want: "token is named"},
 		{old: "go cfg.token(tctx, c, token)", new: "go func() { cfg.token(tctx, c, token) }()", want: "token is named"},
+		// #5251 reviews: a second token read, on a ctx the call does not
+		// end, makes a grant that outlives the call.
+		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(tctx, c, token)\n\tgo cfg.token(ctx, c, token)", want: "Serve calls token 2 times"},
 		// #5232 R1: serving is Serve's alone, so one call is served at a time.
-		{extra: "func free() { serving.Unlock() }", want: "serving is named outside Serve"},
+		{extra: "func free() { <-serving }", want: "serving is named outside Serve"},
 		{extra: "var held = &serving", want: "serving is named outside Serve"},
 		// Lens on #5251: the unlock before the cancel lets the next call
 		// start while this call's grant still reads P2.
-		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { serving.Unlock(); cancel() }()", want: "in that order"},
-		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer cancel()\n\tdefer serving.Unlock()", want: "in that order"},
-		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer serving.Unlock()\n\tdefer cancel()", want: "in that order"},
-		{old: "defer func() { cancel(); serving.Unlock() }()", new: "defer func() { cancel(); serving.Unlock(); serving.Unlock() }()", want: "in that order"},
+		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { <-serving; cancel() }()", want: "in that order"},
+		{old: "defer func() { cancel(); <-serving }()", new: "defer cancel()\n\tdefer func() { <-serving }()", want: "in that order"},
+		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { <-serving }()\n\tdefer cancel()", want: "in that order"},
+		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { cancel(); <-serving; <-serving }()", want: "in that order"},
 		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(ctx, c, token)\n\t_ = tctx", want: "in that order"},
-		{old: "\tif !serving.TryLock() {", new: "\tif c.Number() == \"\" {\n\t\treturn Report{}, nil\n\t}\n\tif !serving.TryLock() {", want: "returns before it takes serving"},
-		{old: "\tif !serving.TryLock() {", new: "\tif !serving.TryLock() && serving.TryLock() {", want: "serving is named 3 times"},
+		{old: "\tcfg = cfg.withDefaults()\n", new: "\tif c.Number() == \"\" {\n\t\treturn Report{}, nil\n\t}\n\tcfg = cfg.withDefaults()\n", want: "returns before it takes serving"},
+		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { cancel(); <-serving }()\n\t_ = len(serving)", want: "serving is named 4 times"},
+		// #5252: the take waits for the call before, never past RingWait.
+		{old: "\tdefault: // another call is served: wait for it to end, up to RingWait\n", new: "\tdefault:\n\t\treturn Report{}, ErrBusy\n\t}\n\tif false {\n", want: "in that order"},
+		{old: "case <-cfg.After(cfg.RingWait):", new: "case <-cfg.After(cfg.MaxCall):", want: "in that order"},
+		{old: "tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)", new: "tctx, cancel := context.WithCancel(ctx)", want: "in that order"},
+		// #5251 reviews: tctx and cancel, the grant's life and its end,
+		// are set once and never written.
+		{old: "go cfg.token(tctx, c, token)", new: "tctx = ctx\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
+		{old: "go cfg.token(tctx, c, token)", new: "tctx, again := ctx, 0\n\t_ = again\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
+		{old: "go cfg.token(tctx, c, token)", new: "p := &tctx\n\t*p = ctx\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
+		{old: "go cfg.token(tctx, c, token)", new: "for _, tctx = range []context.Context{ctx} {\n\t}\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
+		{old: "go cfg.token(tctx, c, token)", new: "cancel = func() {}\n\tgo cfg.token(tctx, c, token)", want: "writes cancel"},
+		{old: "go cfg.token(tctx, c, token)", new: "keepCancel(&cancel)\n\tgo cfg.token(tctx, c, token)", extra: "import \"context\"\nfunc keepCancel(c *context.CancelFunc) { *c = func() {} }", want: "writes cancel"},
 		// A grant made outside check, or by a fill that names no field;
 		// Security's #5229 blocker first.
 		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},
@@ -375,8 +422,8 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{old: "cfg = cfg.withDefaults()", new: "cfg = cfg.withDefaults()\n\tcfg.Token = func(k string) bool { return k == c.Number() }", want: "writes Token"},
 		{extra: "func open(cfg Config) Config { return Config{Answerer: cfg.Answerer, Token: func(string) bool { return true }} }", want: "writes Token"},
 		{extra: "var Open = Config{Token: func(string) bool { return true }}", want: "writes Token"},
-		{extra: "func open(c Config) Config { return Config{c.Recognizer, c.Answerer, c.Synthesizer, c.Clips, c.Hold, 0, nil, nil, nil, 0, nil} }", want: "Config literal without keys"},
-		{extra: "type cfgTwin struct { Recognizer Recognizer; Answerer Answerer; Synthesizer Synthesizer; Clips Clips; Hold func(string) bool; OneMomentAfter time.Duration; Now func() time.Time; After func(time.Duration) <-chan time.Time; Token func(keys string) bool; TokenWindow time.Duration; Done func(Turn) }\nfunc open(c Config) Config { t := cfgTwin(c); t.Token = nil; return Config(t) }", want: "conversion to Config"},
+		{extra: "func open(c Config) Config { return Config{c.Recognizer, c.Answerer, c.Synthesizer, c.Clips, c.Hold, 0, nil, nil, nil, 0, 0, 0, nil} }", want: "Config literal without keys"},
+		{extra: "type cfgTwin struct { Recognizer Recognizer; Answerer Answerer; Synthesizer Synthesizer; Clips Clips; Hold func(string) bool; OneMomentAfter time.Duration; Now func() time.Time; After func(time.Duration) <-chan time.Time; Token func(keys string) bool; TokenWindow time.Duration; RingWait time.Duration; MaxCall time.Duration; Done func(Turn) }\nfunc open(c Config) Config { t := cfgTwin(c); t.Token = nil; return Config(t) }", want: "conversion to Config"},
 		// Out of the type system's sight.
 		{extra: "import \"unsafe\"\nvar _ unsafe.Pointer", want: "imports unsafe"},
 		{extra: "import \"reflect\"\nvar _ reflect.Value", want: "imports reflect"},
