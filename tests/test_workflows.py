@@ -513,8 +513,9 @@ def cache_key_problems(text):
 
 
 # CI-cancel-superseded (#5345, #5348): a push to a PR leaves the old head's runs holding the
-# Actions queue unless the workflow has a concurrency group per PR that cancels them. The workflows
-# below carry this exact block: a PR's first-attempt runs share its group and the newest cancels
+# Actions queue unless the workflow has a concurrency group per PR that cancels them. Every
+# PR-triggered workflow but premerge carries this exact block (#5361), and a new one fails until it
+# does and is listed below: a PR's first-attempt runs share its group and the newest cancels
 # the older ones. A rerun (attempt 2 or later; trusted-base-rerun.yml lists heads before it reruns)
 # and every push, merge-queue, schedule or dispatch run is a group of its own, so it can neither
 # cancel the current head's running run nor replace its pending one, and main's runs are never
@@ -526,7 +527,8 @@ SUPERSEDE_LINES = [
     "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
 ]
 SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml",
-             "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml"]
+             "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml", "infer-real.yml", "vision-real.yml",
+             "testkit.yml", "enforcer-image.yml", "camnode-image.yml", "drone-sitl.yml", "mutgate.yml"]
 # premerge.yml queues its runs on purpose (its record handling) and never cancels one.
 KEEPS_EVERY_RUN = {"premerge.yml"}
 
@@ -548,22 +550,20 @@ def supersede_problems(name, text):
         return ["a job sets its own concurrency group"]
     if name in KEEPS_EVERY_RUN:
         return []
-    if name in SUPERSEDE:
-        at = top.index("concurrency:") if "concurrency:" in top else len(top)
-        return [] if top[at:at + 3] == SUPERSEDE_LINES else ["no per-PR concurrency block as pinned"]
-    cancel = [l for l in top if l.startswith("  cancel-in-progress:")]
-    if "concurrency:" not in top or not cancel or cancel[0].endswith(" false"):
-        return ["a PR run never cancels the runs of the PR's older heads"]
-    return []
+    # #5361: no looser block passes; a rerun guard is part of every PR workflow's group.
+    at = top.index("concurrency:") if "concurrency:" in top else len(top)
+    if top[at:at + 3] != SUPERSEDE_LINES:
+        return ["no per-PR concurrency block as pinned"]
+    return [] if name in SUPERSEDE else ["a PR workflow missing from SUPERSEDE"]
 
 
 class WorkflowTest(unittest.TestCase):
     def test_a_pr_push_cancels_the_older_heads_runs(self):
         # CI-cancel-superseded (#5345): every PR-triggered workflow but premerge cancels a
-        # superseded head's runs; the gates and ci, assurance, vulncheck and image carry the
-        # pinned block (#5348), and no job sets its own group.
+        # superseded head's runs with the pinned block (#5348, #5361), and no job sets its own group.
         names = [f.name for f in self.files()]
         self.assertTrue(set(SUPERSEDE) | KEEPS_EVERY_RUN <= set(names))
+        self.assertEqual(len(SUPERSEDE), len(set(SUPERSEDE)))
         for f in self.files():
             with self.subTest(f.name):
                 self.assertEqual(supersede_problems(f.name, f.read_text()), [])
@@ -599,7 +599,17 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", "concurrency:\n  group: x\n"
                                                                    "  cancel-in-progress: false\njobs:")))
         self.assertEqual(supersede_problems("x.yml", plain.replace("pull_request", "push")), [])
-        # A PR workflow outside the nine: `jobs: ` with a trailing space still exposes its jobs, and
+        # #5361: a new PR workflow with a cancelling block but no rerun guard (the seven's old
+        # blocks) fails, and one with the pinned block fails until it is listed in SUPERSEDE.
+        for block in ["concurrency:\n  group: x-${{ github.event.pull_request.number || github.sha }}\n"
+                      "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+                      "concurrency:\n  group: x-${{ github.ref }}\n  cancel-in-progress: true\n"]:
+            with self.subTest(block=block):
+                self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", block + "jobs:")))
+        pinned = plain.replace("jobs:", "\n".join(SUPERSEDE_LINES) + "\njobs:")
+        self.assertEqual(supersede_problems("x.yml", pinned), ["a PR workflow missing from SUPERSEDE"])
+        self.assertEqual(supersede_problems("mutgate.yml", pinned), [])
+        # A PR workflow: `jobs: ` with a trailing space still exposes its jobs, and
         # a jobs line the check cannot find fails (#5348).
         testkit = (WORKFLOWS / "testkit.yml").read_text()
         self.assertEqual(supersede_problems("testkit.yml", testkit), [])
