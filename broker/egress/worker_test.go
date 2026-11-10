@@ -973,16 +973,28 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-// Egress uses clerk/header (#5278, #5291): a plan route's names refuse the name corpus, a key check's values the value corpus, each refusal names its rule, and a prefixed credential or broker answer header is dropped.
+// Egress uses clerk/header (#5278, #5291, #5320): a plan route's names refuse the name corpus, an answer name also a credential word, a key check's values the value corpus, each refusal names its rule, and forbiddenHeader refuses every corpus credential name by the clerks' word list.
 func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
 	route := func(set func(*PlanRoute, []string), h ...string) error { r := Codex(); set(&r, h); return r.validate() }
 	value := func(v string) error { a := Anthropic("a"); a.KeyCheck.Headers["V"] = v; return a.Validate() }
-	prefix, signIn := func(r *PlanRoute, h []string) { r.ResponsePrefixes = h }, func(r *PlanRoute, h []string) { r.SignInHeaders = h }
-	for _, set := range []func(*PlanRoute, []string){func(r *PlanRoute, h []string) { r.RequestHeaders = h }, signIn, func(r *PlanRoute, h []string) { r.ResponseHeaders = h }} {
+	answer, signIn := func(r *PlanRoute, h []string) { r.ResponseHeaders = h }, func(r *PlanRoute, h []string) { r.SignInHeaders = h }
+	for _, set := range []func(*PlanRoute, []string){func(r *PlanRoute, h []string) { r.RequestHeaders = h }, signIn} {
 		hostiletext.RunHeaders(t, func(h string) bool { return route(set, h) == nil }, header.Names()...)
 	}
+	var answers []string
+	for _, h := range header.Names() {
+		if h != "Session_id" {
+			answers = append(answers, h)
+		}
+	}
+	hostiletext.RunHeaders(t, func(h string) bool { return route(answer, h) == nil }, answers...)
 	hostiletext.RunHeaderValues(t, func(v string) bool { return value(v) == nil })
-	for want, got := range map[string]string{`plan route codex: header prefix "X-" is not on the allowlist`: fmt.Sprint(route(prefix, "X-")), `plan route codex: header prefix "" is not on the allowlist`: fmt.Sprint(route(prefix, "")), `plan route codex: header prefix "x-codex-" is not on the allowlist`: fmt.Sprint(route(prefix, "x-codex-")), "<nil>": fmt.Sprint(route(prefix, "X-Codex-")), `plan route codex: header "X-Api-Key" is not on the allowlist`: fmt.Sprint(route(signIn, "X-Api-Key")), "adapter anthropic: key check header V: the value begins or ends with a space": fmt.Sprint(value(" v")), "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A": strings.Join((&workerRoute{c: WorkerRouteConfig{Route: Codex()}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}, "X-Codex-Auth": {"t"}, "X-Codex-Agentos-Denied": {"1"}}), ",")} {
+	for _, e := range hostiletext.HeaderNames() {
+		if strings.HasPrefix(e.Name, "credential ") && !forbiddenHeader(http.CanonicalHeaderKey("X-Codex-"+e.Text)) {
+			t.Errorf("forbiddenHeader passes %q", e.Text)
+		}
+	}
+	for want, got := range map[string]string{`plan route codex: answer header "Session_id" names a credential ("session")`: fmt.Sprint(route(answer, "Session_id")), `plan route codex: answer header "X-Codex-Session-Token" is not on the allowlist`: fmt.Sprint(route(answer, "X-Codex-Session-Token")), `plan route codex: header "X-Api-Key" is not on the allowlist`: fmt.Sprint(route(signIn, "X-Api-Key")), "adapter anthropic: key check header V: the value begins or ends with a space": fmt.Sprint(value(" v"))} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}

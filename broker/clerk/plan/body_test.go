@@ -226,9 +226,9 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 			d.Body.ToolTypes = []string{"function"}
 			d.Body.Tools = []plan.Tool{{Namespace: "functions", Name: "wait", Type: "function"}}
 		},
-		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
-		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
-		"client_metadata with no keys":             func(d *plan.Declaration) { d.Body.Meta = nil },
+		"an answer header naming X-Forwarded-For": func(d *plan.Declaration) { d.ResponseHeaders = []string{"X-Forwarded-For"} },
+		"an answer header naming a proxy header":  func(d *plan.Declaration) { d.ResponseHeaders = []string{"Proxy-Authorization"} },
+		"client_metadata with no keys":            func(d *plan.Declaration) { d.Body.Meta = nil },
 		"metadata keys with no client_metadata": func(d *plan.Declaration) {
 			d.Body.Keys = []string{"model", "input", "store", "stream"}
 		},
