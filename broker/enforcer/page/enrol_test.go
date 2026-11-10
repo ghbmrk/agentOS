@@ -30,10 +30,9 @@ func (f *fakeNetwork) Replace() (enrol.Card, error) {
 	return enrol.Card{SSID: "Home", Shown: "CANA RYOW NER0", QR: "WIFI:T:WPA;S:Home;P:CANARYOWNER0;;"}, nil
 }
 
-type nopAlerts struct{ recovery bool }
+type nopAlerts struct{}
 
 func (n *nopAlerts) Raise(alert.Kind, string) (alert.Record, error) { return alert.Record{}, nil }
-func (n *nopAlerts) Recovery(p bool)                                { n.recovery = p }
 
 // enrolRig is a page in factory state over a real enrolment book and
 // policy engine.

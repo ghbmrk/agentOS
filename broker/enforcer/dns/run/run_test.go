@@ -22,7 +22,7 @@ import (
 // The test binary is the fake dnsmasq: started with the set's arguments,
 // it appends "start <file content>" to ./events (the set's directory),
 // and "stop <content>" when it is sent SIGTERM. A file holding "crash"
-// exits at once with status 1.
+// exits at once with status 1, and one holding "lasts" after 700 ms.
 func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == "--keep-in-foreground" && os.Args[2] == "--pid-file=" {
 		fakeDnsmasq(strings.TrimPrefix(os.Args[3], "--conf-file="))
@@ -69,7 +69,15 @@ func fakeDnsmasq(path string) {
 	if strings.Contains(conf, "crash") {
 		os.Exit(1)
 	}
-	<-sig
+	if strings.Contains(conf, "lasts") {
+		select {
+		case <-sig:
+		case <-time.After(700 * time.Millisecond):
+			os.Exit(1)
+		}
+	} else {
+		<-sig
+	}
 	event("stop " + conf)
 	os.Exit(0)
 }
@@ -564,5 +572,75 @@ func TestLineLogCuts(t *testing.T) {
 	l.Write([]byte("w"))
 	if want := []string{"p: ", "p: after", "p: " + strings.Repeat("w", 512)}; !slices.Equal(got, want) {
 		t.Errorf("lines %q, want %q", got, want)
+	}
+}
+
+// TestFlapping (#5164 R5 b): an instance that exits on its own reads as
+// flapping, with its exits in a row, until a process of it has stayed up
+// StayUp; an exit after that starts the count again, and a new file
+// clears it. The others, which stay up, never read so.
+func TestFlapping(t *testing.T) {
+	stayUp = 400 * time.Millisecond
+	defer func() { stayUp = StayUp }()
+	s, dir := newSet(t)
+	if got := s.Flapping(); len(got) != 0 {
+		t.Fatalf("an empty set flaps: %v", got)
+	}
+	if err := s.Apply(files("core-crash", "tv-lasts"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	waitEvents(t, dir, "start_core-crash", "start_tv-lasts")
+	flap := func(name string) (int, bool) {
+		for _, f := range s.Flapping() {
+			if f.Name == name {
+				return f.Exits, true
+			}
+		}
+		return 0, false
+	}
+	// tv-lasts is up and has not exited: not flapping.
+	if n, ok := flap("listed-vlan10"); ok {
+		t.Fatalf("a running instance that never exited flaps (%d)", n)
+	}
+	// core-crash: exits in a row, counted while it never stays up.
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if n, ok := flap("listed-core0"); ok && n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a crash loop does not count its exits in a row: %v", s.Flapping())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, f := range s.Flapping() {
+		if f.Name == "people" || f.Name == "dhcp" {
+			t.Fatalf("an instance that stays up flaps: %v", s.Flapping())
+		}
+	}
+	// tv-lasts ran past StayUp before each exit: it flaps after its first
+	// exit, no longer once its next process has stayed up StayUp, and
+	// after its next exit counts 1 again, not 2.
+	deadline = time.Now().Add(8 * time.Second)
+	phase := 0 // 0: before its first exit, 1: flapping, 2: cleared, 3: flapping again
+	for phase < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance that stays up between exits stopped at phase %d: %v", phase, s.Flapping())
+		}
+		n, ok := flap("listed-vlan10")
+		if ok && n != 1 {
+			t.Fatalf("an instance that stayed up before each exit counts %d in a row, want 1", n)
+		}
+		if ok == (phase%2 == 0) {
+			phase++
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A new file clears the count at once.
+	if err := s.Apply(files("core-b", "tv-b"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Flapping(); len(got) != 0 {
+		t.Fatalf("instances on new files still flap: %v", got)
 	}
 }

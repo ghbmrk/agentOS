@@ -96,7 +96,7 @@ type Resolver interface {
 }
 
 // ResolverStop is the resolver's state as the page shows it; the zero
-// value is a resolver that runs.
+// value is a resolver that runs and stays up.
 type ResolverStop struct {
 	// Stopped is whether no instance runs. The causes below are shown
 	// only while it is, since a cause that has gone does not start the
@@ -112,9 +112,42 @@ type ResolverStop struct {
 	// Policy is why the policy in force cannot be served; "" when it can.
 	Policy string
 	// Load is the last refused load's error, shown when no cause above
-	// is: the instances stay as they were until a load is taken.
-	Load string
+	// is: the instances stay as they were until a load is taken. LoadBy
+	// is the step that refused it (#5164 R5 d).
+	Load   string
+	LoadBy LoadStep
+	// Restarting is each instance that runs on the policy in force but
+	// keeps exiting, shown while Stopped is false: a process that is up
+	// between exits does not make it a resolver that runs (#5164 R5 b).
+	Restarting []Restart
 }
+
+// LoadStep is the step of a load that refused it.
+type LoadStep int
+
+const (
+	LoadUntyped  LoadStep = iota // a failure the load did not type
+	LoadCompile                  // the enforcer could not make a ruleset of the policy
+	LoadFirewall                 // the kernel's firewall refused the ruleset
+)
+
+// Restart is one resolver instance that has exited on its own Exits
+// times in a row and has not stayed up since.
+type Restart struct {
+	Part  ResolverPart
+	Iface string // PartListed: the one interface it answers on
+	Exits int
+}
+
+// ResolverPart is what one resolver instance serves.
+type ResolverPart int
+
+const (
+	PartUntyped ResolverPart = iota // an instance the daemon did not type
+	PartListed                      // the listed names of the network on Iface
+	PartPeople                      // any name on Owner, Household, Guests and admin
+	PartDHCP                        // addresses on the networks set up for them
+)
 
 // Unset is one served-check failure other than a stray address, as the
 // daemon's check typed it (#5284): the page words each kind, so a
@@ -298,6 +331,12 @@ func (s *Server) status() map[string]any {
 	if s.cfg.Resolver != nil {
 		if r := s.cfg.Resolver.Stopped(); r.Stopped {
 			out["Resolver"] = plainStop(r)
+		} else if len(r.Restarting) > 0 {
+			var lines []string
+			for _, x := range r.Restarting {
+				lines = append(lines, plainRestart(x))
+			}
+			out["Restarting"] = lines
 		}
 	}
 	return out
@@ -309,12 +348,14 @@ type plainResolver struct {
 	Strays       []Stray
 	Unset        []string
 	Policy, Load string
+	// The step that refused Load: compile, the firewall, or neither.
+	Compile, Firewall bool
 }
 
 // plainStop is r in printable ASCII, as plain shows the core's names: a
 // policy's error can quote a name the core chose.
 func plainStop(r ResolverStop) plainResolver {
-	out := plainResolver{Policy: sentence(r.Policy), Load: sentence(r.Load)}
+	out := plainResolver{Policy: sentence(r.Policy), Load: sentence(r.Load), Compile: r.LoadBy == LoadCompile, Firewall: r.LoadBy == LoadFirewall}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
 	}
@@ -357,6 +398,26 @@ func plainUnset(u Unset) string {
 		return "The enforcer could not read the addresses on interface " + iface + ", so it cannot check that each lies in that network. It tries again every 10 seconds."
 	}
 	return "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
+}
+
+// plainRestart is one instance that keeps exiting in the owner's words:
+// what goes missing while it is down, how many times in a row, and that
+// it is started again (dns/run backs off up to 30 seconds).
+func plainRestart(r Restart) string {
+	what := "Part of the enforcer's name and address service"
+	switch r.Part {
+	case PartListed:
+		what = "The enforcer's name answers on interface " + ascii(r.Iface) + ", which only a listed name gets,"
+	case PartPeople:
+		what = "The enforcer's name answers on the Owner, Household and Guests networks"
+	case PartDHCP:
+		what = "The enforcer's address service, which hands out addresses on the home networks,"
+	}
+	times := ""
+	if r.Exits > 1 {
+		times = " " + strconv.Itoa(r.Exits) + " times in a row"
+	}
+	return what + " stopped on its own" + times + " and has not stayed up since. While it is down, that part of the house gets nothing from it. The enforcer starts it again each time, waiting longer after each stop, up to 30 seconds; its log has the detail."
 }
 
 // sentence is s with every character outside printable ASCII and the

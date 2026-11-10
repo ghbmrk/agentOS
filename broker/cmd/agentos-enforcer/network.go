@@ -87,6 +87,7 @@ type network struct {
 	stopServed error
 	stopPolicy string
 	stopLoad   string
+	stopBy     page.LoadStep
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -194,7 +195,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// included, so the page names the refusal (#5243 L3 item 1).
 		if err != nil {
 			d.net.resMu.Lock()
-			d.net.stopLoad = err.Error()
+			d.net.stopLoad, d.net.stopBy = err.Error(), loadStep(err)
 			d.net.resMu.Unlock()
 		}
 	}()
@@ -205,7 +206,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	ann, aerr := nft.Announces(doc, l)
 	hears, herr := nft.Hears(doc, l)
 	if err := cmp.Or(err, aerr, herr); err != nil {
-		return err
+		return compileErr{err}
 	}
 	files, genErr := dns.Generate(doc, l, d.cfg.DNS)
 	if err := genErr; err != nil {
@@ -261,15 +262,18 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		text, err := nft.Reload(doc, l, running)
 		if err != nil {
-			return err
+			return compileErr{err}
 		}
 		drops, err := nft.Drops(doc, l, nil, d.drop(caps))
 		if err != nil {
-			return err
+			return compileErr{err}
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		return d.dp.Fire.Load(lctx, joinRules(text, drops))
+		if err := d.dp.Fire.Load(lctx, joinRules(text, drops)); err != nil {
+			return fireErr{err}
+		}
+		return nil
 	}
 	if err := d.dp.DNS.Apply(files, load); err != nil {
 		if d.net.counter != nil && d.loaded != "" {
@@ -296,6 +300,28 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	}
 	d.startMDNS(mdns.NewPlan(paths, ann).Hearing(hears))
 	return nil
+}
+
+// compileErr is a load refused before the firewall saw it: the document
+// did not compile to a ruleset. fireErr is one the firewall refused. The
+// page words each apart (#5164 R5 d); any other is untyped.
+type compileErr struct{ error }
+type fireErr struct{ error }
+
+func (e compileErr) Unwrap() error { return e.error }
+func (e fireErr) Unwrap() error    { return e.error }
+
+// loadStep is the step that refused a load, as the page words it.
+func loadStep(err error) page.LoadStep {
+	var c compileErr
+	var f fireErr
+	switch {
+	case errors.As(err, &c):
+		return page.LoadCompile
+	case errors.As(err, &f):
+		return page.LoadFirewall
+	}
+	return page.LoadUntyped
 }
 
 // joinRules appends the drop's text to a full load's, in one transaction.
