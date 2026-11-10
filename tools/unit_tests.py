@@ -46,7 +46,8 @@ STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e",
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
 SERIAL = {}
 # Modules whose tests run across workers inside their one strace tree (CI-par-3), with why.
-SPLIT = {"test_image": "about 10 min on a shared runner; one class is 45% of it, so it splits by test (#4332)"}
+SPLIT = {"test_image": "about 10 min on a shared runner; one class is 45% of it, so it splits by test (#4332)",
+         "test_image_keeper": "481s on the runner after #5167's way tests, over the step's long pole; it splits by test"}
 # Seconds per module on the CI runner (checks job of #4308, 2026-10-31), for ordering only: a
 # module not listed starts after these, biggest file first.
 SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice": 101,

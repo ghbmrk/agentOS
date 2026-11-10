@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_image import ROOT, check, exec_args, arg, ini  # noqa: E402
 from test_image_keeper import (KERNEL, PRESET, SYSUSERS, TMPFILES, UNITS, exec_lines, go_flags,  # noqa: E402
-                               slice_cgroup)
+                               owned_dirs, slice_cgroup)
 
 HOMEKIT = UNITS / "agentos-keeper-homekit.service"
 CMD = ROOT / "broker/cmd/agentos-homekit"
@@ -91,7 +91,7 @@ class HomeKitClerkUnitTest(unittest.TestCase):
         self.assertEqual(arg(self.h, "owner-sock").rsplit("/", 1)[0], run)
         self.assertEqual(self.svc["RuntimeDirectoryMode"], "0755")
         self.assertFalse(check.keeper_reach(run))
-        self.assertIn(run[1:], check.SERVICE_DIRS)
+        self.assertIn(run[1:], owned_dirs(HOMEKIT))
         for key in ("StateDirectory", "RuntimeDirectoryPreserve", "DynamicUser", "Environment", "EnvironmentFile"):
             self.assertNotIn(key, self.svc)
 
