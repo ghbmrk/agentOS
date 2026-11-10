@@ -361,7 +361,7 @@ def _violations(root):
     return (out + dump_violations(root) + swap_violations(root) + wifi_violations(root)
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
-            + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
+            + exec_allow_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
             + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
@@ -1891,7 +1891,9 @@ def unit_made_refusals(root):
        DirectoryMode= others can write, no named path has a parent PID 1 may make (umask 0) on the way.
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
-    service user's. Generators and transient units are not covered (unit_made_dirs)."""
+    service user's. Generators and transient units are not covered (unit_made_dirs). In front of these
+    rules, every line PID 1 may make, link or mount a host path for is on made.allow (made_allow_violations),
+    so a route these rules do not model (a mount that aliases a way) still needs a reviewed entry."""
     out = []
     for made, why in sorted(cached(unit_made_dirs, root)[0].items()):
         for form in (made, made_private(made)):
@@ -3392,6 +3394,96 @@ EXEC_ALLOW_HEADER = """\
 """
 
 
+MADE_ALLOW = "made.allow"
+MADE_ALLOW_REPO = "image/mkosi/" + MADE_ALLOW
+MADE_REGENERATE = "mkosi.finalize --made-allowlist ROOT"
+
+
+def made_entries(root):
+    """#5167 (re-plan 4): (file, value) for every line for which PID 1 may make, link or mount a host path,
+    and (file, None) for a unit file it cannot read: in every file unit_files reads, each [Mount] line
+    whole (a mount can alias a path with no '/' in the line: Options=bind and a relative What=), and each
+    other line at a setting off PID1_READS, PID1_NAMES and PID1_READ_PREFIXES whose value holds a '/' or
+    that is a *Directory= setting; and every etc/fstab line but blanks and comments. The value is
+    "[Section] Key=value" as config_lines gives it (the section too: a key's meaning depends on it), or
+    the fstab line stripped."""
+    root = str(root)
+    for path in sorted(cached(unit_files, root)[0]):
+        try:
+            values = made_values(Conf(root, path).content())
+        except (OSError, Unparsable):
+            yield path, None  # unit_made_dirs names why
+            continue
+        for v in values:
+            yield path, v
+    try:
+        text = Conf(root, "etc/fstab").text()
+    except OSError:
+        return  # fstab_noexec_violations refuses an unreadable one
+    for ln in text.splitlines():
+        if ln.strip(" \t") and not ln.lstrip(" \t").startswith("#"):
+            yield "etc/fstab", ln.strip(" \t")
+
+
+def made_values(data):
+    """#5167: made_entries' values for one unit file's DATA (config_lines' Unparsable if it cannot be read)."""
+    return ["[%s] %s=%s" % (section, key, v) for section, key, v in config_lines(data)
+            if section == "Mount" or (key in UNIT_MADE_DIRS or "/" in v)
+            and not (key in PID1_READS or key in PID1_NAMES or key.startswith(PID1_READ_PREFIXES))]
+
+
+def made_allowed(path=None):
+    """made.allow as a set of (file, value); None if it is missing."""
+    return allow_entries(MADE_ALLOW, path)
+
+
+def made_allow_violations(root, allowed=None):
+    """#5167 (re-plan 4): every line made_entries gives is on made.allow, exactly and under its own file.
+    Rounds 1 to 3 refused the shapes of value they knew to reach a unit-made directory's way, and each
+    review found one more thing PID 1 or libmount does with a value (names, specifiers, escapes, relative
+    paths, links, then a bind of / that aliases the whole tree). The list makes the set of lines PID 1
+    acts on fixed and reviewed: any new route needs a new or changed line, which fails the build until it
+    is listed. unit_made_refusals and the other unit rules still weigh every listed line. Each refusal
+    ends in the entry that would allow it, for review."""
+    allowed = made_allowed() if allowed is None else allowed
+    if allowed is None:
+        return ["%s: missing; every unit-file and fstab line for which PID 1 makes, links or mounts a host path "
+                "must be on it (#5167)" % MADE_ALLOW]
+    # A listed driver's units are DRIVER_TEMPLATE rendered for its name, which driver_violations holds
+    # them to; the template is reviewed here, so its lines are listed by construction.
+    allowed = set(allowed) | {(rel, v) for e in driver_entries(root)[0] for rel, text in driver_units(e["name"]).items()
+                              if rel.startswith("usr/lib/systemd/system/") for v in made_values(text.encode())}
+    out = []
+    for rel, value in made_entries(root):
+        if value is not None and (rel, value) not in allowed:
+            out.append("%s: %s: not on the PID 1 path allowlist (%s, #5167); review the line (what PID 1 makes, links "
+                       "or mounts for it, and whether that can name or alias a step of a service directory's way), "
+                       "then add the entry after 'entry:' to that file (%s only lists what a tree holds, it reviews "
+                       "nothing); entry: %s\t%s" % (rel, value, MADE_ALLOW_REPO, MADE_REGENERATE, rel, value))
+    return out
+
+
+def made_allowlist_text(root):
+    """made.allow for the tree at ROOT: its header, then one entry per line made_entries gives."""
+    return MADE_ALLOW_HEADER + "".join("%s\t%s\n" % e for e in sorted(set(made_entries(root))) if e[1] is not None)
+
+
+MADE_ALLOW_HEADER = """\
+# Every unit-file and fstab line for which PID 1 may make, link or mount a host path (#5167): in every
+# file under the unit directories (and each link's target), each [Mount] line whole, and each other line
+# whose value holds a '/' or that sets a *Directory=, at a setting mkosi.finalize does not list as one
+# PID 1 only reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*,
+# Assert*, Exec*); and every etc/fstab line but comments. One per line: the file's path in the image
+# tree, a tab, and "[Section] Key=value" (fstab: the line). mkosi.finalize fails the build on any such
+# line not here, exactly and under its own file; its other unit rules still weigh every line here.
+# A driver drivers.json lists needs no entry: its units are DRIVER_TEMPLATE's, reviewed in mkosi.finalize.
+# Review a new line for what PID 1 makes, links or mounts for it: a bind, an overlay or a subdirectory
+# mount gives a path a second name, so a mount line is listed only if it names no host path as its
+# source. The failed build prints each new line as "entry: <file><TAB><value>". With the image tree:
+#   python3 image/mkosi/mkosi.finalize --made-allowlist ROOT > image/mkosi/made.allow
+"""
+
+
 def credstore_violations(root):
     """#1543 Security B3: systemd-sysctl and systemd-tmpfiles import sysctl.* and tmpfiles.*
     credentials from the credential store, so nothing ships there but what CREDSTORE_ALLOWED names.
@@ -3837,6 +3929,9 @@ def main():
         return
     if sys.argv[1:2] == ["--exec-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(exec_allowlist_text(sys.argv[2]))
+        return
+    if sys.argv[1:2] == ["--made-allowlist"] and len(sys.argv) == 3:
+        sys.stdout.write(made_allowlist_text(sys.argv[2]))
         return
     root = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("BUILDROOT")
     if not root:

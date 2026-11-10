@@ -1945,7 +1945,9 @@ class NoDumpTest(unittest.TestCase):
                 f.unlink()
         write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults,noexec 0 1\n"
               + (MK / "mkosi.extra/etc/fstab").read_text())
-        self.assertEqual(check.violations(self.root), [])
+        # The PID 1 path allowlist refuses the unlisted root line (MadeAllowTest); the swap rule is under test.
+        with unittest.mock.patch.object(check, "made_allow_violations", return_value=[]):
+            self.assertEqual(check.violations(self.root), [])
 
     def test_no_swap_partition_and_generators_off(self):
         # Built disk: no partition carries the swap type, and gpt-auto and fstab make no swap
@@ -2619,7 +2621,7 @@ class ConfFilesTest(unittest.TestCase):
         mut = pathlib.Path(tmp.name) / "mutant.py"
         mut.write_text(src.replace(old, new))
         # Beside the mutant, where it looks for its allowlist, so its whole check can run.
-        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW):
+        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW, check.MADE_ALLOW):
             (pathlib.Path(tmp.name) / name).write_text((MK / name).read_text())
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()

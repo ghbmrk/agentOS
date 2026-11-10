@@ -1265,6 +1265,134 @@ class KeeperTreeTest(unittest.TestCase):
                 self.unit(name).write_text(good)
 
 
+class MadeAllowTest(unittest.TestCase):
+    """#5167 re-plan 4: every unit-file and fstab line for which PID 1 makes, links or mounts a host path
+    is on image/mkosi/made.allow. Rounds 1 to 3 refused the shapes of value known to reach a unit-made
+    directory's way and each review found one more (the last: a bind of / that aliases the whole tree);
+    the list fixes the set of such lines, so any new route fails the build until it is reviewed."""
+    # REQ: STO-2
+    setUp, unit, edit = KeeperTreeTest.setUp, KeeperTreeTest.unit, KeeperTreeTest.edit
+
+    def refused(self):
+        return check.made_allow_violations(self.root)
+
+    def entry(self, rel, value):
+        return "entry: %s\t%s" % (rel, value)
+
+    def test_the_shipped_tree_passes_and_the_list_has_its_header(self):
+        text = (MK / check.MADE_ALLOW).read_text()
+        self.assertTrue(text.startswith(check.MADE_ALLOW_HEADER))
+        self.assertEqual(self.refused(), [])
+        got = set(check.made_entries(self.root))
+        self.assertLessEqual(got, check.made_allowed())
+        # The shipped units' own lines are there, and none of the list's lines is a read or a name.
+        self.assertIn((SYSTEM + "agentos-keeper-rotate.socket", "[Socket] ListenStream=/run/agentos-keeper/rotate.sock"), got)
+        self.assertIn(("usr/lib/systemd/system/tmp.mount", "[Mount] What=tmpfs"), check.made_allowed())
+        for rel, value in check.made_allowed():
+            key = value.split("] ", 1)[-1].split("=", 1)[0] if value.startswith("[") else None
+            self.assertFalse(key in check.PID1_READS or key in check.PID1_NAMES, value)
+
+    def test_a_mount_that_aliases_a_path_is_refused(self):
+        # Security 6763789301 and L3 6763810610 (#5247): a bind of / joins its shared peer group, so a
+        # bind below /srv/r lands on /var/lib/zq, and StateDirectory=zq's chown hands /etc over. Then the
+        # same class: a bind of an ancestor, a subdirectory mount, and a bind with no '/' in any line.
+        zq = ("zz.service", "[Service]\nStateDirectory=zq\nUser=nobody\n")
+        cases = {
+            "bind of / and a bind below it": [zq, ("srv-r.mount", "[Mount]\nWhat=/\nWhere=/srv/r\nOptions=bind,noexec\n"),
+                                             ("srv-r-var-lib-zq.mount", "[Mount]\nWhat=/etc\nWhere=/srv/r/var/lib/zq\n"
+                                              "Options=bind,noexec\n")],
+            "bind of / and a socket link below it": [zq, ("srv-r.mount", "[Mount]\nWhat=/\nOptions=bind\n"),
+                                                     ("zs.socket", "[Socket]\nListenStream=/run/zs\nSymlinks=/srv/r/var/lib/zq\n")],
+            "bind of an ancestor": [zq, ("srv-v.mount", "[Mount]\nWhat=/var/lib\nWhere=/srv/v\nOptions=bind\n")],
+            "a subdirectory mount": [zq, ("srv-s.mount", "[Mount]\nWhat=/dev/vda1\nWhere=/srv/s\n"
+                                          "Options=X-mount.subdir=var/lib\n")],
+            "a bind with no '/' in its lines": [("tmp.mount.d/x.conf", "[Mount]\nWhat=var\nOptions=bind\n")],
+            "another root": [("zr.service", "[Service]\nRootDirectory=/srv/r\nMountImages=/srv/i.raw:/var/lib/zq\n")],
+            "a directory": [("zd.service", "[Service]\nRuntimeDirectory=zd\n")],
+        }
+        for case, files in cases.items():
+            with self.subTest(case=case):
+                written = [write(self.root, SYSTEM + name, text) for name, text in files]
+                got = self.refused()
+                want = [(SYSTEM + name, v) for name, _ in files for v in
+                        (("[%s] %s" % (sec, ln)) for sec, ln in self.lines(files, name))]
+                self.assertTrue(want)
+                for rel, value in want:
+                    self.assertIn(self.entry(rel, value), " | ".join(got))
+                self.assertIn("not on the PID 1 path allowlist", " | ".join(check.violations(self.root)))
+                for f in written:
+                    f.unlink()
+
+    def lines(self, files, name):
+        # The lines of NAME in FILES the list holds: every [Mount] line, else a '/' or a *Directory= setting.
+        text = dict(files)[name]
+        out = []
+        for section, key, v in check.config_lines(text.encode()):
+            if section == "Mount" or (key in check.UNIT_MADE_DIRS or "/" in v):
+                out.append((section, "%s=%s" % (key, v)))
+        return out
+
+    def test_an_fstab_bind_is_refused(self):
+        fstab = (MK / "mkosi.extra/etc/fstab").read_text()
+        write(self.root, "etc/fstab", fstab + "/run /srv/r none bind 0 0\n# /x /y none bind 0 0\n")
+        write(self.root, SYSTEM + "zq.socket", "[Socket]\nListenStream=/srv/r/zq\n")
+        got = " | ".join(self.refused())
+        self.assertIn(self.entry("etc/fstab", "/run /srv/r none bind 0 0"), got)
+        self.assertIn(self.entry(SYSTEM + "zq.socket", "[Socket] ListenStream=/srv/r/zq"), got)
+        self.assertNotIn("/x /y", got)
+
+    def test_a_listed_line_counts_only_in_its_own_file_and_section(self):
+        line = "ListenStream=/run/agentos-keeper/rotate.sock"
+        write(self.root, SYSTEM + "zz.socket", "[Socket]\n%s\n" % line)
+        self.edit("agentos-keeper-rotate.socket", "[Socket]\n", "[Service]\n%s\n[Socket]\n" % line)
+        self.assertEqual(self.refused(), [
+            "%s: %s: not on the PID 1 path allowlist (image/mkosi/made.allow, #5167); review the line (what PID 1 "
+            "makes, links or mounts for it, and whether that can name or alias a step of a service directory's way), "
+            "then add the entry after 'entry:' to that file (mkosi.finalize --made-allowlist ROOT only lists what a "
+            "tree holds, it reviews nothing); %s" % (rel, value, self.entry(rel, value))
+            for rel, value in ((SYSTEM + "agentos-keeper-rotate.socket", "[Service] " + line),
+                               (SYSTEM + "zz.socket", "[Socket] " + line))])
+        # An edited value is a new line too.
+        self.edit("agentos-keeper-rotate.socket", "[Service]\n%s\n" % line, "")
+        self.edit("agentos-keeper-rotate.socket", line, line + "2")
+        self.assertIn(self.entry(SYSTEM + "agentos-keeper-rotate.socket", "[Socket] %s2" % line),
+                      " | ".join(self.refused()))
+
+    def test_reads_and_names_are_not_listed(self):
+        write(self.root, SYSTEM + "zz.service", "[Unit]\nAfter=a/b.service\nConditionPathExists=/x\nRequiresMountsFor=/y\n"
+              "[Service]\nInaccessiblePaths=/z\nExecStart=/usr/bin/true\nType=oneshot\n")
+        self.assertEqual(self.refused(), [])
+
+    def test_a_driver_s_units_are_listed_only_for_a_listed_driver(self):
+        # DRIVER_TEMPLATE is the list for a driver's units; an unlisted name has none of its lines.
+        units = check.driver_units("scale")
+        for rel, text in units.items():
+            write(self.root, rel, text)
+        sock = ("usr/lib/systemd/system/agentos-driver-scale.socket", "[Socket] ListenStream=/run/agentos-drivers/scale.sock")
+        self.assertIn(self.entry(*sock), " | ".join(self.refused()))
+        self.assertNotIn(sock, check.made_allowed())
+        with unittest.mock.patch.object(check, "driver_entries", return_value=([{"name": "scale"}], [])):
+            self.assertEqual(self.refused(), [])
+
+    def test_regenerate_and_missing(self):
+        write(self.root, SYSTEM + "zz.socket", "[Socket]\nListenStream=/run/zz\n")
+        text = check.made_allowlist_text(self.root)
+        self.assertTrue(text.startswith(check.MADE_ALLOW_HEADER))
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / check.MADE_ALLOW
+            p.write_text(text)
+            allowed = check.made_allowed(str(p))
+            self.assertEqual(allowed, set(check.made_entries(self.root)))
+            self.assertEqual(check.made_allow_violations(self.root, allowed), [])
+            out = subprocess.run([sys.executable, str(MK / "mkosi.finalize"), "--made-allowlist", str(self.root)],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertEqual(out, text)
+        with unittest.mock.patch.object(check, "made_allowed", return_value=None):
+            self.assertEqual(check.made_allow_violations(self.root),
+                             ["made.allow: missing; every unit-file and fstab line for which PID 1 makes, links or "
+                              "mounts a host path must be on it (#5167)"])
+
+
 class KeeperUnitsTest(unittest.TestCase):
     """The keeper's unit files against the mains they run."""
 

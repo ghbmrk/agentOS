@@ -1,0 +1,118 @@
+# Every unit-file and fstab line for which PID 1 may make, link or mount a host path (#5167): in every
+# file under the unit directories (and each link's target), each [Mount] line whole, and each other line
+# whose value holds a '/' or that sets a *Directory=, at a setting mkosi.finalize does not list as one
+# PID 1 only reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*,
+# Assert*, Exec*); and every etc/fstab line but comments. One per line: the file's path in the image
+# tree, a tab, and "[Section] Key=value" (fstab: the line). mkosi.finalize fails the build on any such
+# line not here, exactly and under its own file; its other unit rules still weigh every line here.
+# A driver drivers.json lists needs no entry: its units are DRIVER_TEMPLATE's, reviewed in mkosi.finalize.
+# Review a new line for what PID 1 makes, links or mounts for it: a bind, an overlay or a subdirectory
+# mount gives a path a second name, so a mount line is listed only if it names no host path as its
+# source. The failed build prints each new line as "entry: <file><TAB><value>". With the image tree:
+#   python3 image/mkosi/mkosi.finalize --made-allowlist ROOT > image/mkosi/made.allow
+etc/fstab	devtmpfs /dev     devtmpfs nosuid,noexec       0 0
+etc/fstab	tmpfs    /dev/shm tmpfs    nosuid,nodev,noexec 0 0
+etc/fstab	tmpfs    /run     tmpfs    mode=0755,nosuid,nodev,noexec 0 0
+usr/lib/systemd/system/agentos-camdecode.socket	[Socket] ListenStream=/run/agentos-camdecode/conn.sock
+usr/lib/systemd/system/agentos-camdecode@.service	[Service] TemporaryFileSystem=/run:ro,noexec
+usr/lib/systemd/system/agentos-egress-setup.path	[Path] PathChanged=/var/lib/agentos-localui/claim.json
+usr/lib/systemd/system/agentos-egress.service	[Service] RuntimeDirectory=agentos-egress
+usr/lib/systemd/system/agentos-egress.service	[Service] StateDirectory=agentos-egress
+usr/lib/systemd/system/agentos-imapconn.socket	[Socket] ListenStream=/run/agentos-imapconn/conn.sock
+usr/lib/systemd/system/agentos-imapconn@.service	[Service] BindReadOnlyPaths=/usr/lib/agentos/agentos-imapconn
+usr/lib/systemd/system/agentos-imapconn@.service	[Service] TemporaryFileSystem=/:ro,noexec
+usr/lib/systemd/system/agentos-keeper-camera.service	[Service] OpenFile=/run/agentos-kernel/key-camera.sock:clerk-key
+usr/lib/systemd/system/agentos-keeper-camera.service	[Service] RuntimeDirectory=agentos-camera
+usr/lib/systemd/system/agentos-keeper-enroll.path	[Path] PathExists=/run/agentos-setup/recovery
+usr/lib/systemd/system/agentos-keeper-enroll.service	[Service] StateDirectory=agentos-store
+usr/lib/systemd/system/agentos-keeper-homekit.service	[Service] OpenFile=/run/agentos-kernel/key-homekit.sock:clerk-key
+usr/lib/systemd/system/agentos-keeper-homekit.service	[Service] RuntimeDirectory=agentos-homekit
+usr/lib/systemd/system/agentos-keeper-link-capture.service	[Service] TemporaryFileSystem=/run/agentos-setup:ro /var/lib/agentos-kernel:ro /var/lib/agentos-mail:ro /var/lib/agentos-camera:ro /var/lib/agentos-homekit:ro
+usr/lib/systemd/system/agentos-keeper-mail.service	[Service] Environment=SSL_CERT_FILE=/dev/null SSL_CERT_DIR=/usr/share/ca-certificates/mozilla
+usr/lib/systemd/system/agentos-keeper-mail.service	[Service] OpenFile=/run/agentos-kernel/key-mail.sock:clerk-key
+usr/lib/systemd/system/agentos-keeper-mail.service	[Service] RuntimeDirectory=agentos-mail
+usr/lib/systemd/system/agentos-keeper-rotate.socket	[Socket] ListenStream=/run/agentos-keeper/rotate.sock
+usr/lib/systemd/system/agentos-keeper-setup.socket	[Socket] ListenStream=/run/agentos-keeper/setup.sock
+usr/lib/systemd/system/agentos-link.service	[Service] RuntimeDirectory=agentos-link
+usr/lib/systemd/system/agentos-localui.service	[Service] RuntimeDirectory=agentos-localui
+usr/lib/systemd/system/agentos-localui.service	[Service] StateDirectory=agentos-localui
+usr/lib/systemd/system/agentos-localui.service	[Service] TemporaryFileSystem=/var/lib/agentos:ro
+usr/lib/systemd/system/agentos-modem-env.path	[Path] PathChanged=/etc/agentos/modem.env
+usr/lib/systemd/system/agentos-modem.service	[Service] BindReadOnlyPaths=-/var/lib/agentos/modem
+usr/lib/systemd/system/agentos-modem.service	[Service] TemporaryFileSystem=/var/lib/agentos:ro
+usr/lib/systemd/system/agentos-recovery-restart.path	[Path] PathExists=/run/agentos-recovery-restart
+usr/lib/systemd/system/agentosd.path	[Path] PathExists=/etc/agentos/agentosd.env
+usr/lib/systemd/system/agentosd.service	[Service] StateDirectory=agentos/modem
+usr/lib/systemd/system/dbus.socket	[Socket] ListenStream=/run/dbus/system_bus_socket
+usr/lib/systemd/system/dev-hugepages.mount	[Mount] Options=nosuid,nodev
+usr/lib/systemd/system/dev-hugepages.mount	[Mount] Type=hugetlbfs
+usr/lib/systemd/system/dev-hugepages.mount	[Mount] What=hugetlbfs
+usr/lib/systemd/system/dev-hugepages.mount	[Mount] Where=/dev/hugepages
+usr/lib/systemd/system/dev-mqueue.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/dev-mqueue.mount	[Mount] Type=mqueue
+usr/lib/systemd/system/dev-mqueue.mount	[Mount] What=mqueue
+usr/lib/systemd/system/dev-mqueue.mount	[Mount] Where=/dev/mqueue
+usr/lib/systemd/system/e2scrub@.service	[Service] WorkingDirectory=/
+usr/lib/systemd/system/e2scrub_reap.service	[Service] WorkingDirectory=/
+usr/lib/systemd/system/emergency.service	[Service] Environment=HOME=/root
+usr/lib/systemd/system/emergency.service	[Service] WorkingDirectory=-/root
+usr/lib/systemd/system/proc-sys-fs-binfmt_misc.automount	[Automount] Where=/proc/sys/fs/binfmt_misc
+usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount	[Mount] Type=binfmt_misc
+usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount	[Mount] What=binfmt_misc
+usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount	[Mount] Where=/proc/sys/fs/binfmt_misc
+usr/lib/systemd/system/rescue.service	[Service] Environment=HOME=/root
+usr/lib/systemd/system/rescue.service	[Service] WorkingDirectory=-/root
+usr/lib/systemd/system/run-lock.mount	[Mount] Options=mode=1777,nosuid,nodev,noexec,size=5242880
+usr/lib/systemd/system/run-lock.mount	[Mount] Type=tmpfs
+usr/lib/systemd/system/run-lock.mount	[Mount] What=tmpfs
+usr/lib/systemd/system/run-lock.mount	[Mount] Where=/run/lock
+usr/lib/systemd/system/sys-fs-fuse-connections.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/sys-fs-fuse-connections.mount	[Mount] Type=fusectl
+usr/lib/systemd/system/sys-fs-fuse-connections.mount	[Mount] What=fusectl
+usr/lib/systemd/system/sys-fs-fuse-connections.mount	[Mount] Where=/sys/fs/fuse/connections
+usr/lib/systemd/system/sys-kernel-config.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/sys-kernel-config.mount	[Mount] Type=configfs
+usr/lib/systemd/system/sys-kernel-config.mount	[Mount] What=configfs
+usr/lib/systemd/system/sys-kernel-config.mount	[Mount] Where=/sys/kernel/config
+usr/lib/systemd/system/sys-kernel-debug.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/sys-kernel-debug.mount	[Mount] Type=debugfs
+usr/lib/systemd/system/sys-kernel-debug.mount	[Mount] What=debugfs
+usr/lib/systemd/system/sys-kernel-debug.mount	[Mount] Where=/sys/kernel/debug
+usr/lib/systemd/system/sys-kernel-tracing.mount	[Mount] Options=nosuid,nodev,noexec
+usr/lib/systemd/system/sys-kernel-tracing.mount	[Mount] Type=tracefs
+usr/lib/systemd/system/sys-kernel-tracing.mount	[Mount] What=tracefs
+usr/lib/systemd/system/sys-kernel-tracing.mount	[Mount] Where=/sys/kernel/tracing
+usr/lib/systemd/system/syslog.socket	[Socket] ListenDatagram=/run/systemd/journal/syslog
+usr/lib/systemd/system/systemd-ask-password-console.path	[Path] DirectoryNotEmpty=/run/systemd/ask-password
+usr/lib/systemd/system/systemd-ask-password-wall.path	[Path] DirectoryNotEmpty=/run/systemd/ask-password
+usr/lib/systemd/system/systemd-backlight@.service	[Service] StateDirectory=systemd/backlight
+usr/lib/systemd/system/systemd-bootctl.socket	[Socket] ListenStream=/run/systemd/io.systemd.BootControl
+usr/lib/systemd/system/systemd-creds.socket	[Socket] ListenStream=/run/systemd/io.systemd.Credentials
+usr/lib/systemd/system/systemd-hostnamed.socket	[Socket] ListenStream=/run/systemd/io.systemd.Hostname
+usr/lib/systemd/system/systemd-initctl.socket	[Socket] ListenFIFO=/run/initctl
+usr/lib/systemd/system/systemd-initctl.socket	[Socket] Symlinks=/dev/initctl
+usr/lib/systemd/system/systemd-journald-dev-log.socket	[Socket] ListenDatagram=/run/systemd/journal/dev-log
+usr/lib/systemd/system/systemd-journald-dev-log.socket	[Socket] Symlinks=/dev/log
+usr/lib/systemd/system/systemd-journald.service	[Service] RuntimeDirectory=systemd/journal
+usr/lib/systemd/system/systemd-journald.socket	[Socket] ListenDatagram=/run/systemd/journal/socket
+usr/lib/systemd/system/systemd-journald.socket	[Socket] ListenStream=/run/systemd/journal/stdout
+usr/lib/systemd/system/systemd-logind.service	[Service] RuntimeDirectory=systemd/sessions systemd/seats systemd/users systemd/inhibit systemd/shutdown
+usr/lib/systemd/system/systemd-logind.service	[Service] StateDirectory=systemd/linger
+usr/lib/systemd/system/systemd-networkd-persistent-storage.service	[Service] StateDirectory=systemd/network
+usr/lib/systemd/system/systemd-networkd.service	[Service] RuntimeDirectory=systemd/netif
+usr/lib/systemd/system/systemd-pcrextend.socket	[Socket] ListenStream=/run/systemd/io.systemd.PCRExtend
+usr/lib/systemd/system/systemd-pcrlock.socket	[Socket] ListenStream=/run/systemd/io.systemd.PCRLock
+usr/lib/systemd/system/systemd-pstore.service	[Service] StateDirectory=systemd/pstore
+usr/lib/systemd/system/systemd-resolved.service	[Service] RuntimeDirectory=systemd/resolve
+usr/lib/systemd/system/systemd-rfkill.service	[Service] StateDirectory=systemd/rfkill
+usr/lib/systemd/system/systemd-rfkill.socket	[Socket] ListenSpecial=/dev/rfkill
+usr/lib/systemd/system/systemd-sysext.socket	[Socket] ListenStream=/run/systemd/io.systemd.sysext
+usr/lib/systemd/system/systemd-timesyncd.service	[Service] RuntimeDirectory=systemd/timesync
+usr/lib/systemd/system/systemd-timesyncd.service	[Service] StateDirectory=systemd/timesync
+usr/lib/systemd/system/systemd-udevd-control.socket	[Socket] ListenSequentialPacket=/run/udev/control
+usr/lib/systemd/system/tmp.mount	[Mount] Options=mode=1777,strictatime,nosuid,nodev,size=50%%,nr_inodes=1m
+usr/lib/systemd/system/tmp.mount	[Mount] Type=tmpfs
+usr/lib/systemd/system/tmp.mount	[Mount] What=tmpfs
+usr/lib/systemd/system/tmp.mount	[Mount] Where=/tmp
+usr/lib/systemd/system/tmp.mount.d/50-agentos-noexec.conf	[Mount] Options=mode=1777,strictatime,nosuid,nodev,noexec,size=50%%,nr_inodes=1m
