@@ -202,6 +202,44 @@ func strayThreads(t *testing.T) []string {
 	return stray
 }
 
+// initOnMain is onMainThread's answer during package init, when
+// runtime.main holds the main thread for every init.
+var initOnMain = onMainThread()
+
+// TestMainThreadIsSeen (NET-2 Confined radio stacks; #5286): the real
+// onMainThread, which TestStepLeavesTheMainThread replaces, answers true on
+// the main thread and false on a locked thread off it. Catches a check
+// that never sees the main thread, which would let a step park it in a
+// stack's namespace again (#5159).
+func TestMainThreadIsSeen(t *testing.T) {
+	if !initOnMain {
+		t.Error("onMainThread was false during init, on the main thread")
+	}
+	parked := make(chan struct{})
+	defer close(parked)
+	for range 10 {
+		type result struct{ off, seen bool }
+		got := make(chan result, 1)
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			if syscall.Gettid() == syscall.Getpid() {
+				got <- result{} // the main thread: kept busy, so the next try runs elsewhere
+				<-parked
+				return
+			}
+			got <- result{true, onMainThread()}
+		}()
+		if r := <-got; r.off {
+			if r.seen {
+				t.Error("onMainThread was true on a locked thread off the main one")
+			}
+			return
+		}
+	}
+	t.Fatal("every try ran on the main thread")
+}
+
 // TestStepLeavesTheMainThread (NET-2 Confined radio stacks; #5286): a
 // step that finds itself on the main thread runs on another thread, which
 // enters the stack's namespace, runs fn and stays until keep closes, and
