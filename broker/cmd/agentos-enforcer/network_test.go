@@ -1304,6 +1304,11 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	if len(got.Listed) != 0 || got.People != "" || got.DHCP != "" {
 		t.Fatalf("a refused load left instances running with the check failing: %v", got)
 	}
+	// The page reads the instances it stopped as stopped, refused load
+	// or not (#5164 R1).
+	if !(pageResolver{x.d}).Stopped().Stopped {
+		t.Fatal("the page shows a resolver as running after its instances stopped")
+	}
 }
 
 // TestHold (ENF-net-ra-off, #4222): hold turns router advertisements and
