@@ -1728,20 +1728,28 @@ def manager_environment_violations(root):
     would load units from a directory unit_files never walks. Stock sets none, so any ManagerEnvironment=, in
     any section of any system.conf main file or drop-in, is refused, and so is a file that cannot be read."""
     out = []
+    for rel, lines in manager_files(root):
+        if lines is None:
+            out.append("%s: unreadable; the tree check never passes a manager configuration file it cannot "
+                       "read (#5167)" % rel)
+            continue
+        if any(k == "ManagerEnvironment" for _, k, _ in lines):
+            out.append("%s: sets ManagerEnvironment=, which PID 1 applies to itself (SYSTEMD_UNIT_PATH moves where "
+                       "it loads units from); the tree check never passes one (#5167)" % rel)
+    return out
+
+
+def manager_files(root):
+    """#5167: (file, config_lines or None if it cannot be read) for every system.conf main file the tree
+    holds, whichever wins, and every system.conf.d drop-in PID 1 reads."""
     files = [Conf(str(root), rel) for rel in conf_paths("systemd/system.conf")]
     for f in files + conf_files(root, conf_paths("systemd/system.conf.d")):
         try:
             if f.rel in conf_paths("systemd/system.conf") and tree_lstat(root, f.rel) is None:
                 continue
-            lines = config_lines(f.content())
-        except (OSError, Unparsable) as e:
-            out.append("%s: unreadable (%s); the tree check never passes a manager configuration file it cannot "
-                       "read (#5167)" % (f.rel, e.strerror if isinstance(e, OSError) else e))
-            continue
-        if any(k == "ManagerEnvironment" for _, k, _ in lines):
-            out.append("%s: sets ManagerEnvironment=, which PID 1 applies to itself (SYSTEMD_UNIT_PATH moves where "
-                       "it loads units from); the tree check never passes one (#5167)" % f.rel)
-    return out
+            yield f.rel, config_lines(f.content())
+        except (OSError, Unparsable):
+            yield f.rel, None
 
 
 def unit_files(root):
@@ -3428,7 +3436,8 @@ def made_entries(root):
     and (file, None) for a unit file it cannot read: in every file unit_files reads, each [Mount] line
     whole (a mount can alias a path with no '/' in the line: Options=bind and a relative What=), and each
     other line at a setting off PID1_READS, PID1_NAMES and PID1_READ_PREFIXES whose value holds a '/' or
-    that is a *Directory= setting; and every etc/fstab line but blanks and comments. The value is
+    that is a *Directory= setting; every etc/fstab line but blanks and comments; and every system.conf
+    and system.conf.d line (manager_files). The value is
     "[Section] Key=value" as config_lines gives it (the section too: a key's meaning depends on it), or
     the fstab line stripped."""
     root = str(root)
@@ -3440,6 +3449,11 @@ def made_entries(root):
             continue
         for v in values:
             yield path, v
+    # Every line of the manager's own configuration too: it decides where PID 1 loads units from and how it
+    # runs them, so a key systemd adds later is reviewed like any unit line.
+    for rel, lines in manager_files(root):
+        for section, key, v in lines or ():
+            yield rel, "[%s] %s=%s" % (section, key, v)
     try:
         text = Conf(root, "etc/fstab").text()
     except OSError:
@@ -3493,11 +3507,13 @@ def made_allowlist_text(root):
 
 
 MADE_ALLOW_HEADER = """\
-# Every unit-file and fstab line for which PID 1 may make, link or mount a host path (#5167): in every
+# The unit-file, fstab and manager lines PID 1 may make, link or mount a host path for (#5167): in every
 # file under the unit directories (and each link's target), each [Mount] line whole, and each other line
-# whose value holds a '/' or that sets a *Directory=, at a setting mkosi.finalize does not list as one
-# PID 1 only reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*,
-# Assert*, Exec*); and every etc/fstab line but comments. One per line: the file's path in the image
+# whose value holds a '/' or that sets one of StateDirectory=, RuntimeDirectory=, CacheDirectory=,
+# LogsDirectory= or ConfigurationDirectory=, at a setting mkosi.finalize does not list as one PID 1 only
+# reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*, Assert*, Exec*);
+# every etc/fstab line but comments; and every system.conf and system.conf.d line (ManagerEnvironment= is
+# refused outright). A unit's name alone (a lineless .automount) is held by the unit-made directory rules. One per line: the file's path in the image
 # tree, a tab, and "[Section] Key=value" (fstab: the line). mkosi.finalize fails the build on any such
 # line not here, exactly and under its own file; its other unit rules still weigh every line here.
 # A driver drivers.json lists needs no entry: its units are DRIVER_TEMPLATE's, reviewed in mkosi.finalize.

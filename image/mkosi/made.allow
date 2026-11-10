@@ -1,8 +1,10 @@
-# Every unit-file and fstab line for which PID 1 may make, link or mount a host path (#5167): in every
+# The unit-file, fstab and manager lines PID 1 may make, link or mount a host path for (#5167): in every
 # file under the unit directories (and each link's target), each [Mount] line whole, and each other line
-# whose value holds a '/' or that sets a *Directory=, at a setting mkosi.finalize does not list as one
-# PID 1 only reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*,
-# Assert*, Exec*); and every etc/fstab line but comments. One per line: the file's path in the image
+# whose value holds a '/' or that sets one of StateDirectory=, RuntimeDirectory=, CacheDirectory=,
+# LogsDirectory= or ConfigurationDirectory=, at a setting mkosi.finalize does not list as one PID 1 only
+# reads or that only names units, users or numbers (PID1_READS, PID1_NAMES, Condition*, Assert*, Exec*);
+# every etc/fstab line but comments; and every system.conf and system.conf.d line (ManagerEnvironment= is
+# refused outright). A unit's name alone (a lineless .automount) is held by the unit-made directory rules. One per line: the file's path in the image
 # tree, a tab, and "[Section] Key=value" (fstab: the line). mkosi.finalize fails the build on any such
 # line not here, exactly and under its own file; its other unit rules still weigh every line here.
 # A driver drivers.json lists needs no entry: its units are DRIVER_TEMPLATE's, reviewed in mkosi.finalize.
@@ -13,6 +15,8 @@
 etc/fstab	devtmpfs /dev     devtmpfs nosuid,noexec       0 0
 etc/fstab	tmpfs    /dev/shm tmpfs    nosuid,nodev,noexec 0 0
 etc/fstab	tmpfs    /run     tmpfs    mode=0755,nosuid,nodev,noexec 0 0
+usr/lib/systemd/system.conf.d/10-coredump-debian.conf	[Manager] DefaultLimitCORE=0:infinity
+usr/lib/systemd/system.conf.d/50-agentos-nodump.conf	[Manager] DefaultLimitCORE=0
 usr/lib/systemd/system/agentos-camdecode.socket	[Socket] ListenStream=/run/agentos-camdecode/conn.sock
 usr/lib/systemd/system/agentos-camdecode@.service	[Service] TemporaryFileSystem=/run:ro,noexec
 usr/lib/systemd/system/agentos-egress-setup.path	[Path] PathChanged=/var/lib/agentos-localui/claim.json

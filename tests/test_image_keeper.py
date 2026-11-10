@@ -1376,6 +1376,20 @@ class MadeAllowTest(unittest.TestCase):
         with unittest.mock.patch.object(check, "driver_entries", return_value=([{"name": "scale"}], [])):
             self.assertEqual(self.refused(), [])
 
+    def test_every_way_a_line_reaches_the_list(self):
+        # L3 6766724100 (#5270): a unit file reached by a link from outside the unit directories, a path
+        # value that does not open with '/', and an fstab line holding '#' past its start are each listed.
+        write(self.root, "opt/x/zl.service", "[Service]\nListenStream=/run/zl\n")
+        (self.root / SYSTEM / "zl.service").symlink_to("/opt/x/zl.service")
+        write(self.root, SYSTEM + "zo.service", "[Service]\nStandardOutput=file:/var/log/zo\nBindPaths=-/:/srv/r\n")
+        write(self.root, "etc/fstab", (MK / "mkosi.extra/etc/fstab").read_text() + "/ /srv/r none bind,x#y 0 0\n")
+        got = " | ".join(self.refused())
+        for rel, value in (("opt/x/zl.service", "[Service] ListenStream=/run/zl"),
+                           (SYSTEM + "zo.service", "[Service] StandardOutput=file:/var/log/zo"),
+                           (SYSTEM + "zo.service", "[Service] BindPaths=-/:/srv/r"),
+                           ("etc/fstab", "/ /srv/r none bind,x#y 0 0")):
+            self.assertIn(self.entry(rel, value), got)
+
     def test_a_manager_environment_is_refused(self):
         # Security 6766645273 (#5270): ManagerEnvironment=SYSTEMD_UNIT_PATH moves PID 1's unit search to a
         # directory the check never walks, so an ancestor bind and a unit-made directory there passed.
@@ -1391,8 +1405,13 @@ class MadeAllowTest(unittest.TestCase):
                     self.assertEqual(check.manager_environment_violations(self.root), [want])
                     self.assertIn(want, check.violations(self.root))
                     f.unlink()
+        # Every other manager line is reviewed through the list, so a key systemd adds later is too.
         write(self.root, "usr/lib/systemd/system.conf.d/60-zz.conf", "[Manager]\nDefaultEnvironment=A=1\n")
         self.assertEqual(check.manager_environment_violations(self.root), [])
+        self.assertIn(self.entry("usr/lib/systemd/system.conf.d/60-zz.conf", "[Manager] DefaultEnvironment=A=1"),
+                      " | ".join(self.refused()))
+        self.assertIn(("usr/lib/systemd/system.conf.d/50-agentos-nodump.conf", "[Manager] DefaultLimitCORE=0"),
+                      check.made_allowed())
         write(self.root, "usr/lib/systemd/system.conf.d/60-zz.conf", "[Manager]\nA=\0\n")
         self.assertIn("unreadable", " ".join(check.manager_environment_violations(self.root)))
 
