@@ -431,21 +431,23 @@ func (p *Login) validate() error {
 		}
 	}
 	for k, v := range d.RefreshHeaders {
-		if !contains(header.PassHeaders, k) || k == "Content-Type" {
-			return fmt.Errorf("clerk: refresh header %q may not be declared", k)
+		if err := header.Name(k); err != nil {
+			return fmt.Errorf("clerk: refresh %w", err)
+		} else if k == "Content-Type" {
+			return errors.New(`clerk: refresh header "Content-Type" is the clerk's own`)
 		}
 		if err := header.Value(v); err != nil {
 			return fmt.Errorf("clerk: refresh header %q: %w", k, err)
 		}
 	}
 	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
-		if !contains(header.PassHeaders, h) {
-			return fmt.Errorf("clerk: header %q may not pass", h)
+		if err := header.Name(h); err != nil {
+			return fmt.Errorf("clerk: %w", err)
 		}
 	}
 	for _, pre := range d.ResponsePrefixes {
-		if !contains(header.PassPrefixes, pre) {
-			return fmt.Errorf("clerk: header prefix %q may not pass", pre)
+		if err := header.Prefix(pre); err != nil {
+			return fmt.Errorf("clerk: %w", err)
 		}
 	}
 	return nil
@@ -1097,14 +1099,14 @@ func (p *Login) answer(resp *http.Response, real string) *http.Response {
 }
 
 // answerHeader reports whether the guest gets the answer header k: a
-// declared name or prefix, exactly as New checked it against header.PassHeaders
-// and header.PassPrefixes.
+// declared name, exactly as New checked it against header.Names, or a name
+// that begins with a declared prefix and names no credential (header.Answer).
 func (p *Login) answerHeader(k string) bool {
 	if contains(p.d.ResponseHeaders, k) {
 		return true
 	}
 	for _, pre := range p.d.ResponsePrefixes {
-		if strings.HasPrefix(k, pre) {
+		if header.Answer(k, pre) == nil {
 			return true
 		}
 	}
