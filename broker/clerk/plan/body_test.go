@@ -523,7 +523,7 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 
 	// A quick read moves to a gateway with no external address read yet, and
 	// its full read waits: every public destination is held.
-	reading, release := make(chan struct{}), make(chan struct{})
+	reading, release := make(chan struct{}, 1), make(chan struct{})
 	var connects atomic.Int32
 	d := f.decl(t)
 	guard := netguard.New(netguard.Config{
@@ -554,7 +554,11 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 	go func() { guard.Watch(wctx, events); close(watched) }()
 	t.Cleanup(func() { close(release); wstop(); <-watched })
 	events <- struct{}{}
-	<-reading // the quick read has opened the hold
+	select { // the quick read has opened the hold
+	case <-reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the guard's full read never started: no hold to cancel in")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
