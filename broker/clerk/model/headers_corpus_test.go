@@ -40,6 +40,12 @@ func TestDeclaredHeadersRefuseTheCorpus(t *testing.T) {
 			t.Errorf("the value %q was taken", v)
 		}
 	}
+	// Inner spaces and every visible byte, '~' included, are a value.
+	for _, v := range []string{"2023-06-01 v", "~v~"} {
+		if !declares("Anthropic-Version", v) {
+			t.Errorf("the value %q was refused", v)
+		}
+	}
 	for _, h := range []string{"Openai-Version", "Version", "Anthropic-Beta"} {
 		if declares(h, "v") {
 			t.Errorf("the anthropic declaration may set %q", h)
