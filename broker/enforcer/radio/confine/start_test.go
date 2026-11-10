@@ -293,7 +293,13 @@ func TestStepLeavesTheMainThread(t *testing.T) {
 			err := <-errc
 			got <- result{held, entered, ran, err}
 		}()
-		r := <-got
+		var r result
+		select {
+		case r = <-got:
+		case <-time.After(5 * time.Second): // a step left on the held thread waits there for keep
+			close(keep)
+			t.Fatal("step did not return within 5 s: it ran on the held thread and waits for keep")
+		}
 		if r.held == syscall.Getpid() {
 			close(keep)
 			continue
