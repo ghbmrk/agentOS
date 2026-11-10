@@ -4409,6 +4409,22 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                             self.tmpfiles(argv, tmp)
             self.assertEqual(subprocess.run(missing, capture_output=True).returncode, 127)
 
+    def test_the_guarded_run_takes_the_status_guard(self):
+        # #5333: test_passed_lines_change_nothing_guarded runs each case through self.tmpfiles, so a
+        # tool that exits 127 fails every case as not run. A bare subprocess call there would fail
+        # only the vacuous-oracle check at the end, and a check=True call would error, not fail.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
+                       "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
+            result = unittest.TestResult()
+            with unittest.mock.patch.object(sys.modules[__name__], "image_tool", lambda case, tool: missing):
+                TmpfilesDiffTest("test_passed_lines_change_nothing_guarded").run(result)
+        self.assertEqual(result.errors, [])
+        cases = [tb for t, tb in result.failures if "line=" in str(t)]
+        self.assertTrue(cases, result.failures)
+        for tb in cases:
+            self.assertIn("systemd-tmpfiles did not run", tb)
+
     def test_passed_lines_change_nothing_guarded(self):
         tool = image_tool(self, "systemd-tmpfiles")
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
