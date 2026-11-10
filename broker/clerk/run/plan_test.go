@@ -591,6 +591,32 @@ func TestPlanOwnerSocketCalls(t *testing.T) {
 	}
 	failing.Store(false)
 
+	// A key store that no longer opens answers the state read with
+	// errKeyStore, naming no value.
+	swap := &opens{Sealer: sealer}
+	broken, err := model.NewAPIs(model.Shipped, model.NewKeys(swap, nil), netguard.New(netguard.Config{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broken.SetKey(model.Shipped[0].Provider, "canary-key-0001", true); err != nil {
+		t.Fatal(err)
+	}
+	other := make([]byte, 32)
+	rand.Read(other)
+	if swap.Sealer, err = clerk.NewAESSealer(other); err != nil {
+		t.Fatal(err)
+	}
+	sock2 := filepath.Join(shortDir(t), "owner.sock")
+	ln2, err := ListenPlanOwner(sock2, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln2.Close() })
+	go ServePlanOwner(ln2, broken, h)
+	if st, err := (PlanOwner{proc.Conn{Socket: sock2, UID: os.Getuid()}}).KeyState(); err == nil || err.Error() != errKeyStore.Error() {
+		t.Fatalf("a key store that does not open: %+v %v", st, err)
+	}
+
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
 		t.Fatal(err)
