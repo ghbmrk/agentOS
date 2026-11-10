@@ -326,7 +326,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UNLOCK-closure-exec | UNLOCK-closure-exec: the commands of every unit the unlock step can start are on a closed list, not a word list (#4696 Security R1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | ENF-l-mut | ENF-l-mut: kill the enforcer daemon's surviving deleted statements and restore its REQ claims (NET-2, STO-5, KEY-7) | #4755 (same package; reuse its fault seam) | queued (release; tier A; lane primary; brief briefs/ENF.md) |
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
-| ENF-l-sec-b | ENF-l-sec-b: alert offer single-flight and re-offer on a cut core's reconnect (#4755 items 6, 7) | ENF-l-sec | building(tier A; lane primary; brief briefs/ENF.md) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
 | IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
@@ -337,6 +336,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-shared-quota-a2 | ENF-shared-quota-a2: the enforcer daemon seeds every load with dnsmasq's lease file. Release; split from #4701. | #4701 | queued (release; tier A; lane primary) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | ENF-shared-quota-c | ENF-shared-quota-c: a lease the DHCP server ends early (release, or a client moved to another address) leaves the shared segment's lease set. Release; from #5294. | #5294, #4703 | queued (release; tier A; lane primary) |
+| CI-hostcheck-fetch-retry | CI-hostcheck-fetch-retry: the guest-kernel fetch from snapshot.ubuntu.com retries with a bounded backoff before hostcheck fails. Release; flake, from #5313/#5314/#5315. | #4994 | building (release; tier A; lane primary) |
+| VULN-debian-r5 | VULN-debian-r5: five new openssl 3.5.7-1~deb13u3 advisories (88822, 88823, 95691, 95692, 107496) fail image-vulncheck in image and image/initrd; bump to a patched snapshot if one exists, else accept with records citing #2919. Release; from the #5328 run. | #2919 | building (release; tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -441,27 +442,36 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-confirm-words | KRN-forget-c-confirm-words: the Forget ask names kinds in household words (2 messages, 1 photo), not raw class names like wrap-key. From #5156 Lens R1. | #5124, #5156 | queued (release; tier A) |
 | ENF-net-ra-fu | ENF-net-ra-fu: a stopped resolver shows on the enforcer page; accept_ra=0 does not reach later uplinks; an image sysctl.d line holds accept_redirects=0 outside the daemon. Release; from #5161 (R1 to R3). | #5161 | building (release; tier A) |
 | AGENTOSD-broker-group-status | AGENTOSD-broker-group-status: a leftover broker/ group that will not go shows STATUS 'update needed', not 'restart'. From #5172. | #5172 | queued (release; tier A) |
-| ENF-m-wan-ra | ENF-m-wan-ra: the WAN's router-advertisement handling is set by its link configuration (networkd IPv6AcceptRA= or sysctl.d accept_ra=2 on the WAN) and checked by ci_boot.sh; named in the ENF-m-b brief. Release; from #5165 (L3 R-a). | #5165 | queued (release; tier A) |
+| ENF-m-wan-ra | ENF-m-wan-ra: the WAN's router-advertisement handling is set by its link configuration (networkd IPv6AcceptRA= or sysctl.d accept_ra=2 on the WAN) and checked by ci_boot.sh; named in the ENF-m-b brief. Release; from #5165 (L3 R-a). | #5165 | building (release; tier A) |
 | IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
 | IMG-keeper-reach-tmpfiles-run | IMG-keeper-reach-tmpfiles-run: the link rules and the keeper check count a directory a tmpfiles.d line makes under a box mount for a non-root user as service-owned. Release; from #5167. | #5167 | queued (release; tier A) |
-| CI-image-tool-loader | CI-image-tool-loader: the image's systemd and kmod in the differential tests fail on any library loaded from outside the reference root (loader --library-path falls back to the host's directories). Release; from #5055. | #5230, #4776 | building (release; tier A) |
 | IMG-keeper-reach-sysd-fu | IMG-keeper-reach-sysd-fu: PID 1 acts on no path inside a directory it hands to another user (SocketUser= chown follows a link at the socket path). Release; from #5228. | #5228, #5167 | queued (release; tier A) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
-| TEST-flake-run-waits-bounded | TEST-flake-run-waits-bounded: the run sign-in test's bare <-begun and <-removed waits are unbounded, so a hang there is a package timeout. Release; from #5269. | #5269, #5268 | queued (release; tier A) |
+| TEST-flake-run-waits-bounded | TEST-flake-run-waits-bounded: the run sign-in test's bare <-begun and <-removed waits are unbounded, so a hang there is a package timeout. Release; from #5269. | #5269, #5268 | building (release; tier A) |
 | KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
-| VOICE-ro-d-hangup-fu | VOICE-ro-d-hangup-fu: a bounded hang-up ctx, a nil ctx that cannot hold the lock, C2/C8 and ErrBusy wording, and two surviving mutants killed. Release; from #5258. | #5258, #5252 | building (release; tier A) |
-| CLK-run-mut | CLK-run-mut: kill the 14 old mutgate survivors in broker/clerk/run (plan.go, plansignin.go) that #5269's test-only edit made the gate target. Release; from #5269. | #5269 | building (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
 | ENF-edge-cut-fu | ENF-edge-cut-fu: a failed firewall write after an edge trip fails closed, a missing edgecut.json reads as cut, the Trip alert's covert bit is noted, and an IPv6 netns test. Release; from #5257. | #5257, #5014 | queued (release; tier A) |
-| IMG-keeper-user-pin | IMG-keeper-user-pin: every keeper unit's effective User=/Group=/DynamicUser=, drop-ins included, is the shipped one. Release; from #5270. | #5270, #5167 | queued (release; tier A) |
+| IMG-keeper-user-pin | IMG-keeper-user-pin: every keeper unit's effective User=/Group=/DynamicUser=, drop-ins included, is the shipped one. Release; from #5270. | #5270, #5167 | building (release; tier A) |
 | IMG-keeper-reach-gen | IMG-keeper-reach-gen: no generator or credential adds a unit or mount the tree check does not read (gpt-auto, systemd.extra-unit.*, fstab.extra, systemd.mount-extra). Release; from #5270. | #5270, #5167 | queued (release; tier A) |
 | REV-PROOF-corpus-deny-fu2 | REV-PROOF-corpus-deny-fu2: the plan clerk drops a prefix-matched answer header that names a credential. Release; from #5278. | #5278 | building (release; tier A) |
 | VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | queued (release) |
 | VOICE-ro-d-ending-boundary | VOICE-ro-d-ending-boundary: the call-limit notice waits, bounded, for the sentence playing to end. Release (UX); from #5299. | #5299, #5262 | queued (release; tier A) |
 | VOICE-ro-d-failed-empty | VOICE-ro-d-failed-empty: an unset Failed clip plays nothing when the recognizer stops. Release; from #5299. | #5299, #5262 | queued (release; tier A) |
 | ENF-net-ra-fu-r6 | ENF-net-ra-fu-r6: a typed hold error for a failed IPv6 stat, a page mutant killed, an empty-interface Unset line fixed, and plain words for the Policy/Load lines. Release; from #5306. | #5306, #5284 | queued (release; tier A) |
-| ENF-net-ra-fu-r3 | ENF-net-ra-fu-r3: an enforcer image sysctl.d file holds accept_redirects=0 outside the daemon, checked at build. Release; split from #5164 R3. | #5164, #5161 | building (release; tier A) |
+| VOICE-ro-d-hangup-fu2 | VOICE-ro-d-hangup-fu2: TestSpeechDuringTheTokenIsAnswered bounds its waits so the no-unlock and Answer err-flip mutants fail fast. Release; from #5314. | #5314, #5274 | building (release; tier A) |
+| CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | queued (release; tier A) |
+| ENF-dns-backoff | ENF-dns-backoff: dns/run starts an instance's restart wait again from 1 s once it has stayed up. Release; from #5318. | #5318, #5164 | queued (release; tier A) |
+| REV-PROOF-corpus-deny-fu3 | REV-PROOF-corpus-deny-fu3: answer headers pass by exact quota name, not a denylist inside X-Codex-*; load() parses comments and refuses an empty prefix; egress and clerk share one credential word list. Release; from #5313. | #5313, #5291 | queued (release; tier A) |
+| CI-image-tool-loader-fu | CI-image-tool-loader-fu: the generator-path test pins the case's own empty dir, and TmpfilesDiffTest fails on exit 127. Release; from #5312. | #5312, #5231 | building (release; tier A) |
+| CLK-run-mut-gmail | CLK-run-mut-gmail: kill or waive the old mutgate deletion survivors in the Gmail sign-in and registration (35). Release; from #5290. | #5290, #5276 | building (release; tier A) |
+| CLK-run-mut-mail | CLK-run-mut-mail: kill or waive the old mutgate deletion survivors in the mail host and seen set (45). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
+| CLK-run-mut-senders | CLK-run-mut-senders: kill or waive the old mutgate deletion survivors in senders, the sign-in socket and the world (50). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
+| CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
+| ENF-m-wan-ra-fu | ENF-m-wan-ra-fu: ci_boot.sh keys the placeholder on ExecStart=sleep infinity, requires proto ra on the IPv6 default route once ENF-m-b ships, and says an unknown operstate is unknown. Release; from #5328. | #5328, #5189 | queued (release; tier A) |
+| CI-image-tool-loader-fu2 | CI-image-tool-loader-fu2: a test pins that test_passed_lines_change_nothing_guarded calls self.tmpfiles (source assertion or a 127 stub). Release; from #5332. | #5332, #5322 | queued (release; tier A) |
+| CI-hostcheck-fetch-retry-fu | CI-hostcheck-fetch-retry-fu: the ASSUMPTIONS row says no retry starts after 600 s and the fetch can take about 13 minutes. Release; from #5331. | #5331, #5321 | queued (release; tier B) |
+| TEST-flake-run-waits-bounded-fu | TEST-flake-run-waits-bounded-fu: the 'a remove during the start' subtest's bare <-begun is bounded. Release; from #5339. | #5339, #5272 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
