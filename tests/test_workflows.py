@@ -513,8 +513,8 @@ def cache_key_problems(text):
 
 
 # CI-cancel-superseded (#5345): a push to a PR leaves the old head's runs holding the Actions
-# queue unless the workflow has a concurrency group per PR that cancels them. The five gates
-# below carry this exact block: the PR's newest first-attempt run cancels its older runs, a rerun
+# queue unless the workflow has a concurrency group per PR that cancels them. The workflows
+# below carry this exact block (#5348 added ci, assurance, vulncheck and image): the PR's newest first-attempt run cancels its older runs, a rerun
 # (attempt 2 or later) cancels nothing, so rerunning an old head (trusted-base-rerun.yml lists
 # heads before it reruns) cannot cancel the current head's required check, and every push,
 # schedule or dispatch run is a group of its own, so main's runs are never cancelled.
@@ -524,16 +524,24 @@ SUPERSEDE_LINES = [
     "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
     "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
 ]
-SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml"]
+SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml", "keycheck.yml",
+             "ci.yml", "assurance.yml", "vulncheck.yml", "image.yml"]
 # premerge.yml queues its runs on purpose (its record handling) and never cancels one.
 KEEPS_EVERY_RUN = {"premerge.yml"}
 
 
 def supersede_problems(name, text):
     """Return why a workflow can leave a superseded PR head's runs queued; empty when it cannot."""
-    top = text.split("\njobs:\n", 1)[0].split("\n")
+    top, _, jobs = text.partition("\njobs:\n")
+    top = top.split("\n")
     on_pr = re.search(r"^on:.*?(?=^\S)", text + "\nend", re.M | re.S)
-    if not (on_pr and re.search(r"\bpull_request(_target)?\b", on_pr.group(0))) or name in KEEPS_EVERY_RUN:
+    if not (on_pr and re.search(r"\bpull_request(_target)?\b", on_pr.group(0))):
+        return []
+    # #5348: a job-level group escapes the pinned block (it could cancel the required check on a
+    # rerun, or share a group across PRs), so the workflow-level block is the only one allowed.
+    if re.search(r"\bconcurrency\s*:", jobs):
+        return ["a job sets its own concurrency group"]
+    if name in KEEPS_EVERY_RUN:
         return []
     if name in SUPERSEDE:
         at = top.index("concurrency:") if "concurrency:" in top else len(top)
@@ -547,7 +555,8 @@ def supersede_problems(name, text):
 class WorkflowTest(unittest.TestCase):
     def test_a_pr_push_cancels_the_older_heads_runs(self):
         # CI-cancel-superseded (#5345): every PR-triggered workflow but premerge cancels a
-        # superseded head's runs; the five gates carry the pinned block.
+        # superseded head's runs; the gates and ci, assurance, vulncheck and image carry the
+        # pinned block (#5348), and no job sets its own group.
         names = [f.name for f in self.files()]
         self.assertTrue(set(SUPERSEDE) | KEEPS_EVERY_RUN <= set(names))
         for f in self.files():
@@ -565,6 +574,11 @@ class WorkflowTest(unittest.TestCase):
             "push group by sha": (group, group.replace("format('run-{0}', github.run_id)", "github.sha")),
             "one group": (group, "  group: ${{ github.workflow }}"),
             "no block": ("\n".join(SUPERSEDE_LINES) + "\n", ""),
+            # #5348: a job-level block that cancels, even one that keeps the rerun guard.
+            "job block": ("\njobs:\n", "\njobs:\n  x:\n    concurrency:\n      group: x\n"
+                                       "      cancel-in-progress: true\n"),
+            "job block, flow form": ("\njobs:\n", "\njobs:\n  x: {concurrency: x, runs-on: y}\n"),
+            "job block, string": ("\njobs:\n", "\njobs:\n  x:\n    concurrency: x\n"),
         }
         for name in SUPERSEDE:
             text = (WORKFLOWS / name).read_text()
@@ -577,6 +591,11 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(supersede_problems("x.yml", plain.replace("jobs:", "concurrency:\n  group: x\n"
                                                                    "  cancel-in-progress: false\njobs:")))
         self.assertEqual(supersede_problems("x.yml", plain.replace("pull_request", "push")), [])
+        # premerge keeps every run, but a job of its own may not cancel one either (#5348).
+        premerge = (WORKFLOWS / "premerge.yml").read_text()
+        self.assertEqual(supersede_problems("premerge.yml", premerge), [])
+        self.assertTrue(supersede_problems("premerge.yml", premerge.replace(
+            "\njobs:\n", "\njobs:\n  x:\n    concurrency:\n      group: x\n      cancel-in-progress: true\n", 1)))
 
     def test_cache_keys_name_the_runner_image(self):
         seen = 0
