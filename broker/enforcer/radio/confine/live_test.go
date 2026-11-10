@@ -31,13 +31,6 @@ const liveArg = "confine-live-probe"
 // liveUID is the host user the probe's namespace root maps to: never root.
 const liveUID = 4249
 
-// init keeps the main goroutine, which runs TestMain and so m.Run, on the
-// main thread, and every test's goroutine off it, as the enforcer's
-// main.go does (#5159): strayThreads counts the main thread too.
-func init() {
-	runtime.LockOSThread()
-}
-
 func TestMain(m *testing.M) {
 	Trampoline()
 	if len(os.Args) == 2 && os.Args[1] == exitArg {
