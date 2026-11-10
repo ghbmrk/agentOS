@@ -63,9 +63,6 @@ type network struct {
 	// the last reading count (Potency 6656993166). nil when none.
 	prevDoc *policy.Document
 
-	edgeMu  sync.Mutex
-	edgeDay uint32 // the day the edge's overrun was last logged
-
 	// merging is each counted port that merges segments, or could not be
 	// read: its error, logged when it starts or changes. Its caps are
 	// held spent while it lasts (ENF-l-16). d.fwMu guards it and reload.
@@ -254,9 +251,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 			if err != nil {
 				d.dp.Logf("byte caps: before the load: " + err.Error())
 			}
-			// Tripped off this goroutine: the load holds fwMu, and a trip
-			// must never wait on it (cut.Trip takes no firewall lock; an
-			// edge cut that does must keep it so).
+			// Tripped off this goroutine: the load holds fwMu, which
+			// cut.Trip never takes and the edge's trip takes after its
+			// record (tripEdge), so neither waits on the load.
 			for _, o := range over {
 				go d.overrun(o)
 			}
@@ -325,7 +322,7 @@ func (d *Enforcer) drop(caps traffic.Caps) nft.Drop {
 		p.EdgeCount = p.EdgeCap
 	}
 	p.Past = d.net.past
-	d.spendMerging(&p)
+	d.holdDrop(&p)
 	return p
 }
 
@@ -775,7 +772,7 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
-	d.spendMerging(&p)
+	d.holdDrop(&p)
 	running, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
 		return over, fmt.Errorf("drop: %w", err)
@@ -807,9 +804,8 @@ func (d *Enforcer) addReading(doc policy.Document, listing []byte) ([]traffic.Ov
 	return over, nil
 }
 
-// overrun is one cap passed: the core's cuts the core (KRN-12); the
-// edge's is held by the in-kernel drop, and raised and logged, since no
-// edge cut is built yet (ENF-l-15).
+// overrun is one cap passed: the core's cuts the core (KRN-12), the
+// edge's cuts the edge (edgecut.go, ENF-l-15).
 func (d *Enforcer) overrun(o traffic.Overrun) {
 	why := fmt.Sprintf("byte cap passed: %d of %d bytes today", o.Count, o.Cap)
 	if len(o.Dests) > 0 {
@@ -821,18 +817,7 @@ func (d *Enforcer) overrun(o traffic.Overrun) {
 	case traffic.BoxCore:
 		d.cut.Trip(why)
 	default:
-		// No edge cut exists yet (#5014), so no alert: its text would
-		// name steps the edge does not have, and nothing would clear it
-		// (UX 6656586767). The drop holds the edge at its cap; the log
-		// says so once a day.
-		day := traffic.Day(d.dp.Now())
-		d.net.edgeMu.Lock()
-		first := d.net.edgeDay != day
-		d.net.edgeDay = day
-		d.net.edgeMu.Unlock()
-		if first {
-			d.dp.Logf("byte caps: edge: " + why + "; held at its cap by the drop until the day ends")
-		}
+		d.tripEdge(why)
 	}
 }
 

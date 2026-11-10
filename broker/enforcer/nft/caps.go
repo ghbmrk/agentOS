@@ -61,6 +61,10 @@ const LogCap = "enf cap "
 const (
 	edgeChain     = "cap_edge"
 	dropEdgeChain = "capd_edge"
+	// cutChain is where the forward chain sends every packet to or from
+	// the edge's segment first: empty while the edge is not cut, so each
+	// returns; Drops fills it while it is (Drop.EdgeCut).
+	cutChain = "cut_edge"
 )
 
 func capChain(v6 bool) string     { return "cap" + fam(v6) }
@@ -77,6 +81,12 @@ type Drop struct {
 	Groups    []DropGroup
 	EdgeCap   uint64
 	EdgeCount uint64
+	// EdgeCut cuts the edge's segment (#5014, KRN-12): every packet it
+	// sends or is sent through the enforcer is counted on EdgeCut and
+	// dropped, on every path, open connections included. The daemon sets
+	// it from its own record of the cut, which only the owner lifts, so
+	// every text it loads, full or on its own, carries the cut.
+	EdgeCut bool
 	// Past is this kernel's quota edge (load.Loader.QuotaPast): true where
 	// "over N" matches once the count is past N, false where it matches
 	// once it reaches N. Each quota's N is the cap, or the cap plus one, so
@@ -157,6 +167,10 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 	w.line(DropHeader)
 	w.line("flush chain inet " + Table + " " + capDropChain(true))
 	w.line("flush chain inet " + Table + " " + dropEdgeChain)
+	w.line("flush chain inet " + Table + " " + cutChain)
+	if p.EdgeCut {
+		w.line("add rule inet " + Table + " " + cutChain + " counter name " + strconv.Quote(EdgeCut) + " drop")
+	}
 
 	want := map[string]bool{}
 	byDest := map[string]string{}
@@ -569,6 +583,15 @@ func capChains(w *writer) {
 	w.open("chain " + dropEdgeChain)
 	w.line("drop")
 	w.close()
+	w.open("chain " + cutChain)
+	w.close()
+}
+
+// cutJumps is the forward chain's first rules: every packet the edge's
+// segment sends or is sent goes through the cut chain.
+func cutJumps(l Layout) []string {
+	edge := strconv.Quote(l.Edge)
+	return []string{"iifname " + edge + " jump " + cutChain, "oifname " + edge + " jump " + cutChain}
 }
 
 // capJumps is the forward chain's rules that send the core's packets to

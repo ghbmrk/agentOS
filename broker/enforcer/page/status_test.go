@@ -1,6 +1,6 @@
 package page
 
-// REQ: NET-2, NET-4, KEY-7, STO-4
+// REQ: NET-2, NET-4, KEY-7, STO-4, KRN-12
 
 import (
 	"errors"
@@ -425,5 +425,69 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	g = newRig(t)
 	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") {
 		t.Error("home shows a resolver it was not given")
+	}
+}
+
+type fakeEdge struct {
+	cut    bool
+	reason string
+	err    error
+	lifts  int
+}
+
+func (f *fakeEdge) Cut() (bool, string) { return f.cut, f.reason }
+func (f *fakeEdge) LiftEdge() error {
+	f.lifts++
+	if f.err != nil {
+		return f.err
+	}
+	f.cut, f.reason = false, ""
+	return nil
+}
+
+// #5014 (NET-2 Byte caps, KRN-12): a cut edge shows on home with why and
+// what lifting it does, escaped as page text; the lift takes the owner's
+// passkey, carries no target, is drawn only while the edge is cut, and a
+// lift that fails leaves the card.
+func TestLiftEdgeCut(t *testing.T) {
+	g := newRig(t)
+	if code, _ := g.tapState(g.a, ActLiftEdge, ""); code != http.StatusNotFound {
+		t.Errorf("a lift with no edge wired: %d", code)
+	}
+	ed := &fakeEdge{}
+	cfg := g.s.cfg
+	cfg.Edge, cfg.Lock = ed, nil
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Edge box</h2>") {
+		t.Fatal("home shows an edge that is not cut")
+	}
+	if code, _ := g.tapState(g.a, ActLiftEdge, ""); code != http.StatusConflict || ed.lifts != 0 {
+		t.Errorf("a lift of an edge not cut: %d", code)
+	}
+	ed.cut, ed.reason = true, "byte cap passed: 6000 of 5000 bytes today <b>"
+	h := g.homeHTML()
+	if !strings.Contains(h, "The edge box is cut off: byte cap passed: 6000 of 5000 bytes today &lt;b&gt;.") ||
+		!strings.Contains(h, `data-action="lift-edge"`) {
+		t.Fatalf("home does not show the cut edge and its lift:\n%s", h)
+	}
+	if code, _ := g.tapState(g.a, ActLiftEdge, "x"); code != http.StatusNotFound {
+		t.Errorf("a lift with a target: %d", code)
+	}
+	if code, _ := g.tapState(newAuthenticator(t), ActLiftEdge, ""); code != http.StatusForbidden || ed.lifts != 0 {
+		t.Fatalf("a stranger's lift: %d", code)
+	}
+	ed.err = errors.New("disk full")
+	if code, _ := g.tapState(g.a, ActLiftEdge, ""); code != http.StatusConflict || !strings.Contains(g.homeHTML(), "<h2>Edge box</h2>") {
+		t.Fatalf("a failed lift: %d", code)
+	}
+	ed.err = nil
+	if code, res := g.tapState(g.a, ActLiftEdge, ""); code != http.StatusOK || res["done"] != true {
+		t.Fatalf("lift: %d %v", code, res)
+	}
+	if h := g.homeHTML(); strings.Contains(h, "<h2>Edge box</h2>") {
+		t.Fatal("home still shows a lifted cut")
 	}
 }

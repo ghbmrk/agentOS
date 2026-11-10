@@ -212,6 +212,7 @@ const (
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
+	EdgeCut     = "edge_cut"     // every packet to or from the edge's segment while the edge is cut (Drop.EdgeCut)
 	LogLines    = "log_lines"    // lines written to the kernel log (logged)
 )
 
@@ -274,7 +275,7 @@ func logged(p string) string { return "log_" + slug(p) }
 func lines(p string) string  { return "lines_" + slug(p) }
 func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, LogLines}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, EdgeCut, LogLines}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -889,6 +890,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
+	// A cut edge (Drop.EdgeCut) is cut before any other rule, established
+	// and related packets included, so its open connections end with it.
+	for _, r := range cutJumps(l) {
+		w.line(r)
+	}
 	// Guests: counted only as a whole network, never per device or per
 	// destination, and never logged (NET-3).
 	w.line("iifname " + g + " counter name " + q(GuestsOut))

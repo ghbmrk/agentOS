@@ -123,6 +123,16 @@ type Stray struct {
 	Nets  string       // the network's prefixes it must lie in
 }
 
+// Edge is the edge box's cut (#5014, KRN-12): the edge past its daily
+// byte cap reaches nothing through the enforcer until the owner lifts the
+// cut here, after a tap.
+type Edge interface {
+	// Cut is whether the edge is cut, and why.
+	Cut() (cut bool, reason string)
+	// LiftEdge lifts it; an error leaves it cut.
+	LiftEdge() error
+}
+
 // Page actions on the enforcer's own state, each after a tap of the
 // passkey in force.
 const (
@@ -130,6 +140,7 @@ const (
 	ActRevokeCore  = "revoke-core"  // revoke the core's channel sub-key
 	ActFreshDay    = "fresh-day"    // approve a fresh byte-cap day, after the wait
 	ActCancelFresh = "cancel-fresh" // cancel a fresh day waiting
+	ActLiftEdge    = "lift-edge"    // lift the edge's cut
 )
 
 var (
@@ -140,6 +151,7 @@ var (
 	errFreshWaits = errors.New("a fresh day is already waiting")
 	errNoFresh    = errors.New("no fresh day is waiting")
 	errStarting   = errors.New("the fresh day is starting, so it can no longer be cancelled")
+	errNotCut     = errors.New("the edge is not cut")
 )
 
 // stateChallenge checks that action can be drawn on the enforcer's state
@@ -187,6 +199,14 @@ func (s *Server) stateChallenge(action, target string) (ok bool, code int, err e
 			return true, http.StatusNotFound, errNoFresh
 		}
 		return true, http.StatusOK, nil
+	case ActLiftEdge:
+		if s.cfg.Edge == nil || target != "" {
+			return true, http.StatusNotFound, errMalformed
+		}
+		if cut, _ := s.cfg.Edge.Cut(); !cut {
+			return true, http.StatusConflict, errNotCut
+		}
+		return true, http.StatusOK, nil
 	}
 	return false, 0, nil
 }
@@ -210,6 +230,8 @@ func (s *Server) stateAct(c *challenge, sig []byte) (res map[string]any, err err
 		if err = cerr; err == nil {
 			res = map[string]any{"saved": saved}
 		}
+	case ActLiftEdge:
+		err = s.cfg.Edge.LiftEdge()
 	}
 	return res, err
 }
@@ -225,6 +247,11 @@ func (s *Server) status() map[string]any {
 	if s.cfg.Core != nil {
 		revoked, saved := s.cfg.Core.Revoked()
 		out["Core"], out["Revoked"], out["RevokeUnsaved"] = true, revoked && saved, revoked && !saved
+	}
+	if s.cfg.Edge != nil {
+		if cut, why := s.cfg.Edge.Cut(); cut {
+			out["EdgeCut"] = why
+		}
 	}
 	if s.cfg.Caps != nil {
 		if day := s.cfg.Caps.Day(); day.Spent {
