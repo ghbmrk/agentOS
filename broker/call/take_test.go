@@ -40,11 +40,13 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     token's body, and token, whose ctx is the grant's life, only in
 //     Serve's, both outside any func literal, and token is called once.
 //     serving, the lock that serves one call at a time, is named only in
-//     Serve, which takes it (waiting up to RingWait), makes the token's
-//     ctx and defers cancel then unlock, in that order; nothing writes
-//     tctx or cancel after that. Serve ends by reading the token on tctx,
-//     running the loop, cancelling tctx and waiting for the token read to
-//     close, so no Config.Token try follows the call (#5259).
+//     Serve, which takes it (waiting up to RingWait), defers the unlock,
+//     makes the token's ctx, reads the token on it and defers cancelling
+//     it and waiting for the token read, in that order, so on any return
+//     or panic the grant has died and no Config.Token try is left before
+//     the line is free; nothing writes tctx or cancel after that. token
+//     defers closing out first, so the wait ends. Serve ends by running
+//     the loop, then cancelling tctx (#5259, #5274).
 //  2. A grant composite literal appears only in check, outside any func
 //     literal, and nothing converts to grant or to a type parameter, and
 //     no composite literal has a type parameter as its type. So check is
@@ -64,8 +66,11 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 // token tests pin it), and //go:linkname and assembly (tools/srclint.py
 // fails them in CI). A grant kept past its call, in a package var, a field
 // or a shared answerer, needs no rule: rule 1 makes Serve the only maker
-// of a live grant and serves one call at a time, so a kept grant reads P0
-// in every other call (TestOneCallIsServedAtATime, #5232).
+// of a live grant and kills it before the next call is served, so a kept
+// grant reads P0 in every other call (TestOneCallIsServedAtATime, #5232).
+// A ctx-ignoring answerer's or synthesizer's call can still run into the
+// next call; its Ask reads P0 there, and what it fetched at P2 and keeps
+// is VOICE-ro-c's to scope per call (VOICE-ro-a-C2, C8).
 // If a refactor keeps the rule but breaks the check, change the check in
 // the same PR as the code, with a probe for the new shape, never on its
 // own.
@@ -148,47 +153,62 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// cancel before the unlock, in that order and before anything can
 		// return: so a call's grant has died before the next call is
 		// served, and every return unlocks (Lens on #5251).
-		var serveBody []string
-		var serveStmts []ast.Stmt
-		for _, f := range files {
-			for _, d := range f.Decls {
-				if fd, ok := d.(*ast.FuncDecl); ok && info.Defs[fd.Name] == serve {
-					for _, st := range fd.Body.List {
-						var b strings.Builder
-						printer.Fprint(&b, fset, st)
-						serveBody = append(serveBody, strings.Join(strings.Fields(b.String()), " "))
-						serveStmts = append(serveStmts, st)
+		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
+		if _, ok := tokenFn.(*types.Func); !ok {
+			t.Fatal("Config.token is gone: rewrite this check with the code")
+		}
+		body := func(fn types.Object) (text []string, stmts []ast.Stmt) {
+			for _, f := range files {
+				for _, d := range f.Decls {
+					if fd, ok := d.(*ast.FuncDecl); ok && info.Defs[fd.Name] == fn {
+						for _, st := range fd.Body.List {
+							var b strings.Builder
+							printer.Fprint(&b, fset, st)
+							text = append(text, strings.Join(strings.Fields(b.String()), " "))
+							stmts = append(stmts, st)
+						}
 					}
 				}
 			}
+			return text, stmts
 		}
+		serveBody, serveStmts := body(serve)
 		// The take: at once if no call is served, else waiting up to
-		// RingWait for the call before to end (#5252).
+		// RingWait for the call before to end (#5252). The unlock is
+		// deferred at once, so a panic after the take (a nil ctx) frees
+		// the line; the token read is ended and awaited in a defer run
+		// before it, so on every return or panic the grant has died and
+		// no Config.Token try is left before the next call (#5259, #5274).
 		pinned := []string{
 			"select { case serving <- struct{}{}: default: select { case serving <- struct{}{}: case <-cfg.After(cfg.RingWait): return Report{}, ErrBusy case <-c.Ended(): return Report{}, ErrBusy case <-ctx.Done(): return Report{}, ctx.Err() } }",
+			"defer func() { <-serving }()",
 			"tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)",
-			"defer func() { cancel(); <-serving }()",
+			"token := make(chan *grant, 1)",
+			"go cfg.token(tctx, c, token)",
+			"defer func() { cancel() for range token { } }()",
 		}
 		// tctx and cancel are set once, by the pinned statement, and
 		// never written after it (#5251 reviews).
 		var tctx, cancel types.Object
-		// The end: the token read on tctx, the loop, then the read ended
-		// and awaited before Serve returns (#5259).
+		// The end: the loop, then tctx cancelled before the hang-up.
 		tail := []string{
-			"go cfg.token(tctx, c, token)",
 			"rep, err := loop(tctx, cfg, c, token)",
 			"cancel()",
-			"for range token { }",
 			"return rep, overrun(ctx, tctx, c, err)",
 		}
 		if len(serveBody) < len(tail) || !slices.Equal(serveBody[len(serveBody)-len(tail):], tail) {
-			bad = append(bad, "Serve does not end by reading the token with tctx, running the loop, then cancelling tctx and waiting for the token read")
+			bad = append(bad, "Serve does not end by running the loop, then cancelling tctx")
 		}
-		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+3 > len(serveBody) || !slices.Equal(serveBody[i:i+3], pinned) || !slices.Contains(serveBody[i+3:], "go cfg.token(tctx, c, token)") {
-			bad = append(bad, "Serve does not take serving, make tctx and defer cancel then unlock, in that order, before it reads the token with tctx")
+		if i := slices.Index(serveBody, pinned[0]); i < 0 || i+len(pinned) > len(serveBody) || !slices.Equal(serveBody[i:i+len(pinned)], pinned) {
+			bad = append(bad, "Serve does not take serving, defer the unlock, make tctx, read the token with it and defer cancelling tctx and waiting for the token read, in that order")
 		} else {
-			lhs := serveStmts[i+1].(*ast.AssignStmt).Lhs
+			lhs := serveStmts[i+2].(*ast.AssignStmt).Lhs
 			tctx, cancel = info.Defs[lhs[0].(*ast.Ident)], info.Defs[lhs[1].(*ast.Ident)]
+		}
+		// token closes out once its one check is done, on every path, so
+		// Serve's await ends (#5259, #5274).
+		if tb, _ := body(tokenFn); len(tb) == 0 || tb[0] != "defer close(out)" {
+			bad = append(bad, "token does not defer closing out first")
 		}
 		for _, st := range serveBody[:max(slices.Index(serveBody, pinned[0]), 0)] {
 			if strings.Contains(st, "return") && st != "if ownerNumber == \"\" || c.Number() != ownerNumber { return Report{}, ErrNotOwner }" {
@@ -197,10 +217,6 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		}
 		servingNames := 0
 		gSt, cfgSt := under("grant"), under("Config")
-		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
-		if _, ok := tokenFn.(*types.Func); !ok {
-			t.Fatal("Config.token is gone: rewrite this check with the code")
-		}
 		// Each guarded call, and the one func that may make it; and the
 		// fields nothing may write.
 		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn, tokenFn: serve}
@@ -384,35 +400,43 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		// end, makes a grant that outlives the call.
 		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(tctx, c, token)\n\tgo cfg.token(ctx, c, token)", want: "Serve calls token 2 times"},
 		// #5259: Serve returns only once the token read has ended, so no
-		// Config.Token try follows the call.
-		{old: "\tfor range token {\n\t}\n", new: "", want: "waiting for the token read"},
-		{old: "\tcancel()\n\tfor range token {", new: "\tfor range token {", want: "waiting for the token read"},
-		{old: "\tcancel()\n\tfor range token {\n\t}\n", new: "\tfor range token {\n\t}\n\tcancel()\n", want: "waiting for the token read"},
-		{old: "\tfor range token {\n\t}\n", new: "\tgo func() {\n\t\tfor range token {\n\t\t}\n\t}()\n", want: "waiting for the token read"},
+		// Config.Token try follows the call; #5274: on a panic as well.
+		{old: "\t\tfor range token {\n\t\t}\n", new: "", want: "waiting for the token read"},
+		{old: "\t\tcancel()\n\t\tfor range token {", new: "\t\tfor range token {", want: "waiting for the token read"},
+		{old: "\t\tcancel()\n\t\tfor range token {\n\t\t}\n", new: "\t\tfor range token {\n\t\t}\n\t\tcancel()\n", want: "waiting for the token read"},
+		{old: "\t\tfor range token {\n\t\t}\n", new: "\t\tgo func() {\n\t\t\tfor range token {\n\t\t\t}\n\t\t}()\n", want: "waiting for the token read"},
+		{old: "\tdefer func() {\n\t\tcancel()\n\t\tfor range token {\n\t\t}\n\t}()\n", new: "", want: "waiting for the token read"},
+		{old: "\trep, err := loop(tctx, cfg, c, token)\n", new: "\trep, err := loop(tctx, cfg, c, token)\n\tfor range token {\n\t}\n", want: "then cancelling tctx"},
+		{old: "\tcancel() // the call is over", new: "\t_ = 0 // the call is over", want: "then cancelling tctx"},
+		// #5274: deleting token's close of out leaves Serve's await hung.
+		{old: "\tdefer close(out)\n\tout <- check", new: "\tout <- check", want: "token does not defer closing out first"},
+		{old: "\tdefer close(out)\n\tout <- check", new: "\tdefer func() { close(out) }()\n\tout <- check", want: "token does not defer closing out first"},
 		// #5232 R1: serving is Serve's alone, so one call is served at a time.
 		{extra: "func free() { <-serving }", want: "serving is named outside Serve"},
 		{extra: "var held = &serving", want: "serving is named outside Serve"},
 		// Lens on #5251: the unlock before the cancel lets the next call
-		// start while this call's grant still reads P2.
-		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { <-serving; cancel() }()", want: "in that order"},
-		{old: "defer func() { cancel(); <-serving }()", new: "defer cancel()\n\tdefer func() { <-serving }()", want: "in that order"},
-		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { <-serving }()\n\tdefer cancel()", want: "in that order"},
-		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { cancel(); <-serving; <-serving }()", want: "in that order"},
+		// start while this call's grant still reads P2. #5274: an unlock
+		// deferred after tctx is made leaves the line held on a panic there
+		// (a nil ctx).
+		{old: "\tdefer func() {\n\t\tcancel()\n\t\tfor range token {", new: "\tdefer func() {\n\t\t<-serving\n\t\tcancel()\n\t\tfor range token {", want: "in that order"},
+		{old: "\tdefer func() { <-serving }()\n", new: "", want: "in that order"},
+		{old: "\tdefer func() { <-serving }()\n", new: "\tdefer func() { <-serving; <-serving }()\n", want: "in that order"},
+		{old: "\tdefer func() { <-serving }()\n", new: "\tif ctx == nil {\n\t\t<-serving\n\t\treturn Report{}, nil\n\t}\n", want: "in that order"},
 		{old: "go cfg.token(tctx, c, token)", new: "go cfg.token(ctx, c, token)\n\t_ = tctx", want: "in that order"},
 		{old: "\tcfg = cfg.withDefaults()\n", new: "\tif c.Number() == \"\" {\n\t\treturn Report{}, nil\n\t}\n\tcfg = cfg.withDefaults()\n", want: "returns before it takes serving"},
-		{old: "defer func() { cancel(); <-serving }()", new: "defer func() { cancel(); <-serving }()\n\t_ = len(serving)", want: "serving is named 4 times"},
+		{old: "defer func() { <-serving }()", new: "defer func() { <-serving }()\n\t_ = len(serving)", want: "serving is named 4 times"},
 		// #5252: the take waits for the call before, never past RingWait.
 		{old: "\tdefault: // another call is served: wait for it to end, up to RingWait\n", new: "\tdefault:\n\t\treturn Report{}, ErrBusy\n\t}\n\tif false {\n", want: "in that order"},
 		{old: "case <-cfg.After(cfg.RingWait):", new: "case <-cfg.After(cfg.MaxCall):", want: "in that order"},
 		{old: "tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)", new: "tctx, cancel := context.WithCancel(ctx)", want: "in that order"},
 		// #5251 reviews: tctx and cancel, the grant's life and its end,
 		// are set once and never written.
-		{old: "go cfg.token(tctx, c, token)", new: "tctx = ctx\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
-		{old: "go cfg.token(tctx, c, token)", new: "tctx, again := ctx, 0\n\t_ = again\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
-		{old: "go cfg.token(tctx, c, token)", new: "p := &tctx\n\t*p = ctx\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
-		{old: "go cfg.token(tctx, c, token)", new: "for _, tctx = range []context.Context{ctx} {\n\t}\n\tgo cfg.token(tctx, c, token)", want: "writes tctx"},
-		{old: "go cfg.token(tctx, c, token)", new: "cancel = func() {}\n\tgo cfg.token(tctx, c, token)", want: "writes cancel"},
-		{old: "go cfg.token(tctx, c, token)", new: "keepCancel(&cancel)\n\tgo cfg.token(tctx, c, token)", extra: "import \"context\"\nfunc keepCancel(c *context.CancelFunc) { *c = func() {} }", want: "writes cancel"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "tctx = ctx\n\trep, err := loop(tctx, cfg, c, token)", want: "writes tctx"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "tctx, again := ctx, 0\n\t_ = again\n\trep, err := loop(tctx, cfg, c, token)", want: "writes tctx"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "p := &tctx\n\t*p = ctx\n\trep, err := loop(tctx, cfg, c, token)", want: "writes tctx"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "for _, tctx = range []context.Context{ctx} {\n\t}\n\trep, err := loop(tctx, cfg, c, token)", want: "writes tctx"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "cancel = func() {}\n\trep, err := loop(tctx, cfg, c, token)", want: "writes cancel"},
+		{old: "rep, err := loop(tctx, cfg, c, token)", new: "keepCancel(&cancel)\n\trep, err := loop(tctx, cfg, c, token)", extra: "import \"context\"\nfunc keepCancel(c *context.CancelFunc) { *c = func() {} }", want: "writes cancel"},
 		// A grant made outside check, or by a fill that names no field;
 		// Security's #5229 blocker first.
 		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},
