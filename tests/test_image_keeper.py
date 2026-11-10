@@ -480,6 +480,30 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(check.unit_made_dirs(self.root)[1][0], check.violations(self.root))
                 finally:
                     d.unlink()
+        # Security (re-plan review): systemd chowns a directory it finds there following a link, so a tree
+        # link or file at, or above, a counted directory or its dynamic user form fails the build.
+        (self.root / "srv/foo").mkdir(exist_ok=True)
+        for unit, at, made in (("StateDirectory=foo", "var/lib/foo", "var/lib/foo"),
+                               ("StateDirectory=pa/b", "var/lib/pa", "var/lib/pa/b"),
+                               ("CacheDirectory=foo", "var/cache/private/foo", "var/cache/private/foo"),
+                               ("RuntimeDirectory=r/s", "run/private/r", "run/private/r/s"),
+                               ("LogsDirectory=foo", "var/log/foo", "var/log/foo")):
+            for what in (("link", "/srv/foo"), "file"):
+                with self.subTest(unit=unit, what=what):
+                    remove = self.place({SYSTEM + "foo.service": "[Service]\n%s\nUser=nobody\n" % unit, at: what})
+                    try:
+                        why = "%s= in %sfoo.service" % (unit.split("=")[0], SYSTEM)
+                        got = check.unit_made_dirs(self.root)[1]
+                        self.assertEqual(got, ["%s: /%s, which systemd makes and chowns to the unit's user, is or sits "
+                                               "under a link or a file in the tree; systemd would hand where it leads "
+                                               "to that user (#5167)" % (why, made)])
+                        self.assertIn(got[0], check.violations(self.root))
+                    finally:
+                        remove()
+        # A directory the tree holds there is fine.
+        remove = self.place({SYSTEM + "foo.service": "[Service]\nStateDirectory=foo\n", "var/lib/foo/keep": ""})
+        self.assertEqual(check.unit_made_dirs(self.root)[1], [])
+        remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so

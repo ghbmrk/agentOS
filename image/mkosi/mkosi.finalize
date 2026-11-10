@@ -1701,7 +1701,26 @@ def unit_made_dirs(root):
             for steps in got:
                 if steps:
                     made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
+    # systemd chowns a directory it finds already there following a link (setup_exec_directory's
+    # path_chown_recursive, AT_SYMLINK_FOLLOW), so a tree link at or above one, or above its dynamic
+    # user form, would hand where it leads to the unit's user: refused, never followed.
+    for d, why in sorted(made.items()):
+        for p in (d, made_private(d)):
+            try:
+                st = tree_lstat(root, p)
+            except OSError as e:
+                st = e
+            if isinstance(st, OSError) or st is not None and not stat.S_ISDIR(st.st_mode):
+                out.append("%s: /%s, which systemd makes and chowns to the unit's user, is or sits under a link or "
+                           "a file in the tree; systemd would hand where it leads to that user (#5167)" % (why, p))
+                break
     return made, out
+
+
+def made_private(d):
+    """#5167: the dynamic user form of unit-made directory D: <top>/private/<rest>."""
+    top = next(t for t in sorted(set(UNIT_MADE_DIRS.values()), key=len, reverse=True) if d.startswith(t + "/"))
+    return "%s/private/%s" % (top, d[len(top) + 1:])
 
 
 def made_steps(part):
