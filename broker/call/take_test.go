@@ -36,19 +36,23 @@ func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
 //     it: no interface, constraint, method value or embedding reaches it.
 //     Serve is a function with no receiver, so no method value or interface
 //     carries Serve either.
-//   - Config's fields carry no Rung: no field's type yields one to the loop,
-//     through pointers, slices, maps, chans, arrays, structs, type arguments,
-//     func results, interface method results, or a func param the loop hands
-//     out (a callback or a pointer the callee fills). A Rung the loop only
-//     passes out, as Ask does to the answerer, is allowed (#5217).
-//   - Config.Token is only read: called, or compared with nil. No non-test
-//     code in the package sets it, so only the wiring does (#5219).
+//   - No input of loop but its token channel carries a Rung: the type of
+//     Config, the Line, the context or any later parameter yields none to
+//     the loop, through pointers, slices, maps, chans, arrays, structs, type
+//     arguments, func results, interface method results, or a func param the
+//     loop hands out (a callback or a pointer the callee fills). A Rung the
+//     loop only passes out, as Ask does to the answerer, is allowed (#5217).
+//   - Config.Token is only read: called, or compared with nil, and no Config
+//     is built without field names or converted to or from another type. So
+//     no non-test code in the package sets it, and only the wiring does
+//     (#5219).
 //
 // What the check does not see: unsafe and reflection, and what loop or
 // Serve compute from their inputs (a conversion, a type assertion), which
 // are review's, with the Serve tests pinning what Serve passes loop. A
-// //go:linkname directive or an assembly file, in this package or another,
-// is a tools/srclint.py failure in CI. Each probe below edits the package
+// //go:linkname directive or an assembly file in a non-test file under
+// broker/ (outside vendor/, third_party/, testdata/ and its allow list) is a
+// tools/srclint.py failure in CI. Each probe below edits the package
 // or adds a file, and must fail the check, so each rule is shown to bite.
 func TestOnlyServeChoosesTheRung(t *testing.T) {
 	fset := token.NewFileSet()
@@ -93,7 +97,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			}
 			files = append(files, f)
 		}
-		info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
 		pkg, err := (&types.Config{Importer: imp}).Check("call", fset, files, info)
 		if err != nil {
 			t.Fatal(err)
@@ -104,9 +108,13 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		if loopFn == nil || rung == nil || cfgName == nil {
 			t.Fatal("loop, Rung or Config is gone or changed kind: rewrite this check with the code, never the check alone")
 		}
+		cfgNamed, _ := cfgName.Type().(*types.Named)
 		cfg, ok := cfgName.Type().Underlying().(*types.Struct)
-		if !ok {
-			t.Fatal("Config is no longer a struct: rewrite this check with the code, never the check alone")
+		if !ok || cfgNamed == nil || cfgNamed.TypeParams().Len() > 0 {
+			t.Fatal("Config is no longer a plain struct: rewrite this check with the code, never the check alone")
+		}
+		isCfg := func(t types.Type) bool {
+			return t != nil && (types.Identical(t, cfgNamed) || types.Identical(t, types.NewPointer(cfgNamed)))
 		}
 		var bad []string
 
@@ -174,14 +182,21 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			}
 			return false
 		}
+		// Every input of loop but its token channel: Config, the Line and
+		// the context today, and any parameter added later (Security on #5225).
+		for i := 0; i < loopFn.Signature().Params().Len(); i++ {
+			p := loopFn.Signature().Params().At(i)
+			if ch, ok := p.Type().(*types.Chan); ok && p.Name() == "token" && ch.Dir() == types.RecvOnly && types.Identical(ch.Elem(), rung.Type()) {
+				continue
+			}
+			if carries(p.Type(), true) {
+				bad = append(bad, fmt.Sprintf("%s: loop's input %s (%s) carries a Rung", fset.Position(p.Pos()), p.Name(), p.Type()))
+			}
+		}
 		var tokenField *types.Var
 		for i := 0; i < cfg.NumFields(); i++ {
-			f := cfg.Field(i)
-			if carries(f.Type(), true) {
-				bad = append(bad, fset.Position(f.Pos()).String()+": Config."+f.Name()+" carries a Rung")
-			}
-			if f.Name() == "Token" {
-				tokenField = f
+			if cfg.Field(i).Name() == "Token" {
+				tokenField = cfg.Field(i)
 			}
 		}
 		if tokenField == nil {
@@ -200,6 +215,20 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						return true
 					}
 					stack = append(stack, n)
+					// A Config built without field names, or converted to or
+					// from another type, can set or copy Token unnamed.
+					switch n := n.(type) {
+					case *ast.CompositeLit:
+						if isCfg(info.TypeOf(n)) && len(n.Elts) > 0 {
+							if _, keyed := n.Elts[0].(*ast.KeyValueExpr); !keyed {
+								bad = append(bad, fset.Position(n.Pos()).String()+": Config literal without field names")
+							}
+						}
+					case *ast.CallExpr:
+						if tv := info.Types[n.Fun]; tv.IsType() && len(n.Args) == 1 && (isCfg(tv.Type) || isCfg(info.TypeOf(n.Args[0]))) && !types.Identical(tv.Type, info.TypeOf(n.Args[0])) {
+							bad = append(bad, fset.Position(n.Pos()).String()+": Config converted to or from another type")
+						}
+					}
 					id, ok := n.(*ast.Ident)
 					if !ok {
 						return true
@@ -241,7 +270,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 	}
 
 	if bad := check("", "", ""); len(bad) != 0 {
-		t.Errorf("only Serve may choose the call's rung (briefs/VOICE-ro.md rule 4): loop is named once, as a direct call in Serve's body; Config carries no Rung; Config.Token is only called or nil-checked. "+
+		t.Errorf("only Serve may choose the call's rung (briefs/VOICE-ro.md rule 4): loop is named once, as a direct call in Serve's body; no input of loop but token carries a Rung; Config.Token is only called or nil-checked, and Config is never unkeyed or converted. "+
 			"If a refactor keeps that rule, change this check in the same PR as the code and add a probe for the new shape; never change the check alone.\n%s", strings.Join(bad, "\n"))
 	}
 	const sig = "func(context.Context, Config, Line, <-chan Rung) (Report, error)"
@@ -270,6 +299,10 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		"func open(cfg *Config) { cfg.Token = func(string) bool { return true } }",
 		"func tok(cfg Config) func(string) bool { return cfg.Token }",
 		"func leak(cfg Config) []func(string) bool { return append([]func(string) bool{}, cfg.Token) }",
+		"func g(func(string) bool) {}\nfunc pass(cfg Config) { g(cfg.Token) }",
+		// Token set without naming it (Security and L3 on #5225).
+		"import \"time\"\ntype twin struct {\n\tRecognizer Recognizer\n\tAnswerer Answerer\n\tSynthesizer Synthesizer\n\tClips Clips\n\tHold func(string) bool\n\tOneMomentAfter time.Duration\n\tNow func() time.Time\n\tAfter func(time.Duration) <-chan time.Time\n\tToken func(string) bool\n\tTokenWindow time.Duration\n\tDone func(Turn)\n}\nfunc peek(c Config) func(string) bool { return twin(c).Token }",
+		"import \"time\"\ntype twin struct {\n\tRecognizer Recognizer\n\tAnswerer Answerer\n\tSynthesizer Synthesizer\n\tClips Clips\n\tHold func(string) bool\n\tOneMomentAfter time.Duration\n\tNow func() time.Time\n\tAfter func(time.Duration) <-chan time.Time\n\tToken func(string) bool\n\tTokenWindow time.Duration\n\tDone func(Turn)\n}\nfunc mk() Config { return Config(twin{Token: func(string) bool { return true }}) }",
 	} {
 		probes = append(probes, probe{extra: p})
 	}
@@ -280,12 +313,17 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		probe{direct, "kept = func() (Report, error) { return loop(ctx, cfg, c, token) }\n\treturn Report{}, nil", "var kept func() (Report, error)"},
 		probe{direct, "return keep(loop)(ctx, cfg, c, token)", "var kept " + sig + "\nfunc keep(f " + sig + ") " + sig + " { kept = f; return f }"},
 		probe{"cfg = cfg.withDefaults()", "cfg = cfg.withDefaults()\n\tcfg.Token = func(string) bool { return true }", ""},
+		probe{"cfg = cfg.withDefaults()", "cfg = cfg.withDefaults()\n\tcfg = Config{cfg.Recognizer, cfg.Answerer, cfg.Synthesizer, cfg.Clips, cfg.Hold, cfg.OneMomentAfter, cfg.Now, cfg.After, func(k string) bool { return k == c.Number() }, cfg.TokenWindow, cfg.Done}", ""},
+		// The line, or a new input of loop, carries a Rung (Security on #5225).
+		probe{"type Line interface {\n", "type Line interface {\n\tFloor() Rung\n", ""},
+		probe{"l Line, token <-chan Rung)", "l Line, token <-chan Rung, floor ...func() Rung)", ""},
+		probe{"l Line, token <-chan Rung)", "l Line, tok <-chan Rung)", "var token chan Rung"},
 	)
 	// Config carries a Rung (#5217), one field of each shape.
 	for _, f := range []string{
 		"Rung", "*Rung", "[]Rung", "[1]Rung", "map[string]Rung", "map[Rung]bool", "<-chan Rung", "chan<- Rung",
 		"struct{ R Rung }", "*Report", "func() Rung", "func() (int, Rung)", "interface{ R() Rung }",
-		"func(func(Rung))", "func(*Rung)", "func(...Rung)", "floor", "atomicRung", "holder[Rung]", "tag[Rung]",
+		"func(func(Rung))", "func(*Rung)", "func(...Rung)", "func(map[string]Rung)", "func(chan Rung)", "tag[func(Rung)]", "floor", "atomicRung", "holder[Rung]", "tag[Rung]",
 	} {
 		probes = append(probes, probe{"type Config struct {\n", "type Config struct {\n\tX " + f + "\n",
 			"import \"sync/atomic\"\ntype floor = struct{ get func() Rung }\ntype atomicRung = atomic.Pointer[Rung]\ntype holder[T any] struct{ f func() T }\ntype tag[T any] struct{ p *int }"})

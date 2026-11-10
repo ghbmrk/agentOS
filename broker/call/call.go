@@ -230,8 +230,8 @@ type callRung struct {
 // loop holds one call until it ends or ctx is done. Turns are answered one
 // at a time: a new final turn, any speech from the owner, or the 0 key
 // stops the answer being spoken first. The call is at P0 until its rung
-// comes on token, and token is the loop's only rung input: cfg carries no
-// Rung. loop is a plain unexported function, not a method, so no interface
+// comes on token, and token is the loop's only rung input: no other
+// parameter's type carries a Rung. loop is a plain unexported function, not a method, so no interface
 // or type constraint can name it: code reaches it only by naming it, and
 // Serve, which fills token from the speed-dial check, is the one place that
 // does (briefs/VOICE-ro.md rule 4, #4949; TestOnlyServeChoosesTheRung).
