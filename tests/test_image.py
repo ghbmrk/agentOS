@@ -3359,6 +3359,22 @@ def image_tool(case, name):
             "--argv0", name, os.path.join(root, rel)]
 
 
+def own_generator_dirs(case, argv):
+    """The directory both of systemd's generator paths in ARGV (an image_tool argv) name, failing CASE
+    unless it is one empty directory, no link, made inside the case's own record directory (#5322)."""
+    env = dict(a.split("=", 1) for a in argv[2:argv.index("--inhibit-cache") - 1])
+    own = os.path.dirname(env["AGENTOS_LOADER_RECORD"])
+    paths = {env[v] for v in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH")}
+    case.assertEqual(len(paths), 1, paths)
+    path = paths.pop()
+    case.assertTrue(os.path.isabs(path) and ":" not in path, path)
+    case.assertEqual(os.path.dirname(path), own, path)
+    case.assertFalse(os.path.islink(path), path)
+    case.assertTrue(os.path.isdir(path), path)
+    case.assertEqual(os.listdir(path), [], path)
+    return [path]
+
+
 def dpkg_version(root, package):
     """The installed VERSION of PACKAGE in ROOT's dpkg status, or None."""
     status = pathlib.Path(root, "var/lib/dpkg/status").read_text(errors="replace")
@@ -4362,6 +4378,37 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                     out[rel] = ("dir",)
         return out
 
+    # systemd-tmpfiles' own exit statuses (systemd 257 src/tmpfiles/tmpfiles.c run(), through
+    # DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE): 0, 1 (an error, or out of resources), EX_DATAERR (a line
+    # it refused: a missing user or credential) and EX_CANTCREAT (a path it could not make). A line may
+    # earn any of them; any other status, 127 above all (env or the loader found no tool to run, #5322),
+    # means the tool never ran the line, and a run that wrote nothing would pass as a line that wrote nothing.
+    STATUSES = (0, 1, os.EX_DATAERR, os.EX_CANTCREAT)
+
+    def tmpfiles(self, tool, tmp):
+        p = subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
+        self.assertIn(p.returncode, self.STATUSES, "systemd-tmpfiles did not run: %r" % p.stderr[-2000:])
+
+    def test_a_tool_that_does_not_run_fails_the_case(self):
+        # #5322: the argv image_tool builds (env -i, then the root's loader) with no loader or tool where it
+        # names one exits 127, as does a loader that cannot map the tool's libraries; a signal or a status
+        # tmpfiles never returns fails too. Each tmpfiles status passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
+                       "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
+            # The oracle is written out, not read from STATUSES, so a status added there fails here.
+            self.assertEqual(self.STATUSES, (0, 1, 65, 73))
+            for argv, ok in [(missing, False)] + [(["/bin/sh", "-c", "exit %d" % n, "sh"], n in (0, 1, 65, 73))
+                                                  for n in (0, 1, 2, 65, 73, 126, 127, 255)] + [
+                    (["/bin/sh", "-c", "kill -SEGV $$", "sh"], False)]:
+                with self.subTest(argv=argv):
+                    if ok:
+                        self.tmpfiles(argv, tmp)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "did not run"):
+                            self.tmpfiles(argv, tmp)
+            self.assertEqual(subprocess.run(missing, capture_output=True).returncode, 127)
+
     def test_passed_lines_change_nothing_guarded(self):
         tool = image_tool(self, "systemd-tmpfiles")
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
@@ -4386,9 +4433,8 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                 f = write(root, rel, ln + "\n")
                 passed = not check.tmpfiles_violations(root)
                 before = self.snapshot(tmp)
-                # --root keeps every path inside the scratch tree; the exit code is the line's own
-                # business (a missing user or credential), what it did to the tree is the test.
-                subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
+                # --root keeps every path inside the scratch tree; what the line did to the tree is the test.
+                self.tmpfiles(tool, tmp)
                 if self.snapshot(tmp) != before:
                     changed.add(ln)
                 self.assertEqual(passed, ln not in TMPFILES_PROBES)
@@ -5298,18 +5344,40 @@ class ImageToolTest(MustRun, unittest.TestCase):
             for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
                 os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
                 shutil.copy("/usr/bin/ls", os.path.join(root, rel))
-            seen = []
+            seen, dirs, refused = [], [], []
 
             class Argv(unittest.TestCase):
                 def test_tool(case):
-                    seen.extend(image_tool(case, "systemd-analyze"))  # never run: its own case fails, unrecorded
+                    argv = image_tool(case, "systemd-analyze")  # never run: its own case fails, unrecorded
+                    seen.append(argv)
+                    dirs.extend(own_generator_dirs(case, argv))
+                    # #5322: each path must be the case's own empty directory. A path anywhere else (the
+                    # runner's generators, another case's empty directory, a link out of the case's, a
+                    # directory that holds a generator) fails.
+                    path = dirs[-1]
+                    refused.append({})
+                    with tempfile.TemporaryDirectory() as other:
+                        os.symlink(other, path + "-link")
+                        for name, to in (("runner", "/usr/lib/systemd/system-environment-generators"),
+                                         ("other case", other), ("link", path + "-link"), ("held", path)):
+                            if name == "held":
+                                pathlib.Path(path, "gen").write_text("#!/bin/sh\n")
+                            mutant = [a.replace("=" + path, "=" + to) if a.startswith("SYSTEMD_") else a for a in argv]
+                            try:
+                                own_generator_dirs(case, mutant)
+                                refused[-1][name] = False
+                            except AssertionError:
+                                refused[-1][name] = True
 
-            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
-                Argv("test_tool").run(unittest.TestResult())
-            self.assertEqual(seen[:2], ["/usr/bin/env", "-i"])  # none of the runner's environment
-            for var in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH"):
-                path = next(a.split("=", 1)[1] for a in seen if a.startswith(var + "="))
-                self.assertTrue(os.path.isabs(path) and ":" not in path, path)
+            for _ in range(2):
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                    Argv("test_tool").run(unittest.TestResult())
+            self.assertEqual([argv[:2] for argv in seen], [["/usr/bin/env", "-i"]] * 2)  # none of the runner's environment
+            self.assertEqual(refused, [dict.fromkeys(("runner", "other case", "link", "held"), True)] * 2)
+            self.assertEqual(len(dirs), 2)
+            self.assertNotEqual(dirs[0], dirs[1])  # each case its own
+            for path in dirs:
+                self.assertFalse(os.path.lexists(path), path)  # and it goes with the case
         # A root holding "=" would be read by env as a variable, not run: refused by name (#5310).
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "a=b")
