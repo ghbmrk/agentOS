@@ -671,16 +671,17 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 		}
 	}
 
-	// A renewal near a band's top refreshes the element: a 179 s lease
-	// lasts 120 s, and its renewal ACK a few seconds later starts the 120 s
-	// again, long before the first ran out.
+	// A renewal near a band's top refreshes the element: a lease at the
+	// lowest band's top lasts the band's floor, and its renewal ACK a few
+	// seconds later starts the floor again, long before the first ran out.
 	near := segAddr("guest", 60)
 	macG := h.mac(h.hosts["guest"], "eth0")
-	ack("guest", near, macG, 179)
+	low := leaseBands()[0]
+	ack("guest", near, macG, uint32(low[1]))
 	time.Sleep(2500 * time.Millisecond)
 	_, before, _ := leased("guest", near, macG)
-	ack("guest", near, macG, 179)
-	if _, left, ok := leased("guest", near, macG); !ok || before > 118 || left <= before {
+	ack("guest", near, macG, uint32(low[1]))
+	if _, left, ok := leased("guest", near, macG); !ok || before > int64(low[0])-2 || left <= before {
 		t.Errorf("a renewal near a band's top: %d s left before, %d s after (%v); want it refreshed", before, left, ok)
 	}
 

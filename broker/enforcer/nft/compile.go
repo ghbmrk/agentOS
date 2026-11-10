@@ -240,13 +240,18 @@ const MinLease = 120
 // leaseBands are the lease times, in seconds, each snoop rule reads: each
 // band is its floor and its top (both included), from MinLease to
 // LeaseTimeout, every top below one and a half times its floor, and the
-// last band LeaseTimeout alone.
+// last band LeaseTimeout alone. They are laid from the top down, each
+// floor the least that keeps its top under one and a half times it, and
+// the lowest floor MinLease, which ends the loop.
 func leaseBands() [][2]int {
-	var out [][2]int
-	for lo := MinLease; lo < LeaseTimeout; lo = lo * 3 / 2 {
-		out = append(out, [2]int{lo, min(lo*3/2, LeaseTimeout) - 1})
+	out := [][2]int{{LeaseTimeout, LeaseTimeout}}
+	for top := LeaseTimeout - 1; top != MinLease-1; {
+		lo := max(MinLease, (2*(top+1)+2)/3)
+		out = append(out, [2]int{lo, top})
+		top = lo - 1
 	}
-	return append(out, [2]int{LeaseTimeout, LeaseTimeout})
+	slices.Reverse(out)
+	return out
 }
 
 // secs is a timeout of n seconds as nft reads it.
