@@ -14,9 +14,11 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -508,5 +510,27 @@ func TestSilenceIsTwoHeartbeats(t *testing.T) {
 	}
 	if Silence != 2*time.Minute {
 		t.Errorf("Silence = %v, want two minutes", Silence)
+	}
+}
+
+// TestNoStackStepRunsOnTheMainThread (NET-2 Confined radio stacks;
+// #5159): a goroutine that locks its thread and exits locked, as each of
+// confine's steps in a stack's network namespace does, never runs on the
+// process's main thread, so the runtime ends its thread rather than
+// parking the main one, for good, in the stack's namespace. Its main
+// goroutine holds the main thread from init on (main.go), in this test
+// binary too. Catches an init that no longer locks the main thread: the
+// runtime then hands it to such a goroutine within the first few.
+func TestNoStackStepRunsOnTheMainThread(t *testing.T) {
+	pid := syscall.Getpid()
+	for i := range 200 {
+		tid := make(chan int)
+		go func() {
+			runtime.LockOSThread() // never unlocked, as confine's inNetns
+			tid <- syscall.Gettid()
+		}()
+		if got := <-tid; got == pid {
+			t.Fatalf("step %d ran on the main thread (%d)", i, pid)
+		}
 	}
 }

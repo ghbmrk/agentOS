@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -178,11 +177,11 @@ func leakCheck(t *testing.T) func(what string) {
 	}
 }
 
-// strayThreads lists this process's threads in a network namespace not
-// the calling goroutine's. The main thread is left out: the runtime can
-// run inNetns's goroutine on it, and then keeps it, parked for good, in
-// that namespace (it never ends the main thread), where it runs no Go code
-// (#5159).
+// strayThreads lists this process's threads, the main one included, in a
+// network namespace not the calling goroutine's. The main goroutine holds
+// the main thread (init in live_test.go, as the enforcer's main.go does),
+// so inNetns's goroutine never runs there and the runtime ends every
+// thread it moved (#5159).
 func strayThreads(t *testing.T) []string {
 	t.Helper()
 	runtime.LockOSThread()
@@ -197,7 +196,7 @@ func strayThreads(t *testing.T) []string {
 	}
 	var stray []string
 	for _, e := range tasks {
-		if l, err := os.Readlink("/proc/self/task/" + e.Name() + "/ns/net"); err == nil && l != own && e.Name() != strconv.Itoa(os.Getpid()) {
+		if l, err := os.Readlink("/proc/self/task/" + e.Name() + "/ns/net"); err == nil && l != own {
 			stray = append(stray, e.Name()+":"+l)
 		}
 	}
