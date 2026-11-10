@@ -502,7 +502,8 @@ class KeeperTreeTest(unittest.TestCase):
                      "StandardError=truncate:%S/x", "Symlinks=%i/run/sy", "Symlinks=%R/run/sy", "Symlinks=%B/run/sy",
                      "ListenFIFO=%i/run/sy", 'Symlinks="/run/sy"', "Symlinks='/run/sy'", "Symlinks=\\/run/sy",
                      "Symlinks=/run/s\\x79", "Symlinks=%%%i/run/sy", "ListenStream=/run/a%%b", "Options=size=1%",
-                     "Symlinks=%t", "Symlinks=/run/a\x0b/run/sy"):
+                     "Symlinks=%t", "Symlinks=/run/a\x0b/run/sy", "StandardOutput=file:%i/var/lib/so",
+                     "StandardOutput=file:%R/var/lib/so"):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.socket", "[Socket]\n%s\n" % text)
                 try:
@@ -620,6 +621,11 @@ class KeeperTreeTest(unittest.TestCase):
             ("StateDirectory=pp/x", {SYSTEM + "pp.path": "[Path]\nDirectoryNotEmpty=/var/lib/pp/w\nMakeDirectory=yes\n",
                                      SYSTEM + "pp.path.d/m.conf": "[Path]\nDirectoryMode=0777\n"},
              "/var/lib/pp/x", "below a step PID 1 may make for anyone to write (for /var/lib/pp/w, DirectoryNotEmpty="),
+            # L3 6761389633: PID 1 makes a bind mount's source with the unit's DirectoryMode= (mount_enter_mounting).
+            ("StateDirectory=w/x", {SYSTEM + "srv-m.mount": "[Mount]\nWhat=/var/lib/w/src\nWhere=/srv/m\nOptions=bind\n"
+                                                            "DirectoryMode=0777\n"},
+             "/var/lib/w/x", "below a step PID 1 may make for anyone to write (for /var/lib/w/src, What= in %ssrv-m.mount"
+             % SYSTEM),
             ("StateDirectory=so", {SYSTEM + "so.service": "[Service]\nStandardOutput=file:/var/lib/so\n"}, "/var/lib/so",
              "where PID 1 may make, link or mount /var/lib/so (StandardOutput= in %sso.service)" % SYSTEM),
             # A namespace mount point is made only by root, 0755, so it may sit above the directory, not at it.
@@ -673,6 +679,22 @@ class KeeperTreeTest(unittest.TestCase):
             ("RuntimeDirectory=systemd/journal", {SYSTEM + "j.socket": "[Socket]\nListenStream=/run/systemd/journal/stdout\n"
                                                                        "DirectoryMode=0755\n"}),
             ("RuntimeDirectory=ok", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ok2/sock\nDirectoryMode=0777\n"}),
+            # A mode only root and the group can write leaves PID 1's parents root's (they are root:root).
+            ("RuntimeDirectory=ss/b", {SYSTEM + "s.socket": "[Socket]\nListenStream=/run/ss/a/sock\nDirectoryMode=0775\n"}),
+            # Every setting PID 1 only reads (PID1_READS, the Condition/Assert/Exec prefixes) or that holds only
+            # names (PID1_NAMES) may name the directory or a step of its way.
+            ("StateDirectory=rd", {SYSTEM + "r.service": "[Unit]\nDescription=/var/lib/rd\nDocumentation=file:/var/lib/rd\n"
+                                   "RequiresMountsFor=/var/lib/rd\nWantsMountsFor=/var/lib/rd\nConditionPathExists=/var/lib\n"
+                                   "AssertPathExists=/var/lib/rd\n[Service]\nEnvironmentFile=-/var/lib/rd/env\n"
+                                   "ReadOnlyPaths=/var/lib/rd\nReadWritePaths=/var/lib\nInaccessiblePaths=/var/lib/rd\n"
+                                   "ExecPaths=/var/lib/rd\nNoExecPaths=/var/lib/rd\nTTYPath=/var/lib/rd/tty\n"
+                                   "UtmpIdentifier=/var/lib/rd\nExecStart=/var/lib/rd/x\nExecStartPre=/var/lib/rd/y\n"
+                                   + "".join("%s=/var/lib/rd\n" % k for k in (
+                                       "After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "PartOf", "Upholds",
+                                       "Conflicts", "OnFailure", "OnSuccess", "PropagatesReloadTo", "ReloadPropagatedFrom",
+                                       "PropagatesStopTo", "StopPropagatedFrom", "JoinsNamespaceOf", "WantedBy",
+                                       "RequiredBy", "UpheldBy", "Also", "Slice", "User", "Group", "SupplementaryGroups",
+                                       "SyslogIdentifier", "ImportCredential", "TasksMax"))}),
             ("StateDirectory=bq/x", {SYSTEM + "b.service": "[Service]\nTemporaryFileSystem=/var/lib/bq:ro\n"
                                                            "BindPaths=/var/lib/bq/x /srv/s:/var/lib/bq/x/y\n"}),
         )
@@ -699,12 +721,22 @@ class KeeperTreeTest(unittest.TestCase):
                 with self.subTest(point):
                     line = "tmpfs %s tmpfs mode=0755,noexec,nosuid,nodev 0 0" % point
                     fstab.write_text(kept + line + "\n")
-                    want = ("etc/fstab: %s: a mount point that is not plain text opening with '/': the tree check does not "
-                            "model it; the tree check never passes an fstab line whose paths it cannot read (#5167)" % line)
+                    want = ("etc/fstab: %s: a line that is not plain text with a mount point opening with '/': the tree "
+                            "check does not model it; the tree check never passes an fstab line whose paths it cannot "
+                            "read (#5167)" % line)
                     self.assertEqual(check.unit_made_paths(self.root)[2], [want])
                     self.assertIn(want, check.violations(self.root))
             fstab.write_text(kept + "tmpfs\n")
             self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
+            fstab.write_text(kept + "/var/lib/f\\040q /srv/b none bind 0 0\n")
+            self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
+            # A bind source and an overlay dir are paths PID 1 makes (L3 6761389633).
+            for line in ("/var/lib/fq /srv/b none bind 0 0", "overlay /srv/o overlay lowerdir=/usr,upperdir=/var/lib/fq,workdir=/srv/w 0 0"):
+                with self.subTest(line):
+                    fstab.write_text(kept + line + "\n")
+                    got = check.unit_made_refusals(self.root)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertIn("where PID 1 may make, link or mount /var/lib/fq (etc/fstab)", got[0])
         finally:
             fstab.write_text(kept)
             remove()

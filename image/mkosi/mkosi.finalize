@@ -198,12 +198,18 @@ UNIT_MADE_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "Cache
 # without the file types, and the attribute and ACL types). Any other line at a unit-made directory may
 # leave a link, a copy, a file or a device node there, which systemd would chmod and chown.
 MADE_LAST_TYPES = frozenset("dDevqQzZxXrRaAhHtT")
-# #5167 (Security 6759084501, 6759651094): the only settings whose paths may sit on a unit-made directory's
-# way: ones PID 1 reads, passes to a command, or applies inside the unit's own mount namespace, never making,
-# linking, mounting, chmodding or chowning a host path for them. Any other setting naming a path there is
-# refused, whatever it is (default deny), so a setting systemd adds later is refused too.
+# #5167 (Security 6759084501, 6759651094, L3 6761389633): the only settings whose paths may sit on a unit-made
+# directory's way: ones PID 1 reads, passes to a command, or applies inside the unit's own mount namespace,
+# never making, linking, mounting, chmodding or chowning a host path for them. Checked against systemd v257's
+# parser (load-fragment-gperf.gperf.in) and executor: Description and UtmpIdentifier are strings
+# (config_parse_unit_string_printf; utmp_put_init_process writes only /run/utmp); Documentation is URLs;
+# EnvironmentFile is read (exec_context_load_environment); the four *Paths= access lists are remounts in the
+# unit's namespace (config_parse_namespace_path_strv); Requires/WantsMountsFor add dependencies
+# (unit_add_mounts_for); TTYPath is opened, never created (acquire_terminal, open_terminal_as). What= is not
+# here: mount_enter_mounting makes a bind mount's source (mkdir_p_label(p->what, m->directory_mode)). Any
+# other setting naming a path there is refused (default deny), so a setting systemd adds later is too.
 PID1_READS = ("Description", "Documentation", "EnvironmentFile", "InaccessiblePaths", "ReadOnlyPaths",
-              "ReadWritePaths", "ExecPaths", "NoExecPaths", "RequiresMountsFor", "WantsMountsFor", "What",
+              "ReadWritePaths", "ExecPaths", "NoExecPaths", "RequiresMountsFor", "WantsMountsFor",
               "TTYPath", "UtmpIdentifier")
 PID1_READ_PREFIXES = ("Condition", "Assert", "Exec")
 # #5167 (Security 6760938141): settings whose values are only names or numbers (units, users, groups, a slice,
@@ -1752,8 +1758,9 @@ def unit_made_paths(root):
     have to decode to read). systemd and libmount decode values before they act on them: specifiers (some
     expand to "" or to a path), quotes, C and octal escapes. The check models none of that: a value off the
     two lists holding a '%' (bar a literal "%%" outside any path word), a quote, a backslash or a byte outside
-    printable ASCII, a mount unit name holding a backslash, and an fstab mount point that is not plain
-    printable text opening with '/' are refused, so every path left is read exactly as systemd reads it.
+    printable ASCII, a mount unit name holding a backslash, and an fstab line holding a backslash or such a
+    byte, or whose mount point does not open with '/', are refused, so every path left is read exactly as
+    systemd reads it. An fstab line's bind source and option paths count like a unit's (What=, Options=).
     KIND is "mount" for a mount point, "namespace" for PID1_NAMESPACE_MAKES, else "". *Directory= values
     are unit_made_dirs'."""
     root, out, paths, loose = str(root), [], [], False
@@ -1801,12 +1808,15 @@ def unit_made_paths(root):
         f = ln.split()
         if not f or f[0].startswith("#"):
             continue
-        if len(f) < 2 or not re.fullmatch(r"/[!-\[\]-~]*", f[1]) or any(not " " <= c <= "~" and c != "\t" for c in ln):
-            out.append("etc/fstab: %s: a mount point that is not plain text opening with '/': the tree check does "
-                       "not model it; the tree check never passes an fstab line whose paths it cannot read (#5167)"
-                       % (ln if ln.isprintable() else repr(ln)))
+        if len(f) < 2 or not f[1].startswith("/") or any(not " " <= c <= "~" and c != "\t" or c == "\\" for c in ln):
+            out.append("etc/fstab: %s: a line that is not plain text with a mount point opening with '/': the tree "
+                       "check does not model it; the tree check never passes an fstab line whose paths it cannot "
+                       "read (#5167)" % (ln if ln.isprintable() else repr(ln)))
         else:
             paths.append((path_parts(f[1]), "etc/fstab", "mount"))
+            # A bind source and overlay dirs PID 1 makes too (mount_enter_mounting), read as unit values are.
+            words = re.findall(r"(?<![\w./])/[^\s:=]*", " ".join([f[0]] + f[3:4]))
+            paths += [(path_parts(w), "etc/fstab", "") for w in words + [w.split(",", 1)[0] for w in words if "," in w]]
     return paths, loose, out
 
 
