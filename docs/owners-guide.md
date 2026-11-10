@@ -31,6 +31,7 @@ This is the whole list. A few small things are stored in the PC's own firmware a
 - <!-- host-change: tpm-vault-counter --> **On a PC you trust: one counter in the security chip for each agentOS drive you trust it with.** It only counts up, so an old copy of your drive cannot pretend to be the current one. It stays in the chip after the drive is gone; it holds nothing about you.
 - <!-- host-change: tpm-lockout --> **If you turn on a start-up PIN: the security chip's lockout setting.** The box holds it while the PIN is on, so wrong PINs stay limited. When you turn the PIN off it gives back the setting and the chip's limit on wrong guesses, as they were. Wrong PINs count toward the chip's limit, which Windows shares.
 - <!-- host-change: sbat-level --> **Possibly, an update to the PC's list of blocked old start-up programs,** if agentOS's start-up program carries a newer list than the PC has. Windows Update installs the same list too.
+- <!-- host-change: mor --> **Only after a power cut, or if the PC is switched off without agentOS shutting down: a request to the PC to clear its memory at its next start.** That start takes a little longer, once. When agentOS shuts down normally, it first erases what it kept in memory, then takes the request back.
 - <!-- host-change: windows-recovery-prompt --> **Rarely, a question from Windows at its next start.** If it happens, see below.
 
 Nothing else on the PC changes.
