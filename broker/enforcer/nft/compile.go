@@ -92,20 +92,18 @@ func segments(l Layout) []segment {
 // a load seeds them from the server's lease file (Seed) and carries them
 // (Reload). An IPv4 packet from a shared segment passes only from an
 // address and hardware address LeaseSet holds (claim, ENF-shared-src-1).
-// Only an ACK of a full LeaseTimeout lease is read: an element lasts
-// exactly as long as its lease, so the server gives the address to
-// another host only after it has run out. A client that asked for a
-// shorter lease gets none, so it sends nothing beyond the enforcer (fails
-// closed). nft cannot type a payload field read at an offset, so both sets
+// An element never lasts longer than its lease (snoop), so the server
+// gives the address to another host only after it has run out. nft
+// cannot type a payload field read at an offset, so both sets
 // (and MACSet, which LeasedSet is checked beside) are typed by their raw
 // fields, the IPv4 source (@nh,96,32) and the hardware source (@ll,48,48),
 // and nft lists their elements as integers.
 func LeaseSet(seg string) string  { return "lease_" + seg + "_4" }
 func LeasedSet(seg string) string { return "leased_" + seg }
 
-// LeaseTimeout is the lease, in seconds, every dhcp-range offers:
-// dns.LeaseHours, which dns pins to it, so dns fails to compile when the
-// two differ.
+// LeaseTimeout is the lease, in seconds, every dhcp-range offers, and the
+// longest one the snoop reads: dns.LeaseHours, which dns pins to it, so
+// dns fails to compile when the two differ.
 const LeaseTimeout = 12 * 3600
 
 // HeldSet, ClaimSet and MACSet bind each IPv6 address a host on segment seg
@@ -201,26 +199,54 @@ const (
 	leaseKey = "@nh,96,32 . " + hwField
 )
 
-// snoop is the rule that reads a lease into segment seg's sets from the
+// snoop is the rules that read a lease into segment seg's sets from the
 // server's DHCPACK as it leaves on iface. The ACK is a BOOTP reply (op 2,
 // Ethernet, hardware address length 6, at UDP payload offset 0) with the
 // DHCP magic cookie, and dnsmasq writes its first options in one order:
 // the message type (53, ACK), the server identifier (54, an IPv4 address)
-// and the lease time (51), which must be LeaseTimeout. The lease is
-// yiaddr (payload offset 16) with chaddr (offset 28); an ACK with no
-// address (one to an INFORM) carries none. update refreshes a renewed
-// lease's elements. The offsets are measured against real dnsmasq
-// (ASSUMPTIONS ENF-shared-src-1).
-func snoop(seg, iface string) string {
+// and the lease time (51). The lease is yiaddr (payload offset 16) with
+// chaddr (offset 28); an ACK with no address (one to an INFORM) carries
+// none. A client may ask for a shorter lease than LeaseTimeout, which
+// dnsmasq grants down to 120 s, and nft cannot take a timeout from the
+// packet, so there is one rule per band of lease times (leaseBands): its
+// elements last the band's floor, never longer than the lease, and at
+// least two thirds of it, so a renewal at half the lease refreshes them
+// before they run out. update refreshes a renewed lease's elements. The
+// offsets are measured against real dnsmasq (ASSUMPTIONS
+// ENF-shared-src-1).
+func snoop(seg, iface string) []string {
 	const (
 		yiaddr = "@th,192,32"
 		chaddr = "@th,288,48"
 	)
-	return "oifname " + iface + " udp sport 67 udp dport 68" +
-		" @th,64,24 0x020106 " + yiaddr + " != 0 @th,1952,32 0x63825363" +
-		" @th,1984,40 0x3501053604 @th,2056,48 " + fmt.Sprintf("0x3304%08x", LeaseTimeout) +
-		" update @" + LeaseSet(seg) + " { " + yiaddr + " . " + chaddr + " }" +
-		" update @" + LeasedSet(seg) + " { " + chaddr + " }"
+	var out []string
+	for _, b := range leaseBands() {
+		times := strconv.Itoa(b[0])
+		if b[1] > b[0] {
+			times += "-" + strconv.Itoa(b[1])
+		}
+		out = append(out, "oifname "+iface+" udp sport 67 udp dport 68"+
+			" @th,64,24 0x020106 "+yiaddr+" != 0 @th,1952,32 0x63825363"+
+			" @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 "+times+
+			" update @"+LeaseSet(seg)+" { "+yiaddr+" . "+chaddr+" timeout "+secs(b[0])+" }"+
+			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }")
+	}
+	return out
+}
+
+// MinLease is the shortest lease dnsmasq grants, in seconds.
+const MinLease = 120
+
+// leaseBands are the lease times, in seconds, each snoop rule reads: each
+// band is its floor and its top (both included), from MinLease to
+// LeaseTimeout, every top below one and a half times its floor, and the
+// last band LeaseTimeout alone.
+func leaseBands() [][2]int {
+	var out [][2]int
+	for lo := MinLease; lo < LeaseTimeout; lo = lo * 3 / 2 {
+		out = append(out, [2]int{lo, min(lo*3/2, LeaseTimeout) - 1})
+	}
+	return append(out, [2]int{LeaseTimeout, LeaseTimeout})
 }
 
 // secs is a timeout of n seconds as nft reads it.
@@ -1091,7 +1117,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("type filter hook output priority filter; policy accept;")
 	w.line("oifname " + edge + " drop")
 	for _, sg := range segments(l) {
-		w.line(snoop(sg.name, q(sg.iface)))
+		for _, r := range snoop(sg.name, q(sg.iface)) {
+			w.line(r)
+		}
 	}
 	w.close()
 

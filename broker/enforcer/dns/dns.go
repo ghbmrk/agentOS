@@ -43,12 +43,13 @@ import (
 )
 
 // LeaseHours is the lease every dhcp-range offers, in hours. It must be
-// nft.LeaseTimeout, the only lease whose ACK a shared segment's IPv4 holds
-// follow, and which nft keeps at least twice its IPv6 hold (nft.ClaimTimeout)
-// (ENF-shared-src-1, #4702, #5294): the constant below fails to compile when
-// it is not, and TestLeaseCoversHold reads the lines written. A client may
-// still request a shorter lease, which dnsmasq grants down to 120 s; that
-// case is ENF-shared-src-1's residual.
+// nft.LeaseTimeout, the longest lease whose ACK a shared segment's IPv4
+// holds follow, and which nft keeps at least twice its IPv6 hold
+// (nft.ClaimTimeout) (ENF-shared-src-1, #4702, #5294): the constant below
+// fails to compile when it is not, and TestLeaseCoversHold reads the lines
+// written. A client may still request a shorter lease, which dnsmasq
+// grants down to 120 s (nft.MinLease); the IPv6 hold of such a client is
+// ENF-shared-src-1's residual.
 const LeaseHours = 12
 
 const _ = uint(LeaseHours*3600-nft.LeaseTimeout) + uint(nft.LeaseTimeout-LeaseHours*3600)

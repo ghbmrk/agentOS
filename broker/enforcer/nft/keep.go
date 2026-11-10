@@ -333,9 +333,7 @@ func (w *elems) add(set, v string, left, timeout int64) {
 		w.left[set] = map[string]int64{}
 		w.timed[set] = timeout
 	}
-	if left > w.left[set][v] {
-		w.left[set][v] = left
-	}
+	w.left[set][v] = max(w.left[set][v], left)
 }
 
 // carried is each set's elements as add element reads them, in the order

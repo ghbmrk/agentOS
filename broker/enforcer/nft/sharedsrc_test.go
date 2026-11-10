@@ -5,6 +5,7 @@ package nft
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -431,7 +432,12 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 //     the server's ACK leases it to the first host, which the output chain
 //     reads as it leaves (snoop); after it the first host's datagram from
 //     it arrives and the second host's does not;
-//   - an ACK of a shorter lease than LeaseTimeout leases nothing;
+//   - an ACK of a shorter lease leases its address too, for the floor of
+//     its lease band (leaseBands): at each band edge the element's timeout
+//     is the band's floor, never longer than the lease, and a renewal ACK
+//     near a band's top refreshes it before half the lease (the client's
+//     renewal time) has run; an ACK with no address (to an INFORM) leases
+//     nothing;
 //   - on IPv6 (in CI) the first host's first address holds and a second
 //     address of its hardware address is refused, and the second host,
 //     whose lease is taken away, holds none.
@@ -440,7 +446,8 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 // limit. The datagrams go to a listener on the internet that records them,
 // so a refusal is the datagram not arriving, whoever would get its answer.
 // Catches a claim without the lease check, a lease checked by address
-// alone, a snoop that misses dnsmasq's ACK or takes a shorter lease, no
+// alone, a snoop that misses dnsmasq's ACK, drops a shorter lease or keeps
+// it past its band's floor, takes an ACK with no address, no
 // per-hardware-address IPv6 limit or leased check, and a load that drops
 // the leases or the limit.
 func TestSharedHoldsFollowLeases(t *testing.T) {
@@ -549,6 +556,50 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 		}
 	}
 
+	// leased is the timeout and time left, in seconds, of the element
+	// leasing addr to hw on seg, as nft lists it.
+	leased := func(seg, addr, hw string) (int64, int64, bool) {
+		t.Helper()
+		m, err := net.ParseMAC(hw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := netip.MustParseAddr(addr).As4()
+		key := []uint64{uint64(binary.BigEndian.Uint32(a[:])), hwInt(m)}
+		var doc struct {
+			Nftables []struct {
+				Set *struct {
+					Elem []struct {
+						Elem struct {
+							Val struct {
+								Concat []uint64 `json:"concat"`
+							} `json:"val"`
+							Timeout int64 `json:"timeout"`
+							Expires int64 `json:"expires"`
+						} `json:"elem"`
+					} `json:"elem"`
+				} `json:"set"`
+			} `json:"nftables"`
+		}
+		if err := json.Unmarshal([]byte(run(t, "nft", "-j", "list", "set", "inet", Table, LeaseSet(nftSeg(seg)))), &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range doc.Nftables {
+			if o.Set == nil {
+				continue
+			}
+			for _, e := range o.Set.Elem {
+				if slices.Equal(e.Elem.Val.Concat, key) {
+					if e.Elem.Timeout == 0 { // nft lists no timeout equal to its set's
+						e.Elem.Timeout = LeaseTimeout
+					}
+					return e.Elem.Timeout, e.Elem.Expires, true
+				}
+			}
+		}
+		return 0, 0, false
+	}
+
 	free, short := map[string]string{}, map[string]string{}
 	for _, seg := range segs {
 		a, b := h.hosts[seg], h.hosts[seg+"2"]
@@ -580,8 +631,30 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 			t.Errorf("%s: after the ACK to the first host, its datagram must arrive and the second host's must not", seg)
 		}
 		ack(seg, short[seg], macA, 3600)
-		if arrives(seg, short[seg], seg+" short") {
-			t.Errorf("%s: an ACK of a shorter lease leased its address", seg)
+		if !arrives(seg, short[seg], seg+" short") {
+			t.Errorf("%s: an ACK of a shorter lease did not lease its address", seg)
+		}
+		// Band edges: each ACK leases its own address, for its band's floor.
+		bands := leaseBands()
+		edges := map[uint32]int{}
+		for i, b := range bands {
+			edges[uint32(b[0])], edges[uint32(b[1])] = b[0], b[0]
+			if i > 0 && b[0] != bands[i-1][1]+1 {
+				t.Fatalf("lease bands %v and %v leave a gap", bands[i-1], b)
+			}
+		}
+		i := 20
+		for lease, floor := range edges {
+			addr := segAddr(seg, i)
+			i++
+			ack(seg, addr, macA, lease)
+			if to, left, ok := leased(seg, addr, macA); !ok || to != int64(floor) || left > to || 2*left <= int64(lease) {
+				t.Errorf("%s: a %d s lease: element %v, timeout %d s, %d s left; want its band's floor %d s, past half the lease", seg, lease, ok, to, left, floor)
+			}
+		}
+		ack(seg, "0.0.0.0", macA, LeaseTimeout)
+		if _, _, ok := leased(seg, "0.0.0.0", macA); ok {
+			t.Errorf("%s: an ACK with no address leased 0.0.0.0", seg)
 		}
 		if h.v6 {
 			if !arrives(seg, seg6Addr(seg, 0), seg+" own6") || arrives(seg, seg6Addr(seg, 7), seg+" second6") {
@@ -596,6 +669,19 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 				t.Errorf("%s: IPv6: a hardware address with no lease took a hold", seg)
 			}
 		}
+	}
+
+	// A renewal near a band's top refreshes the element: a 179 s lease
+	// lasts 120 s, and its renewal ACK a few seconds later starts the 120 s
+	// again, long before the first ran out.
+	near := segAddr("guest", 60)
+	macG := h.mac(h.hosts["guest"], "eth0")
+	ack("guest", near, macG, 179)
+	time.Sleep(2500 * time.Millisecond)
+	_, before, _ := leased("guest", near, macG)
+	ack("guest", near, macG, 179)
+	if _, left, ok := leased("guest", near, macG); !ok || before > 118 || left <= before {
+		t.Errorf("a renewal near a band's top: %d s left before, %d s after (%v); want it refreshed", before, left, ok)
 	}
 
 	h.reload(d)
@@ -618,7 +704,7 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 // as the enforcer runs it on the Guests segment, leases an address to a
 // host; the lease set then holds that address with the host's hardware
 // address, and the leased set the hardware address. A host that asks for
-// a shorter lease is granted it and leased nothing. Catches payload
+// a shorter lease is granted it and leased too. Catches payload
 // offsets or an option order that do not match dnsmasq's ACK, which the
 // crafted ACKs of TestSharedHoldsFollowLeases would not show.
 func TestSnoopReadsDnsmasqACK(t *testing.T) {
@@ -756,8 +842,8 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 		!strings.Contains(got, "add element inet "+Table+" "+LeasedSet("guests")+" { "+leased+" expires ") {
 		t.Errorf("dnsmasq leased %s to %s, and the lease sets do not hold it:\n%s", a, full, got[strings.LastIndex(got, "\n}\n")+3:])
 	}
-	if strings.Contains(got, shortElem) || strings.Contains(got, shortLeased) {
-		t.Errorf("dnsmasq's shorter lease of %s to %s was leased", b, short)
+	if !strings.Contains(got, shortElem+" expires ") || !strings.Contains(got, shortLeased+" expires ") {
+		t.Errorf("dnsmasq's shorter lease of %s to %s was not leased", b, short)
 	}
 }
 
@@ -804,5 +890,30 @@ func TestSeedRendersLeases(t *testing.T) {
 	}
 	if got := Seed(l, nil); got != "" {
 		t.Errorf("no leases seeded %q", got)
+	}
+}
+
+// NET-3 (#5294): every lease time dnsmasq grants, MinLease to LeaseTimeout
+// seconds, falls in exactly one lease band, whose floor is at most the
+// lease and more than two thirds of it, so its element never outlives the
+// lease and outlives half of it (the client's renewal) by a sixth.
+// Catches a band gap or overlap, a floor above a lease, and a band wider
+// than one and a half times its floor (a ratio of 2 would let an element
+// run out as the client renews).
+func TestLeaseBandsCoverEveryLease(t *testing.T) {
+	bands := leaseBands()
+	if bands[0][0] != MinLease || bands[len(bands)-1] != [2]int{LeaseTimeout, LeaseTimeout} {
+		t.Fatalf("bands %v: want MinLease first and LeaseTimeout alone last", bands)
+	}
+	for l := MinLease; l <= LeaseTimeout; l++ {
+		var in [][2]int
+		for _, b := range bands {
+			if b[0] <= l && l <= b[1] {
+				in = append(in, b)
+			}
+		}
+		if len(in) != 1 || 3*in[0][0] <= 2*l {
+			t.Fatalf("a %d s lease is in bands %v; want one, floor over two thirds of it", l, in)
+		}
 	}
 }
