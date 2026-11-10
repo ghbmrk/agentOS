@@ -158,8 +158,7 @@ type Enforcer struct {
 	// only a change, since each call re-shows the light and coming up
 	// re-offers every unsent alert (ENF-h-a5). upMu holds toldUp, which a
 	// hello also writes, so a core shown up by a hello is shown down by
-	// the next tick that finds it silent (#4755 item 8). The recovery's
-	// state the book tells the alerts itself, at open and at each change.
+	// the next tick that finds it silent (#4755 item 8).
 	upMu   sync.Mutex
 	toldUp bool
 

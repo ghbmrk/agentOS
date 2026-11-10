@@ -42,9 +42,13 @@ const childEnv = "AGENTOS_DNS_NETNS"
 
 // inNetns re-runs the calling test as root of a fresh user and network
 // namespace, the enforcer's; a skip inside that run fails the test in CI
-// (#5152).
+// (#5152). Only the parent looks for dnsmasq first: the child's own
+// dnsmasq start looks again (#5234).
 func inNetns(t *testing.T) bool {
 	t.Helper()
+	if os.Getenv(childEnv) == "1" {
+		return true
+	}
 	dnsmasq(t)
 	return netnstest.Run(t, childEnv, combined, "nsenter", "ip", "nft")
 }

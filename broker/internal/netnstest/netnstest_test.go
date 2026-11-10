@@ -140,11 +140,12 @@ func TestChildSkipFailsParent(t *testing.T) {
 	}
 }
 
-// TestOnPathSkipsEmptyEntries (#5152): an empty PATH entry, at either end
-// or doubled (::), is not read as the working directory, so a tool there
-// does not count; a listed directory's executable file does, and a file
-// without an execute bit, a directory or a missing name does not.
-func TestOnPathSkipsEmptyEntries(t *testing.T) {
+// TestOnPathSkipsRelativeEntries (#5152, #5234): an empty PATH entry, at
+// either end or doubled (::), and a relative one ("." or a subdirectory's
+// name) are not read against the working directory, so a tool there does
+// not count; a listed absolute directory's executable file does, and a
+// file without an execute bit, a directory or a missing name does not.
+func TestOnPathSkipsRelativeEntries(t *testing.T) {
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -153,6 +154,12 @@ func TestOnPathSkipsEmptyEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(bin, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(bin, "rel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "rel", "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	other := t.TempDir()
@@ -170,6 +177,12 @@ func TestOnPathSkipsEmptyEntries(t *testing.T) {
 		{":" + other, "tool", false},
 		{other + ":", "tool", false},
 		{other + "::" + other, "tool", false},
+		{".", "tool", false},
+		{other + ":.", "tool", false},
+		{"./", "tool", false},
+		{"rel", "tool", false},
+		{other + ":rel", "tool", false},
+		{bin + "/rel", "tool", true},
 	} {
 		t.Setenv("PATH", c.path)
 		if got := onPath(c.name); got != c.want {
