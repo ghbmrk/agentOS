@@ -22,6 +22,7 @@ image/enforcer/build.sh OUT [VERSION]` on a Linux host that reaches the Debian m
 | `mkosi/mkosi.finalize` | Refuses Wi-Fi packages and firmware, a missing module block, a blocked module left installed, any unit enabled outside the preset, a core dump setting other than discard, and any `rp_filter` or `accept_redirects` left on (`test_finalize.py`) |
 | `mkosi/mkosi.extra/` | Self-check (`agentos-enforcer/health`), fallback, boot report, watchdog, module blocks, core dumps discarded, the reverse-path filter off (`usr/lib/sysctl.d/99-enforcer-rpfilter.conf`), ICMP redirects refused (`usr/lib/sysctl.d/99-enforcer-redirects.conf`), preset, the placeholder daemon unit |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot, swtpm and an i6300esb watchdog: self-check, `rp_filter` and `accept_redirects` 0 on a network card, the WAN's router-advertisement handling, blessing, state growth, a USB stick left unauthorised, Wi-Fi refused, and the rollback |
+| `ci_wan.sh` | `ci_boot.sh`'s check of the WAN's router-advertisement handling: a probe in the guest, keyed on the daemon unit's effective `ExecStart`, and the verdict on its line (`test_ci_wan.py`) |
 
 The image ships the enforcer feed's root at `/usr/share/agentos-enforcer/release-root.json`; it is
 the only root its updates are checked against. Assumptions and gaps: [ASSUMPTIONS.md](ASSUMPTIONS.md).
