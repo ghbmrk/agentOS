@@ -14,7 +14,6 @@ import (
 	"errors"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -127,6 +126,13 @@ type Config struct {
 	// TokenWindow is how long Serve waits after the call is up for the
 	// token's keys (default 6 s: a contact's pause is 2 to 3 s per comma).
 	TokenWindow time.Duration
+	// RingWait is how long an owner call that rings while another is
+	// served waits for it to end before ErrBusy (default 10 s, inside the
+	// time a carrier rings before voicemail).
+	RingWait time.Duration
+	// MaxCall ends a call that lasts longer (default 30 min), so a lost
+	// NO CARRIER or a wedged line frees the next owner call.
+	MaxCall time.Duration
 	// Done, if set, gets each turn's record as the turn ends, so timing
 	// is reported while the call goes on.
 	Done func(Turn)
@@ -166,39 +172,69 @@ var ErrNotOwner = errors.New("call: not the owner's number")
 // MaxToken caps the keys read as the speed-dial token.
 const MaxToken = 32
 
-// ErrBusy is returned for a call that rings while another is served. It is
-// left ringing, like any other caller.
+// ErrBusy is returned for an owner call that rings while another call is
+// served and is still ringing once Config.RingWait has passed. It is left
+// ringing, like any other caller.
 var ErrBusy = errors.New("call: another call is being served")
 
-// serving is held while Serve runs, so one call is served at a time and a
-// P2 grant is live only while no other call is: a grant kept from one call,
-// by a package var or a shared answerer, reads P0 in every later call
+// ErrTooLong is returned for a call ended at Config.MaxCall.
+var ErrTooLong = errors.New("call: the call reached its maximum length")
+
+// serving holds a value while Serve runs, so one call is served at a time
+// and a P2 grant is live only while no other call is: a grant kept from one
+// call, by a package var or a shared answerer, reads P0 in every later call
 // (#5232). Only Serve names it (TestOnlyServeChoosesTheRung).
-var serving sync.Mutex
+var serving = make(chan struct{}, 1)
 
 // Serve answers a ringing call from the owner's number, reads the
 // speed-dial token, and runs the loop at P2 if the token checks and at P0
-// otherwise (briefs/VOICE-ro.md rule 4). Any other caller, and an owner
-// call that rings while another call is served, is left ringing for the
-// line's own rules; nothing here answers it.
+// otherwise (briefs/VOICE-ro.md rule 4). Any other caller is left ringing
+// for the line's own rules; nothing here answers it. An owner call that
+// rings while another is served waits for it to end, up to RingWait, so a
+// redial right after a dropped call is answered once the dropped call has
+// unwound (#5252); one still ringing then gets ErrBusy. A call is ended
+// at MaxCall, so a call end the line never reports frees the next call.
 func Serve(ctx context.Context, cfg Config, c Incoming, ownerNumber string) (Report, error) {
 	if ownerNumber == "" || c.Number() != ownerNumber {
 		return Report{}, ErrNotOwner
 	}
-	if !serving.TryLock() {
-		return Report{}, ErrBusy
-	}
-	tctx, cancel := context.WithCancel(ctx)
-	// Ends the token read, and with it the call's grant, before the next
-	// call can be served (TestOnlyServeChoosesTheRung pins the order).
-	defer func() { cancel(); serving.Unlock() }()
-	if err := c.Answer(ctx); err != nil {
-		return Report{}, err
-	}
 	cfg = cfg.withDefaults()
+	select {
+	case serving <- struct{}{}:
+	default: // another call is served: wait for it to end, up to RingWait
+		select {
+		case serving <- struct{}{}:
+		case <-cfg.After(cfg.RingWait):
+			return Report{}, ErrBusy
+		case <-c.Ended(): // the caller gave up first
+			return Report{}, ErrBusy
+		case <-ctx.Done():
+			return Report{}, ctx.Err()
+		}
+	}
+	// The call's ctx: it ends at MaxCall, ends the token read and with it
+	// the call's grant, and is cancelled before the next call can be
+	// served (TestOnlyServeChoosesTheRung pins the order).
+	tctx, cancel := context.WithTimeoutCause(ctx, cfg.MaxCall, ErrTooLong)
+	defer func() { cancel(); <-serving }()
+	if err := c.Answer(tctx); err != nil {
+		return Report{}, overrun(ctx, tctx, c, err)
+	}
 	token := make(chan *grant, 1)
 	go cfg.token(tctx, c, token)
-	return loop(ctx, cfg, c, token)
+	rep, err := loop(tctx, cfg, c, token)
+	return rep, overrun(ctx, tctx, c, err)
+}
+
+// overrun is err, or ErrTooLong once the call's ctx has reached MaxCall:
+// then the line never reported the end, or never finished answering, so
+// overrun hangs it up on Serve's own ctx.
+func overrun(ctx, call context.Context, l Line, err error) error {
+	if context.Cause(call) != ErrTooLong {
+		return err
+	}
+	l.Hangup(ctx)
+	return ErrTooLong
 }
 
 // token sends the call's grant on out: check's verdict on the speed-dial
@@ -437,6 +473,12 @@ func (cfg Config) withDefaults() Config {
 	if cfg.After == nil {
 		cfg.After = time.After
 	}
+	if cfg.RingWait <= 0 {
+		cfg.RingWait = 10 * time.Second
+	}
+	if cfg.MaxCall <= 0 {
+		cfg.MaxCall = 30 * time.Minute
+	}
 	return cfg
 }
 
@@ -455,15 +497,21 @@ type sound struct {
 // sentences while the one before plays; this loop plays them one at a
 // time, and a sentence ready when the deadline falls goes before the clip.
 func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool) {
+	var sounds chan sound // nil until the rung is known
 	pctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	defer func() { // the producer ends with its turn (#5252)
+		cancel()
+		if sounds != nil {
+			for range sounds {
+			}
+		}
+	}()
 	defer func() {
 		if ctx.Err() != nil {
 			t.Stopped = true
 		}
 	}()
 	rung := cr.ready
-	var sounds chan sound // nil until the rung is known
 	ask := func() {
 		rung = nil
 		*asked = true
@@ -551,7 +599,9 @@ func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func
 
 // produce writes the answer's sentences to out, each checked and
 // synthesized, and closes out at the end of the answer. It stops at the
-// first hold or error, which it sends.
+// first hold or error, which it sends, or once ctx ends, even while the
+// answerer or synthesizer it called ignores ctx (within), so its turn can
+// wait for it and none outlives Serve (#5252).
 func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 	defer close(out)
 	send := func(s sound) bool {
@@ -567,7 +617,7 @@ func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 		send(s)
 		return false
 	}
-	chunks, err := cfg.Answerer.Answer(ctx, a)
+	chunks, err := within(ctx, func() (<-chan string, error) { return cfg.Answerer.Answer(ctx, a) })
 	if err != nil {
 		send(sound{err: err})
 		return
@@ -585,7 +635,7 @@ func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 		if cfg.held(s) || (said != "" && cfg.held(said+" "+s)) {
 			return last(sound{held: true})
 		}
-		pcm, err := cfg.Synthesizer.Speak(ctx, s)
+		pcm, err := within(ctx, func() ([]byte, error) { return cfg.Synthesizer.Speak(ctx, s) })
 		if err != nil {
 			return last(sound{err: err})
 		}
@@ -614,6 +664,28 @@ func (cfg Config) produce(ctx context.Context, a Ask, out chan<- sound) {
 				buf = rest
 			}
 		}
+	}
+}
+
+// within returns f's result, or ctx's error once ctx ends first. f runs
+// on its own goroutine, which ends when f returns: a part that ignores ctx
+// keeps only its own call, never the turn or the call.
+func within[T any](ctx context.Context, f func() (T, error)) (T, error) {
+	type result struct {
+		v   T
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := f()
+		done <- result{v, err}
+	}()
+	select {
+	case r := <-done:
+		return r.v, r.err
+	case <-ctx.Done():
+		var zero T
+		return zero, ctx.Err()
 	}
 }
 
