@@ -1,7 +1,10 @@
-// Package header holds the header names a plan route may pass, the words
-// that mark a name as carrying a credential, and the checks on a declared
-// header name and value, shared by the model and plan clerks and the old
-// core's egress (#5278, #5320), so their lists and checks cannot drift.
+// Package header holds the header names a plan route may send upstream and
+// those it may pass back to the guest, the words that mark a name as
+// carrying a credential, and the checks on a declared header name and
+// value, shared by the model and plan clerks and the old core's egress
+// (#5278, #5320), so their lists and checks cannot drift. The request and
+// answer lists are separate data with separate checks (#5346): a name safe
+// to pass back to a guest is not thereby safe to send to a provider.
 package header
 
 import (
@@ -12,30 +15,44 @@ import (
 	"strings"
 )
 
-// vendors is the vendor-owned list (CLK-14): lines that start with a
-// vendor's name, then the names its route passes, each exactly. This code
-// names no vendor.
-//
-//go:embed vendors.txt
-var vendors string
+// requestList and answerList are the vendor-owned lists (CLK-14): lines
+// that start with a vendor's name, then the names its route sends or reads,
+// each exactly. This code names no vendor.
+var (
+	//go:embed requests.txt
+	requestList string
+	//go:embed answers.txt
+	answerList string
+)
 
-// generic are the names any HTTP route passes, each as the CLI sends or
-// reads it (#4914). None carries a credential, reshapes the request or ends
-// at the next hop, and only Content-Type frames it, which a refresh may not
-// declare: the clerk sets its own.
-var generic = []string{"Accept", "Content-Type", "User-Agent", "Retry-After", "X-Request-Id"}
+// genericRequests and genericAnswers are the names any HTTP route sends or
+// reads, each as the CLI does (#4914). None carries a credential, reshapes
+// the request or ends at the next hop, and only Content-Type frames it,
+// which a refresh may not declare: the clerk sets its own.
+var (
+	genericRequests = []string{"Accept", "Content-Type", "User-Agent"}
+	genericAnswers  = []string{"Content-Type", "Retry-After", "X-Request-Id"}
+)
 
-var names = load(vendors)
+var (
+	requests = load(genericRequests, requestList)
+	answers  = load(genericAnswers, answerList)
+)
 
 // credentialWords mark a name as carrying a credential (#2623): the
 // hostiletext corpus's words, which a test holds these to. The clerks and
 // egress all refuse by this one list (#5320).
 var credentialWords = []string{"key", "token", "auth", "secret", "session", "csrf", "xsrf", "signature", "password", "cookie", "credential"}
 
-// load returns the generic names, then each vendor line's names. A # starts
+// tchar is every byte an RFC 9110 token, so a header name, may hold.
+const tchar = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// load returns generic's names, then each vendor line's names. A # starts
 // a comment anywhere on a line, and a name holding * is dropped: there are
-// no prefixes, so each name passes only exactly (#5320).
-func load(list string) []string {
+// no prefixes, so each name passes only exactly (#5320). A name holding a
+// byte outside an RFC 9110 token, such as a non-ASCII look-alike, panics,
+// so a list that holds one stops the process at start (#5346).
+func load(generic []string, list string) []string {
 	n := slices.Clone(generic)
 	for _, line := range strings.Split(list, "\n") {
 		line, _, _ = strings.Cut(line, "#")
@@ -44,6 +61,9 @@ func load(list string) []string {
 			continue
 		}
 		for _, h := range f[1:] {
+			if strings.ContainsFunc(h, func(r rune) bool { return !strings.ContainsRune(tchar, r) }) {
+				panic(fmt.Sprintf("header: the name %q holds a byte outside an RFC 9110 token", h))
+			}
 			if !strings.Contains(h, "*") {
 				n = append(n, h)
 			}
@@ -52,24 +72,30 @@ func load(list string) []string {
 	return n
 }
 
-// Names returns a copy of the names a plan route may pass, so no caller
-// can change the list.
-func Names() []string { return slices.Clone(names) }
+// Requests returns a copy of the names a plan route may send upstream, so
+// no caller can change the list.
+func Requests() []string { return slices.Clone(requests) }
 
-// Name refuses a declared name the list does not hold byte for byte.
-func Name(h string) error {
-	if !slices.Contains(names, h) {
-		return fmt.Errorf("header %q is not on the allowlist", h)
+// Answers returns a copy of the names a plan route may pass back to the
+// guest, so no caller can change the list.
+func Answers() []string { return slices.Clone(answers) }
+
+// Request refuses a declared request name the request list does not hold
+// byte for byte: an answer-only name is refused (#5346).
+func Request(h string) error {
+	if !slices.Contains(requests, h) {
+		return fmt.Errorf("header %q is not on the request allowlist", h)
 	}
 	return nil
 }
 
-// Answer refuses a declared answer name that Name refuses or that names a
-// credential, so no credential a provider's answer carries reaches a guest
-// (CLK-1): a vendor list entry cannot override the word check.
+// Answer refuses a declared answer name the answer list does not hold
+// byte for byte, or one that names a credential, so no credential a
+// provider's answer carries reaches a guest (CLK-1): a vendor list entry
+// cannot override the word check.
 func Answer(h string) error {
-	if err := Name(h); err != nil {
-		return err
+	if !slices.Contains(answers, h) {
+		return fmt.Errorf("header %q is not on the answer allowlist", h)
 	}
 	if w := Credential(h); w != "" {
 		return fmt.Errorf("header %q names a credential (%q)", h, w)

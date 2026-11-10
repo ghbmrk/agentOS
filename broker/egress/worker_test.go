@@ -992,22 +992,25 @@ func TestWorkerRouteAnswersOnlyDeclaredHeaders(t *testing.T) {
 	}
 }
 
-// Egress uses clerk/header (#5278, #5291, #5320): a plan route's names refuse the name corpus, an answer name also a credential word, a key check's values the value corpus, each refusal names its rule, and forbiddenHeader refuses every corpus credential name by the clerks' word list.
+// Egress uses clerk/header (#5278, #5291, #5320, #5346): a plan route's request and answer names refuse the name corpus, each by its own list, so an answer-only name is never sent, a key check's values the value corpus, each refusal names its rule, and forbiddenHeader refuses every corpus credential name by the clerks' word list.
 func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
 	route := func(set func(*PlanRoute, []string), h ...string) error { r := Codex(); set(&r, h); return r.validate() }
 	value := func(v string) error { a := Anthropic("a"); a.KeyCheck.Headers["V"] = v; return a.Validate() }
 	answer, signIn := func(r *PlanRoute, h []string) { r.ResponseHeaders = h }, func(r *PlanRoute, h []string) { r.SignInHeaders = h }
 	for _, set := range []func(*PlanRoute, []string){func(r *PlanRoute, h []string) { r.RequestHeaders = h }, signIn} {
-		hostiletext.RunHeaders(t, func(h string) bool { return route(set, h) == nil }, header.Names()...)
+		hostiletext.RunHeaders(t, func(h string) bool { return route(set, h) == nil }, header.Requests()...)
+		if route(set, "X-Codex-Credits-Balance") == nil {
+			t.Error("a plan route sends the answer-only name X-Codex-Credits-Balance")
+		}
 	}
-	hostiletext.RunHeaders(t, func(h string) bool { return route(answer, h) == nil || h == "Session_id" }, header.Names()...)
+	hostiletext.RunHeaders(t, func(h string) bool { return route(answer, h) == nil }, header.Answers()...)
 	hostiletext.RunHeaderValues(t, func(v string) bool { return value(v) == nil })
 	for _, e := range hostiletext.HeaderNames() {
 		if strings.HasPrefix(e.Name, "credential ") && !forbiddenHeader(http.CanonicalHeaderKey("X-Codex-"+e.Text)) {
 			t.Errorf("forbiddenHeader passes %q", e.Text)
 		}
 	}
-	for want, got := range map[string]string{`plan route codex: answer header "Session_id" names a credential ("session")`: fmt.Sprint(route(answer, "Session_id")), `plan route codex: answer header "X-Codex-Session-Token" is not on the allowlist`: fmt.Sprint(route(answer, "X-Codex-Session-Token")), `plan route codex: header "X-Api-Key" is not on the allowlist`: fmt.Sprint(route(signIn, "X-Api-Key")), "adapter anthropic: key check header V: the value begins or ends with a space": fmt.Sprint(value(" v"))} {
+	for want, got := range map[string]string{`plan route codex: answer header "Session_id" is not on the answer allowlist`: fmt.Sprint(route(answer, "Session_id")), `plan route codex: answer header "X-Codex-Session-Token" is not on the answer allowlist`: fmt.Sprint(route(answer, "X-Codex-Session-Token")), `plan route codex: header "X-Api-Key" is not on the request allowlist`: fmt.Sprint(route(signIn, "X-Api-Key")), "adapter anthropic: key check header V: the value begins or ends with a space": fmt.Sprint(value(" v"))} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
