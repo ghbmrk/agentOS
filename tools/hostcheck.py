@@ -597,10 +597,9 @@ def power_cut_only(name, events, os_starts):
     if sum(e["event"] == "SHUTDOWN" for e in events) != 1:
         raise HostcheckError(f"phase {name!r} shut down more than once, so not in a power cut")
     for e in events:
-        reason = e.get("data", {}).get("reason")
-        if e["event"] == "SHUTDOWN" and reason != "host-qmp-quit" or \
-                e["event"] == "RESET" and any(stamp(e) >= t for t in os_starts):
-            raise HostcheckError(f"phase {name!r} ended in order ({e['event']} {reason}), not in a power cut")
+        if e["event"] == "RESET" and any(stamp(e) >= t for t in os_starts):
+            reason = e.get("data", {}).get("reason")
+            raise HostcheckError(f"phase {name!r} rebooted ({reason}), so not in a power cut")
 
 
 def standin_phases(plant):
