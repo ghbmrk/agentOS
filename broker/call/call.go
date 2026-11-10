@@ -114,6 +114,9 @@ type Config struct {
 	After func(time.Duration) <-chan time.Time
 	// Token checks the speed-dial token's keys; the kernel holds the token
 	// and limits tries across calls. Nil means no token: every call is P0.
+	// Only the wiring sets it: this package only calls it, with the keys
+	// read from the line, and TestOnlyServeChoosesTheRung fails on any other
+	// use here.
 	Token func(keys string) bool
 	// TokenWindow is how long Serve waits after the call is up for the
 	// token's keys (default 6 s: a contact's pause is 2 to 3 s per comma).
@@ -227,11 +230,11 @@ type callRung struct {
 // loop holds one call until it ends or ctx is done. Turns are answered one
 // at a time: a new final turn, any speech from the owner, or the 0 key
 // stops the answer being spoken first. The call is at P0 until its rung
-// comes on token, and token is the loop's only rung input. loop is a plain
-// unexported function, not a method, so no interface or type constraint can
-// name it: code reaches it only by naming it, and Serve, which fills token
-// from the speed-dial check, is the one place that does (briefs/VOICE-ro.md
-// rule 4, #4949; TestOnlyServeChoosesTheRung).
+// comes on token, and token is the loop's only rung input: cfg carries no
+// Rung. loop is a plain unexported function, not a method, so no interface
+// or type constraint can name it: code reaches it only by naming it, and
+// Serve, which fills token from the speed-dial check, is the one place that
+// does (briefs/VOICE-ro.md rule 4, #4949; TestOnlyServeChoosesTheRung).
 //
 // It listens from the start, so the owner's first words are heard while
 // the token is read; keys are the token's until it is read. A turn starts
