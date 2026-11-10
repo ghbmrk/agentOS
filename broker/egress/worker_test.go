@@ -972,12 +972,14 @@ func TestWorkerRouteRefusesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-// Egress uses clerk/header (#5278): a plan route's names refuse the name corpus, a key check's values the value corpus; a prefixed credential answer header is dropped.
+// Egress uses clerk/header (#5278): a plan route's names refuse the name corpus, a key check's values the value corpus, each refusal names its rule, and a prefixed credential answer header is dropped.
 func TestEgressRefusesTheHeaderCorpus(t *testing.T) {
-	hostiletext.RunHeaders(t, func(h string) bool { r := Codex(); r.SignInHeaders = []string{h}; return r.validate() == nil }, header.PassHeaders...)
-	hostiletext.RunHeaderValues(t, func(v string) bool { a := Anthropic("a"); a.KeyCheck.Headers["V"] = v; return a.Validate() == nil })
+	name := func(h string) error { r := Codex(); r.SignInHeaders = []string{h}; return r.validate() }
+	value := func(v string) error { a := Anthropic("a"); a.KeyCheck.Headers["V"] = v; return a.Validate() }
 	prefix := func() error { r := Codex(); r.ResponsePrefixes = []string{"X-"}; return r.validate() }
-	if got := (&workerRoute{c: WorkerRouteConfig{Route: Codex()}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}}); prefix() == nil || strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A" {
-		t.Errorf("prefix %v, answer headers %q", prefix(), got)
+	hostiletext.RunHeaders(t, func(h string) bool { return name(h) == nil }, header.PassHeaders...)
+	hostiletext.RunHeaderValues(t, func(v string) bool { return value(v) == nil })
+	if got := (&workerRoute{c: WorkerRouteConfig{Route: Codex()}}).responseHeaders(http.Header{"X-Codex-A": {"1"}, "X-Codex-Session-Token": {"t"}}); prefix() == nil || prefix().Error() != `plan route codex: response prefix "X-"` || name("X-Api-Key") == nil || name("X-Api-Key").Error() != `plan route codex: may not forward header "X-Api-Key"` || value(" v") == nil || value(" v").Error() != "adapter anthropic: key check header V: the value begins or ends with a space" || strings.Join(got, ",") != "Content-Type,Retry-After,X-Request-Id,Openai-Model,X-Codex-A" {
+		t.Errorf("prefix %v, name %v, value %v, answer headers %q", prefix(), name("X-Api-Key"), value(" v"), got)
 	}
 }

@@ -227,8 +227,7 @@ func (a Adapter) validate() error {
 		for h, v := range kc.Headers {
 			if c := http.CanonicalHeaderKey(h); forbiddenHeader(c) || c == inject {
 				return fmt.Errorf("adapter %s: key check may not send header %s", a.Name, c)
-			}
-			if err := header.Value(v); err != nil {
+			} else if err := header.Value(v); err != nil {
 				return fmt.Errorf("adapter %s: key check header %s: %w", a.Name, h, err)
 			}
 		}
