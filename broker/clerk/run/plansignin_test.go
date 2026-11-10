@@ -586,11 +586,21 @@ func TestPlanSignInStuckHost(t *testing.T) {
 		go func() { removed <- h.Remove() }()
 		until(t, "the remove to begin", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.removing > 0 })
 		close(cli.release)
-		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
-			t.Fatalf("begun: %+v", b)
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInStopped}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Begin never returned after the remove released the stuck read")
 		}
-		if err := <-removed; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-removed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Remove never returned after the stuck read was released")
 		}
 		if st := h.State(); st.Signing || st.Code != "" || st.Last != DSignInStopped {
 			t.Fatalf("after: %+v", st)

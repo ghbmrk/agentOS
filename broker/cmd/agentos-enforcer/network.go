@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,13 +81,13 @@ type network struct {
 	// set under d.fwMu and read under resMu, so the page never waits on a
 	// load: whether its instances run (the files the last taken load
 	// started, or none since the served check stopped them), the served
-	// check's failure, the policy in force's, and the last refused
-	// load's error ("" once one is taken).
+	// check's failure, the policy in force's typed cause, and the step
+	// that refused the last load (LoadTaken once one is taken).
 	resMu      sync.Mutex
 	resRuns    bool
 	stopServed error
-	stopPolicy string
-	stopLoad   string
+	stopPolicy page.PolicyCause
+	stopLoad   page.LoadStep
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -194,7 +195,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// included, so the page names the refusal (#5243 L3 item 1).
 		if err != nil {
 			d.net.resMu.Lock()
-			d.net.stopLoad = err.Error()
+			d.net.stopLoad = loadStep(err)
 			d.net.resMu.Unlock()
 		}
 	}()
@@ -205,7 +206,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	ann, aerr := nft.Announces(doc, l)
 	hears, herr := nft.Hears(doc, l)
 	if err := cmp.Or(err, aerr, herr); err != nil {
-		return err
+		return compiled(err)
 	}
 	files, genErr := dns.Generate(doc, l, d.cfg.DNS)
 	if err := genErr; err != nil {
@@ -261,15 +262,18 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		text, err := nft.Reload(doc, l, running)
 		if err != nil {
-			return err
+			return compiled(err)
 		}
 		drops, err := nft.Drops(doc, l, nil, d.drop(caps))
 		if err != nil {
-			return err
+			return compiled(err)
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		return d.dp.Fire.Load(lctx, joinRules(text, drops))
+		if err := d.dp.Fire.Load(lctx, joinRules(text, drops)); err != nil {
+			return fireErr{err}
+		}
+		return nil
 	}
 	if err := d.dp.DNS.Apply(files, load); err != nil {
 		if d.net.counter != nil && d.loaded != "" {
@@ -279,13 +283,13 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	}
 	// The policy in force is doc only once its load is taken; a refused
 	// one leaves the resolver on the old policy's files, or none.
-	why := ""
+	var why page.PolicyCause
 	if genErr != nil {
-		why = genErr.Error()
+		why = unservable(genErr, doc, l, d.cfg.DNS)
 	}
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
-	d.net.stopPolicy, d.net.stopLoad = why, ""
+	d.net.stopPolicy, d.net.stopLoad = why, page.LoadTaken
 	d.net.resMu.Unlock()
 	b, err := policy.Encode(doc)
 	if err == nil {
@@ -296,6 +300,66 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	}
 	d.startMDNS(mdns.NewPlan(paths, ann).Hearing(hears))
 	return nil
+}
+
+// compileErr is a load refused before the firewall saw it: the document
+// did not compile to a ruleset (nft.ErrPolicy). fireErr is one the firewall refused. The
+// page words each apart (#5164 R5 d); any other is untyped.
+type compileErr struct{ error }
+type fireErr struct{ error }
+
+func (e compileErr) Unwrap() error { return e.error }
+func (e fireErr) Unwrap() error    { return e.error }
+
+// compiled types err as a compile refusal when nft says the policy does
+// not compile (nft.ErrPolicy), and leaves any other failure of the same
+// step, such as a running table it could not read, untyped (Security on
+// #5318).
+func compiled(err error) error {
+	if errors.Is(err, nft.ErrPolicy) {
+		return compileErr{err}
+	}
+	return err
+}
+
+// loadStep is the step that refused a load, as the page words it.
+func loadStep(err error) page.LoadStep {
+	var c compileErr
+	var f fireErr
+	switch {
+	case errors.As(err, &c):
+		return page.LoadCompile
+	case errors.As(err, &f):
+		return page.LoadFirewall
+	}
+	return page.LoadUntyped
+}
+
+// unservable is err, dns.Generate's refusal of doc, by its typed cause
+// for the page (#5307): a device on a Wi-Fi network the setup serves no
+// network for, or a listed name that is not a DNS host name. These are
+// the configuration refusals left once doc compiles, since the setup
+// alone was checked at start (config); any other is untyped, and the
+// page says so without the error's text.
+func unservable(err error, doc policy.Document, l nft.Layout, s dns.Setup) page.PolicyCause {
+	if errors.Is(err, dns.ErrConfig) {
+		for _, dev := range doc.Devices {
+			n, ok := nft.VLAN(dev.WiFi)
+			iface := l.Trunk + "." + strconv.Itoa(n)
+			if ok && dev.Network == policy.NetDevices && !slices.ContainsFunc(s.Nets, func(x dns.Net) bool { return x.Iface == iface }) {
+				return page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
+			}
+		}
+		sets, _ := nft.AllowSets(doc, l) // none on an error: untyped
+		for _, set := range sets {
+			for _, name := range set.Names {
+				if !dns.Hostname(name) {
+					return page.PolicyCause{Kind: page.PolicyName, Name: name}
+				}
+			}
+		}
+	}
+	return page.PolicyCause{Kind: page.PolicyUntyped}
 }
 
 // joinRules appends the drop's text to a full load's, in one transaction.
@@ -562,7 +626,7 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 	_, err := os.Stat(filepath.Join(root, "ipv6"))
 	v6 := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return unsetErr{page.Unset{Kind: page.UnsetIPv6}, err}
 	}
 	ifaces := []string{"default"}
 	for _, n := range nets {

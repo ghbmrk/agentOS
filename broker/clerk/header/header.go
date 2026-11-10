@@ -1,7 +1,7 @@
-// Package header holds the header names a plan route may pass and the
-// checks on a declared header name, prefix and value and on an answer
-// header a prefix passes, shared by the model and plan clerks and the old
-// core's egress (#5278), so their lists and checks cannot drift.
+// Package header holds the header names a plan route may pass, the words
+// that mark a name as carrying a credential, and the checks on a declared
+// header name and value, shared by the model and plan clerks and the old
+// core's egress (#5278, #5320), so their lists and checks cannot drift.
 package header
 
 import (
@@ -12,9 +12,9 @@ import (
 	"strings"
 )
 
-// vendors is the vendor-owned list (CLK-14): one line per vendor, its name
-// and then the names its route passes; a name ending in * is an answer
-// prefix. This code names no vendor.
+// vendors is the vendor-owned list (CLK-14): lines that start with a
+// vendor's name, then the names its route passes, each exactly. This code
+// names no vendor.
 //
 //go:embed vendors.txt
 var vendors string
@@ -25,38 +25,36 @@ var vendors string
 // declare: the clerk sets its own.
 var generic = []string{"Accept", "Content-Type", "User-Agent", "Retry-After", "X-Request-Id"}
 
-var names, prefixes = load(vendors)
+var names = load(vendors)
 
 // credentialWords mark a name as carrying a credential (#2623): the
-// hostiletext corpus's words, which a test holds these to.
+// hostiletext corpus's words, which a test holds these to. The clerks and
+// egress all refuse by this one list (#5320).
 var credentialWords = []string{"key", "token", "auth", "secret", "session", "csrf", "xsrf", "signature", "password", "cookie", "credential"}
 
-// load returns the generic names, then each vendor line's names and
-// prefixes, skipping blank lines and # comments.
-func load(list string) (n, p []string) {
-	n = slices.Clone(generic)
+// load returns the generic names, then each vendor line's names. A # starts
+// a comment anywhere on a line, and a name holding * is dropped: there are
+// no prefixes, so each name passes only exactly (#5320).
+func load(list string) []string {
+	n := slices.Clone(generic)
 	for _, line := range strings.Split(list, "\n") {
+		line, _, _ = strings.Cut(line, "#")
 		f := strings.Fields(line)
-		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+		if len(f) == 0 {
 			continue
 		}
 		for _, h := range f[1:] {
-			if pre, ok := strings.CutSuffix(h, "*"); ok {
-				p = append(p, pre)
-			} else {
+			if !strings.Contains(h, "*") {
 				n = append(n, h)
 			}
 		}
 	}
-	return n, p
+	return n
 }
 
 // Names returns a copy of the names a plan route may pass, so no caller
 // can change the list.
 func Names() []string { return slices.Clone(names) }
-
-// Prefixes returns a copy of the answer prefixes a plan route may pass.
-func Prefixes() []string { return slices.Clone(prefixes) }
 
 // Name refuses a declared name the list does not hold byte for byte.
 func Name(h string) error {
@@ -66,29 +64,29 @@ func Name(h string) error {
 	return nil
 }
 
-// Prefix refuses a declared answer prefix the list does not hold byte for
-// byte.
-func Prefix(p string) error {
-	if !slices.Contains(prefixes, p) {
-		return fmt.Errorf("header prefix %q is not on the allowlist", p)
+// Answer refuses a declared answer name that Name refuses or that names a
+// credential, so no credential a provider's answer carries reaches a guest
+// (CLK-1): a vendor list entry cannot override the word check.
+func Answer(h string) error {
+	if err := Name(h); err != nil {
+		return err
+	}
+	if w := Credential(h); w != "" {
+		return fmt.Errorf("header %q names a credential (%q)", h, w)
 	}
 	return nil
 }
 
-// Answer refuses an answer header k that does not begin with the declared
-// prefix pre, or that names a credential in any case, so no credential a
-// provider's answer carries in a prefixed header reaches a guest (CLK-1).
-func Answer(k, pre string) error {
-	if !strings.HasPrefix(k, pre) {
-		return fmt.Errorf("header %q does not begin with the prefix %q", k, pre)
-	}
-	l := strings.ToLower(k)
+// Credential returns the first credential word h holds in any case, or ""
+// if it holds none.
+func Credential(h string) string {
+	l := strings.ToLower(h)
 	for _, w := range credentialWords {
 		if strings.Contains(l, w) {
-			return fmt.Errorf("header %q names a credential (%q)", k, w)
+			return w
 		}
 	}
-	return nil
+	return ""
 }
 
 // Value refuses a declared header value that is empty, holds a byte other

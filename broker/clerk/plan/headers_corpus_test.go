@@ -51,16 +51,26 @@ func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 		"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 		"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
 		"Retry-After", "X-Request-Id", "Openai-Model",
+		"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
+		"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
+		"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
+		"X-Codex-Rate-Limit-Reached-Type",
 	}
+	// An answer may not name a credential, so Session_id never comes back.
+	answers := slices.DeleteFunc(slices.Clone(want), func(h string) bool { return h == "Session_id" })
 	for name, set := range map[string]func(d *Declaration, h string){
 		"request":  func(d *Declaration, h string) { d.RequestHeaders = []string{h} },
 		"sign-in":  func(d *Declaration, h string) { d.SignInHeaders = []string{h} },
 		"response": func(d *Declaration, h string) { d.ResponseHeaders = []string{h} },
 	} {
 		t.Run(name, func(t *testing.T) {
+			named := hostiletext.Exactly(t, header.Names(), want...)
+			if name == "response" {
+				named = answers
+			}
 			hostiletext.RunHeaders(t, func(h string) bool {
 				return takes(func(d *Declaration) { set(d, h) })
-			}, hostiletext.Exactly(t, header.Names(), want...)...)
+			}, named...)
 		})
 	}
 	t.Run("refresh", func(t *testing.T) {
@@ -70,24 +80,24 @@ func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 		}, slices.DeleteFunc(slices.Clone(hostiletext.Exactly(t, header.Names(), want...)), func(h string) bool { return h == "Content-Type" })...)
 	})
 	t.Run("answer", func(t *testing.T) {
-		hostiletext.RunHeaders(t, (&Login{d: Codex(nil)}).answerHeader,
-			hostiletext.Exactly(t, Codex(nil).ResponseHeaders, "Content-Type", "Retry-After", "X-Request-Id", "Openai-Model")...)
-		// A prefixed answer header naming a credential, in any case, is
-		// dropped; each quota header the CLI reads passes (#5291, CLK-1).
+		// The guest gets each declared answer header by its exact name, the
+		// quota headers among them, and no other: a credential name the old
+		// X-Codex- prefix passed is dropped (#5291, #5320, CLK-1).
 		p := &Login{d: Codex(nil)}
+		hostiletext.RunHeaders(t, (&Login{d: Codex(nil)}).answerHeader, hostiletext.Exactly(t, Codex(nil).ResponseHeaders,
+			"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model",
+			"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
+			"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
+			"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
+			"X-Codex-Rate-Limit-Reached-Type")...)
 		for _, e := range hostiletext.HeaderNames() {
 			if strings.HasPrefix(e.Name, "credential ") && p.answerHeader("X-Codex-"+e.Text) {
 				t.Errorf("the answer header %q reached the guest", "X-Codex-"+e.Text)
 			}
 		}
-		for _, h := range []string{
-			"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
-			"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
-			"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
-			"X-Codex-Rate-Limit-Reached-Type",
-		} {
-			if !p.answerHeader(h) {
-				t.Errorf("the quota header %q did not reach the guest", h)
+		for _, h := range []string{"X-Codex-Bearer", "X-Codex-Jwt", "X-Codex-Refresh", "X-Codex-Access", "X-Codex-Recovery-Code", "X-Codex-Passwd", "X-Codex-A"} {
+			if p.answerHeader(h) {
+				t.Errorf("the answer header %q reached the guest", h)
 			}
 		}
 	})
@@ -100,22 +110,14 @@ func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 	}
 	for want, edit := range map[string]func(*Declaration){
 		`clerk: header "Openai-Organization" is not on the allowlist`:               func(d *Declaration) { d.RequestHeaders = []string{"Openai-Organization"} },
-		`clerk: header "X-Api-Key" is not on the allowlist`:                         func(d *Declaration) { d.ResponseHeaders = []string{"X-Api-Key"} },
-		`clerk: header prefix "X-" is not on the allowlist`:                         func(d *Declaration) { d.ResponsePrefixes = []string{"X-"} },
+		`clerk: answer header "X-Api-Key" is not on the allowlist`:                  func(d *Declaration) { d.ResponseHeaders = []string{"X-Api-Key"} },
+		`clerk: answer header "Session_id" names a credential ("session")`:          func(d *Declaration) { d.ResponseHeaders = []string{"Session_id"} },
 		`clerk: refresh header "Cookie" is not on the allowlist`:                    func(d *Declaration) { d.RefreshHeaders = map[string]string{"Cookie": "v"} },
 		`clerk: refresh header "Content-Type" is the clerk's own`:                   func(d *Declaration) { d.RefreshHeaders = map[string]string{"Content-Type": "v"} },
 		`clerk: refresh header "User-Agent": the value begins or ends with a space`: func(d *Declaration) { d.RefreshHeaders = map[string]string{"User-Agent": "v "} },
 	} {
 		if err := validate(edit); err == nil || err.Error() != want {
 			t.Errorf("got %v, want %q", err, want)
-		}
-	}
-	if !takes(func(d *Declaration) { d.ResponsePrefixes = []string{"X-Codex-"} }) {
-		t.Error(`a declaration passing the prefix "X-Codex-" was refused`)
-	}
-	for _, pre := range []string{"X-", "x-codex-", "Set-", "Proxy-Auth", ""} {
-		if takes(func(d *Declaration) { d.ResponsePrefixes = []string{pre} }) {
-			t.Errorf("a declaration passing the prefix %q was taken", pre)
 		}
 	}
 }

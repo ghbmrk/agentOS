@@ -373,39 +373,75 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") || strings.Contains(h, "stopped answering") {
 		t.Fatal("home shows a running resolver as stopped")
 	}
-	res.stop = ResolverStop{Stopped: true, Load: "an older refusal", Strays: []Stray{
+	res.stop = ResolverStop{Stopped: true, Load: LoadFirewall, Strays: []Stray{
 		{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24 and fd00:10::/64"},
 		{Iface: "dev0", Addr: netip.MustParsePrefix("fd00:99::7/64"), Nets: "10.20.0.0/24"},
+		// An interface name past ASCII is quoted and escaped (#5307).
+		{Iface: "own\u202e0", Addr: netip.MustParsePrefix("10.98.0.1/24"), Nets: "10.10.0.0/24"},
 	}}
 	h := g.homeHTML()
 	for _, want := range []string{
 		"<h2>Names and addresses</h2>", "stopped answering name lookups and handing out addresses on every home network",
 		"Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24 and fd00:10::/64.",
 		"Interface dev0 holds the address fd00:99::7/64, outside its network 10.20.0.0/24.",
+		"Interface &#34;own\\u202e0&#34; holds the address 10.98.0.1/24, outside its network 10.10.0.0/24.",
 		"within 10 seconds of the last such address being removed",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("home with stray addresses lacks %q", want)
 		}
 	}
-	if strings.Contains(h, "could not turn off") || strings.Contains(h, "has no words for") || strings.Contains(h, "The policy in force names") || strings.Contains(h, "an older refusal") || strings.Contains(h, "with its next load of your rules") {
-		t.Error("home shows a cause the resolver does not have, or a refused load beside a listed cause")
+	if strings.Contains(h, "could not turn off") || strings.Contains(h, "has no words for") || strings.Contains(h, "The policy in force") || strings.Contains(h, "The firewall refused") || strings.Contains(h, "with its next load of your rules") || strings.ContainsRune(h, '\u202e') {
+		t.Error("home shows a cause the resolver does not have, a refused load beside a listed cause, or an override")
 	}
-	// With no listed cause, the refused load that keeps it stopped
-	// (#5243 L3 item 1); and a cause while instances run shows nothing.
-	res.stop = ResolverStop{Stopped: true, Load: "nft: load refused \u202e"}
-	if h = g.homeHTML(); !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: load refused \\u202e), and names and addresses come back only with a load it takes.") {
-		t.Errorf("a refused load is not shown, or not in ASCII:\n%s", h)
+	// With no listed cause, the step that refused the load keeping it
+	// stopped, in its own words and never the error's text (#5243 L3
+	// item 1, #5164 R5 d, #5307): a policy that did not compile is no
+	// refusal by the firewall, and an untyped failure claims neither.
+	for step, want := range map[LoadStep]string{
+		LoadFirewall:     "<p>The firewall refused the enforcer&#39;s last load of your rules; the enforcer&#39;s log has the detail. Names and addresses come back only with a load it takes. The enforcer keeps trying.</p>",
+		LoadCompile:      "<p>The enforcer could not make firewall rules of the policy in force, so it loaded nothing; its log has the detail. The firewall keeps the rules it had, and names and addresses come back only with a policy it can load. The enforcer keeps trying.</p>",
+		LoadUntyped:      "<p>The enforcer&#39;s last load of your rules failed; its log has the detail. Names and addresses come back only with a load that works. The enforcer keeps trying.</p>",
+		LoadFirewall + 1: "<p>The enforcer&#39;s last load of your rules failed; its log has the detail.",
+	} {
+		res.stop = ResolverStop{Stopped: true, Load: step}
+		if h = g.homeHTML(); !strings.Contains(h, want) || strings.Count(h, "keeps trying") != 1 || strings.Contains(h, "with its next load of your rules") {
+			t.Errorf("load refused at step %d is not in its own words:\n%s", step, h)
+		}
 	}
 	// Stopped with no cause recorded (between a check that passes and
 	// the next load): the card still says when it ends (Lens on #5243).
 	res.stop = ResolverStop{Stopped: true}
-	if h = g.homeHTML(); !strings.Contains(h, "The enforcer serves names and addresses again with its next load of your rules, within a few seconds.") {
+	if h = g.homeHTML(); !strings.Contains(h, "The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.") || strings.Contains(h, "a few seconds") {
 		t.Errorf("a stop with no cause gives no reason:\n%s", h)
 	}
-	res.stop = ResolverStop{Strays: []Stray{{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24"}}, Load: "x"}
+	res.stop = ResolverStop{Strays: []Stray{{Iface: "own0", Addr: netip.MustParsePrefix("10.99.0.1/24"), Nets: "10.10.0.0/24"}}, Load: LoadUntyped}
 	if h = g.homeHTML(); strings.Contains(h, "Names and addresses") {
 		t.Error("home shows a resolver whose instances run as stopped")
+	}
+	// Instances that run but keep exiting show, each in its words with
+	// its count, and not as a stop (#5164 R5 b); with the resolver
+	// stopped, the stop alone shows.
+	res.stop = ResolverStop{Restarting: []Restart{{Part: PartListed, Iface: "vlan10\u202e", Exits: 3}, {Part: PartPeople, Exits: 1}, {Part: PartDHCP, Exits: 2}, {Exits: 4}}}
+	h = g.homeHTML()
+	for _, want := range []string{
+		"<h2>Names and addresses</h2>",
+		"<p>The enforcer&#39;s name answers on interface &#34;vlan10\\u202e&#34;, which only a listed name gets, stopped or could not start 3 times in a row and has not stayed up since.",
+		"<p>The enforcer&#39;s name answers on the Owner, Household and Guests networks stopped or could not start and has not stayed up since.",
+		"<p>The enforcer&#39;s address service, which hands out addresses on the home networks, stopped or could not start 2 times in a row",
+		"<p>Part of the enforcer&#39;s name and address service stopped or could not start 4 times in a row",
+		"up to 30 seconds",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("home with restarting instances lacks %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "stopped answering name lookups") || strings.ContainsRune(h, '\u202e') {
+		t.Error("restarting instances show as a stopped resolver, or carry an override")
+	}
+	res.stop.Stopped = true
+	if h = g.homeHTML(); strings.Contains(h, "stopped or could not start") || !strings.Contains(h, "stopped answering name lookups") {
+		t.Error("a stopped resolver shows restarts beside the stop")
 	}
 	// A setting that did not take shows in plain words, never the raw
 	// error, and an error said twice shows once (#5280).
@@ -418,13 +454,24 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if strings.Count(h, "router advertisements") != 1 || strings.Contains(h, "/proc/sys") || strings.Contains(h, "&#34;") {
 		t.Errorf("home shows the raw error, or one error twice:\n%s", h)
 	}
-	res.stop = ResolverStop{Stopped: true, Policy: "device plug: vlan109 is not a served VLAN ‮gro.live"}
-	h = g.homeHTML()
-	if !strings.Contains(h, "The policy in force names something the enforcer cannot serve (device plug: vlan109 is not a served VLAN \\u202egro.live).") {
-		t.Errorf("a policy the resolver cannot serve is not shown, or not in ASCII:\n%s", h)
-	}
-	if strings.ContainsRune(h, '‮') {
-		t.Error("home carries a right-to-left override from the policy's error")
+	// A policy the resolver cannot serve, by its typed cause, with any
+	// name in printable ASCII; a refused load is not shown beside it.
+	const still = " The policy still applies; names and addresses come back with the next policy the enforcer can serve.</p>"
+	for cause, want := range map[PolicyCause]string{
+		{Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}:      "<p>The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there." + still,
+		{Kind: PolicyVLAN, Name: "pl\u202eug", WiFi: "vlan 9"}: "<p>The policy in force puts device &#34;pl\\u202eug&#34; on Wi-Fi network &#34;vlan 9&#34;, and the enforcer&#39;s setup serves no names or addresses there." + still,
+		{Kind: PolicyName, Name: "gro.live\u202e"}:             "<p>The policy in force lists &#34;gro.live\\u202e&#34;, which is not a name the enforcer can look up." + still,
+		{Kind: PolicyUntyped, Name: "x\u202e"}:                 "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail." + still,
+		{Kind: PolicyName + 1, Name: "x"}:                      "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail." + still,
+	} {
+		res.stop = ResolverStop{Stopped: true, Policy: cause, Load: LoadFirewall}
+		h = g.homeHTML()
+		if !strings.Contains(h, want) || strings.Contains(h, "The firewall refused") || strings.Contains(h, "with its next load of your rules") {
+			t.Errorf("a policy the resolver cannot serve (%+v) is not in its words:\n%s", cause, h)
+		}
+		if strings.ContainsRune(h, '\u202e') {
+			t.Error("home carries a right-to-left override from the policy")
+		}
 	}
 	if got := sentence("a\tb\x00c é"); got != `a\tb\x00c \u00e9` {
 		t.Errorf("sentence = %q", got)
@@ -441,16 +488,26 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 func TestPlainUnset(t *testing.T) {
 	const again = " It tries again every 10 seconds."
 	for u, want := range map[Unset]string{
-		{Kind: UnsetSetting, Iface: "own0", Setting: RouterAds}:    "The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check." + again,
-		{Kind: UnsetSetting, Iface: "dev0", Setting: Redirects4}:   "The enforcer could not turn off IPv4 redirects on interface dev0, so a device on that network could set a route or address the enforcer did not check." + again,
-		{Kind: UnsetSetting, Iface: "gst0", Setting: Redirects6}:   "The enforcer could not turn off IPv6 redirects on interface gst0, so a device on that network could set a route or address the enforcer did not check." + again,
-		{Kind: UnsetSetting, Iface: "default", Setting: RouterAds}: "The enforcer could not turn off router advertisements for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check." + again,
-		{Kind: UnsetSetting, Iface: "all", Setting: Redirects4}:    "The enforcer could not turn off IPv4 redirects for all interfaces at once, so a device on a home network could set a route the enforcer did not check." + again,
-		{Kind: UnsetName, Iface: "own\u202e0"}:                     `The enforcer's setup names "own\u202e0" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
-		{Kind: UnsetName, Iface: ""}:                               `The enforcer's setup names "" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
-		{Kind: UnsetName, Iface: ".."}:                             `The enforcer's setup names ".." as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
-		{Kind: UnsetChanged, Iface: "own0"}:                        "The addresses on interface own0 changed while the enforcer read them. It reads them again within 10 seconds.",
-		{Kind: UnsetAddrs, Iface: "dev0"}:                          "The enforcer could not read the addresses on interface dev0, so it cannot check that each lies in that network." + again,
+		{Kind: UnsetSetting, Iface: "own0", Setting: RouterAds}: "The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check." + again,
+		// A redirect sets a route, never an address (#5307).
+		{Kind: UnsetSetting, Iface: "dev0", Setting: Redirects4}:    "The enforcer could not turn off IPv4 redirects on interface dev0, so a device on that network could set a route the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "gst0", Setting: Redirects6}:    "The enforcer could not turn off IPv6 redirects on interface gst0, so a device on that network could set a route the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "default", Setting: RouterAds}:  "The enforcer could not turn off router advertisements for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "default", Setting: Redirects4}: "The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network's interface made again could take a route the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "default", Setting: Redirects6}: "The enforcer could not turn off IPv6 redirects for interfaces made from now on, so a home network's interface made again could take a route the enforcer did not check." + again,
+		// An empty interface name is said without one (#5307).
+		{Kind: UnsetSetting, Setting: RouterAds}:                "The enforcer could not turn off router advertisements on a home network's interface, so a device on that network could set a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Setting: Redirects4}:               "The enforcer could not turn off IPv4 redirects on a home network's interface, so a device on that network could set a route the enforcer did not check." + again,
+		{Kind: UnsetSetting, Setting: Redirects6}:               "The enforcer could not turn off IPv6 redirects on a home network's interface, so a device on that network could set a route the enforcer did not check." + again,
+		{Kind: UnsetAddrs}:                                      "The enforcer could not read the addresses on a home network's interface, so it cannot check that each lies in that network." + again,
+		{Kind: UnsetChanged}:                                    "The addresses on a home network's interface changed while the enforcer read them. It reads them again within 10 seconds.",
+		{Kind: UnsetIPv6}:                                       "The enforcer could not read whether the kernel has IPv6 settings, so it could not check that redirects and router advertisements are off on the home networks' interfaces: a device on a home network could set a route or address the enforcer did not check." + again,
+		{Kind: UnsetSetting, Iface: "all", Setting: Redirects4}: "The enforcer could not turn off IPv4 redirects for all interfaces at once, so a device on a home network could set a route the enforcer did not check." + again,
+		{Kind: UnsetName, Iface: "own\u202e0"}:                  `The enforcer's setup names "own\u202e0" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetName, Iface: ""}:                            `The enforcer's setup names "" as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetName, Iface: ".."}:                          `The enforcer's setup names ".." as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected.`,
+		{Kind: UnsetChanged, Iface: "own0"}:                     "The addresses on interface own0 changed while the enforcer read them. It reads them again within 10 seconds.",
+		{Kind: UnsetAddrs, Iface: "dev0"}:                       "The enforcer could not read the addresses on interface dev0, so it cannot check that each lies in that network." + again,
 		// A name past ASCII is quoted and escaped (ascii), never bare.
 		{Kind: UnsetSetting, Iface: "own\u00e9", Setting: RouterAds}: `The enforcer could not turn off router advertisements on interface "own\u00e9", so a device on that network could set a route or address the enforcer did not check.` + again,
 		{Kind: UnsetAddrs, Iface: "own\u00e9"}:                       `The enforcer could not read the addresses on interface "own\u00e9", so it cannot check that each lies in that network.` + again,
@@ -463,7 +520,7 @@ func TestPlainUnset(t *testing.T) {
 		{Kind: UnsetSetting, Iface: "all"}:           "",
 		{Kind: UnsetSetting, Iface: "default"}:       "",
 		{Kind: UnsetSetting, Setting: RouterAds + 1}: "",
-		{Kind: UnsetChanged + 1, Iface: "own0"}:      "",
+		{Kind: UnsetIPv6 + 1, Iface: "own0"}:         "",
 	} {
 		if want == "" {
 			want = "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."

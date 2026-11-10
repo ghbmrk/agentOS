@@ -208,7 +208,9 @@ func TestPathsFollowTheDocument(t *testing.T) {
 func stripKeys(text string) string {
 	for _, v6 := range []bool{false, true} {
 		text = strings.ReplaceAll(text, hostKey(v6), "")
-		text = strings.ReplaceAll(text, claimKey(v6), "")
+	}
+	for _, k := range []string{claimKey, leaseKey, hwField} {
+		text = strings.ReplaceAll(text, k, "")
 	}
 	return text
 }
