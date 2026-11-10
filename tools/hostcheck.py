@@ -32,6 +32,8 @@ Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 2 the check could not be made.
 """
 import argparse
+import atexit
+import functools
 import hashlib
 import json
 import os
@@ -66,27 +68,16 @@ class HostcheckError(Exception):
 # binary on the root's own libraries (--inhibit-cache: not the host's ld.so.cache), as
 # tests/test_image.py image_tool does for systemd and kmod (#4776); paths stay the host's.
 # --library-path still falls back to the loader's built-in host directories, so the loader also
-# records every shared object it looks for or loads (LD_DEBUG), and a path outside the root, from
-# a search, a dlopen or a preload, fails the run (#5055).
+# records every name it looks for, tries or maps (LD_AUDIT, AUDITOR), and a path outside the root,
+# from a search, a dlopen or a preload, fails the run (#5055). glibc's LD_DEBUG text printed names
+# raw, so a name holding a newline or the text's own separators could forge it (#5231).
 TOOLS_LOADER = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
 TOOLS_LIBS = ("usr/lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu/swtpm")
 TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/swtpm",
          "swtpm_ioctl": "usr/bin/swtpm_ioctl"}
 TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
 STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
-# glibc's LD_DEBUG lines: "PID:\ttrying file=PATH" for each search candidate, and
-# "PID:\tfile=NAME [NS];  TAIL" for each object mapped, NAME a path when given as one (a soname
-# is searched, so its candidates are trying lines). Any other line naming a file= fails the
-# audit, so a loader whose format differs cannot pass by being unread. The loader prints a name
-# as it is, so a line after a name that lacks the PID of the record's own suffix is the rest of a
-# name holding a newline, and fails (another PID's line is a forked child's, and may not name a
-# file); a name may hold " [N];  " itself, so every split before a whole TAIL is a candidate (#5231).
-LOADER_LINE = re.compile(r"\s*(\d+):\s+(.*)")
-LOADER_TRYING = re.compile(r"trying file=(.+)")
-LOADER_SPLIT = re.compile(r"(?=( \[\d+\];  ))")  # a lookahead: a split may overlap the one before it
-LOADER_TAIL = re.compile(r"(?:needed by|dynamically loaded by) .* \[\d+\](?: \(relocation dependency\))?"
-                         r"|generating link map|destroying link map")
-LOADER_REOPEN = ("opening file=", "closing file=")  # an object already mapped, or let go
+AUDITOR = pathlib.Path(__file__).with_name("hostcheck_audit.c")  # the loader's record, NUL-delimited names
 
 
 def _root_file(root, rel):
@@ -115,43 +106,25 @@ def tool_env(root, ld_log):
 
 
 def loader_env(ld_log):
-    """PATH alone of the host's, and the loader's record of what it loads, in LD_LOG.PID: the
-    environment of any tool run from a root that audit_records then checks (tests/test_image.py's
+    """PATH alone of the host's, and the loader's record of what it looks for and maps, in LD_LOG.PID:
+    the environment of any tool run from a root that audit_records then checks (tests/test_image.py's
     image_tool too)."""
-    return {"PATH": "/usr/sbin:/usr/bin", "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": str(ld_log)}
+    return {"PATH": "/usr/sbin:/usr/bin", "LD_AUDIT": auditor(), "AGENTOS_LOADER_RECORD": str(ld_log)}
 
 
-def loader_paths(text, pid):
-    """The paths in process PID's LD_DEBUG record that the loader looked for or mapped, or the first
-    line it could not read as either."""
-    paths, named = [], False  # named: the line before named a path read here, so it may go on
-    for line in text.split("\n"):
-        m = LOADER_LINE.fullmatch(line)
-        if not m:
-            if line.strip(" \t"):
-                raise HostcheckError(f"unreadable loader record line: {line!r}")
-            named = False
-            continue
-        if m.group(1) != pid:
-            # A child forked without an exec writes into its parent's record under its own PID (its
-            # exit's "calling fini" lines). It may not name a file, nor go on a name read here.
-            if "file=" in m.group(2) or named:
-                raise HostcheckError(f"the loader's record of PID {pid} holds a line of PID {m.group(1)} that names "
-                                     f"a file or follows a name: {line!r}")
-            continue
-        body, named = m.group(2), False
-        if "file=" not in body or body.startswith(LOADER_REOPEN):
-            continue
-        named = True
-        if t := LOADER_TRYING.fullmatch(body):
-            paths.append(t.group(1))
-            continue
-        rest = body[len("file="):] if body.startswith("file=") else ""
-        names = [rest[:s.start()] for s in LOADER_SPLIT.finditer(rest) if LOADER_TAIL.fullmatch(rest, s.end(1))]
-        if not names:
-            raise HostcheckError(f"unreadable loader record line: {line!r}")
-        paths += [n for n in names if "/" in n]
-    return paths
+@functools.cache
+def auditor():
+    """AUDITOR built once per process with the host's cc into a private directory; the root's loader
+    loads it (#5231)."""
+    out = pathlib.Path(tempfile.mkdtemp(prefix="hostcheck-audit-"), "audit.so")
+    atexit.register(shutil.rmtree, out.parent, True)
+    if ":" in str(out):
+        raise HostcheckError(f"LD_AUDIT would split the audit module's path {out} at its ':'")
+    try:
+        run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-Werror", "-o", str(out), str(AUDITOR)])
+    except OSError as e:
+        raise HostcheckError(f"cannot build the loader audit module {AUDITOR}: {e}")
+    return str(out)
 
 
 def audit_loads(root, ld_log, pid):
@@ -166,27 +139,28 @@ def audit_loads(root, ld_log, pid):
 
 def audit_records(root, ld_log):
     """Fail unless there is a record LD_LOG.*, and every one (each process's and any child's) names
-    only paths in ROOT, at least one each."""
+    only paths in ROOT, at least one each. A name without a / is a soname the loader searches for (its
+    candidates are in the record) or no file (the vDSO, the main program in its own record)."""
     if not root:
         return
     log = pathlib.Path(ld_log)
     recs = sorted(p for p in log.parent.iterdir() if p.name.startswith(log.name + "."))
     if not recs:
         raise HostcheckError(f"the loader kept no record of what it loaded ({log}.*)")
-    base = os.path.realpath(root) + os.sep
+    base = os.fsencode(os.path.realpath(root)) + b"/"
     outside = set()
     for rec in recs:
-        pid = rec.name[len(log.name) + 1:]
-        if not pid.isdigit():
-            raise HostcheckError(f"{rec} is no loader record: its suffix is not a PID")
-        seen = loader_paths(rec.read_bytes().decode(errors="surrogateescape"), pid)  # realpath gets the bytes back
+        *names, end = rec.read_bytes().split(b"\0")
+        if end:
+            raise HostcheckError(f"the loader's record {rec} ends inside a name: {end!r}")
+        seen = [n for n in names if b"/" in n]
         if not seen:
             raise HostcheckError(f"the loader's record {rec} names no shared object")
-        outside |= {p for p in seen if not os.path.isabs(p) or not os.path.realpath(p).startswith(base)}
+        outside |= {n for n in seen if not os.path.isabs(n) or not os.path.realpath(n).startswith(base)}
     if outside:
         raise HostcheckError(f"a binary run from the tools root {root} looked for or loaded shared objects outside the "
                              f"tools root (add the directory to its library path, or the package to the root): "
-                             f"{sorted(outside)[:5]}")
+                             f"{sorted(map(os.fsdecode, outside))[:5]}")
 
 
 def qemu_data_args(root):
