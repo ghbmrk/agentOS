@@ -541,11 +541,15 @@ func TestPlanSignInStuckHost(t *testing.T) {
 		}
 	})
 	t.Run("a remove once the code is printed", func(t *testing.T) {
-		cli := &stuckCLI{fakeCLI: newFakeCLI(login, codexPrinted), reading: make(chan struct{}), release: make(chan struct{})}
+		cli := &stuckCLI{fakeCLI: newFakeCLI(login, codexPrinted), reading: make(chan struct{}, 1), release: make(chan struct{})}
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 		begun := make(chan PlanBegun, 1)
 		go func() { begun <- h.Begin(context.Background()) }()
-		<-cli.reading
+		select { // the read has begun: the code is about to print
+		case <-cli.reading:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the sign-in never read its output: no printed code to remove after")
+		}
 		removed := make(chan error, 1)
 		go func() { removed <- h.Remove() }()
 		until(t, "the remove to begin", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.removing > 0 })
