@@ -125,6 +125,431 @@ func TestGmailSignInDetails(t *testing.T) {
 	}
 }
 
+// A first sign-in that finishes is a change of account whose settings
+// write has ended; it wipes the grant it held and leaves no sign-in
+// waiting, so a later paste finds none (#3023 Security). Its store was
+// sealed under a key drawn for it, never a fixed one.
+func TestAFinishedSignInLeavesNothingBehind(t *testing.T) {
+	srv := gmailtest.New()
+	t.Cleanup(srv.Close)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	consent := h.gmailBegin("watch", fakeClient).Consent
+	h.signMu.Lock()
+	g := h.signing
+	h.signMu.Unlock()
+	landing, ok := srv.Approve(consent)
+	if g == nil || !ok {
+		t.Fatalf("no sign-in waiting (%v) or the fake refused %s", g == nil, consent)
+	}
+	h.mu.Lock()
+	before := h.changes
+	h.mu.Unlock()
+	if d, err := h.gmailFinish("watch", landing); err != nil || d != clerk.DSignedIn+" watch" {
+		t.Fatalf("gmailFinish = %q, %v", d, err)
+	}
+	h.mu.Lock()
+	changes := h.changes
+	h.mu.Unlock()
+	h.ws.mu.Lock()
+	writes := h.ws.writes
+	h.ws.mu.Unlock()
+	if changes != before+1 || writes != 0 {
+		t.Fatalf("%d changes after %d, %d settings writes in flight; want one change and none", changes, before, writes)
+	}
+	if len(g.grant) == 0 || bytes.Count(g.grant, []byte{0}) != len(g.grant) {
+		t.Fatal("the finished sign-in still holds its grant")
+	}
+	if d, err := h.gmailFinish("watch", "https://example.test/"); err != nil || d != clerk.DNoSignIn {
+		t.Fatalf("a paste after the finish = %q, %v; want %q", d, err, clerk.DNoSignIn)
+	}
+	b, err := g.sec.MarshalBinary()
+	if err != nil || g.sec.Len() != 1 {
+		t.Fatalf("the sign-in's store: %d slots, %v", g.sec.Len(), err)
+	}
+	zero, err := clerk.NewAESSealer(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clerk.NewSecrets(zero, nil).UnmarshalBinary(b) == nil {
+		t.Fatal("the sign-in's store opens under the zero key")
+	}
+}
+
+// A profile address the clerk cannot set up is refused like no address:
+// the grant is given back and nothing is set up.
+func TestAProfileAddressThatIsNoMailAddressIsGivenBack(t *testing.T) {
+	srv := gmailtest.New()
+	t.Cleanup(srv.Close)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
+	srv.As("Pat <pat@gmail.test>")
+	if d := signIn(t, srv, owner, "watch", fakeClient); d != DGmailAddress {
+		t.Fatalf("GmailFinish = %q, want %q", d, DGmailAddress)
+	}
+	if a, _ := owner.Account(); a.Set || sec.Len() != 0 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
+		t.Fatalf("account %+v, %d slots, revoked %v; want nothing set up and the grant given back", a, sec.Len(), srv.Revoked())
+	}
+}
+
+// A sign-in the clerk cannot declare (its consent page is not plain https)
+// starts nothing, and gmailrevoke then keeps the account and its grant.
+// Nor can the clerk name the address with a Gmail root it cannot declare:
+// the new grant is given back.
+func TestAGmailSignInTheClerkCannotDeclare(t *testing.T) {
+	t.Run("begin", func(t *testing.T) {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		c.gmail.consent = "http://" + gmailtest.Host + "/consent"
+		h := NewMailHost(context.Background(), dir, sec, c)
+		if b := h.gmailBegin("watch", fakeClient); b.Detail != clerk.DNoAccount || b.Consent != "" {
+			t.Fatalf("gmailBegin = %+v; want %q", b, clerk.DNoAccount)
+		}
+		if d, err := h.gmailRevoke(); err != nil || d != clerk.DNoAccount {
+			t.Fatalf("gmailRevoke = %q, %v; want %q", d, err, clerk.DNoAccount)
+		}
+		if !sec.Has(GmailSlot(gmailtest.User)) || srv.Revokes() != 0 {
+			t.Fatalf("Gmail slot %v, %d revocations; want the account kept", sec.Has(GmailSlot(gmailtest.User)), srv.Revokes())
+		}
+	})
+	t.Run("address", func(t *testing.T) {
+		srv := gmailtest.New()
+		t.Cleanup(srv.Close)
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := signInConfig(srv)
+		c.gmail.base = "http://" + gmailtest.Host + "/gmail/v1/users/me"
+		h := NewMailHost(context.Background(), dir, sec, c)
+		landing, ok := srv.Approve(h.gmailBegin("watch", fakeClient).Consent)
+		if !ok {
+			t.Fatal("the fake refused the consent address")
+		}
+		if d, err := h.gmailFinish("watch", landing); err != nil || d != DGmailAddress {
+			t.Fatalf("gmailFinish = %q, %v; want %q", d, err, DGmailAddress)
+		}
+		if sec.Len() != 0 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
+			t.Fatalf("%d slots, revoked %v; want the grant given back", sec.Len(), srv.Revoked())
+		}
+	})
+}
+
+// A sign-in again with no sealer to hold the grant's copy under starts
+// nothing; one over a store that also holds a mail slot left behind signs
+// in on a copy holding the account's grant only (CLK-1).
+func TestASignInAgainNeedsASealerAndTheGrantAlone(t *testing.T) {
+	t.Run("no sealer", func(t *testing.T) {
+		srv, dir, sec := newGmailAccount(t)
+		c := signInConfig(srv)
+		c.Sealer = nil
+		h := NewMailHost(context.Background(), dir, sec, c)
+		if b := h.gmailBegin("watch", nil); b.Detail != clerk.DNoAccount || b.Consent != "" {
+			t.Fatalf("gmailBegin = %+v; want %q", b, clerk.DNoAccount)
+		}
+	})
+	t.Run("a mail slot left", func(t *testing.T) {
+		srv, dir, sec := newGmailAccount(t)
+		if err := sec.Put(clerk.MailSlots+"left", clerk.KindStatic, []byte("synthetic")); err != nil {
+			t.Fatal(err)
+		}
+		h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+		b := h.gmailBegin("watch", nil)
+		if b.Detail != "" || !strings.Contains(b.Consent, "login_hint="+url.QueryEscape(gmailtest.User)) {
+			t.Fatalf("gmailBegin = %+v; want a sign-in again", b)
+		}
+		h.signMu.Lock()
+		g := h.signing
+		h.signMu.Unlock()
+		if g.sec.Len() != 1 || !g.sec.Has(GmailSlot(gmailtest.User)) || sec.Len() != 2 {
+			t.Fatalf("the copy holds %d slots, the account's store %d; want the grant alone in the copy", g.sec.Len(), sec.Len())
+		}
+	})
+}
+
+// The account removed while Google answers a sign-in again: the late grant
+// is given back before it is used for anything, even the profile.
+func TestASignInAgainYieldsToARemovalDuringFinish(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	landing, ok := srv.Approve(h.gmailBegin("watch", nil).Consent)
+	if !ok {
+		t.Fatal("the fake refused the consent address")
+	}
+	h.signMu.Lock()
+	g := h.signing
+	h.signMu.Unlock()
+	saved := g.in.Saved
+	g.in.Saved = func(grant []byte) error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if err := RemoveMail(h.dir, h.sec); err != nil {
+			t.Error(err)
+		}
+		return saved(grant)
+	}
+	calls := len(srv.Calls())
+	if d, err := h.gmailFinish("watch", landing); err != nil || d != clerk.DNoSignIn {
+		t.Fatalf("gmailFinish = %q, %v; want %q", d, err, clerk.DNoSignIn)
+	}
+	if got := srv.Calls()[calls:]; len(got) != 0 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
+		t.Fatalf("calls %v, revoked %v; want the new grant given back unused", got, srv.Revoked())
+	}
+	if a, err := readMail(dir); err != ErrNoMailAccount || sec.Len() != 0 {
+		t.Fatalf("account %+v, %v; want the removal to stand", a, err)
+	}
+}
+
+// The account removed while the clerk asks Google's profile for the new
+// grant's address, after the check during Finish: the removal stands, and
+// the late grant is given back.
+func TestASignInAgainYieldsToARemovalWhileNamingTheAddress(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	landing, ok := srv.Approve(h.gmailBegin("watch", nil).Consent)
+	if !ok {
+		t.Fatal("the fake refused the consent address")
+	}
+	// A read in flight that this test ends: gmailFinish waits for it once
+	// it has named the address, before it reads the account again.
+	block := make(chan struct{})
+	h.mu.Lock()
+	h.idle()
+	h.reading = block
+	h.mu.Unlock()
+	calls := len(srv.Calls())
+	out := make(chan string, 1)
+	go func() {
+		d, err := h.gmailFinish("watch", landing)
+		if err != nil {
+			t.Error(err)
+		}
+		out <- d
+	}()
+	eventually(t, "the profile asked", func() bool { return len(srv.Calls()) > calls })
+	h.mu.Lock()
+	if err := RemoveMail(h.dir, h.sec); err != nil {
+		t.Error(err)
+	}
+	h.reading = nil
+	close(block)
+	h.mu.Unlock()
+	if d := <-out; d != clerk.DNoSignIn {
+		t.Fatalf("gmailFinish = %q; want %q", d, clerk.DNoSignIn)
+	}
+	if a, err := readMail(dir); err != ErrNoMailAccount || sec.Len() != 0 || !slices.Equal(srv.Revoked(), []string{gmailtest.Issued(1)}) {
+		t.Fatalf("account %+v, %v, %d slots, revoked %v; want the removal to stand and the new grant given back", a, err, sec.Len(), srv.Revoked())
+	}
+}
+
+// A sign-in whose setup fails is no change of account: its settings write
+// has ended, nothing tells the owner of a replacement, and its
+// registration is not kept.
+func TestAFailedSignInSetupChangesNothing(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+	blockSettings(t, dir)
+	srv.As("other@gmail.test")
+	h.mu.Lock()
+	before := h.changes
+	h.mu.Unlock()
+	if _, err := finishSignIn(t, srv, owner, fakeClient); err == nil {
+		t.Fatal("a sign-in whose setup failed answered no error")
+	}
+	h.mu.Lock()
+	changes := h.changes
+	h.mu.Unlock()
+	h.ws.mu.Lock()
+	writes := h.ws.writes
+	h.ws.mu.Unlock()
+	st, _ := owner.Status()
+	if changes != before || writes != 0 || slices.Contains(st.Notices, noteMailReplaced) {
+		t.Fatalf("%d changes after %d, %d settings writes in flight, notices %v; want no change told", changes, before, writes, st.Notices)
+	}
+	if _, ok := loadReg(dir, testSealer()); ok {
+		t.Fatal("a failed setup kept its registration")
+	}
+}
+
+// gmailrevoke is a change of account: the clerk the revoked account opened
+// serves no step after it.
+func TestARevokedGmailAccountServesNoStep(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	if m, stop := h.clerk(); m == nil || stop != nil {
+		t.Fatalf("before the revocation: clerk %v, stop %v", m, stop)
+	}
+	if d, err := h.gmailRevoke(); err != nil || d != clerk.DRevoked {
+		t.Fatalf("gmailRevoke = %q, %v", d, err)
+	}
+	if res := h.Do(kernel.Request{}, nil); res.Detail != DNoAccount {
+		t.Fatalf("a step after the revocation = %+v; want %q", res, DNoAccount)
+	}
+}
+
+// giveBack called without h.mu takes it: it neither asks Google nor tells
+// the owner while another change of the account holds it.
+func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	g, err := h.ownGmailSignIn() // holds no grant: Google keeps nothing, and the owner is told so
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	done := make(chan struct{})
+	go func() { h.giveBack(g, false); close(done) }()
+	wait, cancel := context.WithTimeout(context.Background(), 100e6) // 100 ms
+	defer cancel()
+	select {
+	case <-done:
+		h.mu.Unlock()
+		t.Fatal("giveBack ran while h.mu was held")
+	case <-wait.Done():
+	}
+	h.mu.Unlock()
+	<-done
+	h.mu.Lock()
+	told := slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == noteGmailKept })
+	h.mu.Unlock()
+	if !told {
+		t.Fatal("the grant Google kept was not told")
+	}
+}
+
+// What every Gmail sign-in runs on the mail account's own side (#5323):
+// settings for a Gmail account name no servers and an address in plain
+// form, and a directory others can reach holds no account, so SetGmail,
+// RemoveMail and readMail refuse it.
+func TestGmailSettingsRefuseWhatTheyCannotHold(t *testing.T) {
+	if err := (MailSettings{Address: gmailtest.User, API: APIGmail, IMAP: "imap.example.test:993"}).check(); err != ErrMailAPI {
+		t.Fatalf("Gmail settings naming a server: %v; want %v", err, ErrMailAPI)
+	}
+	_, dir, sec := newGmailAccount(t)
+	const named = "Pat <pat@gmail.test>"
+	if err := sec.Put(GmailSlot(named), clerk.KindGrant, gmailtest.Grant()); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetGmail(dir, sec, named); err != ErrMailAddress {
+		t.Fatalf("SetGmail(%q) = %v; want %v", named, err, ErrMailAddress)
+	}
+	if s, err := readMail(dir); err != nil || s.Address != gmailtest.User {
+		t.Fatalf("after a refused SetGmail: %+v, %v", s, err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetGmail(dir, sec, gmailtest.User); err == nil {
+		t.Fatal("SetGmail wrote into a directory others can reach")
+	}
+	if _, err := readMail(dir); err == nil {
+		t.Fatal("readMail read settings from a directory others can reach")
+	}
+	if err := RemoveMail(dir, sec); err == nil || !sec.Has(GmailSlot(gmailtest.User)) {
+		t.Fatalf("RemoveMail in a directory others can reach = %v, Gmail slot kept %v", err, sec.Has(GmailSlot(gmailtest.User)))
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readMail closes the settings file it reads.
+func TestReadingTheSettingsClosesTheFile(t *testing.T) {
+	_, dir, _ := newGmailAccount(t)
+	open := func() int {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(fds)
+	}
+	before := open()
+	for range 64 {
+		if s, err := readMail(dir); err != nil || s.Address != gmailtest.User {
+			t.Fatalf("readMail = %+v, %v", s, err)
+		}
+	}
+	if n := open(); n-before >= 32 {
+		t.Fatalf("%d files open after 64 reads, %d before", n, before)
+	}
+}
+
+// An account removed under the host, with no change told, is found gone at
+// the next read: the clerk it opened stops serving, and the read counts as
+// no account, not as a failure.
+func TestARemovedAccountIsNoAccountAtTheNextRead(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, signInConfig(srv))
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cur == nil {
+		t.Fatalf("no clerk opened: %s", h.why)
+	}
+	if err := RemoveMail(dir, sec); err != nil {
+		t.Fatal(err)
+	}
+	h.refresh()
+	if h.cur != nil || h.why != "" || h.fails != 0 {
+		t.Fatalf("after the removal: clerk %v, why %q, fails %d", h.cur, h.why, h.fails)
+	}
+}
+
+// A change of account drops the senders record held for the old one and
+// wakes the worker; the world's state starts over, and each settings write
+// moves its generation at its start and its end (#3538).
+func TestAChangeOfAccountStartsTheWorldOver(t *testing.T) {
+	_, dir, sec := newGmailAccount(t)
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	select {
+	case <-h.kick:
+	default:
+	}
+	h.srec = &sealedSenders{Over: true}
+	h.ws.mu.Lock()
+	h.ws.sread, h.ws.hist, h.ws.known, h.ws.contacts = sendersReading+1, slices.Grow(h.ws.hist, 1), []string{"a"}, []string{"b"}
+	h.ws.mu.Unlock()
+	h.changed()
+	select {
+	case <-h.kick:
+	default:
+		t.Fatal("a change of account did not wake the worker")
+	}
+	h.ws.mu.Lock()
+	world := h.ws.sread == sendersReading && h.ws.hist == nil && h.ws.known == nil && h.ws.contacts == nil
+	h.ws.mu.Unlock()
+	if h.srec != nil || !world {
+		t.Fatalf("after a change: senders record %v, world started over %v", h.srec, world)
+	}
+	gen := func() int64 {
+		h.ws.mu.Lock()
+		defer h.ws.mu.Unlock()
+		return h.ws.gen
+	}
+	g0 := gen()
+	end := h.ws.writing()
+	g1 := gen()
+	end()
+	if g1 <= g0 || gen() <= g1 {
+		t.Fatalf("generations %d, %d, %d across a write; want each later", g0, g1, gen())
+	}
+}
+
 // A sign-in again, with the registration sealed in the account's grant,
 // clears the reconnect stop: steps and reads run again, and the account
 // keeps its record (#3009, the #3011 UX point).
