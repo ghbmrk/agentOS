@@ -206,7 +206,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	ann, aerr := nft.Announces(doc, l)
 	hears, herr := nft.Hears(doc, l)
 	if err := cmp.Or(err, aerr, herr); err != nil {
-		return compileErr{err}
+		return compiled(err)
 	}
 	files, genErr := dns.Generate(doc, l, d.cfg.DNS)
 	if err := genErr; err != nil {
@@ -262,11 +262,11 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		text, err := nft.Reload(doc, l, running)
 		if err != nil {
-			return compileErr{err}
+			return compiled(err)
 		}
 		drops, err := nft.Drops(doc, l, nil, d.drop(caps))
 		if err != nil {
-			return compileErr{err}
+			return compiled(err)
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
@@ -303,13 +303,24 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 }
 
 // compileErr is a load refused before the firewall saw it: the document
-// did not compile to a ruleset. fireErr is one the firewall refused. The
+// did not compile to a ruleset (nft.ErrPolicy). fireErr is one the firewall refused. The
 // page words each apart (#5164 R5 d); any other is untyped.
 type compileErr struct{ error }
 type fireErr struct{ error }
 
 func (e compileErr) Unwrap() error { return e.error }
 func (e fireErr) Unwrap() error    { return e.error }
+
+// compiled types err as a compile refusal when nft says the policy does
+// not compile (nft.ErrPolicy), and leaves any other failure of the same
+// step, such as a running table it could not read, untyped (Security on
+// #5318).
+func compiled(err error) error {
+	if errors.Is(err, nft.ErrPolicy) {
+		return compileErr{err}
+	}
+	return err
+}
 
 // loadStep is the step that refused a load, as the page words it.
 func loadStep(err error) page.LoadStep {

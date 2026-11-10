@@ -425,10 +425,10 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	h = g.homeHTML()
 	for _, want := range []string{
 		"<h2>Names and addresses</h2>",
-		"<p>The enforcer&#39;s name answers on interface &#34;vlan10\\u202e&#34;, which only a listed name gets, stopped on its own 3 times in a row and has not stayed up since.",
-		"<p>The enforcer&#39;s name answers on the Owner, Household and Guests networks stopped on its own and has not stayed up since.",
-		"<p>The enforcer&#39;s address service, which hands out addresses on the home networks, stopped on its own 2 times in a row",
-		"<p>Part of the enforcer&#39;s name and address service stopped on its own 4 times in a row",
+		"<p>The enforcer&#39;s name answers on interface &#34;vlan10\\u202e&#34;, which only a listed name gets, stopped or could not start 3 times in a row and has not stayed up since.",
+		"<p>The enforcer&#39;s name answers on the Owner, Household and Guests networks stopped or could not start and has not stayed up since.",
+		"<p>The enforcer&#39;s address service, which hands out addresses on the home networks, stopped or could not start 2 times in a row",
+		"<p>Part of the enforcer&#39;s name and address service stopped or could not start 4 times in a row",
 		"up to 30 seconds",
 	} {
 		if !strings.Contains(h, want) {
@@ -439,7 +439,7 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 		t.Error("restarting instances show as a stopped resolver, or carry an override")
 	}
 	res.stop.Stopped = true
-	if h = g.homeHTML(); strings.Contains(h, "stopped on its own") || !strings.Contains(h, "stopped answering name lookups") {
+	if h = g.homeHTML(); strings.Contains(h, "stopped or could not start") || !strings.Contains(h, "stopped answering name lookups") {
 		t.Error("a stopped resolver shows restarts beside the stop")
 	}
 	// A setting that did not take shows in plain words, never the raw

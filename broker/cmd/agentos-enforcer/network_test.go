@@ -1411,11 +1411,28 @@ func TestLoadStepOnPage(t *testing.T) {
 	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force (") || strings.Contains(h, "The firewall refused") {
 		t.Fatalf("home words a compile refusal as the firewall's:\n%s", h)
 	}
+	// A running table the firewall returned that does not parse is no
+	// policy that failed to compile: untyped.
+	x.fire.mu.Lock()
+	x.fire.listing = []byte("{not json")
+	x.fire.mu.Unlock()
+	err = load(home())
+	if err == nil || errors.Is(err, nft.ErrPolicy) {
+		t.Fatalf("fixture: an unreadable running table: %v", err)
+	}
+	if stop := (pageResolver{x.d}).Stopped(); stop.LoadBy != page.LoadUntyped || stop.Load != err.Error() {
+		t.Fatalf("an unreadable running table on the page: %#v", stop)
+	}
+	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer's last load of your rules failed (") || strings.Contains(h, "could not make firewall rules") {
+		t.Fatalf("home words an unreadable running table as a compile refusal:\n%s", h)
+	}
 	for _, tc := range []struct {
 		err  error
 		want page.LoadStep
 	}{
 		{compileErr{nft.ErrPolicy}, page.LoadCompile},
+		{compiled(fmt.Errorf("%w: device", nft.ErrPolicy)), page.LoadCompile},
+		{compiled(nft.ErrLayout), page.LoadUntyped},
 		{fmt.Errorf("wrapped: %w", fireErr{errors.New("nft: refused")}), page.LoadFirewall},
 		{errors.New("dns/run: refused: closed"), page.LoadUntyped},
 	} {
@@ -1444,7 +1461,7 @@ func TestRestartingResolverOnPage(t *testing.T) {
 		t.Fatalf("restarting instances on the page: %#v", stop)
 	}
 	h := x.b.do(http.MethodGet, "/", nil).Body.String()
-	if !strings.Contains(h, "on interface "+running.Listed[0].Iface+", which only a listed name gets, stopped on its own 3 times in a row") || !strings.Contains(h, "The enforcer&#39;s address service, which hands out addresses on the home networks, stopped on its own and") {
+	if !strings.Contains(h, "on interface "+running.Listed[0].Iface+", which only a listed name gets, stopped or could not start 3 times in a row") || !strings.Contains(h, "The enforcer&#39;s address service, which hands out addresses on the home networks, stopped or could not start and") {
 		t.Fatalf("home does not show the restarting instances:\n%s", h)
 	}
 	for name := range dnsrun.Names(running) {

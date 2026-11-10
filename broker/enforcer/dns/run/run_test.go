@@ -218,6 +218,10 @@ func TestWriteFailure(t *testing.T) {
 	if slices.Contains(events(t, dir), "start_core-a") {
 		t.Fatal("started on a file that was not written")
 	}
+	// It has never run, so it is not running (#5164 R5 b).
+	if got := s.Flapping(); len(got) != 1 || got[0] != (Flap{Name: "listed-core0", Exits: 1}) {
+		t.Fatalf("an instance whose file could not be written: Flapping = %v", got)
+	}
 	os.Remove(blocker)
 	waitEvents(t, dir, "start_core-a")
 	if err := s.Apply(files("core-b", "tv-a"), func() error { return nil }); err != nil {
@@ -636,11 +640,45 @@ func TestFlapping(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// A new file clears the count at once.
+	// A refused load puts core-crash's file back in force, and its count
+	// with it; a new file in force clears the count at once.
+	n, _ := flap("listed-core0")
+	if err := s.Apply(files("core-b", "tv-b"), func() error { return errors.New("refused") }); err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	if m, ok := flap("listed-core0"); !ok || m < n {
+		t.Fatalf("a refused load restarted the count of the file it put back: %d, was %d", m, n)
+	}
 	if err := s.Apply(files("core-b", "tv-b"), func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.Flapping(); len(got) != 0 {
 		t.Fatalf("instances on new files still flap: %v", got)
+	}
+}
+
+// TestFlappingNeverStarted (#5164 R5 b, L3 and Security on #5318): an
+// instance whose start keeps failing has never served, so Flapping names
+// it with each failed start counted, the first at once and the next at
+// its retry.
+func TestFlappingNeverStarted(t *testing.T) {
+	s, _, logs := newLoggedSet(t, "/nonexistent/dnsmasq")
+	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatalf("Apply = %v: a failed start read as a refused load", err)
+	}
+	want := []Flap{{"dhcp", 1}, {"listed-core0", 1}, {"listed-vlan10", 1}, {"people", 1}}
+	if got := s.Flapping(); !slices.Equal(got, want) {
+		t.Fatalf("instances that could not start: Flapping = %v, want %v", got, want)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := s.Flapping()
+		if len(got) == 4 && got[0].Exits >= 2 && got[1].Exits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a failed retry is not counted: %v\n%s", got, logs())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

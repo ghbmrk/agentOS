@@ -52,8 +52,9 @@ const StayUp = RestartMax
 
 var stayUp = StayUp // the tests' seam
 
-// Flap is an instance in force that exited on its own and has not stayed
-// up StayUp since: Exits is how many times in a row (#5164 R5 b).
+// Flap is an instance in force that exited on its own or could not start,
+// and has not stayed up StayUp since: Exits is how many times in a row
+// (#5164 R5 b).
 type Flap struct {
 	Name  string
 	Exits int
@@ -75,9 +76,9 @@ type Set struct {
 	// its load is done, so nothing starts on a file of either document
 	// in the meantime.
 	want map[string]string
-	// exits counts each instance's exits of its own in a row on its file
-	// in force: one that ran StayUp starts the count again, and a new
-	// file clears it.
+	// exits counts each instance's exits of its own and failed starts in
+	// a row on its file in force: an exit after a process ran StayUp
+	// starts the count again, and a new file in force clears it.
 	exits  map[string]int
 	closed bool
 }
@@ -154,11 +155,6 @@ func (s *Set) Apply(f dns.Files, load func() error) error {
 		}
 	}
 	s.want = kept
-	for name := range s.exits {
-		if _, ok := kept[name]; !ok {
-			delete(s.exits, name)
-		}
-	}
 	var stop []*proc
 	for name, p := range s.procs {
 		if kept[name] != p.conf {
@@ -175,6 +171,13 @@ func (s *Set) Apply(f dns.Files, load func() error) error {
 	}
 	s.mu.Lock()
 	s.want = in
+	// A file in force anew clears its instance's count; a refused load
+	// puts the previous files back, and their counts with them.
+	for name := range s.exits {
+		if in[name] != prev[name] {
+			delete(s.exits, name)
+		}
+	}
 	s.mu.Unlock()
 	s.startAll(in)
 	s.prune(in)
@@ -240,6 +243,7 @@ func (s *Set) start(name, conf string, backoff time.Duration) error {
 	}
 	path := confPath(s.dir, name, conf)
 	if err := writeFile(path, conf); err != nil {
+		s.exits[name]++ // a start that fails counts as an exit (Flapping)
 		s.mu.Unlock()
 		return err
 	}
@@ -254,6 +258,7 @@ func (s *Set) start(name, conf string, backoff time.Duration) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Stderr = &lineLog{logf: s.logf, prefix: "dns: " + name + ": "}
 	if err := cmd.Start(); err != nil {
+		s.exits[name]++
 		s.mu.Unlock()
 		return fmt.Errorf("%w: %v", ErrRun, err)
 	}
@@ -288,9 +293,10 @@ func (s *Set) watch(name string, p *proc, backoff time.Duration) {
 	s.retry(name, p.conf, backoff)
 }
 
-// Flapping is each instance in force, by name, that exited on its own and
-// has not stayed up StayUp since: between an exit and its start again, or
-// running for less than StayUp after it. A process that is up is not
+// Flapping is each instance in force, by name, that exited on its own or
+// could not start, and has not stayed up StayUp since: between an exit or
+// a failed start and its start again, or running for less than StayUp
+// after it. A process that is up is not
 // enough to call an instance running, since a crash loop is up between
 // its exits (#5164 R5 b).
 func (s *Set) Flapping() []Flap {

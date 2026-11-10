@@ -417,7 +417,7 @@ func plainRestart(r Restart) string {
 	if r.Exits > 1 {
 		times = " " + strconv.Itoa(r.Exits) + " times in a row"
 	}
-	return what + " stopped on its own" + times + " and has not stayed up since. While it is down, that part of the house gets nothing from it. The enforcer starts it again each time, waiting longer after each stop, up to 30 seconds; its log has the detail."
+	return what + " stopped or could not start" + times + " and has not stayed up since. While it is down, that part of the house gets nothing from it. The enforcer starts it again each time, waiting longer after each try, up to 30 seconds; its log has the detail."
 }
 
 // sentence is s with every character outside printable ASCII and the
