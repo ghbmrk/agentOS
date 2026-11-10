@@ -338,7 +338,7 @@ class PhaseFlagsTest(unittest.TestCase):
 class CmdQemuTest(unittest.TestCase):
     """cmd_qemu's own wiring, with QEMU and the snapshots stubbed (M9)."""
 
-    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img")):
+    def run_qemu(self, phases, file_phases, events, flags=(), source=("--image", "/x/agentos.img"), on_boot=None, stubs=None):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "vars.fd").write_bytes(b"")
@@ -347,6 +347,8 @@ class CmdQemuTest(unittest.TestCase):
 
             def boot_once(args, work, label, steps, boot):
                 seen.append((label, steps, boot))
+                if on_boot:
+                    on_boot(args, label)
                 return {"rtc": [], "errors": [], "events": events.get(label, [])}
 
             evaluate = hostcheck.evaluate
@@ -359,7 +361,7 @@ class CmdQemuTest(unittest.TestCase):
                     str(d / "phases.json"), "--host-disk", "w=/dev/null", "--ovmf-vars", str(d / "vars.fd"),
                     "--phases", phases] + [a for f in flags for a in ("--flag", f)]
             with unittest.mock.patch.multiple(hostcheck, boot_once=boot_once, seed_tpm=lambda a, w: None,
-                                              qemu_snapshot=lambda a, w: snap(), evaluate=spy):
+                                              qemu_snapshot=lambda a, w: snap(), evaluate=spy, **(stubs or {})):
                 rc = hostcheck.main(argv)
             report = d / "work" / "report.json"
             return rc, seen, judged, json.loads(report.read_text()) if report.exists() else None
@@ -400,6 +402,29 @@ class CmdQemuTest(unittest.TestCase):
                "data": {"guest": True, "reason": "guest-shutdown"}}
         rc, _, judged, report = self.run_qemu("unclean", self.PHASES, {"unclean": [off, self.CUT]})
         self.assertEqual((rc, judged, report), (2, [], None))
+
+
+    def test_a_record_written_after_its_process_was_checked_fails_the_run(self):
+        # #5231: stack_done checks the records as each stack process ends; one written after that (by a
+        # child still running) is caught by one more sweep before report.json is written.
+        class Listing:
+            pid, returncode = 1, 0
+
+            def communicate(self, timeout=None):
+                return os.path.join(root, "usr/share/qemu") + "\n", None
+
+        with tempfile.TemporaryDirectory() as root:
+            fake_root(root)
+            for where, want in ((root, 0), ("/lib/x86_64-linux-gnu", 2)):
+                def late(args, label):
+                    if label == "unclean":
+                        pathlib.Path(f"{args.ld_log}.9").write_bytes(os.fsencode(f"{where}/libc.so.6\0"))
+                with self.subTest(where):
+                    rc, _, _, report = self.run_qemu(
+                        "unclean", self.PHASES, {"unclean": [self.CUT]}, on_boot=late,
+                        source=("--image", "/x/agentos.img", "--tools-root", root),
+                        stubs=dict(stack_popen=lambda *a, **kw: Listing(), stack_done=lambda a, p: None))
+                    self.assertEqual((rc, report is None), (want, want == 2))
 
 
 class DriveTest(unittest.TestCase):
@@ -605,7 +630,7 @@ class ToolsRootTest(unittest.TestCase):
                 os.environ, {"LD_PRELOAD": "/x/evil.so", "LD_DEBUG": "", "QEMU_MODULE_DIR": "/usr/lib"}):
             self.assertEqual(hostcheck.tool_env(d, "/w/ld/stack"), {
                 "PATH": "/usr/sbin:/usr/bin", "QEMU_MODULE_DIR": os.path.join(d, "usr/lib/x86_64-linux-gnu/qemu"),
-                "LD_DEBUG": "libs,files", "LD_DEBUG_OUTPUT": "/w/ld/stack"})
+                "LD_AUDIT": hostcheck.auditor(), "AGENTOS_LOADER_RECORD": "/w/ld/stack"})
 
     def test_missing_or_linked_tool_is_an_error_not_the_runners(self):
         for rel in (hostcheck.TOOLS_LOADER, hostcheck.TOOLS["swtpm"]):
@@ -729,13 +754,20 @@ class LoaderAuditTest(unittest.TestCase):
             with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
                 self.run_probe(d, os.path.join(log, "stack"))
 
-    def test_a_missing_or_empty_record_fails_the_run(self):
+    def test_a_missing_empty_or_cut_record_fails_the_run(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
-            pathlib.Path(d, "stack.42").write_text("     42:\t\n")
-            with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
+            pathlib.Path(d, "stack.43").write_bytes(os.fsencode(f"{d}/libc.so.6\0"))  # another process's only
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
+            os.unlink(os.path.join(d, "stack.43"))
+            for data, why in ((b"", "names no shared object"), (b"\0linux-vdso.so.1\0libc.so.6\0", "names no shared object"),
+                              (os.fsencode(d) + b"/libc.so.6", "ends inside a name")):
+                with self.subTest(data):
+                    pathlib.Path(d, "stack.42").write_bytes(data)
+                    with self.assertRaisesRegex(hostcheck.HostcheckError, why):
+                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 42)
 
     def test_a_child_the_stack_starts_is_audited(self):
         # The probe is the host's dash in the root (libc alone); it runs the host's true, whose own
@@ -753,52 +785,147 @@ class LoaderAuditTest(unittest.TestCase):
                 hostcheck.stack_done(args, p)
             self.assertTrue(libs)
 
-    def test_unread_or_odd_loader_lines_fail(self):
+    def test_records_are_read_as_whole_names(self):
+        # #5231: names are NUL-ended, so a name holding a newline, a record-shaped line or " [N];  " is one
+        # name, read whole, as bytes; a relative name (the process's cwd, unknown here) fails.
         with tempfile.TemporaryDirectory() as d:
-            for line in ("file=/usr/lib/x86_64 linux/libx.so [0];  dynamically loaded by /r/swtpm [0]",  # a space
-                         "file=./libx.so [0];  dynamically loaded by /r/swtpm [0]",  # relative to the cwd
-                         "trying file=libx.so"):
-                with self.subTest(line):
-                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+            up = "/.." * 12
+            rec = pathlib.Path(d, "stack.7")
+            for name in (f"{d}/a\n      7:\ttrying file={d}/b{up}/lib/libc.so.6",
+                         f"{d}/a [0];  generating link map{up}/lib/libc.so.6",
+                         f"{d}/../lib/x86_64-linux-gnu/libc.so.6", "/lib/x86_64-linux-gnu/libbar.so.2", "./libx.so"):
+                with self.subTest(name):
+                    rec.write_bytes(os.fsencode(f"{d}/usr/lib/libc.so.6\0{name}\0"))
                     with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
                         hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            # A relative name is the stack process's cwd, unknown here: even read from inside the root it fails.
-            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n"
-                                                  "      7:\tfile=./libx.so [0];  dynamically loaded by /r/swtpm [0]\n")
-            cwd = os.getcwd()
+            rec.write_bytes(os.fsencode(f"\0libc.so.6\0{d}/a\n\n 1:\tq [0];  needed by\0{d}/usr/lib/libc.so.6\0"))
+            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            pathlib.Path(d, "stack.8").write_bytes(b"/lib/x86_64-linux-gnu/libc.so.6\0")  # a child's, beside it
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+            os.unlink(os.path.join(d, "stack.8"))
+            cwd = os.getcwd()  # a relative name fails even when it would resolve inside the root
             try:
                 os.chdir(d)
+                rec.write_bytes(b"./libx.so\0")
                 with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
                     hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
             finally:
                 os.chdir(cwd)
-            for line in ("file=/usr/lib/libx.so needed by swtpm", "trying  file=/usr/lib/libx.so", "file=x"):
-                with self.subTest(line):
-                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
-                    with self.assertRaisesRegex(hostcheck.HostcheckError, "unreadable loader record line"):
-                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            # A child's record beside the parent's is read too.
-            pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
-            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            pathlib.Path(d, "stack.8").write_text("      8:\ttrying file=/lib/x86_64-linux-gnu/libc.so.6\n")
+            os.symlink("/usr/lib", os.path.join(os.fsencode(d), b"\xff"))  # not UTF-8: realpath gets its bytes
+            rec.write_bytes(os.fsencode(d) + b"/\xff/libc.so.6\0")
             with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
                 hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            pathlib.Path(d, "stack.8").write_text("      8:\topening file= [0]; direct_opencount=2\n")
-            with self.assertRaisesRegex(hostcheck.HostcheckError, "names no shared object"):
-                hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
 
-    def test_preloads_and_dlopens_by_path_are_seen(self):
-        with tempfile.TemporaryDirectory() as d:
-            for line in ("file=/usr/lib/x86_64-linux-gnu/libfoo.so.1 [0];  needed by (null) [0]",
-                         "file=/opt/x/qemu/accel-tcg-x86_64.so [0];  dynamically loaded by /r/qemu [0]",
-                         "trying file=/lib/x86_64-linux-gnu/libbar.so.2"):
-                with self.subTest(line):
-                    pathlib.Path(d, "stack.7").write_text(f"      7:\ttrying file={d}/usr/lib/libc.so.6\n      7:\t{line}\n")
+    DLOPEN = ("#define _GNU_SOURCE\n#include <dlfcn.h>\nint main(int c, char **v) {\n"  # a 2nd argument: a new namespace
+              "  return c < 2 || c > 3 || !(c == 3 ? dlmopen(LM_ID_NEWLM, v[1], RTLD_NOW) : dlopen(v[1], RTLD_NOW)); }\n")
+
+    def dlopen_root(self, d):
+        """A root of the host's loader and libc whose `swtpm` dlopens its one argument."""
+        self.root(d, with_deps=False)
+        src = pathlib.Path(d, "dl.c")
+        src.write_text(self.DLOPEN)
+        subprocess.run(["cc", "-o", os.path.join(d, hostcheck.TOOLS["swtpm"]), str(src)], check=True)
+
+    def test_every_forged_name_fails_through_the_real_loader(self):
+        # #5310's review repros, each a name in the root that LD_DEBUG's text let pass: the loader maps the
+        # runner's libm through it, and the record names it whole, so its real path fails the run. The same
+        # names leading to the root's own libc pass.
+        libm = next(p for p in ("/usr/lib/x86_64-linux-gnu/libm.so.6", "/lib/x86_64-linux-gnu/libm.so.6")
+                    if os.path.isfile(p))
+        names = ("L [0];  needed by y [2]; ",  # L3 and Security round 1: a name holding its own split
+                 "X [0];  generating link map\n 1:\topening file=q",  # Security round 1: newline, another PID
+                 "Y [0];  generating link map\n\n 1:\tq",  # Security round 3: a blank line, then another PID
+                 "Z\n      7:\ttrying file=libc.so.6", b"\xff")  # a record line; not UTF-8
+        for name in names:
+            for target, ok in ((libm, False), ("usr/lib/x86_64-linux-gnu/libc.so.6", True)):
+                with self.subTest(name=name, ok=ok), tempfile.TemporaryDirectory() as d, \
+                        tempfile.TemporaryDirectory() as log:
+                    self.dlopen_root(d)
+                    path = os.path.join(os.fsencode(d), os.fsencode(name))
+                    os.symlink(target, path)
+                    args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+                    p = hostcheck.stack_popen(args, "swtpm", [path])
+                    self.assertEqual(p.wait(timeout=60), 0)  # it loaded: only the record tells
+                    if ok:
+                        hostcheck.stack_done(args, p)
+                        continue
                     with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
-                        hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
-            pathlib.Path(d, "stack.7").write_text(f"      7:\tfile=libc.so.6 [0];  needed by {d}/usr/bin/x [0]\n"
-                                                  f"      7:\ttrying file={d}/usr/lib/libc.so.6\n")
-            hostcheck.audit_loads(d, os.path.join(d, "stack"), 7)
+                        hostcheck.stack_done(args, p)
+        # A search the runner's directories end, for a name found nowhere (an optional library), fails too:
+        # a runner update could add the library there.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            self.dlopen_root(d)
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", ["libagentos-absent.so.9"])
+            self.assertEqual(p.wait(timeout=60), 1)  # not found: the tool goes on without it
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root.*libagentos-absent"):
+                hostcheck.stack_done(args, p)
+        # dlmopen into a new namespace by path asks no search of the module, only maps: la_objopen names it.
+        for target, ok in ((libm, False), (None, True)):
+            with self.subTest(dlmopen=target), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+                self.dlopen_root(d)
+                args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+                p = hostcheck.stack_popen(args, "swtpm", [target or os.path.join(d, hostcheck.TOOLS_LIBS[0], "libc.so.6"), "new"])
+                self.assertEqual(p.wait(timeout=60), 0)
+                if ok:
+                    hostcheck.stack_done(args, p)
+                    continue
+                with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root.*libm"):
+                    hostcheck.stack_done(args, p)
+        # A path that leaves the root by ".." is named as given, so its real path fails too.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            self.dlopen_root(d)
+            os.makedirs(os.path.join(d, "a [0];  needed by ", "x"))
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", [os.path.join(d, "a [0];  needed by ", "x") + "/.." * 40 + libm])
+            self.assertEqual(p.wait(timeout=60), 0)
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.stack_done(args, p)
+
+    def test_a_forked_child_passes_and_a_process_without_its_record_stops(self):
+        # #5310 round 2: a child forked without an exec (bash's subshell) is normal output, not a failure.
+        # The probe is the host's bash in the root with every library it links.
+        bash = os.path.realpath(shutil.which("bash"))
+        out = subprocess.run(["ldd", bash], capture_output=True, text=True, check=True).stdout
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as log:
+            for lib in [a or b for a, b in re.findall(r"=> (/\S+)|^\s*(/\S+)", out, re.M)]:
+                dst = pathlib.Path(d, "usr/lib/x86_64-linux-gnu", os.path.basename(lib))
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(os.path.realpath(lib), dst)
+            pathlib.Path(d, "usr/bin").mkdir(parents=True)
+            shutil.copy(bash, pathlib.Path(d, hostcheck.TOOLS["swtpm"]))
+            args = argparse.Namespace(tools_root=d, ld_log=os.path.join(log, "stack"))
+            p = hostcheck.stack_popen(args, "swtpm", ["-c", "( echo sub >/dev/null; ); echo done"],
+                                      stdout=subprocess.DEVNULL)
+            self.assertEqual(p.wait(timeout=60), 0)
+            hostcheck.stack_done(args, p)
+            # The module stops a process that has no record to write to, rather than run it unrecorded.
+            # Nor one whose record path is relative or cannot be written.
+            for record in (None, "stack", os.path.join(log, "absent", "stack")):
+                with self.subTest(record=record):
+                    env = hostcheck.tool_env(d, os.path.join(log, "other"))
+                    if record is None:
+                        del env["AGENTOS_LOADER_RECORD"]
+                    else:
+                        env["AGENTOS_LOADER_RECORD"] = record
+                    p = subprocess.run(hostcheck.tool_argv(d, "swtpm") + ["-c", "exit 0"], env=env, cwd=log)
+                    self.assertEqual(p.returncode, 127)
+
+    def test_records_alone_need_one_and_read_every_one(self):
+        # #5231: audit_records, for tools with no PID to name (tests/test_image.py image_tool), needs a record.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "toolbox.3").write_bytes(os.fsencode(f"{d}/libc.so.6\0"))
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "kept no record"):  # another prefix's
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "tool.3").write_bytes(os.fsencode(f"{d}/libc.so.6\0"))
+            hostcheck.audit_records(d, os.path.join(d, "tool"))
+            pathlib.Path(d, "tool.4").write_bytes(b"/lib/x86_64-linux-gnu/libc.so.6\0")
+            with self.assertRaisesRegex(hostcheck.HostcheckError, "outside the tools root"):
+                hostcheck.audit_records(d, os.path.join(d, "tool"))
+        hostcheck.audit_records(None, "/nonexistent/tool")
 
 
 class StandinTest(unittest.TestCase):

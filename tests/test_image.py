@@ -47,6 +47,7 @@ check = load("image_check", MK / "mkosi.finalize")
 check.TREE_OWNER = os.geteuid()
 check.TREE_GROUP = os.getegid()
 finish = load("image_finish", IMG / "finish_image.py")
+hostcheck = load("hostcheck", ROOT / "tools" / "hostcheck.py")
 
 
 def ini(path):
@@ -3322,12 +3323,20 @@ def image_tool(case, name):
     tests compare against. The root's own loader runs the binary on the root's own libraries
     (--inhibit-cache: not the runner's ld.so.cache), so no root or namespace is needed and paths the
     tool is given stay the runner's. --argv0 gives kmod the name it dispatches on. Missing, it skips
-    or fails as reference_tool does."""
+    or fails as reference_tool does.
+    --library-path still falls back to the loader's built-in runner directories, so, as hostcheck's
+    stack does (#5055), the tool runs with no runner environment but PATH and with the loader's record
+    of what it loads in a directory of the case's own; when the case ends, every record must name only
+    paths in the root, and there must be one (#5231). `env -i` is in the argv, so no caller can run the
+    tool without its record. systemd's generator paths name an empty directory: `verify` runs the
+    environment generators, and the runner's are runner binaries (#5312's checks job ran one)."""
     root = os.environ.get("AGENTOS_REFERENCE_ROOT", "")
     rel = IMAGE_TOOLS[name][1]
     why = None
     if not root:
         why = "AGENTOS_REFERENCE_ROOT is not set"
+    elif "=" in root:
+        why = "AGENTOS_REFERENCE_ROOT %s holds '=', which env would read as a variable" % root
     else:
         for p in (IMAGE_LOADER, rel):
             if os.path.islink(os.path.join(root, p)) or not os.path.isfile(os.path.join(root, p)):
@@ -3337,7 +3346,15 @@ def image_tool(case, name):
         if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
             case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s (%s)" % (why, name))
         case.skipTest("%s; this test is skipped without the image's %s" % (why, name))
-    return [os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
+    records = tempfile.TemporaryDirectory()
+    case.addCleanup(records.cleanup)
+    log = os.path.join(records.name, "tool")
+    case.addCleanup(hostcheck.audit_records, root, log)  # cleanups run last first: before the directory goes
+    none = os.path.join(records.name, "no-generators")
+    os.mkdir(none)
+    env = dict(hostcheck.loader_env(log), SYSTEMD_GENERATOR_PATH=none, SYSTEMD_ENVIRONMENT_GENERATOR_PATH=none)
+    return ["/usr/bin/env", "-i"] + ["%s=%s" % kv for kv in sorted(env.items())] + [
+            os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
             "--library-path", ":".join(os.path.join(root, d) for d in IMAGE_LIBS),
             "--argv0", name, os.path.join(root, rel)]
 
@@ -5238,6 +5255,71 @@ class ImageToolTest(MustRun, unittest.TestCase):
                 else:
                     # "kmod version 34.2": the upstream part of the Debian version.
                     self.assertEqual(first, "kmod version " + want.split(":")[-1].rsplit("-", 1)[0], out)
+
+    def test_a_library_from_outside_the_root_fails_the_case(self):
+        # #5231: --library-path falls back to the runner's directories, so a root without a library the
+        # tool links still runs it, on the runner's copy; the loader's record fails the case. The tool is
+        # the runner's ls (libselinux beside libc on Ubuntu) in a root of the runner's loader and libc, and,
+        # for the control, every library ls links. A case that never runs the tool it took fails too.
+        out = subprocess.run(["ldd", "/usr/bin/ls"], capture_output=True, text=True, check=True).stdout
+        libs = [a or b for a, b in re.findall(r"=> (/\S+)|^\s*(/\S+)", out, re.M)]
+        self.assertTrue(any("libselinux" in lib for lib in libs), libs)
+        for whole, runs, want in ((True, True, None), (False, True, r"outside the tools root.*libselinux"),
+                                  (True, False, "kept no record")):
+            with self.subTest(whole=whole, runs=runs), tempfile.TemporaryDirectory() as root:
+                for lib in libs:
+                    if whole or re.search(r"/(ld-linux-x86-64\.so\.2|libc\.so\.6)$", lib):
+                        dst = pathlib.Path(root, IMAGE_LIBS[0], os.path.basename(lib))
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(os.path.realpath(lib), dst)
+                dst = pathlib.Path(root, IMAGE_TOOLS["systemd-analyze"][1])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy("/usr/bin/ls", dst)
+
+                class Case(unittest.TestCase):
+                    def test_tool(case):
+                        tool = image_tool(case, "systemd-analyze")
+                        if runs:
+                            p = subprocess.run(tool + [root], capture_output=True, timeout=60)
+                            case.assertEqual(p.returncode, 0, p.stderr)  # it runs: only the record tells
+
+                result = unittest.TestResult()
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                    Case("test_tool").run(result)
+                failed = [tb for _, tb in result.errors + result.failures]
+                if want:
+                    self.assertEqual(len(failed), 1, failed)
+                    self.assertRegex(failed[0], want)
+                else:
+                    self.assertEqual(failed, [])
+        # No runner environment, and systemd finds no generator to run: the runner's would run on the
+        # runner's loader (#5312).
+        with tempfile.TemporaryDirectory() as root:
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            seen = []
+
+            class Argv(unittest.TestCase):
+                def test_tool(case):
+                    seen.extend(image_tool(case, "systemd-analyze"))  # never run: its own case fails, unrecorded
+
+            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                Argv("test_tool").run(unittest.TestResult())
+            self.assertEqual(seen[:2], ["/usr/bin/env", "-i"])  # none of the runner's environment
+            for var in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH"):
+                path = next(a.split("=", 1)[1] for a in seen if a.startswith(var + "="))
+                self.assertTrue(os.path.isabs(path) and ":" not in path, path)
+        # A root holding "=" would be read by env as a variable, not run: refused by name (#5310).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "a=b")
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root,
+                                                       "AGENTOS_REQUIRE_REFERENCE_TOOLS": ""}):
+                with self.assertRaisesRegex(unittest.SkipTest, "holds '='"):
+                    image_tool(self, "systemd-analyze")
 
 
 class UplinkTest(unittest.TestCase):
