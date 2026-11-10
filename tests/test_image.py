@@ -3328,7 +3328,8 @@ def image_tool(case, name):
     stack does (#5055), the tool runs with no runner environment but PATH and with the loader's record
     of what it loads in a directory of the case's own; when the case ends, every record must name only
     paths in the root, and there must be one (#5231). `env -i` is in the argv, so no caller can run the
-    tool without its record."""
+    tool without its record. systemd's generator paths name an empty directory: `verify` runs the
+    environment generators, and the runner's are runner binaries (#5312's checks job ran one)."""
     root = os.environ.get("AGENTOS_REFERENCE_ROOT", "")
     rel = IMAGE_TOOLS[name][1]
     why = None
@@ -3349,7 +3350,10 @@ def image_tool(case, name):
     case.addCleanup(records.cleanup)
     log = os.path.join(records.name, "tool")
     case.addCleanup(hostcheck.audit_records, root, log)  # cleanups run last first: before the directory goes
-    return ["/usr/bin/env", "-i"] + ["%s=%s" % kv for kv in sorted(hostcheck.loader_env(log).items())] + [
+    none = os.path.join(records.name, "no-generators")
+    os.mkdir(none)
+    env = dict(hostcheck.loader_env(log), SYSTEMD_GENERATOR_PATH=none, SYSTEMD_ENVIRONMENT_GENERATOR_PATH=none)
+    return ["/usr/bin/env", "-i"] + ["%s=%s" % kv for kv in sorted(env.items())] + [
             os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
             "--library-path", ":".join(os.path.join(root, d) for d in IMAGE_LIBS),
             "--argv0", name, os.path.join(root, rel)]
@@ -5288,6 +5292,22 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     self.assertRegex(failed[0], want)
                 else:
                     self.assertEqual(failed, [])
+        # systemd finds no generator to run: the runner's would run on the runner's loader (#5312).
+        with tempfile.TemporaryDirectory() as root:
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            seen = []
+
+            class Argv(unittest.TestCase):
+                def test_tool(case):
+                    seen.extend(image_tool(case, "systemd-analyze"))  # never run: its own case fails, unrecorded
+
+            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                Argv("test_tool").run(unittest.TestResult())
+            for var in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH"):
+                path = next(a.split("=", 1)[1] for a in seen if a.startswith(var + "="))
+                self.assertTrue(os.path.isabs(path) and ":" not in path, path)
         # A root holding "=" would be read by env as a variable, not run: refused by name (#5310).
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "a=b")
