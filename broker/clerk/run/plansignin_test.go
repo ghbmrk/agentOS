@@ -378,8 +378,22 @@ func TestPlanOwnerSocket(t *testing.T) {
 	if n, _ := cli2.started(); n != 0 {
 		t.Fatal("a sandbox was started")
 	}
-	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn {
+	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn || st.Last != DSignInStopped {
 		t.Fatalf("state while unswappable: %+v %v", st, err)
+	}
+}
+
+// A zero bound takes its default.
+func TestPlanSignInTimesDefaults(t *testing.T) {
+	if got := (SignInTimes{}).orDefault(); got != (SignInTimes{Poll: time.Second, Link: 45 * time.Second, Wall: 15 * time.Minute}) {
+		t.Fatalf("defaults: %+v", got)
+	}
+}
+
+// Each sign-in guest has a random name of its own.
+func TestPlanSignInGuestsAreDistinct(t *testing.T) {
+	if a, b := signInGuest(), signInGuest(); a == b {
+		t.Fatalf("two sign-in guests named %q", a)
 	}
 }
 
@@ -538,6 +552,24 @@ func TestPlanSignInStuckHost(t *testing.T) {
 		}
 		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
 			t.Fatalf("begun: %+v", b)
+		}
+	})
+	t.Run("a caller that gives up during the start", func(t *testing.T) {
+		times := quick
+		times.Link = time.Minute
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: &stuckCLI{fakeCLI: newFakeCLI(login, ""), stuck: true}, Times: times}
+		ctx, cancel := context.WithCancel(context.Background())
+		begun := make(chan PlanBegun, 1)
+		go func() { begun <- h.Begin(ctx) }()
+		until(t, "the sign-in to start", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.cur != nil })
+		cancel()
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInTimedOut}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Begin ran on after its caller gave up")
 		}
 	})
 	t.Run("a remove once the code is printed", func(t *testing.T) {
