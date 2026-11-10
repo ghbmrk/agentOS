@@ -288,10 +288,9 @@ func records(sets []listedSet, l Layout) []carried {
 	}
 	w := elems{}
 	for _, s := range sets {
-		r, ok := by[s.Name]
-		if !ok {
-			continue
-		}
+		// A set records does not carry has the zero carry, whose longest
+		// of 0 leaves every element out.
+		r := by[s.Name]
 		for _, raw := range s.Elem {
 			var e struct {
 				Elem *struct {

@@ -360,7 +360,7 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 		},
 		HostSet("household", true): {hostEl("7", "fd10:20::2", "fd10:20::2", hw2, 3600)},
 		HeldSet("owner"):           {el(`"fd10:10::2"`, 50), el(`"10.10.0.2"`, 50), el(`"fe80::1%eth0"`, 50), el(`"::ffff:10.10.0.2"`, 50)},
-		ClaimSet("household"):      {el(`{"concat": ["fd10:20::2", "02:00:00:00:00:02"]}`, 50), el(`{"concat": ["10.20.0.2", "02:00:00:00:00:02"]}`, 50)},
+		ClaimSet("household"):      {el(`{"concat": ["fd10:20::2", "02:00:00:00:00:02"]}`, 50), el(`{"concat": ["10.20.0.2", "02:00:00:00:00:02"]}`, 50), el(`"fd10:20::3"`, 50)},
 		MACSet("household"):        {el(`2199023255554`, 50), el(`"02:00:00:00:00:02"`, 50), el(`2199023255555`, 21601)},
 		// 10.30.0.2 is 169738242; 02:00:00:00:00:01 is 2199023255553.
 		LeaseSet("guests"): {
@@ -384,6 +384,7 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 			el(`{"concat": ["10.10.0.4", "02:00:00:00:00:0b"]}`, 21601),
 			el(`{"concat": ["0.0.0.0", "02:00:00:00:00:0b"]}`, 60),
 			el(`{"concat": ["fd10:10::4", "02:00:00:00:00:0b"]}`, 60),
+			el(`"10.10.0.6"`, 60),
 		},
 		"ip/enforcer/" + HeldSet("owner"):          {el(`"fd10:10::7"`, 50)},
 		"inet/other/" + HostSet("guests", false):   {hostEl("1", "10.30.0.2", "10.30.0.2", hw, 100)},
