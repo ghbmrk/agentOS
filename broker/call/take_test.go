@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // RunAt lets the package's own tests hold a call at a chosen rung. It is in
@@ -358,5 +359,25 @@ func TestErrorAfterAStopIsNotAFailure(t *testing.T) {
 	}
 	if tu.Err == nil || len(played) != 1 || string(played[0]) != "CLIP:failed" {
 		t.Fatalf("failed turn: err %v, played %q", tu.Err, played)
+	}
+}
+
+// A callRung whose token is still being read is P0, at once: check sets r
+// before ready closes, so r means nothing until then.
+func TestARungNotYetReadIsP0(t *testing.T) {
+	cr := &callRung{ready: make(chan struct{}), r: P2}
+	got := make(chan Rung, 1)
+	go func() { got <- cr.level() }()
+	select {
+	case r := <-got:
+		if r != P0 {
+			t.Fatalf("a rung still being read says %v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("level waited for the token")
+	}
+	close(cr.ready)
+	if r := cr.level(); r != P2 {
+		t.Fatalf("a read rung says %v", r)
 	}
 }
