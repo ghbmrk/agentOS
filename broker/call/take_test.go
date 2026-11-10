@@ -16,47 +16,48 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // RunAt lets the package's own tests hold a call at a chosen rung. It is in
 // a _test.go file, so no importer of the package can reach it (#4949), and
 // the guard below reads only the non-test files.
 func RunAt(ctx context.Context, cfg Config, l Line, rung Rung) (Report, error) {
-	cr := &callRung{ready: make(chan struct{}), r: rung}
-	close(cr.ready)
-	return loop(ctx, cfg.withDefaults(), l, cr)
+	token := make(chan *grant, 1)
+	token <- &grant{r: rung, live: make(chan struct{})}
+	return loop(ctx, cfg.withDefaults(), l, token)
 }
 
 // The rung is the call's, set by the speed-dial check, never the caller's
 // to choose (briefs/VOICE-ro.md rule 4, CH-5, #4949). The answerer learns
-// it only from Ask.Rung, which reads the call's callRung. So the guard does
-// not trace what could carry a rung; it pins the few names that can make
-// one, by the rules below, over the type-checked non-test files:
+// it only from Ask.Rung, which reads the call's grant. So the guard does not
+// trace what could carry a rung or a grant. It makes every grant check's,
+// by these rules over the type-checked non-test files:
 //
 //  1. loop is named once, as the callee of a call in Serve's body outside
 //     any func literal, so only Serve, which answers only the owner's
 //     number, runs a call. check is named only as the callee of calls in
 //     token's body outside any func literal.
-//  2. callRung.r is written only in check and callRung.live only in Serve,
-//     outside any func literal, and Config.Token is written nowhere: a
-//     field is written by assigning it, incrementing it, taking its
-//     address, ranging into it, calling a method on it, or naming it as a
-//     composite literal key.
-//  3. No callRung or Config literal leaves out its keys, nothing converts
-//     to either (or to a pointer to either), and no composite literal or
-//     conversion has a type parameter as its type. Those are the ways Go
-//     fills a struct without naming its fields.
+//  2. A grant composite literal appears only in check, outside any func
+//     literal, and nothing converts to grant or to a type parameter, and
+//     no composite literal has a type parameter as its type. So check is
+//     the only source of a grant but the zero value.
+//  3. No code writes a grant's fields, or Config.Token: a field is written
+//     by assigning it, incrementing it, taking its address, ranging into
+//     it, calling a method on it, or naming it as a composite literal key
+//     (outside check's grant literal). No Config literal leaves out its
+//     keys, and nothing converts to Config, so nothing sets Token unnamed.
 //  4. No non-test file imports unsafe, reflect or C.
 //
-// callRung is unexported, so no other package can make one, and Ask's
-// rung is unexported, so no other package can set it. An Ask kept from a
-// call reads P0 once Serve returns. What these rules leave to review:
-// what check, token and Serve do with their inputs (the Serve and token
-// tests pin it); //go:linkname and assembly (tools/srclint.py fails them in
-// CI); and an Ask from one live call fed into another live call. If a
-// refactor keeps the rule but breaks the check, change the check in the
-// same PR as the code, with a probe for the new shape, never on its own.
+// So a grant is check's or zero, and a whole-value write or copy only
+// moves one of those: no write can mint a grant or stretch its life (the
+// #5229 Security blocker, a keyed literal that left live nil, is now a
+// rule 2 failure, and a zero grant reads P0). What these rules leave to
+// review: what check, token and Serve do with their inputs (the Serve and
+// token tests pin it); //go:linkname and assembly (tools/srclint.py fails
+// them in CI); and a grant from one live call used in another live call.
+// If a refactor keeps the rule but breaks the check, change the check in
+// the same PR as the code, with a probe for the new shape, never on its
+// own.
 func TestOnlyServeChoosesTheRung(t *testing.T) {
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil) // one importer: dependencies are read once
@@ -127,14 +128,15 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			return nil
 		}
 		serve, loopFn, checkFn := fn("Serve"), fn("loop"), fn("check")
-		crSt, cfgSt := under("callRung"), under("Config")
+		gSt, cfgSt := under("grant"), under("Config")
 		tokenFn, _, _ := types.LookupFieldOrMethod(pkg.Scope().Lookup("Config").Type(), false, pkg, "token")
 		if _, ok := tokenFn.(*types.Func); !ok {
 			t.Fatal("Config.token is gone: rewrite this check with the code")
 		}
-		// Each guarded name, and the one func that may use it (nil: none).
+		// Each guarded call, and the one func that may make it; and the
+		// fields nothing may write.
 		callIn := map[types.Object]types.Object{loopFn: serve, checkFn: tokenFn}
-		writeIn := map[types.Object]types.Object{field(crSt, "r"): checkFn, field(crSt, "live"): serve, field(cfgSt, "Token"): nil}
+		gr, gl, tok := field(gSt, "r"), field(gSt, "live"), field(cfgSt, "Token")
 		guarded := func(t types.Type) string {
 			if p, ok := t.Underlying().(*types.Pointer); ok {
 				t = p.Elem()
@@ -142,8 +144,8 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 			switch {
 			case func() bool { _, ok := t.(*types.TypeParam); return ok }():
 				return "a type parameter"
-			case types.Identical(t.Underlying(), crSt):
-				return "callRung"
+			case types.Identical(t.Underlying(), gSt):
+				return "grant"
 			case types.Identical(t.Underlying(), cfgSt):
 				return "Config"
 			}
@@ -191,6 +193,8 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 						switch g := guarded(info.Types[n].Type); {
 						case g == "a type parameter":
 							at(n, "composite literal of a type parameter")
+						case g == "grant" && (encl != checkFn || lit):
+							at(n, "grant literal outside check")
 						case g != "" && len(n.Elts) > 0 && !isKey(n.Elts[0]):
 							at(n, "%s literal without keys", g)
 						}
@@ -212,7 +216,7 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 								at(n, "%s is named other than as a direct call in %s", obj.Name(), in.Name())
 							}
 						}
-						if in, ok := writeIn[obj]; ok {
+						if obj == gr || obj == gl || obj == tok {
 							e, up := ast.Node(n), parent(1)
 							if kv, ok := up.(*ast.KeyValueExpr); ok && kv.Key == n {
 								up = kv // a composite literal key sets the field
@@ -221,8 +225,8 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 							}
 							var write bool
 							switch up := up.(type) {
-							case *ast.KeyValueExpr:
-								write = up.Key == n
+							case *ast.KeyValueExpr: // a grant literal is rule 2's
+								write = up.Key == n && obj == tok
 							case *ast.AssignStmt:
 								write = slices.ContainsFunc(up.Lhs, func(x ast.Expr) bool { return ast.Unparen(x) == e })
 							case *ast.IncDecStmt, *ast.StarExpr, *ast.IndexExpr, *ast.SliceExpr:
@@ -234,12 +238,8 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 							case *ast.SelectorExpr:
 								write = ast.Unparen(up.X) == e // a method on the field may take its address
 							}
-							if write && (in == nil || encl != in || lit) {
-								where := "outside any func"
-								if in != nil {
-									where = "outside " + in.Name()
-								}
-								at(n, "writes %s %s", obj.Name(), where)
+							if write {
+								at(n, "writes %s", obj.Name())
 							}
 						}
 					}
@@ -254,53 +254,56 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 	}
 
 	if bad := check(probe{}); len(bad) != 0 {
-		t.Errorf("the call's rung can be set other than by check, or the loop entered other than through Serve:\n%s\n"+
-			"Rule: only check sets a call's rung, only token calls check, and only Serve calls loop. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
+		t.Errorf("a grant can be made other than by check, or the loop entered other than through Serve:\n%s\n"+
+			"Rule: only check makes a grant, nothing writes one, only token calls check, and only Serve calls loop. If a refactor keeps that rule, change this check with the code, with a probe for the new shape.", strings.Join(bad, "\n"))
 	}
-	const cr3 = "type twin struct { ready chan struct{}; r Rung; live <-chan struct{} }\n"
+	const twin = "type twin struct { r Rung; live <-chan struct{} }\n"
 	for _, p := range []probe{
 		// Lens and Security on #5211, and main's old Run: loop named
 		// outside Serve.
 		{extra: "var Run = loop", want: "loop is named"},
 		{extra: "func Run(ctx context.Context, cfg Config, l Line) (Report, error) { return loop(ctx, cfg, l, nil) }", want: "loop is named"},
-		{extra: "func Runner() func(context.Context, Config, Line, *callRung) (Report, error) { return loop }", want: "loop is named"},
+		{extra: "func Runner() func(context.Context, Config, Line, <-chan *grant) (Report, error) { return loop }", want: "loop is named"},
 		{extra: "type ctl struct{}\nfunc (ctl) Run(ctx context.Context, cfg Config, l Line) (Report, error) { return loop(ctx, cfg, l, nil) }", want: "loop is named"},
 		{extra: "func init() { go loop(context.Background(), Config{}, nil, nil) }", want: "loop is named"},
 		{extra: "func (cfg Config) Serve(ctx context.Context, l Line) (Report, error) { return loop(ctx, cfg, l, nil) }", want: "loop is named"},
 		// #5219 item 1: inside Serve, but not a direct call.
-		{old: "return loop(ctx, cfg, c, cr)", new: "keep = func() { loop(ctx, cfg, c, cr) }\n\treturn Report{}, nil", extra: "var keep func()", want: "loop is named"},
-		{old: "return loop(ctx, cfg, c, cr)", new: "return id(loop)(ctx, cfg, c, cr)", extra: "func id[T any](t T) T { return t }", want: "loop is named"},
-		{old: "return loop(ctx, cfg, c, cr)", new: "loop(ctx, cfg, c, cr)\n\treturn loop(ctx, cfg, c, cr)", want: "Serve calls loop 2 times"},
+		{old: "return loop(ctx, cfg, c, token)", new: "keep = func() { loop(ctx, cfg, c, token) }\n\treturn Report{}, nil", extra: "var keep func()", want: "loop is named"},
+		{old: "return loop(ctx, cfg, c, token)", new: "return id(loop)(ctx, cfg, c, token)", extra: "func id[T any](t T) T { return t }", want: "loop is named"},
+		{old: "return loop(ctx, cfg, c, token)", new: "loop(ctx, cfg, c, token)\n\treturn loop(ctx, cfg, c, token)", want: "Serve calls loop 2 times"},
 		// check named outside token, or not as a direct call.
 		{extra: "var Check = check", want: "check is named"},
-		{extra: "func raise(cfg Config, cr *callRung, l Incoming) { check(cfg, cr, l.Number()) }", want: "check is named"},
-		{old: "check(cfg, cr, b.String())\n\t\t\treturn\n\t\tcase", new: "keepCheck = func(k string) { check(cfg, cr, k) }\n\t\t\treturn\n\t\tcase", extra: "var keepCheck func(string)", want: "check is named"},
-		// The rung set outside check: every way Go writes a field.
-		{extra: "func raise(cr *callRung) { cr.r = P2 }", want: "writes r outside check"},
-		{extra: "func raise(cr *callRung) { cr.r++ }", want: "writes r outside check"},
-		{extra: "func raise(cr *callRung) { cr.r += 2 }", want: "writes r outside check"},
-		{extra: "func raise(cr *callRung) { p := &cr.r; *p = P2 }", want: "writes r outside check"},
-		{extra: "func raise(cr *callRung) { for _, (cr.r) = range []Rung{P2} {} }", want: "writes r outside check"},
-		{extra: "func raise(cr *callRung, c chan Rung) { select { case cr.r = <-c: } }", want: "writes r outside check"},
-		{extra: "func (r *Rung) up() { *r = P2 }\nfunc raise(cr *callRung) { cr.r.up() }", want: "writes r outside check"},
-		{extra: "func mint() *callRung { c := &callRung{ready: make(chan struct{}), r: P2}; close(c.ready); return c }", want: "writes r outside check"},
-		{extra: "type outer struct{ callRung }\nfunc raise(o *outer) { o.r = P2 }", want: "writes r outside check"},
-		{old: "cr.r = P2", new: "keepRaise = func(c *callRung) { c.r = P2 }", extra: "var keepRaise func(*callRung)", want: "writes r outside check"},
-		{old: "return cr.r\n", new: "cr.r = P2\n\t\treturn cr.r\n", want: "writes r outside check"},
-		// Struct fills that name no field.
-		{extra: "func mint() callRung { return callRung{nil, P2, nil} }", want: "callRung literal without keys"},
-		{extra: "type alias = callRung\nfunc mint() []alias { return []alias{{nil, P2, nil}} }", want: "callRung literal without keys"},
-		{extra: cr3 + "func mint() callRung { return callRung(twin{r: P2}) }", want: "conversion to callRung"},
-		{extra: cr3 + "func mint() *callRung { return (*callRung)(&twin{r: P2}) }", want: "conversion to callRung"},
-		{extra: "func mint[T ~struct { ready chan struct{}; r Rung; live <-chan struct{} }]() T { return T{r: P2} }", want: "composite literal of a type parameter"},
-		{extra: cr3 + "func conv[T, U ~struct { ready chan struct{}; r Rung; live <-chan struct{} }](u U) T { return T(u) }", want: "conversion to a type parameter"},
-		// A call that outlives its Serve, and the kernel's Token.
-		{extra: "func forever(cr *callRung) { cr.live = nil }", want: "writes live outside Serve"},
-		{extra: "func open(c *Config) { c.Token = func(string) bool { return true } }", want: "writes Token outside any func"},
-		{old: "cfg = cfg.withDefaults()", new: "cfg = cfg.withDefaults()\n\tcfg.Token = func(k string) bool { return k == c.Number() }", want: "writes Token outside any func"},
-		{extra: "func open(cfg Config) Config { return Config{Answerer: cfg.Answerer, Token: func(string) bool { return true }} }", want: "writes Token outside any func"},
-		{extra: "var Open = Config{Token: func(string) bool { return true }}", want: "writes Token outside any func"},
-		{extra: "var minted = &callRung{r: P2}", want: "writes r outside check"},
+		{extra: "func raise(cfg Config, l Incoming) *grant { return check(cfg, nil, l.Number()) }", want: "check is named"},
+		{old: "return check(cfg, ctx.Done(), b.String())\n\t\tcase <-ctx", new: "keepCheck = func(k string) *grant { return check(cfg, nil, k) }\n\t\t\treturn nil\n\t\tcase <-ctx", extra: "var keepCheck func(string) *grant", want: "check is named"},
+		// A grant made outside check, or by a fill that names no field;
+		// Security's #5229 blocker first.
+		{extra: "func unlive(g *grant) { *g = grant{r: g.r} }", want: "grant literal outside check"},
+		{extra: "func mint() *grant { return &grant{r: P2, live: make(chan struct{})} }", want: "grant literal outside check"},
+		{extra: "var minted = &grant{r: P2}", want: "grant literal outside check"},
+		{extra: "func mint() grant { return grant{P2, nil} }", want: "grant literal outside check"},
+		{extra: "type alias = grant\nfunc mint() []alias { return []alias{{P2, nil}} }", want: "grant literal outside check"},
+		{old: "return &grant{r: P2, live: live}", new: "keepMint = func() *grant { return &grant{r: P2} }\n\t\treturn nil", extra: "var keepMint func() *grant", want: "grant literal outside check"},
+		{extra: twin + "func mint() grant { return grant(twin{r: P2}) }", want: "conversion to grant"},
+		{extra: twin + "func mint() *grant { return (*grant)(&twin{r: P2}) }", want: "conversion to grant"},
+		{extra: "func mint[T ~struct { r Rung; live <-chan struct{} }]() T { return T{r: P2} }", want: "composite literal of a type parameter"},
+		{extra: twin + "func conv[T, U ~struct { r Rung; live <-chan struct{} }](u U) T { return T(u) }", want: "conversion to a type parameter"},
+		// Every way Go writes a field, on a grant.
+		{extra: "func raise(g *grant) { g.r = P2 }", want: "writes r"},
+		{extra: "func raise(g *grant) { g.r++ }", want: "writes r"},
+		{extra: "func raise(g *grant) { g.r += 2 }", want: "writes r"},
+		{extra: "func raise(g *grant) { p := &g.r; *p = P2 }", want: "writes r"},
+		{extra: "func raise(g *grant) { for _, (g.r) = range []Rung{P2} {} }", want: "writes r"},
+		{extra: "func raise(g *grant, c chan Rung) { select { case g.r = <-c: } }", want: "writes r"},
+		{extra: "func (r *Rung) up() { *r = P2 }\nfunc raise(g *grant) { g.r.up() }", want: "writes r"},
+		{extra: "type outer struct{ grant }\nfunc raise(o *outer) { o.r = P2 }", want: "writes r"},
+		{extra: "func forever(g *grant) { g.live = make(chan struct{}) }", want: "writes live"},
+		{old: "if g == nil || g.live == nil {", new: "if g == nil {\n\t\tg.live = nil", want: "writes live"},
+		{old: "return &grant{r: P2, live: live}", new: "g := &grant{r: P2, live: live}\n\t\tg.live = nil\n\t\treturn g", want: "writes live"},
+		// The kernel's Token.
+		{extra: "func open(c *Config) { c.Token = func(string) bool { return true } }", want: "writes Token"},
+		{old: "cfg = cfg.withDefaults()", new: "cfg = cfg.withDefaults()\n\tcfg.Token = func(k string) bool { return k == c.Number() }", want: "writes Token"},
+		{extra: "func open(cfg Config) Config { return Config{Answerer: cfg.Answerer, Token: func(string) bool { return true }} }", want: "writes Token"},
+		{extra: "var Open = Config{Token: func(string) bool { return true }}", want: "writes Token"},
 		{extra: "func open(c Config) Config { return Config{c.Recognizer, c.Answerer, c.Synthesizer, c.Clips, c.Hold, 0, nil, nil, nil, 0, nil} }", want: "Config literal without keys"},
 		{extra: "type cfgTwin struct { Recognizer Recognizer; Answerer Answerer; Synthesizer Synthesizer; Clips Clips; Hold func(string) bool; OneMomentAfter time.Duration; Now func() time.Time; After func(time.Duration) <-chan time.Time; Token func(keys string) bool; TokenWindow time.Duration; Done func(Turn) }\nfunc open(c Config) Config { t := cfgTwin(c); t.Token = nil; return Config(t) }", want: "conversion to Config"},
 		// Out of the type system's sight.
@@ -325,9 +328,13 @@ func TestOnlyServeChoosesTheRung(t *testing.T) {
 		{extra: "var Floor = P2"},
 		{extra: "func Hook() Rung { return P2 }"},
 		{extra: "type floored struct{ Config; Floor Rung }"},
-		{extra: "func peek(cr *callRung) (Rung, bool) { return cr.r, cr.live == nil }"},
+		{extra: "func peek(g *grant) (Rung, bool) { return g.r, g.live == nil }"},
 		{extra: "func keys(cfg Config) bool { return cfg.Token != nil && cfg.Token(\"1\") }"},
-		{extra: "func copyOf(cr *callRung) callRung { return *cr }"},
+		// A whole-value write or copy moves only check's grants or zero
+		// ones (Security on #5229, M2 and M4).
+		{extra: "func copyOf(g *grant, src *grant) { *g = *src }"},
+		{extra: "func copyAll(dst, src []grant) int { return copy(dst, src) }"},
+		{extra: "func zero(g *grant) { var z grant; *g = z }"},
 	} {
 		if bad := check(p); len(bad) != 0 {
 			t.Errorf("probe %q flagged: %q", p.extra, bad)
@@ -362,22 +369,21 @@ func TestErrorAfterAStopIsNotAFailure(t *testing.T) {
 	}
 }
 
-// A callRung whose token is still being read is P0, at once: check sets r
-// before ready closes, so r means nothing until then.
-func TestARungNotYetReadIsP0(t *testing.T) {
-	cr := &callRung{ready: make(chan struct{}), r: P2}
-	got := make(chan Rung, 1)
-	go func() { got <- cr.level() }()
-	select {
-	case r := <-got:
-		if r != P0 {
-			t.Fatalf("a rung still being read says %v", r)
+// A grant says P2 while its call is live and P0 after; no grant, and a
+// zero one, say P0 (a zero grant's live is nil, which never closes).
+func TestAGrantLivesWithItsCall(t *testing.T) {
+	live := make(chan struct{})
+	g := &grant{r: P2, live: live}
+	for _, c := range []struct {
+		g    *grant
+		want Rung
+	}{{nil, P0}, {&grant{}, P0}, {&grant{r: P2}, P0}, {g, P2}} {
+		if got := c.g.level(); got != c.want {
+			t.Fatalf("%+v says %v, want %v", c.g, got, c.want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("level waited for the token")
 	}
-	close(cr.ready)
-	if r := cr.level(); r != P2 {
-		t.Fatalf("a read rung says %v", r)
+	close(live)
+	if got := g.level(); got != P0 {
+		t.Fatalf("a grant whose call ended says %v", got)
 	}
 }
