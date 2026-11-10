@@ -154,14 +154,14 @@ type Enforcer struct {
 	conns         atomic.Int32
 	changed       chan struct{}
 	lastLit       time.Time
-	// The page's core and recovery state as last told to the alerts:
-	// Tick tells them only a change, since each call re-shows the light
-	// and coming up re-offers every unsent alert (ENF-h-a5). upMu holds
-	// toldUp, which a hello also writes, so a core shown up by a hello
-	// is shown down by the next tick that finds it silent (#4755 item 8).
-	upMu         sync.Mutex
-	toldUp       bool
-	toldRecovery bool
+	// The page's core state as last told to the alerts: Tick tells them
+	// only a change, since each call re-shows the light and coming up
+	// re-offers every unsent alert (ENF-h-a5). upMu holds toldUp, which a
+	// hello also writes, so a core shown up by a hello is shown down by
+	// the next tick that finds it silent (#4755 item 8). The recovery's
+	// state the book tells the alerts itself, at open and at each change.
+	upMu   sync.Mutex
+	toldUp bool
 
 	// fresh is the byte caps' fresh day (state.go); freshStop carries
 	// errFreshDay to the daemon's loop once its day is saved.
@@ -230,8 +230,6 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		return nil, err
 	}
 	d.openFresh()
-	d.toldRecovery = d.recoveryPending()
-	d.alerts.Recovery(d.toldRecovery) // the alerts start with the core down (toldUp false)
 	// Nothing is served until the policy in force is loaded: the box may
 	// have booted with any ruleset, so a refused first load is a failed
 	// start, and the service manager starts the daemon again (P4, P5,
@@ -315,11 +313,6 @@ func (d *Enforcer) coreUp() bool {
 	return s != 0 && d.dp.Elapsed()-time.Duration(s-1) < Silence
 }
 
-func (d *Enforcer) recoveryPending() bool {
-	_, ok := d.book.Recovery()
-	return ok
-}
-
 // kick asks the run loop to bring the firewall up to the policy in force.
 func (d *Enforcer) kick() {
 	select {
@@ -362,10 +355,6 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	// The book takes the policy lock itself (enrol ASSUMPTIONS ENF-c-8).
 	if _, err := d.book.Tick(); err != nil {
 		d.dp.Logf("enrolment: " + err.Error())
-	}
-	if r := d.recoveryPending(); r != d.toldRecovery {
-		d.toldRecovery = r
-		d.alerts.Recovery(r)
 	}
 	d.mu.Lock()
 	_, err := d.engine.Tick(now.UnixMilli())
@@ -412,9 +401,8 @@ func (d *Enforcer) renewCert(now time.Time) bool {
 	r, err := d.cert.Renew(d.cfg.Name, now)
 	if err != nil {
 		d.dp.Logf("page certificate: " + err.Error())
-		return false
 	}
-	if leafEqual(r, d.cert) {
+	if err != nil || leafEqual(r, d.cert) {
 		return false
 	}
 	if err := saveCert(d.store(fileCert), r); err != nil {
@@ -491,7 +479,6 @@ func (d *Enforcer) Close() {
 	for _, ln := range d.pageLns {
 		ln.Close()
 	}
-	d.pageLns = nil
 	d.pageMu.Unlock()
 	d.closeFresh()
 	d.closeNetwork()
@@ -560,16 +547,14 @@ func (d *Enforcer) ServeChannel(ln net.Listener) error {
 func (d *Enforcer) serveConn(t *tls.Conn) {
 	hello := time.Now().Add(d.dp.HelloWait)
 	t.SetDeadline(hello)
-	if err := t.Handshake(); err != nil {
+	if t.Handshake() != nil {
 		return
 	}
-	t.SetDeadline(time.Time{})
+	// deadlineConn sets each read's and write's deadline from here on.
 	cs := t.ConnectionState()
-	exp, err := cs.ExportKeyingMaterial(wire.ExporterLabel, nil, wire.ExporterLen)
-	if err != nil {
-		return
+	if exp, err := cs.ExportKeyingMaterial(wire.ExporterLabel, nil, wire.ExporterLen); err == nil {
+		_ = d.ch.Serve(&deadlineConn{Conn: t, hello: hello, idle: d.dp.IdleWait}, exp)
 	}
-	_ = d.ch.Serve(&deadlineConn{Conn: t, hello: hello, idle: d.dp.IdleWait}, exp)
 }
 
 // deadlineConn bounds a channel session's reads and writes (#4755 items 2
@@ -631,10 +616,7 @@ func ephemeralCert(r io.Reader) (tls.Certificate, error) {
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(r, t, t, pub, priv)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, nil
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, err
 }
 
 // lockedPolicy is the engine as the channel reaches it: every call under

@@ -356,6 +356,11 @@ func TestChannelAcceptBackoff(t *testing.T) {
 	if !other.closed.Load() {
 		t.Fatal("a connection off the core's segment was left open")
 	}
+	select {
+	case <-other.read:
+		t.Fatal("a connection off the core's segment was read: a handshake began")
+	case <-time.After(100 * time.Millisecond):
+	}
 	want := []time.Duration{5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 5 * time.Millisecond}
 	var got []string
 	x.mu.Lock()

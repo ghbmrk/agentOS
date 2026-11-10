@@ -56,6 +56,23 @@ func TestChannelElapsedIsBootTime(t *testing.T) {
 	}
 }
 
+// TestBootTimeNeverStepsBack: a reading below one already returned
+// gives the larger one again, so the channel's rates never see time run
+// backwards (#4507); each call takes and gives back the clock's lock.
+func TestBootTimeNeverStepsBack(t *testing.T) {
+	bootMu.Lock()
+	saved := lastBoot
+	ahead := boot(t) + 1000*time.Hour
+	lastBoot = ahead
+	bootMu.Unlock()
+	t.Cleanup(func() { bootMu.Lock(); lastBoot = saved; bootMu.Unlock() })
+	for range 2 {
+		if e := bootTime(); e != ahead {
+			t.Fatalf("bootTime %v after %v was returned", e, ahead)
+		}
+	}
+}
+
 // TestDepsRequired: the daemon refuses to start with any piece missing,
 // so production never runs a channel on Go's monotonic clock or with no
 // firewall, light or radio host.
@@ -129,6 +146,22 @@ func TestConfigRefused(t *testing.T) {
 			t.Errorf("%s: taken", name)
 		}
 	}
+	// Each of these is refused by its own check, which the error names.
+	for _, c := range []struct {
+		want string
+		f    func(*Config)
+	}{
+		{"name is required", func(c *Config) { c.Name = "" }},
+		{"config: layout: ", func(c *Config) { c.Layout.ISP = nil }},
+		{"page and page_allow are required", func(c *Config) { c.Page = nil }},
+		{"page and page_allow are required", func(c *Config) { c.PageAllow = nil }},
+	} {
+		cfg := good
+		c.f(&cfg)
+		if err := cfg.check(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("want %q: %v", c.want, err)
+		}
+	}
 	// A hardware address that does not parse is named as it was written.
 	bad := good
 	bad.Wake = []WakeMachine{{MAC: "zz", Iface: "hh0"}}
@@ -146,6 +179,10 @@ func TestConfigRefused(t *testing.T) {
 	}
 	if _, err := parseConfig(b); err != nil {
 		t.Fatalf("the good configuration was refused: %v", err)
+	}
+	// A second document after the first is refused, not dropped.
+	if _, err := parseConfig(append(slices.Clone(b), "{}"...)); err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Errorf("trailing data: %v", err)
 	}
 	// A good configuration plus one unknown key: only the key can refuse it.
 	if _, err := parseConfig(append(b[:len(b)-1], `,"extra":1}`...)); err == nil {
@@ -188,8 +225,8 @@ func TestIdleTickQuiet(t *testing.T) {
 			x.advance(time.Second)
 		}
 		d.Close()
-		if light == alert.Light(cl) && cl.n > 1 {
-			t.Fatalf("an idle minute showed the light %d times; only the minute's Refresh should", cl.n)
+		if light == alert.Light(cl) && cl.n != 1 {
+			t.Fatalf("an idle minute showed the light %d times; only the minute's Refresh should, once", cl.n)
 		}
 	}
 	if n := strings.Count(buf.String(), "light:"); n != 0 {
