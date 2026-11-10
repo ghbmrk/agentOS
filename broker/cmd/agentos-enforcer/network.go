@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -77,6 +78,17 @@ type network struct {
 	// "" while they are: no resolver instance runs meanwhile (ENF-l-21).
 	// d.fwMu guards it.
 	unserved string
+	// The resolver as the page shows it (pageResolver, #5164 R1), each
+	// set under d.fwMu and read under resMu, so the page never waits on a
+	// load: whether its instances run (the files the last taken load
+	// started, or none since the served check stopped them), the served
+	// check's failure, the policy in force's, and the last refused
+	// load's error ("" once one is taken).
+	resMu      sync.Mutex
+	resRuns    bool
+	stopServed error
+	stopPolicy string
+	stopLoad   string
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -178,7 +190,16 @@ func (d *Enforcer) ServeWake(ctx context.Context) error {
 // The running table is read on every load, the first after a restart
 // included, so the resolver's answers survive a restart (#4754 Potency
 // point 1).
-func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
+func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err error) {
+	defer func() {
+		// A refused load leaves the resolver as it was, stopped
+		// included, so the page names the refusal (#5243 L3 item 1).
+		if err != nil {
+			d.net.resMu.Lock()
+			d.net.stopLoad = err.Error()
+			d.net.resMu.Unlock()
+		}
+	}()
 	l := d.cfg.Layout
 	// One compile check refuses all three: a document that does not
 	// compile touches neither the resolver nor the ruleset.
@@ -188,8 +209,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 	if err := cmp.Or(err, aerr, herr); err != nil {
 		return err
 	}
-	files, err := dns.Generate(doc, l, d.cfg.DNS)
-	if err != nil {
+	files, genErr := dns.Generate(doc, l, d.cfg.DNS)
+	if err := genErr; err != nil {
 		// A document the resolver cannot serve still loads, so a
 		// tightening is never held back; every instance stops, so no
 		// list resolves at all until one can be served (ENF-l-11).
@@ -205,6 +226,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		// only failure, a closed set, fails the load's Apply below too.
 		d.dp.DNS.Apply(dns.Files{}, func() error { return nil })
 		files = dns.Files{}
+		d.net.resMu.Lock()
+		d.net.resRuns = false
+		d.net.resMu.Unlock()
 	}
 	caps := traffic.CapsOf(doc)
 	load := func() error {
@@ -255,6 +279,16 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		}
 		return err
 	}
+	// The policy in force is doc only once its load is taken; a refused
+	// one leaves the resolver on the old policy's files, or none.
+	why := ""
+	if genErr != nil {
+		why = genErr.Error()
+	}
+	d.net.resMu.Lock()
+	d.net.resRuns = len(dnsrun.Names(files)) > 0
+	d.net.stopPolicy, d.net.stopLoad = why, ""
+	d.net.resMu.Unlock()
 	b, err := policy.Encode(doc)
 	if err == nil {
 		err = d.store(fileLoaded).Save(b)
@@ -447,9 +481,13 @@ func (d *Enforcer) offloads() bool {
 // resolver's instances (ENF-l-21). d.fwMu is held.
 func (d *Enforcer) servedLocked() bool {
 	msg := ""
-	if err := d.dp.Served(d.cfg.DNS.Nets); err != nil {
+	err := d.dp.Served(d.cfg.DNS.Nets)
+	if err != nil {
 		msg = err.Error()
 	}
+	d.net.resMu.Lock()
+	d.net.stopServed = err
+	d.net.resMu.Unlock()
 	changed := msg != d.net.unserved
 	switch {
 	case changed && msg != "":
@@ -460,6 +498,18 @@ func (d *Enforcer) servedLocked() bool {
 	d.net.unserved = msg
 	d.net.reload = d.net.reload || changed
 	return changed
+}
+
+// strayAddr is an address hold found on a served interface outside its
+// network: the page names the interface and the address (#5164 R1).
+type strayAddr struct {
+	iface string
+	addr  netip.Prefix
+	nets  string
+}
+
+func (s strayAddr) Error() string {
+	return fmt.Sprintf("served interface %s holds %s, outside %s", s.iface, s.addr, s.nets)
 }
 
 // procNet is the kernel's network settings (sysctl net.*).
@@ -541,7 +591,7 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 		}
 		for _, p := range have {
 			if !inNet(p, n) {
-				errs = append(errs, fmt.Errorf("served interface %s holds %s, outside %s", n.Iface, p, netsOf(n)))
+				errs = append(errs, strayAddr{n.Iface, p, netsOf(n)})
 			}
 		}
 	}

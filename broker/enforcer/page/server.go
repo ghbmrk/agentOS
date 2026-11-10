@@ -121,6 +121,9 @@ type Config struct {
 	// Caps is the byte caps' day and the owner's fresh start of it; nil
 	// with no byte caps.
 	Caps Caps
+	// Resolver is why the enforcer's resolver is stopped, which home
+	// shows; nil shows nothing.
+	Resolver Resolver
 	// Act carries out the owner's asserted actions on safety-list devices
 	// (slice s); nil serves none. ActTimeout bounds each call, and so how
 	// long a tap holds Lock: zero means action.Timeout, and more is refused.

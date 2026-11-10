@@ -6,4 +6,5 @@ __pycache__/
 /broker/agentos-devices
 /broker/cmd/agentos-devices/agentos-devices
 /broker/cmd/agentosd/agentosd
+/broker/cmd/agentos-enforcer/agentos-enforcer
 *.test
