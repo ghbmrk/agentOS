@@ -29,7 +29,7 @@ class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_x")
         self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
-                                                  "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
+                                                  "trace=open,openat,openat2,creat,bind,symlink,symlinkat,chdir,fchdir,"
                                                   "unlink,unlinkat,rename,renameat,renameat2,truncate",
                                                   "-e", "signal=none"])
         # #5413: the trace goes to strace's stdin, a pipe; sh gives the module /dev/null there and
@@ -187,6 +187,11 @@ class RunTest(unittest.TestCase):
         # Only the run's own last line counts: a test printing the format earlier does not.
         self.assertIsNone(unit_tests.slowest_part("test_0", line.format(1.0) + "more\n"))
         self.assertIsNone(unit_tests.slowest_part("test_0", "test_01: slowest part 1.000s x\n"))
+
+
+def strace_closed():
+    """Whether this user's strace runs closed to /proc: unreadable to a user other than root."""
+    return os.geteuid() != 0 and not os.access(shutil.which("strace") or "/", os.R_OK)
 
 
 def traced():
@@ -390,7 +395,7 @@ class StraceFaultTest(unittest.TestCase):
         d = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d)
         (d / "test_x.trace.cut").write_text("an earlier run's")
-        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n", "", None)):
+        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n", "", [])):
             self.assertEqual(unit_tests.run_one("test_x", str(d))[1], 0)
         self.assertFalse((d / "test_x.trace.cut").exists())
 
@@ -566,8 +571,10 @@ class StraceFaultTest(unittest.TestCase):
                     """))
                 fake = top / "bin" / "strace"
                 fake.parent.mkdir()
+                # Closed to /proc as main requires (STRACE_OPEN), as an unreadable strace runs.
                 fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent("""\
-                    import pathlib, subprocess, sys
+                    import ctypes, pathlib, subprocess, sys
+                    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
                     module = sys.argv[sys.argv.index("-p") + 1][:-3]
                     pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(f"trace of {module}")
                     sys.exit(subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode)
@@ -617,10 +624,36 @@ class StraceFaultTest(unittest.TestCase):
         with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
             _, rc, _, out = unit_tests.run_one("test_x", str(d))
         self.assertEqual((rc, (d / "calls").read_text()), (1, "x"), out)
-        self.assertRegex(out, r"the module opened its own trace's pipe \(pipe:\[\d+\]\), so its trace may hide lines")
+        self.assertRegex(out, r"test_x's trace cannot be trusted, so the module fails: it shows an open of a trace's pipe \(pipe:\[\d+\]\)")
         self.assertNotIn(unit_tests.RERAN, out)
-        # Another pipe's name is no sign.
-        self.assertFalse(unit_tests._shows(os.open(d, os.O_RDWR | os.O_TMPFILE), b"pipe:[1]"))
+        # A pipe this process did not make for a trace is no sign.
+        other = os.open(d, os.O_RDWR | os.O_TMPFILE)
+        self.addCleanup(os.close, other)
+        os.write(other, b"= 4<pipe:[1]>\n")
+        self.assertEqual(unit_tests.pipes_in(other), [])
+
+    def test_a_module_that_opens_another_modules_trace_pipe_fails(self):
+        # #5413: module a's fake strace logs an open of module b's trace pipe: a fails, b does not.
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        fake = d / "strace"
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent(f"""\
+            import os, pathlib, sys
+            module = sys.argv[sys.argv.index("-p") + 1][:-3]
+            b = pathlib.Path({str(d / "b")!r})
+            if module == "test_b":
+                b.write_text(str(os.fstat(0).st_ino))
+                line = ""
+            else:
+                line = f'7 openat(AT_FDCWD</>, "/proc/6/fd/3", O_WRONLY) = 4<pipe:[{{b.read_text()}}]>\\n'
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(line)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            _, rc_b, _, _ = unit_tests.run_one("test_b", str(d))
+            _, rc_a, _, out = unit_tests.run_one("test_a", str(d))
+        self.assertEqual((rc_a, rc_b), (1, 0), out)
+        self.assertIn(f"test_a's trace cannot be trusted, so the module fails: it shows an open of a trace's pipe (pipe:[{(d / 'b').read_text()}])", out)
 
     @unittest.skipUnless(shutil.which("strace"), "strace is not installed (CI installs it)")
     @unittest.skipIf(traced(), "already under strace (CI's step): a nested strace cannot attach")
@@ -642,8 +675,79 @@ class StraceFaultTest(unittest.TestCase):
             """))
         _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
         self.assertEqual(rc, 1, out)
-        self.assertIn("the module opened its own trace's pipe", out)
+        if strace_closed():  # as on CI: the open is refused (ci.yml makes strace unreadable)
+            self.assertIn("PermissionError", out)
+            return
+        self.assertIn("test_fake's trace cannot be trusted, so the module fails: it shows an open of a trace's pipe", out)
         self.assertIn("999 x(", (root / "test_fake.trace").read_text(errors="replace"))
+
+    @unittest.skipIf(os.geteuid() == 0, "root opens any process's descriptors, so nothing is closed to it")
+    def test_main_refuses_a_strace_open_to_proc(self):
+        # #5413: a strace this user can read runs dumpable, so a module could write into its trace
+        # stream by any /proc path. main fails each module whose strace was open; run_one alone
+        # (tests' fake straces) does not check. Here the fake strace is a readable script.
+        top = pathlib.Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, top, True)
+        root = top / "repo"
+        (root / "tools").mkdir(parents=True)
+        (root / "tests").mkdir()
+        shutil.copy(unit_tests.__file__, root / "tools" / "unit_tests.py")
+        (root / "tests" / "test_x.py").write_text("import unittest\nclass A(unittest.TestCase):\n    def test_x(self): pass\n")
+        fake = top / "bin" / "strace"
+        fake.parent.mkdir()
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent("""\
+            import pathlib, subprocess, sys, time
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("1 openat(...)\\n")
+            time.sleep(1)  # still running when the runner looks
+            sys.exit(subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode)
+            """))
+        fake.chmod(0o755)
+        p = subprocess.run([sys.executable, str(root / "tools" / "unit_tests.py"), str(top / "reads")], cwd=root,
+                           capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ.get('PATH', '')}"})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("test_x's trace cannot be trusted, so the module fails: strace was open to /proc", p.stdout)
+        self.assertNotIn(unit_tests.RERAN, p.stdout)
+
+    @unittest.skipUnless(shutil.which("strace"), "strace is not installed (CI installs it)")
+    @unittest.skipIf(traced(), "already under strace (CI's step): a nested strace cannot attach")
+    @unittest.skipIf(os.geteuid() != 0 and not strace_closed(),
+                     "strace is readable here, so main refuses it before any pipe is opened")
+    def test_a_module_writing_into_another_modules_trace_fails_the_step(self):
+        # #5413, end to end: tools/unit_tests.py under the real strace, on a copied layout. test_a
+        # finds test_b's strace and writes a fragment into each of its pipes while test_b runs.
+        top = pathlib.Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, top, True)
+        root = top / "repo"
+        (root / "tools").mkdir(parents=True)
+        (root / "tests").mkdir()
+        shutil.copy(unit_tests.__file__, root / "tools" / "unit_tests.py")
+        (root / "tests" / "test_b.py").write_text(
+            "import time, unittest\nclass B(unittest.TestCase):\n    def test_b(self): time.sleep(3)\n")
+        (root / "tests" / "test_a.py").write_text(textwrap.dedent("""\
+            import os, time, unittest
+            class A(unittest.TestCase):
+                def test_a(self):
+                    time.sleep(1)
+                    for pid in filter(str.isdigit, os.listdir("/proc")):
+                        try:
+                            argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\\0")
+                        except OSError:
+                            continue
+                        if argv[0].endswith(b"strace") and b"test_b.py" in argv:
+                            for n in os.listdir(f"/proc/{pid}/fd"):
+                                if os.readlink(f"/proc/{pid}/fd/{n}").startswith("pipe:"):
+                                    os.write(os.open(f"/proc/{pid}/fd/{n}", os.O_WRONLY), b"999 x(")
+                            return
+                    self.fail("no strace for test_b")
+            """))
+        p = subprocess.run([sys.executable, str(root / "tools" / "unit_tests.py"), str(top / "reads"), "--jobs", "2"],
+                           cwd=root, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("::error::test_a failed", p.stdout)
+        self.assertIn("PermissionError" if strace_closed() else
+                      "test_a's trace cannot be trusted, so the module fails: it shows an open of a trace's pipe", p.stdout)
+        self.assertNotIn("::error::test_b failed", p.stdout)
 
     def test_a_failed_test_is_never_rerun(self):
         rc, out, trace, calls = self.run_plan("fail-then-cut", "ok")
@@ -1057,6 +1161,11 @@ class ClashTest(unittest.TestCase):
             for name in names:
                 self.assertEqual(clash_audit.clashes({"test_a": cwd + line, "test_b": w(2, name)}, serial={}),
                                  [("path", name, "test_a", "test_b")], line)
+        # creat (x86_64's raw syscall; glibc's creat() is an openat) is a write open: a clash and a read.
+        made = '1 creat("/f/x", 0644)                  = 3</f/x>\n'
+        self.assertEqual(clash_audit.clashes({"test_a": made, "test_b": w(2, "/f/x")}, serial={}),
+                         [("path", "/f/x", "test_a", "test_b")])
+        self.assertIn(("LEDGER.md", False), records_audit.opened(f'1 creat("{R}/LEDGER.md", 0644) = 3<{R}/LEDGER.md>\n'))
         # No directory fd: the name joins the cwd the pid's lines showed, else stays as asked.
         self.assertEqual(clash_audit.writes(cwd + '1 unlink("c") = 0\n'), {("path", "/d/c")})
         self.assertEqual(clash_audit.writes('1 unlink("c") = 0\n'), {("path", "c")})

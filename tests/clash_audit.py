@@ -43,7 +43,7 @@ import unit_tests  # noqa: E402
 
 # One strace -f -y line: pid, call, rest. A call split by another process's ends
 # `<unfinished ...>`; its result is on a later `<... call resumed>` line of the same pid.
-_CALLS = "open|openat|openat2|bind|symlink|symlinkat|chdir|fchdir|unlink|unlinkat|rename|renameat|renameat2|truncate"
+_CALLS = "open|openat|openat2|creat|bind|symlink|symlinkat|chdir|fchdir|unlink|unlinkat|rename|renameat|renameat2|truncate"
 _LINE = re.compile(rf'^(\d+)\s+({_CALLS})\((.*)$')
 _RESUMED = re.compile(rf'^(\d+)\s+<\.\.\. ({_CALLS}) resumed>(.*)$')
 _STR = r'"((?:[^"\\]|\\.)*)"'
@@ -234,12 +234,12 @@ class _Tree:
             self.cwd[pid] = _decode(m.group(2))
 
 
-def _write_open(tree, pid, rest):
+def _write_open(tree, pid, rest, creat=False):
     """The names a write open asked for, walked, or None for an open that writes nothing. Only
     an open the kernel gave no file for is walked; a resolved one is its reached file. The result
     is read only after the quoted path, since a name can hold `) = 3<` (a split line has none)."""
     m = _OPEN_ARGS.match(rest)
-    if not m or not _WRITE.search(_flags(m.group(3))):
+    if not m or not (creat or _WRITE.search(_flags(m.group(3)))):
         return None
     reached = _REACHED.search(m.group(3))
     if reached:
@@ -296,7 +296,7 @@ def _scan(trace, tree):
             elif not call.startswith("open"):
                 out |= _named(tree, pid, call, rest)
             else:
-                names = _write_open(tree, pid, rest)
+                names = _write_open(tree, pid, rest, call == "creat")  # creat: O_CREAT|O_WRONLY|O_TRUNC
                 if names is not None:
                     # A split open's asked path counts even if the call never resumes (the process
                     # was killed mid-open); the resumed line adds the file it reached.

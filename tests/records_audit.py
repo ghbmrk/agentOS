@@ -18,8 +18,8 @@ writing, unlinked, renamed or truncated a path in the trace directory fails too:
 may not write them, its own or another module's (#5407; the write as tests/clash_audit.py reads it).
 tools/unit_tests.py names no trace until every module has ended (#5413), so a module cannot
 plant, link, move or rewrite one by name; one that reaches strace's own descriptors through
-/proc/<strace>/fd to write into its trace fails there (unit_tests.OWN_PIPE): the open shows
-the pipe it reached (an io_uring open, or pidfd_getfd where ptrace allows it, shows none).
+/proc/<strace>/fd is refused, as strace runs closed to /proc (unit_tests.STRACE_OPEN), and an
+open of any trace's pipe that the trace shows fails its module too (unit_tests.PIPES).
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """
@@ -41,8 +41,8 @@ TESTS = os.path.join(ROOT, "tests")
 # process's ends in `<unfinished ...>`, its result on a later `<... openat resumed>` line. strace
 # pads a short result to a column (`)          = 3</path>`, every resumed line), and -y escapes
 # the paths it prints as strace quotes them (clash_audit._decode).
-_OPEN = re.compile(r'^\d+\s+open(?:at2?)?\((?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)"(.*)$')
-_RESUMED = re.compile(r'^\d+\s+<\.\.\. open(?:at2?)? resumed>')
+_OPEN = re.compile(r'^\d+\s+(?:open(?:at2?)?|creat)\((?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)"(.*)$')
+_RESUMED = re.compile(r'^\d+\s+<\.\.\. (?:open(?:at2?)?|creat) resumed>')
 _REACHED = re.compile(r'\)\s+= \d+<([^>]*)>$')
 
 

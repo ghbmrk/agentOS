@@ -7,8 +7,8 @@ ci.yml's unit-test step. Each module runs as `python -m unittest discover -s tes
 changes. No trace has a name while any module runs (#5413): strace writes it into a pipe this
 process alone reads, into a file with no name, and once every module has ended this process makes
 DIR, which must not exist before, and copies each trace to its name there. So no module can plant,
-link, rename or rewrite a trace by name; this process is closed to /proc (PR_SET_DUMPABLE 0), so
-none reaches the unnamed files either. A module's output is buffered and printed whole, in name order, so logs do not
+link, rename or rewrite a trace by name; this process and strace are closed to /proc (STRACE_OPEN),
+so none reaches the unnamed files or the trace stream either. A module's output is buffered and printed whole, in name order, so logs do not
 interleave; a line per finished module shows progress meanwhile. The longest modules start
 first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
@@ -55,12 +55,12 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # bind: a fixed port or socket name shared by two modules is a clash; symlink, symlinkat, chdir
 # and fchdir let tests/clash_audit.py resolve a path the kernel gave no file for, as it was walked.
-# unlink, unlinkat, rename, renameat, renameat2 and truncate change a name as a write open does
+# creat is an open for writing. unlink, unlinkat, rename, renameat, renameat2 and truncate change a name as a write open does
 # (#5413): another module's file, or a trace (tests/records_audit.py).
 # --kill-on-exit: the kernel SIGKILLs every process strace still traces when strace exits, so a run
 # strace gives up on (STRACE_FAULT) cannot go on untraced, whatever session it moved to (#5364).
 STRACE = ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
-          "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
+          "trace=open,openat,openat2,creat,bind,symlink,symlinkat,chdir,fchdir,"
           "unlink,unlinkat,rename,renameat,renameat2,truncate",
           "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
@@ -82,13 +82,12 @@ ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # The module's first step, under strace: its stderr joins its stdout, so strace keeps its own
 # stderr, on which alone a fault is read; nothing a test prints can fake one (#5407). sh joins
 # them before Python starts, so no site hook (.pth, sitecustomize, usercustomize) or child it
-# starts holds strace's stream (#5413). Only a test that opens that stream by its /proc name
-# reaches it, and a cut it fakes so gains only a rerun: both audits read the cut attempt's trace.
+# starts holds strace's stream (#5413); strace is closed to /proc (STRACE_OPEN), so none opens it
+# either, and a cut faked where it is not gains only a rerun: both audits read the cut trace.
 # strace's trace goes to its stdin, the pipe's write end (TRACE_TO), and the module gets
-# /dev/null there instead, so no module holds the pipe. Only an open of strace's own descriptor
-# (/proc/<strace>/fd, by any path) reaches it, and bytes written there could cut strace's next line
-# so that no audit reads it; but strace logs that open whole, showing the pipe it reached, before
-# the module holds it, so a trace that shows the pipe (OWN_PIPE) fails its module (#5413).
+# /dev/null there instead, so no module holds the pipe. Bytes written there could cut strace's next
+# line so that no audit reads it: main refuses a strace open to /proc, and a trace that shows an
+# open of any trace pipe (PIPES) fails its module (#5413).
 JOIN = ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh"]
 TRACE_TO = "/proc/self/fd/0"
 LONG_POLE = 1.25
@@ -243,36 +242,66 @@ STRACE_FAULT = re.compile(r"(?m)^strace: .*(?:Input/output error|PTRACE_)")
 # counts, as do an unexpected success and the run's failure summary.
 TEST_FAILED = re.compile(r"(?m)(?:FAIL|ERROR)$|unexpected success|^(?:FAIL|ERROR): |^FAILED \(")
 RERAN = "the module reruns whole into a fresh trace"
-OWN_PIPE = "pipe:[{}]"  # -y's name for the trace pipe, by its inode, in a trace that opened it
+# Every trace pipe this process made, by inode, recorded before strace starts: -y names one a trace
+# opened as pipe:[<inode>]. A module that opens its own or another module's (by any /proc path)
+# fails, checked when its attempt ends: a pipe it could open was made, and recorded, before.
+PIPES = set()
+# A module that can open strace's descriptors through /proc can write into its trace stream (and its
+# stderr) by any path, and an open of it may show no pipe: another thread can move the descriptor
+# before strace names it. So main runs strace closed to /proc: its file must not be readable by
+# this user (ci.yml: sudo chmod go-r), which makes the kernel run it non-dumpable.
+STRACE_OPEN = ("strace was open to /proc, so a module could write into its trace; make it unreadable to "
+               "this user: sudo chmod go-r \"$(command -v strace)\"")
+PIPE_NAME = re.compile(rb"pipe:\[(\d+)\]")
 # A module strace faults on runs once more, whole, into a fresh trace. Two, so at most one attempt
 # is cut and kept (CUT): a cut trace ends mid-line, so a second one could not follow it whole.
 STRACE_ATTEMPTS = 2
 CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, the one finished trace per module
 
 
-def _copy(r, out, done):
+def open_to_proc(pid):
+    """Whether a process of this user other than pid's parent could open pid's descriptors through
+    /proc, as a module could, by trying what it would. A process is closed when it runs a program
+    its user cannot read (the kernel makes it non-dumpable); root reaches every process anyway."""
+    if os.geteuid() == 0:
+        return False
+    try:
+        os.listdir(f"/proc/{pid}/fd")
+        return True
+    except PermissionError:
+        return False
+
+
+def _copy(r, out, done, pid, opened):
     """Copies pipe r into file out until its writers are gone, or until done is set and nothing
-    waits in it: a process that keeps a copy of the write end cannot hold the run open."""
+    waits in it: a process that keeps a copy of the write end cannot hold the run open. At the
+    first bytes, strace has run and opened its trace: if pid (strace) is open to /proc, says so
+    into opened."""
+    first = True
     while True:
         if not select.select([r], [], [], 0.1)[0]:
             if done.is_set():
                 return
         elif not os.splice(r, out, 1 << 20):
             return
+        elif first:
+            first = False
+            if pid is not None and open_to_proc(pid):
+                opened.append(STRACE_OPEN)
 
 
-def attempt(cmd, trace, root=ROOT):
-    """(rc, output, strace's own stderr, the trace pipe's name if the trace shows the module opened
-    it, else None) of one traced run, started in its own session; its trace (from TRACE_TO) is
-    copied into the file trace, an fd. When strace ends, whatever is left of
+def attempt(cmd, trace, root=ROOT, private=False):
+    """(rc, output, strace's own stderr, why its trace cannot be trusted: a list) of one traced run,
+    started in its own session; its trace (from TRACE_TO) is copied into the file trace, an fd. The
+    trace is not trusted if it shows an open of a trace pipe (PIPES) or, private, if strace was open
+    to /proc (STRACE_OPEN). When strace ends, whatever is left of
     that session's process group is killed before this returns, so nothing of the run goes on
     into the next one (#5364). strace's pid, and so the group id, stays held until the group is
     killed: it is reaped only after. Output goes to files, not pipes, so a process that keeps a
     copy of one cannot hold the run open."""
     r, w = os.pipe()
-    own = OWN_PIPE.format(os.fstat(w).st_ino)
-    done = threading.Event()
-    copier = threading.Thread(target=_copy, args=(r, trace, done))
+    PIPES.add(os.fstat(w).st_ino)
+    done, untrusted = threading.Event(), []
     with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as err:
         try:
             p = subprocess.Popen(cmd, cwd=root, stdin=w, env=ENV, stdout=log, stderr=err, start_new_session=True)
@@ -281,6 +310,7 @@ def attempt(cmd, trace, root=ROOT):
             raise
         finally:
             os.close(w)
+        copier = threading.Thread(target=_copy, args=(r, trace, done, p.pid if private else None, untrusted))
         copier.start()
         try:
             os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
@@ -295,38 +325,43 @@ def attempt(cmd, trace, root=ROOT):
             os.close(r)
         log.seek(0)
         err.seek(0)
-        return (p.returncode, log.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace"),
-                own if _shows(trace, own.encode()) else None)
+        shown = pipes_in(trace)
+        if shown:
+            untrusted.append(f"it shows an open of a trace's pipe ({', '.join(f'pipe:[{i}]' for i in shown)}): bytes "
+                             f"written there can hide another trace line from the audits")
+        return p.returncode, log.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace"), untrusted
 
 
-def _shows(fd, text):
-    """Whether the file fd holds text."""
+def pipes_in(fd):
+    """The trace pipes (PIPES) the trace in file fd names, sorted."""
     if not os.fstat(fd).st_size:
-        return False
+        return []
     with mmap.mmap(fd, 0, prot=mmap.PROT_READ) as m:
-        return m.find(text) >= 0
+        return sorted({int(i) for i in PIPE_NAME.findall(m)} & PIPES)
 
 
-def run_one(module, trace_dir, root=ROOT, store=None):
+
+def run_one(module, trace_dir, root=ROOT, store=None, private=False):
     """(module, rc, seconds, output). An attempt that strace cut short (STRACE_FAULT on strace's
     own stderr, which follows the module's output in the log) reruns the module whole into a fresh
     trace, so the trace kept is the passing attempt's; the cut attempt's trace is kept as
     <module>.trace.cut, for records_audit.py and clash_audit.py (each sees every attempt). A cut
     attempt that already showed a failing test fails the module and is not rerun, and a module
     strace cuts on every attempt fails. The traces, unnamed files, go into store ({name: fd}) for
-    main to publish once every module has ended; with no store, into trace_dir now."""
+    main to publish once every module has ended; with no store, into trace_dir now. private: the
+    trace is not trusted unless strace was closed to /proc (attempt)."""
     start, outs, files = time.monotonic(), [], {}
     near = os.path.dirname(os.path.abspath(trace_dir))  # the unnamed files' file system
     for n in range(1, STRACE_ATTEMPTS + 1):
         trace = os.open(near, os.O_RDWR | os.O_TMPFILE, 0o600)
         files[module + ".trace"] = trace
-        rc, out, err, opened = attempt(command(module), trace, root)
+        rc, out, err, untrusted = attempt(command(module), trace, root, private)
         failed = TEST_FAILED.search(out)
         if err:  # strace's own lines, after the module's, on a line of their own
             out += ("\n" if out and not out.endswith("\n") else "") + err
-        if opened:  # whatever strace's stderr says: the trace may hide lines, so no rerun
-            outs.append(f"{out}\nunit_tests: the module opened its own trace's pipe ({opened}), so its trace "
-                        f"may hide lines; the module fails\n")
+        if untrusted:  # whatever strace's stderr says: no rerun
+            outs.append(f"{out}\nunit_tests: {module}'s trace cannot be trusted, so the module fails: "
+                        + "; ".join(untrusted) + "\n")
             rc = rc or 1
             break
         if not STRACE_FAULT.search(err):
@@ -497,7 +532,7 @@ def main(argv=None):
     names = modules()
     lanes, store = [], {}
     start = time.monotonic()
-    results = run(names, args.trace_dir, args.jobs, runner=functools.partial(run_one, store=store), lanes=lanes)
+    results = run(names, args.trace_dir, args.jobs, runner=functools.partial(run_one, store=store, private=True), lanes=lanes)
     rc = report(names, results, jobs=args.jobs, lanes=lanes, wall=time.monotonic() - start)
     try:
         publish(args.trace_dir, store, fresh=True)
