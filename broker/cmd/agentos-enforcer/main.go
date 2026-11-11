@@ -89,7 +89,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return enrol.Provision(fileStore{path: filepath.Join(*state, fileEnrol)}, strings.TrimSpace(string(b)), nil)
+		return provisionState(*state, strings.TrimSpace(string(b)))
 	case *pub:
 		k, err := channelKey(fileStore{path: filepath.Join(*state, fileChannelKey)}, nil)
 		if err != nil {

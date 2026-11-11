@@ -395,9 +395,31 @@ func TestGenerateRefuses(t *testing.T) {
 			t.Errorf("%s: refused by another check: %v, want %q", name, err, c.want)
 		}
 	}
+	// The refusal carries what Generate refused (#5352): of two bad names
+	// in a list, the first written, which is the first sorted; of two
+	// devices on networks the setup leaves out, the first in the
+	// document's order. A setup fault is refused before either.
+	d := fixturePolicy()
+	d.Destinations = append(d.Destinations, "Zed.example", "Abc.example")
+	d.Caps["Zed.example"], d.Caps["Abc.example"] = 1<<40, 1<<40
+	var name BadName
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &name) || name != (BadName{"Abc.example"}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two bad names: %#v, %v", name, err)
+	}
+	d = fixturePolicy()
+	d.Devices = append(d.Devices, policy.Device{ID: "lamp", Network: policy.NetDevices, WiFi: "vlan109"}, policy.Device{ID: "fan", Network: policy.NetDevices, WiFi: "vlan110"})
+	var dev UnservedDevice
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &dev) || dev != (UnservedDevice{"lamp", "vlan109", l.Trunk + ".109"}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two unserved devices: %#v, %v", dev, err)
+	}
+	s := fixtureSetup()
+	s.Upstream = nil
+	if _, err := Generate(d, l, s); !errors.Is(err, ErrConfig) || errors.As(err, &dev) || errors.As(err, &name) {
+		t.Errorf("a setup fault is typed as the document's: %v", err)
+	}
 	// A name the policy accepts but this package refuses still refuses a
 	// whole version, so the previous configuration stays.
-	d := fixturePolicy()
+	d = fixturePolicy()
 	d.Devices[1].Allow = []string{"Speaker.example"} // on a device with no set: not reached
 	if _, err := Generate(d, l, fixtureSetup()); err != nil {
 		t.Errorf("a name on a device with no allow set is never written: %v", err)
