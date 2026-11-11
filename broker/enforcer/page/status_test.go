@@ -516,6 +516,9 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 		!strings.Contains(h, "device "+strings.Repeat("a", PolicyNameMax-1)+"... on Wi-Fi network "+strings.Repeat("a", PolicyNameMax-1)+"..., and") || strings.Contains(h, "bbb") || len(h) > 16<<10 {
 		t.Errorf("a long name is not cut at PolicyNameMax (%d bytes):\n%.3000s", len(h), h)
 	}
+	if got := clip(strings.Repeat("\x80", 2*PolicyNameMax)); got != "..." {
+		t.Errorf("a name of continuation bytes clips to %.40q", got)
+	}
 	// More reasons than PolicyShown (#5431): the first PolicyShown show,
 	// each once, then one line with the exact count of the rest, each
 	// counted once; the page stays bounded however many the policy holds.

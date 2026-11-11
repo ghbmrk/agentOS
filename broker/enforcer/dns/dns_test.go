@@ -452,6 +452,14 @@ func TestGenerateRefuses(t *testing.T) {
 	if txt := (Refused{huge, BadName{"Abc.example"}}).Error(); !strings.HasSuffix(txt, `...; `+BadName{"Abc.example"}.Error()) || len(txt) > RefusedTextMax+len(`...; `+BadName{"Abc.example"}.Error()) || !utf8.ValidString(txt) || len(txt) < RefusedTextMax-1 {
 		t.Errorf("a long refusal is not cut at %d bytes: %d bytes, %.80q", RefusedTextMax, len(txt), txt)
 	}
+	// A text of no character start at all cuts to "...", and no refusal
+	// reads "" (mutgate on #5478).
+	if txt := (Refused{errors.New(strings.Repeat("\x80", 2*RefusedTextMax))}).Error(); txt != "..." {
+		t.Errorf("a refusal of continuation bytes reads %.40q", txt)
+	}
+	if txt := (Refused{}).Error(); txt != "" {
+		t.Errorf("no refusal reads %q", txt)
+	}
 	at, over := strings.Repeat("x", RefusedTextMax), strings.Repeat("x", RefusedTextMax+1)
 	if txt := (Refused{errors.New(at), errors.New(over)}).Error(); txt != at+"; "+at+"..." {
 		t.Errorf("refusals of %d and %d bytes read %d bytes", RefusedTextMax, RefusedTextMax+1, len(txt))
