@@ -82,12 +82,13 @@ env:
   GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
 permissions:
   contents: read
-# A newer push to the same PR cancels that PR's older run, both builds and every check after them,
-# so only the latest revision spends runner time. Pushes to main and manual runs each get a group of
-# their own (the run id), so they never cancel or displace one another and always finish.
+# CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
+# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
+# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
+# replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 jobs:
   build:
     strategy:

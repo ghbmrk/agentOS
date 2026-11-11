@@ -326,6 +326,153 @@ func TestRunningTableUnreadable(t *testing.T) {
 	x.enforced()
 }
 
+// TestLoadSeedsLeases (ENF-l-23, #5295): every full load, the first after
+// a restart included, seeds the shared segments' lease sets from the DHCP
+// server's lease file, in the same transaction after the ruleset, so a
+// reboot does not cut every leased IPv4 host off until it renews. A line
+// seeds only a Guests, Owner or Household host address inside its own
+// segment's subnet, on that segment; a line for another segment's subnet
+// seeds that segment. Out-of-subnet, admin, core and device-VLAN
+// addresses, a segment's network, broadcast or own address, malformed,
+// IPv6, non-Ethernet, infinite (expiry 0) and run-out lines seed nothing.
+func TestLoadSeedsLeases(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.mu.Lock()
+	now := x.now.Unix()
+	x.mu.Unlock()
+	exp := func(left int64) string { return strconv.FormatInt(now+left, 10) }
+	file := strings.Join([]string{
+		exp(600) + " 02:00:00:00:00:01 10.30.0.20 phone 01:02:00:00:00:00:01",
+		exp(700) + " 02:00:00:00:00:02 10.20.0.21 * *",
+		exp(800) + " 02:00:00:00:00:03 10.10.0.22 laptop *",
+		exp(100) + " 02:00:00:00:00:04 10.99.0.5 * *",        // in no subnet
+		exp(100) + " 02:00:00:00:00:05 10.40.0.20 * *",       // admin
+		exp(100) + " 02:00:00:00:00:06 10.50.0.20 * *",       // core
+		exp(100) + " 02:00:00:00:00:07 10.101.0.20 * *",      // device VLAN
+		exp(100) + " 02:00:00:00:00:08 10.30.0.0 * *",        // network
+		exp(100) + " 02:00:00:00:00:15 10.30.0.9 * *",        // below the lease range
+		exp(100) + " 02:00:00:00:00:09 10.30.0.255 * *",      // broadcast
+		exp(100) + " 02:00:00:00:00:0a 10.30.0.21 *",         // four fields
+		exp(100) + " 02:00:00:00:00:0b 10.30.0.22 * * extra", // six fields
+		"later 02:00:00:00:00:0c 10.30.0.23 * *",
+		"0 02:00:00:00:00:0d 10.30.0.24 * *",
+		exp(-1) + " 02:00:00:00:00:0e 10.30.0.25 * *",
+		exp(0) + " 02:00:00:00:00:0f 10.30.0.26 * *",
+		exp(100) + " not-a-mac 10.30.0.27 * *",
+		exp(100) + " 02:00:00:00:00:00:00:10 10.30.0.28 * *", // not Ethernet
+		exp(100) + " 02:00:00:00:00:11 10.30.0.300 * *",
+		"duid 00:01:00:01:00:00:00:00:02:00:00:00:00:12",
+		exp(100) + " 1234 fd00:30::20 * 00:01",
+		exp(100) + " 02:00:00:00:00:13 ::ffff:10.30.0.29 * *",
+		exp(100) + " 02:00:00:00:00:14 10.30.0.1 * *", // the enforcer's
+	}, "\n")
+	path := filepath.Join(t.TempDir(), "dhcp.leases")
+	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.cfg.DNS.LeaseFile = path
+	x.restart()
+	hw := func(s string) net.HardwareAddr { m, _ := net.ParseMAC(s); return m }
+	l := x.cfg.Layout
+	seed := nft.Seed(l, []nft.Lease{
+		{Iface: l.Guests, Addr: netip.MustParseAddr("10.30.0.20"), HW: hw("02:00:00:00:00:01"), Left: 600},
+		{Iface: l.Household, Addr: netip.MustParseAddr("10.20.0.21"), HW: hw("02:00:00:00:00:02"), Left: 700},
+		{Iface: l.Owner, Addr: netip.MustParseAddr("10.10.0.22"), HW: hw("02:00:00:00:00:03"), Left: 800},
+	})
+	if strings.Count(seed, "add element") != 6 {
+		t.Fatalf("fixture: seed %q", seed)
+	}
+	if got, want := x.fire.last(), x.seededLoad(x.current(), seed); got != want {
+		t.Fatalf("loaded:\n%s\nwant the ruleset, then the seed:\n%s", got, seed)
+	}
+	// Every full load seeds, not only the first: the lease file is read
+	// again, so a lease it no longer holds is not seeded.
+	if err := os.WriteFile(path, []byte(exp(900)+" 02:00:00:00:00:01 10.30.0.20 * *\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed = nft.Seed(l, []nft.Lease{{Iface: l.Guests, Addr: netip.MustParseAddr("10.30.0.20"), HW: hw("02:00:00:00:00:01"), Left: 900}})
+	if got, want := x.fire.last(), x.seededLoad(x.current(), seed); got != want {
+		t.Fatalf("second load:\n%s\nwant the seed:\n%s", got, seed)
+	}
+}
+
+// TestLeasesOf (ENF-l-23, #5295): a lease seeds only an address in its
+// one shared segment's DHCP lease range (dns.Hosts4), never the subnet's
+// network, broadcast or enforcer's own address (its first host), an
+// address two networks claim, or one on a shared interface DHCP does not
+// serve. The fixture is a setup the daemon accepts.
+func TestLeasesOf(t *testing.T) {
+	c := testConfig(t)
+	s := c.DNS
+	for i, n := range s.Nets {
+		switch n.Iface {
+		case "own0":
+			s.Nets[i].DHCP = false
+		case "ap0.101":
+			s.Nets[i].Prefix4 = netip.MustParsePrefix("10.20.0.128/25") // hh0's upper half
+		}
+	}
+	if _, err := dns.Generate(policy.Document{}, c.Layout, s); err != nil {
+		t.Fatalf("fixture: setup refused: %v", err)
+	}
+	file := strings.Join([]string{
+		"1100 02:00:00:00:00:01 10.30.0.10 * *", // first in range
+		"1100 02:00:00:00:00:02 10.30.0.9 * *",
+		"1100 02:00:00:00:00:03 10.30.0.1 * *", // the enforcer's
+		"1100 02:00:00:00:00:04 10.30.0.0 * *",
+		"1100 02:00:00:00:00:05 10.30.0.254 * *", // last in range
+		"1100 02:00:00:00:00:06 10.30.0.255 * *",
+		"1100 02:00:00:00:00:07 10.10.0.20 * *", // DHCP off
+		"1100 02:00:00:00:00:08 10.20.0.20 * *",
+		"1100 02:00:00:00:00:09 10.20.0.130 * *", // two subnets
+		"1001 02:00:00:00:00:0a 10.30.0.11 * *",
+		"1000 02:00:00:00:00:0b 10.30.0.12 * *",
+		"1100 02:00:00:00:00:0c 10.30.0.13 * *", // last line, no newline
+	}, "\n")
+	hw := func(s string) net.HardwareAddr { m, _ := net.ParseMAC(s); return m }
+	want := []nft.Lease{
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.254"), HW: hw("02:00:00:00:00:05"), Left: 100},
+		{Iface: "hh0", Addr: netip.MustParseAddr("10.20.0.20"), HW: hw("02:00:00:00:00:08"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.11"), HW: hw("02:00:00:00:00:0a"), Left: 1},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.13"), HW: hw("02:00:00:00:00:0c"), Left: 100},
+	}
+	got := leasesOf([]byte(file), s.Nets, c.Layout, 1000)
+	if !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
+		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
+	}) {
+		t.Fatalf("leases %+v, want %+v", got, want)
+	}
+	if got := leasesOf(nil, s.Nets, c.Layout, 1000); len(got) != 0 {
+		t.Fatalf("no file: leases %+v", got)
+	}
+}
+
+// TestLeaseFileUnreadable (ENF-l-23, #5295): a missing lease file (a first
+// boot) or an unreadable one loads the ruleset with no seed, and the load
+// is taken; only the unreadable one is logged.
+func TestLeaseFileUnreadable(t *testing.T) {
+	x, _ := enrolled(t, false)
+	x.cfg.DNS.LeaseFile = filepath.Join(t.TempDir(), "none")
+	x.restart()
+	x.enforced()
+	if strings.Contains(x.logText(), "lease file") {
+		t.Fatal("a missing lease file was logged")
+	}
+	x.cfg.DNS.LeaseFile = t.TempDir() // a directory: read fails
+	x.restart()
+	x.enforced()
+	if !strings.Contains(x.logText(), "lease file unreadable") {
+		t.Fatal("an unreadable lease file was not logged")
+	}
+}
+
 // TestUnservableLogged: the log says why the resolver stopped.
 func TestUnservableLogged(t *testing.T) {
 	x, _ := enrolled(t, false)
@@ -1333,11 +1480,11 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 		t.Fatalf("a refused load with the stray gone started instances: %v", got)
 	}
 	stop := (pageResolver{x.d}).Stopped()
-	if !stop.Stopped || len(stop.Strays)+len(stop.Unset) != 0 || stop.Load != "nft: refused" || stop.LoadBy != page.LoadFirewall {
+	if !stop.Stopped || len(stop.Strays)+len(stop.Unset) != 0 || stop.Load != page.LoadFirewall {
 		t.Fatalf("the page after the stray went and the load was refused: %#v", stop)
 	}
 	h := x.b.do(http.MethodGet, "/", nil).Body.String()
-	if !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (nft: refused)") || strings.Contains(h, "Interface own0 holds") {
+	if !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules; the enforcer&#39;s log has the detail.") || strings.Contains(h, "nft: refused") || strings.Contains(h, "Interface own0 holds") {
 		t.Fatalf("home does not show the refused load in place of the stray:\n%s", h)
 	}
 	x.d.fwMu.Lock()
@@ -1352,7 +1499,7 @@ func TestRefusedLoadKeepsResolverStopped(t *testing.T) {
 	if !slices.Equal(got.Listed, was.Listed) || got.People != was.People || got.DHCP != was.DHCP {
 		t.Fatalf("the load taken did not start the instances: %v", got)
 	}
-	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || stop.Load != "" || strings.Contains(x.b.do(http.MethodGet, "/", nil).Body.String(), "Names and addresses") {
+	if stop := (pageResolver{x.d}).Stopped(); stop.Stopped || stop.Load != page.LoadTaken || strings.Contains(x.b.do(http.MethodGet, "/", nil).Body.String(), "Names and addresses") {
 		t.Fatalf("the load is taken and home still shows the stop: %#v", stop)
 	}
 }
@@ -1386,7 +1533,7 @@ func TestLoadStepOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadFirewall {
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.Load != page.LoadFirewall {
 		t.Fatalf("the firewall's refusal on the page: %#v", stop)
 	}
 	bad := home()
@@ -1404,11 +1551,11 @@ func TestLoadStepOnPage(t *testing.T) {
 	if reached {
 		t.Fatal("a document that does not compile reached the firewall")
 	}
-	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.LoadBy != page.LoadCompile || stop.Load != err.Error() {
+	if stop := (pageResolver{x.d}).Stopped(); !stop.Stopped || stop.Load != page.LoadCompile {
 		t.Fatalf("a compile refusal on the page: %#v", stop)
 	}
 	h := x.b.do(http.MethodGet, "/", nil).Body.String()
-	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force (") || strings.Contains(h, "The firewall refused") {
+	if !strings.Contains(h, "The enforcer could not make firewall rules of the policy in force, so it loaded nothing;") || strings.Contains(h, "The firewall refused") || strings.Contains(h, "not-a-vlan") {
 		t.Fatalf("home words a compile refusal as the firewall's:\n%s", h)
 	}
 	// A running table the firewall returned that does not parse is no
@@ -1420,10 +1567,10 @@ func TestLoadStepOnPage(t *testing.T) {
 	if err == nil || errors.Is(err, nft.ErrPolicy) {
 		t.Fatalf("fixture: an unreadable running table: %v", err)
 	}
-	if stop := (pageResolver{x.d}).Stopped(); stop.LoadBy != page.LoadUntyped || stop.Load != err.Error() {
+	if stop := (pageResolver{x.d}).Stopped(); stop.Load != page.LoadUntyped {
 		t.Fatalf("an unreadable running table on the page: %#v", stop)
 	}
-	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer's last load of your rules failed (") || strings.Contains(h, "could not make firewall rules") {
+	if h := x.b.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(h, "The enforcer&#39;s last load of your rules failed; its log has the detail.") || strings.Contains(h, "could not make firewall rules") || strings.Contains(h, "not json") {
 		t.Fatalf("home words an unreadable running table as a compile refusal:\n%s", h)
 	}
 	for _, tc := range []struct {
@@ -1686,7 +1833,8 @@ func TestHold(t *testing.T) {
 		t.Errorf("an unwritable setting: %v", err)
 	}
 	// An interface's settings that cannot be read (a loop, ELOOP) and an
-	// IPv6 tree that cannot be: each fails, never reads as "not there".
+	// IPv6 tree that cannot be: each fails, never reads as "not there",
+	// and the IPv6 tree's by its typed cause (#5307).
 	root = box(true)
 	loop := filepath.Join(root, "ipv4/conf/own0")
 	if err := os.Symlink(loop, loop); err != nil {
@@ -1703,8 +1851,8 @@ func TestHold(t *testing.T) {
 	if err := os.Symlink(v6, v6); err != nil {
 		t.Fatal(err)
 	}
-	if err := hold(root, nil, addrs); err == nil {
-		t.Error("an IPv6 tree that cannot be read passed")
+	if err := hold(root, nil, addrs); err == nil || !slices.Equal(causes(err), []page.Unset{{Kind: page.UnsetIPv6}}) || !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("an IPv6 tree that cannot be read: %v", err)
 	}
 }
 
@@ -2020,11 +2168,11 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != "" {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != (page.PolicyCause{}) {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
-	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "<p>The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network&#39;s interface made again could take a route or address the enforcer did not check. It tries again every 10 seconds.</p>"} {
+	for _, want := range []string{"<h2>Names and addresses</h2>", "Interface own0 holds the address 10.99.0.1/24, outside its network 10.10.0.0/24.", "<p>The enforcer could not turn off IPv4 redirects for interfaces made from now on, so a home network&#39;s interface made again could take a route the enforcer did not check. It tries again every 10 seconds.</p>"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("home lacks %q", want)
 		}
@@ -2063,10 +2211,10 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if !stopped {
 		t.Fatal("fixture: a refused load started the instances")
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != "" || got.Load == "" {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != (page.PolicyCause{}) || got.Load != page.LoadFirewall {
 		t.Fatalf("a refused load after the check passes: %#v", got)
 	}
-	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer's last load of your rules (") {
+	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules;") {
 		t.Errorf("home does not show the resolver stopped by a refused load:\n%s", h)
 	}
 	x.fire.mu.Lock()
@@ -2083,6 +2231,8 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if genErr == nil {
 		t.Fatal("fixture: the resolver serves vlan109")
 	}
+	// The page has the refusal's typed cause, never its text (#5307).
+	vlan := page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}
 	load := func(doc policy.Document) error {
 		x.d.fwMu.Lock()
 		defer x.d.fwMu.Unlock()
@@ -2103,10 +2253,10 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != genErr.Error() || got.Load != "" || len(got.Strays)+len(got.Unset) != 0 {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != vlan || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
 		t.Fatalf("a policy the resolver cannot serve: %#v", got)
 	}
-	if !strings.Contains(view(), "The policy in force names something the enforcer cannot serve (") {
+	if h := view(); !strings.Contains(h, "The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.") || strings.Contains(h, "ap0.109") {
 		t.Error("home does not show the policy the resolver cannot serve")
 	}
 	x.fire.mu.Lock()
@@ -2115,7 +2265,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Policy != genErr.Error() {
+	if got := (pageResolver{x.d}).Stopped(); got.Policy != vlan {
 		t.Fatalf("a refused load cleared the cause in force: %#v", got)
 	}
 	x.fire.mu.Lock()
@@ -2126,5 +2276,50 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	}
 	if got := (pageResolver{x.d}).Stopped(); got.Stopped {
 		t.Fatalf("a servable policy in force still shows a stopped resolver: %#v", got)
+	}
+}
+
+// TestUnservable (#5307): dns.Generate's refusal of a compiled document
+// reaches the page by its typed cause: a device on a Wi-Fi network the
+// setup serves no network for, or a listed name that is not a DNS host
+// name; any other refusal is untyped, whatever its text.
+func TestUnservable(t *testing.T) {
+	x := newBox(t, false)
+	l, s := x.cfg.Layout, x.cfg.DNS
+	vlan := home()
+	vlan.Devices = append(vlan.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
+	name := home()
+	name.Destinations = []string{"updates.example", "Upper.example"}
+	for _, tc := range []struct {
+		doc  policy.Document
+		want page.PolicyCause
+	}{
+		{vlan, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}},
+		{name, page.PolicyCause{Kind: page.PolicyName, Name: "Upper.example"}},
+	} {
+		if _, err := nft.Paths(tc.doc, l); err != nil {
+			t.Fatalf("fixture: %v", err)
+		}
+		_, err := dns.Generate(tc.doc, l, s)
+		if !errors.Is(err, dns.ErrConfig) {
+			t.Fatalf("fixture: %v", err)
+		}
+		if got := unservable(err, tc.doc, l, s); got != tc.want {
+			t.Errorf("unservable(%v) = %+v, want %+v", err, got, tc.want)
+		}
+	}
+	// A device off the device network, or with no VLAN, needs none.
+	off := home()
+	off.Devices = append(off.Devices, policy.Device{ID: "plug", Network: policy.NetOwner, WiFi: "vlan109"}, policy.Device{ID: "lamp", Network: policy.NetDevices})
+	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
+	for _, err := range []error{fmt.Errorf("%w: x", dns.ErrConfig), errors.New("vlan109 Upper.example")} {
+		for _, doc := range []policy.Document{home(), off} {
+			if got := unservable(err, doc, l, s); got != untyped {
+				t.Errorf("unservable(%v) on a servable document = %+v", err, got)
+			}
+		}
+		if err := error(errors.New("other")); unservable(err, vlan, l, s) != untyped || unservable(err, name, l, s) != untyped {
+			t.Error("a refusal other than the setup's is typed")
+		}
 	}
 }

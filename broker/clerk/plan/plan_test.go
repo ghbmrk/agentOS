@@ -794,14 +794,13 @@ func TestPlanClerkHoldsOneSlot(t *testing.T) {
 	}
 	for _, mod := range []func(*plan.Declaration){
 		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "Set-Cookie") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Set-") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "X-") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Proxy-Auth") },
+		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "X-Codex-Session-Token") },
+		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "Session_id") },
 	} {
 		d = f.decl(t)
 		mod(&d)
 		if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
-			t.Errorf("a declaration passing a forbidden answer header was taken: %v %v", d.ResponseHeaders, d.ResponsePrefixes)
+			t.Errorf("a declaration passing a forbidden answer header was taken: %v", d.ResponseHeaders)
 		}
 	}
 }

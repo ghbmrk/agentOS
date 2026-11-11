@@ -310,8 +310,11 @@ func TestOneMomentDefaults(t *testing.T) {
 	r.say("q")
 	r.next()
 	r.hangup()
-	if len(asked) != 1 || asked[0] != time.Second {
-		t.Fatalf("waits asked: %v", asked)
+	mu.Lock()
+	got := append([]time.Duration(nil), asked...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != time.Second {
+		t.Fatalf("waits asked: %v", got)
 	}
 
 	release := make(chan struct{})
@@ -400,9 +403,15 @@ func TestSpeedDialTokenRaisesTheCallToP2(t *testing.T) {
 	if len(tried) != 1 || tried[0] != "4071" {
 		t.Fatalf("tried %q", tried)
 	}
-	// The turn's one-moment wait counts from the end of speech: 1 s.
-	if len(waits) == 0 || waits[len(waits)-1] != time.Second {
-		t.Fatalf("waits %v", waits)
+	// The turn's one-moment wait counts from the end of speech: 1 s. The
+	// token window (6 s) is asked for when the call is up, which can land
+	// before or after the turn's wait, so the test asserts the set, not
+	// the order (#5354).
+	mu.Lock()
+	got := append([]time.Duration(nil), waits...)
+	mu.Unlock()
+	if count(got, time.Second) != 1 || count(got, 6*time.Second) > 1 || len(got) != count(got, time.Second)+count(got, 6*time.Second) {
+		t.Fatalf("waits %v", got)
 	}
 }
 
@@ -516,8 +525,11 @@ func TestTokenWindowAndLimit(t *testing.T) {
 	if rep := r.hangup(); rep.Rung != call.P0 || checked {
 		t.Fatalf("no keys: rung %v, checked %v", rep.Rung, checked)
 	}
-	if len(waits) == 0 || waits[0] != 6*time.Second || count(waits, 6*time.Second) != 1 { // one default window
-		t.Fatalf("waits %v", waits)
+	mu.Lock()
+	got := append([]time.Duration(nil), waits...)
+	mu.Unlock()
+	if len(got) == 0 || got[0] != 6*time.Second || count(got, 6*time.Second) != 1 { // one default window
+		t.Fatalf("waits %v", got)
 	}
 }
 

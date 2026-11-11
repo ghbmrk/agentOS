@@ -109,13 +109,13 @@ type ResolverStop struct {
 	// Unset is every other way the served interfaces are not as set up:
 	// a setting that did not take, or addresses that could not be read.
 	Unset []Unset
-	// Policy is why the policy in force cannot be served; "" when it can.
-	Policy string
-	// Load is the last refused load's error, shown when no cause above
-	// is: the instances stay as they were until a load is taken. LoadBy
-	// is the step that refused it (#5164 R5 d).
-	Load   string
-	LoadBy LoadStep
+	// Policy is why the policy in force cannot be served; its zero value
+	// when it can.
+	Policy PolicyCause
+	// Load is the step that refused the last load, shown when no cause
+	// above is: the instances stay as they were until a load is taken
+	// (#5164 R5 d). LoadTaken when none was refused since one was taken.
+	Load LoadStep
 	// Restarting is each instance in force that keeps exiting or failing
 	// to start, shown while Stopped is false: a process that is up between
 	// exits does not make it a resolver that runs (#5164 R5 b).
@@ -126,9 +126,32 @@ type ResolverStop struct {
 type LoadStep int
 
 const (
-	LoadUntyped  LoadStep = iota // a failure the load did not type
+	LoadTaken    LoadStep = iota // no load refused since the last taken
+	LoadUntyped                  // a failure the load did not type
 	LoadCompile                  // the enforcer could not make a ruleset of the policy
 	LoadFirewall                 // the kernel's firewall refused the ruleset
+)
+
+// PolicyCause is why the policy in force cannot be served, as the
+// daemon typed it (#5307): the page words each kind, so the owner never
+// reads a resolver error's text. The zero value is a policy that can be.
+type PolicyCause struct {
+	Kind PolicyKind
+	// Name is what the policy names that cannot be served: the device
+	// (PolicyVLAN) or the name to look up (PolicyName).
+	Name string
+	// WiFi is the device's Wi-Fi network (PolicyVLAN).
+	WiFi string
+}
+
+// PolicyKind is how the policy in force cannot be served.
+type PolicyKind int
+
+const (
+	PolicyServed  PolicyKind = iota // it can be
+	PolicyUntyped                   // a refusal the daemon did not type
+	PolicyVLAN                      // a device on a Wi-Fi network the setup serves no names on
+	PolicyName                      // a name to look up that is not a DNS host name
 )
 
 // Restart is one resolver instance that has exited on its own Exits
@@ -171,6 +194,7 @@ const (
 	UnsetName                     // a setup name that is no interface name
 	UnsetAddrs                    // addresses that could not be read
 	UnsetChanged                  // addresses that changed while read
+	UnsetIPv6                     // whether the kernel has IPv6 settings could not be read
 )
 
 // Setting is a kernel setting the served check turns off.
@@ -343,19 +367,17 @@ func (s *Server) status() map[string]any {
 }
 
 // plainResolver is a stopped resolver as home shows it: every cause in
-// printable ASCII, each Unset in the owner's words.
+// the owner's words, with each name in printable ASCII.
 type plainResolver struct {
 	Strays       []Stray
 	Unset        []string
-	Policy, Load string
-	// The step that refused Load: compile, the firewall, or neither.
-	Compile, Firewall bool
+	Policy, Load string // "" for none
 }
 
-// plainStop is r in printable ASCII, as plain shows the core's names: a
-// policy's error can quote a name the core chose.
+// plainStop is r in the owner's words: a policy can name what the core
+// chose, so no name reaches the page outside printable ASCII.
 func plainStop(r ResolverStop) plainResolver {
-	out := plainResolver{Policy: sentence(r.Policy), Load: sentence(r.Load), Compile: r.LoadBy == LoadCompile, Firewall: r.LoadBy == LoadFirewall}
+	out := plainResolver{Policy: plainPolicy(r.Policy), Load: plainLoad(r.Load)}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
 	}
@@ -382,22 +404,65 @@ var unsetSettings = map[Setting]string{
 // with no words (untyped, or a setting the page does not know) is one
 // generic line pointing at the log.
 func plainUnset(u Unset) string {
-	iface := ascii(u.Iface)
+	// An interface with no name is said without one (#5307).
+	iface := "interface " + ascii(u.Iface)
+	if u.Iface == "" {
+		iface = "a home network's interface"
+	}
+	// A redirect sets a route; a router advertisement can also give an
+	// address (#5307).
+	takes := "route"
+	if u.Setting == RouterAds {
+		takes = "route or address"
+	}
 	switch what := unsetSettings[u.Setting]; {
 	case u.Kind == UnsetSetting && what != "" && u.Iface == "all":
 		return "The enforcer could not turn off " + what + " for all interfaces at once, so a device on a home network could set a route the enforcer did not check. It tries again every 10 seconds."
 	case u.Kind == UnsetSetting && what != "" && u.Iface == "default":
-		return "The enforcer could not turn off " + what + " for interfaces made from now on, so a home network's interface made again could take a route or address the enforcer did not check. It tries again every 10 seconds."
+		return "The enforcer could not turn off " + what + " for interfaces made from now on, so a home network's interface made again could take a " + takes + " the enforcer did not check. It tries again every 10 seconds."
 	case u.Kind == UnsetSetting && what != "":
-		return "The enforcer could not turn off " + what + " on interface " + iface + ", so a device on that network could set a route or address the enforcer did not check. It tries again every 10 seconds."
+		return "The enforcer could not turn off " + what + " on " + iface + ", so a device on that network could set a " + takes + " the enforcer did not check. It tries again every 10 seconds."
 	case u.Kind == UnsetName:
 		return "The enforcer's setup names " + strconv.QuoteToASCII(u.Iface) + " as a home network's interface, and that is not an interface name. Names and addresses stay stopped until the setup is corrected."
 	case u.Kind == UnsetChanged:
-		return "The addresses on interface " + iface + " changed while the enforcer read them. It reads them again within 10 seconds."
+		return "The addresses on " + iface + " changed while the enforcer read them. It reads them again within 10 seconds."
 	case u.Kind == UnsetAddrs:
-		return "The enforcer could not read the addresses on interface " + iface + ", so it cannot check that each lies in that network. It tries again every 10 seconds."
+		return "The enforcer could not read the addresses on " + iface + ", so it cannot check that each lies in that network. It tries again every 10 seconds."
+	case u.Kind == UnsetIPv6:
+		return "The enforcer could not read whether the kernel has IPv6 settings, so it could not check that redirects and router advertisements are off on the home networks' interfaces: a device on a home network could set a route or address the enforcer did not check. It tries again every 10 seconds."
 	}
 	return "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
+}
+
+// plainPolicy is why the policy in force cannot be served in the owner's
+// words, from its typed cause (#5307); "" when it can be. A refusal with
+// no words is one generic line pointing at the log, never its text.
+func plainPolicy(p PolicyCause) string {
+	const still = " The policy still applies; names and addresses come back with the next policy the enforcer can serve."
+	switch p.Kind {
+	case PolicyServed:
+		return ""
+	case PolicyVLAN:
+		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there." + still
+	case PolicyName:
+		return "The policy in force lists " + strconv.QuoteToASCII(p.Name) + ", which is not a name the enforcer can look up." + still
+	}
+	return "The policy in force names something the enforcer cannot serve; the enforcer's log has the detail." + still
+}
+
+// plainLoad is the step that refused the last load in the owner's words
+// (#5164 R5 d, #5307); "" when none was. An untyped failure is one
+// generic line pointing at the log, never its text.
+func plainLoad(l LoadStep) string {
+	switch l {
+	case LoadTaken:
+		return ""
+	case LoadCompile:
+		return "The enforcer could not make firewall rules of the policy in force, so it loaded nothing; its log has the detail. The firewall keeps the rules it had, and names and addresses come back only with a policy it can load. The enforcer keeps trying."
+	case LoadFirewall:
+		return "The firewall refused the enforcer's last load of your rules; the enforcer's log has the detail. Names and addresses come back only with a load it takes. The enforcer keeps trying."
+	}
+	return "The enforcer's last load of your rules failed; its log has the detail. Names and addresses come back only with a load that works. The enforcer keeps trying."
 }
 
 // plainRestart is one instance that keeps exiting or failing to start in

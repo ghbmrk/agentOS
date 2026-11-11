@@ -151,10 +151,9 @@ type Declaration struct {
 	// bound the code to. Any other redirect_uri is refused.
 	RedirectFrom, RedirectTo string
 	// RequestHeaders pass on run requests, SignInHeaders on sign-in steps;
-	// ResponseHeaders and ResponsePrefixes come back to the guest,
-	// redacted. Nothing else passes either way.
-	RequestHeaders, SignInHeaders     []string
-	ResponseHeaders, ResponsePrefixes []string
+	// ResponseHeaders come back to the guest, redacted, each by its exact
+	// name. Nothing else passes either way.
+	RequestHeaders, SignInHeaders, ResponseHeaders []string
 	// MaxBody bounds a model call's body; 0 is 16 MiB.
 	MaxBody int64
 	// Body is a model call's request shape, and Pool how its answer states
@@ -431,7 +430,7 @@ func (p *Login) validate() error {
 		}
 	}
 	for k, v := range d.RefreshHeaders {
-		if err := header.Name(k); err != nil {
+		if err := header.Request(k); err != nil {
 			return fmt.Errorf("clerk: refresh %w", err)
 		} else if k == "Content-Type" {
 			return errors.New(`clerk: refresh header "Content-Type" is the clerk's own`)
@@ -440,14 +439,14 @@ func (p *Login) validate() error {
 			return fmt.Errorf("clerk: refresh header %q: %w", k, err)
 		}
 	}
-	for _, h := range append(append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...), d.ResponseHeaders...) {
-		if err := header.Name(h); err != nil {
+	for _, h := range append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...) {
+		if err := header.Request(h); err != nil {
 			return fmt.Errorf("clerk: %w", err)
 		}
 	}
-	for _, pre := range d.ResponsePrefixes {
-		if err := header.Prefix(pre); err != nil {
-			return fmt.Errorf("clerk: %w", err)
+	for _, h := range d.ResponseHeaders {
+		if err := header.Answer(h); err != nil {
+			return fmt.Errorf("clerk: answer %w", err)
 		}
 	}
 	return nil
@@ -1099,19 +1098,8 @@ func (p *Login) answer(resp *http.Response, real string) *http.Response {
 }
 
 // answerHeader reports whether the guest gets the answer header k: a
-// declared name, exactly as New checked it against header.Names, or a name
-// that begins with a declared prefix and names no credential (header.Answer).
-func (p *Login) answerHeader(k string) bool {
-	if contains(p.d.ResponseHeaders, k) {
-		return true
-	}
-	for _, pre := range p.d.ResponsePrefixes {
-		if header.Answer(k, pre) == nil {
-			return true
-		}
-	}
-	return false
-}
+// declared name, exactly as New checked it (header.Answer).
+func (p *Login) answerHeader(k string) bool { return contains(p.d.ResponseHeaders, k) }
 
 // device makes a device step and reads its answer whole: one too large to
 // read, or with a body that is not a JSON object, is dropped, and an error
@@ -1774,9 +1762,14 @@ func Codex(guard *netguard.Policy) Declaration {
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
 		},
-		SignInHeaders:    []string{"Accept", "Content-Type", "User-Agent", "Originator"},
-		ResponseHeaders:  []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model"},
-		ResponsePrefixes: []string{"X-Codex-"},
+		SignInHeaders: []string{"Accept", "Content-Type", "User-Agent", "Originator"},
+		ResponseHeaders: []string{
+			"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model",
+			"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
+			"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
+			"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
+			"X-Codex-Rate-Limit-Reached-Type",
+		},
 		// The CLI's request: #809 saw model, input, tool_choice, include
 		// and stream; the rest are the fields the CLI's request type sets.
 		Body: Body{

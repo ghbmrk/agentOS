@@ -550,8 +550,13 @@ func TestPlanSignInStuckHost(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("Remove waited on a stuck start")
 		}
-		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
-			t.Fatalf("begun: %+v", b)
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInStopped}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Begin never returned after the remove ended the stuck start")
 		}
 	})
 	t.Run("a caller that gives up during the start", func(t *testing.T) {

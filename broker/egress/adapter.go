@@ -158,13 +158,12 @@ var (
 
 // Header names no adapter may forward: they carry credentials, pick the
 // account or project billed, or steer a response somewhere else. Any name
-// containing one of credentialWords is refused too.
+// holding a credential word (header.Credential, the clerks' one list) is
+// refused too.
 var credentialHeaders = map[string]bool{
 	"Location": true, "Openai-Organization": true, "Openai-Project": true,
 	"Anthropic-Beta": true, "Accept-Encoding": true, "Content-Encoding": true,
 }
-
-var credentialWords = []string{"auth", "key", "token", "session", "cookie", "secret", "password"}
 
 func forbiddenHeader(canonical string) bool {
 	if credentialHeaders[canonical] {
@@ -176,12 +175,7 @@ func forbiddenHeader(canonical string) bool {
 	if strings.Contains(l, "agentos") {
 		return true
 	}
-	for _, w := range credentialWords {
-		if strings.Contains(l, w) {
-			return true
-		}
-	}
-	return false
+	return header.Credential(canonical) != ""
 }
 
 func (a Adapter) validate() error {

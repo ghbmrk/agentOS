@@ -267,9 +267,19 @@ func TestApplyFailedLoad(t *testing.T) {
 	if err := s.Apply(files("core-b", "tv-a"), func() error { return refused }); !errors.Is(err, refused) {
 		t.Fatalf("Apply = %v, want the load's error", err)
 	}
-	got := waitEvents(t, dir, "stop_core-a")
+	waitEvents(t, dir, "stop_core-a")
+	// Apply has started the old instance again before it returns, but the
+	// instance writes its start event itself, later: wait for it (#5365).
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Count(strings.Join(events(t, dir), " "), "start_core-a") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the old core list's instance did not start again after the refused load: %v", events(t, dir))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A settle only for what must not appear.
 	time.Sleep(50 * time.Millisecond)
-	got = events(t, dir)
+	got := events(t, dir)
 	if n := strings.Count(strings.Join(got, " "), "start_core-a"); n != 2 {
 		t.Errorf("the old core list's instance started %d times, want 2 (again after the refused load): %v", n, got)
 	}

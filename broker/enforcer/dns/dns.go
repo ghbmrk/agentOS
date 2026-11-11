@@ -42,16 +42,17 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-// LeaseHours is the lease every dhcp-range offers, in hours. A shared
-// segment's address hold (nft.ClaimTimeout) must be at most half of it, so
-// a departed host's hold has run out before its address can be leased
-// again (ENF-shared-src-1, #4702): the constant below fails to compile when
-// it is not, and TestLeaseCoversHold reads the lines written. A client may
-// still request a shorter lease, which dnsmasq grants down to 120 s; that
-// case is ENF-shared-src-1's residual.
+// LeaseHours is the lease every dhcp-range offers, in hours. It must be
+// nft.LeaseTimeout, the longest lease whose ACK a shared segment's IPv4
+// holds follow, and which nft keeps at least twice its IPv6 hold
+// (nft.ClaimTimeout) (ENF-shared-src-1, #4702, #5294): the constant below
+// fails to compile when it is not, and TestLeaseCoversHold reads the lines
+// written. A client may still request a shorter lease, which dnsmasq
+// grants down to 120 s (nft.MinLease); the IPv6 hold of such a client is
+// ENF-shared-src-1's residual.
 const LeaseHours = 12
 
-const _ uint = LeaseHours*3600 - 2*nft.ClaimTimeout
+const _ = uint(LeaseHours*3600-nft.LeaseTimeout) + uint(nft.LeaseTimeout-LeaseHours*3600)
 
 // lease is LeaseHours as dnsmasq's lease field.
 var lease = strconv.Itoa(LeaseHours) + "h"
@@ -173,7 +174,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	dhcp.add("dhcp-option=option:dns-server,0.0.0.0")
 	v6 := false
 	for _, n := range leased {
-		first, last := hosts4(n.Prefix4)
+		first, last := Hosts4(n.Prefix4)
 		// dnsmasq serves a range on the interface whose address is in it.
 		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + "," + lease)
 		if n.Prefix6.IsValid() {
@@ -334,9 +335,9 @@ func upstream(u netip.AddrPort) string {
 	return u.Addr().String() + "#" + strconv.Itoa(int(u.Port()))
 }
 
-// hosts4 is the lease range of p: its tenth host to its last before the
-// broadcast address.
-func hosts4(p netip.Prefix) (first, last netip.Addr) {
+// Hosts4 is the lease range of p, the only addresses DHCP leases there:
+// its tenth host to its last before the broadcast address.
+func Hosts4(p netip.Prefix) (first, last netip.Addr) {
 	b := p.Addr().As4()
 	n := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 	size := uint32(1) << (32 - p.Bits())

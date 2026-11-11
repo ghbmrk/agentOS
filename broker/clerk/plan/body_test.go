@@ -226,9 +226,9 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 			d.Body.ToolTypes = []string{"function"}
 			d.Body.Tools = []plan.Tool{{Namespace: "functions", Name: "wait", Type: "function"}}
 		},
-		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
-		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
-		"client_metadata with no keys":             func(d *plan.Declaration) { d.Body.Meta = nil },
+		"an answer header naming X-Forwarded-For": func(d *plan.Declaration) { d.ResponseHeaders = []string{"X-Forwarded-For"} },
+		"an answer header naming a proxy header":  func(d *plan.Declaration) { d.ResponseHeaders = []string{"Proxy-Authorization"} },
+		"client_metadata with no keys":            func(d *plan.Declaration) { d.Body.Meta = nil },
 		"metadata keys with no client_metadata": func(d *plan.Declaration) {
 			d.Body.Keys = []string{"model", "input", "store", "stream"}
 		},
@@ -573,11 +573,15 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 		t.Fatalf("a held call cancelled before connect settled %+v, want once, not sent", u)
 	}
 
-	// The same cancel once the provider has the call: it was sent.
+	// The same cancel once the provider has the call: it was sent. The
+	// provider never answers: it drops the connection once the caller has
+	// gone, since an answer written then can still reach the transport ahead
+	// of its own close and be returned as the call's answer (#5381).
 	arrived := make(chan struct{})
 	f.stream = func(w http.ResponseWriter, r *http.Request) {
 		close(arrived)
 		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
 	}
 	ctx, cancel = context.WithCancel(context.Background())
 	go func() { <-arrived; cancel() }()
