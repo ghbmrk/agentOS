@@ -87,16 +87,21 @@ class CommandTest(unittest.TestCase):
                   "GOENV": f"{h}/.config/go/env", "GITHUB_ENV": f"{h}/work/_temp/_runner_file_commands/set_env_x",
                   "GITHUB_PATH": "/f", "GITHUB_OUTPUT": "/f", "GITHUB_STATE": "/f", "GITHUB_STEP_SUMMARY": "/f",
                   "ACTIONS_RUNTIME_URL": "u", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "t", "GITHUB_TOKEN": "t"}
+        ws = f"{h}/work/agentOS/agentOS"
         inputs = {"HOME": h, "AGENTOS_REFERENCE_ROOT": f"{h}/work/_temp/image-tools", "RUNNER_TEMP": f"{h}/work/_temp",
-                  "GITHUB_WORKSPACE": f"{h}/work/agentOS/agentOS", "GITHUB_SHA": "s"}
-        with mock.patch.dict(unit_tests.ENV, {**runner, **inputs}):
+                  "GITHUB_WORKSPACE": ws, "GITHUB_SHA": "s", "PATH": f"{h}/.local/bin:/usr/bin"}
+        tools = {"NVM_DIR": f"{h}/.nvm", "CARGO_HOME": f"{h}/.cargo", "RUNNER_WORKSPACE": f"{h}/work/agentOS"}
+        with mock.patch.dict(unit_tests.ENV, {**runner, **inputs, **tools}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
             e2 = unit_tests.env("test_x", "/r/reads")
-        self.assertEqual(set(runner) & set(e2), set())  # the runner's own directories, files for later steps, tokens
-        self.assertEqual(e2["GITHUB_SHA"], "s")
-        # Nothing names the runner's home but what a test reads: the worktree and the job's inputs
-        # under the runner's work directory (PATH lists programs to run, not a place to write).
-        self.assertEqual([k for k, v in e2.items() if k != "PATH" and (v == h or v.startswith(h + "/"))
-                          and not v.startswith(h + "/work/")], [])
+        self.assertEqual((set(runner) | set(tools)) & set(e2), set())  # the runner's own directories, step files, tokens
+        self.assertEqual({k: e2[k] for k in inputs if k != "HOME"}, {k: v for k, v in inputs.items() if k != "HOME"})
+        # In any environment, nothing env() passes on names the runner's home but the worktree and
+        # the job's temporary directory (PATH lists programs to run, not a place to write).
+        home, temp = unit_tests.ENV.get("HOME", "/nonexistent"), unit_tests.ENV.get("RUNNER_TEMP", "/nonexistent")
+        self.assertEqual([k for k, v in unit_tests.env("test_x", "/r/reads").items()
+                          if k != "PATH" and v.startswith(home.rstrip("/") + "/")
+                          and not v.startswith((str(unit_tests.ROOT), temp))], [])
         n = int(unit_tests.ENV.get("GIT_CONFIG_COUNT", 0))  # git reads the worktree, another user's
         self.assertEqual((e["GIT_CONFIG_COUNT"], e[f"GIT_CONFIG_KEY_{n}"], e[f"GIT_CONFIG_VALUE_{n}"]),
                          (str(n + 1), "safe.directory", str(unit_tests.ROOT)))

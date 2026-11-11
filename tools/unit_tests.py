@@ -152,12 +152,24 @@ def go_dir(trace_dir):
 UNSHARED = re.compile(r"XDG_\w+|GOPATH|GOENV|GITHUB_(?:ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)|ACTIONS_\w+|\w*_TOKEN\w*")
 
 
+def _runners(value):
+    """Whether value names a path in the runner's home (ENV's HOME) other than the worktree or the
+    job's temporary directory (RUNNER_TEMP: inputs such as the reference root): a tool's own
+    directory there (NVM_DIR, a cache, a config) is the runner's, not the module's. PATH lists
+    programs to run and is kept whole."""
+    home = ENV.get("HOME", "").rstrip("/")
+    if not home or not (value == home or value.startswith(home + "/")):
+        return False
+    keep = [str(ROOT)] + ([ENV["RUNNER_TEMP"].rstrip("/")] if ENV.get("RUNNER_TEMP") else [])
+    return not any(value == k or value.startswith(k + "/") for k in keep)
+
+
 def env(module, trace_dir):
     """The module's environment: ENV, its own home, the shared Go caches, and git told the worktree,
     another user's, is safe to read (in command scope, which git takes for safe.directory)."""
     home = scratch(trace_dir) / "home" / module
     n = int(ENV.get("GIT_CONFIG_COUNT", 0))
-    return {**{k: v for k, v in ENV.items() if not UNSHARED.match(k)}, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
+    return {**{k: v for k, v in ENV.items() if not UNSHARED.match(k) and (k == "PATH" or not _runners(v))}, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
             "GOCACHE": str(go_dir(trace_dir) / "build"), "GOMODCACHE": str(go_dir(trace_dir) / "mod"),
             "GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": "safe.directory", f"GIT_CONFIG_VALUE_{n}": str(ROOT)}
 
