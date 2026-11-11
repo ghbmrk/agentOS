@@ -2174,7 +2174,7 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("continue-on-error", self.text)
 
     def test_summary_fails_unless_the_claim_ran_and_each_package_passed(self):
-        script = job(self.text, "mutgate").split("run: |\n", 1)[1]
+        script = job(self.text, "mutgate").split("name: The claim ran", 1)[1].split("run: |\n", 1)[1]
         script = re.split(r"\n      [-#] ", script, maxsplit=1)[0]
         script = "\n".join(l[10:] for l in script.split("\n"))
         cases = [
@@ -2243,8 +2243,10 @@ class Workflow(unittest.TestCase):
 
     def test_mutgate_job_verifies_the_artifacts_from_a_fresh_checkout(self):
         body = job(self.text, "mutgate")
-        steps = body.split("\n      - ")[1:]
+        # The first step reads the PR's head (#5409); tests/test_workflows.py pins it.
+        steps = body.split("\n      - ")[2:]
         names = [st.split("\n", 1)[0] for st in steps]
+        self.assertEqual(body.split("\n      - ")[1].split("\n", 1)[0], "name: This run's head is still the PR's current head")
         self.assertEqual(names, [
             "name: The claim ran and every claimed package passed",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
