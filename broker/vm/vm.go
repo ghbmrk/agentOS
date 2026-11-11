@@ -1559,7 +1559,7 @@ func (h *diskHold) release() {
 	h.m.diskMu.Unlock()
 }
 
-// Unread lists the snapshots kept unread at open, oldest first: each
+// Unread lists the snapshots kept unread at open, in no order: each
 // holds a restore point whose record did not read, and loads at the next
 // open once it does.
 func (m *Manager) Unread() []string {
@@ -1569,7 +1569,6 @@ func (m *Manager) Unread() []string {
 	for id := range m.unread {
 		out = append(out, id)
 	}
-	sort.Strings(out)
 	return out
 }
 

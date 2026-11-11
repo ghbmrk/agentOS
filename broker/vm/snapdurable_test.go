@@ -232,6 +232,25 @@ func TestCAP3ForgetDeletesUnreadSnapshot(t *testing.T) {
 	}
 }
 
+// CAP-3 (#5461): a forget that cannot delete an unread snapshot fails,
+// so the erase stays retryable, and the snapshot stays listed unread.
+func TestCAP3ForgetFailsWhenUnreadSnapshotStays(t *testing.T) {
+	e := newEnv(t, 4096)
+	mc := e.create("m", admission.Accepted, 500)
+	id := snapName(9)
+	must(t, os.MkdirAll(filepath.Join(e.cfg.StateDir, "snapshots", id, "meta.json"), 0o700))
+	e.restart("m")
+	real := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	t.Cleanup(func() { syncSnapDir = real })
+	if err := e.m.ForgetSince(bg, mc.Lineage, time.Now()); err == nil {
+		t.Fatal("forget succeeded with an unread snapshot left")
+	}
+	if got := e.m.Unread(); len(got) != 1 || got[0] != id {
+		t.Fatalf("unread after a failed forget = %v, want [%s]", got, id)
+	}
+}
+
 // CAP-3 (#5461): an entry under snapshots/ that is not a directory is not
 // a snapshot: the open succeeds, nothing is loaded from it, and it is left
 // alone; no new snapshot takes its name.
