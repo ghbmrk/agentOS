@@ -2,9 +2,13 @@
 """Run every tests/test*.py module in its own process tree under strace, several at once (CI-par).
 
 ci.yml's unit-test step. Each module runs as `python -m unittest discover -s tests -p <module>.py
--v` under `strace -f -y`, which writes <dir>/<module>.trace for tests/records_audit.py
+-v` under `strace -f -y`, whose trace becomes <dir>/<module>.trace for tests/records_audit.py
 (CI-PATHS) and tests/clash_audit.py (CI-par-clash); only the number running at a time
-changes. A module's output is buffered and printed whole, in name order, so logs do not
+changes. No trace has a name while any module runs (#5413): strace writes it into a pipe this
+process alone reads, into a file with no name, and once every module has ended this process makes
+DIR, which must not exist before, and copies each trace to its name there. So no module can plant,
+link, rename or rewrite a trace by name; this process is closed to /proc (PR_SET_DUMPABLE 0), so
+none reaches the unnamed files either. A module's output is buffered and printed whole, in name order, so logs do not
 interleave; a line per finished module shows progress meanwhile. The longest modules start
 first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
@@ -30,12 +34,15 @@ first process exits after every worker, as tests/records_audit.py requires.
 """
 import argparse
 import concurrent.futures
+import ctypes
+import functools
 import io
 import multiprocessing
 import multiprocessing.connection
 import os
 import pathlib
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -76,7 +83,11 @@ ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # them before Python starts, so no site hook (.pth, sitecustomize, usercustomize) or child it
 # starts holds strace's stream (#5413). Only a test that opens that stream by its /proc name
 # reaches it, and a cut it fakes so gains only a rerun: both audits read the cut attempt's trace.
-JOIN = ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh"]
+# strace's trace goes to its stdin, the pipe's write end (TRACE_TO), and the module gets
+# /dev/null there instead, so no module holds the pipe; only /proc/<strace>/fd reaches it, and a
+# pipe takes only more lines, never fewer.
+JOIN = ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh"]
+TRACE_TO = "/proc/self/fd/0"
 LONG_POLE = 1.25
 FLOOR = 60  # seconds: a module shorter than this never fails the long-pole check
 
@@ -85,14 +96,14 @@ def modules(root=ROOT):
     return sorted(p.stem for p in (root / "tests").glob("test*.py"))
 
 
-def command(module, trace_dir, workers=None):
+def command(module, workers=None):
     if module in SPLIT:
         run = [*JOIN, sys.executable, "-c", "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                str(pathlib.Path(__file__).resolve()), "--split", module, "--workers", str(workers or os.cpu_count() or 1)]
     else:  # as `python -m unittest discover ...`
         run = [*JOIN, sys.executable, "-c", "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
                "unittest", "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
-    return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *run]
+    return [*STRACE, "-o", TRACE_TO, *run]
 
 
 class _Claimed(unittest.TestSuite):
@@ -235,15 +246,36 @@ STRACE_ATTEMPTS = 2
 CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, the one finished trace per module
 
 
-def attempt(cmd, root=ROOT):
-    """(rc, output, strace's own stderr) of one traced run, started in its own session. When strace
-    ends, whatever is left of that session's process group is killed before this returns, so
-    nothing of the run goes on into the next one (#5364). strace's pid, and so the group id, stays held until the
-    group is killed: it is reaped only after. Output goes to files, not pipes, so a process that
-    keeps a copy of one cannot hold the run open."""
+def _copy(r, out, done):
+    """Copies pipe r into file out until its writers are gone, or until done is set and nothing
+    waits in it: a process that keeps a copy of the write end cannot hold the run open."""
+    while True:
+        if not select.select([r], [], [], 0.1)[0]:
+            if done.is_set():
+                return
+        elif not os.splice(r, out, 1 << 20):
+            return
+
+
+def attempt(cmd, trace, root=ROOT):
+    """(rc, output, strace's own stderr) of one traced run, started in its own session; its trace
+    (from TRACE_TO) is copied into the file trace, an fd. When strace ends, whatever is left of
+    that session's process group is killed before this returns, so nothing of the run goes on
+    into the next one (#5364). strace's pid, and so the group id, stays held until the group is
+    killed: it is reaped only after. Output goes to files, not pipes, so a process that keeps a
+    copy of one cannot hold the run open."""
+    r, w = os.pipe()
+    done = threading.Event()
+    copier = threading.Thread(target=_copy, args=(r, trace, done))
     with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, env=ENV, stdout=log,
-                             stderr=err, start_new_session=True)
+        try:
+            p = subprocess.Popen(cmd, cwd=root, stdin=w, env=ENV, stdout=log, stderr=err, start_new_session=True)
+        except BaseException:
+            os.close(r)
+            raise
+        finally:
+            os.close(w)
+        copier.start()
         try:
             os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
         finally:
@@ -252,24 +284,28 @@ def attempt(cmd, root=ROOT):
             except ProcessLookupError:
                 pass
             p.wait()
+            done.set()
+            copier.join()
+            os.close(r)
         log.seek(0)
         err.seek(0)
         return p.returncode, log.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace")
 
 
-def run_one(module, trace_dir, root=ROOT):
+def run_one(module, trace_dir, root=ROOT, store=None):
     """(module, rc, seconds, output). An attempt that strace cut short (STRACE_FAULT on strace's
-    own stderr, which follows the module's output in the log) reruns the module whole, and strace
-    -o rewrites its trace, so the trace kept is the passing attempt's; the cut attempt's trace is
-    kept as <module>.trace.cut, for records_audit.py and clash_audit.py (each sees every attempt). A cut attempt
-    that already showed a failing test fails the module and is not rerun, and a module strace cuts
-    on every attempt fails."""
-    start, outs = time.monotonic(), []
-    trace = pathlib.Path(trace_dir) / f"{module}.trace"
-    cut = trace.with_name(module + CUT)
-    cut.unlink(missing_ok=True)  # one left by an earlier run in this directory is not this run's
+    own stderr, which follows the module's output in the log) reruns the module whole into a fresh
+    trace, so the trace kept is the passing attempt's; the cut attempt's trace is kept as
+    <module>.trace.cut, for records_audit.py and clash_audit.py (each sees every attempt). A cut
+    attempt that already showed a failing test fails the module and is not rerun, and a module
+    strace cuts on every attempt fails. The traces, unnamed files, go into store ({name: fd}) for
+    main to publish once every module has ended; with no store, into trace_dir now."""
+    start, outs, files = time.monotonic(), [], {}
+    near = os.path.dirname(os.path.abspath(trace_dir))  # the unnamed files' file system
     for n in range(1, STRACE_ATTEMPTS + 1):
-        rc, out, err = attempt(command(module, trace_dir), root)
+        trace = os.open(near, os.O_RDWR | os.O_TMPFILE, 0o600)
+        files[module + ".trace"] = trace
+        rc, out, err = attempt(command(module), trace, root)
         failed = TEST_FAILED.search(out)
         if err:  # strace's own lines, after the module's, on a line of their own
             out += ("\n" if out and not out.endswith("\n") else "") + err
@@ -284,9 +320,38 @@ def run_one(module, trace_dir, root=ROOT):
                        "the module fails\n" if last else RERAN + "\n"))
         if last:
             break
-        if trace.exists():  # the one cut attempt's trace (STRACE_ATTEMPTS)
-            trace.replace(cut)
+        files[module + CUT] = trace  # the one cut attempt's trace (STRACE_ATTEMPTS)
+    if store is None:
+        for name in (module + ".trace", module + CUT):  # one an earlier run left is not this run's
+            pathlib.Path(trace_dir, name).unlink(missing_ok=True)
+        publish(trace_dir, files)
+    else:
+        store.update(files)
     return module, rc, time.monotonic() - start, "".join(outs)
+
+
+def publish(trace_dir, files, fresh=False):
+    """Copies each unnamed trace ({name: fd}) to a new file of that name in trace_dir and closes
+    it. fresh: makes trace_dir, failing if anything is there already."""
+    if fresh:
+        os.mkdir(trace_dir)
+    for name, fd in sorted(files.items()):
+        out = os.open(os.path.join(trace_dir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            while os.sendfile(out, fd, None, 1 << 30):
+                pass
+        finally:
+            os.close(out)
+            os.close(fd)
+
+
+def undumpable():
+    """Closes this process's /proc entries, and so the files it holds, to other processes of its
+    user (PR_SET_DUMPABLE 0); a process it starts is open again once it execs."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0)")
 
 
 def size(module, root=ROOT):
@@ -405,12 +470,21 @@ def main(argv=None):
         return split(args.split, args.workers)
     if not args.trace_dir:
         ap.error("TRACE_DIR is required")
-    os.makedirs(args.trace_dir, exist_ok=True)
+    if os.path.lexists(args.trace_dir):
+        ap.error("TRACE_DIR must not exist yet: it is made once every module has ended")
+    os.makedirs(os.path.dirname(os.path.abspath(args.trace_dir)), exist_ok=True)
+    undumpable()
     names = modules()
-    lanes = []
+    lanes, store = [], {}
     start = time.monotonic()
-    results = run(names, args.trace_dir, args.jobs, lanes=lanes)
-    return report(names, results, jobs=args.jobs, lanes=lanes, wall=time.monotonic() - start)
+    results = run(names, args.trace_dir, args.jobs, runner=functools.partial(run_one, store=store), lanes=lanes)
+    rc = report(names, results, jobs=args.jobs, lanes=lanes, wall=time.monotonic() - start)
+    try:
+        publish(args.trace_dir, store, fresh=True)
+    except FileExistsError:
+        print(f"::error::{args.trace_dir} was made while the modules ran: a test wrote where the traces go")
+        return 1
+    return rc
 
 
 if __name__ == "__main__":

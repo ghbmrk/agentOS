@@ -27,15 +27,16 @@ import records_audit  # noqa: E402
 
 class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
-        cmd = unit_tests.command("test_x", "/r")
+        cmd = unit_tests.command("test_x")
         self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
                                                   "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
                                                   "unlink,unlinkat,rename,renameat,renameat2,truncate",
                                                   "-e", "signal=none"])
-        self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
-        # #5413: sh joins stderr to stdout before Python, and so any site hook, starts.
+        # #5413: the trace goes to strace's stdin, a pipe; sh gives the module /dev/null there and
+        # joins its stderr to stdout before Python, and so any site hook, starts.
+        self.assertEqual(cmd[cmd.index("-o") + 1], "/proc/self/fd/0")
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh", sys.executable, "-c",
+                         ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh", sys.executable, "-c",
                           "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', "
                           "alter_sys=True)", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
@@ -236,9 +237,9 @@ class SplitTest(unittest.TestCase):
         return p, [line.split() for line in log.read_text().splitlines()], root
 
     def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
-        cmd = unit_tests.command("test_image", "/r", workers=4)
+        cmd = unit_tests.command("test_image", workers=4)
         self.assertIn("test_image", unit_tests.SPLIT)
-        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", *unit_tests.JOIN, sys.executable, "-c",
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", unit_tests.TRACE_TO, *unit_tests.JOIN, sys.executable, "-c",
                                "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                                str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
                                "--workers", "4"])
@@ -305,8 +306,8 @@ class SplitTest(unittest.TestCase):
     def test_split_trace_is_one_finished_tree(self):
         trace_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, trace_dir)
-        prefix = unit_tests.command("test_x", trace_dir)
-        prefix = prefix[:prefix.index("-o") + 2]
+        prefix = unit_tests.command("test_x")
+        prefix = [*prefix[:prefix.index("-o")], "-o", os.path.join(trace_dir, "test_x.trace")]
         p, log, root = self.run_split(self.BODY, prefix)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         trace = pathlib.Path(trace_dir, "test_x.trace").read_text(errors="surrogateescape")
@@ -522,6 +523,78 @@ class StraceFaultTest(unittest.TestCase):
              mock.patch.dict(unit_tests.SERIAL, clear=True):
             self.assertEqual(clash_audit.main(["clash_audit.py", str(root)]), 1)
         self.assertEqual(stdout.getvalue(), "::error::test_fake and test_other both write /tmp/agentos-x\n")
+
+    def test_traces_get_their_names_only_after_every_module_has_ended(self):
+        # #5413: tools/unit_tests.py itself, on a copy of the repository's layout, under a fake strace
+        # that writes "trace of <module>" to its -o and runs the module. While modules run, the
+        # trace directory does not exist and no trace has a name in it; test_y then plants a link
+        # where test_x's trace will go, or moves the directory above it. The planted directory fails
+        # the step; the moved one changes nothing, as the traces are named only at the end.
+        for attack in ("none", "plant", "move"):
+            with self.subTest(attack=attack):
+                top = pathlib.Path(os.path.realpath(tempfile.mkdtemp()))
+                self.addCleanup(shutil.rmtree, top, True)
+                root, d = top / "repo", top / "temp" / "reads"
+                (root / "tools").mkdir(parents=True)
+                (root / "tests").mkdir()
+                shutil.copy(unit_tests.__file__, root / "tools" / "unit_tests.py")
+                seen = top / "seen"
+                (root / "tests" / "test_x.py").write_text(textwrap.dedent(f"""\
+                    import os, pathlib, time, unittest
+                    class A(unittest.TestCase):
+                        def test_x(self):
+                            time.sleep(1)  # test_y's attack comes first
+                            runner = pathlib.Path(f"/proc/{{os.getppid()}}/stat").read_text().split(") ")[1].split()[1]
+                            try:
+                                os.listdir(f"/proc/{{runner}}/fd")
+                                closed = "open"
+                            except PermissionError:
+                                closed = "closed"
+                            pathlib.Path({str(seen)!r}).write_text(f"{{os.path.lexists({str(d)!r})}} {{closed}}")
+                    """))
+                (root / "tests" / "test_y.py").write_text(textwrap.dedent(f"""\
+                    import os, pathlib, unittest
+                    class A(unittest.TestCase):
+                        def test_y(self):
+                            d = pathlib.Path({str(d)!r})
+                            if {attack!r} == "plant":
+                                d.mkdir()
+                                (d / "test_x.trace").symlink_to({str(top / "f")!r})
+                            elif {attack!r} == "move":
+                                d.parent.rename(d.parent.with_name("old"))
+                                d.parent.mkdir()
+                    """))
+                fake = top / "bin" / "strace"
+                fake.parent.mkdir()
+                fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent("""\
+                    import pathlib, subprocess, sys
+                    module = sys.argv[sys.argv.index("-p") + 1][:-3]
+                    pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(f"trace of {module}")
+                    sys.exit(subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode)
+                    """))
+                fake.chmod(0o755)
+                p = subprocess.run([sys.executable, str(root / "tools" / "unit_tests.py"), str(d), "--jobs", "2"],
+                                   cwd=root, capture_output=True, text=True, timeout=120,
+                                   env={**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ.get('PATH', '')}"})
+                exists, closed = seen.read_text().split()
+                self.assertEqual(exists, str(attack == "plant"))  # only test_y's plant made it
+                if os.geteuid() != 0:  # root reads any process's /proc
+                    self.assertEqual(closed, "closed")
+                if attack == "plant":
+                    self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+                    self.assertIn(f"::error::{d} was made while the modules ran", p.stdout)
+                    self.assertFalse((top / "f").exists())
+                    continue
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertEqual(sorted(os.listdir(d)), ["test_x.trace", "test_y.trace"])
+                for m in ("test_x", "test_y"):
+                    self.assertFalse((d / f"{m}.trace").is_symlink())
+                    self.assertEqual((d / f"{m}.trace").read_text(), f"trace of {m}")
+                # A directory left from an earlier run is refused before any module runs.
+                p = subprocess.run([sys.executable, str(root / "tools" / "unit_tests.py"), str(d)], cwd=root,
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(p.returncode, 2)
+                self.assertIn("TRACE_DIR must not exist yet", p.stderr)
 
     def test_a_failed_test_is_never_rerun(self):
         rc, out, trace, calls = self.run_plan("fail-then-cut", "ok")

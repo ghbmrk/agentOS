@@ -16,6 +16,9 @@ as <module>.trace.cut: a record it opened counts as the module's (every attempt 
 and being partial, it is held to nothing else. A module whose tree, in any attempt, opened for
 writing, unlinked, renamed or truncated a path in the trace directory fails too: the traces are this audit's evidence, so a test
 may not write them, its own or another module's (#5407; the write as tests/clash_audit.py reads it).
+tools/unit_tests.py names no trace until every module has ended (#5413), so a module cannot
+plant, link, move or rewrite one by name; one that reaches strace's own descriptors through
+/proc/<strace>/fd can add lines to its trace's pipe, never take any away.
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """

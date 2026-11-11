@@ -23,8 +23,8 @@ module's, so it needs no exception; shared() lists the paths built to be written
 processes at once (devices, Python's bytecode cache, Go's build and module caches and telemetry
 counters). tools/unit_tests.py turns off git's optional index lock, so the shared worktree's
 .git/index.lock is written only by a git command that changes the index.
-Not seen: a clash through something other than open or bind (a fixed directory made by mkdir
-and only listed, a lock taken with flock on a file opened read-only,
+Not seen: a clash through something other than these calls (a fixed name made by mkdir, mknod or
+link, a lock taken with flock on a file opened read-only,
 a connect to a server another module started), by a process outside the module's tree (a
 daemon), or between the tests of one SPLIT module, whose workers share one trace (CI-par-3).
 Not resolved: a link that is gone by the audit and was made outside the module's tree or put in
