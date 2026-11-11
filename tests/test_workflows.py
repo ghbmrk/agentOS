@@ -561,6 +561,9 @@ EVENT_LIST = re.compile(r"[a-z_]+|\[[ \t]*[a-z_]+(?:[ \t]*,[ \t]*[a-z_]+)*[ \t]*
 def workflow_triggers(text):
     """Return the events a workflow's `on` key names and why the check cannot read the workflow."""
     events, problems, seen, key, indent = [], [], set(), None, None
+    # YAML 1.1 also breaks lines at CR, NEL, LS and PS, where this reader (and the `jobs:` search
+    # below) splits at LF only (Security on #5408).
+    problems += ["a line break other than LF: %r" % c for c in "\r\x85\u2028\u2029" if c in text]
     for line in text.split("\n"):
         bare = re.sub(r"(?:^|[ \t])#.*", "", line).rstrip(" \t")
         if not bare:
@@ -729,6 +732,14 @@ class WorkflowTest(unittest.TestCase):
             "alias in a flow list": ("on:\n  pull_request:", "on: [push, *t]"),
             "indented before the first key": ("name: x", " name: x"),
         }
+        for brk in "\r\x85\u2028\u2029":
+            unread.update({"%r in a comment" % brk: ("name: x", "name: x # a" + brk + "on: [pull_request]"),
+                           "%r in a plain scalar" % brk: ("name: x", "name: x" + brk + "y"),
+                           "%r in an env value" % brk: ("permissions:", "env:\n  A: a" + brk + "b\npermissions:")})
+            with self.subTest(brk=brk):
+                text = "name: x" + brk + "on: [pull_request]\njobs:\n"
+                self.assertTrue(workflow_triggers(text)[1])
+                self.assertTrue(supersede_problems("x.yml", text))
         # L3 on #5408: a document indented by one space throughout is still one GitHub reads.
         indented = "".join(" " + line for line in plain.splitlines(True))
         self.assertTrue(workflow_triggers(indented)[1])
