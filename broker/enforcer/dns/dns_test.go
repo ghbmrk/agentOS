@@ -430,6 +430,30 @@ func TestGenerateRefuses(t *testing.T) {
 	if want := ErrConfig.Error() + `: no upstream resolver; ` + lamp.Error() + "; " + fan.Error(); err.Error() != want {
 		t.Errorf("Refused reads %q, want %q", err, want)
 	}
+	// The setup fault is typed apart from every other refusal (#5431),
+	// and still reads as ErrConfig with its text.
+	var setup BadSetup
+	if !errors.As(got[0], &setup) || !errors.Is(got[0], ErrConfig) || errors.As(got[1], &setup) {
+		t.Errorf("the setup fault is not typed BadSetup: %#v", got)
+	}
+	// Refused's text names the first RefusedShown refusals and counts the
+	// rest exactly, so the log line stays bounded (#5431).
+	var many Refused
+	for i := range RefusedShown + 7 {
+		many = append(many, BadName{"N" + strconv.Itoa(i) + ".example"})
+	}
+	if txt := many.Error(); !strings.HasSuffix(txt, `"N`+strconv.Itoa(RefusedShown-1)+`.example" is not a DNS host name; and 7 more`) || strings.Count(txt, "is not a DNS host name") != RefusedShown || strings.Contains(txt, "\n") {
+		t.Errorf("Refused of %d reads %q", len(many), txt)
+	}
+	if txt := many[:RefusedShown].Error(); strings.Contains(txt, "more") || strings.Count(txt, "is not a DNS host name") != RefusedShown {
+		t.Errorf("Refused of %d reads %q", RefusedShown, txt)
+	}
+	for range 5000 {
+		many = append(many, BadName{"Long-name-that-is-refused.example"})
+	}
+	if txt := many.Error(); len(txt) > 4<<10 || !strings.HasSuffix(txt, "; and "+strconv.Itoa(len(many)-RefusedShown)+" more") {
+		t.Errorf("Refused of %d reads %d bytes: %.200q", len(many), len(txt), txt)
+	}
 	// A name the policy accepts but this package refuses still refuses a
 	// whole version, so the previous configuration stays.
 	d = fixturePolicy()

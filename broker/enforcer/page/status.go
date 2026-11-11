@@ -156,7 +156,13 @@ const (
 	PolicyUntyped PolicyKind = iota // a refusal the daemon did not type
 	PolicyVLAN                      // a device on a Wi-Fi network the setup serves no names on
 	PolicyName                      // a name to look up that is not a DNS host name
+	PolicySetup                     // the enforcer's own network setup, refused
 )
+
+// PolicyShown is how many reasons the policy in force cannot be served
+// home lists; one line after them counts the rest (#5431), so the page
+// stays bounded however many the policy holds.
+const PolicyShown = 20
 
 // Restart is one resolver instance that has exited on its own Exits
 // times in a row and has not stayed up since.
@@ -387,10 +393,25 @@ type plainResolver struct {
 // chose, so no name reaches the page outside printable ASCII.
 func plainStop(r ResolverStop) plainResolver {
 	out := plainResolver{Load: plainLoad(r.Load)}
+	// The first PolicyShown reasons, each once, then how many more there
+	// are, counted once each too (#5431).
+	seen, more := map[string]bool{}, 0
 	for _, p := range r.Policy {
-		if p := plainPolicy(p); !slices.Contains(out.Policy, p) {
+		switch p := plainPolicy(p); {
+		case seen[p]:
+		case len(seen) < PolicyShown:
+			seen[p] = true
 			out.Policy = append(out.Policy, p)
+		default:
+			seen[p] = true
+			more++
 		}
+	}
+	switch {
+	case more == 1:
+		out.Policy = append(out.Policy, "There is 1 more reason the policy in force cannot be served, not listed here.")
+	case more > 1:
+		out.Policy = append(out.Policy, "There are "+strconv.Itoa(more)+" more reasons the policy in force cannot be served, not listed here.")
 	}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
@@ -457,6 +478,8 @@ func plainPolicy(p PolicyCause) string {
 		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there."
 	case PolicyName:
 		return "The policy in force lists " + strconv.QuoteToASCII(p.Name) + ", which is not a name the enforcer can look up."
+	case PolicySetup:
+		return "The network setup could not be applied: the enforcer's own setup of its names and addresses is not one it can serve. The enforcer's log has the detail."
 	}
 	return "The policy in force names something the enforcer cannot serve; the enforcer's log has the detail."
 }
