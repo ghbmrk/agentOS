@@ -258,3 +258,48 @@ func TestRefusedBigExcusesOnlyAClockBehind(t *testing.T) {
 		t.Errorf("a refusal for its second passkey: %v, counted %d", err, s.bigRefused)
 	}
 }
+
+// The two clock invariants judge at their edges: a hold whose earliest
+// reading is a millisecond short of its due ended early, one at its due did
+// not; an effect whose latest reading reached the key's expiry exactly is
+// under an expired key, one a millisecond short is not (TIM-1, KEY-7, KEY-8).
+func TestTheClockInvariantsJudgeAtTheirEdges(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	owner, holder := gen(rng), gen(rng)
+	root := key.Issue(owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Post}, Serial: "e1"})
+	ck, err := key.ClerkKey(root, owner.pass, holder.pub, 0, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk, err := key.Derive(ck, holder.priv, holder.pub, key.LimitHold(hour/6, hour/2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const heldAt, na = 10 * hour, 20 * hour
+	ek, err := key.Derive(ck, holder.priv, holder.pub, key.LimitExpires(na))
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := heldAt + hour/6
+	held := kernel.Dispatch{Held: true, HeldAt: heldAt}
+	for _, c := range []struct {
+		name  string
+		k     key.Key
+		now   int64
+		reads [2]int64
+		bad   string
+	}{
+		{"earliest a millisecond short of the due", hk, due, [2]int64{due - 1, due}, "a hold ended before its due by the earliest reading"},
+		{"earliest at the due", hk, due, [2]int64{due, due}, ""},
+		{"latest at the expiry", ek, na - 1, [2]int64{na - 1, na}, "effect under a key once a reading passed its expiry"},
+		{"latest a millisecond short of the expiry", ek, na - 1, [2]int64{na - 1, na - 1}, ""},
+	} {
+		now, reads := c.now, c.reads
+		w := &world{anchors: []key.PublicKey{owner.pk}, now: &now, reads: &reads, done: map[string]bool{}, dead: map[key.ID]bool{}}
+		p := kernel.SignPlan(kernel.Plan{ID: "e", Key: c.k, Steps: []kernel.PlanStep{{Verb: key.Post, Clerk: "mail", Args: map[string]string{"to": "alice", "msg": "hi"}}}}, holder.priv)
+		w.judge(kernel.Request{Plan: p}, heldView{held})
+		if want := c.bad != ""; want != (len(w.bad) == 1) || want && w.bad[0] != c.bad || !want && len(w.bad) > 0 {
+			t.Errorf("%s: judged %q", c.name, w.bad)
+		}
+	}
+}
