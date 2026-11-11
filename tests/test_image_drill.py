@@ -62,6 +62,9 @@ class DrillTest(unittest.TestCase):
         self.rc = t / "rc"
         self.rc.write_text("0\n")
         self.statusf = t / "status"
+        # mv fails while the flag exists: a rename that cannot be done (#5455).
+        self.mvfail = t / "mvfail"
+        stub(self.bin, "mv", '[ -e "%s" ] && exit 1; exec "%s" "$@"' % (self.mvfail, shutil.which("mv")))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -214,9 +217,81 @@ class DrillTest(unittest.TestCase):
         self.assertTrue(out.startswith("agentos-drill: FAIL image=verified "), out)
         self.assertTrue((self.drill / "pending").exists())
 
+    def break_write(self):
+        (self.drill / "pending.new").mkdir(parents=True)  # in the way: the record cannot be written
+
+    def test_a_record_not_written_is_said_and_the_reboot_goes_ahead(self):
+        # DRILL-stamp-report (#5455): on both reboot paths, a write or a rename that fails is reported
+        # and the reboot is still asked for; the next healthy boot reports the drill as missed.
+        for how in ("write", "rename"):
+            for path in ("inhibited", "week"):
+                with self.subTest(how=how, path=path):
+                    shutil.rmtree(self.drill, ignore_errors=True)
+                    self.log.unlink(missing_ok=True)
+                    self.mvfail.unlink(missing_ok=True)
+                    if how == "write":
+                        self.break_write()
+                    else:
+                        self.mvfail.write_text("")
+                    if path == "inhibited":
+                        write(self.root, "proc/uptime", "3600.42 12.00\n")
+                        self.inhibit.write_text("1\n")
+                        want = ["systemctl reboot --check-inhibitors=yes", "sleep 300",
+                                "systemctl reboot --check-inhibitors=yes"]
+                    else:
+                        write(self.root, "proc/uptime", "604800.00 1.00\n")
+                        self.inhibit.write_text("1000000\n")
+                        want = ["systemctl reboot --check-inhibitors=no"]
+                    out, calls = self.reboot()
+                    self.assertEqual([c for c in calls if not c.startswith("veritysetup")], want)
+                    self.assertIn("agentos-reboot: FAIL drill record not written (image=", out)
+                    self.assertEqual(out.count("FAIL drill record not written"), len([c for c in want if c.startswith("systemctl")]))
+                    self.assertFalse((self.drill / "pending").exists())
+                    self.assertTrue((self.drill / "unrecorded").exists())
+                    self.mvfail.unlink(missing_ok=True)
+                    rc, line = self.report()
+                    self.assertEqual(rc, 1, line)
+                    self.assertTrue(line.startswith("agentos-drill: FAIL missed: "), line)
+                    self.assertEqual(len(line.splitlines()), 1)
+                    # No last.json: the month is not reset, so the next weekly reboot drills again.
+                    self.assertFalse((self.drill / "last.json").exists())
+                    self.assertFalse((self.drill / "unrecorded").exists())
+
+    def test_a_later_run_with_a_working_disk_records_the_drill(self):
+        self.break_write()
+        out, _ = self.reboot()
+        self.assertIn("FAIL drill record not written", out)
+        (self.drill / "pending.new").rmdir()
+        self.log.unlink()
+        out, calls = self.reboot()
+        self.assertEqual(calls[0], "veritysetup verify /dev/vda2 /dev/vda3 " + HASH)
+        self.assertNotIn("FAIL", out)
+        self.assertEqual(self.pending()["image"], "verified")
+        self.assertFalse((self.drill / "unrecorded").exists())
+        rc, line = self.report()
+        self.assertEqual(rc, 0, line)
+        self.assertTrue(line.startswith("agentos-drill: pass image=verified "), line)
+
+    def test_a_check_cut_off_before_its_record_reads_as_missed(self):
+        # A power cut during the check: unrecorded is there and no record; the next healthy boot says so.
+        write(self.root, "var/lib/agentos/drill/unrecorded")
+        rc, line = self.report()
+        self.assertEqual(rc, 1, line)
+        self.assertTrue(line.startswith("agentos-drill: FAIL missed: "), line)
+
+    def test_an_ordinary_reboot_leaves_nothing_to_report(self):
+        write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
+        out, _ = self.reboot()
+        self.assertNotIn("FAIL", out)
+        self.assertEqual(sorted(p.name for p in self.drill.iterdir()), ["last.json"])
+
     def test_the_report_unit(self):
         u = ini(UNITS / "agentos-drill-report.service")
-        self.assertEqual(u["Unit"]["ConditionPathExists"], "/var/lib/agentos/drill/pending")
+        # Triggering conditions (|): the report runs on a record or a missed one, and an ordinary boot,
+        # with neither, skips (#5455).
+        conds = [ln.split("=", 1)[1] for ln in (UNITS / "agentos-drill-report.service").read_text().splitlines()
+                 if ln.startswith("Condition")]
+        self.assertEqual(conds, ["|/var/lib/agentos/drill/pending", "|/var/lib/agentos/drill/unrecorded"])
         # Requires= as well as After=: ordering alone would start the report on a boot whose health
         # check failed, and record that boot's drill as a pass (#2958 L3 1).
         self.assertEqual(u["Unit"]["Requires"], "boot-complete.target")

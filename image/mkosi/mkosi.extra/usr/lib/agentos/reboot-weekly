@@ -22,6 +22,10 @@ due() { [ -z "$(find "$D/last.json" -mtime -27 2>/dev/null)" ]; }
 image=
 if due; then
 	start=$(date +%s)
+	# unrecorded stands until a drill's record is written, so the next healthy boot reports a drill whose
+	# record never was (a full or failing disk, a power cut during the check) as missed (#5455).
+	mkdir -p -m 0700 "$D"
+	: >"$D/unrecorded"
 	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
 	st=$(veritysetup status usr 2>/dev/null)
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')
@@ -39,15 +43,19 @@ if due; then
 		fi
 	fi
 	secs=$(($(date +%s) - start))
-	mkdir -p -m 0700 "$D"
 	echo "agentos-reboot: drill image=$image in ${secs}s; the reboot is the clean start"
 fi
 # The drill's record, rewritten just before each reboot is asked for, so a wait on an inhibitor is not
-# counted in the time to a clean core.
+# counted in the time to a clean core. A record that cannot be written is said so, and the reboot goes
+# ahead: the week's bound outranks the report, and the next weekly reboot drills again (#5455).
 stamp() {
 	[ -n "$image" ] || return 0
-	printf 'image=%s image_seconds=%s reboot_at=%s\n' "$image" "$secs" "$(date +%s)" >"$D/pending.new" &&
-		mv -f "$D/pending.new" "$D/pending"
+	if printf 'image=%s image_seconds=%s reboot_at=%s\n' "$image" "$secs" "$(date +%s)" >"$D/pending.new" &&
+		mv -fT "$D/pending.new" "$D/pending"; then
+		rm -f "$D/unrecorded"
+	else
+		echo "agentos-reboot: FAIL drill record not written (image=$image); rebooting anyway"
+	fi
 }
 while [ "$(up)" -lt "$WEEK" ]; do
 	stamp
