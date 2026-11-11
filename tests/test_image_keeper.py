@@ -394,7 +394,7 @@ class KeeperTreeTest(unittest.TestCase):
                 finally:
                     remove()
         # Beside the protected paths, and the types the image ships, pass; a type or spelling the table lacks does not.
-        for t in ("srv", "xbootldr", "esp", "usr", "root", "usr-verity", "root-verity"):
+        for t in ("srv", "xbootldr", "esp", "usr", "root", "usr-verity", "root-verity", "usr-verity-sig", "root-verity-sig"):
             with self.subTest(t=t):
                 remove = self.place(definition(t))
                 try:
@@ -423,6 +423,28 @@ class KeeperTreeTest(unittest.TestCase):
                                         for g in got), got)
         finally:
             remove()
+        # systemd-repart reads each of the tree's definition directories, and each type has its own mount points.
+        for d in ("etc/repart.d/", "usr/local/lib/repart.d/", "usr/lib/repart.d/"):
+            with self.subTest(d=d):
+                remove = self.place({d + "60-x.conf": "[Partition]\nType=home\n"})
+                try:
+                    self.assertEqual(len(check.gpt_auto_violations(self.root)), 1)
+                finally:
+                    remove()
+        with unittest.mock.patch.object(check, "repart_build", return_value=None):
+            for t, want in (("xbootldr", {("boot",): ["60-x.conf"]}), ("srv", {("srv",): ["60-x.conf"]}),
+                            ("esp", {("boot",): ["60-x.conf"], ("efi",): ["60-x.conf"]}), ("usr", {}),
+                            ("root", {}), ("usr-verity", {}), ("usr-verity-sig", {}), ("root-verity", {}),
+                            ("root-verity-sig", {})):
+                with self.subTest(t=t):
+                    remove = self.place(definition(t))
+                    try:
+                        self.assertEqual(check.gpt_auto_mounts(self.root)[0], want)
+                    finally:
+                        remove()
+        self.assertEqual(sorted(check.GPT_AUTO_MOUNTS), sorted(
+            ["esp", "xbootldr", "home", "srv", "var", "tmp", "usr", "root", "root-verity", "root-verity-sig",
+             "usr-verity", "usr-verity-sig"]))
         # The build's own definitions count too, and violations() carries the refusal.
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "mkosi.repart").mkdir()
