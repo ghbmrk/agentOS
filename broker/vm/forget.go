@@ -70,6 +70,14 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 			errs = append(errs, err)
 		}
 	}
+	// A snapshot kept unread has no lineage or time this broker can
+	// read: deleted rather than kept, or it would come back at a later
+	// open holding what was forgotten.
+	for _, id := range m.Unread() {
+		if err := m.removeSnapshot(id); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -200,7 +208,8 @@ var syncSnapDir = durable.SyncDir
 // (CAP-3, #1240); a failed sync is returned, and the reset stays retryable.
 func (m *Manager) removeSnapshot(id string) error {
 	dir := m.snapDir(id)
-	if err := os.Remove(filepath.Join(dir, "meta.json")); err != nil && !os.IsNotExist(err) {
+	// RemoveAll: the record of a snapshot kept unread may not be a file.
+	if err := os.RemoveAll(filepath.Join(dir, "meta.json")); err != nil {
 		return err
 	}
 	if err := syncSnapDir(dir); err != nil && !os.IsNotExist(err) {
@@ -208,6 +217,7 @@ func (m *Manager) removeSnapshot(id string) error {
 	}
 	m.mu.Lock()
 	delete(m.snaps, id)
+	delete(m.unread, id)
 	m.mu.Unlock()
 	return os.RemoveAll(dir)
 }

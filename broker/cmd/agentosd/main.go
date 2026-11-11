@@ -799,6 +799,7 @@ func main() {
 			caps.agentOff(agentNoMachines)
 		} else {
 			pre.m.Store(m)
+			caps.snapsUnread(m.Unread)
 			// Held lineages go back before any machine is served or
 			// pruned; the journal has the owner's NOs by now.
 			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))

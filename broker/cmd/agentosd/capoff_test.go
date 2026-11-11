@@ -234,6 +234,12 @@ func capCases() []capCase {
 		{row: "C10_worker_image_unregistered", name: "Worker tools:", induce: func(t *testing.T, b *capBox) {
 			b.caps.workers(workerTools(nil, images{"other": "/x"}, "worker", "sleep infinity", 2048, workerGates{}) != nil)
 		}},
+		{row: "CAP3_restore_point_unread", name: "Restore points:", induce: func(t *testing.T, b *capBox) {
+			unread := []string{"s0000000007"}
+			b.caps.snapsUnread(func() []string { return unread })
+		}, clear: func(t *testing.T, b *capBox) {
+			b.caps.snapsUnread(func() []string { return nil })
+		}},
 		{row: "C11_update_checks", name: "Update checks:", induce: func(t *testing.T, b *capBox) {
 			b.caps.updateChecks(false)
 		}, clear: func(t *testing.T, b *capBox) {
@@ -588,6 +594,34 @@ func TestOwnerLinesNameTheWiFiPage(t *testing.T) {
 // KRN-forget b: an erase a store or the key still owes gives one STATUS
 // line by count and store, never by name; nothing owed gives none; an
 // unreachable kernel gives one line, not silence; forgetNotRunning is gone.
+// CAP-3 (#5461): restore points kept unread at open name themselves in one
+// owner-worded line, one by its ID and more by count, from the machines'
+// live list; none, no line.
+func TestUnreadRestorePointLine(t *testing.T) {
+	var unread []string
+	s := &capState{}
+	if got := s.unreadLine(); got != "" {
+		t.Fatalf("machines not open: %q", got)
+	}
+	s.snapsUnread(func() []string { return unread })
+	if got := s.unreadLine(); got != "" {
+		t.Fatalf("nothing unread: %q", got)
+	}
+	unread = []string{"s0000000007"}
+	if got := s.unreadLine(); got != "Restore points: s0000000007 could not be read, so it is not offered; I retry it at each start." {
+		t.Fatalf("one unread: %q", got)
+	}
+	unread = append(unread, "s0000000123")
+	if got := s.unreadLine(); got != "Restore points: 2 could not be read, so they are not offered; I retry them at each start." {
+		t.Fatalf("two unread: %q", got)
+	}
+	for _, l := range []string{unreadLine([]string{"s0000000007"}), unreadLine(unread)} {
+		if err := ownerWorded(l); err != nil {
+			t.Errorf("%q: %v", l, err)
+		}
+	}
+}
+
 func TestForgetStatusLines(t *testing.T) {
 	k := newFakeKernel()
 	note := forgetStatus(k)

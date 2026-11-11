@@ -76,12 +76,26 @@ const (
 	forgetNotErased = "Forget: old learning data not fully erased; " + fixRestart + "."
 )
 
+// unreadLine is STATUS's line for restore points whose record did not
+// read at the machines' open (CAP-3): kept on disk, not offered, and
+// read again at each start, so restarting is the step that works.
+func unreadLine(ids []string) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return "Restore points: " + ids[0] + " could not be read, so it is not offered; I retry it at each start."
+	}
+	return fmt.Sprintf("Restore points: %d could not be read, so they are not offered; I retry them at each start.", len(ids))
+}
+
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotErased,
 		forgetRecordUnread, forgetReadsUnknown, forgetUnreached, forgetHeldLine([]string{"helper.1"}), forgetHeldLine([]string{"a", "b"}),
-		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}})}
+		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}}),
+		unreadLine([]string{"s0000000007"}), unreadLine([]string{"s0000000007", "s0000000123"})}
 }
 
 // forgetHeldLine is STATUS's line for agents that read erased content and
@@ -165,6 +179,7 @@ func newCapLines(s *capState) *capLines {
 	r.add("questions", capHost, s.questionsLine)
 	r.add("workers", capConfig, s.workersLine)
 	r.add("update-checks", capHeld, s.updatesLine)
+	r.add("restore-points", capHost, s.unreadLine)
 	return r
 }
 
@@ -246,13 +261,14 @@ func ownerWorded(l string) error {
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
 type capState struct {
-	agent        atomic.Pointer[string] // C1's line, nil while the agent can run
-	held         atomic.Bool            // the agent line already says why it is off (lateStatus.off)
-	model        *modelProbe            // C2
-	recallOff    atomic.Bool            // C7
-	questionsOff atomic.Bool            // C9
-	workersOff   atomic.Bool            // C10
-	updates      atomic.Bool            // C11: an update check runs
+	agent        atomic.Pointer[string]          // C1's line, nil while the agent can run
+	held         atomic.Bool                     // the agent line already says why it is off (lateStatus.off)
+	model        *modelProbe                     // C2
+	recallOff    atomic.Bool                     // C7
+	questionsOff atomic.Bool                     // C9
+	workersOff   atomic.Bool                     // C10
+	updates      atomic.Bool                     // C11: an update check runs
+	unread       atomic.Pointer[func() []string] // the machines' restore points kept unread (vm Unread)
 }
 
 func newCapState(modelSocket string) *capState {
@@ -284,6 +300,16 @@ func (s *capState) workers(on bool)     { s.workersOff.Store(!on) }
 // updateChecks records whether an update check runs (W5b). None is built,
 // so main never sets it and STATUS says update checks are not running.
 func (s *capState) updateChecks(on bool) { s.updates.Store(on) }
+
+// snapsUnread wires the restore-point line to the machines' live list.
+func (s *capState) snapsUnread(list func() []string) { s.unread.Store(&list) }
+
+func (s *capState) unreadLine() string {
+	if l := s.unread.Load(); l != nil {
+		return unreadLine((*l)())
+	}
+	return ""
+}
 
 func (s *capState) agentLine() string {
 	if l := s.agent.Load(); l != nil && !s.held.Load() {
