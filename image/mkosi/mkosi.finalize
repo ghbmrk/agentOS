@@ -2154,8 +2154,25 @@ def inside_refusals(root):
     root, out, refused = str(root), [], set()
     held, named = cached(root_made_dirs, root), cached(unit_made_paths, root)[0]
     # #5400: a mount the box does not make itself (BOX_MOUNTS) hides the tree below it, and the check does not read
-    # what it holds (a tmpfs's mode=, a disk's root directory), so a path below one is refused (fail closed).
-    mounts = sorted({tuple(s) for s, _, k in named if k == "mount" and s and "/".join(s) not in BOX_MOUNTS})
+    # what it holds (a tmpfs's mode=, a disk's root directory), so a path below one is refused (fail closed). A
+    # mount counts in every form it has (as written, resolved, through the box's links), so var-run.mount hides
+    # /run too (#5437 L3 6791117463). One at a box mount is exempt only as the box's own: no unit mounts there but
+    # at a WORLD_WRITABLE one (tmp.mount), and an etc/fstab line there gives it to no one (mount_gives_away); systemd
+    # finds the box's mount and only remounts it (#5437 Security 6790413268 release 1).
+    try:
+        loose = {tuple(path_parts(f[1])) for f in (ln.split() for ln in Conf(root, "etc/fstab").text().splitlines())
+                 if len(f) > 3 and not f[0].startswith("#") and mount_gives_away(f[3])}
+    except OSError:
+        loose = set()  # fstab_noexec_violations refuses an unreadable one
+    mounts = set()
+    for s, w, k in named:
+        if k != "mount" or not s:
+            continue
+        forms = mount_forms(root, s)
+        if (any("/".join(f) not in BOX_MOUNTS for f in forms) or tuple(s) in loose and w == "etc/fstab"
+                or w != "etc/fstab" and not any("/".join(f) in WORLD_WRITABLE for f in forms)):
+            mounts |= forms
+    mounts = sorted(mounts)
     for steps, where, kind in named:
         if kind == "watch" or where in refused:  # one line per setting, of its words as written or resolved
             continue
@@ -2197,6 +2214,26 @@ def inside_refusals(root):
                            "of that way is not root's alone: %s (#5359)" % (where, "/".join(steps).split(",", 1)[0], why))
                 refused.add(where)
     return out
+
+
+def mount_forms(root, steps):
+    """#5437: the forms of mount point STEPS that name one mount: as written and as the tree resolves it (tree_chase
+    follows the box's links where the tree lacks them); a form the tree cannot resolve is unit_made_paths' error."""
+    try:
+        return {tuple(steps), tuple(tree_resolve(root, steps))}
+    except OSError:
+        return {tuple(steps)}
+
+
+def mount_gives_away(options):
+    """#5437: whether mount OPTIONS (comma-separated) give the mounted root to anyone but root: a mode= that
+    a group or others can write, or one the check cannot read, or a uid= or gid= other than root's."""
+    for o in options.split(","):
+        k, _, v = o.partition("=")
+        if k == "mode" and (not re.fullmatch(r"[0-7]{1,4}", v) or int(v, 8) & 0o022) \
+                or k in ("uid", "gid") and v not in ("0", "root"):
+            return True
+    return False
 
 
 def pid1_may_make(root, steps):

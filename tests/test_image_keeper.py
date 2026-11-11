@@ -1391,6 +1391,35 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(got, [hidden("var/tmp/m/s", "var/tmp/m")])
         finally:
             remove()
+        # #5437 (L3 6791117463): a mount counts in all its forms, so var-run.mount (over the box's /var/run link) hides
+        # /run under either name; a unit mount at a box mount other than /tmp hides it too, and so does an etc/fstab
+        # line there that gives it away (Security 6790413268 release 1).
+        varrun = {SYSTEM + "var-run.mount": "[Mount]\nWhat=tmpfs\nWhere=/var/run\nType=tmpfs\nOptions=mode=1777\n"}
+        for files, want in (
+                (dict(varrun, **sock("/run/foo/s", user=False)), [hidden("run/foo/s", "run")]),
+                (dict(varrun, **sock("/var/run/foo/s", user=False)), [hidden("var/run/foo/s", "var/run")]),
+                (dict({SYSTEM + "run.mount": "[Mount]\nWhat=tmpfs\nWhere=/run\nType=tmpfs\n"},
+                      **sock("/run/foo/s", user=False)), [hidden("run/foo/s", "run")]),
+                (dict({SYSTEM + "dev.automount": "[Automount]\nWhere=/dev\n"}, **sock("/dev/foo", user=False)),
+                 [hidden("dev/foo", "dev")]),
+                # A mount written through a tree link onto a box mount hides it under its resolved name too.
+                (dict({"rr": ("link", "/run"), SYSTEM + "rr.mount": "[Mount]\nWhat=tmpfs\nWhere=/rr\nType=tmpfs\n"},
+                      **sock("/run/foo/s", user=False)), [hidden("run/foo/s", "run")]),
+                # Stock tmp.mount (in this tree) and the image's own fstab /run and /dev lines are the box's mounts: a path
+                # in /tmp is refused as inside a world-writable directory, not below a mount.
+                (sock("/tmp/x", user=False), [inside("tmp/x", "tmp", "anyone on the box can write")]),
+                (sock("/run/foo/s", user=False), [])):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], want)
+                finally:
+                    remove()
+        for opts, gives in (("mode=0755,nosuid", False), ("nosuid,noexec", False), ("uid=0,gid=root", False),
+                            ("mode=1777", True), ("mode=0775", True), ("mode=u+rwx", True), ("uid=1000", True),
+                            ("size=1m,gid=100", True)):
+            self.assertEqual(check.mount_gives_away(opts), gives, opts)
+
         # #5437 (Security 6790413268): a link on the way whose target the tree lacks is refused, not weighed as written:
         # the box makes the target at runtime (a mount point, a unit's directory), so the link leads under it.
         def stuck(path, link, at=where):
@@ -1432,6 +1461,24 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(check.inside_refusals(self.root), [])
             write(self.root, "etc/fstab", (old or "") + "tmpfs /srv tmpfs mode=1777 0 0\n")
             self.assertEqual(check.inside_refusals(self.root), [hidden("srv/s", "srv")])
+            # An fstab line at a box mount that gives it away (release 1), and one that does not.
+            remove()
+            remove = self.place(sock("/run/foo/s", user=False))
+            write(self.root, "etc/fstab", (old or "") + "tmpfs /run tmpfs mode=1777 0 0\n")
+            self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)],
+                             [hidden("run/foo/s", "run")])
+            write(self.root, "etc/fstab", (old or "") + "tmpfs /run tmpfs mode=0755,nosuid 0 0\n#tmpfs /run tmpfs mode=1777 0 0\n")
+            self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], [])
+            # An fstab line counts in all its forms too (its lines share one "etc/fstab"), so one written off the box's
+            # mounts, through the box's link or a tree link, hides /run whatever its options.
+            for line in ("tmpfs /var/run tmpfs mode=0755 0 0\n", "tmpfs /rr tmpfs mode=0755 0 0\n"):
+                (self.root / "rr").symlink_to("/run")
+                write(self.root, "etc/fstab", (old or "") + line)
+                try:
+                    self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)],
+                                     [hidden("run/foo/s", "run")], line)
+                finally:
+                    (self.root / "rr").unlink()
             # A mount point through a link the tree cannot follow (Security 6790413268 repro B).
             (self.root / "data").symlink_to("/srv2")
             write(self.root, "etc/fstab", (old or "") + "tmpfs /data tmpfs mode=1777 0 0\n")
