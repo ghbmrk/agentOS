@@ -5,6 +5,7 @@ package kernel_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -191,6 +192,9 @@ func TestTIM1ClockStepBackRevivesNoKey(t *testing.T) {
 	}
 	es := r.k.Log().Entries()
 	for i := 1; i < len(es); i++ {
+		if es[i].Late != nil { // an exact reading logs no Late
+			t.Fatalf("entry %d at an exact reading carries Late %d", es[i].Seq, *es[i].Late)
+		}
 		if es[i].At < es[i-1].At {
 			t.Fatalf("entry %d at %d is before entry %d at %d", es[i].Seq, es[i].At, es[i-1].Seq, es[i-1].At)
 		}
@@ -205,8 +209,9 @@ func TestTIM1ClockStepBackRevivesNoKey(t *testing.T) {
 	bad := append([]kernel.Entry(nil), es...)
 	bad[len(bad)-1].At = hour / 2
 	var d *kernel.Divergence
-	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != bad[len(bad)-1].Seq {
-		t.Fatalf("a log whose times decrease: want a divergence at its last entry, got %v", err)
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != bad[len(bad)-1].Seq ||
+		d.Derived != fmt.Sprintf("a time no earlier than %d", es[len(es)-2].At) {
+		t.Fatalf("a log whose times decrease: want a divergence on its time at its last entry, got %v", err)
 	}
 	if _, err := r.k.Log().Append(hour, kernel.TStop, 1, struct{}{}); !errors.Is(err, kernel.ErrBackward) {
 		t.Fatalf("an append before the last entry: %v, want ErrBackward", err)

@@ -57,6 +57,25 @@ var sweep = sync.OnceValues(func() (Result, error) {
 					traced[op]++
 				}
 			}
+			// The clock faults trace the offsets they set: a step back of
+			// 1 to 48 hours, a disagreement of 0 to 3 hours each way.
+			_, rest, _ := strings.Cut(l, " ")
+			if h, ok := strings.CutPrefix(rest, "kernel clock steps back "); ok {
+				traced["steps back"]++
+				if n, err := strconv.Atoi(strings.TrimSuffix(h, "h")); err != nil || n < 1 || n > 48 {
+					traced["clock offsets out of range"]++
+				}
+			}
+			if d, ok := strings.CutPrefix(rest, "clock sources disagree by -"); ok {
+				e, la, _ := strings.Cut(strings.TrimSuffix(d, "h"), "h +")
+				ne, err := strconv.Atoi(e)
+				nl, err2 := strconv.Atoi(la)
+				if err != nil || err2 != nil || ne < 0 || ne > 3 || nl < 0 || nl > 3 {
+					traced["clock offsets out of range"]++
+				}
+				traced["sources behind"] += min(ne, 1)
+				traced["sources ahead"] += min(nl, 1)
+			}
 		}
 	}
 	return sum, nil
@@ -169,10 +188,16 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"traced RESUMEs at once":                       traced["resume at once"],
 		"traced task opens":                            traced["open task"],
 		"traced task ends":                             traced["end task"],
+		"kernel clock steps back":                      traced["steps back"],
+		"a guard source behind the kernel's clock":     traced["sources behind"],
+		"a guard source ahead of the kernel's clock":   traced["sources ahead"],
 	} {
 		if n <= 0 {
 			t.Errorf("the sweep never reached: %s", name)
 		}
+	}
+	if n := traced["clock offsets out of range"]; n > 0 {
+		t.Errorf("%d clock faults set an offset out of their range", n)
 	}
 	// Half the STOPs that land are resumed at once, and each such RESUME is
 	// logged right after its STOP (taskOp).

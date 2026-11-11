@@ -1067,13 +1067,12 @@ func Run(c Config) (*Result, error) {
 	for i := range nseed {
 		nseed[i] = byte(rng.IntN(256))
 	}
-	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
+	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed), reads: [2]int64{math.MinInt64, math.MinInt64}}
 	s.disk = &Disk{rng: rng}
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.spare = gen(rng)
 	s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, mutant: c.Mutant, rng: rng, now: &s.now, reads: &s.reads, done: map[string]bool{}, dead: map[key.ID]bool{}}
-	s.reads = [2]int64{math.MinInt64, math.MinInt64}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {

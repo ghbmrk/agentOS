@@ -177,3 +177,84 @@ func TestNoReadingKernelFailsBothClockInvariants(t *testing.T) {
 		}
 	}
 }
+
+// The cut-off judges the phone's grants on its entry's time: a grant live
+// by then stays, at that time exactly too; one still in its hold then, or
+// one the log never took, never goes live, though the kernel's time has
+// since passed its hold. Only the held one counts as cancelled (D-146, TIM-1).
+func TestTheCutOffJudgesGrantsOnItsEntrysTime(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	var nseed [32]byte
+	t0 := key.DayMS
+	s := &sim{rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed), now: t0}
+	s.disk = &Disk{rng: rng}
+	s.owner, s.holder, s.head, s.spare = gen(rng), gen(rng), gen(rng), gen(rng)
+	s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, rng: rng, now: &s.now, reads: &s.reads, done: map[string]bool{}, dead: map[key.ID]bool{}}
+	s.w.mail = s.w.newMail()
+	if err := s.boot(); err != nil {
+		t.Fatal(err)
+	}
+	grant := func(at int64, serial string) key.ID {
+		t.Helper()
+		s.now = at
+		root := key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Send}, Serial: serial})
+		ck := s.clerkKey(s.owner.pass, root)
+		if err := s.k.Issue(s.kt(), approve([]key.Key{root, ck}, s.owner, s.spare), root, ck); err != nil {
+			t.Fatal(err)
+		}
+		return ck.Tip()
+	}
+	live, edge, held := grant(t0, "c1"), grant(t0+hour/2, "c2"), grant(t0+hour, "c3")
+	cutAt := t0 + hour/2 + kernel.GrantHold // edge goes live at the cut-off exactly
+	s.phone = gen(rng)
+	if err := s.k.Enroll(s.kt(), key.Enroll(s.spare.pass, s.phone.pk)); err != nil {
+		t.Fatal(err)
+	}
+	s.now = cutAt
+	if err := s.k.Unenroll(s.kt(), key.Unenroll(s.owner.pass, s.phone.pk)); err != nil {
+		t.Fatal(err)
+	}
+	s.now = cutAt + 2*hour // a later entry, past the held grant's hold
+	if err := s.k.Stop(s.kt()); err != nil {
+		t.Fatal(err)
+	}
+	s.now += hour
+	var never key.ID
+	never[0] = 1
+	s.byPhone = []key.ID{live, edge, held, never}
+	s.cut()
+	for id, dead := range map[key.ID]bool{live: false, edge: false, held: true, never: true} {
+		if s.w.dead[id] != dead {
+			t.Errorf("grant %x: dead %v, want %v", id[:4], s.w.dead[id], dead)
+		}
+	}
+	if s.cutCancelled != 1 {
+		t.Errorf("%d grants counted cancelled, want the held one", s.cutCancelled)
+	}
+}
+
+// A big batch refused for its second passkey is counted; a clerk key past
+// ClerkLife is excused only while the kernel's earliest reading is behind
+// the true time, by its step back or its sources' spread (D-146, TIM-1).
+func TestRefusedBigExcusesOnlyAClockBehind(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		ahead, early int64
+		excused      bool
+	}{
+		{"stepped back", -2 * hour, 0, true},
+		{"a source behind", 0, hour, true},
+		{"on the true time", 0, 0, false},
+		{"ahead", hour, 0, false},
+		{"ahead past its source's spread", 2 * hour, hour, false},
+	} {
+		s := &sim{now: key.DayMS, ahead: c.ahead, early: c.early}
+		if err := s.refusedBig(kernel.ErrLife); (err == nil) != c.excused {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+	s := &sim{}
+	if err := s.refusedBig(kernel.ErrNeedsCosign); err != nil || s.bigRefused != 1 {
+		t.Errorf("a refusal for its second passkey: %v, counted %d", err, s.bigRefused)
+	}
+}

@@ -503,3 +503,28 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 		t.Fatalf("a wide source while running read %+v: Latest is not its Latest", r)
 	}
 }
+
+// OpenKernel reads a configured clock through onLog: a forward step of the
+// box clock after boot does not move the time the kernel logs at (TIM-1).
+//
+// REQ: TIM-1, KEY-8
+func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	box := b.now
+	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
+	b.restart()
+	box = 1 << 50 // a forward step while running
+	err := b.h.With(func(k *kernel.Kernel) error {
+		if err := k.Stop(b.now); err != nil {
+			return err
+		}
+		es := k.Log().Entries()
+		if at := es[len(es)-1].At; at >= box {
+			t.Fatalf("a forward step of the box clock moved the logged time to %d", at)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -734,6 +734,304 @@ func TestSpentPrintIsRefusedThroughTheClerk(t *testing.T) {
 	}
 }
 
+// Start refuses a config with a bad origin, no driver or no workspace, and
+// takes the recipe's token parameters. Close stops the driver and reaps it,
+// and a second Close is a no-op that does not block.
+func TestStartChecksItsConfigAndCloseReaps(t *testing.T) {
+	ok := Config{Driver: []string{"/bin/sh", "-c", "exec cat"}, Origins: []string{"https://shop.example.test"}, Workspace: t.TempDir()}
+	for name, cfg := range map[string]Config{
+		"a bad origin": {Driver: ok.Driver, Origins: []string{"shop.example.test"}, Workspace: ok.Workspace},
+		"no driver":    {Origins: ok.Origins, Workspace: ok.Workspace},
+		"no workspace": {Driver: ok.Driver, Origins: ok.Origins},
+	} {
+		if g, err := Start(context.Background(), cfg); err == nil {
+			g.Close()
+			t.Errorf("%s: started", name)
+		}
+	}
+	ok.TokenParams = []string{"csrf"}
+	g, err := Start(context.Background(), ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.tokens["csrf"] {
+		t.Error("the recipe's token parameter was not taken")
+	}
+	done := make(chan struct{})
+	go func() { g.Close(); g.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Close blocked")
+	}
+	if !g.stopped {
+		t.Error("Close left the executor running")
+	}
+	if err := g.cmd.Wait(); err == nil || !strings.Contains(err.Error(), "already called") {
+		t.Errorf("the driver was not reaped: a later Wait gave %v", err)
+	}
+	if _, _, _, _, refused := g.judge([]byte(`{"v":0,"verb":"snapshot"}`)); refused == nil || refused.Error != "stopped" {
+		t.Errorf("a stopped gate judged %+v", refused)
+	}
+}
+
+// A driver line longer than MaxLine is no reply: the gate stops reading
+// and the executor is stopped.
+func TestADriverLinePastMaxLineStops(t *testing.T) {
+	g, err := Start(context.Background(), Config{
+		Driver:    []string{"/bin/sh", "-c", "head -c " + strconv.Itoa(MaxLine+1) + " /dev/zero | tr '\\000' x; echo; exec sleep 30"},
+		Origins:   []string{"https://shop.example.test"},
+		Workspace: t.TempDir(),
+		Timeout:   20 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	if res, _, _ := g.do(context.Background(), []byte(`{"v":0,"verb":"snapshot"}`), nil); res.Error != "stopped" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// small caps every field it bounds, each refused navigation too; post
+// names an unknown error code "driver", floors the redaction count, marks a
+// snapshot the driver cut and counts no bytes without a file.
+func TestSmallAndPostBoundTheReply(t *testing.T) {
+	long := strings.Repeat("y", MaxURL+maxLabel+maxErrDetail+10)
+	r := small(Result{Error: long, To: long, Path: long, RefusedNavigations: []string{long}})
+	if len(r.Error) > maxTitle+8 || len(r.To) > MaxURL+maxLabel+8 || len(r.Path) > maxTitle+8 || len(r.RefusedNavigations[0]) > maxTitle+8 {
+		t.Errorf("small left fields long: %d %d %d %d", len(r.Error), len(r.To), len(r.Path), len(r.RefusedNavigations[0]))
+	}
+	h := newHarness(t, nil, "", 0)
+	res, ok := h.g.post("snapshot", Result{OK: true, URL: "https://shop.example.test/", Error: "not a code!", Redactions: -5,
+		Truncated: true, Snapshot: "- heading \"Hi\"", Bytes: 99})
+	if !ok || res.Error != "driver" || res.Redactions != 0 || !strings.HasSuffix(res.Snapshot, "\n[snapshot truncated]") || res.Bytes != 0 {
+		t.Fatalf("post: %+v", res)
+	}
+}
+
+// A click on a ref the last snapshot did not show is refused.
+func TestAClickOnAnUnseenRefIsRefused(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	if r := h.do(t, `{"v":0,"verb":"click","ref":"e99"}`); r.Error != "unknown_ref" {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+// Once the gate has lost track of typed text, a page with an entry field
+// is withheld whole, though its value shows nowhere else.
+func TestALostGateWithholdsAPageWithAField(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	snap := "- textbox \"Code\" [ref=e5]: pw-canary-short"
+	if out, _ := h.g.omit(snap, h.g.page); out == withheldMark {
+		t.Fatalf("withheld before anything was lost: %s", out)
+	}
+	h.g.lost = true
+	if out, n := h.g.omit(snap, h.g.page); out != withheldMark || n != 1 {
+		t.Fatalf("a lost gate showed %q (%d)", out, n)
+	}
+}
+
+// A request the driver cannot read stops the executor, even if a line from
+// the driver follows: that line answers nothing the gate sent (K8).
+func TestAWriteTheDriverCannotReadStops(t *testing.T) {
+	g, err := Start(context.Background(), Config{
+		Driver:    []string{"/bin/sh", "-c", `exec 0<&-; sleep 1; echo '{"ok":true,"url":"https://shop.example.test/"}'; exec sleep 30`},
+		Origins:   []string{"https://shop.example.test"},
+		Workspace: t.TempDir(),
+		Timeout:   10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Close() })
+	// Newlines the driver ignores fill nothing; the first that fails is
+	// past its closing its input.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := g.stdin.Write([]byte("\n")); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the driver kept its input open")
+		}
+	}
+	if res, _, _ := g.do(context.Background(), []byte(`{"v":0,"verb":"snapshot"}`), nil); res.OK || res.Error != "stopped" || !g.stopped {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// Close drains a line the driver wrote that nothing asked for, so the
+// gate's reader ends and closes its line channel.
+func TestCloseDrainsAnUnaskedLine(t *testing.T) {
+	g, err := Start(context.Background(), Config{
+		Driver:    []string{"/bin/sh", "-c", `echo '{"ok":true,"url":"https://shop.example.test/"}'; exec 0<&-; exec sleep 30`},
+		Origins:   []string{"https://shop.example.test"},
+		Workspace: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := g.stdin.Write([]byte("\n")); err != nil { // past the line: it closed its input after
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the driver kept its input open")
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // the reader holds the line
+	g.Close()
+	select {
+	case _, open := <-g.lines:
+		if open {
+			t.Fatal("the unasked line was left for a reader")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the line channel was not closed")
+	}
+}
+
+// An approval quotes the option and text the request carries, shows no
+// target where the live control has none though the agent was shown one,
+// and prints typed fields in one order however the gate holds them.
+func TestApprovalShowsWhatTheRequestCarries(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	see(h.g, "e1", link{role: "combobox", name: "Colour"})
+	a := h.g.approval(Request{Verb: "type", Ref: "e1", Text: "synthTyped", Option: "Blue"}, h.g.refs["e1"])
+	if a.Option != `"Blue"` || a.Text != `"synthTyped"` {
+		t.Fatalf("option %s, text %s", a.Option, a.Text)
+	}
+	h.g.shown["e2"] = link{role: "button", name: "Go", target: "https://shop.example.test/t"}
+	h.g.refs["e2"] = link{role: "button", name: "Go"}
+	if a := h.g.approval(Request{Verb: "click", Ref: "e2"}, h.g.refs["e2"]); a.Target != "" {
+		t.Fatalf("a control with no target shows %q", a.Target)
+	}
+	h.g.typed = map[string]typedField{}
+	for i := range 8 {
+		h.g.typed["f"+strconv.Itoa(i)] = typedField{text: "synthNote" + strconv.Itoa(i), url: h.g.page}
+	}
+	first := h.g.approval(Request{Verb: "click", Ref: "e2"}, h.g.refs["e2"]).Print
+	for range 8 {
+		if p := h.g.approval(Request{Verb: "click", Ref: "e2"}, h.g.refs["e2"]).Print; p != first {
+			t.Fatal("the print depends on the order the gate holds typed fields")
+		}
+	}
+}
+
+// parseRefs keeps only elements with a ref, drops a ref two elements share,
+// marks a dialog's Close a dismissal, and leaves a field in a clickable
+// link focused, not clicked.
+func TestParseRefsDropsSharedRefsAndMarksDismissals(t *testing.T) {
+	snap := "- dialog \"Confirm\" [ref=e1]:\n  - button \"Close\" [ref=e2]\n" +
+		"- link \"Card\" [ref=e4] [cursor=pointer]:\n  - /url: https://shop.example.test/x\n  - textbox \"Search\" [ref=e5]\n" +
+		"- button \"One\" [ref=e6]\n- button \"Two\" [ref=e6]\n- generic [cursor=pointer]:\n  - text: hi"
+	refs := parseRefs(snap, "https://shop.example.test/")
+	if len(refs) != 4 {
+		t.Fatalf("refs %v, want e1 e2 e4 e5", refs)
+	}
+	if l := refs["e2"]; !l.dismiss || !l.clickable {
+		t.Errorf("a dialog's Close: %+v", l)
+	}
+	if l := refs["e5"]; l.clickable || l.dismiss {
+		t.Errorf("a field in a link: %+v", l)
+	}
+	if refs := parseRefs("- button \"Plain\"", "https://shop.example.test/"); len(refs) != 0 {
+		t.Errorf("an element with no ref: %v", refs)
+	}
+}
+
+// Parse says what is wrong with a line: not an object, not JSON, a field of
+// the wrong type; a cut-off line is an error, never a panic.
+func TestParseNamesWhatIsWrongWithALine(t *testing.T) {
+	for raw, want := range map[string]string{
+		`not json`:                       "JSON object",
+		`"a string"`:                     "JSON object",
+		`{"v":0,`:                        "not JSON",
+		`{"v":0,"verb":5}`:               "must be a string",
+		`{"v":0,"verb":"click","ref":1}`: "must be a string",
+	} {
+		if _, err := Parse([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", raw, err, want)
+		}
+	}
+	if !hasArg([]string{"a", "b"}, "b") || hasArg([]string{"a"}, "b") {
+		t.Error("hasArg")
+	}
+}
+
+// An IP host is its own site, not a suffix of it; a "token" key is dropped
+// only from a query, never from a URL without one.
+func TestSiteOfAnIPAndATokenOutsideAQuery(t *testing.T) {
+	if s := site("https://10.0.0.1/x"); s != "10.0.0.1" {
+		t.Errorf("site of an IP: %q", s)
+	}
+	if s := dropTokenKey("token=abc"); s != "token=abc" {
+		t.Errorf("no query: %q", s)
+	}
+	if s := dropTokenKey("/a?token=abc&b=1"); s != "/a?=abc&b=1" {
+		t.Errorf("a query: %q", s)
+	}
+}
+
+// A request whose index is out of its plan's steps names the zero step.
+func TestAnIndexOutOfThePlanIsTheZeroStep(t *testing.T) {
+	for _, i := range []int{-1, 0, 3} {
+		if s := step(kernel.Request{Index: i}); s.Verb != "" || s.Args != nil {
+			t.Errorf("index %d: %+v", i, s)
+		}
+	}
+}
+
+// A YAML-quoted key loses its opening quote; an attribute after the ref
+// does not hide the value, so a field showing the agent's own text is
+// neither omitted nor forgotten.
+func TestUnquotedKeysAndAttributesAfterTheRef(t *testing.T) {
+	if s := unquoteKey("  - 'a': b"); s != "  - a': b" {
+		t.Errorf("unquoteKey: %q", s)
+	}
+	if s := unquoteKey("  - a: b"); s != "  - a: b" {
+		t.Errorf("unquoteKey of a plain key: %q", s)
+	}
+	line := "- textbox \"Code\" [ref=e5] [active]: synthShown"
+	if refs, stale := entryRefs(line, map[string]string{"e5": "synthShown"}); len(refs) != 0 || len(stale) != 0 {
+		t.Errorf("the agent's own text: omitted %v, stale %v", refs, stale)
+	}
+	if refs, stale := entryRefs(line, map[string]string{"e5": "synthOther"}); !refs["e5"] || !stale["e5"] {
+		t.Errorf("other text: omitted %v, stale %v", refs, stale)
+	}
+}
+
+// A line that holds two fields' values loses the longer first, so a value
+// that holds the other leaves none of itself showing (CRED-4).
+func TestALineWithTwoValuesLosesTheLongerWhole(t *testing.T) {
+	snap := "- group \"Codes pwCode2024 pwCode\" [ref=e1]:\n  - textbox \"A\" [ref=e2]: pwCode\n  - textbox \"B\" [ref=e3]: pwCode2024"
+	if out := omitValues(snap, map[string]bool{"e2": true, "e3": true}, map[string]bool{}, nil); strings.Contains(out, "2024") {
+		t.Fatalf("a part of the longer value shows: %s", out)
+	}
+}
+
+// The print covers each typed field's ref and name with its text, and a
+// cut never splits a character.
+func TestThePrintCoversEachFieldsRefAndName(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	h.g.typed = map[string]typedField{"f1": {text: "synthNote", url: h.g.page}}
+	h.g.refs["f1"] = link{role: "textbox", name: "Note"}
+	printOf := func() string { return h.g.approval(Request{Verb: "click", Ref: "e1"}, h.g.refs["e1"]).Print }
+	a := printOf()
+	h.g.refs["f1"] = link{role: "textbox", name: "Memo"}
+	if printOf() == a {
+		t.Error("a field's name is not in the print")
+	}
+	h.g.typed = map[string]typedField{"f2": {text: "synthNote", url: h.g.page}}
+	h.g.refs["f2"] = link{role: "textbox", name: "Note"}
+	if printOf() == a {
+		t.Error("a field's ref is not in the print")
+	}
+	if s := capText("ééé", 3); s != "é…" {
+		t.Errorf("capText cut %q", s)
+	}
+}
+
 // Only the owner's passkey makes an approval: a key the home clerk derives
 // itself with the right prints and use cap releases nothing, and neither
 // does an owner's link over it that names no prints, caps no uses, or

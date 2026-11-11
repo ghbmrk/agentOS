@@ -552,6 +552,78 @@ func TestPlanUnderAMailKeyMakesACappedCall(t *testing.T) {
 	}
 }
 
+// A provider's zero figure, a free price and a sum at the very edge of the
+// round-up room are metered as the provider gave them; one past that edge is
+// metered at the admitted worst case.
+func TestEdgeFiguresAreMeteredAsTheProviderGaveThem(t *testing.T) {
+	for name, tc := range map[string]struct {
+		p      model.Price
+		u      model.Usage
+		amount int64
+		source string
+	}{
+		"no input tokens": {model.Price{InPerM: 1_000_000, OutPerM: 1_000_000}, model.Usage{Out: 5}, 5, "provider"},
+		"free input":      {model.Price{OutPerM: 1_000_000}, model.Usage{In: 3, Out: 4}, 4, "provider"},
+		"at the edge":     {model.Price{InPerM: 1, OutPerM: 1}, model.Usage{In: math.MaxInt64 - 1_000_000, Out: 1}, math.MaxInt64 / 1_000_000, "provider"},
+		// 2^40 * (2^23-1) is 2^63-2^40: the largest product below 2^63 of these factors
+		"product at the edge": {model.Price{InPerM: 1<<23 - 1}, model.Usage{In: 1 << 40}, (1<<63 - 1<<40 + 999_999) / 1_000_000, "provider"},
+		"past the edge":       {model.Price{InPerM: 1, OutPerM: 1}, model.Usage{In: math.MaxInt64 - 999_999, Out: 1}, 1, "admitted"},
+	} {
+		tc.u.Reported = true
+		f := &fake{u: tc.u}
+		c, k, _ := rig(t, f)
+		c.Routes["r"] = tc.p
+		if _, err := c.Call(1, "t", "r", "hi", 10); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		body := string(lastEntry(k).Body)
+		if !strings.Contains(body, fmt.Sprintf(`"amount":%d,`, tc.amount)) || !strings.Contains(body, `"source":"`+tc.source+`"`) {
+			t.Fatalf("%s: metered %s, want %d from %s", name, body, tc.amount, tc.source)
+		}
+	}
+}
+
+// A plan past its key's daily cap is held like one past its task cap, so a
+// smaller call does not slip under the cap's remainder (KEY-2, RES-5).
+func TestADayCapExhaustedPlanIsHeld(t *testing.T) {
+	f := &fake{u: model.Usage{In: 30, Out: 40, Reported: true}}
+	c, k, _ := rig(t, f)
+	_, opriv := seed(1)
+	hpub, hpriv := seed(2)
+	root := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "day"})
+	ky, err := key.ClerkKey(root, key.Ed25519Signer(opriv), hpub, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Issue(0, cosigned(root, ky), root, ky); err != nil {
+		t.Fatal(err)
+	}
+	step := kernel.PlanStep{Verb: key.Read, Clerk: "model", Args: map[string]string{"query": "q"}}
+	if err := k.Submit(kernel.GrantHold, kernel.SignPlan(kernel.Plan{ID: "d", Key: ky, Steps: []kernel.PlanStep{step}}, hpriv)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(kernel.GrantHold+1, "d", "api", "hi", 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(kernel.GrantHold+2, "d", "api", "hi", 50); err == nil {
+		t.Fatal("an over-cap call must be refused")
+	}
+	if h, ok := k.State().SpendHeld["d"]; !ok || h.Code != key.RSpendDay {
+		t.Fatalf("plan not held on its day cap: %+v", h)
+	}
+}
+
+// A declaration naming a field the clerk does not know is refused, not read
+// as if the field were absent (CLK-3).
+func TestADeclarationWithAnUnknownFieldIsRefused(t *testing.T) {
+	if _, err := model.ParseDeclarations([]byte(`[{"provider":"p"}]`)); err != nil {
+		t.Fatalf("a known field: %v", err)
+	}
+	if _, err := model.ParseDeclarations([]byte(`[{"provider":"p","hosts":"evil.example"}]`)); err == nil {
+		t.Fatal("an unknown field was accepted")
+	}
+}
+
 // A provider that sends a figure is metered by it even when it says the request
 // never left: ErrNotSent alone is not a reason to drop reported usage.
 func TestReportedUsageIsMeteredEvenWithErrNotSent(t *testing.T) {
