@@ -568,6 +568,12 @@ func (x *box) enforced() string {
 // in the same transaction, the byte caps' drop at no bytes sent.
 func (x *box) fullLoad(doc policy.Document) string {
 	x.t.Helper()
+	return x.seededLoad(doc, "")
+}
+
+// seededLoad is fullLoad with seed (nft.Seed's text) after the ruleset.
+func (x *box) seededLoad(doc policy.Document, seed string) string {
+	x.t.Helper()
 	text, err := nft.Reload(doc, x.cfg.Layout, nil)
 	if err != nil {
 		x.t.Fatal(err)
@@ -581,7 +587,7 @@ func (x *box) fullLoad(doc policy.Document) string {
 	if err != nil {
 		x.t.Fatal(err)
 	}
-	return joinRules(text, drops)
+	return joinRules(joinRules(text, seed), drops)
 }
 
 func (x *box) opened(k alert.Kind) bool {
