@@ -101,22 +101,30 @@ PREMERGE_LINES = [
     '  issue_comment:',
     '    types: [created, edited, deleted]',
     '  workflow_run:',
-    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image]',
+    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, mutgate, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]',
     '    types: [completed]',
+    '  workflow_dispatch:',
+    '    inputs:',
+    '      pr:',
+    "        description: the PR to rerun the gate for (premerge's fork-pr job)",
+    '        required: true',
+    '        type: number',
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}',
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]",
+    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
     '      merge-head: ${{ steps.gate.outputs.merge-head }}',
+    '      merge-repo: ${{ steps.gate.outputs.merge-repo }}',
+    '      merge-ref: ${{ steps.gate.outputs.merge-ref }}',
     '    permissions:',
     '      contents: read',
     '      issues: read',
@@ -140,11 +148,12 @@ PREMERGE_LINES = [
     '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        id: gate',
     '        env:',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
     '          REPO: ${{ github.repository }}',
     '          GH_TOKEN: ${{ github.token }}',
     '          STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}',
     '        run: |',
+    '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
@@ -201,7 +210,7 @@ PREMERGE_LINES = [
     '          post "$state" "$out"',
     '          if [ "$state" = success ] && [ "$out" = same ] && \\',
     '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
-    '            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"',
+    '            printf \'merge-head=%s\\nmerge-repo=%s\\nmerge-ref=%s\\n\' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"',
     '          fi',
     '  merge:',
     '    name: merge',
@@ -216,12 +225,16 @@ PREMERGE_LINES = [
     '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        env:',
     '          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
     '          REPO: ${{ github.repository }}',
     '          HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}',
+    '          HEAD_REPO: ${{ needs.premerge-gate.outputs.merge-repo }}',
+    '          HEAD_REF: ${{ needs.premerge-gate.outputs.merge-ref }}',
     '        run: |',
+    '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
     '          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
+    '          [ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || { echo "::warning::#$PR_NUMBER head repository unknown: arm by hand"; exit 0; }',
     '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
     '            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }',
     "          bwfs='[]' bruns='[]'",
@@ -235,13 +248,19 @@ PREMERGE_LINES = [
     '                    done | jq -cs \'map(select(.conclusion == "failure") | .name) | unique\') || bruns=\'[]\'',
     '          fi',
     '          echo "excused as failed on the merge base: $bwfs $bruns"',
-    '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
-    '            | jq -rs --argjson base "$bwfs" \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
+    '          hr=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
+    '            | jq -cs --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" \\',
+    '                \'map({ours: (.head_repository.full_name == $repo and .head_branch == $ref), check_suite_id, path, workflow_id, id, status, conclusion, name})\') \\',
+    '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
+    '          foreign=$(printf \'%s\' "$hr" | jq -c \'map(select(.ours | not) | .check_suite_id)\')',
+    '          wfs=$(printf \'%s\' "$hr" \\',
+    '            | jq -r --argjson base "$bwfs" \'map(select(.ours and (.path | startswith(".github/workflows/premerge.yml") | not))) | group_by(.workflow_id)[] | max_by(.id)',
     '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
     '                      | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
     '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
-    '            | jq -r --argjson suite "$suite" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '            | jq -r --argjson suite "$suite" --argjson foreign "$foreign" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '                  | select(.check_suite.id | IN($foreign[]) | not)',
     '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
     '                  | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
@@ -252,6 +271,37 @@ PREMERGE_LINES = [
     '            echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0',
     '          fi',
     '          echo "merged #$PR_NUMBER at $HEAD_SHA"',
+    '  fork-pr:',
+    '    name: fork-pr',
+    "    if: github.event_name == 'workflow_run' && !github.event.workflow_run.pull_requests[0] && startsWith(github.event.workflow_run.event, 'pull_request')",
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      pull-requests: read',
+    "      actions: write # dispatch premerge.yml on main for the run's PR, nothing else",
+    '    steps:',
+    "      - name: Rerun the gate for the run's one open PR into main",
+    '        shell: bash # -eo pipefail: a failed read must stop the step, never read as no PR',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}',
+    '          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}',
+    '          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}',
+    '        run: |',
+    '          [[ "$HEAD_OWNER" =~ ^[A-Za-z0-9-]+$ ]] && [ "$HEAD_REPO" != "${HEAD_REPO#"$HEAD_OWNER"/}" ] && [ -n "$HEAD_BRANCH" ] \\',
+    '            || { echo "::warning::the run names no head repository and branch; no gate rerun"; exit 0; }',
+    '          gh api -X GET "repos/$REPO/pulls" -f state=open -f base=main -f head="$HEAD_OWNER:$HEAD_BRANCH" -f per_page=100 \\',
+    '            > "$RUNNER_TEMP/prs.json"',
+    '          prs=$(jq -c --arg repo "$HEAD_REPO" --arg ref "$HEAD_BRANCH" \\',
+    '            \'[.[] | select(.head.repo.full_name == $repo and .head.ref == $ref and .base.ref == "main") | .number]\' "$RUNNER_TEMP/prs.json")',
+    '          if [ "$(jq length <<< "$prs")" != 1 ]; then',
+    '            echo "::warning::$HEAD_REPO:$HEAD_BRANCH has open PRs into main $prs, not one; no gate rerun"; exit 0',
+    '          fi',
+    '          pr=$(jq \'.[0]\' <<< "$prs")',
+    '          [[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]]',
+    '          gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null',
+    '          echo "reran the gate for #$pr"',
 ]
 
 
@@ -602,8 +652,10 @@ def workflow_triggers(text):
 def supersede_problems(name, text):
     """Return why a workflow can leave a superseded PR head's runs queued; empty when it cannot."""
     events, problems = workflow_triggers(text)
-    if problems or not any(e.startswith("pull_request") for e in events):
-        return problems
+    if problems:
+        return problems + [SUBSET]
+    if not any(e.startswith("pull_request") for e in events):
+        return []
     # The jobs line by the line, as GitHub reads it (`jobs: ` with a trailing space too); a PR
     # workflow without one fails rather than hide its jobs from the ban below (#5348).
     at = re.search(r"^jobs: *$", text, re.M)
@@ -617,10 +669,118 @@ def supersede_problems(name, text):
     if name in KEEPS_EVERY_RUN:
         return []
     # #5361: no looser block passes; a rerun guard is part of every PR workflow's group.
-    at = top.index("concurrency:") if "concurrency:" in top else len(top)
-    if top[at:at + 3] != SUPERSEDE_LINES:
+    return concurrency_problems(top) or ([] if name in SUPERSEDE else ["a PR workflow missing from SUPERSEDE"])
+
+
+# Lens R1 on #5408: a form the readers here do not read fails with the subset they do read, not a bare mismatch.
+SUBSET = ("the check reads only this YAML subset: LF line breaks; each top-level key once at column 0, plain or "
+          "quoted; triggers one event a line at one indent, or one flow list on the `on` line; a concurrency block "
+          "of plain `key: value` lines at two spaces; no tab, anchor, alias, tag, `?` key or other flow style")
+PINNED_CONCURRENCY = dict(l.strip(SP).split(": ", 1) for l in SUPERSEDE_LINES[1:])
+CONCURRENCY_ENTRY = re.compile(r"  ([a-z-]+): ([^ &*!|>{\[\]}'\"%@`#,?-].*)")
+
+
+def concurrency_problems(top):
+    """Return why the top-level lines `top` hold no concurrency block equal to the pin, read whole.
+
+    #5409 (from #5408's review): the block is read as a mapping to its last line, so a second
+    `cancel-in-progress` or an extra key fails as surely as a changed value.
+    """
+    at = [i for i, l in enumerate(top) if re.match(r"""(["']?)concurrency\1[ \t]*:""", l)]
+    if not at:
         return ["no per-PR concurrency block as pinned"]
-    return [] if name in SUPERSEDE else ["a PR workflow missing from SUPERSEDE"]
+    if top[at[0]] != "concurrency:":
+        return ["a concurrency key the check cannot read: %r" % top[at[0]], SUBSET]
+    block = {}
+    for line in top[at[0] + 1:]:
+        if not line.strip(" \t") or line.lstrip(SP).startswith("#"):
+            continue
+        if line[0] not in " \t":
+            break
+        m = CONCURRENCY_ENTRY.fullmatch(line)
+        if not m:
+            return ["a concurrency line the check cannot read: %r" % line, SUBSET]
+        if m.group(1) in block:
+            return ["concurrency sets %s twice" % m.group(1)]
+        block[m.group(1)] = m.group(2)
+    if block != PINNED_CONCURRENCY:
+        return ["no per-PR concurrency block as pinned: %s" % ", ".join(
+            "%s is %r, pinned %r" % (k, block.get(k, "<missing>"), PINNED_CONCURRENCY.get(k, "<none>"))
+            for k in sorted(set(block) | set(PINNED_CONCURRENCY)) if block.get(k) != PINNED_CONCURRENCY.get(k))]
+    return []
+
+
+# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
+# mutgate's first job is this one, pinned whole: it reads the PR's head from the API and, when the
+# run's is older, ends with a notice. `claimed` runs only on its `current`, and no later job runs
+# past a skipped claim but the `mutgate` job, which then fails, so a stale run never passes.
+HEAD_GUARD_LINES = [
+    "  head:",
+    "    runs-on: ubuntu-24.04",
+    "    timeout-minutes: 5",
+    "    permissions:",
+    "      pull-requests: read",
+    "    outputs:",
+    "      current: ${{ steps.head.outputs.current }}",
+    "    steps:",
+    "      - name: This run's head is the PR's current head",
+    "        id: head",
+    "        env:",
+    "          GH_TOKEN: ${{ github.token }}",
+    "          REPO: ${{ github.repository }}",
+    "          PR_NUMBER: ${{ github.event.pull_request.number }}",
+    "          RUN_HEAD: ${{ github.event.pull_request.head.sha }}",
+    "        run: |",
+    '          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || '
+    '{ echo "::error::cannot read the PR\'s head"; exit 1; }',
+    "          [[ \"$now\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::the PR's head is not a sha: $now\"; exit 1; }",
+    '          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
+    '          echo "::notice::this run\'s head $RUN_HEAD is not the PR\'s current head $now: no gate runs; '
+    'the current head\'s own run decides"',
+    '          echo "current=false" >> "$GITHUB_OUTPUT"',
+]
+CLAIM_WAITS = ["  claimed:", "    needs: head", "    if: ${{ needs.head.outputs.current == 'true' }}"]
+# L3 on #5433: "Re-run failed jobs" copies `head`'s current=true from attempt 1, so each job that
+# runs PR tests or decides reads the head itself as its first step and fails on an older one.
+HEAD_CHECK_JOBS = ("plan", "mutants", "mutgate")
+HEAD_CHECK_LINES = [
+    "    permissions:",
+    "      contents: read",
+    "      pull-requests: read",
+    "    steps:",
+    "      - name: This run's head is still the PR's current head",
+] + HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        env:"):-3] + [
+    '          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run\'s head $RUN_HEAD is not the PR\'s current head '
+    '$now: a rerun of an old head gates nothing; the current head\'s own run decides"; exit 1; }',
+]
+
+
+def head_guard_problems(text):
+    """Return why mutgate.yml can run its gate on a head the PR has left; empty when it cannot."""
+    if "\njobs:\n" not in text:
+        return ["no `jobs:` line"]
+    code = [l for l in text.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
+    jobs = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
+    first = code[:jobs[1]] if len(jobs) > 1 else code
+    if first != HEAD_GUARD_LINES:
+        return ["the first job is not the pinned head check"]
+    claim = [i for i in jobs[:-1] if code[i] == "  claimed:"]
+    if not claim or code[claim[0]:claim[0] + 3] != CLAIM_WAITS:
+        return ["`claimed` does not wait on the head check"]
+    # Only the deciding job may run past a skipped claim, and it fails unless the claim succeeded.
+    for a, b in zip(jobs, jobs[1:]):
+        body = "\n".join(code[a:b])
+        name = code[a].strip(SP + ":")
+        if name in HEAD_CHECK_JOBS:
+            at = [i for i in range(a, b) if code[i] == "    permissions:"]
+            if [l for l in code[a:b] if l.startswith("    permissions")] != ["    permissions:"] or \
+                    code[at[0]:at[0] + len(HEAD_CHECK_LINES)] != HEAD_CHECK_LINES or "    steps:" in code[a:at[0]]:
+                return ["%s does not read the PR's head first" % name]
+        if code[a] != "  mutgate:" and re.search(r"\b(always|cancelled|failure|success)\(", body):
+            return ["%s runs past a skipped claim" % name]
+        if code[a] == "  mutgate:" and '[ "$CLAIMED" = success ] || exit 1' not in body:
+            return ["the mutgate job does not fail when the claim did not run"]
+    return []
 
 
 class WorkflowTest(unittest.TestCase):
@@ -751,6 +911,116 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(workflow_triggers(text)[1], name)
                 self.assertTrue(supersede_problems("mutgate.yml", text.replace("jobs:", block + "jobs:")), name)
                 self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
+
+    def test_a_stale_mutgate_run_stops_at_its_first_job(self):
+        # CI-mutgate-head-guard (#5409): mutgate's first job is the pinned head check, `claimed`
+        # waits on it, and no job but the failing `mutgate` one runs past a skipped claim.
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(head_guard_problems(text), [])
+        guard = "\n".join(HEAD_GUARD_LINES) + "\n"
+        edits = {
+            "no guard": (guard, ""),
+            "a job before the guard": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
+            "guard widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
+            "guard always passes": ('if [ "$now" = "$RUN_HEAD" ]', 'if true || [ "$now" = "$RUN_HEAD" ]'),
+            "guard reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
+            "claim ignores it": ("    if: ${{ needs.head.outputs.current == 'true' }}\n", ""),
+            "claim waits on nothing": ("    needs: head\n", ""),
+            "plan runs past a skip": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
+                                      "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate passes a skip": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            "no jobs line": ("\njobs:\n", "\njobs: \n"),
+            # L3 on #5433: each job that runs PR tests or decides checks the head itself, first.
+            "a job's check passes an old head": ('          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run',
+                                                 '          true || { echo "::error::this run'),
+            "a second permissions key": ("    if: ${{ !cancelled() }}\n", "    if: ${{ !cancelled() }}\n    permissions: {}\n"),
+        }
+        check = "\n".join(HEAD_CHECK_LINES[4:]) + "\n"
+        for job in HEAD_CHECK_JOBS:
+            body = text.split("\n  %s:\n" % job, 1)[1]
+            edits["no check in " + job] = ("\n  %s:\n" % job + body[:body.index(check) + len(check)],
+                                           "\n  %s:\n" % job + body[:body.index(check)].replace(
+                                               "    permissions:\n      contents: read\n      pull-requests: read\n", ""))
+            edits["check after the checkout in " + job] = (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - uses: actions/checkout@",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - uses: actions/checkout@x\n" + check
+                + "      - uses: actions/checkout@") if job != "mutgate" else (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - name: The claim ran",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + "      - name: The claim ran")
+        for edit, (old, new) in edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, text)
+                self.assertTrue(head_guard_problems(text.replace(old, new, 1)), edit)
+        # The guard's script: the current head runs the gate, an older one ends green with a notice,
+        # and an unreadable head fails the job (so `claimed` and every gate job skip and mutgate fails).
+        script = "\n".join(l[10:] for l in HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        run: |") + 1:])
+        sha, other = "a" * 40, "b" * 40
+        for out, rc, want_rc, want in [(sha, 0, 0, "current=true"), (other, 0, 0, "current=false"),
+                                       ("", 1, 1, ""), ("not a sha", 0, 1, ""), (sha + "\n" + sha, 0, 1, "")]:
+            with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
+                gh = pathlib.Path(d, "gh")
+                gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
+                gh.chmod(0o755)
+                env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "RUN_HEAD": sha,
+                       "REPO": "o/r", "PR_NUMBER": "1", "GITHUB_OUTPUT": str(pathlib.Path(d, "out"))}
+                r = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, want_rc, r.stdout + r.stderr)
+                got = pathlib.Path(d, "out").read_text().strip() if pathlib.Path(d, "out").exists() else ""
+                self.assertEqual(got, want)
+                self.assertEqual("::notice::this run's head" in r.stdout, want == "current=false")
+                # Each later job's own check: only the current head goes on; anything else fails the job.
+                check = "\n".join(l[10:] for l in HEAD_CHECK_LINES[HEAD_CHECK_LINES.index("        run: |") + 1:])
+                r = subprocess.run(["bash", "-e", "-c", check], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0 if want == "current=true" else 1, r.stdout + r.stderr)
+                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, want == "current=false")
+
+    def test_concurrency_block_is_read_whole(self):
+        # #5409 (from #5408's review): the pinned block's three lines with more after them fail,
+        # whatever the extra line is; the same mapping in another order or with a comment passes.
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        block = "\n".join(SUPERSEDE_LINES) + "\n"
+        group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
+        self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+        for edit, new in {
+            "second cancel-in-progress": block + "  cancel-in-progress: true\n",
+            "second group": block + "  group: shared\n",
+            "extra key": block + "  x: y\n",
+            "extra key after a comment": block + "  # c\n  x: y\n",
+            "missing key": block.replace(cancel + "\n", ""),
+        }.items():
+            with self.subTest(edit):
+                self.assertTrue(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), edit)
+        for edit, new in {"reordered": "concurrency:\n" + cancel + "\n" + group + "\n",
+                          "comment and blank line inside": "concurrency:\n  # c\n\n" + group + "\n" + cancel + "\n"}.items():
+            with self.subTest(edit):
+                self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
+
+    def test_unread_yaml_names_the_supported_subset(self):
+        # Lens R1 on #5408: flow style, an anchor or a tab-indented block fails with the subset the
+        # check reads, not a bare mismatch; a readable block that differs says what differs.
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        block = "\n".join(SUPERSEDE_LINES) + "\n"
+        group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
+        flow = "concurrency: {%s, %s}\n" % (group.strip(SP), cancel.strip(SP))
+        for edit, new in {
+            "flow mapping": flow,
+            "anchor": block.replace("concurrency:", "concurrency: &c"),
+            "quoted key": block.replace("concurrency:", '"concurrency":'),
+            "tab-indented block": block.replace("  group", "\tgroup"),
+            "tab after the indent": block.replace("  group", "  \tgroup"),
+            "deeper line": block + "    x: y\n",
+            "quoted value": block.replace(cancel, "  cancel-in-progress: 'x'"),
+            "alias value": block.replace(cancel, "  cancel-in-progress: *c"),
+            "flow triggers": ("on:\n  pull_request:", "on: {pull_request: }"),
+        }.items():
+            text = plain.replace("jobs:", block + "jobs:").replace(*new) if isinstance(new, tuple) \
+                else plain.replace("jobs:", new + "jobs:")
+            with self.subTest(edit):
+                self.assertIn(SUBSET, supersede_problems("mutgate.yml", text), edit)
+        changed = supersede_problems("mutgate.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
+        self.assertEqual(len(changed), 1)
+        self.assertNotIn(SUBSET, changed)
+        self.assertIn("cancel-in-progress is 'true', pinned", changed[0])
 
     def test_cache_keys_name_the_runner_image(self):
         seen = 0
@@ -1173,9 +1443,25 @@ class WorkflowTest(unittest.TestCase):
                      ('startswith(".github/workflows/premerge.yml") | not', 'startswith(".github/workflows/") | not'),
                      ("max_by(.id)", "min_by(.id)"),
                      ("select(.check_suite.id != $suite)", "select(.name != \"merge\")"),
+                     # PREMERGE-merge-bind (#5384): only this PR's runs count, and only the other runs' suites are left out.
+                     ("(.head_repository.full_name == $repo and .head_branch == $ref)", "(.head_branch == $ref)"),
+                     ("map(select(.ours and (.path", "map(select((.path"),
+                     ("map(select(.ours | not) | .check_suite_id)", "map(.check_suite_id)"),
+                     ('[ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || ', ""),
+                     ('"$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF"', '"$HEAD_SHA" "$REPO" "$HEAD_REF"'),
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
+                     # PREMERGE-fork-rerun (#5383): the dispatched run joins the PR's group, reads only a number, and
+                     # only the job that dispatches holds `actions: write`, for runs that name no PR.
+                     ("|| inputs.pr || github.run_id }}", "|| github.run_id }}"),
+                     ("        type: number", "        type: string"),
+                     ("!github.event.workflow_run.pull_requests[0] && ", ""),
+                     ("startsWith(github.event.workflow_run.event, 'pull_request')", "true"),
+                     ("      actions: write # dispatch", "      contents: write\n      actions: write # dispatch"),
+                     (".head.ref == $ref and .base.ref == \"main\"", ".base.ref == \"main\""),
+                     ('!= 1 ]; then', '-lt 1 ]; then'),
+                     ('-f ref=main -f "inputs[pr]=$pr"', '-f ref="$HEAD_BRANCH" -f "inputs[pr]=$pr"'),
                      ("GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}", "GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}"),
                      ):
             with self.subTest(edit[0]):
@@ -1277,13 +1563,31 @@ def merge_script():
     return run_block(lines, lines.index("        run: |", lines.index("  merge:")) + 1)
 
 
+def fork_pr_script():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    run = lines.index("        run: |", lines.index("  fork-pr:"))
+    return step_argv(lines, run), run_block(lines, run + 1)
+
+
+# PREMERGE-fork-rerun (#5383): `gh` for the fork-pr job records each call's arguments one per line, answers the
+# open-PR list with $PRS and accepts the dispatch.
+STUB_FORK_GH = r"""#!/bin/sh
+{ printf '%s\n' "$@"; echo --; } >> "$STUBS/calls"
+case "$1 $2 $3" in
+  "api -X GET") [ "$FAIL_AT" = pulls ] && exit 1; printf '%s' "$PRS" ;;
+  "api -X POST") [ "$FAIL_AT" = dispatch ] && exit 1; : ;;
+  *) exit 2 ;;
+esac
+"""
+
+
 class PremergeRunTest(unittest.TestCase):
     SHA = "a" * 40
 
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 descriptions=None, trailer="41\n", calls=None):
+                 descriptions=None, trailer="41\n", calls=None, pr="7"):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1293,7 +1597,7 @@ class PremergeRunTest(unittest.TestCase):
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
-                   "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
+                   "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
                    "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
             # The runner's default `run` shell.
@@ -1319,6 +1623,83 @@ class PremergeRunTest(unittest.TestCase):
 
     def test_same_posts_success(self):
         self.assertEqual(self.run_gate("same"), (0, ["success"]))
+
+    def test_gate_reads_only_a_pr_number(self):
+        # PREMERGE-fork-rerun (#5383): a dispatch carries its PR as an input, so the number is checked before any read.
+        for pr in ("", "0", "07", "7a", "7 ", "-7", "12345678901"):
+            with self.subTest(pr=pr):
+                self.assertEqual(self.run_gate("same", pr=pr), (1, []))
+        self.assertEqual(self.run_gate("same", pr="1234567890"), (0, ["success"]))
+
+    def run_fork_pr(self, prs, owner="f", repo="f/r", branch="feat", fail_at=""):
+        """Run premerge.yml's fork-pr step; return its exit code, the GET's arguments and the dispatched PR, if any."""
+        real_jq = shutil.which("jq")
+        self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
+        argv, script = fork_pr_script()
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            (stubs / "gh").write_text(STUB_FORK_GH)
+            (stubs / "gh").chmod(0o755)
+            (stubs / "jq").symlink_to(real_jq)
+            (stubs / "run.sh").write_text(script)
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "RUNNER_TEMP": d, "GH_TOKEN": "synthetic", "REPO": "o/r",
+                   "HEAD_OWNER": owner, "HEAD_REPO": repo, "HEAD_BRANCH": branch, "PRS": json.dumps(prs), "FAIL_AT": fail_at}
+            proc = subprocess.run(argv + [str(stubs / "run.sh")], env=env, cwd=d, capture_output=True, text=True, timeout=30)
+            calls = (stubs / "calls").read_text().split("--\n")[:-1] if (stubs / "calls").exists() else []
+        calls = [c.splitlines() for c in calls]
+        get = [c for c in calls if c[:3] == ["api", "-X", "GET"]]
+        posts = [c for c in calls if c[:3] == ["api", "-X", "POST"]]
+        self.assertLessEqual(len(posts), 1)
+        for c in posts:
+            self.assertEqual(c[:6], ["api", "-X", "POST", "repos/o/r/actions/workflows/premerge.yml/dispatches", "-f", "ref=main"])
+        dispatched = [c[7].removeprefix("inputs[pr]=") for c in posts if c[6] == "-f" and c[7].startswith("inputs[pr]=")]
+        return proc.returncode, get, dispatched
+
+    @staticmethod
+    def pr_(number=12, repo="f/r", ref="feat", base="main"):
+        return {"number": number, "head": {"repo": {"full_name": repo}, "ref": ref}, "base": {"ref": base}}
+
+    def test_fork_pr_reruns_the_gate_for_its_one_open_pr(self):
+        # PREMERGE-fork-rerun (#5383): a fork PR's workflow_run names no PR, so the job finds the one open PR into
+        # main whose head is the run's owner:branch and dispatches this workflow on main for it.
+        code, get, dispatched = self.run_fork_pr([self.pr_()])
+        self.assertEqual((code, dispatched), (0, ["12"]))
+        self.assertEqual(get, [["api", "-X", "GET", "repos/o/r/pulls", "-f", "state=open", "-f", "base=main",
+                                "-f", "head=f:feat", "-f", "per_page=100"]])
+        # A branch name is one argument, never shell: the fork chooses it.
+        odd = 'x";$(touch p)`id`&#'
+        code, get, dispatched = self.run_fork_pr([self.pr_(ref=odd)], branch=odd)
+        self.assertEqual((code, dispatched), (0, ["12"]))
+        self.assertIn("head=f:" + odd, get[0])
+
+    def test_fork_pr_reruns_nothing_without_exactly_one_matching_pr(self):
+        # PREMERGE-fork-rerun (#5383): GitHub's head filter only narrows; the PR must name the run's repository and
+        # branch exactly and target main, and anything but one such PR dispatches nothing (the job stays green).
+        for prs in ([], [self.pr_(), self.pr_(13)], [self.pr_(repo="g/r")], [self.pr_(ref="feat2")], [self.pr_(ref="Feat")],
+                    [self.pr_(base="dev")]):
+            with self.subTest(prs=prs):
+                code, get, dispatched = self.run_fork_pr(prs)
+                self.assertEqual((code, len(get), dispatched), (0, 1, []))
+        # One match among others is still one.
+        self.assertEqual(self.run_fork_pr([self.pr_(repo="g/r", number=3), self.pr_(), self.pr_(base="dev", number=4)])[2], ["12"])
+
+    def test_fork_pr_reads_nothing_without_a_head(self):
+        # PREMERGE-fork-rerun (#5383): a deleted fork leaves no head repository; an owner that is not a login, or a
+        # repository outside that owner, is not read at all.
+        for kw in (dict(owner=""), dict(owner="f/g"), dict(owner="f:g"), dict(owner="f:g", repo="f:g/r"), dict(owner="", repo="/r"),
+                   dict(owner="f g", repo="f g/r"), dict(repo=""), dict(repo="g/r"),
+                   dict(repo="f"), dict(branch="")):
+            with self.subTest(**kw):
+                self.assertEqual(self.run_fork_pr([self.pr_()], **kw), (0, [], []))
+
+    def test_fork_pr_fails_on_a_failed_read_or_dispatch(self):
+        # PREMERGE-fork-rerun (#5383): a failed read must never read as no PR, a number that is not one is never
+        # dispatched, and a refused dispatch turns the job red.
+        self.assertEqual(self.run_fork_pr([self.pr_()], fail_at="pulls")[0::2], (1, []))
+        self.assertNotEqual(self.run_fork_pr([self.pr_()], fail_at="dispatch")[0], 0)
+        for number in ("12", "1 2", 0, -1, 1.5, None, [12]):
+            with self.subTest(number=number):
+                self.assertEqual(self.run_fork_pr([self.pr_(number=number)])[0::2], (1, []))
         self.assertEqual(self.run_gate("bot", ref="bot/trace"), (0, ["success"]))
 
     def test_error_after_head_known_posts_failure(self):
@@ -1366,7 +1747,7 @@ class PremergeRunTest(unittest.TestCase):
         # ARM-on-accept (#3103): the gate hands the merge job the head it read, only on `same`.
         out = []
         self.assertEqual(self.run_gate("same", outputs=out), (0, ["success"]))
-        self.assertEqual(out, ["merge-head=" + self.SHA])
+        self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=o/r", "merge-ref=feature"])
         for verdict, kw in (("no-verdict", {}), ("needs-security", {}), ("edited-verdict", {}), ("bot", {"ref": "bot/trace"}),
                             ("same", {"base": "stacked"}), ("same", {"fail_at": "comments"}),
                             ("same", {"pr_state": self.OPEN.replace('"draft":false', '"draft":true')}),
@@ -1408,10 +1789,12 @@ def run_(name, status="completed", conclusion="success", suite=1, id=1):
     return {"name": name, "id": id, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def wf_(name, id=1, status="completed", conclusion="success", path=None, event="push", branch="main", attempt=1, suite=1):
+def wf_(name, id=1, status="completed", conclusion="success", path=None, event="push", branch="main", attempt=1, suite=1,
+        repo="o/r"):
+    # The head runs default to branch main of o/r, which run_merge names as the PR's head (PREMERGE-merge-bind, #5384).
     return {"name": name, "id": id, "workflow_id": hash(name) % 1000, "status": status, "conclusion": conclusion,
             "path": path or ".github/workflows/%s.yml" % name, "event": event, "head_branch": branch,
-            "run_attempt": attempt, "check_suite_id": suite}
+            "run_attempt": attempt, "check_suite_id": suite, "head_repository": repo and {"full_name": repo}}
 
 
 class MergeRunTest(unittest.TestCase):
@@ -1423,7 +1806,8 @@ class MergeRunTest(unittest.TestCase):
                 wf_("premerge", status="in_progress", conclusion=None)]
 
     def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
-                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40):
+                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40,
+                  head_repo="o/r", head_ref="main"):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1433,6 +1817,7 @@ class MergeRunTest(unittest.TestCase):
             (stubs / "run.sh").write_text(merge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
                    "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
+                   "HEAD_REPO": head_repo, "HEAD_REF": head_ref,
                    "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
                    "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}), "BJOBS": json.dumps(base_jobs or {}),
                    "BWFS": json.dumps({"workflow_runs": list(base_wfs)}),
@@ -1538,6 +1923,35 @@ class MergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_merge(read="stat", statuses=())[:2], (0, []))
         self.assertEqual(self.run_merge(read="wfs", wfs=())[:2], (0, []))
         self.assertEqual(self.run_merge(read="suite")[:2], (0, []))
+
+    def test_only_this_prs_runs_and_their_check_runs_hold(self):
+        # PREMERGE-merge-bind (#5384): a fork PR opened on this head commit, or a PR from another branch, writes runs and
+        # check runs on the same sha; their red or pending state must not stall this PR's merge.
+        merged = (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA])
+        foreign = [wf_("lane-gate", id=5, conclusion="failure", repo="f/r", event="pull_request_target", suite=55),
+                   wf_("ci", id=6, status="in_progress", conclusion=None, branch="other", event="pull_request", suite=56),
+                   wf_("vulncheck", id=7, status="queued", conclusion=None, repo=None, suite=57)]
+        runs = [run_("lane-gate", conclusion="failure", suite=55), run_("checks", status="in_progress", conclusion=None, suite=56),
+                run_("vulncheck", status="queued", conclusion=None, suite=57)]
+        self.assertEqual(self.run_merge(wfs=self.WF_GREEN + foreign, runs=self.GREEN + runs)[:2], merged)
+        held = [
+            # this PR's own red or pending run, and a check run in its suite
+            dict(wfs=self.WF_GREEN + foreign + [wf_("lane-gate", id=8, conclusion="failure", suite=58)]),
+            dict(wfs=self.WF_GREEN + foreign, runs=self.GREEN + [run_("lane-gate", conclusion="failure", suite=1)]),
+            # a check run no run on the head claims (another App's) still holds
+            dict(wfs=self.WF_GREEN + foreign, runs=self.GREEN + [run_("ext", status="queued", conclusion=None, suite=777)]),
+            # a foreign run newer than this PR's red run of the same workflow does not mask it
+            dict(wfs=self.WF_GREEN + [wf_("vulncheck", id=8, conclusion="failure"), wf_("vulncheck", id=9, repo="f/r")]),
+            # a fork PR's own red run holds it
+            dict(wfs=self.WF_GREEN + [wf_("image", id=8, conclusion="failure", repo="f/r", branch="x")], head_repo="f/r",
+                 head_ref="x", runs=self.GREEN),
+            # without the PR's head repository and branch nothing binds, so nothing merges
+            dict(head_repo=""), dict(head_ref=""),
+        ]
+        for kw in held:
+            self.assertEqual(self.run_merge(**kw)[:2], (0, []), kw)
+        # a fork PR's own runs bind by the fork's repository and branch
+        self.assertEqual(self.run_merge(wfs=[wf_("ci", repo="f/r", branch="x")], head_repo="f/r", head_ref="x")[:2], merged)
 
     def test_no_token_or_bad_head_never_merges(self):
         self.assertEqual(self.run_merge(token="")[:2], (0, []))

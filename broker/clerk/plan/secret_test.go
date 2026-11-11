@@ -329,6 +329,7 @@ func TestPlanSignInDropsATokenAnswerEchoingASecret(t *testing.T) {
 	if p.Signed() || p.SignedIn("s") {
 		t.Fatal("an echoing token answer was stored")
 	}
+	returns(t, "a Forget after a dropped answer", func() { p.Forget("s") })
 }
 
 // A device step's user code and secrets are held to maxDevice (512 bytes):

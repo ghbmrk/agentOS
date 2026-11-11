@@ -431,3 +431,52 @@ func TestDropsCarryTheEdgeCut(t *testing.T) {
 		}
 	}
 }
+
+// TestEdgeTrippedFollowsTheText (#5399 item 2, KRN-12): the kernel cuts
+// the edge once a Drops text is applied exactly when TripSet holds the
+// edge's interface and the text does not empty the set: the running edge
+// quota is p's or none. Another interface cuts nothing; a listing that
+// does not read back, or an element of the set that is not a name, is an
+// error.
+func TestEdgeTrippedFollowsTheText(t *testing.T) {
+	d, l := fixturePolicy(), fixtureLayout()
+	p := fresh(d)
+	p.EdgeCap = 1000
+	qe, old := edgeQuota(p.Day, p.EdgeCap), edgeQuota(p.Day-1, p.EdgeCap)
+	quota := func(q string) string {
+		return `{"quota": {"family": "inet", "table": "enforcer", "name": "` + q + `"}}`
+	}
+	set := func(elems string) string {
+		return `{"set": {"family": "inet", "table": "enforcer", "name": "edge_trip", "elem": [` + elems + `]}}`
+	}
+	for _, c := range []struct {
+		name string
+		objs []string
+		want bool
+	}{
+		{name: "empty", objs: []string{set("")}},
+		{name: "filled", objs: []string{set(`"edge0"`)}, want: true},
+		{name: "filled, the same quota running", objs: []string{quota(qe), set(`"edge0"`)}, want: true},
+		{name: "filled, another quota running", objs: []string{quota(old), set(`"edge0"`)}},
+		{name: "filled, as an element object", objs: []string{set(`{"elem": {"val": "edge0"}}`)}, want: true},
+		{name: "another interface", objs: []string{set(`"core0"`)}},
+		{name: "another set", objs: []string{`{"set": {"family": "inet", "table": "enforcer", "name": "capc_4", "elem": ["edge0"]}}`}},
+		{name: "another table", objs: []string{`{"set": {"family": "inet", "table": "other", "name": "edge_trip", "elem": ["edge0"]}}`}},
+	} {
+		running := []byte(`{"nftables": [` + strings.Join(c.objs, ", ") + `]}`)
+		got, err := EdgeTripped(running, l, p)
+		if err != nil || got != c.want {
+			t.Errorf("%s: tripped %v, %v; want %v", c.name, got, err, c.want)
+		}
+		// The text Drops writes agrees: it empties the set only where
+		// EdgeTripped says the cut does not hold.
+		if text := mustDrops(t, d, running, p); c.want && strings.Contains(text, "flush set inet enforcer edge_trip\n") {
+			t.Errorf("%s: the text empties a set EdgeTripped says still cuts", c.name)
+		}
+	}
+	for _, bad := range []string{`{`, `{"nftables": [{"quota": "unreadable"}]}`, `{"nftables": [{"set": "unreadable"}]}`, `{"nftables": [` + set(`7`) + `]}`, `{"nftables": [` + set(`{"elem": 7}`) + `]}`} {
+		if _, err := EdgeTripped([]byte(bad), l, p); err == nil {
+			t.Errorf("listing %s read back", bad)
+		}
+	}
+}
