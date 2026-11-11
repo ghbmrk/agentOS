@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
@@ -98,6 +99,10 @@ type network struct {
 	stopServed error
 	stopPolicy []page.PolicyCause
 	stopLoad   page.LoadStep
+	// unseeded is when the last taken load seeded no lease because the
+	// lease file could not be read whole (zero: it seeded what the file
+	// holds), shown on home until every host has renewed (#5394).
+	unseeded time.Time
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -240,6 +245,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		d.net.resMu.Unlock()
 	}
 	caps := traffic.CapsOf(doc)
+	var unseeded bool
 	load := func() (err error) {
 		// A full load starts the edge's quota and TripSet afresh, so it
 		// holds the edge only while its port merges now; one the firewall
@@ -297,7 +303,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		seed := nft.Seed(l, d.leases())
+		var seeds []nft.Lease
+		seeds, unseeded = d.leases()
+		seed := nft.Seed(l, seeds)
 		if err := d.dp.Fire.Load(lctx, joinRules(joinRules(text, seed), drops)); err != nil {
 			return fireErr{err}
 		}
@@ -318,6 +326,10 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
 	d.net.stopPolicy, d.net.stopLoad = why, page.LoadTaken
+	d.net.unseeded = time.Time{}
+	if unseeded {
+		d.net.unseeded = d.dp.Now()
+	}
 	d.net.resMu.Unlock()
 	b, err := policy.Encode(doc)
 	if err == nil {
@@ -401,38 +413,91 @@ func joinRules(text, drops string) string {
 // segments now, for a full load to seed (nft.Seed, ENF-l-23, #5295), so a
 // restart or reboot does not cut every leased IPv4 host off until it
 // renews, up to half a lease later. A missing file (a first boot) seeds
-// nothing; an unreadable one seeds nothing and is logged; neither fails
+// nothing. One that cannot be read, or not read whole (leaseFile), seeds
+// nothing, is logged, and unread says so for home (#5394). Neither fails
 // the load, whose hosts then wait for their next renewal (fails closed).
-func (d *Enforcer) leases() []nft.Lease {
-	b, err := os.ReadFile(d.cfg.DNS.LeaseFile)
+func (d *Enforcer) leases() (ls []nft.Lease, unread bool) {
+	b, err := leaseFile(func() ([]byte, error) { return os.ReadFile(d.cfg.DNS.LeaseFile) })
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.dp.Logf("firewall: lease file unreadable, no lease seeded: " + err.Error())
+		return nil, true
 	}
-	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix())
+	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix()), false
+}
+
+var errTorn = errors.New("it changed while read, three times in a row")
+
+// leaseFile is the lease file, read whole twice in a row and taken only
+// when both reads are equal and it ends with a whole line (#5394). The
+// DHCP server rewrites the file in place, so a read that lands while it
+// does can splice the old file's start onto the new one's end, which can
+// pair an address with another line's hardware address, or stop short.
+// Two equal reads with no change between them hold no splice; two that
+// both stop short at a line's end hold fewer leases, never a wrong one.
+// It tries three times.
+func leaseFile(read func() ([]byte, error)) ([]byte, error) {
+	for range 3 {
+		a, err := read()
+		if err != nil {
+			return nil, err
+		}
+		b, err := read()
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(a, b) && (len(a) == 0 || a[len(a)-1] == '\n') {
+			return a, nil
+		}
+	}
+	return nil, errTorn
 }
 
 // leasesOf is the IPv4 leases in lease file b (dnsmasq's lines, each
 // "expiry mac ip hostname clientid", expiry in Unix seconds) with time
-// left at now, each on the shared segment (Guests, Owner, Household)
-// whose DHCP subnet in nets holds its address. A line seeds nothing when
-// its address is in no subnet, in more than one, in a subnet that is not
-// a DHCP-served shared segment's, or outside that subnet's lease range
+// left, each on the shared segment (Guests, Owner, Household) whose DHCP
+// subnet in nets holds its address. A line seeds nothing when its address
+// is in no subnet, in more than one, in a subnet that is not a
+// DHCP-served shared segment's, or outside that subnet's lease range
 // (dns.Hosts4, which the network, broadcast and enforcer's own addresses
 // are outside); nor does a line that is not exactly five fields, a
 // hardware address that is not Ethernet, an infinite lease (expiry 0) or
-// one run out. Seed drops what is left of more than nft.LeaseTimeout.
+// one run out. An address on two lines seeds nothing (#5394): the server
+// writes each once, and neither line can be told the true holder.
+//
+// Time left is counted from now, or from the latest moment the file
+// proves the clock has passed, if later (#5394): no lease is longer than
+// nft.LeaseTimeout, so every lease was granted at or after its expiry
+// minus that, by the clock that wrote it. A clock behind after a reboot
+// therefore seeds no lease for longer than it has left from its newest
+// grant; so no lease seeds more than LeaseTimeout either.
 func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
-	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
-	var out []nft.Lease
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
+	type line struct {
+		expiry int64
+		hw     net.HardwareAddr
+		a      netip.Addr
+	}
+	var lines []line
+	times := map[netip.Addr]int{}
+	for _, s := range strings.Split(string(b), "\n") {
+		f := strings.Fields(s)
 		if len(f) != 5 {
 			continue
 		}
 		expiry, eerr := strconv.ParseInt(f[0], 10, 64)
 		hw, herr := net.ParseMAC(f[1])
 		a, aerr := netip.ParseAddr(f[2])
-		if eerr != nil || herr != nil || aerr != nil || len(hw) != 6 || expiry <= now {
+		if eerr != nil || herr != nil || aerr != nil {
+			continue
+		}
+		times[a]++
+		now = max(now, expiry-nft.LeaseTimeout)
+		lines = append(lines, line{expiry, hw, a})
+	}
+	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
+	var out []nft.Lease
+	for _, ln := range lines {
+		a := ln.a
+		if times[a] != 1 || len(ln.hw) != 6 || ln.expiry <= now {
 			continue
 		}
 		var in []dns.Net
@@ -447,7 +512,7 @@ func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
 		if first, last := dns.Hosts4(in[0].Prefix4); a.Less(first) || last.Less(a) {
 			continue
 		}
-		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: hw, Left: expiry - now})
+		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: ln.hw, Left: ln.expiry - now})
 	}
 	return out
 }

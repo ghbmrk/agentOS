@@ -443,6 +443,18 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if h = g.homeHTML(); strings.Contains(h, "stopped or could not start") || !strings.Contains(h, "stopped answering name lookups") {
 		t.Error("a stopped resolver shows restarts beside the stop")
 	}
+	// A lease file the last load could not read shows in one line,
+	// whether or not the resolver runs (#5394 item 3), and only then.
+	const unseeded = "<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>"
+	if strings.Contains(h, "Addresses handed out") {
+		t.Error("home shows an unread lease file the load read")
+	}
+	for _, stopped := range []bool{false, true} {
+		res.stop = ResolverStop{Stopped: stopped, Unseeded: true}
+		if h = g.homeHTML(); !strings.Contains(h, "<h2>Addresses handed out</h2>") || strings.Count(h, unseeded) != 1 {
+			t.Errorf("home (stopped %v) does not show an unread lease file in its words:\n%s", stopped, h)
+		}
+	}
 	// A setting that did not take shows in plain words, never the raw
 	// error, and an error said twice shows once (#5280).
 	ra := Unset{Kind: UnsetSetting, Iface: "own0", Setting: RouterAds}

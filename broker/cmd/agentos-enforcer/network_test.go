@@ -367,7 +367,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		exp(100) + " 1234 fd00:30::20 * 00:01",
 		exp(100) + " 02:00:00:00:00:13 ::ffff:10.30.0.29 * *",
 		exp(100) + " 02:00:00:00:00:14 10.30.0.1 * *", // the enforcer's
-	}, "\n")
+	}, "\n") + "\n"
 	path := filepath.Join(t.TempDir(), "dhcp.leases")
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
@@ -454,6 +454,91 @@ func TestLeasesOf(t *testing.T) {
 	if got := leasesOf(nil, s.Nets, c.Layout, 1000); len(got) != 0 {
 		t.Fatalf("no file: leases %+v", got)
 	}
+	// An address on two lines seeds neither (#5394 item 2), whether the
+	// hardware addresses differ or not; the address's neighbours seed.
+	file = strings.Join([]string{
+		"1100 02:00:00:00:00:01 10.30.0.10 * *",
+		"1100 02:00:00:00:00:02 10.30.0.14 * *",
+		"1200 02:00:00:00:00:03 10.30.0.14 * *",
+		"1100 02:00:00:00:00:04 10.30.0.15 * *",
+		"1100 02:00:00:00:00:04 10.30.0.15 * *",
+		"1100 02:00:00:00:00:05 10.30.0.16 * *",
+	}, "\n")
+	want = []nft.Lease{
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.16"), HW: hw("02:00:00:00:00:05"), Left: 100},
+	}
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
+		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
+	}) {
+		t.Fatalf("duplicate addresses: leases %+v, want %+v", got, want)
+	}
+	// A clock behind (#5394 item 4): a lease that ends LeaseTimeout+50
+	// after now was granted 50 s from now, so the clock is at least that
+	// far behind, and every lease's time left counts from then: the
+	// newest seeds LeaseTimeout, one ending 1100 seeds 50, and one ending
+	// within those 50 s seeds nothing, even from another subnet's line.
+	grant := strconv.FormatInt(1050+nft.LeaseTimeout, 10)
+	file = strings.Join([]string{
+		"1100 02:00:00:00:00:01 10.30.0.10 * *",
+		"1050 02:00:00:00:00:02 10.30.0.11 * *",
+		"1049 02:00:00:00:00:03 10.30.0.12 * *",
+		grant + " 02:00:00:00:00:04 10.99.0.5 * *", // in no subnet
+		"1100 02:00:00:00:00:05 10.20.0.20 * *",
+	}, "\n")
+	want = []nft.Lease{
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 50},
+		{Iface: "hh0", Addr: netip.MustParseAddr("10.20.0.20"), HW: hw("02:00:00:00:00:05"), Left: 50},
+	}
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
+		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
+	}) {
+		t.Fatalf("clock behind: leases %+v, want %+v", got, want)
+	}
+	file = grant + " 02:00:00:00:00:01 10.30.0.10 * *\n1100 02:00:00:00:00:02 10.30.0.11 * *"
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); len(got) != 2 || got[0].Left != nft.LeaseTimeout || got[1].Left != 50 {
+		t.Fatalf("clock behind, the newest grant: leases %+v", got)
+	}
+}
+
+// TestLeaseFileTorn (#5394 item 1): the lease file is taken only when two
+// reads in a row are equal and it ends with a whole line, up to three
+// tries; a read error is the file's, and a file never read whole is an
+// error, so it seeds nothing.
+func TestLeaseFileTorn(t *testing.T) {
+	reads := func(rs ...string) (func() ([]byte, error), *int) {
+		n := new(int)
+		return func() ([]byte, error) {
+			r := rs[min(*n, len(rs)-1)]
+			*n++
+			if r == "!" {
+				return nil, os.ErrPermission
+			}
+			return []byte(r), nil
+		}, n
+	}
+	const whole = "1 a 10.0.0.1 * *\n2 b 10.0.0.2 * *\n"
+	for _, c := range []struct {
+		reads []string
+		want  string
+		err   error
+		n     int
+	}{
+		{[]string{whole, whole}, whole, nil, 2},
+		{[]string{"", ""}, "", nil, 2},
+		{[]string{"1 a 10.0.0.1 * *\n2 b 10.0.0.", whole, whole, whole}, whole, nil, 4},
+		{[]string{"x\n", "y\n", "z\n", "w\n", whole, whole}, whole, nil, 6},
+		{[]string{"x\n", "y\n", "z\n", "w\n", "u\n", "v\n", whole}, "", errTorn, 6},
+		{[]string{"1 a 10.0.0.1 * *"}, "", errTorn, 6},
+		{[]string{"!"}, "", os.ErrPermission, 1},
+		{[]string{whole, "!"}, "", os.ErrPermission, 2},
+	} {
+		read, n := reads(c.reads...)
+		got, err := leaseFile(read)
+		if string(got) != c.want || !errors.Is(err, c.err) || *n != c.n {
+			t.Errorf("reads %q: %q, %v after %d reads; want %q, %v after %d", c.reads, got, err, *n, c.want, c.err, c.n)
+		}
+	}
 }
 
 // TestLeaseFileUnreadable (ENF-l-23, #5295): a missing lease file (a first
@@ -467,11 +552,50 @@ func TestLeaseFileUnreadable(t *testing.T) {
 	if strings.Contains(x.logText(), "lease file") {
 		t.Fatal("a missing lease file was logged")
 	}
+	if (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home shows a missing lease file as unreadable")
+	}
 	x.cfg.DNS.LeaseFile = t.TempDir() // a directory: read fails
 	x.restart()
 	x.enforced()
 	if !strings.Contains(x.logText(), "lease file unreadable") {
 		t.Fatal("an unreadable lease file was not logged")
+	}
+	// Home shows it (#5394 item 3) until half a lease has passed, when
+	// every host the load did not seed has renewed.
+	if !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home does not show an unreadable lease file")
+	}
+	x.advance(nft.LeaseTimeout/2*time.Second - time.Second)
+	if !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home stops showing an unreadable lease file before every host has renewed")
+	}
+	x.advance(time.Second)
+	if (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home still shows an unreadable lease file half a lease later")
+	}
+	// A file that does not end with a whole line is one read mid-rewrite:
+	// no seed, logged, shown; a load that reads it whole clears it.
+	x.cfg.DNS.LeaseFile = filepath.Join(t.TempDir(), "dhcp.leases")
+	exp := strconv.FormatInt(x.nowMS()/1000+600, 10)
+	if err := os.WriteFile(x.cfg.DNS.LeaseFile, []byte(exp+" 02:00:00:00:00:01 10.30.0.20 * *"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if got := x.fire.last(); strings.Contains(got, "add element inet enforcer lease_") || !strings.Contains(x.logText(), errTorn.Error()) || !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatalf("a torn lease file seeded, or was not logged or shown:\n%s", got)
+	}
+	if err := os.WriteFile(x.cfg.DNS.LeaseFile, []byte(exp+" 02:00:00:00:00:01 10.30.0.20 * *\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(x.fire.last(), "add element inet enforcer lease_guests_4 { 0x0a1e0014 . 0x020000000001 expires 600s }") || (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatalf("a lease file read whole did not seed, or home still shows it unread:\n%s", x.fire.last())
 	}
 }
 
