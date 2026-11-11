@@ -1,6 +1,6 @@
 package sim
 
-// REQ: KEY-8, KEY-9
+// REQ: KEY-7, KEY-8, KEY-9, TIM-1
 
 import (
 	"math"
@@ -61,7 +61,7 @@ func TestTheOracleJudgesTheHoldOnTheTrueClock(t *testing.T) {
 		{"no window", ck, heldAt, kernel.Dispatch{}, false},
 	} {
 		now := c.now
-		w := &world{anchors: []key.PublicKey{owner.pk}, now: &now, done: map[string]bool{}, dead: map[key.ID]bool{}}
+		w := &world{anchors: []key.PublicKey{owner.pk}, now: &now, reads: &[2]int64{math.MaxInt64, math.MinInt64}, done: map[string]bool{}, dead: map[key.ID]bool{}}
 		p := kernel.SignPlan(kernel.Plan{ID: "j", Key: c.k, Steps: []kernel.PlanStep{{Verb: key.Post, Clerk: "mail", Args: map[string]string{"to": "alice", "msg": "hi"}}}}, holder.priv)
 		w.judge(kernel.Request{Plan: p}, heldView{c.d})
 		if got := slices.Contains(w.bad, "irreversible effect inside its hold window"); got != c.inside || len(w.bad) > 1 {
@@ -95,9 +95,10 @@ func TestTheHostileClockJumpsPastEveryHold(t *testing.T) {
 		}
 		root := key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Send}, Serial: "h1"})
 		ck := s.clerkKey(s.owner.pass, root)
-		if err := s.k.Issue(s.now-kernel.GrantHold, approve([]key.Key{root, ck}, s.owner, s.spare), root, ck); err != nil {
+		if err := s.k.Issue(s.now, approve([]key.Key{root, ck}, s.owner, s.spare), root, ck); err != nil {
 			t.Fatal(err)
 		}
+		s.now += kernel.GrantHold // the kernel reads its clock, so the grant waits its hold
 		hk, err := key.Derive(ck, s.holder.priv, s.holder.pub, key.LimitHold(c.hold, c.hold))
 		if err != nil {
 			t.Fatal(err)
@@ -116,6 +117,63 @@ func TestTheHostileClockJumpsPastEveryHold(t *testing.T) {
 		}
 		if a := kernel.Next(s.k.State(), "h", s.now+ahead); c.pastDue != (a.Kind == kernel.ActDispatch) {
 			t.Errorf("%s: at the jumped clock, act %+v", c.name, a)
+		}
+	}
+}
+
+// A kernel that decides on its clock alone, not the guard's interval, ends a
+// hold the earliest reading has not reached and acts under a key the latest
+// reading has passed: the sweep's two clock invariants catch both, and the
+// kernel that reads the interval waits the hold and rejects the plan (TIM-1,
+// KEY-7, KEY-8).
+func TestNoReadingKernelFailsBothClockInvariants(t *testing.T) {
+	for _, c := range []struct {
+		bad        string
+		hold, life int64
+	}{
+		{"a hold ended before its due by the earliest reading", hour, 0},
+		{"effect under a key once a reading passed its expiry", 0, hour},
+	} {
+		for _, m := range []Mutant{"", MutantNoClock} {
+			rng := rand.New(rand.NewPCG(5, 6))
+			var nseed [32]byte
+			s := &sim{cfg: Config{Mutant: m}, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed), now: key.DayMS}
+			s.disk = &Disk{rng: rng}
+			s.owner, s.holder, s.head, s.spare = gen(rng), gen(rng), gen(rng), gen(rng)
+			s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, rng: rng, now: &s.now, reads: &s.reads, done: map[string]bool{}, dead: map[key.ID]bool{}}
+			s.w.mail = s.w.newMail()
+			if err := s.boot(); err != nil {
+				t.Fatal(err)
+			}
+			root := key.Issue(s.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Send}, Serial: "n1"})
+			ck := s.clerkKey(s.owner.pass, root)
+			if err := s.k.Issue(s.now, approve([]key.Key{root, ck}, s.owner, s.spare), root, ck); err != nil {
+				t.Fatal(err)
+			}
+			s.now += kernel.GrantHold
+			cv := key.LimitExpires(s.now + c.life)
+			if c.hold > 0 {
+				cv = key.LimitHold(c.hold, c.hold)
+			}
+			hk, err := key.Derive(ck, s.holder.priv, s.holder.pub, cv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.late = 2 * hour // the guard's sources disagree: one runs two hours ahead
+			p := kernel.SignPlan(kernel.Plan{ID: "n", Key: hk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: "mail", Args: map[string]string{"to": "a", "msg": "hi"}}}}, s.holder.priv)
+			if err := s.k.Submit(s.kt(), p); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := s.k.Tick(s.kt()); err != nil {
+					t.Fatal(err)
+				}
+				s.now, s.early = s.now+c.hold, 2*hour // to the hold's due on the true clock; one source runs two hours behind
+			}
+			caught, st := slices.Contains(s.w.bad, c.bad), s.k.State().Plans["n"]
+			if m == MutantNoClock && !caught || m == "" && (len(s.w.bad) > 0 || c.hold > 0 && (len(st.Steps) == 0 || st.Steps[0].Phase != kernel.PHeld) || c.life > 0 && st.Status != kernel.SRejected) {
+				t.Errorf("%q, mutant %q: judged %q, plan %s %+v", c.bad, m, s.w.bad, st.Status, st.Steps)
+			}
 		}
 	}
 }

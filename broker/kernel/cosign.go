@@ -83,16 +83,17 @@ func (p *power) day() int64 {
 
 type holderAt struct{ clerk, holder string }
 
-// powers folds the grants live at at, those still in their hold too when
-// pending, and keys, into each holder's power. A paused grant is none.
-func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*power {
+// powers folds the grants live by at.Earliest and not lapsed by at.Latest,
+// those still in their hold too when pending, and keys, into each holder's
+// power. A paused grant is none.
+func (s *State) powers(at Reading, pending bool, keys []key.Key) map[holderAt]*power {
 	out := map[holderAt]*power{}
 	add := func(k key.Key) {
 		w := holderAt{k.Root.Clerk, ""}
 		day := int64(0)
 		if len(k.Links) > 0 {
 			exp := lapse(k.Links[0].Caveats)
-			if exp != nil && *exp <= at {
+			if exp != nil && *exp <= at.Latest {
 				return
 			}
 			w.holder = string(k.Links[0].Holder)
@@ -109,7 +110,7 @@ func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*pow
 		p.days[rootOf(k)] = max(p.days[rootOf(k)], day)
 	}
 	for id, g := range s.Grants {
-		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || s.Changes.Paused[id] || g.From > at && !pending {
+		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || s.Changes.Paused[id] || g.From > at.Earliest && !pending {
 			continue
 		}
 		add(g.Key)
@@ -141,7 +142,7 @@ func spendDay(cs []key.Caveat) int64 {
 // would have adds the grants still in their hold, so raises in one hold
 // cannot each pass as small: a renewal's cap replaces its root's, and a new
 // root's adds to the budget.
-func (s *State) big(keys []key.Key, at int64) bool {
+func (s *State) big(keys []key.Key, at Reading) bool {
 	before := s.powers(at, false, nil)
 	for w, a := range s.powers(at, true, keys) {
 		b := before[w]
@@ -164,7 +165,7 @@ func (s *State) big(keys []key.Key, at int64) bool {
 // proves (KEY-9): a new key of rank 3 (identity, safety or uncapped money)
 // asks the hardware key, so its batch needs the co-sign a big one does. A
 // grant already in the log or a same-limit renewal widens nothing.
-func (s *State) priced(keys []key.Key, at int64) bool {
+func (s *State) priced(keys []key.Key, at Reading) bool {
 	return slices.ContainsFunc(keys, func(k key.Key) bool {
 		w, _ := key.Worth(k) // a malformed key is worth the most
 		_, had := s.Grants[k.Tip()]

@@ -400,7 +400,7 @@ func (k *Kernel) Issue(at int64, cos []key.Cosign, keys ...key.Key) error {
 	if err != nil {
 		return err
 	}
-	if _, err := k.s.grants(keys, cos, now.Earliest); err != nil {
+	if _, err := k.s.grants(keys, cos, now); err != nil {
 		return err
 	}
 	return k.owner(now, TKeyIssued, grantBatch{keys, cos})

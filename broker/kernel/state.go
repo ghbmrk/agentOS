@@ -628,7 +628,7 @@ var ErrNotAGrant = errors.New("kernel: only a root or a first link off a granted
 // grants decides one batch logged at at, in order: the grants it adds, or
 // the first refusal. A big or priced batch needs its second passkey, as a whole. The
 // fold and Issue share it, so Issue logs only what the fold grants.
-func (s *State) grants(keys []key.Key, cos []key.Cosign, at int64) (map[key.ID]Grant, error) {
+func (s *State) grants(keys []key.Key, cos []key.Cosign, at Reading) (map[key.ID]Grant, error) {
 	out := map[key.ID]Grant{}
 	if (s.big(keys, at) || s.priced(keys, at)) && !s.cosigned(keys, cos) {
 		return out, ErrNeedsCosign
@@ -650,14 +650,14 @@ func (s *State) grants(keys []key.Key, cos []key.Cosign, at int64) (map[key.ID]G
 // decide is when grant k, logged at at, is live. A root waits GrantHold. So
 // does a first link, never less than its root, but a renewal of a live grant
 // at the same limits is live at once (renews).
-func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, error) {
+func (s *State) decide(k key.Key, at Reading, batch map[key.ID]Grant) (int64, error) {
 	if len(k.Links) > 1 {
 		return 0, ErrNotAGrant
 	}
 	if _, err := key.Chain(k, s.Passkeys()); err != nil {
 		return 0, err
 	}
-	from := at + GrantHold
+	from := at.Earliest + GrantHold
 	if len(k.Links) == 0 {
 		return from, nil
 	}
@@ -673,7 +673,7 @@ func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, erro
 		}
 	}
 	if s.renews(k, at) {
-		from = at
+		from = at.Earliest
 	}
 	return max(from, r.From), nil
 }
@@ -681,20 +681,20 @@ func (s *State) decide(k key.Key, at int64, batch map[key.ID]Grant) (int64, erro
 // renews reports whether k renews a live clerk key: same root and holder,
 // limits within the old key's (a renewal may narrow, never widen) and a later
 // expiry, and neither lapsed, paused nor revoked (D-146, #2670 item 5).
-func (s *State) renews(k key.Key, at int64) bool {
+func (s *State) renews(k key.Key, at Reading) bool {
 	exp := lapse(k.Links[0].Caveats)
 	lim, err := key.Fold(k.Links[0].Caveats)
-	if exp == nil || *exp > at+key.ClerkLife || err != nil {
+	if exp == nil || *exp > at.Earliest+key.ClerkLife || err != nil {
 		return false
 	}
 	for id, g := range s.Grants {
-		if len(g.Key.Links) != 1 || g.From > at || s.Changes.Revoked[id] || s.Changes.Paused[id] ||
+		if len(g.Key.Links) != 1 || g.From > at.Earliest || s.Changes.Revoked[id] || s.Changes.Paused[id] ||
 			rootOf(g.Key) != rootOf(k) || !bytes.Equal(g.Key.Links[0].Holder, k.Links[0].Holder) {
 			continue
 		}
 		old := lapse(g.Key.Links[0].Caveats)
 		was, err := key.Fold(g.Key.Links[0].Caveats)
-		if old != nil && *old > at && *exp >= *old && err == nil && lim.Within(was) {
+		if old != nil && *old > at.Latest && *exp >= *old && err == nil && lim.Within(was) {
 			return true
 		}
 	}
@@ -936,7 +936,7 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		add, _ := s.grants(b.Keys, b.Cosigns, e.At) // a refused key adds nothing, nor any after it
+		add, _ := s.grants(b.Keys, b.Cosigns, e.reading()) // a refused key adds nothing, nor any after it
 		for id, g := range add {
 			s.Grants[id] = g
 		}

@@ -448,3 +448,22 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 		t.Fatal("the anchor's grant in its hold was cancelled")
 	}
 }
+
+// A renewal is live at once only while the key it renews has not lapsed by
+// the latest credible time: a key already expired by Latest, though not by
+// Earliest, is renewed only after the hold (TIM-1, KEY-7, D-146).
+//
+// REQ: TIM-1, KEY-7
+func TestTIM1ARenewalOfAKeyLapsedByLatestWaitsTheHold(t *testing.T) {
+	r := newRig(t)
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: 0, Latest: 1 << 50} })
+	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, 0, 1<<39) // narrower: a renewal by its limits
+	must(t, err)
+	must(t, r.issue(0, k))
+	if from, _ := r.k.State().Granted(k.Tip()); from != kernel.GrantHold {
+		t.Fatalf("a renewal of a key lapsed by Latest is live from %d, want after the hold %d", from, kernel.GrantHold)
+	}
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -416,20 +416,21 @@ func (h *Kernel) Close() error {
 	return h.store.Close()
 }
 
-// onLog is c floored at the log's last time as the process opened it, carried
-// forward on the monotonic clock. So a start whose wall clock is behind the
-// log (a flat CMOS battery, an RTC kept in local time) neither stops the
-// kernel's time at the log, which would keep a task or key past its end, nor
-// takes it back below (TIM-1, KEY-7). It rests on the kernel's floor: true
-// time was at least each entry's when the kernel wrote it.
+// onLog is the kernel process's clock from source c. Earliest runs on the
+// monotonic clock from the later of the log's last time and c's Latest at the
+// start; c only raises Latest. So a step of the box clock while running, back
+// or forward, never moves Earliest, which the log's times and the floor take:
+// a step back neither stops time nor revives a key, and a step forward ends no
+// hold and leaves the log as it was, its Latest firing expiries only while it
+// lasts (TIM-1, KEY-7, KEY-8). A start whose clock is behind the log reads the
+// log's time; one ahead of true time is not seen.
 func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
-	es := l.Entries()
-	if len(es) == 0 {
-		return c
+	base, start := c().Latest, time.Now()
+	if es := l.Entries(); len(es) > 0 {
+		base = max(base, es[len(es)-1].At)
 	}
-	base, start := es[len(es)-1].At, time.Now()
 	return func() kernel.Reading {
-		r, f := c(), base+time.Since(start).Milliseconds()
-		return kernel.Reading{Earliest: max(r.Earliest, f), Latest: max(r.Latest, f)}
+		e := base + time.Since(start).Milliseconds()
+		return kernel.Reading{Earliest: e, Latest: max(e, c().Latest)}
 	}
 }

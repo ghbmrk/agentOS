@@ -708,9 +708,9 @@ func (s *sim) op() error {
 			// start on a flat CMOS battery; the guard does not see it.
 			s.hostile, s.ahead = false, -int64(1+s.pick(48))*hour
 			s.logf("kernel clock steps back %dh", -s.ahead/hour)
-		case 5:
+		case 5, 6:
 			// The guard's sources disagree, or agree again (TIM-1).
-			s.early, s.late = int64(s.pick(3))*hour, int64(s.pick(3))*hour
+			s.early, s.late = int64(s.pick(4))*hour, int64(s.pick(4))*hour
 			s.logf("clock sources disagree by -%dh +%dh", s.early/hour, s.late/hour)
 		default:
 			n := 1 + s.pick(8)
@@ -958,17 +958,22 @@ func (s *sim) grant(keys ...key.Key) error {
 }
 
 // refusedBig counts a big batch refused for its missing second passkey; any
-// other error stands.
+// other error stands, but a clerk key the phone dated by the true time, which
+// would outlive ClerkLife on a kernel clock behind it (D-146, TIM-1).
 func (s *sim) refusedBig(err error) error {
 	if errors.Is(err, kernel.ErrNeedsCosign) {
 		s.bigRefused++
 		return nil
 	}
+	if errors.Is(err, kernel.ErrLife) && s.kt()-s.early < s.now {
+		return nil
+	}
 	return err
 }
 
-// pastHolds is a jump that puts the kernel's clock just past every held
-// step's window, or a few hours when nothing is held: a hostile clock.
+// pastHolds is a jump that puts the kernel's clock, its earliest reading
+// too, just past every held step's window, or a few hours when nothing is
+// held: a hostile clock the guard's sources all follow.
 func (s *sim) pastHolds() int64 {
 	ahead := int64(1+s.pick(6)) * hour
 	st := s.k.State()
@@ -980,7 +985,7 @@ func (s *sim) pastHolds() int64 {
 			}
 			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
 				if due := v.Due(p.Plan.Step(i).Verb, p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
-					ahead = max(ahead, due-s.now+60_000) // a step never due sets no jump
+					ahead = max(ahead, due-s.now+s.early+60_000) // a step never due sets no jump
 				}
 			}
 		}

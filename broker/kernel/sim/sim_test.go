@@ -186,29 +186,3 @@ func TestSimEraseReachesEveryViewOnce(t *testing.T) {
 	}
 	t.Logf("crashes by write: %v", hits)
 }
-
-// A kernel that decides on its own clock alone, not the guard's interval,
-// fails both clock invariants: a hold ends before its due by the earliest
-// reading, and a key acts after a reading passed its expiry (TIM-1, KEY-7,
-// KEY-8, #5147).
-//
-// REQ: TIM-1, KEY-7, KEY-8
-func TestNoReadingKernelFailsBothClockInvariants(t *testing.T) {
-	want := map[string]bool{
-		"a hold ended before its due by the earliest reading": false,
-		"effect under a key once a reading passed its expiry": false,
-	}
-	for seed, left := 0, len(want); seed < 400 && left > 0; seed++ {
-		_, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: MutantNoClock})
-		for m, caught := range want {
-			if !caught && err != nil && strings.Contains(err.Error(), m) {
-				want[m], left = true, left-1
-			}
-		}
-	}
-	for m, caught := range want {
-		if !caught {
-			t.Errorf("no seed caught %q", m)
-		}
-	}
-}

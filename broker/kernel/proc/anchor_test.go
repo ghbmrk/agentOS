@@ -454,35 +454,41 @@ func ownDir(t *testing.T) string {
 	return d
 }
 
-// A start whose wall clock is behind the log reads the log's last time,
-// carried forward on the monotonic clock, so the kernel's time neither stops
-// at the log nor goes below it; a clock ahead of that reads as itself
-// (TIM-1, KEY-7, #5147).
+// The kernel process's Earliest runs on the monotonic clock from the later of
+// the log's last time and the box clock at the start; the box clock raises
+// only Latest. A start behind the log reads the log's time and moves on, and
+// a step of the box clock while running, back or forward, leaves Earliest
+// where the monotonic clock has it (TIM-1, KEY-7, KEY-8, #5147).
 //
-// REQ: TIM-1, KEY-7
+// REQ: TIM-1, KEY-7, KEY-8
 func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wall := kernel.At(0) // a flat CMOS battery: the clock restarted in the past
-	if c := onLog(l, func() kernel.Reading { return wall }); c() != wall {
-		t.Fatalf("an empty log moved the reading: %+v", c())
-	}
 	const last = int64(1_000_000_000_000)
 	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	c := onLog(l, func() kernel.Reading { return wall })
-	if r := c(); r.Earliest < last || r.Latest < last {
+	box := int64(0) // a flat CMOS battery: the clock restarted in the past
+	c := onLog(l, func() kernel.Reading { return kernel.At(box) })
+	if r := c(); r.Earliest < last || r.Latest < r.Earliest {
 		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
 	}
 	// The monotonic clock carries it on: a stopped time spins to the test's timeout.
-	for r := c(); r.Earliest == last || r.Latest == last; r = c() {
+	for r := c(); r.Earliest == last; r = c() {
 	}
-	wall = kernel.Reading{Earliest: 2 * last, Latest: 3 * last}
-	if r := c(); r != wall {
-		t.Fatalf("a clock ahead of the log read %+v, want %+v", r, wall)
+	box = 3 * last // a forward step while running
+	if r := c(); r.Earliest >= 2*last || r.Latest != box {
+		t.Fatalf("a forward step read %+v: it moved Earliest, or Latest is not the box clock", r)
+	}
+	box = 0 // and back
+	if r := c(); r.Earliest <= last || r.Latest != r.Earliest {
+		t.Fatalf("a step back read %+v", r)
+	}
+	box = 5 * last // a start ahead of the log starts there
+	if r := onLog(l, func() kernel.Reading { return kernel.At(box) })(); r.Earliest < box {
+		t.Fatalf("a start ahead of the log read %+v", r)
 	}
 }
