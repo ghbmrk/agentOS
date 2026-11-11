@@ -154,7 +154,7 @@ func (h *Handler) Handle(ctx context.Context, from, msg string) []string {
 	case WordUndo, WordMore:
 		r = fmt.Sprintf("No request %s.", cmd.Args[0])
 	case WordUnclear:
-		r = "Not understood, and not sent to your agent. Reply HELP for commands."
+		r = UnclearReply
 	default:
 		var out []string
 		unlocked := h.Auth.SessionUnlocked(h.now())

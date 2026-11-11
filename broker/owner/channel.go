@@ -648,6 +648,9 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		control.WordMore, control.WordResume, control.WordUnclear:
 		return route{delegate: text, run: true, limited: !unlocked}
 	}
+	if foldedCodeWord(text) {
+		return route{replies: []string{control.UnclearReply}, limited: !unlocked}
+	}
 	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
 		return route{delegate: text, run: true, limited: true}
 	}
@@ -656,6 +659,23 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		return c.unlockedChatLocked(text, rest, code, now)
 	}
 	return c.lockedLocked(rest, code, now)
+}
+
+// foldedCodeWord reports whether text, read through fold, is a RESUME,
+// YES or NO that carries a number, such as one typed in full-width or
+// look-alike letters ("ＲＥＳＵＭＥ １２３４５６"). It may hold a code, so it
+// is quarantined like control.WordUnclear and never reaches a guest or
+// the held queue. It never authenticates: codes are ASCII digits only
+// (CTL-unicode-code, #5454).
+func foldedCodeWord(text string) bool {
+	if !strings.ContainsFunc(text, unicode.IsNumber) {
+		return false
+	}
+	switch control.Parse(fold(text)).Word {
+	case control.WordResume, control.WordYes, control.WordNo, control.WordUnclear:
+		return true
+	}
+	return false
 }
 
 // splitCode finds a code that is the whole message or a separate trailing
