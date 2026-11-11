@@ -793,6 +793,12 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" unreadable") {
 		t.Fatal("an unreadable record did not start the edge cut, or was not logged")
 	}
+	// #5399: as a missing one, it raises its own alert, which lights red.
+	if !slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool {
+		return r.Kind == alert.RecordMissing && r.Device == edgeDevice
+	}) || x.d.alerts.Status().Colour != alert.Red {
+		t.Fatal("an unreadable record raised no missing record alert")
+	}
 	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
 		t.Fatalf("lift: %d %s", w.Code, w.Body)
 	}
@@ -1541,16 +1547,23 @@ func TestMergeHoldOutlivesARefusedLoad(t *testing.T) {
 		return x.fire.updates[len(x.fire.updates)-1]
 	}
 	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	refuse := func() { x.fire.mu.Lock(); x.fire.fail = true; x.fire.mu.Unlock() }
+	// The merge starts and the load it asks for is refused: the edge is
+	// held from the start, though its quota is not spent yet.
+	n := loads()
 	x.merges(edge, errors.New("offload: edge0: rx-gro on"))
+	refuse()
 	x.advance(readEvery)
+	if loads() != n || strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("a merge whose load was refused leaves the edge unheld")
+	}
+	x.advance(time.Second)
 	if _, e := spentIn(t, x); !e || strings.Contains(lastUpdate(), edgeTripRule) {
 		t.Fatal("fixture: the edge's port merging is not held spent")
 	}
-	n := loads()
+	n = loads()
 	x.merges(edge, nil)
-	x.fire.mu.Lock()
-	x.fire.fail = true
-	x.fire.mu.Unlock()
+	refuse()
 	x.advance(readEvery)
 	if loads() != n {
 		t.Fatal("fixture: the load after the merge ended was not refused")
@@ -1571,6 +1584,57 @@ func TestMergeHoldOutlivesARefusedLoad(t *testing.T) {
 	x.advance(readEvery)
 	if !strings.Contains(lastUpdate(), edgeTripRule) {
 		t.Fatal("the reading after the load the firewall took keeps the edge held")
+	}
+}
+
+// TestReadingDropRefused (#5399 item 2): a reading whose running table the
+// drop cannot be built against, or whose TripSet does not read, writes no
+// drop and records no cut; the reading's error says so.
+func TestReadingDropRefused(t *testing.T) {
+	x, doc, _ := capped(t)
+	good := listingOf(t, x, doc, 7, 10, 100, true)
+	var o map[string][]map[string]any
+	if err := json.Unmarshal(good, &o); err != nil {
+		t.Fatal(err)
+	}
+	o["nftables"] = append(o["nftables"], map[string]any{"set": map[string]any{
+		"family": "inet", "table": nft.Table, "name": nft.TripSet, "elem": []any{7},
+	}})
+	badTrip, err := json.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name    string
+		running []byte
+		cut     bool
+	}{
+		{"a table the drop refuses", []byte(`{"nftables": [{"quota": "unreadable"}]}`), false},
+		{"a TripSet element that is not a name", badTrip, false},
+		// Cut, so the TripSet is not read: the drop's own refusal stops it.
+		{"a table the drop refuses, the edge cut", []byte(`{"nftables": [{"quota": "unreadable"}]}`), true},
+	} {
+		x.d.edge.mu.Lock()
+		x.d.edge.st.Cut = c.cut
+		x.d.edge.mu.Unlock()
+		x.fire.mu.Lock()
+		first := x.fire.listed + 1
+		x.fire.listAt = func(n int) ([]byte, error, bool) {
+			if n == first {
+				return good, nil, true
+			}
+			return c.running, nil, true
+		}
+		ups := len(x.fire.updates)
+		x.fire.mu.Unlock()
+		over, kernelCut, err := x.d.readCapsLocked(context.Background())
+		x.fire.mu.Lock()
+		x.fire.listAt = nil
+		wrote := len(x.fire.updates) != ups
+		x.fire.mu.Unlock()
+		if err == nil || !strings.HasPrefix(err.Error(), "drop: ") || wrote || kernelCut != "" || len(over) != 0 {
+			t.Errorf("%s: %v, update written %v, kernel cut %q", c.name, err, wrote, kernelCut)
+		}
 	}
 }
 

@@ -435,8 +435,9 @@ func TestDropsCarryTheEdgeCut(t *testing.T) {
 // TestEdgeTrippedFollowsTheText (#5399 item 2, KRN-12): the kernel cuts
 // the edge once a Drops text is applied exactly when TripSet holds the
 // edge's interface and the text does not empty the set: the running edge
-// quota is p's or none. Another interface, an element nft did not print
-// as a name, and a listing that does not read back cut nothing.
+// quota is p's or none. Another interface cuts nothing; a listing that
+// does not read back, or an element of the set that is not a name, is an
+// error.
 func TestEdgeTrippedFollowsTheText(t *testing.T) {
 	d, l := fixturePolicy(), fixtureLayout()
 	p := fresh(d)
@@ -459,7 +460,6 @@ func TestEdgeTrippedFollowsTheText(t *testing.T) {
 		{name: "filled, another quota running", objs: []string{quota(old), set(`"edge0"`)}},
 		{name: "filled, as an element object", objs: []string{set(`{"elem": {"val": "edge0"}}`)}, want: true},
 		{name: "another interface", objs: []string{set(`"core0"`)}},
-		{name: "an element not a name", objs: []string{set(`7, {"elem": 7}`)}},
 		{name: "another set", objs: []string{`{"set": {"family": "inet", "table": "enforcer", "name": "capc_4", "elem": ["edge0"]}}`}},
 		{name: "another table", objs: []string{`{"set": {"family": "inet", "table": "other", "name": "edge_trip", "elem": ["edge0"]}}`}},
 	} {
@@ -474,7 +474,7 @@ func TestEdgeTrippedFollowsTheText(t *testing.T) {
 			t.Errorf("%s: the text empties a set EdgeTripped says still cuts", c.name)
 		}
 	}
-	for _, bad := range []string{`{`, `{"nftables": [{"quota": "unreadable"}]}`} {
+	for _, bad := range []string{`{`, `{"nftables": [{"quota": "unreadable"}]}`, `{"nftables": [{"set": "unreadable"}]}`, `{"nftables": [` + set(`7`) + `]}`, `{"nftables": [` + set(`{"elem": 7}`) + `]}`} {
 		if _, err := EdgeTripped([]byte(bad), l, p); err == nil {
 			t.Errorf("listing %s read back", bad)
 		}

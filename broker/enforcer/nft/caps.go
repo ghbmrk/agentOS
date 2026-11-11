@@ -375,7 +375,9 @@ func EdgeTripped(running []byte, l Layout, p Drop) (bool, error) {
 					} `json:"elem"`
 				}
 				if json.Unmarshal(raw, &o) != nil {
-					continue
+					// TripSet holds only interface names: one that does
+					// not read leaves the kernel's cut unknown.
+					return false, fmt.Errorf("nft: %s element %s", TripSet, raw)
 				}
 				v = o.Elem.Val
 			}
