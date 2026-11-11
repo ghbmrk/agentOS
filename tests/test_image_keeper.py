@@ -1138,6 +1138,28 @@ class KeeperTreeTest(unittest.TestCase):
                 self.assertEqual(len(check.unit_made_refusals(self.root)), 1, where)
             finally:
                 remove()
+        # etc/fstab's paths count through the box's links too (#5382 Security 6785625049): a mount point, a bind
+        # source and an overlay option under /var/lock or /var/run, and a mount point inside nobody's /var/run/hq.
+        fstab = self.root / "etc/fstab"
+        kept = fstab.read_text()
+        for line, path, d, owner in (
+                ("/srv /var/lock/m none bind 0 0", "run/lock/m", "run/lock", "anyone on the box can write"),
+                ("/var/run/hq/src /mnt/x none bind 0 0", "run/hq/src", "run/hq", hq % "RuntimeDirectory"),
+                ("overlay /mnt/o overlay lowerdir=/usr,upperdir=/var/lock/u,workdir=/srv/w 0 0", "run/lock/u", "run/lock",
+                 "anyone on the box can write"),
+                ("tmpfs /var/run/hq/in tmpfs mode=0755,noexec,nosuid,nodev 0 0", None, None, None)):
+            with self.subTest(line):
+                remove = self.place(nobody)
+                try:
+                    fstab.write_text(kept + line + "\n")
+                    if path is None:  # a mount point: unit_made_refusals' rule 4, once
+                        self.assertEqual(check.inside_refusals(self.root), [])
+                        self.assertEqual(len(check.unit_made_refusals(self.root)), 1)
+                    else:
+                        self.assertEqual(check.inside_refusals(self.root), [inside(path, d, owner, "etc/fstab")])
+                finally:
+                    fstab.write_text(kept)
+                    remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
