@@ -14,6 +14,7 @@ metadata read back from the verified partition with fsck.erofs (#4059), so two b
 root hashes differ name the differing file.
 Usage: finish_image.py OUTDIR VERSION [DRIVERS_JSON]; finish_image.py --stage-drivers DRIVERS STAGE CHECKER"""
 import errno
+import functools
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -250,14 +251,23 @@ class ToolError(Exception):
 
 def debugfs_ls(img, offset, path):
     """{name: octal mode} of directory PATH in the ext4 file system at byte OFFSET of IMG. A listing
-    with no "." entry (not a directory) gives None. Raises ToolError when debugfs exits non-zero or
-    writes anything to stderr but its banner."""
+    with no "." entry (not a directory) gives None. Raises ToolError when debugfs exits non-zero, writes
+    anything to stderr but its banner, or prints a line that is not a row or a name twice (a name holding
+    a newline could forge a row; Security 6804479798 release a)."""
     p = subprocess.run(["debugfs", "-R", "ls -p %s" % path, "%s?offset=%d" % (img, offset)],
                        capture_output=True, text=True)
     err = DEBUGFS_BANNER.sub("", p.stderr, count=1).strip()
     if p.returncode or err:
         raise ToolError("debugfs ls -p %s exited %d: %s" % (path, p.returncode, err or "no message"))
-    rows = {m.group(5): m.group(2) for m in map(DEBUGFS_ROW.fullmatch, p.stdout.splitlines()) if m}
+    rows = {}
+    for ln in p.stdout.splitlines():
+        m = DEBUGFS_ROW.fullmatch(ln)
+        if not m and ln.strip():
+            raise ToolError("debugfs ls -p %s printed a line that is not a row: %r" % (path, ln))
+        if m and m.group(5) in rows:
+            raise ToolError("debugfs ls -p %s listed %r twice" % (path, m.group(5)))
+        if m:
+            rows[m.group(5)] = m.group(2)
     return rows if "." in rows else None
 
 
@@ -547,12 +557,16 @@ def ungzip(data):
     return one_stream(zlib.decompressobj(31), data, "gzip")
 
 
-def cpio_members(data, decompress=None):
-    """Every member of an initrd, as (path, mode, content): newc cpio archives and compressed (zstd, xz
-    or gzip) streams of them, back to back with zero padding between them, read on as the kernel does.
-    Anything else raises ValueError, so an initrd this cannot read fails the build rather than passing
-    unchecked. DECOMPRESS maps a magic to a function returning (output, the bytes after the stream)."""
+def cpio_members(data, decompress=None, _archive=None):
+    """Every member of an initrd, as (path, mode, content, link): newc cpio archives and compressed
+    (zstd, xz or gzip) streams of them, back to back with zero padding between them, read on as the
+    kernel does. LINK is the key the kernel's find_link groups hard links by (the archive, as its table
+    is freed at each trailer, then ino, devmajor, devminor and file type) when nlink is 2 or more and
+    it is not a directory or link (do_name links only those), else None. Anything else raises ValueError, so an initrd this cannot read fails the build rather than
+    passing unchecked. DECOMPRESS maps a magic to a function returning (output, the bytes after the
+    stream)."""
     decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
+    archive = _archive if _archive is not None else [0]
     members, off = [], 0
     while True:
         while off < len(data) and data[off] == 0:
@@ -562,7 +576,7 @@ def cpio_members(data, decompress=None):
         fn = next((fn for magic, fn in decompress.items() if data.startswith(magic, off)), None)
         if fn:
             out, rest = fn(data[off:])
-            members += cpio_members(out, decompress)
+            members += cpio_members(out, decompress, archive)
             data, off = rest, 0
             continue
         if data[off:off + 6] not in CPIO_MAGICS:
@@ -581,13 +595,16 @@ def cpio_members(data, decompress=None):
                 raise ValueError("initrd: truncated cpio file %s" % name)
             body, off = data[off:off + size], (off + size + 3) & ~3
             if name == "TRAILER!!!":
+                archive[0] += 1
                 break
-            members.append((name[2:] if name.startswith("./") else name, hdr["mode"], body))
+            link = ((archive[0], hdr["ino"], hdr["devmajor"], hdr["devminor"], stat.S_IFMT(hdr["mode"]))
+                    if hdr["nlink"] >= 2 and stat.S_IFMT(hdr["mode"]) not in (stat.S_IFDIR, stat.S_IFLNK) else None)
+            members.append((name[2:] if name.startswith("./") else name, hdr["mode"], body, link))
 
 
 def cpio_names(data, decompress=None):
     """Every path in an initrd (cpio_members)."""
-    return [n for n, _, _ in cpio_members(data, decompress)]
+    return [m[0] for m in cpio_members(data, decompress)]
 
 
 # Bluetooth must not come up in the initrd either (#1475): the image blocks btusb and btmtk with a
@@ -610,65 +627,137 @@ def bluetooth_violations(names):
 # The initrd's own files that would give its systemd a unit, mount, device or partition no check here
 # or in mkosi.finalize reads (#5418; mkosi.finalize's tree check reads only the main tree). The initrd
 # is built from packages alone (it has no mkosi.extra), so each of these is refused whatever its content:
-# - a repart.d entry, or a step to one that is not a directory (a link elsewhere). In the initrd
-#   systemd-repart reads /sysusr's or /sysroot's definitions (repart.c, v257), which the disk checks
-#   above hold, but the initrd's own would be the first that systemd-repart.service's conditions see;
+# - a repart.d entry. In the initrd systemd-repart reads /sysusr's or /sysroot's definitions (repart.c,
+#   v257), which the disk checks above hold, but the initrd's own would be the first that
+#   systemd-repart.service's conditions see;
 # - an fstab, crypttab, veritytab or integritytab line: the fstab, cryptsetup, veritysetup and
 #   integritysetup generators make mounts and devices from them. A file of blank and # lines is empty;
 # - a credential in a store (the main tree's rule and exceptions: mkosi.finalize CREDSTORE_ALLOWED);
-# - a generator outside /usr/lib (in /etc/systemd or /usr/local/lib/systemd), and a unit or drop-in
-#   there but an enablement link or mask: a link to /usr/lib/systemd/system/<name> or /dev/null.
-# /run is a tmpfs in the initrd too, so its files are hidden. The units and generators packages ship in
-# /usr/lib are packages' files, like every binary (I21).
-INITRD_REPART_STEPS = ("etc", "usr", "usr/lib", "usr/local", "usr/local/lib")
-INITRD_REPART = ("etc/repart.d", "usr/lib/repart.d", "usr/local/lib/repart.d", "lib/repart.d")
+# - a generator outside /usr/lib (in /etc/systemd or /usr/local/lib/systemd), and a unit or drop-in in
+#   any unit directory outside /usr/lib (UNIT_PATHS: system.control, system, system.attached and
+#   /usr/local's) but an enablement link or mask: a link to /usr/lib/systemd/system/<name>, not
+#   systemd-sysext's or systemd-confext's, or /dev/null;
+# - a sysext or confext image in systemd-sysext's or systemd-confext's initrd search paths
+#   (discover-image.c, v257; .extra is systemd-stub's, which the image does not use).
+# The check judges the tree the kernel unpacks, not the members one by one (Security 6804479798): every
+# initrd of the entry in boot order into one tree, as the kernel unpacks them into one rootfs; a hard
+# link's content is its group's, written into one inode as maybe_link() does; names are taken as the
+# kernel resolves them ("", "." and ".." steps). A member written through a link (a link on its way, or a
+# link at its own name, which O_CREAT follows) is refused, so every file lands at its own name; and every
+# step to a checked directory, and the directory itself, is a directory (or absent). /run is a tmpfs in
+# the initrd too, so its files are hidden. The units and generators packages ship in /usr/lib are
+# packages' files, like every binary (I21).
+INITRD_REPART = ("etc/repart.d", "usr/lib/repart.d", "usr/local/lib/repart.d")
 INITRD_TABS = ("etc/fstab", "etc/crypttab", "etc/veritytab", "etc/integritytab")
-INITRD_CREDSTORES = tuple("%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib", "lib")
+INITRD_CREDSTORES = tuple("%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib")
                           for n in ("credstore", "credstore.encrypted"))
 INITRD_CREDS_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/firstboot.locale",
                         "usr/lib/credstore/firstboot.timezone", "usr/lib/credstore/passwd.hashed-password.root")
-INITRD_UNIT_DIRS = ("etc/systemd/system", "usr/local/lib/systemd/system")
 INITRD_GENERATOR_DIRS = ("etc/systemd/system-generators", "usr/local/lib/systemd/system-generators")
-INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/[^/]+|/dev/null")
+INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", ".extra/sysext", "run/confexts",
+                     "var/lib/confexts", "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
+# An enablement link or mask; never one that turns on systemd-sysext or systemd-confext (L3 6804604094: in
+# v257 both run in the initrd, and mkosi-initrd's preset, disable *, is all that leaves them off).
+INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/(?!systemd-(sysext|confext)[.@])[^/]+|/dev/null")
+
+
+@functools.lru_cache(maxsize=None)
+def initrd_checked():
+    """(the unit directories outside /usr/lib, from mkosi.finalize's UNIT_PATHS, so the two checks share
+    one list (L3 6804604094); every step to a checked directory or tab, and each checked directory
+    itself, which must be directories or absent)."""
+    units = tuple(d for d in finalize_module().UNIT_PATHS if not d.startswith("usr/lib/"))
+    checked = INITRD_REPART + INITRD_CREDSTORES + units + INITRD_GENERATOR_DIRS + INITRD_IMAGE_DIRS
+    steps = {"/".join(d.split("/")[:i]) for d in checked + INITRD_TABS for i in range(1, d.count("/") + 1)}
+    return units, tuple(sorted(steps | set(checked)))
+
+
+def initrd_tree(members):
+    """(the tree MEMBERS unpack to, {path: [type, content]}, hard links sharing one list; the members
+    refused as the model could differ from the kernel there). A member written through a link (a link on
+    its way, or at its own name, which O_CREAT follows) is refused, as is one that replaces an entry of
+    another type or a link, so each name is resolved lexically and lands where the kernel puts it. A
+    regular file over a regular file is written into its inode (O_TRUNC), as do_name does; a hard link
+    (cpio_members' LINK) joins its group's inode and is written from the start without truncating, as
+    maybe_link() does."""
+    tree, groups, out = {}, {}, []
+    for name, mode, body, link in members:
+        cur, why = [], None
+        parts = [x for x in name.split("/") if x not in ("", ".")]
+        if not parts or parts[-1] == "..":
+            continue
+        for x in parts[:-1]:
+            if x == "..":
+                cur = cur[:-1]
+                continue
+            cur.append(x)
+            if tree.get("/".join(cur), [None])[0] == stat.S_IFLNK:
+                why = why or "unpacked through the link %s" % "/".join(cur)
+        path = "/".join(cur + [parts[-1]])
+        kind, old = stat.S_IFMT(mode), tree.get(path)
+        if not why and old and (kind == stat.S_IFLNK or old[0] != kind):
+            why = "replaces a %s at %s" % ("link" if old[0] == stat.S_IFLNK else "%o entry" % old[0], path)
+        if why:
+            out.append("%s: %s" % (name, why))
+            continue
+        node = tree.get(groups[link]) if link in groups else None
+        if node is not None and node[0] == kind:
+            node[1] = body + node[1][len(body):]
+            tree[path] = node
+        elif old:
+            old[1] = body if kind == stat.S_IFREG else old[1]
+        else:
+            tree[path] = [kind, body]
+        if link and link not in groups:
+            groups[link] = path
+    return tree, out
 
 
 def initrd_violations(members):
-    """The initrd members (cpio_members) that add a unit, mount, device or partition (above)."""
-    out = []
-    for name, mode, body in members:
-        kind = stat.S_IFMT(mode)
-
+    """The unpacked initrd's files that add a unit, mount, device or partition (above)."""
+    tree, out = initrd_tree(members)
+    unit_dirs, steps = initrd_checked()
+    for path, (kind, body) in sorted(tree.items()):
         def at(dirs):
-            return any(name == d or name.startswith(d + "/") for d in dirs)
-        if name in INITRD_REPART_STEPS and kind != stat.S_IFDIR:
-            out.append("%s: not a directory; a repart.d could be reached through it" % name)
+            return any(path == d or path.startswith(d + "/") for d in dirs)
+        if path in steps and kind != stat.S_IFDIR:
+            out.append("%s: not a directory; a checked path could be reached through it" % path)
         elif at(INITRD_REPART):
-            out.append("%s: a repart.d entry; systemd-repart would make what it defines" % name)
-        elif name in INITRD_TABS and (kind != stat.S_IFREG or any(
+            out.append("%s: a repart.d entry; systemd-repart would make what it defines" % path)
+        elif path in INITRD_TABS and (kind != stat.S_IFREG or any(
                 ln.strip() and not ln.strip().startswith(b"#") for ln in body.splitlines())):
-            out.append("%s: has an entry; a generator would make a mount or device from it" % name)
-        elif at(INITRD_CREDSTORES) and kind != stat.S_IFDIR and name not in INITRD_CREDS_ALLOWED:
-            out.append("%s: a credential in a store" % name)
-        elif at(INITRD_UNIT_DIRS) and kind != stat.S_IFDIR and not (
+            out.append("%s: has an entry; a generator would make a mount or device from it" % path)
+        elif at(INITRD_CREDSTORES) and kind != stat.S_IFDIR and path not in INITRD_CREDS_ALLOWED:
+            out.append("%s: a credential in a store" % path)
+        elif at(unit_dirs) and kind != stat.S_IFDIR and not (
                 kind == stat.S_IFLNK and INITRD_UNIT_LINK.fullmatch(body.decode("utf-8", "replace"))):
-            out.append("%s: a unit or drop-in outside /usr/lib" % name)
+            out.append("%s: a unit or drop-in outside /usr/lib" % path)
         elif at(INITRD_GENERATOR_DIRS) and kind != stat.S_IFDIR:
-            out.append("%s: a generator outside /usr/lib" % name)
+            out.append("%s: a generator outside /usr/lib" % path)
+        elif at(INITRD_IMAGE_DIRS) and kind != stat.S_IFDIR:
+            out.append("%s: an image systemd-sysext or systemd-confext would merge" % path)
     return out
 
 
 def check_initrd(path, data):
-    """Exit unless the initrd at PATH lists files, none of them is Bluetooth (#1475), and none adds a
-    unit, mount, device or partition (initrd_violations, #5418)."""
+    """Exit unless the initrd at PATH lists files and none of them is Bluetooth (#1475); its members,
+    for check_initrd_tree."""
     members = cpio_members(data)
-    names = [n for n, _, _ in members]
+    names = [m[0] for m in members]
     print("initrd %s: %d files, %d kernel modules" % (path, len(names), sum(".ko" in n for n in names)))
     bad = bluetooth_violations(names) if names else ["no files"]
     if bad:
         sys.exit("initrd %s could bring up Bluetooth (#1475): %s" % (path, bad))
+    return members
+
+
+def check_initrd_tree(paths, members):
+    """Exit if the tree the entry's initrds PATHS unpack to, MEMBERS in boot order, adds a unit, mount,
+    device or partition (initrd_violations, #5418)."""
     bad = initrd_violations(members)
     if bad:
-        sys.exit("initrd %s adds a unit, mount, device or partition no check reads (#5418): %s" % (path, bad))
+        sys.exit("initrds %s add a unit, mount, device or partition no check reads (#5418): %s"
+                 % (" ".join(paths), bad))
 
 
 def manifest(version, roothash, entry_name, entry_text, files, boot=None, drivers=None):
@@ -872,12 +961,13 @@ def main(out, version, drivers_json=None):
     bad = root_repart_violations(str(img), partition_table(str(img)))
     if bad:
         sys.exit("root carries a repart.d systemd-repart would read (#5289): %s" % bad)
-    boot = {}
+    boot, members = {}, []
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
         boot[p] = hashlib.sha256(data_).hexdigest()
         if p in initrd_files(text):
-            check_initrd(p, data_)
+            members += check_initrd(p, data_)
+    check_initrd_tree(initrd_files(text), members)
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)
     verify_usr(data, tree, roothash)

@@ -11,8 +11,9 @@ unit directories, fstab and system.conf. Five other routes give PID 1 units, mou
   root ext4 has no feature that hides a name from debugfs (encrypt, casefold), and the root and /usr
   hold no sysext or confext image either (#5418), which would merge another /usr or /etc over them.
 - the cryptsetup, veritysetup and integritysetup generators, from crypttab, veritytab and integritytab:
-  the main tree has none (exec.allow), and the initrd's tabs hold no entry (finish_image.check_initrd,
-  which also refuses an initrd repart.d, fstab entry, stored credential, or unit outside /usr/lib).
+  the main tree has none (exec.allow), and the initrd's tabs hold no entry (finish_image.initrd_violations,
+  on the tree the entry's initrds unpack to, which also refuses an initrd repart.d, fstab entry, stored
+  credential, sysext or confext image, or unit outside /usr/lib).
 - systemd.mount-extra= (fstab-generator) on the kernel command line: the line is an allowlist.
 - the systemd.extra-unit.* (debug-generator) and fstab.extra (fstab-generator) credentials: the
   command line may set only the two shipped unit-dropin credentials, the ESP may hold no credential
@@ -76,11 +77,13 @@ GOOD = {"/": {"etc": DIR, "run": DIR, "var": DIR}, "/etc": {}, "/run": {}, "/var
 
 
 def newc(members):
-    """A newc cpio archive of MEMBERS, (name, mode, content) each, then the trailer."""
+    """A newc cpio archive of MEMBERS, then the trailer: (name, mode, content), each its own inode, or
+    (name, mode, content, ino, nlink) for a hard link group."""
     out = b""
-    for i, (n, mode, body) in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
+    for i, m in enumerate(list(members) + [("TRAILER!!!", 0, b"")]):
+        (n, mode, body), (ino, nlink) = m[:3], (m[3:] or (1000 + i, 1))
         name = n.encode() + b"\0"
-        out += b"070701" + b"".join(b"%08X" % v for v in (i, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
+        out += b"070701" + b"".join(b"%08X" % v for v in (ino, mode, 0, 0, nlink, 0, len(body), 0, 0, 0, 0, len(name), 0))
         out += name + b"\0" * (-(110 + len(name)) % 4) + body + b"\0" * (-len(body) % 4)
     return out
 
@@ -258,6 +261,13 @@ class GptAutoTest(unittest.TestCase):
                     with unittest.mock.patch.dict(finish.os.environ, PATH="%s:%s" % (bin_, finish.os.environ["PATH"])):
                         v = finish.root_repart_violations(img, table)
                     self.assertEqual(v, ["debugfs ls -p / %s; a tool failure, not the image's" % says])
+            # A line that is not a row, or a name listed twice, is the tool's too (Security 6804479798 release a).
+            for out, says in (("/2/040755/0/0/.//\nrepart.d\n", "printed a line that is not a row: 'repart.d'"),
+                              ("/2/040755/0/0/.//\n/9/040755/0/0/etc//\n/9/040755/0/0/etc//\n", "listed 'etc' twice")):
+                with self.subTest(out), unittest.mock.patch.object(finish.subprocess, "run", lambda a, **k: (
+                        subprocess.CompletedProcess(a, 0, out, "debugfs 1.47.2 (1-Jan-2025)\n"))):
+                    self.assertEqual(finish.root_repart_violations(img, table),
+                                     ["debugfs ls -p / %s; a tool failure, not the image's" % says])
             # Real debugfs on a missing image: it exits 0 and says so on stderr.
             with self.assertRaisesRegex(finish.ToolError, "while trying to open"):
                 finish.debugfs_ls(str(pathlib.Path(d) / "none.img"), 0, "/")
@@ -386,17 +396,117 @@ class InitrdTest(unittest.TestCase):
                 self.assertEqual(len(got), 1, got)
 
     def test_build_stops_on_an_initrd_route(self):
-        bad = newc(self.STOCK + [("etc/crypttab", self.F, b"home /dev/sda4 none\n")])
+        # Every initrd of the entry, in boot order, is one tree: a link the first makes counts for the second.
+        first, second = newc(self.STOCK), newc([("etc/crypttab", self.F, b"home /dev/sda4 none\n")])
+        members = finish.check_initrd("a", first) + finish.check_initrd("b", second)
         with self.assertRaises(SystemExit) as e:
-            finish.check_initrd("initrd", bad)
+            finish.check_initrd_tree(["a", "b"], members)
         self.assertIn("#5418", str(e.exception.code))
         self.assertIn("etc/crypttab", str(e.exception.code))
-        finish.check_initrd("initrd", newc(self.STOCK))
+        finish.check_initrd_tree(["a"], finish.check_initrd("a", first))
+        linked = finish.check_initrd("a", newc(self.STOCK + [("x", self.L, b"/etc/fstab")]))
+        with self.assertRaises(SystemExit) as e:
+            finish.check_initrd_tree(["a", "b"], linked + finish.check_initrd(
+                "b", newc([("x", self.F, b"/dev/sda4 /sysroot/home ext4 defaults 0 0\n")])))
+        self.assertIn("x: replaces a link at x", str(e.exception.code))
 
     def test_credentials_allowed_are_the_tree_checks(self):
         self.assertEqual(finish.INITRD_CREDS_ALLOWED, check.CREDSTORE_ALLOWED)
-        self.assertEqual(set(finish.INITRD_CREDSTORES) | {d for d in check.CREDSTORE_DIRS if d.startswith("run/")},
-                         set(check.CREDSTORE_DIRS))
+        # /run is a tmpfs in the initrd, and its /lib is a link to usr/lib, which nothing is unpacked through.
+        self.assertEqual(set(finish.INITRD_CREDSTORES),
+                         {d for d in check.CREDSTORE_DIRS if not d.startswith(("run/", "lib/"))})
+
+    def test_hard_links_are_read_as_one_inode(self):
+        # Security 6804479798 blocker 1: GNU cpio puts a group's data on its last link; the kernel's
+        # maybe_link() links the later name to the first and writes into the shared inode.
+        F, line = self.F, b"/dev/vda9 /mnt ext4 defaults 0 0\n"
+        for order in ((("etc/fstab", F, b"", 7, 2), ("usr/x", F, line, 7, 2)),
+                      (("usr/x", F, b"", 7, 2), ("etc/fstab", F, line, 7, 2)),
+                      (("usr/x", F, line, 7, 2), ("etc/fstab", F, b"", 7, 2)),
+                      (("etc/crypttab", F, b"", 9, 3), ("usr/a", F, b"", 9, 3), ("usr/b", F, b"home /dev/sda4 none\n", 9, 3))):
+            with self.subTest(order[0][0]):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + list(order))))
+                self.assertEqual(len(got), 1, got)
+                self.assertRegex(got[0], r"^etc/(fstab|crypttab): has an entry")
+        # A plain file written over a hard-linked one goes into the shared inode (O_TRUNC, same inode).
+        got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+            ("usr/x", F, b"", 7, 2), ("etc/fstab", F, b"", 7, 2), ("usr/x", F, line)])))
+        self.assertEqual(len(got), 1, got)
+        # The kernel frees its link table at each trailer: the same ino in the next archive is a new file.
+        got = finish.initrd_violations(finish.cpio_members(
+            newc(self.STOCK + [("etc/fstab", F, b"", 7, 2)]) + newc([("usr/x", F, line, 7, 2)])))
+        self.assertEqual(got, [])
+
+    def test_nothing_is_unpacked_through_a_link(self):
+        # Security 6804479798 blocker 2: a link on a step above a checked directory, or the directory
+        # itself linked, would put units where the check reads nothing.
+        D, F, L = self.D, self.F, self.L
+        unit = b"[Service]\nExecStart=/bin/true\n"
+        for step in finish.initrd_checked()[1]:
+            with self.subTest(step=step):
+                got = finish.initrd_violations(finish.cpio_members(newc(
+                    [m for m in self.STOCK if m[0] != step and not m[0].startswith(step + "/")]
+                    + [(step, L, b"/usr/lib/systemd/system/x")])))
+                self.assertEqual(got, ["%s: not a directory; a checked path could be reached through it" % step])
+        cases = {"etc/systemd": [("opt/s/system", D, b""), ("etc/systemd", L, b"/opt/s"),
+                                 ("etc/systemd/system/evil.service", F, unit)],
+                 "generators": [("etc/systemd", L, b"/opt/s"), ("etc/systemd/system-generators/g", F, b"#!/bin/sh\n")],
+                 "a link and ..": [("q", L, b"usr/share"), ("q/../etc/fstab", F, b"/dev/sda4 /home ext4\n")],
+                 "write through a final link": [("z", L, b"/etc/fstab"), ("z", F, b"/dev/sda4 /home ext4\n")],
+                 "a link replaced": [("etc/systemd/system/a.d", L, b"/opt/d"), ("etc/systemd/system/a.d", L, b"/dev/null")],
+                 # clean_path() follows the old link to /dev/null, unlinks it, and the new link stands.
+                 "a mask replaced": [("etc/systemd/system/a.d", L, b"/dev/null"), ("etc/systemd/system/a.d", L, b"/opt/d")],
+                 "a file replaced by a dir": [("usr/y", F, b""), ("usr/y", D, b"")]}
+        for why, ms in cases.items():
+            with self.subTest(why):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + ms)))
+                self.assertTrue(got, why)
+        # Names resolve as the kernel resolves them.
+        for name in ("/etc/fstab", "etc//fstab", "./etc/./fstab", "usr/../etc/fstab", "../../etc/fstab"):
+            with self.subTest(name):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+                    (name, F, b"/dev/sda4 /home ext4\n")])))
+                self.assertEqual(got, ["etc/fstab: has an entry; a generator would make a mount or device from it"])
+
+    def test_every_unit_directory_is_read(self):
+        # L3 6804604094 blocker 1: the initrd's systemd reads system.control and system.attached too; the
+        # list is mkosi.finalize's UNIT_PATHS outside /usr/lib, not a second one.
+        D, F, L = self.D, self.F, self.L
+        units = finish.initrd_checked()[0]
+        self.assertEqual(units, tuple(d for d in check.UNIT_PATHS if not d.startswith("usr/lib/")))
+        self.assertEqual(set(units), {"etc/systemd/system.control", "etc/systemd/system", "etc/systemd/system.attached",
+                                      "usr/local/lib/systemd/system"})
+        for d in units:
+            for ms in ([(d + "/evil.service", F, b"[Service]\nExecStart=/bin/true\n")],
+                       [(d + "/initrd.target.wants", D, b""), (d + "/initrd.target.wants/evil.service", L, b"../evil.service")],
+                       [(d + "/initrd.target.d", D, b""), (d + "/initrd.target.d/x.conf", F, b"[Unit]\nWants=evil.service\n")]):
+                with self.subTest(d=d, m=ms[-1][0]):
+                    got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + ms)))
+                    self.assertEqual(got, ["%s: a unit or drop-in outside /usr/lib" % ms[-1][0]])
+            with self.subTest(d=d, ok="enablement link"):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+                    (d + "/initrd.target.wants", D, b""),
+                    (d + "/initrd.target.wants/a.service", L, b"/usr/lib/systemd/system/a.service")])))
+                self.assertEqual(got, [])
+
+    def test_no_link_turns_on_an_extension_merge(self):
+        # L3 6804604094 blocker 2: an enablement link to systemd-sysext or systemd-confext would run it in
+        # the initrd, over mkosi-initrd's preset.
+        for unit in ("systemd-sysext.service", "systemd-confext.service", "systemd-sysext.socket",
+                     "systemd-sysext@.service", "systemd-confext.socket"):
+            with self.subTest(unit):
+                name = "etc/systemd/system/sysinit.target.wants/" + unit
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+                    ("etc/systemd/system/sysinit.target.wants", self.D, b""),
+                    (name, self.L, b"/usr/lib/systemd/system/" + unit.encode())])))
+                self.assertEqual(got, ["%s: a unit or drop-in outside /usr/lib" % name])
+
+    def test_initrd_ships_no_extension_image(self):
+        # Security 6804479798 release b: systemd-sysext's and systemd-confext's initrd search paths.
+        for d in finish.INITRD_IMAGE_DIRS:
+            with self.subTest(d):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [(d + "/x.raw", self.F, b"x")])))
+                self.assertEqual(got, ["%s/x.raw: an image systemd-sysext or systemd-confext would merge" % d])
 
     def test_main_tree_has_no_crypt_generators(self):
         # Item 2 of #5418: the main tree's cryptsetup, veritysetup and integritysetup generators would read
