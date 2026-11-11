@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -474,7 +475,8 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 		{Kind: PolicyVLAN, Name: "pl\u202eug", WiFi: "vlan 9"}: "<p>The policy in force puts device &#34;pl\\u202eug&#34; on Wi-Fi network &#34;vlan 9&#34;, and the enforcer&#39;s setup serves no names or addresses there.</p>",
 		{Kind: PolicyName, Name: "gro.live\u202e"}:             "<p>The policy in force lists &#34;gro.live\\u202e&#34;, which is not a name the enforcer can look up.</p>",
 		{Kind: PolicyUntyped, Name: "x\u202e"}:                 "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>",
-		{Kind: PolicyName + 1, Name: "x"}:                      "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>",
+		{Kind: PolicySetup, Name: "no upstream\u202e"}:         "<p>The network setup could not be applied: the enforcer&#39;s own setup of its names and addresses is not one it can serve. The enforcer&#39;s log has the detail.</p>",
+		{Kind: PolicySetup + 1, Name: "x"}:                     "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>",
 	} {
 		res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{cause}, Load: LoadFirewall}
 		h = g.homeHTML()
@@ -487,19 +489,65 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	}
 	// Every reason shows, each once, in the order given, and the policy
 	// still applies is said once after them (#5405): a setup fault beside
-	// two devices and two names, and an untyped reason given twice.
+	// two devices and two names, and an untyped reason given twice. The
+	// setup fault has its own words, apart from the untyped one's (#5431).
 	res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{
-		{Kind: PolicyUntyped}, {Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}, {Kind: PolicyVLAN, Name: "lamp", WiFi: "vlan110"},
-		{Kind: PolicyName, Name: "Abc.example"}, {Kind: PolicyName, Name: "Zed.example"}, {Kind: PolicyUntyped},
+		{Kind: PolicySetup}, {Kind: PolicyUntyped}, {Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}, {Kind: PolicyVLAN, Name: "lamp", WiFi: "vlan110"},
+		{Kind: PolicyName, Name: "Abc.example"}, {Kind: PolicyName, Name: "Zed.example"}, {Kind: PolicyUntyped}, {Kind: PolicySetup},
 	}}
 	h = g.homeHTML()
-	want := "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>\n" +
+	want := "<p>The network setup could not be applied: the enforcer&#39;s own setup of its names and addresses is not one it can serve. The enforcer&#39;s log has the detail.</p>\n" +
+		"<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>\n" +
 		"<p>The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.</p>\n" +
 		"<p>The policy in force puts device lamp on Wi-Fi network vlan110, and the enforcer&#39;s setup serves no names or addresses there.</p>\n" +
 		"<p>The policy in force lists &#34;Abc.example&#34;, which is not a name the enforcer can look up.</p>\n" +
 		"<p>The policy in force lists &#34;Zed.example&#34;, which is not a name the enforcer can look up.</p>\n" + still
-	if !strings.Contains(h, want) || strings.Count(h, "cannot serve;") != 1 || strings.Count(h, "still applies") != 1 {
+	if !strings.Contains(h, want) || strings.Count(h, "cannot serve;") != 1 || strings.Count(h, "could not be applied") != 1 || strings.Count(h, "still applies") != 1 || strings.Contains(h, "more reason") {
 		t.Errorf("home does not list every reason the policy cannot be served, each once:\n%s", h)
+	}
+	// A name longer than PolicyNameMax shows its first PolicyNameMax
+	// bytes, cut at a character's start, then "...", so each line is
+	// bounded whatever the name (#5431); one of PolicyNameMax shows whole.
+	whole := strings.Repeat("a", PolicyNameMax-1) + "z"
+	long := strings.Repeat("a", PolicyNameMax-1) + "\u00e9" + strings.Repeat("b", 1<<16)
+	res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{{Kind: PolicyName, Name: whole}, {Kind: PolicyName, Name: long}, {Kind: PolicyVLAN, Name: long, WiFi: long}}}
+	h = g.homeHTML()
+	if !strings.Contains(h, "&#34;"+whole+"&#34;") || !strings.Contains(h, "&#34;"+strings.Repeat("a", PolicyNameMax-1)+"...&#34;, which") ||
+		!strings.Contains(h, "device "+strings.Repeat("a", PolicyNameMax-1)+"... on Wi-Fi network "+strings.Repeat("a", PolicyNameMax-1)+"..., and") || strings.Contains(h, "bbb") || len(h) > 16<<10 {
+		t.Errorf("a long name is not cut at PolicyNameMax (%d bytes):\n%.3000s", len(h), h)
+	}
+	if got := clip(strings.Repeat("\x80", 2*PolicyNameMax)); got != "..." {
+		t.Errorf("a name of continuation bytes clips to %.40q", got)
+	}
+	// More reasons than PolicyShown (#5431): the first PolicyShown show,
+	// each once, then one line with the exact count of the rest, each
+	// counted once; the page stays bounded however many the policy holds.
+	for _, tc := range []struct {
+		names int
+		more  string
+	}{
+		{PolicyShown, ""},
+		{PolicyShown + 1, "<p>There is 1 more reason the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
+		{PolicyShown + 37, "<p>There are 37 more reasons the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
+		{5000, "<p>There are " + strconv.Itoa(5000-PolicyShown) + " more reasons the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
+	} {
+		var causes []PolicyCause
+		for i := range tc.names {
+			c := PolicyCause{Kind: PolicyName, Name: "N" + strconv.Itoa(i) + ".example"}
+			causes = append(causes, c, c) // each given twice counts once
+		}
+		res.stop = ResolverStop{Stopped: true, Policy: causes}
+		h = g.homeHTML()
+		listed := strings.Count(h, "which is not a name the enforcer can look up")
+		if listed != PolicyShown || !strings.Contains(h, "&#34;N0.example&#34;") || !strings.Contains(h, "&#34;N"+strconv.Itoa(PolicyShown-1)+".example&#34;") || strings.Contains(h, "&#34;N"+strconv.Itoa(PolicyShown)+".example&#34;") {
+			t.Errorf("%d reasons: home lists %d, want the first %d", tc.names, listed, PolicyShown)
+		}
+		if (tc.more == "") == strings.Contains(h, "more reason") || !strings.Contains(h, tc.more) || strings.Count(h, "still applies") != 1 {
+			t.Errorf("%d reasons: the count of the rest is not %q:\n%s", tc.names, tc.more, h)
+		}
+		if tc.names == 5000 && len(h) > 16<<10 {
+			t.Errorf("%d reasons: home is %d bytes, not bounded", tc.names, len(h))
+		}
 	}
 	if got := sentence("a\tb\x00c é"); got != `a\tb\x00c \u00e9` {
 		t.Errorf("sentence = %q", got)

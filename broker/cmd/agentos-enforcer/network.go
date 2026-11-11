@@ -375,11 +375,16 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
+// Home's words for the reasons it does not list say the log names as
+// many as it does (#5431): this fails to compile when the two differ.
+const _ = uint(dns.RefusedShown-page.PolicyShown) + uint(page.PolicyShown-dns.RefusedShown)
+
 // refusedCauses is err, dns.Generate's refusal of a document, as every
 // typed cause it carries, in its order (#5307, #5352, #5405): each device
 // on a Wi-Fi network the setup serves no network for, and each listed
 // name that is not a DNS host name, read from the refusal, never from the
-// document. Any other, a setup fault among them, is untyped, and the page
+// document, and a fault in the enforcer's own setup (dns.BadSetup, #5431),
+// which carries no text to the page. Any other is untyped, and the page
 // says so without the error's text.
 func refusedCauses(err error) []page.PolicyCause {
 	errs := []error{err}
@@ -391,7 +396,10 @@ func refusedCauses(err error) []page.PolicyCause {
 	for i, err := range errs {
 		var dev dns.UnservedDevice
 		var name dns.BadName
+		var setup dns.BadSetup
 		switch {
+		case errors.As(err, &setup):
+			out[i] = page.PolicyCause{Kind: page.PolicySetup}
 		case errors.As(err, &dev):
 			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
 		case errors.As(err, &name):
