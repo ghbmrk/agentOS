@@ -359,6 +359,80 @@ class KeeperTreeTest(unittest.TestCase):
                 f.unlink()
         return remove
 
+    def test_gpt_auto_mounts_are_judged_by_the_partition_types(self):
+        # #5474: systemd-gpt-auto-generator mounts from the disk's partition types, and no unit or fstab line names
+        # the mount. A repart definition (the build's mkosi.repart or the tree's repart.d) whose Type= would mount
+        # on, over or under a protected or box-mount path is refused; so is a Type= the table cannot place.
+        repart = "usr/lib/repart.d/"
+
+        def definition(t, name="60-x.conf"):
+            return {repart + name: "[Partition]\nType=%s\n" % t}
+        self.assertEqual(check.gpt_auto_violations(self.root), [])
+        self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
+        for t in ("home", "var", "var-tmp", "HOME"):
+            with self.subTest(t=t):
+                remove = self.place(definition(t))
+                try:
+                    got = check.gpt_auto_violations(self.root)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].startswith("60-x.conf: Type=%s: systemd-gpt-auto-generator mounts it at /" % t)
+                                    and got[0].endswith("(#5474)"), got)
+                finally:
+                    remove()
+        # A path on the box's own mounts: no real type reaches one, so plant the table entries.
+        for m, hit in (("run", "run"), ("tmp", "tmp"), ("dev", "dev"), ("proc/x", "proc"), ("run/lock", "run"),
+                       ("home/u", "home")):
+            with self.subTest(m=m), unittest.mock.patch.dict(check.GPT_AUTO_MOUNTS, {"zz": (m,)}):
+                remove = self.place(definition("zz"))
+                try:
+                    got = check.gpt_auto_violations(self.root)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertIn("at /%s, which holds or covers /%s," % (m, hit), got[0])
+                finally:
+                    remove()
+        # Beside the protected paths, and the types the image ships, pass; a type or spelling the table lacks does not.
+        for t in ("srv", "xbootldr", "esp", "usr", "root", "usr-verity", "root-verity"):
+            with self.subTest(t=t):
+                remove = self.place(definition(t))
+                try:
+                    self.assertEqual(check.gpt_auto_violations(self.root), [])
+                finally:
+                    remove()
+        for body in ("[Partition]\nType=linux-generic\n", "[Partition]\nType=933ac7e1-2eb4-4f13-b844-0e14e2aef915\n",
+                     "[Partition]\nLabel=x\n", "[Partition]\nType=home\nType=root\n"):
+            with self.subTest(body=body):
+                remove = self.place({repart + "60-x.conf": body})
+                try:
+                    got = check.gpt_auto_violations(self.root)
+                    self.assertEqual(len(got), 1, got)
+                    self.assertIn("is not one gpt-auto-generator's mounts are known for", got[0])
+                finally:
+                    remove()
+        # The build's own definitions count too, and violations() carries the refusal.
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "mkosi.repart").mkdir()
+            (pathlib.Path(d) / "mkosi.repart/10-v.conf").write_text("[Partition]\nType=var\n")
+            with unittest.mock.patch.object(check, "REPART_BUILD", pathlib.Path(d) / "mkosi.repart"):
+                self.assertEqual(len(check.gpt_auto_violations(self.root)), 1)
+                self.assertTrue([v for v in check.violations(self.root) if "(#5474)" in v])
+        # A mount the tree check does not read hides the tree below it, so a unit's path there is refused as for a
+        # unit's own mount (#5400); the /usr slot is this tree, so a path below /usr is not.
+        sock = lambda path: {SYSTEM + "s.socket": "[Socket]\nListenStream=%s\n" % path}
+        where = "ListenStream= in %ss.socket" % SYSTEM
+        for t, path, hidden in (("srv", "/srv/s", "srv"), ("esp", "/boot/s", "boot"), ("esp", "/efi/s", "efi"),
+                                ("usr", "/usr/s", None), ("srv", "/srv2/s", None), ("srv", "/srv", None)):
+            with self.subTest(t=t, path=path):
+                remove = self.place(dict(definition(t), **sock(path)))
+                try:
+                    got = [g for g in check.inside_refusals(self.root) if g.startswith(where)]
+                    if hidden is None:
+                        self.assertEqual(got, [])
+                    else:
+                        self.assertEqual(len(got), 1, got)
+                        self.assertIn("is below /%s, where a unit, etc/fstab or gpt-auto mounts" % hidden, got[0])
+                finally:
+                    remove()
+
     def test_every_directory_a_unit_file_names_counts(self):
         # #5167 re-plan: every file in the unit directories, and every link's target, counts whatever names,
         # aliases, precedence or users systemd resolves, so each repro of #5192's four fix-lists is refused
@@ -1363,7 +1437,7 @@ class KeeperTreeTest(unittest.TestCase):
 
         # A mount that hides the tree: a unit's or etc/fstab's, the path below it refused whatever the mount holds.
         def hidden(path, m, at=where):
-            return ("%s: /%s is below /%s, where a unit or etc/fstab mounts a filesystem the tree check does not read; "
+            return ("%s: /%s is below /%s, where a unit, etc/fstab or gpt-auto mounts a filesystem the tree check does not read; "
                     "the mount, not the tree, decides who can write that way, and PID 1 makes, links, binds or chowns "
                     "the path following any link on it; name a path outside the mount (#5400)" % (at, path, m))
         mount = {SYSTEM + "srv.mount": "[Mount]\nWhat=tmpfs\nWhere=/srv\nType=tmpfs\nOptions=mode=1777\n"}
