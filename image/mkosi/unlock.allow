@@ -6,6 +6,30 @@
 # "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator that found nothing
 # to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
+restart agentos-egress-setup.service TriggeredBy agentos-egress-setup.path
+restart agentos-egress.service Restart on-failure
+restart agentos-keeper-enroll.service TriggeredBy agentos-keeper-enroll.path
+restart agentos-keeper-kernel.service Restart on-failure
+restart agentos-keeper-link-capture.service Restart on-failure
+restart agentos-link.service Restart on-failure
+restart agentos-modem-env.service TriggeredBy agentos-modem-env.path
+restart agentos-reboot.service TriggeredBy agentos-reboot.timer
+restart agentos-reboot.service TriggeredBy agentos-recovery-restart.path
+restart agentosd.service Restart on-failure
+restart agentosd.service TriggeredBy agentosd.path
+restart dbus.service TriggeredBy dbus.socket
+restart fstrim.service TriggeredBy fstrim.timer
+restart systemd-ask-password-console.service TriggeredBy systemd-ask-password-console.path
+restart systemd-ask-password-wall.service TriggeredBy systemd-ask-password-wall.path
+restart systemd-hostnamed.service TriggeredBy systemd-hostnamed.socket
+restart systemd-journald.service Restart always
+restart systemd-journald.service TriggeredBy systemd-journald-audit.socket
+restart systemd-journald.service TriggeredBy systemd-journald-dev-log.socket
+restart systemd-journald.service TriggeredBy systemd-journald.socket
+restart systemd-resolved.service Restart always
+restart systemd-udevd.service Restart always
+restart systemd-udevd.service TriggeredBy systemd-udevd-control.socket
+restart systemd-udevd.service TriggeredBy systemd-udevd-kernel.socket
 start -.slice Requires from agentos.slice
 start -.slice Requires from dev-hugepages.mount
 start -.slice Requires from dev-mqueue.mount
@@ -15,19 +39,29 @@ start -.slice Requires from sys-kernel-config.mount
 start -.slice Requires from sys-kernel-debug.mount
 start -.slice Requires from sys-kernel-tracing.mount
 start -.slice Requires from system.slice
+start agentos-egress.service Wants from agentosd.service
 start agentos-fallback.service OnFailure from agentos-health.service
+start agentos-inbound.service Requires from agentos-egress.service
 start agentos-inbound.service Requires from agentos-keeper-link-capture.service
 start agentos-inbound.service Requires from agentos-link.service
+start agentos-inbound.service Requires from agentosd.service
 start agentos-inbound.service Requires from systemd-resolved.service
 start agentos-inbound.service Wants from sysinit.target
 start agentos-keeper-kernel.service
+start agentos-keeper-kernel.service Wants from agentos-keeper-enroll.service
 start agentos-keeper-link-capture.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
+start agentos-keeper-pageca.service Wants from agentos-keeper-enroll.service
+start agentos-keeper.slice Requires from agentos-keeper-enroll.service
 start agentos-keeper.slice Requires from agentos-keeper-kernel.service
 start agentos-keeper.slice Requires from agentos-keeper-link-capture.service
+start agentos-keeper.slice Requires from agentos-keeper-pageca.service
 start agentos-link.service Wants from agentos-keeper-kernel.service
 start agentos-link.service Wants from sys-subsystem-net-devices-agentos\x2dlink.device
 start agentos-mor.service Wants from sysinit.target
 start agentos.slice Requires from agentos-keeper.slice
+start agentos.slice Requires from agentosd.service
+start dbus.service Triggers from dbus.socket
+start dbus.socket Requires from dbus.service
 start dev-hugepages.mount Wants from sysinit.target
 start dev-mqueue.mount Wants from sysinit.target
 start emergency.service Requires from emergency.target
@@ -61,32 +95,53 @@ start sys-kernel-debug.mount Wants from sysinit.target
 start sys-kernel-tracing.mount Wants from sysinit.target
 start sys-subsystem-net-devices-agentos\x2dlink.device BindsTo from agentos-keeper-link-capture.service
 start sys-subsystem-net-devices-agentos\x2dlink.device BindsTo from agentos-link.service
+start sysinit.target Requires from agentos-egress-setup.service
+start sysinit.target Requires from agentos-egress.service
 start sysinit.target Requires from agentos-fallback.service
+start sysinit.target Requires from agentos-keeper-enroll.service
 start sysinit.target Requires from agentos-keeper-kernel.service
 start sysinit.target Requires from agentos-keeper-link-capture.service
+start sysinit.target Requires from agentos-keeper-pageca.service
 start sysinit.target Requires from agentos-link.service
+start sysinit.target Requires from agentos-modem-env.service
+start sysinit.target Requires from agentos-reboot.service
+start sysinit.target Requires from agentosd.service
+start sysinit.target Requires from dbus.service
+start sysinit.target Requires from dbus.socket
+start sysinit.target Requires from fstrim.service
+start sysinit.target Requires from systemd-ask-password-wall.service
+start sysinit.target Requires from systemd-hostnamed.service
 start sysinit.target Requires from systemd-pcrphase.service
 start system-modprobe.slice Requires from modprobe@configfs.service
 start system-modprobe.slice Requires from modprobe@dm_mod.service
 start system-modprobe.slice Requires from modprobe@efi_pstore.service
 start system-modprobe.slice Requires from modprobe@fuse.service
 start system-modprobe.slice Requires from modprobe@loop.service
+start system.slice Requires from agentos-egress-setup.service
+start system.slice Requires from agentos-egress.service
 start system.slice Requires from agentos-fallback.service
 start system.slice Requires from agentos-inbound.service
 start system.slice Requires from agentos-link.service
+start system.slice Requires from agentos-modem-env.service
 start system.slice Requires from agentos-mor.service
+start system.slice Requires from agentos-reboot.service
+start system.slice Requires from dbus.service
+start system.slice Requires from dbus.socket
 start system.slice Requires from emergency.service
+start system.slice Requires from fstrim.service
 start system.slice Requires from kmod-static-nodes.service
 start system.slice Requires from ldconfig.service
 start system.slice Requires from run-lock.mount
 start system.slice Requires from system-modprobe.slice
 start system.slice Requires from systemd-ask-password-console.service
+start system.slice Requires from systemd-ask-password-wall.service
 start system.slice Requires from systemd-binfmt.service
 start system.slice Requires from systemd-boot-random-seed.service
 start system.slice Requires from systemd-boot-update.service
 start system.slice Requires from systemd-confext.service
 start system.slice Requires from systemd-firstboot.service
 start system.slice Requires from systemd-hibernate-clear.service
+start system.slice Requires from systemd-hostnamed.service
 start system.slice Requires from systemd-hwdb-update.service
 start system.slice Requires from systemd-journal-catalog-update.service
 start system.slice Requires from systemd-journal-flush.service
@@ -183,9 +238,13 @@ start systemd-udevd.service Triggers from systemd-udevd-kernel.socket
 start systemd-udevd.service Wants from sysinit.target
 start systemd-udevd.service Wants from systemd-udev-trigger.service
 start systemd-update-done.service Wants from sysinit.target
+start tmp.mount Wants from agentos-egress-setup.service
+start tmp.mount Wants from agentos-egress.service
 start tmp.mount Wants from agentos-keeper-link-capture.service
 start tmp.mount Wants from agentos-link.service
+start tmp.mount Wants from agentos-modem-env.service
 start tmp.mount Wants from local-fs.target
+start tmp.mount Wants from systemd-hostnamed.service
 stop -.slice RequiredBy -.mount
 stop -.slice RequiredBy agentos.slice
 stop -.slice RequiredBy dev-full.mount
