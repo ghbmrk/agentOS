@@ -45,6 +45,9 @@ name: premerge
 # is fixed (vulncheck on #3503, #3509, #3520, #3523), so a failed check or workflow run is
 # excused when the same name failed in main's own first-attempt push or scheduled run of the
 # PR's merge base. Any other conclusion, a failure the base lacked and any status still hold it.
+# PREMERGE-merge-bind (#5384): the merge job waits only on this PR's runs (head repository and branch, from the
+# gate's own read of the PR) and on every check run outside the other runs' suites, so a fork PR opened on the same
+# commit cannot stall the bot merge with its own red or pending run.
 # PREMERGE-fork-rerun (#5383): GitHub names no PR in a fork PR's workflow_run (`pull_requests` is
 # empty), so the gate job skipped and a held check's completion left `premerge` at its last value.
 # The `fork-pr` job finds the one open PR into main whose head is the run's owner:branch and
@@ -83,6 +86,8 @@ jobs:
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
     outputs:
       merge-head: ${{ steps.gate.outputs.merge-head }}
+      merge-repo: ${{ steps.gate.outputs.merge-repo }}
+      merge-ref: ${{ steps.gate.outputs.merge-ref }}
     permissions:
       contents: read
       issues: read
@@ -175,7 +180,7 @@ jobs:
           post "$state" "$out"
           if [ "$state" = success ] && [ "$out" = same ] && \
             jq -e '.state == "open" and .draft == false and .auto_merge == null' "$RUNNER_TEMP/pr.json" > /dev/null; then
-            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            printf 'merge-head=%s\nmerge-repo=%s\nmerge-ref=%s\n' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"
           fi
   merge:
     name: merge
@@ -193,10 +198,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}
+          HEAD_REPO: ${{ needs.premerge-gate.outputs.merge-repo }}
+          HEAD_REF: ${{ needs.premerge-gate.outputs.merge-ref }}
         run: |
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }
           [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
+          [ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || { echo "::warning::#$PR_NUMBER head repository unknown: arm by hand"; exit 0; }
           # Every check run but this workflow's own jobs must have passed or failed on the merge base too; every status must have passed.
           # Each read stops the run on its own failure: a failed read must never look like no checks.
           # A job has no check run until GitHub creates it (`needs: scope`), so the head's workflow
@@ -219,13 +227,22 @@ jobs:
                     done | jq -cs 'map(select(.conclusion == "failure") | .name) | unique') || bruns='[]'
           fi
           echo "excused as failed on the merge base: $bwfs $bruns"
-          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
-            | jq -rs --argjson base "$bwfs" 'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)
+          # PREMERGE-merge-bind (#5384): another PR (a fork's, or one into another base) can carry this head commit, and
+          # its runs and their check runs sit on the same sha. A run is this PR's when its head repository and branch are
+          # the PR's; only the other runs' suites are left out of the check runs, so a check run no run claims still holds.
+          hr=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
+            | jq -cs --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" \
+                'map({ours: (.head_repository.full_name == $repo and .head_branch == $ref), check_suite_id, path, workflow_id, id, status, conclusion, name})') \
+            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
+          foreign=$(printf '%s' "$hr" | jq -c 'map(select(.ours | not) | .check_suite_id)')
+          wfs=$(printf '%s' "$hr" \
+            | jq -r --argjson base "$bwfs" 'map(select(.ours and (.path | startswith(".github/workflows/premerge.yml") | not))) | group_by(.workflow_id)[] | max_by(.id)
                       | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
                       | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
           runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs[]' \
-            | jq -r --argjson suite "$suite" --argjson base "$bruns" 'select(.check_suite.id != $suite)
+            | jq -r --argjson suite "$suite" --argjson foreign "$foreign" --argjson base "$bruns" 'select(.check_suite.id != $suite)
+                  | select(.check_suite.id | IN($foreign[]) | not)
                   | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
                   | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }

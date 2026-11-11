@@ -123,6 +123,8 @@ PREMERGE_LINES = [
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
     '    outputs:',
     '      merge-head: ${{ steps.gate.outputs.merge-head }}',
+    '      merge-repo: ${{ steps.gate.outputs.merge-repo }}',
+    '      merge-ref: ${{ steps.gate.outputs.merge-ref }}',
     '    permissions:',
     '      contents: read',
     '      issues: read',
@@ -208,7 +210,7 @@ PREMERGE_LINES = [
     '          post "$state" "$out"',
     '          if [ "$state" = success ] && [ "$out" = same ] && \\',
     '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
-    '            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"',
+    '            printf \'merge-head=%s\\nmerge-repo=%s\\nmerge-ref=%s\\n\' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"',
     '          fi',
     '  merge:',
     '    name: merge',
@@ -226,10 +228,13 @@ PREMERGE_LINES = [
     '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
     '          REPO: ${{ github.repository }}',
     '          HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}',
+    '          HEAD_REPO: ${{ needs.premerge-gate.outputs.merge-repo }}',
+    '          HEAD_REF: ${{ needs.premerge-gate.outputs.merge-ref }}',
     '        run: |',
     '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
     '          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
+    '          [ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || { echo "::warning::#$PR_NUMBER head repository unknown: arm by hand"; exit 0; }',
     '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
     '            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }',
     "          bwfs='[]' bruns='[]'",
@@ -243,13 +248,19 @@ PREMERGE_LINES = [
     '                    done | jq -cs \'map(select(.conclusion == "failure") | .name) | unique\') || bruns=\'[]\'',
     '          fi',
     '          echo "excused as failed on the merge base: $bwfs $bruns"',
-    '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
-    '            | jq -rs --argjson base "$bwfs" \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
+    '          hr=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
+    '            | jq -cs --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" \\',
+    '                \'map({ours: (.head_repository.full_name == $repo and .head_branch == $ref), check_suite_id, path, workflow_id, id, status, conclusion, name})\') \\',
+    '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
+    '          foreign=$(printf \'%s\' "$hr" | jq -c \'map(select(.ours | not) | .check_suite_id)\')',
+    '          wfs=$(printf \'%s\' "$hr" \\',
+    '            | jq -r --argjson base "$bwfs" \'map(select(.ours and (.path | startswith(".github/workflows/premerge.yml") | not))) | group_by(.workflow_id)[] | max_by(.id)',
     '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
     '                      | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
     '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
-    '            | jq -r --argjson suite "$suite" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '            | jq -r --argjson suite "$suite" --argjson foreign "$foreign" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '                  | select(.check_suite.id | IN($foreign[]) | not)',
     '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
     '                  | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
@@ -1432,6 +1443,12 @@ class WorkflowTest(unittest.TestCase):
                      ('startswith(".github/workflows/premerge.yml") | not', 'startswith(".github/workflows/") | not'),
                      ("max_by(.id)", "min_by(.id)"),
                      ("select(.check_suite.id != $suite)", "select(.name != \"merge\")"),
+                     # PREMERGE-merge-bind (#5384): only this PR's runs count, and only the other runs' suites are left out.
+                     ("(.head_repository.full_name == $repo and .head_branch == $ref)", "(.head_branch == $ref)"),
+                     ("map(select(.ours and (.path", "map(select((.path"),
+                     ("map(select(.ours | not) | .check_suite_id)", "map(.check_suite_id)"),
+                     ('[ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || ', ""),
+                     ('"$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF"', '"$HEAD_SHA" "$REPO" "$HEAD_REF"'),
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
@@ -1730,7 +1747,7 @@ class PremergeRunTest(unittest.TestCase):
         # ARM-on-accept (#3103): the gate hands the merge job the head it read, only on `same`.
         out = []
         self.assertEqual(self.run_gate("same", outputs=out), (0, ["success"]))
-        self.assertEqual(out, ["merge-head=" + self.SHA])
+        self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=o/r", "merge-ref=feature"])
         for verdict, kw in (("no-verdict", {}), ("needs-security", {}), ("edited-verdict", {}), ("bot", {"ref": "bot/trace"}),
                             ("same", {"base": "stacked"}), ("same", {"fail_at": "comments"}),
                             ("same", {"pr_state": self.OPEN.replace('"draft":false', '"draft":true')}),
@@ -1772,10 +1789,12 @@ def run_(name, status="completed", conclusion="success", suite=1, id=1):
     return {"name": name, "id": id, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def wf_(name, id=1, status="completed", conclusion="success", path=None, event="push", branch="main", attempt=1, suite=1):
+def wf_(name, id=1, status="completed", conclusion="success", path=None, event="push", branch="main", attempt=1, suite=1,
+        repo="o/r"):
+    # The head runs default to branch main of o/r, which run_merge names as the PR's head (PREMERGE-merge-bind, #5384).
     return {"name": name, "id": id, "workflow_id": hash(name) % 1000, "status": status, "conclusion": conclusion,
             "path": path or ".github/workflows/%s.yml" % name, "event": event, "head_branch": branch,
-            "run_attempt": attempt, "check_suite_id": suite}
+            "run_attempt": attempt, "check_suite_id": suite, "head_repository": repo and {"full_name": repo}}
 
 
 class MergeRunTest(unittest.TestCase):
@@ -1787,7 +1806,8 @@ class MergeRunTest(unittest.TestCase):
                 wf_("premerge", status="in_progress", conclusion=None)]
 
     def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
-                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40):
+                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40,
+                  head_repo="o/r", head_ref="main"):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1797,6 +1817,7 @@ class MergeRunTest(unittest.TestCase):
             (stubs / "run.sh").write_text(merge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
                    "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
+                   "HEAD_REPO": head_repo, "HEAD_REF": head_ref,
                    "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
                    "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}), "BJOBS": json.dumps(base_jobs or {}),
                    "BWFS": json.dumps({"workflow_runs": list(base_wfs)}),
@@ -1902,6 +1923,35 @@ class MergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_merge(read="stat", statuses=())[:2], (0, []))
         self.assertEqual(self.run_merge(read="wfs", wfs=())[:2], (0, []))
         self.assertEqual(self.run_merge(read="suite")[:2], (0, []))
+
+    def test_only_this_prs_runs_and_their_check_runs_hold(self):
+        # PREMERGE-merge-bind (#5384): a fork PR opened on this head commit, or a PR from another branch, writes runs and
+        # check runs on the same sha; their red or pending state must not stall this PR's merge.
+        merged = (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA])
+        foreign = [wf_("lane-gate", id=5, conclusion="failure", repo="f/r", event="pull_request_target", suite=55),
+                   wf_("ci", id=6, status="in_progress", conclusion=None, branch="other", event="pull_request", suite=56),
+                   wf_("vulncheck", id=7, status="queued", conclusion=None, repo=None, suite=57)]
+        runs = [run_("lane-gate", conclusion="failure", suite=55), run_("checks", status="in_progress", conclusion=None, suite=56),
+                run_("vulncheck", status="queued", conclusion=None, suite=57)]
+        self.assertEqual(self.run_merge(wfs=self.WF_GREEN + foreign, runs=self.GREEN + runs)[:2], merged)
+        held = [
+            # this PR's own red or pending run, and a check run in its suite
+            dict(wfs=self.WF_GREEN + foreign + [wf_("lane-gate", id=8, conclusion="failure", suite=58)]),
+            dict(wfs=self.WF_GREEN + foreign, runs=self.GREEN + [run_("lane-gate", conclusion="failure", suite=1)]),
+            # a check run no run on the head claims (another App's) still holds
+            dict(wfs=self.WF_GREEN + foreign, runs=self.GREEN + [run_("ext", status="queued", conclusion=None, suite=777)]),
+            # a foreign run newer than this PR's red run of the same workflow does not mask it
+            dict(wfs=self.WF_GREEN + [wf_("vulncheck", id=8, conclusion="failure"), wf_("vulncheck", id=9, repo="f/r")]),
+            # a fork PR's own red run holds it
+            dict(wfs=self.WF_GREEN + [wf_("image", id=8, conclusion="failure", repo="f/r", branch="x")], head_repo="f/r",
+                 head_ref="x", runs=self.GREEN),
+            # without the PR's head repository and branch nothing binds, so nothing merges
+            dict(head_repo=""), dict(head_ref=""),
+        ]
+        for kw in held:
+            self.assertEqual(self.run_merge(**kw)[:2], (0, []), kw)
+        # a fork PR's own runs bind by the fork's repository and branch
+        self.assertEqual(self.run_merge(wfs=[wf_("ci", repo="f/r", branch="x")], head_repo="f/r", head_ref="x")[:2], merged)
 
     def test_no_token_or_bad_head_never_merges(self):
         self.assertEqual(self.run_merge(token="")[:2], (0, []))
