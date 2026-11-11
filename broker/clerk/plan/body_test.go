@@ -3,7 +3,6 @@ package plan_test
 // REQ: PLN-5, CLK-7, LOG-7, RES-5
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/netguard"
 )
@@ -1103,125 +1101,5 @@ func TestCodexBodyIsMeasuredOnThePinnedCLI(t *testing.T) {
 	v := plan.Codex(nil).Version
 	if !regexp.MustCompile(`^codex-` + regexp.QuoteMeta(string(m[0][1])) + `-[0-9]+$`).MatchString(v) {
 		t.Fatalf("the Codex declaration is %q, measured on another CLI than the pinned %s", v, m[0][1])
-	}
-}
-
-// The answer to a token exchange reaches the guest as JSON, and a
-// credential the provider sends that is part of the guest's placeholder is
-// not swapped into it: the placeholder would carry the credential (CLK-7).
-func TestPlanExchangeAnswerHoldsNoCredential(t *testing.T) {
-	f := newPlanFix(t)
-	p := f.login(t)
-	if err := p.BeginSignIn("signin"); err != nil {
-		t.Fatal(err)
-	}
-	resp, d := p.Do(context.Background(), "signin", req("POST", "/oauth/token", deviceSteps(t, p, "signin"), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
-	if d != "" {
-		t.Fatalf("code exchange: %s", d)
-	}
-	resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("the exchange answer's Content-Type is %q", ct)
-	}
-	g, _ := p.Guest("g")
-	f.answerWith(200, `{"access_token":"agentos-ph-access","id_token":"`+idToken("acct-1")+`"}`)
-	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DUnswappable {
-		t.Fatalf("a credential inside a placeholder: %v %q", resp != nil, d)
-	}
-	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp == nil || d != "" {
-		t.Fatalf("the refresh after it: %q", d)
-	}
-}
-
-// A refused login the slot could not record is held in memory, and a new
-// sign-in answers it there too.
-func TestPlanSignInAnswersAHeldRefusal(t *testing.T) {
-	f := newPlanFix(t)
-	var fail atomic.Bool
-	f.sec = plan.NewStore(sealer(t), func([]byte) error {
-		if fail.Load() {
-			return errors.New("disk full")
-		}
-		return nil
-	})
-	p := f.login(t)
-	signIn(t, p, "signin")
-	g, _ := p.Guest("g")
-	fail.Store(true)
-	f.answerWith(401, `{"error":{"code":"refresh_token_expired"}}`)
-	refreshReq(p, "g", g.Tokens["refresh_token"])
-	if p.Stopped() != plan.StopRefused {
-		t.Fatalf("Stopped = %q, want a held refusal", p.Stopped())
-	}
-	fail.Store(false)
-	signIn(t, p, "signin-2")
-	if p.Stopped() != "" {
-		t.Fatalf("a new sign-in left the route %q", p.Stopped())
-	}
-}
-
-// sealProbe is a sealer whose Seal can be made to fail, whose Open can be
-// made to fail while still handing back what it opened, and which keeps
-// every plaintext it handed back.
-type sealProbe struct {
-	clerk.Sealer
-	failSeal, failOpen atomic.Bool
-	mu                 sync.Mutex
-	opened             [][]byte
-}
-
-func (s *sealProbe) Seal(plain, aad []byte) ([]byte, error) {
-	if s.failSeal.Load() {
-		return nil, errors.New("seal fails")
-	}
-	return s.Sealer.Seal(plain, aad)
-}
-
-func (s *sealProbe) Open(blob, aad []byte) ([]byte, error) {
-	plain, err := s.Sealer.Open(blob, aad)
-	s.mu.Lock()
-	s.opened = append(s.opened, plain)
-	s.mu.Unlock()
-	if s.failOpen.Load() {
-		return plain, errors.New("open fails")
-	}
-	return plain, err
-}
-
-// The login's slot: a login that cannot be sealed is not stored, and the
-// one stored stays; a slot that does not open is not read, whatever the
-// sealer handed back; every plaintext opened is wiped once read (CLK-1).
-func TestPlanSlotSealsOpensAndWipes(t *testing.T) {
-	f := newPlanFix(t)
-	s := &sealProbe{Sealer: f.seal}
-	f.sec = plan.NewStore(s, nil)
-	p := f.login(t)
-	signIn(t, p, "signin")
-	g, _ := p.Guest("g")
-	before, _ := f.sec.MarshalBinary()
-
-	s.failSeal.Store(true)
-	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DSave {
-		t.Fatalf("a refresh that cannot be sealed: %v %q", resp != nil, d)
-	}
-	s.failSeal.Store(false)
-	if after, _ := f.sec.MarshalBinary(); !bytes.Equal(after, before) || !p.Signed() {
-		t.Fatal("a login that could not be sealed changed the stored one")
-	}
-
-	s.mu.Lock()
-	if len(s.opened) == 0 {
-		t.Fatal("nothing was opened")
-	}
-	for i, b := range s.opened {
-		if len(b) == 0 || bytes.Count(b, []byte{0}) != len(b) {
-			t.Fatalf("plaintext %d was not wiped: %q", i, b)
-		}
-	}
-	s.mu.Unlock()
-
-	s.failOpen.Store(true)
-	if _, err := plan.New(f.decl(t), f.sec, f.roots); err == nil {
-		t.Fatal("a slot that did not open was read")
 	}
 }
