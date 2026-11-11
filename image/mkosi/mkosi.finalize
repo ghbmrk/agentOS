@@ -2155,19 +2155,28 @@ def made_way_refusal(root, form):
 # Type= this table lacks is refused (fail closed). /usr is the verity slot built from this tree, so the tree
 # check reads what it holds; every other mount point holds a filesystem the check does not read.
 GPT_AUTO_MOUNTS = {"esp": ("boot", "efi"), "xbootldr": ("boot",), "home": ("home",), "srv": ("srv",),
-                   "var": ("var",), "var-tmp": ("var/tmp",), "usr": ("usr",), "root": (), "root-verity": (),
+                   "var": ("var",), "tmp": ("var/tmp",), "usr": ("usr",), "root": (), "root-verity": (),
                    "root-verity-sig": (), "usr-verity": (), "usr-verity-sig": ()}
 GPT_AUTO_TREE = ("usr",)
 REPART_TREE = ("etc/repart.d", "usr/local/lib/repart.d", "usr/lib/repart.d")
-REPART_BUILD = pathlib.Path(__file__).resolve().parent / "mkosi.repart"
+
+
+def repart_build():
+    """The build's mkosi.repart directory: beside this script, else under $SRCDIR (mkosi v24.3 mounts the script
+    alone at /work/finalize and the configuration directory at /work/src, as allow_path); None if neither has it."""
+    for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
+        if d and os.path.isdir(os.path.join(d, "mkosi.repart")):
+            return pathlib.Path(d, "mkosi.repart")
+    return None
 
 
 def repart_types(root):
     """(where, [Type= values], why unreadable or None) for each repart definition systemd-repart reads from the
-    tree (REPART_TREE) and from the build's own mkosi.repart directory (REPART_BUILD; None: none)."""
+    tree (REPART_TREE) and from the build's own mkosi.repart directory (repart_build; the caller refuses a build without one)."""
     files = conf_files(root, REPART_TREE)
-    if REPART_BUILD is not None and REPART_BUILD.is_dir():
-        files += conf_files(str(REPART_BUILD.parent), (REPART_BUILD.name,))
+    build = repart_build()
+    if build is not None:
+        files += conf_files(str(build.parent), (build.name,))
     out = []
     for f in files:
         try:
@@ -2183,6 +2192,12 @@ def gpt_auto_mounts(root):
     GPT_AUTO_MOUNTS) or whose mount point lands on a path the keeper protects or the box mounts itself): #5474."""
     where, bad = {}, []
     protected = BOX_MOUNTS + WORLD_WRITABLE + SERVICE_DIRS
+    if repart_build() is None:
+        bad.append("mkosi.repart: not beside this script or under $SRCDIR, so the partitions gpt-auto-generator mounts "
+                   "from the built disk are unknown; the build's definitions must be readable (#5474)")
+    if entry_mode(root, "run/repart.d"):  # systemd-repart reads /run/repart.d too; the box mounts /run, so none ships
+        bad.append("run/repart.d: systemd-repart reads definitions here, but the box mounts /run at boot, so the tree "
+                   "check cannot read what it will hold; ship none (#5474)")
     for name, types, why in repart_types(root):
         if why is not None:
             bad.append("%s: could not be read (%s), so the mounts gpt-auto-generator makes from it are unknown (#5474)"

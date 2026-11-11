@@ -10,6 +10,8 @@ of a refusal is a mutant of the shipped tree that mkosi.finalize must refuse. CI
 on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines)."""
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
 import contextlib
+import importlib.machinery
+import importlib.util
 import io
 import itertools
 import os
@@ -369,7 +371,7 @@ class KeeperTreeTest(unittest.TestCase):
             return {repart + name: "[Partition]\nType=%s\n" % t}
         self.assertEqual(check.gpt_auto_violations(self.root), [])
         self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
-        for t in ("home", "var", "var-tmp", "HOME"):
+        for t in ("home", "var", "tmp", "HOME"):
             with self.subTest(t=t):
                 remove = self.place(definition(t))
                 try:
@@ -425,9 +427,38 @@ class KeeperTreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "mkosi.repart").mkdir()
             (pathlib.Path(d) / "mkosi.repart/10-v.conf").write_text("[Partition]\nType=var\n")
-            with unittest.mock.patch.object(check, "REPART_BUILD", pathlib.Path(d) / "mkosi.repart"):
+            with unittest.mock.patch.object(check, "repart_build", return_value=pathlib.Path(d) / "mkosi.repart"):
                 self.assertEqual(len(check.gpt_auto_violations(self.root)), 1)
                 self.assertTrue([v for v in check.violations(self.root) if "(#5474)" in v])
+        # mkosi v24.3 runs the script alone at /work/finalize with the configuration at $SRCDIR: the build's definitions
+        # are found there, and a build with none beside the script or under $SRCDIR is refused, not read as empty.
+        with tempfile.TemporaryDirectory() as d:
+            lone = pathlib.Path(d) / "work"
+            lone.mkdir()
+            script = lone / "finalize"
+            script.write_bytes((MK / "mkosi.finalize").read_bytes())
+            loader = importlib.machinery.SourceFileLoader("lone_finalize", str(script))
+            lonely = importlib.util.module_from_spec(importlib.util.spec_from_loader("lone_finalize", loader))
+            loader.exec_module(lonely)
+            with unittest.mock.patch.dict(os.environ):
+                os.environ.pop("SRCDIR", None)
+                self.assertIsNone(lonely.repart_build())
+                got = lonely.gpt_auto_violations(self.root)
+                self.assertEqual(len(got), 1, got)
+                self.assertIn("mkosi.repart: not beside this script or under $SRCDIR", got[0])
+                self.assertEqual(lonely.gpt_auto_mounts(self.root)[0], {})
+                os.environ["SRCDIR"] = str(MK)
+                self.assertEqual(lonely.repart_build(), MK / "mkosi.repart")
+                self.assertEqual(lonely.gpt_auto_violations(self.root), [])
+                self.assertEqual(sorted(lonely.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
+        # systemd-repart also reads /run/repart.d, which the box mounts: a tree entry there is refused.
+        remove = self.place({"run/repart.d/60-x.conf": "[Partition]\nType=home\n"})
+        try:
+            got = check.gpt_auto_violations(self.root)
+            self.assertEqual(len(got), 1, got)
+            self.assertTrue(got[0].startswith("run/repart.d: systemd-repart reads definitions here"), got)
+        finally:
+            remove()
         # A mount the tree check does not read hides the tree below it, so a unit's path there is refused as for a
         # unit's own mount (#5400); the /usr slot is this tree, so a path below /usr is not.
         sock = lambda path: {SYSTEM + "s.socket": "[Socket]\nListenStream=%s\n" % path}
