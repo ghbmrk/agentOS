@@ -1215,6 +1215,76 @@ class PremergeTest(unittest.TestCase):
         self.assertTrue(g("a/**", "a/b/c.go") and g("a/*", "a/b") and g("**/x.go", "x.go") and g("**/x.go", "a/b/x.go"))
         self.assertFalse(g("a/*", "a/b/c") or g("a/**", "ab/c") or g("a.b", "aXb") or g("a/**", "a"))
 
+    def runs_helper(self, routes, onto, pr=None, drop=()):
+        """Run tools/premerge_runs.sh with `gh` stubbed: `routes` maps each API route to the items its --jq selects.
+        Returns the exit code, the parsed document (None if stdout is empty) and the routes read, in order."""
+        import json, shutil
+        self.assertTrue(shutil.which("jq") and shutil.which("bash"), "jq and bash are on the runner image; the test needs them")
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        for i, (route, items) in enumerate(routes.items()):
+            if route not in drop:
+                (d / f"{i}.route").write_text(route)
+                (d / f"{i}.out").write_text("".join(json.dumps(x) + "\n" for x in items))
+        (d / "gh").write_text('#!/bin/sh\n[ "$1 $2 $4" = "api --paginate --jq" ] || exit 2\necho "$3" >> "$STUBS/calls"\n'
+                              'for r in "$STUBS"/*.route; do [ "$(cat "$r")" = "$3" ] && exec cat "${r%.route}.out"; done\nexit 1\n')
+        (d / "gh").chmod(0o755)
+        f = d / "pr.json"
+        f.write_text(json.dumps(pr if pr is not None else {"number": 7, "head": {"sha": git(self.r, "rev-parse", "HEAD"),
+                                                                       "ref": "pr", "repo": {"full_name": REPO}}}))
+        env = {"PATH": f"{d}:/usr/bin:/bin", "STUBS": str(d), "TMPDIR": str(d)}
+        r = subprocess.run(["bash", str(ROOT / "tools/premerge_runs.sh"), REPO, str(f), onto],
+                           env=env, capture_output=True, text=True, timeout=30)
+        calls = (d / "calls").read_text().splitlines() if (d / "calls").exists() else []
+        return r.returncode, json.loads(r.stdout) if r.stdout.strip() else None, calls
+
+    def test_runs_helper_builds_what_the_check_reads(self):
+        # PREMERGE-runs-local (#5386): premerge.yml runs main's tools/premerge_runs.sh, so a session running it locally
+        # reads the held checks exactly as the gate does. Its document must be one checks_held reads: each failed run
+        # with its jobs (the head's latest attempt, the base's first), the base's push and scheduled runs, the PR binding.
+        onto, sha = self.held_repo()
+        api = f"repos/{REPO}/actions/runs"
+        head = [self.wf(11, "vulncheck", "failure", sha, attempt=2), self.wf(12, "formal", "success", sha)]
+        push = [dict(self.wf(21, "vulncheck", "failure", onto, event="push", branch="main", prs=()))]
+        sched = [dict(self.wf(19, "vulncheck", "success", onto, event="schedule", branch="main", prs=()))]
+        job = lambda run, attempt, name: {"run_id": run, "run_attempt": attempt, "name": name, "conclusion": "failure"}
+        routes = {f"{api}?head_sha={sha}&per_page=100": head,
+                  f"{api}/11/jobs?per_page=100": [job(11, 2, "scan")],
+                  f"{api}?head_sha={onto}&event=push&per_page=100": push,
+                  f"{api}/21/attempts/1/jobs?per_page=100": [job(21, 1, "scan")],
+                  f"{api}?head_sha={onto}&event=schedule&per_page=100": sched}
+        code, doc, calls = self.runs_helper(routes, onto)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, list(routes))  # only failed runs' jobs are read, each by its own route
+        self.assertEqual(doc, bundle([{**head[0], "jobs": [job(11, 2, "scan")]}, {**head[1], "jobs": []}],
+                                     [{**push[0], "jobs": [job(21, 1, "scan")]}, {**sched[0], "jobs": []}]))
+        # The gate's reader passes the head's vulncheck failure only because the same job failed in main's newest run on
+        # the merge base (the push, id 21 over the schedule's 19).
+        self.assertEqual(premerge.checks_held(self.r, doc, "HEAD", "main"), [])
+        routes[f"{api}/21/attempts/1/jobs?per_page=100"] = [{**job(21, 1, "scan"), "name": "other"}]
+        self.assertEqual(premerge.checks_held(self.r, self.runs_helper(routes, onto)[1], "HEAD", "main"), ["vulncheck:failure"])
+
+    def test_runs_helper_fails_closed(self):
+        # PREMERGE-runs-local (#5386): any failed read, a bad merge base or a pr.json without a head prints nothing, so
+        # no caller reads a partial document as one with no failed runs.
+        onto, sha = self.held_repo()
+        api = f"repos/{REPO}/actions/runs"
+        routes = {f"{api}?head_sha={sha}&per_page=100": [self.wf(11, "vulncheck", "failure", sha), self.wf(12, "formal", "failure", sha)],
+                  f"{api}/11/jobs?per_page=100": [],
+                  f"{api}/12/jobs?per_page=100": [],
+                  f"{api}?head_sha={onto}&event=push&per_page=100": [],
+                  f"{api}?head_sha={onto}&event=schedule&per_page=100": []}
+        self.assertEqual(self.runs_helper(routes, onto)[0], 0)
+        for route in routes:
+            with self.subTest(drop=route):
+                self.assertEqual(self.runs_helper(routes, onto, drop=(route,))[:2], (1, None))
+        for bad in ("", onto[:39], onto.upper(), onto + "&event=push", "HEAD"):
+            with self.subTest(onto=bad):
+                self.assertEqual(self.runs_helper(routes, bad), (2, None, []))
+        for pr in ({"number": 7}, {"number": 7, "head": {"sha": "HEAD"}}, {"number": 7, "head": {"sha": sha + "\nx"}}):
+            with self.subTest(pr=pr):
+                self.assertEqual(self.runs_helper(routes, onto, pr=pr), (1, None, []))  # nothing read
+
     def test_check_gate_holds_checks_after_every_verdict(self):
         import json
         onto, sha = self.held_repo()
@@ -1230,6 +1300,7 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run(self.wf(1, "vulncheck", "cancelled", sha)), (1, ["needs-check", "vulncheck:cancelled"]))
         self.assertEqual(run(), (1, ["needs-check", "vulncheck:missing"]))
         self.assertEqual(run(extra=[]), (1, premerge.NO_RUNS.split()))  # no --runs never reads same
+        self.assertIn("tools/premerge_runs.sh", premerge.NO_RUNS)  # and names what builds it (#5386)
         # either option order
         r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--check", str(f), "7", "--base", "main",
                             "--runs", self.runs(head=[self.wf(1, "vulncheck", "success", sha)]), "HEAD"],

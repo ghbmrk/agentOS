@@ -189,19 +189,7 @@ PREMERGE_LINES = [
     '              --jq \'.[] | {author_association, created_at, updated_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
     '            jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1',
     '            onto=$(git merge-base refs/remotes/pr/base "$HEAD_SHA") || exit 1',
-    '            runs() { # $1: the runs query, $2: the jobs route under a failed run',
-    '              gh api --paginate "repos/$REPO/actions/runs?$1&per_page=100" --jq \'.workflow_runs[]\' | jq -s . > "$RUNNER_TEMP/r.json" || return 1',
-    '              jq -r \'.[] | select(.conclusion == "failure") | .id\' "$RUNNER_TEMP/r.json" | while read -r id; do',
-    '                gh api --paginate "repos/$REPO/actions/runs/$id/$2?per_page=100" --jq \'.jobs[]\' || exit 1',
-    '              done | jq -s --slurpfile r "$RUNNER_TEMP/r.json" \'. as $j | $r[0] | map(.id as $id | . + {jobs: [$j[] | select(.run_id == $id)]})\'',
-    '            }',
-    '            runs "head_sha=$HEAD_SHA" jobs > "$RUNNER_TEMP/head-runs.json" || exit 1',
-    '            runs "head_sha=$onto&event=push" attempts/1/jobs > "$RUNNER_TEMP/push-runs.json" || exit 1',
-    '            runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$RUNNER_TEMP/schedule-runs.json" || exit 1',
-    '            jq -n --slurpfile h "$RUNNER_TEMP/head-runs.json" --slurpfile p "$RUNNER_TEMP/push-runs.json" \\',
-    '              --slurpfile s "$RUNNER_TEMP/schedule-runs.json" --slurpfile pr "$RUNNER_TEMP/pr.json" --arg repo "$REPO" \\',
-    '              \'{repo: $repo, pr: {number: $pr[0].number, repo: $pr[0].head.repo.full_name, branch: $pr[0].head.ref},',
-    '                head: $h[0], base: ($p[0] + $s[0])}\' > "$RUNNER_TEMP/runs.json" || exit 1',
+    '            bash tools/premerge_runs.sh "$REPO" "$RUNNER_TEMP/pr.json" "$onto" > "$RUNNER_TEMP/runs.json" || exit 1',
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \\',
     '              --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
@@ -1443,6 +1431,8 @@ class WorkflowTest(unittest.TestCase):
                      ('startswith(".github/workflows/premerge.yml") | not', 'startswith(".github/workflows/") | not'),
                      ("max_by(.id)", "min_by(.id)"),
                      ("select(.check_suite.id != $suite)", "select(.name != \"merge\")"),
+                     # PREMERGE-runs-local (#5386): a failed runs fetch never reaches --check.
+                     ('"$onto" > "$RUNNER_TEMP/runs.json" || exit 1', '"$onto" > "$RUNNER_TEMP/runs.json"'),
                      # PREMERGE-merge-bind (#5384): only this PR's runs count, and only the other runs' suites are left out.
                      ("(.head_repository.full_name == $repo and .head_branch == $ref)", "(.head_branch == $ref)"),
                      ("map(select(.ours and (.path", "map(select((.path"),
@@ -1509,6 +1499,7 @@ case "$*" in
      echo '{"artifacts":[{"id":5,"name":"trace","expired":false},{"id":6,"name":"board","expired":false},{"id":4,"name":"trace","expired":true}]}' ;;
   "api repos/o/r/actions/runs/41") [ "$FAIL_AT" = run ] && exit 1; echo '{"id":41}' ;;
   "api repos/o/r/actions/artifacts/"*"/zip") [ "$FAIL_AT" = zip ] && exit 1; echo "$*" >> "$STUBS/zips" ;;
+  "api --paginate repos/o/r/actions/runs?"*) [ "$FAIL_AT" = runs ] && exit 1; echo "$*" >> "$STUBS/runs" ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
                  echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
@@ -1526,6 +1517,7 @@ echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
 # MAIN-PROT-3 (#757): `git log` answers the head commit's Bot-Run trailer; every other git call succeeds silently.
 STUB_GIT = r"""#!/bin/sh
 [ "$1" = log ] && printf '%s' "$TRAILER"
+[ "$1" = merge-base ] && echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 exit 0
 """
 
@@ -1596,6 +1588,9 @@ class PremergeRunTest(unittest.TestCase):
                 (stubs / name).write_text(body)
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
+            # The step runs from the base checkout, so its runs fetch is that checkout's tools/premerge_runs.sh (#5386).
+            (stubs / "tools").mkdir()
+            shutil.copy(WORKFLOWS.parent.parent / "tools/premerge_runs.sh", stubs / "tools")
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
@@ -1611,7 +1606,7 @@ class PremergeRunTest(unittest.TestCase):
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
             if calls is not None:
-                for f in ("zips", "py"):
+                for f in ("zips", "py", "runs"):
                     calls.extend((stubs / f).read_text().splitlines() if (stubs / f).exists() else [])
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
 
@@ -1623,6 +1618,13 @@ class PremergeRunTest(unittest.TestCase):
 
     def test_same_posts_success(self):
         self.assertEqual(self.run_gate("same"), (0, ["success"]))
+        # PREMERGE-runs-local (#5386): the base checkout's tools/premerge_runs.sh reads the head's and the merge base's runs
+        # and --check reads its document.
+        calls, a, b = [], self.SHA, "b" * 40
+        self.assertEqual(self.run_gate("same", calls=calls), (0, ["success"]))
+        q = "api --paginate repos/o/r/actions/runs?%s&per_page=100 --jq .workflow_runs[]"
+        self.assertEqual(calls[1:], [q % f"head_sha={a}", q % f"head_sha={b}&event=push", q % f"head_sha={b}&event=schedule"])
+        self.assertRegex(calls[0], r"^-I tools/premerge\.py --check \S+/comments\.json 7 --runs \S+/runs\.json --base refs/remotes/pr/base " + a + "$")
 
     def test_gate_reads_only_a_pr_number(self):
         # PREMERGE-fork-rerun (#5383): a dispatch carries its PR as an input, so the number is checked before any read.
@@ -1708,6 +1710,7 @@ class PremergeRunTest(unittest.TestCase):
         code, states = self.run_gate("same", fail_at="jq")
         self.assertEqual((code != 0, states), (True, ["failure"]))
         self.assertEqual(self.run_gate("same", fail_at="comments"), (0, ["failure"]))
+        self.assertEqual(self.run_gate("same", fail_at="runs"), (0, ["failure"]))  # PREMERGE-runs-local (#5386)
         code, states = self.run_gate("same", fail_at="post")
         self.assertEqual((code != 0, states), (True, ["failure"]))
 
