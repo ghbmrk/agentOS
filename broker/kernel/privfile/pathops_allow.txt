@@ -92,8 +92,7 @@ allow broker/vm/vm.go publishSnap os.RemoveAll the root-held snapshot directory 
 allow broker/vm/vm.go readJSON os.ReadFile a machine's or snapshot's meta.json, at the top of its root-held directory, which only the broker writes
 allow broker/vm/vm.go Manager.load os.ReadDir lists root-held snapshots/ and machines/ in StateDir, made 0700 inside root-held /var/lib/agentos
 allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory, root-held
-allow broker/vm/forget.go Manager.removeSnapshot os.Remove the snapshot's meta.json, at the top of its root-held directory
-allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the root-held snapshot directory
+allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the snapshot's meta.json, at the top of its root-held directory, and the root-held snapshot directory
 allow broker/vm/prune.go Manager.Prune os.RemoveAll snapshot directories in root-held snapshots/
 allow broker/vm/sleep.go treeHash os.Open a file WalkDir found (it follows no link) and d.Info, an lstat, showed regular, in a root-held snapshot no guest runs on
 allow broker/vm/gvisor/gvisor.go Runtime.launch os.MkdirAll r.StateDir, runsc's --root: agentosd's machines/runsc, root-held

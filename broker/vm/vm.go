@@ -468,6 +468,9 @@ type Manager struct {
 	machines map[string]*machine
 	snaps    map[string]Snapshot
 	seq      int
+	// unread are the snapshots kept on disk whose record did not read
+	// at open: not offered, retried at the next open.
+	unread map[string]bool
 
 	// afterGet, set only by tests, runs between a lookup and the caller
 	// locking what it found: where a destroy can retire the handle.
@@ -609,7 +612,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]int64{}}
+	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, unread: map[string]bool{}, live: map[uint32]int64{}}
 	if err := m.load(ctx); err != nil {
 		return nil, err
 	}
@@ -1556,6 +1559,19 @@ func (h *diskHold) release() {
 	h.m.diskMu.Unlock()
 }
 
+// Unread lists the snapshots kept unread at open, in no order: each
+// holds a restore point whose record did not read, and loads at the next
+// open once it does.
+func (m *Manager) Unread() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.unread))
+	for id := range m.unread {
+		out = append(out, id)
+	}
+	return out
+}
+
 func (m *Manager) nextSnapID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2401,14 +2417,26 @@ func (m *Manager) load(ctx context.Context) error {
 		return err
 	}
 	for _, e := range snaps {
+		if n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "s")); err == nil && n > m.seq {
+			// Every name taken, loaded or not: a new snapshot never lands
+			// on a kept one.
+			m.seq = n
+		}
+		if !e.IsDir() {
+			// Not a snapshot, and not the broker's: left alone.
+			continue
+		}
 		var s Snapshot
 		err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s)
 		var pe *fs.PathError
 		if errors.As(err, &pe) && !errors.Is(err, fs.ErrNotExist) {
 			// A read that fails for another reason than absence may be
-			// transient: the snapshot may be published, so keep it and
-			// refuse the open.
-			return fmt.Errorf("vm: snapshot %s: %w", e.Name(), err)
+			// transient: the snapshot may be published, so keep it, unread,
+			// for the next open, and open without it. Persistent, it would
+			// otherwise fail every open. ForgetSince deletes it.
+			log.Printf("vm: snapshot %s kept unread: %v", e.Name(), err)
+			m.unread[e.Name()] = true
+			continue
 		}
 		if err != nil || s.ID != e.Name() {
 			// A snapshot without metadata was never published: drop it.
@@ -2416,9 +2444,6 @@ func (m *Manager) load(ctx context.Context) error {
 			continue
 		}
 		m.snaps[s.ID] = s
-		if n, err := strconv.Atoi(strings.TrimPrefix(s.ID, "s")); err == nil && n > m.seq {
-			m.seq = n
-		}
 	}
 	ms, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "machines"))
 	if err != nil {
