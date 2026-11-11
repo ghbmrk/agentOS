@@ -464,7 +464,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-unit-runners-norm | CI-unit-runners-norm: _runners normalises .. before its prefix match. Release; from #5438 (Security). | #5413, #5438 | building (release; tier B) |
 | LOG-open-anchor-first | LOG-open-anchor-first: kernel log Open checks the anchor before truncating an unread tail, so a refused open keeps every byte (LOG-2). | #5387 | queued (release; tier A; after #5387) |
 | CTL-unicode-chat-code | CTL-unicode-chat-code: a trailing code in non-ASCII digits in chat or UNLOCK is stripped or quarantined before the agent; codes stay ASCII-only. | none | queued (release; tier A) |
-| VM-snap-read-keep-fu | VM-snap-read-keep-fu: a persistently unreadable snapshot record or a stray file under snapshots/ no longer fails every restart, and the owner line names the snapshot. Release; from #5457. | #5452, #5457 | building (release; tier A) |
 | DRIVE-ID-soft-create | DRIVE-ID-soft-create: drive-id's failed create does not exit the script (true, not a redirected ':'). | none | queued (release; tier A) |
 | STOP-queued-start-fu | STOP-queued-start-fu: the queued-STOP tests are deterministic, a STOP-refused fork pauses and keeps nothing, and create and provider_run recheck STOP at the actual start. | STOP-queued-start | queued (release; tier A) |
 | DRILL-stamp-wording | DRILL-stamp-wording: one stamp-failure line per reboot with a cause hint; a later failed stamp leaves no stale timing. | none | queued (release; tier A) |
