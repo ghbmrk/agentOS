@@ -2279,23 +2279,32 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	}
 }
 
-// TestUnservable (#5307): dns.Generate's refusal of a compiled document
-// reaches the page by its typed cause: a device on a Wi-Fi network the
-// setup serves no network for, or a listed name that is not a DNS host
-// name; any other refusal is untyped, whatever its text.
-func TestUnservable(t *testing.T) {
-	x := newBox(t, false)
+// TestRefusedCause (#5307, #5352): dns.Generate's refusal of a compiled
+// document reaches the page and the log as the one Generate refused, read
+// from the error: a device on a Wi-Fi network the setup serves no network
+// for, or a listed name that is not a DNS host name. With two of either,
+// it is the one Generate refused, not another the document also holds;
+// any other refusal is untyped, whatever its text.
+func TestRefusedCause(t *testing.T) {
+	x, _ := enrolled(t, false)
 	l, s := x.cfg.Layout, x.cfg.DNS
-	vlan := home()
-	vlan.Devices = append(vlan.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
-	name := home()
-	name.Destinations = []string{"updates.example", "Upper.example"}
+	plug := func(id, wifi string) policy.Device {
+		return policy.Device{ID: id, Network: policy.NetDevices, WiFi: wifi, Everyday: true, Allow: []string{id + ".example"}}
+	}
+	vlans := home()
+	vlans.Devices = append(vlans.Devices, plug("plug", "vlan109"), plug("lamp", "vlan110"))
+	// Generate writes each list sorted, so it refuses Abc.example; the
+	// document lists Zed.example first.
+	names := home()
+	names.Destinations = []string{"updates.example", "Zed.example", "Abc.example"}
+	view := func() string { return x.b.do(http.MethodGet, "/", nil).Body.String() }
 	for _, tc := range []struct {
-		doc  policy.Document
-		want page.PolicyCause
+		doc       policy.Document
+		want      page.PolicyCause
+		said, not string
 	}{
-		{vlan, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}},
-		{name, page.PolicyCause{Kind: page.PolicyName, Name: "Upper.example"}},
+		{vlans, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}, "plug", "lamp"},
+		{names, page.PolicyCause{Kind: page.PolicyName, Name: "Abc.example"}, "Abc.example", "Zed.example"},
 	} {
 		if _, err := nft.Paths(tc.doc, l); err != nil {
 			t.Fatalf("fixture: %v", err)
@@ -2304,22 +2313,46 @@ func TestUnservable(t *testing.T) {
 		if !errors.Is(err, dns.ErrConfig) {
 			t.Fatalf("fixture: %v", err)
 		}
-		if got := unservable(err, tc.doc, l, s); got != tc.want {
-			t.Errorf("unservable(%v) = %+v, want %+v", err, got, tc.want)
+		if got := refusedCause(err); got != tc.want {
+			t.Errorf("refusedCause(%v) = %+v, want %+v", err, got, tc.want)
 		}
-	}
-	// A device off the device network, or with no VLAN, needs none.
-	off := home()
-	off.Devices = append(off.Devices, policy.Device{ID: "plug", Network: policy.NetOwner, WiFi: "vlan109"}, policy.Device{ID: "lamp", Network: policy.NetDevices})
-	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
-	for _, err := range []error{fmt.Errorf("%w: x", dns.ErrConfig), errors.New("vlan109 Upper.example")} {
-		for _, doc := range []policy.Document{home(), off} {
-			if got := unservable(err, doc, l, s); got != untyped {
-				t.Errorf("unservable(%v) on a servable document = %+v", err, got)
+		x.mu.Lock()
+		x.log = nil
+		x.mu.Unlock()
+		x.d.fwMu.Lock()
+		err = x.d.loadNetwork(context.Background(), tc.doc)
+		x.d.fwMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != tc.want {
+			t.Errorf("the page's cause for %s: %#v", tc.said, got)
+		}
+		if h := view(); !strings.Contains(h, tc.said) || strings.Contains(h, tc.not) {
+			t.Errorf("home names %s, or names %s, which Generate did not refuse", tc.said, tc.not)
+		}
+		x.mu.Lock()
+		var logged []string
+		for _, line := range x.log {
+			if strings.HasPrefix(line, "dns: the policy in force cannot be served") {
+				logged = append(logged, line)
 			}
 		}
-		if err := error(errors.New("other")); unservable(err, vlan, l, s) != untyped || unservable(err, name, l, s) != untyped {
-			t.Error("a refusal other than the setup's is typed")
+		x.mu.Unlock()
+		if len(logged) != 1 || !strings.Contains(logged[0], strconv.Quote(tc.said)) || strings.Contains(logged[0], tc.not) {
+			t.Errorf("the log names %s, or names %s, which Generate did not refuse: %q", tc.said, tc.not, logged)
+		}
+	}
+	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
+	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil} {
+		if got := refusedCause(err); got != untyped {
+			t.Errorf("refusedCause(%v) = %+v, want untyped", err, got)
+		}
+	}
+	// Typed, the refusal still reads as wrapped by ErrConfig.
+	for _, err := range []error{fmt.Errorf("load: %w", dns.UnservedDevice{ID: "plug", WiFi: "vlan109", Iface: "ap0.109"}), fmt.Errorf("load: %w", dns.BadName{Name: "Upper.example"})} {
+		if !errors.Is(err, dns.ErrConfig) || refusedCause(err) == untyped {
+			t.Errorf("%v: not typed", err)
 		}
 	}
 }

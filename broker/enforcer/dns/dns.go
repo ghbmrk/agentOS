@@ -59,6 +59,28 @@ var lease = strconv.Itoa(LeaseHours) + "h"
 
 var ErrConfig = errors.New("dns: configuration refused")
 
+// UnservedDevice and BadName are Generate's refusals of a document for
+// its own content, the ones left once it compiles and the setup alone
+// passes: device ID is on Wi-Fi network WiFi, whose interface Iface the
+// setup serves no network on, or a listed name is not a DNS host name.
+// Each carries what Generate refused and wraps ErrConfig, so a caller
+// names the refused item from the error, never by checking the document
+// again (#5352).
+type UnservedDevice struct{ ID, WiFi, Iface string }
+
+type BadName struct{ Name string }
+
+func (e UnservedDevice) Error() string {
+	return fmt.Sprintf("%v: device %q on Wi-Fi network %q: no network for %q, which an instance answers on", ErrConfig, e.ID, e.WiFi, e.Iface)
+}
+
+func (e BadName) Error() string {
+	return fmt.Sprintf("%v: %q is not a DNS host name", ErrConfig, e.Name)
+}
+
+func (UnservedDevice) Unwrap() error { return ErrConfig }
+func (BadName) Unwrap() error        { return ErrConfig }
+
 // MaxTTL caps the TTL the listed instance hands out, so a device asks
 // again within this many seconds, and an answer that missed a ruleset
 // load's carry-over is back in its set by then (ASSUMPTIONS ENF-f-3,
@@ -128,19 +150,26 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	}
 	views := []Listed{{Iface: l.Core}}
 	viewSets := []nft.AllowSet{setOf[nft.CoreSet(false)]}
+	var devs []policy.Device // devs[i] is views[i+1]'s
 	for _, dev := range d.Devices {
 		if n, ok := nft.VLAN(dev.WiFi); ok && dev.Network == policy.NetDevices {
 			views = append(views, Listed{Iface: l.Trunk + "." + strconv.Itoa(n)})
 			viewSets = append(viewSets, setOf[nft.DeviceSet(n, false)])
+			devs = append(devs, dev)
 		}
 	}
 	peopleIfaces := []string{l.Owner, l.Household, l.Guests, l.Admin}
-	answered := slices.Clone(peopleIfaces)
-	for _, v := range views {
-		answered = append(answered, v.Iface)
-	}
-	if err := s.check(l, answered); err != nil {
+	if err := s.check(l); err != nil {
 		return Files{}, err
+	}
+	// A device's VLAN is answered on only when the setup serves it; the
+	// first device in the document's order on one it does not is the
+	// refusal.
+	for i, dev := range devs {
+		iface := views[i+1].Iface
+		if !slices.ContainsFunc(s.Nets, func(n Net) bool { return n.Iface == iface }) {
+			return Files{}, UnservedDevice{ID: dev.ID, WiFi: dev.WiFi, Iface: iface}
+		}
 	}
 	for i, set := range viewSets {
 		conf, err := s.listed(views[i].Iface, set)
@@ -206,7 +235,7 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 	w.add("max-ttl=" + strconv.Itoa(MaxTTL))
 	for _, n := range names {
 		if !Hostname(n) {
-			return "", fmt.Errorf("%w: %q is not a DNS host name", ErrConfig, n)
+			return "", BadName{Name: n}
 		}
 		for _, u := range s.Upstream {
 			w.add("server=/" + n + "/" + upstream(u))
@@ -233,11 +262,11 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 
 // check refuses a setup that names an interface the layout does not serve
 // (the edge's segment, the WAN and the access point's management
-// interface among them), leaves out one an instance answers on (answered),
-// marks no network for DHCP, holds a prefix that is not a masked private
+// interface among them), leaves out one of the people's networks or the
+// core's, marks no network for DHCP, holds a prefix that is not a masked private
 // block, an upstream that is not a global address or is on a served
 // network, or a lease file path that needs quoting.
-func (s Setup) check(l nft.Layout, answered []string) error {
+func (s Setup) check(l nft.Layout) error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrConfig}, a...)...) }
 	if len(s.Upstream) == 0 {
 		return bad("no upstream resolver")
@@ -276,7 +305,7 @@ func (s Setup) check(l nft.Layout, answered []string) error {
 	if !slices.ContainsFunc(s.Nets, func(n Net) bool { return n.DHCP }) {
 		return bad("no network is served DHCP")
 	}
-	for _, i := range answered {
+	for _, i := range served {
 		if !slices.Contains(seen, i) {
 			return bad("no network for %q, which an instance answers on", i)
 		}
