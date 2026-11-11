@@ -368,10 +368,10 @@ func (s *Server) status() map[string]any {
 // plainResolver is a stopped resolver as home shows it: every cause in
 // the owner's words, with each name in printable ASCII.
 type plainResolver struct {
-	Strays       []Stray
-	Unset        []string
-	Policy       []string
-	Load         string // "" for none
+	Strays []Stray
+	Unset  []string
+	Policy []string
+	Load   string // "" for none
 }
 
 // plainStop is r in the owner's words: a policy can name what the core
