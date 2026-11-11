@@ -247,14 +247,22 @@ func TestFirstLoadCutsOnce(t *testing.T) {
 
 // NET-2 Byte caps, KRN-12 (#5014): a cut edge reaches nothing through the
 // enforcer. The drop's text on its own cuts the edge's open connections,
-// to a device and to the internet, both ways, and refuses new ones, while
-// the core's go on; a full load that carries the cut (a restart) keeps it;
-// a text without it lifts it, and the edge's paths open again.
+// to a device and to the internet, both ways and over both families, and
+// refuses new ones, while the core's go on; a full load that carries the
+// cut (a restart) keeps it; a text without it lifts it, and the edge's
+// paths open again. #5282: the kernel cuts the edge itself at the first
+// byte past its cap, with no write of the daemon's (TripSet); a full load
+// whose count is past the cap starts cut; the owner's lift on the day
+// (Drop.EdgeHold) opens the edge's device paths while its quota still
+// holds the internet; the next day's quota starts it uncut.
 func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 	if !inNetns(t) {
 		return
 	}
 	h := build(t)
+	if h.v6 {
+		h.seg6("edge")
+	}
 	d, l := cutPolicy(), fixtureLayout()
 	text, err := Compile(d, l)
 	if err != nil {
@@ -268,13 +276,13 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 	}
 	loader := load.Loader{Bin: nftBin}
 	drop := func(cut bool) Drop { p := fresh(d); p.EdgeCut = cut; return p }
-	update := func(cut bool) {
+	apply := func(p Drop) {
 		t.Helper()
 		running, err := loader.List(context.Background(), Table)
 		if err != nil {
 			t.Fatal(err)
 		}
-		u, err := Drops(d, l, running, drop(cut))
+		u, err := Drops(d, l, running, p)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -282,6 +290,7 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	update := func(cut bool) { t.Helper(); apply(drop(cut)) }
 	// refused: a new connection from the edge gets no answer.
 	refused := func(why, to, addr string, port int) {
 		t.Helper()
@@ -299,20 +308,39 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 			}
 		})
 	}
-	device := h.hold("the edge to an online device", "edge", "101", devAddr(101), 9100)
-	internet := h.hold("the edge to the internet", "edge", "isp", netOther, 9210)
-	core := h.hold("the core to its list", "core", "isp", netCore, 9211)
-	h.expectOpen(true, device, internet, core)
+	// edgeHolds are the edge's held connections to a device and to the
+	// internet, over IPv6 too where the kernel has it, on ports from port.
+	devices := func(why string) []*held {
+		hs := []*held{h.hold("the edge to an online device"+why, "edge", "101", devAddr(101), 9100)}
+		if h.v6 {
+			hs = append(hs, h.hold("the edge to an online device over IPv6"+why, "edge", "101", devAddr6(101), 9100))
+		}
+		return hs
+	}
+	edgeHolds := func(why string, port int) (device, internet []*held) {
+		internet = []*held{h.hold("the edge to the internet"+why, "edge", "isp", netOther, port)}
+		if h.v6 {
+			internet = append(internet, h.hold("the edge to the internet over IPv6"+why, "edge", "isp", net6Other, port+1))
+		}
+		return devices(why), internet
+	}
+	device, internet := edgeHolds("", 9210)
+	core := h.hold("the core to its list", "core", "isp", netCore, 9220)
+	h.expectOpen(true, append(append(device, internet...), core)...)
 
 	update(true)
 	before := h.counter(EdgeCut)
-	h.expectOpen(false, device, internet)
+	h.expectOpen(false, append(device, internet...)...)
 	h.expectOpen(true, core)
 	if h.counter(EdgeCut) == before {
 		t.Error("the cut dropped nothing it counted")
 	}
 	refused("a new connection to a device", "101", devAddr(101), 9100)
 	refused("a new connection to the internet", "isp", netOther, 9212)
+	if h.v6 {
+		refused("a new connection to a device over IPv6", "101", devAddr6(101), 9100)
+		refused("a new connection to the internet over IPv6", "isp", net6Other, 9212)
+	}
 
 	// A restart's first load carries the cut in the same transaction.
 	u, err := Drops(d, l, nil, drop(true))
@@ -321,12 +349,68 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 	}
 	h.load(text + u)
 	h.fillSets()
-	h.expectOpen(false, device, internet)
+	h.expectOpen(false, append(device, internet...)...)
 	refused("a new connection to a device, after a full load", "101", devAddr(101), 9100)
 
 	update(false)
-	h.expectOpen(true,
-		h.hold("the edge to an online device, lifted", "edge", "101", devAddr(101), 9100),
-		h.hold("the edge to the internet, lifted", "edge", "isp", netOther, 9213),
-	)
+	device, internet = edgeHolds(", lifted", 9230)
+	h.expectOpen(true, append(device, internet...)...)
+
+	// The kernel's own cut (#5282). A new cap starts a new quota and empties
+	// TripSet; the edge then sends past it on its internet connection.
+	const edgeCap = 4096
+	capped := func(day uint32, count uint64, hold bool) Drop {
+		p := drop(false)
+		p.Day, p.EdgeCap, p.EdgeCount, p.EdgeHold = day, edgeCap, count, hold
+		return p
+	}
+	apply(capped(20000, 0, false))
+	device, internet = edgeHolds(", within its cap", 9240)
+	h.expectOpen(true, append(device, internet...)...)
+	before, drops := h.counter(EdgeCut), h.counter(CapDrop)
+	if _, err := internet[0].c.Write(make([]byte, 2*edgeCap)); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(5 * time.Second); h.counter(CapDrop) == drops && time.Now().Before(end); {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(run(t, "nft", "list", "set", "inet", Table, TripSet), `"`+l.Edge+`"`) {
+		t.Error("the quota stopped a byte and TripSet does not hold the edge")
+	}
+	h.expectOpen(false, append(device, internet...)...)
+	h.expectOpen(true, core)
+	if h.counter(EdgeCut) == before {
+		t.Error("the kernel's cut dropped nothing it counted")
+	}
+	refused("a new connection to a device, past the cap", "101", devAddr(101), 9100)
+
+	// A full load whose count is past the cap starts cut, before the record
+	// says so or the edge sends again: no path opens across it. The edge's
+	// internet connections are reset at both ends first, so it sends
+	// nothing after the load that could pass the new quota.
+	for _, x := range internet {
+		for _, c := range []net.Conn{x.s, x.c} {
+			c.(*net.TCPConn).SetLinger(0)
+			c.Close()
+		}
+	}
+	u, err = Drops(d, l, nil, capped(20000, 2*edgeCap, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.load(text + u)
+	h.fillSets()
+	h.expectOpen(false, device...)
+	refused("a new connection to a device, after a full load past the cap", "101", devAddr(101), 9100)
+
+	// The owner's lift on the day: the device paths open, the quota still
+	// holds the internet.
+	apply(capped(20000, 2*edgeCap, true))
+	h.expectOpen(true, devices(", lifted on the day")...)
+	refused("a new connection to the internet, lifted on the day", "isp", netOther, 9252)
+
+	// The next day's quota starts the edge uncut.
+	apply(capped(20001, 0, false))
+	device, internet = edgeHolds(", the next day", 9260)
+	h.expectOpen(true, append(device, internet...)...)
 }

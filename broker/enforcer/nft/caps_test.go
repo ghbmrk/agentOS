@@ -362,4 +362,71 @@ func TestDropsCarryTheEdgeCut(t *testing.T) {
 	if !strings.Contains(text, "\tchain cut_edge {\n\t}\n") {
 		t.Error("the cut chain is not declared empty")
 	}
+	if !strings.Contains(text, "\tchain over_edge {\n\t\tadd @edge_trip { \"edge0\" }\n\t\tgoto log_cap\n\t}\n") {
+		t.Error("past the edge's quota, a packet does not put the edge in TripSet before it is dropped")
+	}
+
+	// #5282: the kernel's own cut. Unless the edge is held, the cut chain
+	// drops every packet once TripSet holds the edge; the edge's quota
+	// sends what passes it to over_edge; TripSet is emptied when the
+	// running edge quota is another (a new day or cap) and holds the edge
+	// at once when the count is already past the cap.
+	trip := []string{
+		`add rule inet enforcer cut_edge iifname @edge_trip counter name "edge_cut" drop`,
+		`add rule inet enforcer cut_edge oifname @edge_trip counter name "edge_cut" drop`,
+	}
+	const (
+		flush = "flush set inet enforcer edge_trip\n"
+		fill  = `add element inet enforcer edge_trip { "edge0" }` + "\n"
+	)
+	p := fresh(d)
+	p.EdgeCap = 1000
+	qe := edgeQuota(p.Day, p.EdgeCap)
+	listing := func(quotas ...string) []byte {
+		var objs []string
+		for _, q := range quotas {
+			objs = append(objs, `{"quota": {"family": "inet", "table": "enforcer", "name": "`+q+`"}}`)
+		}
+		return []byte(`{"nftables": [` + strings.Join(objs, ", ") + `]}`)
+	}
+	for _, c := range []struct {
+		name          string
+		cut, hold     bool
+		count         uint64
+		running       []byte
+		rules         []string
+		flush, filled bool
+	}{
+		{name: "uncut", rules: trip},
+		{name: "held", hold: true},
+		{name: "cut", cut: true, rules: []string{rule}},
+		{name: "at the cap", count: 1000, rules: trip},
+		{name: "past the cap", count: 1001, rules: trip, filled: true},
+		{name: "past the cap, held", count: 1001, hold: true, filled: true},
+		{name: "the same quota running", running: listing(qe), rules: trip},
+		{name: "another quota running", running: listing(qe, edgeQuota(p.Day-1, p.EdgeCap)), rules: trip, flush: true},
+		{name: "a new day past the cap", count: 1001, running: listing(edgeQuota(p.Day-1, p.EdgeCap)), rules: trip, flush: true, filled: true},
+	} {
+		q := p
+		q.EdgeCut, q.EdgeHold, q.EdgeCount = c.cut, c.hold, c.count
+		text := mustDrops(t, d, c.running, q)
+		var rules []string
+		for _, ln := range strings.Split(text, "\n") {
+			if strings.HasPrefix(ln, "add rule inet enforcer cut_edge ") {
+				rules = append(rules, ln)
+			}
+		}
+		if !slices.Equal(rules, c.rules) {
+			t.Errorf("%s: cut rules %q, want %q", c.name, rules, c.rules)
+		}
+		if strings.Contains(text, flush) != c.flush {
+			t.Errorf("%s: TripSet emptied %v, want %v:\n%s", c.name, !c.flush, c.flush, text)
+		}
+		if i := strings.Index(text, fill); (i >= 0) != c.filled || c.flush && c.filled && i < strings.Index(text, flush) {
+			t.Errorf("%s: TripSet filled %v, want %v, after it is emptied:\n%s", c.name, i >= 0, c.filled, text)
+		}
+		if want := `add rule inet enforcer capd_edge quota name "` + qe + `" goto over_edge`; !strings.Contains(text, want+"\n") {
+			t.Errorf("%s: the edge's quota does not send what passes it to over_edge:\n%s", c.name, text)
+		}
+	}
 }

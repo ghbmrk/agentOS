@@ -21,12 +21,13 @@ type Home = home
 
 func InNetns(t *testing.T) bool { return inNetns(t) }
 
-// Build is the fixture home with the core given IPv6 as well, where the
-// kernel has it.
+// Build is the fixture home with the core and the edge given IPv6 as
+// well, where the kernel has it.
 func Build(t *testing.T) *Home {
 	h := build(t)
 	if h.v6 {
 		h.seg6("core")
+		h.seg6("edge")
 	}
 	return h
 }

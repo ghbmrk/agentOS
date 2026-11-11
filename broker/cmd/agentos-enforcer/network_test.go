@@ -254,7 +254,9 @@ func TestByteCapStateUnreadable(t *testing.T) {
 	for i := range p.Groups {
 		p.Groups[i].Count = p.Groups[i].Cap
 	}
-	p.EdgeCount, p.Past = p.EdgeCap, true
+	// Every cap is spent, not counted, so the kernel does not cut the edge
+	// at its quota (nft.Drop.EdgeHold, #5282).
+	p.EdgeCount, p.Past, p.EdgeHold = p.EdgeCap, true, true
 	drops, err := nft.Drops(doc, x.cfg.Layout, nil, p)
 	if err != nil {
 		t.Fatal(err)
@@ -621,6 +623,11 @@ func TestUnresolvedBytesTrip(t *testing.T) {
 	}
 }
 
+// edgeTripRule is the cut chain's rule that drops the edge's packets once
+// the kernel put it in nft.TripSet (#5282): present in every drop unless
+// the edge is held (nft.Drop.EdgeHold).
+const edgeTripRule = `add rule inet enforcer cut_edge iifname @edge_trip counter name "edge_cut" drop`
+
 // TestByteCapTripsTheEdge (#5014, ENF-l-15, KRN-12): the edge past its
 // cap is cut: the record says so and why, a trip alert names the edge
 // and turns the light red, and the drop written at once carries the cut
@@ -650,6 +657,11 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) {
 		t.Fatal("the edge was cut at its cap, not past it")
+	}
+	// The kernel cuts it at the first byte past (#5282), whatever the
+	// writes after it do.
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the drop at the edge's cap leaves the kernel's own cut off")
 	}
 	x.fail(fileEdgeCut, true) // the disk refuses the trip's record
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
@@ -712,6 +724,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 0 {
 		t.Fatal("the owner's lift left the edge cut, in the record, the firewall or the alerts")
 	}
+	if strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the owner's lift on the overrun's day leaves the kernel cutting the edge at the quota it passed")
+	}
 	if err := (pageEdge{x.d}).LiftEdge(); err != nil { // a second lift changes nothing
 		t.Fatal(err)
 	}
@@ -725,6 +740,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	}
 
 	x.advance(24 * time.Hour)
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the day after a lift, the kernel does not cut the edge at its new quota")
+	}
 	x.setListing(listingOf(t, x, doc, 9, 10, 6000, true))
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); !cut {
@@ -794,6 +812,52 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	}
 	os.Remove(path)
 	x.start()
+}
+
+// TestCutRecordsMissing (#5282 item 2): provisioning writes the core's and
+// the edge's cut records uncut, so a fresh box starts with neither cut; a
+// record missing later (deleted, or a state partition that lost it) is a
+// cut, logged, until the owner lifts it on the page.
+func TestCutRecordsMissing(t *testing.T) {
+	x, _, a := capped(t)
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if b, err := os.ReadFile(filepath.Join(x.dir, name)); err != nil || string(b) != "{}" {
+			t.Fatalf("provisioning did not write %s uncut: %q, %v", name, b, err)
+		}
+	}
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("a fresh box starts cut")
+	}
+	x.d.Close()
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if err := os.Remove(filepath.Join(x.dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.start()
+	cut, why := x.d.edge.Cut()
+	if !cut || why != "the record of the edge's cut is missing" || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" missing") {
+		t.Fatalf("a missing edge record: cut %v, reason %q", cut, why)
+	}
+	if !strings.Contains(x.fire.last(), `add rule inet enforcer cut_edge counter name "edge_cut" drop`) {
+		t.Fatal("the first load with the edge's record missing does not cut the edge")
+	}
+	x.d.cut.mu.Lock()
+	why = x.d.cut.reason
+	x.d.cut.mu.Unlock()
+	if x.d.cut.Stage() != channel.Tripped || why != "the record of the core's cut is missing" || !strings.Contains(x.logText(), "cut: "+fileCut+" missing") {
+		t.Fatalf("a missing core record: stage %v, reason %q", x.d.cut.Stage(), why)
+	}
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if err := x.d.cut.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("the owner's lift and resume did not write the records again")
+	}
 }
 
 // TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
@@ -1317,14 +1381,19 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	if c, e := spentIn(t, x); c || !e {
 		t.Fatalf("the edge's port merging: core spent %v (want false), edge spent %v (want true)", c, e)
 	}
+	// Its quota is spent, not counted, so the kernel does not cut the edge
+	// at it (nft.Drop.EdgeHold, #5282).
+	if strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatal("the edge's port merging: the kernel cuts the edge at a quota held spent")
+	}
 	x.advance(readEvery)
 	if loads() != n+1 {
 		t.Fatal("a full load with no port changed")
 	}
 	x.merges(edge, nil)
 	x.advance(readEvery)
-	if c, e := spentIn(t, x); c || e {
-		t.Fatalf("caps still spent once both ports read clean: core %v, edge %v", c, e)
+	if c, e := spentIn(t, x); c || e || !strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatalf("caps still spent once both ports read clean, or the kernel's cut of the edge not back: core %v, edge %v", c, e)
 	}
 	if !strings.Contains(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again") {
 		t.Fatalf("the end not logged:\n%s", x.logText())

@@ -198,14 +198,31 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 		traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"b.example"}, Cap: 100, Count: 101})
 
 	// The edge: six 50-byte datagrams are its 300; the seventh is past.
-	for range 6 {
+	// Where the kernel has IPv6, the sixth and the seventh go over it (2
+	// payload bytes are 50), so the edge's one cap counts both families.
+	for i := range 6 {
+		if i == 5 && r.h.V6() {
+			r.send("edge", nft.Net6Other, 2, true, "edge at its cap over IPv6")
+			continue
+		}
 		r.send("edge", nft.NetOther, 22, true, "edge within its cap")
 	}
 	over := r.read()
 	if slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge }) {
 		t.Errorf("edge at its cap tripped: %+v", over)
 	}
-	r.send("edge", nft.NetOther, 22, false, "edge past its cap")
+	cuts := r.h.Counter(nft.EdgeCut)
+	if r.h.V6() {
+		r.send("edge", nft.Net6Other, 2, false, "edge past its cap over IPv6")
+	} else {
+		r.send("edge", nft.NetOther, 22, false, "edge past its cap")
+	}
+	// The byte the quota stopped cut the edge in the kernel (#5282): its
+	// next packet, either family, ends in the cut chain.
+	r.send("edge", nft.NetOther, 1, false, "edge cut by the kernel")
+	if r.h.Counter(nft.EdgeCut) == cuts {
+		t.Error("past its cap, the edge's next packet was not dropped by the kernel's cut")
+	}
 	over = r.read()
 	if !slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge && o.Cap == 300 && o.Count == 350 }) {
 		t.Errorf("edge past its cap: overruns %+v, want the edge at 350 of 300", over)
