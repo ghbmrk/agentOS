@@ -2391,7 +2391,13 @@ func (m *Manager) load(ctx context.Context) error {
 	}
 	for _, e := range snaps {
 		var s Snapshot
-		if err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s); err != nil || s.ID != e.Name() {
+		b, err := os.ReadFile(filepath.Join(m.snapDir(e.Name()), "meta.json"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			// A read that fails for another reason may be transient: the
+			// snapshot may be published, so keep it and refuse the open.
+			return fmt.Errorf("vm: snapshot %s: %w", e.Name(), err)
+		}
+		if err != nil || json.Unmarshal(b, &s) != nil || s.ID != e.Name() {
 			// A snapshot without metadata was never published: drop it.
 			os.RemoveAll(m.snapDir(e.Name()))
 			continue
