@@ -29,11 +29,14 @@ class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_x", "/r")
         self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
-                                                  "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
+                                                  "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
+                                                  "unlink,unlinkat,rename,renameat,renameat2,truncate",
                                                   "-e", "signal=none"])
         self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
+        # #5413: sh joins stderr to stdout before Python, and so any site hook, starts.
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         [sys.executable, "-c", unit_tests.JOIN + "runpy.run_module(sys.argv.pop(1), run_name='__main__', "
+                         ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh", sys.executable, "-c",
+                          "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', "
                           "alter_sys=True)", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
     def test_every_test_module_is_run(self):
@@ -235,8 +238,8 @@ class SplitTest(unittest.TestCase):
     def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_image", "/r", workers=4)
         self.assertIn("test_image", unit_tests.SPLIT)
-        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", sys.executable, "-c",
-                               unit_tests.JOIN + "sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", *unit_tests.JOIN, sys.executable, "-c",
+                               "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                                str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
                                "--workers", "4"])
 
@@ -440,6 +443,8 @@ class StraceFaultTest(unittest.TestCase):
         # #5407: a fake strace with strace's file descriptors (the command inherits its stdout and
         # stderr) runs the real command; a test prints the fault text every way it can. JOIN gives
         # the test the module's stream, so strace's own stays clean: one attempt, the verdict kept.
+        # #5413: so does a sitecustomize, which Python runs before any of the module's own code,
+        # and a child it starts that writes after the test has run.
         root = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
         (root / "tests").mkdir()
@@ -452,21 +457,71 @@ class StraceFaultTest(unittest.TestCase):
                     os.write(2, b"{self.CUT}\\n")
                     subprocess.run([sys.executable, "-c", "import sys; sys.stderr.write('{self.CUT}\\\\n')"])
             """))
+        site = root / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent(f"""\
+            import os, subprocess, sys
+            os.write(2, b"{self.CUT}\\n")
+            subprocess.Popen([sys.executable, "-I", "-c", "import os, time; time.sleep(1); os.write(2, b'{self.CUT}\\\\n')"])
+            """))
         fake = root / "strace"
-        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
-            import pathlib, subprocess, sys
+        # -I: the fake strace runs no sitecustomize of its own.
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent(f"""\
+            import pathlib, subprocess, sys, time
             calls = pathlib.Path({str(root / "calls")!r})
             calls.write_text(calls.read_text() + "x" if calls.exists() else "x")
             pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("t")
+            rc = subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode
+            time.sleep(2)  # the hook's child writes meanwhile
+            sys.exit(rc)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}",
+                                              "PYTHONPATH": str(site)}):
+            _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
+        self.assertEqual((rc, (root / "calls").read_text()), (0, "x"), out)
+        self.assertEqual(out.count(self.CUT), 4 + 2 * 2, out)  # the test's 4, and the hook's 2 in each of 2 Pythons
+        self.assertIn("\nok\n", out)
+        self.assertNotIn("strace failed itself", out)
+
+    def test_a_cut_faked_through_straces_proc_fd_hides_no_write(self):
+        # #5413: a test can still reach strace's stderr by its /proc name and fake a cut on
+        # attempt 1 only. Its write then sits in the cut trace alone; clash_audit reads that as the
+        # module's, so the clash with another module still fails the step.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(textwrap.dedent(f"""\
+            import os, pathlib, unittest
+            class A(unittest.TestCase):
+                def test_a(self):
+                    first = pathlib.Path({str(root / "first")!r})
+                    if not first.exists():
+                        first.write_text("")
+                        with open(f"/proc/{{os.getppid()}}/fd/2", "a") as f:  # the fake strace's
+                            f.write("{self.CUT}\\n")
+            """))
+        fake = root / "strace"
+        # Each call's trace: the first run's shows the shared write, the rerun's does not.
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent(f"""\
+            import pathlib, subprocess, sys
+            first = not pathlib.Path({str(root / "first")!r}).exists()
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text({w(5, "/tmp/agentos-x")!r} if first else "")
             sys.exit(subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode)
             """))
         fake.chmod(0o755)
         with mock.patch.dict(unit_tests.ENV, {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}):
             _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
-        self.assertEqual((rc, (root / "calls").read_text()), (0, "x"), out)
-        self.assertEqual(out.count(self.CUT), 4, out)
-        self.assertIn("\nok\n", out)
-        self.assertNotIn("strace failed itself", out)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("strace failed itself on attempt 1 of 2", out)
+        self.assertEqual((root / "test_fake.trace").read_text(), "")
+        (root / "test_other.trace").write_text(w(6, "/tmp/agentos-x"))
+        stdout = io.StringIO()
+        with mock.patch.object(unit_tests, "modules", lambda root=None: ["test_fake", "test_other"]), \
+             mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(unit_tests.SERIAL, clear=True):
+            self.assertEqual(clash_audit.main(["clash_audit.py", str(root)]), 1)
+        self.assertEqual(stdout.getvalue(), "::error::test_fake and test_other both write /tmp/agentos-x\n")
 
     def test_a_failed_test_is_never_rerun(self):
         rc, out, trace, calls = self.run_plan("fail-then-cut", "ok")
@@ -863,6 +918,57 @@ class ClashTest(unittest.TestCase):
         clash_audit.writes(failed, ondisk=lambda name: seen.append(name))
         self.assertEqual(seen, ["/w", "/w/l"])
 
+    def test_unlink_rename_and_truncate_change_a_name_as_a_write_does(self):
+        # #5413: strace 6.8's lines for each, whatever the result. Each name counts, resolved from
+        # its directory fd or the process's cwd; truncate follows a link the tree made, unlink does not.
+        cwd = '1 openat(AT_FDCWD</d>, "x", O_RDONLY) = 3</d/x>\n'
+        for line, names in (('1 unlink("c")                       = 0\n', ["/d/c"]),
+                            ('1 unlink("/d/c")                     = -1 ENOENT (No such file or directory)\n', ["/d/c"]),
+                            ('1 unlinkat(3</e>, "f", 0)      = 0\n', ["/e/f"]),
+                            ('1 unlinkat(AT_FDCWD</e>, "g", AT_REMOVEDIR) = 0\n', ["/e/g"]),
+                            ('1 rename("a", "b")                  = 0\n', ["/d/a", "/d/b"]),
+                            ('1 renameat(3</e>, "a", 4</f>, "b") = 0\n', ["/e/a", "/f/b"]),
+                            ('1 renameat2(AT_FDCWD</e>, "a", AT_FDCWD</f>, "b", RENAME_NOREPLACE) = 0\n', ["/e/a", "/f/b"]),
+                            ('1 truncate("c", 0)                  = 0\n', ["/d/c"]),
+                            ('1 unlink("c" <unfinished ...>\n', ["/d/c"])):
+            self.assertLessEqual({("path", n) for n in names}, clash_audit.writes(cwd + line), line)
+            for name in names:
+                self.assertEqual(clash_audit.clashes({"test_a": cwd + line, "test_b": w(2, name)}, serial={}),
+                                 [("path", name, "test_a", "test_b")], line)
+        # No directory fd: the name joins the cwd the pid's lines showed, else stays as asked.
+        self.assertEqual(clash_audit.writes(cwd + '1 unlink("c") = 0\n'), {("path", "/d/c")})
+        self.assertEqual(clash_audit.writes('1 unlink("c") = 0\n'), {("path", "c")})
+        link = '1 symlink("/t/real", "/d/l") = 0\n'
+        self.assertEqual(clash_audit.writes(link + '1 truncate("/d/l", 0) = 0\n'), {("path", "/t/real"), ("path", "/d/l")})
+        self.assertEqual(clash_audit.writes(link + '1 unlink("/d/l") = 0\n'), {("path", "/d/l")})
+        # records_audit: removing or renaming a trace, or another module's cut trace, is a write there.
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            for line, path in ((f'2 unlink("{d}/test_b.trace.cut") = 0\n', "test_b.trace.cut"),
+                               (f'2 renameat(AT_FDCWD</>, "{d}/test_m.trace", AT_FDCWD</>, "/tmp/y") = 0\n', "test_m.trace"),
+                               (f'2 truncate("{d}/test_b.trace", 0) = 0\n', "test_b.trace")):
+                trace = own + line + "1 +++ exited with 0 +++\n"
+                self.assertEqual(records_audit.problems({"test_m": trace}, ["tests.test_m"], trace_dir=d),
+                                 [f"tests.test_m\twrote {d}/{path}: {records_audit.TAMPER}"], line)
+
+    def test_a_cut_attempts_writes_are_the_modules(self):
+        # #5413: tools/unit_tests.py keeps a cut attempt's trace as <module>.trace.cut; a write
+        # only it shows still clashes, and main reads it from the trace directory.
+        self.assertEqual(clash_audit.clashes({"test_a": "", "test_b": w(2, "/x")}, serial={}, cut={"test_a": w(1, "/x")}),
+                         [("path", "/x", "test_a", "test_b")])
+        self.assertEqual(clash_audit.clashes({"test_a": w(1, "/x"), "test_b": ""}, serial={}, cut={"test_a": w(1, "/x")}), [])
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, "test_a.trace").write_text("")
+            pathlib.Path(d, "test_b.trace").write_text(w(2, "/x"))
+            pathlib.Path(d, "test_a" + unit_tests.CUT).write_text(w(1, "/x"))
+            out = io.StringIO()
+            with mock.patch.object(unit_tests, "modules", lambda root=None: ["test_a", "test_b"]), \
+                 mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()), \
+                 mock.patch.dict(unit_tests.SERIAL, clear=True):
+                self.assertEqual(clash_audit.main(["clash_audit.py", d]), 1)
+            self.assertEqual(out.getvalue(), "::error::test_a and test_b both write /x\n")
+
     def test_a_fixed_port_or_socket_name_clashes_and_port_zero_does_not(self):
         def bind(pid, addr, result="= 0"):
             return f"{pid} bind(3<socket:[9]>, {{{addr}}}, 16) {result}\n"
@@ -905,8 +1011,7 @@ class ClashTest(unittest.TestCase):
             pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
-            # A cut attempt's trace (tools/unit_tests.py CUT) is no unit: it ran alongside other modules, but the
-            # completed rerun repeats its writes, so skipping it hides no clash.
+            # A cut attempt's trace (tools/unit_tests.py CUT) is its module's, not a unit of its own.
             pathlib.Path(d, "test_b" + unit_tests.CUT).write_text(w(9, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)

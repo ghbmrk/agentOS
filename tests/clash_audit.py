@@ -2,17 +2,18 @@
 """No two unit-test modules that run at the same time write one path or bind one address (CI-par-clash).
 
 tools/unit_tests.py runs the tests/test*.py modules several at a time, each under `strace -f -y`
-into its own `<module>.trace` (CI-PATHS). `clash_audit.py DIR` reads those traces and fails
-when two modules, neither of them in unit_tests.SERIAL, each
+into its own `<module>.trace`, and a run strace cut short into `<module>.trace.cut` (CI-PATHS).
+`clash_audit.py DIR` reads both, as one module's, and fails when two modules, neither of them in
+unit_tests.SERIAL, each
   - open one path for writing or creating (O_WRONLY, O_RDWR or O_CREAT; the file the open
     reached, else the path it asked for, so a create that failed because the other module's
-    file was there counts), or
+    file was there counts), or unlink, rename (either name) or truncate it, whatever the result, or
   - bind one fixed address: an IP port other than 0 (any address, either protocol), or a Unix
     socket name, abstract or a path.
 A path the kernel did not resolve for us (a failed or cut-off open, a socket path) is resolved as
 the kernel walked it when the trace was taken: from the directory fd or the process's cwd, `..`
 and symlinks followed in each parent component, and in the final one unless the call makes that
-name (O_EXCL, O_NOFOLLOW, bind), through the links the module's own tree made before that call
+name (O_EXCL, O_NOFOLLOW, bind, unlink, rename), through the links the module's own tree made before that call
 (symlink and symlinkat, traced), then through links on disk for names the tree never made a link
 at. A failed create through a symlinked directory so names the real file.
 It names both modules and the path, and points at unit_tests.SERIAL. The check reads every
@@ -23,7 +24,7 @@ processes at once (devices, Python's bytecode cache, Go's build and module cache
 counters). tools/unit_tests.py turns off git's optional index lock, so the shared worktree's
 .git/index.lock is written only by a git command that changes the index.
 Not seen: a clash through something other than open or bind (a fixed directory made by mkdir
-and only listed, a rename onto a fixed name, a lock taken with flock on a file opened read-only,
+and only listed, a lock taken with flock on a file opened read-only,
 a connect to a server another module started), by a process outside the module's tree (a
 daemon), or between the tests of one SPLIT module, whose workers share one trace (CI-par-3).
 Not resolved: a link that is gone by the audit and was made outside the module's tree or put in
@@ -42,13 +43,15 @@ import unit_tests  # noqa: E402
 
 # One strace -f -y line: pid, call, rest. A call split by another process's ends
 # `<unfinished ...>`; its result is on a later `<... call resumed>` line of the same pid.
-_CALLS = "open|openat|openat2|bind|symlink|symlinkat|chdir|fchdir"
+_CALLS = "open|openat|openat2|bind|symlink|symlinkat|chdir|fchdir|unlink|unlinkat|rename|renameat|renameat2|truncate"
 _LINE = re.compile(rf'^(\d+)\s+({_CALLS})\((.*)$')
 _RESUMED = re.compile(rf'^(\d+)\s+<\.\.\. ({_CALLS}) resumed>(.*)$')
 _STR = r'"((?:[^"\\]|\\.)*)"'
 _DIRFD = r'[A-Z_\d]+<([^>]*)>'
 _OPEN_ARGS = re.compile(rf'^(?:{_DIRFD}, )?{_STR}, (.*)$')
 _SYMLINK_ARGS = re.compile(rf'^{_STR}, (?:{_DIRFD}, )?{_STR}')
+# unlink and truncate's one name, rename's two, each after its directory fd if the call takes one.
+_NAMES_ARGS = re.compile(rf'^(?:{_DIRFD}, )?{_STR}(?:, (?:{_DIRFD}, )?{_STR})?')
 _CHDIR_ARGS = re.compile(rf'^(?:{_STR}|\d+<([^>]*)>)')
 # The cwd strace shows as a call's AT_FDCWD: openat's first argument, symlinkat's second.
 _CWD = re.compile(rf'^(?:{_STR}, )?AT_FDCWD<([^>]*)>')
@@ -245,6 +248,20 @@ def _write_open(tree, pid, rest):
     return tree.asked(pid, path, base, not _NOFOLLOW.search(_flags(m.group(3))), as_main(path, base))
 
 
+def _named(tree, pid, call, rest):
+    """The names an unlink, rename or truncate changes, asked for and walked: truncate follows
+    its final component, the others act on the name itself. A call with no directory fd shows
+    no cwd, so its name as asked joins the cwd the pid's own lines last showed."""
+    m = _NAMES_ARGS.match(rest)
+    out = set()
+    for base, path in ((m.group(1), m.group(2)), (m.group(3), m.group(4))) if m else ():
+        if path is not None:
+            base, path = base and _decode(base), _decode(path)
+            main = as_main(path, base if base is not None else tree.cwd.get(pid))
+            out |= tree.asked(pid, path, base, call == "truncate", main)
+    return out
+
+
 def _bound(tree, pid, args):
     port = _PORT.search(args)
     if port and port.group(1) != "0":
@@ -276,6 +293,8 @@ def _scan(trace, tree):
                     tree.made(pid, call, rest)
             elif call == "bind":
                 out |= _bound(tree, pid, rest)
+            elif not call.startswith("open"):
+                out |= _named(tree, pid, call, rest)
             else:
                 names = _write_open(tree, pid, rest)
                 if names is not None:
@@ -298,15 +317,17 @@ def _scan(trace, tree):
     return out, tree
 
 
-def clashes(traces, serial=None, is_shared=shared):
-    """traces: {module: strace text}. [(kind, name, module_a, module_b)] for every name two
-    modules outside serial both wrote or bound, in name order."""
+def clashes(traces, serial=None, is_shared=shared, cut=None):
+    """traces: {module: strace text}; cut: {module: the trace of its attempt strace cut short},
+    whose writes are the module's too (#5413). [(kind, name, module_a, module_b)] for every name
+    two modules outside serial both wrote or bound, in name order."""
     serial = unit_tests.SERIAL if serial is None else serial
+    cut = cut or {}
     seen = {}
     for unit in sorted(traces):
         if unit in serial:
             continue
-        for kind, name in writes(traces[unit]):
+        for kind, name in writes(traces[unit]) | writes(cut.get(unit, "")):
             if kind == "path" and is_shared(name):
                 continue
             seen.setdefault((kind, name), []).append(unit)
@@ -320,15 +341,16 @@ def clashes(traces, serial=None, is_shared=shared):
 
 def main(argv):
     d = argv[1]
-    traces = {}
+    traces, cut = {}, {}
     for name in sorted(os.listdir(d)):
-        if name.endswith(".trace"):
-            with open(os.path.join(d, name), errors="surrogateescape") as f:
-                traces[name[:-len(".trace")]] = f.read()
+        for suffix, into in ((".trace", traces), (unit_tests.CUT, cut)):
+            if name.endswith(suffix):
+                with open(os.path.join(d, name), errors="surrogateescape") as f:
+                    into[name[:-len(suffix)]] = f.read()
     missing = [m for m in unit_tests.modules() if m not in traces]
     for m in missing:
         print(f"::error::{m} has no trace in {d}: nothing to check it against")
-    found = clashes(traces)
+    found = clashes(traces, cut=cut)
     for kind, name, a, b in found:
         print(f"::error::{a} and {b} both {'write' if kind == 'path' else 'bind'} {name}")
     if found:
