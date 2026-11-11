@@ -470,13 +470,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keeper-reach-dangling-box-link | IMG-keeper-reach-dangling-box-link: a tree link into a box-made path (/var/run, /var/lock) is weighed through the box's link. Release; from #5382. | #5382, #5233 | queued (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | ENF-net-ra-fu-r8 | ENF-net-ra-fu-r8: the page reports every refused name and device, and a setup fault with an unserved device still names the device (regression from #5396). Release; from #5396. | #5352, #5396 | building (release; tier A) |
-| CI-unit-strace-retry-3 | CI-unit-strace-retry-3: STRACE_FAULT matches strace's own status not the test's output; pin the attempt count; settle the writable trace directory; reword the ClashTest comment. Release; from #5397. | #5364, #5397 | building (release; tier A) |
 | CI-mutgate-head-guard | CI-mutgate-head-guard: mutgate.yml's first job exits when the run's head differs from the PR's current head; the OPERATING.md sentence on old-head reruns is replaced. Release; from #5408. | #5377, #5408, #5361 | queued (release; tier A) |
 | CLK-plan-mut | CLK-plan-mut: kill the clerk/plan statement-deletion survivors (about 137) with tests, or waive the ones no test can tell. Release; from #5402. | #5393, #5402 | building (release; tier A) |
-| CI-unit-strace-retry-4 | CI-unit-strace-retry-4: audit opens of another process's /proc fd; trace unlink, rename and truncate; isolate sitecustomize; read .trace.cut in clash_audit. Release; from #5411. | #5407, #5411 | queued (release; tier A) |
-| TOOLCHAIN-go-1-26-11 | TOOLCHAIN-go-1-26-11: bump the Go toolchain to go1.26.11 for GO-2026-6859 (net/http), which turns vulncheck red on every head. Defect; from #5411. | #5411 | building (defect; tier A) |
+| CI-unit-strace-retry-4 | CI-unit-strace-retry-4: audit opens of another process's /proc fd; trace unlink, rename and truncate; isolate sitecustomize; read .trace.cut in clash_audit. Release; from #5411. | #5407, #5411 | building (release; tier A) |
 | IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | queued (release; tier A) |
 | IMG-keeper-reach-gen-tree | IMG-keeper-reach-gen-tree: the tree check reads crypttab/veritytab/integritytab, the initrd gets the unit, credential and repart.d checks, and the docstring points the generator routes at finish_image.py. Release; from #5289. | #5289 | queued (release; tier A) |
+| TEST-flake-ble-wire-le | TEST-flake-ble-wire-le: TestWireRoundTrip races on the package-level byte order le (2nd sighting). Release; from #5362. | #5290, #5362 | building (release; tier A) |
+| TEST-flake-arc6-owner-chat | TEST-flake-arc6-owner-chat: TestARC6OwnerChatReachesTheGuestAndBack gets an empty message under broker-race (2nd sighting). Release; from #5424. | #5235, #5424 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
