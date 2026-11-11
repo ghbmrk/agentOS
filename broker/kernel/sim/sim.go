@@ -888,15 +888,21 @@ func (s *sim) syncPhone() {
 }
 
 // cut records the phone as cut off, in the world's own books: its grants
-// the log does not hold live by now never go live.
+// the log does not hold live by the cut-off's time never go live. That time
+// is the entry's At, the kernel's floored Earliest, not the sim's clock.
 func (s *sim) cut() {
-	st := s.k.State()
+	st, at := s.k.State(), s.kt()
+	for _, e := range s.k.Log().Entries() {
+		if e.Type == kernel.TUnenrolled {
+			at = e.At
+		}
+	}
 	for _, id := range s.byPhone {
 		g, ok := st.Grants[id]
-		if !ok || g.From > s.kt() { // never live: dropped by a crash, or cancelled in its hold
+		if !ok || g.From > at { // never live: dropped by a crash, or cancelled in its hold
 			s.w.dead[id] = true
 		}
-		if ok && g.From > s.kt() {
+		if ok && g.From > at {
 			s.cutCancelled++
 		}
 	}

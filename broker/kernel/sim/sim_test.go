@@ -89,9 +89,19 @@ func TestSameSeedGivesTheSameLog(t *testing.T) {
 	}
 }
 
-// Each mutant is caught within 100 seeds. The seeds run four at a time, each
-// run on its own state, so the race build's run stays inside its timeout.
+// Each mutant is caught within 100 seeds, on a seed the unmutated sim
+// passes, so a fault of the sim's own is never counted as a catch. The
+// seeds run four at a time, each run on its own state, so the race build's
+// run stays inside its timeout. Seed 75 at 200 ops once failed unmutated: the
+// cut-off judged a grant's hold on the sim's clock, not the kernel's.
 func TestMutantsAreCaught(t *testing.T) {
+	var clean [100]func() error
+	for i := range clean {
+		clean[i] = sync.OnceValue(func() error { _, err := Run(Config{Seed: uint64(i), Ops: 200}); return err })
+	}
+	if err := clean[75](); err != nil {
+		t.Fatalf("seed 75 unmutated: %v", err)
+	}
 	for _, m := range []Mutant{MutantClerkTrusts, MutantNoDedupe, MutantNoClock} {
 		var mu sync.Mutex
 		next, caught := 0, false
@@ -108,6 +118,10 @@ func TestMutantsAreCaught(t *testing.T) {
 						return
 					}
 					if _, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: m}); err != nil {
+						if base := clean[seed](); base != nil {
+							t.Errorf("seed %d fails unmutated: %v", seed, base)
+							continue
+						}
 						mu.Lock()
 						caught = true
 						mu.Unlock()
