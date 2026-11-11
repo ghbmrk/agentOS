@@ -1735,6 +1735,9 @@ func TestPlanTokenAnswerIsHeldToItsShape(t *testing.T) {
 		if det != c.want || (resp != nil) != (c.want == "") {
 			t.Errorf("%s: %v %q, want %q", c.name, resp != nil, det, c.want)
 		}
+		if stop := map[bool]string{true: "", false: plan.StopUnswappable}[c.want == ""]; p.Stopped() != stop {
+			t.Errorf("%s: the route reads %q, want %q", c.name, p.Stopped(), stop)
+		}
 		if resp != nil {
 			read(t, resp)
 		}
@@ -1900,6 +1903,7 @@ func TestPlanRefreshAnsweredAfterAnUnswappableStop(t *testing.T) {
 		if after, _ := f.sec.MarshalBinary(); !bytes.Equal(before, after) {
 			t.Errorf("%s: an answer to a stopped route rewrote the slot", c.name)
 		}
+		returns(t, "a Resume after it", func() { p.Resume() })
 	}
 }
 
@@ -2103,6 +2107,7 @@ func TestPlanRefreshIsStaleOnceItHoldsTheCommitLock(t *testing.T) {
 	if d := <-got; d != plan.DStale || p.Stopped() != "" {
 		t.Fatalf("a refresh answer to a login removed meanwhile: %q, stopped %q", d, p.Stopped())
 	}
+	returns(t, "a Remove after it", func() { p.Remove() })
 }
 
 // deep is a value nested n objects deep.
@@ -2136,6 +2141,7 @@ func TestPlanModelBodyHeldToEachRule(t *testing.T) {
 		{"an input item that is text", "input", func(m map[string]any) { m["input"] = []any{"x"} }},
 		{"tools inside an input item", "tool", func(m map[string]any) { m["input"] = msg("meta", tools) }},
 		{"additional_tools with no tools", "input", func(m map[string]any) { m["input"] = []any{map[string]any{"type": "additional_tools"}} }},
+		{"content that is text", "", func(m map[string]any) { m["input"] = msg("content", "x") }},
 		{"content that is a number", "content", func(m map[string]any) { m["input"] = msg("content", 5) }},
 		{"a content part that is text", "content", func(m map[string]any) { m["input"] = msg("content", []any{"x"}) }},
 		{"tools inside a content part", "tool", func(m map[string]any) {
