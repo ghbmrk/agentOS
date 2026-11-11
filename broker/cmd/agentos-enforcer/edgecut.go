@@ -139,18 +139,18 @@ func (c *edgeCut) Persist() error {
 // Lift lifts the cut on day. The page calls it only after the owner's
 // passkey assertion on the page's own lift challenge; nothing on the
 // channel reaches it. A lift that is not saved does not happen. A lift of
-// a cut on its overrun's day, or of one with no day (a record missing or
-// unreadable, whose overrun day is unknown), holds for the rest of day,
-// so an edge already past its cap is not cut again at the next reading
-// (#5399 item 4).
-func (c *edgeCut) Lift(day uint32) error {
+// a cut on its overrun's day holds for the rest of day, as does one of a
+// cut with no day (a record missing or unreadable) when the edge is past
+// its cap at the lift, so it is not cut again at the next reading (#5399
+// item 4). Within its cap, it is not held: its next overrun cuts.
+func (c *edgeCut) Lift(day uint32, past bool) error {
 	c.mu.Lock()
 	if !c.st.Cut {
 		c.mu.Unlock()
 		return nil
 	}
 	next := edgeCutState{}
-	if c.st.Day == day || c.st.Day == 0 {
+	if c.st.Day == day || c.st.Day == 0 && past {
 		next.Lifted = day
 	}
 	b, _ := json.Marshal(next)
@@ -172,6 +172,20 @@ func (d *Enforcer) tripEdge(why string) {
 	}
 }
 
+// edgePast reports whether the edge is past its cap today, as the drop
+// holds it: its count past the cap, or every cap held spent (the day
+// unreadable, ENF-l-14, or the table's bytes lost, net.unread).
+func (d *Enforcer) edgePast() bool {
+	d.fwMu.Lock()
+	defer d.fwMu.Unlock()
+	c := d.net.counter
+	if c == nil || d.net.unread {
+		return true
+	}
+	n := c.Counts()
+	return n.EdgeCount > n.EdgeCap
+}
+
 // pageEdge is the edge's cut as the page shows and lifts it (page.Edge).
 type pageEdge struct{ d *Enforcer }
 
@@ -181,7 +195,7 @@ func (p pageEdge) Cut() (bool, string) { return p.d.edge.Cut() }
 // then the firewall.
 func (p pageEdge) LiftEdge() error {
 	d := p.d
-	err := d.edge.Lift(traffic.Day(d.dp.Now()))
+	err := d.edge.Lift(traffic.Day(d.dp.Now()), d.edgePast())
 	if cut, _ := d.edge.Cut(); !cut {
 		d.loadCut() // lifted, though resolving its trips may have failed
 	}

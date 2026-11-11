@@ -900,6 +900,61 @@ func TestCutRecordsMissing(t *testing.T) {
 	}
 }
 
+// TestDayZeroLiftWithinCap (#5399 item 4, Security on #5434): the lift of
+// a cut with no day (a missing record) holds for the rest of the day only
+// when the edge is already past its cap. Within its cap it is not held,
+// so its overrun later that day cuts it, with a trip, as any overrun does.
+func TestDayZeroLiftWithinCap(t *testing.T) {
+	x, doc, a := capped(t)
+	x.d.Close()
+	if err := os.Remove(filepath.Join(x.dir, fileEdgeCut)); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
+	x.setListing(listingOf(t, x, doc, 7, 10, 5000, true)) // at the cap, not past it
+	x.advance(readEvery)
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if cut, _ := x.d.edge.held(traffic.Day(x.d.dp.Now())); cut {
+		t.Fatal("fixture: not lifted")
+	}
+	if _, lifted := x.d.edge.held(traffic.Day(x.d.dp.Now())); lifted {
+		t.Fatal("a lift of a cut with no day, within the cap, holds the edge for the day")
+	}
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
+	x.advance(readEvery)
+	trips := 0
+	for _, r := range x.d.alerts.Status().Open {
+		if r.Kind == alert.Trip && r.Device == edgeDevice {
+			trips++
+		}
+	}
+	if cut, _ := x.d.edge.Cut(); !cut || trips != 1 {
+		t.Fatalf("an overrun after the lift: cut %v, %d trips", cut, trips)
+	}
+	// Every cap held spent counts as past: the table's bytes lost, or the
+	// day unreadable.
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.d.fwMu.Lock()
+	c := x.d.net.counter
+	x.d.net.unread = true
+	x.d.net.counter = traffic.NewCounter(x.d.dp.Now, traffic.CapsOf(doc))
+	x.d.fwMu.Unlock()
+	unread := x.d.edgePast()
+	x.d.fwMu.Lock()
+	x.d.net.unread, x.d.net.counter = false, nil
+	x.d.fwMu.Unlock()
+	spent := x.d.edgePast()
+	x.d.fwMu.Lock()
+	x.d.net.counter = c
+	x.d.fwMu.Unlock()
+	if !unread || !spent {
+		t.Fatalf("caps held spent: past %v with the table unread, %v with the day unreadable", unread, spent)
+	}
+}
+
 // TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
 // saved at a clean stop, so the restart finds the edge cut; and the cut
 // is never written to the firewall before its first load.
