@@ -690,6 +690,19 @@ HEAD_GUARD_LINES = [
     '          echo "current=false" >> "$GITHUB_OUTPUT"',
 ]
 CLAIM_WAITS = ["  claimed:", "    needs: head", "    if: ${{ needs.head.outputs.current == 'true' }}"]
+# L3 on #5433: "Re-run failed jobs" copies `head`'s current=true from attempt 1, so each job that
+# runs PR tests or decides reads the head itself as its first step and fails on an older one.
+HEAD_CHECK_JOBS = ("plan", "mutants", "mutgate")
+HEAD_CHECK_LINES = [
+    "    permissions:",
+    "      contents: read",
+    "      pull-requests: read",
+    "    steps:",
+    "      - name: This run's head is still the PR's current head",
+] + HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        env:"):-3] + [
+    '          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run\'s head $RUN_HEAD is not the PR\'s current head '
+    '$now: a rerun of an old head gates nothing; the current head\'s own run decides"; exit 1; }',
+]
 
 
 def head_guard_problems(text):
@@ -707,8 +720,14 @@ def head_guard_problems(text):
     # Only the deciding job may run past a skipped claim, and it fails unless the claim succeeded.
     for a, b in zip(jobs, jobs[1:]):
         body = "\n".join(code[a:b])
+        name = code[a].strip(SP + ":")
+        if name in HEAD_CHECK_JOBS:
+            at = [i for i in range(a, b) if code[i] == "    permissions:"]
+            if [l for l in code[a:b] if l.startswith("    permissions")] != ["    permissions:"] or \
+                    code[at[0]:at[0] + len(HEAD_CHECK_LINES)] != HEAD_CHECK_LINES or "    steps:" in code[a:at[0]]:
+                return ["%s does not read the PR's head first" % name]
         if code[a] != "  mutgate:" and re.search(r"\b(always|cancelled|failure|success)\(", body):
-            return ["%s runs past a skipped claim" % code[a].strip(SP + ":")]
+            return ["%s runs past a skipped claim" % name]
         if code[a] == "  mutgate:" and '[ "$CLAIMED" = success ] || exit 1' not in body:
             return ["the mutgate job does not fail when the claim did not run"]
     return []
@@ -861,7 +880,23 @@ class WorkflowTest(unittest.TestCase):
                                       "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
             "gate passes a skip": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
             "no jobs line": ("\njobs:\n", "\njobs: \n"),
+            # L3 on #5433: each job that runs PR tests or decides checks the head itself, first.
+            "a job's check passes an old head": ('          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run',
+                                                 '          true || { echo "::error::this run'),
+            "a second permissions key": ("    if: ${{ !cancelled() }}\n", "    if: ${{ !cancelled() }}\n    permissions: {}\n"),
         }
+        check = "\n".join(HEAD_CHECK_LINES[4:]) + "\n"
+        for job in HEAD_CHECK_JOBS:
+            body = text.split("\n  %s:\n" % job, 1)[1]
+            edits["no check in " + job] = ("\n  %s:\n" % job + body[:body.index(check) + len(check)],
+                                           "\n  %s:\n" % job + body[:body.index(check)].replace(
+                                               "    permissions:\n      contents: read\n      pull-requests: read\n", ""))
+            edits["check after the checkout in " + job] = (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - uses: actions/checkout@",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - uses: actions/checkout@x\n" + check
+                + "      - uses: actions/checkout@") if job != "mutgate" else (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - name: The claim ran",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + "      - name: The claim ran")
         for edit, (old, new) in edits.items():
             with self.subTest(edit):
                 self.assertIn(old, text)
@@ -883,6 +918,11 @@ class WorkflowTest(unittest.TestCase):
                 got = pathlib.Path(d, "out").read_text().strip() if pathlib.Path(d, "out").exists() else ""
                 self.assertEqual(got, want)
                 self.assertEqual("::notice::this run's head" in r.stdout, want == "current=false")
+                # Each later job's own check: only the current head goes on; anything else fails the job.
+                check = "\n".join(l[10:] for l in HEAD_CHECK_LINES[HEAD_CHECK_LINES.index("        run: |") + 1:])
+                r = subprocess.run(["bash", "-e", "-c", check], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0 if want == "current=true" else 1, r.stdout + r.stderr)
+                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, want == "current=false")
 
     def test_concurrency_block_is_read_whole(self):
         # #5409 (from #5408's review): the pinned block's three lines with more after them fail,

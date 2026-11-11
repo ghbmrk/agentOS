@@ -102,7 +102,22 @@ jobs:
     timeout-minutes: 15
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
+      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
+      - name: This run's head is still the PR's current head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || { echo "::error::cannot read the PR's head"; exit 1; }
+          [[ "$now" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the PR's head is not a sha: $now"; exit 1; }
+          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run's head $RUN_HEAD is not the PR's current head $now: a rerun of an old head gates nothing; the current head's own run decides"; exit 1; }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
@@ -164,7 +179,22 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.shards) }}
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
+      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
+      - name: This run's head is still the PR's current head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || { echo "::error::cannot read the PR's head"; exit 1; }
+          [[ "$now" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the PR's head is not a sha: $now"; exit 1; }
+          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run's head $RUN_HEAD is not the PR's current head $now: a rerun of an old head gates nothing; the current head's own run decides"; exit 1; }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
@@ -241,7 +271,22 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
+      # #5409 (L3): "Re-run failed jobs" copies the `head` job's result from attempt 1, so each job
+      # that runs PR tests or decides reads the PR's head itself, first, and fails on an older one.
+      - name: This run's head is still the PR's current head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || { echo "::error::cannot read the PR's head"; exit 1; }
+          [[ "$now" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the PR's head is not a sha: $now"; exit 1; }
+          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run's head $RUN_HEAD is not the PR's current head $now: a rerun of an old head gates nothing; the current head's own run decides"; exit 1; }
       - name: The claim ran and every claimed package passed
         env:
           CLAIMED: ${{ needs.claimed.result }}
