@@ -1068,8 +1068,10 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || trips != 1 {
 		t.Fatalf("an overrun after the lift: cut %v, %d trips", cut, trips)
 	}
-	// Every cap held spent counts as past: the table's bytes lost, or the
-	// day unreadable.
+	// The day unreadable holds every cap spent, which counts as past. The
+	// table unread does not (#5445 item 1): its spend is the drop's, and a
+	// lift in that window would otherwise hold the whole day after the
+	// table reads again.
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
 	x.d.fwMu.Lock()
 	c := x.d.net.counter
@@ -1084,8 +1086,8 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	x.d.fwMu.Lock()
 	x.d.net.counter = c
 	x.d.fwMu.Unlock()
-	if !unread || !spent {
-		t.Fatalf("caps held spent: past %v with the table unread, %v with the day unreadable", unread, spent)
+	if unread || !spent {
+		t.Fatalf("past %v with the table unread (want false), %v with the day unreadable (want true)", unread, spent)
 	}
 }
 

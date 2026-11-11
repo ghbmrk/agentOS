@@ -174,12 +174,14 @@ func (d *Enforcer) tripEdge(why string) {
 
 // edgePast reports whether the edge is past its cap today, as the drop
 // holds it: its count past the cap, or every cap held spent (the day
-// unreadable, ENF-l-14, or the table's bytes lost, net.unread).
+// unreadable, ENF-l-14). An unread table (net.unread) is not past: its
+// held spend is the drop's, and a lift taken in that window must not hold
+// the day after the table reads again (#5445 item 1).
 func (d *Enforcer) edgePast() bool {
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	c := d.net.counter
-	if c == nil || d.net.unread {
+	if c == nil {
 		return true
 	}
 	n := c.Counts()

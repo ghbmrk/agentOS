@@ -80,6 +80,9 @@ type network struct {
 	// its table is taken, which the first reading's listing that reads
 	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
 	unread bool
+	// unreadShown is unread as the page reads it, under resMu, so the
+	// page never waits on a load (pageCaps.Day, #5445 item 4).
+	unreadShown bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -254,7 +257,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		_, d.net.edgeMerged = d.net.merging[l.Edge]
 		defer func() {
 			if err != nil {
-				d.net.edgeMerged, d.net.unread = merged, unread
+				d.net.edgeMerged = merged
+				d.setUnread(unread)
 			}
 		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
@@ -264,7 +268,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// never held back, with every cap held spent until a full load
 		// that read its table is taken (holdDrop). The first load after a
 		// start has none to read: a reboot leaves no table.
-		d.net.unread = err != nil && d.loaded != ""
+		d.setUnread(err != nil && d.loaded != "")
 		if err != nil {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
 			running = nil
@@ -1063,6 +1067,14 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, 
 		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
 	return over, kernelCut, nil
+}
+
+// setUnread sets net.unread and what the page reads of it; d.fwMu is held.
+func (d *Enforcer) setUnread(v bool) {
+	d.net.unread = v
+	d.net.resMu.Lock()
+	d.net.unreadShown = v
+	d.net.resMu.Unlock()
 }
 
 // addReading adds the reading in listing, the running table compiled

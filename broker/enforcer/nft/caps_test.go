@@ -474,7 +474,12 @@ func TestEdgeTrippedFollowsTheText(t *testing.T) {
 			t.Errorf("%s: the text empties a set EdgeTripped says still cuts", c.name)
 		}
 	}
-	for _, bad := range []string{`{`, `{"nftables": [{"quota": "unreadable"}]}`, `{"nftables": [{"set": "unreadable"}]}`, `{"nftables": [` + set(`7`) + `]}`, `{"nftables": [` + set(`{"elem": 7}`) + `]}`} {
+	for _, bad := range []string{`{`, `{"nftables": [{"quota": "unreadable"}]}`, `{"nftables": [{"set": "unreadable"}]}`, `{"nftables": [` + set(`7`) + `]}`, `{"nftables": [` + set(`{"elem": 7}`) + `]}`,
+		// An element with no name is an error wherever it sits among the
+		// others (#5445 item 3), not skipped.
+		`{"nftables": [` + set(`{"elem": {}}`) + `]}`, `{"nftables": [` + set(`{"elem": {"val": ""}}`) + `]}`,
+		`{"nftables": [` + set(`{"elem": {}}, "edge0"`) + `]}`, `{"nftables": [` + set(`"edge0", {"elem": {}}`) + `]}`,
+		`{"nftables": [` + set(`""`) + `]}`} {
 		if _, err := EdgeTripped([]byte(bad), l, p); err == nil {
 			t.Errorf("listing %s read back", bad)
 		}

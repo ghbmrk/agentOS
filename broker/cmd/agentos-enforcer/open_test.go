@@ -502,19 +502,41 @@ func TestUnreadTableHeldSpent(t *testing.T) {
 		t.Fatal("fixture: caps spent")
 	}
 
+	// A load the firewall refuses leaves what the page shows as it was
+	// (#5445 item 4): the table was readable before it.
+	listFails(true)
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	refused := x.current()
+	refused.Caps = map[string]uint64{"updates.example": 400}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), refused)
+	held := x.d.net.unread
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = false
+	x.fire.mu.Unlock()
+	if err == nil || held || (pageCaps{x.d}).Day().Unread {
+		t.Fatalf("a refused load over an unread table: err %v, held %v, shown %v", err, held, (pageCaps{x.d}).Day().Unread)
+	}
+
 	// A tightening loads while the table does not read, with every cap
 	// held spent and the edge held.
-	listFails(true)
 	n := loads()
 	before := x.fire.last()
 	next := x.current()
 	next.Caps = map[string]uint64{"updates.example": 500}
 	x.d.fwMu.Lock()
-	err := x.d.loadNetwork(context.Background(), next)
+	err = x.d.loadNetwork(context.Background(), next)
 	unread := x.d.net.unread
 	x.d.fwMu.Unlock()
 	if err != nil || loads() != n+1 || x.fire.last() == before {
 		t.Fatalf("a tightening with the table unreadable: %v, %d loads", err, loads()-n)
+	}
+	// Home says so (#5445 item 4): the caps are held while the table is unread.
+	if !(pageCaps{x.d}).Day().Unread {
+		t.Fatal("home does not show the caps held while the table is unread")
 	}
 	if c, e := spentIn(t, x); !c || !e || !unread || strings.Contains(x.fire.last(), edgeTripRule) {
 		t.Fatalf("the load over an unread table: core spent %v, edge spent %v, held %v, kernel cut %v", c, e, unread, strings.Contains(x.fire.last(), edgeTripRule))
@@ -540,6 +562,9 @@ func TestUnreadTableHeldSpent(t *testing.T) {
 	x.d.fwMu.Lock()
 	unread = x.d.net.unread
 	x.d.fwMu.Unlock()
+	if (pageCaps{x.d}).Day().Unread {
+		t.Fatal("home still shows the caps held once a load read its table")
+	}
 	if unread || loads() < n+3 {
 		t.Fatalf("the table reads again: still held %v, %d loads", unread, loads()-n)
 	}

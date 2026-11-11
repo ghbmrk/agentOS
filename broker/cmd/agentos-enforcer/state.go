@@ -138,7 +138,10 @@ func (p pageCaps) Day() page.CapsDay {
 	f := &p.d.fresh
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return page.CapsDay{Spent: p.d.net.spent, DueMS: f.due, Starting: f.starting || f.started,
+	p.d.net.resMu.Lock()
+	unread := p.d.net.unreadShown
+	p.d.net.resMu.Unlock()
+	return page.CapsDay{Spent: p.d.net.spent, Unread: unread, DueMS: f.due, Starting: f.starting || f.started,
 		Retrying: f.starting, Unsaved: f.unsaved != nil}
 }
 
