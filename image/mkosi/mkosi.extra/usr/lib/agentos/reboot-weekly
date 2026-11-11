@@ -27,7 +27,8 @@ if due; then
 	# still standing from an earlier drill is superseded, so it cannot stand in for this one.
 	mkdir -p -m 0700 "$D"
 	rm -f "$D/pending" "$D/pending.new"
-	: >"$D/unrecorded" || echo "agentos-reboot: FAIL drill marker not written; a missed record goes unreported"
+	# true, not ":": a redirection error on a special builtin exits the shell, which would skip the reboot.
+	true >"$D/unrecorded" || echo "agentos-reboot: FAIL drill marker not written; a missed record goes unreported"
 	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
 	st=$(veritysetup status usr 2>/dev/null)
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')

@@ -310,6 +310,19 @@ class DrillTest(unittest.TestCase):
         self.assertEqual(rc, 0, line)
         self.assertFalse((self.drill / "unrecorded").exists())
 
+    def test_a_marker_that_cannot_be_created_still_reboots(self):
+        # #5460 delta L3 1: a directory at unrecorded stands in for a create that fails; the reboot is
+        # still asked for (a redirected ":" would exit the shell before it), under sh and bash --posix.
+        write(self.root, "var/lib/agentos/drill/unrecorded/x")
+        for shell in (["sh"], ["bash", "--posix"]):
+            with self.subTest(shell=shell[0]):
+                self.log.unlink(missing_ok=True)
+                (self.drill / "pending").unlink(missing_ok=True)
+                r = subprocess.run(shell + [str(AG / "reboot-weekly")], env=self.env(), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("agentos-reboot: FAIL drill marker not written", r.stdout)
+                self.assertEqual(self.log.read_text().splitlines()[-1], "systemctl reboot --check-inhibitors=yes")
+
     def test_an_ordinary_reboot_leaves_nothing_to_report(self):
         write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
         out, _ = self.reboot()
