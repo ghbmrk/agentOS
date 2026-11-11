@@ -455,9 +455,13 @@ func TestLeasesOf(t *testing.T) {
 		t.Fatalf("no file: leases %+v", got)
 	}
 	// An address on two lines seeds neither (#5394 item 2), whether the
-	// hardware addresses differ or not; the address's neighbours seed.
+	// hardware addresses differ or not; the address's neighbours seed. A
+	// line that does not parse names no address and proves no clock.
 	file = strings.Join([]string{
 		"1100 02:00:00:00:00:01 10.30.0.10 * *",
+		"1100 not-a-mac 10.30.0.10 * *",
+		"later 02:00:00:00:00:09 10.30.0.10 * *",
+		"99999999 02:00:00:00:00:09 10.30.0.x * *",
 		"1100 02:00:00:00:00:02 10.30.0.14 * *",
 		"1200 02:00:00:00:00:03 10.30.0.14 * *",
 		"1100 02:00:00:00:00:04 10.30.0.15 * *",
