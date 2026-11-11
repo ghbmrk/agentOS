@@ -336,9 +336,13 @@ func TestRunningTableUnreadable(t *testing.T) {
 	x.fire.mu.Lock()
 	x.fire.listErr = fmt.Errorf("load: listing enforcer: %w: Error: No such file or directory", load.ErrNoTable)
 	x.fire.mu.Unlock()
+	logged := x.logs("firewall: running table unreadable")
 	x.restart()
 	if x.d.net.unread || (pageCaps{x.d}).Day().Unread {
 		t.Fatal("a first load over an absent table holds the caps")
+	}
+	if x.logs("firewall: running table unreadable") != logged {
+		t.Fatal("an absent table at a first load was logged as unreadable")
 	}
 	x.enforced()
 	x.d.fwMu.Lock()

@@ -297,7 +297,7 @@ func TestFreshDayPage(t *testing.T) {
 	// #5445 item 4: a table the last load could not read holds every cap
 	// spent, with a line of its own and no button: it clears by itself.
 	ca.day.Unread = true
-	if h := g.homeHTML(); !strings.Contains(h, "could not read the firewall's count of today's bytes") || strings.Contains(h, `data-action="fresh-day"`) {
+	if h := g.homeHTML(); !strings.Contains(h, "could not read the firewall's count of today's bytes") || strings.Contains(h, `data-action="fresh-day"`) || strings.Contains(h, "nor its own record") {
 		t.Errorf("home does not say the caps are held while the table is unread:\n%s", h)
 	}
 	ca.day.Unread = false
