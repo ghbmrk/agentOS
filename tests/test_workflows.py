@@ -552,7 +552,7 @@ KEEPS_EVERY_RUN = {"premerge.yml"}
 # may quote it, and a text match on `on:` missed `"on":`. Each top-level line must be one workflow
 # key, plain or quoted, once; the triggers one plain or quoted event a line at one indent, or one
 # flow list of names. Any other form (an anchor, alias, merge key, tag, `?` key, second document,
-# tab, unknown or repeated key) fails rather than being read, so no spelling hides a trigger.
+# tab, indented first key, unknown or repeated key) fails rather than being read, so no spelling hides a trigger.
 TOP_KEY = re.compile(r"""(["']?)(name|run-name|on|permissions|env|defaults|concurrency|jobs)\1[ \t]*:(?=[ \t]|$)""")
 EVENT = re.compile(r"""(["']?)([a-z_]+)\1[ \t]*:(?=[ \t]|$)""")
 EVENT_LIST = re.compile(r"[a-z_]+|\[[ \t]*[a-z_]+(?:[ \t]*,[ \t]*[a-z_]+)*[ \t]*\]")
@@ -580,6 +580,8 @@ def workflow_triggers(text):
                     problems.append("triggers the check cannot read: %r" % rest)
                 key = "on, flow"
             continue
+        if key is None:
+            problems.append("an indented line before the first top-level key: %r" % line)
         if key == "on, flow":
             problems.append("a line under a flow list of triggers: %r" % line)
         if key != "on":
@@ -725,7 +727,12 @@ class WorkflowTest(unittest.TestCase):
             "a line of ideographic space": ("permissions:", "\u3000\npermissions:"),
             "two names without a list": ("on:\n  pull_request:", "on: push pull_request"),
             "alias in a flow list": ("on:\n  pull_request:", "on: [push, *t]"),
+            "indented before the first key": ("name: x", " name: x"),
         }
+        # L3 on #5408: a document indented by one space throughout is still one GitHub reads.
+        indented = "".join(" " + line for line in plain.splitlines(True))
+        self.assertTrue(workflow_triggers(indented)[1])
+        self.assertTrue(supersede_problems("mutgate.yml", indented))
         for name, (old, new) in unread.items():
             with self.subTest(name):
                 self.assertIn(old, plain)
