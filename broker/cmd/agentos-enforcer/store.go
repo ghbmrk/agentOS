@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 )
 
 // The enforcer's state files, each under the state directory (ASSUMPTIONS
@@ -24,6 +26,24 @@ const (
 	fileAlerts     = "alerts.jsonl"  // alert.Alerts journal
 	fileHeads      = "heads.jsonl"   // heads.Store journal
 )
+
+// provisionState provisions a fresh state directory at first boot: enrolment
+// with the case code (enrol.Provision refuses a store that holds
+// anything), then the core's and the edge's cuts, written uncut. A cut
+// record is never removed after this, so one missing at start is a cut
+// (openCut, openEdgeCut); a first boot that stops between the two writes
+// starts both cut, and the owner resumes them on the page.
+func provisionState(dir, caseCode string) error {
+	if err := enrol.Provision(fileStore{path: filepath.Join(dir, fileEnrol)}, caseCode, nil); err != nil {
+		return err
+	}
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if err := (fileStore{path: filepath.Join(dir, name)}).Save([]byte("{}")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 var errStateDir = errors.New("state directory must be a directory owned by this user with no group or other access")
 

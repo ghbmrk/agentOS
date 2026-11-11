@@ -194,6 +194,8 @@ BOX_LINKS = {"var/lock": ("../run/lock", "/run/lock"),
 # systemd-timesyncd's var/lib/systemd/timesync among them.
 UNIT_MADE_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
                   "LogsDirectory": "var/log", "ConfigurationDirectory": "etc"}
+# #5233: the modes systemd gives those directories (root_made_dirs).
+MADE_MODES = tuple(k + "Mode" for k in UNIT_MADE_DIRS)
 # #5167: the tmpfiles.d types that leave a directory, or nothing, at the path they name (TMPFILES_STEP_TYPES
 # without the file types, and the attribute and ACL types). Any other line at a unit-made directory may
 # leave a link, a copy, a file or a device node there, which systemd would chmod and chown.
@@ -227,7 +229,8 @@ PID1_NAMES = ("After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "P
 # #5167: settings that mount in the unit's own namespace and, on the host, make only root's 0755 directories
 # on the way (namespace.c mkdir_p_label, mkdir_parents) and at the mount point a directory or an empty file
 # (make_mount_point_inode_from_path). Strictly above a unit-made directory that is root's alone; at it, a
-# file is what the chown would hand over, so there they count like any other setting.
+# file is what the chown would hand over, so there they count like any other setting; below one another
+# user holds, that user's links lead the way (inside_refusals, #5233).
 PID1_NAMESPACE_MAKES = ("BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem", "MountImages")
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
@@ -364,6 +367,7 @@ def _violations(root):
             + exec_allow_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
+            + inside_refusals(root)
             + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
@@ -1699,7 +1703,7 @@ def unit_made_dirs(root):
     are not covered). Each word, and each side of a:b, counts (made_steps); a value holding a specifier
     is refused, not expanded (Security 6760938141)."""
     root = str(root)
-    files, out = cached(unit_files, root)
+    files, out, _ = cached(unit_files, root)
     out, made = list(out), {}
     for path, rel in sorted(files.items()):
         try:
@@ -1712,19 +1716,140 @@ def unit_made_dirs(root):
             if key not in UNIT_MADE_DIRS or not v:
                 continue
             try:
-                # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so
-                # split() splits as systemd does once every other byte outside printable ASCII is refused.
-                if any(not " " <= c <= "~" and c != "\t" for c in v):
-                    raise ValueError(v)
-                got = [made_steps(p) for w in v.split() for p in w.split(":")]
+                got = [d for w in made_dir_words(key, v) for d in w]
             except ValueError:
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                            "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                 continue
-            for steps in got:
-                if steps:
-                    made.setdefault("/".join([UNIT_MADE_DIRS[key]] + steps), "%s= in %s" % (key, rel))
+            for d in got:
+                made.setdefault(d, "%s= in %s" % (key, rel))
     return made, out
+
+
+def made_dir_words(key, v):
+    """#5167, #5233: [[the tree paths each field of one word a or a:b names (made_steps)]] for one non-empty
+    *Directory= assignment KEY=V. ValueError for a value the check does not model."""
+    # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so split() splits as
+    # systemd does once every other byte outside printable ASCII is refused.
+    if any(not " " <= c <= "~" and c != "\t" for c in v):
+        raise ValueError(v)
+    return [["/".join([UNIT_MADE_DIRS[key]] + steps) for steps in (made_steps(p) for p in w.split(":")) if steps]
+            for w in v.split()]
+
+
+def unit_made_words(root):
+    """#5233: [(unit file path, how many fields the word has, every tree path a field may take on the box)]
+    for each word of every *Directory= assignment in every unit_files file. systemd 257 makes a source a at
+    <top>/<a> (for a dynamic user at <top>/private/<a>, linked from <top>/<a>) and a destination b as a link
+    at <top>/<b> (create_many_symlinks); a third field (flags) is taken as a name too. Each field counts in
+    both forms (made_private), a superset of every place systemd puts it. A file or value unit_made_dirs
+    refuses is left out here; violations() refuses it there."""
+    root, out = str(root), []
+    for path in cached(unit_files, root)[0]:
+        try:
+            lines = config_lines(Conf(root, path).content())
+        except (OSError, Unparsable):
+            continue
+        for _, key, v in lines:
+            try:
+                words = made_dir_words(key, v) if key in UNIT_MADE_DIRS and v else []
+            except ValueError:
+                continue
+            out.extend((path, len(w), {f for d in w for f in (d, made_private(d))}) for w in words if w)
+    return out
+
+
+def unit_merged_files(root, path):
+    """#5233: every file systemd 257 may merge into the unit it loads from unit file PATH (a unit_files
+    path): the file of that name at the top of each unit directory (the first wins; a link or a mask
+    there decides which) and every drop-in unit_with_dropins applies to the name. None when the check
+    cannot name that set: PATH is not at the top of a unit directory (a drop-in, or a file systemd reaches
+    only through a link), the name is a template's or an instance's, or a link of another name leads to
+    it (an alias, whose own drop-ins merge too; a .wants link of the same name only adds a dependency). A
+    top file that is a link of the same name (what systemctl link leaves) is not read, so it fails closed."""
+    root = str(root)
+    dirs = unit_dirs(root)[0]
+    d, name = path.rsplit("/", 1)
+    links = cached(unit_files, root)[2].get(path, [])
+    if d not in dirs or "@" in name or any(r.rsplit("/", 1)[-1] != name for r in links):
+        return None
+    tops = []
+    for x in dirs:
+        try:
+            if tree_lstat(root, x + "/" + name) is not None:
+                tops.append(Conf(root, x + "/" + name))
+        except OSError:
+            return None
+    return tops + unit_with_dropins(root, dirs, name)[1:]
+
+
+def unit_merged_lines(root, path):
+    """#5233: config_lines of every file unit_merged_files names for PATH, or None when it names none or
+    one cannot be read."""
+    files = unit_merged_files(root, path)
+    try:
+        return None if files is None else [ln for f in files for ln in config_lines(f.content())]
+    except (OSError, Unparsable):
+        return None
+
+
+def root_made_dirs(root):
+    """#5233: the tree paths of unit-made directories that only root's units make. The rule is keyed by the
+    tree path itself, so no second name can stand in for one (#5350 Security 6778501910, 6780012845,
+    6781649895; L3 6778896704, 6781841386). A word's paths (unit_made_words) are held when:
+    - the word is one field, so systemd makes no link for it (an a:b word is never held);
+    - its file's unit runs as root (unit_runs_as_root: every merged file readable, no User=, Group= or
+      DynamicUser=, no *DirectoryMode= a group or others could write);
+    - the tree and tmpfiles.d hand none of its paths to anyone (made_roots_alone);
+    - no word that fails the first two may take any of its paths (its own included).
+    systemd 257's setup_exec_directory then makes it root:root at most 0755, with no link at it or to it,
+    so no other user can put anything inside it. Stock trixie's systemd-journald.service
+    (RuntimeDirectory=systemd/journal, where its sockets and syslog.socket's live) is one. The sets carry no
+    file order. A directory nested in another is weighed step by step (inside_refusals), and a link over an
+    ancestor comes only from an a:b, whose paths are never held."""
+    words = cached(unit_made_words, root)
+    rooted = {p for p in {w[0] for w in words} if unit_runs_as_root(root, p)}
+    # A word that is not held takes its own paths, so only a one-field root word can pass the next line.
+    taken = {f for path, n, forms in words if n > 1 or path not in rooted for f in forms}
+    return {f for _, _, forms in words if not forms & taken and all(made_roots_alone(root, x) for x in forms)
+            for f in forms}
+
+
+def made_roots_alone(root, made):
+    """#5233: whether the tree and tmpfiles.d hand unit-made directory MADE to no one but root (root_made_dirs):
+    the tree holds a root-owned directory no group or others can write, with no ACL, or nothing, and no
+    tmpfiles.d line at MADE itself makes or remakes it (tmpfiles_maker). A recursive Z, A+ or D line on an
+    ancestor is not weighed here: unit_made_refusals' way rule and tmpfiles.allow refuse it."""
+    try:
+        st = tree_lstat(root, made)
+        acl = [] if st is None else [x for x in tree_xattrs(root, made) if x in ACL_XATTRS]
+    except OSError:
+        return False
+    if st is not None and (not stat.S_ISDIR(st.st_mode) or st.st_uid != TREE_OWNER or st.st_gid != TREE_GROUP
+                           or st.st_mode & 0o022 or acl):
+        return False
+    return tmpfiles_maker(root, made.split("/")) is None
+
+
+def unit_runs_as_root(root, path):
+    """#5233: whether the unit loaded from unit file PATH runs as root and makes its directories for root
+    alone (root_made_dirs)."""
+    lines = unit_merged_lines(root, path)
+    return lines is not None and not any(
+        k in USER_KEYS and v or k in MADE_MODES and (not re.fullmatch(r"[0-7]{1,4}", v) or int(v, 8) & 0o022)
+        for _, k, v in lines)
+
+
+def unit_only_watches(root, path, key):
+    """#5233: whether PID 1 only watches path setting KEY of path unit file PATH (inotify, which changes
+    nothing): always for PathExists= and PathExistsGlob= (path.c path_spec_mkdir skips them), and for the
+    other PATH_WATCHES when no file merged into the unit sets MakeDirectory= true (or one the check cannot
+    read), which would make the path (mkdir_p_label)."""
+    if key in ("PathExists", "PathExistsGlob"):
+        return True
+    lines = unit_merged_lines(root, path)
+    return lines is not None and not any(k == "MakeDirectory" and v and v.lower() not in FALSE_WORDS
+                                         for _, k, v in lines)
 
 
 def manager_environment_violations(root):
@@ -1761,8 +1886,9 @@ def manager_files(root):
 def unit_files(root):
     """#5167: ({tree path: the unit-directory entry that reaches it} for every regular file under the unit
     directories at ROOT, top level or in any subdirectory, hidden or not, and the regular file each link
-    there leads to, a mask skipped; and one error per directory or link the check cannot read)."""
-    root, out, files, todo = str(root), [], {}, list(dict.fromkeys(unit_dirs(root)[0]))
+    there leads to, a mask skipped; one error per directory or link the check cannot read; and, #5233,
+    {tree path: [every link there that leads to it]})."""
+    root, out, files, todo, linked = str(root), [], {}, list(dict.fromkeys(unit_dirs(root)[0])), {}
     while todo:
         d = todo.pop()
         try:
@@ -1788,7 +1914,8 @@ def unit_files(root):
                                "a unit directory it cannot read (#5167)" % (rel, tree_readlink(root, rel)))
                 else:
                     files.setdefault(got, rel)
-    return files, out
+                    linked.setdefault(got, []).append(rel)
+    return files, out, linked
 
 
 def unit_made_paths(root):
@@ -1803,10 +1930,10 @@ def unit_made_paths(root):
     printable ASCII, a mount unit name holding a backslash, and an fstab line holding a backslash or such a
     byte, or whose mount point does not open with '/', are refused, so every path left is read exactly as
     systemd reads it. An fstab line's bind source and option paths count like a unit's (What=, Options=).
-    KIND is "mount" for a mount point, "namespace" for PID1_NAMESPACE_MAKES, else "". *Directory= values
-    are unit_made_dirs'."""
+    KIND is "mount" for a mount point, "namespace" for PID1_NAMESPACE_MAKES, "watch" for a path PID 1 only
+    watches (unit_only_watches), else "". *Directory= values are unit_made_dirs'."""
     root, out, paths, loose = str(root), [], [], False
-    files, _ = cached(unit_files, root)
+    files = cached(unit_files, root)[0]
     for path, rel in sorted(files.items()):
         try:
             lines = config_lines(Conf(root, path).content())
@@ -1845,7 +1972,8 @@ def unit_made_paths(root):
                     out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                                "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
                     break
-                kind = "mount" if key == "Where" else "namespace" if key in PID1_NAMESPACE_MAKES else ""
+                kind = ("mount" if key == "Where" else "namespace" if key in PID1_NAMESPACE_MAKES
+                        else "watch" if key in PATH_WATCHES and unit_only_watches(root, path, key) else "")
                 paths.append((path_parts(w), "%s= in %s" % (key, rel), kind))
     try:
         text = Conf(root, "etc/fstab").text()
@@ -1871,7 +1999,10 @@ def unit_made_paths(root):
             else:
                 paths += [(path_parts(w), "etc/fstab", "") for w in words]
     # PID 1 makes each path following the links on its way (mkdir_p_label), so each counts as written and as
-    # the tree resolves it ('..' steps are refused above, so as written is never popped past a link).
+    # the tree resolves it ('..' steps are refused above, so as written is never popped past a link), each
+    # also through the box's own links (box_link_forms: /var/run and /var/lock count before the tree holds
+    # them; #5382 Security 6782954731).
+    seen = {(tuple(s), w, k) for s, w, k in paths}
     for steps, where, kind in list(paths):
         try:
             got = tree_resolve(root, steps)
@@ -1879,8 +2010,11 @@ def unit_made_paths(root):
             out.append("%s: /%s: a link on its way the tree check cannot follow; the tree check never passes a path it "
                        "cannot read (#5167)" % (where, "/".join(steps)))
             continue
-        if got != steps:
-            paths.append((got, where, kind))
+        # A box form lies under /run, which is empty at boot, so the tree has nothing on its way to resolve.
+        for p in [got] + [path_parts(f) for w in (steps, got) for f in box_link_forms("/" + "/".join(w))[1:]]:
+            if (tuple(p), where, kind) not in seen:
+                seen.add((tuple(p), where, kind))
+                paths.append((p, where, kind))
     return paths, loose, out
 
 
@@ -1929,7 +2063,8 @@ def unit_made_refusals(root):
        DirectoryMode= others can write, no named path has a parent PID 1 may make (umask 0) on the way.
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
-    service user's. Generators and transient units are not covered (unit_made_dirs). In front of these
+    service user's. A path PID 1 acts on inside the directory is inside_refusals' (#5233). Generators and
+    transient units are not covered (unit_made_dirs). In front of these
     rules, every line PID 1 may make, link or mount a host path for is on made.allow (made_allow_violations),
     so a route these rules do not model (a mount that aliases a way) still needs a reviewed entry."""
     out = []
@@ -1980,6 +2115,41 @@ def made_way_refusal(root, form):
                     "others can write)" % ("/".join(steps), where))
     why = chain_refusal(root, up, "/" + form, True, mounted=up[0] in BOX_MOUNTS)
     return None if why is None else "below a step another user can write or remake: " + why
+
+
+def inside_refusals(root):
+    """#5233: one violation per path PID 1 may make, link, bind or mount (unit_made_paths, a path it only
+    watches aside) inside a directory another user may write: a WORLD_WRITABLE one, a SERVICE_DIRS one, or
+    a unit-made directory in either form that root_made_dirs does not hold for root alone. PID 1
+    follows links on the way (mkdir_p_label for a socket's, a mount point's or a path unit's parents) and
+    at the path itself (socket_chown's chown, path_chown_recursive below a mount, Symlinks=), and that
+    user can swap any entry inside for a link between two of its steps, so the user decides what PID 1
+    acts on. A mount point inside a unit-made directory is unit_made_refusals' (rule 4: the chown descends
+    into it), whoever runs the unit, so it is not refused twice."""
+    root, out, refused = str(root), [], set()
+    held = cached(root_made_dirs, root)
+    for steps, where, kind in cached(unit_made_paths, root)[0]:
+        if kind == "watch" or where in refused:  # one line per setting, of its words as written or resolved
+            continue
+        for k in range(1, len(steps)):
+            d = "/".join(steps[:k])
+            made = None if d in WORLD_WRITABLE or d in SERVICE_DIRS or d in held else service_dir(root, d)
+            if d in WORLD_WRITABLE:
+                owner = "anyone on the box can write"
+            elif d in SERVICE_DIRS:
+                owner = "a login or service user owns"
+            elif made is not None and kind != "mount":
+                owner = "systemd makes for a unit and may hand to a user other than root (%s)" % made
+            else:
+                continue
+            # A mount option word may run on past its ',' (path_words); name the path as cut there.
+            out.append("%s: /%s is inside /%s, which %s; PID 1 makes, links, binds or chowns it following any link "
+                       "that user puts on its way, so that user decides what PID 1 acts on; name a path only root "
+                       "can write, or make the directory in a unit that runs as root (#5233)"
+                       % (where, "/".join(steps).split(",", 1)[0], d, owner))
+            refused.add(where)
+            break
+    return out
 
 
 def pid1_may_make(root, steps):
@@ -2172,7 +2342,10 @@ def keeper_violations(root):
       StartLimitIntervalSec= in [Unit], and no failure or start-limit action that reboots, which would
       restart it on every boot. Its one reboot is ExecStopPost=KERNEL_REBOOT (#2998); it sets no
       OnFailure= or OnSuccess=, and no other command names a REBOOT_WORDS tool. With that line, an
-      ExecStartPre= is KERNEL_UP_CLEAR."""
+      ExecStartPre= is KERNEL_UP_CLEAR.
+    - #5288: every assignment of a keeper unit's User=, Group= and DynamicUser=, in its file and every drop-in,
+      and the value systemd ends with, is the shipped one (KEEPER_USERS): PID 1 hands its directories to whoever
+      it runs as."""
     if _MAKERS is None:
         return once(keeper_violations, root)
     root = str(root)
@@ -2449,15 +2622,17 @@ def keeper_unit_violations(name, files, root):
         out.append("%s: Slice is %s; the keeper's units run in %s (D-154)" % (name, slice_, KEEPER_SLICE))
     if not keeper and slice_ == KEEPER_SLICE:
         out.append("%s: in %s but not one of the keeper's units (D-154)" % (name, KEEPER_SLICE))
-    # #5288: every assignment, not only the last, since systemd ignores an empty or invalid one of some.
+    # #5288: every assignment, not only the last, since systemd ignores an empty or invalid one of some. A key
+    # no assignment sets (an override file that leaves it out) is refused once, by the value systemd ends with.
     for key, pin in zip(USER_KEYS, KEEPER_USERS.get(name, ())):
-        for f, v in ini_every_in(files, "Service", key):
-            if v != pin:
-                out.append("%s: %s=%s in %s; a keeper unit runs as shipped (%s=%s): PID 1 hands its directories to "
-                           "whoever it runs as (#5288)" % (name, key, v, f.rel, key, pin))
-        if (ini_last(files, "Service", key) or "") != pin:
-            out.append("%s: %s is %s; a keeper unit runs as shipped (%s=%s) (#5288)"
-                       % (name, key, ini_last(files, "Service", key), key, pin))
+        shipped = "%s=%s" % (key, pin) if pin else "as root: no %s=" % key
+        bad = [(f, v) for f, v in ini_every_in(files, "Service", key) if v != pin]
+        for f, v in bad:
+            out.append("%s: %s=%s in %s; a keeper unit runs as shipped (%s): PID 1 hands its directories to "
+                       "whoever it runs as (#5288)" % (name, key, v, f.rel, shipped))
+        if not bad and (ini_last(files, "Service", key) or "") != pin:
+            out.append("%s: leaves %s unset; a keeper unit runs as shipped (%s): PID 1 hands its directories to "
+                       "whoever it runs as (#5288)" % (name, key, shipped))
     if not keeper and name not in NOEXEC_EXEMPT:
         hidden = ini_paths(files, "Service", "InaccessiblePaths")
         words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]

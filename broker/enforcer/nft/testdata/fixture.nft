@@ -228,6 +228,11 @@ table inet enforcer {
 		type ipv6_addr;
 		flags timeout;
 	}
+	set edge_trip {
+		type ifname;
+		size 1;
+		flags dynamic;
+	}
 	set capc_4 {
 		type ipv4_addr;
 		size 65535;
@@ -1146,6 +1151,10 @@ table inet enforcer {
 	}
 	chain capd_edge {
 		drop
+	}
+	chain over_edge {
+		add @edge_trip { "edge0" }
+		goto log_cap
 	}
 	chain cut_edge {
 	}
