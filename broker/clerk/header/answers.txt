@@ -1,0 +1,13 @@
+# Vendor answer header names a plan route may pass back to the guest
+# (CLK-14), beside the generic answer names in header.go: lines that start
+# with the vendor's name, then each name exactly as its pinned CLI reads
+# it. A # starts a comment anywhere on a line, a name holding * is dropped,
+# and a name holding a byte outside an RFC 9110 token refuses the whole
+# list. There are no prefixes, a name naming a credential is still refused
+# as an answer, and no name here can be sent upstream (#5346). A change
+# here widens what reaches a guest: review it as code.
+openai Openai-Model
+# The quota headers the pinned CLI reads (#5291), each by its exact name.
+openai X-Codex-Primary-Used-Percent X-Codex-Primary-Window-Minutes X-Codex-Primary-Reset-At
+openai X-Codex-Secondary-Used-Percent X-Codex-Secondary-Window-Minutes X-Codex-Secondary-Reset-At
+openai X-Codex-Credits-Has-Credits X-Codex-Credits-Unlimited X-Codex-Credits-Balance X-Codex-Rate-Limit-Reached-Type

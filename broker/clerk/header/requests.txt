@@ -1,0 +1,9 @@
+# Vendor request header names a plan route may send upstream (CLK-14),
+# beside the generic request names in header.go: lines that start with the
+# vendor's name, then each name exactly as its pinned CLI sends it. A #
+# starts a comment anywhere on a line, a name holding * is dropped, and a
+# name holding a byte outside an RFC 9110 token refuses the whole list. A
+# name here reaches the provider, and only names here do: answers.txt
+# cannot add one (#5346). A change here widens what reaches a provider:
+# review it as code.
+openai Openai-Beta Originator Version Session_id Conversation_id Chatgpt-Account-Id X-Openai-Internal-Codex-Responses-Lite
