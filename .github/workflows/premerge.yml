@@ -45,6 +45,19 @@ name: premerge
 # is fixed (vulncheck on #3503, #3509, #3520, #3523), so a failed check or workflow run is
 # excused when the same name failed in main's own first-attempt push or scheduled run of the
 # PR's merge base. Any other conclusion, a failure the base lacked and any status still hold it.
+# PREMERGE-merge-bind (#5384): the merge job waits only on this PR's runs (head repository and branch, from the
+# gate's own read of the PR) and on every check run outside the other runs' suites, so a fork PR opened on the same
+# commit cannot stall the bot merge with its own red or pending run.
+# PREMERGE-fork-rerun (#5383): GitHub names no PR in a fork PR's workflow_run (`pull_requests` is
+# empty), so the gate job skipped and a held check's completion left `premerge` at its last value.
+# The `fork-pr` job finds the one open PR into main whose head is the run's owner:branch and
+# dispatches this workflow on main with that number. It does not run the gate itself: the
+# dispatched run joins the PR's own concurrency group (`premerge-<number>`), so it never runs
+# beside the PR's comment or push runs, where a slower run that read an older verdict could post
+# its status last. Dispatching takes `actions: write`; that job reads the run's head only as
+# env strings, checks nothing out and runs no repository code. A dispatch from any other branch
+# runs that branch's copy, which the `premerge` environment refuses its key, as for any branch
+# workflow (PREMERGE-source); anyone who may dispatch may already comment, which reruns the gate.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -53,20 +66,28 @@ on:
   workflow_run:
     workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, mutgate, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: the PR to rerun the gate for (premerge's fork-pr job)
+        required: true
+        type: number
 permissions:
   contents: read
 concurrency:
-  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}
   cancel-in-progress: false
 jobs:
   premerge-gate:
     name: premerge-gate
-    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
     outputs:
       merge-head: ${{ steps.gate.outputs.merge-head }}
+      merge-repo: ${{ steps.gate.outputs.merge-repo }}
+      merge-ref: ${{ steps.gate.outputs.merge-ref }}
     permissions:
       contents: read
       issues: read
@@ -90,12 +111,13 @@ jobs:
         shell: bash # -eo pipefail: GitHub's default `bash -e` lets a failed read piped into jq pass
         id: gate
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           # The head, branch and base come from the API, not the event: a comment event has no PR payload.
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }
           gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
@@ -133,23 +155,10 @@ jobs:
             gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
               --jq '.[] | {author_association, created_at, updated_at, body}' > "$RUNNER_TEMP/comments.jsonl" || exit 1
             jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1
-            # PREMERGE-cancelled-checks (#5366): the head's runs and the merge base's main runs, each failed one with its
-            # jobs (the head's latest attempt, the base's first), so --check holds the checks the ruleset does not require.
+            # PREMERGE-cancelled-checks (#5366): the head's and the merge base's runs, so --check holds the checks the ruleset
+            # does not require. Main's copy of the script builds them (PREMERGE-runs-local, #5386), so a local check reads the same.
             onto=$(git merge-base refs/remotes/pr/base "$HEAD_SHA") || exit 1
-            runs() { # $1: the runs query, $2: the jobs route under a failed run
-              gh api --paginate "repos/$REPO/actions/runs?$1&per_page=100" --jq '.workflow_runs[]' | jq -s . > "$RUNNER_TEMP/r.json" || return 1
-              jq -r '.[] | select(.conclusion == "failure") | .id' "$RUNNER_TEMP/r.json" | while read -r id; do
-                gh api --paginate "repos/$REPO/actions/runs/$id/$2?per_page=100" --jq '.jobs[]' || exit 1
-              done | jq -s --slurpfile r "$RUNNER_TEMP/r.json" '. as $j | $r[0] | map(.id as $id | . + {jobs: [$j[] | select(.run_id == $id)]})'
-            }
-            runs "head_sha=$HEAD_SHA" jobs > "$RUNNER_TEMP/head-runs.json" || exit 1
-            runs "head_sha=$onto&event=push" attempts/1/jobs > "$RUNNER_TEMP/push-runs.json" || exit 1
-            runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$RUNNER_TEMP/schedule-runs.json" || exit 1
-            # The PR's number, head repository and branch bind each head run to this PR (another PR can share the commit).
-            jq -n --slurpfile h "$RUNNER_TEMP/head-runs.json" --slurpfile p "$RUNNER_TEMP/push-runs.json" \
-              --slurpfile s "$RUNNER_TEMP/schedule-runs.json" --slurpfile pr "$RUNNER_TEMP/pr.json" --arg repo "$REPO" \
-              '{repo: $repo, pr: {number: $pr[0].number, repo: $pr[0].head.repo.full_name, branch: $pr[0].head.ref},
-                head: $h[0], base: ($p[0] + $s[0])}' > "$RUNNER_TEMP/runs.json" || exit 1
+            bash tools/premerge_runs.sh "$REPO" "$RUNNER_TEMP/pr.json" "$onto" > "$RUNNER_TEMP/runs.json" || exit 1
             exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \
               --base refs/remotes/pr/base "$HEAD_SHA"
           ) && state=success
@@ -158,7 +167,7 @@ jobs:
           post "$state" "$out"
           if [ "$state" = success ] && [ "$out" = same ] && \
             jq -e '.state == "open" and .draft == false and .auto_merge == null' "$RUNNER_TEMP/pr.json" > /dev/null; then
-            echo "merge-head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            printf 'merge-head=%s\nmerge-repo=%s\nmerge-ref=%s\n' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"
           fi
   merge:
     name: merge
@@ -173,12 +182,16 @@ jobs:
         shell: bash # -eo pipefail: GitHub's default `bash -e` lets a failed read piped into jq pass
         env:
           GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}
+          HEAD_REPO: ${{ needs.premerge-gate.outputs.merge-repo }}
+          HEAD_REF: ${{ needs.premerge-gate.outputs.merge-ref }}
         run: |
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }
           [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
+          [ -n "$HEAD_REPO" ] && [ -n "$HEAD_REF" ] || { echo "::warning::#$PR_NUMBER head repository unknown: arm by hand"; exit 0; }
           # Every check run but this workflow's own jobs must have passed or failed on the merge base too; every status must have passed.
           # Each read stops the run on its own failure: a failed read must never look like no checks.
           # A job has no check run until GitHub creates it (`needs: scope`), so the head's workflow
@@ -201,13 +214,22 @@ jobs:
                     done | jq -cs 'map(select(.conclusion == "failure") | .name) | unique') || bruns='[]'
           fi
           echo "excused as failed on the merge base: $bwfs $bruns"
-          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
-            | jq -rs --argjson base "$bwfs" 'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)
+          # PREMERGE-merge-bind (#5384): another PR (a fork's, or one into another base) can carry this head commit, and
+          # its runs and their check runs sit on the same sha. A run is this PR's when its head repository and branch are
+          # the PR's; only the other runs' suites are left out of the check runs, so a check run no run claims still holds.
+          hr=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
+            | jq -cs --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" \
+                'map({ours: (.head_repository.full_name == $repo and .head_branch == $ref), check_suite_id, path, workflow_id, id, status, conclusion, name})') \
+            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
+          foreign=$(printf '%s' "$hr" | jq -c 'map(select(.ours | not) | .check_suite_id)')
+          wfs=$(printf '%s' "$hr" \
+            | jq -r --argjson base "$bwfs" 'map(select(.ours and (.path | startswith(".github/workflows/premerge.yml") | not))) | group_by(.workflow_id)[] | max_by(.id)
                       | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
                       | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
           runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs[]' \
-            | jq -r --argjson suite "$suite" --argjson base "$bruns" 'select(.check_suite.id != $suite)
+            | jq -r --argjson suite "$suite" --argjson foreign "$foreign" --argjson base "$bruns" 'select(.check_suite.id != $suite)
+                  | select(.check_suite.id | IN($foreign[]) | not)
                   | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
                   | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }
@@ -218,3 +240,36 @@ jobs:
             echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0
           fi
           echo "merged #$PR_NUMBER at $HEAD_SHA"
+  fork-pr:
+    name: fork-pr
+    if: github.event_name == 'workflow_run' && !github.event.workflow_run.pull_requests[0] && startsWith(github.event.workflow_run.event, 'pull_request')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      actions: write # dispatch premerge.yml on main for the run's PR, nothing else
+    steps:
+      - name: Rerun the gate for the run's one open PR into main
+        shell: bash # -eo pipefail: a failed read must stop the step, never read as no PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          # The run's head comes from a fork, so it is read only as these env strings, never as code.
+          [[ "$HEAD_OWNER" =~ ^[A-Za-z0-9-]+$ ]] && [ "$HEAD_REPO" != "${HEAD_REPO#"$HEAD_OWNER"/}" ] && [ -n "$HEAD_BRANCH" ] \
+            || { echo "::warning::the run names no head repository and branch; no gate rerun"; exit 0; }
+          # GitHub's head filter is owner:branch; the PR must also name the run's repository and branch exactly, into main.
+          gh api -X GET "repos/$REPO/pulls" -f state=open -f base=main -f head="$HEAD_OWNER:$HEAD_BRANCH" -f per_page=100 \
+            > "$RUNNER_TEMP/prs.json"
+          prs=$(jq -c --arg repo "$HEAD_REPO" --arg ref "$HEAD_BRANCH" \
+            '[.[] | select(.head.repo.full_name == $repo and .head.ref == $ref and .base.ref == "main") | .number]' "$RUNNER_TEMP/prs.json")
+          if [ "$(jq length <<< "$prs")" != 1 ]; then
+            echo "::warning::$HEAD_REPO:$HEAD_BRANCH has open PRs into main $prs, not one; no gate rerun"; exit 0
+          fi
+          pr=$(jq '.[0]' <<< "$prs")
+          [[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]]
+          gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null
+          echo "reran the gate for #$pr"

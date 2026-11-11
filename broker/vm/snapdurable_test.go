@@ -142,6 +142,53 @@ func TestCAP3CrashedStageNotLoaded(t *testing.T) {
 	}
 }
 
+// CAP-3 (#5452): a published snapshot whose metadata fails to read for a
+// reason other than absence is kept, and the restart returns the error;
+// once the metadata reads again a restart takes it back. A snapshot with
+// no metadata was never published and is still dropped.
+func TestCAP3SnapshotKeptOnMetadataReadError(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "notes", "kept")
+	s, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	meta := filepath.Join(e.m.snapDir(s.ID), "meta.json")
+	saved, err := os.ReadFile(meta)
+	must(t, err)
+	// A directory where the file was: the read fails with EISDIR, not absence.
+	must(t, os.Remove(meta))
+	must(t, os.Mkdir(meta, 0o700))
+	e.adm.Release("m")
+	e.rt = newFake()
+	e.cfg.Runtime = e.rt
+	if _, err := Open(bg, e.cfg); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("open with an unreadable snapshot record: %v, want a read error", err)
+	}
+	if _, err := os.Stat(e.m.snapDir(s.ID)); err != nil {
+		t.Fatalf("snapshot removed after a read error: %v", err)
+	}
+	must(t, os.Remove(meta))
+	must(t, os.WriteFile(meta, saved, 0o600))
+	e.open()
+	if got := e.m.Snapshots("m"); len(got) != 1 || got[0].ID != s.ID {
+		t.Fatalf("snapshots after the record reads again: %+v", got)
+	}
+	e.guestWrite("m", "notes", "later")
+	must(t, e.m.Rollback(bg, "m", s.ID))
+	if got := e.guestRead("m", "notes"); got != "kept" {
+		t.Fatalf("rollback after the reopen: notes = %q, want kept", got)
+	}
+	// Absent metadata: never published, dropped.
+	must(t, os.Remove(meta))
+	e.restart("m")
+	if got := e.m.Snapshots("m"); len(got) != 0 {
+		t.Fatalf("unpublished snapshot loaded: %+v", got)
+	}
+	if _, err := os.Lstat(e.m.snapDir(s.ID)); !os.IsNotExist(err) {
+		t.Fatalf("unpublished snapshot left on disk: %v", err)
+	}
+}
+
 // The snapshot keeps what overlay.Copy keeps when it is written to a stage:
 // hard links, holes and extended attributes.
 func TestCAP3SnapshotKeepsLinksHolesXattrs(t *testing.T) {

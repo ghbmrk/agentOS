@@ -20,8 +20,8 @@
 {{end}}
 {{with .EdgeCut}}<h2>Edge box</h2>
 <div class="pending warn">
-<p>The edge box is cut off: {{.}}. It reaches nothing through the enforcer, neither the internet nor your devices, and stays cut after a restart until you lift the cut here.</p>
-<p>Lift it once you trust the edge again. It gets back what your rules give it, and its internet bytes stay held at its cap for the rest of the day.</p>
+<p>The edge box is cut off: {{.}}</p>
+<p>It reaches nothing through the enforcer, neither the internet nor your devices, and stays cut after a restart until you lift the cut here. Lifted, it gets back what your rules give it, and its internet bytes stay held at its cap for the rest of the day.</p>
 <button class="act" data-action="lift-edge" data-target="" data-rp="{{$.Name}}">Lift the edge's cut with your passkey</button>
 </div>
 {{end}}
@@ -44,6 +44,11 @@
 {{end}}{{if not (or .Strays .Unset .Policy)}}{{with .Load}}<p>{{.}}</p>
 {{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
 {{end}}</div>
+{{end}}
+{{if .Unseeded}}<h2>Addresses handed out</h2>
+<div class="pending warn">
+<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
+</div>
 {{end}}
 {{with .Restarting}}<h2>Names and addresses</h2>
 <div class="pending warn">

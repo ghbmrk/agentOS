@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
@@ -69,6 +70,16 @@ type network struct {
 	// read: its error, logged when it starts or changes. Its caps are
 	// held spent while it lasts (ENF-l-16). d.fwMu guards it and reload.
 	merging map[string]string
+	// edgeMerged: the edge's port merges segments, or did since the last
+	// full load the firewall took, whose quota still runs spent; the
+	// edge is held meanwhile (holdDrop, #5399 item 5). d.fwMu guards it.
+	edgeMerged bool
+	// unread: the last full load taken could not read the table it
+	// replaced, so the bytes since the last reading count nowhere; every
+	// cap is held spent and the edge held until a full load that read
+	// its table is taken, which the first reading's listing that reads
+	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
+	unread bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -88,6 +99,10 @@ type network struct {
 	stopServed error
 	stopPolicy []page.PolicyCause
 	stopLoad   page.LoadStep
+	// unseeded is when the last taken load seeded no lease because the
+	// lease file could not be read whole (zero: it seeded what the file
+	// holds), shown on home until every host has renewed (#5394).
+	unseeded time.Time
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -230,8 +245,26 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		d.net.resMu.Unlock()
 	}
 	caps := traffic.CapsOf(doc)
-	load := func() error {
+	var unseeded bool
+	load := func() (err error) {
+		// A full load starts the edge's quota and TripSet afresh, so it
+		// holds the edge only while its port merges now; one the firewall
+		// does not take leaves the spent quota running, and the hold.
+		merged, unread := d.net.edgeMerged, d.net.unread
+		_, d.net.edgeMerged = d.net.merging[l.Edge]
+		defer func() {
+			if err != nil {
+				d.net.edgeMerged, d.net.unread = merged, unread
+			}
+		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
+		// A table this process loaded that does not read (#5399 item 6)
+		// takes its bytes since the last reading and the edge in TripSet
+		// with it. The load still goes ahead, so a cut or a tightening is
+		// never held back, with every cap held spent until a full load
+		// that read its table is taken (holdDrop). The first load after a
+		// start has none to read: a reboot leaves no table.
+		d.net.unread = err != nil && d.loaded != ""
 		if err != nil {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
 			running = nil
@@ -270,7 +303,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		seed := nft.Seed(l, d.leases())
+		var seeds []nft.Lease
+		seeds, unseeded = d.leases()
+		seed := nft.Seed(l, seeds)
 		if err := d.dp.Fire.Load(lctx, joinRules(joinRules(text, seed), drops)); err != nil {
 			return fireErr{err}
 		}
@@ -291,6 +326,10 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
 	d.net.stopPolicy, d.net.stopLoad = why, page.LoadTaken
+	d.net.unseeded = time.Time{}
+	if unseeded {
+		d.net.unseeded = d.dp.Now()
+	}
 	d.net.resMu.Unlock()
 	b, err := policy.Encode(doc)
 	if err == nil {
@@ -374,38 +413,91 @@ func joinRules(text, drops string) string {
 // segments now, for a full load to seed (nft.Seed, ENF-l-23, #5295), so a
 // restart or reboot does not cut every leased IPv4 host off until it
 // renews, up to half a lease later. A missing file (a first boot) seeds
-// nothing; an unreadable one seeds nothing and is logged; neither fails
+// nothing. One that cannot be read, or not read whole (leaseFile), seeds
+// nothing, is logged, and unread says so for home (#5394). Neither fails
 // the load, whose hosts then wait for their next renewal (fails closed).
-func (d *Enforcer) leases() []nft.Lease {
-	b, err := os.ReadFile(d.cfg.DNS.LeaseFile)
+func (d *Enforcer) leases() (ls []nft.Lease, unread bool) {
+	b, err := leaseFile(func() ([]byte, error) { return os.ReadFile(d.cfg.DNS.LeaseFile) })
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		d.dp.Logf("firewall: lease file unreadable, no lease seeded: " + err.Error())
+		return nil, true
 	}
-	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix())
+	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix()), false
+}
+
+var errTorn = errors.New("it changed while read, three times in a row")
+
+// leaseFile is the lease file, read whole twice in a row and taken only
+// when both reads are equal and it ends with a whole line (#5394). The
+// DHCP server rewrites the file in place, so a read that lands while it
+// does can splice the old file's start onto the new one's end, which can
+// pair an address with another line's hardware address, or stop short.
+// Two equal reads with no change between them hold no splice; two that
+// both stop short at a line's end hold fewer leases, never a wrong one.
+// It tries three times.
+func leaseFile(read func() ([]byte, error)) ([]byte, error) {
+	for range 3 {
+		a, err := read()
+		if err != nil {
+			return nil, err
+		}
+		b, err := read()
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(a, b) && (len(a) == 0 || a[len(a)-1] == '\n') {
+			return a, nil
+		}
+	}
+	return nil, errTorn
 }
 
 // leasesOf is the IPv4 leases in lease file b (dnsmasq's lines, each
 // "expiry mac ip hostname clientid", expiry in Unix seconds) with time
-// left at now, each on the shared segment (Guests, Owner, Household)
-// whose DHCP subnet in nets holds its address. A line seeds nothing when
-// its address is in no subnet, in more than one, in a subnet that is not
-// a DHCP-served shared segment's, or outside that subnet's lease range
+// left, each on the shared segment (Guests, Owner, Household) whose DHCP
+// subnet in nets holds its address. A line seeds nothing when its address
+// is in no subnet, in more than one, in a subnet that is not a
+// DHCP-served shared segment's, or outside that subnet's lease range
 // (dns.Hosts4, which the network, broadcast and enforcer's own addresses
 // are outside); nor does a line that is not exactly five fields, a
 // hardware address that is not Ethernet, an infinite lease (expiry 0) or
-// one run out. Seed drops what is left of more than nft.LeaseTimeout.
+// one run out. An address on two lines seeds nothing (#5394): the server
+// writes each once, and neither line can be told the true holder.
+//
+// Time left is counted from now, or from the latest moment the file
+// proves the clock has passed, if later (#5394): no lease is longer than
+// nft.LeaseTimeout, so every lease was granted at or after its expiry
+// minus that, by the clock that wrote it. A clock behind after a reboot
+// therefore seeds no lease for longer than it has left from its newest
+// grant; so no lease seeds more than LeaseTimeout either.
 func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
-	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
-	var out []nft.Lease
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
+	type line struct {
+		expiry int64
+		hw     net.HardwareAddr
+		a      netip.Addr
+	}
+	var lines []line
+	times := map[netip.Addr]int{}
+	for _, s := range strings.Split(string(b), "\n") {
+		f := strings.Fields(s)
 		if len(f) != 5 {
 			continue
 		}
 		expiry, eerr := strconv.ParseInt(f[0], 10, 64)
 		hw, herr := net.ParseMAC(f[1])
 		a, aerr := netip.ParseAddr(f[2])
-		if eerr != nil || herr != nil || aerr != nil || len(hw) != 6 || expiry <= now {
+		if eerr != nil || herr != nil || aerr != nil {
+			continue
+		}
+		times[a]++
+		now = max(now, expiry-nft.LeaseTimeout)
+		lines = append(lines, line{expiry, hw, a})
+	}
+	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
+	var out []nft.Lease
+	for _, ln := range lines {
+		a := ln.a
+		if times[a] != 1 || len(ln.hw) != 6 || ln.expiry <= now {
 			continue
 		}
 		var in []dns.Net
@@ -420,7 +512,7 @@ func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
 		if first, last := dns.Hosts4(in[0].Prefix4); a.Less(first) || last.Less(a) {
 			continue
 		}
-		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: hw, Left: expiry - now})
+		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: ln.hw, Left: ln.expiry - now})
 	}
 	return out
 }
@@ -547,6 +639,9 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The table reads again: a full load that reads it ends the caps
+	// held spent since one that could not (holdDrop).
+	d.net.reload = d.net.reload || d.net.unread
 	text, err := nft.Refresh(d.loadedDoc, d.cfg.Layout, running)
 	if err != nil || text == "" {
 		return err
@@ -586,6 +681,9 @@ func (d *Enforcer) offloads() bool {
 		changed = changed || bad != still
 	}
 	d.net.merging = now
+	if _, ok := now[d.cfg.Layout.Edge]; ok {
+		d.net.edgeMerged = true
+	}
 	d.net.reload = d.net.reload || changed
 	return changed
 }
@@ -902,45 +1000,61 @@ var ne = binary.NativeEndian
 // saves the day. A cap passed again at the next reading trips again,
 // which a tripped core takes at no cost (cut.Trip).
 func (d *Enforcer) readCaps(ctx context.Context) error {
-	over, err := d.readCapsLocked(ctx)
+	over, kernelCut, err := d.readCapsLocked(ctx)
 	for _, o := range over {
 		d.overrun(o)
+	}
+	if kernelCut != "" {
+		d.tripEdge(kernelCut)
 	}
 	return err
 }
 
-func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error) {
+// readCapsLocked takes a reading and writes the drop from it. kernelCut
+// is why the kernel cuts the edge on the text written, by TripSet, when
+// the record does not say it is cut: the record then follows, so the
+// kernel's cut always has a card and a lift (#5399 item 2).
+func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, kernelCut string, err error) {
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	c := d.net.counter
 	if c == nil || d.loaded == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 	defer cancel()
 	listing, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return nil, fmt.Errorf("reading: %w", err)
+		return nil, "", fmt.Errorf("reading: %w", err)
 	}
-	over, err := d.addReading(d.loadedDoc, listing)
+	over, err = d.addReading(d.loadedDoc, listing)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
 	d.holdDrop(&p)
 	running, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
 	}
 	text, err := nft.Drops(d.loadedDoc, d.cfg.Layout, running, p)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
+	}
+	if !p.EdgeCut && !p.EdgeHold {
+		tripped, err := nft.EdgeTripped(running, d.cfg.Layout, p)
+		if err != nil {
+			return over, "", fmt.Errorf("drop: %w", err)
+		}
+		if tripped {
+			kernelCut = fmt.Sprintf("the firewall cut it at the first byte past its byte cap of %d bytes today", p.EdgeCap)
+		}
 	}
 	if err := d.dp.Fire.Update(lctx, text); err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
-	return over, nil
+	return over, kernelCut, nil
 }
 
 // addReading adds the reading in listing, the running table compiled
@@ -1004,11 +1118,14 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	}
 	// The channel asks from its read loop: a cap passed is tripped off it,
 	// since a trip raises an alert, which the channel sends.
-	over, err := d.readCapsLocked(context.Background())
-	if len(over) > 0 {
+	over, kernelCut, err := d.readCapsLocked(context.Background())
+	if len(over) > 0 || kernelCut != "" {
 		go func() {
 			for _, o := range over {
 				d.overrun(o)
+			}
+			if kernelCut != "" {
+				d.tripEdge(kernelCut)
 			}
 		}()
 	}

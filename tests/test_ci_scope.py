@@ -533,7 +533,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn("        if: steps.scope.outputs.records != 'true'\n", unit)
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
         # tools/unit_tests.py runs each module under strace into its own trace (test_unit_tests).
-        self.assertTrue(unit.endswith('          python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
+        self.assertTrue(unit.endswith('          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
         self.assertEqual(check.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                          '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 

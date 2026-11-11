@@ -47,7 +47,8 @@ it. Likewise a verdict comment whose `Record:` line does not parse (a package ID
 Last, every verdict being in, it holds the checks main's ruleset does not require (HELD, #5366), since GitHub merges
 an armed PR past a cancelled one: `--runs` is the head's and merge base's Actions runs (`checks_held`), and each held
 workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
-exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread.
+exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
+`tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -569,7 +570,7 @@ HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-g
 # ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
 UNHELD = ("ci", "trusted-base", "premerge")
 PASSED = ("success", "skipped")
-NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (premerge.yml builds it) to read the held checks"
+NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
 _ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
 

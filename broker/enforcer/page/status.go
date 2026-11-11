@@ -120,6 +120,11 @@ type ResolverStop struct {
 	// to start, shown while Stopped is false: a process that is up between
 	// exits does not make it a resolver that runs (#5164 R5 b).
 	Restarting []Restart
+	// Unseeded is whether the last load could not read the address
+	// service's lease file, while a host it held may not have renewed
+	// since (#5394): until it does, the firewall passes nothing of it.
+	// It shows whether or not the instances run.
+	Unseeded bool
 }
 
 // LoadStep is the step of a load that refused it.
@@ -217,7 +222,9 @@ type Stray struct {
 // byte cap reaches nothing through the enforcer until the owner lifts the
 // cut here, after a tap.
 type Edge interface {
-	// Cut is whether the edge is cut, and why.
+	// Cut is whether the edge is cut, and why: the card's text after
+	// "cut off: ", whole sentences that end with what to check before
+	// the lift (#5399), since that depends on the cause.
 	Cut() (cut bool, reason string)
 	// LiftEdge lifts it; an error leaves it cut.
 	LiftEdge() error
@@ -352,7 +359,9 @@ func (s *Server) status() map[string]any {
 		}
 	}
 	if s.cfg.Resolver != nil {
-		if r := s.cfg.Resolver.Stopped(); r.Stopped {
+		r := s.cfg.Resolver.Stopped()
+		out["Unseeded"] = r.Unseeded
+		if r.Stopped {
 			out["Resolver"] = plainStop(r)
 		} else if len(r.Restarting) > 0 {
 			var lines []string
