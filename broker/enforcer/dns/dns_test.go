@@ -395,27 +395,32 @@ func TestGenerateRefuses(t *testing.T) {
 			t.Errorf("%s: refused by another check: %v, want %q", name, err, c.want)
 		}
 	}
-	// The refusal carries what Generate refused (#5352): of two bad names
-	// in a list, the first written, which is the first sorted; of two
-	// devices on networks the setup leaves out, the first in the
-	// document's order. A setup fault is refused before either.
+	// The refusal carries every item Generate refused (#5352, #5405): both
+	// bad names, sorted; both devices on networks the setup leaves out, in
+	// the document's order; and with a setup fault, the fault first and
+	// the devices still. Each still reads as ErrConfig, and the text is one
+	// line.
 	d := fixturePolicy()
 	d.Destinations = append(d.Destinations, "Zed.example", "Abc.example")
 	d.Caps["Zed.example"], d.Caps["Abc.example"] = 1<<40, 1<<40
-	var name BadName
-	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &name) || name != (BadName{"Abc.example"}) || !errors.Is(err, ErrConfig) {
-		t.Errorf("two bad names: %#v, %v", name, err)
+	var got Refused
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Abc.example"}, BadName{"Zed.example"}}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two bad names: %#v, %v", got, err)
 	}
 	d = fixturePolicy()
 	d.Devices = append(d.Devices, policy.Device{ID: "lamp", Network: policy.NetDevices, WiFi: "vlan109"}, policy.Device{ID: "fan", Network: policy.NetDevices, WiFi: "vlan110"})
-	var dev UnservedDevice
-	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &dev) || dev != (UnservedDevice{"lamp", "vlan109", l.Trunk + ".109"}) || !errors.Is(err, ErrConfig) {
-		t.Errorf("two unserved devices: %#v, %v", dev, err)
+	lamp, fan := UnservedDevice{"lamp", "vlan109", l.Trunk + ".109"}, UnservedDevice{"fan", "vlan110", l.Trunk + ".110"}
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{lamp, fan}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two unserved devices: %#v, %v", got, err)
 	}
 	s := fixtureSetup()
 	s.Upstream = nil
-	if _, err := Generate(d, l, s); !errors.Is(err, ErrConfig) || errors.As(err, &dev) || errors.As(err, &name) {
-		t.Errorf("a setup fault is typed as the document's: %v", err)
+	_, err := Generate(d, l, s)
+	if !errors.As(err, &got) || len(got) != 3 || got[0].Error() != ErrConfig.Error()+": no upstream resolver" || !slices.Equal(got[1:], Refused{lamp, fan}) {
+		t.Errorf("a setup fault hides the devices: %#v", got)
+	}
+	if want := ErrConfig.Error() + `: no upstream resolver; ` + lamp.Error() + "; " + fan.Error(); err.Error() != want {
+		t.Errorf("Refused reads %q, want %q", err, want)
 	}
 	// A name the policy accepts but this package refuses still refuses a
 	// whole version, so the previous configuration stays.
