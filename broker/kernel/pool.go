@@ -249,7 +249,7 @@ func (s *State) applyPool(e Entry) error {
 		}
 		if s.lowerOK(e.At, b) == nil {
 			p := s.Pools[b.Pool].live(e.At)
-			p.Lowering, p.Changes = &Lowering{b.Reserve, e.At + GrantHold}, p.Changes+1
+			p.Lowering, p.Changes = &Lowering{b.Reserve, e.reading().Latest + GrantHold}, p.Changes+1
 			s.Pools[b.Pool] = p
 		}
 	}
@@ -297,7 +297,7 @@ func (k *Kernel) ReadPool(at int64, pool string, windows []WindowReading) error 
 		}
 		seen[w.Window] = true
 		if w.ResetAt <= now.Earliest {
-			w.ResetAt = now.Earliest + PoolWindowMS
+			w.ResetAt = now.Latest + PoolWindowMS
 		}
 		rs[i] = w
 	}

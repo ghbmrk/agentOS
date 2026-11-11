@@ -657,13 +657,13 @@ func (s *State) decide(k key.Key, at Reading, batch map[key.ID]Grant) (int64, er
 	if _, err := key.Chain(k, s.Passkeys()); err != nil {
 		return 0, err
 	}
-	from := at.Earliest + GrantHold
+	from := at.Latest + GrantHold
 	if len(k.Links) == 0 {
 		return from, nil
 	}
 	// A clerk key lives at most ClerkLife once live: a tap cannot sign one
 	// that runs for years (D-146).
-	if exp := lapse(k.Links[0].Caveats); exp == nil || *exp > from+key.ClerkLife {
+	if exp := lapse(k.Links[0].Caveats); exp == nil || *exp > at.Earliest+GrantHold+key.ClerkLife {
 		return 0, ErrLife
 	}
 	r, ok := batch[rootOf(k)]
@@ -997,7 +997,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		s.reserved[e.Seq] = &b
 		for _, id := range b.Scopes {
-			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: s.planTask(b.Task)}})
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.reading().Latest, Amount: b.Amount, Task: s.planTask(b.Task)}})
 		}
 	case TModelUsed:
 		b, err := body[modelUsed](e)
@@ -1011,7 +1011,7 @@ func (s *State) Apply(e Entry) error {
 			}
 		}
 		for _, id := range b.Scopes {
-			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: s.planTask(b.Task)}})
+			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.reading().Latest, Amount: b.Amount, Task: s.planTask(b.Task)}})
 		}
 		s.spend(e.At, b.Route, b.Amount)
 	case TSpendHeld:
@@ -1090,7 +1090,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if _, st := s.step(b.stepRef); st != nil && st.Phase == PQueued {
-			st.Phase, st.HeldSeq, st.HeldAt, st.Novel = PHeld, e.Seq, e.At, b.Novel
+			st.Phase, st.HeldSeq, st.HeldAt, st.Novel = PHeld, e.Seq, e.reading().Latest, b.Novel
 		}
 	case TStepDispatch:
 		b, err := body[stepDispatch](e)
@@ -1103,7 +1103,7 @@ func (s *State) Apply(e Entry) error {
 				st.DispatchSeq, st.SentAt = e.Seq, e.At
 				sp := p.Plan.Step(b.Index)
 				for _, id := range p.Scopes {
-					s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: sp.Amount, Recipient: sp.Recipient, Task: sp.Task}})
+					s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.reading().Latest, Amount: sp.Amount, Recipient: sp.Recipient, Task: sp.Task}})
 				}
 			}
 		}
@@ -1116,7 +1116,7 @@ func (s *State) Apply(e Entry) error {
 			st.Detail = b.Detail
 			switch b.Outcome {
 			case "ok":
-				s.complete(p, b.Index, e.At)
+				s.complete(p, b.Index, e.reading().Latest)
 				if b.Covered != "" && shown(b.Covered) {
 					st.Covered, st.SentAt = b.Covered, e.At
 				}
@@ -1149,7 +1149,7 @@ func (s *State) Apply(e Entry) error {
 		if p, st := s.step(b.stepRef); st != nil && (st.Phase == PUnknown || st.Phase == PParked) {
 			switch b.Outcome {
 			case "done":
-				s.complete(p, b.Index, e.At)
+				s.complete(p, b.Index, e.reading().Latest)
 				if b.Covered != "" && shown(b.Covered) {
 					st.Covered, st.SentAt = b.Covered, e.At
 				}

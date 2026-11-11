@@ -37,4 +37,9 @@ func (k *Kernel) read(now int64) Reading {
 
 // reading is e's: the time it was logged at and the latest its decision
 // allowed (Entry.Late).
-func (e Entry) reading() Reading { return Reading{e.At, max(e.At, e.Late)} }
+func (e Entry) reading() Reading {
+	if e.Late == nil {
+		return At(e.At)
+	}
+	return Reading{e.At, max(e.At, *e.Late)}
+}

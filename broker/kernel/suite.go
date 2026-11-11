@@ -217,7 +217,7 @@ func (s *State) applySecurity(e Entry) error {
 			return err
 		}
 		if s.dropOK(b) {
-			s.sec.drops[b.ID] = pendingDrop{e.At + GrantHold, b.By.By}
+			s.sec.drops[b.ID] = pendingDrop{e.reading().Latest + GrantHold, b.By.By}
 			s.sec.n++
 		}
 	case TSecurityKept:

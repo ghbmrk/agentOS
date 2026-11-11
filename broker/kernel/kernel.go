@@ -88,7 +88,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 			fresh[fp] = true
 		}
 		for _, id := range v.Scopes() {
-			ov.extra[id] = append(ov.extra[id], key.Use{At: now.Earliest, Amount: st.Amount, Recipient: st.Recipient, Task: st.Task})
+			ov.extra[id] = append(ov.extra[id], key.Use{At: now.Latest, Amount: st.Amount, Recipient: st.Recipient, Task: st.Task})
 		}
 	}
 	return v.Root(), v.Scopes(), nil

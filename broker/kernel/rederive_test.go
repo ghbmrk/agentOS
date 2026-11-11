@@ -266,8 +266,8 @@ func TestTIM1ReadingDecidesBothWays(t *testing.T) {
 		t.Fatalf("no %s for %s", typ, plan)
 		return 0
 	}
-	if e := es[find(kernel.TPlanRejected, "expired")]; e.At != 0 || e.Late != hour {
-		t.Fatalf("the rejection carries reading [%d, %d], want [0, %d]", e.At, e.Late, hour)
+	if e := es[find(kernel.TPlanRejected, "expired")]; e.At != 0 || e.Late == nil || *e.Late != hour {
+		t.Fatalf("the rejection carries reading %d, %v, want [0, %d]", e.At, e.Late, hour)
 	}
 	for name, tc := range map[string]struct {
 		i  int
@@ -281,10 +281,10 @@ func TestTIM1ReadingDecidesBothWays(t *testing.T) {
 			must(t, json.Unmarshal(acc.Body, &b))
 			b["plan"], b["cause"] = "expired", es[find(kernel.TPlanSubmit, "")].Seq
 			e.Body, _ = json.Marshal(b)
-			e.Seq, e.At, e.Late = es[find(kernel.TPlanRejected, "expired")].Seq, 0, hour
+			e.Seq, e.At, e.Late = es[find(kernel.TPlanRejected, "expired")].Seq, 0, &[]int64{hour}[0]
 		}},
 		"a dispatch from a hold whose Earliest is before its due": {find(kernel.TStepDispatch, "held"), func(e *kernel.Entry) {
-			e.At, e.Late = hour-1, 5*hour
+			e.At, e.Late = hour-1, &[]int64{5 * hour}[0]
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -296,6 +296,53 @@ func TestTIM1ReadingDecidesBothWays(t *testing.T) {
 				t.Fatalf("want a divergence at seq %d, got %v", es[tc.i].Seq, err)
 			}
 		})
+	}
+}
+
+// A widening window starts at the latest credible time and ends on the
+// earliest, so it runs its full length of true time however wide the
+// reading: a hold started on [0, 1 h - 1 ms] is not over at [1 h, 1 h], and
+// a grant issued on [0, GrantHold - 1 ms] is not live at GrantHold. Rederive
+// fails a log that dispatched the hold at 1 h (TIM-1, KEY-4, KEY-8).
+//
+// REQ: TIM-1, KEY-4, KEY-8
+func TestTIM1AWideningWindowStartsAtLatest(t *testing.T) {
+	r := newRig(t)
+	buy := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "w1"}), 1<<40)
+	var now kernel.Reading
+	r.k.UseClock(func() kernel.Reading { return now })
+	at := func(e, l int64) int64 { now = kernel.Reading{Earliest: e, Latest: l}; return e }
+	s := st(key.Buy, "shop")
+	s.Args["amount"] = "10"
+	must(t, r.k.Submit(at(0, hour-1), r.sign(kernel.Plan{ID: "held", Key: buy, Steps: []kernel.PlanStep{s}})))
+	must(t, r.tick(at(0, hour-1)))
+	must(t, r.tick(at(hour, hour)))
+	if p := r.k.State().Plans["held"]; p.Steps[0].Phase != kernel.PHeld || len(r.mail.Effects()) != 0 {
+		t.Fatalf("a hold started at Latest 1 h - 1 ms ended at 1 h: phase %s", p.Steps[0].Phase)
+	}
+	must(t, r.tick(at(2*hour-1, 2*hour-1)))
+	if len(r.mail.Effects()) != 1 {
+		t.Fatalf("the hold's due from Latest: %d effects, want 1", len(r.mail.Effects()))
+	}
+	es := r.k.Log().Entries()
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), es); err != nil {
+		t.Fatal(err)
+	}
+	bad := append([]kernel.Entry(nil), es...)
+	i := len(bad) - 1
+	for bad[i].Type != kernel.TStepDispatch {
+		i--
+	}
+	bad[i].At = hour
+	var d *kernel.Divergence
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != bad[i].Seq {
+		t.Fatalf("a dispatch at 1 h from a hold started at Latest 1 h - 1 ms: want a divergence at seq %d, got %v", bad[i].Seq, err)
+	}
+
+	k := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "w2"})
+	must(t, r.issue(at(2*hour, 2*hour+kernel.GrantHold-1), k))
+	if from, _ := r.k.State().Granted(k.Tip()); from != 2*hour+2*kernel.GrantHold-1 {
+		t.Fatalf("a grant issued on [2 h, 2 h + GrantHold - 1 ms] is live from %d, want a hold after Latest", from)
 	}
 }
 

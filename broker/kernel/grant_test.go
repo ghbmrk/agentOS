@@ -451,7 +451,8 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 
 // A renewal is live at once only while the key it renews has not lapsed by
 // the latest credible time: a key already expired by Latest, though not by
-// Earliest, is renewed only after the hold (TIM-1, KEY-7, D-146).
+// Earliest, is renewed only after the hold, which starts at Latest (TIM-1,
+// KEY-7, D-146).
 //
 // REQ: TIM-1, KEY-7
 func TestTIM1ARenewalOfAKeyLapsedByLatestWaitsTheHold(t *testing.T) {
@@ -460,8 +461,8 @@ func TestTIM1ARenewalOfAKeyLapsedByLatestWaitsTheHold(t *testing.T) {
 	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, 0, 1<<39) // narrower: a renewal by its limits
 	must(t, err)
 	must(t, r.issue(0, k))
-	if from, _ := r.k.State().Granted(k.Tip()); from != kernel.GrantHold {
-		t.Fatalf("a renewal of a key lapsed by Latest is live from %d, want after the hold %d", from, kernel.GrantHold)
+	if from, _ := r.k.State().Granted(k.Tip()); from != 1<<50+kernel.GrantHold {
+		t.Fatalf("a renewal of a key lapsed by Latest is live from %d, want a hold after Latest", from)
 	}
 	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); err != nil {
 		t.Fatal(err)

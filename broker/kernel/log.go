@@ -72,7 +72,7 @@ type Entry struct {
 	At   int64  `json:"at"` // unix ms: the kernel's reading's Earliest, never below the entry before
 	// Late is the reading's Latest when it is past At (TIM-1), so Rederive
 	// checks a move that time decided from the log alone.
-	Late int64           `json:"late,omitempty"`
+	Late *int64          `json:"late,omitempty"`
 	Type string          `json:"type"`
 	V    int             `json:"v"`
 	Body json.RawMessage `json:"body"`
@@ -347,7 +347,7 @@ func (l *Log) append(r Reading, typ string, v int, body any) (Entry, error) {
 	}
 	e := Entry{Seq: uint64(len(f.entries) + 1), At: r.Earliest, Type: typ, V: v, Body: bb}
 	if r.Latest > r.Earliest {
-		e.Late = r.Latest
+		e.Late = &r.Latest
 	}
 	if len(f.entries) > 0 {
 		last := f.entries[len(f.entries)-1]
