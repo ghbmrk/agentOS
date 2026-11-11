@@ -127,13 +127,13 @@ func (f failing) Exec(context.Context, string, vm.Command, time.Duration) (vm.Ex
 func (f failing) Checkpoint(context.Context, string) (vm.Snapshot, error) {
 	return vm.Snapshot{}, f.err
 }
-func (f failing) ForkHeld(context.Context, string, []string, func() bool) (vm.Snapshot, error) {
+func (f failing) Fork(context.Context, string, []string) (vm.Snapshot, error) {
 	return vm.Snapshot{}, f.err
 }
-func (f failing) Diff(string, string, string) ([]overlay.Change, error)           { return nil, f.err }
-func (f failing) RollbackHeld(context.Context, string, string, func() bool) error { return f.err }
-func (f failing) Destroy(context.Context, string) error                           { return f.err }
-func (f failing) RaiseLabel(string, vm.Label) error                               { return f.err }
+func (f failing) Diff(string, string, string) ([]overlay.Change, error) { return nil, f.err }
+func (f failing) Rollback(context.Context, string, string) error        { return f.err }
+func (f failing) Destroy(context.Context, string) error                 { return f.err }
+func (f failing) RaiseLabel(string, vm.Label) error                     { return f.err }
 func (f failing) DeleteFiles(context.Context, string, vm.Deletion) (vm.DeleteReport, error) {
 	return vm.DeleteReport{}, f.err
 }

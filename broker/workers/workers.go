@@ -42,12 +42,10 @@ type Machines interface {
 	CreateWorker(ctx context.Context, id, lineage string, s vm.Spec) (vm.Machine, error)
 	Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error)
 	Checkpoint(ctx context.Context, id string) (vm.Snapshot, error)
-	// ForkHeld and RollbackHeld ask hold again just before a start or
-	// restore, after any wait for the machine (STOP-queued-start).
-	ForkHeld(ctx context.Context, id string, ids []string, hold func() bool) (vm.Snapshot, error)
+	Fork(ctx context.Context, id string, ids []string) (vm.Snapshot, error)
 	Snapshot(id string) (vm.Snapshot, error)
 	Diff(requester, a, b string) ([]overlay.Change, error)
-	RollbackHeld(ctx context.Context, id, snapID string, hold func() bool) error
+	Rollback(ctx context.Context, id, snapID string) error
 	Destroy(ctx context.Context, id string) error
 	RaiseLabel(id string, l vm.Label) error
 	Park(ctx context.Context, id string) (vm.Snapshot, error)
@@ -725,7 +723,7 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	defer func() { t.settle(ids, made) }()
 	// STOP is asked again as each fork starts: a fork that waited on the
 	// worker while STOP came starts nothing (STOP-queued-start).
-	s, err := t.M.ForkHeld(ctx, w.ID, ids, t.Stopped)
+	s, err := t.M.Fork(vm.WithHold(ctx, t.Stopped), w.ID, ids)
 	made = err == nil
 	if err != nil {
 		return nil, startErr(a.Name, err)
@@ -787,7 +785,7 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 		return nil, err
 	}
 	// Asked again at the restore, as for a fork (STOP-queued-start).
-	if err := t.M.RollbackHeld(ctx, w.ID, a.Snapshot, t.Stopped); err != nil {
+	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
 		return nil, startErr(a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil

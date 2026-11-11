@@ -728,10 +728,10 @@ type hold struct {
 	release chan struct{}
 }
 
-func (h hold) ForkHeld(ctx context.Context, id string, ids []string, held func() bool) (vm.Snapshot, error) {
+func (h hold) Fork(ctx context.Context, id string, ids []string) (vm.Snapshot, error) {
 	close(h.forking)
 	<-h.release
-	return h.Manager.ForkHeld(ctx, id, ids, held)
+	return h.Manager.Fork(ctx, id, ids)
 }
 
 // A fork's reserved slots count before its workers exist: a create that
@@ -903,16 +903,26 @@ func (p *pauseGate) Pause(context.Context, string) error {
 }
 
 // queueBehindCheckpoint runs tool on worker w while a checkpoint holds w's
-// lock, sets STOP once tool waits on it, and returns tool's answer.
+// lock, sets STOP once tool has passed the entry gate (its first ask of
+// Stopped; a checkpoint asks none), and returns tool's answer. Ordered by
+// that ask, not by time, so the entry gate can never be the one refusing.
 func queueBehindCheckpoint(t *testing.T, r *rig, g *pauseGate, stopped *atomic.Bool, tool string, args m) error {
 	t.Helper()
 	g.arm()
 	ckpt := make(chan error, 1)
 	go func() { ckpt <- r.call("agent", toolCkpt, m{"name": "w"}, nil) }()
 	<-g.paused
+	entered := make(chan struct{})
+	var once sync.Once
+	r.tools.Stopped = func() bool {
+		s := stopped.Load()
+		once.Do(func() { close(entered) })
+		return s
+	}
+	defer func() { r.tools.Stopped = stopped.Load }()
 	queued := make(chan error, 1)
 	go func() { queued <- r.call("agent", tool, args, nil) }()
-	time.Sleep(20 * time.Millisecond) // past the entry gate, waiting on w
+	<-entered
 	stopped.Store(true)
 	close(g.release)
 	if err := <-ckpt; err != nil {

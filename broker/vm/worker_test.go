@@ -843,3 +843,52 @@ func TestCAP8cRaisedLabelGuardsTheCommand(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A fork or rollback whose context carries a hold that says true starts or
+// restores nothing and keeps no admission it took; a hold that says false
+// changes nothing (STOP-queued-start).
+func TestOP6HeldForkAndRollbackStartNothing(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a1", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	s, err := e.m.Checkpoint(bg, "wk-a1")
+	must(t, err)
+	_, err = e.m.Exec(bg, "wk-a1", Command{Argv: []string{"write", "after"}, Stdin: []byte("kept")}, time.Second)
+	must(t, err)
+	stop := WithHold(bg, func() bool { return true })
+	resume := WithHold(bg, func() bool { return false })
+	admitted := func(id string) bool { _, ok := e.adm.Snapshot().Running[id]; return ok }
+
+	if _, err := e.m.Fork(stop, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held fork: %v, want ErrHeld", err)
+	}
+	for _, f := range []string{"wk-f1", "wk-f2"} {
+		if _, err := e.m.Get(f); err == nil || admitted(f) {
+			t.Fatalf("held fork left %s (get %v, admitted %v)", f, err, admitted(f))
+		}
+	}
+	if err := e.m.Rollback(stop, "wk-a1", s.ID); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held rollback: %v, want ErrHeld", err)
+	}
+	r, err := e.m.Exec(bg, "wk-a1", Command{Argv: []string{"cat", "after"}}, time.Second)
+	if err != nil || string(r.Stdout) != "kept" || !admitted("wk-a1") {
+		t.Fatalf("held rollback touched the running worker: %q, %v, admitted %v", r.Stdout, err, admitted("wk-a1"))
+	}
+	p, err := e.m.Park(bg, "wk-a1")
+	must(t, err)
+	if err := e.m.Rollback(stop, "wk-a1", p.ID); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held rollback of a parked worker: %v, want ErrHeld", err)
+	}
+	if w, _ := e.m.Get("wk-a1"); w.State == Running || admitted("wk-a1") {
+		t.Fatalf("held rollback of a parked worker: %v, admitted %v", w.State, admitted("wk-a1"))
+	}
+
+	must(t, e.m.Rollback(resume, "wk-a1", s.ID))
+	if r, err := e.m.Exec(bg, "wk-a1", Command{Argv: []string{"cat", "after"}}, time.Second); err == nil && string(r.Stdout) == "kept" {
+		t.Fatal("rollback under a false hold did not restore")
+	}
+	if _, err := e.m.Fork(resume, "wk-a1", []string{"wk-f1"}); err != nil || !admitted("wk-f1") {
+		t.Fatalf("fork under a false hold: %v, admitted %v", err, admitted("wk-f1"))
+	}
+}
