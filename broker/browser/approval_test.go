@@ -1010,6 +1010,24 @@ func TestALineWithTwoValuesLosesTheLongerWhole(t *testing.T) {
 	}
 }
 
+// A value that the omission mark itself spells is no copy of it, and a
+// copy on a line beside the field's path, not above it, withholds the page.
+func TestTheMarkIsNoCopyAndASiblingsIs(t *testing.T) {
+	snap := "- textbox \"A\" [ref=e2]: password\n- textbox \"B\" [ref=e3]: synthOther\n  - paragraph"
+	if out := omitValues(snap, map[string]bool{"e2": true, "e3": true}, map[string]bool{}, nil); out == withheldMark {
+		t.Fatalf("the mark was read as a copy: %s", out)
+	}
+	snap = "- group \"G\":\n  - heading \"synthSecret77\"\n  - group \"H\":\n    - textbox \"A\" [ref=e2]: synthSecret77"
+	if out := omitValues(snap, map[string]bool{"e2": true}, map[string]bool{}, nil); out != withheldMark {
+		t.Fatalf("a copy in a sibling was scrubbed, not withheld: %s", out)
+	}
+	// A field's own child is on its path: its role is no copy of a value that spells it.
+	snap = "- textbox \"Note\" [ref=e2]: text\n  - text: synthMore"
+	if out := omitValues(snap, map[string]bool{"e2": true}, map[string]bool{}, nil); out != "- textbox \"Note\" [ref=e2]: "+omittedMark+"\n  - text: "+omittedMark {
+		t.Fatalf("a field's own child was read as a copy, or lost its role: %s", out)
+	}
+}
+
 // The print covers each typed field's ref and name with its text, and a
 // cut never splits a character.
 func TestThePrintCoversEachFieldsRefAndName(t *testing.T) {
