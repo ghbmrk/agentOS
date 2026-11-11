@@ -1161,6 +1161,106 @@ class KeeperTreeTest(unittest.TestCase):
                     fstab.write_text(kept)
                     remove()
 
+    def test_pid1_acts_on_no_path_inside_a_directory_the_tree_or_tmpfiles_gives_another_user(self):
+        """#5359 (from #5350 Security 6778501910 R1, L3 6778896704 R2): a directory another uid holds through the tree
+        or a tmpfiles.d line, which no unit makes, is that user's too, so PID 1 acts on no path inside it. Every
+        step above the path is held to the link rules (chain_refusal): tree owner, group write, ACL, others write,
+        and each tmpfiles.d line that makes or remakes it for another user or as a link; under /run, the
+        tmpfiles.d lines alone."""
+        tmpf = "usr/lib/tmpfiles.d/zz.conf"
+        journald = {SYSTEM + "systemd-journald.service": "[Service]\nRuntimeDirectory=systemd/journal\n",
+                    SYSTEM + "sysinit.target.wants/systemd-journald.service": ("link", "../systemd-journald.service")}
+
+        def sock(path, user=True):
+            return {SYSTEM + "s.socket": "[Socket]\nListenStream=%s\n%s" % (path, "SocketUser=nobody\n" if user else "")}
+
+        def refusal(path, why):
+            return ("ListenStream= in %ss.socket: /%s: PID 1 makes, links, binds or chowns it following any link on its "
+                    "way, and a step of that way is not root's alone: a link to /%s, %s (#5359)" % (SYSTEM, path, path, why))
+        refused = (
+            # The row's two repros: a tmpfiles.d directory for nobody under /run, and one inside root's journald.
+            (dict(sock("/run/foo/sock"), **{tmpf: "d /run/foo 0755 nobody - -\n"}), "run/foo/sock",
+             "through /run/foo, which the tree lacks and %s line 1 makes mode 0755 for nobody:-; ship the step in the "
+             "tree (#1803)" % tmpf),
+            (dict(journald, **sock("/run/systemd/journal/sub/s"), **{tmpf: "d /run/systemd/journal/sub 0755 nobody - -\n"}),
+             "run/systemd/journal/sub/s", "through /run/systemd/journal/sub, which the tree lacks and %s line 1 makes mode "
+             "0755 for nobody:-; ship the step in the tree (#1803)" % tmpf),
+            # Any step, not only the last, and through the box's /var/run link.
+            (dict(sock("/var/run/foo/a/sock", user=False), **{tmpf: "d /run/foo 0755 - nogroup -\n"}), "run/foo/a/sock",
+             "through /run/foo, which the tree lacks and %s line 1 makes mode 0755 for -:nogroup; ship the step in the "
+             "tree (#1803)" % tmpf),
+            # A tmpfiles.d line that makes a step a link, or remakes a tree step for another user.
+            # A path one step below such a directory.
+            (dict(sock("/srv/sock"), **{tmpf: "d /srv 0755 nobody - -\n"}), "srv/sock",
+             "through /srv, which the tree lacks and %s line 1 makes mode 0755 for nobody:-; ship the step in the tree "
+             "(#1803)" % tmpf),
+            (dict(sock("/run/ln/sock"), **{tmpf: "L /run/ln - - - - /var/tmp\n"}), "run/ln/sock",
+             "through /run/ln, which the tree lacks and %s line 1 makes a link; ship the step in the tree (#1803)" % tmpf),
+            (dict(sock("/srv/t/sock"), **{"srv/t/keep": "", tmpf: "z /srv/t 0755 nobody - -\n"}), "srv/t/sock",
+             "through /srv/t, which %s line 1 remakes mode 0755 for nobody:- on the box; the line, not the tree, decides "
+             "who can write it (#1829)" % tmpf),
+        )
+        for files, path, why in refused:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    got = check.inside_refusals(self.root)
+                    self.assertEqual(got, [refusal(path, why)])
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+        # The tree holds the step for another uid, a group that can write it, or an ACL (CI does not run as root, so
+        # tree_lstat and tree_xattrs are patched as in the #5350 cases); others write needs no patch. A fresh
+        # directory per case, since place() removes only files.
+        real_lstat, real_xattrs = check.tree_lstat, check.tree_xattrs
+        for i, (uid, gid, mode, acl, why) in enumerate((
+                (check.TREE_OWNER + 1000, check.TREE_GROUP, None, None, "through /srv/u0, which uid %d owns; that user would "
+                 "decide what it reads (#1803)" % (check.TREE_OWNER + 1000)),
+                (check.TREE_OWNER, check.TREE_GROUP + 4, 0o775, None, "through /srv/u1, which gid %d can write; that group "
+                 "would decide what it reads (#1829)" % (check.TREE_GROUP + 4)),
+                (check.TREE_OWNER, check.TREE_GROUP, None, "system.posix_acl_access", "through /srv/u2, which carries a "
+                 "POSIX ACL (system.posix_acl_access); that user would decide what it reads (#1803)"),
+                (check.TREE_OWNER, check.TREE_GROUP, 0o757, None, "inside /srv/u3, which anyone on the box can write, or a "
+                 "service user owns; a local user would decide what it reads (#1543, #1702)"))):
+            d = "srv/u%d" % i
+
+            def lstat(root, rel, d=d, uid=uid, gid=gid):
+                st = real_lstat(root, rel)
+                if rel != d or st is None:
+                    return st
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, uid, gid) + tuple(st)[6:])
+
+            def xattrs(root, rel, d=d, acl=acl):
+                return [acl] if rel == d and acl else real_xattrs(root, rel)
+            with self.subTest(d=d), unittest.mock.patch.object(check, "tree_lstat", lstat), \
+                    unittest.mock.patch.object(check, "tree_xattrs", xattrs):
+                remove = self.place(dict(sock("/%s/sock" % d), **{d + "/keep": ""}))
+                try:
+                    if mode is not None:
+                        (self.root / d).chmod(mode)
+                    self.assertEqual(check.inside_refusals(self.root), [refusal(d + "/sock", why)])
+                finally:
+                    remove()
+        # Root's own steps pass: a tmpfiles.d directory and a tree directory only root can write, a path PID 1 only
+        # watches inside another user's, and stock journald's sockets.
+        for files in (
+                dict(sock("/run/foo/sock"), **{tmpf: "d /run/foo 0755 root root -\nd /run/foo/a 0700 - - -\n"}),
+                dict(sock("/srv/r/sock"), **{"srv/r/keep": ""}),
+                {tmpf: "d /run/w 0755 nobody - -\n", SYSTEM + "p.path": "[Path]\nPathChanged=/run/w/x\n"},
+                dict(journald, **sock("/run/systemd/journal/stdout", user=False)),
+                # The directory itself is not inside it: only its owner's links below it lead PID 1 astray.
+                dict(sock("/run/own"), **{tmpf: "d /run/own 0755 nobody - -\n"}),
+                # The box mounts its own /run, so what the tree holds there is hidden (chain_refusal's MOUNTED).
+                dict(sock("/run/hid/sock"), **{"run/hid/keep": ""})):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    if "run/hid/keep" in files:
+                        (self.root / "run/hid").chmod(0o777)
+                    self.assertEqual(check.inside_refusals(self.root), [])
+                finally:
+                    remove()
+
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
