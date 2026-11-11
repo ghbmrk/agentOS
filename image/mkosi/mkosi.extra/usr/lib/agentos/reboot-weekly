@@ -23,9 +23,11 @@ image=
 if due; then
 	start=$(date +%s)
 	# unrecorded stands until a drill's record is written, so the next healthy boot reports a drill whose
-	# record never was (a full or failing disk, a power cut during the check) as missed (#5455).
+	# record never was (a full or failing disk, a power cut during the check) as missed (#5455). A record
+	# still standing from an earlier drill is superseded, so it cannot stand in for this one.
 	mkdir -p -m 0700 "$D"
-	: >"$D/unrecorded"
+	rm -f "$D/pending" "$D/pending.new"
+	: >"$D/unrecorded" || echo "agentos-reboot: FAIL drill marker not written; a missed record goes unreported"
 	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
 	st=$(veritysetup status usr 2>/dev/null)
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')

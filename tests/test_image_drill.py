@@ -279,6 +279,37 @@ class DrillTest(unittest.TestCase):
         self.assertEqual(rc, 1, line)
         self.assertTrue(line.startswith("agentos-drill: FAIL missed: "), line)
 
+    def test_an_earlier_record_cannot_stand_in_for_this_drill(self):
+        # #5460 L3 1 / Security 1: an earlier drill's record still stands (its report could not write
+        # last.json); this month's check fails and its record cannot be renamed. The next healthy boot
+        # reports a missed drill, never the earlier pass.
+        write(self.root, "var/lib/agentos/drill/pending", "image=verified image_seconds=40 reboot_at=900000\n")
+        self.rc.write_text("1\n")
+        self.mvfail.write_text("")
+        out, _ = self.reboot()
+        self.assertIn("FAIL drill record not written (image=failed)", out)
+        self.mvfail.unlink()
+        rc, line = self.report()
+        self.assertEqual(rc, 1, line)
+        self.assertTrue(line.startswith("agentos-drill: FAIL missed: "), line)
+        self.assertFalse((self.drill / "last.json").exists())
+
+    def test_a_directory_at_the_record_does_not_swallow_it(self):
+        # mv -T: without it the record would move into the directory and read as written (#5460 L3 2).
+        write(self.root, "var/lib/agentos/drill/pending/x")
+        out, _ = self.reboot()
+        self.assertIn("FAIL drill record not written", out)
+        self.assertTrue((self.drill / "unrecorded").exists())
+
+    def test_a_report_clears_a_marker_its_record_outlived(self):
+        # The record was written but removing unrecorded failed: the report reads the record and
+        # clears both, so the next boot does not report a missed drill (#5460 L3 3).
+        self.reboot()
+        write(self.root, "var/lib/agentos/drill/unrecorded")
+        rc, line = self.report()
+        self.assertEqual(rc, 0, line)
+        self.assertFalse((self.drill / "unrecorded").exists())
+
     def test_an_ordinary_reboot_leaves_nothing_to_report(self):
         write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
         out, _ = self.reboot()
