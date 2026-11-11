@@ -375,6 +375,10 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
+// Home's words for the reasons it does not list say the log names as
+// many as it does (#5431): this fails to compile when the two differ.
+const _ = uint(dns.RefusedShown-page.PolicyShown) + uint(page.PolicyShown-dns.RefusedShown)
+
 // refusedCauses is err, dns.Generate's refusal of a document, as every
 // typed cause it carries, in its order (#5307, #5352, #5405): each device
 // on a Wi-Fi network the setup serves no network for, and each listed

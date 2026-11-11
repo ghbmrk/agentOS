@@ -505,6 +505,17 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if !strings.Contains(h, want) || strings.Count(h, "cannot serve;") != 1 || strings.Count(h, "could not be applied") != 1 || strings.Count(h, "still applies") != 1 || strings.Contains(h, "more reason") {
 		t.Errorf("home does not list every reason the policy cannot be served, each once:\n%s", h)
 	}
+	// A name longer than PolicyNameMax shows its first PolicyNameMax
+	// bytes, cut at a character's start, then "...", so each line is
+	// bounded whatever the name (#5431); one of PolicyNameMax shows whole.
+	whole := strings.Repeat("a", PolicyNameMax-1) + "z"
+	long := strings.Repeat("a", PolicyNameMax-1) + "\u00e9" + strings.Repeat("b", 1<<16)
+	res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{{Kind: PolicyName, Name: whole}, {Kind: PolicyName, Name: long}, {Kind: PolicyVLAN, Name: long, WiFi: long}}}
+	h = g.homeHTML()
+	if !strings.Contains(h, "&#34;"+whole+"&#34;") || !strings.Contains(h, "&#34;"+strings.Repeat("a", PolicyNameMax-1)+"...&#34;, which") ||
+		!strings.Contains(h, "device "+strings.Repeat("a", PolicyNameMax-1)+"... on Wi-Fi network "+strings.Repeat("a", PolicyNameMax-1)+"..., and") || strings.Contains(h, "bbb") || len(h) > 16<<10 {
+		t.Errorf("a long name is not cut at PolicyNameMax (%d bytes):\n%.3000s", len(h), h)
+	}
 	// More reasons than PolicyShown (#5431): the first PolicyShown show,
 	// each once, then one line with the exact count of the rest, each
 	// counted once; the page stays bounded however many the policy holds.
@@ -513,9 +524,9 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 		more  string
 	}{
 		{PolicyShown, ""},
-		{PolicyShown + 1, "<p>There is 1 more reason the policy in force cannot be served, not listed here.</p>\n" + still},
-		{PolicyShown + 37, "<p>There are 37 more reasons the policy in force cannot be served, not listed here.</p>\n" + still},
-		{5000, "<p>There are " + strconv.Itoa(5000-PolicyShown) + " more reasons the policy in force cannot be served, not listed here.</p>\n" + still},
+		{PolicyShown + 1, "<p>There is 1 more reason the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
+		{PolicyShown + 37, "<p>There are 37 more reasons the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
+		{5000, "<p>There are " + strconv.Itoa(5000-PolicyShown) + " more reasons the policy in force cannot be served. This page and the enforcer&#39;s log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed.</p>\n" + still},
 	} {
 		var causes []PolicyCause
 		for i := range tc.names {

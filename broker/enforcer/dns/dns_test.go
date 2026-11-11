@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -444,6 +445,20 @@ func TestGenerateRefuses(t *testing.T) {
 	}
 	if txt := many.Error(); !strings.HasSuffix(txt, `"N`+strconv.Itoa(RefusedShown-1)+`.example" is not a DNS host name; and 7 more`) || strings.Count(txt, "is not a DNS host name") != RefusedShown || strings.Contains(txt, "\n") {
 		t.Errorf("Refused of %d reads %q", len(many), txt)
+	}
+	// Each refusal's text is cut at RefusedTextMax bytes, at a character's
+	// start, then "..." (#5431).
+	huge := BadName{strings.Repeat("\u00e9", 1<<15)}
+	if txt := (Refused{huge, BadName{"Abc.example"}}).Error(); !strings.HasSuffix(txt, `...; `+BadName{"Abc.example"}.Error()) || len(txt) > RefusedTextMax+len(`...; `+BadName{"Abc.example"}.Error()) || !utf8.ValidString(txt) || len(txt) < RefusedTextMax-1 {
+		t.Errorf("a long refusal is not cut at %d bytes: %d bytes, %.80q", RefusedTextMax, len(txt), txt)
+	}
+	at, over := strings.Repeat("x", RefusedTextMax), strings.Repeat("x", RefusedTextMax+1)
+	if txt := (Refused{errors.New(at), errors.New(over)}).Error(); txt != at+"; "+at+"..." {
+		t.Errorf("refusals of %d and %d bytes read %d bytes", RefusedTextMax, RefusedTextMax+1, len(txt))
+	}
+	// One past the cap is counted, never dropped.
+	if txt := many[:RefusedShown+1].Error(); !strings.HasSuffix(txt, ".example\" is not a DNS host name; and 1 more") || strings.Count(txt, "is not a DNS host name") != RefusedShown {
+		t.Errorf("Refused of %d reads %q", RefusedShown+1, txt)
 	}
 	if txt := many[:RefusedShown].Error(); strings.Contains(txt, "more") || strings.Count(txt, "is not a DNS host name") != RefusedShown {
 		t.Errorf("Refused of %d reads %q", RefusedShown, txt)

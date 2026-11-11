@@ -37,6 +37,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -96,13 +97,28 @@ func (e BadSetup) Unwrap() error { return e.Err }
 // log line stays bounded however many a document holds (#5431).
 type Refused []error
 
-// RefusedShown is how many refusals Refused's text names.
-const RefusedShown = 20
+// RefusedShown is how many refusals Refused's text names, and
+// RefusedTextMax the most bytes of each one's text, cut at a character's
+// start, then "..." (#5431). A refusal of a signed policy is far shorter,
+// since the policy's names are at most 253 bytes; the cap bounds the line
+// whatever a refusal carries.
+const (
+	RefusedShown   = 20
+	RefusedTextMax = 1024
+)
 
 func (r Refused) Error() string {
 	s := make([]string, 0, min(len(r), RefusedShown)+1)
 	for _, err := range r[:min(len(r), RefusedShown)] {
-		s = append(s, err.Error())
+		t := err.Error()
+		if len(t) > RefusedTextMax {
+			n := RefusedTextMax
+			for n > 0 && !utf8.RuneStart(t[n]) {
+				n--
+			}
+			t = t[:n] + "..."
+		}
+		s = append(s, t)
 	}
 	if n := len(r) - RefusedShown; n > 0 {
 		s = append(s, "and "+strconv.Itoa(n)+" more")

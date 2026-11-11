@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -163,6 +164,25 @@ const (
 // home lists; one line after them counts the rest (#5431), so the page
 // stays bounded however many the policy holds.
 const PolicyShown = 20
+
+// PolicyNameMax is the most bytes of a name a reason shows (#5431): a
+// longer one shows its first PolicyNameMax bytes, cut at a character's
+// start, then "...". It is the longest DNS name, and the longest name a
+// signed policy holds (policy's name check), so a name the policy can
+// hold is never cut; the page bounds its own lines whatever it is handed.
+const PolicyNameMax = 253
+
+// clip is s cut to PolicyNameMax bytes as above.
+func clip(s string) string {
+	if len(s) <= PolicyNameMax {
+		return s
+	}
+	n := PolicyNameMax
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
+}
 
 // Restart is one resolver instance that has exited on its own Exits
 // times in a row and has not stayed up since.
@@ -407,11 +427,14 @@ func plainStop(r ResolverStop) plainResolver {
 			more++
 		}
 	}
+	// The log names as many as home (dns.RefusedShown, held equal at the
+	// daemon), so neither says the rest are anywhere.
+	rest := "This page and the enforcer's log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed."
 	switch {
 	case more == 1:
-		out.Policy = append(out.Policy, "There is 1 more reason the policy in force cannot be served, not listed here.")
+		out.Policy = append(out.Policy, "There is 1 more reason the policy in force cannot be served. "+rest)
 	case more > 1:
-		out.Policy = append(out.Policy, "There are "+strconv.Itoa(more)+" more reasons the policy in force cannot be served, not listed here.")
+		out.Policy = append(out.Policy, "There are "+strconv.Itoa(more)+" more reasons the policy in force cannot be served. "+rest)
 	}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
@@ -473,6 +496,7 @@ func plainUnset(u Unset) string {
 // owner's words, from its typed cause (#5307). A refusal with no words is
 // one generic line pointing at the log, never its text.
 func plainPolicy(p PolicyCause) string {
+	p.Name, p.WiFi = clip(p.Name), clip(p.WiFi)
 	switch p.Kind {
 	case PolicyVLAN:
 		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there."
