@@ -405,6 +405,7 @@ func TestDropsCarryTheEdgeCut(t *testing.T) {
 		{name: "past the cap, held", count: 1001, hold: true, filled: true},
 		{name: "the same quota running", running: listing(qe), rules: trip},
 		{name: "another quota running", running: listing(qe, edgeQuota(p.Day-1, p.EdgeCap)), rules: trip, flush: true},
+		{name: "two other quotas running", running: listing(edgeQuota(p.Day-1, p.EdgeCap), edgeQuota(p.Day, 2000)), rules: trip, flush: true},
 		{name: "a new day past the cap", count: 1001, running: listing(edgeQuota(p.Day-1, p.EdgeCap)), rules: trip, flush: true, filled: true},
 	} {
 		q := p
@@ -419,8 +420,8 @@ func TestDropsCarryTheEdgeCut(t *testing.T) {
 		if !slices.Equal(rules, c.rules) {
 			t.Errorf("%s: cut rules %q, want %q", c.name, rules, c.rules)
 		}
-		if strings.Contains(text, flush) != c.flush {
-			t.Errorf("%s: TripSet emptied %v, want %v:\n%s", c.name, !c.flush, c.flush, text)
+		if n := strings.Count(text, flush); n != map[bool]int{false: 0, true: 1}[c.flush] {
+			t.Errorf("%s: TripSet emptied %d times, want it once %v:\n%s", c.name, n, c.flush, text)
 		}
 		if i := strings.Index(text, fill); (i >= 0) != c.filled || c.flush && c.filled && i < strings.Index(text, flush) {
 			t.Errorf("%s: TripSet filled %v, want %v, after it is emptied:\n%s", c.name, i >= 0, c.filled, text)
