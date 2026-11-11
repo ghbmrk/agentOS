@@ -602,8 +602,10 @@ def workflow_triggers(text):
 def supersede_problems(name, text):
     """Return why a workflow can leave a superseded PR head's runs queued; empty when it cannot."""
     events, problems = workflow_triggers(text)
-    if problems or not any(e.startswith("pull_request") for e in events):
-        return problems
+    if problems:
+        return problems + [SUBSET]
+    if not any(e.startswith("pull_request") for e in events):
+        return []
     # The jobs line by the line, as GitHub reads it (`jobs: ` with a trailing space too); a PR
     # workflow without one fails rather than hide its jobs from the ban below (#5348).
     at = re.search(r"^jobs: *$", text, re.M)
@@ -617,10 +619,118 @@ def supersede_problems(name, text):
     if name in KEEPS_EVERY_RUN:
         return []
     # #5361: no looser block passes; a rerun guard is part of every PR workflow's group.
-    at = top.index("concurrency:") if "concurrency:" in top else len(top)
-    if top[at:at + 3] != SUPERSEDE_LINES:
+    return concurrency_problems(top) or ([] if name in SUPERSEDE else ["a PR workflow missing from SUPERSEDE"])
+
+
+# Lens R1 on #5408: a form the readers here do not read fails with the subset they do read, not a bare mismatch.
+SUBSET = ("the check reads only this YAML subset: LF line breaks; each top-level key once at column 0, plain or "
+          "quoted; triggers one event a line at one indent, or one flow list on the `on` line; a concurrency block "
+          "of plain `key: value` lines at two spaces; no tab, anchor, alias, tag, `?` key or other flow style")
+PINNED_CONCURRENCY = dict(l.strip(SP).split(": ", 1) for l in SUPERSEDE_LINES[1:])
+CONCURRENCY_ENTRY = re.compile(r"  ([a-z-]+): ([^ &*!|>{\[\]}'\"%@`#,?-].*)")
+
+
+def concurrency_problems(top):
+    """Return why the top-level lines `top` hold no concurrency block equal to the pin, read whole.
+
+    #5409 (from #5408's review): the block is read as a mapping to its last line, so a second
+    `cancel-in-progress` or an extra key fails as surely as a changed value.
+    """
+    at = [i for i, l in enumerate(top) if re.match(r"""(["']?)concurrency\1[ \t]*:""", l)]
+    if not at:
         return ["no per-PR concurrency block as pinned"]
-    return [] if name in SUPERSEDE else ["a PR workflow missing from SUPERSEDE"]
+    if top[at[0]] != "concurrency:":
+        return ["a concurrency key the check cannot read: %r" % top[at[0]], SUBSET]
+    block = {}
+    for line in top[at[0] + 1:]:
+        if not line.strip(" \t") or line.lstrip(SP).startswith("#"):
+            continue
+        if line[0] not in " \t":
+            break
+        m = CONCURRENCY_ENTRY.fullmatch(line)
+        if not m:
+            return ["a concurrency line the check cannot read: %r" % line, SUBSET]
+        if m.group(1) in block:
+            return ["concurrency sets %s twice" % m.group(1)]
+        block[m.group(1)] = m.group(2)
+    if block != PINNED_CONCURRENCY:
+        return ["no per-PR concurrency block as pinned: %s" % ", ".join(
+            "%s is %r, pinned %r" % (k, block.get(k, "<missing>"), PINNED_CONCURRENCY.get(k, "<none>"))
+            for k in sorted(set(block) | set(PINNED_CONCURRENCY)) if block.get(k) != PINNED_CONCURRENCY.get(k))]
+    return []
+
+
+# CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
+# mutgate's first job is this one, pinned whole: it reads the PR's head from the API and, when the
+# run's is older, ends with a notice. `claimed` runs only on its `current`, and no later job runs
+# past a skipped claim but the `mutgate` job, which then fails, so a stale run never passes.
+HEAD_GUARD_LINES = [
+    "  head:",
+    "    runs-on: ubuntu-24.04",
+    "    timeout-minutes: 5",
+    "    permissions:",
+    "      pull-requests: read",
+    "    outputs:",
+    "      current: ${{ steps.head.outputs.current }}",
+    "    steps:",
+    "      - name: This run's head is the PR's current head",
+    "        id: head",
+    "        env:",
+    "          GH_TOKEN: ${{ github.token }}",
+    "          REPO: ${{ github.repository }}",
+    "          PR_NUMBER: ${{ github.event.pull_request.number }}",
+    "          RUN_HEAD: ${{ github.event.pull_request.head.sha }}",
+    "        run: |",
+    '          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || '
+    '{ echo "::error::cannot read the PR\'s head"; exit 1; }',
+    "          [[ \"$now\" =~ ^[0-9a-f]{40}$ ]] || { echo \"::error::the PR's head is not a sha: $now\"; exit 1; }",
+    '          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi',
+    '          echo "::notice::this run\'s head $RUN_HEAD is not the PR\'s current head $now: no gate runs; '
+    'the current head\'s own run decides"',
+    '          echo "current=false" >> "$GITHUB_OUTPUT"',
+]
+CLAIM_WAITS = ["  claimed:", "    needs: head", "    if: ${{ needs.head.outputs.current == 'true' }}"]
+# L3 on #5433: "Re-run failed jobs" copies `head`'s current=true from attempt 1, so each job that
+# runs PR tests or decides reads the head itself as its first step and fails on an older one.
+HEAD_CHECK_JOBS = ("plan", "mutants", "mutgate")
+HEAD_CHECK_LINES = [
+    "    permissions:",
+    "      contents: read",
+    "      pull-requests: read",
+    "    steps:",
+    "      - name: This run's head is still the PR's current head",
+] + HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        env:"):-3] + [
+    '          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run\'s head $RUN_HEAD is not the PR\'s current head '
+    '$now: a rerun of an old head gates nothing; the current head\'s own run decides"; exit 1; }',
+]
+
+
+def head_guard_problems(text):
+    """Return why mutgate.yml can run its gate on a head the PR has left; empty when it cannot."""
+    if "\njobs:\n" not in text:
+        return ["no `jobs:` line"]
+    code = [l for l in text.split("\njobs:\n", 1)[1].split("\n") if l.strip(SP) and not l.lstrip(SP).startswith("#")]
+    jobs = [i for i, l in enumerate(code) if re.match(r"  \S", l)] + [len(code)]
+    first = code[:jobs[1]] if len(jobs) > 1 else code
+    if first != HEAD_GUARD_LINES:
+        return ["the first job is not the pinned head check"]
+    claim = [i for i in jobs[:-1] if code[i] == "  claimed:"]
+    if not claim or code[claim[0]:claim[0] + 3] != CLAIM_WAITS:
+        return ["`claimed` does not wait on the head check"]
+    # Only the deciding job may run past a skipped claim, and it fails unless the claim succeeded.
+    for a, b in zip(jobs, jobs[1:]):
+        body = "\n".join(code[a:b])
+        name = code[a].strip(SP + ":")
+        if name in HEAD_CHECK_JOBS:
+            at = [i for i in range(a, b) if code[i] == "    permissions:"]
+            if [l for l in code[a:b] if l.startswith("    permissions")] != ["    permissions:"] or \
+                    code[at[0]:at[0] + len(HEAD_CHECK_LINES)] != HEAD_CHECK_LINES or "    steps:" in code[a:at[0]]:
+                return ["%s does not read the PR's head first" % name]
+        if code[a] != "  mutgate:" and re.search(r"\b(always|cancelled|failure|success)\(", body):
+            return ["%s runs past a skipped claim" % name]
+        if code[a] == "  mutgate:" and '[ "$CLAIMED" = success ] || exit 1' not in body:
+            return ["the mutgate job does not fail when the claim did not run"]
+    return []
 
 
 class WorkflowTest(unittest.TestCase):
@@ -751,6 +861,116 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(workflow_triggers(text)[1], name)
                 self.assertTrue(supersede_problems("mutgate.yml", text.replace("jobs:", block + "jobs:")), name)
                 self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
+
+    def test_a_stale_mutgate_run_stops_at_its_first_job(self):
+        # CI-mutgate-head-guard (#5409): mutgate's first job is the pinned head check, `claimed`
+        # waits on it, and no job but the failing `mutgate` one runs past a skipped claim.
+        text = (WORKFLOWS / "mutgate.yml").read_text()
+        self.assertEqual(head_guard_problems(text), [])
+        guard = "\n".join(HEAD_GUARD_LINES) + "\n"
+        edits = {
+            "no guard": (guard, ""),
+            "a job before the guard": ("\njobs:\n", "\njobs:\n  early:\n    runs-on: ubuntu-24.04\n"),
+            "guard widened": ("      pull-requests: read\n", "      pull-requests: write\n"),
+            "guard always passes": ('if [ "$now" = "$RUN_HEAD" ]', 'if true || [ "$now" = "$RUN_HEAD" ]'),
+            "guard reads the event": ('gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha', 'echo "$RUN_HEAD"'),
+            "claim ignores it": ("    if: ${{ needs.head.outputs.current == 'true' }}\n", ""),
+            "claim waits on nothing": ("    needs: head\n", ""),
+            "plan runs past a skip": ("    if: ${{ needs.claimed.outputs.packages != '[]' }}\n",
+                                      "    if: ${{ always() && needs.claimed.outputs.packages != '[]' }}\n"),
+            "gate passes a skip": ('[ "$CLAIMED" = success ] || exit 1', '[ "$CLAIMED" != failure ] || exit 1'),
+            "no jobs line": ("\njobs:\n", "\njobs: \n"),
+            # L3 on #5433: each job that runs PR tests or decides checks the head itself, first.
+            "a job's check passes an old head": ('          [ "$now" = "$RUN_HEAD" ] || { echo "::error::this run',
+                                                 '          true || { echo "::error::this run'),
+            "a second permissions key": ("    if: ${{ !cancelled() }}\n", "    if: ${{ !cancelled() }}\n    permissions: {}\n"),
+        }
+        check = "\n".join(HEAD_CHECK_LINES[4:]) + "\n"
+        for job in HEAD_CHECK_JOBS:
+            body = text.split("\n  %s:\n" % job, 1)[1]
+            edits["no check in " + job] = ("\n  %s:\n" % job + body[:body.index(check) + len(check)],
+                                           "\n  %s:\n" % job + body[:body.index(check)].replace(
+                                               "    permissions:\n      contents: read\n      pull-requests: read\n", ""))
+            edits["check after the checkout in " + job] = (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - uses: actions/checkout@",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - uses: actions/checkout@x\n" + check
+                + "      - uses: actions/checkout@") if job != "mutgate" else (
+                "\n  %s:\n" % job + body[:body.index(check) + len(check)] + "      - name: The claim ran",
+                "\n  %s:\n" % job + body[:body.index(check)] + "      - run: true\n" + check + "      - name: The claim ran")
+        for edit, (old, new) in edits.items():
+            with self.subTest(edit):
+                self.assertIn(old, text)
+                self.assertTrue(head_guard_problems(text.replace(old, new, 1)), edit)
+        # The guard's script: the current head runs the gate, an older one ends green with a notice,
+        # and an unreadable head fails the job (so `claimed` and every gate job skip and mutgate fails).
+        script = "\n".join(l[10:] for l in HEAD_GUARD_LINES[HEAD_GUARD_LINES.index("        run: |") + 1:])
+        sha, other = "a" * 40, "b" * 40
+        for out, rc, want_rc, want in [(sha, 0, 0, "current=true"), (other, 0, 0, "current=false"),
+                                       ("", 1, 1, ""), ("not a sha", 0, 1, ""), (sha + "\n" + sha, 0, 1, "")]:
+            with self.subTest(out=out, rc=rc), tempfile.TemporaryDirectory() as d:
+                gh = pathlib.Path(d, "gh")
+                gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$STUB_OUT\"\nexit \"$STUB_RC\"\n")
+                gh.chmod(0o755)
+                env = {"PATH": d + ":/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc), "RUN_HEAD": sha,
+                       "REPO": "o/r", "PR_NUMBER": "1", "GITHUB_OUTPUT": str(pathlib.Path(d, "out"))}
+                r = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, want_rc, r.stdout + r.stderr)
+                got = pathlib.Path(d, "out").read_text().strip() if pathlib.Path(d, "out").exists() else ""
+                self.assertEqual(got, want)
+                self.assertEqual("::notice::this run's head" in r.stdout, want == "current=false")
+                # Each later job's own check: only the current head goes on; anything else fails the job.
+                check = "\n".join(l[10:] for l in HEAD_CHECK_LINES[HEAD_CHECK_LINES.index("        run: |") + 1:])
+                r = subprocess.run(["bash", "-e", "-c", check], env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0 if want == "current=true" else 1, r.stdout + r.stderr)
+                self.assertEqual("a rerun of an old head gates nothing" in r.stdout, want == "current=false")
+
+    def test_concurrency_block_is_read_whole(self):
+        # #5409 (from #5408's review): the pinned block's three lines with more after them fail,
+        # whatever the extra line is; the same mapping in another order or with a comment passes.
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        block = "\n".join(SUPERSEDE_LINES) + "\n"
+        group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
+        self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+        for edit, new in {
+            "second cancel-in-progress": block + "  cancel-in-progress: true\n",
+            "second group": block + "  group: shared\n",
+            "extra key": block + "  x: y\n",
+            "extra key after a comment": block + "  # c\n  x: y\n",
+            "missing key": block.replace(cancel + "\n", ""),
+        }.items():
+            with self.subTest(edit):
+                self.assertTrue(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), edit)
+        for edit, new in {"reordered": "concurrency:\n" + cancel + "\n" + group + "\n",
+                          "comment and blank line inside": "concurrency:\n  # c\n\n" + group + "\n" + cancel + "\n"}.items():
+            with self.subTest(edit):
+                self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", new + "jobs:")), [], edit)
+
+    def test_unread_yaml_names_the_supported_subset(self):
+        # Lens R1 on #5408: flow style, an anchor or a tab-indented block fails with the subset the
+        # check reads, not a bare mismatch; a readable block that differs says what differs.
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        block = "\n".join(SUPERSEDE_LINES) + "\n"
+        group, cancel = SUPERSEDE_LINES[1], SUPERSEDE_LINES[2]
+        flow = "concurrency: {%s, %s}\n" % (group.strip(SP), cancel.strip(SP))
+        for edit, new in {
+            "flow mapping": flow,
+            "anchor": block.replace("concurrency:", "concurrency: &c"),
+            "quoted key": block.replace("concurrency:", '"concurrency":'),
+            "tab-indented block": block.replace("  group", "\tgroup"),
+            "tab after the indent": block.replace("  group", "  \tgroup"),
+            "deeper line": block + "    x: y\n",
+            "quoted value": block.replace(cancel, "  cancel-in-progress: 'x'"),
+            "alias value": block.replace(cancel, "  cancel-in-progress: *c"),
+            "flow triggers": ("on:\n  pull_request:", "on: {pull_request: }"),
+        }.items():
+            text = plain.replace("jobs:", block + "jobs:").replace(*new) if isinstance(new, tuple) \
+                else plain.replace("jobs:", new + "jobs:")
+            with self.subTest(edit):
+                self.assertIn(SUBSET, supersede_problems("mutgate.yml", text), edit)
+        changed = supersede_problems("mutgate.yml", plain.replace("jobs:", block.replace(cancel, "  cancel-in-progress: true") + "jobs:"))
+        self.assertEqual(len(changed), 1)
+        self.assertNotIn(SUBSET, changed)
+        self.assertIn("cancel-in-progress is 'true', pinned", changed[0])
 
     def test_cache_keys_name_the_runner_image(self):
         seen = 0
