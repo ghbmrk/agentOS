@@ -1152,6 +1152,13 @@ class PremergeTest(unittest.TestCase):
               if any(premerge.pr_paths(f.read_text(), e) is not None for e in ("pull_request", "pull_request_target"))}
         self.assertEqual(pr, set(premerge.HELD) | set(premerge.UNHELD))
         self.assertFalse(set(premerge.HELD) & set(premerge.UNHELD))
+        # a held workflow whose PR trigger has a paths filter must read as that filter, not as unfiltered, or every
+        # PR outside it holds as `<wf>:missing` for good (#5432 L3: testkit.yml's flow-style list read as [])
+        for stem in premerge.HELD:
+            text = (wfs / f"{stem}.yml").read_text()
+            pr_on = text.split("\njobs:", 1)[0].split("\n  pull_request", 1)[-1].split("\n  push:", 1)[0]
+            if "pull_request" in text and "paths:" in pr_on:
+                self.assertTrue(premerge.pr_paths(text) or premerge.pr_paths(text, "pull_request_target"), stem)
         # premerge reruns when each held workflow completes, else a hold stays until some other event: workflow_run
         # names a workflow by its `name:`, which for testkit.yml is testkit-image.
         on = (wfs / "premerge.yml").read_text().split("workflow_run:\n", 1)[1].split("\n")[0]
@@ -1170,6 +1177,19 @@ class PremergeTest(unittest.TestCase):
                                                                           ("mutgate", "failure")])), ["mutgate:failure"])
         self.assertEqual(held(self.wf(2, "mutgate", "cancelled", sha)), ["mutgate:cancelled"])
         self.assertEqual(held(self.wf(2, "mutgate", "success", sha)), [])
+        # the real testkit.yml filter: a PR changing only b.md and mutgate.yml owes no testkit run (#5432 L3)
+        self.write(".github/workflows/testkit.yml", (wfs / "testkit.yml").read_text())
+        sha = self.commit("testkit")
+        mut = self.wf(2, "mutgate", "success", sha)
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha), mut]), "HEAD", "main"),
+                         ["testkit:missing"])  # the PR changes testkit.yml itself, so its run is owed
+        git(self.r, "checkout", "-q", "main")
+        git(self.r, "merge", "-q", "--no-edit", "pr")
+        git(self.r, "checkout", "-q", "pr")
+        self.write("c.md", "y\n")
+        sha = self.commit("unrelated")
+        self.assertEqual(premerge.checks_held(self.r, bundle([self.wf(1, "vulncheck", "success", sha),
+                                                              self.wf(2, "mutgate", "success", sha)]), "HEAD", "main"), [])
 
     def test_pr_paths_reads_only_the_block_style_it_knows(self):
         p = premerge.pr_paths
