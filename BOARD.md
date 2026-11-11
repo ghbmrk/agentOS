@@ -452,8 +452,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | VULN-openclaw-held-r3 | VULN-openclaw-held-r3: the vulncheck record and its test say what holds (the prune, not a read-only config), and the plugins/channels test parses quoted, indented and same-line keys. Release; from #5369. | #5369, #5368 | queued (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
-| PREMERGE-fork-rerun | PREMERGE-fork-rerun: premerge.yml reruns the gate when a held workflow completes on a fork PR (its workflow_run names no PR). Release; from #5380 (Security). | #5380, #5366 | building (release; tier A; gate files) |
-| PREMERGE-merge-bind | PREMERGE-merge-bind: premerge.yml's merge job reads only this PR's runs and check runs, so a foreign PR on the same commit cannot stall the bot merge. Release; from #5380. | #5380, #5366 | queued (release; tier A; gate files) |
+| PREMERGE-merge-bind | PREMERGE-merge-bind: premerge.yml's merge job reads only this PR's runs and check runs, so a foreign PR on the same commit cannot stall the bot merge. Release; from #5380. | #5380, #5366 | building (release; tier A; gate files) |
 | PREMERGE-runs-local | PREMERGE-runs-local: a local premerge --check can read the held checks (a runs-fetch helper pinned to premerge.yml) or OPERATING says to read the premerge status. Release; from #5380 (Lens R2). | #5380, #5366 | queued (release; tier A; gate files) |
 | TRUSTED-ceiling-raise-5147 | TRUSTED-ceiling-raise-5147: raise the D-310 trusted-lines ceiling to 59,120 (+167) for KRN-clock-b (held for Mark's yes). Release; from #5387. | #5147, #5387 | queued (release; tier A; held for Mark) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
@@ -470,6 +469,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | TEST-e2e-owner-label | TEST-e2e-owner-label: the e2e check that owner chat never reaches a still-public machine cannot fail; start agent as public in the stub. Defect; from #5427. | #5425, #5427 | queued (defect; tier A) |
 | ENF-net-ra-fu-r9 | ENF-net-ra-fu-r9: cap the refused-name list on the page and in the log; a setup fault has its own words on the page. Release; from #5420. | #5405, #5420 | queued (release; tier A) |
+| PREMERGE-status-bind | PREMERGE-status-bind: a fork PR on the same head commit cannot overwrite another PR's `premerge` status. Release; from #5384. | #5384 | queued (release; tier A; gate files) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
