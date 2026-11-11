@@ -192,16 +192,23 @@ func (p pageEdge) LiftEdge() error {
 // merges segments spent (ENF-l-16), and the edge's cut as recorded. The
 // kernel cuts the edge at the first byte past its cap (nft.TripSet) unless
 // the edge is held: while its quota is not its count (the edge's port
-// merged segments since the last full load the firewall took, or the day
-// is unreadable and every cap spent, ENF-l-14), so an edge within its cap
+// merged segments since the last full load the firewall took, the last
+// full load could not read the table it replaced, or the day is
+// unreadable and every cap spent, ENF-l-14), so an edge within its cap
 // is never cut, and on the day the owner lifted its cut. The hold for a
 // merge lasts until a full load starts the quota and TripSet afresh:
 // a refused one leaves the spent quota running, which would fill the set
 // (#5399 item 5). d.fwMu is held.
 func (d *Enforcer) holdDrop(p *nft.Drop) {
 	d.spendMerging(p)
+	if d.net.unread {
+		for i := range p.Groups {
+			p.Groups[i].Count = max(p.Groups[i].Count, p.Groups[i].Cap)
+		}
+		p.EdgeCount = max(p.EdgeCount, p.EdgeCap)
+	}
 	cut, lifted := d.edge.held(p.Day)
-	p.EdgeCut, p.EdgeHold = cut, lifted || d.net.edgeMerged || d.net.counter == nil
+	p.EdgeCut, p.EdgeHold = cut, lifted || d.net.edgeMerged || d.net.unread || d.net.counter == nil
 }
 
 // loadCut writes the drop again with the edge's cut as recorded now, so a

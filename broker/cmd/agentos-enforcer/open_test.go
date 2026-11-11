@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
-	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
@@ -448,12 +447,13 @@ func TestLoadRefusesUncompiled(t *testing.T) {
 	}
 }
 
-// TestFailedListingBytesDropped: at the first load, a running table that
-// does not read is taken as empty, whatever bytes came with the error, so
-// the load is the document's own. Once this process has loaded one, a load
-// over a table that does not read is refused and the running table stays
-// (#5399 item 6): replacing it would lose its bytes since the last reading
-// and the edge in TripSet; the next tick tries again.
+// TestFailedListingBytesDropped: a running table that does not read is
+// taken as empty, whatever bytes came with the error, so the load is the
+// document's own. Once this process has loaded a table, its bytes since
+// the last reading and the edge in TripSet are lost with it (#5399 item
+// 6): the load still goes ahead, so a tightening is never held back, with
+// every cap held spent and the edge held, until the table reads again and
+// a full load that read it is taken.
 func TestFailedListingBytesDropped(t *testing.T) {
 	x, _ := enrolled(t, false)
 	failing := func(on bool) {
@@ -466,26 +466,86 @@ func TestFailedListingBytesDropped(t *testing.T) {
 		}
 		x.fire.mu.Unlock()
 	}
-	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
 	failing(true)
-	doc := home()
-	doc.Devices[0].Allow = []string{"tv.example", "tv2.example"}
-	n := loads()
-	x.d.fwMu.Lock()
-	err := x.d.loadNetwork(context.Background(), doc)
-	x.d.fwMu.Unlock()
-	if err == nil || loads() != n || loadStep(err) != page.LoadFirewall || !strings.Contains(err.Error(), "running table unreadable, it stays in force") {
-		t.Fatalf("a load over a table this process loaded that does not read: %v, %d loads", err, loads()-n)
-	}
 	x.d.Close()
-	x.start() // its first load
-	if x.fire.last() != x.fullLoad(x.current()) {
-		t.Fatal("the load read the bytes of a failed listing")
+	x.start() // its first load: nothing to read
+	if x.fire.last() != x.fullLoad(x.current()) || x.d.net.unread {
+		t.Fatal("the first load read the bytes of a failed listing, or held its caps")
 	}
 	if x.logs("firewall: running table unreadable") == 0 {
 		t.Fatal("the unreadable running table was not logged")
 	}
 	failing(false)
+}
+
+// TestUnreadTableHeldSpent (#5399 item 6, L3 on #5434): a full load over a
+// table this process loaded that does not read still loads, so a
+// tightening is in force and a recorded edge cut reaches the firewall,
+// while every cap is held spent and the edge held (no kernel cut at a
+// quota that is not its count). Once a reading finds the table readable
+// again, the next tick loads in full from the counts.
+func TestUnreadTableHeldSpent(t *testing.T) {
+	x, doc, _ := capped(t)
+	const cutRule = `add rule inet enforcer cut_edge counter name "edge_cut" drop`
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	listFails := func(on bool) {
+		x.fire.mu.Lock()
+		x.fire.listErr = nil
+		if on {
+			x.fire.listErr = errors.New("nft: list failed")
+		}
+		x.fire.mu.Unlock()
+	}
+	x.setListing(listingOf(t, x, doc, 7, 10, 100, true))
+	x.advance(readEvery)
+	if c, e := spentIn(t, x); c || e {
+		t.Fatal("fixture: caps spent")
+	}
+
+	// A tightening loads while the table does not read, with every cap
+	// held spent and the edge held.
+	listFails(true)
+	n := loads()
+	before := x.fire.last()
+	next := x.current()
+	next.Caps = map[string]uint64{"updates.example": 500}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), next)
+	unread := x.d.net.unread
+	x.d.fwMu.Unlock()
+	if err != nil || loads() != n+1 || x.fire.last() == before {
+		t.Fatalf("a tightening with the table unreadable: %v, %d loads", err, loads()-n)
+	}
+	if c, e := spentIn(t, x); !c || !e || !unread || strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatalf("the load over an unread table: core spent %v, edge spent %v, held %v, kernel cut %v", c, e, unread, strings.Contains(x.fire.last(), edgeTripRule))
+	}
+
+	// A recorded edge cut whose own write cannot read the table: the full
+	// load it asks for carries it.
+	x.d.tripEdge("test overrun")
+	for range 2 {
+		x.advance(readEvery)
+	}
+	x.d.fwMu.Lock()
+	reload := x.d.net.reload
+	x.d.fwMu.Unlock()
+	if loads() < n+2 || !strings.Contains(x.fire.last(), cutRule) || reload {
+		t.Fatalf("a recorded cut with the table unreadable: %d loads, cut written %v, reload pending %v", loads()-n, strings.Contains(x.fire.last(), cutRule), reload)
+	}
+
+	// The table reads again: the next tick loads in full from the counts.
+	listFails(false)
+	x.advance(readEvery)
+	x.advance(time.Second)
+	x.d.fwMu.Lock()
+	unread = x.d.net.unread
+	x.d.fwMu.Unlock()
+	if unread || loads() < n+3 {
+		t.Fatalf("the table reads again: still held %v, %d loads", unread, loads()-n)
+	}
+	if c, e := spentIn(t, x); c || e {
+		t.Fatalf("caps still spent once a load read its table: core %v, edge %v", c, e)
+	}
 }
 
 // TestMergingReloadFailureLogged: a reload a port's merging asks for
