@@ -83,6 +83,11 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 		if errors.As(err, &ref) {
 			// The closed reason, never the wrapped cause. A reason this
 			// table lacks leaves as a logged ref.
+			// A run that failed while STOP holds failed because of it (the
+			// boot or command was held): say STOP, not "shorten the brief".
+			if ref.Reason == "failed" && t.Stopped != nil && t.Stopped() {
+				return nil, errStartStopped
+			}
 			if r, ok := providerReasons[ref.Reason]; ok {
 				return nil, r
 			}

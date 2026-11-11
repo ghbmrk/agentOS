@@ -332,3 +332,27 @@ func TestOP6ProviderRunHeldWhenStopLandsAfterTheEntryCheck(t *testing.T) {
 		t.Fatalf("command after STOP: %v, want ErrHeld", exec)
 	}
 }
+
+// A run that fails because STOP held its boot reads as STOP, not as the
+// brief's fault; the same failure without STOP keeps its reason
+// (STOP-queued-start-fu, UX).
+// REQ: OP-6
+func TestOP6ProviderRunHeldByStopAnswersStop(t *testing.T) {
+	r := newRig(t, 4096)
+	r.agent("a1", vm.Public)
+	f := r.provider()
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	f.err = &ProviderRefusal{Reason: "failed"}
+	f.during = func(context.Context) { stopped.Store(true) } // after the entry check
+	err := r.call("a1", "provider_run", m{"provider": "codex", "brief": "b", "task_class": "code"}, nil)
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("run held by STOP: %v, want the STOP text", err)
+	}
+	stopped.Store(false)
+	f.during = nil
+	err = r.call("a1", "provider_run", m{"provider": "codex", "brief": "b", "task_class": "code"}, nil)
+	if err == nil || err.Error() != providerReasons["failed"].Error() {
+		t.Fatalf("failure without STOP: %v, want its own reason", err)
+	}
+}
