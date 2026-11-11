@@ -1290,10 +1290,10 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 			t.Fatal(err)
 		}
 		f := strings.Fields(text)
-		if !strings.HasPrefix(text, "Forget everything under “Alice”, 1 item (message 1)? Reply YES ") || len(f) < 11 {
+		if !strings.HasPrefix(text, "Forget everything under “Alice”, 1 message? Reply YES ") || len(f) < 9 {
 			t.Fatalf("askforget answers %q", text)
 		}
-		return f[10]
+		return f[8]
 	}
 	erased := func() bool {
 		var r recallRead

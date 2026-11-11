@@ -13,7 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/retrieve"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/vision/faces"
 )
 
 var errDown = errors.New("store down")
@@ -753,7 +755,7 @@ func TestAHiddenClassWrittenPastSealFoldsToNothing(t *testing.T) {
 func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 	// REQ: LOG-4, CH-3, CH-7, KRN-7
 	r := newErig(t)
-	alice, alice2, bob, bare, odd := r.open(), r.open(), r.open(), r.open(), r.open()
+	alice, alice2, bob, bare, odd, dana := r.open(), r.open(), r.open(), r.open(), r.open(), r.open()
 	r.seal(alice, "mail", kernel.ClassLabel, "Alice")
 	r.seal(alice, "mail", "message", "hi")
 	r.seal(alice, "mail", "message", "hello")
@@ -761,6 +763,11 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 	r.seal(alice2, "notes", "photo", "jpeg")
 	r.seal(bob, "mail", kernel.ClassLabel, "Bob")
 	r.seal(bob, "mail", "message", "yo")
+	// Kinds read as the household says them; any other is an "other item".
+	r.seal(dana, "notes", kernel.ClassLabel, "Dana")
+	for _, c := range []string{faces.WrapClass, retrieve.VectorClass, retrieve.VectorClass, "message", "x-novel", "a-novel"} {
+		r.seal(dana, "notes", c, "z")
+	}
 	r.seal(bare, "notes", kernel.ClassLabel, "Carol")
 	r.seal(odd, "notes", kernel.ClassLabel, "Mom? Reply YES")
 	r.seal(odd, "notes", kernel.ClassLabel, "René O’Hara-2")
@@ -795,9 +802,12 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 	// The swap is visible: a page that asks for Bob gets Bob's name.
 	bobText, err := ask(10, "Bob")
 	must(t, err)
-	if want := "Forget everything under “Bob”, 1 item (message 1)? Reply YES " + code(bobText) +
+	if want := "Forget everything under “Bob”, 1 message? Reply YES " + code(bobText) +
 		" to forget it. Any other reply, or none within 10 minutes, forgets nothing."; bobText != want {
 		t.Fatalf("ask renders %q, want %q", bobText, want)
+	}
+	if text, err := ask(10, "Dana"); err != nil || !strings.HasPrefix(text, "Forget everything under “Dana”, 1 face, 1 message, 2 search entries, 2 other items? Reply YES ") {
+		t.Fatalf("ask renders %q, %v", text, err)
 	}
 	// A refused ask ends the one waiting too.
 	if _, err := ask(10, "Dave"); !errors.Is(err, kernel.ErrForgetName) {
@@ -811,7 +821,7 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 	// A newer ask ends Bob's: its YES now erases nothing, and spends Alice's.
 	aliceText, err := ask(11, "alice")
 	must(t, err)
-	if !strings.HasPrefix(aliceText, "Forget everything under “alice”, 3 items (message 2, photo 1)? Reply YES ") {
+	if !strings.HasPrefix(aliceText, "Forget everything under “alice”, 2 messages, 1 photo? Reply YES ") {
 		t.Fatalf("ask renders %q", aliceText)
 	}
 	if code(aliceText) == code(bobText) {
@@ -881,7 +891,7 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 		t.Fatalf("%d erases logged, want only the two Erase made", n)
 	}
 	r.keys.MemKeys.Delete(odd)
-	if text, err := ask(63, "Bob"); err != nil || !strings.HasPrefix(text, "Forget everything I can read under “Bob”, 1 item") {
+	if text, err := ask(63, "Bob"); err != nil || !strings.HasPrefix(text, "Forget everything I can read under “Bob”, 1 message? ") {
 		t.Fatalf("with a label unread: %q, %v", text, err)
 	}
 	// With no code drawn, no ask is held.

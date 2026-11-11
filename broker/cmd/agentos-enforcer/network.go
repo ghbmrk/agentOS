@@ -270,7 +270,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		if err := d.dp.Fire.Load(lctx, joinRules(text, drops)); err != nil {
+		seed := nft.Seed(l, d.leases())
+		if err := d.dp.Fire.Load(lctx, joinRules(joinRules(text, seed), drops)); err != nil {
 			return fireErr{err}
 		}
 		return nil
@@ -368,6 +369,61 @@ func joinRules(text, drops string) string {
 		text += "\n"
 	}
 	return text + drops
+}
+
+// leases is what the DHCP server's lease file holds for the shared
+// segments now, for a full load to seed (nft.Seed, ENF-l-23, #5295), so a
+// restart or reboot does not cut every leased IPv4 host off until it
+// renews, up to half a lease later. A missing file (a first boot) seeds
+// nothing; an unreadable one seeds nothing and is logged; neither fails
+// the load, whose hosts then wait for their next renewal (fails closed).
+func (d *Enforcer) leases() []nft.Lease {
+	b, err := os.ReadFile(d.cfg.DNS.LeaseFile)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.dp.Logf("firewall: lease file unreadable, no lease seeded: " + err.Error())
+	}
+	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix())
+}
+
+// leasesOf is the IPv4 leases in lease file b (dnsmasq's lines, each
+// "expiry mac ip hostname clientid", expiry in Unix seconds) with time
+// left at now, each on the shared segment (Guests, Owner, Household)
+// whose DHCP subnet in nets holds its address. A line seeds nothing when
+// its address is in no subnet, in more than one, in a subnet that is not
+// a DHCP-served shared segment's, or outside that subnet's lease range
+// (dns.Hosts4, which the network, broadcast and enforcer's own addresses
+// are outside); nor does a line that is not exactly five fields, a
+// hardware address that is not Ethernet, an infinite lease (expiry 0) or
+// one run out. Seed drops what is left of more than nft.LeaseTimeout.
+func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
+	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
+	var out []nft.Lease
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 5 {
+			continue
+		}
+		expiry, eerr := strconv.ParseInt(f[0], 10, 64)
+		hw, herr := net.ParseMAC(f[1])
+		a, aerr := netip.ParseAddr(f[2])
+		if eerr != nil || herr != nil || aerr != nil || len(hw) != 6 || expiry <= now {
+			continue
+		}
+		var in []dns.Net
+		for _, n := range nets {
+			if n.Prefix4.Contains(a) { // never an IPv6 or IPv4-mapped address
+				in = append(in, n)
+			}
+		}
+		if len(in) != 1 || !in[0].DHCP || !shared[in[0].Iface] {
+			continue
+		}
+		if first, last := dns.Hosts4(in[0].Prefix4); a.Less(first) || last.Less(a) {
+			continue
+		}
+		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: hw, Left: expiry - now})
+	}
+	return out
 }
 
 // drop is the byte caps' drop for caps: the counter's day, or, when the

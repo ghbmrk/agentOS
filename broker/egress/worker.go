@@ -369,7 +369,7 @@ func (r PlanRoute) validate() error {
 		}
 	}
 	for _, h := range append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...) {
-		if err := header.Name(h); err != nil {
+		if err := header.Request(h); err != nil {
 			return fmt.Errorf("plan route %s: %w", r.Provider, err)
 		}
 	}

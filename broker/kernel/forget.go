@@ -27,6 +27,15 @@ var (
 	ErrForgetStop  = errors.New("kernel: STOP holds, so no Forget is asked")
 )
 
+// kindWords names a kind as the household says it, for one and for more; the
+// ask calls any other kind an "other item" (#5163).
+var kindWords = map[string][2]string{
+	"message":          {"message", "messages"},
+	"photo":            {"photo", "photos"},
+	"vision-wrap-key":  {"face", "faces"},
+	"retrieve-vectors": {"search entry", "search entries"},
+}
+
 type forgetAsk struct {
 	subjects []string
 	code     string
@@ -51,20 +60,29 @@ func (k *Kernel) AskForget(at int64, label string) (string, error) {
 	if len(unread) > 0 {
 		all = "everything I can read" // a label that cannot be read may name it too
 	}
-	kinds := map[string]int{}
+	kinds, other := map[[2]string]int{}, [2]string{"other item", "other items"}
 	for _, s := range subjects {
 		for _, it := range k.s.subjects[s].items {
-			kinds[it.Class]++
+			if w, ok := kindWords[it.Class]; ok {
+				kinds[w]++
+			} else if it.Class != ClassLabel {
+				kinds[other]++
+			}
 		}
 	}
-	delete(kinds, ClassLabel)
-	n, list, items := 0, "", "nothing but the name"
-	for _, c := range slices.Sorted(maps.Keys(kinds)) {
-		n += kinds[c]
-		list += fmt.Sprintf(", %s %d", c, kinds[c])
+	rank := func(w [2]string) string { // by word, other items last
+		if w == other {
+			return "\x7f"
+		}
+		return w[0]
 	}
-	if n > 0 {
-		items = fmt.Sprintf("%d %s (%s)", n, map[bool]string{true: "item", false: "items"}[n == 1], list[2:])
+	var list []string
+	for _, w := range slices.SortedFunc(maps.Keys(kinds), func(a, b [2]string) int { return strings.Compare(rank(a), rank(b)) }) {
+		list = append(list, fmt.Sprintf("%d %s", kinds[w], w[min(kinds[w], 2)-1]))
+	}
+	items := "nothing but the name"
+	if len(list) > 0 {
+		items = strings.Join(list, ", ")
 	}
 	var b [8]byte // 10^6 codes from 2^64 draws: no code is notably likelier
 	if _, err := io.ReadFull((*k.log.p).cfg.Rand, b[:]); err != nil {
