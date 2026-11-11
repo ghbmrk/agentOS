@@ -721,7 +721,9 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	made := false
 	defer func() { t.settle(ids, made) }()
-	s, err := t.M.Fork(ctx, w.ID, ids)
+	// STOP is asked again as each fork starts: a fork that waited on the
+	// worker while STOP came starts nothing (STOP-queued-start).
+	s, err := t.M.Fork(vm.WithHold(ctx, t.Stopped), w.ID, ids)
 	made = err == nil
 	if err != nil {
 		return nil, startErr(a.Name, err)
@@ -782,7 +784,8 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 	if _, err := t.snapshot(c, a.Snapshot); err != nil {
 		return nil, err
 	}
-	if err := t.M.Rollback(ctx, w.ID, a.Snapshot); err != nil {
+	// Asked again at the restore, as for a fork (STOP-queued-start).
+	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
 		return nil, startErr(a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil
@@ -790,6 +793,9 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 
 // startErr says what to do when admission has no room (UX-146-2).
 func startErr(name string, err error) error {
+	if errors.Is(err, vm.ErrHeld) {
+		return errStartStopped
+	}
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
 		return say("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", named(name))
 	}
