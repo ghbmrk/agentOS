@@ -247,8 +247,7 @@ func TestFirstLoadCutsOnce(t *testing.T) {
 
 // NET-2 Byte caps, KRN-12 (#5014): a cut edge reaches nothing through the
 // enforcer. The drop's text on its own cuts the edge's open connections,
-// to a device and to the internet, both ways and over both families, and
-// refuses new ones, while the core's go on; a full load that carries the
+// to a device and to the internet, both ways, and refuses new ones, while the core's go on; a full load that carries the
 // cut (a restart) keeps it; a text without it lifts it, and the edge's
 // paths open again. #5282: the kernel cuts the edge itself at the first
 // byte past its cap, with no write of the daemon's (TripSet); a full load
@@ -260,9 +259,6 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 		return
 	}
 	h := build(t)
-	if h.v6 {
-		h.seg6("edge")
-	}
 	d, l := cutPolicy(), fixtureLayout()
 	text, err := Compile(d, l)
 	if err != nil {
@@ -311,18 +307,58 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 	// edgeHolds are the edge's held connections to a device and to the
 	// internet, over IPv6 too where the kernel has it, on ports from port.
 	devices := func(why string) []*held {
-		hs := []*held{h.hold("the edge to an online device"+why, "edge", "101", devAddr(101), 9100)}
-		if h.v6 {
-			hs = append(hs, h.hold("the edge to an online device over IPv6"+why, "edge", "101", devAddr6(101), 9100))
-		}
-		return hs
+		return []*held{h.hold("the edge to an online device"+why, "edge", "101", devAddr(101), 9100)}
 	}
 	edgeHolds := func(why string, port int) (device, internet []*held) {
-		internet = []*held{h.hold("the edge to the internet"+why, "edge", "isp", netOther, port)}
-		if h.v6 {
-			internet = append(internet, h.hold("the edge to the internet over IPv6"+why, "edge", "isp", net6Other, port+1))
+		return devices(why), []*held{h.hold("the edge to the internet"+why, "edge", "isp", netOther, port)}
+	}
+	// A hostile edge's IPv6 (ENF-e-6: the segment is IPv4 only, and the
+	// enforcer answers no neighbour discovery there): it gives itself an
+	// address and a static neighbour entry for the enforcer, so its
+	// datagrams reach the enforcer's port without any discovery. None is
+	// forwarded, cut or not: no route leads back to the edge's segment for
+	// its address, so the reverse-path check drops each as spoofed before
+	// the forward chain.
+	var edge6 func(why string)
+	if h.v6 {
+		x := h.hosts["edge"]
+		h.in(x, "ip", "addr", "add", "fd10:60::2/64", "dev", "eth0", "nodad")
+		h.in(x, "ip", "-6", "route", "add", "default", "dev", "eth0")
+		f := strings.Fields(run(t, "ip", "-o", "link", "show", "dev", l.Edge))
+		i := slices.Index(f, "link/ether")
+		if i < 0 || i+1 >= len(f) {
+			t.Fatalf("the enforcer's %s has no hardware address: %q", l.Edge, f)
 		}
-		return devices(why), internet
+		h.in(x, "ip", "-6", "neigh", "replace", net6Other, "lladdr", f[i+1], "dev", "eth0", "nud", "permanent")
+		edge6 = func(why string) {
+			t.Helper()
+			var pc net.PacketConn
+			within(t, h.hosts["isp"], func() {
+				if pc, err = net.ListenPacket("udp", net.JoinHostPort(net6Other, "9270")); err != nil {
+					t.Fatalf("%s: listen: %v", why, err)
+				}
+			})
+			defer pc.Close()
+			spoofed := h.counter(Spoofed)
+			within(t, x, func() {
+				c, err := net.Dial("udp", net.JoinHostPort(net6Other, "9270"))
+				if err != nil {
+					t.Fatalf("%s: dial: %v", why, err)
+				}
+				defer c.Close()
+				for range 3 {
+					c.Write([]byte("edge6"))
+				}
+			})
+			pc.SetReadDeadline(time.Now().Add(probeWait))
+			if _, _, err := pc.ReadFrom(make([]byte, 16)); err == nil {
+				t.Errorf("%s: the edge's IPv6 was forwarded to the internet", why)
+			}
+			if h.counter(Spoofed) == spoofed {
+				t.Errorf("%s: the edge's IPv6 was not dropped as spoofed", why)
+			}
+		}
+		edge6("the edge's IPv6, not cut")
 	}
 	device, internet := edgeHolds("", 9210)
 	core := h.hold("the core to its list", "core", "isp", netCore, 9220)
@@ -337,9 +373,8 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 	}
 	refused("a new connection to a device", "101", devAddr(101), 9100)
 	refused("a new connection to the internet", "isp", netOther, 9212)
-	if h.v6 {
-		refused("a new connection to a device over IPv6", "101", devAddr6(101), 9100)
-		refused("a new connection to the internet over IPv6", "isp", net6Other, 9212)
+	if edge6 != nil {
+		edge6("the edge's IPv6, cut")
 	}
 
 	// A restart's first load carries the cut in the same transaction.

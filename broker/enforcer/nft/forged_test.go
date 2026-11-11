@@ -144,7 +144,7 @@ func hostPort(t *testing.T, a net.Addr) (string, int) {
 // never given one, since its segment is IPv4 only (ENF-e-6).
 func (h *home) seg6(seg string) {
 	l := fixtureLayout()
-	ifc := map[string]string{"owner": l.Owner, "household": l.Household, "guest": l.Guests, "core": l.Core, "edge": l.Edge}[seg]
+	ifc := map[string]string{"owner": l.Owner, "household": l.Household, "guest": l.Guests, "core": l.Core}[seg]
 	p := "fd10:" + strings.Split(segNets[seg], ".")[1] + "::"
 	run(h.t, "ip", "addr", "add", p+"1/64", "dev", ifc, "nodad")
 	h.in(h.hosts[seg], "ip", "addr", "add", p+"2/64", "dev", "eth0", "nodad")
