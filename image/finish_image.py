@@ -660,7 +660,10 @@ INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", "
                      "var/lib/confexts", "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
 # An enablement link or mask; never one that turns on systemd-sysext or systemd-confext (L3 6804604094: in
 # v257 both run in the initrd, and mkosi-initrd's preset, disable *, is all that leaves them off).
-INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/(?!systemd-(sysext|confext)[.@])[^/]+|/dev/null")
+# The target is a unit file (a unit-type suffix), so a link to a directory under it is refused (L3 6805882795).
+INITRD_UNIT_TYPES = ("service", "socket", "target", "device", "mount", "automount", "swap", "timer", "path", "slice", "scope")
+INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/(?!systemd-(sysext|confext)[.@])[^/]+\.(%s)|/dev/null"
+                              % "|".join(INITRD_UNIT_TYPES))
 # But the two links Debian's systemd enables in the stock initrd (image build (a) at e1a85d2): both merges
 # run there, and find nothing to merge, since every initrd search path for an image is refused above and
 # the image has no systemd-stub to fill .extra (UnifiedKernelImages=no).
