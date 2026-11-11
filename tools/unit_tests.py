@@ -9,7 +9,9 @@ interleave; a line per finished module shows progress meanwhile. The longest mod
 first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
 A run strace itself cut short (STRACE_FAULT) has no verdict and reruns whole, once, into a
-fresh trace; a run that already showed a failed test is never rerun (#5358).
+fresh trace; a run that already showed a failed test is never rerun (#5358). Each run is its own
+session, killed whole when strace ends, so nothing of a cut run outlives it, and a cut run's trace
+stays as <module>.trace.cut, which records_audit.py reads and clash_audit.py does not (#5364).
 Exit 1 if any module failed or did not run, or if the longest unit runs over FLOOR seconds and
 over LONG_POLE times the ideal: that one unit then sets the step's length. A unit is a module, so
 split it (SPLIT), or for a module already split, its slowest part (one test with any class or
@@ -33,8 +35,10 @@ import multiprocessing.connection
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -42,7 +46,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # bind: a fixed port or socket name shared by two modules is a clash; symlink, symlinkat, chdir
 # and fchdir let tests/clash_audit.py resolve a path the kernel gave no file for, as it was walked.
-STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e",
+# --kill-on-exit: the kernel SIGKILLs every process strace still traces when strace exits, so a run
+# strace gives up on (STRACE_FAULT) cannot go on untraced, whatever session it moved to (#5364).
+STRACE = ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
           "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
           "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
@@ -213,30 +219,58 @@ STRACE_FAULT = re.compile(r"strace: .*(?:Input/output error|PTRACE_)")
 TEST_FAILED = re.compile(r"(?m)(?:FAIL|ERROR)$|unexpected success|^(?:FAIL|ERROR): |^FAILED \(")
 RERAN = "the module reruns whole into a fresh trace"
 STRACE_ATTEMPTS = 2  # a module strace faults on runs once more, whole, into a fresh trace
+CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, which clash_audit.py reads as a module's
+
+
+def attempt(cmd, root=ROOT):
+    """(rc, output) of one traced run, started in its own session. When strace ends, whatever is
+    left of that session's process group is killed before this returns, so nothing of the run
+    goes on into the next one (#5364). strace's pid, and so the group id, stays held until the
+    group is killed: it is reaped only after. Output goes to a file, not a pipe, so a process that
+    keeps a copy of it cannot hold the run open."""
+    with tempfile.TemporaryFile() as log:
+        p = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, env=ENV, stdout=log,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+        log.seek(0)
+        return p.returncode, log.read().decode("utf-8", "replace")
 
 
 def run_one(module, trace_dir, root=ROOT):
     """(module, rc, seconds, output). An attempt that strace cut short (STRACE_FAULT) reruns the
-    module whole, and strace -o rewrites its trace, so the trace kept is the passing attempt's. A
-    cut attempt that already showed a failing test fails the module and is not rerun, and a module
-    strace cuts on every attempt fails."""
+    module whole, and strace -o rewrites its trace, so the trace kept is the passing attempt's;
+    the cut attempt's trace is kept as <module>.trace.cut, for records_audit.py (CI-PATHS sees
+    every attempt). A cut attempt that already showed a failing test fails the module and is not
+    rerun, and a module strace cuts on every attempt fails."""
     start, outs = time.monotonic(), []
-    for attempt in range(1, STRACE_ATTEMPTS + 1):
-        p = subprocess.run(command(module, trace_dir), cwd=root, stdin=subprocess.DEVNULL, env=ENV,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out, rc = p.stdout.decode("utf-8", "replace"), p.returncode
+    trace = pathlib.Path(trace_dir) / f"{module}.trace"
+    cut = trace.with_name(module + CUT)
+    cut.unlink(missing_ok=True)  # one left by an earlier run in this directory is not this run's
+    for n in range(1, STRACE_ATTEMPTS + 1):
+        rc, out = attempt(command(module, trace_dir), root)
         if not STRACE_FAULT.search(out):
             outs.append(out)
             break
         rc = rc or 1
         failed = TEST_FAILED.search(out)
-        last = failed or attempt == STRACE_ATTEMPTS
-        outs.append(f"{out}\nunit_tests: strace failed itself on attempt {attempt} of {STRACE_ATTEMPTS}, so the "
+        last = failed or n == STRACE_ATTEMPTS
+        outs.append(f"{out}\nunit_tests: strace failed itself on attempt {n} of {STRACE_ATTEMPTS}, so the "
                     f"run and its trace are cut short; "
                     + ("a test had already failed, so the module fails without a rerun\n" if failed else
                        "the module fails\n" if last else RERAN + "\n"))
         if last:
             break
+        if trace.exists():  # every cut attempt's trace, in order, in the one file
+            with open(cut, "ab") as f:
+                f.write(trace.read_bytes())
+            trace.unlink()
     return module, rc, time.monotonic() - start, "".join(outs)
 
 
