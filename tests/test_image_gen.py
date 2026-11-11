@@ -6,15 +6,17 @@ unit directories, fstab and system.conf. Four other routes give PID 1 units or m
 - systemd-gpt-auto-generator mounts /home, /srv, /var or /var/tmp from partitions of those types on
   the root's disk, and systemd-repart makes any partition its definitions name. finish_image.py pins
   the built disk to exactly mkosi.repart's partitions, the definitions to the ESP, /usr, its verity
-  and root, and /usr/lib/repart.d to mkosi.extra's files, so gpt-auto finds only the ESP and root.
+  and root, /usr/lib/repart.d to mkosi.extra's files (through plain directories only), and the
+  root partition's /etc and /run to hold no repart.d, so gpt-auto finds only the ESP and root.
 - systemd.mount-extra= (fstab-generator) on the kernel command line: the line is an allowlist.
 - the systemd.extra-unit.* (debug-generator) and fstab.extra (fstab-generator) credentials: the
   command line may set only the two shipped unit-dropin credentials, the ESP may hold no credential
-  file (and no UKI's systemd-stub runs to read one), and the image's credential stores hold only
+  file, and the image's credential stores hold only
   mkosi's four named credentials (I21). Credentials from firmware (SMBIOS, fw_cfg) are I22."""
 # REQ: STO-2, DEV-2, CH-9
 import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
@@ -101,10 +103,56 @@ class GptAutoTest(unittest.TestCase):
                "changed": rows[:2] + [row[:-1] + ["0" * 64]],
                "a link": rows[:2] + [["lib/repart.d/50-root.conf", "l", "0777", 0, 0, 0, 1, 0, row[-1]]],
                "/usr/local": rows + [["local/lib/repart.d/60-var.conf"] + row[1:]],
-               "missing": rows[:2]}
+               "missing": rows[:2],
+               # A link or a file at a step points systemd-repart's directory elsewhere (L3, Security B).
+               "local/lib a link": rows + [["local", "d"] + row[2:-1] + [""], ["local/lib", "l"] + row[2:-1] + ["../share/x"],
+                                           ["share/x/repart.d/60-home.conf"] + row[1:]],
+               "local a link": rows + [["local", "l"] + row[2:-1] + ["share/y"],
+                                       ["share/y/lib/repart.d/60-home.conf"] + row[1:]],
+               "local/lib/repart.d a link": rows + [["local/lib/repart.d", "l"] + row[2:-1] + ["../../lib/x"]],
+               "lib/repart.d a link": [rows[0], ["lib/repart.d", "l"] + row[2:-1] + ["../share/x"], row],
+               "lib/repart.d a file": [rows[0], ["lib/repart.d", "f"] + row[2:]],
+               "local a file": rows + [["local", "f"] + row[2:]]}
         for why, r in bad.items():
             with self.subTest(why):
                 self.assertNotEqual(finish.usr_repart_violations(r), [])
+
+    def test_root_carries_no_repart_d(self):
+        # systemd-repart reads /etc/repart.d and /run/repart.d too, from the writable root.
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+
+            def disk(*make):
+                t = d / "t"
+                subprocess.run(["rm", "-rf", str(t)], check=True)
+                for p in ("etc/agentos", "run", "var"):
+                    (t / p).mkdir(parents=True)
+                for m in make:
+                    m(t)
+                img = d / "p.img"
+                img.unlink(missing_ok=True)
+                subprocess.run(["truncate", "-s", "8M", str(img)], check=True)
+                subprocess.run(["mkfs.ext4", "-q", "-F", "-E", "offset=%d" % (2048 * 512), "-d", str(t), str(img),
+                                "4M"], check=True, env={"PATH": "/usr/sbin:/sbin:/usr/bin:/bin"})
+                return str(img), {"partitions": [{"type": finish.ESP.upper(), "start": 34},
+                                                 {"type": finish.ROOT_GUID.upper(), "start": 2048}]}
+
+            self.assertEqual(finish.root_repart_violations(*disk()), [])
+            cases = {"etc/repart.d": lambda t: (t / "etc/repart.d").mkdir(),
+                     "etc/repart.d file": lambda t: (t / "etc/repart.d").write_text("[Partition]\nType=home\n"),
+                     "etc/repart.d link": lambda t: (t / "etc/repart.d").symlink_to("/var/x"),
+                     "run/repart.d": lambda t: (t / "run/repart.d").mkdir(),
+                     "etc a link": lambda t: ((t / "etc").rename(t / "etc2"), (t / "etc").symlink_to("var")),
+                     "no run": lambda t: (t / "run").rmdir()}
+            for why, m in cases.items():
+                with self.subTest(why):
+                    self.assertNotEqual(finish.root_repart_violations(*disk(m)), [])
+            img, table = disk()
+            self.assertNotEqual(finish.root_repart_violations(img, {"partitions": table["partitions"][:1]}), [])
+            self.assertNotEqual(finish.root_repart_violations(img, {"partitions": table["partitions"] * 2}), [])
+            # A listing debugfs cannot give (wrong offset: no file system) refuses rather than passes.
+            self.assertNotEqual(finish.root_repart_violations(img, {"partitions": [
+                {"type": finish.ROOT_GUID, "start": 4}]}), [])
 
     def test_build_stops_on_an_undefined_partition(self):
         class Proc:
@@ -127,6 +175,14 @@ class GptAutoTest(unittest.TestCase):
                 finish.main(d, "1.0")
         self.assertIn("#5289", str(e.exception.code))
         self.assertIn(GPT_AUTO["home"], str(e.exception.code))
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.multiple(
+                finish, partition_table=lambda img: {"partitions": TABLE},
+                root_repart_violations=lambda img, table: ["/etc/repart.d: on root"], **ok):
+            with self.assertRaises(SystemExit) as e:
+                finish.main(d, "1.0")
+        self.assertIn("#5289", str(e.exception.code))
+        self.assertIn("/etc/repart.d", str(e.exception.code))
+        ok["root_repart_violations"] = lambda img, table: []
 
         # Past the disk, the /usr list it writes is held to the first-boot definitions.
         def usr_list(data, dst):
@@ -178,9 +234,10 @@ class CredentialRouteTest(unittest.TestCase):
                      "systemd.mask", "systemd.debug_shell", "systemd.ssh", "root=", "mount.")), w)
         with tempfile.TemporaryDirectory() as d:
             conf = pathlib.Path(d) / "mkosi.conf"
-            for name in ("systemd.extra-unit.x.service", "fstab.extra"):
-                with self.subTest(listed=name):
-                    w = cred % ("", name)
+            # Each listed in mkosi.conf, so the credential rule, not the allowlist, refuses it.
+            for w in [p + cred % (s, n) for n in ("systemd.extra-unit.x.service", "fstab.extra", "FSTAB.EXTRA")
+                      for s in ("", "_binary", "-binary") for p in ("", "rd.")]:
+                with self.subTest(listed=w):
                     conf.write_text("[Content]\nKernelCommandLine=quiet %s\n" % w)
                     v = finish.cmdline_violations("options quiet %s\n" % w, conf)
                     self.assertEqual(len(v), 1, v)
@@ -195,8 +252,8 @@ class CredentialRouteTest(unittest.TestCase):
         self.assertEqual(sorted(creds), sorted(finish.SHIPPED_CREDENTIALS))
 
     def test_esp_carries_no_credential(self):
-        # systemd-stub, which hands loader/credentials/*.cred and a UKI's .extra.d/*.cred to PID 1, runs
-        # only from a UKI; the image boots a Type #1 entry, and the ESP allowlist refuses both files.
+        # systemd-boot and systemd-stub hand loader/credentials/*.cred and a UKI's .extra.d/*.cred to
+        # PID 1; the ESP allowlist refuses every such file, whichever loader would read it.
         self.assertEqual(ini(MK / "mkosi.conf")["Content"]["UnifiedKernelImages"], "no")
         entry = self.entry()
         for p in ("loader/credentials/fstab.extra.cred", "loader/credentials/systemd.extra-unit.x.service.cred",
