@@ -501,9 +501,22 @@ class InitrdTest(unittest.TestCase):
 
     def test_no_link_turns_on_an_extension_merge(self):
         # L3 6804604094 blocker 2: an enablement link to systemd-sysext or systemd-confext would run it in
-        # the initrd, over mkosi-initrd's preset.
-        for unit in ("systemd-sysext.service", "systemd-confext.service", "systemd-sysext.socket",
-                     "systemd-sysext@.service", "systemd-confext.socket"):
+        # the initrd. Stock Debian enables the two sysinit.target ones (image build (a) at e1a85d2); they pass
+        # only by exact path and target, and merge nothing as every image search path is refused.
+        wants = "etc/systemd/system/sysinit.target.wants"
+        stock = [(wants, self.D, b"")] + [("%s/%s.service" % (wants, n), self.L, b"/usr/lib/systemd/system/%s.service"
+                                          % n.encode()) for n in ("systemd-sysext", "systemd-confext")]
+        self.assertEqual(finish.initrd_violations(finish.cpio_members(newc(self.STOCK + stock))), [])
+        for name, target in (("etc/systemd/system/initrd.target.wants/systemd-sysext.service",
+                              b"/usr/lib/systemd/system/systemd-sysext.service"),
+                             (wants + "/systemd-sysext.service", b"/usr/lib/systemd/system/systemd-confext.service"),
+                             ("etc/systemd/system.control/sysinit.target.wants/systemd-sysext.service",
+                              b"/usr/lib/systemd/system/systemd-sysext.service")):
+            with self.subTest(name, target=target):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+                    (name.rsplit("/", 1)[0], self.D, b""), (name, self.L, target)])))
+                self.assertEqual(got, ["%s: a unit or drop-in outside /usr/lib" % name])
+        for unit in ("systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.socket"):
             with self.subTest(unit):
                 name = "etc/systemd/system/sysinit.target.wants/" + unit
                 got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [

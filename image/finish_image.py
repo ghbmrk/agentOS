@@ -638,7 +638,7 @@ def bluetooth_violations(names):
 # - a generator outside /usr/lib (in /etc/systemd or /usr/local/lib/systemd), and a unit or drop-in in
 #   any unit directory outside /usr/lib (UNIT_PATHS: system.control, system, system.attached and
 #   /usr/local's) but an enablement link or mask: a link to /usr/lib/systemd/system/<name>, not
-#   systemd-sysext's or systemd-confext's, or /dev/null;
+#   systemd-sysext's or systemd-confext's but stock Debian's two (INITRD_MERGE_LINKS), or /dev/null;
 # - a sysext or confext image in systemd-sysext's or systemd-confext's initrd search paths
 #   (discover-image.c, v257; .extra is systemd-stub's, which the image does not use).
 # The check judges the tree the kernel unpacks, not the members one by one (Security 6804479798): every
@@ -661,6 +661,11 @@ INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", "
 # An enablement link or mask; never one that turns on systemd-sysext or systemd-confext (L3 6804604094: in
 # v257 both run in the initrd, and mkosi-initrd's preset, disable *, is all that leaves them off).
 INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/(?!systemd-(sysext|confext)[.@])[^/]+|/dev/null")
+# But the two links Debian's systemd enables in the stock initrd (image build (a) at e1a85d2): both merges
+# run there, and find nothing to merge, since every initrd search path for an image is refused above and
+# the image has no systemd-stub to fill .extra (UnifiedKernelImages=no).
+INITRD_MERGE_LINKS = {"etc/systemd/system/sysinit.target.wants/%s.service" % n:
+                      b"/usr/lib/systemd/system/%s.service" % n.encode() for n in ("systemd-sysext", "systemd-confext")}
 
 
 @functools.lru_cache(maxsize=None)
@@ -732,7 +737,8 @@ def initrd_violations(members):
         elif at(INITRD_CREDSTORES) and kind != stat.S_IFDIR and path not in INITRD_CREDS_ALLOWED:
             out.append("%s: a credential in a store" % path)
         elif at(unit_dirs) and kind != stat.S_IFDIR and not (
-                kind == stat.S_IFLNK and INITRD_UNIT_LINK.fullmatch(body.decode("utf-8", "replace"))):
+                kind == stat.S_IFLNK and (INITRD_UNIT_LINK.fullmatch(body.decode("utf-8", "replace"))
+                                          or INITRD_MERGE_LINKS.get(path) == body)):
             out.append("%s: a unit or drop-in outside /usr/lib" % path)
         elif at(INITRD_GENERATOR_DIRS) and kind != stat.S_IFDIR:
             out.append("%s: a generator outside /usr/lib" % path)
