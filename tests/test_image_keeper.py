@@ -11,6 +11,7 @@ on the first boot with synthetic factors (image/ci_boot.sh, agentos-keeper lines
 # REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
 import contextlib
 import io
+import itertools
 import os
 import pathlib
 import re
@@ -781,6 +782,485 @@ class KeeperTreeTest(unittest.TestCase):
             finally:
                 remove()
 
+    # REQ: STO-2
+    def test_pid1_acts_on_no_path_inside_a_directory_another_user_holds(self):
+        """#5233: PID 1 makes a socket's, a mount point's and a path unit's parents following links
+        (mkdir_p_label), chowns a socket node (socket_chown), places Symlinks= and opens OpenFile= and
+        StandardOutput=file:, so a path for any of them inside a directory another user can write is that
+        user's choice. Refused inside a world-writable directory, a service directory, and a unit-made
+        directory (either form) unless only units running as root make it; a path PID 1 only watches passes."""
+        etc, q = "etc/systemd/system/", SYSTEM + "q.service"
+        nobody = {q: "[Service]\nRuntimeDirectory=hq\nStateDirectory=hq\nLogsDirectory=hq\nUser=nobody\n"}
+        journald = {SYSTEM + "systemd-journald.service": "[Service]\nRuntimeDirectory=systemd/journal\n"
+                                                         "RuntimeDirectoryPreserve=yes\n",
+                    SYSTEM + "sysinit.target.wants/systemd-journald.service": ("link", "../systemd-journald.service")}
+        sock = {SYSTEM + "j.socket": "[Socket]\nListenStream=/run/systemd/journal/stdout\n"}
+        jdir = ("systemd makes for a unit and may hand to a user other than root (RuntimeDirectory= in "
+                "%ssystemd-journald.service)" % SYSTEM)
+
+        def inside(path, d, owner, where):
+            return ("%s: /%s is inside /%s, which %s; PID 1 makes, links, binds or chowns it following any link that "
+                    "user puts on its way, so that user decides what PID 1 acts on; name a path only root can write, "
+                    "or make the directory in a unit that runs as root (#5233)" % (where, path, d, owner))
+        hq = "systemd makes for a unit and may hand to a user other than root (%%s= in %s)" % q
+        refused = (
+            # #5228 Security item 2: a socket node chowned (SocketUser=) inside the unit's runtime directory, and its
+            # Symlinks=, OpenFile=, StandardOutput=file: and a FIFO.
+            (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenStream=/run/hq/sock\nSocketUser=nobody\n"}),
+             "run/hq/sock", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenStream=/run/x.sock\nSymlinks=/run/hq/l\n"}),
+             "run/hq/l", "run/hq", hq % "RuntimeDirectory", "Symlinks= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenFIFO=/var/lib/hq/fifo\n"}),
+             "var/lib/hq/fifo", "var/lib/hq", hq % "StateDirectory", "ListenFIFO= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "o.service": "[Service]\nOpenFile=/var/lib/hq/f:f\n"}),
+             "var/lib/hq/f", "var/lib/hq", hq % "StateDirectory", "OpenFile= in %so.service" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "o.service": "[Service]\nStandardOutput=file:/var/log/hq/out\n"}),
+             "var/log/hq/out", "var/log/hq", hq % "LogsDirectory", "StandardOutput= in %so.service" % SYSTEM),
+            # #5270 Security R2: a namespace mount point below the directory, made following its user's links.
+            (dict(nobody, **{SYSTEM + "b.service": "[Service]\nBindReadOnlyPaths=/usr:/var/lib/hq/sub\n"}),
+             "var/lib/hq/sub", "var/lib/hq", hq % "StateDirectory", "BindReadOnlyPaths= in %sb.service" % SYSTEM),
+            # #5241: an overlay's workdir= is made too.
+            (dict(nobody, **{SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
+                                                      "Options=lowerdir=/usr,upperdir=/srv/u,workdir=/var/lib/hq/w\n"}),
+             "var/lib/hq/w", "var/lib/hq", hq % "StateDirectory", "Options= in %ssrv-o.mount" % SYSTEM),
+            # Not the last option: the path is named as cut at its ','.
+            (dict(nobody, **{SYSTEM + "srv-o.mount": "[Mount]\nWhat=overlay\n"
+                                                      "Options=workdir=/var/lib/hq/w,lowerdir=/usr,upperdir=/srv/u\n"}),
+             "var/lib/hq/w", "var/lib/hq", hq % "StateDirectory", "Options= in %ssrv-o.mount" % SYSTEM),
+            # A path unit's directory: MakeDirectory= in the unit, its drop-in or a type-wide drop-in.
+            (dict(nobody, **{SYSTEM + "p.path": "[Path]\nDirectoryNotEmpty=/run/hq/in\nMakeDirectory=yes\n"}),
+             "run/hq/in", "run/hq", hq % "RuntimeDirectory", "DirectoryNotEmpty= in %sp.path" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathChanged=/run/hq/in\n",
+                             SYSTEM + "p.path.d/m.conf": "[Path]\nMakeDirectory=on\n"}),
+             "run/hq/in", "run/hq", hq % "RuntimeDirectory", "PathChanged= in %sp.path" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathModified=/run/hq/in\n",
+                             etc + "path.d/m.conf": "[Path]\nMakeDirectory=1\n"}),
+             "run/hq/in", "run/hq", hq % "RuntimeDirectory", "PathModified= in %sp.path" % SYSTEM),
+            # A watch the check cannot tie to one unit: set in a drop-in, or in a file an alias leads to.
+            (dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathExists=/run/x\n",
+                             SYSTEM + "p.path.d/w.conf": "[Path]\nPathChanged=/run/hq/in\n"}),
+             "run/hq/in", "run/hq", hq % "RuntimeDirectory", "PathChanged= in %sp.path.d/w.conf" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathChanged=/run/hq/in\n",
+                             etc + "al.path": ("link", "/usr/lib/systemd/system/p.path")}),
+             "run/hq/in", "run/hq", hq % "RuntimeDirectory", "PathChanged= in %sp.path" % SYSTEM),
+            # Its dynamic user form.
+            ({q: "[Service]\nStateDirectory=dq\nDynamicUser=yes\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/private/dq/sock\n"},
+             "var/lib/private/dq/sock", "var/lib/private/dq",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %s)" % q,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            # Through a link the tree holds: PID 1 follows it, so the path counts as the tree resolves it.
+            (dict(nobody, **{"var/lib/keep": "", "srv/hl": ("link", "/var/lib"),
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/srv/hl/hq/s\n"}),
+             "var/lib/hq/s", "var/lib/hq", hq % "StateDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            # A service directory and the world-writable ones.
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/home/u/sock\n"}, "home/u/sock", "home",
+             "a login or service user owns", "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/run/user/0/sock\n"}, "run/user/0/sock", "run/user",
+             "a login or service user owns", "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/tmp/sock\n"}, "tmp/sock", "tmp",
+             "anyone on the box can write", "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "m.service": "[Service]\nBindPaths=/srv:/run/lock/m\n"}, "run/lock/m", "run/lock",
+             "anyone on the box can write", "BindPaths= in %sm.service" % SYSTEM),
+            # Journald's directory, once anything gives its unit a user, a group, a loose mode, a template, an
+            # alias, or another unit (or a drop-in) names the same directory.
+            (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/u.conf": "[Service]\nUser=nobody\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{"usr/local/lib/systemd/system/systemd-.service.d/u.conf": "[Service]\nGroup=adm\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{etc + "service.d/u.conf": "[Service]\nDynamicUser=yes\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{etc + "systemd-journald.service": "[Service]\nUser=nobody\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0775\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0o755\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{etc + "jj.service": ("link", "/usr/lib/systemd/system/systemd-journald.service")}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # A tmpfiles.d or tree link, or a tree file, at the directory a root unit makes.
+            ({SYSTEM + "rf.service": "[Service]\nStateDirectory=rf\n", "var/lib/rf": "",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/rf/sock\n"},
+             "var/lib/rf/sock", "var/lib/rf",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %srf.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "rl.service": "[Service]\nStateDirectory=rl\n", "var/lib/rl": ("link", "/srv"),
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/rl/sock\n"},
+             "var/lib/rl/sock", "var/lib/rl",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %srl.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(journald, **sock, **{"usr/lib/tmpfiles.d/zz.conf": "L /run/systemd/journal - - - - /srv\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # A tmpfiles.d line that makes it for another user before the unit starts.
+            (dict(journald, **sock, **{"usr/lib/tmpfiles.d/zz.conf": "d /run/systemd/journal 0755 nobody - -\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # A service directory stays one, whoever else names it.
+            ({SYSTEM + "rm.service": "[Service]\nStateDirectory=agentos-mail\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/agentos-mail/sock\n"},
+             "var/lib/agentos-mail/sock", "var/lib/agentos-mail", "a login or service user owns",
+             "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(sock, **{SYSTEM + "jt@.service": "[Service]\nRuntimeDirectory=systemd/journal\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal",
+             jdir.replace("systemd-journald.service", "jt@.service"),
+             "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "k.service": "[Service]\nRuntimeDirectory=systemd/journal\nUser=nobody\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir.replace("systemd-journald.service", "k.service"), "ListenStream= in %sj.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "k.service": "[Service]\n", SYSTEM + "k.service.d/d.conf":
+                                       "[Service]\nRuntimeDirectory=systemd/journal\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir.replace("systemd-journald.service", "k.service.d/d.conf"), "ListenStream= in %sj.socket" % SYSTEM),
+            # The box's own /var/lock and /var/run links count before the tree holds them (#5382 Security 6782954731).
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lock/a/x\nSocketUser=nobody\n"}, "run/lock/a/x",
+             "run/lock", "anyone on the box can write", "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenStream=/var/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            # As written too, wherever the tree's own link on the way leads.
+            (dict(nobody, **{"var/run": ("link", "/srv"), "srv/keep": "",
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/var/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{"srv/vr": ("link", "/var"),
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/srv/vr/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "m.service": "[Service]\nBindPaths=/srv:/var/lock/m\n"}, "run/lock/m", "run/lock",
+             "anyone on the box can write", "BindPaths= in %sm.service" % SYSTEM),
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/run/x.sock\nSymlinks=/var/lock/l\n"}, "run/lock/l", "run/lock",
+             "anyone on the box can write", "Symlinks= in %ss.socket" % SYSTEM),
+            # A root unit's directory any *DirectoryMode= lets a group or others write, in its file or a drop-in
+            # (#5382 Security 6782954731 2, L3 6783515775 1).
+            ({SYSTEM + "sx.service": "[Service]\nStateDirectory=sx\nStateDirectoryMode=0777\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/sx/sock\n"}, "var/lib/sx/sock", "var/lib/sx",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nCacheDirectory=sx\n", SYSTEM + "sx.service.d/m.conf":
+              "[Service]\nCacheDirectoryMode=0757\n", SYSTEM + "s.socket": "[Socket]\nListenStream=/var/cache/sx/sock\n"},
+             "var/cache/sx/sock", "var/cache/sx",
+             "systemd makes for a unit and may hand to a user other than root (CacheDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nLogsDirectory=sx\nLogsDirectoryMode=0702\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/log/sx/sock\n"}, "var/log/sx/sock", "var/log/sx",
+             "systemd makes for a unit and may hand to a user other than root (LogsDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nConfigurationDirectory=sx\nConfigurationDirectoryMode=0757\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/etc/sx/sock\n"}, "etc/sx/sock", "etc/sx",
+             "systemd makes for a unit and may hand to a user other than root (ConfigurationDirectory= in %ssx.service)"
+             % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0757\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # A tree file above a root unit's directory: the check cannot read the directory's tree state.
+            ({SYSTEM + "a.service": "[Service]\nStateDirectory=a/b\n", "var/lib/a": "",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/a/b/sock\n"}, "var/lib/a/b/sock", "var/lib/a/b",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+        )
+        wired = ("Symlinks= in %ss.socket" % SYSTEM, "BindReadOnlyPaths= in %sb.service" % SYSTEM)
+        for files, path, d, owner, where in refused:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    got = check.inside_refusals(self.root)
+                    if etc + "path.d/m.conf" in files:
+                        # A type-wide MakeDirectory= makes the image's own watch (agentos-egress-setup.path) a path
+                        # PID 1 makes too, inside agentos-localui's directory.
+                        self.assertIn("PathChanged= in %sagentos-egress-setup.path: /var/lib/agentos-localui/claim.json "
+                                      "is inside /var/lib/agentos-localui, " % SYSTEM, got[0])
+                        got = got[1:]
+                    self.assertEqual(got, [inside(path, d, owner, where)])
+                    if where in wired:  # through the whole check too
+                        self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+        passing = (
+            # Stock trixie's journald: its sockets live in the runtime directory a root unit makes.
+            dict(journald, **{
+                SYSTEM + "systemd-journald.socket": "[Socket]\nListenDatagram=/run/systemd/journal/socket\n"
+                                                    "ListenStream=/run/systemd/journal/stdout\n",
+                SYSTEM + "systemd-journald-dev-log.socket": "[Socket]\nListenDatagram=/run/systemd/journal/dev-log\n"
+                                                            "Symlinks=/dev/log\n",
+                SYSTEM + "syslog.socket": "[Socket]\nListenDatagram=/run/systemd/journal/syslog\n",
+                # A drop-in that sets neither user nor mode, and an empty reset, change nothing.
+                SYSTEM + "systemd-journald.service.d/n.conf": "[Service]\nUser=\nRuntimeDirectoryMode=0755\n"}),
+            # The image's own shape (agentos-egress-setup.path): a path PID 1 only watches. PathExists= is never
+            # made, even with MakeDirectory=.
+            dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathChanged=/var/lib/hq/claim.json\nMakeDirectory=no\n",
+                            SYSTEM + "paths.target.wants/p.path": ("link", "../p.path")}),
+            dict(nobody, **{SYSTEM + "p.path": "[Path]\nPathExists=/var/lib/hq/x\nPathExistsGlob=/run/hq/*\n"
+                                               "MakeDirectory=yes\n"}),
+            # Settings PID 1 only reads, and paths beside the directory, not inside it.
+            dict(nobody, **{SYSTEM + "r.service": "[Service]\nReadOnlyPaths=/var/lib/hq/x\nEnvironmentFile=-/run/hq/e\n"
+                                                  "ExecStart=/run/hq/x\n[Unit]\nRequiresMountsFor=/var/lib/hq/m\n",
+                            SYSTEM + "s.socket": "[Socket]\nListenStream=/run/hq2/sock\n"}),
+        )
+        for files in passing:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    self.assertEqual(check.inside_refusals(self.root), [])
+                    self.assertEqual(check.unit_made_refusals(self.root), [])
+                finally:
+                    remove()
+        # #5350 re-plan: a directory is held by its tree path, so no second name stands in for it. Each case runs
+        # with its units under every order of file names, since no file order may decide what is held.
+        nob, dyn = "User=nobody\n", "DynamicUser=yes\n"
+
+        def orders(units, extra):
+            """{tree path: text} for UNITS ([[Service] lines]) under every order of names, plus EXTRA."""
+            for perm in itertools.permutations(range(len(units))):
+                yield dict(extra, **{SYSTEM + "u%d.service" % perm[i]: "[Service]\n" + u for i, u in enumerate(units)})
+
+        def socket(path):
+            return {SYSTEM + "s.socket": "[Socket]\nListenStream=/%s\nSocketUser=nobody\n" % path}
+        shuffled = (
+            # A non-root unit's a:b at the private form of a root unit's directory, and a root unit's a:b at a
+            # dynamic unit's (Security 6778501910).
+            ([nob + "StateDirectory=hqn:private/hq\n", "StateDirectory=hq\n"], "var/lib/private/hq/sock", "var/lib/private/hq"),
+            # A non-dynamic unit takes a pre-existing <top>/private/<x> over as <top>/<x> (setup_exec_directory), so a
+            # link another user puts at the private form reaches the plain one too.
+            ([nob + "StateDirectory=hqn:private/hq\n", "StateDirectory=hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=zq:private/zz\n", dyn + "StateDirectory=zz\n"], "var/lib/private/zz/sock", "var/lib/private/zz"),
+            # A root unit's a:b link into another user's directory, in either form, under any top, through a chain
+            # (Security 6780012845).
+            (["StateDirectory=q:hq\n", nob + "StateDirectory=q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=q:private/hq\n", nob + "StateDirectory=q\n"], "var/lib/private/hq/sock", "var/lib/private/hq"),
+            (["StateDirectory=q:hq\n", dyn + "StateDirectory=q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["RuntimeDirectory=q:hq\n", nob + "RuntimeDirectory=q\n"], "run/hq/sock", "run/hq"),
+            (["StateDirectory=m:hq\n", "StateDirectory=q:private/m\n", nob + "StateDirectory=x q\n"],
+             "var/lib/hq/sock", "var/lib/hq"),
+            # A name with two private/ steps beside a dynamic or nobody unit's directory (Security 6781649895 1).
+            ([dyn + "StateDirectory=hq\n", "StateDirectory=q:private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([dyn + "StateDirectory=hq\n", "StateDirectory=private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([nob + "StateDirectory=hq\n", "StateDirectory=q:private/private/hq\n"], "var/lib/private/hq/sock",
+             "var/lib/private/hq"),
+            ([dyn + "RuntimeDirectory=hq\n", "RuntimeDirectory=q:private/private/hq\n"], "run/private/hq/sock",
+             "run/private/hq"),
+            # Another user's directory named again by a root unit's a:b (Security 6781649895 2, L3 6781841386 1).
+            ([dyn + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/q/sock", "var/lib/q"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=x:q\n"], "var/lib/x/sock", "var/lib/x"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=hq:q\n"], "var/lib/hq/sock", "var/lib/hq"),
+            ([nob + "StateDirectory=q\n", "StateDirectory=hq:q\n"], "var/lib/q/sock", "var/lib/q"),
+            # Another user names the directory first, a root unit's a:b links to it later (Lens, #5350).
+            ([nob + "StateDirectory=hq\n", "StateDirectory=q:hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            # A root unit's link over an ancestor of another user's directory (L3 6781841386 R1).
+            (["StateDirectory=q:x\n", nob + "StateDirectory=q/y\n"], "var/lib/x/y/sock", "var/lib/x"),
+            # Any a:b: systemd links one name to another, so neither side is held, even when both are root's.
+            (["StateDirectory=q:hq\n"], "var/lib/hq/sock", "var/lib/hq"),
+            (["StateDirectory=q2:private/hq2\n"], "var/lib/private/hq2/sock", "var/lib/private/hq2"),
+            (["StateDirectory=hq\n", "StateDirectory=hq:x\n"], "var/lib/hq/sock", "var/lib/hq"),
+        )
+        for units, path, d in shuffled:
+            for files in orders(units, socket(path)):
+                with self.subTest(files=files):
+                    remove = self.place(files)
+                    try:
+                        got = check.inside_refusals(self.root)
+                        self.assertEqual(len(got), 1, got)
+                        self.assertTrue(got[0].startswith(
+                            "ListenStream= in %ss.socket: /%s is inside /%s, which systemd makes for a unit and may hand "
+                            "to a user other than root (" % (SYSTEM, path, d)), got)
+                    finally:
+                        remove()
+        # Root units alone, in any order: the same one-field name twice, and two names beside each other.
+        for units, path in (
+                (["StateDirectory=hq\n", "StateDirectory=hq\nRuntimeDirectory=hq\n"], "var/lib/hq/sock"),
+                (["StateDirectory=hq\n", "StateDirectory=hq2\n", nob + "StateDirectory=hq3\n"], "var/lib/hq/sock")):
+            for files in orders(units, socket(path)):
+                with self.subTest(files=files):
+                    remove = self.place(files)
+                    try:
+                        self.assertEqual(check.inside_refusals(self.root), [])
+                    finally:
+                        remove()
+        # The stock journald lines, as made.allow lists them, pass the whole check; a drop-in that lets others write
+        # journald's directory makes all four refused (L3 6783515775 1).
+        remove = self.place(dict(passing[0]))
+        try:
+            self.assertEqual(check.violations(self.root), [])
+            again = self.place({SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0757\n"})
+            try:
+                got = check.violations(self.root)
+                self.assertEqual(len(got), 4, got)
+                self.assertTrue(all(" is inside /run/systemd/journal, " in v for v in got), got)
+            finally:
+                again()
+        finally:
+            remove()
+        # A tree directory a root unit names but a group can write is not root's alone.
+        remove = self.place({SYSTEM + "rh.service": "[Service]\nStateDirectory=rh\n", "var/lib/rh/keep": "",
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/rh/sock\n"})
+        try:
+            self.assertEqual(check.inside_refusals(self.root), [])
+            for mode in (0o775, 0o757):
+                (self.root / "var/lib/rh").chmod(mode)
+                self.assertEqual(check.inside_refusals(self.root), [inside(
+                    "var/lib/rh/sock", "var/lib/rh", "systemd makes for a unit and may hand to a user other than root "
+                    "(StateDirectory= in %srh.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
+        finally:
+            remove()
+        # The tree may hand a root unit's directory, in either form, to another uid, group or ACL before the unit
+        # starts (#5350 Security 6778501910, L3 6778896704); CI does not run as root, so tree_lstat and tree_xattrs
+        # report them. A group the tree gives counts once a tmpfiles.d line lets it write.
+        real_lstat, real_xattrs = check.tree_lstat, check.tree_xattrs
+        for form in ("var/lib/tr", "var/lib/private/tr"):
+            for what, uid, gid, acl, tmpf in (
+                    ("uid", check.TREE_OWNER + 1000, check.TREE_GROUP, None, ""),
+                    ("gid", check.TREE_OWNER, check.TREE_GROUP + 4, None, "z /%s 0775 - - -\n" % form),
+                    ("gid alone", check.TREE_OWNER, check.TREE_GROUP + 4, None, ""),
+                    ("access ACL", check.TREE_OWNER, check.TREE_GROUP, "system.posix_acl_access", ""),
+                    ("default ACL", check.TREE_OWNER, check.TREE_GROUP, "system.posix_acl_default", "")):
+
+                def lstat(root, rel, form=form, uid=uid, gid=gid):
+                    st = real_lstat(root, rel)
+                    if rel != form or st is None:
+                        return st
+                    return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, uid, gid) + tuple(st)[6:])
+
+                def xattrs(root, rel, form=form, acl=acl):
+                    return [acl] if rel == form and acl else real_xattrs(root, rel)
+                with self.subTest(form=form, what=what), unittest.mock.patch.object(check, "tree_lstat", lstat), \
+                        unittest.mock.patch.object(check, "tree_xattrs", xattrs):
+                    files = {SYSTEM + "tr.service": "[Service]\nStateDirectory=tr\n", form + "/keep": "",
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/%s/sock\n" % form}
+                    if tmpf:
+                        files["usr/lib/tmpfiles.d/zz.conf"] = tmpf
+                    remove = self.place(files)
+                    try:
+                        self.assertEqual(check.inside_refusals(self.root), [inside(
+                            form + "/sock", form, "systemd makes for a unit and may hand to a user other than root "
+                            "(StateDirectory= in %str.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
+                    finally:
+                        remove()
+        # A mount point inside a unit-made directory is refused once, by unit_made_refusals (the chown descends),
+        # through the box's /var/run link too.
+        for where in ("/var/lib/hq/in", "/var/run/hq/in"):
+            remove = self.place(dict(nobody, **{SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=%s\n" % where}))
+            try:
+                self.assertEqual(check.inside_refusals(self.root), [])
+                self.assertEqual(len(check.unit_made_refusals(self.root)), 1, where)
+            finally:
+                remove()
+        # etc/fstab's paths count through the box's links too (#5382 Security 6785625049): a mount point, a bind
+        # source and an overlay option under /var/lock or /var/run, and a mount point inside nobody's /var/run/hq.
+        fstab = self.root / "etc/fstab"
+        kept = fstab.read_text()
+        for line, path, d, owner in (
+                ("/srv /var/lock/m none bind 0 0", "run/lock/m", "run/lock", "anyone on the box can write"),
+                ("/var/run/hq/src /mnt/x none bind 0 0", "run/hq/src", "run/hq", hq % "RuntimeDirectory"),
+                ("overlay /mnt/o overlay lowerdir=/usr,upperdir=/var/lock/u,workdir=/srv/w 0 0", "run/lock/u", "run/lock",
+                 "anyone on the box can write"),
+                ("tmpfs /var/run/hq/in tmpfs mode=0755,noexec,nosuid,nodev 0 0", None, None, None)):
+            with self.subTest(line):
+                remove = self.place(nobody)
+                try:
+                    fstab.write_text(kept + line + "\n")
+                    if path is None:  # a mount point: unit_made_refusals' rule 4, once
+                        self.assertEqual(check.inside_refusals(self.root), [])
+                        self.assertEqual(len(check.unit_made_refusals(self.root)), 1)
+                    else:
+                        self.assertEqual(check.inside_refusals(self.root), [inside(path, d, owner, "etc/fstab")])
+                finally:
+                    fstab.write_text(kept)
+                    remove()
+
+    def test_pid1_acts_on_no_path_inside_a_directory_the_tree_or_tmpfiles_gives_another_user(self):
+        """#5359 (from #5350 Security 6778501910 R1, L3 6778896704 R2): a directory another uid holds through the tree
+        or a tmpfiles.d line, which no unit makes, is that user's too, so PID 1 acts on no path inside it. Every
+        step above the path is held to the link rules (chain_refusal): tree owner, group write, ACL, others write,
+        and each tmpfiles.d line that makes or remakes it for another user or as a link; under /run, the
+        tmpfiles.d lines alone."""
+        tmpf = "usr/lib/tmpfiles.d/zz.conf"
+        journald = {SYSTEM + "systemd-journald.service": "[Service]\nRuntimeDirectory=systemd/journal\n",
+                    SYSTEM + "sysinit.target.wants/systemd-journald.service": ("link", "../systemd-journald.service")}
+
+        def sock(path, user=True):
+            return {SYSTEM + "s.socket": "[Socket]\nListenStream=%s\n%s" % (path, "SocketUser=nobody\n" if user else "")}
+
+        def refusal(path, why):
+            return ("ListenStream= in %ss.socket: /%s: PID 1 makes, links, binds or chowns it following any link on its "
+                    "way, and a step of that way is not root's alone: a link to /%s, %s (#5359)" % (SYSTEM, path, path, why))
+        refused = (
+            # The row's two repros: a tmpfiles.d directory for nobody under /run, and one inside root's journald.
+            (dict(sock("/run/foo/sock"), **{tmpf: "d /run/foo 0755 nobody - -\n"}), "run/foo/sock",
+             "through /run/foo, which the tree lacks and %s line 1 makes mode 0755 for nobody:-; ship the step in the "
+             "tree (#1803)" % tmpf),
+            (dict(journald, **sock("/run/systemd/journal/sub/s"), **{tmpf: "d /run/systemd/journal/sub 0755 nobody - -\n"}),
+             "run/systemd/journal/sub/s", "through /run/systemd/journal/sub, which the tree lacks and %s line 1 makes mode "
+             "0755 for nobody:-; ship the step in the tree (#1803)" % tmpf),
+            # Any step, not only the last, and through the box's /var/run link.
+            (dict(sock("/var/run/foo/a/sock", user=False), **{tmpf: "d /run/foo 0755 - nogroup -\n"}), "run/foo/a/sock",
+             "through /run/foo, which the tree lacks and %s line 1 makes mode 0755 for -:nogroup; ship the step in the "
+             "tree (#1803)" % tmpf),
+            # A tmpfiles.d line that makes a step a link, or remakes a tree step for another user.
+            # A path one step below such a directory.
+            (dict(sock("/srv/sock"), **{tmpf: "d /srv 0755 nobody - -\n"}), "srv/sock",
+             "through /srv, which the tree lacks and %s line 1 makes mode 0755 for nobody:-; ship the step in the tree "
+             "(#1803)" % tmpf),
+            (dict(sock("/run/ln/sock"), **{tmpf: "L /run/ln - - - - /var/tmp\n"}), "run/ln/sock",
+             "through /run/ln, which the tree lacks and %s line 1 makes a link; ship the step in the tree (#1803)" % tmpf),
+            (dict(sock("/srv/t/sock"), **{"srv/t/keep": "", tmpf: "z /srv/t 0755 nobody - -\n"}), "srv/t/sock",
+             "through /srv/t, which %s line 1 remakes mode 0755 for nobody:- on the box; the line, not the tree, decides "
+             "who can write it (#1829)" % tmpf),
+        )
+        for files, path, why in refused:
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    got = check.inside_refusals(self.root)
+                    self.assertEqual(got, [refusal(path, why)])
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    remove()
+        # The tree holds the step for another uid, a group that can write it, or an ACL (CI does not run as root, so
+        # tree_lstat and tree_xattrs are patched as in the #5350 cases); others write needs no patch. A fresh
+        # directory per case, since place() removes only files.
+        real_lstat, real_xattrs = check.tree_lstat, check.tree_xattrs
+        for i, (uid, gid, mode, acl, why) in enumerate((
+                (check.TREE_OWNER + 1000, check.TREE_GROUP, None, None, "through /srv/u0, which uid %d owns; that user would "
+                 "decide what it reads (#1803)" % (check.TREE_OWNER + 1000)),
+                (check.TREE_OWNER, check.TREE_GROUP + 4, 0o775, None, "through /srv/u1, which gid %d can write; that group "
+                 "would decide what it reads (#1829)" % (check.TREE_GROUP + 4)),
+                (check.TREE_OWNER, check.TREE_GROUP, None, "system.posix_acl_access", "through /srv/u2, which carries a "
+                 "POSIX ACL (system.posix_acl_access); that user would decide what it reads (#1803)"),
+                (check.TREE_OWNER, check.TREE_GROUP, 0o757, None, "inside /srv/u3, which anyone on the box can write, or a "
+                 "service user owns; a local user would decide what it reads (#1543, #1702)"))):
+            d = "srv/u%d" % i
+
+            def lstat(root, rel, d=d, uid=uid, gid=gid):
+                st = real_lstat(root, rel)
+                if rel != d or st is None:
+                    return st
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, uid, gid) + tuple(st)[6:])
+
+            def xattrs(root, rel, d=d, acl=acl):
+                return [acl] if rel == d and acl else real_xattrs(root, rel)
+            with self.subTest(d=d), unittest.mock.patch.object(check, "tree_lstat", lstat), \
+                    unittest.mock.patch.object(check, "tree_xattrs", xattrs):
+                remove = self.place(dict(sock("/%s/sock" % d), **{d + "/keep": ""}))
+                try:
+                    if mode is not None:
+                        (self.root / d).chmod(mode)
+                    self.assertEqual(check.inside_refusals(self.root), [refusal(d + "/sock", why)])
+                finally:
+                    remove()
+        # Root's own steps pass: a tmpfiles.d directory and a tree directory only root can write, a path PID 1 only
+        # watches inside another user's, and stock journald's sockets.
+        for files in (
+                dict(sock("/run/foo/sock"), **{tmpf: "d /run/foo 0755 root root -\nd /run/foo/a 0700 - - -\n"}),
+                dict(sock("/srv/r/sock"), **{"srv/r/keep": ""}),
+                {tmpf: "d /run/w 0755 nobody - -\n", SYSTEM + "p.path": "[Path]\nPathChanged=/run/w/x\n"},
+                dict(journald, **sock("/run/systemd/journal/stdout", user=False)),
+                # The directory itself is not inside it: only its owner's links below it lead PID 1 astray.
+                dict(sock("/run/own"), **{tmpf: "d /run/own 0755 nobody - -\n"}),
+                # The box mounts its own /run, so what the tree holds there is hidden (chain_refusal's MOUNTED).
+                dict(sock("/run/hid/sock"), **{"run/hid/keep": ""})):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    if "run/hid/keep" in files:
+                        (self.root / "run/hid").chmod(0o777)
+                    self.assertEqual(check.inside_refusals(self.root), [])
+                finally:
+                    remove()
+
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".
@@ -966,7 +1446,7 @@ class KeeperTreeTest(unittest.TestCase):
     def test_a_drop_in_cannot_change_who_a_keeper_unit_runs_as(self):
         """#5288: PID 1 chowns a unit's *Directory= to whoever it runs as, so every assignment of a keeper
         unit's User=, Group= and DynamicUser=, in its file and every drop-in systemd applies, resets
-        included, is the shipped one, and so is the value systemd ends with."""
+        included, is the shipped one, and so is the value systemd ends with. One line per cause (#5329)."""
         shipped = {n: tuple(ini(UNITS / n)["Service"].get(k, "") for k in check.USER_KEYS)
                    for n in check.KEEPER_UNITS}
         self.assertEqual(check.KEEPER_USERS, shipped)
@@ -976,26 +1456,37 @@ class KeeperTreeTest(unittest.TestCase):
                 ("etc/systemd/system/agentos-keeper-enroll.service.d/b.conf", "DynamicUser=yes", "enroll"),
                 ("etc/systemd/system/service.d/b.conf", "Group=nogroup", "kernel"),
                 (SYSTEM + "agentos-keeper-.service.d/b.conf", "User=agentos-camera", "mail"),
+                # Every unit directory, not only /usr/lib and /etc (#5329).
+                ("usr/local/lib/systemd/system/agentos-keeper-pageca.service.d/b.conf", "User=nobody", "pageca"),
+                ("etc/systemd/system.control/agentos-keeper-kernel.service.d/b.conf", "Group=adm", "kernel"),
+                ("etc/systemd/system.attached/agentos-keeper-camera.service.d/b.conf", "User=nobody", "camera"),
                 # A reset runs the unit as root; an empty DynamicUser= leaves an earlier yes in place.
                 (SYSTEM + "agentos-keeper-mail.service.d/b.conf", "User=", "mail"),
                 (SYSTEM + "agentos-keeper-rotate@.service.d/b.conf", "DynamicUser=no", "rotate@")):
             with self.subTest(rel=rel, line=line):
-                write(self.root, rel, "[Service]\n%s\n" % line)
-                name = "agentos-keeper-%s.service" % unit
-                key, val = line.split("=", 1)
-                pin = check.KEEPER_USERS[name][check.USER_KEYS.index(key)]
-                self.assertIn("%s: %s=%s in %s; a keeper unit runs as shipped (%s=%s): PID 1 hands its "
-                              "directories to whoever it runs as (#5288)" % (name, key, val, rel, key, pin), self.v())
-                (self.root / rel).unlink()
+                # Removed in finally, so one failing case leaves nothing behind for the next (#5329).
+                remove = self.place({rel: "[Service]\n%s\n" % line})
+                try:
+                    name = "agentos-keeper-%s.service" % unit
+                    key, val = line.split("=", 1)
+                    pin = check.KEEPER_USERS[name][check.USER_KEYS.index(key)]
+                    shipped = "%s=%s" % (key, pin) if pin else "as root: no %s=" % key
+                    got = [g for g in self.v() if g.startswith(name + ": ")]
+                    # One refusal, naming the file, even where the value systemd ends with is the bad one too.
+                    self.assertEqual(got, ["%s: %s=%s in %s; a keeper unit runs as shipped (%s): PID 1 hands its "
+                                           "directories to whoever it runs as (#5288)" % (name, key, val, rel, shipped)])
+                finally:
+                    remove()
         self.assertEqual(self.v(), [])
         # The shipped value again passes; an override file that leaves it out ends as root.
-        write(self.root, SYSTEM + "agentos-keeper-mail.service.d/b.conf", "[Service]\nUser=%s\n" % mail[0])
-        self.assertEqual(self.v(), [])
-        (self.root / SYSTEM / "agentos-keeper-mail.service.d/b.conf").unlink()
-        write(self.root, "etc/systemd/system/agentos-keeper-mail.service",
-              MAIL.read_text().replace("User=%s\n" % mail[0], ""))
-        self.assertIn("agentos-keeper-mail.service: User is None; a keeper unit runs as shipped (User=%s) (#5288)"
-                      % mail[0], self.v())
+        remove = self.place({SYSTEM + "agentos-keeper-mail.service.d/b.conf": "[Service]\nUser=%s\n" % mail[0]})
+        try:
+            self.assertEqual(self.v(), [])
+        finally:
+            remove()
+        self.place({"etc/systemd/system/agentos-keeper-mail.service": MAIL.read_text().replace("User=%s\n" % mail[0], "")})
+        self.assertEqual(self.v(), ["agentos-keeper-mail.service: leaves User unset; a keeper unit runs as shipped "
+                                    "(User=%s): PID 1 hands its directories to whoever it runs as (#5288)" % mail[0]])
 
     def test_a_keeper_unit_outside_the_slice_is_refused(self):
         (self.root / SYSTEM / "agentos-keeper-.service.d/90-keeper.conf").unlink()

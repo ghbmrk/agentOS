@@ -254,7 +254,9 @@ func TestByteCapStateUnreadable(t *testing.T) {
 	for i := range p.Groups {
 		p.Groups[i].Count = p.Groups[i].Cap
 	}
-	p.EdgeCount, p.Past = p.EdgeCap, true
+	// Every cap is spent, not counted, so the kernel does not cut the edge
+	// at its quota (nft.Drop.EdgeHold, #5282).
+	p.EdgeCount, p.Past, p.EdgeHold = p.EdgeCap, true, true
 	drops, err := nft.Drops(doc, x.cfg.Layout, nil, p)
 	if err != nil {
 		t.Fatal(err)
@@ -621,6 +623,11 @@ func TestUnresolvedBytesTrip(t *testing.T) {
 	}
 }
 
+// edgeTripRule is the cut chain's rule that drops the edge's packets once
+// the kernel put it in nft.TripSet (#5282): present in every drop unless
+// the edge is held (nft.Drop.EdgeHold).
+const edgeTripRule = `add rule inet enforcer cut_edge iifname @edge_trip counter name "edge_cut" drop`
+
 // TestByteCapTripsTheEdge (#5014, ENF-l-15, KRN-12): the edge past its
 // cap is cut: the record says so and why, a trip alert names the edge
 // and turns the light red, and the drop written at once carries the cut
@@ -650,6 +657,11 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) {
 		t.Fatal("the edge was cut at its cap, not past it")
+	}
+	// The kernel cuts it at the first byte past (#5282), whatever the
+	// writes after it do.
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the drop at the edge's cap leaves the kernel's own cut off")
 	}
 	x.fail(fileEdgeCut, true) // the disk refuses the trip's record
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
@@ -712,6 +724,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 0 {
 		t.Fatal("the owner's lift left the edge cut, in the record, the firewall or the alerts")
 	}
+	if strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the owner's lift on the overrun's day leaves the kernel cutting the edge at the quota it passed")
+	}
 	if err := (pageEdge{x.d}).LiftEdge(); err != nil { // a second lift changes nothing
 		t.Fatal(err)
 	}
@@ -725,6 +740,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	}
 
 	x.advance(24 * time.Hour)
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the day after a lift, the kernel does not cut the edge at its new quota")
+	}
 	x.setListing(listingOf(t, x, doc, 9, 10, 6000, true))
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); !cut {
@@ -794,6 +812,52 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	}
 	os.Remove(path)
 	x.start()
+}
+
+// TestCutRecordsMissing (#5282 item 2): provisioning writes the core's and
+// the edge's cut records uncut, so a fresh box starts with neither cut; a
+// record missing later (deleted, or a state partition that lost it) is a
+// cut, logged, until the owner lifts it on the page.
+func TestCutRecordsMissing(t *testing.T) {
+	x, _, a := capped(t)
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if b, err := os.ReadFile(filepath.Join(x.dir, name)); err != nil || string(b) != "{}" {
+			t.Fatalf("provisioning did not write %s uncut: %q, %v", name, b, err)
+		}
+	}
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("a fresh box starts cut")
+	}
+	x.d.Close()
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if err := os.Remove(filepath.Join(x.dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.start()
+	cut, why := x.d.edge.Cut()
+	if !cut || why != "the record of the edge's cut is missing" || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" missing") {
+		t.Fatalf("a missing edge record: cut %v, reason %q", cut, why)
+	}
+	if !strings.Contains(x.fire.last(), `add rule inet enforcer cut_edge counter name "edge_cut" drop`) {
+		t.Fatal("the first load with the edge's record missing does not cut the edge")
+	}
+	x.d.cut.mu.Lock()
+	why = x.d.cut.reason
+	x.d.cut.mu.Unlock()
+	if x.d.cut.Stage() != channel.Tripped || why != "the record of the core's cut is missing" || !strings.Contains(x.logText(), "cut: "+fileCut+" missing") {
+		t.Fatalf("a missing core record: stage %v, reason %q", x.d.cut.Stage(), why)
+	}
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if err := x.d.cut.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("the owner's lift and resume did not write the records again")
+	}
 }
 
 // TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
@@ -1317,14 +1381,19 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	if c, e := spentIn(t, x); c || !e {
 		t.Fatalf("the edge's port merging: core spent %v (want false), edge spent %v (want true)", c, e)
 	}
+	// Its quota is spent, not counted, so the kernel does not cut the edge
+	// at it (nft.Drop.EdgeHold, #5282).
+	if strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatal("the edge's port merging: the kernel cuts the edge at a quota held spent")
+	}
 	x.advance(readEvery)
 	if loads() != n+1 {
 		t.Fatal("a full load with no port changed")
 	}
 	x.merges(edge, nil)
 	x.advance(readEvery)
-	if c, e := spentIn(t, x); c || e {
-		t.Fatalf("caps still spent once both ports read clean: core %v, edge %v", c, e)
+	if c, e := spentIn(t, x); c || e || !strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatalf("caps still spent once both ports read clean, or the kernel's cut of the edge not back: core %v, edge %v", c, e)
 	}
 	if !strings.Contains(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again") {
 		t.Fatalf("the end not logged:\n%s", x.logText())
@@ -2168,7 +2237,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != (page.PolicyCause{}) {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != nil {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
@@ -2211,7 +2280,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if !stopped {
 		t.Fatal("fixture: a refused load started the instances")
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != (page.PolicyCause{}) || got.Load != page.LoadFirewall {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != nil || got.Load != page.LoadFirewall {
 		t.Fatalf("a refused load after the check passes: %#v", got)
 	}
 	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules;") {
@@ -2232,7 +2301,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 		t.Fatal("fixture: the resolver serves vlan109")
 	}
 	// The page has the refusal's typed cause, never its text (#5307).
-	vlan := page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}
+	vlan := []page.PolicyCause{{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}}
 	load := func(doc policy.Document) error {
 		x.d.fwMu.Lock()
 		defer x.d.fwMu.Unlock()
@@ -2253,7 +2322,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != vlan || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || !slices.Equal(got.Policy, vlan) || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
 		t.Fatalf("a policy the resolver cannot serve: %#v", got)
 	}
 	if h := view(); !strings.Contains(h, "The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.") || strings.Contains(h, "ap0.109") {
@@ -2265,7 +2334,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Policy != vlan {
+	if got := (pageResolver{x.d}).Stopped(); !slices.Equal(got.Policy, vlan) {
 		t.Fatalf("a refused load cleared the cause in force: %#v", got)
 	}
 	x.fire.mu.Lock()
@@ -2279,23 +2348,33 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	}
 }
 
-// TestUnservable (#5307): dns.Generate's refusal of a compiled document
-// reaches the page by its typed cause: a device on a Wi-Fi network the
-// setup serves no network for, or a listed name that is not a DNS host
-// name; any other refusal is untyped, whatever its text.
-func TestUnservable(t *testing.T) {
-	x := newBox(t, false)
+// TestRefusedCause (#5307, #5352, #5405): dns.Generate's refusal of a
+// compiled document reaches the page and the log as every item Generate
+// refused, read from the error: each device on a Wi-Fi network the setup
+// serves no network for, and each listed name that is not a DNS host
+// name. With a setup fault too, the fault is one untyped cause and the
+// devices are still named; any other refusal is untyped, whatever its
+// text.
+func TestRefusedCause(t *testing.T) {
+	x, _ := enrolled(t, false)
 	l, s := x.cfg.Layout, x.cfg.DNS
-	vlan := home()
-	vlan.Devices = append(vlan.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
-	name := home()
-	name.Destinations = []string{"updates.example", "Upper.example"}
+	plug := func(id, wifi string) policy.Device {
+		return policy.Device{ID: id, Network: policy.NetDevices, WiFi: wifi, Everyday: true, Allow: []string{id + ".example"}}
+	}
+	vlans := home()
+	vlans.Devices = append(vlans.Devices, plug("plug", "vlan109"), plug("lamp", "vlan110"))
+	both := []page.PolicyCause{{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}, {Kind: page.PolicyVLAN, Name: "lamp", WiFi: "vlan110"}}
+	// Generate lists names sorted; the document lists Zed.example first.
+	names := home()
+	names.Destinations = []string{"updates.example", "Zed.example", "Abc.example"}
+	view := func() string { return x.b.do(http.MethodGet, "/", nil).Body.String() }
 	for _, tc := range []struct {
 		doc  policy.Document
-		want page.PolicyCause
+		want []page.PolicyCause
+		said []string
 	}{
-		{vlan, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}},
-		{name, page.PolicyCause{Kind: page.PolicyName, Name: "Upper.example"}},
+		{vlans, both, []string{"plug", "lamp"}},
+		{names, []page.PolicyCause{{Kind: page.PolicyName, Name: "Abc.example"}, {Kind: page.PolicyName, Name: "Zed.example"}}, []string{"Abc.example", "Zed.example"}},
 	} {
 		if _, err := nft.Paths(tc.doc, l); err != nil {
 			t.Fatalf("fixture: %v", err)
@@ -2304,22 +2383,58 @@ func TestUnservable(t *testing.T) {
 		if !errors.Is(err, dns.ErrConfig) {
 			t.Fatalf("fixture: %v", err)
 		}
-		if got := unservable(err, tc.doc, l, s); got != tc.want {
-			t.Errorf("unservable(%v) = %+v, want %+v", err, got, tc.want)
+		if got := refusedCauses(err); !slices.Equal(got, tc.want) {
+			t.Errorf("refusedCauses(%v) = %+v, want %+v", err, got, tc.want)
 		}
-	}
-	// A device off the device network, or with no VLAN, needs none.
-	off := home()
-	off.Devices = append(off.Devices, policy.Device{ID: "plug", Network: policy.NetOwner, WiFi: "vlan109"}, policy.Device{ID: "lamp", Network: policy.NetDevices})
-	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
-	for _, err := range []error{fmt.Errorf("%w: x", dns.ErrConfig), errors.New("vlan109 Upper.example")} {
-		for _, doc := range []policy.Document{home(), off} {
-			if got := unservable(err, doc, l, s); got != untyped {
-				t.Errorf("unservable(%v) on a servable document = %+v", err, got)
+		x.mu.Lock()
+		x.log = nil
+		x.mu.Unlock()
+		x.d.fwMu.Lock()
+		err = x.d.loadNetwork(context.Background(), tc.doc)
+		x.d.fwMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := (pageResolver{x.d}).Stopped(); !got.Stopped || !slices.Equal(got.Policy, tc.want) {
+			t.Errorf("the page's causes for %v: %#v", tc.said, got)
+		}
+		h := view()
+		x.mu.Lock()
+		var logged []string
+		for _, line := range x.log {
+			if strings.HasPrefix(line, "dns: the policy in force cannot be served") {
+				logged = append(logged, line)
 			}
 		}
-		if err := error(errors.New("other")); unservable(err, vlan, l, s) != untyped || unservable(err, name, l, s) != untyped {
-			t.Error("a refusal other than the setup's is typed")
+		x.mu.Unlock()
+		if len(logged) != 1 || strings.Contains(logged[0], "\n") {
+			t.Errorf("the refusal is not one log line: %q", logged)
+		}
+		for _, said := range tc.said {
+			if !strings.Contains(h, said) || !strings.Contains(strings.Join(logged, ""), strconv.Quote(said)) {
+				t.Errorf("home or the log leaves out %s, which Generate refused", said)
+			}
+		}
+	}
+	// A setup fault beside the unserved devices: the fault is untyped and
+	// both devices are still named, as before #5396 (#5405).
+	bad := s
+	bad.Upstream = nil
+	_, err := dns.Generate(vlans, l, bad)
+	if got := refusedCauses(err); !slices.Equal(got, append([]page.PolicyCause{{Kind: page.PolicyUntyped}}, both...)) {
+		t.Errorf("a setup fault beside unserved devices: %+v", got)
+	}
+	untyped := []page.PolicyCause{{Kind: page.PolicyUntyped}}
+	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil} {
+		if got := refusedCauses(err); !slices.Equal(got, untyped) {
+			t.Errorf("refusedCauses(%v) = %+v, want untyped", err, got)
+		}
+	}
+	// Typed, wrapped, the refusal still reads as ErrConfig and keeps its
+	// causes.
+	for _, err := range []error{fmt.Errorf("load: %w", dns.Refused{dns.UnservedDevice{ID: "plug", WiFi: "vlan109", Iface: "ap0.109"}}), fmt.Errorf("load: %w", dns.Refused{dns.BadName{Name: "Upper.example"}})} {
+		if got := refusedCauses(err); !errors.Is(err, dns.ErrConfig) || len(got) != 1 || got[0].Kind == page.PolicyUntyped {
+			t.Errorf("%v: not typed", err)
 		}
 	}
 }

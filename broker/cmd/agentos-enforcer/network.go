@@ -81,12 +81,12 @@ type network struct {
 	// set under d.fwMu and read under resMu, so the page never waits on a
 	// load: whether its instances run (the files the last taken load
 	// started, or none since the served check stopped them), the served
-	// check's failure, the policy in force's typed cause, and the step
+	// check's failure, the policy in force's typed causes, and the step
 	// that refused the last load (LoadTaken once one is taken).
 	resMu      sync.Mutex
 	resRuns    bool
 	stopServed error
-	stopPolicy page.PolicyCause
+	stopPolicy []page.PolicyCause
 	stopLoad   page.LoadStep
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
@@ -284,9 +284,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	}
 	// The policy in force is doc only once its load is taken; a refused
 	// one leaves the resolver on the old policy's files, or none.
-	var why page.PolicyCause
+	var why []page.PolicyCause
 	if genErr != nil {
-		why = unservable(genErr, doc, l, d.cfg.DNS)
+		why = refusedCauses(genErr)
 	}
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
@@ -336,31 +336,30 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
-// unservable is err, dns.Generate's refusal of doc, by its typed cause
-// for the page (#5307): a device on a Wi-Fi network the setup serves no
-// network for, or a listed name that is not a DNS host name. These are
-// the configuration refusals left once doc compiles, since the setup
-// alone was checked at start (config); any other is untyped, and the
-// page says so without the error's text.
-func unservable(err error, doc policy.Document, l nft.Layout, s dns.Setup) page.PolicyCause {
-	if errors.Is(err, dns.ErrConfig) {
-		for _, dev := range doc.Devices {
-			n, ok := nft.VLAN(dev.WiFi)
-			iface := l.Trunk + "." + strconv.Itoa(n)
-			if ok && dev.Network == policy.NetDevices && !slices.ContainsFunc(s.Nets, func(x dns.Net) bool { return x.Iface == iface }) {
-				return page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
-			}
-		}
-		sets, _ := nft.AllowSets(doc, l) // none on an error: untyped
-		for _, set := range sets {
-			for _, name := range set.Names {
-				if !dns.Hostname(name) {
-					return page.PolicyCause{Kind: page.PolicyName, Name: name}
-				}
-			}
+// refusedCauses is err, dns.Generate's refusal of a document, as every
+// typed cause it carries, in its order (#5307, #5352, #5405): each device
+// on a Wi-Fi network the setup serves no network for, and each listed
+// name that is not a DNS host name, read from the refusal, never from the
+// document. Any other, a setup fault among them, is untyped, and the page
+// says so without the error's text.
+func refusedCauses(err error) []page.PolicyCause {
+	errs := []error{err}
+	var r dns.Refused
+	if errors.As(err, &r) {
+		errs = r
+	}
+	out := make([]page.PolicyCause, len(errs))
+	for i, err := range errs {
+		var dev dns.UnservedDevice
+		var name dns.BadName
+		switch {
+		case errors.As(err, &dev):
+			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
+		case errors.As(err, &name):
+			out[i] = page.PolicyCause{Kind: page.PolicyName, Name: name.Name}
 		}
 	}
-	return page.PolicyCause{Kind: page.PolicyUntyped}
+	return out
 }
 
 // joinRules appends the drop's text to a full load's, in one transaction.

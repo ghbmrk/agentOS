@@ -11,7 +11,11 @@ counts as its target), a directory of records, or anything in the git object sto
 `show` and `cat-file` read records from there). The module is the unit: a read at import, in a
 fixture, or cached by one test and used by another is covered alike. A module with no trace, or
 whose trace does not show its own file opened and the top process exiting (tracing did not run
-or was cut short), fails too.
+or was cut short), fails too. A run strace cut short and tools/unit_tests.py reran left its trace
+as <module>.trace.cut: a record it opened counts as the module's (every attempt is seen, #5364),
+and being partial, it is held to nothing else. A module whose tree, in any attempt, opened for
+writing a path in the trace directory fails too: the traces are this audit's evidence, so a test
+may not write them, its own or another module's (#5407; the write as tests/clash_audit.py reads it).
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """
@@ -21,7 +25,10 @@ import sys
 
 import importlib.util
 
+import clash_audit
 from clash_audit import _decode
+
+TAMPER = "no test may write the trace directory"
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 TESTS = os.path.join(ROOT, "tests")
@@ -122,11 +129,19 @@ def finished(trace):
     return bool(first) and re.search(rf"(?m)^{first.group(1)}\s+\+\+\+ exited with \d+ \+\+\+$", trace) is not None
 
 
-def problems(traces, listed, is_record=None):
-    """traces: {module stem: strace text}, one per tests/test*.py module."""
+def problems(traces, listed, is_record=None, cut=None, trace_dir=None):
+    """traces: {module stem: strace text}, one per tests/test*.py module. cut: {module stem: the
+    traces of its attempts strace cut short}, whose opens count for the record check and the
+    trace_dir check only. trace_dir: the directory the traces were written to."""
     is_record = is_record or _is_record()
+    cut = cut or {}
     out = []
+    tdir = trace_dir and os.path.realpath(trace_dir)
     for stem, trace in sorted(traces.items()):
+        if tdir:
+            for kind, path in sorted(clash_audit.writes(trace) | clash_audit.writes(cut.get(stem, ""))):
+                if kind == "path" and (path == tdir or path.startswith(tdir + "/")):
+                    out.append(f"tests.{stem}\twrote {path}: {TAMPER}")
         paths = opened(trace)
         if not any(rel == f"tests/{stem}.py" or re.fullmatch(rf"tests/__pycache__/{stem}\.[\w.-]+\.pyc", rel)
                    for rel, _ in paths):
@@ -137,26 +152,31 @@ def problems(traces, listed, is_record=None):
             continue
         if f"tests.{stem}" in listed:
             continue
-        for rel, directory in sorted(paths):
+        for rel, directory in sorted(paths | opened(cut.get(stem, ""))):
             if is_record(rel, directory):
                 out.append(f"tests.{stem}\t{rel}")
     return out
 
 
+def _read(path):
+    try:
+        with open(path, errors="surrogateescape") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
 def main(argv):
-    traces = {}
+    traces, cut = {}, {}
     for name in sorted(os.listdir(TESTS)):
         if name.startswith("test") and name.endswith(".py"):
             stem = name[:-3]
-            try:
-                with open(os.path.join(argv[1], stem + ".trace"), errors="surrogateescape") as f:
-                    traces[stem] = f.read()
-            except FileNotFoundError:
-                traces[stem] = ""
-    found = problems(traces, records_run_tests())
+            traces[stem] = _read(os.path.join(argv[1], stem + ".trace"))
+            cut[stem] = _read(os.path.join(argv[1], stem + ".trace.cut"))
+    found = problems(traces, records_run_tests(), cut=cut, trace_dir=argv[1])
     for p in found:
         print(p)
-    if found:
+    if any(not p.endswith(TAMPER) for p in found):
         print("Add these modules, whole, to ci.yml's records-only step (a test that reads a record "
               "must run there).", file=sys.stderr)
     return 1 if found else 0

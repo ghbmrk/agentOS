@@ -30,16 +30,18 @@ import (
 // today, which keeps every read sender opened for unopenedDays (fail closed).
 const (
 	seenFile = "seen.log"
-	// maxSeen bounds the sealed record before it is read. Opened keeps at most
-	// inbox.OpenedMax bytes, charging each entry its address and far more than
-	// the record's gob spends on the rest of it (its digest, date and field
-	// marks, under 64 bytes), so any log Opened hands back fits, with room for
-	// Since, Told and the seal (TestEveryLogOpenedKeepsFitsTheRecord).
-	maxSeen = inbox.OpenedMax + 4<<10
 	// warmDays is inbox's unopenedDays: how long the record must watch before
 	// a read mail's own day counts.
 	warmDays = 90
 )
+
+// maxSeen bounds the sealed record before it is read. Opened keeps at most
+// inbox.OpenedMax bytes, charging each entry its address and far more than
+// the record's gob spends on the rest of it (its digest, date and field
+// marks, under 64 bytes), so any log Opened hands back fits, with room for
+// Since, Told and the seal (TestEveryLogOpenedKeepsFitsTheRecord). A var for
+// tests, which cannot seal a record of this size.
+var maxSeen = inbox.OpenedMax + 4<<10
 
 // sealedSeen is the record as sealed: the log Opened keeps, and whether the
 // owner has read that the warm-up ended.
@@ -73,7 +75,7 @@ func loadSeen(dir string, s clerk.Sealer, slot string) (r sealedSeen, st seenSta
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || privfile.CheckFile(f) != nil || fi.Size() > maxSeen {
+	if err != nil || privfile.CheckFile(f) != nil || fi.Size() > int64(maxSeen) {
 		return r, seenBad
 	}
 	// Read in one allocation of the file's size: the file is replaced by
