@@ -1383,6 +1383,14 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(check.inside_refusals(self.root), want)
                 finally:
                     remove()
+        # Below a mount that is itself in a directory anyone can write: the path is refused once, as below the mount.
+        remove = self.place(dict(sock("/var/tmp/m/s", user=False), **{
+            SYSTEM + "var-tmp-m.mount": "[Mount]\nWhat=tmpfs\nWhere=/var/tmp/m\nType=tmpfs\n"}))
+        try:
+            got = [g for g in check.inside_refusals(self.root) if g.startswith(where)]
+            self.assertEqual(got, [hidden("var/tmp/m/s", "var/tmp/m")])
+        finally:
+            remove()
         fstab = self.root / "etc/fstab"
         old = fstab.read_text() if fstab.is_file() else None
         remove = self.place(sock("/srv/s", user=False))
