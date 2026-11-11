@@ -35,49 +35,58 @@ func TestRefreshHeaderValuesRefuseTheCorpus(t *testing.T) {
 	}
 }
 
-// Each header a plan declaration passes is a name header.Names holds
-// exactly, and the guest gets only the answer headers it declares: the
-// header corpus's credential, request-reshaping, hop-by-hop and broken
-// names, in any case, are refused on every list (#4914). Catches a route
-// passing X-Original-Url, X-Api-Key or Forwarded, or a widened list.
+// Each header a plan declaration sends is a name header.Requests holds
+// exactly, each it passes back one header.Answers holds, and the guest gets
+// only the answer headers it declares: the header corpus's credential,
+// request-reshaping, hop-by-hop and broken names, in any case, are refused
+// on every list (#4914), and an answer-only name is refused as a request,
+// sign-in or refresh header (#5346). Catches a route passing
+// X-Original-Url, X-Api-Key or Forwarded, a quota name sent upstream, or a
+// widened list.
 func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 	takes := func(edit func(*Declaration)) bool {
 		d := Codex(nil)
 		edit(&d)
 		return (&Login{d: d, token: map[string]*Field{}, refused: map[string]bool{}}).validate() == nil
 	}
-	// The names header.Names may hold, written out, not read from it.
-	want := []string{
+	// The names each list may hold, written out, not read from it.
+	requests := hostiletext.Exactly(t, header.Requests(),
 		"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
-		"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
-		"Retry-After", "X-Request-Id", "Openai-Model",
+		"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite")
+	answers := hostiletext.Exactly(t, header.Answers(),
+		"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model",
 		"X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At",
 		"X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At",
 		"X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance",
-		"X-Codex-Rate-Limit-Reached-Type",
-	}
-	// An answer may not name a credential, so Session_id never comes back.
-	answers := slices.DeleteFunc(slices.Clone(want), func(h string) bool { return h == "Session_id" })
+		"X-Codex-Rate-Limit-Reached-Type")
 	for name, set := range map[string]func(d *Declaration, h string){
 		"request":  func(d *Declaration, h string) { d.RequestHeaders = []string{h} },
 		"sign-in":  func(d *Declaration, h string) { d.SignInHeaders = []string{h} },
 		"response": func(d *Declaration, h string) { d.ResponseHeaders = []string{h} },
 	} {
 		t.Run(name, func(t *testing.T) {
-			named := hostiletext.Exactly(t, header.Names(), want...)
+			named := requests
 			if name == "response" {
 				named = answers
 			}
 			hostiletext.RunHeaders(t, func(h string) bool {
 				return takes(func(d *Declaration) { set(d, h) })
 			}, named...)
+			for _, h := range append(slices.Clone(requests), answers...) {
+				if takes(func(d *Declaration) { set(d, h) }) != slices.Contains(named, h) {
+					t.Errorf("the %s list's decision on %q is not its own list's", name, h)
+				}
+			}
 		})
 	}
 	t.Run("refresh", func(t *testing.T) {
 		// The clerk sets a refresh's Content-Type itself.
 		hostiletext.RunHeaders(t, func(h string) bool {
 			return takes(func(d *Declaration) { d.RefreshHeaders = map[string]string{h: "v"} })
-		}, slices.DeleteFunc(slices.Clone(hostiletext.Exactly(t, header.Names(), want...)), func(h string) bool { return h == "Content-Type" })...)
+		}, slices.DeleteFunc(slices.Clone(requests), func(h string) bool { return h == "Content-Type" })...)
+		if takes(func(d *Declaration) { d.RefreshHeaders = map[string]string{"X-Codex-Credits-Balance": "v"} }) {
+			t.Error("a refresh sends the answer-only name X-Codex-Credits-Balance")
+		}
 	})
 	t.Run("answer", func(t *testing.T) {
 		// The guest gets each declared answer header by its exact name, the
@@ -109,10 +118,10 @@ func TestPassHeadersRefuseTheCorpus(t *testing.T) {
 		return (&Login{d: d, token: map[string]*Field{}, refused: map[string]bool{}}).validate()
 	}
 	for want, edit := range map[string]func(*Declaration){
-		`clerk: header "Openai-Organization" is not on the allowlist`:               func(d *Declaration) { d.RequestHeaders = []string{"Openai-Organization"} },
-		`clerk: answer header "X-Api-Key" is not on the allowlist`:                  func(d *Declaration) { d.ResponseHeaders = []string{"X-Api-Key"} },
-		`clerk: answer header "Session_id" names a credential ("session")`:          func(d *Declaration) { d.ResponseHeaders = []string{"Session_id"} },
-		`clerk: refresh header "Cookie" is not on the allowlist`:                    func(d *Declaration) { d.RefreshHeaders = map[string]string{"Cookie": "v"} },
+		`clerk: header "Openai-Organization" is not on the request allowlist`:       func(d *Declaration) { d.RequestHeaders = []string{"Openai-Organization"} },
+		`clerk: answer header "X-Api-Key" is not on the answer allowlist`:           func(d *Declaration) { d.ResponseHeaders = []string{"X-Api-Key"} },
+		`clerk: answer header "Session_id" is not on the answer allowlist`:          func(d *Declaration) { d.ResponseHeaders = []string{"Session_id"} },
+		`clerk: refresh header "Cookie" is not on the request allowlist`:            func(d *Declaration) { d.RefreshHeaders = map[string]string{"Cookie": "v"} },
 		`clerk: refresh header "Content-Type" is the clerk's own`:                   func(d *Declaration) { d.RefreshHeaders = map[string]string{"Content-Type": "v"} },
 		`clerk: refresh header "User-Agent": the value begins or ends with a space`: func(d *Declaration) { d.RefreshHeaders = map[string]string{"User-Agent": "v "} },
 	} {

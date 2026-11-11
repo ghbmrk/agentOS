@@ -658,7 +658,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	// The content calls answer subject IDs drawn at random per kernel, so
 	// two kernels never read alike: TestEraseOverTheOwnerSocket covers them.
-	for _, op := range []string{"named", "recall", "unerased", "erasedreads"} {
+	for _, op := range []string{"named", "recall", "unerased", "erasedreads", "askforget"} {
 		served[op] = true
 	}
 	for _, side := range []Side{OwnerSide, MeterSide} {
@@ -822,7 +822,7 @@ func get[T any](t *testing.T, f func() (T, error)) T {
 // side has read; only the owner side has the erase calls, and a named
 // answer carries subject IDs, never a label's text.
 func TestNoSideReadsSealedContent(t *testing.T) {
-	content := []string{"named", "recall", "erase", "unerased", "erasedreads"}
+	content := []string{"named", "recall", "erase", "unerased", "erasedreads", "askforget", "forgetreply"}
 	for _, side := range []Side{OwnerSide, MeterSide, LinkSide, ContentSide("vision")} {
 		for _, op := range []string{"read", "readfor", "open", "content", "opensubject", "seal"} {
 			_, a := side.ops[op]
@@ -1255,5 +1255,80 @@ func TestAnEraseErrorCrossesAsWhatItWraps(t *testing.T) {
 				t.Errorf("%v crossed: errors.Is(%v) = %v", c.err, e, errors.Is(got, e))
 			}
 		}
+	}
+}
+
+// D-314 (#5124): over the owner socket a Forget's text names the subjects
+// it holds, and only the owner's YES to that text erases them; any other
+// reply, or a second YES, logs no erase.
+func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
+	// REQ: LOG-4, CH-3, KRN-7
+	dir := t.TempDir()
+	h := contentKernel(t, filepath.Join(dir, "log"), filepath.Join(dir, "keys"))
+	defer h.Close()
+	b := &box{t: t, h: h}
+	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	var sub string
+	if err := h.With(func(k *kernel.Kernel) error {
+		if _, err := k.OpenContent(brokenKeys{kernel.NewMemKeys(), kernel.ErrStore}, map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 1000); err != nil {
+			return err
+		}
+		var err error
+		if sub, err = k.OpenSubject(1000); err == nil {
+			_, err = k.Seal(1000, sub, "mail", kernel.ClassLabel, []byte("Alice"))
+		}
+		if err == nil {
+			_, err = k.Seal(1000, sub, "mail", "message", []byte("hi"))
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ask := func() string {
+		var text string
+		if err := o.Call("askforget", labelArgs{"Alice"}, &text); err != nil {
+			t.Fatal(err)
+		}
+		f := strings.Fields(text)
+		if !strings.HasPrefix(text, "Forget everything under “Alice”, 1 message? Reply YES ") || len(f) < 9 {
+			t.Fatalf("askforget answers %q", text)
+		}
+		return f[8]
+	}
+	erased := func() bool {
+		var r recallRead
+		if err := o.Call("recall", sub, &r); err != nil || r.Recall == nil {
+			t.Fatalf("recall: %+v, %v", r, err)
+		}
+		return r.Recall.Erased
+	}
+	if err := o.Call("askforget", labelArgs{"Bob"}, nil); !errors.Is(err, kernel.ErrForgetName) {
+		t.Fatalf("a swapped name: %v", err)
+	}
+	if err := o.Call("askforget", labelArgs{strings.Repeat("a", MaxLabel+1)}, nil); !errors.Is(err, kernel.ErrForgetName) {
+		t.Fatalf("a long name: %v", err)
+	}
+	if err := o.Call("askforget", 7, nil); !errors.Is(err, ErrArgs) {
+		t.Fatalf("args that are not an ask: %v", err)
+	}
+	code := ask()
+	for _, reply := range []string{"NO " + code, "YES " + code} {
+		if err := o.Call("forgetreply", reply, nil); !errors.Is(err, kernel.ErrForgetReply) || erased() {
+			t.Fatalf("reply %q after NO: %v, erased %v", reply, err, erased())
+		}
+	}
+	// The YES erases; a key that will not delete crosses as erase's does.
+	code = ask()
+	var got []eraseRead
+	if err := o.Call("forgetreply", "Yes "+code, &got); err != nil || len(got) != 1 || got[0].Subject != sub ||
+		got[0].Confirmation.Subject != sub || got[0].Err != kernel.ErrStore.Error() || got[0].Is != kernel.ErrStore.Error() || !erased() {
+		t.Fatalf("the YES: %+v, %v", got, err)
+	}
+	before := b.entries()
+	if err := o.Call("forgetreply", "YES "+code, nil); !errors.Is(err, kernel.ErrForgetReply) || b.entries() != before {
+		t.Fatalf("a second YES: %v, %d entries logged", err, b.entries()-before)
+	}
+	if err := o.Call("forgetreply", 7, nil); !errors.Is(err, ErrArgs) {
+		t.Fatalf("a reply that is not text: %v", err)
 	}
 }

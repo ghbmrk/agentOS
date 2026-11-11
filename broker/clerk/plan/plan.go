@@ -430,7 +430,7 @@ func (p *Login) validate() error {
 		}
 	}
 	for k, v := range d.RefreshHeaders {
-		if err := header.Name(k); err != nil {
+		if err := header.Request(k); err != nil {
 			return fmt.Errorf("clerk: refresh %w", err)
 		} else if k == "Content-Type" {
 			return errors.New(`clerk: refresh header "Content-Type" is the clerk's own`)
@@ -440,7 +440,7 @@ func (p *Login) validate() error {
 		}
 	}
 	for _, h := range append(append([]string{}, d.RequestHeaders...), d.SignInHeaders...) {
-		if err := header.Name(h); err != nil {
+		if err := header.Request(h); err != nil {
 			return fmt.Errorf("clerk: %w", err)
 		}
 	}

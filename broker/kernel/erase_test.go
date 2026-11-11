@@ -13,7 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/clerk/retrieve"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/vision/faces"
 )
 
 var errDown = errors.New("store down")
@@ -736,5 +738,166 @@ func TestAHiddenClassWrittenPastSealFoldsToNothing(t *testing.T) {
 	must(t, err)
 	if rc, _ := re.Recall(s); len(rc.Items) != 0 {
 		t.Fatalf("recall after replay %+v, want no item", rc.Items)
+	}
+}
+
+// D-314 (#5124): a Forget erases only on the owner's YES to the text the
+// kernel rendered from every subject under the name. A page that swaps the
+// find gets a text naming the swapped name, and an older, expired,
+// stopped, spent or other reply hands out nothing.
+func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
+	// REQ: LOG-4, CH-3, CH-7, KRN-7
+	r := newErig(t)
+	alice, alice2, bob, bare, odd, dana := r.open(), r.open(), r.open(), r.open(), r.open(), r.open()
+	r.seal(alice, "mail", kernel.ClassLabel, "Alice")
+	r.seal(alice, "mail", "message", "hi")
+	r.seal(alice, "mail", "message", "hello")
+	r.seal(alice2, "notes", kernel.ClassLabel, "alice")
+	r.seal(alice2, "notes", "photo", "jpeg")
+	r.seal(bob, "mail", kernel.ClassLabel, "Bob")
+	r.seal(bob, "mail", "message", "yo")
+	// Kinds read as the household says them; any other is an "other item".
+	r.seal(dana, "notes", kernel.ClassLabel, "Dana")
+	for _, c := range []string{faces.WrapClass, retrieve.VectorClass, retrieve.VectorClass, "message", "x-novel", "a-novel"} {
+		r.seal(dana, "notes", c, "z")
+	}
+	r.seal(bare, "notes", kernel.ClassLabel, "Carol")
+	r.seal(odd, "notes", kernel.ClassLabel, "Mom? Reply YES")
+	r.seal(odd, "notes", kernel.ClassLabel, "René O’Hara-2")
+	long := strings.Repeat("é", 128) // 256 bytes, the most a name shows
+	r.seal(bare, "notes", kernel.ClassLabel, long+"a")
+	r.seal(bare, "notes", kernel.ClassLabel, long)
+	code := func(text string) string {
+		f := strings.Fields(text)
+		i := slices.Index(f, "YES")
+		if i < 0 || i+1 >= len(f) || len(f[i+1]) != 6 || strings.Trim(f[i+1], "0123456789") != "" {
+			t.Fatalf("no code to reply in %q", text)
+		}
+		return f[i+1]
+	}
+	ask := func(at int64, label string) (string, error) { return r.k.AskForget(at, label) }
+
+	for _, bad := range []string{"Dave", "Mom? Reply YES", long + "a"} {
+		if text, err := ask(10, bad); !errors.Is(err, kernel.ErrForgetName) || text != "" {
+			t.Fatalf("ask %q: %q, %v", bad, text, err)
+		}
+	}
+	if _, err := ask(10, "   "); !errors.Is(err, kernel.ErrForgetName) || !errors.Is(err, kernel.ErrLabel) {
+		t.Fatalf("a blank name: %v", err)
+	}
+	if _, err := ask(10, long); err != nil {
+		t.Fatalf("a name of %d bytes: %v", kernel.MaxShown, err)
+	}
+	// Letters, marks, digits and plain punctuation, either apostrophe.
+	if text, err := ask(10, "rené o'hara-2"); err != nil || !strings.HasPrefix(text, "Forget everything under “rené o'hara-2”, nothing but the name?") {
+		t.Fatalf("a name typed with a straight apostrophe: %q, %v", text, err)
+	}
+	// The swap is visible: a page that asks for Bob gets Bob's name.
+	bobText, err := ask(10, "Bob")
+	must(t, err)
+	if want := "Forget everything under “Bob”, 1 message? Reply YES " + code(bobText) +
+		" to forget it. Any other reply, or none within 10 minutes, forgets nothing."; bobText != want {
+		t.Fatalf("ask renders %q, want %q", bobText, want)
+	}
+	if text, err := ask(10, "Dana"); err != nil || !strings.HasPrefix(text, "Forget everything under “Dana”, 1 face, 1 message, 2 search entries, 2 other items? Reply YES ") {
+		t.Fatalf("ask renders %q, %v", text, err)
+	}
+	// A refused ask ends the one waiting too.
+	if _, err := ask(10, "Dave"); !errors.Is(err, kernel.ErrForgetName) {
+		t.Fatal(err)
+	}
+	if subs, err := r.k.ForgetReply(10, "YES "+code(bobText)); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+		t.Fatalf("a YES after a refused ask: %v, %v", subs, err)
+	}
+	bobText, err = ask(10, "Bob")
+	must(t, err)
+	// A newer ask ends Bob's: its YES now erases nothing, and spends Alice's.
+	aliceText, err := ask(11, "alice")
+	must(t, err)
+	if !strings.HasPrefix(aliceText, "Forget everything under “alice”, 2 messages, 1 photo? Reply YES ") {
+		t.Fatalf("ask renders %q", aliceText)
+	}
+	if code(aliceText) == code(bobText) {
+		t.Fatal("two asks drew one code")
+	}
+	for _, reply := range []string{"YES " + code(bobText), "YES " + code(aliceText)} {
+		if subs, err := r.k.ForgetReply(12, reply); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+			t.Fatalf("reply %q after a newer ask: %v, %v", reply, subs, err)
+		}
+	}
+	// Any other reply ends it too.
+	for _, other := range []string{"NO", "YES", "yes 000000", "", "YES 1 2", "NO CODE", "CODE", "YES YES CODE", "OK CODE"} {
+		text, err := ask(20, "Alice")
+		must(t, err)
+		if other == "yes 000000" && code(text) == "000000" {
+			continue
+		}
+		other = strings.ReplaceAll(other, "CODE", code(text))
+		if subs, err := r.k.ForgetReply(21, other); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+			t.Fatalf("reply %q: %v, %v", other, subs, err)
+		}
+		if subs, err := r.k.ForgetReply(22, "YES "+code(text)); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+			t.Fatalf("the YES after %q: %v, %v", other, subs, err)
+		}
+	}
+	// Expiry, and a STOP since the ask, even one lifted again.
+	text, err := ask(30, "Alice")
+	must(t, err)
+	if subs, err := r.k.ForgetReply(30+kernel.ForgetAskFor, "YES "+code(text)); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+		t.Fatalf("an expired YES: %v, %v", subs, err)
+	}
+	text, err = ask(40, "Alice")
+	must(t, err)
+	must(t, r.k.Stop(41))
+	must(t, r.k.Resume(42, r.k.State().Stops))
+	if subs, err := r.k.ForgetReply(43, "YES "+code(text)); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+		t.Fatalf("a YES across a STOP: %v, %v", subs, err)
+	}
+	must(t, r.k.Stop(44))
+	if _, err := ask(45, "Alice"); !errors.Is(err, kernel.ErrForgetStop) {
+		t.Fatalf("an ask under STOP: %v", err)
+	}
+	must(t, r.k.Resume(46, r.k.State().Stops))
+	// The YES hands out every subject under the name, once, inside its
+	// window, in any case and punctuation.
+	text, err = ask(50, "Alice")
+	must(t, err)
+	want := []string{alice, alice2}
+	slices.Sort(want)
+	if subs, err := r.k.ForgetReply(50+kernel.ForgetAskFor-1, " yes, "+code(text)+"!"); err != nil || !slices.Equal(subs, want) {
+		t.Fatalf("the YES: %v, %v; want %v", subs, err, want)
+	}
+	if subs, err := r.k.ForgetReply(51, "YES "+code(text)); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+		t.Fatalf("a second YES: %v, %v", subs, err)
+	}
+	// An erased subject is never asked again, and a label that cannot be
+	// read makes the text say so.
+	for _, s := range want {
+		if _, err := r.k.Erase(61, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ask(62, "Alice"); !errors.Is(err, kernel.ErrForgetName) {
+		t.Fatalf("erased subjects: %v", err)
+	}
+	if n := r.count(kernel.TSubjectErased); n != 2 {
+		t.Fatalf("%d erases logged, want only the two Erase made", n)
+	}
+	r.keys.MemKeys.Delete(odd)
+	if text, err := ask(63, "Bob"); err != nil || !strings.HasPrefix(text, "Forget everything I can read under “Bob”, 1 message? ") {
+		t.Fatalf("with a label unread: %q, %v", text, err)
+	}
+	// With no code drawn, no ask is held.
+	l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: failReader{}})
+	must(t, err)
+	k, err := kernel.Boot(l, nil, nil, 0)
+	must(t, err)
+	_, err = k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 0)
+	must(t, err)
+	if text, err := k.AskForget(70, "Bob"); err == nil || text != "" {
+		t.Fatalf("an ask with no code: %q, %v", text, err)
+	}
+	if subs, err := k.ForgetReply(71, "YES 000000"); !errors.Is(err, kernel.ErrForgetReply) || subs != nil {
+		t.Fatalf("a YES to an ask with no code: %v, %v", subs, err)
 	}
 }

@@ -4,6 +4,7 @@
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
 import ast
 import base64
+import collections
 import contextlib
 import errno
 import fnmatch
@@ -4409,14 +4410,58 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                             self.tmpfiles(argv, tmp)
             self.assertEqual(subprocess.run(missing, capture_output=True).returncode, 127)
 
-    def test_passed_lines_change_nothing_guarded(self):
-        tool = image_tool(self, "systemd-tmpfiles")
+    def not_run_misses(self, tmpfiles=None):
+        # #5333, #5353: runs test_passed_lines_change_nothing_guarded with a tool that exits 127 and
+        # returns the cases (file, line) that did NOT fail as "not run". TMPFILES may stand in for the
+        # class's tmpfiles, as a mutant of the guarded test would.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
+                       "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
+            result = unittest.TestResult()
+            with unittest.mock.patch.object(sys.modules[__name__], "image_tool", lambda case, tool: missing), \
+                    unittest.mock.patch.object(TmpfilesDiffTest, "tmpfiles", tmpfiles or TmpfilesDiffTest.tmpfiles):
+                TmpfilesDiffTest("test_passed_lines_change_nothing_guarded").run(result)
+        self.assertEqual(result.errors, [])
+        not_run = collections.Counter((t.params["file"], t.params["line"]) for t, tb in result.failures
+                                      if getattr(t, "params", None) and "systemd-tmpfiles did not run" in tb)
+        cases = collections.Counter(self.guarded_cases())
+        self.assertGreater(len(cases), 0)
+        self.assertEqual(not_run - cases, collections.Counter())
+        return sorted((cases - not_run).elements())
+
+    def test_the_guarded_run_takes_the_status_guard(self):
+        # #5333: test_passed_lines_change_nothing_guarded runs each case through self.tmpfiles, so a
+        # tool that exits 127 fails every case as not run. A bare subprocess call there would fail
+        # only the vacuous-oracle check at the end, and a check=True call would error, not fail.
+        # #5353: every case, the allow_groups ones too, so a guard dropped from some cases fails here.
+        self.assertEqual(self.not_run_misses(), [])
+
+    def test_a_case_without_the_guard_fails_the_pin(self):
+        # #5353: one allow_groups case run bare (the status guard dropped from it alone) is reported,
+        # and only it, while every other case still fails as not run.
+        rel = sorted(allow_groups())[0]
+        guarded = TmpfilesDiffTest.tmpfiles
+
+        def tmpfiles(case, tool, tmp):
+            if os.path.exists(os.path.join(tmp, rel)):
+                subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True,
+                               timeout=60)
+            else:
+                guarded(case, tool, tmp)
+        self.assertEqual(self.not_run_misses(tmpfiles), [(rel, "\n".join(allow_groups()[rel]))])
+
+    def guarded_cases(self):
+        """The (file, text) cases test_passed_lines_change_nothing_guarded runs: each passed or probe
+        line alone, then every allowlisted file whole, under its own path, so that an entry added to
+        tmpfiles.allow is run too (#1543 P/UX P1): the tree then passes the allowlist as well as the guard."""
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
                                       if ln and not ln.startswith("#")) + TMPFILES_PROBES
-        # Every allowlisted file whole, under its own path, so that an entry added to tmpfiles.allow
-        # is run too (#1543 P/UX P1): the tree then passes the allowlist as well as the guard.
-        cases = [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
+        return [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
             (rel, "\n".join(group)) for rel, group in sorted(allow_groups().items())]
+
+    def test_passed_lines_change_nothing_guarded(self):
+        tool = image_tool(self, "systemd-tmpfiles")
+        cases = self.guarded_cases()
         changed = set()
         # #4694: every case starts from a copy of one clean tree, checked once, rather than building
         # and whole-checking the same tree again for each case (0.3 s each, over 250 cases).
