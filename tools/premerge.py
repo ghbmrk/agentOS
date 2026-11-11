@@ -641,17 +641,24 @@ def _owed(cwd, head, base, path, files):
     return False
 
 
-def _ours(run, pr, repo):
-    """Whether a head run is this PR's (#5380 review): another PR, a fork's included, can carry the same head commit,
-    so a run binds by its head repository and branch, and a same-repository run also by naming only this PR into main.
-    A fork PR's runs name no PR, so a fork's head repository and branch are the binding there."""
+def _bind(run, pr, repo):
+    """How a head run binds to this PR (#5380 review): `ours`, `foreign` or `unbound`. Another PR, a fork's included, can
+    carry the same head commit, so a run binds by its head repository and branch, and a same-repository run also by
+    naming only this PR into main. A fork PR's runs name no PR, so a fork's head repository and branch are the binding
+    there. A same-repository run on this PR's branch whose `pull_requests` is empty, malformed, or names any other PR
+    or base is `unbound` (#5392): it holds as `<workflow>:unbound`, not `missing`, since the run exists but GitHub's
+    list does not tie it to this PR alone. A PR named twice is one PR (dedupe by number and base)."""
     if (run.get("head_repository") or {}).get("full_name") != pr["repo"] or run.get("head_branch") != pr["branch"]:
-        return False
+        return "foreign"
     if pr["repo"] != repo:
-        return True
+        return "ours"
     prs = run.get("pull_requests")
-    return bool(prs) and isinstance(prs, list) and all(
-        p.get("number") == pr["number"] and (p.get("base") or {}).get("ref") == "main" for p in prs)
+    if not (isinstance(prs, list) and all(isinstance(p, dict) and isinstance(p.get("number"), int)
+                                          and isinstance(p.get("base"), dict) and isinstance(p["base"].get("ref"), str)
+                                          for p in prs)):
+        return "unbound"
+    named = {(p["number"], p["base"]["ref"]) for p in prs}
+    return "ours" if named == {(pr["number"], "main")} else "unbound"
 
 
 def _jobs(run, attempt):
@@ -681,9 +688,10 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
 
     `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
     number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
-    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_ours`). A run passes on `success` or
+    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
     `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
-    A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes."""
+    A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
+    `unbound` when only this branch's runs that name no PR or another PR are on the head."""
     pr = runs.get("pr") if isinstance(runs, dict) else None
     if not (isinstance(pr, dict) and isinstance(pr.get("number"), int) and all(isinstance(pr.get(k), str) for k in ("repo", "branch"))
             and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base"))):
@@ -694,11 +702,12 @@ def checks_held(cwd, runs, head="HEAD", base="origin/main"):
     held = []
     for name, exempt in HELD.items():
         path = f".github/workflows/{name}.yml"
-        mine = [r for r in runs["head"] if r.get("path") == path and r.get("head_sha") == sha
-                and r.get("event") in ("pull_request", "pull_request_target") and _ours(r, pr, runs["repo"])]
+        bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
+                 and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
+        mine = [r for b, r in bound if b == "ours"]
         if not mine:
             if _owed(cwd, sha, base, path, files):
-                held.append(f"{name}:missing")
+                held.append(f"{name}:{'unbound' if any(b == 'unbound' for b, _ in bound) else 'missing'}")
             continue
         r = max(mine, key=lambda r: r.get("id") or 0)
         state = r.get("conclusion") if r.get("status") == "completed" else r.get("status")

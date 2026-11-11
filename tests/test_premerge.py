@@ -1052,13 +1052,26 @@ class PremergeTest(unittest.TestCase):
         onto, sha = self.held_repo()
         wf = lambda id, c, **k: self.wf(id, "vulncheck", c, sha, **k)
         held = lambda *runs, **k: premerge.checks_held(self.r, bundle(runs, **k), "HEAD", "main")
-        foreign = ({"repo": "outsider/agentOS", "prs": ()}, {"branch": "other"}, {"prs": ((8, "main"),)},
-                   {"prs": ((7, "pkg/old"),)}, {"prs": ((7, "main"), (8, "pkg/old"))}, {"prs": ()})
-        for k in foreign:
-            # a newer foreign run neither holds this PR's pass nor clears its cancel
+        foreign = ({"repo": "outsider/agentOS", "prs": ()}, {"branch": "other"})
+        # #5392: a run on this PR's own branch whose list is empty or names another PR or base is unbound, not missing
+        unbound = ({"prs": ((8, "main"),)}, {"prs": ((7, "pkg/old"),)}, {"prs": ((7, "main"), (8, "pkg/old"))},
+                   {"prs": ((7, "main"), (8, "main"))}, {"prs": ()})
+        for k in foreign + unbound:
+            # a newer foreign or unbound run neither holds this PR's pass nor clears its cancel
             self.assertEqual(held(wf(1, "success"), wf(2, "action_required", **k)), [], k)
             self.assertEqual(held(wf(1, "cancelled"), wf(2, "success", **k)), ["vulncheck:cancelled"], k)
-            self.assertEqual(held(wf(2, "success", **k)), ["vulncheck:missing"], k)
+            self.assertEqual(held(wf(2, "success", **k)), ["vulncheck:unbound" if k in unbound else "vulncheck:missing"], k)
+        # an unbound run beside a foreign one still names the hold unbound; an unowed workflow is not held for one
+        self.assertEqual(held(wf(2, "success", prs=()), wf(3, "success", branch="other")), ["vulncheck:unbound"])
+        self.assertEqual(held(wf(1, "success"), self.wf(2, "formal", "success", sha, prs=())), [])
+        # a list naming this PR twice is one PR (dedupe by number and base)
+        self.assertEqual(held(wf(1, "success", prs=((7, "main"), (7, "main")))), [])
+        self.assertEqual(held(wf(1, "cancelled", prs=((7, "main"), (7, "main")))), ["vulncheck:cancelled"])
+        # a malformed list is unbound, never a crash and never a pass
+        for prs in (None, "7", [7], [{"number": "7", "base": {"ref": "main"}}], [{"number": 7}],
+                    [{"number": 7, "base": "main"}], [{"number": [7], "base": {"ref": "main"}}],
+                    [{"number": 7, "base": {"ref": ["main"]}}]):
+            self.assertEqual(held({**wf(1, "success"), "pull_requests": prs}), ["vulncheck:unbound"], prs)
         missing = {**wf(1, "success"), "head_repository": None}
         self.assertEqual(held(missing), ["vulncheck:missing"])
         # a fork PR's runs name no PR: its head repository and branch bind them
