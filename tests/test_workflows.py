@@ -548,11 +548,57 @@ SUPERSEDE = ["trusted-base.yml", "lane-gate.yml", "word-budget.yml", "formal.yml
 KEEPS_EVERY_RUN = {"premerge.yml"}
 
 
+# #5377: the triggers as GitHub reads them. YAML 1.1 reads a plain `on` key as true, so a workflow
+# may quote it, and a text match on `on:` missed `"on":`. Each top-level line must be one workflow
+# key, plain or quoted, once; the triggers one plain or quoted event a line at one indent, or one
+# flow list of names. Any other form (an anchor, alias, merge key, tag, `?` key, second document,
+# tab, unknown or repeated key) fails rather than being read, so no spelling hides a trigger.
+TOP_KEY = re.compile(r"""(["']?)(name|run-name|on|permissions|env|defaults|concurrency|jobs)\1[ \t]*:(?=[ \t]|$)""")
+EVENT = re.compile(r"""(["']?)([a-z_]+)\1[ \t]*:(?=[ \t]|$)""")
+EVENT_LIST = re.compile(r"[a-z_]+|\[[ \t]*[a-z_]+(?:[ \t]*,[ \t]*[a-z_]+)*[ \t]*\]")
+
+
+def workflow_triggers(text):
+    """Return the events a workflow's `on` key names and why the check cannot read the workflow."""
+    events, problems, seen, key, indent = [], [], set(), None, None
+    for line in text.split("\n"):
+        bare = re.sub(r"(?:^|[ \t])#.*", "", line).rstrip(" \t")
+        if not bare:
+            continue
+        if not bare.startswith(" "):
+            m = TOP_KEY.match(bare)
+            key = m and m.group(2)
+            if not m or key in seen:
+                problems.append("a top-level line that is not one workflow key: %r" % line)
+                continue
+            seen.add(key)
+            rest = bare[m.end():].strip(" \t")
+            if key == "on" and rest:
+                if EVENT_LIST.fullmatch(rest):
+                    events += re.findall(r"[a-z_]+", rest)
+                else:
+                    problems.append("triggers the check cannot read: %r" % rest)
+                key = "on, flow"
+            continue
+        if key == "on, flow":
+            problems.append("a line under a flow list of triggers: %r" % line)
+        if key != "on":
+            continue
+        width = len(bare) - len(bare.lstrip(" "))
+        indent = width if indent is None else indent
+        m = EVENT.match(bare, width)
+        if width == indent and m:
+            events.append(m.group(2))
+        elif width <= indent:
+            problems.append("a trigger the check cannot read: %r" % line)
+    return events, problems
+
+
 def supersede_problems(name, text):
     """Return why a workflow can leave a superseded PR head's runs queued; empty when it cannot."""
-    on_pr = re.search(r"^on:.*?(?=^\S)", text + "\nend", re.M | re.S)
-    if not (on_pr and re.search(r"\bpull_request(_target)?\b", on_pr.group(0))):
-        return []
+    events, problems = workflow_triggers(text)
+    if problems or not any(e.startswith("pull_request") for e in events):
+        return problems
     # The jobs line by the line, as GitHub reads it (`jobs: ` with a trailing space too); a PR
     # workflow without one fails rather than hide its jobs from the ban below (#5348).
     at = re.search(r"^jobs: *$", text, re.M)
@@ -639,6 +685,54 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(supersede_problems("premerge.yml", premerge), [])
         self.assertTrue(supersede_problems("premerge.yml", premerge.replace(
             "\njobs:\n", "\njobs:\n  x:\n    concurrency:\n      group: x\n      cancel-in-progress: true\n", 1)))
+
+    def test_triggers_read_as_github_reads_them(self):
+        # CI-rerun-guard-rest-fu (#5377): YAML 1.1 reads a plain `on` as true, so a workflow may
+        # quote the key; a PR trigger under `on:`, `"on":` or `'on':` needs the pinned block, and a
+        # push-only one does not.
+        block = "\n".join(SUPERSEDE_LINES) + "\n"
+        for key in ["on", '"on"', "'on'"]:
+            for triggers in ["\n  pull_request:\n", "\n  # a comment at column 0 follows\n#\n  pull_request_target:\n",
+                             " [push, pull_request]\n", " pull_request\n", " pull_request # x\n",
+                             "\n  push:\n    branches: [main]\n  \"pull_request_review\": {types: [submitted]}\n"]:
+                plain = "name: x\n" + key + ":" + triggers + "permissions:\n  contents: read\njobs:\n"
+                with self.subTest(key=key, triggers=triggers):
+                    self.assertTrue(supersede_problems("mutgate.yml", plain))
+                    self.assertEqual(supersede_problems("mutgate.yml", plain.replace("jobs:", block + "jobs:")), [])
+            with self.subTest(key=key, triggers="push"):
+                push = "name: x\n" + key + ":\n  push:\n    paths: [pull_request]\njobs:\n"
+                self.assertEqual(workflow_triggers(push), (["push"], []))
+                self.assertEqual(supersede_problems("x.yml", push), [])
+        # A form the check cannot read fails rather than hide a trigger, wherever it sits.
+        plain = "name: x\non:\n  pull_request:\npermissions:\n  contents: read\njobs:\n"
+        self.assertEqual(workflow_triggers(plain), (["pull_request"], []))
+        unread = {
+            "true key": ("on:", "true:"), "capital key": ("on:", "On:"), "explicit key": ("on:", "? on\n:"),
+            "escaped key": ("on:", '"o\\x6en":'), "quotes that differ": ("on:", "\"on':"),
+            "anchor": ("on:", "on: &t"), "alias": ("on:\n  pull_request:", "on: *t"),
+            "merge key": ("  pull_request:", "  push:\n  <<: *t"), "tagged key": ("on:", "!!str on:"),
+            "flow mapping": ("on:\n  pull_request:", "on: {pull_request: }"),
+            "flow list on two lines": ("on:\n  pull_request:", "on: [push,\n  pull_request]"),
+            "flow list then a block": ("on:", "on: [push]"), "sequence": ("  pull_request:", "  - pull_request"),
+            "event under the event indent": ("  pull_request:", "   push:\n  pull_request:"),
+            "tab": ("  pull_request:", "  \tpull_request:"), "key at column 0 with a tab": ("on:", "\ton:"),
+            "second document": ("name: x", "---\nname: x"), "unknown key": ("permissions:", "permission:"),
+            "key twice": ("permissions:", "on:\n  push:\npermissions:"), "carriage return": ("on:", "on:\r"),
+            "continuation at column 0": ("name: x", 'name: "x\npull_request"'),
+            "non-ASCII event": ("  pull_request:", "  pull_r\u0435quest:"),
+            "no space after a key's colon": ("permissions:", "permissions:x"),
+            "no space after an event's colon": ("  pull_request:", "  pull_request:x"),
+            "a line of ideographic space": ("permissions:", "\u3000\npermissions:"),
+            "two names without a list": ("on:\n  pull_request:", "on: push pull_request"),
+            "alias in a flow list": ("on:\n  pull_request:", "on: [push, *t]"),
+        }
+        for name, (old, new) in unread.items():
+            with self.subTest(name):
+                self.assertIn(old, plain)
+                text = plain.replace(old, new, 1)
+                self.assertTrue(workflow_triggers(text)[1], name)
+                self.assertTrue(supersede_problems("mutgate.yml", text.replace("jobs:", block + "jobs:")), name)
+                self.assertTrue(supersede_problems("x.yml", text.replace("pull_request", "push")), name)
 
     def test_cache_keys_name_the_runner_image(self):
         seen = 0

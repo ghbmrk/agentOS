@@ -193,7 +193,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Blocked threads get a card or no block.** Mark, 2026-10-10: "Currently there are blocked threads. They should either be cards in here for me to unblock or they shouldn't be blocked" and "Every time there are blocked threads ask this question." Whenever any thread shows as blocked, the coordinator checks it at once against GitHub's live state and the owner's existing approvals. A stale block is resolved, a block the owner's existing approvals cover is told to proceed, and a block that truly needs the owner becomes a decision card. No thread is left blocked without a card. A relayed card tap does not satisfy the permission check for closing PRs, so such a card carries direct GitHub links for the owner to act on.
 - **Coordinator cost rules.** Count cold starts (new sessions, wakes after more than an hour idle, model switches, compactions) per merged PR and minimise them. The coordinator routes; investigation goes to a thread. Per thread: one ack, one result, one blocker reply, with progress in the status checklist. Wait by subscription, not polling. Never wake an idle thread for new work; start a fresh one (D-094).
 
-**Speed rules** (Mark, 2026-10-15; D-121). Each one removes a round trip that CI, a reviewer or a later package would otherwise find, and every round trip is another wake and a full-context reread (§1).
+**Speed rules** (Mark, 2026-10-15; D-121). Each removes a round trip, which costs a wake and a full-context reread (§1).
 
 - **Run CI's own commands before a PR or a verdict.** Builders, review workers and fix workers run, before opening a PR or giving a verdict, every `run:` command of the `.github/workflows/ci.yml` jobs that the change's scope triggers (among them: from `broker/`, `go vet ./...` and `go test -race ./...`; the `checks` job's Python tests, `trace.py --check` and `doclint.py`), plus the lane gate command (`python3 tools/risk_tier.py --git origin/main HEAD`, from `lane-gate.yml`). A new concurrency test also runs under `go test -race -count=N` (a stress run) first. A failure CI would have shown costs a full CI round and a wake; a local run costs neither.
 - **Briefs name their guard files.** A brief for a new package lists the guard files it must touch and pre-approves them in its declared scope (the `**Guard files:**` line under Package records below), so the builder does not stop to ask and CI does not fail on a missing class or allowlist entry.
@@ -203,7 +203,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Deletion first (D-245).** Among startable rows, start those that delete old-core code, and the rows that unblock them, before new features; report the old core's remaining lines to Mark weekly.
 - **Keep the critical path parallel.** Run G1 critical-path packages in parallel wherever they touch disjoint files (the conflict guard above still applies).
 - **Models by tier.** Tier-A builders run on Opus, the strongest model; tier B and C builders run on Sonnet (D-121 item 7).
-- **Fix a flake the second time.** A flaky test seen a second time gets an issue and a fix, not another re-run.
+- **Fix a flake the second time.** A flaky test seen a second time gets an issue and a fix, not another rerun. Rerun only a PR's current head: a newer push never cancels a rerun (#5377).
 - **Reviews unchanged.** Tier A keeps its two separate reviews, Security and Potency/UX/L3 (§3, §4); the speed rules shorten the rounds, not the review set.
 
 **Package records.**
