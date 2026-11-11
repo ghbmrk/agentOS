@@ -299,8 +299,8 @@ func (d *Enforcer) closeFresh() {
 // pageResolver is the resolver as the page shows it: stopped while no
 // instance runs, and then why: each stray address hold found with its
 // interface, every other failure of the served check by its typed cause
-// (#5284), the typed cause of the policy in force's that dns.Generate
-// refused (#5307), and the step that refused the last load (ENF-l-11,
+// (#5284), each typed cause of the policy in force's that dns.Generate
+// refused (#5307, #5405), and the step that refused the last load (ENF-l-11,
 // ENF-l-21; #5164 R1, R5 d).
 // While instances run, each that keeps exiting or failing to start is
 // shown instead (R5 b), read from dns/run, which the page waits on only

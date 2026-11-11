@@ -451,27 +451,43 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	if !strings.Contains(h, "<p>The enforcer could not turn off router advertisements on interface own0, so a device on that network could set a route or address the enforcer did not check. It tries again every 10 seconds.</p>") || strings.Contains(h, "Interface own0 holds") {
 		t.Errorf("a setting that did not take is not shown alone:\n%s", h)
 	}
-	if strings.Count(h, "router advertisements") != 1 || strings.Contains(h, "/proc/sys") || strings.Contains(h, "&#34;") {
+	if strings.Count(h, "router advertisements") != 1 || strings.Contains(h, "/proc/sys") || strings.Contains(h, "&#34;") || strings.Contains(h, "still applies") {
 		t.Errorf("home shows the raw error, or one error twice:\n%s", h)
 	}
 	// A policy the resolver cannot serve, by its typed cause, with any
 	// name in printable ASCII; a refused load is not shown beside it.
-	const still = " The policy still applies; names and addresses come back with the next policy the enforcer can serve.</p>"
+	const still = "<p>The policy still applies; names and addresses come back with the next policy the enforcer can serve.</p>"
 	for cause, want := range map[PolicyCause]string{
-		{Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}:      "<p>The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there." + still,
-		{Kind: PolicyVLAN, Name: "pl\u202eug", WiFi: "vlan 9"}: "<p>The policy in force puts device &#34;pl\\u202eug&#34; on Wi-Fi network &#34;vlan 9&#34;, and the enforcer&#39;s setup serves no names or addresses there." + still,
-		{Kind: PolicyName, Name: "gro.live\u202e"}:             "<p>The policy in force lists &#34;gro.live\\u202e&#34;, which is not a name the enforcer can look up." + still,
-		{Kind: PolicyUntyped, Name: "x\u202e"}:                 "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail." + still,
-		{Kind: PolicyName + 1, Name: "x"}:                      "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail." + still,
+		{Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}:      "<p>The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.</p>",
+		{Kind: PolicyVLAN, Name: "pl\u202eug", WiFi: "vlan 9"}: "<p>The policy in force puts device &#34;pl\\u202eug&#34; on Wi-Fi network &#34;vlan 9&#34;, and the enforcer&#39;s setup serves no names or addresses there.</p>",
+		{Kind: PolicyName, Name: "gro.live\u202e"}:             "<p>The policy in force lists &#34;gro.live\\u202e&#34;, which is not a name the enforcer can look up.</p>",
+		{Kind: PolicyUntyped, Name: "x\u202e"}:                 "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>",
+		{Kind: PolicyName + 1, Name: "x"}:                      "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>",
 	} {
-		res.stop = ResolverStop{Stopped: true, Policy: cause, Load: LoadFirewall}
+		res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{cause}, Load: LoadFirewall}
 		h = g.homeHTML()
-		if !strings.Contains(h, want) || strings.Contains(h, "The firewall refused") || strings.Contains(h, "with its next load of your rules") {
+		if !strings.Contains(h, want+"\n"+still) || strings.Contains(h, "The firewall refused") || strings.Contains(h, "with its next load of your rules") {
 			t.Errorf("a policy the resolver cannot serve (%+v) is not in its words:\n%s", cause, h)
 		}
 		if strings.ContainsRune(h, '\u202e') {
 			t.Error("home carries a right-to-left override from the policy")
 		}
+	}
+	// Every reason shows, each once, in the order given, and the policy
+	// still applies is said once after them (#5405): a setup fault beside
+	// two devices and two names, and an untyped reason given twice.
+	res.stop = ResolverStop{Stopped: true, Policy: []PolicyCause{
+		{Kind: PolicyUntyped}, {Kind: PolicyVLAN, Name: "plug", WiFi: "vlan109"}, {Kind: PolicyVLAN, Name: "lamp", WiFi: "vlan110"},
+		{Kind: PolicyName, Name: "Abc.example"}, {Kind: PolicyName, Name: "Zed.example"}, {Kind: PolicyUntyped},
+	}}
+	h = g.homeHTML()
+	want := "<p>The policy in force names something the enforcer cannot serve; the enforcer&#39;s log has the detail.</p>\n" +
+		"<p>The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.</p>\n" +
+		"<p>The policy in force puts device lamp on Wi-Fi network vlan110, and the enforcer&#39;s setup serves no names or addresses there.</p>\n" +
+		"<p>The policy in force lists &#34;Abc.example&#34;, which is not a name the enforcer can look up.</p>\n" +
+		"<p>The policy in force lists &#34;Zed.example&#34;, which is not a name the enforcer can look up.</p>\n" + still
+	if !strings.Contains(h, want) || strings.Count(h, "cannot serve;") != 1 || strings.Count(h, "still applies") != 1 {
+		t.Errorf("home does not list every reason the policy cannot be served, each once:\n%s", h)
 	}
 	if got := sentence("a\tb\x00c é"); got != `a\tb\x00c \u00e9` {
 		t.Errorf("sentence = %q", got)

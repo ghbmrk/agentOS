@@ -39,7 +39,8 @@
 <p>The enforcer has stopped answering name lookups and handing out addresses on every home network: no device, agentOS included, gets a name answered, and a device that joins or renews gets no address. A device already joined keeps its address until its lease ends, within 12 hours. Your rules stay in force.</p>
 {{range .Strays}}<p>Interface {{.Iface}} holds the address {{.Addr}}, outside its network {{.Nets}}. Nothing in your rules put it there. The enforcer serves names and addresses again within 10 seconds of the last such address being removed.</p>
 {{end}}{{range .Unset}}<p>{{.}}</p>
-{{end}}{{with .Policy}}<p>{{.}}</p>
+{{end}}{{range .Policy}}<p>{{.}}</p>
+{{end}}{{if .Policy}}<p>The policy still applies; names and addresses come back with the next policy the enforcer can serve.</p>
 {{end}}{{if not (or .Strays .Unset .Policy)}}{{with .Load}}<p>{{.}}</p>
 {{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
 {{end}}</div>

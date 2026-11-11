@@ -81,12 +81,12 @@ type network struct {
 	// set under d.fwMu and read under resMu, so the page never waits on a
 	// load: whether its instances run (the files the last taken load
 	// started, or none since the served check stopped them), the served
-	// check's failure, the policy in force's typed cause, and the step
+	// check's failure, the policy in force's typed causes, and the step
 	// that refused the last load (LoadTaken once one is taken).
 	resMu      sync.Mutex
 	resRuns    bool
 	stopServed error
-	stopPolicy page.PolicyCause
+	stopPolicy []page.PolicyCause
 	stopLoad   page.LoadStep
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
@@ -284,9 +284,9 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	}
 	// The policy in force is doc only once its load is taken; a refused
 	// one leaves the resolver on the old policy's files, or none.
-	var why page.PolicyCause
+	var why []page.PolicyCause
 	if genErr != nil {
-		why = refusedCause(genErr)
+		why = refusedCauses(genErr)
 	}
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
@@ -336,23 +336,30 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
-// refusedCause is err, dns.Generate's refusal of a document, by the typed
-// cause it carries (#5307, #5352): a device on a Wi-Fi network the setup
-// serves no network for, or a listed name that is not a DNS host name,
-// each the one Generate refused. These are the configuration refusals
-// left once the document compiles, since the setup alone was checked at
-// start (config); any other is untyped, and the page says so without
-// the error's text.
-func refusedCause(err error) page.PolicyCause {
-	var dev dns.UnservedDevice
-	var name dns.BadName
-	switch {
-	case errors.As(err, &dev):
-		return page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
-	case errors.As(err, &name):
-		return page.PolicyCause{Kind: page.PolicyName, Name: name.Name}
+// refusedCauses is err, dns.Generate's refusal of a document, as every
+// typed cause it carries, in its order (#5307, #5352, #5405): each device
+// on a Wi-Fi network the setup serves no network for, and each listed
+// name that is not a DNS host name, read from the refusal, never from the
+// document. Any other, a setup fault among them, is untyped, and the page
+// says so without the error's text.
+func refusedCauses(err error) []page.PolicyCause {
+	errs := []error{err}
+	var r dns.Refused
+	if errors.As(err, &r) {
+		errs = r
 	}
-	return page.PolicyCause{Kind: page.PolicyUntyped}
+	out := make([]page.PolicyCause, len(errs))
+	for i, err := range errs {
+		var dev dns.UnservedDevice
+		var name dns.BadName
+		switch {
+		case errors.As(err, &dev):
+			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
+		case errors.As(err, &name):
+			out[i] = page.PolicyCause{Kind: page.PolicyName, Name: name.Name}
+		}
+	}
+	return out
 }
 
 // joinRules appends the drop's text to a full load's, in one transaction.
