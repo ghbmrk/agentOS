@@ -101,7 +101,7 @@ PREMERGE_LINES = [
     '  issue_comment:',
     '    types: [created, edited, deleted]',
     '  workflow_run:',
-    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image]',
+    '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, mutgate, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]',
     '    types: [completed]',
     'permissions:',
     '  contents: read',
