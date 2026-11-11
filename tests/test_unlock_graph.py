@@ -23,7 +23,7 @@ def graph(spec):
     """graph()'s shape from {unit: ["Kind: target", ...]}."""
     return {name: {"edges": [tuple(e.split(": ")) for e in edges], "actions": list(NONE), "load": "loaded",
                    "job_modes": [(m, "replace") for m in g.JOB_MODES],
-                   "restart": ("no", "normal") if name.endswith(".service") else None}
+                   "restart": "no" if name.endswith(".service") else None}
             for name, edges in spec.items()}
 
 
@@ -46,22 +46,23 @@ class FakeManager:
     """show() over a fixed graph, as offline_systemd.Manager answers it."""
 
     def __init__(self, spec):
-        self.spec, self.asked = spec, []
+        self.spec, self.asked, self.props = spec, [], []
 
     def show(self, units, props):
         self.asked.append(sorted(units))
+        self.props.append(tuple(props))
         out = {}
         for u in units:
             p = {k: "" for k in props}
             p.update({a: "none" for a in g.ACTIONS}, LoadState="loaded", OnFailureJobMode="replace",
-                     OnSuccessJobMode="fail", Restart="no", RestartMode="normal")
+                     OnSuccessJobMode="fail", Restart="no")
             for e in self.spec.get(u, ()):
                 k, t = e.split(": ")
                 if k in g.RESTART:
                     p[k] = t
                 else:
                     p[k] = (p.get(k, "") + " " + ('"%s"' % t.replace("\\", "\\\\") if "\\" in t else t)).strip()
-            # systemctl shows only the properties the unit's type has: Restart= and RestartMode= are a service's.
+            # systemctl shows only the properties the unit's type has: Restart= is a service's.
             if not u.endswith(".service") and set(props) & set(g.RESTART):
                 raise SystemExit("%s has no %s" % (u, props))
             out[u] = {k: p[k] for k in props}
@@ -119,7 +120,7 @@ class ReachTest(unittest.TestCase):
         # #4919: the reverse lists of Upholds= and Triggers=, by which a stopped unit is started again, and
         # the two enums that say whether a service's automatic restart stops it on the way back.
         self.assertEqual(g.RESTART_KINDS, ("TriggeredBy", "UpheldBy"))
-        self.assertEqual(g.RESTART, ("Restart", "RestartMode"))
+        self.assertEqual(g.RESTART, ("Restart",))
 
     def test_facts_are_the_root_each_edge_taken_and_failed_generators(self):
         units = graph(SHIPPED)
@@ -308,18 +309,17 @@ class ViolationsTest(unittest.TestCase):
                 self.assertNotIn("x.service", g.closure(graph(spec))[1])
 
     def test_a_started_service_that_restarts_is_walked_as_stopped(self):
-        # #4919: under RestartMode=normal, a started service's automatic restart stops the units that require
-        # or bind to it; Restart=no, or RestartMode=direct, does not. (Its OnFailure= is a start kind, walked
-        # either way.)
+        # #4919: a started service's automatic restart stops the units that require or bind to it, whatever its
+        # RestartMode= (on systemd 255 a direct restart still stopped a Requires= dependent, #5403 L3 round 1);
+        # Restart=no does not. (Its OnFailure= is a start kind, walked either way.)
         spec = copy(SHIPPED)
         spec["agentos-inbound.service"] = ["RequiredBy: y.service", "OnFailure: f.service"]
         spec["y.service"] = []
         spec["f.service"] = []
-        for restart, mode, walked in (("always", "normal", True), ("on-failure", "debug", True),
-                                      ("no", "normal", False), ("always", "direct", False)):
-            with self.subTest(restart=restart, mode=mode):
+        for restart, walked in (("always", True), ("on-failure", True), ("on-abnormal", True), ("no", False)):
+            with self.subTest(restart=restart):
                 units = graph(spec)
-                units["agentos-inbound.service"]["restart"] = (restart, mode)
+                units["agentos-inbound.service"]["restart"] = restart
                 started, stopped, edges = g.closure(units)
                 self.assertEqual("y.service" in stopped, walked)
                 self.assertIn("f.service", started)
@@ -330,9 +330,12 @@ class ViolationsTest(unittest.TestCase):
                                  in g.violations(units, set(), g.facts(units, ()), "257.13", FSTAB), walked)
         # A unit that is not a service has no Restart=, and graph() asks only services for it.
         self.assertFalse(g.restarts({"restart": None}))
-        m = FakeManager({U: ["Requires: agentos-keeper.slice", "Wants: x.service"], "x.service": ["Restart: always"]})
+        # RestartMode= is not asked for, so RestartMode=direct exempts nothing.
+        m = FakeManager({U: ["Requires: agentos-keeper.slice", "Wants: x.service"],
+                         "x.service": ["Restart: always", "RestartMode: direct"]})
         got = g.graph(m)
-        self.assertEqual(got["x.service"]["restart"], ("always", "normal"))
+        self.assertNotIn("RestartMode", {k for asked in m.props for k in asked})
+        self.assertEqual(got["x.service"]["restart"], "always")
         self.assertIsNone(got["agentos-keeper.slice"]["restart"])
         self.assertIn("restart x.service Restart always", g.closure(got)[2])
 

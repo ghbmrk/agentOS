@@ -17,7 +17,7 @@ stops another unit (STOP_KINDS). Starting a unit stops what it conflicts with (S
 stopped unit it follows the kinds that carry the stop on (PROPAGATE_STOP) and the units a stop can start
 (STOP_STARTS: OnFailure= when ExecStop fails, OnSuccess= on a clean stop). A stopped unit is started again
 by the units that trigger or uphold it (RESTART_KINDS), and a started service whose Restart= is not "no"
-stops on its way back unless its RestartMode= is "direct" (restarts()). All of it runs to a fixed point
+stops on its way back (restarts()). All of it runs to a fixed point
 (closure()) (#4919). Each edge it takes, the unlock unit as the root and the generators that failed must
 be exactly the lines of
 image/mkosi/unlock.allow, which `unlock_graph.py --allowlist` prints for a built image, so a new path
@@ -65,10 +65,10 @@ STOP_STARTS = ("OnSuccess", "OnFailure")
 # upholding unit (UpheldBy=) while it stays up. Whether those are themselves stopped first is not read, so
 # each counts (#4919).
 RESTART_KINDS = ("TriggeredBy", "UpheldBy")
-# A service's Restart= and RestartMode= (systemctl shows them for services only). Under RestartMode=normal,
-# systemd 257's default, an automatic restart passes through the inactive or failed state, so the units that
-# Requires=/BindsTo= the service stop and its OnSuccess=/OnFailure= run; RestartMode=direct skips that state.
-RESTART = ("Restart", "RestartMode")
+# A service's Restart= (systemctl shows it for services only). An automatic restart can stop the units that
+# Requires=/BindsTo= the service and run its OnSuccess=/OnFailure=. RestartMode= is not read: on systemd 255
+# a RestartMode=direct restart still stopped a Requires= dependent (#5403 L3 round 1), so no mode exempts it.
+RESTART = ("Restart",)
 ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
 JOB_MODES = ("OnFailureJobMode", "OnSuccessJobMode")  # isolate stops every unit outside the target
 PROPS = START_KINDS + STOP_KINDS + RESTART_KINDS + ACTIONS + JOB_MODES + ("LoadState",)
@@ -86,7 +86,7 @@ WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)
 
 def graph(manager, start=UNIT):
     """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "job_modes":
-    [(name, value)], "restart": (Restart, RestartMode) or None}} for START and every unit closure() reaches
+    [(name, value)], "restart": Restart or None}} for START and every unit closure() reaches
     from it, as MANAGER's systemd shows them. Restart is None for a unit that is not a service."""
     units = {}
     while True:
@@ -100,14 +100,14 @@ def graph(manager, start=UNIT):
                                      for t in unit_names(name, k, p[k])],
                            "actions": [(k, p[k]) for k in ACTIONS], "load": p["LoadState"],
                            "job_modes": [(k, p[k]) for k in JOB_MODES],
-                           "restart": tuple(services[name][k] for k in RESTART) if name in services else None}
+                           "restart": services[name]["Restart"] if name in services else None}
 
 
 def restarts(unit):
     """Whether UNIT (a graph() entry) is a service whose automatic restart stops it on the way back: Restart=
-    is not "no" and RestartMode= is not "direct". Each is an enum, so any other value counts."""
+    is not "no". It is an enum, so any other value counts."""
     r = unit.get("restart")
-    return bool(r) and r[0] != "no" and r[1] != "direct"
+    return bool(r) and r != "no"
 
 
 UNIT_NAME = re.compile(r"[A-Za-z0-9:_.\\@-]+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)\Z")
@@ -153,7 +153,7 @@ def closure(units, start=UNIT):
             continue
         unit = units.get(u, {})
         if up and restarts(unit):
-            edges.add("restart %s Restart %s" % (u, unit["restart"][0]))
+            edges.add("restart %s Restart %s" % (u, unit["restart"]))
             todo.append((False, u))
         for k, t in unit.get("edges", ()):
             if k in (START_KINDS if up else STOP_STARTS):
