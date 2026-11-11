@@ -37,7 +37,33 @@ env:
   GOTOOLCHAIN: local
   GOWORK: "off"
 jobs:
+  # CI-mutgate-head-guard (#5409): a rerun keeps its event, so it can test a head the PR has left.
+  # This job reads the PR's head from the API and, when the run's head is older, ends with a notice
+  # and skips `claimed`; the `mutgate` job then fails, so a run that gated nothing never passes.
+  head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      current: ${{ steps.head.outputs.current }}
+    steps:
+      - name: This run's head is the PR's current head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha) || { echo "::error::cannot read the PR's head"; exit 1; }
+          [[ "$now" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the PR's head is not a sha: $now"; exit 1; }
+          if [ "$now" = "$RUN_HEAD" ]; then echo "current=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "::notice::this run's head $RUN_HEAD is not the PR's current head $now: no gate runs; the current head's own run decides"
+          echo "current=false" >> "$GITHUB_OUTPUT"
   claimed:
+    needs: head
+    if: ${{ needs.head.outputs.current == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
