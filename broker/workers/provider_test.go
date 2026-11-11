@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/vm"
@@ -18,10 +20,16 @@ type fakeProvider struct {
 	got  []ProviderRequest
 	text string
 	err  error
+	// during, when set, runs inside Run with the context provider_run
+	// passed: the point where the real runner boots its worker.
+	during func(ctx context.Context)
 }
 
-func (f *fakeProvider) Run(_ context.Context, q ProviderRequest) (string, error) {
+func (f *fakeProvider) Run(ctx context.Context, q ProviderRequest) (string, error) {
 	f.got = append(f.got, q)
+	if f.during != nil {
+		f.during(ctx)
+	}
 	return f.text, f.err
 }
 
@@ -288,5 +296,39 @@ func TestProviderRunNeedsTheRunnerTheOwnerStopAndAnAgentCaller(t *testing.T) {
 	}
 	if len(f.got) != 0 {
 		t.Fatal("runner ran for a worker")
+	}
+}
+
+// A provider run whose STOP lands after the entry check, while the runner is
+// running, boots no worker and runs no command: the context provider_run
+// hands the runner carries the hold, which the machine's lock asks at the
+// boot and at each command (STOP-queued-start-fu). The runner here stands for
+// provagent's steps: boot, then Exec.
+// REQ: OP-6
+func TestOP6ProviderRunHeldWhenStopLandsAfterTheEntryCheck(t *testing.T) {
+	r := newRig(t, 4096)
+	r.agent("a1", vm.Public)
+	f := r.provider()
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	spec := vm.Spec{Image: "base", Class: admission.Experiment, MemMB: 256, Label: vm.Private, Argv: []string{"idle"}}
+	var boot, exec error
+	f.during = func(ctx context.Context) {
+		stopped.Store(true) // after the entry check, before the boot
+		_, boot = r.m.CreateProviderWorker(ctx, providerWorkerID, spec, nil)
+		stopped.Store(false)
+		if _, err := r.m.CreateProviderWorker(ctx, providerWorkerID, spec, nil); err != nil {
+			t.Errorf("boot under RESUME: %v", err)
+			return
+		}
+		stopped.Store(true) // after the boot, before the agent CLI
+		_, exec = r.m.Exec(ctx, providerWorkerID, vm.Command{Argv: []string{"echo", "ran"}, As: vm.Private}, time.Second)
+	}
+	r.must("a1", "provider_run", m{"provider": "codex", "brief": "b", "task_class": "code"}, nil)
+	if !errors.Is(boot, vm.ErrHeld) {
+		t.Fatalf("boot after STOP: %v, want ErrHeld", boot)
+	}
+	if !errors.Is(exec, vm.ErrHeld) {
+		t.Fatalf("command after STOP: %v, want ErrHeld", exec)
 	}
 }

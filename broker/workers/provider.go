@@ -71,7 +71,10 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	res, err := t.Provider.Run(ctx, ProviderRequest{
+	// The run's boot and each command ask STOP again under the machine's
+	// lock, so a STOP that lands after the entry check starts nothing and
+	// never reaches the model route (STOP-queued-start-fu).
+	res, err := t.Provider.Run(vm.WithHold(ctx, t.Stopped), ProviderRequest{
 		Provider: a.Provider, Brief: a.Brief, TaskClass: a.TaskClass,
 		Machine: c.machine, Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
 	})
