@@ -502,15 +502,33 @@ func TestUnreadTableHeldSpent(t *testing.T) {
 		t.Fatal("fixture: caps spent")
 	}
 
+	// A load the firewall refuses leaves what the page shows as it was
+	// (#5445 item 4): the table was readable before it.
+	listFails(true)
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	refused := x.current()
+	refused.Caps = map[string]uint64{"updates.example": 400}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), refused)
+	held := x.d.net.unread
+	x.d.fwMu.Unlock()
+	x.fire.mu.Lock()
+	x.fire.fail = false
+	x.fire.mu.Unlock()
+	if err == nil || held || (pageCaps{x.d}).Day().Unread {
+		t.Fatalf("a refused load over an unread table: err %v, held %v, shown %v", err, held, (pageCaps{x.d}).Day().Unread)
+	}
+
 	// A tightening loads while the table does not read, with every cap
 	// held spent and the edge held.
-	listFails(true)
 	n := loads()
 	before := x.fire.last()
 	next := x.current()
 	next.Caps = map[string]uint64{"updates.example": 500}
 	x.d.fwMu.Lock()
-	err := x.d.loadNetwork(context.Background(), next)
+	err = x.d.loadNetwork(context.Background(), next)
 	unread := x.d.net.unread
 	x.d.fwMu.Unlock()
 	if err != nil || loads() != n+1 || x.fire.last() == before {
