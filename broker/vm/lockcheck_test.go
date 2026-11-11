@@ -38,7 +38,7 @@ var plainLocks = map[string]struct {
 	"Manager.rollbackTo": {1, "after admit; claimLocked refuses a retired machine"},
 	"Manager.resumeOf":   {2, "a state read (a retired machine reads Stopped), then after admit; admit and claimLocked refuse a retired machine"},
 	"Manager.rebuildOf":  {2, "a state read (a retired machine reads Stopped), then after admit; admit and claimLocked refuse a retired machine"},
-	"Manager.Fork":       {2, "a read of src.Last (takeOf then refuses a retired src), and each reserved fork's claim: claimLocked refuses it and the cleanup skips it (!mc.gone)"},
+	"Manager.ForkHeld":   {2, "a read of src.Last (takeOf then refuses a retired src), and each reserved fork's claim: claimLocked refuses it and the cleanup skips it (!mc.gone)"},
 
 	// admit only reads the request; it checks gone under admitMu.
 	"Manager.admit": {1, "reads the request; refuses a retired machine under admitMu before admission"},

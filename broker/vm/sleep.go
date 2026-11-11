@@ -143,7 +143,7 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 		h(id)
 	}
 	if cold == "" {
-		if err := m.rollbackTo(ctx, mc, s); err == nil {
+		if err := m.rollbackTo(ctx, mc, s, nil); err == nil {
 			return Wake{Restored: true}, nil
 		}
 		// The restore failed: whatever it left, the machine starts cold.

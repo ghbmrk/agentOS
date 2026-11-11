@@ -1587,6 +1587,14 @@ func ownSnap(mc *machine, s Snapshot) bool {
 // file system. The machine's label does not fall (REV-5). A preempted or
 // stopped machine is re-admitted first.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
+	return m.RollbackHeld(ctx, id, snapID, nil)
+}
+
+// RollbackHeld is Rollback that asks hold, when set, under the machine's
+// lock just before the restore, after any wait for that lock: true refuses
+// with ErrHeld, restoring nothing, as Command.Hold does for a command
+// (STOP-queued-start).
+func (m *Manager) RollbackHeld(ctx context.Context, id, snapID string, hold func() bool) error {
 	if err := refuseProvider(id); err != nil {
 		return err
 	}
@@ -1601,12 +1609,12 @@ func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	return m.rollbackTo(ctx, mc, s)
+	return m.rollbackTo(ctx, mc, s, hold)
 }
 
-// rollbackTo is Rollback for a handle the caller holds: a handle Destroy
-// retired is refused, never resolved again by its ID.
-func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot) error {
+// rollbackTo is RollbackHeld for a handle the caller holds: a handle
+// Destroy retired is refused, never resolved again by its ID.
+func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot, hold func() bool) error {
 	if err := mc.lockEndingExecLive(); err != nil {
 		return err
 	}
@@ -1623,6 +1631,9 @@ func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot) error
 	}
 	mc.mu.Lock()
 	err := claimLocked(mc)
+	if err == nil && hold != nil && hold() {
+		err = ErrHeld
+	}
 	if err == nil && s.Label > mc.Label {
 		// Saved before the snapshot's content reaches the layer (LABEL-durable).
 		err = m.raiseLocked(mc, s.Label)
@@ -1746,6 +1757,13 @@ func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
 // admitted on its own budget, because forks share no memory (S3). Either all
 // forks start or none do.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
+	return m.ForkHeld(ctx, id, ids, nil)
+}
+
+// ForkHeld is Fork that asks hold, when set, under each fork's lock just
+// before it starts, after every wait on the source: true refuses with
+// ErrHeld and undoes the forks as any failed start does (STOP-queued-start).
+func (m *Manager) ForkHeld(ctx context.Context, id string, ids []string, hold func() bool) (Snapshot, error) {
 	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
 		return Snapshot{}, err
 	}
@@ -1856,6 +1874,9 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
+		if err == nil && hold != nil && hold() {
+			err = ErrHeld
+		}
 		tried := err == nil
 		if tried {
 			err = m.startFrom(ctx, mc, &s)

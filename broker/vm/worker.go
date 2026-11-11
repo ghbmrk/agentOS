@@ -79,7 +79,8 @@ type Command struct {
 	Hold func() bool
 }
 
-// ErrHeld refuses a command while its Hold says so.
+// ErrHeld refuses a command while its Hold says so, and a start or restore
+// while the hold passed to ForkHeld or RollbackHeld does.
 var ErrHeld = errors.New("vm: commands are held")
 
 // WorkerFull refuses a command or snapshot of a worker whose files are

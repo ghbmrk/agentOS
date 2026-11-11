@@ -65,7 +65,7 @@ func (c canaryMachines) Exec(_ context.Context, id string, _ vm.Command, _ time.
 func (c canaryMachines) Checkpoint(_ context.Context, id string) (vm.Snapshot, error) {
 	return vm.Snapshot{}, c.err("checkpoint", id)
 }
-func (c canaryMachines) Fork(_ context.Context, id string, _ []string) (vm.Snapshot, error) {
+func (c canaryMachines) ForkHeld(_ context.Context, id string, _ []string, _ func() bool) (vm.Snapshot, error) {
 	return vm.Snapshot{}, c.err("fork", id)
 }
 func (c canaryMachines) Snapshot(id string) (vm.Snapshot, error) {
@@ -74,9 +74,11 @@ func (c canaryMachines) Snapshot(id string) (vm.Snapshot, error) {
 func (c canaryMachines) Diff(_, a, _ string) ([]overlay.Change, error) {
 	return nil, c.err("diff", a)
 }
-func (c canaryMachines) Rollback(_ context.Context, id, _ string) error { return c.err("rollback", id) }
-func (c canaryMachines) Destroy(_ context.Context, id string) error     { return c.err("destroy", id) }
-func (c canaryMachines) RaiseLabel(id string, _ vm.Label) error         { return c.err("label", id) }
+func (c canaryMachines) RollbackHeld(_ context.Context, id, _ string, _ func() bool) error {
+	return c.err("rollback", id)
+}
+func (c canaryMachines) Destroy(_ context.Context, id string) error { return c.err("destroy", id) }
+func (c canaryMachines) RaiseLabel(id string, _ vm.Label) error     { return c.err("label", id) }
 func (c canaryMachines) Park(_ context.Context, id string) (vm.Snapshot, error) {
 	return vm.Snapshot{}, c.err("park", id)
 }
