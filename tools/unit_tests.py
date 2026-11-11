@@ -41,6 +41,7 @@ import multiprocessing
 import multiprocessing.connection
 import os
 import pathlib
+import mmap
 import re
 import select
 import signal
@@ -84,8 +85,10 @@ ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # starts holds strace's stream (#5413). Only a test that opens that stream by its /proc name
 # reaches it, and a cut it fakes so gains only a rerun: both audits read the cut attempt's trace.
 # strace's trace goes to its stdin, the pipe's write end (TRACE_TO), and the module gets
-# /dev/null there instead, so no module holds the pipe; only /proc/<strace>/fd reaches it, and a
-# pipe takes only more lines, never fewer.
+# /dev/null there instead, so no module holds the pipe. Only an open of strace's own descriptor
+# (/proc/<strace>/fd, by any path) reaches it, and bytes written there could cut strace's next line
+# so that no audit reads it; but strace logs that open whole, showing the pipe it reached, before
+# the module holds it, so a trace that shows the pipe (OWN_PIPE) fails its module (#5413).
 JOIN = ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh"]
 TRACE_TO = "/proc/self/fd/0"
 LONG_POLE = 1.25
@@ -240,6 +243,7 @@ STRACE_FAULT = re.compile(r"(?m)^strace: .*(?:Input/output error|PTRACE_)")
 # counts, as do an unexpected success and the run's failure summary.
 TEST_FAILED = re.compile(r"(?m)(?:FAIL|ERROR)$|unexpected success|^(?:FAIL|ERROR): |^FAILED \(")
 RERAN = "the module reruns whole into a fresh trace"
+OWN_PIPE = "pipe:[{}]"  # -y's name for the trace pipe, by its inode, in a trace that opened it
 # A module strace faults on runs once more, whole, into a fresh trace. Two, so at most one attempt
 # is cut and kept (CUT): a cut trace ends mid-line, so a second one could not follow it whole.
 STRACE_ATTEMPTS = 2
@@ -258,13 +262,15 @@ def _copy(r, out, done):
 
 
 def attempt(cmd, trace, root=ROOT):
-    """(rc, output, strace's own stderr) of one traced run, started in its own session; its trace
-    (from TRACE_TO) is copied into the file trace, an fd. When strace ends, whatever is left of
+    """(rc, output, strace's own stderr, the trace pipe's name if the trace shows the module opened
+    it, else None) of one traced run, started in its own session; its trace (from TRACE_TO) is
+    copied into the file trace, an fd. When strace ends, whatever is left of
     that session's process group is killed before this returns, so nothing of the run goes on
     into the next one (#5364). strace's pid, and so the group id, stays held until the group is
     killed: it is reaped only after. Output goes to files, not pipes, so a process that keeps a
     copy of one cannot hold the run open."""
     r, w = os.pipe()
+    own = OWN_PIPE.format(os.fstat(w).st_ino)
     done = threading.Event()
     copier = threading.Thread(target=_copy, args=(r, trace, done))
     with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as err:
@@ -289,7 +295,16 @@ def attempt(cmd, trace, root=ROOT):
             os.close(r)
         log.seek(0)
         err.seek(0)
-        return p.returncode, log.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace")
+        return (p.returncode, log.read().decode("utf-8", "replace"), err.read().decode("utf-8", "replace"),
+                own if _shows(trace, own.encode()) else None)
+
+
+def _shows(fd, text):
+    """Whether the file fd holds text."""
+    if not os.fstat(fd).st_size:
+        return False
+    with mmap.mmap(fd, 0, prot=mmap.PROT_READ) as m:
+        return m.find(text) >= 0
 
 
 def run_one(module, trace_dir, root=ROOT, store=None):
@@ -305,10 +320,15 @@ def run_one(module, trace_dir, root=ROOT, store=None):
     for n in range(1, STRACE_ATTEMPTS + 1):
         trace = os.open(near, os.O_RDWR | os.O_TMPFILE, 0o600)
         files[module + ".trace"] = trace
-        rc, out, err = attempt(command(module), trace, root)
+        rc, out, err, opened = attempt(command(module), trace, root)
         failed = TEST_FAILED.search(out)
         if err:  # strace's own lines, after the module's, on a line of their own
             out += ("\n" if out and not out.endswith("\n") else "") + err
+        if opened:  # whatever strace's stderr says: the trace may hide lines, so no rerun
+            outs.append(f"{out}\nunit_tests: the module opened its own trace's pipe ({opened}), so its trace "
+                        f"may hide lines; the module fails\n")
+            rc = rc or 1
+            break
         if not STRACE_FAULT.search(err):
             outs.append(out)
             break

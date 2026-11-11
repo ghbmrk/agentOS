@@ -18,7 +18,8 @@ writing, unlinked, renamed or truncated a path in the trace directory fails too:
 may not write them, its own or another module's (#5407; the write as tests/clash_audit.py reads it).
 tools/unit_tests.py names no trace until every module has ended (#5413), so a module cannot
 plant, link, move or rewrite one by name; one that reaches strace's own descriptors through
-/proc/<strace>/fd can add lines to its trace's pipe, never take any away.
+/proc/<strace>/fd to write into its trace fails there (unit_tests.OWN_PIPE): the open shows
+the pipe it reached (an io_uring open, or pidfd_getfd where ptrace allows it, shows none).
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """
