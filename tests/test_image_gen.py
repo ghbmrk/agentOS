@@ -533,7 +533,8 @@ class InitrdTest(unittest.TestCase):
             with self.subTest(target):
                 got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
                     (wants, self.D, b""), (wants + "/a", self.L, target)])))
-                self.assertEqual(got, [] if ok else [wants + "/a: a unit or drop-in outside /usr/lib"])
+                self.assertEqual(got, [] if ok else [wants + "/a: links to a directory, not a unit file, under "
+                                                     "/usr/lib/systemd/system"])
 
     def test_initrd_image_dirs_are_these_nine(self):
         # Lens R2: each entry is pinned by name, so dropping one fails here and the loop below cannot pass without it.

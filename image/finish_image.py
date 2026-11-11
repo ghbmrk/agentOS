@@ -664,6 +664,8 @@ INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", "
 INITRD_UNIT_TYPES = ("service", "socket", "target", "device", "mount", "automount", "swap", "timer", "path", "slice", "scope")
 INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/(?!systemd-(sysext|confext)[.@])[^/]+\.(%s)|/dev/null"
                               % "|".join(INITRD_UNIT_TYPES))
+# A link to a name there that is no unit file: the refusal says so (UX 6807986061).
+INITRD_DIR_LINK = re.compile(r"/usr/lib/systemd/system/(?![^/]*\.(%s)$)[^/]+" % "|".join(INITRD_UNIT_TYPES))
 # But the two links Debian's systemd enables in the stock initrd (image build (a) at e1a85d2): both merges
 # run there, and find nothing to merge, since every initrd search path for an image is refused above and
 # the image has no systemd-stub to fill .extra (UnifiedKernelImages=no).
@@ -742,7 +744,9 @@ def initrd_violations(members):
         elif at(unit_dirs) and kind != stat.S_IFDIR and not (
                 kind == stat.S_IFLNK and (INITRD_UNIT_LINK.fullmatch(body.decode("utf-8", "replace"))
                                           or INITRD_MERGE_LINKS.get(path) == body)):
-            out.append("%s: a unit or drop-in outside /usr/lib" % path)
+            out.append("%s: %s" % (path, "links to a directory, not a unit file, under /usr/lib/systemd/system"
+                                   if kind == stat.S_IFLNK and INITRD_DIR_LINK.fullmatch(body.decode("utf-8", "replace"))
+                                   else "a unit or drop-in outside /usr/lib"))
         elif at(INITRD_GENERATOR_DIRS) and kind != stat.S_IFDIR:
             out.append("%s: a generator outside /usr/lib" % path)
         elif at(INITRD_IMAGE_DIRS) and kind != stat.S_IFDIR:
