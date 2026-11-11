@@ -288,3 +288,18 @@ func TestUnicodeDigitResumeCodeIsQuarantined(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CH-11
+// TestFoldedCodeWordWithoutNumberStaysChat: a full-width RESUME or NO
+// with no number holds no code, so it is not quarantined: unlocked, the
+// agent gets it as chat (CTL-unicode-code, #5454).
+func TestFoldedCodeWordWithoutNumberStaysChat(t *testing.T) {
+	for _, text := range []string{fullWidth("RESUME"), fullWidth("no")} {
+		r := newRig(t, nil)
+		r.unlock()
+		sent := len(r.agent.got())
+		if got := r.say(text); got == control.UnclearReply || len(r.agent.got()) != sent+1 {
+			t.Fatalf("%q: %q, agent %v; want it passed on as chat", text, got, r.agent.got())
+		}
+	}
+}
