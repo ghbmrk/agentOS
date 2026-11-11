@@ -29,7 +29,7 @@
 <div class="pending warn">
 {{if and .CapsUnread .Caps}}<p>The enforcer could not read the firewall's count of today's bytes, nor its own record of them, so agentOS and the edge are blocked from every service with a byte cap. It tries again for the firewall's count every 10 seconds and that part goes away by itself; the record needs the step below. If the count stays unread, the enforcer's log has the detail.</p>
 {{else if .CapsUnread}}<p>The enforcer could not read the firewall's count of today's bytes, so agentOS and the edge are blocked from every service with a byte cap until it can. It tries again every 10 seconds and this goes away by itself. If it stays, the enforcer's log has the detail.</p>
-{{end}}{{with .Caps}}{{if not $.CapsUnread}}<p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. {{end}}Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
+{{end}}{{with .Caps}}<p>{{if not $.CapsUnread}}The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. {{end}}Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
 {{if .Retrying}}<p>The wait is over, but the fresh day could not be saved. The enforcer tries again every second, and every cap stays spent until it is saved.</p>
 {{else if .Starting}}<p>The wait is over and the fresh day is saved. The enforcer restarts to take it up.</p>
 {{else if not .DueMS}}<button class="act" data-action="fresh-day" data-target="" data-rp="{{$.Name}}">Start the day afresh with your passkey</button>{{end}}

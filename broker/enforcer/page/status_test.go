@@ -310,6 +310,8 @@ func TestFreshDayPage(t *testing.T) {
 	if h := g.homeHTML(); strings.Count(h, "<h2>Byte caps</h2>") != 1 || strings.Count(h, `class="pending warn"`) != 1 ||
 		!strings.Contains(h, "nor its own record of them") || !strings.Contains(h, `data-action="fresh-day"`) {
 		t.Errorf("home does not show one card for the day and the table both unread:\n%s", h)
+	} else if strings.Count(h, "<p>")+strings.Count(h, "<p ") != strings.Count(h, "</p>") {
+		t.Errorf("home's paragraphs do not balance with the day and the table both unread (%d open, %d close):\n%s", strings.Count(h, "<p>")+strings.Count(h, "<p "), strings.Count(h, "</p>"), h)
 	}
 	ca.day.Unread = false
 	h := g.homeHTML()

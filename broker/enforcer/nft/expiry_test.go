@@ -392,6 +392,7 @@ func TestListTellsAbsentFromUnread(t *testing.T) {
 		{"enoent-after-context", "printf 'Error: No such file or directory\\nlist table inet enforcer\\n' >&2; exit 1", true},
 		{"eperm", "echo 'Error: Operation not permitted' >&2; exit 1", false},
 		{"enoent-other-exit", "echo 'Error: No such file or directory' >&2; exit 2", false},
+		{"enoent-other-message", "echo 'Error: Could not process rule: No such file or directory' >&2; exit 1", false},
 		{"enoent-first-word", "echo 'No such file or directory: busy' >&2; exit 1", false},
 		{"silent", "exit 1", false},
 		{"killed", "echo 'Error: No such file or directory' >&2; kill -9 $$", false},

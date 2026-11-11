@@ -182,7 +182,7 @@ func (l Loader) List(ctx context.Context, table string) ([]byte, error) {
 	if err := cmd.Run(); err != nil {
 		line := firstLine(stderr.String())
 		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 && strings.HasSuffix(line, "No such file or directory") {
+		if errors.As(err, &ee) && ee.ExitCode() == 1 && line == "Error: No such file or directory" {
 			return nil, fmt.Errorf("load: listing %s: %w: %s", table, ErrNoTable, line)
 		}
 		return nil, fmt.Errorf("load: listing %s: %v: %s", table, err, line)
