@@ -80,6 +80,7 @@ type Caps interface {
 // CapsDay is the byte caps' day as the page shows it.
 type CapsDay struct {
 	Spent    bool  // the saved day did not read back: every cap counts as spent
+	Unread   bool  // the firewall's table did not read at the last load: every cap is held spent until it does (#5445)
 	DueMS    int64 // a fresh day waits until then; 0: none waits
 	Starting bool  // the wait is over: the fresh day is being saved and taken up
 	Retrying bool  // the start's save failed and is tried again every second
@@ -377,7 +378,9 @@ func (s *Server) status() map[string]any {
 		}
 	}
 	if s.cfg.Caps != nil {
-		if day := s.cfg.Caps.Day(); day.Spent {
+		day := s.cfg.Caps.Day()
+		out["CapsUnread"] = day.Unread
+		if day.Spent {
 			out["Caps"] = day
 			if day.DueMS != 0 {
 				out["FreshDue"] = s.when(day.DueMS)

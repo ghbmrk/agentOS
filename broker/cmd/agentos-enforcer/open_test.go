@@ -516,6 +516,10 @@ func TestUnreadTableHeldSpent(t *testing.T) {
 	if err != nil || loads() != n+1 || x.fire.last() == before {
 		t.Fatalf("a tightening with the table unreadable: %v, %d loads", err, loads()-n)
 	}
+	// Home says so (#5445 item 4): the caps are held while the table is unread.
+	if !(pageCaps{x.d}).Day().Unread {
+		t.Fatal("home does not show the caps held while the table is unread")
+	}
 	if c, e := spentIn(t, x); !c || !e || !unread || strings.Contains(x.fire.last(), edgeTripRule) {
 		t.Fatalf("the load over an unread table: core spent %v, edge spent %v, held %v, kernel cut %v", c, e, unread, strings.Contains(x.fire.last(), edgeTripRule))
 	}
@@ -540,6 +544,9 @@ func TestUnreadTableHeldSpent(t *testing.T) {
 	x.d.fwMu.Lock()
 	unread = x.d.net.unread
 	x.d.fwMu.Unlock()
+	if (pageCaps{x.d}).Day().Unread {
+		t.Fatal("home still shows the caps held once a load read its table")
+	}
 	if unread || loads() < n+3 {
 		t.Fatalf("the table reads again: still held %v, %d loads", unread, loads()-n)
 	}

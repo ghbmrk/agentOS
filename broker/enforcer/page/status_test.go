@@ -294,6 +294,16 @@ func TestFreshDayPage(t *testing.T) {
 	if code, _ := g.tapState(g.a, ActFreshDay, ""); code != http.StatusConflict || ca.fresh != 0 {
 		t.Errorf("a fresh day for a day that reads back: %d", code)
 	}
+	// #5445 item 4: a table the last load could not read holds every cap
+	// spent, with a line of its own and no button: it clears by itself.
+	ca.day.Unread = true
+	if h := g.homeHTML(); !strings.Contains(h, "could not read the firewall's count of today's bytes") || strings.Contains(h, `data-action="fresh-day"`) {
+		t.Errorf("home does not say the caps are held while the table is unread:\n%s", h)
+	}
+	ca.day.Unread = false
+	if h := g.homeHTML(); strings.Contains(h, "could not read the firewall's count") {
+		t.Error("home still says the table is unread")
+	}
 	ca.day.Spent = true
 	h := g.homeHTML()
 	if !strings.Contains(h, "could not read its record of today's bytes") || !strings.Contains(h, "it waits 10 minutes") ||
