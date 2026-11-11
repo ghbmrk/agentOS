@@ -25,18 +25,29 @@ slowest test, not the module, sets the step's floor (CI-par-3). Its last line na
 part and its time, for the long-pole check. The trace is still one tree whose
 first process exits after every worker, as tests/records_audit.py requires.
 
-    python3 tools/unit_tests.py TRACE_DIR [--jobs N]
+Each module runs as a user of its own, under strace run as root, and its trace goes to TRACE_DIR,
+which must not exist yet and is made mode 0700 for whoever ran sudo (#5413: JOIN, private()). So
+no process a module controls can open, signal or trace strace, the runner, another module or a
+trace, and the kernel, not a check of the trace, is what refuses it. The runner so runs as root,
+locally too, and each module's user needs search permission on every directory above the repository:
+
+    sudo -E env "PATH=$PATH" python3 tools/unit_tests.py TRACE_DIR [--jobs N]
     python3 tools/unit_tests.py --split MODULE [--workers N]   (run from the repository root)
 """
 import argparse
 import concurrent.futures
+import grp
+import hashlib
 import io
 import multiprocessing
 import multiprocessing.connection
 import os
 import pathlib
+import pwd
 import re
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -71,12 +82,18 @@ SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice"
 # modules doing so at once in the shared worktree is a clash (tests/clash_audit.py). Without the
 # optional lock, any write left there is a git command that changes the index: a real clash.
 ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
-# The module's first step, under strace: its stderr joins its stdout, so strace keeps its own
-# stderr, on which alone a fault is read; nothing a test prints can fake one (#5407). sh joins
-# them before Python starts, so no site hook (.pth, sitecustomize, usercustomize) or child it
-# starts holds strace's stream (#5413). Only a test that opens that stream by its /proc name
-# reaches it, and a cut it fakes so gains only a rerun: both audits read the cut attempt's trace.
-JOIN = ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh"]
+# The OS boundary between a module and every trace stream (#5413). The runner and strace run as
+# root; each module runs as a user of its own (user()), so the kernel refuses it every route to a
+# stream: strace's and the runner's /proc entries, ptrace and signals (root's processes), another
+# module's (another user's), and the trace directory (private(): only its owner enters it). The
+# module's first step, under strace, is JOIN, a root sh that joins the module's stderr to its
+# stdout and gives it /dev/null for stdin, then drop()'s setpriv, which takes the module's user
+# with no new privileges (no setuid or file-capability program raises it again) before the module
+# starts. So no process of the module ever holds strace's stderr, on which alone a fault is read
+# (#5407), or its trace, and no site hook (.pth, sitecustomize, usercustomize) runs before the
+# join. When an attempt ends, every process of the module's user is killed (sweep()).
+JOIN = ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh"]
+GROUP = "agentos-tests"  # every module's user is in it, for the Go caches the modules share (go_dir())
 LONG_POLE = 1.25
 FLOOR = 60  # seconds: a module shorter than this never fails the long-pole check
 
@@ -87,12 +104,121 @@ def modules(root=ROOT):
 
 def command(module, trace_dir, workers=None):
     if module in SPLIT:
-        run = [*JOIN, sys.executable, "-c", "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
+        run = [sys.executable, "-c", "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                str(pathlib.Path(__file__).resolve()), "--split", module, "--workers", str(workers or os.cpu_count() or 1)]
     else:  # as `python -m unittest discover ...`
-        run = [*JOIN, sys.executable, "-c", "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
+        run = [sys.executable, "-c", "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
                "unittest", "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
-    return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *run]
+    return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *JOIN, *drop(module), *run]
+
+
+def user(module):
+    """The name of the module's own user: ut-<module without test_>, or a hash where that is not a
+    valid user name."""
+    name = "ut-" + module.removeprefix("test_")
+    if len(name) > 32 or not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+        name = "ut-" + hashlib.sha256(module.encode()).hexdigest()[:20]
+    return name
+
+
+def drop(module):
+    """setpriv's arguments that run the rest as the module's user and its groups, with no new
+    privileges."""
+    return ["setpriv", f"--reuid={user(module)}", f"--regid={user(module)}", "--init-groups", "--no-new-privs", "--"]
+
+
+def sweep(module):
+    """Kill every process of the module's user: kill(-1) as that user reaches its own processes only.
+    Fails (CalledProcessError) if it cannot run as that user."""
+    subprocess.run([*drop(module), sys.executable, "-I", "-c",
+                    "import os\ntry: os.kill(-1, 9)\nexcept ProcessLookupError: pass"], check=True)
+
+
+def scratch(trace_dir):
+    """The run's other directory, next to the trace directory: each module's home, and the Go
+    caches the modules share."""
+    return pathlib.Path(str(pathlib.Path(trace_dir)) + ".run")
+
+
+def go_dir(trace_dir):
+    """GOCACHE and GOMODCACHE for every module: GROUP's, by a default ACL, so a file one module's
+    go made the next one's go may use and replace (tests/clash_audit.py's shared())."""
+    return scratch(trace_dir) / "go"
+
+
+def env(module, trace_dir):
+    home = scratch(trace_dir) / "home" / module
+    return {**ENV, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
+            "GOCACHE": str(go_dir(trace_dir) / "build"), "GOMODCACHE": str(go_dir(trace_dir) / "mod")}
+
+
+def _owner():
+    """(uid, gid) of whoever ran the runner: sudo's caller, else root."""
+    return int(os.environ.get("SUDO_UID", 0)), int(os.environ.get("SUDO_GID", 0))
+
+
+def private(trace_dir, owner=None, others=None):
+    """Make trace_dir, which must not exist, mode 0700 and owned by owner, and fail (OSError naming
+    the directory) unless every directory above it is owned by root or owner and writable by no
+    other user: a module may then neither enter it nor move it or any directory above it. others:
+    the gids of the modules' groups."""
+    uid, gid = owner or _owner()
+    d = pathlib.Path(os.path.abspath(trace_dir))
+    try:
+        os.mkdir(d, 0o700)
+    except FileExistsError:
+        raise OSError(f"{d} exists: the trace directory must be new, so nothing in it predates the run") from None
+    os.chown(d, uid, gid)
+    os.chmod(d, 0o700)
+    others = set(others or ())
+    for a in d.parents:
+        st = os.lstat(a)
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(f"{a} is not a directory: a link above the trace directory may be swapped")
+        if st.st_uid not in (0, uid):
+            raise OSError(f"{a} is owned by uid {st.st_uid}: only root or uid {uid} may own a directory above "
+                          f"the trace directory")
+        sticky = st.st_mode & stat.S_ISVTX
+        if not sticky and (st.st_mode & stat.S_IWOTH or st.st_mode & stat.S_IWGRP and st.st_gid in others):
+            raise OSError(f"{a} is writable by other users: a module could move the trace directory")
+    return d
+
+
+def prepare(names, trace_dir):
+    """As root: make GROUP and each module's user (a system user, its own group, no login or home
+    in /etc/passwd), the trace directory (private()), and the scratch directory: a home per module
+    that only its user enters, and the shared Go directory. Fails, naming the cause, unless each
+    user can read the repository."""
+    if os.geteuid() != 0:
+        raise OSError("run as root (sudo -E env PATH=\"$PATH\" python3 tools/unit_tests.py DIR): each module runs "
+                      "as a user of its own, and strace as root, so no module can reach a trace (#5413)")
+    if subprocess.run(["getent", "group", GROUP], stdout=subprocess.DEVNULL).returncode:
+        subprocess.run(["groupadd", "--system", GROUP], check=True)
+    for m in names:
+        if subprocess.run(["getent", "passwd", user(m)], stdout=subprocess.DEVNULL).returncode:
+            subprocess.run(["useradd", "--system", "--user-group", "--groups", GROUP, "--no-create-home",
+                            "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", user(m)], check=True)
+    gids = {grp.getgrnam(GROUP).gr_gid} | {pwd.getpwnam(user(m)).pw_gid for m in names}
+    private(trace_dir, others=gids)
+    run = scratch(trace_dir)
+    shutil.rmtree(run, ignore_errors=True)
+    os.mkdir(run, 0o711)
+    os.mkdir(run / "home", 0o711)
+    for m in names:
+        sweep(m)  # nothing of an earlier run of this user goes on into this one
+        home = run / "home" / m
+        os.mkdir(home, 0o700)
+        os.chown(home, pwd.getpwnam(user(m)).pw_uid, pwd.getpwnam(user(m)).pw_gid)
+    go = go_dir(trace_dir)
+    os.mkdir(go, 0o2770)
+    os.chown(go, 0, grp.getgrnam(GROUP).gr_gid)
+    os.chmod(go, 0o2770)
+    subprocess.run(["setfacl", "-m", f"g:{GROUP}:rwx,d:g:{GROUP}:rwx,d:m::rwx", str(go)], check=True)
+    for m in names[:1]:
+        probe = subprocess.run([*drop(m), "test", "-r", str(ROOT / "tools" / "unit_tests.py")], env=env(m, trace_dir))
+        if probe.returncode:
+            raise OSError(f"{user(m)} cannot read {ROOT}: give each directory above it search permission for "
+                          f"other users (chmod o+x; ci.yml does so for $HOME)")
 
 
 class _Claimed(unittest.TestSuite):
@@ -235,14 +361,14 @@ STRACE_ATTEMPTS = 2
 CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, the one finished trace per module
 
 
-def attempt(cmd, root=ROOT):
+def attempt(cmd, root=ROOT, environ=None):
     """(rc, output, strace's own stderr) of one traced run, started in its own session. When strace
     ends, whatever is left of that session's process group is killed before this returns, so
     nothing of the run goes on into the next one (#5364). strace's pid, and so the group id, stays held until the
     group is killed: it is reaped only after. Output goes to files, not pipes, so a process that
     keeps a copy of one cannot hold the run open."""
     with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as err:
-        p = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, env=ENV, stdout=log,
+        p = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, env=ENV if environ is None else environ, stdout=log,
                              stderr=err, start_new_session=True)
         try:
             os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT)
@@ -269,7 +395,10 @@ def run_one(module, trace_dir, root=ROOT):
     cut = trace.with_name(module + CUT)
     cut.unlink(missing_ok=True)  # one left by an earlier run in this directory is not this run's
     for n in range(1, STRACE_ATTEMPTS + 1):
-        rc, out, err = attempt(command(module, trace_dir), root)
+        try:
+            rc, out, err = attempt(command(module, trace_dir), root, env(module, trace_dir))
+        finally:
+            sweep(module)  # nothing of this attempt goes on, in or out of its session
         failed = TEST_FAILED.search(out)
         if err:  # strace's own lines, after the module's, on a line of their own
             out += ("\n" if out and not out.endswith("\n") else "") + err
@@ -405,11 +534,18 @@ def main(argv=None):
         return split(args.split, args.workers)
     if not args.trace_dir:
         ap.error("TRACE_DIR is required")
-    os.makedirs(args.trace_dir, exist_ok=True)
     names = modules()
+    try:
+        prepare(names, args.trace_dir)
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"::error::{e}")
+        return 1
     lanes = []
     start = time.monotonic()
-    results = run(names, args.trace_dir, args.jobs, lanes=lanes)
+    try:
+        results = run(names, args.trace_dir, args.jobs, lanes=lanes)
+    finally:
+        shutil.rmtree(scratch(args.trace_dir), ignore_errors=True)
     return report(names, results, jobs=args.jobs, lanes=lanes, wall=time.monotonic() - start)
 
 

@@ -7,7 +7,10 @@ REQ: CI-PATHS
 import io
 import os
 import pathlib
+import pwd
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +28,19 @@ import clash_audit  # noqa: E402
 import records_audit  # noqa: E402
 
 
+def boundary_unready():
+    """Why the real uid boundary (#5413) cannot be run here, or None."""
+    if os.geteuid() != 0:
+        return "needs root, as tools/unit_tests.py does (ci.yml's own step for it runs as root)"
+    missing = [t for t in ("strace", "setpriv", "setfacl", "useradd") if not shutil.which(t)]
+    return f"missing {', '.join(missing)}" if missing else None
+
+
+def stat_of(path):
+    st = os.stat(path)
+    return stat.S_IMODE(st.st_mode), st.st_uid
+
+
 class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_x", "/r")
@@ -33,9 +49,13 @@ class CommandTest(unittest.TestCase):
                                                   "unlink,unlinkat,rename,renameat,renameat2,truncate",
                                                   "-e", "signal=none"])
         self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
-        # #5413: sh joins stderr to stdout before Python, and so any site hook, starts.
+        # #5413: a root sh gives the module /dev/null for stdin and joins its stderr to its stdout,
+        # then setpriv runs it as its own user, with no new privileges, before Python (and so any
+        # site hook) starts.
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh", sys.executable, "-c",
+                         ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh",
+                          "setpriv", "--reuid=ut-x", "--regid=ut-x", "--init-groups", "--no-new-privs", "--",
+                          sys.executable, "-c",
                           "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', "
                           "alter_sys=True)", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
@@ -48,6 +68,155 @@ class CommandTest(unittest.TestCase):
     def test_modules_run_without_gits_optional_index_lock(self):
         # git status/diff in the shared worktree would each write .git/index.lock (a clash).
         self.assertEqual(unit_tests.ENV["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_each_module_runs_as_a_user_of_its_own_with_its_own_home(self):
+        # #5413: one user per module, so no module's process can reach another's.
+        names = unit_tests.modules()
+        users = {unit_tests.user(m) for m in names}
+        self.assertEqual(len(users), len(names))
+        self.assertTrue(all(len(u) <= 32 and u.startswith("ut-") for u in users), users)
+        self.assertEqual(unit_tests.user("test_" + "x" * 40), unit_tests.user("test_" + "x" * 40))
+        self.assertNotEqual(unit_tests.user("test_" + "x" * 40), unit_tests.user("test_" + "x" * 41))
+        e = unit_tests.env("test_x", "/r/reads")
+        self.assertEqual((e["HOME"], e["USER"], e["LOGNAME"]), ("/r/reads.run/home/test_x", "ut-x", "ut-x"))
+        self.assertEqual((e["GOCACHE"], e["GOMODCACHE"]), ("/r/reads.run/go/build", "/r/reads.run/go/mod"))
+        self.assertEqual(e["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_the_runner_refuses_to_run_as_a_user(self):
+        # #5413: only root can run strace over another user and make the modules' users.
+        with mock.patch("os.geteuid", return_value=1000), self.assertRaisesRegex(OSError, "run as root"):
+            unit_tests.prepare(["test_x"], "/nonexistent/reads")
+        out = io.StringIO()
+        with mock.patch("os.geteuid", return_value=1000), mock.patch("sys.stdout", out):
+            self.assertEqual(unit_tests.main(["/nonexistent/reads"]), 1)
+        self.assertIn("::error::run as root (sudo", out.getvalue())
+
+    def test_the_trace_directory_must_be_new(self):
+        # #5413 (Lens R1): nothing in it may predate the run, made by whoever.
+        with tempfile.TemporaryDirectory() as d:
+            me = (os.getuid(), os.getgid())
+            reads = unit_tests.private(os.path.join(d, "reads"), owner=me)
+            self.assertEqual(stat_of(reads), (0o700, os.getuid()))
+            with self.assertRaisesRegex(OSError, "exists: the trace directory must be new"):
+                unit_tests.private(os.path.join(d, "reads"), owner=me)
+            os.mkdir(os.path.join(d, "made"), 0o700)  # empty, mode and owner right: still refused
+            with self.assertRaisesRegex(OSError, "exists"):
+                unit_tests.private(os.path.join(d, "made"), owner=me)
+
+    def test_a_directory_above_the_traces_another_user_may_change_is_refused(self):
+        # #5413 (Lens R1): a module may not move the trace directory or a directory above it. Each
+        # case is a fresh trace directory, so only the check on the directories above it refuses.
+        me = (os.getuid(), os.getgid())
+        with tempfile.TemporaryDirectory() as d:
+            up = os.path.join(d, "up")
+            os.mkdir(up)
+            for mode, others, refused in ((0o755, (), False), (0o777, (), True), (0o1777, (), False),
+                                          (0o775, (), False), (0o775, (os.getgid(),), True),
+                                          (0o1775, (os.getgid(),), False)):
+                os.chmod(up, mode)
+                reads = os.path.join(up, "reads")
+                if refused:
+                    with self.assertRaisesRegex(OSError, f"{up} is writable by other users", msg=oct(mode)):
+                        unit_tests.private(reads, owner=me, others=others)
+                else:
+                    unit_tests.private(reads, owner=me, others=others)
+                if os.path.exists(reads):
+                    os.rmdir(reads)
+            os.chmod(up, 0o755)
+            os.symlink(up, os.path.join(d, "link"))
+            with self.assertRaisesRegex(OSError, "link is not a directory"):
+                unit_tests.private(os.path.join(d, "link", "reads"), owner=me)
+            if os.geteuid() == 0:  # chown to another uid takes root
+                os.chown(up, 4242, 4242)
+                with self.assertRaisesRegex(OSError, "owned by uid 4242"):
+                    unit_tests.private(os.path.join(up, "reads2"), owner=me)
+
+    def test_a_module_reaches_no_trace_stream_and_no_other_module(self):
+        # #5413: the real boundary, end to end, as root (ci.yml's own step for it). Two modules run
+        # at once under real strace, each as its own user, and try every route to a trace stream
+        # rounds 1-4 of #5426 found: strace's and the runner's /proc fds, a signal to strace, the
+        # trace directory and a link into it, the other module's /proc fds, a privilege raise. Each
+        # is refused; each module holds /dev/null and its own output only; a process of its user
+        # left outside strace is killed by sweep().
+        # ci.yml's root step sets AGENTOS_REQUIRE_UID_BOUNDARY, so there it fails rather than skips.
+        if boundary_unready() and os.environ.get("AGENTOS_REQUIRE_UID_BOUNDARY") != "1":
+            self.skipTest(boundary_unready())
+        self.assertIsNone(boundary_unready())
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        os.chmod(root, 0o755)
+        (root / "tests").mkdir()
+        meet = root / "meet"
+        meet.mkdir()
+        os.chmod(meet, 0o1777)
+        trace_dir = root / "reads"
+        names = ["test_zz_boundary_a", "test_zz_boundary_b"]
+        for name in names:
+            (root / "tests" / f"{name}.py").write_text(textwrap.dedent(f"""\
+                import os, pathlib, subprocess, sys, time, unittest
+                MEET, TRACES = pathlib.Path({str(meet)!r}), {str(trace_dir)!r}
+                def ancestors():
+                    pid = os.getpid()
+                    while True:
+                        pid = int(pathlib.Path(f"/proc/{{pid}}/stat").read_text().rsplit(")", 1)[1].split()[1])
+                        if pid <= 1:
+                            return
+                        yield pid
+                class Boundary(unittest.TestCase):
+                    def test_boundary(self):
+                        self.assertNotEqual(os.getuid(), 0)
+                        self.assertEqual(os.readlink("/proc/self/fd/0"), "/dev/null")
+                        self.assertEqual(os.readlink("/proc/self/fd/1"), os.readlink("/proc/self/fd/2"))
+                        self.assertEqual(sorted(os.listdir("/proc/self/fd")), ["0", "1", "2", "3"])  # 3: listdir's own
+                        def meet(suffix):  # wait for the other module, so both run at once
+                            (MEET / ("{name}" + suffix)).write_text(str(os.getpid()))
+                            for _ in range(300):
+                                if len([p for p in MEET.iterdir() if p.name.endswith(suffix)]) == 2:
+                                    return
+                                time.sleep(0.1)
+                        meet(".up")
+                        peers = [int(p.read_text()) for p in MEET.iterdir() if p.name.endswith(".up") and p.name != "{name}.up"]
+                        self.assertEqual(len(peers), 1)
+                        for pid in [*ancestors(), *peers]:  # strace, the runner and above; the other module
+                            with self.subTest(pid=pid):
+                                for reach in (lambda: os.listdir(f"/proc/{{pid}}/fd"),
+                                              lambda: open(f"/proc/{{pid}}/fd/2", "a"),
+                                              lambda: open(f"/proc/{{pid}}/fd/1", "a"),
+                                              lambda: os.kill(pid, 0)):
+                                    self.assertRaises(PermissionError, reach)
+                        self.assertRaises(PermissionError, os.listdir, TRACES)
+                        self.assertRaises(PermissionError, open, TRACES + "/{name}.trace", "a")
+                        self.assertRaises(PermissionError, os.symlink, "/tmp/x", TRACES + "/test_q.trace")
+                        self.assertRaises(PermissionError, os.rename, TRACES, {str(root / "moved")!r})
+                        self.assertNotEqual(subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode, 0)
+                        raised = subprocess.run([{str(root / "suid-id")!r}, "-u"], capture_output=True, text=True)
+                        self.assertEqual(raised.stdout.strip(), str(os.getuid()))  # no new privileges: setuid root is ignored
+                        print("BOUNDARY HELD", os.getuid(), flush=True)
+                        meet(".done")  # the other module is still alive through all of the above
+                """))
+        shutil.copy("/usr/bin/id", root / "suid-id")
+        os.chmod(root / "suid-id", 0o4755)
+        unit_tests.prepare(names, trace_dir)
+        self.addCleanup(shutil.rmtree, unit_tests.scratch(trace_dir), True)
+        self.assertEqual(stat_of(trace_dir), (0o700, unit_tests._owner()[0]))
+        results = unit_tests.run(names, str(trace_dir), 2, runner=lambda m, d: unit_tests.run_one(m, d, root=root))
+        uids = set()
+        for name in names:
+            rc, _, out = results[name]
+            self.assertEqual(rc, 0, out)
+            held = re.findall(r"BOUNDARY HELD (\d+)", out)
+            self.assertEqual(len(held), 1, out)
+            uids.add(int(held[0]))
+            trace = (trace_dir / f"{name}.trace").read_text()
+            self.assertIn("EACCES", trace)  # strace saw the refused opens
+            self.assertTrue(records_audit.finished(trace), trace[-500:])
+        self.assertEqual(uids, {pwd.getpwnam(unit_tests.user(m)).pw_uid for m in names})
+        # sweep(): a process of the module's user that strace does not trace is killed.
+        stray = subprocess.Popen([*unit_tests.drop(names[0]), "sleep", "300"], start_new_session=True)
+        self.addCleanup(stray.kill)
+        time.sleep(0.2)
+        unit_tests.sweep(names[0])
+        self.assertEqual(stray.wait(timeout=10), -9)
 
 
 class RunTest(unittest.TestCase):
@@ -238,7 +407,8 @@ class SplitTest(unittest.TestCase):
     def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_image", "/r", workers=4)
         self.assertIn("test_image", unit_tests.SPLIT)
-        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", *unit_tests.JOIN, sys.executable, "-c",
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", *unit_tests.JOIN,
+                               *unit_tests.drop("test_image"), sys.executable, "-c",
                                "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                                str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
                                "--workers", "4"])
@@ -337,6 +507,14 @@ class StraceFaultTest(unittest.TestCase):
            "bare-fail-then-cut": ("test_a ... PASS\ncoverage: 100.0% of statements\nFAIL\ntest_b ... ", f"{CUT}\n", 1),
            # #5407: a test printing strace's text is the module's output, not strace's.
            "says-cut": (f"test_a ... {CUT}\n{CUT}\nok\n\nOK\n", "", 0)}
+
+    def setUp(self):
+        # These fake strace and run as whoever runs the tests: no module user to drop to or sweep
+        # (the real boundary: test_a_module_reaches_no_trace_stream_and_no_other_module).
+        for name, fake in (("drop", lambda module: []), ("sweep", lambda module: None)):
+            patcher = mock.patch.object(unit_tests, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def run_plan(self, *plan):
         """run_one under a fake strace that plays plan's steps in order, one per call, writing
@@ -485,9 +663,10 @@ class StraceFaultTest(unittest.TestCase):
         self.assertNotIn("strace failed itself", out)
 
     def test_a_cut_faked_through_straces_proc_fd_hides_no_write(self):
-        # #5413: a test can still reach strace's stderr by its /proc name and fake a cut on
-        # attempt 1 only. Its write then sits in the cut trace alone; clash_audit reads that as the
-        # module's, so the clash with another module still fails the step.
+        # #5413: were a cut faked on attempt 1 only (here through a fake strace's /proc entry, which
+        # the module's own user cannot open under the real one), its write sits in the cut trace
+        # alone; clash_audit reads that as the module's, so the clash with another module still
+        # fails the step.
         root = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
         (root / "tests").mkdir()
@@ -1029,6 +1208,16 @@ class ClashTest(unittest.TestCase):
         step = step[:step.index("\n      - ")]
         self.assertEqual(step.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                                                  '        run: python tests/clash_audit.py "$RUNNER_TEMP/reads"'])
+
+    def test_ci_runs_the_uid_boundary_test_as_root_where_it_cannot_skip(self):
+        # #5413: under tools/unit_tests.py the test runs as a module's user and skips; this step runs it.
+        ci = (unit_tests.ROOT / ".github/workflows/ci.yml").read_text()
+        step = ci[ci.index("python tests/clash_audit.py"):]
+        step = step[step.index("\n      - "):][1:]
+        step = step[:step.index("\n      - ")].splitlines()
+        self.assertEqual(step[1], "        if: steps.scope.outputs.records != 'true'")
+        self.assertEqual(step[-1], '        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest '
+                                   'tests.test_unit_tests -v')
 
 
 if __name__ == "__main__":
