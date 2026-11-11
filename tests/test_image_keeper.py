@@ -482,6 +482,31 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(check.gpt_auto_violations(self.root), [])
             self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
         self.assertEqual({str(r) for r in roots}, {str(self.root)})
+        # The build's directory: only *.conf files count (systemd-repart's own suffix), and a directory that cannot be
+        # listed is a refusal, not an empty set (Potency bc2e7257).
+        with tempfile.TemporaryDirectory() as d:
+            build = pathlib.Path(d) / "mkosi.repart"
+            build.mkdir()
+            (build / "10-esp.conf").write_text("[Partition]\nType=esp\n")
+            (build / "20-home.conf.bak").write_text("[Partition]\nType=home\n")
+            (build / "30-home.txt").write_text("[Partition]\nType=home\n")
+            with unittest.mock.patch.object(check, "repart_build", return_value=build):
+                self.assertEqual(check.gpt_auto_violations(self.root), [])
+                self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
+                (build / "20-home.conf").write_text("[Partition]\nType=home\n")
+                got = check.gpt_auto_violations(self.root)
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith("20-home.conf: Type=home: "), got)
+                real_listdir = os.listdir
+
+                def listdir(p="."):
+                    if str(p) == str(build):
+                        raise OSError(13, "Permission denied")
+                    return real_listdir(p)
+                with unittest.mock.patch.object(os, "listdir", listdir):
+                    got = check.gpt_auto_violations(self.root)
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith("mkosi.repart: could not be read (Permission denied)"), got)
         # systemd-repart also reads /run/repart.d, which the box mounts: a tree entry there is refused.
         remove = self.place({"run/repart.d/60-x.conf": "[Partition]\nType=home\n"})
         try:
