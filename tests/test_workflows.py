@@ -103,15 +103,21 @@ PREMERGE_LINES = [
     '  workflow_run:',
     '    workflows: [ci, assurance, vulncheck, word-budget, lane-gate, trusted-base, formal, keycheck, image, testkit-image, mutgate, infer-real, vision-real, enforcer-image, camnode-image, drone-sitl]',
     '    types: [completed]',
+    '  workflow_dispatch:',
+    '    inputs:',
+    '      pr:',
+    "        description: the PR to rerun the gate for (premerge's fork-pr job)",
+    '        required: true',
+    '        type: number',
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}',
+    '  group: premerge-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}',
     '  cancel-in-progress: false',
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0]",
+    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
@@ -140,11 +146,12 @@ PREMERGE_LINES = [
     '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        id: gate',
     '        env:',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
     '          REPO: ${{ github.repository }}',
     '          GH_TOKEN: ${{ github.token }}',
     '          STATUS_TOKEN: ${{ steps.app.outputs.token || github.token }}',
     '        run: |',
+    '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
@@ -216,10 +223,11 @@ PREMERGE_LINES = [
     '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        env:',
     '          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}',
-    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
     '          REPO: ${{ github.repository }}',
     '          HEAD_SHA: ${{ needs.premerge-gate.outputs.merge-head }}',
     '        run: |',
+    '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
     '          [ -n "$GH_TOKEN" ] || { echo "::warning::BOT_PR_TOKEN unset: arm #$PR_NUMBER by hand (OPERATING section 7)"; exit 0; }',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
     '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
@@ -252,6 +260,37 @@ PREMERGE_LINES = [
     '            echo "::warning::#$PR_NUMBER merge refused at $HEAD_SHA; the next run retries, or arm by hand"; exit 0',
     '          fi',
     '          echo "merged #$PR_NUMBER at $HEAD_SHA"',
+    '  fork-pr:',
+    '    name: fork-pr',
+    "    if: github.event_name == 'workflow_run' && !github.event.workflow_run.pull_requests[0] && startsWith(github.event.workflow_run.event, 'pull_request')",
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      pull-requests: read',
+    "      actions: write # dispatch premerge.yml on main for the run's PR, nothing else",
+    '    steps:',
+    "      - name: Rerun the gate for the run's one open PR into main",
+    '        shell: bash # -eo pipefail: a failed read must stop the step, never read as no PR',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}',
+    '          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}',
+    '          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}',
+    '        run: |',
+    '          [[ "$HEAD_OWNER" =~ ^[A-Za-z0-9-]+$ ]] && [ "$HEAD_REPO" != "${HEAD_REPO#"$HEAD_OWNER"/}" ] && [ -n "$HEAD_BRANCH" ] \\',
+    '            || { echo "::warning::the run names no head repository and branch; no gate rerun"; exit 0; }',
+    '          gh api -X GET "repos/$REPO/pulls" -f state=open -f base=main -f head="$HEAD_OWNER:$HEAD_BRANCH" -f per_page=100 \\',
+    '            > "$RUNNER_TEMP/prs.json"',
+    '          prs=$(jq -c --arg repo "$HEAD_REPO" --arg ref "$HEAD_BRANCH" \\',
+    '            \'[.[] | select(.head.repo.full_name == $repo and .head.ref == $ref and .base.ref == "main") | .number]\' "$RUNNER_TEMP/prs.json")',
+    '          if [ "$(jq length <<< "$prs")" != 1 ]; then',
+    '            echo "::warning::$HEAD_REPO:$HEAD_BRANCH has open PRs into main $prs, not one; no gate rerun"; exit 0',
+    '          fi',
+    '          pr=$(jq \'.[0]\' <<< "$prs")',
+    '          [[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]]',
+    '          gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null',
+    '          echo "reran the gate for #$pr"',
 ]
 
 
@@ -1396,6 +1435,16 @@ class WorkflowTest(unittest.TestCase):
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
+                     # PREMERGE-fork-rerun (#5383): the dispatched run joins the PR's group, reads only a number, and
+                     # only the job that dispatches holds `actions: write`, for runs that name no PR.
+                     ("|| inputs.pr || github.run_id }}", "|| github.run_id }}"),
+                     ("        type: number", "        type: string"),
+                     ("!github.event.workflow_run.pull_requests[0] && ", ""),
+                     ("startsWith(github.event.workflow_run.event, 'pull_request')", "true"),
+                     ("      actions: write # dispatch", "      contents: write\n      actions: write # dispatch"),
+                     (".head.ref == $ref and .base.ref == \"main\"", ".base.ref == \"main\""),
+                     ('!= 1 ]; then', '-lt 1 ]; then'),
+                     ('-f ref=main -f "inputs[pr]=$pr"', '-f ref="$HEAD_BRANCH" -f "inputs[pr]=$pr"'),
                      ("GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}", "GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}"),
                      ):
             with self.subTest(edit[0]):
@@ -1497,13 +1546,31 @@ def merge_script():
     return run_block(lines, lines.index("        run: |", lines.index("  merge:")) + 1)
 
 
+def fork_pr_script():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    run = lines.index("        run: |", lines.index("  fork-pr:"))
+    return step_argv(lines, run), run_block(lines, run + 1)
+
+
+# PREMERGE-fork-rerun (#5383): `gh` for the fork-pr job records each call's arguments one per line, answers the
+# open-PR list with $PRS and accepts the dispatch.
+STUB_FORK_GH = r"""#!/bin/sh
+{ printf '%s\n' "$@"; echo --; } >> "$STUBS/calls"
+case "$1 $2 $3" in
+  "api -X GET") [ "$FAIL_AT" = pulls ] && exit 1; printf '%s' "$PRS" ;;
+  "api -X POST") [ "$FAIL_AT" = dispatch ] && exit 1; : ;;
+  *) exit 2 ;;
+esac
+"""
+
+
 class PremergeRunTest(unittest.TestCase):
     SHA = "a" * 40
 
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 descriptions=None, trailer="41\n", calls=None):
+                 descriptions=None, trailer="41\n", calls=None, pr="7"):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1513,7 +1580,7 @@ class PremergeRunTest(unittest.TestCase):
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
-                   "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
+                   "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
                    "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
             # The runner's default `run` shell.
@@ -1539,6 +1606,83 @@ class PremergeRunTest(unittest.TestCase):
 
     def test_same_posts_success(self):
         self.assertEqual(self.run_gate("same"), (0, ["success"]))
+
+    def test_gate_reads_only_a_pr_number(self):
+        # PREMERGE-fork-rerun (#5383): a dispatch carries its PR as an input, so the number is checked before any read.
+        for pr in ("", "0", "07", "7a", "7 ", "-7", "12345678901"):
+            with self.subTest(pr=pr):
+                self.assertEqual(self.run_gate("same", pr=pr), (1, []))
+        self.assertEqual(self.run_gate("same", pr="1234567890"), (0, ["success"]))
+
+    def run_fork_pr(self, prs, owner="f", repo="f/r", branch="feat", fail_at=""):
+        """Run premerge.yml's fork-pr step; return its exit code, the GET's arguments and the dispatched PR, if any."""
+        real_jq = shutil.which("jq")
+        self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
+        argv, script = fork_pr_script()
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            (stubs / "gh").write_text(STUB_FORK_GH)
+            (stubs / "gh").chmod(0o755)
+            (stubs / "jq").symlink_to(real_jq)
+            (stubs / "run.sh").write_text(script)
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "RUNNER_TEMP": d, "GH_TOKEN": "synthetic", "REPO": "o/r",
+                   "HEAD_OWNER": owner, "HEAD_REPO": repo, "HEAD_BRANCH": branch, "PRS": json.dumps(prs), "FAIL_AT": fail_at}
+            proc = subprocess.run(argv + [str(stubs / "run.sh")], env=env, cwd=d, capture_output=True, text=True, timeout=30)
+            calls = (stubs / "calls").read_text().split("--\n")[:-1] if (stubs / "calls").exists() else []
+        calls = [c.splitlines() for c in calls]
+        get = [c for c in calls if c[:3] == ["api", "-X", "GET"]]
+        posts = [c for c in calls if c[:3] == ["api", "-X", "POST"]]
+        self.assertLessEqual(len(posts), 1)
+        for c in posts:
+            self.assertEqual(c[:6], ["api", "-X", "POST", "repos/o/r/actions/workflows/premerge.yml/dispatches", "-f", "ref=main"])
+        dispatched = [c[7].removeprefix("inputs[pr]=") for c in posts if c[6] == "-f" and c[7].startswith("inputs[pr]=")]
+        return proc.returncode, get, dispatched
+
+    @staticmethod
+    def pr_(number=12, repo="f/r", ref="feat", base="main"):
+        return {"number": number, "head": {"repo": {"full_name": repo}, "ref": ref}, "base": {"ref": base}}
+
+    def test_fork_pr_reruns_the_gate_for_its_one_open_pr(self):
+        # PREMERGE-fork-rerun (#5383): a fork PR's workflow_run names no PR, so the job finds the one open PR into
+        # main whose head is the run's owner:branch and dispatches this workflow on main for it.
+        code, get, dispatched = self.run_fork_pr([self.pr_()])
+        self.assertEqual((code, dispatched), (0, ["12"]))
+        self.assertEqual(get, [["api", "-X", "GET", "repos/o/r/pulls", "-f", "state=open", "-f", "base=main",
+                                "-f", "head=f:feat", "-f", "per_page=100"]])
+        # A branch name is one argument, never shell: the fork chooses it.
+        odd = 'x";$(touch p)`id`&#'
+        code, get, dispatched = self.run_fork_pr([self.pr_(ref=odd)], branch=odd)
+        self.assertEqual((code, dispatched), (0, ["12"]))
+        self.assertIn("head=f:" + odd, get[0])
+
+    def test_fork_pr_reruns_nothing_without_exactly_one_matching_pr(self):
+        # PREMERGE-fork-rerun (#5383): GitHub's head filter only narrows; the PR must name the run's repository and
+        # branch exactly and target main, and anything but one such PR dispatches nothing (the job stays green).
+        for prs in ([], [self.pr_(), self.pr_(13)], [self.pr_(repo="g/r")], [self.pr_(ref="feat2")], [self.pr_(ref="Feat")],
+                    [self.pr_(base="dev")]):
+            with self.subTest(prs=prs):
+                code, get, dispatched = self.run_fork_pr(prs)
+                self.assertEqual((code, len(get), dispatched), (0, 1, []))
+        # One match among others is still one.
+        self.assertEqual(self.run_fork_pr([self.pr_(repo="g/r", number=3), self.pr_(), self.pr_(base="dev", number=4)])[2], ["12"])
+
+    def test_fork_pr_reads_nothing_without_a_head(self):
+        # PREMERGE-fork-rerun (#5383): a deleted fork leaves no head repository; an owner that is not a login, or a
+        # repository outside that owner, is not read at all.
+        for kw in (dict(owner=""), dict(owner="f/g"), dict(owner="f:g"), dict(owner="f:g", repo="f:g/r"), dict(owner="", repo="/r"),
+                   dict(owner="f g", repo="f g/r"), dict(repo=""), dict(repo="g/r"),
+                   dict(repo="f"), dict(branch="")):
+            with self.subTest(**kw):
+                self.assertEqual(self.run_fork_pr([self.pr_()], **kw), (0, [], []))
+
+    def test_fork_pr_fails_on_a_failed_read_or_dispatch(self):
+        # PREMERGE-fork-rerun (#5383): a failed read must never read as no PR, a number that is not one is never
+        # dispatched, and a refused dispatch turns the job red.
+        self.assertEqual(self.run_fork_pr([self.pr_()], fail_at="pulls")[0::2], (1, []))
+        self.assertNotEqual(self.run_fork_pr([self.pr_()], fail_at="dispatch")[0], 0)
+        for number in ("12", "1 2", 0, -1, 1.5, None, [12]):
+            with self.subTest(number=number):
+                self.assertEqual(self.run_fork_pr([self.pr_(number=number)])[0::2], (1, []))
         self.assertEqual(self.run_gate("bot", ref="bot/trace"), (0, ["success"]))
 
     def test_error_after_head_known_posts_failure(self):
