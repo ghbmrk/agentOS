@@ -147,9 +147,13 @@ def go_dir(trace_dir):
 
 
 def env(module, trace_dir):
+    """The module's environment: ENV, its own home, the shared Go caches, and git told the worktree,
+    another user's, is safe to read (in command scope, which git takes for safe.directory)."""
     home = scratch(trace_dir) / "home" / module
+    n = int(ENV.get("GIT_CONFIG_COUNT", 0))
     return {**ENV, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
-            "GOCACHE": str(go_dir(trace_dir) / "build"), "GOMODCACHE": str(go_dir(trace_dir) / "mod")}
+            "GOCACHE": str(go_dir(trace_dir) / "build"), "GOMODCACHE": str(go_dir(trace_dir) / "mod"),
+            "GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": "safe.directory", f"GIT_CONFIG_VALUE_{n}": str(ROOT)}
 
 
 def _owner():

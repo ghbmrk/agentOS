@@ -81,6 +81,9 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((e["HOME"], e["USER"], e["LOGNAME"]), ("/r/reads.run/home/test_x", "ut-x", "ut-x"))
         self.assertEqual((e["GOCACHE"], e["GOMODCACHE"]), ("/r/reads.run/go/build", "/r/reads.run/go/mod"))
         self.assertEqual(e["GIT_OPTIONAL_LOCKS"], "0")
+        n = int(unit_tests.ENV.get("GIT_CONFIG_COUNT", 0))  # git reads the worktree, another user's
+        self.assertEqual((e["GIT_CONFIG_COUNT"], e[f"GIT_CONFIG_KEY_{n}"], e[f"GIT_CONFIG_VALUE_{n}"]),
+                         (str(n + 1), "safe.directory", str(unit_tests.ROOT)))
 
     def test_the_runner_refuses_to_run_as_a_user(self):
         # #5413: only root can run strace over another user and make the modules' users.
