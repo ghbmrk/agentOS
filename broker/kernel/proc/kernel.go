@@ -109,7 +109,6 @@ type Kernel struct {
 	// address in every verb and at any depth (DECOY-b-8, #4719).
 	firstEdge ed25519.PublicKey
 	link      **ed25519.PrivateKey
-	clock     kernel.Clock // KernelConfig's
 	// head is KernelConfig's Sign, the store's head key: it signs the
 	// recovery-key approvals the root steps verify (handoff.Approval).
 	// Set at open and never changed.
@@ -165,7 +164,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		return nil, err
 	}
 	k.PinChecker(cfg.Checker)
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: new(&cfg.LinkKey), clock: cfg.Clock, head: new(&cfg.Sign), card: new(new(recoveryCard))}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: new(&cfg.LinkKey), head: new(&cfg.Sign), card: new(new(recoveryCard))}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		stores := map[string]kernel.ContentStore{}
@@ -289,14 +288,10 @@ func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
 		wg.Go(func() {
 			defer h.reseals.Done()
 			r.Run()
-			end := now
-			if h.clock != nil {
-				end = max(now, h.clock().Earliest)
-			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			if h.k != nil {
-				h.k.Resealed(end, r)
+				h.k.Resealed(now, r) // a kernel with a clock reads it afresh
 			}
 			delete(h.running, r.Backup)
 			close(over[i])

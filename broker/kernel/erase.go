@@ -779,16 +779,16 @@ type (
 	}
 )
 
-// held reports whether the delete of ref was tried and failed too recently.
-// A now before that try (a wall clock stepped back) holds nothing, so a
-// clock correction cannot keep a key on disk past RetryMax.
-func (k *Kernel) held(ref eraseRef, now int64) bool {
+// held reports whether the delete of ref was tried and failed too recently,
+// on Earliest. A now before that try (a wall clock stepped back) holds
+// nothing, so a clock correction cannot keep a key on disk past RetryMax.
+func (k *Kernel) held(ref eraseRef, now Reading) bool {
 	b, ok := k.retry[ref]
-	return ok && b.last <= now && now < b.last+b.wait
+	return ok && b.last <= now.Earliest && now.Earliest < b.last+b.wait
 }
 
 // failed pushes the next try of ref back, doubling its wait.
-func (k *Kernel) failed(ref eraseRef, now int64, err error) {
+func (k *Kernel) failed(ref eraseRef, now Reading, err error) {
 	if k.retry == nil {
 		k.retry = map[eraseRef]backoff{}
 	}
@@ -796,7 +796,7 @@ func (k *Kernel) failed(ref eraseRef, now int64, err error) {
 	if b, ok := k.retry[ref]; ok {
 		w = min(2*b.wait, RetryMax)
 	}
-	k.retry[ref] = backoff{now, w, err}
+	k.retry[ref] = backoff{now.Earliest, w, err}
 }
 
 // confirm deletes subject's key and its items in each store not yet
@@ -807,7 +807,7 @@ func (k *Kernel) confirm(now Reading, subject string) (keyErr, err error) {
 	st := k.s.subjects[subject]
 	for _, store := range st.unconfirmed() {
 		ref := eraseRef{subject, store}
-		if k.held(ref, now.Earliest) {
+		if k.held(ref, now) {
 			continue
 		}
 		var derr error
@@ -827,7 +827,7 @@ func (k *Kernel) confirm(now Reading, subject string) (keyErr, err error) {
 			}
 		}
 		if derr != nil {
-			k.failed(ref, now.Earliest, derr)
+			k.failed(ref, now, derr)
 			continue
 		}
 		delete(k.retry, ref)
@@ -879,12 +879,12 @@ func (k *Kernel) Reseals(at int64) []*Reseal {
 	var out []*Reseal
 	for _, b := range k.backups.List() {
 		ref := eraseRef{store: b}
-		if _, out := k.resealing[b]; out || k.held(ref, now.Earliest) || !slices.ContainsFunc(k.backups.Subjects(b), k.s.erased) {
+		if _, out := k.resealing[b]; out || k.held(ref, now) || !slices.ContainsFunc(k.backups.Subjects(b), k.s.erased) {
 			continue
 		}
 		io, err := k.backups.Prepare(b, k.keys, k.s)
 		if err != nil {
-			k.failed(ref, now.Earliest, err)
+			k.failed(ref, now, err)
 			continue
 		}
 		if k.resealing == nil {
@@ -908,7 +908,7 @@ func (k *Kernel) Resealed(at int64, r *Reseal) {
 		err = r.commit()
 	}
 	if err != nil && !moved {
-		k.failed(ref, now.Earliest, err)
+		k.failed(ref, now, err)
 		return
 	}
 	delete(k.retry, ref)
@@ -927,9 +927,8 @@ func (k *Kernel) RetryBackup(backup string) {
 // ResealBackups runs every re-seal due in place, for a caller that holds
 // no lock other callers wait on (Tick).
 func (k *Kernel) ResealBackups(at int64) {
-	now := k.read(at)
-	for _, r := range k.Reseals(now.Earliest) {
+	for _, r := range k.Reseals(at) {
 		r.Run()
-		k.Resealed(now.Earliest, r)
+		k.Resealed(at, r)
 	}
 }

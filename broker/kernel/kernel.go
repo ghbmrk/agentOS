@@ -68,7 +68,7 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 		}
 	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
-	ctx := key.Context{Now: now.Earliest, Late: now.Latest, Changes: &s.Changes, Ledger: ov}
+	ctx := s.context(now, ov)
 	fresh := map[string]bool{}
 	for i := range p.Steps {
 		st := p.Step(i)
@@ -92,6 +92,11 @@ func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 		}
 	}
 	return v.Root(), v.Scopes(), nil
+}
+
+// context is a key check at now: uses count back a day from Earliest; expiries fire by Latest.
+func (s *State) context(now Reading, l key.Ledger) key.Context {
+	return key.Context{Now: now.Earliest, Late: now.Latest, Changes: &s.Changes, Ledger: l}
 }
 
 type overlay struct {
@@ -201,7 +206,7 @@ func next(s *State, id string, now Reading) Act {
 	holds := class.Irreversible() && max(v.Window(sp.Verb, false), v.Window(sp.Verb, true)) > 0
 	due := v.Due(sp.Verb, st.HeldAt, st.Novel)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now.Earliest < due))
-	if r := v.Authorize(sp, key.Context{Now: now.Earliest, Late: now.Latest, Changes: &s.Changes, Ledger: led}); r != nil {
+	if r := v.Authorize(sp, s.context(now, led)); r != nil {
 		if r.Code == key.RPaused {
 			return a // waits for key.resumed
 		}
@@ -494,7 +499,7 @@ func (k *Kernel) citedLive(now Reading, ps *PlanState) *key.Refusal {
 	if r != nil {
 		return r
 	}
-	return cited.Live(key.Context{Now: now.Earliest, Late: now.Latest, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+	return cited.Live(k.s.context(now, k.s.Ledger()))
 }
 
 // Admitted is a metered call's admission: the worst case it may spend,
@@ -528,8 +533,8 @@ func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key
 		return Admitted{}, &key.Refusal{Code: CHeld, Detail: h.Code}
 	}
 	task := ps.Plan.Task()
-	if r := v.Spend(task, amount, key.Context{Now: now.Earliest, Late: now.Latest, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
-		settled := key.Context{Now: now.Earliest, Late: now.Latest, Changes: &k.s.Changes, Ledger: ledger{s: k.s, settled: true}}
+	if r := v.Spend(task, amount, k.s.context(now, k.s.Ledger())); r != nil {
+		settled := k.s.context(now, ledger{s: k.s, settled: true})
 		sr := v.Spend(task, amount, settled)
 		if sr != nil {
 			// The cap settled usage alone exhausts, which is the one a hold
@@ -626,7 +631,7 @@ func (k *Kernel) Extend(at int64, ext key.Key, plan string) error {
 	if !slices.ContainsFunc(v.Limits.Caps, func(c key.Cap) bool { return c.Kind == key.KSpendTask }) {
 		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
 	}
-	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, key.Context{Now: now.Earliest, Late: now.Latest, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, k.s.context(now, k.s.Ledger())); r != nil {
 		return r
 	}
 	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
@@ -882,7 +887,7 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.R
 	}
 	sp := p.Plan.Step(i)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved)
-	return v.Authorize(sp, key.Context{Now: now.Earliest, Late: now.Latest, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
+	return v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq)))
 }
 
 // Tick retries the erases not yet confirmed and the backup re-seals due

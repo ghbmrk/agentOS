@@ -312,3 +312,151 @@ func TestAPlanNamedLikeATaskSpendsNoneOfIt(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A task ends once Latest reaches its timeout: a plan under it is refused,
+// EndTask finds it ended, and the scheduler logs its end, which Rederive
+// derives from the entry's Latest (TIM-1, KRN-5).
+// REQ: TIM-1, KRN-5
+func TestTIM1ATaskEndsOnLatest(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1", 0))
+	must(t, r.k.OpenTask(0, "t2", 0))
+	span(r, kernel.TaskTimeout-hour, kernel.TaskTimeout)
+	r.plan("p1", r.serve("t1"), st(key.Trash, "m1"))
+	if p := r.k.State().Plans["p1"]; p.Status != kernel.SRejected || p.Reject != kernel.CTask {
+		t.Fatalf("a plan under a task past its timeout by Latest: %s %s", p.Status, p.Reject)
+	}
+	if err := r.k.EndTask(0, "t2"); !errors.Is(err, kernel.ErrTask) {
+		t.Fatalf("EndTask of a task past its timeout by Latest: %v", err)
+	}
+	must(t, r.tick(kernel.TaskTimeout-hour))
+	n := 0
+	for _, e := range r.k.Log().Entries() {
+		if e.Type == kernel.TTaskEnded {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("%d tasks ended by the scheduler, want 2", n)
+	}
+	r.replays()
+	if rd, _ := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); rd.Checked[kernel.TTaskEnded] != 2 {
+		t.Fatalf("Rederive checked %d ends as the scheduler's, want 2", rd.Checked[kernel.TTaskEnded])
+	}
+}
+
+// A task's step is sent only while Latest is short of the task's timeout:
+// Send refuses one at a reading whose Latest reached it, and Rederive finds
+// a dispatch logged with such a Latest (TIM-1, KRN-5).
+// REQ: TIM-1, KRN-5
+func TestTIM1ATaskStepsStopOnLatest(t *testing.T) {
+	const end = kernel.TaskTimeout
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1", 0))
+	span(r, end-hour, end-hour)
+	r.plan("p1", r.serve("t1"), st(key.Organize, "a"))
+	cs := r.calls(0, 1)
+	span(r, end-hour, end)
+	if ok, err := r.k.Send(0, cs[0]); err != nil || ok {
+		t.Fatalf("a step sent once Latest reached its task's timeout: %v, %v", ok, err)
+	}
+	if p := r.k.State().Plans["p1"]; p.Status != kernel.SCancelled || p.Cancel != kernel.CTask {
+		t.Fatalf("p1: %s %s, want cancelled with its task", p.Status, p.Cancel)
+	}
+	r.replays()
+
+	r = newRig(t)
+	must(t, r.k.OpenTask(0, "t1", 0))
+	span(r, end-1, end-1)
+	r.plan("p1", r.serve("t1"), st(key.Organize, "a"))
+	must(t, r.tick(0))
+	if r.status("p1") != kernel.SDone {
+		t.Fatalf("p1: %s", r.status("p1"))
+	}
+	bad := append([]kernel.Entry(nil), r.k.Log().Entries()...)
+	i := len(bad) - 1
+	for bad[i].Type != kernel.TStepDispatch {
+		i--
+	}
+	late := end
+	bad[i].Late = &late
+	var d *kernel.Divergence
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != bad[i].Seq {
+		t.Fatalf("a dispatch logged with a Latest at its task's timeout: want a divergence at seq %d, got %v", bad[i].Seq, err)
+	}
+}
+
+// A dispatched step's spend and a completed effect's repeat line both run a
+// day from the reading's Latest, whether the answer came at once or a probe
+// found the effect done (TIM-1, KRN-8).
+//
+// REQ: TIM-1, KRN-8, KEY-3
+func TestTIM1AStepUseAgesFromLatest(t *testing.T) {
+	r := newRig(t)
+	buy := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Buy}, Serial: "w3"}), 100)
+	var now kernel.Reading
+	r.k.UseClock(func() kernel.Reading { return now })
+	at := func(e, l int64) int64 { now = kernel.Reading{Earliest: e, Latest: l}; return e }
+	shop := func(id, amount string) kernel.Plan {
+		s := st(key.Buy, "shop")
+		s.Args["amount"] = amount
+		return r.sign(kernel.Plan{ID: id, Key: buy, Steps: []kernel.PlanStep{s}})
+	}
+	must(t, r.k.Submit(at(0, 0), shop("a", "60")))
+	must(t, r.tick(at(0, 0)))
+	must(t, r.tick(at(hour, 2*hour)))
+	if len(r.mail.Effects()) != 1 {
+		t.Fatalf("%d effects, want the held buy sent at 1 h", len(r.mail.Effects()))
+	}
+	end := 2*hour + key.DayMS
+	must(t, r.k.Submit(at(end-1, end-1+hour), shop("bw", "50")))
+	if r.status("bw") != kernel.SRejected {
+		t.Fatalf("bw: %s; a day's spend counts back from Earliest, not Latest", r.status("bw"))
+	}
+	must(t, r.k.Submit(at(end-1, end-1), shop("b", "50")))
+	if r.status("b") != kernel.SRejected {
+		t.Fatalf("b: %s; a spend sent on [1 h, 2 h] aged out of its day before Latest + a day", r.status("b"))
+	}
+	must(t, r.k.Submit(at(end, end), shop("c", "50")))
+	if r.status("c") != kernel.SActive {
+		t.Fatalf("c: %s; the spend ages out a day after Latest", r.status("c"))
+	}
+
+	for _, lost := range []bool{false, true} {
+		r := newRig(t)
+		r.k.UseClock(func() kernel.Reading { return now })
+		if lost {
+			r.mail.Fault = func(op string, _ kernel.Request) string {
+				if op == "do" {
+					return clerk.FaultLostAck
+				}
+				return ""
+			}
+		}
+		must(t, r.k.Submit(at(0, 0), r.sign(kernel.Plan{ID: "p1", Key: r.ck, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
+		done := int64(0)
+		if lost {
+			must(t, r.tick(at(0, 0)))
+		}
+		if lost {
+			done = kernel.ProbeEvery
+		}
+		must(t, r.tick(at(done, done+hour)))
+		if r.status("p1") != kernel.SDone {
+			t.Fatalf("lost %v: p1 %s", lost, r.status("p1"))
+		}
+		end := done + hour + key.DayMS
+		must(t, r.k.Submit(at(end-1, end-1+hour), r.sign(kernel.Plan{ID: "p2w", Key: r.ck, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
+		if r.status("p2w") != kernel.SRejected {
+			t.Fatalf("lost %v: p2w %s; the repeat line counts back from Earliest", lost, r.status("p2w"))
+		}
+		must(t, r.k.Submit(at(end-1, end-1), r.sign(kernel.Plan{ID: "p2", Key: r.ck, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
+		if r.status("p2") != kernel.SRejected {
+			t.Fatalf("lost %v: p2 %s; an effect done on [%d, %d] repeats before Latest + a day", lost, r.status("p2"), done, done+hour)
+		}
+		must(t, r.k.Submit(at(end, end), r.sign(kernel.Plan{ID: "p3", Key: r.ck, Steps: []kernel.PlanStep{st(key.Unsubscribe, "list-a")}})))
+		if r.status("p3") != kernel.SActive {
+			t.Fatalf("lost %v: p3 %s; the repeat line ends a day after Latest", lost, r.status("p3"))
+		}
+	}
+}

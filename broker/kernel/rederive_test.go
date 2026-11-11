@@ -346,6 +346,69 @@ func TestTIM1AWideningWindowStartsAtLatest(t *testing.T) {
 	}
 }
 
+// Rederive judges each decision at its entry's reading: a tick and a send
+// whose Latest passes a key's expiry cancel the plan, and Rederive agrees;
+// a dispatch whose logged Latest had passed it is a divergence (TIM-1).
+//
+// REQ: TIM-1, KEY-7, KRN-1
+func TestTIM1ARederiveReadsEachEntrysLatest(t *testing.T) {
+	r := newRig(t)
+	var now kernel.Reading
+	r.k.UseClock(func() kernel.Reading { return now })
+	at := func(e, l int64) int64 { now = kernel.Reading{Earliest: e, Latest: l}; return e }
+	at(0, 0)
+	r.plan("a", r.derive(key.LimitExpires(hour)), st(key.Organize, "a"))
+	must(t, r.tick(at(0, hour)))
+	at(hour, hour)
+	r.plan("b", r.derive(key.LimitExpires(2*hour)), st(key.Organize, "b"))
+	cs, err := r.k.Calls(0)
+	must(t, err)
+	at(hour, 2*hour)
+	if ok, err := r.k.Send(0, cs[0]); err != nil || ok {
+		t.Fatalf("a send whose Latest passed the key's expiry: sent %v, %v", ok, err)
+	}
+	for _, id := range []string{"a", "b"} {
+		if p := r.k.State().Plans[id]; p.Status != kernel.SCancelled || p.Cancel != key.RExpired {
+			t.Fatalf("%s: %s %s, want cancelled as expired by Latest", id, p.Status, p.Cancel)
+		}
+	}
+	at(3*hour-1, 3*hour-1)
+	r.plan("c", r.derive(key.LimitExpires(3*hour)), st(key.Organize, "c"))
+	must(t, r.tick(3*hour-1))
+	if r.status("c") != kernel.SDone {
+		t.Fatalf("c: %s", r.status("c"))
+	}
+	r.replays()
+	bad := append([]kernel.Entry(nil), r.k.Log().Entries()...)
+	i := len(bad) - 1
+	for bad[i].Type != kernel.TStepDispatch {
+		i--
+	}
+	late := 3 * hour
+	bad[i].Late = &late
+	var d *kernel.Divergence
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), bad); !errors.As(err, &d) || d.Seq != bad[i].Seq {
+		t.Fatalf("a dispatch logged with a Latest past its key's expiry: want a divergence at seq %d, got %v", bad[i].Seq, err)
+	}
+}
+
+// A grant is live once Earliest is past its hold: a plan under it at a
+// reading whose Latest alone is past the hold is refused (TIM-1, D-146).
+//
+// REQ: TIM-1, KEY-4
+func TestTIM1AGrantLiveOnEarliest(t *testing.T) {
+	r := newRig(t)
+	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize}, Serial: "g"})
+	k, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 0, 1<<40)
+	must(t, err)
+	must(t, r.issue(0, root, k))
+	wide(r, kernel.GrantHold-1)
+	r.plan("p", k, st(key.Organize, "a"))
+	if r.status("p") != kernel.SRejected {
+		t.Fatalf("a plan under a grant live only by Latest: %s", r.status("p"))
+	}
+}
+
 // Send takes a fresh reading: a dispatch whose key expires while an earlier
 // call in the same tick hangs is answered unsent, and its plan cancelled,
 // though the tick began before the expiry.

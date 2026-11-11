@@ -898,3 +898,81 @@ func TestAForgetErasesOnlyOnTheYesItsTextAsks(t *testing.T) {
 		t.Fatalf("a YES to an ask with no code: %v, %v", subs, err)
 	}
 }
+
+// A failed delete backs off from Earliest and is asked again once Earliest
+// is past its wait: a wide reading neither hurries nor skips it (TIM-1,
+// LOG-4).
+func TestTIM1AnEraseBacksOffOnEarliest(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.notes.failDelete = true
+	at := func(e, l int64) {
+		r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: e, Latest: l} })
+	}
+	at(10, 10+hour)
+	r.k.Erase(0, s)
+	at(10+kernel.RetryMin-1, 10+kernel.RetryMin-1+hour)
+	must(t, r.k.Tick(0))
+	if r.notes.deletes != 1 {
+		t.Fatalf("%d deletes: asked again before Earliest passed its wait", r.notes.deletes)
+	}
+	at(10+kernel.RetryMin, 10+kernel.RetryMin)
+	must(t, r.k.Tick(0))
+	if r.notes.deletes != 2 {
+		t.Fatalf("%d deletes: not asked once Earliest passed its wait", r.notes.deletes)
+	}
+}
+
+// A Forget ask lapses ForgetAskFor after Earliest, once Latest reaches it: a
+// wide reading never lengthens the window a YES is taken in (TIM-1, LOG-4).
+func TestTIM1AForgetAskLapsesOnLatest(t *testing.T) {
+	r := newErig(t)
+	r.seal(r.open(), "mail", kernel.ClassLabel, "Alice")
+	at := func(e, l int64) {
+		r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: e, Latest: l} })
+	}
+	ask := func(e, l int64) string {
+		at(e, l)
+		text, err := r.k.AskForget(0, "Alice")
+		must(t, err)
+		f := strings.Fields(text)
+		return "YES " + f[slices.Index(f, "YES")+1]
+	}
+	reply := func(e, l int64, s string) error {
+		at(e, l)
+		_, err := r.k.ForgetReply(0, s)
+		return err
+	}
+	const f = kernel.ForgetAskFor
+	if err := reply(10+f, 10+f, ask(10, 10+hour)); !errors.Is(err, kernel.ErrForgetReply) {
+		t.Fatalf("a YES ForgetAskFor after an ask's Earliest: %v", err)
+	}
+	e := 20 + f
+	if err := reply(e+f-1, e+f, ask(e, e)); !errors.Is(err, kernel.ErrForgetReply) {
+		t.Fatalf("a YES once Latest reached the ask's lapse: %v", err)
+	}
+	e = 30 + 3*f
+	if err := reply(e+f-1, e+f-1, ask(e, e)); err != nil {
+		t.Fatalf("a YES inside the ask: %v", err)
+	}
+}
+
+// A backoff from a try at a later Earliest than now's holds nothing, however
+// late now's Latest: a clock stepped back retries at once (TIM-1, LOG-4).
+func TestTIM1AnEraseBackoffFromAStepBackHoldsNothing(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	r.seal(s, "notes", "message", "a")
+	r.notes.failDelete = true
+	r.k.Erase(10, s)
+	must(t, r.k.Tick(5_000)) // a second try fails, unlogged: its backoff runs from 5000
+	if r.notes.deletes != 2 {
+		t.Fatalf("%d deletes, want the erase's and the retry's", r.notes.deletes)
+	}
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: 1_000, Latest: 6_000} })
+	must(t, r.k.Tick(0))
+	if r.notes.deletes != 3 {
+		t.Fatalf("%d deletes: a backoff from after Earliest held the retry", r.notes.deletes)
+	}
+}

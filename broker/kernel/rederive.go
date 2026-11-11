@@ -139,8 +139,8 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		if s.taskDue(b.Task, e.reading().Latest) {
 			return []derived{entry(TTaskEnded, taskEnded{b.Task})}, true
 		}
-		_, live := s.Task(b.Task, e.reading().Latest)
-		return nil, !live
+		t := s.tasks[b.Task] // not due, so live unless absent or ended
+		return nil, t == nil || t.ended
 	case TPoolReset:
 		_ = json.Unmarshal(e.Body, &ref)
 		if s.WindowDue(e.At, ref.Pool, ref.Window) {

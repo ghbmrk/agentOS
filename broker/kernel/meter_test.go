@@ -319,3 +319,33 @@ func sum(us []key.Use) (n int64) {
 	}
 	return n
 }
+
+// A model call's use ages out of its day from the reading's Latest: under a
+// wide reading, a reservation left unsettled and a metered use each count
+// for a full day of true time (TIM-1, LOG-7).
+// REQ: TIM-1, LOG-7
+func TestTIM1AModelUseAgesFromLatest(t *testing.T) {
+	for _, settle := range []bool{false, true} {
+		r := newRig(t)
+		k := modelKey(r, "m1", key.LimitSpendDay(100))
+		modelPlan(r, "t1", k)
+		modelPlan(r, "t2", k)
+		wide(r, 1)
+		a, rf := r.k.AdmitSpend(1, "t1", 60)
+		if rf != nil {
+			t.Fatal(rf)
+		}
+		if settle {
+			must(t, r.k.Meter(1, a, "api", 60, "provider"))
+		}
+		end := 1 + hour + key.DayMS
+		r.k.UseClock(func() kernel.Reading { return kernel.At(end - 1) })
+		if _, rf := r.k.AdmitSpend(end-1, "t2", 41); rf == nil {
+			t.Fatalf("settled %v: a use logged on [1, 1 + 1 h] aged out of its day before Latest + a day", settle)
+		}
+		r.k.UseClock(func() kernel.Reading { return kernel.At(end) })
+		if _, rf := r.k.AdmitSpend(end, "t2", 41); rf != nil {
+			t.Fatalf("settled %v: the use ages out a day after Latest: %v", settle, rf)
+		}
+	}
+}

@@ -291,3 +291,53 @@ func TestAHugeRootCapNeedsACosignInAnyOrder(t *testing.T) {
 		}
 	}
 }
+
+// What a holder already has is the grants live by Earliest and not lapsed by
+// Latest, so at a wide reading a grant still in its hold or one lapsing adds
+// nothing: a new key measured against them is big, and a one-off's line
+// counts neither (TIM-1, D-146).
+// REQ: TIM-1, KEY-4
+func TestTIM1AWhatIsHeldIsLiveByEarliestAndNotLapsedByLatest(t *testing.T) {
+	bank := func(r *rig, serial string, at, day int64) (key.Key, key.Key) {
+		root := key.Issue(r.owner.pass, key.Root{Clerk: "bank", Verbs: []key.Verb{key.Buy}, Serial: serial})
+		ck, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, at, day)
+		must(t, err)
+		return root, ck
+	}
+	oneOff := func(r *rig, id string, root key.Key, amount string) string {
+		s := kernel.PlanStep{Verb: key.Buy, Clerk: "bank", Args: map[string]string{}}
+		for _, n := range key.ArgNames(key.Buy) {
+			s.Args[n] = id
+		}
+		s.Args[key.ArgAmount] = amount
+		must(t, r.k.Submit(0, kernel.SignPlan(kernel.Plan{ID: id, Key: key.Key{Root: root.Root}, Steps: []kernel.PlanStep{s}}, r.owner.priv)))
+		return r.k.State().Plans[id].Reject
+	}
+
+	// A grant in its hold by Earliest.
+	r := newRig(t)
+	root, ck := bank(r, "h", 0, 100)
+	must(t, r.issue(-kernel.GrantHold, root))
+	must(t, r.issue(0, ck))
+	_, ck2 := bank(r, "h", 0, 100)
+	wide(r, kernel.GrantHold-1)
+	if err := r.k.Issue(0, nil, ck2); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a key measured against a grant live only by Latest: %v", err)
+	}
+	if got := oneOff(r, "o1", root, "1"); got != kernel.CCosign {
+		t.Fatalf("a one-off under a root whose clerk key is live only by Latest: %q", got)
+	}
+
+	// A grant lapsing by Latest.
+	r = newRig(t)
+	root, ck = bank(r, "l", 0, 100)
+	must(t, r.issue(-kernel.GrantHold, root, ck))
+	_, ck2 = bank(r, "l", key.ClerkLife-hour, 100)
+	span(r, key.ClerkLife-hour, key.ClerkLife)
+	if err := r.k.Issue(0, nil, ck2); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a key measured against a grant lapsed by Latest: %v", err)
+	}
+	if got := oneOff(r, "o2", root, "1"); got != kernel.CCosign {
+		t.Fatalf("a one-off under a root whose clerk key lapsed by Latest: %q", got)
+	}
+}

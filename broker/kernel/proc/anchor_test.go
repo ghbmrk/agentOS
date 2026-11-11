@@ -491,4 +491,15 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	if r := onLog(l, func() kernel.Reading { return kernel.At(box) })(); r.Earliest < box {
 		t.Fatalf("a start ahead of the log read %+v", r)
 	}
+	// A source whose Latest is past its Earliest starts at its Latest, and
+	// Latest follows the source's Latest.
+	src := kernel.Reading{Earliest: last, Latest: 6 * last}
+	w := onLog(l, func() kernel.Reading { return src })
+	if r := w(); r.Earliest < 6*last {
+		t.Fatalf("a wide source at the start read %+v: Earliest is not its Latest", r)
+	}
+	src = kernel.Reading{Earliest: 7 * last, Latest: 8 * last}
+	if r := w(); r.Latest != 8*last {
+		t.Fatalf("a wide source while running read %+v: Latest is not its Latest", r)
+	}
 }

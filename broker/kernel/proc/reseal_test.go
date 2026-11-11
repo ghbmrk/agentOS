@@ -295,13 +295,19 @@ func TestCloseLeavesAHungResealToTheNextStart(t *testing.T) {
 }
 
 // LOG-4 (#3339 item 2, Security finding 3 on #3332): a re-seal that fails
-// slowly backs off from when it finished, read from the process's clock,
+// slowly backs off from when it finished, read from the kernel's clock,
 // not from when it was handed out, so a slow target still gets its
-// backoff. Mutant: pass Resealed the hand-out time.
+// backoff.
 func TestASlowFailedResealBacksOffFromItsFinish(t *testing.T) {
 	b, gone, _, _, id, h := hungBox(t)
 	var clock atomic.Int64
-	b.h.clock = func() kernel.Reading { return kernel.At(clock.Load()) }
+	clock.Store(b.now)
+	if err := b.h.With(func(k *kernel.Kernel) error {
+		k.UseClock(func() kernel.Reading { return kernel.At(clock.Load()) })
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.fail.Store(true)
 	tickHung(t, b, gone, h)
 	end := b.now + 10*kernel.RetryMin
@@ -310,6 +316,7 @@ func TestASlowFailedResealBacksOffFromItsFinish(t *testing.T) {
 	h.free()
 	b.h.reseals.Wait()
 	due := func(now int64) (n int) {
+		clock.Store(now)
 		b.h.With(func(k *kernel.Kernel) error {
 			for _, r := range k.Reseals(now) {
 				n++

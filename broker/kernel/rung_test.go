@@ -93,3 +93,18 @@ func TestNoTaskIsP0AndAPageTaskIsP3(t *testing.T) {
 		t.Fatalf("a P3 task's step: %s", r.status("page"))
 	}
 }
+
+// A held step waits for its approval until Earliest reaches the hold's end:
+// a wide reading does not cut the wait short and cancel it (TIM-1, CH-3).
+// REQ: TIM-1, CH-3
+func TestTIM1AHeldStepWaitsForItsApprovalUntilEarliest(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1", key.P1))
+	r.plan("lapsed", r.serve("t1", key.LimitRung(key.P3), key.LimitHold(hour, hour)), st(key.Unsubscribe, "list-b"))
+	must(t, r.tick(2))
+	wide(r, 2+hour-1)
+	must(t, r.tick(0))
+	if p := r.k.State().Plans["lapsed"]; p.Status != kernel.SActive || p.Steps[0].Phase != kernel.PHeld {
+		t.Fatalf("a hold not yet over by Earliest: %s %s, want held for an approval", p.Status, p.Steps[0].Phase)
+	}
+}

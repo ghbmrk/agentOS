@@ -868,3 +868,110 @@ func TestSpendAtTheInt64FloorReplays(t *testing.T) {
 		t.Fatalf("spent %v", got)
 	}
 }
+
+// wide makes r's kernel read [e, e+hour]: a TIM-1 guard whose sources
+// disagree by an hour.
+func wide(r *rig, e int64) { span(r, e, e+hour) }
+
+// span makes r's kernel read [e, l].
+func span(r *rig, e, l int64) {
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: e, Latest: l} })
+}
+
+// A full window with no usable reset time stays closed PoolWindowMS from the
+// reading's Latest, so a wide reading never shortens it (TIM-1).
+// REQ: TIM-1, RES-5
+func TestTIM1APoolResetStartsAtLatest(t *testing.T) {
+	r := newRig(t)
+	wide(r, 100)
+	must(t, read(r, 100, "p", 1000, 0))
+	due := 100 + hour + kernel.PoolWindowMS
+	if w := r.k.State().Pools["p"].Windows["5h"]; w.ResetAt != due {
+		t.Fatalf("a window read full on [100, 100 + 1 h] resets at %d, want %d", w.ResetAt, due)
+	}
+	r.k.UseClock(nil)
+	if rf := r.k.AdmitPool(due-1, "p"); rf == nil {
+		t.Fatal("the window opened before its reset from Latest")
+	}
+	if rf := r.k.AdmitPool(due, "p"); rf != nil {
+		t.Fatalf("the window is the cooldown from Latest: %v", rf)
+	}
+	span(r, 2*due, 0) // a malformed reading is read as its Earliest
+	must(t, read(r, 0, "m", 1000, 0))
+	if w := r.k.State().Pools["m"].Windows["5h"]; w.ResetAt != 2*due+kernel.PoolWindowMS {
+		t.Fatalf("a window read full at the malformed [%d, 0] resets at %d", 2*due, w.ResetAt)
+	}
+}
+
+// A lowering of the reserve goes live GrantHold after the reading's Latest,
+// live and after a restart, so a wide reading never shortens its hold (TIM-1).
+// REQ: TIM-1, KEY-4
+func TestTIM1ALoweringStartsAtLatest(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Reserve(1, "p", 300))
+	must(t, read(r, 1, "p", 800, 1<<40))
+	wide(r, 2)
+	must(t, r.k.Reserve(2, "p", 0, lower(r, "p", 0, r.owner)))
+	live := 2 + hour + kernel.GrantHold
+	for _, boot := range []bool{false, true} {
+		if boot {
+			r.boot(3)
+		}
+		if got := r.k.State().PendingReserves(3); len(got) != 1 || got[0].Live != live {
+			t.Fatalf("boot %v: pending %+v, want live at %d", boot, got, live)
+		}
+	}
+	if rf := r.k.AdmitPool(live-1, "p"); rf == nil {
+		t.Fatal("the lowering is live before its hold from Latest ends")
+	}
+	if rf := r.k.AdmitPool(live, "p"); rf != nil {
+		t.Fatalf("the lowering is live at the end of its hold: %v", rf)
+	}
+}
+
+// A pool widens only once Earliest is past its due: a window's reset, a
+// lowering going live, and the live reserve a later change is judged
+// against. A reset time inside the reading is the provider's (TIM-1).
+// REQ: TIM-1, RES-5, KEY-4
+func TestTIM1APoolWideningsWaitForEarliest(t *testing.T) {
+	r := newRig(t)
+	must(t, read(r, 1, "p", 1000, 10_000))
+	must(t, r.k.Reserve(1, "q", 300))
+	must(t, read(r, 1, "q", 800, 1<<40))
+	must(t, r.k.Reserve(2, "q", 100, lower(r, "q", 100, r.owner)))
+	wide(r, 10_000-1)
+	if rf := r.k.AdmitPool(0, "p"); rf == nil {
+		t.Fatal("a window reopened before Earliest reached its reset")
+	}
+	must(t, read(r, 0, "r", 1000, 10_000+hour-1))
+	if w := r.k.State().Pools["r"].Windows["5h"]; w.ResetAt != 10_000+hour-1 {
+		t.Fatalf("a reset time inside the reading was replaced: %d", w.ResetAt)
+	}
+	wide(r, 2+kernel.GrantHold-1)
+	if rf := r.k.AdmitPool(0, "q"); rf == nil {
+		t.Fatal("a lowering went live before Earliest reached its hold's end")
+	}
+	if err := r.k.Reserve(0, "q", 250); !errors.Is(err, kernel.ErrReserveSig) {
+		t.Fatalf("250 is a lowering of the reserve live by Earliest: %v", err)
+	}
+	must(t, r.k.Reserve(0, "q", 50, lower(r, "q", 50, r.owner)))
+}
+
+// An extension's envelope must be live by Earliest: one still in its hold
+// releases nothing at a reading whose Latest alone is past it (TIM-1, KEY-4).
+// REQ: TIM-1, KEY-4, LOG-7
+func TestTIM1AnExtensionsGrantIsLiveByEarliest(t *testing.T) {
+	r := newRig(t)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	exhaust(r, "t1", 100)
+	root := key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "env"})
+	env, err := key.ClerkKey(root, r.owner.pass, r.holder.pub, 3, 800, key.LimitSpendTask(500))
+	must(t, err)
+	must(t, r.issue(3, root, env))
+	wide(r, 3+kernel.GrantHold-1)
+	if err := r.k.Extend(0, extension(r, env, key.LimitSpendTask(300)), "t1"); err == nil {
+		t.Fatal("an envelope live only by Latest released a hold")
+	}
+	wide(r, 3+kernel.GrantHold)
+	must(t, r.k.Extend(0, extension(r, env, key.LimitSpendTask(300)), "t1"))
+}
