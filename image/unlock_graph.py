@@ -11,12 +11,15 @@ this asks it, unit by unit, for each dependency list and action. Each of those v
 names or an enum, so no unit's text can pose as systemd's answer. Three rounds of review on #4696 each
 found another way into a hand-written model. This one has no model to keep in step.
 
-The walk starts at the unlock unit and follows every dependency that starts another unit
-(START_KINDS); it lists every dependency from those that stops another unit (STOP_KINDS). Starting a
-unit stops what it conflicts with (STOP_ON_START), so from each of those it follows the kinds that carry
-the stop on (PROPAGATE_STOP) and the units a stop can start (STOP_STARTS: OnFailure= when ExecStop
-fails, OnSuccess= on a clean stop), to a fixed point (closure()). Each edge it takes, the
-unlock unit as the root and the generators that failed must be exactly the lines of
+The walk starts at the unlock unit, which the step both starts and stops (its stop is the reboot), and
+follows every dependency that starts another unit (START_KINDS); it lists every dependency from those that
+stops another unit (STOP_KINDS). Starting a unit stops what it conflicts with (STOP_ON_START), so from each
+stopped unit it follows the kinds that carry the stop on (PROPAGATE_STOP) and the units a stop can start
+(STOP_STARTS: OnFailure= when ExecStop fails, OnSuccess= on a clean stop). A stopped unit is started again
+by the units that trigger or uphold it (RESTART_KINDS), and a started service whose Restart= is not "no"
+stops on its way back unless its RestartMode= is "direct" (restarts()). All of it runs to a fixed point
+(closure()) (#4919). Each edge it takes, the unlock unit as the root and the generators that failed must
+be exactly the lines of
 image/mkosi/unlock.allow, which `unlock_graph.py --allowlist` prints for a built image, so a new path
 onto a unit already listed is a new line for review (#4822). Whatever that list says, none of these may
 happen: a unit started is a shutdown unit (SHUTDOWN); a unit started or stopped carries a failure,
@@ -52,15 +55,23 @@ STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "Requi
 # PROPAGATE_STOP_GRACEFUL in systemd 257); Conflicts= acts only when a unit starts. STOP_STARTS start the
 # other unit when this one stops: OnSuccess= on a clean stop, OnFailure= when it stops failed (#4823).
 # STOP_ON_START are the kinds by which starting a unit stops another. The other STOP_KINDS act when the
-# started unit itself stops, and every unit it requires is required by most of the system (system.slice,
-# sysinit.target), so they are listed one hop out but not walked: walking them reaches every unit on the
-# box, active or not, and none of them is stopped by the unlock step starting.
+# unit itself stops, so they are walked only from a unit that stops: one stopped by these kinds, the unlock
+# unit itself, and a started service that restarts (restarts()). From any other started unit they are listed
+# one hop out: every unit it requires is required by most of the system (system.slice, sysinit.target).
 PROPAGATE_STOP = ("PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf")
 STOP_ON_START = ("Conflicts", "ConflictedBy")
 STOP_STARTS = ("OnSuccess", "OnFailure")
+# A stopped unit is started again by the units in these lists: a trigger's next event (TriggeredBy=) and an
+# upholding unit (UpheldBy=) while it stays up. Whether those are themselves stopped first is not read, so
+# each counts (#4919).
+RESTART_KINDS = ("TriggeredBy", "UpheldBy")
+# A service's Restart= and RestartMode= (systemctl shows them for services only). Under RestartMode=normal,
+# systemd 257's default, an automatic restart passes through the inactive or failed state, so the units that
+# Requires=/BindsTo= the service stop and its OnSuccess=/OnFailure= run; RestartMode=direct skips that state.
+RESTART = ("Restart", "RestartMode")
 ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
 JOB_MODES = ("OnFailureJobMode", "OnSuccessJobMode")  # isolate stops every unit outside the target
-PROPS = START_KINDS + STOP_KINDS + ACTIONS + JOB_MODES + ("LoadState",)
+PROPS = START_KINDS + STOP_KINDS + RESTART_KINDS + ACTIONS + JOB_MODES + ("LoadState",)
 # A reached unit must load as it would on the box: a not-found unit may be a name whose specifier took the
 # runner's value here (%H, %v, %m). Masked units load nowhere.
 LOADED = ("loaded", "masked")
@@ -75,17 +86,28 @@ WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)
 
 def graph(manager, start=UNIT):
     """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "load": LoadState, "job_modes":
-    [(name, value)]}} for START and every unit closure() reaches from it, as MANAGER's systemd shows them."""
+    [(name, value)], "restart": (Restart, RestartMode) or None}} for START and every unit closure() reaches
+    from it, as MANAGER's systemd shows them. Restart is None for a unit that is not a service."""
     units = {}
     while True:
         started, stopped, _ = closure(units, start)
         batch = sorted((started | stopped) - set(units))
         if not batch:
             return units
+        services = manager.show([n for n in batch if n.endswith(".service")], RESTART)
         for name, p in manager.show(batch, PROPS).items():
-            units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS for t in unit_names(name, k, p[k])],
+            units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS + RESTART_KINDS
+                                     for t in unit_names(name, k, p[k])],
                            "actions": [(k, p[k]) for k in ACTIONS], "load": p["LoadState"],
-                           "job_modes": [(k, p[k]) for k in JOB_MODES]}
+                           "job_modes": [(k, p[k]) for k in JOB_MODES],
+                           "restart": tuple(services[name][k] for k in RESTART) if name in services else None}
+
+
+def restarts(unit):
+    """Whether UNIT (a graph() entry) is a service whose automatic restart stops it on the way back: Restart=
+    is not "no" and RestartMode= is not "direct". Each is an enum, so any other value counts."""
+    r = unit.get("restart")
+    return bool(r) and r[0] != "no" and r[1] != "direct"
 
 
 UNIT_NAME = re.compile(r"[A-Za-z0-9:_.\\@-]+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)\Z")
@@ -113,14 +135,15 @@ def fstab_devices(text):
 
 
 def closure(units, start=UNIT):
-    """(started, stopped, edges) for START in UNITS (graph()): the units starting START can start, START
-    included; the units it can stop; and each edge taken, as an allowlist line. A started unit's START_KINDS
-    start the other unit ("start T KIND from U"); its STOP_KINDS are listed ("stop U KIND T") and its
-    STOP_ON_START stop the other unit; a stopped unit's PROPAGATE_STOP stop the other unit and its
-    STOP_STARTS start it. A shutdown unit is started but
-    not walked past (it is refused where it is started), and stopping one is not followed or listed: every
+    """(started, stopped, edges) for START in UNITS (graph()): the units the unlock step can start, START
+    included; the units it can stop, START included (its stop is the reboot); and each edge taken, as an
+    allowlist line. A started unit's START_KINDS start the other unit ("start T KIND from U"); its STOP_KINDS
+    are listed ("stop U KIND T") and its STOP_ON_START stop the other unit; a started service that restarts()
+    is stopped too ("restart U Restart VALUE"). A stopped unit's PROPAGATE_STOP stop the other unit, its
+    STOP_STARTS start it, and its RESTART_KINDS start it again ("restart U KIND T"). A shutdown unit is started
+    but not walked past (it is refused where it is started), and stopping one is not followed or listed: every
     unit with default dependencies conflicts with shutdown.target and umount.target, and none is active."""
-    started, stopped, edges, todo = set(), set(), {"start " + start}, [(True, start)]
+    started, stopped, edges, todo = set(), set(), {"start " + start}, [(False, start), (True, start)]
     while todo:
         up, u = todo.pop()
         if u in (started if up else stopped):
@@ -128,7 +151,11 @@ def closure(units, start=UNIT):
         (started if up else stopped).add(u)
         if u in SHUTDOWN:
             continue
-        for k, t in units.get(u, {}).get("edges", ()):
+        unit = units.get(u, {})
+        if up and restarts(unit):
+            edges.add("restart %s Restart %s" % (u, unit["restart"][0]))
+            todo.append((False, u))
+        for k, t in unit.get("edges", ()):
             if k in (START_KINDS if up else STOP_STARTS):
                 edges.add("start %s %s from %s" % (t, k, u))
                 todo.append((True, t))
@@ -136,6 +163,9 @@ def closure(units, start=UNIT):
                 edges.add("stop %s %s %s" % (u, k, t))
                 if k in (STOP_ON_START if up else PROPAGATE_STOP):
                     todo.append((False, t))
+            elif not up and k in RESTART_KINDS:
+                edges.add("restart %s %s %s" % (u, k, t))
+                todo.append((True, u))
     return started, stopped, edges
 
 
@@ -146,7 +176,7 @@ def reached(units, start=UNIT):
 
 def facts(units, generators, start=UNIT):
     """The allowlist's lines for one run: "start START" as the root, each edge closure() takes ("start T
-    KIND from U", "stop U KIND T") and "generator G failed" for each of GENERATORS."""
+    KIND from U", "stop U KIND T", "restart U KIND T") and "generator G failed" for each of GENERATORS."""
     return closure(units, start)[2] | {"generator %s failed" % g for g in generators}
 
 
@@ -239,6 +269,31 @@ CONTROLS = {
     "a generator killed by a signal (L3 6595128762 1)": (
         "generator agentos-plant-generator failed" + NOT_LISTED,
         {"etc/systemd/system-generators/agentos-plant-generator": "#!/bin/sh\nkill -SEGV $$\n"}),
+    # #4919: three ways the unlock step stops a unit that the walk once missed. Each planted unit is loaded
+    # the way a shipped one would be, from a target the box starts, not from the unlock unit. The third's
+    # units have no default dependencies, so the stop of sysinit.target that the emergency cascade reaches
+    # does not stand in for the restart's own. On the built image the first is also reached through that cascade; the unit test
+    # test_the_unlock_units_own_stop_is_walked holds the root's own stop without it.
+    "PartOf= the unlock unit with SuccessAction=reboot (#4894 Security 6604961676 1, L3 6605070833 3)": (
+        "agentos-plant.service, which %s stops, has SuccessAction=reboot; %s" % (UNIT, WHY),
+        {"etc/systemd/system/agentos-plant.service":
+             "[Unit]\nPartOf=%s\nSuccessAction=reboot\n[Service]\nExecStart=/bin/true\n" % UNIT,
+         "etc/systemd/system/multi-user.target.d/99-plant.conf": "[Unit]\nWants=agentos-plant.service\n"}),
+    "a unit the unlock unit's stop stops, started again by its socket (#4894 L3 6605070833 3)": (
+        "%s starts reboot.target; %s" % (UNIT, WHY),
+        {"etc/systemd/system/agentos-plant.service":
+             "[Unit]\nPartOf=%s\nWants=reboot.target\n[Service]\nExecStart=/bin/true\n" % UNIT,
+         "etc/systemd/system/agentos-plant.socket": "[Socket]\nListenStream=/run/agentos-plant\n",
+         "etc/systemd/system/sockets.target.d/99-plant.conf": "[Unit]\nWants=agentos-plant.socket\n"}),
+    "a service the unlock step starts with Restart=, required by one with SuccessAction=reboot (#4894 L3 "
+    "6605070833 3)": (
+        "agentos-plant-b.service, which %s stops, has SuccessAction=reboot; %s" % (UNIT, WHY),
+        {"etc/systemd/system/%s.d/99-plant.conf" % UNIT: "[Unit]\nWants=agentos-plant.service\n",
+         "etc/systemd/system/agentos-plant.service":
+             "[Unit]\nDefaultDependencies=no\n[Service]\nExecStart=/bin/true\nRestart=always\n",
+         "etc/systemd/system/agentos-plant-b.service": "[Unit]\nDefaultDependencies=no\nRequires=agentos-plant.service\n"
+                                                       "SuccessAction=reboot\n[Service]\nExecStart=/bin/true\n",
+         "etc/systemd/system/multi-user.target.d/99-plant.conf": "[Unit]\nWants=agentos-plant-b.service\n"}),
 }
 
 
@@ -318,11 +373,13 @@ def main(argv):
         cleanup()
 
 
-ALLOW_HEADER = """# What starting agentos-keeper-kernel.service can start or stop, as the built image's own systemd
-# computes it (image/unlock_graph.py, #4667). Each line is reviewed: "start T KIND from U" is an edge
-# by which a unit the unlock step starts or stops starts T, "stop U KIND T" one by which it stops T
-# (#4822, #4823), "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator
-# that found nothing to read in the build's tree. Regenerate with, as root, after an image build:
+ALLOW_HEADER = """# What the unlock step (agentos-keeper-kernel.service starting, then stopping) can start or stop, as
+# the built image's own systemd computes it (image/unlock_graph.py, #4667). Each line is reviewed:
+# "start T KIND from U" is an edge by which a unit the step starts or stops starts T, "stop U KIND T" one
+# by which it stops T (#4822, #4823), "restart U KIND T" one by which a stopped U is started again
+# (TriggeredBy, UpheldBy) or a started service U stops on its way back (Restart, T its value; #4919),
+# "start agentos-keeper-kernel.service" the root, and "generator G failed" a generator that found nothing
+# to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
 """
 
