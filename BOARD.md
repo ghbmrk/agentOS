@@ -442,7 +442,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keeper-reach-sysd-msg | IMG-keeper-reach-sysd-msg: the #5167 'does not model it' refusals name the remedy (plain path, or PID1_NAMES with its systemd source). Release; from #5247 Lens. | #5247, #5167 | queued (release; tier A) |
 | KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
-| IMG-keeper-reach-gen | IMG-keeper-reach-gen: no generator or credential adds a unit or mount the tree check does not read (gpt-auto, systemd.extra-unit.*, fstab.extra, systemd.mount-extra). Release; from #5270. | #5270, #5167 | building (release; tier A) |
 | VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | queued (release) |
 | VOICE-ro-d-ending-boundary | VOICE-ro-d-ending-boundary: the call-limit notice waits, bounded, for the sentence playing to end. Release (UX); from #5299. | #5299, #5262 | queued (release; tier A) |
 | VOICE-ro-d-failed-empty | VOICE-ro-d-failed-empty: an unset Failed clip plays nothing when the recognizer stops. Release; from #5299. | #5299, #5262 | queued (release; tier A) |
@@ -465,14 +464,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-lease-seed-fu | ENF-lease-seed-fu: the lease-file seed survives a torn read and a duplicate address, an unreadable file shows on home, and the behind-clock residual is closed or named. Release; from #5372. | #5295, #5372, #5300 | queued (release; tier A) |
 | KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
 | ENF-edge-cut-fu2 | ENF-edge-cut-fu2: a missing cut record raises its own alert with its own wording; the page follows the kernel's cut; a lift after a Day-0 cut; an honest edge keeps its hold until the full load; a refused read keeps edge_trip; the covert-bit bound is reworded. Release; from #5398. | #5282, #5398 | building (release; tier A) |
-| IMG-keeper-reach-dangling-box-link | IMG-keeper-reach-dangling-box-link: a tree link into a box-made path (/var/run, /var/lock) is weighed through the box's link. Release; from #5382. | #5382, #5233 | queued (release; tier A) |
+| IMG-keeper-reach-dangling-box-link | IMG-keeper-reach-dangling-box-link: a tree link into a box-made path (/var/run, /var/lock) is weighed through the box's link. Release; from #5382. | #5382, #5233 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | CI-mutgate-head-guard | CI-mutgate-head-guard: mutgate.yml's first job exits when the run's head differs from the PR's current head; the OPERATING.md sentence on old-head reruns is replaced. Release; from #5408. | #5377, #5408, #5361 | building (release; tier A) |
 | CLK-plan-mut | CLK-plan-mut: kill the clerk/plan statement-deletion survivors (about 137) with tests, or waive the ones no test can tell. Release; from #5402. | #5393, #5402 | building (release; tier A) |
-| CI-unit-strace-retry-4 | CI-unit-strace-retry-4: audit opens of another process's /proc fd; trace unlink, rename and truncate; isolate sitecustomize; read .trace.cut in clash_audit. Release; from #5411. | #5407, #5411 | building (release; tier A) |
 | IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | queued (release; tier A) |
 | IMG-keeper-reach-gen-tree | IMG-keeper-reach-gen-tree: the tree check reads crypttab/veritytab/integritytab, the initrd gets the unit, credential and repart.d checks, and the docstring points the generator routes at finish_image.py. Release; from #5289. | #5289 | queued (release; tier A) |
-| TEST-flake-ble-wire-le | TEST-flake-ble-wire-le: TestWireRoundTrip races on the package-level byte order le (2nd sighting). Release; from #5362. | #5290, #5362 | building (release; tier A) |
 | TEST-flake-arc6-owner-chat | TEST-flake-arc6-owner-chat: TestARC6OwnerChatReachesTheGuestAndBack gets an empty message under broker-race (2nd sighting). Release; from #5424. | #5235, #5424 | building (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | TEST-e2e-owner-label | TEST-e2e-owner-label: the e2e check that owner chat never reaches a still-public machine cannot fail; start agent as public in the stub. Defect; from #5427. | #5425, #5427 | queued (defect; tier A) |
@@ -520,4 +517,5 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
+issue #5413: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has ['building', 'escalated']
 ```
