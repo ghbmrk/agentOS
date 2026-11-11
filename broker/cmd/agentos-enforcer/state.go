@@ -310,16 +310,19 @@ type pageResolver struct{ d *Enforcer }
 func (p pageResolver) Stopped() page.ResolverStop {
 	n := &p.d.net
 	n.resMu.Lock()
-	runs, served, why, load := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad
+	runs, served, why, load, unseeded := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.unseeded
 	n.resMu.Unlock()
+	// A host the load did not seed has renewed by half a lease after it
+	// (nft.LeaseTimeout, the lease every range offers).
+	unread := !unseeded.IsZero() && p.d.dp.Now().Sub(unseeded) < nft.LeaseTimeout/2*time.Second
 	if runs {
-		var out page.ResolverStop
+		out := page.ResolverStop{Unseeded: unread}
 		for _, f := range p.d.dp.DNS.Flapping() {
 			out.Restarting = append(out.Restarting, restartOf(f))
 		}
 		return out
 	}
-	out := page.ResolverStop{Stopped: true, Policy: why, Load: load}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, Unseeded: unread}
 	errs := []error{served}
 	if j, ok := served.(interface{ Unwrap() []error }); ok {
 		errs = j.Unwrap()
