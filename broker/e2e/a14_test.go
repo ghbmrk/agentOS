@@ -108,11 +108,12 @@ func (m *machines) Lineage(id string) (string, error) { return id, nil }
 var _ egress.Config = egress.Config{Label: (*vm.Manager)(nil).DataLabel}
 
 // label has vm.Manager.DataLabel's contract: "public" only for a known
-// machine labelled public; unknown machines read private.
+// machine labelled public; unknown machines read private. m1, m2 and agent
+// start public, so a check that the label rose can fail (#5430).
 func (m *machines) label(id string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if (id == "m1" || id == "m2") && !m.private[id] {
+	if (id == "m1" || id == "m2" || id == "agent") && !m.private[id] {
 		return "public"
 	}
 	return "private"
