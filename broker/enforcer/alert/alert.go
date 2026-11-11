@@ -57,8 +57,13 @@ const (
 	// that lights the bulb. Appended, so journalled kinds keep their numbers.
 	Trip
 	// A factory reset by the case code dropped the passkey (NET-2
-	// Hardening): a text, never the light (D-254). Appended last.
+	// Hardening): a text, never the light (D-254). Appended after Trip.
 	FactoryReset
+	// The enforcer's record of a box's cut is missing or does not read
+	// back (#5399): provisioning wrote it and nothing removes it, so its
+	// loss means root on the enforcer or lost state. The box stays cut;
+	// like Trip it lights the bulb until the cut lifts. Appended last.
+	RecordMissing
 )
 
 // Delivery is how a kind reaches the owner.
@@ -92,6 +97,7 @@ var kinds = map[Kind]spec{
 	RoutineLock:      {LogOnly, true, "%s locked."},
 	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
 	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
+	RecordMissing:    {Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window
@@ -115,6 +121,10 @@ func (k Kind) Delivery() (d Delivery, ok bool) {
 	s, ok := kinds[k]
 	return s.delivery, ok
 }
+
+// lights reports whether an open alert of kind k turns the light red: a
+// known attack (D-254), which only lifting its cut resolves (Lifted).
+func (k Kind) lights() bool { return k == Trip || k == RecordMissing }
 
 // Words is the fixed text for k about device.
 func Words(k Kind, device string) (string, error) {
@@ -440,14 +450,14 @@ func (a *Alerts) resolve(i int) error {
 	return nil
 }
 
-// Lifted resolves every open trip from device; the page calls it once
-// the owner's passkey has lifted that cut in full (NET-4). The light goes
-// off when no trip is left open.
+// Lifted resolves every open trip and missing record from device; the
+// page calls it once the owner's passkey has lifted that cut in full
+// (NET-4). The light goes off when none is left open.
 func (a *Alerts) Lifted(device string) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
-		if r := a.log[i]; r.Open && r.Kind == Trip && r.Device == device {
+		if r := a.log[i]; r.Open && r.Kind.lights() && r.Device == device {
 			err = errors.Join(err, a.resolve(i))
 		}
 	}
@@ -495,7 +505,7 @@ func (a *Alerts) Status() Status {
 			s.Open = append(s.Open, r)
 		}
 	}
-	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind == Trip }) {
+	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind.lights() }) {
 		s.Colour = Red
 	}
 	return s

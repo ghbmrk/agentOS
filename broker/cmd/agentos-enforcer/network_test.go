@@ -814,12 +814,16 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	x.start()
 }
 
-// TestCutRecordsMissing (#5282 item 2): provisioning writes the core's and
-// the edge's cut records uncut, so a fresh box starts with neither cut; a
-// record missing later (deleted, or a state partition that lost it) is a
-// cut, logged, until the owner lifts it on the page.
+// TestCutRecordsMissing (#5282, #5399 items 1 and 4): provisioning writes
+// both cut records uncut, and nothing removes them, so a record missing at
+// a start means root on the enforcer or lost state: the box stays cut,
+// an alert of its own names it and turns the light red, and each card's
+// reason says to check the enforcer, not to trust the box. The owner's
+// lift and resume write the records whole and resolve the alerts. Such a
+// cut carries no day, so a lift on a day the edge is already past its cap
+// holds for the rest of it: the next reading does not cut it again.
 func TestCutRecordsMissing(t *testing.T) {
-	x, _, a := capped(t)
+	x, doc, a := capped(t)
 	for _, name := range []string{fileCut, fileEdgeCut} {
 		if b, err := os.ReadFile(filepath.Join(x.dir, name)); err != nil || string(b) != "{}" {
 			t.Fatalf("provisioning did not write %s uncut: %q, %v", name, b, err)
@@ -827,6 +831,20 @@ func TestCutRecordsMissing(t *testing.T) {
 	}
 	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
 		t.Fatal("a fresh box starts cut")
+	}
+	missing := func() (core, edge int) {
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind == alert.RecordMissing && r.Device == coreDevice {
+				core++
+			}
+			if r.Kind == alert.RecordMissing && r.Device == edgeDevice {
+				edge++
+			}
+		}
+		return core, edge
+	}
+	if c, e := missing(); c+e != 0 || x.d.alerts.Status().Colour != alert.Off {
+		t.Fatal("a fresh box raised a missing record")
 	}
 	x.d.Close()
 	for _, name := range []string{fileCut, fileEdgeCut} {
@@ -836,7 +854,8 @@ func TestCutRecordsMissing(t *testing.T) {
 	}
 	x.start()
 	cut, why := x.d.edge.Cut()
-	if !cut || why != "the record of the edge's cut is missing" || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" missing") {
+	if !cut || why != "the record of the edge's cut is missing. Someone may have tampered with the enforcer: check it before you lift the cut." ||
+		strings.Contains(why, "trust the edge") || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" missing") {
 		t.Fatalf("a missing edge record: cut %v, reason %q", cut, why)
 	}
 	if !strings.Contains(x.fire.last(), `add rule inet enforcer cut_edge counter name "edge_cut" drop`) {
@@ -845,18 +864,39 @@ func TestCutRecordsMissing(t *testing.T) {
 	x.d.cut.mu.Lock()
 	why = x.d.cut.reason
 	x.d.cut.mu.Unlock()
-	if x.d.cut.Stage() != channel.Tripped || why != "the record of the core's cut is missing" || !strings.Contains(x.logText(), "cut: "+fileCut+" missing") {
+	if x.d.cut.Stage() != channel.Tripped || why != "the record of the core's cut is missing. Someone may have tampered with the enforcer: check it before you resume the core's channel." ||
+		!strings.Contains(x.logText(), "cut: "+fileCut+" missing") {
 		t.Fatalf("a missing core record: stage %v, reason %q", x.d.cut.Stage(), why)
 	}
+	if c, e := missing(); c != 1 || e != 1 || x.d.alerts.Status().Colour != alert.Red {
+		t.Fatalf("missing records raised %d core and %d edge alerts, light %v", c, e, x.d.alerts.Status().Colour)
+	}
+	// The edge is past its cap today: the cut's day is unknown, so the
+	// lift holds for the rest of today.
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
 	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
 		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a lift of a cut with no day cut the edge again at the next reading")
+	}
+	if c, e := missing(); c != 1 || e != 0 {
+		t.Fatalf("after the edge's lift: %d core and %d edge alerts open", c, e)
 	}
 	if err := x.d.cut.Resume(); err != nil {
 		t.Fatal(err)
 	}
+	if c, e := missing(); c+e != 0 || x.d.alerts.Status().Colour != alert.Off {
+		t.Fatal("the lift and resume left a missing record's alert open or the light red")
+	}
 	x.restart()
 	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
 		t.Fatal("the owner's lift and resume did not write the records again")
+	}
+	if c, e := missing(); c+e != 0 {
+		t.Fatal("a restart with both records raised a missing record")
 	}
 }
 
@@ -1427,6 +1467,119 @@ func TestMergingReloadRetried(t *testing.T) {
 	}
 	if c, _ := spentIn(t, x); !c {
 		t.Fatal("the core's caps are not spent while its port merges")
+	}
+}
+
+// TestMergeHoldOutlivesARefusedLoad (#5399 item 5, NET-2 Byte caps): the
+// edge's quota held spent while its port merged segments still runs after
+// the merge ends, until a full load starts it from the count. A refused
+// load leaves it running, so the readings' drops keep the edge held: a
+// spent quota would otherwise fill TripSet and cut an edge within its cap
+// with no record to lift. The load the firewall takes ends the hold.
+func TestMergeHoldOutlivesARefusedLoad(t *testing.T) {
+	x, doc, _ := capped(t)
+	edge := x.cfg.Layout.Edge
+	x.setListing(listingOf(t, x, doc, 7, 10, 100, true))
+	lastUpdate := func() string {
+		x.fire.mu.Lock()
+		defer x.fire.mu.Unlock()
+		return x.fire.updates[len(x.fire.updates)-1]
+	}
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	x.merges(edge, errors.New("offload: edge0: rx-gro on"))
+	x.advance(readEvery)
+	if _, e := spentIn(t, x); !e || strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("fixture: the edge's port merging is not held spent")
+	}
+	n := loads()
+	x.merges(edge, nil)
+	x.fire.mu.Lock()
+	x.fire.fail = true
+	x.fire.mu.Unlock()
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the load after the merge ended was not refused")
+	}
+	if strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("a reading after a refused load lets TripSet cut the edge while its spent quota still runs")
+	}
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the edge was cut within its cap")
+	}
+	x.advance(time.Second)
+	if loads() != n+1 {
+		t.Fatal("the full load was not retried")
+	}
+	if _, e := spentIn(t, x); e || !strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatal("the load the firewall took kept the edge held, or its quota spent")
+	}
+	x.advance(readEvery)
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the reading after the load the firewall took keeps the edge held")
+	}
+}
+
+// TestKernelCutRecorded (#5399 item 2, KRN-12): the record follows the
+// kernel's cut. A reading whose running table has TripSet holding the
+// edge trips the record, with its card and lift, even while the count is
+// within the cap; not while the edge is held (the owner lifted it today),
+// and not when the set belongs to another day's quota, which the drop
+// empties.
+func TestKernelCutRecorded(t *testing.T) {
+	x, doc, a := capped(t)
+	tripped := func(quota string) []byte {
+		b := listingOf(t, x, doc, 7, 10, 100, true)
+		var o map[string][]map[string]any
+		if err := json.Unmarshal(b, &o); err != nil {
+			t.Fatal(err)
+		}
+		o["nftables"] = append(o["nftables"], map[string]any{"set": map[string]any{
+			"family": "inet", "table": nft.Table, "name": nft.TripSet, "elem": []any{x.cfg.Layout.Edge},
+		}})
+		if quota != "" {
+			o["nftables"] = append(o["nftables"], map[string]any{"quota": map[string]any{"family": "inet", "table": nft.Table, "name": quota}})
+		}
+		b, err := json.Marshal(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	// Another day's edge quota running: the drop empties the set.
+	x.setListing(tripped("qe_0000000000000000"))
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a set the drop empties cut the record")
+	}
+	x.setListing(tripped(""))
+	x.advance(readEvery)
+	cut, why := x.d.edge.Cut()
+	if !cut || why != "the firewall cut it at the first byte past its byte cap of 5000 bytes today. Lift the cut once you trust the edge again." {
+		t.Fatalf("a kernel cut within the count: cut %v, reason %q", cut, why)
+	}
+	if !strings.Contains(x.logText(), "byte caps: edge: the firewall cut it") {
+		t.Fatal("the kernel's cut is not logged")
+	}
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the set after the owner's lift today cut the record again")
+	}
+	// The channel's counts read follows the kernel's cut too.
+	x.d.edge.mu.Lock()
+	x.d.edge.st.Lifted = 0
+	x.d.edge.mu.Unlock()
+	if _, err := x.d.counts(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cut, _ := x.d.edge.Cut(); !cut; cut, _ = x.d.edge.Cut() {
+		if time.Now().After(deadline) {
+			t.Fatal("the channel's counts read left the kernel's cut unrecorded")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

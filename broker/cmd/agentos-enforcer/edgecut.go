@@ -47,10 +47,19 @@ type edgeCutState struct {
 	Lifted uint32 `json:"lifted,omitempty"`
 }
 
+// tamperAdvice ends the reason of a cut whose record is missing or does
+// not read back: the fault is in the enforcer's state, not the edge.
+const tamperAdvice = ". Someone may have tampered with the enforcer: check it before you lift the cut."
+
+// trustAdvice ends the reason of a cut the edge's own bytes caused.
+const trustAdvice = ". Lift the cut once you trust the edge again."
+
 // openEdgeCut reads the record. One that is missing or does not read back
-// is a cut: provisioning wrote it (provisionState), so a box that runs has one.
-// The edge stays cut, the log says why, and the owner's lift writes the
-// record whole again (fails closed, P5).
+// is a cut: provisioning wrote it (provisionState) and nothing removes it,
+// so its loss means root on the enforcer or lost state (#5399). The edge
+// stays cut, the log says why, the alert for a missing record turns the
+// light red, and the owner's lift writes the record whole again and
+// resolves the alert (fails closed, P5). Such a cut carries no day.
 func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edgeCut, error) {
 	c := &edgeCut{store: store, alerts: alerts, logf: logf}
 	b, err := store.Load()
@@ -58,11 +67,13 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 		return nil, err
 	}
 	if b == nil {
-		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut is missing"}
+		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut is missing" + tamperAdvice}
 		logf("edge cut: " + fileEdgeCut + " missing, the edge stays cut until you lift it on the page")
+		recordMissing(alerts, edgeDevice, logf)
 	} else if err := json.Unmarshal(b, &c.st); err != nil {
-		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut does not read back"}
+		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut does not read back" + tamperAdvice}
 		logf("edge cut: " + fileEdgeCut + " unreadable, the edge stays cut until you lift it on the page: " + err.Error())
+		recordMissing(alerts, edgeDevice, logf)
 	}
 	return c, nil
 }
@@ -127,7 +138,11 @@ func (c *edgeCut) Persist() error {
 
 // Lift lifts the cut on day. The page calls it only after the owner's
 // passkey assertion on the page's own lift challenge; nothing on the
-// channel reaches it. A lift that is not saved does not happen.
+// channel reaches it. A lift that is not saved does not happen. A lift of
+// a cut on its overrun's day, or of one with no day (a record missing or
+// unreadable, whose overrun day is unknown), holds for the rest of day,
+// so an edge already past its cap is not cut again at the next reading
+// (#5399 item 4).
 func (c *edgeCut) Lift(day uint32) error {
 	c.mu.Lock()
 	if !c.st.Cut {
@@ -135,7 +150,7 @@ func (c *edgeCut) Lift(day uint32) error {
 		return nil
 	}
 	next := edgeCutState{}
-	if c.st.Day == day {
+	if c.st.Day == day || c.st.Day == 0 {
 		next.Lifted = day
 	}
 	b, _ := json.Marshal(next)
@@ -148,9 +163,10 @@ func (c *edgeCut) Lift(day uint32) error {
 	return c.alerts.Lifted(edgeDevice)
 }
 
-// tripEdge cuts the edge for an overrun and puts the cut in force at once.
+// tripEdge cuts the edge for why, a cause of its own bytes, and puts the
+// cut in force at once.
 func (d *Enforcer) tripEdge(why string) {
-	if d.edge.Trip(traffic.Day(d.dp.Now()), why) {
+	if d.edge.Trip(traffic.Day(d.dp.Now()), why+trustAdvice) {
 		d.dp.Logf("byte caps: edge: " + why + "; the edge is cut until you lift it on the enforcer's page")
 		d.loadCut()
 	}
@@ -176,14 +192,16 @@ func (p pageEdge) LiftEdge() error {
 // merges segments spent (ENF-l-16), and the edge's cut as recorded. The
 // kernel cuts the edge at the first byte past its cap (nft.TripSet) unless
 // the edge is held: while its quota is not its count (the edge's port
-// merges segments, or the day is unreadable and every cap spent,
-// ENF-l-14), so an edge within its cap is never cut, and on the day the
-// owner lifted its cut. d.fwMu is held.
+// merged segments since the last full load the firewall took, or the day
+// is unreadable and every cap spent, ENF-l-14), so an edge within its cap
+// is never cut, and on the day the owner lifted its cut. The hold for a
+// merge lasts until a full load starts the quota and TripSet afresh:
+// a refused one leaves the spent quota running, which would fill the set
+// (#5399 item 5). d.fwMu is held.
 func (d *Enforcer) holdDrop(p *nft.Drop) {
 	d.spendMerging(p)
-	_, merging := d.net.merging[d.cfg.Layout.Edge]
 	cut, lifted := d.edge.held(p.Day)
-	p.EdgeCut, p.EdgeHold = cut, lifted || merging || d.net.counter == nil
+	p.EdgeCut, p.EdgeHold = cut, lifted || d.net.edgeMerged || d.net.counter == nil
 }
 
 // loadCut writes the drop again with the edge's cut as recorded now, so a

@@ -340,6 +340,53 @@ func (w *writer) edgeCut(l Layout, p Drop, qe string, have map[string]bool) {
 	}
 }
 
+// EdgeTripped reports whether the kernel cuts the edge on the running
+// table once the Drops text for p is applied to it: TripSet holds the
+// edge's interface and the text keeps the set, as it does while the
+// running edge quota is p's (edgeCut empties it when it replaces another).
+// The daemon records such a cut, so a cut in the kernel always has a card
+// and a lift even while its readings lag (#5399 item 2). p must not be
+// held (Drop.EdgeHold), or the set cuts nothing.
+func EdgeTripped(running []byte, l Layout, p Drop) (bool, error) {
+	sets, err := listed(running)
+	if err != nil {
+		return false, err
+	}
+	have, err := capObjects(running)
+	if err != nil {
+		return false, err
+	}
+	qe := edgeQuota(p.Day, p.EdgeCap)
+	for name := range have {
+		if strings.HasPrefix(name, "qe_") && name != qe {
+			return false, nil
+		}
+	}
+	for _, s := range sets {
+		if s.Name != TripSet {
+			continue
+		}
+		for _, raw := range s.Elem {
+			var v string
+			if json.Unmarshal(raw, &v) != nil {
+				var o struct {
+					Elem struct {
+						Val string `json:"val"`
+					} `json:"elem"`
+				}
+				if json.Unmarshal(raw, &o) != nil {
+					continue
+				}
+				v = o.Elem.Val
+			}
+			if v == l.Edge {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // capped is the rules of a chain that charges a packet to quota q of cap:
 // past it, the packet goes to chain past; none for a cap the kernel's
 // quota cannot hold, which then only trips.

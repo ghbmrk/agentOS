@@ -586,12 +586,20 @@ func TestLiftEdgeCut(t *testing.T) {
 	if code, _ := g.tapState(g.a, ActLiftEdge, ""); code != http.StatusConflict || ed.lifts != 0 {
 		t.Errorf("a lift of an edge not cut: %d", code)
 	}
-	ed.cut, ed.reason = true, "byte cap passed: 6000 of 5000 bytes today <b>"
+	ed.cut, ed.reason = true, "byte cap passed: 6000 of 5000 bytes today <b>. Lift the cut once you trust the edge again."
 	h := g.homeHTML()
-	if !strings.Contains(h, "The edge box is cut off: byte cap passed: 6000 of 5000 bytes today &lt;b&gt;.") ||
+	if !strings.Contains(h, "The edge box is cut off: byte cap passed: 6000 of 5000 bytes today &lt;b&gt;. Lift the cut once you trust the edge again.</p>") ||
 		!strings.Contains(h, `data-action="lift-edge"`) {
 		t.Fatalf("home does not show the cut edge and its lift:\n%s", h)
 	}
+	// #5399 item 1: the advice is the reason's own, so a cut whose record
+	// is missing says to check the enforcer, never to trust the edge.
+	ed.reason = "the record of the edge's cut is missing. Someone may have tampered with the enforcer: check it before you lift the cut."
+	if h := g.homeHTML(); !strings.Contains(h, "The edge box is cut off: the record of the edge&#39;s cut is missing. Someone may have tampered with the enforcer: check it before you lift the cut.</p>") ||
+		strings.Contains(h, "trust the edge") {
+		t.Fatalf("a missing record's card:\n%s", h)
+	}
+	ed.reason = "byte cap passed: 6000 of 5000 bytes today <b>. Lift the cut once you trust the edge again."
 	if code, _ := g.tapState(g.a, ActLiftEdge, "x"); code != http.StatusNotFound {
 		t.Errorf("a lift with a target: %d", code)
 	}

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
+	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
@@ -447,30 +448,44 @@ func TestLoadRefusesUncompiled(t *testing.T) {
 	}
 }
 
-// TestFailedListingBytesDropped: a running table that does not read is
-// taken as empty, whatever bytes came with the error, so the load is
-// the document's own.
+// TestFailedListingBytesDropped: at the first load, a running table that
+// does not read is taken as empty, whatever bytes came with the error, so
+// the load is the document's own. Once this process has loaded one, a load
+// over a table that does not read is refused and the running table stays
+// (#5399 item 6): replacing it would lose its bytes since the last reading
+// and the edge in TripSet; the next tick tries again.
 func TestFailedListingBytesDropped(t *testing.T) {
 	x, _ := enrolled(t, false)
-	x.fire.mu.Lock()
-	x.fire.listAt = func(int) ([]byte, error, bool) {
-		return []byte(`{"nftables": [`), errors.New("nft: list failed"), true
+	failing := func(on bool) {
+		x.fire.mu.Lock()
+		x.fire.listAt = nil
+		if on {
+			x.fire.listAt = func(int) ([]byte, error, bool) {
+				return []byte(`{"nftables": [`), errors.New("nft: list failed"), true
+			}
+		}
+		x.fire.mu.Unlock()
 	}
-	x.fire.mu.Unlock()
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	failing(true)
 	doc := home()
 	doc.Devices[0].Allow = []string{"tv.example", "tv2.example"}
+	n := loads()
 	x.d.fwMu.Lock()
 	err := x.d.loadNetwork(context.Background(), doc)
 	x.d.fwMu.Unlock()
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || loads() != n || loadStep(err) != page.LoadFirewall || !strings.Contains(err.Error(), "running table unreadable, it stays in force") {
+		t.Fatalf("a load over a table this process loaded that does not read: %v, %d loads", err, loads()-n)
 	}
-	if x.fire.last() != x.fullLoad(doc) {
+	x.d.Close()
+	x.start() // its first load
+	if x.fire.last() != x.fullLoad(x.current()) {
 		t.Fatal("the load read the bytes of a failed listing")
 	}
 	if x.logs("firewall: running table unreadable") == 0 {
 		t.Fatal("the unreadable running table was not logged")
 	}
+	failing(false)
 }
 
 // TestMergingReloadFailureLogged: a reload a port's merging asks for
