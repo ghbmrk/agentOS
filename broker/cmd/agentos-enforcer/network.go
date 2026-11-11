@@ -286,7 +286,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 	// one leaves the resolver on the old policy's files, or none.
 	var why page.PolicyCause
 	if genErr != nil {
-		why = unservable(genErr, doc, l, d.cfg.DNS)
+		why = refusedCause(genErr)
 	}
 	d.net.resMu.Lock()
 	d.net.resRuns = len(dnsrun.Names(files)) > 0
@@ -336,29 +336,21 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
-// unservable is err, dns.Generate's refusal of doc, by its typed cause
-// for the page (#5307): a device on a Wi-Fi network the setup serves no
-// network for, or a listed name that is not a DNS host name. These are
-// the configuration refusals left once doc compiles, since the setup
-// alone was checked at start (config); any other is untyped, and the
-// page says so without the error's text.
-func unservable(err error, doc policy.Document, l nft.Layout, s dns.Setup) page.PolicyCause {
-	if errors.Is(err, dns.ErrConfig) {
-		for _, dev := range doc.Devices {
-			n, ok := nft.VLAN(dev.WiFi)
-			iface := l.Trunk + "." + strconv.Itoa(n)
-			if ok && dev.Network == policy.NetDevices && !slices.ContainsFunc(s.Nets, func(x dns.Net) bool { return x.Iface == iface }) {
-				return page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
-			}
-		}
-		sets, _ := nft.AllowSets(doc, l) // none on an error: untyped
-		for _, set := range sets {
-			for _, name := range set.Names {
-				if !dns.Hostname(name) {
-					return page.PolicyCause{Kind: page.PolicyName, Name: name}
-				}
-			}
-		}
+// refusedCause is err, dns.Generate's refusal of a document, by the typed
+// cause it carries (#5307, #5352): a device on a Wi-Fi network the setup
+// serves no network for, or a listed name that is not a DNS host name,
+// each the one Generate refused. These are the configuration refusals
+// left once the document compiles, since the setup alone was checked at
+// start (config); any other is untyped, and the page says so without
+// the error's text.
+func refusedCause(err error) page.PolicyCause {
+	var dev dns.UnservedDevice
+	var name dns.BadName
+	switch {
+	case errors.As(err, &dev):
+		return page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
+	case errors.As(err, &name):
+		return page.PolicyCause{Kind: page.PolicyName, Name: name.Name}
 	}
 	return page.PolicyCause{Kind: page.PolicyUntyped}
 }
