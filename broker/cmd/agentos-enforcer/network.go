@@ -23,6 +23,7 @@ import (
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
@@ -267,10 +268,15 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// with it. The load still goes ahead, so a cut or a tightening is
 		// never held back, with every cap held spent until a full load
 		// that read its table is taken (holdDrop). The first load after a
-		// start has none to read: a reboot leaves no table.
-		d.setUnread(err != nil && d.loaded != "")
-		if err != nil {
+		// start has none to read when nft says the table is absent (ENOENT,
+		// load.ErrNoTable): a reboot leaves no table. Any other failure
+		// there is unread, crash restart included (#5491).
+		absent := err != nil && d.loaded == "" && errors.Is(err, load.ErrNoTable)
+		d.setUnread(err != nil && !absent)
+		if err != nil && !absent {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
+		}
+		if err != nil {
 			running = nil
 		}
 		// A full load starts new counters (a new Gen), so the bytes since

@@ -21,6 +21,12 @@ import (
 
 var ErrLoad = errors.New("load: ruleset refused; the previous one stays")
 
+// ErrNoTable is a listing of a table that is not there: nft exited 1 with
+// "Error: No such file or directory" (ENOENT). Every other failure to list
+// (EPERM, a deadline, a killed nft, a missing binary) is not it, so the
+// table may be there and unread (ENF-l-15).
+var ErrNoTable = errors.New("load: table absent")
+
 // Loader runs nft. Bin is the absolute path of the image's nft binary; it
 // is never looked up on PATH.
 type Loader struct {
@@ -174,7 +180,12 @@ func (l Loader) List(ctx context.Context, table string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("load: listing %s: %v: %s", table, err, firstLine(stderr.String()))
+		line := firstLine(stderr.String())
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 && strings.HasSuffix(line, "No such file or directory") {
+			return nil, fmt.Errorf("load: listing %s: %w: %s", table, ErrNoTable, line)
+		}
+		return nil, fmt.Errorf("load: listing %s: %v: %s", table, err, line)
 	}
 	return stdout.Bytes(), nil
 }
