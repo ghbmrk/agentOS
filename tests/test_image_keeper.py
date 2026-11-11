@@ -1261,6 +1261,144 @@ class KeeperTreeTest(unittest.TestCase):
                 finally:
                     remove()
 
+    def test_a_path_through_a_box_link_or_below_a_mount_is_weighed_where_the_box_puts_it(self):
+        """#5400: a tree link into /var/run or /var/lock, which the tree lacks (tmpfiles makes them at boot), leads on
+        the box through the box's own link into /run, so the path is weighed there (tree_chase follows BOX_LINKS for a
+        step the tree lacks). Under /run the mount point itself is weighed by the tmpfiles.d lines that name it (#5421
+        Security 6787712450 1), and a path below a mount a unit or etc/fstab names, which hides the tree, is refused
+        (6787712450 2)."""
+        tmpf = "usr/lib/tmpfiles.d/zz.conf"
+        q = SYSTEM + "q.service"
+        nobody = {q: "[Service]\nRuntimeDirectory=hq\nUser=nobody\n"}
+        where = "ListenStream= in %ss.socket" % SYSTEM
+
+        def sock(path, user=True):
+            return {SYSTEM + "s.socket": "[Socket]\nListenStream=%s\n%s" % (path, "SocketUser=nobody\n" if user else "")}
+
+        def inside(path, d, owner):
+            return ("%s: /%s is inside /%s, which %s; PID 1 makes, links, binds or chowns it following any link that "
+                    "user puts on its way, so that user decides what PID 1 acts on; name a path only root can write, "
+                    "or make the directory in a unit that runs as root (#5233)" % (where, path, d, owner))
+        hq = "systemd makes for a unit and may hand to a user other than root (RuntimeDirectory= in %s)" % q
+        # The tree lacks var/run and var/lock (and var itself): the chase goes on through the box's link.
+        with tempfile.TemporaryDirectory() as t:
+            r = pathlib.Path(t)
+            (r / "srv").mkdir()
+            (r / "srv/vr").symlink_to("/var/run")
+            (r / "srv/vl").symlink_to("/var/lock")
+            (r / "srv/vv").symlink_to("/var")
+            self.assertEqual(check.tree_resolve(t, ["srv", "vr", "hq", "x"]), ["run", "hq", "x"])
+            self.assertEqual(check.tree_resolve(t, ["srv", "vl", "a", "x"]), ["run", "lock", "a", "x"])
+            self.assertEqual(check.tree_resolve(t, ["srv", "vv", ".", "run", "hq"]), ["run", "hq"])
+            self.assertEqual(check.tree_chase(t, "srv/vr/hq", missing_ok=True)[0], "/run/hq")
+            # The box's link counts as a hop, like the tree's.
+            self.assertEqual(check.tree_chase(t, "srv/vr/hq", hops=2, missing_ok=True)[0], "/run/hq")
+            with self.assertRaises(OSError):
+                check.tree_chase(t, "srv/vr/hq", hops=1, missing_ok=True)
+            (r / "var").mkdir()
+            self.assertEqual(check.tree_resolve(t, ["srv", "vr", "hq", "x"]), ["run", "hq", "x"])
+            self.assertEqual(check.tree_resolve(t, ["var", "lock"]), ["run", "lock"])
+            # A tree that holds the step is followed as it is.
+            (r / "var/run").mkdir()
+            self.assertEqual(check.tree_resolve(t, ["srv", "vr", "hq", "x"]), ["var", "run", "hq", "x"])
+            self.assertEqual(check.box_link_way([], ["var", "lib"]), None)
+            self.assertEqual(check.box_link_way(["var", "run"], ["x"]), None)
+        cases = (
+            # The row's repro: srv/vr -> /var/run, a nobody unit's runtime directory, a socket chowned inside it.
+            (dict(nobody, **{"srv/vr": ("link", "/var/run")}, **sock("/srv/vr/hq/x")), [inside("run/hq/x", "run/hq", hq)], None),
+            # srv/vl -> /var/lock: /run/lock is anyone's.
+            (dict({"srv/vl": ("link", "/var/lock")}, **sock("/srv/vl/a/x")),
+             [inside("run/lock/a/x", "run/lock", "anyone on the box can write")], None),
+            # Relative links too.
+            (dict(nobody, **{"srv/vr": ("link", "../var/run")}, **sock("/srv/vr/hq/x")), [inside("run/hq/x", "run/hq", hq)],
+             None),
+            # The unit-made directory itself, through the link: PID 1 makes it before the unit's user gets it.
+            (dict(nobody, **{"srv/vr": ("link", "/var/run")}, **sock("/srv/vr/hq")), [],
+             "where PID 1 may make, link or mount /run/hq (%s)" % where),
+        )
+        for files, want, made in cases:
+            with self.subTest(files=files):
+                self.assertFalse((self.root / "var/run").exists() or (self.root / "var/run").is_symlink())
+                remove = self.place(files)
+                try:
+                    self.assertEqual(check.inside_refusals(self.root), want)
+                    for w in want:
+                        self.assertIn(w, check.violations(self.root))
+                    if made:
+                        got = check.unit_made_refusals(self.root)
+                        self.assertEqual(len(got), 1, got)
+                        self.assertIn(made, got[0])
+                finally:
+                    remove()
+        # The /run mount point: a tmpfiles.d line that gives it to anyone, or to another user.
+        for line, what in (("z /run 0777 - - -", "mode 0777 for -:-"), ("d /run 0755 nobody - -", "mode 0755 for nobody:-")):
+            with self.subTest(line=line):
+                remove = self.place(dict(sock("/run/foo/sock"), **{tmpf: line + "\n"}))
+                try:
+                    # Every path under /run is refused, the image's own too; this one among them.
+                    self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], [
+                        "%s: /run/foo/sock: PID 1 makes, links, binds or chowns it following any link on its way, and a "
+                        "step of that way is not root's alone: a link to /run/foo/sock, through /run, where the box mounts "
+                        "its own filesystem and %s line 1 remakes it %s on the box; the line decides who can write it "
+                        "(#5400) (#5359)" % (where, tmpf, what)])
+                finally:
+                    remove()
+                remove = self.place(dict(nobody, **{tmpf: line + "\n"}))
+                try:
+                    got = [g for g in check.unit_made_refusals(self.root) if g.startswith("RuntimeDirectory= in " + q)]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertIn("through /run, where the box mounts its own filesystem and %s line 1" % tmpf, got[0])
+                finally:
+                    remove()
+
+        # Stock var.conf's "L /var/run" names the link, not /run (systemd 257's patch_var_run rewrites only paths
+        # below /var/run), so it leaves the mount point root's.
+        self.assertEqual(check.tmpfiles_paths(str(self.root), "/var/run", True)[0], ["var", "run"])
+        self.assertEqual(check.tmpfiles_paths(str(self.root), "/var/run/x")[0], ["run", "x"])
+        remove = self.place(dict(sock("/run/foo/sock", user=False), **{tmpf: "L /var/run - - - - ../run\n"}))
+        try:
+            self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], [])
+        finally:
+            remove()
+
+        # A mount that hides the tree: a unit's or etc/fstab's, the path below it refused whatever the mount holds.
+        def hidden(path, m, at=where):
+            return ("%s: /%s is below /%s, where a unit or etc/fstab mounts a filesystem the tree check does not read; "
+                    "the mount, not the tree, decides who can write that way, and PID 1 makes, links, binds or chowns "
+                    "the path following any link on it; name a path outside the mount (#5400)" % (at, path, m))
+        mount = {SYSTEM + "srv.mount": "[Mount]\nWhat=tmpfs\nWhere=/srv\nType=tmpfs\nOptions=mode=1777\n"}
+        for files, want in (
+                (dict(mount, **sock("/srv/s", user=False)), [hidden("srv/s", "srv")]),
+                (dict(mount, **sock("/srv/a/b/s", user=False)), [hidden("srv/a/b/s", "srv")]),
+                # A mount below another one is made inside it.
+                (dict(mount, **{SYSTEM + "srv-m.mount": "[Mount]\nWhat=/usr\nWhere=/srv/m\nOptions=bind\n"}),
+                 [hidden("srv/m", "srv", "the name of %ssrv-m.mount" % SYSTEM),
+                  hidden("srv/m", "srv", "Where= in %ssrv-m.mount" % SYSTEM)]),
+                # Beside the mount, and the mount point itself, pass.
+                (dict(mount, **sock("/srv2/s", user=False)), []),
+                (dict(mount, **sock("/srv", user=False)), [])):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    self.assertEqual(check.inside_refusals(self.root), want)
+                finally:
+                    remove()
+        fstab = self.root / "etc/fstab"
+        old = fstab.read_text() if fstab.is_file() else None
+        remove = self.place(sock("/srv/s", user=False))
+        try:
+            # The root filesystem is the tree itself, so its line hides nothing.
+            write(self.root, "etc/fstab", (old or "") + "UUID=x / ext4 defaults,noexec 0 1\n")
+            self.assertEqual(check.inside_refusals(self.root), [])
+            write(self.root, "etc/fstab", (old or "") + "tmpfs /srv tmpfs mode=1777 0 0\n")
+            self.assertEqual(check.inside_refusals(self.root), [hidden("srv/s", "srv")])
+        finally:
+            remove()
+            if old is None:
+                fstab.unlink()
+            else:
+                fstab.write_text(old)
+
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
         # the image makes each keeper path at boot, before any main-side unit, and the mask has no "-".

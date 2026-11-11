@@ -504,9 +504,15 @@ def chain_refusal(root, parts, target, held, mounted=False, skip=frozenset()):
     refused by step_refusal's rules at any step, or None. HELD: the path is the tree's, not under a box
     mount, so a step the tree lacks is weighed by the tmpfiles.d lines that may make it. MOUNTED (#5167,
     with HELD): the path is under a box mount, so the mount point is the box's own and each step below
-    it is weighed as one the tree lacks (the mount hides the tree's). SKIP (#5359): steps another rule
-    weighs, passed here."""
+    it is weighed as one the tree lacks (the mount hides the tree's); the mount point itself is the box's
+    root-owned mount, weighed by the tmpfiles.d lines that name it (#5400). SKIP (#5359): steps another
+    rule weighs, passed here."""
     gid = TREE_GROUP
+    if mounted and parts[0] not in skip:
+        made = tmpfiles_maker(root, parts[:1])
+        if made:
+            return ("a link to %s, through /%s, where the box mounts its own filesystem and %s line %d remakes it %s "
+                    "on the box; the line decides who can write it (#5400)" % ((target, parts[0]) + made))
     for k in range(1 + mounted, len(parts) + 1):
         d = "/".join(parts[:k])
         if d in skip:
@@ -2136,11 +2142,23 @@ def inside_refusals(root):
     at the path itself (socket_chown's chown, path_chown_recursive below a mount, Symlinks=), and that
     user can swap any entry inside for a link between two of its steps, so the user decides what PID 1
     acts on. A mount point inside a unit-made directory is unit_made_refusals' (rule 4: the chown descends
-    into it), whoever runs the unit, so it is not refused twice."""
+    into it), whoever runs the unit, so it is not refused twice. A path below a mount point a unit or
+    etc/fstab names (not one of BOX_MOUNTS) is refused too: the mount hides the tree (#5400)."""
     root, out, refused = str(root), [], set()
-    held = cached(root_made_dirs, root)
-    for steps, where, kind in cached(unit_made_paths, root)[0]:
+    held, named = cached(root_made_dirs, root), cached(unit_made_paths, root)[0]
+    # #5400: a mount the box does not make itself (BOX_MOUNTS) hides the tree below it, and the check does not read
+    # what it holds (a tmpfs's mode=, a disk's root directory), so a path below one is refused (fail closed).
+    mounts = sorted({tuple(s) for s, _, k in named if k == "mount" and s and "/".join(s) not in BOX_MOUNTS})
+    for steps, where, kind in named:
         if kind == "watch" or where in refused:  # one line per setting, of its words as written or resolved
+            continue
+        hid = next((m for m in mounts if len(m) < len(steps) and tuple(steps[:len(m)]) == m), None)
+        if hid is not None:
+            out.append("%s: /%s is below /%s, where a unit or etc/fstab mounts a filesystem the tree check does not "
+                       "read; the mount, not the tree, decides who can write that way, and PID 1 makes, links, binds or "
+                       "chowns the path following any link on it; name a path outside the mount (#5400)"
+                       % (where, "/".join(steps).split(",", 1)[0], "/".join(hid)))
+            refused.add(where)
             continue
         for k in range(1, len(steps)):
             d = "/".join(steps[:k])
@@ -2863,7 +2881,8 @@ def tree_chase(root, rel, hops=40, missing_ok=False, walked=None):
     """REL resolved as the booted image resolves it (systemd's chase with the image as root):
     symlinks are followed inside ROOT, an absolute target from ROOT and never from the build host,
     and '..' stops at ROOT. Returns (in-image path, lstat of it). A path that enters one of
-    BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. Raises
+    BOX_MOUNTS returns ("/" + that path, None) without looking at the tree. A step the tree lacks at or
+    above one of BOX_LINKS is the box's link, followed as the box follows it (box_link_way, #5400). Raises
     FileNotFoundError if a step is missing (with MISSING_OK, returns (where the path would go, None):
     the rest taken as written, '..' and all), and OSError if links loop or a step is not a directory.
     WALKED, a list, gets each tree directory the chase steps into after following a link (#1803: who
@@ -2882,6 +2901,15 @@ def tree_chase(root, rel, hops=40, missing_ok=False, walked=None):
             return "/" + "/".join([name] + parts), None
         p = "/".join(cur + [name])
         st = tree_lstat(root, p)
+        box = box_link_way(cur, [name] + parts) if st is None else None
+        if box is not None:
+            # #5400: the tree lacks a step at or above one of the box's own links (BOX_LINKS), which tmpfiles
+            # makes at boot, so the box follows that link whether or not the tree holds it yet.
+            hops -= 1
+            if hops < 0:
+                raise OSError(errno.ELOOP, "too many levels of links", p)
+            cur, parts, linked = [], box, True
+            continue
         if st is None:
             if missing_ok:
                 return "/".join(cur + [name] + parts), None
@@ -2902,6 +2930,18 @@ def tree_chase(root, rel, hops=40, missing_ok=False, walked=None):
         if linked and walked is not None and parts and p not in walked:
             walked.append(p)
     return "/".join(cur), st
+
+
+def box_link_way(cur, rest):
+    """#5400: the steps the box walks instead, from /, when the tree holds CUR and lacks REST[0], and CUR + REST
+    is at or under a BOX_LINKS link whose path REST[0] is on (the link or a step above it): the link's target
+    resolved from the link's directory, then the rest below the link. None otherwise."""
+    full = cur + [x for x in rest if x != "."]
+    for l, t in BOX_LINKS.items():
+        lp = l.split("/")
+        if len(cur) < len(lp) and full[:len(lp)] == lp:
+            return path_parts("/".join(lp[:-1] + [t[0]])) + full[len(lp):]
+    return None
 
 
 def tree_stat(root, rel):
@@ -3399,9 +3439,11 @@ def tmpfiles_removers(root):
 def tmpfiles_paths(root, path, link=False):
     """#1803, #1829: the glob components a tmpfiles.d PATH may name: as written, with the /var/run
     rewrite, and through the image's links. LINK: an L line makes its last component the link, so only
-    the steps before it are resolved; it does not remake where a link the tree already holds leads."""
+    the steps before it are resolved; it does not remake where a link the tree already holds leads. The
+    rewrite is systemd 257's patch_var_run: a path below /var/run, never /var/run itself (stock var.conf's
+    "L /var/run" names the link, not /run; a line other than L on it still reaches /run through the link)."""
     parts = path_parts(tmpfiles_expand(path))
-    if parts[:2] == ["var", "run"]:
+    if parts[:2] == ["var", "run"] and len(parts) > 2:
         parts = ["run"] + parts[2:]
     paths = [parts]
     try:
