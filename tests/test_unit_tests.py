@@ -242,6 +242,48 @@ class CommandTest(unittest.TestCase):
         unit_tests.sweep(names[0])
         self.assertEqual(stray.wait(timeout=10), -9)
 
+    def test_run_one_kills_a_child_of_the_module_that_left_its_session(self):
+        # #5449: run_one's sweep(module) is all that reaches a child of the module that left the
+        # attempt's session (setsid), so killpg misses it. Real strace -f would wait for that child
+        # rather than end, so a stand-in runs the rest of the command untraced, as the module's user.
+        if boundary_unready() and os.environ.get("AGENTOS_REQUIRE_UID_BOUNDARY") != "1":
+            self.skipTest(boundary_unready())
+        self.assertIsNone(boundary_unready())
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        os.chmod(root, 0o755)
+        (root / "tests").mkdir()
+        meet = root / "meet"
+        meet.mkdir()
+        os.chmod(meet, 0o1777)
+        name, trace_dir = "test_zz_sweep_pin", root / "reads"
+        (root / "tests" / f"{name}.py").write_text(textwrap.dedent(f"""\
+            import os, pathlib, subprocess, unittest
+            class Leave(unittest.TestCase):
+                def test_leave(self):
+                    p = subprocess.Popen(["sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                    pathlib.Path({str(meet / "pid")!r}).write_text(str(p.pid))
+            """))
+        unit_tests.prepare([name], trace_dir)
+        self.addCleanup(shutil.rmtree, unit_tests.scratch(trace_dir), True)
+
+        def alive(pid):
+            try:
+                return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+            except OSError:
+                return False
+        with mock.patch.object(unit_tests, "STRACE", ["/bin/sh", "-c", 'shift 2; exec "$@"', "sh"]):
+            _, rc, _, out = unit_tests.run_one(name, str(trace_dir), root=root)
+        self.assertEqual(rc, 0, out)
+        pid = int((meet / "pid").read_text())
+        self.addCleanup(lambda: alive(pid) and os.kill(pid, 9))
+        for _ in range(50):  # SIGKILL is delivered before kill() returns; the exit itself may lag
+            if not alive(pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(alive(pid), f"pid {pid}, a setsid child of {name}, outlived run_one")
+
 
 class RunTest(unittest.TestCase):
     def fake(self, fail=(), log=None, delay=0.05):

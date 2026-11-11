@@ -8,6 +8,7 @@
 # a tool is missing. HOSTCHECK_KERNEL names the guest kernel; HOSTCHECK_TOOLS_ROOT, if set,
 # a root holding qemu, swtpm and OVMF (CI: the image's Debian snapshot, #4906).
 import argparse
+import hashlib
 import http.server
 import json
 import os
@@ -1016,7 +1017,20 @@ DPKG = re.compile(r"\bdpkg\s(?:.*\s)?(?:-[A-Za-z]*i\b|--install\b|--unpack\b)")
 
 # CI-hostcheck-fetch-retry (#5321): the hostcheck job's guest-kernel fetch, as ci.yml must hold it.
 KERNEL_FETCH = ("curl --proto '=https' -fsSL --retry 8 --retry-connrefused --retry-max-time 600 "
-                "--connect-timeout 30 --max-time 180 -o \"$deb\" \"$KERNEL_URL\"")
+                "--connect-timeout 30 --max-time 180 -o \"$deb\" \"$url\" && { src=$url; break; }")
+# CI-hostcheck-kernel-mirror (#5463): this repository's release asset first, the snapshot second, then
+# the pin decides; the lines from the source loop to the hash check, in order.
+KERNEL_SOURCES = [
+    "src=",
+    'for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"; do',
+    KERNEL_FETCH,
+    'echo "::warning::the guest kernel did not download from $url"',
+    "done",
+    '[ -n "$src" ] || { echo "::error::the guest kernel did not download from either source"; exit 1; }',
+    'got=$(sha256sum "$deb" | cut -d\' \' -f1)',
+    'echo "guest kernel: $src sha256 $got (pinned: $KERNEL_SHA256)"',
+    '[ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }',
+]
 
 
 class HostcheckJobTest(unittest.TestCase):
@@ -1095,7 +1109,18 @@ class HostcheckJobTest(unittest.TestCase):
             out.append("the guest kernel has no SHA-256 pin")
         if not url or env.get("KERNEL_VMLINUZ") != f"boot/vmlinuz-{url.group(1)}-generic":
             out.append("the guest kernel path is not the pinned package's vmlinuz")
+        # #5463: the mirror is this repository's release of exactly that package, tagged by its version.
+        deb = env.get("KERNEL_URL", "").rsplit("/", 1)[-1]
+        ver = re.fullmatch(r"linux-image-[\w.+~-]+_([\w.+~-]+)_amd64\.deb", deb)
+        if not ver or env.get("KERNEL_MIRROR_URL") != ("https://github.com/ghbmrk/agentOS/releases/download/"
+                                                       f"guest-kernel-{ver.group(1)}/{deb}"):
+            out.append("the guest kernel mirror is not this repository's release of the pinned package")
         lines = [ln.strip() for ln in b.splitlines()]
+        start = lines.index(KERNEL_SOURCES[0]) if KERNEL_SOURCES[0] in lines else -1
+        if start < 0 or lines[start:start + len(KERNEL_SOURCES)] != KERNEL_SOURCES:
+            out.append("the guest kernel is not fetched from the mirror, then the snapshot, then hash-checked")
+        if sum("curl " in ln for ln in lines) != 1:
+            out.append("the guest kernel has a fetch outside the source loop")
         want = ['got=$(sha256sum "$deb" | cut -d\' \' -f1)',
                 '[ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned '
                 '$KERNEL_SHA256"; exit 1; }',
@@ -1105,50 +1130,80 @@ class HostcheckJobTest(unittest.TestCase):
         idx = [lines.index(w) if w in lines else -1 for w in want]
         if -1 in idx or idx != sorted(idx):
             out.append("the guest kernel is not hash-checked before it is unpacked and named")
-        if not any(ln.startswith("curl --proto '=https' ") and ln.endswith('-o "$deb" "$KERNEL_URL"') for ln in lines):
-            out.append("the guest kernel is not fetched from the pinned URL over HTTPS")
+        if not any(ln.startswith("curl --proto '=https' ") and ln.endswith('-o "$deb" "$url" && { src=$url; break; }')
+                   for ln in lines):
+            out.append("the guest kernel is not fetched from the pinned URLs over HTTPS")
         if KERNEL_FETCH not in lines:
             out.append("the guest kernel fetch is not the bounded retry (#5321)")
         return out
 
-    def fetch(self, answers):
-        """Run the job's fetch line against a local server giving ANSWERS in turn: (exit, statuses served)."""
-        served = []
+    def fetch(self, answers, mirror=(404,), body=b"ok", pin=None):
+        """Run the job's source loop and hash check against two local servers, the mirror giving MIRROR
+        and the snapshot ANSWERS in turn (each serving BODY): (exit, snapshot statuses, stderr, mirror
+        statuses; stderr carries stdout too). PIN defaults to BODY's SHA-256."""
+        servers = []
+        for want in (mirror, answers):
+            served = []
 
-        class H(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                code = answers[min(len(served), len(answers) - 1)]
-                served.append(code)
-                self.send_response(code)
-                self.send_header("Content-Length", "2")
-                self.end_headers()
-                self.wfile.write(b"ok")
+            class H(http.server.BaseHTTPRequestHandler):
+                def do_GET(self, want=want, served=served):
+                    code = want[min(len(served), len(want) - 1)]
+                    served.append(code)
+                    self.send_response(code)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
 
-            def log_message(self, *a):
-                pass
+                def log_message(self, *a):
+                    pass
 
-        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        line = next(ln.strip() for _, b in job_steps(self.ci, "hostcheck") for ln in b.splitlines()
-                     if ln.strip().startswith("curl ") and "$KERNEL_URL" in ln)
+            srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            servers.append((srv, served))
+        lines = [ln.strip() for _, b in job_steps(self.ci, "hostcheck") if "HOSTCHECK_KERNEL=" in b
+                 for ln in b.splitlines()]
+        start = lines.index("src=")
+        end = next(i for i, ln in enumerate(lines) if ln.startswith('[ "$got" = "$KERNEL_SHA256" ]'))
+        script = "\n".join(lines[start:end + 1]).replace("'=https'", "'=http'")
+        (m, m_served), (s, s_served) = servers
         try:
             with tempfile.TemporaryDirectory() as d:
-                p = subprocess.run(["bash", "-c", 'deb="$D/k.deb"; ' + line.replace("'=https'", "'=http'")],
+                p = subprocess.run(["bash", "-e", "-c", 'deb="$D/k.deb"\n' + script],
                                    env={"PATH": os.environ["PATH"], "D": d,
-                                        "KERNEL_URL": f"http://127.0.0.1:{srv.server_port}/k.deb"},
-                                   capture_output=True, text=True, timeout=60)
+                                        "KERNEL_SHA256": pin or hashlib.sha256(body).hexdigest(),
+                                        "KERNEL_MIRROR_URL": f"http://127.0.0.1:{m.server_port}/k.deb",
+                                        "KERNEL_URL": f"http://127.0.0.1:{s.server_port}/k.deb"},
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
         finally:
-            srv.shutdown()
-            srv.server_close()
-        return p.returncode, served, p.stderr
+            for srv, _ in servers:
+                srv.shutdown()
+                srv.server_close()
+        return p.returncode, s_served, p.stdout, m_served
 
     def test_the_kernel_fetch_retries_an_outage_and_not_a_wrong_pin(self):
         # #5321: snapshot.ubuntu.com's 503/504 runs reddened hostcheck on PRs that never moved the pin.
-        rc, served, err = self.fetch([503, 504, 200])
+        rc, served, err, _ = self.fetch([503, 504, 200])
         self.assertEqual((rc, served), (0, [503, 504, 200]), err)
-        rc, served, err = self.fetch([404, 200])  # a moved pin is the PR's fault: no retry
-        self.assertEqual((rc, served), (22, [404]), err)
+        rc, served, err, _ = self.fetch([404, 200])  # a moved pin is the PR's fault: no retry
+        self.assertEqual((rc, served), (1, [404]), err)
         self.assertIn("404", err)
+        self.assertIn("did not download from either source", err)
+
+    def test_the_kernel_comes_from_the_mirror_first_and_the_pin_decides(self):
+        # #5463: the release asset first; the snapshot only when the asset does not download.
+        rc, served, err, mirror = self.fetch([200], mirror=[200])
+        self.assertEqual((rc, mirror, served), (0, [200], []), err)
+        rc, served, err, mirror = self.fetch([200], mirror=[503, 200])  # the mirror's own retry
+        self.assertEqual((rc, mirror, served), (0, [503, 200], []), err)
+        rc, served, err, mirror = self.fetch([200], mirror=[404])  # no asset: the snapshot serves
+        self.assertEqual((rc, mirror, served), (0, [404], [200]), err)
+        self.assertIn("did not download from http://127.0.0.1:", err)
+        # Bytes off the pin fail the step, from whichever host, and no other source is tried.
+        rc, served, err, mirror = self.fetch([200], mirror=[200], pin="0" * 64)
+        self.assertEqual((rc, mirror, served), (1, [200], []), err)
+        self.assertIn("hashes to", err)
+        rc, served, err, mirror = self.fetch([200], mirror=[404], pin="0" * 64)
+        self.assertEqual((rc, mirror, served), (1, [404], [200]), err)
 
     def test_vm_stack_comes_from_the_snapshot(self):
         self.assertEqual(self.problems(self.ci), [])
@@ -1194,6 +1249,19 @@ class HostcheckJobTest(unittest.TestCase):
             "fixed delay": ("--retry 8 ", "--retry 8 --retry-delay 5 "),
             "retry a 404": ("--retry-connrefused ", "--retry-all-errors "),
             "no try timeout": ("--max-time 180 ", ""),
+            "no mirror": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"', 'for url in "$KERNEL_URL"'),
+            "no second source": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"', 'for url in "$KERNEL_MIRROR_URL"'),
+            "snapshot first": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"',
+                               'for url in "$KERNEL_URL" "$KERNEL_MIRROR_URL"'),
+            "third source": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"',
+                             'for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL" "$X"'),
+            "other mirror": ("https://github.com/ghbmrk/agentOS/releases/", "https://example.com/ghbmrk/agentOS/releases/"),
+            "other mirror tag": ("download/guest-kernel-6.8.0-149.149/", "download/guest-kernel-6.8.0-150.150/"),
+            "other mirror file": ("149.149/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb\n",
+                                  "149.149/linux-image-6.8.0-150-generic_6.8.0-150.150_amd64.deb\n"),
+            "no source guard": ('          [ -n "$src" ] ||', "          true ||"),
+            "retry on a bad hash": ('-o "$deb" "$url" && { src=$url; break; }', '-o "$deb" "$url" && src=$url'),
+            "a fetch outside the loop": ("          src=\n", '          src=\n          curl -fsSL -o "$deb" "$X"\n'),
             "kernel env elsewhere": ('echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"',
                                      'echo "HOSTCHECK_KERNEL=$(ls "$RUNNER_TEMP"/k/boot/vmlinuz-*)" >> "$GITHUB_ENV"'),
         }.items():
