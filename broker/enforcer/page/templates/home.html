@@ -45,6 +45,11 @@
 {{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
 {{end}}</div>
 {{end}}
+{{if .Unseeded}}<h2>Addresses handed out</h2>
+<div class="pending warn">
+<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
+</div>
+{{end}}
 {{with .Restarting}}<h2>Names and addresses</h2>
 <div class="pending warn">
 {{range .}}<p>{{.}}</p>
