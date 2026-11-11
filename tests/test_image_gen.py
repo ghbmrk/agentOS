@@ -524,6 +524,28 @@ class InitrdTest(unittest.TestCase):
                     (name, self.L, b"/usr/lib/systemd/system/" + unit.encode())])))
                 self.assertEqual(got, ["%s: a unit or drop-in outside /usr/lib" % name])
 
+    def test_unit_link_names_a_unit_file(self):
+        # L3 6805882795: a .wants or .d entry may link to a unit file under /usr/lib/systemd/system, not a directory.
+        wants = "etc/systemd/system/initrd.target.wants"
+        for target, ok in ((b"/usr/lib/systemd/system/a.service", True), (b"/usr/lib/systemd/system/a@b.timer", True),
+                           (b"/usr/lib/systemd/system/a.target.wants", False), (b"/usr/lib/systemd/system/dir", False),
+                           (b"/usr/lib/systemd/system/a.service.d", False)):
+            with self.subTest(target):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
+                    (wants, self.D, b""), (wants + "/a", self.L, target)])))
+                self.assertEqual(got, [] if ok else [wants + "/a: links to a directory, not a unit file, under "
+                                                     "/usr/lib/systemd/system"])
+
+    def test_initrd_image_dirs_are_these_nine(self):
+        # Lens R2: each entry is pinned by name, so dropping one fails here and the loop below cannot pass without it.
+        nine = ("etc/extensions", "run/extensions", "var/lib/extensions", ".extra/sysext", "run/confexts",
+                "var/lib/confexts", "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
+        self.assertEqual(sorted(finish.INITRD_IMAGE_DIRS), sorted(nine))
+        for d in nine:
+            with self.subTest(d):
+                got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [(d + "/x.raw", self.F, b"x")])))
+                self.assertEqual(got, ["%s/x.raw: an image systemd-sysext or systemd-confext would merge" % d])
+
     def test_initrd_ships_no_extension_image(self):
         # Security 6804479798 release b: systemd-sysext's and systemd-confext's initrd search paths.
         for d in finish.INITRD_IMAGE_DIRS:
