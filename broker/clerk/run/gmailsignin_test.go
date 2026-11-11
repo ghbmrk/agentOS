@@ -470,21 +470,31 @@ func TestGmailSettingsRefuseWhatTheyCannotHold(t *testing.T) {
 // readMail closes the settings file it reads.
 func TestReadingTheSettingsClosesTheFile(t *testing.T) {
 	_, dir, _ := newGmailAccount(t)
-	open := func() int {
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, mailSettings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each fd still open on the file right after a read is one the read
+	// left: a leaked fd closes only when the GC finalizes its *os.File.
+	held := func() bool {
 		fds, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(fds)
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
 	}
-	before := open()
 	for range 64 {
 		if s, err := readMail(dir); err != nil || s.Address != gmailtest.User {
 			t.Fatalf("readMail = %+v, %v", s, err)
 		}
-	}
-	if n := open(); n-before >= 32 {
-		t.Fatalf("%d files open after 64 reads, %d before", n, before)
+		if held() {
+			t.Fatalf("readMail left %s open", path)
+		}
 	}
 }
 

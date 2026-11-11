@@ -213,21 +213,31 @@ func TestLoadingTheRegistrationClosesItsFile(t *testing.T) {
 	if err := saveReg(dir, testSealer(), *fakeClient, nil); err != nil {
 		t.Fatal(err)
 	}
-	open := func() int {
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, regFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each fd still open on the file right after a read is one the read
+	// left: a leaked fd closes only when the GC finalizes its *os.File.
+	held := func() bool {
 		fds, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(fds)
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
 	}
-	before := open()
 	for range 64 {
 		if r, ok := loadReg(dir, testSealer()); !ok || r != *fakeClient {
 			t.Fatalf("loadReg = %v, %v", r.ID, ok)
 		}
-	}
-	if n := open(); n-before >= 32 {
-		t.Fatalf("%d files open after 64 loads, %d before", n, before)
+		if held() {
+			t.Fatalf("loadReg left %s open", path)
+		}
 	}
 }
 
