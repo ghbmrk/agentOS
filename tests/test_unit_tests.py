@@ -81,6 +81,22 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((e["HOME"], e["USER"], e["LOGNAME"]), ("/r/reads.run/home/test_x", "ut-x", "ut-x"))
         self.assertEqual((e["GOCACHE"], e["GOMODCACHE"]), ("/r/reads.run/go/build", "/r/reads.run/go/mod"))
         self.assertEqual(e["GIT_OPTIONAL_LOCKS"], "0")
+        h = "/home/runner"  # a hosted runner's environment, as sudo -E passes it on
+        runner = {"XDG_CONFIG_HOME": f"{h}/.config", "XDG_CACHE_HOME": f"{h}/.cache", "XDG_DATA_HOME": f"{h}/.local/share",
+                  "XDG_STATE_HOME": f"{h}/.local/state", "XDG_RUNTIME_DIR": "/run/user/1001", "GOPATH": f"{h}/go",
+                  "GOENV": f"{h}/.config/go/env", "GITHUB_ENV": f"{h}/work/_temp/_runner_file_commands/set_env_x",
+                  "GITHUB_PATH": "/f", "GITHUB_OUTPUT": "/f", "GITHUB_STATE": "/f", "GITHUB_STEP_SUMMARY": "/f",
+                  "ACTIONS_RUNTIME_URL": "u", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "t", "GITHUB_TOKEN": "t"}
+        inputs = {"HOME": h, "AGENTOS_REFERENCE_ROOT": f"{h}/work/_temp/image-tools", "RUNNER_TEMP": f"{h}/work/_temp",
+                  "GITHUB_WORKSPACE": f"{h}/work/agentOS/agentOS", "GITHUB_SHA": "s"}
+        with mock.patch.dict(unit_tests.ENV, {**runner, **inputs}):
+            e2 = unit_tests.env("test_x", "/r/reads")
+        self.assertEqual(set(runner) & set(e2), set())  # the runner's own directories, files for later steps, tokens
+        self.assertEqual(e2["GITHUB_SHA"], "s")
+        # Nothing names the runner's home but what a test reads: the worktree and the job's inputs
+        # under the runner's work directory (PATH lists programs to run, not a place to write).
+        self.assertEqual([k for k, v in e2.items() if k != "PATH" and (v == h or v.startswith(h + "/"))
+                          and not v.startswith(h + "/work/")], [])
         n = int(unit_tests.ENV.get("GIT_CONFIG_COUNT", 0))  # git reads the worktree, another user's
         self.assertEqual((e["GIT_CONFIG_COUNT"], e[f"GIT_CONFIG_KEY_{n}"], e[f"GIT_CONFIG_VALUE_{n}"]),
                          (str(n + 1), "safe.directory", str(unit_tests.ROOT)))
@@ -1197,6 +1213,16 @@ class ClashTest(unittest.TestCase):
             pathlib.Path(d, "test_b" + unit_tests.CUT).write_text(w(9, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
+            # #5413: the Go directory every module's user shares is no clash; a name that only
+            # starts with it and leaves it through `..` is.
+            go = str(unit_tests.go_dir(d))
+            for path, rc in ((f"{go}/build/ab/abc-d", 0), (f"{go}/../escape", 1)):
+                pathlib.Path(d, "test_a.trace").write_text(w(1, path))
+                pathlib.Path(d, "test_b.trace").write_text(w(2, path))
+                with mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()), \
+                     mock.patch.dict(unit_tests.SERIAL, clear=True):
+                    self.assertEqual(clash_audit.main(["clash_audit.py", d]), rc, path)
+            pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             # A module with no trace fails: an empty directory never passes.
             pathlib.Path(d, "test_c.trace").unlink()
             out = io.StringIO()

@@ -350,8 +350,8 @@ def main(argv):
     missing = [m for m in unit_tests.modules() if m not in traces]
     for m in missing:
         print(f"::error::{m} has no trace in {d}: nothing to check it against")
-    go = str(unit_tests.go_dir(d)) + "/"  # the Go caches every module's user shares (unit_tests.env)
-    found = clashes(traces, cut=cut, is_shared=lambda path: shared(path) or path.startswith(go))
+    go = os.path.normpath(os.path.abspath(unit_tests.go_dir(d))) + "/"  # the Go caches every module's user shares (unit_tests.env)
+    found = clashes(traces, cut=cut, is_shared=lambda path: shared(path) or os.path.normpath(path).startswith(go))
     for kind, name, a, b in found:
         print(f"::error::{a} and {b} both {'write' if kind == 'path' else 'bind'} {name}")
     if found:

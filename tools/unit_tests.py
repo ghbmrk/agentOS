@@ -146,12 +146,18 @@ def go_dir(trace_dir):
     return scratch(trace_dir) / "go"
 
 
+# Not passed to a module: the directories a tool keeps its own files in (XDG's, GOPATH), which
+# name the runner's home and follow the module's HOME once unset; the runner's files for later steps
+# (GITHUB_ENV and the like); and its runtime tokens.
+UNSHARED = re.compile(r"XDG_\w+|GOPATH|GOENV|GITHUB_(?:ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)|ACTIONS_\w+|\w*_TOKEN\w*")
+
+
 def env(module, trace_dir):
     """The module's environment: ENV, its own home, the shared Go caches, and git told the worktree,
     another user's, is safe to read (in command scope, which git takes for safe.directory)."""
     home = scratch(trace_dir) / "home" / module
     n = int(ENV.get("GIT_CONFIG_COUNT", 0))
-    return {**ENV, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
+    return {**{k: v for k, v in ENV.items() if not UNSHARED.match(k)}, "HOME": str(home), "USER": user(module), "LOGNAME": user(module),
             "GOCACHE": str(go_dir(trace_dir) / "build"), "GOMODCACHE": str(go_dir(trace_dir) / "mod"),
             "GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": "safe.directory", f"GIT_CONFIG_VALUE_{n}": str(ROOT)}
 
