@@ -165,8 +165,9 @@ def _runners(value):
 
 
 def _norm(path):
-    """path with its .. and // resolved and no trailing /, so "/" and "" are both ""."""
-    return os.path.normpath(path).rstrip("/") if path else ""
+    """path with its .. and // resolved (normpath keeps a leading //, so that is collapsed first) and no
+    trailing /, so "/" and "" are both ""."""
+    return os.path.normpath(re.sub(r"^/+", "/", path)).rstrip("/") if path else ""
 
 
 def env(module, trace_dir):

@@ -114,7 +114,8 @@ class CommandTest(unittest.TestCase):
         with mock.patch.dict(unit_tests.ENV, {"HOME": h, "RUNNER_TEMP": f"{h}/work/_temp"}, clear=True), \
              mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
             for escapes in (f"{ws}/../../../.config", f"{ws}/..", f"{h}/work/_temp/../../.nvm",
-                            f"/tmp/..{h}/.cargo", f"/tmp/../{h}/go", f"{ws}/x/../../.."):
+                            f"/tmp/..{h}/.cargo", f"/tmp/../{h}/go", f"{ws}/x/../../..",
+                            f"/{h}/.nvm", f"//{h}/.nvm", f"//{ws}/../.cargo", f"///{h}"):
                 self.assertTrue(unit_tests._runners(escapes), escapes)
             for inside in (f"{ws}/x/../y", f"{ws}/tools/..", f"{h}/../../{ws}/z", f"{h}/work/_temp/a/../b",
                            f"{h}/..", f"/tmp/../usr", f"{ws}//x"):
@@ -122,7 +123,11 @@ class CommandTest(unittest.TestCase):
         with mock.patch.dict(unit_tests.ENV, {"HOME": f"{h}/x/..//", "RUNNER_TEMP": f"{h}/work/x/../_temp/"}, clear=True), \
              mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
             self.assertEqual([unit_tests._runners(v) for v in (f"{h}/.nvm", f"{h}/work/_temp/a", h)], [True, False, True])
-        for root_home in ("", "/", "//", "/x/.."):  # no home, or the root as home: nothing is the runner's
+        with mock.patch.dict(unit_tests.ENV, {"HOME": f"/{h}", "RUNNER_TEMP": f"//{h}/work/_temp"}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):  # a leading // on HOME or RUNNER_TEMP
+            self.assertEqual([unit_tests._runners(v) for v in (f"{h}/.nvm", f"//{h}/work/_temp/a", f"//{ws}/x")],
+                             [True, False, False])
+        for root_home in ("", "/", "//", "///", "/x/.."):  # no home, or the root as home: nothing is the runner's
             with mock.patch.dict(unit_tests.ENV, {"HOME": root_home}, clear=True):
                 self.assertEqual([unit_tests._runners(v) for v in ("", "/", f"{h}/.nvm", "/x/../y")], [False] * 4, root_home)
 
