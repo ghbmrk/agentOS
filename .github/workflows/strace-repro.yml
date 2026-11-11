@@ -40,7 +40,7 @@ jobs:
           for flags in "--seccomp-bpf" "--kill-on-exit --seccomp-bpf" ""; do
             for r in 1 2 3; do
               s=$(date +%s)
-              timeout 300 strace -f $flags -q -y -e trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir -e signal=none -o /dev/null python3 listen_eio.py 1500 2>err.txt; rc=$?
+              rc=0; timeout 300 strace -f $flags -q -y -e trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir -e signal=none -o /dev/null python3 listen_eio.py 1500 2>err.txt || rc=$?
               grep -v '^round' err.txt | head -2
               echo "flags='$flags' try $r: rc=$rc after $(( $(date +%s)-s ))s"
             done
