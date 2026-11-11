@@ -1120,7 +1120,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		}
 	}
 
-	capChains(w)
+	capChains(w, l)
 
 	w.open("chain output")
 	w.line("type filter hook output priority filter; policy accept;")

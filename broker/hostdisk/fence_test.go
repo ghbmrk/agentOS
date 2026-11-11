@@ -1,6 +1,9 @@
 package hostdisk
 
 import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -82,6 +85,19 @@ func TestFencePackageReportsUnreadFiles(t *testing.T) {
 	}
 }
 
+// sysoObject is the smallest ELF object the go command accepts as a .syso:
+// from go1.26.11 go list rejects a .syso that is not a well-formed object
+// (cmd/go/internal/work/security.go), so an empty file no longer lists.
+func sysoObject() string {
+	h := elf.Header64{Type: uint16(elf.ET_REL), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT), Shoff: 64, Ehsize: 64, Shentsize: 64, Shnum: 1}
+	copy(h.Ident[:], elf.ELFMAG)
+	h.Ident[elf.EI_CLASS], h.Ident[elf.EI_DATA], h.Ident[elf.EI_VERSION] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), byte(elf.EV_CURRENT)
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, h)
+	_ = binary.Write(&b, binary.LittleEndian, elf.Section64{}) // the null section an ET_REL needs
+	return b.String()
+}
+
 // Each kind of file the fence does not read is reported (Security R1 on
 // #4268): one the build leaves out, a cgo file, assembly and a syso object.
 func TestFenceReportsUnreadFiles(t *testing.T) {
@@ -93,7 +109,7 @@ func TestFenceReportsUnreadFiles(t *testing.T) {
 		"cgo.go":      "package x\n\nimport \"C\"\n",
 		"asm_amd64.s": "",
 		"asm_arm64.s": "",
-		"blob.syso":   "",
+		"blob.syso":   sysoObject(),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
