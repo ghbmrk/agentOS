@@ -1127,7 +1127,9 @@ class PremergeTest(unittest.TestCase):
     def test_image_vulncheck_is_the_one_exempt_job(self):
         # #5366: image-vulncheck stays out (Mark's #2919 paste); every other image job is held.
         self.assertEqual(premerge.HELD["image"], ("image-vulncheck",))
-        self.assertEqual(sorted(premerge.HELD), ["assurance", "formal", "image", "keycheck", "lane-gate", "vulncheck", "word-budget"])
+        self.assertEqual(sorted(premerge.HELD), ["assurance", "camnode-image", "drone-sitl", "enforcer-image", "formal", "image",
+                                                 "infer-real", "keycheck", "lane-gate", "mutgate", "testkit", "vision-real",
+                                                 "vulncheck", "word-budget"])
         self.assertEqual([x for x in premerge.HELD.values() if x != ()], [("image-vulncheck",)])
         onto, sha = self.held_repo()
         self.write(".github/workflows/image.yml", "on:\n  pull_request:\n")
@@ -1140,6 +1142,34 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(held(img([("build (a)", "success"), ("image-vulncheck", "cancelled")], c="cancelled")), ["image:cancelled"])
         self.assertEqual(held(img([("image-vulncheck", "cancelled")])), ["image:failure"])
         self.assertEqual(held(), ["image:missing"])
+
+    def test_every_pr_workflow_is_held_or_required(self):
+        # PREMERGE-held-rest (#5385): a PR-triggered workflow outside HELD merges past a cancelled run unless main's
+        # ruleset requires its jobs, so each workflow file with a PR trigger is HELD or UNHELD (ci, trusted-base,
+        # premerge), never both or neither, and a new one fails here until it is placed.
+        wfs = ROOT / ".github" / "workflows"
+        pr = {f.stem for f in wfs.glob("*.yml")
+              if any(premerge.pr_paths(f.read_text(), e) is not None for e in ("pull_request", "pull_request_target"))}
+        self.assertEqual(pr, set(premerge.HELD) | set(premerge.UNHELD))
+        self.assertFalse(set(premerge.HELD) & set(premerge.UNHELD))
+        # premerge reruns when each held workflow completes, else a hold stays until some other event: workflow_run
+        # names a workflow by its `name:`, which for testkit.yml is testkit-image.
+        on = (wfs / "premerge.yml").read_text().split("workflow_run:\n", 1)[1].split("\n")[0]
+        listed = {w.strip() for w in on.split("[", 1)[1].split("]", 1)[0].split(",")}
+        for stem in premerge.HELD:
+            name = next(l[6:].strip() for l in (wfs / f"{stem}.yml").read_text().splitlines() if l.startswith("name: "))
+            self.assertIn(name, listed, stem)
+        # a mutgate shard cut at its timeout fails the run (mutgate.yml), and that failure is not excused
+        onto, sha = self.held_repo()
+        self.write(".github/workflows/mutgate.yml", "on:\n  pull_request:\n")
+        sha = self.commit("mutgate")
+        ok = self.wf(1, "vulncheck", "success", sha)
+        held = lambda *runs: premerge.checks_held(self.r, bundle([ok, *runs]), "HEAD", "main")
+        self.assertEqual(held(), ["mutgate:missing"])
+        self.assertEqual(held(self.wf(2, "mutgate", "failure", sha, jobs=[("mutants x shard 0 of 2", "cancelled"),
+                                                                          ("mutgate", "failure")])), ["mutgate:failure"])
+        self.assertEqual(held(self.wf(2, "mutgate", "cancelled", sha)), ["mutgate:cancelled"])
+        self.assertEqual(held(self.wf(2, "mutgate", "success", sha)), [])
 
     def test_pr_paths_reads_only_the_block_style_it_knows(self):
         p = premerge.pr_paths

@@ -560,9 +560,14 @@ def _named(v, kind, pr):
 
 # PREMERGE-cancelled-checks (#5366): workflows main's ruleset does not require, so GitHub merges past a cancelled or
 # missing run of them; --check holds each to its latest PR run on the head, less the jobs named here (image-vulncheck
-# waits on Mark's #2919 paste).
+# waits on Mark's #2919 paste). PREMERGE-held-rest (#5385) holds every other PR-triggered workflow file too, the slow
+# image and real-model ones included: a long run only delays the merge, while an unheld one merges past a cancel.
 HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
-        "formal": (), "keycheck": ()}
+        "formal": (), "keycheck": (), "mutgate": (), "infer-real": (), "vision-real": (), "testkit": (),
+        "enforcer-image": (), "camnode-image": (), "drone-sitl": ()}
+# The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
+# ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
+UNHELD = ("ci", "trusted-base", "premerge")
 PASSED = ("success", "skipped")
 NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (premerge.yml builds it) to read the held checks"
 _GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
