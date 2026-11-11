@@ -432,6 +432,16 @@ class InitrdTest(unittest.TestCase):
         got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [
             ("usr/x", F, b"", 7, 2), ("etc/fstab", F, b"", 7, 2), ("usr/x", F, line)])))
         self.assertEqual(len(got), 1, got)
+        # Security delta 6804788432: the entry's two initrds are one tree, and the kernel's link table restarts
+        # only at a trailer, so the same ino in the second file is a new file, never the first file's fstab.
+        one = newc([("etc", self.D, b""), ("etc/fstab", F, line, 9, 2)])
+        two = newc([("usr", self.D, b""), ("usr/y", F, b"#" * 40 + b"\n", 9, 2)])
+        archive = [0]
+        members = finish.check_initrd("a", one, archive) + finish.check_initrd("b", two, archive)
+        with self.assertRaises(SystemExit) as e:
+            finish.check_initrd_tree(["a", "b"], members)
+        self.assertIn("etc/fstab: has an entry", str(e.exception.code))
+        self.assertEqual(archive, [2])
         # The kernel frees its link table at each trailer: the same ino in the next archive is a new file.
         got = finish.initrd_violations(finish.cpio_members(
             newc(self.STOCK + [("etc/fstab", F, b"", 7, 2)]) + newc([("usr/x", F, line, 7, 2)])))

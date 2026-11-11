@@ -557,16 +557,18 @@ def ungzip(data):
     return one_stream(zlib.decompressobj(31), data, "gzip")
 
 
-def cpio_members(data, decompress=None, _archive=None):
+def cpio_members(data, decompress=None, archive=None):
     """Every member of an initrd, as (path, mode, content, link): newc cpio archives and compressed
     (zstd, xz or gzip) streams of them, back to back with zero padding between them, read on as the
     kernel does. LINK is the key the kernel's find_link groups hard links by (the archive, as its table
     is freed at each trailer, then ino, devmajor, devminor and file type) when nlink is 2 or more and
     it is not a directory or link (do_name links only those), else None. Anything else raises ValueError, so an initrd this cannot read fails the build rather than
     passing unchecked. DECOMPRESS maps a magic to a function returning (output, the bytes after the
-    stream)."""
+    stream). ARCHIVE, a one-item list, counts the archives read so far: pass one list for every initrd
+    of an entry, as the kernel unpacks them all into one rootfs and its link table restarts only at a
+    trailer (Security delta 6804788432)."""
     decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
-    archive = _archive if _archive is not None else [0]
+    archive = archive if archive is not None else [0]
     members, off = [], 0
     while True:
         while off < len(data) and data[off] == 0:
@@ -739,10 +741,10 @@ def initrd_violations(members):
     return out
 
 
-def check_initrd(path, data):
+def check_initrd(path, data, archive=None):
     """Exit unless the initrd at PATH lists files and none of them is Bluetooth (#1475); its members,
-    for check_initrd_tree."""
-    members = cpio_members(data)
+    for check_initrd_tree (ARCHIVE: cpio_members', shared by the entry's initrds)."""
+    members = cpio_members(data, archive=archive)
     names = [m[0] for m in members]
     print("initrd %s: %d files, %d kernel modules" % (path, len(names), sum(".ko" in n for n in names)))
     bad = bluetooth_violations(names) if names else ["no files"]
@@ -961,12 +963,12 @@ def main(out, version, drivers_json=None):
     bad = root_repart_violations(str(img), partition_table(str(img)))
     if bad:
         sys.exit("root carries a repart.d systemd-repart would read (#5289): %s" % bad)
-    boot, members = {}, []
+    boot, members, archive = {}, [], [0]
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
         boot[p] = hashlib.sha256(data_).hexdigest()
         if p in initrd_files(text):
-            members += check_initrd(p, data_)
+            members += check_initrd(p, data_, archive)
     check_initrd_tree(initrd_files(text), members)
     roothash = usrhash(text)
     data, tree = out / ("agentos_%s.usr.raw" % version), out / ("agentos_%s.usr-verity.raw" % version)

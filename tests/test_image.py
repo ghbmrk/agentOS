@@ -932,7 +932,7 @@ class InitrdBluetoothTest(unittest.TestCase):
         self.assertEqual(finish.initrd_files(two), ["debian/6.12.48+deb13-amd64/initrd",
                                                     "agentos/6.12.48+deb13-amd64/kernel-modules.initrd"])
         src = (IMG / "finish_image.py").read_text()
-        self.assertIn("if p in initrd_files(text):\n            members += check_initrd(p, data_)\n"
+        self.assertIn("if p in initrd_files(text):\n            members += check_initrd(p, data_, archive)\n"
                       "    check_initrd_tree(initrd_files(text), members)", src)
 
     def test_check_initrd_exits_on_bluetooth_or_no_files(self):
