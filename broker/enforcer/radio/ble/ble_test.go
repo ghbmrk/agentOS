@@ -440,7 +440,7 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 // (32 MiB limit) delivers from any peer.
 func oversized() []byte {
 	b := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(b[4:], MaxMessage-16+1)
+	binary.LittleEndian.PutUint32(b[4:], MaxMessage-16+1)
 	return append(b, make([]byte, MaxMessage-16+1)...)
 }
 
@@ -458,10 +458,10 @@ func malformed() []byte {
 func TestReadSkipsWhatDoesNotDecode(t *testing.T) {
 	good := mustEncode(t, propsChanged(2, bluezName, measurePath, []byte{1}))
 	longHead := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(longHead[12:], maxHeader+1)
+	binary.LittleEndian.PutUint32(longHead[12:], maxHeader+1)
 	longHead = append(longHead, make([]byte, maxHeader+8)...)
 	badHead := withField(t, &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C"}, 1, "s", "/x")
-	le.PutUint32(badHead[4:], 8)
+	binary.LittleEndian.PutUint32(badHead[4:], 8)
 	badHead = append(badHead, make([]byte, 8)...)
 	refused := mustEncode(t, propsChanged(3, ":1.9", measurePath, []byte{1}))
 	r := bytes.NewReader(slices.Concat(oversized(), longHead, badHead, malformed(), refused, good, []byte("x234567890123456")))

@@ -3,11 +3,16 @@ name: testkit-image
 # Runs here because GitHub's runners can reach deb.debian.org; the cloud agent sessions cannot.
 on:
   workflow_dispatch:
+  # Block-style paths: premerge.py's pr_paths reads only this form, and reads any other as unfiltered (#5432 L3).
   pull_request:
-    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+    paths:
+      - "spikes/S1S2-testkit/**"
+      - ".github/workflows/testkit.yml"
   push:
     branches: [main]
-    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+    paths:
+      - "spikes/S1S2-testkit/**"
+      - ".github/workflows/testkit.yml"
 permissions:
   contents: read
 # CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first

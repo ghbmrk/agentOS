@@ -203,7 +203,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Deletion first (D-245).** Among startable rows, start those that delete old-core code, and the rows that unblock them, before new features; report the old core's remaining lines to Mark weekly.
 - **Keep the critical path parallel.** Run G1 critical-path packages in parallel wherever they touch disjoint files (the conflict guard above still applies).
 - **Models by tier.** Tier-A builders run on Opus, the strongest model; tier B and C builders run on Sonnet (D-121 item 7).
-- **Fix a flake the second time.** A flaky test seen a second time gets an issue and a fix, not another rerun. Rerun only a PR's current head: a newer push never cancels a rerun (#5377).
+- **Fix a flake the second time.** A flaky test seen a second time gets an issue and a fix, not another rerun. Rerun only a PR's current head; a stale mutgate rerun stops and fails (#5409).
 - **Reviews unchanged.** Tier A keeps its two separate reviews, Security and Potency/UX/L3 (§3, §4); the speed rules shorten the rounds, not the review set.
 
 **Package records.**

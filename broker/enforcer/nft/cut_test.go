@@ -247,9 +247,9 @@ func TestFirstLoadCutsOnce(t *testing.T) {
 
 // NET-2 Byte caps, KRN-12 (#5014): a cut edge reaches nothing through the
 // enforcer. The drop's text on its own cuts the edge's open connections,
-// to a device and to the internet, both ways, and refuses new ones, while the core's go on; a full load that carries the
-// cut (a restart) keeps it; a text without it lifts it, and the edge's
-// paths open again. #5282: the kernel cuts the edge itself at the first
+// to a device and to the internet, both ways, and refuses new ones, while
+// the core's go on; a full load that carries the cut (a restart) keeps
+// it; a text without it lifts it, and the edge's paths open again. #5282: the kernel cuts the edge itself at the first
 // byte past its cap, with no write of the daemon's (TripSet); a full load
 // whose count is past the cap starts cut; the owner's lift on the day
 // (Drop.EdgeHold) opens the edge's device paths while its quota still
@@ -305,7 +305,8 @@ func TestEdgeCutEndsEveryEdgePath(t *testing.T) {
 		})
 	}
 	// edgeHolds are the edge's held connections to a device and to the
-	// internet, over IPv6 too where the kernel has it, on ports from port.
+	// internet, over IPv4 (its segment's only family, ENF-e-6), on ports
+	// from port.
 	devices := func(why string) []*held {
 		return []*held{h.hold("the edge to an online device"+why, "edge", "101", devAddr(101), 9100)}
 	}
