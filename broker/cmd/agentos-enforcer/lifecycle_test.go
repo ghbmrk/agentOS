@@ -406,7 +406,7 @@ func newBox(t *testing.T, withCore bool) *box {
 	if err := os.Chmod(x.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := enrol.Provision(fileStore{path: filepath.Join(x.dir, fileEnrol)}, caseCode, nil); err != nil {
+	if err := provisionState(x.dir, caseCode); err != nil {
 		t.Fatal(err)
 	}
 	if withCore {
