@@ -206,6 +206,116 @@ func TestAnUnfitRegistrationCountsAsMissing(t *testing.T) {
 	}
 }
 
+// A kept registration is read through a file loadReg closes: reading it
+// again and again holds no more files open.
+func TestLoadingTheRegistrationClosesItsFile(t *testing.T) {
+	dir := shortDir(t)
+	if err := saveReg(dir, testSealer(), *fakeClient, nil); err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, regFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each fd still open on the file right after a read is one the read
+	// left: a leaked fd closes only when the GC finalizes its *os.File.
+	held := func() bool {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
+	}
+	for range 64 {
+		if r, ok := loadReg(dir, testSealer()); !ok || r != *fakeClient {
+			t.Fatalf("loadReg = %v, %v", r.ID, ok)
+		}
+		if held() {
+			t.Fatalf("loadReg left %s open", path)
+		}
+	}
+}
+
+// The registration file has a bound: a sealed registration of maxReg bytes
+// loads, one a byte past it does not, though it opens, and saveReg refuses
+// to write one.
+func TestTheRegistrationHasABound(t *testing.T) {
+	dir := shortDir(t)
+	sealed := func(secret string) []byte {
+		blob, err := testSealer().Seal([]byte(`{"id":"x","secret":"`+secret+`"}`), regAAD())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return blob
+	}
+	secret := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = 's'
+		}
+		return string(b)
+	}
+	pad := maxReg - len(sealed(""))
+	for _, c := range []struct {
+		secret string
+		ok     bool
+	}{{secret(pad), true}, {secret(pad + 1), false}} {
+		blob := sealed(c.secret)
+		if err := privfile.WriteAtomic(dir, regFile, blob, nil); err != nil {
+			t.Fatal(err)
+		}
+		if r, ok := loadReg(dir, testSealer()); ok != c.ok || ok && r.Secret != c.secret {
+			t.Fatalf("a %d-byte registration file loads %v; want %v", len(blob), ok, c.ok)
+		}
+	}
+	dir = shortDir(t)
+	if err := saveReg(dir, testSealer(), clerk.Registration{ID: "x", Secret: secret(pad + 1)}, nil); err == nil {
+		t.Fatal("saveReg wrote a registration past its bound")
+	}
+	if _, err := os.Stat(filepath.Join(dir, regFile)); !os.IsNotExist(err) {
+		t.Fatalf("a registration past its bound left a file: %v", err)
+	}
+}
+
+// keepReg with no sealer keeps nothing and says why.
+func TestKeepingARegistrationNeedsASealer(t *testing.T) {
+	dir := shortDir(t)
+	grant := []byte(`{"refresh_token":"r","client_id":"x","client_secret":"y"}`)
+	if err := keepReg(dir, nil, grant); err != errNoSealer {
+		t.Fatalf("keepReg with no sealer = %v; want %v", err, errNoSealer)
+	}
+	if err := keepReg(dir, testSealer(), grant); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := loadReg(dir, testSealer()); !ok || r != (clerk.Registration{ID: "x", Secret: "y"}) {
+		t.Fatalf("kept %v, %v", r.ID, ok)
+	}
+}
+
+// The registration's plaintext, client secret and all, is wiped once
+// saveReg has sealed it and once loadReg has read it.
+func TestTheRegistrationsPlaintextIsWiped(t *testing.T) {
+	dir := shortDir(t)
+	k := &gmailtest.Kept{Sealer: testSealer()}
+	if err := saveReg(dir, k, *fakeClient, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("saveReg left %d plaintexts, wiped %v", n, wiped)
+	}
+	if r, ok := loadReg(dir, k); !ok || r != *fakeClient {
+		t.Fatalf("loadReg = %v, %v", r.ID, ok)
+	}
+	if n, wiped := k.Wiped(); n != 2 || !wiped {
+		t.Fatalf("loadReg left %d plaintexts, wiped %v", n, wiped)
+	}
+}
+
 // sealReg replaces path with plain sealed as a registration.
 func sealReg(t *testing.T, path, plain string) {
 	t.Helper()

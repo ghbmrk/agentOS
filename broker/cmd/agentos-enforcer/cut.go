@@ -43,14 +43,20 @@ func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, er
 	if err != nil {
 		return nil, err
 	}
-	if b != nil {
-		var st cutState
-		if err := json.Unmarshal(b, &st); err != nil {
-			return nil, errors.New("cut: state unreadable")
-		}
-		if st.Tripped {
-			c.stage, c.reason = channel.Tripped, st.Reason
-		}
+	if b == nil {
+		// Provisioning wrote it (provisionState) and nothing removes it,
+		// so its loss means root on the enforcer or lost state (#5399).
+		c.stage, c.reason = channel.Tripped, "the record of the core's cut is missing. Someone may have tampered with the enforcer: check it before you resume the core's channel."
+		logf("cut: " + fileCut + " missing, the core stays cut until you resume it on the page")
+		recordMissing(alerts, coreDevice, logf)
+		return c, nil
+	}
+	var st cutState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, errors.New("cut: state unreadable")
+	}
+	if st.Tripped {
+		c.stage, c.reason = channel.Tripped, st.Reason
 	}
 	return c, nil
 }
@@ -139,4 +145,13 @@ func (c *cut) Resume() error {
 	c.stage, c.reason, c.unsaved = channel.Open, "", false
 	c.mu.Unlock()
 	return errors.Join(c.alerts.Resumed(), c.alerts.Lifted(coreDevice))
+}
+
+// recordMissing raises the alert for a box whose cut record is missing or
+// does not read back (#5399): the light turns red, and the owner's lift
+// or resume resolves it (alert.Lifted).
+func recordMissing(alerts *alert.Alerts, device string, logf func(string)) {
+	if _, err := alerts.Raise(alert.RecordMissing, device); err != nil {
+		logf("cut: missing record alert: " + err.Error())
+	}
 }

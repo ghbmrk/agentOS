@@ -109,9 +109,9 @@ type ResolverStop struct {
 	// Unset is every other way the served interfaces are not as set up:
 	// a setting that did not take, or addresses that could not be read.
 	Unset []Unset
-	// Policy is why the policy in force cannot be served; its zero value
+	// Policy is every reason the policy in force cannot be served; none
 	// when it can.
-	Policy PolicyCause
+	Policy []PolicyCause
 	// Load is the step that refused the last load, shown when no cause
 	// above is: the instances stay as they were until a load is taken
 	// (#5164 R5 d). LoadTaken when none was refused since one was taken.
@@ -120,6 +120,11 @@ type ResolverStop struct {
 	// to start, shown while Stopped is false: a process that is up between
 	// exits does not make it a resolver that runs (#5164 R5 b).
 	Restarting []Restart
+	// Unseeded is whether the last load could not read the address
+	// service's lease file, while a host it held may not have renewed
+	// since (#5394): until it does, the firewall passes nothing of it.
+	// It shows whether or not the instances run.
+	Unseeded bool
 }
 
 // LoadStep is the step of a load that refused it.
@@ -134,7 +139,7 @@ const (
 
 // PolicyCause is why the policy in force cannot be served, as the
 // daemon typed it (#5307): the page words each kind, so the owner never
-// reads a resolver error's text. The zero value is a policy that can be.
+// reads a resolver error's text.
 type PolicyCause struct {
 	Kind PolicyKind
 	// Name is what the policy names that cannot be served: the device
@@ -148,8 +153,7 @@ type PolicyCause struct {
 type PolicyKind int
 
 const (
-	PolicyServed  PolicyKind = iota // it can be
-	PolicyUntyped                   // a refusal the daemon did not type
+	PolicyUntyped PolicyKind = iota // a refusal the daemon did not type
 	PolicyVLAN                      // a device on a Wi-Fi network the setup serves no names on
 	PolicyName                      // a name to look up that is not a DNS host name
 )
@@ -218,7 +222,9 @@ type Stray struct {
 // byte cap reaches nothing through the enforcer until the owner lifts the
 // cut here, after a tap.
 type Edge interface {
-	// Cut is whether the edge is cut, and why.
+	// Cut is whether the edge is cut, and why: the card's text after
+	// "cut off: ", whole sentences that end with what to check before
+	// the lift (#5399), since that depends on the cause.
 	Cut() (cut bool, reason string)
 	// LiftEdge lifts it; an error leaves it cut.
 	LiftEdge() error
@@ -353,7 +359,9 @@ func (s *Server) status() map[string]any {
 		}
 	}
 	if s.cfg.Resolver != nil {
-		if r := s.cfg.Resolver.Stopped(); r.Stopped {
+		r := s.cfg.Resolver.Stopped()
+		out["Unseeded"] = r.Unseeded
+		if r.Stopped {
 			out["Resolver"] = plainStop(r)
 		} else if len(r.Restarting) > 0 {
 			var lines []string
@@ -369,15 +377,21 @@ func (s *Server) status() map[string]any {
 // plainResolver is a stopped resolver as home shows it: every cause in
 // the owner's words, with each name in printable ASCII.
 type plainResolver struct {
-	Strays       []Stray
-	Unset        []string
-	Policy, Load string // "" for none
+	Strays []Stray
+	Unset  []string
+	Policy []string
+	Load   string // "" for none
 }
 
 // plainStop is r in the owner's words: a policy can name what the core
 // chose, so no name reaches the page outside printable ASCII.
 func plainStop(r ResolverStop) plainResolver {
-	out := plainResolver{Policy: plainPolicy(r.Policy), Load: plainLoad(r.Load)}
+	out := plainResolver{Load: plainLoad(r.Load)}
+	for _, p := range r.Policy {
+		if p := plainPolicy(p); !slices.Contains(out.Policy, p) {
+			out.Policy = append(out.Policy, p)
+		}
+	}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
 	}
@@ -434,20 +448,17 @@ func plainUnset(u Unset) string {
 	return "A home network's interface is not as set up, in a way this page has no words for; the enforcer's log has the detail. It checks again every 10 seconds."
 }
 
-// plainPolicy is why the policy in force cannot be served in the owner's
-// words, from its typed cause (#5307); "" when it can be. A refusal with
-// no words is one generic line pointing at the log, never its text.
+// plainPolicy is one reason the policy in force cannot be served in the
+// owner's words, from its typed cause (#5307). A refusal with no words is
+// one generic line pointing at the log, never its text.
 func plainPolicy(p PolicyCause) string {
-	const still = " The policy still applies; names and addresses come back with the next policy the enforcer can serve."
 	switch p.Kind {
-	case PolicyServed:
-		return ""
 	case PolicyVLAN:
-		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there." + still
+		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there."
 	case PolicyName:
-		return "The policy in force lists " + strconv.QuoteToASCII(p.Name) + ", which is not a name the enforcer can look up." + still
+		return "The policy in force lists " + strconv.QuoteToASCII(p.Name) + ", which is not a name the enforcer can look up."
 	}
-	return "The policy in force names something the enforcer cannot serve; the enforcer's log has the detail." + still
+	return "The policy in force names something the enforcer cannot serve; the enforcer's log has the detail."
 }
 
 // plainLoad is the step that refused the last load in the owner's words

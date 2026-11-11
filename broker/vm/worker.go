@@ -79,8 +79,26 @@ type Command struct {
 	Hold func() bool
 }
 
-// ErrHeld refuses a command while its Hold says so.
+// ErrHeld refuses a command while its Hold says so, and a fork or rollback
+// while the hold its context carries (WithHold) does.
 var ErrHeld = errors.New("vm: commands are held")
+
+type holdKey struct{}
+
+// WithHold returns ctx carrying hold for Fork and Rollback: each asks it
+// under the machine's lock just before a start or restore, after every wait
+// for a lock, and refuses with ErrHeld, starting nothing, while it says true
+// (STOP-queued-start). It rides the context so that every wrapper of a
+// Manager passes it on. A nil hold never holds.
+func WithHold(ctx context.Context, hold func() bool) context.Context {
+	return context.WithValue(ctx, holdKey{}, hold)
+}
+
+// heldBy asks the hold ctx carries, if any.
+func heldBy(ctx context.Context) bool {
+	h, _ := ctx.Value(holdKey{}).(func() bool)
+	return h != nil && h()
+}
 
 // WorkerFull refuses a command or snapshot of a worker whose files are
 // over its layer cap (Config.WorkerLayerBytes). It is an ErrQuota.

@@ -740,3 +740,53 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"access_token": s.mint(refresh), "expires_in": 3599, "token_type": "Bearer"})
 }
+
+// Kept is a sealer probe for the mail clerk's tests: it seals and opens
+// with Sealer, and keeps each plaintext it is handed or hands back, so a
+// test can check that the caller wiped the registration's client secret,
+// or any other plaintext, once done with it.
+type Kept struct {
+	Sealer interface {
+		Seal(plain, aad []byte) ([]byte, error)
+		Open(blob, aad []byte) ([]byte, error)
+	}
+	mu    sync.Mutex
+	plain [][]byte
+}
+
+// Seal keeps plain and seals it with k.Sealer.
+func (k *Kept) Seal(plain, aad []byte) ([]byte, error) {
+	k.keep(plain)
+	return k.Sealer.Seal(plain, aad)
+}
+
+// Open opens blob with k.Sealer and keeps the plaintext.
+func (k *Kept) Open(blob, aad []byte) ([]byte, error) {
+	plain, err := k.Sealer.Open(blob, aad)
+	k.keep(plain)
+	return plain, err
+}
+
+func (k *Kept) keep(plain []byte) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.plain = append(k.plain, plain)
+}
+
+// Wiped is how many non-empty plaintexts k kept, and whether each is now
+// all zero bytes.
+func (k *Kept) Wiped() (n int, wiped bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	wiped = true
+	for _, p := range k.plain {
+		if len(p) == 0 {
+			continue
+		}
+		n++
+		for _, b := range p {
+			wiped = wiped && b == 0
+		}
+	}
+	return n, wiped
+}

@@ -1623,6 +1623,11 @@ func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot) error
 	}
 	mc.mu.Lock()
 	err := claimLocked(mc)
+	// Asked after every wait for the lock, just before the restore
+	// (STOP-queued-start).
+	if err == nil && heldBy(ctx) {
+		err = ErrHeld
+	}
 	if err == nil && s.Label > mc.Label {
 		// Saved before the snapshot's content reaches the layer (LABEL-durable).
 		err = m.raiseLocked(mc, s.Label)
@@ -1856,6 +1861,12 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
+		// Asked after every wait on the source, just before each fork
+		// starts; a held one is undone as any failed start is
+		// (STOP-queued-start).
+		if err == nil && heldBy(ctx) {
+			err = ErrHeld
+		}
 		tried := err == nil
 		if tried {
 			err = m.startFrom(ctx, mc, &s)
@@ -2391,7 +2402,15 @@ func (m *Manager) load(ctx context.Context) error {
 	}
 	for _, e := range snaps {
 		var s Snapshot
-		if err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s); err != nil || s.ID != e.Name() {
+		err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s)
+		var pe *fs.PathError
+		if errors.As(err, &pe) && !errors.Is(err, fs.ErrNotExist) {
+			// A read that fails for another reason than absence may be
+			// transient: the snapshot may be published, so keep it and
+			// refuse the open.
+			return fmt.Errorf("vm: snapshot %s: %w", e.Name(), err)
+		}
+		if err != nil || s.ID != e.Name() {
 			// A snapshot without metadata was never published: drop it.
 			os.RemoveAll(m.snapDir(e.Name()))
 			continue

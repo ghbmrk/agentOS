@@ -290,7 +290,7 @@ func TestWordsFixed(t *testing.T) {
 		if s.delivery == Text && !strings.Contains(w, "enforcer's page at home") {
 			t.Fatalf("kind %d's text does not send the owner to the page: %q", k, w)
 		}
-		if strings.Contains(w, "light") != (k == Trip) {
+		if strings.Contains(w, "light") != k.lights() {
 			t.Fatalf("kind %d's text and the light: %q", k, w)
 		}
 		want := Text
@@ -406,6 +406,30 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	off("core cut lifted")
+
+	// #5399: a box's missing cut record is a known attack too: it lights
+	// the bulb, and lifting that box's cut resolves it.
+	if RecordMissing != FactoryReset+1 {
+		t.Fatalf("RecordMissing is %d, want %d: journalled kinds would change meaning", RecordMissing, FactoryReset+1)
+	}
+	if d, ok := RecordMissing.Delivery(); !ok || d != Text {
+		t.Fatalf("RecordMissing's delivery %d %v", d, ok)
+	}
+	if _, err := r.a.Raise(RecordMissing, "edge"); err != nil {
+		t.Fatal(err)
+	}
+	red("edge record missing")
+	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of edge's cut is missing or unreadable, so edge stays cut. Someone may have tampered with the enforcer: check it before you let edge back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+		t.Fatalf("missing record text: %q", w)
+	}
+	if err := r.a.Lifted("core"); err != nil {
+		t.Fatal(err)
+	}
+	red("another box's cut lifted")
+	if err := r.a.Lifted("edge"); err != nil {
+		t.Fatal(err)
+	}
+	off("edge cut lifted")
 
 	// A paused channel still resolves only by resuming it.
 	p := r.a.Status().Open

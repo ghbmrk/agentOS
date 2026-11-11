@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         if: steps.scope.outputs.records != 'true'
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         if: steps.scope.outputs.records != 'true'
@@ -103,22 +103,29 @@ jobs:
         # without them (#1531), and fail on any skip among them (#1543).
         # Each module runs in its own process tree under strace, which logs every file opened in it
         # for tests/records_audit.py (CI-PATHS); tools/unit_tests.py runs one module per core at
-        # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree.
+        # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree. It runs as root, and each
+        # module as a user of its own (#5413), which needs search permission down to the worktree.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
           AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools
           GOFLAGS: -buildvcs=false
         run: |
-          # erofs-utils: the /usr list tests build erofs images (#4470).
-          pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
+          # erofs-utils: the /usr list tests build erofs images (#4470). acl: the modules' shared Go caches.
+          pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
           [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
-          python tools/unit_tests.py "$RUNNER_TEMP/reads"
+          d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
+          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"
       - name: The records-only step runs every test that reads a record (CI-PATHS)
         if: steps.scope.outputs.records != 'true'
         run: python tests/records_audit.py "$RUNNER_TEMP/reads"
       - name: No two unit-test units write one path or bind one address (CI-par-clash)
         if: steps.scope.outputs.records != 'true'
         run: python tests/clash_audit.py "$RUNNER_TEMP/reads"
+      - name: Each module reaches no trace and no other module (#5413)
+        if: steps.scope.outputs.records != 'true'
+        # The uid boundary end to end, as root as tools/unit_tests.py runs; under it, as a module's
+        # user, that test skips. The variable makes it fail rather than skip here.
+        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
         # full CI's record-read audit fails when a test that reads one is missing here.
@@ -249,7 +256,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         if: steps.scope.outputs.records != 'true'
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         if: steps.scope.outputs.records != 'true'
@@ -343,7 +350,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
@@ -438,7 +445,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |

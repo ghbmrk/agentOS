@@ -72,6 +72,14 @@ func TestParseGarbledCodeRepliesNeverReachTheAgent(t *testing.T) {
 			t.Errorf("Parse(%q) = %+v, want unclear with no text", in, got)
 		}
 	}
+	// Any script's digits, or other numbers, count as code-shaped: the
+	// live code re-sent in them must not reach the agent (#5454).
+	for _, in := range []string{"RESUME １２３４５６", "resume ١٢٣٤٥٦", "RESUME ٣٨٢٩١٠ please",
+		"YES 1 ۴۸۲۱", "no １", "RESUME ¹²³⁴⁵⁶ now", "YES 𝟏𝟐"} {
+		if got := Parse(in); got.Word != WordUnclear || got.Text != "" {
+			t.Errorf("Parse(%q) = %+v, want unclear with no text", in, got)
+		}
+	}
 	if got := Parse("yes please"); got.Word != WordNone {
 		t.Errorf("no digits, so it is chat: %+v", got)
 	}

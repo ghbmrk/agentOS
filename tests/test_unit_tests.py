@@ -4,9 +4,13 @@ written path or a bound address (tests/clash_audit.py, CI-par-clash).
 
 REQ: CI-PATHS
 """
+import io
 import os
 import pathlib
+import pwd
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,15 +28,36 @@ import clash_audit  # noqa: E402
 import records_audit  # noqa: E402
 
 
+def boundary_unready():
+    """Why the real uid boundary (#5413) cannot be run here, or None."""
+    if os.geteuid() != 0:
+        return "needs root, as tools/unit_tests.py does (ci.yml's own step for it runs as root)"
+    missing = [t for t in ("strace", "setpriv", "setfacl", "useradd") if not shutil.which(t)]
+    return f"missing {', '.join(missing)}" if missing else None
+
+
+def stat_of(path):
+    st = os.stat(path)
+    return stat.S_IMODE(st.st_mode), st.st_uid
+
+
 class CommandTest(unittest.TestCase):
     def test_each_module_runs_alone_under_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_x", "/r")
-        self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e",
-                                                  "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
+        self.assertEqual(cmd[:cmd.index("-o")], ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
+                                                  "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
+                                                  "unlink,unlinkat,rename,renameat,renameat2,truncate",
                                                   "-e", "signal=none"])
         self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
+        # #5413: a root sh gives the module /dev/null for stdin and joins its stderr to its stdout,
+        # then setpriv runs it as its own user, with no new privileges, before Python (and so any
+        # site hook) starts.
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
+                         ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh",
+                          "setpriv", "--reuid=ut-x", "--regid=ut-x", "--init-groups", "--no-new-privs", "--",
+                          sys.executable, "-c",
+                          "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', "
+                          "alter_sys=True)", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
     def test_every_test_module_is_run(self):
         names = unit_tests.modules()
@@ -43,6 +68,179 @@ class CommandTest(unittest.TestCase):
     def test_modules_run_without_gits_optional_index_lock(self):
         # git status/diff in the shared worktree would each write .git/index.lock (a clash).
         self.assertEqual(unit_tests.ENV["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_each_module_runs_as_a_user_of_its_own_with_its_own_home(self):
+        # #5413: one user per module, so no module's process can reach another's.
+        names = unit_tests.modules()
+        users = {unit_tests.user(m) for m in names}
+        self.assertEqual(len(users), len(names))
+        self.assertTrue(all(len(u) <= 32 and u.startswith("ut-") for u in users), users)
+        self.assertEqual(unit_tests.user("test_" + "x" * 40), unit_tests.user("test_" + "x" * 40))
+        self.assertNotEqual(unit_tests.user("test_" + "x" * 40), unit_tests.user("test_" + "x" * 41))
+        e = unit_tests.env("test_x", "/r/reads")
+        self.assertEqual((e["HOME"], e["USER"], e["LOGNAME"]), ("/r/reads.run/home/test_x", "ut-x", "ut-x"))
+        self.assertEqual((e["GOCACHE"], e["GOMODCACHE"]), ("/r/reads.run/go/build", "/r/reads.run/go/mod"))
+        self.assertEqual(e["GIT_OPTIONAL_LOCKS"], "0")
+        h = "/home/runner"  # a hosted runner's environment, as sudo -E passes it on
+        runner = {"XDG_CONFIG_HOME": f"{h}/.config", "XDG_CACHE_HOME": f"{h}/.cache", "XDG_DATA_HOME": f"{h}/.local/share",
+                  "XDG_STATE_HOME": f"{h}/.local/state", "XDG_RUNTIME_DIR": "/run/user/1001", "GOPATH": f"{h}/go",
+                  "GOENV": f"{h}/.config/go/env", "GITHUB_ENV": f"{h}/work/_temp/_runner_file_commands/set_env_x",
+                  "GITHUB_PATH": "/f", "GITHUB_OUTPUT": "/f", "GITHUB_STATE": "/f", "GITHUB_STEP_SUMMARY": "/f",
+                  "ACTIONS_RUNTIME_URL": "u", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "t", "GITHUB_TOKEN": "t"}
+        ws = f"{h}/work/agentOS/agentOS"
+        inputs = {"HOME": h, "AGENTOS_REFERENCE_ROOT": f"{h}/work/_temp/image-tools", "RUNNER_TEMP": f"{h}/work/_temp",
+                  "GITHUB_WORKSPACE": ws, "GITHUB_SHA": "s", "PATH": f"{h}/.local/bin:/usr/bin"}
+        tools = {"NVM_DIR": f"{h}/.nvm", "CARGO_HOME": f"{h}/.cargo", "RUNNER_WORKSPACE": f"{h}/work/agentOS"}
+        with mock.patch.dict(unit_tests.ENV, {**runner, **inputs, **tools}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
+            e2 = unit_tests.env("test_x", "/r/reads")
+        self.assertEqual((set(runner) | set(tools)) & set(e2), set())  # the runner's own directories, step files, tokens
+        self.assertEqual({k: e2[k] for k in inputs if k != "HOME"}, {k: v for k, v in inputs.items() if k != "HOME"})
+        # In any environment, nothing env() passes on names the runner's home but the worktree and
+        # the job's temporary directory (PATH lists programs to run, not a place to write).
+        home, temp = unit_tests.ENV.get("HOME", "/nonexistent"), unit_tests.ENV.get("RUNNER_TEMP", "/nonexistent")
+        self.assertEqual([k for k, v in unit_tests.env("test_x", "/r/reads").items()
+                          if k != "PATH" and v.startswith(home.rstrip("/") + "/")
+                          and not v.startswith((str(unit_tests.ROOT), temp))], [])
+        n = int(unit_tests.ENV.get("GIT_CONFIG_COUNT", 0))  # git reads the worktree, another user's
+        self.assertEqual((e["GIT_CONFIG_COUNT"], e[f"GIT_CONFIG_KEY_{n}"], e[f"GIT_CONFIG_VALUE_{n}"]),
+                         (str(n + 1), "safe.directory", str(unit_tests.ROOT)))
+
+    def test_the_runner_refuses_to_run_as_a_user(self):
+        # #5413: only root can run strace over another user and make the modules' users.
+        with mock.patch("os.geteuid", return_value=1000), self.assertRaisesRegex(OSError, "run as root"):
+            unit_tests.prepare(["test_x"], "/nonexistent/reads")
+        out = io.StringIO()
+        with mock.patch("os.geteuid", return_value=1000), mock.patch("sys.stdout", out):
+            self.assertEqual(unit_tests.main(["/nonexistent/reads"]), 1)
+        self.assertIn("::error::run as root (sudo", out.getvalue())
+
+    def test_the_trace_directory_must_be_new(self):
+        # #5413 (Lens R1): nothing in it may predate the run, made by whoever.
+        with tempfile.TemporaryDirectory() as d:
+            me = (os.getuid(), os.getgid())
+            reads = unit_tests.private(os.path.join(d, "reads"), owner=me)
+            self.assertEqual(stat_of(reads), (0o700, os.getuid()))
+            with self.assertRaisesRegex(OSError, "exists: the trace directory must be new"):
+                unit_tests.private(os.path.join(d, "reads"), owner=me)
+            os.mkdir(os.path.join(d, "made"), 0o700)  # empty, mode and owner right: still refused
+            with self.assertRaisesRegex(OSError, "exists"):
+                unit_tests.private(os.path.join(d, "made"), owner=me)
+
+    def test_a_directory_above_the_traces_another_user_may_change_is_refused(self):
+        # #5413 (Lens R1): a module may not move the trace directory or a directory above it. Each
+        # case is a fresh trace directory, so only the check on the directories above it refuses.
+        me = (os.getuid(), os.getgid())
+        with tempfile.TemporaryDirectory() as d:
+            up = os.path.join(d, "up")
+            os.mkdir(up)
+            for mode, others, refused in ((0o755, (), False), (0o777, (), True), (0o1777, (), False),
+                                          (0o775, (), False), (0o775, (os.getgid(),), True),
+                                          (0o1775, (os.getgid(),), False)):
+                os.chmod(up, mode)
+                reads = os.path.join(up, "reads")
+                if refused:
+                    with self.assertRaisesRegex(OSError, f"{up} is writable by other users", msg=oct(mode)):
+                        unit_tests.private(reads, owner=me, others=others)
+                else:
+                    unit_tests.private(reads, owner=me, others=others)
+                if os.path.exists(reads):
+                    os.rmdir(reads)
+            os.chmod(up, 0o755)
+            os.symlink(up, os.path.join(d, "link"))
+            with self.assertRaisesRegex(OSError, "link is not a directory"):
+                unit_tests.private(os.path.join(d, "link", "reads"), owner=me)
+            if os.geteuid() == 0:  # chown to another uid takes root
+                os.chown(up, 4242, 4242)
+                with self.assertRaisesRegex(OSError, "owned by uid 4242"):
+                    unit_tests.private(os.path.join(up, "reads2"), owner=me)
+
+    def test_a_module_reaches_no_trace_stream_and_no_other_module(self):
+        # #5413: the real boundary, end to end, as root (ci.yml's own step for it). Two modules run
+        # at once under real strace, each as its own user, and try every route to a trace stream
+        # rounds 1-4 of #5426 found: strace's and the runner's /proc fds, a signal to strace, the
+        # trace directory and a link into it, the other module's /proc fds, a privilege raise. Each
+        # is refused; each module holds /dev/null and its own output only; a process of its user
+        # left outside strace is killed by sweep().
+        # ci.yml's root step sets AGENTOS_REQUIRE_UID_BOUNDARY, so there it fails rather than skips.
+        if boundary_unready() and os.environ.get("AGENTOS_REQUIRE_UID_BOUNDARY") != "1":
+            self.skipTest(boundary_unready())
+        self.assertIsNone(boundary_unready())
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        os.chmod(root, 0o755)
+        (root / "tests").mkdir()
+        meet = root / "meet"
+        meet.mkdir()
+        os.chmod(meet, 0o1777)
+        trace_dir = root / "reads"
+        names = ["test_zz_boundary_a", "test_zz_boundary_b"]
+        for name in names:
+            (root / "tests" / f"{name}.py").write_text(textwrap.dedent(f"""\
+                import os, pathlib, subprocess, sys, time, unittest
+                MEET, TRACES = pathlib.Path({str(meet)!r}), {str(trace_dir)!r}
+                def ancestors():
+                    pid = os.getpid()
+                    while True:
+                        pid = int(pathlib.Path(f"/proc/{{pid}}/stat").read_text().rsplit(")", 1)[1].split()[1])
+                        if pid <= 1:
+                            return
+                        yield pid
+                class Boundary(unittest.TestCase):
+                    def test_boundary(self):
+                        self.assertNotEqual(os.getuid(), 0)
+                        self.assertEqual(os.readlink("/proc/self/fd/0"), "/dev/null")
+                        self.assertEqual(os.readlink("/proc/self/fd/1"), os.readlink("/proc/self/fd/2"))
+                        self.assertEqual(sorted(os.listdir("/proc/self/fd")), ["0", "1", "2", "3"])  # 3: listdir's own
+                        def meet(suffix):  # wait for the other module, so both run at once
+                            (MEET / ("{name}" + suffix)).write_text(str(os.getpid()))
+                            for _ in range(300):
+                                if len([p for p in MEET.iterdir() if p.name.endswith(suffix)]) == 2:
+                                    return
+                                time.sleep(0.1)
+                        meet(".up")
+                        peers = [int(p.read_text()) for p in MEET.iterdir() if p.name.endswith(".up") and p.name != "{name}.up"]
+                        self.assertEqual(len(peers), 1)
+                        for pid in [*ancestors(), *peers]:  # strace, the runner and above; the other module
+                            with self.subTest(pid=pid):
+                                for reach in (lambda: os.listdir(f"/proc/{{pid}}/fd"),
+                                              lambda: open(f"/proc/{{pid}}/fd/2", "a"),
+                                              lambda: open(f"/proc/{{pid}}/fd/1", "a"),
+                                              lambda: os.kill(pid, 0)):
+                                    self.assertRaises(PermissionError, reach)
+                        self.assertRaises(PermissionError, os.listdir, TRACES)
+                        self.assertRaises(PermissionError, open, TRACES + "/{name}.trace", "a")
+                        self.assertRaises(PermissionError, os.symlink, "/tmp/x", TRACES + "/test_q.trace")
+                        self.assertRaises(PermissionError, os.rename, TRACES, {str(root / "moved")!r})
+                        self.assertNotEqual(subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode, 0)
+                        raised = subprocess.run([{str(root / "suid-id")!r}, "-u"], capture_output=True, text=True)
+                        self.assertEqual(raised.stdout.strip(), str(os.getuid()))  # no new privileges: setuid root is ignored
+                        print("BOUNDARY HELD", os.getuid(), flush=True)
+                        meet(".done")  # the other module is still alive through all of the above
+                """))
+        shutil.copy("/usr/bin/id", root / "suid-id")
+        os.chmod(root / "suid-id", 0o4755)
+        unit_tests.prepare(names, trace_dir)
+        self.addCleanup(shutil.rmtree, unit_tests.scratch(trace_dir), True)
+        self.assertEqual(stat_of(trace_dir), (0o700, unit_tests._owner()[0]))
+        results = unit_tests.run(names, str(trace_dir), 2, runner=lambda m, d: unit_tests.run_one(m, d, root=root))
+        uids = set()
+        for name in names:
+            rc, _, out = results[name]
+            self.assertEqual(rc, 0, out)
+            held = re.findall(r"BOUNDARY HELD (\d+)", out)
+            self.assertEqual(len(held), 1, out)
+            uids.add(int(held[0]))
+            trace = (trace_dir / f"{name}.trace").read_text()
+            self.assertIn("EACCES", trace)  # strace saw the refused opens
+            self.assertTrue(records_audit.finished(trace), trace[-500:])
+        self.assertEqual(uids, {pwd.getpwnam(unit_tests.user(m)).pw_uid for m in names})
+        # sweep(): a process of the module's user that strace does not trace is killed.
+        stray = subprocess.Popen([*unit_tests.drop(names[0]), "sleep", "300"], start_new_session=True)
+        self.addCleanup(stray.kill)
+        time.sleep(0.2)
+        unit_tests.sweep(names[0])
+        self.assertEqual(stray.wait(timeout=10), -9)
 
 
 class RunTest(unittest.TestCase):
@@ -233,7 +431,9 @@ class SplitTest(unittest.TestCase):
     def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
         cmd = unit_tests.command("test_image", "/r", workers=4)
         self.assertIn("test_image", unit_tests.SPLIT)
-        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", sys.executable,
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", *unit_tests.JOIN,
+                               *unit_tests.drop("test_image"), sys.executable, "-c",
+                               "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                                str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
                                "--workers", "4"])
 
@@ -321,13 +521,24 @@ class StraceFaultTest(unittest.TestCase):
     strace cuts every time fails."""
     # REQ: CI-PATHS
     CUT = "strace: ptrace(PTRACE_LISTEN,pid:24103,sig:0): Input/output error"
-    SAY = {"ok": ("test_a ... ok\n\nOK\n", 0),
-           "cut": (f"test_a ... ok\ncoverage: 100.0% of statements\n{CUT}\n", 1),
-           "cut-exit-0": (f"test_a ... ok\ntest_b ... {CUT}\n", 0),
-           "fail-then-cut": (f"test_a ... FAIL\ntest_b ... {CUT}\n", 1),
-           "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", 1),
+    # step: (the module's output, strace's own stderr, strace's exit status)
+    SAY = {"ok": ("test_a ... ok\n\nOK\n", "", 0),
+           "cut": ("test_a ... ok\ncoverage: 100.0% of statements\n", f"{CUT}\n", 1),
+           "cut-exit-0": ("test_a ... ok\ntest_b ... ", f"{CUT}\n", 0),
+           "fail-then-cut": ("test_a ... FAIL\ntest_b ... ", f"{CUT}\n", 1),
+           "fail": ("test_a ... FAIL\n\nFAILED (failures=1)\n", "", 1),
            # #5355's shape: a child's PASS and coverage lines, then unittest's verdict on a bare line.
-           "bare-fail-then-cut": (f"test_a ... PASS\ncoverage: 100.0% of statements\nFAIL\ntest_b ... {CUT}\n", 1)}
+           "bare-fail-then-cut": ("test_a ... PASS\ncoverage: 100.0% of statements\nFAIL\ntest_b ... ", f"{CUT}\n", 1),
+           # #5407: a test printing strace's text is the module's output, not strace's.
+           "says-cut": (f"test_a ... {CUT}\n{CUT}\nok\n\nOK\n", "", 0)}
+
+    def setUp(self):
+        # These fake strace and run as whoever runs the tests: no module user to drop to or sweep
+        # (the real boundary: test_a_module_reaches_no_trace_stream_and_no_other_module).
+        for name, fake in (("drop", lambda module: []), ("sweep", lambda module: None)):
+            patcher = mock.patch.object(unit_tests, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def run_plan(self, *plan):
         """run_one under a fake strace that plays plan's steps in order, one per call, writing
@@ -345,7 +556,8 @@ class StraceFaultTest(unittest.TestCase):
             pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(steps[0])
             time.sleep(0.2)
             sys.stdout.write(say[steps[0]][0])
-            sys.exit(say[steps[0]][1])
+            sys.stderr.write(say[steps[0]][1])
+            sys.exit(say[steps[0]][2])
             """))
         fake.chmod(0o755)
         with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
@@ -354,14 +566,16 @@ class StraceFaultTest(unittest.TestCase):
         left = [s for s in (d / "plan").read_text().split("\n") if s]
         calls = len(plan) - len(left)
         self.assertGreaterEqual(secs, 0.2 * calls)  # every attempt's time counts
+        self.cut = (d / "test_x.trace.cut").read_text() if (d / "test_x.trace.cut").exists() else None
         return rc, out, (d / "test_x.trace").read_text(), calls
 
     def test_a_cut_run_reruns_whole_and_keeps_the_passing_runs_trace(self):
         rc, out, trace, calls = self.run_plan("cut", "ok")
         self.assertEqual((rc, trace, calls), (0, "ok", 2))
+        self.assertEqual(self.cut, "cut")  # #5364: the cut attempt's trace stays, for records_audit
         self.assertIn("strace failed itself on attempt 1 of 2", out)
         self.assertIn("the module reruns whole into a fresh trace", out)
-        self.assertTrue(out.startswith(self.SAY["cut"][0]), out)  # the cut attempt's own log stays
+        self.assertTrue(out.startswith(self.SAY["cut"][0] + self.CUT), out)  # the cut attempt's own log stays
         self.assertTrue(out.endswith(self.SAY["ok"][0]), out)
 
     def test_a_cut_run_is_no_pass_even_when_strace_exits_zero(self):
@@ -369,11 +583,148 @@ class StraceFaultTest(unittest.TestCase):
         self.assertEqual((rc, calls), (1, 2))
         self.assertIn("strace failed itself on attempt 2 of 2", out)
         self.assertIn("the module fails\n", out)
+        self.assertEqual(self.cut, "cut-exit-0")  # attempt 1's; attempt 2's is the module's trace
+        rc, _, _, _ = self.run_plan("ok")
+        self.assertEqual((rc, self.cut), (0, None))
+
+    def test_a_stale_cut_trace_is_not_this_runs(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        (d / "test_x.trace.cut").write_text("an earlier run's")
+        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n", "")):
+            self.assertEqual(unit_tests.run_one("test_x", str(d))[1], 0)
+        self.assertFalse((d / "test_x.trace.cut").exists())
+
+    def test_nothing_of_a_cut_attempt_runs_on_into_the_rerun(self):
+        # #5364: a fake strace that, cut, exits and leaves two children of the run behind, one that
+        # keeps the run's output open and one that does not, both ignoring SIGTERM. The rerun
+        # finds both gone, and the first does not hold the run open until it ends.
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        left = d / "left"
+        fake = d / "strace"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import os, pathlib, signal, subprocess, sys, time
+            left = pathlib.Path({str(left)!r})
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("x")
+            def alive(pid):
+                try:
+                    return pathlib.Path(f"/proc/{{pid}}/stat").read_text().split(") ")[1][0] != "Z"
+                except OSError:
+                    return False
+            if left.exists():
+                print("left alive:", [alive(int(p)) for p in left.read_text().split()])
+                sys.exit(0)
+            stay = [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"]
+            ps = [subprocess.Popen(stay), subprocess.Popen(stay, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)]
+            left.write_text(" ".join(str(p.pid) for p in ps))
+            print("{self.CUT}", file=sys.stderr)
+            sys.exit(1)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{d}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            _, rc, secs, out = unit_tests.run_one("test_x", str(d))
+        self.assertIn("left alive: [False, False]\n", out)
+        self.assertEqual(rc, 0, out)
+        self.assertLess(secs, 30)
 
     def test_a_module_strace_cuts_every_time_fails(self):
         rc, out, _, calls = self.run_plan("cut", "cut", "ok")
         self.assertEqual((rc, calls), (1, unit_tests.STRACE_ATTEMPTS))
+        # #5407: pinned, so at most one attempt is cut and kept, whole (a cut trace ends mid-line).
         self.assertEqual(unit_tests.STRACE_ATTEMPTS, 2)
+        self.assertEqual(self.cut, "cut")
+
+    def test_a_test_printing_straces_fault_text_is_not_rerun(self):
+        # #5407: the module's output never counts as strace's, however it is printed.
+        rc, out, trace, calls = self.run_plan("says-cut", "ok")
+        self.assertEqual((rc, trace, calls, self.cut), (0, "says-cut", 1, None))
+        self.assertNotIn("strace failed itself", out)
+
+    def test_a_tests_stdout_and_stderr_never_reach_straces_stderr(self):
+        # #5407: a fake strace with strace's file descriptors (the command inherits its stdout and
+        # stderr) runs the real command; a test prints the fault text every way it can. JOIN gives
+        # the test the module's stream, so strace's own stays clean: one attempt, the verdict kept.
+        # #5413: so does a sitecustomize, which Python runs before any of the module's own code,
+        # and a child it starts that writes after the test has run.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(textwrap.dedent(f"""\
+            import os, subprocess, sys, unittest
+            class A(unittest.TestCase):
+                def test_a(self):
+                    print("{self.CUT}", flush=True)
+                    print("{self.CUT}", file=sys.stderr, flush=True)
+                    os.write(2, b"{self.CUT}\\n")
+                    subprocess.run([sys.executable, "-c", "import sys; sys.stderr.write('{self.CUT}\\\\n')"])
+            """))
+        site = root / "site"
+        site.mkdir()
+        (site / "sitecustomize.py").write_text(textwrap.dedent(f"""\
+            import os, subprocess, sys
+            os.write(2, b"{self.CUT}\\n")
+            subprocess.Popen([sys.executable, "-I", "-c", "import os, time; time.sleep(1); os.write(2, b'{self.CUT}\\\\n')"])
+            """))
+        fake = root / "strace"
+        # -I: the fake strace runs no sitecustomize of its own.
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent(f"""\
+            import pathlib, subprocess, sys, time
+            calls = pathlib.Path({str(root / "calls")!r})
+            calls.write_text(calls.read_text() + "x" if calls.exists() else "x")
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text("t")
+            rc = subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode
+            time.sleep(2)  # the hook's child writes meanwhile
+            sys.exit(rc)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}",
+                                              "PYTHONPATH": str(site)}):
+            _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
+        self.assertEqual((rc, (root / "calls").read_text()), (0, "x"), out)
+        self.assertEqual(out.count(self.CUT), 4 + 2 * 2, out)  # the test's 4, and the hook's 2 in each of 2 Pythons
+        self.assertIn("\nok\n", out)
+        self.assertNotIn("strace failed itself", out)
+
+    def test_a_cut_faked_through_straces_proc_fd_hides_no_write(self):
+        # #5413: were a cut faked on attempt 1 only (here through a fake strace's /proc entry, which
+        # the module's own user cannot open under the real one), its write sits in the cut trace
+        # alone; clash_audit reads that as the module's, so the clash with another module still
+        # fails the step.
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(textwrap.dedent(f"""\
+            import os, pathlib, unittest
+            class A(unittest.TestCase):
+                def test_a(self):
+                    first = pathlib.Path({str(root / "first")!r})
+                    if not first.exists():
+                        first.write_text("")
+                        with open(f"/proc/{{os.getppid()}}/fd/2", "a") as f:  # the fake strace's
+                            f.write("{self.CUT}\\n")
+            """))
+        fake = root / "strace"
+        # Each call's trace: the first run's shows the shared write, the rerun's does not.
+        fake.write_text(f"#!{sys.executable} -I\n" + textwrap.dedent(f"""\
+            import pathlib, subprocess, sys
+            first = not pathlib.Path({str(root / "first")!r}).exists()
+            pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text({w(5, "/tmp/agentos-x")!r} if first else "")
+            sys.exit(subprocess.run(sys.argv[sys.argv.index("-o") + 2:]).returncode)
+            """))
+        fake.chmod(0o755)
+        with mock.patch.dict(unit_tests.ENV, {"PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}):
+            _, rc, _, out = unit_tests.run_one("test_fake", str(root), root=root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("strace failed itself on attempt 1 of 2", out)
+        self.assertEqual((root / "test_fake.trace").read_text(), "")
+        (root / "test_other.trace").write_text(w(6, "/tmp/agentos-x"))
+        stdout = io.StringIO()
+        with mock.patch.object(unit_tests, "modules", lambda root=None: ["test_fake", "test_other"]), \
+             mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", io.StringIO()), \
+             mock.patch.dict(unit_tests.SERIAL, clear=True):
+            self.assertEqual(clash_audit.main(["clash_audit.py", str(root)]), 1)
+        self.assertEqual(stdout.getvalue(), "::error::test_fake and test_other both write /tmp/agentos-x\n")
 
     def test_a_failed_test_is_never_rerun(self):
         rc, out, trace, calls = self.run_plan("fail-then-cut", "ok")
@@ -414,7 +765,7 @@ class StraceFaultTest(unittest.TestCase):
                 print("OK"); sys.exit(0)
             p = subprocess.Popen(sys.argv[sys.argv.index("-o") + 2:], start_new_session=True)
             time.sleep(3)
-            sys.stdout.write("{self.CUT}\\n"); sys.stdout.flush()
+            sys.stderr.write("{self.CUT}\\n"); sys.stderr.flush()
             os.killpg(p.pid, signal.SIGKILL)
             p.wait()
             sys.exit(1)
@@ -439,13 +790,12 @@ class StraceFaultTest(unittest.TestCase):
         self.assertIn("counting the run strace cut short and its rerun", text)
         self.assertNotIn("split it", text)
 
-    def test_the_runners_own_strace_lines_are_faults_and_test_output_is_not(self):
-        # #5258's line followed a test's partial line; #5355's stood alone.
-        for line in ("test_a_guard (test_mutgate.Deletion.test_a_guard) ... " + self.CUT, self.CUT):
-            self.assertTrue(unit_tests.STRACE_FAULT.search(line), line)
-        for line in ("test_x (m.T.test_x) ... skipped 'needs user+net namespaces and strace'",
-                     "test_a_tracee_cannot_erase_strace_fault_message (m.T.test_a) ... ok"):
-            self.assertFalse(unit_tests.STRACE_FAULT.search(line), line)
+    def test_strace_faults_are_its_own_ptrace_failures(self):
+        # Read on strace's own stderr (#5258, #5355), where each of its lines starts `strace: `.
+        for err in (self.CUT, f"strace: other\n{self.CUT}\n", "strace: ptrace(PTRACE_CONT,pid:1,sig:0): x"):
+            self.assertTrue(unit_tests.STRACE_FAULT.search(err), err)
+        for err in ("", "strace: exec: No such file or directory\n", "x " + self.CUT):
+            self.assertFalse(unit_tests.STRACE_FAULT.search(err), err)
         for line in ("t (m.T.t) ... FAIL", "t (m.T.t) ... ERROR", "ERROR: setUpClass (m.T)", "FAILED (errors=1)",
                      "FAIL", "t (m.T.t) ... partialFAIL", "t (m.T.t) ... unexpected success",
                      "  t (m.T.t) (i=1) ... ERROR"):
@@ -481,6 +831,57 @@ class RecordsAuditTest(unittest.TestCase):
         # The asked path decodes as the reached one does.
         asked = f'6 openat(AT_FDCWD<{R}>, "LEDGER\\x2emd", O_RDONLY <unfinished ...>\n'
         self.assertIn(("LEDGER.md", False), records_audit.opened(asked))
+
+    def test_a_record_only_a_cut_attempt_opened_counts(self):
+        # #5364: tools/unit_tests.py keeps a cut attempt's trace as <module>.trace.cut. Its opens
+        # count for the record check; partial, it needs neither the module's file nor an exit.
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        rerun = own + "1 +++ exited with 0 +++\n"
+        cut = f'7 openat(AT_FDCWD<{R}>, "LEDGER.md", O_RDONLY) = 3<{R}/LEDGER.md>\n'
+        self.assertEqual(records_audit.problems({"test_m": rerun}, [], cut={"test_m": cut}),
+                         ["tests.test_m\tLEDGER.md"])
+        self.assertEqual(records_audit.problems({"test_m": rerun}, ["tests.test_m"], cut={"test_m": cut}), [])
+        self.assertEqual(records_audit.problems({"test_m": rerun}, [], cut={"test_m": "7 openat(AT_FDCWD</tmp>, \"y\", O_RDONLY) = 3</tmp/y>\n"}), [])
+        # main reads it from the trace directory, under unit_tests' name for it.
+        self.assertEqual(unit_tests.CUT, ".trace.cut")
+        with tempfile.TemporaryDirectory() as d:
+            for stem in unit_tests.modules():
+                pathlib.Path(d, f"{stem}.trace").write_text(rerun.replace("test_m", stem))
+            pathlib.Path(d, "test_unit_tests.trace.cut").write_text(cut)
+            out = []
+            with mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))), \
+                 mock.patch.object(records_audit, "records_run_tests", return_value=[]):
+                self.assertEqual(records_audit.main(["records_audit.py", d]), 1)
+            self.assertIn("tests.test_unit_tests\tLEDGER.md", out)
+
+    def test_a_write_in_the_trace_directory_fails_the_module(self):
+        # #5407: the traces are the audit's evidence. A write open there, in any attempt, by the
+        # path it reached or asked for, fails the module whether or not it is listed; a read does not.
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        end = "1 +++ exited with 0 +++\n"
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            tamper = f"tests.test_m\twrote {d}/test_b.trace: {records_audit.TAMPER}"
+            for listed in ([], ["tests.test_m"]):
+                for line in (w(2, f"{d}/test_b.trace"), w(2, f"{d}/test_b.trace", "O_RDWR"),
+                             f'2 openat(AT_FDCWD<{d}>, "test_b.trace", O_WRONLY|O_CREAT, 0666) = -1 EACCES (Permission denied)\n'):
+                    self.assertEqual(records_audit.problems({"test_m": own + line + end}, listed, trace_dir=d),
+                                     [tamper], line)
+                    self.assertEqual(records_audit.problems({"test_m": own + end}, listed, cut={"test_m": line},
+                                                            trace_dir=d), [tamper], line)
+                read = f'2 openat(AT_FDCWD<{d}>, "test_b.trace", O_RDONLY) = 3<{d}/test_b.trace>\n'
+                self.assertEqual(records_audit.problems({"test_m": own + read + w(3, f"{d}x/y") + end}, listed,
+                                                        trace_dir=d), [])
+            # main reads the directory it is given, and asks for no records-step change for it.
+            for stem in unit_tests.modules():
+                pathlib.Path(d, f"{stem}.trace").write_text(
+                    (own + end).replace("test_m", stem) + (w(2, f"{d}/x") if stem == "test_unit_tests" else ""))
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err), \
+                 mock.patch.object(records_audit, "records_run_tests", return_value=[]):
+                self.assertEqual(records_audit.main(["records_audit.py", d]), 1)
+            self.assertEqual(out.getvalue(), f"tests.test_unit_tests\twrote {d}/x: {records_audit.TAMPER}\n")
+            self.assertEqual(err.getvalue(), "")
 
     def test_an_escaped_resumed_path_and_an_escaped_directory_fd_decode(self):
         # Each _decode call keeps one escaped name from reading as another (#4538): the file a
@@ -720,6 +1121,57 @@ class ClashTest(unittest.TestCase):
         clash_audit.writes(failed, ondisk=lambda name: seen.append(name))
         self.assertEqual(seen, ["/w", "/w/l"])
 
+    def test_unlink_rename_and_truncate_change_a_name_as_a_write_does(self):
+        # #5413: strace 6.8's lines for each, whatever the result. Each name counts, resolved from
+        # its directory fd or the process's cwd; truncate follows a link the tree made, unlink does not.
+        cwd = '1 openat(AT_FDCWD</d>, "x", O_RDONLY) = 3</d/x>\n'
+        for line, names in (('1 unlink("c")                       = 0\n', ["/d/c"]),
+                            ('1 unlink("/d/c")                     = -1 ENOENT (No such file or directory)\n', ["/d/c"]),
+                            ('1 unlinkat(3</e>, "f", 0)      = 0\n', ["/e/f"]),
+                            ('1 unlinkat(AT_FDCWD</e>, "g", AT_REMOVEDIR) = 0\n', ["/e/g"]),
+                            ('1 rename("a", "b")                  = 0\n', ["/d/a", "/d/b"]),
+                            ('1 renameat(3</e>, "a", 4</f>, "b") = 0\n', ["/e/a", "/f/b"]),
+                            ('1 renameat2(AT_FDCWD</e>, "a", AT_FDCWD</f>, "b", RENAME_NOREPLACE) = 0\n', ["/e/a", "/f/b"]),
+                            ('1 truncate("c", 0)                  = 0\n', ["/d/c"]),
+                            ('1 unlink("c" <unfinished ...>\n', ["/d/c"])):
+            self.assertLessEqual({("path", n) for n in names}, clash_audit.writes(cwd + line), line)
+            for name in names:
+                self.assertEqual(clash_audit.clashes({"test_a": cwd + line, "test_b": w(2, name)}, serial={}),
+                                 [("path", name, "test_a", "test_b")], line)
+        # No directory fd: the name joins the cwd the pid's lines showed, else stays as asked.
+        self.assertEqual(clash_audit.writes(cwd + '1 unlink("c") = 0\n'), {("path", "/d/c")})
+        self.assertEqual(clash_audit.writes('1 unlink("c") = 0\n'), {("path", "c")})
+        link = '1 symlink("/t/real", "/d/l") = 0\n'
+        self.assertEqual(clash_audit.writes(link + '1 truncate("/d/l", 0) = 0\n'), {("path", "/t/real"), ("path", "/d/l")})
+        self.assertEqual(clash_audit.writes(link + '1 unlink("/d/l") = 0\n'), {("path", "/d/l")})
+        # records_audit: removing or renaming a trace, or another module's cut trace, is a write there.
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            for line, path in ((f'2 unlink("{d}/test_b.trace.cut") = 0\n', "test_b.trace.cut"),
+                               (f'2 renameat(AT_FDCWD</>, "{d}/test_m.trace", AT_FDCWD</>, "/tmp/y") = 0\n', "test_m.trace"),
+                               (f'2 truncate("{d}/test_b.trace", 0) = 0\n', "test_b.trace")):
+                trace = own + line + "1 +++ exited with 0 +++\n"
+                self.assertEqual(records_audit.problems({"test_m": trace}, ["tests.test_m"], trace_dir=d),
+                                 [f"tests.test_m\twrote {d}/{path}: {records_audit.TAMPER}"], line)
+
+    def test_a_cut_attempts_writes_are_the_modules(self):
+        # #5413: tools/unit_tests.py keeps a cut attempt's trace as <module>.trace.cut; a write
+        # only it shows still clashes, and main reads it from the trace directory.
+        self.assertEqual(clash_audit.clashes({"test_a": "", "test_b": w(2, "/x")}, serial={}, cut={"test_a": w(1, "/x")}),
+                         [("path", "/x", "test_a", "test_b")])
+        self.assertEqual(clash_audit.clashes({"test_a": w(1, "/x"), "test_b": ""}, serial={}, cut={"test_a": w(1, "/x")}), [])
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, "test_a.trace").write_text("")
+            pathlib.Path(d, "test_b.trace").write_text(w(2, "/x"))
+            pathlib.Path(d, "test_a" + unit_tests.CUT).write_text(w(1, "/x"))
+            out = io.StringIO()
+            with mock.patch.object(unit_tests, "modules", lambda root=None: ["test_a", "test_b"]), \
+                 mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()), \
+                 mock.patch.dict(unit_tests.SERIAL, clear=True):
+                self.assertEqual(clash_audit.main(["clash_audit.py", d]), 1)
+            self.assertEqual(out.getvalue(), "::error::test_a and test_b both write /x\n")
+
     def test_a_fixed_port_or_socket_name_clashes_and_port_zero_does_not(self):
         def bind(pid, addr, result="= 0"):
             return f"{pid} bind(3<socket:[9]>, {{{addr}}}, 16) {result}\n"
@@ -749,7 +1201,6 @@ class ClashTest(unittest.TestCase):
 
     @mock.patch.object(unit_tests, "modules", lambda root=None: ["test_a", "test_b", "test_c"])
     def test_the_step_fails_naming_both_units_and_the_escape_hatch(self):
-        import io
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             for unit, text in {"test_a": w(1, "/tmp/agentos-x"), "test_b": w(2, "/tmp/agentos-x"),
@@ -763,6 +1214,20 @@ class ClashTest(unittest.TestCase):
             pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
+            # A cut attempt's trace (tools/unit_tests.py CUT) is its module's, not a unit of its own.
+            pathlib.Path(d, "test_b" + unit_tests.CUT).write_text(w(9, "/tmp/tmpb/x"))
+            with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
+                self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
+            # #5413: the Go directory every module's user shares is no clash; a name that only
+            # starts with it and leaves it through `..` is.
+            go = str(unit_tests.go_dir(d))
+            for path, rc in ((f"{go}/build/ab/abc-d", 0), (f"{go}/../escape", 1)):
+                pathlib.Path(d, "test_a.trace").write_text(w(1, path))
+                pathlib.Path(d, "test_b.trace").write_text(w(2, path))
+                with mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()), \
+                     mock.patch.dict(unit_tests.SERIAL, clear=True):
+                    self.assertEqual(clash_audit.main(["clash_audit.py", d]), rc, path)
+            pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             # A module with no trace fails: an empty directory never passes.
             pathlib.Path(d, "test_c.trace").unlink()
             out = io.StringIO()
@@ -777,6 +1242,16 @@ class ClashTest(unittest.TestCase):
         step = step[:step.index("\n      - ")]
         self.assertEqual(step.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                                                  '        run: python tests/clash_audit.py "$RUNNER_TEMP/reads"'])
+
+    def test_ci_runs_the_uid_boundary_test_as_root_where_it_cannot_skip(self):
+        # #5413: under tools/unit_tests.py the test runs as a module's user and skips; this step runs it.
+        ci = (unit_tests.ROOT / ".github/workflows/ci.yml").read_text()
+        step = ci[ci.index("python tests/clash_audit.py"):]
+        step = step[step.index("\n      - "):][1:]
+        step = step[:step.index("\n      - ")].splitlines()
+        self.assertEqual(step[1], "        if: steps.scope.outputs.records != 'true'")
+        self.assertEqual(step[-1], '        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest '
+                                   'tests.test_unit_tests -v')
 
 
 if __name__ == "__main__":

@@ -299,8 +299,8 @@ func (d *Enforcer) closeFresh() {
 // pageResolver is the resolver as the page shows it: stopped while no
 // instance runs, and then why: each stray address hold found with its
 // interface, every other failure of the served check by its typed cause
-// (#5284), the typed cause of the policy in force's that dns.Generate
-// refused (#5307), and the step that refused the last load (ENF-l-11,
+// (#5284), each typed cause of the policy in force's that dns.Generate
+// refused (#5307, #5405), and the step that refused the last load (ENF-l-11,
 // ENF-l-21; #5164 R1, R5 d).
 // While instances run, each that keeps exiting or failing to start is
 // shown instead (R5 b), read from dns/run, which the page waits on only
@@ -310,16 +310,19 @@ type pageResolver struct{ d *Enforcer }
 func (p pageResolver) Stopped() page.ResolverStop {
 	n := &p.d.net
 	n.resMu.Lock()
-	runs, served, why, load := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad
+	runs, served, why, load, unseeded := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.unseeded
 	n.resMu.Unlock()
+	// A host the load did not seed has renewed by half a lease after it
+	// (nft.LeaseTimeout, the lease every range offers).
+	unread := !unseeded.IsZero() && p.d.dp.Now().Sub(unseeded) < nft.LeaseTimeout/2*time.Second
 	if runs {
-		var out page.ResolverStop
+		out := page.ResolverStop{Unseeded: unread}
 		for _, f := range p.d.dp.DNS.Flapping() {
 			out.Restarting = append(out.Restarting, restartOf(f))
 		}
 		return out
 	}
-	out := page.ResolverStop{Stopped: true, Policy: why, Load: load}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, Unseeded: unread}
 	errs := []error{served}
 	if j, ok := served.(interface{ Unwrap() []error }); ok {
 		errs = j.Unwrap()

@@ -19,10 +19,14 @@ const (
 	WordUndo   Word = "UNDO"
 	WordMore   Word = "MORE"
 	// WordUnclear is a message that starts with RESUME, YES, or NO and has
-	// digits but fits no grammar. It may hold a code, so it never goes to
-	// the agent (CH-10: the agent never sees a code).
+	// a digit or other number in any script but fits no grammar. It may
+	// hold a code, so it never goes to the agent (CH-10: the agent never
+	// sees a code). Codes themselves stay ASCII-only (digits).
 	WordUnclear Word = "?"
 )
+
+// UnclearReply is the fixed reply to WordUnclear.
+const UnclearReply = "Not understood, and not sent to your agent. Reply HELP for commands."
 
 // Command is a parsed owner message. For task chat, Word is WordNone and
 // Text is what the agent receives; Public is set by a leading PUBLIC.
@@ -46,7 +50,7 @@ func Parse(msg string) Command {
 			}
 			return Command{Word: w, Args: args}
 		}
-		if (w == WordResume || w == WordYes || w == WordNo) && strings.ContainsAny(msg, "0123456789") {
+		if (w == WordResume || w == WordYes || w == WordNo) && strings.ContainsFunc(msg, unicode.IsNumber) {
 			return Command{Word: WordUnclear}
 		}
 		if w == "PUBLIC" && len(args) > 0 {

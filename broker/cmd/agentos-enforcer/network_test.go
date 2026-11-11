@@ -254,7 +254,9 @@ func TestByteCapStateUnreadable(t *testing.T) {
 	for i := range p.Groups {
 		p.Groups[i].Count = p.Groups[i].Cap
 	}
-	p.EdgeCount, p.Past = p.EdgeCap, true
+	// Every cap is spent, not counted, so the kernel does not cut the edge
+	// at its quota (nft.Drop.EdgeHold, #5282).
+	p.EdgeCount, p.Past, p.EdgeHold = p.EdgeCap, true, true
 	drops, err := nft.Drops(doc, x.cfg.Layout, nil, p)
 	if err != nil {
 		t.Fatal(err)
@@ -365,7 +367,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		exp(100) + " 1234 fd00:30::20 * 00:01",
 		exp(100) + " 02:00:00:00:00:13 ::ffff:10.30.0.29 * *",
 		exp(100) + " 02:00:00:00:00:14 10.30.0.1 * *", // the enforcer's
-	}, "\n")
+	}, "\n") + "\n"
 	path := filepath.Join(t.TempDir(), "dhcp.leases")
 	if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
@@ -452,6 +454,95 @@ func TestLeasesOf(t *testing.T) {
 	if got := leasesOf(nil, s.Nets, c.Layout, 1000); len(got) != 0 {
 		t.Fatalf("no file: leases %+v", got)
 	}
+	// An address on two lines seeds neither (#5394 item 2), whether the
+	// hardware addresses differ or not; the address's neighbours seed. A
+	// line that does not parse names no address and proves no clock.
+	file = strings.Join([]string{
+		"1100 02:00:00:00:00:01 10.30.0.10 * *",
+		"1100 not-a-mac 10.30.0.10 * *",
+		"later 02:00:00:00:00:09 10.30.0.10 * *",
+		"99999999 02:00:00:00:00:09 10.30.0.x * *",
+		"1100 02:00:00:00:00:02 10.30.0.14 * *",
+		"1200 02:00:00:00:00:03 10.30.0.14 * *",
+		"1100 02:00:00:00:00:04 10.30.0.15 * *",
+		"1100 02:00:00:00:00:04 10.30.0.15 * *",
+		"1100 02:00:00:00:00:05 10.30.0.16 * *",
+	}, "\n")
+	want = []nft.Lease{
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 100},
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.16"), HW: hw("02:00:00:00:00:05"), Left: 100},
+	}
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
+		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
+	}) {
+		t.Fatalf("duplicate addresses: leases %+v, want %+v", got, want)
+	}
+	// A clock behind (#5394 item 4): a lease that ends LeaseTimeout+50
+	// after now was granted 50 s from now, so the clock is at least that
+	// far behind, and every lease's time left counts from then: the
+	// newest seeds LeaseTimeout, one ending 1100 seeds 50, and one ending
+	// within those 50 s seeds nothing, even from another subnet's line.
+	grant := strconv.FormatInt(1050+nft.LeaseTimeout, 10)
+	file = strings.Join([]string{
+		"1100 02:00:00:00:00:01 10.30.0.10 * *",
+		"1050 02:00:00:00:00:02 10.30.0.11 * *",
+		"1049 02:00:00:00:00:03 10.30.0.12 * *",
+		grant + " 02:00:00:00:00:04 10.99.0.5 * *", // in no subnet
+		"1100 02:00:00:00:00:05 10.20.0.20 * *",
+	}, "\n")
+	want = []nft.Lease{
+		{Iface: "gst0", Addr: netip.MustParseAddr("10.30.0.10"), HW: hw("02:00:00:00:00:01"), Left: 50},
+		{Iface: "hh0", Addr: netip.MustParseAddr("10.20.0.20"), HW: hw("02:00:00:00:00:05"), Left: 50},
+	}
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); !slices.EqualFunc(got, want, func(a, b nft.Lease) bool {
+		return a.Iface == b.Iface && a.Addr == b.Addr && slices.Equal(a.HW, b.HW) && a.Left == b.Left
+	}) {
+		t.Fatalf("clock behind: leases %+v, want %+v", got, want)
+	}
+	file = grant + " 02:00:00:00:00:01 10.30.0.10 * *\n1100 02:00:00:00:00:02 10.30.0.11 * *"
+	if got = leasesOf([]byte(file), s.Nets, c.Layout, 1000); len(got) != 2 || got[0].Left != nft.LeaseTimeout || got[1].Left != 50 {
+		t.Fatalf("clock behind, the newest grant: leases %+v", got)
+	}
+}
+
+// TestLeaseFileTorn (#5394 item 1): the lease file is taken only when two
+// reads in a row are equal and it ends with a whole line, up to three
+// tries; a read error is the file's, and a file never read whole is an
+// error, so it seeds nothing.
+func TestLeaseFileTorn(t *testing.T) {
+	reads := func(rs ...string) (func() ([]byte, error), *int) {
+		n := new(int)
+		return func() ([]byte, error) {
+			r := rs[min(*n, len(rs)-1)]
+			*n++
+			if r == "!" {
+				return nil, os.ErrPermission
+			}
+			return []byte(r), nil
+		}, n
+	}
+	const whole = "1 a 10.0.0.1 * *\n2 b 10.0.0.2 * *\n"
+	for _, c := range []struct {
+		reads []string
+		want  string
+		err   error
+		n     int
+	}{
+		{[]string{whole, whole}, whole, nil, 2},
+		{[]string{"", ""}, "", nil, 2},
+		{[]string{"1 a 10.0.0.1 * *\n2 b 10.0.0.", whole, whole, whole}, whole, nil, 4},
+		{[]string{"x\n", "y\n", "z\n", "w\n", whole, whole}, whole, nil, 6},
+		{[]string{"x\n", "y\n", "z\n", "w\n", "u\n", "v\n", whole}, "", errTorn, 6},
+		{[]string{"1 a 10.0.0.1 * *"}, "", errTorn, 6},
+		{[]string{"!"}, "", os.ErrPermission, 1},
+		{[]string{whole, "!"}, "", os.ErrPermission, 2},
+	} {
+		read, n := reads(c.reads...)
+		got, err := leaseFile(read)
+		if string(got) != c.want || !errors.Is(err, c.err) || *n != c.n {
+			t.Errorf("reads %q: %q, %v after %d reads; want %q, %v after %d", c.reads, got, err, *n, c.want, c.err, c.n)
+		}
+	}
 }
 
 // TestLeaseFileUnreadable (ENF-l-23, #5295): a missing lease file (a first
@@ -465,11 +556,50 @@ func TestLeaseFileUnreadable(t *testing.T) {
 	if strings.Contains(x.logText(), "lease file") {
 		t.Fatal("a missing lease file was logged")
 	}
+	if (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home shows a missing lease file as unreadable")
+	}
 	x.cfg.DNS.LeaseFile = t.TempDir() // a directory: read fails
 	x.restart()
 	x.enforced()
 	if !strings.Contains(x.logText(), "lease file unreadable") {
 		t.Fatal("an unreadable lease file was not logged")
+	}
+	// Home shows it (#5394 item 3) until half a lease has passed, when
+	// every host the load did not seed has renewed.
+	if !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home does not show an unreadable lease file")
+	}
+	x.advance(nft.LeaseTimeout/2*time.Second - time.Second)
+	if !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home stops showing an unreadable lease file before every host has renewed")
+	}
+	x.advance(time.Second)
+	if (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatal("home still shows an unreadable lease file half a lease later")
+	}
+	// A file that does not end with a whole line is one read mid-rewrite:
+	// no seed, logged, shown; a load that reads it whole clears it.
+	x.cfg.DNS.LeaseFile = filepath.Join(t.TempDir(), "dhcp.leases")
+	exp := strconv.FormatInt(x.nowMS()/1000+600, 10)
+	if err := os.WriteFile(x.cfg.DNS.LeaseFile, []byte(exp+" 02:00:00:00:00:01 10.30.0.20 * *"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.restart()
+	if got := x.fire.last(); strings.Contains(got, "add element inet enforcer lease_") || !strings.Contains(x.logText(), errTorn.Error()) || !(pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatalf("a torn lease file seeded, or was not logged or shown:\n%s", got)
+	}
+	if err := os.WriteFile(x.cfg.DNS.LeaseFile, []byte(exp+" 02:00:00:00:00:01 10.30.0.20 * *\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(x.fire.last(), "add element inet enforcer lease_guests_4 { 0x0a1e0014 . 0x020000000001 expires 600s }") || (pageResolver{x.d}).Stopped().Unseeded {
+		t.Fatalf("a lease file read whole did not seed, or home still shows it unread:\n%s", x.fire.last())
 	}
 }
 
@@ -621,6 +751,11 @@ func TestUnresolvedBytesTrip(t *testing.T) {
 	}
 }
 
+// edgeTripRule is the cut chain's rule that drops the edge's packets once
+// the kernel put it in nft.TripSet (#5282): present in every drop unless
+// the edge is held (nft.Drop.EdgeHold).
+const edgeTripRule = `add rule inet enforcer cut_edge iifname @edge_trip counter name "edge_cut" drop`
+
 // TestByteCapTripsTheEdge (#5014, ENF-l-15, KRN-12): the edge past its
 // cap is cut: the record says so and why, a trip alert names the edge
 // and turns the light red, and the drop written at once carries the cut
@@ -650,6 +785,11 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) {
 		t.Fatal("the edge was cut at its cap, not past it")
+	}
+	// The kernel cuts it at the first byte past (#5282), whatever the
+	// writes after it do.
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the drop at the edge's cap leaves the kernel's own cut off")
 	}
 	x.fail(fileEdgeCut, true) // the disk refuses the trip's record
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
@@ -712,6 +852,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); cut || strings.Contains(lastUpdate(), cutRule) || edgeTrips() != 0 {
 		t.Fatal("the owner's lift left the edge cut, in the record, the firewall or the alerts")
 	}
+	if strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the owner's lift on the overrun's day leaves the kernel cutting the edge at the quota it passed")
+	}
 	if err := (pageEdge{x.d}).LiftEdge(); err != nil { // a second lift changes nothing
 		t.Fatal(err)
 	}
@@ -725,6 +868,9 @@ func TestByteCapTripsTheEdge(t *testing.T) {
 	}
 
 	x.advance(24 * time.Hour)
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the day after a lift, the kernel does not cut the edge at its new quota")
+	}
 	x.setListing(listingOf(t, x, doc, 9, 10, 6000, true))
 	x.advance(readEvery)
 	if cut, _ := x.d.edge.Cut(); !cut {
@@ -775,6 +921,12 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" unreadable") {
 		t.Fatal("an unreadable record did not start the edge cut, or was not logged")
 	}
+	// #5399: as a missing one, it raises its own alert, which lights red.
+	if !slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool {
+		return r.Kind == alert.RecordMissing && r.Device == edgeDevice
+	}) || x.d.alerts.Status().Colour != alert.Red {
+		t.Fatal("an unreadable record raised no missing record alert")
+	}
 	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
 		t.Fatalf("lift: %d %s", w.Code, w.Body)
 	}
@@ -794,6 +946,147 @@ func TestEdgeCutRecordUnreadable(t *testing.T) {
 	}
 	os.Remove(path)
 	x.start()
+}
+
+// TestCutRecordsMissing (#5282, #5399 items 1 and 4): provisioning writes
+// both cut records uncut, and nothing removes them, so a record missing at
+// a start means root on the enforcer or lost state: the box stays cut,
+// an alert of its own names it and turns the light red, and each card's
+// reason says to check the enforcer, not to trust the box. The owner's
+// lift and resume write the records whole and resolve the alerts. Such a
+// cut carries no day, so a lift on a day the edge is already past its cap
+// holds for the rest of it: the next reading does not cut it again.
+func TestCutRecordsMissing(t *testing.T) {
+	x, doc, a := capped(t)
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if b, err := os.ReadFile(filepath.Join(x.dir, name)); err != nil || string(b) != "{}" {
+			t.Fatalf("provisioning did not write %s uncut: %q, %v", name, b, err)
+		}
+	}
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("a fresh box starts cut")
+	}
+	missing := func() (core, edge int) {
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind == alert.RecordMissing && r.Device == coreDevice {
+				core++
+			}
+			if r.Kind == alert.RecordMissing && r.Device == edgeDevice {
+				edge++
+			}
+		}
+		return core, edge
+	}
+	if c, e := missing(); c+e != 0 || x.d.alerts.Status().Colour != alert.Off {
+		t.Fatal("a fresh box raised a missing record")
+	}
+	x.d.Close()
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if err := os.Remove(filepath.Join(x.dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.start()
+	cut, why := x.d.edge.Cut()
+	if !cut || why != "the record of the edge's cut is missing. Someone may have tampered with the enforcer: check it before you lift the cut." ||
+		strings.Contains(why, "trust the edge") || !strings.Contains(x.logText(), "edge cut: "+fileEdgeCut+" missing") {
+		t.Fatalf("a missing edge record: cut %v, reason %q", cut, why)
+	}
+	if !strings.Contains(x.fire.last(), `add rule inet enforcer cut_edge counter name "edge_cut" drop`) {
+		t.Fatal("the first load with the edge's record missing does not cut the edge")
+	}
+	x.d.cut.mu.Lock()
+	why = x.d.cut.reason
+	x.d.cut.mu.Unlock()
+	if x.d.cut.Stage() != channel.Tripped || why != "the record of the core's cut is missing. Someone may have tampered with the enforcer: check it before you resume the core's channel." ||
+		!strings.Contains(x.logText(), "cut: "+fileCut+" missing") {
+		t.Fatalf("a missing core record: stage %v, reason %q", x.d.cut.Stage(), why)
+	}
+	if c, e := missing(); c != 1 || e != 1 || x.d.alerts.Status().Colour != alert.Red {
+		t.Fatalf("missing records raised %d core and %d edge alerts, light %v", c, e, x.d.alerts.Status().Colour)
+	}
+	// The edge is past its cap today: the cut's day is unknown, so the
+	// lift holds for the rest of today.
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a lift of a cut with no day cut the edge again at the next reading")
+	}
+	if c, e := missing(); c != 1 || e != 0 {
+		t.Fatalf("after the edge's lift: %d core and %d edge alerts open", c, e)
+	}
+	if err := x.d.cut.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if c, e := missing(); c+e != 0 || x.d.alerts.Status().Colour != alert.Off {
+		t.Fatal("the lift and resume left a missing record's alert open or the light red")
+	}
+	x.restart()
+	if cut, _ := x.d.edge.Cut(); cut || x.d.cut.Stage() != channel.Open {
+		t.Fatal("the owner's lift and resume did not write the records again")
+	}
+	if c, e := missing(); c+e != 0 {
+		t.Fatal("a restart with both records raised a missing record")
+	}
+}
+
+// TestDayZeroLiftWithinCap (#5399 item 4, Security on #5434): the lift of
+// a cut with no day (a missing record) holds for the rest of the day only
+// when the edge is already past its cap. Within its cap it is not held,
+// so its overrun later that day cuts it, with a trip, as any overrun does.
+func TestDayZeroLiftWithinCap(t *testing.T) {
+	x, doc, a := capped(t)
+	x.d.Close()
+	if err := os.Remove(filepath.Join(x.dir, fileEdgeCut)); err != nil {
+		t.Fatal(err)
+	}
+	x.start()
+	x.setListing(listingOf(t, x, doc, 7, 10, 5000, true)) // at the cap, not past it
+	x.advance(readEvery)
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if cut, _ := x.d.edge.held(traffic.Day(x.d.dp.Now())); cut {
+		t.Fatal("fixture: not lifted")
+	}
+	if _, lifted := x.d.edge.held(traffic.Day(x.d.dp.Now())); lifted {
+		t.Fatal("a lift of a cut with no day, within the cap, holds the edge for the day")
+	}
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.advance(readEvery)
+	x.advance(readEvery)
+	trips := 0
+	for _, r := range x.d.alerts.Status().Open {
+		if r.Kind == alert.Trip && r.Device == edgeDevice {
+			trips++
+		}
+	}
+	if cut, _ := x.d.edge.Cut(); !cut || trips != 1 {
+		t.Fatalf("an overrun after the lift: cut %v, %d trips", cut, trips)
+	}
+	// Every cap held spent counts as past: the table's bytes lost, or the
+	// day unreadable.
+	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
+	x.d.fwMu.Lock()
+	c := x.d.net.counter
+	x.d.net.unread = true
+	x.d.net.counter = traffic.NewCounter(x.d.dp.Now, traffic.CapsOf(doc))
+	x.d.fwMu.Unlock()
+	unread := x.d.edgePast()
+	x.d.fwMu.Lock()
+	x.d.net.unread, x.d.net.counter = false, nil
+	x.d.fwMu.Unlock()
+	spent := x.d.edgePast()
+	x.d.fwMu.Lock()
+	x.d.net.counter = c
+	x.d.fwMu.Unlock()
+	if !unread || !spent {
+		t.Fatalf("caps held spent: past %v with the table unread, %v with the day unreadable", unread, spent)
+	}
 }
 
 // TestEdgeCutSavedAtClose (#5014): a trip whose write the disk refused is
@@ -1317,14 +1610,19 @@ func TestMergingPortHeldAtItsCaps(t *testing.T) {
 	if c, e := spentIn(t, x); c || !e {
 		t.Fatalf("the edge's port merging: core spent %v (want false), edge spent %v (want true)", c, e)
 	}
+	// Its quota is spent, not counted, so the kernel does not cut the edge
+	// at it (nft.Drop.EdgeHold, #5282).
+	if strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatal("the edge's port merging: the kernel cuts the edge at a quota held spent")
+	}
 	x.advance(readEvery)
 	if loads() != n+1 {
 		t.Fatal("a full load with no port changed")
 	}
 	x.merges(edge, nil)
 	x.advance(readEvery)
-	if c, e := spentIn(t, x); c || e {
-		t.Fatalf("caps still spent once both ports read clean: core %v, edge %v", c, e)
+	if c, e := spentIn(t, x); c || e || !strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatalf("caps still spent once both ports read clean, or the kernel's cut of the edge not back: core %v, edge %v", c, e)
 	}
 	if !strings.Contains(x.logText(), "byte caps: "+edge+" merges no segments again, its caps count again") {
 		t.Fatalf("the end not logged:\n%s", x.logText())
@@ -1358,6 +1656,177 @@ func TestMergingReloadRetried(t *testing.T) {
 	}
 	if c, _ := spentIn(t, x); !c {
 		t.Fatal("the core's caps are not spent while its port merges")
+	}
+}
+
+// TestMergeHoldOutlivesARefusedLoad (#5399 item 5, NET-2 Byte caps): the
+// edge's quota held spent while its port merged segments still runs after
+// the merge ends, until a full load starts it from the count. A refused
+// load leaves it running, so the readings' drops keep the edge held: a
+// spent quota would otherwise fill TripSet and cut an edge within its cap
+// with no record to lift. The load the firewall takes ends the hold.
+func TestMergeHoldOutlivesARefusedLoad(t *testing.T) {
+	x, doc, _ := capped(t)
+	edge := x.cfg.Layout.Edge
+	x.setListing(listingOf(t, x, doc, 7, 10, 100, true))
+	lastUpdate := func() string {
+		x.fire.mu.Lock()
+		defer x.fire.mu.Unlock()
+		return x.fire.updates[len(x.fire.updates)-1]
+	}
+	loads := func() int { x.fire.mu.Lock(); defer x.fire.mu.Unlock(); return len(x.fire.loads) }
+	refuse := func() { x.fire.mu.Lock(); x.fire.fail = true; x.fire.mu.Unlock() }
+	// The merge starts and the load it asks for is refused: the edge is
+	// held from the start, though its quota is not spent yet.
+	n := loads()
+	x.merges(edge, errors.New("offload: edge0: rx-gro on"))
+	refuse()
+	x.advance(readEvery)
+	if loads() != n || strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("a merge whose load was refused leaves the edge unheld")
+	}
+	x.advance(time.Second)
+	if _, e := spentIn(t, x); !e || strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("fixture: the edge's port merging is not held spent")
+	}
+	n = loads()
+	x.merges(edge, nil)
+	refuse()
+	x.advance(readEvery)
+	if loads() != n {
+		t.Fatal("fixture: the load after the merge ended was not refused")
+	}
+	if strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("a reading after a refused load lets TripSet cut the edge while its spent quota still runs")
+	}
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the edge was cut within its cap")
+	}
+	x.advance(time.Second)
+	if loads() != n+1 {
+		t.Fatal("the full load was not retried")
+	}
+	if _, e := spentIn(t, x); e || !strings.Contains(x.fire.last(), edgeTripRule) {
+		t.Fatal("the load the firewall took kept the edge held, or its quota spent")
+	}
+	x.advance(readEvery)
+	if !strings.Contains(lastUpdate(), edgeTripRule) {
+		t.Fatal("the reading after the load the firewall took keeps the edge held")
+	}
+}
+
+// TestReadingDropRefused (#5399 item 2): a reading whose running table the
+// drop cannot be built against, or whose TripSet does not read, writes no
+// drop and records no cut; the reading's error says so.
+func TestReadingDropRefused(t *testing.T) {
+	x, doc, _ := capped(t)
+	good := listingOf(t, x, doc, 7, 10, 100, true)
+	var o map[string][]map[string]any
+	if err := json.Unmarshal(good, &o); err != nil {
+		t.Fatal(err)
+	}
+	o["nftables"] = append(o["nftables"], map[string]any{"set": map[string]any{
+		"family": "inet", "table": nft.Table, "name": nft.TripSet, "elem": []any{7},
+	}})
+	badTrip, err := json.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name    string
+		running []byte
+		cut     bool
+	}{
+		{"a table the drop refuses", []byte(`{"nftables": [{"quota": "unreadable"}]}`), false},
+		{"a TripSet element that is not a name", badTrip, false},
+		// Cut, so the TripSet is not read: the drop's own refusal stops it.
+		{"a table the drop refuses, the edge cut", []byte(`{"nftables": [{"quota": "unreadable"}]}`), true},
+	} {
+		x.d.edge.mu.Lock()
+		x.d.edge.st.Cut = c.cut
+		x.d.edge.mu.Unlock()
+		x.fire.mu.Lock()
+		first := x.fire.listed + 1
+		x.fire.listAt = func(n int) ([]byte, error, bool) {
+			if n == first {
+				return good, nil, true
+			}
+			return c.running, nil, true
+		}
+		ups := len(x.fire.updates)
+		x.fire.mu.Unlock()
+		over, kernelCut, err := x.d.readCapsLocked(context.Background())
+		x.fire.mu.Lock()
+		x.fire.listAt = nil
+		wrote := len(x.fire.updates) != ups
+		x.fire.mu.Unlock()
+		if err == nil || !strings.HasPrefix(err.Error(), "drop: ") || wrote || kernelCut != "" || len(over) != 0 {
+			t.Errorf("%s: %v, update written %v, kernel cut %q", c.name, err, wrote, kernelCut)
+		}
+	}
+}
+
+// TestKernelCutRecorded (#5399 item 2, KRN-12): the record follows the
+// kernel's cut. A reading whose running table has TripSet holding the
+// edge trips the record, with its card and lift, even while the count is
+// within the cap; not while the edge is held (the owner lifted it today),
+// and not when the set belongs to another day's quota, which the drop
+// empties.
+func TestKernelCutRecorded(t *testing.T) {
+	x, doc, a := capped(t)
+	tripped := func(quota string) []byte {
+		b := listingOf(t, x, doc, 7, 10, 100, true)
+		var o map[string][]map[string]any
+		if err := json.Unmarshal(b, &o); err != nil {
+			t.Fatal(err)
+		}
+		o["nftables"] = append(o["nftables"], map[string]any{"set": map[string]any{
+			"family": "inet", "table": nft.Table, "name": nft.TripSet, "elem": []any{x.cfg.Layout.Edge},
+		}})
+		if quota != "" {
+			o["nftables"] = append(o["nftables"], map[string]any{"quota": map[string]any{"family": "inet", "table": nft.Table, "name": quota}})
+		}
+		b, err := json.Marshal(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	// Another day's edge quota running: the drop empties the set.
+	x.setListing(tripped("qe_0000000000000000"))
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("a set the drop empties cut the record")
+	}
+	x.setListing(tripped(""))
+	x.advance(readEvery)
+	cut, why := x.d.edge.Cut()
+	if !cut || why != "the firewall cut it at the first byte past its byte cap of 5000 bytes today. Lift the cut once you trust the edge again." {
+		t.Fatalf("a kernel cut within the count: cut %v, reason %q", cut, why)
+	}
+	if !strings.Contains(x.logText(), "byte caps: edge: the firewall cut it") {
+		t.Fatal("the kernel's cut is not logged")
+	}
+	if w := x.b.act(a, page.ActLiftEdge, ""); w.Code != http.StatusOK {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	x.advance(readEvery)
+	if cut, _ := x.d.edge.Cut(); cut {
+		t.Fatal("the set after the owner's lift today cut the record again")
+	}
+	// The channel's counts read follows the kernel's cut too.
+	x.d.edge.mu.Lock()
+	x.d.edge.st.Lifted = 0
+	x.d.edge.mu.Unlock()
+	if _, err := x.d.counts(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cut, _ := x.d.edge.Cut(); !cut; cut, _ = x.d.edge.Cut() {
+		if time.Now().After(deadline) {
+			t.Fatal("the channel's counts read left the kernel's cut unrecorded")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -2168,7 +2637,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	x.mu.Unlock()
 	x.advance(readEvery)
 	got := (pageResolver{x.d}).Stopped()
-	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != (page.PolicyCause{}) {
+	if want := (page.Stray{Iface: "own0", Addr: stray.addr, Nets: "10.10.0.0/24"}); !got.Stopped || len(got.Strays) != 1 || got.Strays[0] != want || !slices.Equal(got.Unset, []page.Unset{unset.cause}) || got.Policy != nil {
 		t.Fatalf("stopped resolver: %#v", got)
 	}
 	h := view()
@@ -2211,7 +2680,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if !stopped {
 		t.Fatal("fixture: a refused load started the instances")
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != (page.PolicyCause{}) || got.Load != page.LoadFirewall {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || len(got.Strays)+len(got.Unset) != 0 || got.Policy != nil || got.Load != page.LoadFirewall {
 		t.Fatalf("a refused load after the check passes: %#v", got)
 	}
 	if h := view(); !strings.Contains(h, "<h2>Names and addresses</h2>") || !strings.Contains(h, "The firewall refused the enforcer&#39;s last load of your rules;") {
@@ -2232,7 +2701,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 		t.Fatal("fixture: the resolver serves vlan109")
 	}
 	// The page has the refusal's typed cause, never its text (#5307).
-	vlan := page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}
+	vlan := []page.PolicyCause{{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}}
 	load := func(doc policy.Document) error {
 		x.d.fwMu.Lock()
 		defer x.d.fwMu.Unlock()
@@ -2253,7 +2722,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(doc); err != nil {
 		t.Fatal(err)
 	}
-	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || got.Policy != vlan || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
+	if got := (pageResolver{x.d}).Stopped(); !got.Stopped || !slices.Equal(got.Policy, vlan) || got.Load != page.LoadTaken || len(got.Strays)+len(got.Unset) != 0 {
 		t.Fatalf("a policy the resolver cannot serve: %#v", got)
 	}
 	if h := view(); !strings.Contains(h, "The policy in force puts device plug on Wi-Fi network vlan109, and the enforcer&#39;s setup serves no names or addresses there.") || strings.Contains(h, "ap0.109") {
@@ -2265,7 +2734,7 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	if err := load(home()); err == nil {
 		t.Fatal("fixture: the load was not refused")
 	}
-	if got := (pageResolver{x.d}).Stopped(); got.Policy != vlan {
+	if got := (pageResolver{x.d}).Stopped(); !slices.Equal(got.Policy, vlan) {
 		t.Fatalf("a refused load cleared the cause in force: %#v", got)
 	}
 	x.fire.mu.Lock()
@@ -2279,23 +2748,33 @@ func TestStoppedResolverOnPage(t *testing.T) {
 	}
 }
 
-// TestUnservable (#5307): dns.Generate's refusal of a compiled document
-// reaches the page by its typed cause: a device on a Wi-Fi network the
-// setup serves no network for, or a listed name that is not a DNS host
-// name; any other refusal is untyped, whatever its text.
-func TestUnservable(t *testing.T) {
-	x := newBox(t, false)
+// TestRefusedCause (#5307, #5352, #5405): dns.Generate's refusal of a
+// compiled document reaches the page and the log as every item Generate
+// refused, read from the error: each device on a Wi-Fi network the setup
+// serves no network for, and each listed name that is not a DNS host
+// name. With a setup fault too, the fault is one untyped cause and the
+// devices are still named; any other refusal is untyped, whatever its
+// text.
+func TestRefusedCause(t *testing.T) {
+	x, _ := enrolled(t, false)
 	l, s := x.cfg.Layout, x.cfg.DNS
-	vlan := home()
-	vlan.Devices = append(vlan.Devices, policy.Device{ID: "plug", Network: policy.NetDevices, WiFi: "vlan109", Everyday: true, Allow: []string{"plug.example"}})
-	name := home()
-	name.Destinations = []string{"updates.example", "Upper.example"}
+	plug := func(id, wifi string) policy.Device {
+		return policy.Device{ID: id, Network: policy.NetDevices, WiFi: wifi, Everyday: true, Allow: []string{id + ".example"}}
+	}
+	vlans := home()
+	vlans.Devices = append(vlans.Devices, plug("plug", "vlan109"), plug("lamp", "vlan110"))
+	both := []page.PolicyCause{{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}, {Kind: page.PolicyVLAN, Name: "lamp", WiFi: "vlan110"}}
+	// Generate lists names sorted; the document lists Zed.example first.
+	names := home()
+	names.Destinations = []string{"updates.example", "Zed.example", "Abc.example"}
+	view := func() string { return x.b.do(http.MethodGet, "/", nil).Body.String() }
 	for _, tc := range []struct {
 		doc  policy.Document
-		want page.PolicyCause
+		want []page.PolicyCause
+		said []string
 	}{
-		{vlan, page.PolicyCause{Kind: page.PolicyVLAN, Name: "plug", WiFi: "vlan109"}},
-		{name, page.PolicyCause{Kind: page.PolicyName, Name: "Upper.example"}},
+		{vlans, both, []string{"plug", "lamp"}},
+		{names, []page.PolicyCause{{Kind: page.PolicyName, Name: "Abc.example"}, {Kind: page.PolicyName, Name: "Zed.example"}}, []string{"Abc.example", "Zed.example"}},
 	} {
 		if _, err := nft.Paths(tc.doc, l); err != nil {
 			t.Fatalf("fixture: %v", err)
@@ -2304,22 +2783,58 @@ func TestUnservable(t *testing.T) {
 		if !errors.Is(err, dns.ErrConfig) {
 			t.Fatalf("fixture: %v", err)
 		}
-		if got := unservable(err, tc.doc, l, s); got != tc.want {
-			t.Errorf("unservable(%v) = %+v, want %+v", err, got, tc.want)
+		if got := refusedCauses(err); !slices.Equal(got, tc.want) {
+			t.Errorf("refusedCauses(%v) = %+v, want %+v", err, got, tc.want)
 		}
-	}
-	// A device off the device network, or with no VLAN, needs none.
-	off := home()
-	off.Devices = append(off.Devices, policy.Device{ID: "plug", Network: policy.NetOwner, WiFi: "vlan109"}, policy.Device{ID: "lamp", Network: policy.NetDevices})
-	untyped := page.PolicyCause{Kind: page.PolicyUntyped}
-	for _, err := range []error{fmt.Errorf("%w: x", dns.ErrConfig), errors.New("vlan109 Upper.example")} {
-		for _, doc := range []policy.Document{home(), off} {
-			if got := unservable(err, doc, l, s); got != untyped {
-				t.Errorf("unservable(%v) on a servable document = %+v", err, got)
+		x.mu.Lock()
+		x.log = nil
+		x.mu.Unlock()
+		x.d.fwMu.Lock()
+		err = x.d.loadNetwork(context.Background(), tc.doc)
+		x.d.fwMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := (pageResolver{x.d}).Stopped(); !got.Stopped || !slices.Equal(got.Policy, tc.want) {
+			t.Errorf("the page's causes for %v: %#v", tc.said, got)
+		}
+		h := view()
+		x.mu.Lock()
+		var logged []string
+		for _, line := range x.log {
+			if strings.HasPrefix(line, "dns: the policy in force cannot be served") {
+				logged = append(logged, line)
 			}
 		}
-		if err := error(errors.New("other")); unservable(err, vlan, l, s) != untyped || unservable(err, name, l, s) != untyped {
-			t.Error("a refusal other than the setup's is typed")
+		x.mu.Unlock()
+		if len(logged) != 1 || strings.Contains(logged[0], "\n") {
+			t.Errorf("the refusal is not one log line: %q", logged)
+		}
+		for _, said := range tc.said {
+			if !strings.Contains(h, said) || !strings.Contains(strings.Join(logged, ""), strconv.Quote(said)) {
+				t.Errorf("home or the log leaves out %s, which Generate refused", said)
+			}
+		}
+	}
+	// A setup fault beside the unserved devices: the fault is untyped and
+	// both devices are still named, as before #5396 (#5405).
+	bad := s
+	bad.Upstream = nil
+	_, err := dns.Generate(vlans, l, bad)
+	if got := refusedCauses(err); !slices.Equal(got, append([]page.PolicyCause{{Kind: page.PolicyUntyped}}, both...)) {
+		t.Errorf("a setup fault beside unserved devices: %+v", got)
+	}
+	untyped := []page.PolicyCause{{Kind: page.PolicyUntyped}}
+	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil} {
+		if got := refusedCauses(err); !slices.Equal(got, untyped) {
+			t.Errorf("refusedCauses(%v) = %+v, want untyped", err, got)
+		}
+	}
+	// Typed, wrapped, the refusal still reads as ErrConfig and keeps its
+	// causes.
+	for _, err := range []error{fmt.Errorf("load: %w", dns.Refused{dns.UnservedDevice{ID: "plug", WiFi: "vlan109", Iface: "ap0.109"}}), fmt.Errorf("load: %w", dns.Refused{dns.BadName{Name: "Upper.example"}})} {
+		if got := refusedCauses(err); !errors.Is(err, dns.ErrConfig) || len(got) != 1 || got[0].Kind == page.PolicyUntyped {
+			t.Errorf("%v: not typed", err)
 		}
 	}
 }
