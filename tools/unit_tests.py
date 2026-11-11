@@ -12,7 +12,7 @@ A run strace itself cut short (STRACE_FAULT, read from strace's own stderr, whic
 output never reaches: JOIN) has no verdict and reruns whole, once, into a fresh trace; a run that
 already showed a failed test is never rerun (#5358). Each run is its own
 session, killed whole when strace ends, so nothing of a cut run outlives it, and a cut run's trace
-stays as <module>.trace.cut, which records_audit.py reads and clash_audit.py does not (#5364).
+stays as <module>.trace.cut, which records_audit.py and clash_audit.py read as the module's (#5364, #5413).
 Exit 1 if any module failed or did not run, or if the longest unit runs over FLOOR seconds and
 over LONG_POLE times the ideal: that one unit then sets the step's length. A unit is a module, so
 split it (SPLIT), or for a module already split, its slowest part (one test with any class or
@@ -47,10 +47,13 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # bind: a fixed port or socket name shared by two modules is a clash; symlink, symlinkat, chdir
 # and fchdir let tests/clash_audit.py resolve a path the kernel gave no file for, as it was walked.
+# unlink, unlinkat, rename, renameat, renameat2 and truncate change a name as a write open does
+# (#5413): another module's file, or a trace (tests/records_audit.py).
 # --kill-on-exit: the kernel SIGKILLs every process strace still traces when strace exits, so a run
 # strace gives up on (STRACE_FAULT) cannot go on untraced, whatever session it moved to (#5364).
 STRACE = ["strace", "-f", "--kill-on-exit", "--seccomp-bpf", "-q", "-y", "-e",
-          "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir",
+          "trace=open,openat,openat2,bind,symlink,symlinkat,chdir,fchdir,"
+          "unlink,unlinkat,rename,renameat,renameat2,truncate",
           "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
 SERIAL = {}
@@ -69,9 +72,11 @@ SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice"
 # optional lock, any write left there is a git command that changes the index: a real clash.
 ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # The module's first step, under strace: its stderr joins its stdout, so strace keeps its own
-# stderr, on which alone a fault is read; nothing a test prints can fake one (#5407). Only a test
-# that opens strace's stream by its /proc name reaches it, and its trace shows that open.
-JOIN = "import os, runpy, sys; os.dup2(1, 2); "
+# stderr, on which alone a fault is read; nothing a test prints can fake one (#5407). sh joins
+# them before Python starts, so no site hook (.pth, sitecustomize, usercustomize) or child it
+# starts holds strace's stream (#5413). Only a test that opens that stream by its /proc name
+# reaches it, and a cut it fakes so gains only a rerun: both audits read the cut attempt's trace.
+JOIN = ["/bin/sh", "-c", 'exec "$@" 2>&1', "sh"]
 LONG_POLE = 1.25
 FLOOR = 60  # seconds: a module shorter than this never fails the long-pole check
 
@@ -82,10 +87,10 @@ def modules(root=ROOT):
 
 def command(module, trace_dir, workers=None):
     if module in SPLIT:
-        run = [sys.executable, "-c", JOIN + "sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
+        run = [*JOIN, sys.executable, "-c", "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                str(pathlib.Path(__file__).resolve()), "--split", module, "--workers", str(workers or os.cpu_count() or 1)]
     else:  # as `python -m unittest discover ...`
-        run = [sys.executable, "-c", JOIN + "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
+        run = [*JOIN, sys.executable, "-c", "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
                "unittest", "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
     return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *run]
 
@@ -227,7 +232,7 @@ RERAN = "the module reruns whole into a fresh trace"
 # A module strace faults on runs once more, whole, into a fresh trace. Two, so at most one attempt
 # is cut and kept (CUT): a cut trace ends mid-line, so a second one could not follow it whole.
 STRACE_ATTEMPTS = 2
-CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, which clash_audit.py reads as a module's
+CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, the one finished trace per module
 
 
 def attempt(cmd, root=ROOT):
@@ -256,7 +261,7 @@ def run_one(module, trace_dir, root=ROOT):
     """(module, rc, seconds, output). An attempt that strace cut short (STRACE_FAULT on strace's
     own stderr, which follows the module's output in the log) reruns the module whole, and strace
     -o rewrites its trace, so the trace kept is the passing attempt's; the cut attempt's trace is
-    kept as <module>.trace.cut, for records_audit.py (CI-PATHS sees every attempt). A cut attempt
+    kept as <module>.trace.cut, for records_audit.py and clash_audit.py (each sees every attempt). A cut attempt
     that already showed a failing test fails the module and is not rerun, and a module strace cuts
     on every attempt fails."""
     start, outs = time.monotonic(), []

@@ -14,7 +14,7 @@ whose trace does not show its own file opened and the top process exiting (traci
 or was cut short), fails too. A run strace cut short and tools/unit_tests.py reran left its trace
 as <module>.trace.cut: a record it opened counts as the module's (every attempt is seen, #5364),
 and being partial, it is held to nothing else. A module whose tree, in any attempt, opened for
-writing a path in the trace directory fails too: the traces are this audit's evidence, so a test
+writing, unlinked, renamed or truncated a path in the trace directory fails too: the traces are this audit's evidence, so a test
 may not write them, its own or another module's (#5407; the write as tests/clash_audit.py reads it).
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
