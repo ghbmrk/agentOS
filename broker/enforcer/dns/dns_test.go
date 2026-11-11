@@ -407,6 +407,14 @@ func TestGenerateRefuses(t *testing.T) {
 	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Abc.example"}, BadName{"Zed.example"}}) || !errors.Is(err, ErrConfig) {
 		t.Errorf("two bad names: %#v, %v", got, err)
 	}
+	// A bad name in two lists is one refusal: the core's and a device's.
+	d = fixturePolicy()
+	d.Destinations = append(d.Destinations, "Zed.example")
+	d.Caps["Zed.example"] = 1 << 40
+	d.Devices[0].Allow = append(d.Devices[0].Allow, "Zed.example")
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Zed.example"}}) {
+		t.Errorf("a bad name in two lists: %#v, %v", got, err)
+	}
 	d = fixturePolicy()
 	d.Devices = append(d.Devices, policy.Device{ID: "lamp", Network: policy.NetDevices, WiFi: "vlan109"}, policy.Device{ID: "fan", Network: policy.NetDevices, WiFi: "vlan110"})
 	lamp, fan := UnservedDevice{"lamp", "vlan109", l.Trunk + ".109"}, UnservedDevice{"fan", "vlan110", l.Trunk + ".110"}
