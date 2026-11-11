@@ -304,7 +304,6 @@ func TestProviderRunNeedsTheRunnerTheOwnerStopAndAnAgentCaller(t *testing.T) {
 // hands the runner carries the hold, which the machine's lock asks at the
 // boot and at each command (STOP-queued-start-fu). The runner here stands for
 // provagent's steps: boot, then Exec.
-// REQ: OP-6
 func TestOP6ProviderRunHeldWhenStopLandsAfterTheEntryCheck(t *testing.T) {
 	r := newRig(t, 4096)
 	r.agent("a1", vm.Public)
@@ -336,7 +335,6 @@ func TestOP6ProviderRunHeldWhenStopLandsAfterTheEntryCheck(t *testing.T) {
 // A run that fails because STOP held its boot reads as STOP, not as the
 // brief's fault; the same failure without STOP keeps its reason
 // (STOP-queued-start-fu, UX).
-// REQ: OP-6
 func TestOP6ProviderRunHeldByStopAnswersStop(t *testing.T) {
 	r := newRig(t, 4096)
 	r.agent("a1", vm.Public)
