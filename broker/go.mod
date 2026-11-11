@@ -2,7 +2,7 @@ module github.com/ghbmrk/agentos/broker
 
 go 1.26.4
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/bluenviron/gomavlib/v3 v3.3.5
