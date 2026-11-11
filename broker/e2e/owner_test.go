@@ -131,6 +131,11 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	if _, err := plane.Open("agent"); err != nil {
 		t.Fatal(err)
 	}
+	// The machine starts public, so the label check below fails unless
+	// the owner's message raised it (REV-5).
+	if l := ms.label("agent"); l != "public" {
+		t.Fatalf("agent starts %s, want public", l)
+	}
 	// The session opens on the page (CH-14, D-311); task chat then goes
 	// by text. A code in unlocked chat is stripped (owner's own tests).
 	code := totp(seed, time.Now())
