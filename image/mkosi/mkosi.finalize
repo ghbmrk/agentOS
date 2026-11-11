@@ -2163,40 +2163,47 @@ REPART_BUILD = pathlib.Path(__file__).resolve().parent / "mkosi.repart"
 
 
 def repart_types(root):
-    """(where, Type= or None) for each repart definition systemd-repart reads from the tree (REPART_TREE) and
-    from the build's own mkosi.repart directory (REPART_BUILD; None: none); None where the file does not hold exactly one."""
+    """(where, [Type= values], why unreadable or None) for each repart definition systemd-repart reads from the
+    tree (REPART_TREE) and from the build's own mkosi.repart directory (REPART_BUILD; None: none)."""
     files = conf_files(root, REPART_TREE)
     if REPART_BUILD is not None and REPART_BUILD.is_dir():
         files += conf_files(str(REPART_BUILD.parent), (REPART_BUILD.name,))
     out = []
     for f in files:
         try:
-            types = [v for s, k, v in config_lines(f.content()) if (s, k) == ("Partition", "Type")]
+            out.append((f.name, [v for s, k, v in config_lines(f.content()) if (s, k) == ("Partition", "Type")], None))
         except (OSError, Unparsable) as e:
-            out.append((f.name, "unreadable (%s)" % (e.strerror if isinstance(e, OSError) else e)))
-            continue
-        out.append((f.name, types[0] if len(types) == 1 else None))
+            out.append((f.name, [], e.strerror if isinstance(e, OSError) else str(e)))
     return out
 
 
 def gpt_auto_mounts(root):
     """({mount point steps: definition names} gpt-auto can mount a filesystem the tree check does not read at,
-    one violation line per definition whose Type= is not on GPT_AUTO_MOUNTS, or whose mount point lands on a
-    path the keeper protects or the box mounts itself): #5474."""
+    one violation line per definition it cannot place (unreadable, no or several Type=, a Type= not on
+    GPT_AUTO_MOUNTS) or whose mount point lands on a path the keeper protects or the box mounts itself): #5474."""
     where, bad = {}, []
     protected = BOX_MOUNTS + WORLD_WRITABLE + SERVICE_DIRS
-    for name, t in repart_types(root):
-        paths = GPT_AUTO_MOUNTS.get((t or "").lower())
+    for name, types, why in repart_types(root):
+        if why is not None:
+            bad.append("%s: could not be read (%s), so the mounts gpt-auto-generator makes from it are unknown (#5474)"
+                       % (name, why))
+            continue
+        if len(types) != 1:
+            bad.append("%s: has %s; gpt-auto-generator's mounts follow it, so name exactly one (#5474)"
+                       % (name, "no Type= line" if not types else "%d Type= lines" % len(types)))
+            continue
+        paths = GPT_AUTO_MOUNTS.get(types[0].lower())
         if paths is None:
-            bad.append("%s: Type=%s is not one gpt-auto-generator's mounts are known for (%s); name one of them"
-                       % (name, t, ", ".join(sorted(GPT_AUTO_MOUNTS))))
+            bad.append("%s: Type=%s is not one gpt-auto-generator's mounts are known for (%s); name one of them (#5474)"
+                       % (name, types[0], ", ".join(sorted(GPT_AUTO_MOUNTS))))
             continue
         for m in paths:
             hit = next((p for p in protected if m == p or m.startswith(p + "/") or p.startswith(m + "/")), None)
             if hit is not None:
                 bad.append("%s: Type=%s: systemd-gpt-auto-generator mounts it at /%s, which holds or covers /%s, a path "
-                           "the keeper protects or the box mounts itself, and no unit or etc/fstab line names that "
-                           "mount for the tree check to read (#5474)" % (name, t, m, hit))
+                           "the keeper protects or the box mounts itself, and the tree check does not read what "
+                           "gpt-auto mounts there; drop the partition or give it a path that no protected path holds "
+                           "(#5474)" % (name, types[0], m, hit))
             if m not in GPT_AUTO_TREE:
                 where.setdefault(tuple(m.split("/")), []).append(name)
     return where, bad

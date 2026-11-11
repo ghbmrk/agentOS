@@ -388,6 +388,7 @@ class KeeperTreeTest(unittest.TestCase):
                     got = check.gpt_auto_violations(self.root)
                     self.assertEqual(len(got), 1, got)
                     self.assertIn("at /%s, which holds or covers /%s," % (m, hit), got[0])
+                    self.assertIn("drop the partition", got[0])
                 finally:
                     remove()
         # Beside the protected paths, and the types the image ships, pass; a type or spelling the table lacks does not.
@@ -398,16 +399,28 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(check.gpt_auto_violations(self.root), [])
                 finally:
                     remove()
-        for body in ("[Partition]\nType=linux-generic\n", "[Partition]\nType=933ac7e1-2eb4-4f13-b844-0e14e2aef915\n",
-                     "[Partition]\nLabel=x\n", "[Partition]\nType=home\nType=root\n"):
+        for body, text in (("[Partition]\nType=linux-generic\n", "Type=linux-generic is not one gpt-auto-generator's mounts"),
+                           ("[Partition]\nType=933ac7e1-2eb4-4f13-b844-0e14e2aef915\n", "is not one gpt-auto-generator's mounts"),
+                           ("[Partition]\nLabel=x\n", "60-x.conf: has no Type= line;"),
+                           ("[Partition]\nType=home\nType=root\n", "60-x.conf: has 2 Type= lines;")):
             with self.subTest(body=body):
                 remove = self.place({repart + "60-x.conf": body})
                 try:
                     got = check.gpt_auto_violations(self.root)
                     self.assertEqual(len(got), 1, got)
-                    self.assertIn("is not one gpt-auto-generator's mounts are known for", got[0])
+                    self.assertIn(text, got[0])
+                    self.assertNotIn("Type=None", got[0])
                 finally:
                     remove()
+        # A file the check cannot read names that, not a Type=.
+        remove = self.place(definition("root"))
+        try:
+            with unittest.mock.patch.object(check.Conf, "content", side_effect=OSError(13, "Permission denied")):
+                got = check.gpt_auto_violations(self.root)
+            self.assertTrue(got and all("could not be read (Permission denied), so the mounts" in g and "Type=" not in g
+                                        for g in got), got)
+        finally:
+            remove()
         # The build's own definitions count too, and violations() carries the refusal.
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "mkosi.repart").mkdir()
