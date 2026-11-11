@@ -33,8 +33,8 @@ class CommandTest(unittest.TestCase):
                                                   "-e", "signal=none"])
         self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x.trace")
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         [sys.executable, "-c", unit_tests.JOIN + "runpy.run_module('unittest', run_name='__main__', "
-                          "alter_sys=True)", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
+                         [sys.executable, "-c", unit_tests.JOIN + "runpy.run_module(sys.argv.pop(1), run_name='__main__', "
+                          "alter_sys=True)", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
     def test_every_test_module_is_run(self):
         names = unit_tests.modules()

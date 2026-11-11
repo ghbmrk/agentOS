@@ -85,8 +85,8 @@ def command(module, trace_dir, workers=None):
         run = [sys.executable, "-c", JOIN + "sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
                str(pathlib.Path(__file__).resolve()), "--split", module, "--workers", str(workers or os.cpu_count() or 1)]
     else:  # as `python -m unittest discover ...`
-        run = [sys.executable, "-c", JOIN + "runpy.run_module('unittest', run_name='__main__', alter_sys=True)",
-               "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
+        run = [sys.executable, "-c", JOIN + "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)",
+               "unittest", "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
     return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *run]
 
 
@@ -231,9 +231,9 @@ CUT = ".trace.cut"  # a cut attempt's trace: not `*.trace`, which clash_audit.py
 
 
 def attempt(cmd, root=ROOT):
-    """(rc, output, strace's own stderr) of one traced run, started in its own session. When strace ends, whatever is
-    left of that session's process group is killed before this returns, so nothing of the run
-    goes on into the next one (#5364). strace's pid, and so the group id, stays held until the
+    """(rc, output, strace's own stderr) of one traced run, started in its own session. When strace
+    ends, whatever is left of that session's process group is killed before this returns, so
+    nothing of the run goes on into the next one (#5364). strace's pid, and so the group id, stays held until the
     group is killed: it is reaped only after. Output goes to files, not pipes, so a process that
     keeps a copy of one cannot hold the run open."""
     with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as err:
