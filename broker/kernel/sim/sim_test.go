@@ -89,13 +89,33 @@ func TestSameSeedGivesTheSameLog(t *testing.T) {
 	}
 }
 
+// Each mutant is caught within 100 seeds. The seeds run four at a time, each
+// run on its own state, so the race build's run stays inside its timeout.
 func TestMutantsAreCaught(t *testing.T) {
 	for _, m := range []Mutant{MutantClerkTrusts, MutantNoDedupe, MutantNoClock} {
-		caught := false
-		for seed := 0; seed < 100 && !caught; seed++ {
-			_, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: m})
-			caught = err != nil
+		var mu sync.Mutex
+		next, caught := 0, false
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				for {
+					mu.Lock()
+					seed := next
+					next++
+					done := caught || seed >= 100
+					mu.Unlock()
+					if done {
+						return
+					}
+					if _, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: m}); err != nil {
+						mu.Lock()
+						caught = true
+						mu.Unlock()
+					}
+				}
+			})
 		}
+		wg.Wait()
 		if !caught {
 			t.Errorf("mutant %q survived 100 seeds", m)
 		}
