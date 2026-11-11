@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"reflect"
@@ -94,30 +95,58 @@ func TestWireRoundTrip(t *testing.T) {
 	}
 }
 
-// bigEndian encodes m in the big-endian order, by encoding it with a
-// big-endian encoder (test only: the stack sends little-endian).
-func bigEndian(t *testing.T, m *Message) []byte {
-	t.Helper()
-	old := le
-	defer func() { le = old }()
-	le = bigOrder{}
-	b := mustEncode(t, m)
-	b[0] = 'B'
-	return b
+// TestWireOrderPerEncoder encodes little-endian on another goroutine
+// while the test encodes big-endian, as a fake peer left by an earlier
+// test did when the order was a package variable (#5423). Under -race
+// a shared order is a reported race; without it, a little-endian
+// message flagged 'B' or a big-endian one flagged 'l'.
+func TestWireOrderPerEncoder(t *testing.T) {
+	m := &Message{Type: typeSignal, Serial: 0x01020304, Path: "/x", Interface: "a.b", Member: "C", Sig: "u", Body: []any{uint32(7)}}
+	stop, done := make(chan struct{}), make(chan error)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			b, err := m.Encode()
+			if err == nil && (b[0] != 'l' || binary.LittleEndian.Uint32(b[8:]) != m.Serial) {
+				err = fmt.Errorf("little-endian encode came out as % x", b[:12])
+			}
+			if err != nil {
+				<-stop
+				done <- err
+				return
+			}
+		}
+	}()
+	for range 200 {
+		b := bigEndian(t, m)
+		if b[0] != 'B' || binary.BigEndian.Uint32(b[8:]) != m.Serial {
+			close(stop)
+			<-done
+			t.Fatalf("big-endian encode came out as % x", b[:12])
+		}
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
-type bigOrder struct{ binary.ByteOrder }
-
-func (bigOrder) Uint16(b []byte) uint16                 { return binary.BigEndian.Uint16(b) }
-func (bigOrder) Uint32(b []byte) uint32                 { return binary.BigEndian.Uint32(b) }
-func (bigOrder) Uint64(b []byte) uint64                 { return binary.BigEndian.Uint64(b) }
-func (bigOrder) PutUint16(b []byte, v uint16)           { binary.BigEndian.PutUint16(b, v) }
-func (bigOrder) PutUint32(b []byte, v uint32)           { binary.BigEndian.PutUint32(b, v) }
-func (bigOrder) PutUint64(b []byte, v uint64)           { binary.BigEndian.PutUint64(b, v) }
-func (bigOrder) AppendUint16(b []byte, v uint16) []byte { return binary.BigEndian.AppendUint16(b, v) }
-func (bigOrder) AppendUint32(b []byte, v uint32) []byte { return binary.BigEndian.AppendUint32(b, v) }
-func (bigOrder) AppendUint64(b []byte, v uint64) []byte { return binary.BigEndian.AppendUint64(b, v) }
-func (bigOrder) String() string                         { return "big" }
+// bigEndian encodes m in the big-endian order (test only: the stack
+// sends little-endian). The order is the encoder's own, so a goroutine
+// encoding at the same moment is untouched.
+func bigEndian(t *testing.T, m *Message) []byte {
+	t.Helper()
+	b, err := m.encode(binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 // TestWireRefusesMalformed: each fault a hostile or broken peer could put
 // on the bus is refused, not decoded into something else.
@@ -179,8 +208,8 @@ func TestWireRefusesMalformed(t *testing.T) {
 // withField encodes m with one extra header field.
 func withField(t *testing.T, m *Message, code byte, sig Signature, v any) []byte {
 	t.Helper()
-	e := &encoder{b: []byte{'l', m.Type, 0, 1, 0, 0, 0, 0}}
-	e.b = le.AppendUint32(e.b, m.Serial)
+	e := &encoder{b: []byte{'l', m.Type, 0, 1, 0, 0, 0, 0}, o: binary.LittleEndian}
+	e.b = binary.LittleEndian.AppendUint32(e.b, m.Serial)
 	fields := []any{
 		[]any{uint8(1), Variant{Sig: "o", Value: m.Path}},
 		[]any{uint8(2), Variant{Sig: "s", Value: m.Interface}},
@@ -198,7 +227,7 @@ func withField(t *testing.T, m *Message, code byte, sig Signature, v any) []byte
 // signature, unchecked: the faults an encoder never makes.
 func raw(t *testing.T, sig string, body []byte) []byte {
 	t.Helper()
-	e := &encoder{b: []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}}
+	e := &encoder{b: []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}, o: binary.LittleEndian}
 	fields := []any{
 		[]any{uint8(1), Variant{Sig: "o", Value: ObjectPath("/")}},
 		[]any{uint8(2), Variant{Sig: "s", Value: "a.b"}},
@@ -211,7 +240,7 @@ func raw(t *testing.T, sig string, body []byte) []byte {
 		t.Fatal(err)
 	}
 	e.pad(8)
-	le.PutUint32(e.b[4:], uint32(len(body)))
+	binary.LittleEndian.PutUint32(e.b[4:], uint32(len(body)))
 	return append(e.b, body...)
 }
 
@@ -286,7 +315,7 @@ func TestWireBounds(t *testing.T) {
 		t.Error("encoded MaxMessage+1 bytes")
 	}
 	b = append(b, 0)
-	le.PutUint32(b[4:], le.Uint32(b[4:])+1)
+	binary.LittleEndian.PutUint32(b[4:], binary.LittleEndian.Uint32(b[4:])+1)
 	bad("MaxMessage+1 bytes", b)
 	if _, _, err := frameLen(b[:16]); err == nil {
 		t.Error("frameLen took MaxMessage+1")
@@ -298,8 +327,8 @@ func TestWireBounds(t *testing.T) {
 		head   int64
 		err    error
 	}{{maxHeader, 16 + maxHeader, nil}, {maxHeader + 1, 16 + maxHeader + 8, errTooLong}, {1, 24, nil}} {
-		le.PutUint32(h[4:], 3)
-		le.PutUint32(h[12:], c.fields)
+		binary.LittleEndian.PutUint32(h[4:], 3)
+		binary.LittleEndian.PutUint32(h[12:], c.fields)
 		head, n, err := frameLen(h)
 		if head != c.head || n != c.head+3 || !errors.Is(err, c.err) {
 			t.Errorf("header fields of %d bytes: %d, %d, %v", c.fields, head, n, err)
@@ -315,8 +344,8 @@ func TestWireBounds(t *testing.T) {
 // the reader inside the frame, reading a forged body as the next message.
 func TestReadSkipsLargestDeclaredFrame(t *testing.T) {
 	h := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(h[4:], math.MaxUint32)
-	le.PutUint32(h[12:], math.MaxUint32)
+	binary.LittleEndian.PutUint32(h[4:], math.MaxUint32)
+	binary.LittleEndian.PutUint32(h[12:], math.MaxUint32)
 	const head = 16 + math.MaxUint32 + 1 // fields padded to 8
 	const n = head + math.MaxUint32
 	if gh, gn, err := frameLen(h); gh != head || gn != n || !errors.Is(err, errTooLong) {
@@ -386,12 +415,12 @@ func FuzzDecode(f *testing.F) {
 // at a multiple of 8, as the header's padding leaves it.
 func frame(t *testing.T, typ byte, fields []any, body []byte) []byte {
 	t.Helper()
-	e := &encoder{b: []byte{'l', typ, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}}
+	e := &encoder{b: []byte{'l', typ, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}, o: binary.LittleEndian}
 	if err := e.value(headerTyp, fields); err != nil {
 		t.Fatal(err)
 	}
 	e.pad(8)
-	le.PutUint32(e.b[4:], uint32(len(body)))
+	binary.LittleEndian.PutUint32(e.b[4:], uint32(len(body)))
 	return append(e.b, body...)
 }
 
@@ -473,7 +502,7 @@ func TestWireAlignment(t *testing.T) {
 	} {
 		m := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "y" + c.sig, Body: []any{uint8(9), c.v}}
 		b := mustEncode(t, m)
-		body := b[len(b)-int(le.Uint32(b[4:])):]
+		body := b[len(b)-int(binary.LittleEndian.Uint32(b[4:])):]
 		if want := "\x09" + c.want; string(body) != want {
 			t.Errorf("%s after a byte encodes as %x, want %x", c.sig, body, want)
 		}
@@ -576,7 +605,7 @@ func TestWireRequiredHeaders(t *testing.T) {
 	long := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b"}
 	for n := 1; ; n++ {
 		long.Member = strings.Repeat("C", n)
-		if b := mustEncode(t, long); le.Uint32(b[12:]) == maxHeader+1 {
+		if b := mustEncode(t, long); binary.LittleEndian.Uint32(b[12:]) == maxHeader+1 {
 			if _, err := Decode(b); !errors.Is(err, errTooLong) {
 				t.Errorf("header fields of %d bytes: %v", maxHeader+1, err)
 			}
@@ -585,7 +614,7 @@ func TestWireRequiredHeaders(t *testing.T) {
 				t.Errorf("header fields of %d bytes: %v", maxHeader, err)
 			}
 			break
-		} else if le.Uint32(b[12:]) > maxHeader+1 {
+		} else if binary.LittleEndian.Uint32(b[12:]) > maxHeader+1 {
 			t.Fatalf("no member gives header fields of %d bytes", maxHeader+1)
 		}
 	}
@@ -594,14 +623,14 @@ func TestWireRequiredHeaders(t *testing.T) {
 	for n := 1; n < 9; n++ {
 		b := frame(t, typeSignal, []any{hf(1, "o", ObjectPath("/")), hf(2, "s", "a.b"), hf(8, "g", Signature("ay")), hf(3, "s", strings.Repeat("C", n))},
 			[]byte{1, 0, 0, 0, 7})
-		head := 16 + int(le.Uint32(b[12:]))
+		head := 16 + int(binary.LittleEndian.Uint32(b[12:]))
 		if head%8 != 4 {
 			continue
 		}
 		if _, err := Decode(b); err != nil {
 			t.Fatalf("the sound frame: %v", err)
 		}
-		le.PutUint32(b[head:], 5) // the 4 pad bytes now read as a length of 5
+		binary.LittleEndian.PutUint32(b[head:], 5) // the 4 pad bytes now read as a length of 5
 		if m, err := Decode(b); !errors.Is(err, ErrWire) {
 			t.Errorf("nonzero header padding: %+v, %v", m, err)
 		}

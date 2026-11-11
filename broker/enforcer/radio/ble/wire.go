@@ -408,18 +408,19 @@ func (d *decoder) value(t *typ, depth int) (any, error) {
 	return nil, wireErr("type %q", t.code)
 }
 
-// encoder writes values little-endian; offsets are from the message's
-// start.
+// encoder writes values in its own order; offsets are from the message's
+// start. The order is per encoder, never shared, so no encode can see
+// another's order change.
 type encoder struct {
 	b []byte
+	o byteOrder
 }
 
-// le is the order the encoder writes; tests swap it to make big-endian
-// messages.
-var le interface {
+// byteOrder is an order the encoder can write.
+type byteOrder interface {
 	binary.ByteOrder
 	binary.AppendByteOrder
-} = binary.LittleEndian
+}
 
 func (e *encoder) pad(n int) {
 	for len(e.b)%n != 0 {
@@ -459,49 +460,49 @@ func (e *encoder) value(t *typ, v any) error {
 		if x {
 			u = 1
 		}
-		e.b = le.AppendUint32(e.b, u)
+		e.b = e.o.AppendUint32(e.b, u)
 	case 'n':
 		x, ok := v.(int16)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint16(e.b, uint16(x))
+		e.b = e.o.AppendUint16(e.b, uint16(x))
 	case 'q':
 		x, ok := v.(uint16)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint16(e.b, x)
+		e.b = e.o.AppendUint16(e.b, x)
 	case 'i':
 		x, ok := v.(int32)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint32(e.b, uint32(x))
+		e.b = e.o.AppendUint32(e.b, uint32(x))
 	case 'u':
 		x, ok := v.(uint32)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint32(e.b, x)
+		e.b = e.o.AppendUint32(e.b, x)
 	case 'x':
 		x, ok := v.(int64)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint64(e.b, uint64(x))
+		e.b = e.o.AppendUint64(e.b, uint64(x))
 	case 't':
 		x, ok := v.(uint64)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint64(e.b, x)
+		e.b = e.o.AppendUint64(e.b, x)
 	case 'd':
 		x, ok := v.(float64)
 		if !ok {
 			return bad()
 		}
-		e.b = le.AppendUint64(e.b, math.Float64bits(x))
+		e.b = e.o.AppendUint64(e.b, math.Float64bits(x))
 	case 's', 'o':
 		var s string
 		switch x := v.(type) {
@@ -518,7 +519,7 @@ func (e *encoder) value(t *typ, v any) error {
 		default:
 			return bad()
 		}
-		e.b = le.AppendUint32(e.b, uint32(len(s)))
+		e.b = e.o.AppendUint32(e.b, uint32(len(s)))
 		return e.str(s)
 	case 'g':
 		x, ok := v.(Signature)
@@ -569,7 +570,7 @@ func (e *encoder) value(t *typ, v any) error {
 				}
 			}
 		}
-		le.PutUint32(e.b[at:], uint32(len(e.b)-start))
+		e.o.PutUint32(e.b[at:], uint32(len(e.b)-start))
 	case '(':
 		xs, ok := v.([]any)
 		if !ok || len(xs) != len(t.fields) {
@@ -602,6 +603,16 @@ var headerTyp = &typ{code: 'a', elem: &typ{code: '(', fields: []*typ{{code: 'y'}
 
 // Encode returns m on the wire, little-endian.
 func (m *Message) Encode() ([]byte, error) {
+	return m.encode(binary.LittleEndian)
+}
+
+// encode returns m on the wire in order o, flagged 'l' for little-endian
+// and 'B' for any other order.
+func (m *Message) encode(o byteOrder) ([]byte, error) {
+	flag := byte('B')
+	if o == binary.LittleEndian {
+		flag = 'l'
+	}
 	if m.Type < typeCall || m.Type > typeSignal || m.Serial == 0 {
 		return nil, wireErr("header")
 	}
@@ -642,8 +653,8 @@ func (m *Message) Encode() ([]byte, error) {
 	if len(ts) != len(m.Body) {
 		return nil, wireErr("body has %d values for signature %q", len(m.Body), m.Sig)
 	}
-	e := &encoder{b: []byte{'l', m.Type, m.Flags, 1, 0, 0, 0, 0}}
-	e.b = le.AppendUint32(e.b, m.Serial)
+	e := &encoder{b: []byte{flag, m.Type, m.Flags, 1, 0, 0, 0, 0}, o: o}
+	e.b = e.o.AppendUint32(e.b, m.Serial)
 	if err := e.value(headerTyp, fields); err != nil {
 		return nil, err
 	}
@@ -654,7 +665,7 @@ func (m *Message) Encode() ([]byte, error) {
 			return nil, err
 		}
 	}
-	le.PutUint32(e.b[4:], uint32(len(e.b)-start))
+	e.o.PutUint32(e.b[4:], uint32(len(e.b)-start))
 	if len(e.b) > MaxMessage {
 		return nil, wireErr("message too long")
 	}
