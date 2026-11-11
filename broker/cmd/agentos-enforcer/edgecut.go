@@ -47,8 +47,9 @@ type edgeCutState struct {
 	Lifted uint32 `json:"lifted,omitempty"`
 }
 
-// openEdgeCut reads the record. One that does not read back is a cut:
-// the edge stays cut, the log says why, and the owner's lift writes the
+// openEdgeCut reads the record. One that is missing or does not read back
+// is a cut: provisioning wrote it (provisionState), so a box that runs has one.
+// The edge stays cut, the log says why, and the owner's lift writes the
 // record whole again (fails closed, P5).
 func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edgeCut, error) {
 	c := &edgeCut{store: store, alerts: alerts, logf: logf}
@@ -56,11 +57,12 @@ func openEdgeCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*edg
 	if err != nil {
 		return nil, err
 	}
-	if b != nil {
-		if err := json.Unmarshal(b, &c.st); err != nil {
-			c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut does not read back"}
-			logf("edge cut: " + fileEdgeCut + " unreadable, the edge stays cut until you lift it on the page: " + err.Error())
-		}
+	if b == nil {
+		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut is missing"}
+		logf("edge cut: " + fileEdgeCut + " missing, the edge stays cut until you lift it on the page")
+	} else if err := json.Unmarshal(b, &c.st); err != nil {
+		c.st = edgeCutState{Cut: true, Reason: "the record of the edge's cut does not read back"}
+		logf("edge cut: " + fileEdgeCut + " unreadable, the edge stays cut until you lift it on the page: " + err.Error())
 	}
 	return c, nil
 }
@@ -70,6 +72,14 @@ func (c *edgeCut) Cut() (bool, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.st.Cut, c.st.Reason
+}
+
+// held reports whether the edge is cut, and whether the owner lifted a cut
+// on day, which holds for the rest of it.
+func (c *edgeCut) held(day uint32) (cut, lifted bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.st.Cut, c.st.Lifted != 0 && c.st.Lifted == day
 }
 
 // Trip cuts the edge for an overrun on day and reports whether it was
@@ -163,18 +173,26 @@ func (p pageEdge) LiftEdge() error {
 }
 
 // holdDrop holds in p what the counts do not say: the caps of a port that
-// merges segments spent (ENF-l-16), and the edge's cut as recorded.
-// d.fwMu is held.
+// merges segments spent (ENF-l-16), and the edge's cut as recorded. The
+// kernel cuts the edge at the first byte past its cap (nft.TripSet) unless
+// the edge is held: while its quota is not its count (the edge's port
+// merges segments, or the day is unreadable and every cap spent,
+// ENF-l-14), so an edge within its cap is never cut, and on the day the
+// owner lifted its cut. d.fwMu is held.
 func (d *Enforcer) holdDrop(p *nft.Drop) {
 	d.spendMerging(p)
-	p.EdgeCut, _ = d.edge.Cut()
+	_, merging := d.net.merging[d.cfg.Layout.Edge]
+	cut, lifted := d.edge.held(p.Day)
+	p.EdgeCut, p.EdgeHold = cut, lifted || merging || d.net.counter == nil
 }
 
 // loadCut writes the drop again with the edge's cut as recorded now, so a
-// trip or a lift is in force at once rather than at the next reading. A
-// write that fails asks for a full load at the next tick, which carries
-// the cut in the same transaction (syncFirewall). Before the first load
-// it does nothing: that load carries it.
+// trip or a lift is in force at once rather than at the next reading. The
+// kernel already cut an edge whose quota stopped a byte (nft.TripSet), so
+// a write that fails after a trip leaves the edge cut; it asks for a full
+// load at the next tick, which carries the cut in the same transaction
+// (syncFirewall), and a refused load shows on the page. Before the first
+// load it does nothing: that load carries it.
 func (d *Enforcer) loadCut() {
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()

@@ -4,6 +4,8 @@ name: premerge
 # comment is an accept and the diff it reviewed (its `Record:` head) equals the head's, so a
 # push after the accept, a later fix-list, a deleted accept or a PR never reviewed all fail;
 # the lens screen the tier owes and, on a gate-file or tier-A PR, the Security accept must match too.
+# Then each workflow the ruleset does not require (premerge.py HELD; #5366) must have passed on the head:
+# GitHub merges an armed PR past a cancelled one, so the gate reads the head's runs, and reruns as each completes.
 # The generated-file bot PRs (bot/trace, bot/metrics, bot/board from this repository, not a
 # fork) carry no verdict and pass through `--bot` when they change only their own output and it
 # is the bot's (MAIN-PROT-3, #757): the head commit's `Bot-Run:` trailer names the writer run, and
@@ -131,7 +133,25 @@ jobs:
             gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
               --jq '.[] | {author_association, created_at, updated_at, body}' > "$RUNNER_TEMP/comments.jsonl" || exit 1
             jq -s . "$RUNNER_TEMP/comments.jsonl" > "$RUNNER_TEMP/comments.json" || exit 1
-            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --base refs/remotes/pr/base "$HEAD_SHA"
+            # PREMERGE-cancelled-checks (#5366): the head's runs and the merge base's main runs, each failed one with its
+            # jobs (the head's latest attempt, the base's first), so --check holds the checks the ruleset does not require.
+            onto=$(git merge-base refs/remotes/pr/base "$HEAD_SHA") || exit 1
+            runs() { # $1: the runs query, $2: the jobs route under a failed run
+              gh api --paginate "repos/$REPO/actions/runs?$1&per_page=100" --jq '.workflow_runs[]' | jq -s . > "$RUNNER_TEMP/r.json" || return 1
+              jq -r '.[] | select(.conclusion == "failure") | .id' "$RUNNER_TEMP/r.json" | while read -r id; do
+                gh api --paginate "repos/$REPO/actions/runs/$id/$2?per_page=100" --jq '.jobs[]' || exit 1
+              done | jq -s --slurpfile r "$RUNNER_TEMP/r.json" '. as $j | $r[0] | map(.id as $id | . + {jobs: [$j[] | select(.run_id == $id)]})'
+            }
+            runs "head_sha=$HEAD_SHA" jobs > "$RUNNER_TEMP/head-runs.json" || exit 1
+            runs "head_sha=$onto&event=push" attempts/1/jobs > "$RUNNER_TEMP/push-runs.json" || exit 1
+            runs "head_sha=$onto&event=schedule" attempts/1/jobs > "$RUNNER_TEMP/schedule-runs.json" || exit 1
+            # The PR's number, head repository and branch bind each head run to this PR (another PR can share the commit).
+            jq -n --slurpfile h "$RUNNER_TEMP/head-runs.json" --slurpfile p "$RUNNER_TEMP/push-runs.json" \
+              --slurpfile s "$RUNNER_TEMP/schedule-runs.json" --slurpfile pr "$RUNNER_TEMP/pr.json" --arg repo "$REPO" \
+              '{repo: $repo, pr: {number: $pr[0].number, repo: $pr[0].head.repo.full_name, branch: $pr[0].head.ref},
+                head: $h[0], base: ($p[0] + $s[0])}' > "$RUNNER_TEMP/runs.json" || exit 1
+            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \
+              --base refs/remotes/pr/base "$HEAD_SHA"
           ) && state=success
           out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
           echo "premerge $HEAD_SHA: $state ($out)"
