@@ -2172,15 +2172,19 @@ def repart_build():
 
 def repart_types(root):
     """(where, [Type= values], why unreadable or None) for each repart definition systemd-repart reads from the
-    tree (REPART_TREE) and from the build's own mkosi.repart directory (repart_build; the caller refuses a build without one)."""
-    files = conf_files(root, REPART_TREE)
+    tree (REPART_TREE, held to the tree's rules) and in the build's own mkosi.repart directory (repart_build; the
+    caller refuses a build without one), which is the checkout, not the tree: read as it is, by name order."""
+    files, out = conf_files(root, REPART_TREE), []
     build = repart_build()
     if build is not None:
-        files += conf_files(str(build.parent), (build.name,))
-    out = []
+        try:
+            files += [pathlib.Path(build, n) for n in sorted(os.listdir(build)) if n.endswith(".conf")]
+        except OSError as e:
+            out.append((build.name, [], e.strerror))
     for f in files:
         try:
-            out.append((f.name, [v for s, k, v in config_lines(f.content()) if (s, k) == ("Partition", "Type")], None))
+            data = f.content() if isinstance(f, Conf) else f.read_bytes()
+            out.append((f.name, [v for s, k, v in config_lines(data) if (s, k) == ("Partition", "Type")], None))
         except (OSError, Unparsable) as e:
             out.append((f.name, [], e.strerror if isinstance(e, OSError) else str(e)))
     return out

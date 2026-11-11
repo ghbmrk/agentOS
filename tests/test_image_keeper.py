@@ -473,6 +473,15 @@ class KeeperTreeTest(unittest.TestCase):
                 self.assertEqual(lonely.repart_build(), MK / "mkosi.repart")
                 self.assertEqual(lonely.gpt_auto_violations(self.root), [])
                 self.assertEqual(sorted(lonely.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
+        # The build's mkosi.repart is the checkout, not the tree: CI's checkout root is owned by another uid than 0, so
+        # holding it to the tree's rules refused every stock definition as unreadable (the first build of #5495). It is
+        # read as it is, and only the tree goes through conf_files.
+        roots = []
+        real = check.conf_files
+        with unittest.mock.patch.object(check, "conf_files", side_effect=lambda r, *a, **k: roots.append(r) or real(r, *a, **k)):
+            self.assertEqual(check.gpt_auto_violations(self.root), [])
+            self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
+        self.assertEqual({str(r) for r in roots}, {str(self.root)})
         # systemd-repart also reads /run/repart.d, which the box mounts: a tree entry there is refused.
         remove = self.place({"run/repart.d/60-x.conf": "[Partition]\nType=home\n"})
         try:
