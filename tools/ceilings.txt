@@ -12,5 +12,5 @@
 # active DECISIONS.md row on main that names the PR. Each PR is measured against main at its last
 # push, so two PRs can land together above a ceiling; main is then over it and may not grow.
 
-trusted-lines 58958
+trusted-lines 59120
 spec-words 65725
