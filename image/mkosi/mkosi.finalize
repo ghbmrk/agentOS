@@ -1716,7 +1716,7 @@ def unit_made_dirs(root):
             if key not in UNIT_MADE_DIRS or not v:
                 continue
             try:
-                got = made_dir_values(key, v)
+                got = [d for w in made_dir_words(key, v) for d in w]
             except ValueError:
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
                            "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
@@ -1726,15 +1726,9 @@ def unit_made_dirs(root):
     return made, out
 
 
-def made_dir_values(key, v):
-    """#5167: the tree paths of the directories one non-empty *Directory= assignment KEY=V names (made_steps).
-    ValueError for a value the check does not model."""
-    return [d for w in made_dir_words(key, v) for d in w]
-
-
 def made_dir_words(key, v):
-    """#5233: made_dir_values one word at a time: [[the tree paths one word a or a:b names]]. ValueError as
-    made_dir_values."""
+    """#5167, #5233: [[the tree paths each field of one word a or a:b names (made_steps)]] for one non-empty
+    *Directory= assignment KEY=V. ValueError for a value the check does not model."""
     # Only space and tab may separate words (systemd's WHITESPACE, after config_lines), so split() splits as
     # systemd does once every other byte outside printable ASCII is refused.
     if any(not " " <= c <= "~" and c != "\t" for c in v):
@@ -1771,7 +1765,8 @@ def unit_merged_files(root, path):
     there decides which) and every drop-in unit_with_dropins applies to the name. None when the check
     cannot name that set: PATH is not at the top of a unit directory (a drop-in, or a file systemd reaches
     only through a link), the name is a template's or an instance's, or a link of another name leads to
-    it (an alias, whose own drop-ins merge too; a .wants link of the same name only adds a dependency)."""
+    it (an alias, whose own drop-ins merge too; a .wants link of the same name only adds a dependency). A
+    top file that is a link of the same name (what systemctl link leaves) is not read, so it fails closed."""
     root = str(root)
     dirs = unit_dirs(root)[0]
     d, name = path.rsplit("/", 1)
@@ -1821,7 +1816,10 @@ def root_made_dirs(root):
 
 
 def made_roots_alone(root, made):
-    """#5233: whether nothing but root's unit hands unit-made directory MADE to anyone (root_made_dirs)."""
+    """#5233: whether the tree and tmpfiles.d hand unit-made directory MADE to no one but root (root_made_dirs):
+    the tree holds a root-owned directory no group or others can write, with no ACL, or nothing, and no
+    tmpfiles.d line at MADE itself makes or remakes it (tmpfiles_maker). A recursive Z, A+ or D line on an
+    ancestor is not weighed here: unit_made_refusals' way rule and tmpfiles.allow refuse it."""
     try:
         st = tree_lstat(root, made)
         acl = [] if st is None else [x for x in tree_xattrs(root, made) if x in ACL_XATTRS]
@@ -2001,7 +1999,10 @@ def unit_made_paths(root):
             else:
                 paths += [(path_parts(w), "etc/fstab", "") for w in words]
     # PID 1 makes each path following the links on its way (mkdir_p_label), so each counts as written and as
-    # the tree resolves it ('..' steps are refused above, so as written is never popped past a link).
+    # the tree resolves it ('..' steps are refused above, so as written is never popped past a link), each
+    # also through the box's own links (box_link_forms: /var/run and /var/lock count before the tree holds
+    # them; #5382 Security 6782954731).
+    seen = {(tuple(s), w, k) for s, w, k in paths}
     for steps, where, kind in list(paths):
         try:
             got = tree_resolve(root, steps)
@@ -2009,8 +2010,11 @@ def unit_made_paths(root):
             out.append("%s: /%s: a link on its way the tree check cannot follow; the tree check never passes a path it "
                        "cannot read (#5167)" % (where, "/".join(steps)))
             continue
-        if got != steps:
-            paths.append((got, where, kind))
+        # A box form lies under /run, which is empty at boot, so the tree has nothing on its way to resolve.
+        for p in [got] + [path_parts(f) for w in (steps, got) for f in box_link_forms("/" + "/".join(w))[1:]]:
+            if (tuple(p), where, kind) not in seen:
+                seen.add((tuple(p), where, kind))
+                paths.append((p, where, kind))
     return paths, loose, out
 
 

@@ -908,6 +908,48 @@ class KeeperTreeTest(unittest.TestCase):
             (dict(journald, **sock, **{SYSTEM + "k.service": "[Service]\n", SYSTEM + "k.service.d/d.conf":
                                        "[Service]\nRuntimeDirectory=systemd/journal\n"}),
              "run/systemd/journal/stdout", "run/systemd/journal", jdir.replace("systemd-journald.service", "k.service.d/d.conf"), "ListenStream= in %sj.socket" % SYSTEM),
+            # The box's own /var/lock and /var/run links count before the tree holds them (#5382 Security 6782954731).
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lock/a/x\nSocketUser=nobody\n"}, "run/lock/a/x",
+             "run/lock", "anyone on the box can write", "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{SYSTEM + "s.socket": "[Socket]\nListenStream=/var/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            # As written too, wherever the tree's own link on the way leads.
+            (dict(nobody, **{"var/run": ("link", "/srv"), "srv/keep": "",
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/var/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(nobody, **{"srv/vr": ("link", "/var"),
+                             SYSTEM + "s.socket": "[Socket]\nListenStream=/srv/vr/run/hq/x\nSocketUser=nobody\n"}),
+             "run/hq/x", "run/hq", hq % "RuntimeDirectory", "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "m.service": "[Service]\nBindPaths=/srv:/var/lock/m\n"}, "run/lock/m", "run/lock",
+             "anyone on the box can write", "BindPaths= in %sm.service" % SYSTEM),
+            ({SYSTEM + "s.socket": "[Socket]\nListenStream=/run/x.sock\nSymlinks=/var/lock/l\n"}, "run/lock/l", "run/lock",
+             "anyone on the box can write", "Symlinks= in %ss.socket" % SYSTEM),
+            # A root unit's directory any *DirectoryMode= lets a group or others write, in its file or a drop-in
+            # (#5382 Security 6782954731 2, L3 6783515775 1).
+            ({SYSTEM + "sx.service": "[Service]\nStateDirectory=sx\nStateDirectoryMode=0777\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/sx/sock\n"}, "var/lib/sx/sock", "var/lib/sx",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nCacheDirectory=sx\n", SYSTEM + "sx.service.d/m.conf":
+              "[Service]\nCacheDirectoryMode=0757\n", SYSTEM + "s.socket": "[Socket]\nListenStream=/var/cache/sx/sock\n"},
+             "var/cache/sx/sock", "var/cache/sx",
+             "systemd makes for a unit and may hand to a user other than root (CacheDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nLogsDirectory=sx\nLogsDirectoryMode=0702\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/log/sx/sock\n"}, "var/log/sx/sock", "var/log/sx",
+             "systemd makes for a unit and may hand to a user other than root (LogsDirectory= in %ssx.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
+            ({SYSTEM + "sx.service": "[Service]\nConfigurationDirectory=sx\nConfigurationDirectoryMode=0757\n",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/etc/sx/sock\n"}, "etc/sx/sock", "etc/sx",
+             "systemd makes for a unit and may hand to a user other than root (ConfigurationDirectory= in %ssx.service)"
+             % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM),
+            (dict(journald, **sock, **{SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0757\n"}),
+             "run/systemd/journal/stdout", "run/systemd/journal", jdir, "ListenStream= in %sj.socket" % SYSTEM),
+            # A tree file above a root unit's directory: the check cannot read the directory's tree state.
+            ({SYSTEM + "a.service": "[Service]\nStateDirectory=a/b\n", "var/lib/a": "",
+              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/a/b/sock\n"}, "var/lib/a/b/sock", "var/lib/a/b",
+             "systemd makes for a unit and may hand to a user other than root (StateDirectory= in %sa.service)" % SYSTEM,
+             "ListenStream= in %ss.socket" % SYSTEM),
         )
         wired = ("Symlinks= in %ss.socket" % SYSTEM, "BindReadOnlyPaths= in %sb.service" % SYSTEM)
         for files, path, d, owner, where in refused:
@@ -1028,10 +1070,18 @@ class KeeperTreeTest(unittest.TestCase):
                         self.assertEqual(check.inside_refusals(self.root), [])
                     finally:
                         remove()
-        # The stock journald lines, as made.allow lists them, pass the whole check.
+        # The stock journald lines, as made.allow lists them, pass the whole check; a drop-in that lets others write
+        # journald's directory makes all four refused (L3 6783515775 1).
         remove = self.place(dict(passing[0]))
         try:
             self.assertEqual(check.violations(self.root), [])
+            again = self.place({SYSTEM + "systemd-journald.service.d/m.conf": "[Service]\nRuntimeDirectoryMode=0757\n"})
+            try:
+                got = check.violations(self.root)
+                self.assertEqual(len(got), 4, got)
+                self.assertTrue(all(" is inside /run/systemd/journal, " in v for v in got), got)
+            finally:
+                again()
         finally:
             remove()
         # A tree directory a root unit names but a group can write is not root's alone.
@@ -1039,10 +1089,11 @@ class KeeperTreeTest(unittest.TestCase):
                              SYSTEM + "s.socket": "[Socket]\nListenStream=/var/lib/rh/sock\n"})
         try:
             self.assertEqual(check.inside_refusals(self.root), [])
-            (self.root / "var/lib/rh").chmod(0o775)
-            self.assertEqual(check.inside_refusals(self.root), [inside(
-                "var/lib/rh/sock", "var/lib/rh", "systemd makes for a unit and may hand to a user other than root "
-                "(StateDirectory= in %srh.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
+            for mode in (0o775, 0o757):
+                (self.root / "var/lib/rh").chmod(mode)
+                self.assertEqual(check.inside_refusals(self.root), [inside(
+                    "var/lib/rh/sock", "var/lib/rh", "systemd makes for a unit and may hand to a user other than root "
+                    "(StateDirectory= in %srh.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
         finally:
             remove()
         # The tree may hand a root unit's directory, in either form, to another uid, group or ACL before the unit
@@ -1078,13 +1129,15 @@ class KeeperTreeTest(unittest.TestCase):
                             "(StateDirectory= in %str.service)" % SYSTEM, "ListenStream= in %ss.socket" % SYSTEM)])
                     finally:
                         remove()
-        # A mount point inside a unit-made directory is refused once, by unit_made_refusals (the chown descends).
-        remove = self.place(dict(nobody, **{SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=/var/lib/hq/in\n"}))
-        try:
-            self.assertEqual(check.inside_refusals(self.root), [])
-            self.assertEqual(len(check.unit_made_refusals(self.root)), 1)
-        finally:
-            remove()
+        # A mount point inside a unit-made directory is refused once, by unit_made_refusals (the chown descends),
+        # through the box's /var/run link too.
+        for where in ("/var/lib/hq/in", "/var/run/hq/in"):
+            remove = self.place(dict(nobody, **{SYSTEM + "m.mount": "[Mount]\nWhat=/dev/sda\nWhere=%s\n" % where}))
+            try:
+                self.assertEqual(check.inside_refusals(self.root), [])
+                self.assertEqual(len(check.unit_made_refusals(self.root)), 1, where)
+            finally:
+                remove()
 
     def test_the_mask_holds_from_the_first_boot(self):
         # #2981 (Security 1): a "-" entry gives no mask to a unit started before the path exists, so
