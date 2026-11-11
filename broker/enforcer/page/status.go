@@ -217,7 +217,9 @@ type Stray struct {
 // byte cap reaches nothing through the enforcer until the owner lifts the
 // cut here, after a tap.
 type Edge interface {
-	// Cut is whether the edge is cut, and why.
+	// Cut is whether the edge is cut, and why: the card's text after
+	// "cut off: ", whole sentences that end with what to check before
+	// the lift (#5399), since that depends on the cause.
 	Cut() (cut bool, reason string)
 	// LiftEdge lifts it; an error leaves it cut.
 	LiftEdge() error

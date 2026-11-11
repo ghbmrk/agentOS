@@ -69,6 +69,16 @@ type network struct {
 	// read: its error, logged when it starts or changes. Its caps are
 	// held spent while it lasts (ENF-l-16). d.fwMu guards it and reload.
 	merging map[string]string
+	// edgeMerged: the edge's port merges segments, or did since the last
+	// full load the firewall took, whose quota still runs spent; the
+	// edge is held meanwhile (holdDrop, #5399 item 5). d.fwMu guards it.
+	edgeMerged bool
+	// unread: the last full load taken could not read the table it
+	// replaced, so the bytes since the last reading count nowhere; every
+	// cap is held spent and the edge held until a full load that read
+	// its table is taken, which the first reading's listing that reads
+	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
+	unread bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -230,8 +240,25 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		d.net.resMu.Unlock()
 	}
 	caps := traffic.CapsOf(doc)
-	load := func() error {
+	load := func() (err error) {
+		// A full load starts the edge's quota and TripSet afresh, so it
+		// holds the edge only while its port merges now; one the firewall
+		// does not take leaves the spent quota running, and the hold.
+		merged, unread := d.net.edgeMerged, d.net.unread
+		_, d.net.edgeMerged = d.net.merging[l.Edge]
+		defer func() {
+			if err != nil {
+				d.net.edgeMerged, d.net.unread = merged, unread
+			}
+		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
+		// A table this process loaded that does not read (#5399 item 6)
+		// takes its bytes since the last reading and the edge in TripSet
+		// with it. The load still goes ahead, so a cut or a tightening is
+		// never held back, with every cap held spent until a full load
+		// that read its table is taken (holdDrop). The first load after a
+		// start has none to read: a reboot leaves no table.
+		d.net.unread = err != nil && d.loaded != ""
 		if err != nil {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
 			running = nil
@@ -547,6 +574,9 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The table reads again: a full load that reads it ends the caps
+	// held spent since one that could not (holdDrop).
+	d.net.reload = d.net.reload || d.net.unread
 	text, err := nft.Refresh(d.loadedDoc, d.cfg.Layout, running)
 	if err != nil || text == "" {
 		return err
@@ -586,6 +616,9 @@ func (d *Enforcer) offloads() bool {
 		changed = changed || bad != still
 	}
 	d.net.merging = now
+	if _, ok := now[d.cfg.Layout.Edge]; ok {
+		d.net.edgeMerged = true
+	}
 	d.net.reload = d.net.reload || changed
 	return changed
 }
@@ -902,45 +935,61 @@ var ne = binary.NativeEndian
 // saves the day. A cap passed again at the next reading trips again,
 // which a tripped core takes at no cost (cut.Trip).
 func (d *Enforcer) readCaps(ctx context.Context) error {
-	over, err := d.readCapsLocked(ctx)
+	over, kernelCut, err := d.readCapsLocked(ctx)
 	for _, o := range over {
 		d.overrun(o)
+	}
+	if kernelCut != "" {
+		d.tripEdge(kernelCut)
 	}
 	return err
 }
 
-func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error) {
+// readCapsLocked takes a reading and writes the drop from it. kernelCut
+// is why the kernel cuts the edge on the text written, by TripSet, when
+// the record does not say it is cut: the record then follows, so the
+// kernel's cut always has a card and a lift (#5399 item 2).
+func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, kernelCut string, err error) {
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	c := d.net.counter
 	if c == nil || d.loaded == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 	defer cancel()
 	listing, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return nil, fmt.Errorf("reading: %w", err)
+		return nil, "", fmt.Errorf("reading: %w", err)
 	}
-	over, err := d.addReading(d.loadedDoc, listing)
+	over, err = d.addReading(d.loadedDoc, listing)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
 	d.holdDrop(&p)
 	running, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
 	}
 	text, err := nft.Drops(d.loadedDoc, d.cfg.Layout, running, p)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
+	}
+	if !p.EdgeCut && !p.EdgeHold {
+		tripped, err := nft.EdgeTripped(running, d.cfg.Layout, p)
+		if err != nil {
+			return over, "", fmt.Errorf("drop: %w", err)
+		}
+		if tripped {
+			kernelCut = fmt.Sprintf("the firewall cut it at the first byte past its byte cap of %d bytes today", p.EdgeCap)
+		}
 	}
 	if err := d.dp.Fire.Update(lctx, text); err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
-	return over, nil
+	return over, kernelCut, nil
 }
 
 // addReading adds the reading in listing, the running table compiled
@@ -1004,11 +1053,14 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	}
 	// The channel asks from its read loop: a cap passed is tripped off it,
 	// since a trip raises an alert, which the channel sends.
-	over, err := d.readCapsLocked(context.Background())
-	if len(over) > 0 {
+	over, kernelCut, err := d.readCapsLocked(context.Background())
+	if len(over) > 0 || kernelCut != "" {
 		go func() {
 			for _, o := range over {
 				d.overrun(o)
+			}
+			if kernelCut != "" {
+				d.tripEdge(kernelCut)
 			}
 		}()
 	}
