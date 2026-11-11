@@ -198,6 +198,7 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 		traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"b.example"}, Cap: 100, Count: 101})
 
 	// The edge: six 50-byte datagrams are its 300; the seventh is past.
+	// The edge's segment is IPv4 only (ENF-e-6).
 	for range 6 {
 		r.send("edge", nft.NetOther, 22, true, "edge within its cap")
 	}
@@ -205,7 +206,14 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 	if slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge }) {
 		t.Errorf("edge at its cap tripped: %+v", over)
 	}
+	cuts := r.h.Counter(nft.EdgeCut)
 	r.send("edge", nft.NetOther, 22, false, "edge past its cap")
+	// The byte the quota stopped cut the edge in the kernel (#5282): its
+	// next packet ends in the cut chain.
+	r.send("edge", nft.NetOther, 1, false, "edge cut by the kernel")
+	if r.h.Counter(nft.EdgeCut) == cuts {
+		t.Error("past its cap, the edge's next packet was not dropped by the kernel's cut")
+	}
 	over = r.read()
 	if !slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge && o.Cap == 300 && o.Count == 350 }) {
 		t.Errorf("edge past its cap: overruns %+v, want the edge at 350 of 300", over)

@@ -43,14 +43,18 @@ func openCut(store fileStore, alerts *alert.Alerts, logf func(string)) (*cut, er
 	if err != nil {
 		return nil, err
 	}
-	if b != nil {
-		var st cutState
-		if err := json.Unmarshal(b, &st); err != nil {
-			return nil, errors.New("cut: state unreadable")
-		}
-		if st.Tripped {
-			c.stage, c.reason = channel.Tripped, st.Reason
-		}
+	if b == nil {
+		// Provisioning wrote it (provisionState), so a box that runs has one.
+		c.stage, c.reason = channel.Tripped, "the record of the core's cut is missing"
+		logf("cut: " + fileCut + " missing, the core stays cut until you resume it on the page")
+		return c, nil
+	}
+	var st cutState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, errors.New("cut: state unreadable")
+	}
+	if st.Tripped {
+		c.stage, c.reason = channel.Tripped, st.Reason
 	}
 	return c, nil
 }
