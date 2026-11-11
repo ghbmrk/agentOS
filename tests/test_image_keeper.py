@@ -1415,15 +1415,25 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], want)
                 finally:
                     remove()
-        for opts, gives in (("mode=0755,nosuid", False), ("nosuid,noexec", False), ("uid=0,gid=root", False),
-                            ("mode=1777", True), ("mode=0775", True), ("mode=u+rwx", True), ("uid=1000", True),
-                            ("size=1m,gid=100", True)):
-            self.assertEqual(check.mount_gives_away(opts), gives, opts)
+        # An fstab line at a box mount stays the box's own only with the box's type and allowlisted options
+        # (L3 6791716329): libmount's X-mount.mode= and X-mount.owner= chmod and chown the target on a remount too.
+        for line, own in (("tmpfs /run tmpfs mode=0755,nosuid,nodev,noexec 0 0", True),
+                          ("devtmpfs /dev devtmpfs nosuid,noexec 0 0", True), ("tmpfs /run tmpfs", True),
+                          ("tmpfs /run tmpfs defaults,rw 0 0", True), ("tmpfs //run/ tmpfs mode=700 0 0", True),
+                          ("tmpfs /run tmpfs X-mount.mode=0777,noexec 0 0", False),
+                          ("tmpfs /run tmpfs X-mount.owner=nobody,noexec 0 0", False),
+                          ("tmpfs /run tmpfs uid=0 0 0", False), ("tmpfs /run tmpfs mode=1777 0 0", False),
+                          ("tmpfs /run tmpfs mode=0775 0 0", False), ("tmpfs /run tmpfs mode=0702 0 0", False),
+                          ("tmpfs /run tmpfs mode=0755x 0 0", False), ("tmpfs /run tmpfs mode=u+rwx 0 0", False),
+                          ("tmpfs /run tmpfs mode= 0 0", False), ("/dev/sdb1 /run ext4 nosuid 0 0", False),
+                          ("tmpfs /dev tmpfs nosuid 0 0", False), ("tmpfs /srv tmpfs nosuid 0 0", False),
+                          ("tmpfs /run", False)):
+            self.assertEqual(check.box_own_line(line.split()), own, line)
 
         # #5437 (Security 6790413268): a link on the way whose target the tree lacks is refused, not weighed as written:
         # the box makes the target at runtime (a mount point, a unit's directory), so the link leads under it.
         def stuck(path, link, at=where):
-            return ("%s: /%s: a link on its way the tree check cannot follow (/%s); the tree check never passes a path it "
+            return ("%s: /%s: a step on its way the tree check cannot follow (/%s); the tree check never passes a path it "
                     "cannot read (#5167, #5437)" % (at, path, link))
         for files, want in (
                 # Repro A, with a mount point the tree has never held (earlier cases leave srv/ behind).
@@ -1434,7 +1444,9 @@ class KeeperTreeTest(unittest.TestCase):
                 (dict({"srv/l": ("link", "/nowhere")}, **sock("/srv/l", user=False)), stuck("srv/l", "srv/l")),
                 (dict({"srv/l": ("link", "/srv/l2"), "srv/l2": ("link", "/nowhere")}, **sock("/srv/l/s", user=False)),
                  stuck("srv/l/s", "srv/l")),
-                (dict({"srv/l": ("link", "/srv/l")}, **sock("/srv/l/s", user=False)), stuck("srv/l/s", "srv/l"))):
+                (dict({"srv/l": ("link", "/srv/l")}, **sock("/srv/l/s", user=False)), stuck("srv/l/s", "srv/l")),
+                # A file the tree holds where the way goes on below it (L3 6791716329: only a missing step passes).
+                (dict({"srv/f": ""}, **sock("/srv/f/s", user=False)), stuck("srv/f/s", "srv/f"))):
             with self.subTest(files=files):
                 remove = self.place(files)
                 try:
@@ -1464,9 +1476,11 @@ class KeeperTreeTest(unittest.TestCase):
             # An fstab line at a box mount that gives it away (release 1), and one that does not.
             remove()
             remove = self.place(sock("/run/foo/s", user=False))
-            write(self.root, "etc/fstab", (old or "") + "tmpfs /run tmpfs mode=1777 0 0\n")
-            self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)],
-                             [hidden("run/foo/s", "run")])
+            for line in ("tmpfs /run tmpfs mode=1777 0 0\n", "tmpfs /run tmpfs X-mount.mode=0777,noexec 0 0\n",
+                         "tmpfs /run tmpfs X-mount.owner=nobody,noexec 0 0\n"):
+                write(self.root, "etc/fstab", (old or "") + line)
+                self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)],
+                                 [hidden("run/foo/s", "run")], line)
             write(self.root, "etc/fstab", (old or "") + "tmpfs /run tmpfs mode=0755,nosuid 0 0\n#tmpfs /run tmpfs mode=1777 0 0\n")
             self.assertEqual([g for g in check.inside_refusals(self.root) if g.startswith(where)], [])
             # An fstab line counts in all its forms too (its lines share one "etc/fstab"), so one written off the box's
