@@ -807,12 +807,15 @@ def stub(d, name, body):
 
 
 def newc(names, trailer=True):
-    """A newc cpio archive holding NAMES, each a one-byte file, as cpio --format=newc writes it."""
-    out = b""
-    for i, n in enumerate(list(names) + (["TRAILER!!!"] if trailer else [])):
-        body = b"" if n == "TRAILER!!!" else b"x"
+    """A newc cpio archive holding NAMES, each a one-byte file but a directory where a later name is
+    under it, as cpio --format=newc writes it."""
+    out, names = b"", list(names)
+    for i, n in enumerate(names + (["TRAILER!!!"] if trailer else [])):
+        is_dir = any(m.startswith(n + "/") for m in names)
+        body = b"" if n == "TRAILER!!!" or is_dir else b"x"
         name = n.encode() + b"\0"
-        hdr = b"070701" + b"".join(b"%08X" % v for v in (i, 0o100644, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
+        mode = 0o040755 if is_dir else 0o100644
+        hdr = b"070701" + b"".join(b"%08X" % v for v in (i, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
         out += hdr + name
         out += b"\0" * (-len(out) % 4) + body
         out += b"\0" * (-len(out) % 4)

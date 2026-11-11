@@ -195,12 +195,16 @@ def partition_violations(partitions, defs=REPART_DIR, runtime=REPART_D):
 # The /usr steps on the way to systemd-repart's /usr definitions: each must be a plain directory, so
 # no link points a definition directory elsewhere in /usr. lib/repart.d must exist; the rest may not.
 USR_REPART_STEPS = ("lib", "lib/repart.d", "local", "local/lib", "local/lib/repart.d")
+# systemd-confext merges the images in these /usr directories over /etc (discover-image.c, v257), so an
+# image there could add a repart.d or a unit the checks here never read (#5418). /usr ships neither.
+USR_CONFEXTS = ("lib/confexts", "local/lib/confexts")
 
 
 def usr_repart_violations(rows, runtime=REPART_D):
     """The /usr list rows (path, type, ..., digest) that let systemd-repart read a definition other than
     mkosi.extra's repart.d files, byte for byte: a changed, added or missing file under lib/repart.d or
-    local/lib/repart.d, or a step on the way to either that is not a plain directory."""
+    local/lib/repart.d, or a step on the way to either that is not a plain directory; or that give
+    systemd-confext an image to merge over /etc (USR_CONFEXTS)."""
     want = {"lib/repart.d/" + f.name: sha256(f) for f in pathlib.Path(runtime).glob("*.conf")}
     out, seen = [], set()
     kinds = {r[0]: r[1] for r in rows}
@@ -209,6 +213,8 @@ def usr_repart_violations(rows, runtime=REPART_D):
             out.append("/usr/%s: not a plain directory (%s)" % (step, kinds.get(step, "missing")))
     for r in rows:
         path, kind, digest = r[0], r[1], r[-1]
+        if any(path == c or path.startswith(c + "/") for c in USR_CONFEXTS):
+            out.append("/usr/%s: systemd-confext would merge it over /etc" % path)
         if not path.startswith(("lib/repart.d/", "local/lib/repart.d/")):
             continue
         seen.add(path)
@@ -218,40 +224,91 @@ def usr_repart_violations(rows, runtime=REPART_D):
     return out
 
 
-# systemd-repart also reads /etc/repart.d and /run/repart.d, which live on the writable root. The
-# image ships neither (/run is an empty mount point for a tmpfs), so the root's /etc and /run must be
-# plain directories holding no repart.d entry of any kind. Read with debugfs's raw directory listing
+# Directories on the writable root that systemd reads definitions or images from (#5289, #5418):
+# systemd-repart's repart.d, systemd-sysext's extensions (merged over /usr) and systemd-confext's
+# confexts (merged over /etc), each by the v257 search paths (discover-image.c). The image ships none
+# of them (/run is an empty mount point for a tmpfs), so every step to each listed directory must be
+# a plain directory, readable, and hold none of its names. Read with debugfs's raw directory listing
 # (ls -p: /inode/mode/uid/gid/name/size/), which follows no link.
-ROOT_REPART_DIRS = ("etc", "run")
+ROOT_READS = {"etc": ("repart.d", "extensions"), "run": ("repart.d", "extensions", "confexts"),
+              "var/lib": ("extensions", "confexts")}
+READERS = {"repart.d": "systemd-repart would make what it defines", "extensions": "systemd-sysext would merge it "
+           "over /usr", "confexts": "systemd-confext would merge it over /etc"}
 DEBUGFS_ROW = re.compile(r"/(\d+)/([0-7]{6})/(\d+)/(\d+)/(.*)/(\d*)/")
+# What debugfs writes to stderr on every run; anything else there is a failure, as debugfs exits 0 when
+# it cannot open the image or find a path (e2fsprogs 1.47).
+DEBUGFS_BANNER = re.compile(r"debugfs \S+ \([^()\n]*\)\n")
+# Superblock incompat features under which a name in a directory block is not the name debugfs prints
+# (#5418): an encrypted directory's names are ciphertext, and a casefolded one matches "Repart.D" as
+# repart.d. The root ext4 has neither (mkosi.conf's SYSTEMD_REPART_MKFS_OPTIONS_EXT4 sets neither).
+EXT4_HIDING = {0x10000: "encrypt", 0x20000: "casefold"}
+
+
+class ToolError(Exception):
+    """debugfs failed: the build stops on the tool, not on the image."""
 
 
 def debugfs_ls(img, offset, path):
     """{name: octal mode} of directory PATH in the ext4 file system at byte OFFSET of IMG. A listing
-    with no "." entry (not found, not a directory) gives None."""
-    text = subprocess.run(["debugfs", "-R", "ls -p %s" % path, "%s?offset=%d" % (img, offset)],
-                          capture_output=True, text=True).stdout
-    rows = {m.group(5): m.group(2) for m in map(DEBUGFS_ROW.fullmatch, text.splitlines()) if m}
+    with no "." entry (not a directory) gives None. Raises ToolError when debugfs exits non-zero or
+    writes anything to stderr but its banner."""
+    p = subprocess.run(["debugfs", "-R", "ls -p %s" % path, "%s?offset=%d" % (img, offset)],
+                       capture_output=True, text=True)
+    err = DEBUGFS_BANNER.sub("", p.stderr, count=1).strip()
+    if p.returncode or err:
+        raise ToolError("debugfs ls -p %s exited %d: %s" % (path, p.returncode, err or "no message"))
+    rows = {m.group(5): m.group(2) for m in map(DEBUGFS_ROW.fullmatch, p.stdout.splitlines()) if m}
     return rows if "." in rows else None
 
 
+def ext4_hiding_violations(img, offset):
+    """The root's superblock, read as quota_violations reads it: ext4, with no EXT4_HIDING feature."""
+    with open(img, "rb") as f:
+        f.seek(offset + 1024)
+        sb = f.read(1024)
+    if len(sb) < 1024 or struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
+        return ["root is not ext4"]
+    incompat = struct.unpack_from("<I", sb, 0x60)[0]
+    return ["root ext4 has the %s feature; debugfs would not read its names as systemd does" % n
+            for bit, n in sorted(EXT4_HIDING.items()) if incompat & bit]
+
+
 def root_repart_violations(img, table, ls=debugfs_ls):
-    """The root partition's /etc and /run that are not plain directories, or hold a repart.d."""
+    """The root partition's ROOT_READS directories that are not plain, readable directories on every
+    step, or hold a name systemd would read; and a root ext4 debugfs cannot read as systemd does."""
     roots = [p for p in table["partitions"] if p["type"].lower() == ROOT_GUID]
     if len(roots) != 1:
         return ["expected one root partition, found %d" % len(roots)]
     offset = roots[0]["start"] * table.get("sectorsize", 512)
-    top = ls(img, offset, "/") or {}
-    out = []
-    for d in ROOT_REPART_DIRS:
-        if not top.get(d, "").startswith("04"):
-            out.append("/%s: not a plain directory on root (%s)" % (d, top.get(d, "missing")))
-            continue
-        listing = ls(img, offset, "/" + d)
-        if listing is None:
-            out.append("/%s: unreadable on root" % d)
-        elif "repart.d" in listing:
-            out.append("/%s/repart.d: on root; systemd-repart would make what it defines" % d)
+    out = ext4_hiding_violations(img, offset)
+    if out:
+        return out
+    seen = {}
+
+    def listing(path):
+        if path not in seen:
+            seen[path] = None
+            up, _, name = path.rpartition("/")
+            top = listing(up) if path else {}
+            if top is None:
+                return None
+            mode = top.get(name, "missing") if path else "040"
+            if not mode.startswith("04"):
+                out.append("/%s: not a plain directory on root (%s)" % (path, mode))
+                return None
+            got = ls(img, offset, "/" + path)
+            if not got:
+                out.append("/%s: unreadable on root" % path)
+                return None
+            seen[path] = got
+        return seen[path]
+
+    try:
+        for d, names in ROOT_READS.items():
+            got = listing(d) or {}
+            out += ["/%s/%s: on root; %s" % (d, n, READERS[n]) for n in names if n in got]
+    except ToolError as e:
+        return ["%s; a tool failure, not the image's" % e]
     return out
 
 
@@ -490,22 +547,22 @@ def ungzip(data):
     return one_stream(zlib.decompressobj(31), data, "gzip")
 
 
-def cpio_names(data, decompress=None):
-    """Every path in an initrd: newc cpio archives and compressed (zstd, xz or gzip) streams of
-    them, back to back with zero padding between them, read on as the kernel does. Anything else
-    raises ValueError, so an initrd this cannot read fails the build rather than passing unchecked.
-    DECOMPRESS maps a magic to a function returning (output, the bytes after the stream)."""
+def cpio_members(data, decompress=None):
+    """Every member of an initrd, as (path, mode, content): newc cpio archives and compressed (zstd, xz
+    or gzip) streams of them, back to back with zero padding between them, read on as the kernel does.
+    Anything else raises ValueError, so an initrd this cannot read fails the build rather than passing
+    unchecked. DECOMPRESS maps a magic to a function returning (output, the bytes after the stream)."""
     decompress = decompress or {ZSTD: unzstd, XZ: unxz, GZIP: ungzip}
-    names, off = [], 0
+    members, off = [], 0
     while True:
         while off < len(data) and data[off] == 0:
             off += 1
         if off >= len(data):
-            return names
+            return members
         fn = next((fn for magic, fn in decompress.items() if data.startswith(magic, off)), None)
         if fn:
             out, rest = fn(data[off:])
-            names += cpio_names(out, decompress)
+            members += cpio_members(out, decompress)
             data, off = rest, 0
             continue
         if data[off:off + 6] not in CPIO_MAGICS:
@@ -522,10 +579,15 @@ def cpio_names(data, decompress=None):
             off = (end + 3) & ~3
             if off + size > len(data):
                 raise ValueError("initrd: truncated cpio file %s" % name)
-            off = (off + size + 3) & ~3
+            body, off = data[off:off + size], (off + size + 3) & ~3
             if name == "TRAILER!!!":
                 break
-            names.append(name[2:] if name.startswith("./") else name)
+            members.append((name[2:] if name.startswith("./") else name, hdr["mode"], body))
+
+
+def cpio_names(data, decompress=None):
+    """Every path in an initrd (cpio_members)."""
+    return [n for n, _, _ in cpio_members(data, decompress)]
 
 
 # Bluetooth must not come up in the initrd either (#1475): the image blocks btusb and btmtk with a
@@ -545,13 +607,68 @@ def bluetooth_violations(names):
     return sorted(n for n in names if n not in BT_ALLOWED and any(re.search(p, n) for p in BT_PATTERNS))
 
 
+# The initrd's own files that would give its systemd a unit, mount, device or partition no check here
+# or in mkosi.finalize reads (#5418; mkosi.finalize's tree check reads only the main tree). The initrd
+# is built from packages alone (it has no mkosi.extra), so each of these is refused whatever its content:
+# - a repart.d entry, or a step to one that is not a directory (a link elsewhere). In the initrd
+#   systemd-repart reads /sysusr's or /sysroot's definitions (repart.c, v257), which the disk checks
+#   above hold, but the initrd's own would be the first that systemd-repart.service's conditions see;
+# - an fstab, crypttab, veritytab or integritytab line: the fstab, cryptsetup, veritysetup and
+#   integritysetup generators make mounts and devices from them. A file of blank and # lines is empty;
+# - a credential in a store (the main tree's rule and exceptions: mkosi.finalize CREDSTORE_ALLOWED);
+# - a generator outside /usr/lib (in /etc/systemd or /usr/local/lib/systemd), and a unit or drop-in
+#   there but an enablement link or mask: a link to /usr/lib/systemd/system/<name> or /dev/null.
+# /run is a tmpfs in the initrd too, so its files are hidden. The units and generators packages ship in
+# /usr/lib are packages' files, like every binary (I21).
+INITRD_REPART_STEPS = ("etc", "usr", "usr/lib", "usr/local", "usr/local/lib")
+INITRD_REPART = ("etc/repart.d", "usr/lib/repart.d", "usr/local/lib/repart.d", "lib/repart.d")
+INITRD_TABS = ("etc/fstab", "etc/crypttab", "etc/veritytab", "etc/integritytab")
+INITRD_CREDSTORES = tuple("%s/%s" % (top, n) for top in ("etc", "usr/local/lib", "usr/lib", "lib")
+                          for n in ("credstore", "credstore.encrypted"))
+INITRD_CREDS_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/firstboot.locale",
+                        "usr/lib/credstore/firstboot.timezone", "usr/lib/credstore/passwd.hashed-password.root")
+INITRD_UNIT_DIRS = ("etc/systemd/system", "usr/local/lib/systemd/system")
+INITRD_GENERATOR_DIRS = ("etc/systemd/system-generators", "usr/local/lib/systemd/system-generators")
+INITRD_UNIT_LINK = re.compile(r"/usr/lib/systemd/system/[^/]+|/dev/null")
+
+
+def initrd_violations(members):
+    """The initrd members (cpio_members) that add a unit, mount, device or partition (above)."""
+    out = []
+    for name, mode, body in members:
+        kind = stat.S_IFMT(mode)
+
+        def at(dirs):
+            return any(name == d or name.startswith(d + "/") for d in dirs)
+        if name in INITRD_REPART_STEPS and kind != stat.S_IFDIR:
+            out.append("%s: not a directory; a repart.d could be reached through it" % name)
+        elif at(INITRD_REPART):
+            out.append("%s: a repart.d entry; systemd-repart would make what it defines" % name)
+        elif name in INITRD_TABS and (kind != stat.S_IFREG or any(
+                ln.strip() and not ln.strip().startswith(b"#") for ln in body.splitlines())):
+            out.append("%s: has an entry; a generator would make a mount or device from it" % name)
+        elif at(INITRD_CREDSTORES) and kind != stat.S_IFDIR and name not in INITRD_CREDS_ALLOWED:
+            out.append("%s: a credential in a store" % name)
+        elif at(INITRD_UNIT_DIRS) and kind != stat.S_IFDIR and not (
+                kind == stat.S_IFLNK and INITRD_UNIT_LINK.fullmatch(body.decode("utf-8", "replace"))):
+            out.append("%s: a unit or drop-in outside /usr/lib" % name)
+        elif at(INITRD_GENERATOR_DIRS) and kind != stat.S_IFDIR:
+            out.append("%s: a generator outside /usr/lib" % name)
+    return out
+
+
 def check_initrd(path, data):
-    """Exit unless the initrd at PATH lists files and none of them is Bluetooth (#1475)."""
-    names = cpio_names(data)
+    """Exit unless the initrd at PATH lists files, none of them is Bluetooth (#1475), and none adds a
+    unit, mount, device or partition (initrd_violations, #5418)."""
+    members = cpio_members(data)
+    names = [n for n, _, _ in members]
     print("initrd %s: %d files, %d kernel modules" % (path, len(names), sum(".ko" in n for n in names)))
     bad = bluetooth_violations(names) if names else ["no files"]
     if bad:
         sys.exit("initrd %s could bring up Bluetooth (#1475): %s" % (path, bad))
+    bad = initrd_violations(members)
+    if bad:
+        sys.exit("initrd %s adds a unit, mount, device or partition no check reads (#5418): %s" % (path, bad))
 
 
 def manifest(version, roothash, entry_name, entry_text, files, boot=None, drivers=None):

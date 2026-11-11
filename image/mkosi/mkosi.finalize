@@ -1713,8 +1713,10 @@ def unit_made_dirs(root):
     to; a mask is skipped. Every assignment of each key counts, in any section, whatever a later one
     sets, and whoever runs the unit. No name, alias, precedence or user is resolved: for any name
     systemd loads, every file it reads is one of these, so its directories are a subset of these, and
-    adding a file or link only adds to them (the re-plan on #5167; generators' and transient units
-    are not covered). Each word, and each side of a:b, counts (made_steps); a value holding a specifier
+    adding a file or link only adds to them (the re-plan on #5167). Units a generator makes are held by
+    finish_image.py on the built disk (partition_violations, usr_repart_violations, root_repart_violations,
+    cmdline_violations, check_initrd; #5289, #5418), and a transient unit comes only from a process asking
+    PID 1 at runtime. Each word, and each side of a:b, counts (made_steps); a value holding a specifier
     is refused, not expanded (Security 6760938141)."""
     root = str(root)
     files, out, _ = cached(unit_files, root)
@@ -2092,8 +2094,8 @@ def unit_made_refusals(root):
        DirectoryMode= others can write, no named path has a parent PID 1 may make (umask 0) on the way.
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
-    service user's. A path PID 1 acts on inside the directory is inside_refusals' (#5233). Generators and
-    transient units are not covered (unit_made_dirs). In front of these
+    service user's. A path PID 1 acts on inside the directory is inside_refusals' (#5233). Generators' and
+    transient units are finish_image.py's and runtime's (unit_made_dirs). In front of these
     rules, every line PID 1 may make, link or mount a host path for is on made.allow (made_allow_violations),
     so a route these rules do not model (a mount that aliases a way) still needs a reviewed entry."""
     out = []
