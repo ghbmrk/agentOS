@@ -1391,6 +1391,38 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(got, [hidden("var/tmp/m/s", "var/tmp/m")])
         finally:
             remove()
+        # #5437 (Security 6790413268): a link on the way whose target the tree lacks is refused, not weighed as written:
+        # the box makes the target at runtime (a mount point, a unit's directory), so the link leads under it.
+        def stuck(path, link, at=where):
+            return ("%s: /%s: a link on its way the tree check cannot follow (/%s); the tree check never passes a path it "
+                    "cannot read (#5167, #5437)" % (at, path, link))
+        for files, want in (
+                # Repro A, with a mount point the tree has never held (earlier cases leave srv/ behind).
+                ({SYSTEM + "mnt9.mount": "[Mount]\nWhat=tmpfs\nWhere=/mnt9\nType=tmpfs\n", "data": ("link", "mnt9"),
+                  **sock("/data/s", user=False)}, stuck("data/s", "data")),
+                (dict(nobody, **{"srv/d": ("link", "/var/lib/hq")}, **sock("/srv/d/x")), stuck("srv/d/x", "srv/d")),
+                # The last step too, and a link to a link the tree lacks, and a looping one.
+                (dict({"srv/l": ("link", "/nowhere")}, **sock("/srv/l", user=False)), stuck("srv/l", "srv/l")),
+                (dict({"srv/l": ("link", "/srv/l2"), "srv/l2": ("link", "/nowhere")}, **sock("/srv/l/s", user=False)),
+                 stuck("srv/l/s", "srv/l")),
+                (dict({"srv/l": ("link", "/srv/l")}, **sock("/srv/l/s", user=False)), stuck("srv/l/s", "srv/l"))):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    got = check.unit_made_paths(self.root)[2]
+                    self.assertEqual(got, [want])
+                    self.assertIn(want, check.violations(self.root))
+                finally:
+                    remove()
+        # A link the tree follows, a step the tree lacks, and a link into a box mount are weighed, not refused.
+        for files in ({"srv/ok": ("link", "/usr"), **sock("/srv/ok/s", user=False)}, sock("/srv/no/s", user=False),
+                      {"srv/r": ("link", "/run/x"), **sock("/srv/r/s", user=False)}):
+            with self.subTest(files=files):
+                remove = self.place(files)
+                try:
+                    self.assertEqual(check.unit_made_paths(self.root)[2], [])
+                finally:
+                    remove()
         fstab = self.root / "etc/fstab"
         old = fstab.read_text() if fstab.is_file() else None
         remove = self.place(sock("/srv/s", user=False))
@@ -1400,8 +1432,14 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(check.inside_refusals(self.root), [])
             write(self.root, "etc/fstab", (old or "") + "tmpfs /srv tmpfs mode=1777 0 0\n")
             self.assertEqual(check.inside_refusals(self.root), [hidden("srv/s", "srv")])
+            # A mount point through a link the tree cannot follow (Security 6790413268 repro B).
+            (self.root / "data").symlink_to("/srv2")
+            write(self.root, "etc/fstab", (old or "") + "tmpfs /data tmpfs mode=1777 0 0\n")
+            self.assertEqual(check.unit_made_paths(self.root)[2], [stuck("data", "data", "etc/fstab")])
         finally:
             remove()
+            if (self.root / "data").is_symlink():
+                (self.root / "data").unlink()
             if old is None:
                 fstab.unlink()
             else:

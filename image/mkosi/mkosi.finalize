@@ -2023,9 +2023,16 @@ def unit_made_paths(root):
     for steps, where, kind in list(paths):
         try:
             got = tree_resolve(root, steps)
+            stuck = tree_link_stop(root, steps)
         except OSError:
-            out.append("%s: /%s: a link on its way the tree check cannot follow; the tree check never passes a path it "
-                       "cannot read (#5167)" % (where, "/".join(steps)))
+            stuck = "/".join(steps)
+        if stuck is not None:
+            # #5437 (Security 6790413268): a link whose target the tree lacks leads where the box makes that target at
+            # runtime (a mount point, a unit's directory), so the way as written says nothing; refused, not weighed.
+            why = ("%s: /%s: a link on its way the tree check cannot follow (/%s); the tree check never passes a path "
+                   "it cannot read (#5167, #5437)" % (where, "/".join(steps), stuck))
+            if why not in out:  # a word counts in several forms (path_words)
+                out.append(why)
             continue
         # A box form lies under /run, which is empty at boot, so the tree has nothing on its way to resolve.
         for p in [got] + [path_parts(f) for w in (steps, got) for f in box_link_forms("/" + "/".join(w))[1:]]:
@@ -3242,6 +3249,22 @@ def tree_resolve(root, parts):
             raise OSError(errno.EXDEV, "a '..' past a directory the tree does not hold", "/".join(parts))
         return path_parts(p) + parts[k:]
     return parts
+
+
+def tree_link_stop(root, parts):
+    """#5437: the tree path of the first link on PARTS' way (the last step included) whose target the tree cannot
+    follow (missing, looping or not a directory), where tree_resolve would keep the rest as written, or None. A
+    step the tree simply lacks, or one under a box mount, is not a link."""
+    for k in range(len(parts), -1, -1):
+        try:
+            p, _ = tree_chase(root, "/".join(parts[:k]))
+        except OSError:
+            continue
+        if k == len(parts):  # a path under a box mount always chases whole
+            return None
+        q = "/".join(path_parts(p) + parts[k:k + 1])
+        st = tree_lstat(root, q)
+        return q if st is not None and stat.S_ISLNK(st.st_mode) else None
 
 
 def tree_glob(root, parts):
