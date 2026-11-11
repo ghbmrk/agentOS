@@ -152,6 +152,62 @@ def cmdline_violations(entry, conf=MKOSI_CONF):
     return out
 
 
+# IMG-keeper-reach-gen (#5289): systemd-gpt-auto-generator mounts, from the root's disk, the ESP at
+# /boot and any /home, /srv, /var or /var/tmp partition, and adds swap units; systemd-repart makes any
+# partition its definitions name. Those mounts are units no unit directory, fstab or system.conf holds,
+# so the tree check never reads them. The definitions may name only these four types, and the built
+# disk must hold exactly the partitions mkosi.repart defines, in order, so gpt-auto has the ESP and
+# root and nothing else. /usr/lib/repart.d (first boot) may hold only mkosi.extra's files.
+REPART_TYPES = {"esp": ESP, "usr": USR_GUID, "usr-verity": USR_VERITY_GUID, "root": ROOT_GUID}
+REPART_DIR = MKOSI_CONF.parent / "mkosi.repart"
+REPART_D = MKOSI_CONF.parent / "mkosi.extra" / "usr" / "lib" / "repart.d"
+
+
+def repart_types(d):
+    """(file name, Type=) for each *.conf in D, sorted by name as systemd-repart sorts them. A file
+    with no [Partition] Type= or more than one gives None, which no allowed type matches."""
+    out = []
+    for f in sorted(pathlib.Path(d).glob("*.conf")):
+        section, types = None, []
+        for ln in f.read_text().splitlines():
+            ln = ln.strip()
+            if ln.startswith("[") and ln.endswith("]"):
+                section = ln[1:-1]
+            elif section == "Partition" and ln.partition("=")[0].strip() == "Type":
+                types.append(ln.partition("=")[2].strip())
+        out.append((f.name, types[0] if len(types) == 1 else None))
+    return out
+
+
+def partition_violations(partitions, defs=REPART_DIR, runtime=REPART_D):
+    """The built disk's partitions (sfdisk -J's list) against the repart definitions: every
+    definition names an allowed type, and the disk holds exactly mkosi.repart's partitions."""
+    out = ["%s/%s: Type=%s; gpt-auto or systemd-repart would act on it (allowed: %s)"
+           % (pathlib.Path(d).name, n, t, ", ".join(sorted(REPART_TYPES)))
+           for d in (defs, runtime) for n, t in repart_types(d) if t not in REPART_TYPES]
+    want = [REPART_TYPES.get(t) for _, t in repart_types(defs)]
+    got = [p["type"].lower() for p in partitions]
+    if got != want:
+        out.append("disk partition types %s are not mkosi.repart's %s" % (got, want))
+    return out
+
+
+def usr_repart_violations(rows, runtime=REPART_D):
+    """The /usr list rows (path, type, ..., digest) under lib/repart.d or local/lib/repart.d that are
+    not mkosi.extra's repart.d files, byte for byte: systemd-repart would make what another names."""
+    want = {"lib/repart.d/" + f.name: sha256(f) for f in pathlib.Path(runtime).glob("*.conf")}
+    out, seen = [], set()
+    for r in rows:
+        path, kind, digest = r[0], r[1], r[-1]
+        if not path.startswith(("lib/repart.d/", "local/lib/repart.d/")):
+            continue
+        seen.add(path)
+        if kind != "f" or want.get(path) != digest:
+            out.append("/usr/%s: not mkosi.extra's repart.d file" % path)
+    out += ["/usr/%s: missing" % p for p in sorted(set(want) - seen)]
+    return out
+
+
 def swap_violations(partitions, entry):
     """No swap on the built disk (IMG-nodump): no partition of the swap type, and the entry turns
     off swap units (its last systemd.swap= is 0). partitions: sfdisk -J's list."""
@@ -646,6 +702,9 @@ def main(out, version, drivers_json=None):
     bad = secret_violations(str(img), partition_table(str(img)))
     if bad:
         sys.exit("disk holds a private key or Owner Card outside /usr (HW-1): %s" % bad)
+    bad = partition_violations(partition_table(str(img))["partitions"])
+    if bad:
+        sys.exit("disk holds a partition gpt-auto or systemd-repart could mount (#5289): %s" % bad)
     boot = {}
     for p in boot_files(text):
         data_ = subprocess.check_output(["mtype", "-i", fs, "::/" + p])
@@ -660,6 +719,10 @@ def main(out, version, drivers_json=None):
         sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s; a key that ships in "
                  "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
     print("/usr list: %d entries" % write_usr_list(data, out / ("agentos_%s.usr.list" % version)))
+    rows = [json.loads(ln) for ln in (out / ("agentos_%s.usr.list" % version)).read_text().splitlines()]
+    bad = usr_repart_violations(rows)
+    if bad:
+        sys.exit("/usr ships a repart.d definition the build did not (#5289): %s" % bad)
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files, boot, drivers)
