@@ -156,12 +156,17 @@ def _runners(value):
     """Whether value names a path in the runner's home (ENV's HOME) other than the worktree or the
     job's temporary directory (RUNNER_TEMP: inputs such as the reference root): a tool's own
     directory there (NVM_DIR, a cache, a config) is the runner's, not the module's. PATH lists
-    programs to run and is kept whole."""
-    home = ENV.get("HOME", "").rstrip("/")
+    programs to run and is kept whole. Each path is matched with its .. and // resolved (#5450)."""
+    home, value = _norm(ENV.get("HOME", "")), _norm(value)
     if not home or not (value == home or value.startswith(home + "/")):
         return False
-    keep = [str(ROOT)] + ([ENV["RUNNER_TEMP"].rstrip("/")] if ENV.get("RUNNER_TEMP") else [])
+    keep = [_norm(str(ROOT))] + ([_norm(ENV["RUNNER_TEMP"])] if ENV.get("RUNNER_TEMP") else [])
     return not any(value == k or value.startswith(k + "/") for k in keep)
+
+
+def _norm(path):
+    """path with its .. and // resolved and no trailing /, so "/" and "" are both ""."""
+    return os.path.normpath(path).rstrip("/") if path else ""
 
 
 def env(module, trace_dir):
