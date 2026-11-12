@@ -1983,8 +1983,9 @@ class PremergeRunTest(unittest.TestCase):
     def test_only_a_whole_same_output_arms_the_merge(self):
         # PREMERGE-status-cut-pins (#5561): the cut status of `same`, two spaces and a long token is `same`, and the filter
         # strips control characters; neither reaches the merge job, which reads the whole output. VERDICT_OK stands in
-        # for a success exit, since premerge.py prints no such line today.
-        for verdict, shown in (("same  " + "x" * 115, "same"), ("same\x07", "same"), ("same", "same")):
+        # for a success exit, since premerge.py prints no such line today. A multi-line output ending in `same` shows
+        # `same` too, since the status keeps the last line, and must not arm (PREMERGE-merge-whole-output-fu, #5563).
+        for verdict, shown in (("same  " + "x" * 115, "same"), ("same\x07", "same"), ("x\nsame", "same"), ("same", "same")):
             with self.subTest(verdict=verdict):
                 out, desc = [], []
                 self.assertEqual(self.run_gate(verdict, env_extra={"VERDICT_OK": "1"}, outputs=out, descriptions=desc),
