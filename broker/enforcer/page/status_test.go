@@ -308,7 +308,9 @@ func TestFreshDayPage(t *testing.T) {
 	// one heading, with the step for the day.
 	ca.day.Unread, ca.day.Spent = true, true
 	if h := g.homeHTML(); strings.Count(h, "<h2>Byte caps</h2>") != 1 || strings.Count(h, `class="pending warn"`) != 1 ||
-		!strings.Contains(h, "nor its own record of them") || !strings.Contains(h, `data-action="fresh-day"`) {
+		!strings.Contains(h, "nor its own record of them") || !strings.Contains(h, `data-action="fresh-day"`) ||
+		strings.Count(h, "could not read its record") != 0 {
+		// #5504 item 1: the record's own sentence is not said a second time.
 		t.Errorf("home does not show one card for the day and the table both unread:\n%s", h)
 	} else if strings.Count(h, "<p>")+strings.Count(h, "<p ") != strings.Count(h, "</p>") {
 		t.Errorf("home's paragraphs do not balance with the day and the table both unread (%d open, %d close):\n%s", strings.Count(h, "<p>")+strings.Count(h, "<p "), strings.Count(h, "</p>"), h)
