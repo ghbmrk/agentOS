@@ -106,6 +106,31 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((e["GIT_CONFIG_COUNT"], e[f"GIT_CONFIG_KEY_{n}"], e[f"GIT_CONFIG_VALUE_{n}"]),
                          (str(n + 1), "safe.directory", str(unit_tests.ROOT)))
 
+    def test_runners_normalises_dot_dot_before_its_prefix_match(self):
+        # #5450: a value is matched once its .. and // are resolved, so a path that names the worktree
+        # or the job's temporary directory but climbs out into the runner's home is the runner's, and
+        # one that climbs back into the worktree is the module's.
+        h, ws = "/home/runner", "/home/runner/work/agentOS/agentOS"
+        with mock.patch.dict(unit_tests.ENV, {"HOME": h, "RUNNER_TEMP": f"{h}/work/_temp"}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
+            for escapes in (f"{ws}/../../../.config", f"{ws}/..", f"{h}/work/_temp/../../.nvm",
+                            f"/tmp/..{h}/.cargo", f"/tmp/../{h}/go", f"{ws}/x/../../..",
+                            f"/{h}/.nvm", f"//{h}/.nvm", f"//{ws}/../.cargo", f"///{h}"):
+                self.assertTrue(unit_tests._runners(escapes), escapes)
+            for inside in (f"{ws}/x/../y", f"{ws}/tools/..", f"{h}/../../{ws}/z", f"{h}/work/_temp/a/../b",
+                           f"{h}/..", f"/tmp/../usr", f"{ws}//x"):
+                self.assertFalse(unit_tests._runners(inside), inside)
+        with mock.patch.dict(unit_tests.ENV, {"HOME": f"{h}/x/..//", "RUNNER_TEMP": f"{h}/work/x/../_temp/"}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
+            self.assertEqual([unit_tests._runners(v) for v in (f"{h}/.nvm", f"{h}/work/_temp/a", h)], [True, False, True])
+        with mock.patch.dict(unit_tests.ENV, {"HOME": f"/{h}", "RUNNER_TEMP": f"//{h}/work/_temp"}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):  # a leading // on HOME or RUNNER_TEMP
+            self.assertEqual([unit_tests._runners(v) for v in (f"{h}/.nvm", f"//{h}/work/_temp/a", f"//{ws}/x")],
+                             [True, False, False])
+        for root_home in ("", "/", "//", "///", "/x/.."):  # no home, or the root as home: nothing is the runner's
+            with mock.patch.dict(unit_tests.ENV, {"HOME": root_home}, clear=True):
+                self.assertEqual([unit_tests._runners(v) for v in ("", "/", f"{h}/.nvm", "/x/../y")], [False] * 4, root_home)
+
     def test_the_runner_refuses_to_run_as_a_user(self):
         # #5413: only root can run strace over another user and make the modules' users.
         with mock.patch("os.geteuid", return_value=1000), self.assertRaisesRegex(OSError, "run as root"):
