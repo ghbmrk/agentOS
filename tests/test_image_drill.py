@@ -62,9 +62,13 @@ class DrillTest(unittest.TestCase):
         self.rc = t / "rc"
         self.rc.write_text("0\n")
         self.statusf = t / "status"
-        # mv fails while the flag exists: a rename that cannot be done (#5455).
-        self.mvfail = t / "mvfail"
-        stub(self.bin, "mv", '[ -e "%s" ] && exit 1; exec "%s" "$@"' % (self.mvfail, shutil.which("mv")))
+        # mv fails while the flag exists: a rename that cannot be done (#5455); or, while mvfrom holds N,
+        # from its Nth call on (#5466).
+        self.mvfail, self.mvfrom = t / "mvfail", t / "mvfrom"
+        stub(self.bin, "mv", '[ -e "{f}" ] && exit 1\n'
+             'if [ -e "{n}" ]; then c=$(($(cat "{c}" 2>/dev/null || echo 0) + 1)); echo $c >"{c}"\n'
+             '[ "$c" -ge "$(cat "{n}")" ] && exit 1; fi\n'
+             'exec "{mv}" "$@"'.format(f=self.mvfail, n=self.mvfrom, c=t / "mvcount", mv=shutil.which("mv")))
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -257,6 +261,53 @@ class DrillTest(unittest.TestCase):
                     self.assertFalse((self.drill / "last.json").exists())
                     self.assertFalse((self.drill / "unrecorded").exists())
 
+    def test_a_failed_record_is_said_once_and_again_before_the_reboot(self):
+        # DRILL-stamp-wording (#5466) UX r1: a record that cannot be written on every 5-minute retry
+        # under an inhibitor is said once, with a likely cause, and once more just before the reboot;
+        # the shell's own errors are not repeated either.
+        self.mvfail.write_text("")
+        self.inhibit.write_text("5\n")
+        r = subprocess.run(["sh", str(AG / "reboot-weekly")], env=self.env(), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.log.read_text().count("systemctl reboot --check-inhibitors=yes"), 6)
+        fails = [ln for ln in r.stdout.splitlines() if "FAIL" in ln]
+        self.assertEqual(len(fails), 2, r.stdout)
+        self.assertTrue(fails[0].startswith("agentos-reboot: FAIL drill record not written (image=verified): "
+                                            "is /var full or failing?"), fails[0])
+        self.assertEqual(fails[0], fails[1])
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[-2:], [fails[1], "agentos-reboot: rebooting"])
+        self.assertEqual(r.stderr, "")
+
+    def test_a_later_failed_record_leaves_no_stale_timing(self):
+        # DRILL-stamp-wording (#5466) Potency: the first try's record is written, a later one is not.
+        # The earlier record, whose reboot_at would count the wait on the inhibitor, is removed, so the
+        # next healthy boot reports a missed drill, and no pending.new is left behind.
+        for path in ("inhibited", "week"):
+            with self.subTest(path=path):
+                shutil.rmtree(self.drill, ignore_errors=True)
+                self.log.unlink(missing_ok=True)
+                self.bin.parent.joinpath("mvcount").unlink(missing_ok=True)
+                self.clock.write_text("1000000\n")
+                self.mvfrom.write_text("2\n")
+                if path == "inhibited":
+                    write(self.root, "proc/uptime", "3600.42 12.00\n")
+                    self.inhibit.write_text("2\n")
+                else:
+                    write(self.root, "proc/uptime", "604200.00 1.00\n")
+                    self.inhibit.write_text("1000000\n")
+                out, _ = self.reboot()
+                self.assertEqual(out.count("FAIL drill record not written"), 2, out)
+                self.assertFalse((self.drill / "pending").exists())
+                self.assertFalse((self.drill / "pending.new").exists())
+                self.assertTrue((self.drill / "unrecorded").exists())
+                self.mvfrom.unlink()
+                rc, line = self.report()
+                self.assertEqual(rc, 1, line)
+                self.assertTrue(line.startswith("agentos-drill: FAIL missed: "), line)
+                self.assertIn("(likely a full or failing disk under /var, or a power cut during the check)", line)
+                self.assertFalse((self.drill / "last.json").exists())
+
     def test_a_later_run_with_a_working_disk_records_the_drill(self):
         self.break_write()
         out, _ = self.reboot()
@@ -320,7 +371,7 @@ class DrillTest(unittest.TestCase):
                 (self.drill / "pending").unlink(missing_ok=True)
                 r = subprocess.run(shell + [str(AG / "reboot-weekly")], env=self.env(), capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                self.assertIn("agentos-reboot: FAIL drill marker not written", r.stdout)
+                self.assertIn("agentos-reboot: FAIL drill start not recorded: is /var full or failing?", r.stdout)
                 self.assertEqual(self.log.read_text().splitlines()[-1], "systemctl reboot --check-inhibitors=yes")
 
     def test_an_ordinary_reboot_leaves_nothing_to_report(self):
