@@ -1968,11 +1968,7 @@ def file_scripts(f, kind):
 
 # Hits in another lane's files, each with the row that fixes it; an entry that no longer hits fails, so
 # the fixing PR removes its entry.
-SHELL_ALLOWED = {
-    "guest/builder/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
-    "guest/codex/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
-    "guest/openclaw/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
-}
+SHELL_ALLOWED = {}
 
 
 class ImageShellLintTest(unittest.TestCase):
