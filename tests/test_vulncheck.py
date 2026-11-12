@@ -187,6 +187,15 @@ class RecordsTest(unittest.TestCase):
         self.assertIn("fix: remove each unused record", out.getvalue())
         self.assertTrue(vulncheck.summary(fs, [], [], io.StringIO()))
 
+    def test_unused_records_behind_a_problem_point_at_the_problem(self):
+        # #5178 UX: a problem can hide a tree's findings, so every record of that tree reads unused;
+        # the closing fix line then points at the problem, not at deleting valid records.
+        recs = [{"id": "GO-7", "issue": 12, "why": "x", **M}]
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([], ["initrd: no status file"], recs, out))
+        self.assertIn("fix: clear the problems above first", out.getvalue())
+        self.assertNotIn("fix: remove each unused record", out.getvalue())
+
     def test_a_record_accepts_only_its_package_and_version(self):
         # #4153 (Security finding 2 on #4152): a record for minimatch 10.2.5 must not accept
         # an upgraded or other copy that the same advisory is later widened to cover.
@@ -1317,12 +1326,13 @@ class WorkflowTest(unittest.TestCase):
     def test_a_records_change_builds_and_scans_the_image(self):
         # #5093 follow-up: a change to assurance/vulncheck.json alone runs image-vulncheck, on pull
         # requests and on main, so an image record is checked against a build before it merges.
+        # Whole lines only: a commented-out `# - "assurance/vulncheck.json"` must not count.
         wf = IMAGE_WORKFLOW.read_text()
         for event in ("pull_request", "push"):
             block = wf[wf.index(f"\n  {event}:"):]
             block = block[:re.search(r"\n  \S|\n\S", block[1:]).start() + 1]
             with self.subTest(event=event):
-                self.assertIn('- "assurance/vulncheck.json"', block)
+                self.assertRegex(block, r'(?m)^ +- "assurance/vulncheck\.json"$')
 
     def test_image_build_is_scanned_after_the_control(self):
         # TN-vulncheck-6: every image build scans its own package list, with the same pins.

@@ -1426,7 +1426,10 @@ def summary(findings, problems, unused, out=None):
     if any(not (f["where"] in IMAGE_TREES and f["fixed"]) for f in failing):
         print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
-    if unused:
+    if unused and problems:
+        print("fix: clear the problems above first; a record can look unused when its tree was not read",
+              file=out)
+    elif unused:
         print("fix: remove each unused record from assurance/vulncheck.json", file=out)
     return not failing and not problems and not unused
 
