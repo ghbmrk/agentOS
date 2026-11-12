@@ -84,6 +84,17 @@ class NoDump(Tree):
         (self.root / "etc/sysctl.d/10-x.conf").symlink_to("/var/tmp/x.conf")
         self.assertIn("sysctl.d: etc/sysctl.d/10-x.conf is a link", self.refusals())
 
+    def test_etc_sysctl_conf_read_last_refused(self):
+        # /etc/sysctl.conf is read after every sysctl.d file, so it undoes both dump settings (#5120).
+        self.put("etc/sysctl.conf", "kernel.core_pattern=core\nfs.suid_dumpable=2\n")
+        self.assertEqual(len(self.refusals()), 2, self.refusals())
+
+    def test_etc_sysctl_conf_link_refused(self):
+        self.put("var/tmp/x.conf", "")
+        (self.root / "etc").mkdir(exist_ok=True)
+        (self.root / "etc/sysctl.conf").symlink_to("/var/tmp/x.conf")
+        self.assertIn("sysctl.d: etc/sysctl.conf is a link", self.refusals())
+
     def test_comments_and_earlier_files_do_not_count(self):
         self.put("usr/lib/sysctl.d/10-early.conf", "kernel.core_pattern=core\n")
         self.put("etc/sysctl.d/zz-note.conf", "# kernel.core_pattern=core\n; fs.suid_dumpable=2\n")
@@ -134,6 +145,16 @@ class RpFilter(Tree):
                 self.put("usr/lib/sysctl.d/" + name, line)
                 self.assertEqual(len(self.refusals()), 1, self.refusals())
                 (self.root / "usr/lib/sysctl.d" / name).unlink()
+
+    def test_etc_sysctl_conf_read_last_refused(self):
+        # /etc/sysctl.conf is read after every sysctl.d file, so it can turn the filter back on (#5120).
+        for line in ("net.ipv4.conf.all.rp_filter=1\n", "net.ipv4.conf.*.rp_filter=2\n",
+                     "net.ipv4.conf.default.rp_filter=1\n"):
+            with self.subTest(line=line):
+                self.put("etc/sysctl.conf", line)
+                self.assertEqual(len(self.refusals()), 1, self.refusals())
+        self.put("etc/sysctl.conf", "# net.ipv4.conf.all.rp_filter=1\nnet.ipv4.conf.all.forwarding=1\n")
+        self.assertEqual(self.refusals(), [])
 
     def test_bare_minus_says_unset(self):
         # #5309: a bare "-key" leaves the key unset, and the build log says so, not "None".
