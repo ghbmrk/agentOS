@@ -6,8 +6,8 @@ file (#4459), or that leaves the kernel's reverse-path filter (#4810), ICMP redi
 source routing (#5560) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a
 line of the build log. The running box's agentos-enforcer/health checks the effects: no Wi-Fi radio,
 the Wi-Fi and USB storage modules not loaded, core dumps, rp_filter and ICMP redirects. Only this
-build check sees the installed packages, the modprobe.d lines, the unit preset and source routing
-(ENF-m-14), and it catches each before an image exists."""
+build check sees the installed packages, the modprobe.d lines, a blocked module's installed .ko file,
+the unit preset and source routing (ENF-m-14), and it catches each before an image exists."""
 import fnmatch
 import os
 import pathlib
