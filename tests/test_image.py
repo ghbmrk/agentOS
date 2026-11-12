@@ -1485,7 +1485,7 @@ class DriveIdTest(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 r = self.run_id("assign", shell)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but the marker was not written", r.stdout)
+                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but /var/lib/agentos/drive-id was not written", r.stdout)
                 self.assertNotIn("assigned", r.stdout)
                 self.assertNotIn("sync", "\n".join(self.sfdisk_calls()))
                 r = self.run_id("assign", shell, restored)
@@ -1532,6 +1532,147 @@ class DriveIdTest(unittest.TestCase):
         self.assertEqual(self.sfdisk_calls(), [])
         self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
         self.assertFalse((self.root / "run/agentos-drive-id").exists())
+
+
+# ':' is a POSIX special builtin: a redirection error on it exits a non-interactive shell before any
+# '||' handler or 'set -e' report runs (#5464). 'true' is a regular builtin, so its handler runs. Per
+# line, single-quoted text, ${...} expansions and comments are dropped, the rest is cut into simple
+# commands at ; & (not >& or <&) | ( ) { and backquotes (so after &&, ||, a case arm, $(...) and
+# `...`), and a command is flagged when, after leading reserved words, time, !, assignments and
+# redirections, its command word is ':' and it carries a redirection anywhere. Here-document bodies
+# are not parsed.
+SHELL_SEP = re.compile(r"[;|(){`]|(?<![<>])&")
+SHELL_PREFIX = re.compile(r"\s*(?:(?:then|do|else|if|elif|while|until|time|!)(?=\s)"
+                          r"|[A-Za-z_]\w*=\S*|(?P<redir>\d*[<>]+&?\s*[^\s<>;&|]+))")
+SHELL_COLON = re.compile(r"\s*:(?=[\s<>]|$)")
+
+
+def colon_redirected(command):
+    pos, redirected = 0, False
+    while m := SHELL_PREFIX.match(command, pos):
+        redirected |= m.group("redir") is not None
+        pos = m.end()
+    m = SHELL_COLON.match(command, pos)
+    return bool(m) and (redirected or bool(re.search(r"[<>]", command[m.end():])))
+
+
+def redirected_colons(text):
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = re.sub(r"'[^']*'", "''", line)
+        line = re.sub(r"\$\{[^}]*\}", "$P", line)
+        line = re.sub(r"(?:^|\s)#.*", "", line)
+        if any(colon_redirected(c) for c in SHELL_SEP.split(line)):
+            out.append(n)
+    return out
+
+
+def image_shell(root=IMG):
+    out = []
+    for f in sorted(root.rglob("*")):
+        if not f.is_file() or f.is_symlink():
+            continue
+        with f.open("rb") as fh:
+            head = fh.readline()
+        if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
+            out.append(f)
+    return out
+
+
+class ImageShellLintTest(unittest.TestCase):
+    FLAGGED = (
+        ': >"$W/a"',
+        '\t: >>log',
+        'x && :>y',
+        'a || : >x',
+        'a; : >x',
+        'a | : >x',
+        '{ : >x; }',
+        '( : >x )',
+        'v=$(: <in)',
+        '  a) : >x ;;',
+        'v=`: >x`',
+        'if : >x; then y; fi',
+        'if a; then : 2>/dev/null; fi',
+        'if a; then b; elif : >x; then c; fi',
+        'if a; then b; else : >x; fi',
+        'while : >x; do y; done',
+        'until : >x; do y; done',
+        'for i in 1; do : >x; done',
+        '! : >x',
+        'time : >x',
+        'x=1 : >x',
+        'x=1 y=2 : >x',
+        '2>/dev/null : >x',
+        '>x :',
+        '2>&1 :',
+        ': "${X:=d}" >f',
+        ': x#y >f',
+        ': a b >f',
+        ': >&2',
+    )
+    CLEAN = (
+        '#!/bin/sh',
+        '# then : >x',
+        '\t# : >comment',
+        ': # >x',
+        'true >"$W/a"',
+        ': "${X:=default}"',
+        'echo "a: >b"',
+        "echo 'a; : >b'",
+        "awk '$2 == \":\" { print > \"f\" }'",
+        'case $x in a:b) ;; esac',
+        'undo :>x',
+        'doing : >x',
+        'thenx : >x',
+        'do: >x',
+        'timer : >x',
+        ':foo >x',
+        ': ; echo >x',
+        'x || :; y >x',
+        ': | cat >x',
+        ': & y >x',
+        ': && y >x',
+        '{ :; } >f',
+        'x=1:2 >f',
+        '1x=2 : >f',
+        'echo >x',
+        'y 2>&1 && :',
+    )
+
+    def test_lint_flags_a_redirected_colon(self):
+        for line in self.FLAGGED:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_colons(line), [1])
+        self.assertEqual(redirected_colons("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
+                         [len(self.CLEAN) + 1])
+
+    def test_lint_passes_clean_shell(self):
+        for line in self.CLEAN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_colons(line), [])
+
+    def test_image_shell_picks_shell_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
+                     "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
+                     "i.py": "#!/bin/shx\n", "j": "echo\n"}
+            for name, body in files.items():
+                (d / name).parent.mkdir(parents=True, exist_ok=True)
+                (d / name).write_text(body)
+            (d / "link.sh").symlink_to(d / "a.sh")
+            (d / "dir.sh").mkdir()
+            self.assertEqual([str(f.relative_to(d)) for f in image_shell(d)],
+                             ["a.sh", "c", "e", "f", "g", "sub/b"])
+
+    def test_image_shell_has_no_redirected_colon(self):
+        files = image_shell()
+        self.assertIn(IMG / "ci_boot.sh", files)
+        self.assertIn(MK / "mkosi.extra/usr/lib/agentos/drive-id", files)
+        hits = ["%s:%d" % (f.relative_to(ROOT), n) for f in files
+                for n in redirected_colons(f.read_text(errors="replace"))]
+        self.assertEqual(hits, [], "use 'true >file': a failed redirect on ':' exits the shell before a handler runs")
 
 
 class ConfigTest(unittest.TestCase):
@@ -5832,7 +5973,7 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
-        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+        self.assertIn('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n\te2e_console', e2e)
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
@@ -5916,7 +6057,7 @@ class UplinkTest(unittest.TestCase):
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                       for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
-        block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
+        block = s[s.index('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "console-e2e.log").write_bytes(console)
             p = subprocess.run(["sh", "-c", fns + 'W="$1"; fail="$2"\n' + block + 'echo "rc=$fail"\n', "-", d, fail],
