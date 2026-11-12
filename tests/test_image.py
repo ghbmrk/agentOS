@@ -2640,6 +2640,13 @@ class ConfigTest(unittest.TestCase):
         # Every packaged line in Packages= is a package name: an indented comment would become one.
         self.assertFalse([p for p in c["Content"]["Packages"].split() if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", p)])
 
+    def test_name_only_keys_were_read_from_this_snapshot(self):
+        # #5557 (Security on #5556): NAME_ONLY_KEYS was read from the systemd the pinned snapshot ships, so a snapshot
+        # bump fails here, on every run, with or without the image's systemd (ImageToolTest), until the list is read
+        # again and NAME_ONLY_SNAPSHOT changed with it. The snapshot timestamp has no epoch to misread.
+        mirror = ini(MK / "mkosi.conf")["Distribution"]["Mirror"]
+        self.assertEqual(mirror, "https://snapshot.debian.org/archive/debian/%s/" % check.NAME_ONLY_SNAPSHOT)
+
     def test_ab_usr_slots(self):
         # UPD-1: two equal /usr slots plus verity, so an update writes the idle one.
         parts = [ini(f)["Partition"] for f in sorted((MK / "mkosi.repart").glob("*.conf"))]
@@ -6272,7 +6279,8 @@ class ImageToolTest(MustRun, unittest.TestCase):
         # systemd fails here until the list is read again and NAME_ONLY_SYSTEMD changed with it.
         tool = image_tool(self, "systemd-analyze")
         out = subprocess.run(tool + ["--version"], capture_output=True, text=True, timeout=60).stdout
-        # "systemd 257 (257.9-1~deb13u1)": the major version is the second word.
+        # "systemd 257 (257.9-1~deb13u1)": the major version is the second word, systemd's own version, not the
+        # Debian one, so an epoch ("1:257.9-1") never reaches it; any other first line fails toward a re-read.
         self.assertEqual(out.split("\n", 1)[0].split(" ")[1], check.NAME_ONLY_SYSTEMD, out)
 
     def test_a_library_from_outside_the_root_fails_the_case(self):
