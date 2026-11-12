@@ -51,4 +51,32 @@ func TestListTellsAbsentFromUnread(t *testing.T) {
 	if _, err := fake("slow", "echo 'Error: No such file or directory' >&2; exec sleep 5").List(ctx, "enforcer"); err == nil || errors.Is(err, ErrNoTable) {
 		t.Errorf("a listing past its deadline: %v", err)
 	}
+	// #5504 item 3: List's own guards. nft runs with an empty environment,
+	// only from an absolute path and only for a plain identifier, and a
+	// failure's line in the error is cut at 200 bytes.
+	t.Setenv("AGENTOS_LOAD_CANARY", "1")
+	ok := fake("ok", `[ -z "$AGENTOS_LOAD_CANARY" ] || exit 3; echo '{}'`)
+	if out, err := ok.List(context.Background(), "enforcer"); err != nil || string(out) != "{}\n" {
+		t.Errorf("a listing with an empty environment: %q %v", out, err)
+	}
+	for _, table := range []string{"", "Enforcer", "enforcer x", "enforcer;"} {
+		if _, err := ok.List(context.Background(), table); err == nil {
+			t.Errorf("table %q listed", table)
+		}
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, ok.Bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Loader{Bin: "./" + rel}).List(context.Background(), "enforcer"); err == nil {
+		t.Errorf("a relative nft path %q listed", rel)
+	}
+	long := fake("long", "printf 'Error: %0300d\\n' 0 >&2; exit 1")
+	if _, err := long.List(context.Background(), "enforcer"); err == nil || len(err.Error()) > 300 {
+		t.Errorf("a long failure line is not cut: %v", err)
+	}
 }
