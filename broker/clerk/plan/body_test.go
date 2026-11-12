@@ -594,6 +594,58 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 	}
 }
 
+// A model call its caller cancels partway through the provider's answer
+// was sent. The guest gets the answer as far as it came and then the
+// cancel, never an end that reads as the whole answer, and the call settles
+// once, when the cut reaches the meter: sent, not done, with no usage
+// reported and the bytes that came (LOG-7). The cancel comes only once the
+// part is read, so no timing decides the test.
+func TestPlanModelCallCancelledMidAnswer(t *testing.T) {
+	f := newPlanFix(t)
+	part := strings.SplitAfter(sse(10, 20), "\n\n")
+	head := part[0] + part[1] // created and a delta; no completed event
+	f.stream = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, head)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		panic(http.ErrAbortHandler) // the rest of the answer never comes
+	}
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + g.Tokens["access_token"]}
+	rec := &recorder{}
+	resp, det := p.Do(ctx, "g", req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`, h), rec.meter)
+	if det != "" {
+		t.Fatalf("model call: %s", det)
+	}
+	defer resp.Body.Close()
+	got := make([]byte, len(head))
+	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != head {
+		t.Fatalf("the answer's first part: %q %v, want %q", got, err, head)
+	}
+	if u := rec.settled(); len(u) != 0 {
+		t.Fatalf("a call still answering settled %+v", u)
+	}
+
+	cancel()
+	rest, err := io.ReadAll(resp.Body)
+	if len(rest) != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("after the cancel the guest read %q, %v; want nothing more and the cancel", rest, err)
+	}
+	want := plan.Used{Sent: true, Bytes: int64(len(head))}
+	if u := rec.settled(); len(u) != 1 || u[0] != want {
+		t.Fatalf("a call cancelled mid-answer settled %+v, want once, %+v", u, want)
+	}
+	resp.Body.Close()
+	if u := rec.settled(); len(u) != 1 {
+		t.Fatalf("closing a cut answer settled it again: %+v", u)
+	}
+}
+
 // The pool reading is the window nearest its limit, per mille and in unix
 // ms; a reached limit reads as full; a window with no readable use is no
 // reading of it (RES-5).
