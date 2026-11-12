@@ -146,12 +146,12 @@ jobs:
         # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
         # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
         # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that). The
-        # build compiles the patched bwrap statically, so it needs libcap-dev (#1720). The shell and
-        # tools come from the image-tools root above, never from the runner (#5570): the same pinned
-        # apt sources as image/guest-base.sh, but its package set (systemd, kmod), not the shipped one.
+        # shell and tools come from the root image/guest-base.sh installs from the image's apt
+        # sources, never from the runner (#5570), and its gcc compiles the patched bwrap (#5571).
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo GUEST_BASE="$RUNNER_TEMP/image-tools" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
+          sudo GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Old core only shrinks (D-139 ratchet; markers, lines and imports against the base)
@@ -681,7 +681,6 @@ jobs:
         # Built as root, as the rootfs test builds it: inside the CLI's user namespace root keeps no override
         # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache GUEST_BASE=/tmp/guest-base \
             sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker

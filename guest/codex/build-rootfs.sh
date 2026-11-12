@@ -5,9 +5,9 @@
 # (#1015 writes the placeholder into CODEX_HOME at machine create).
 #
 # Usage: build-rootfs.sh OUT_DIR
-# Needs: Go (unless FORWARDER_BIN is set), curl (unless both tarballs are set), openssl, tar, xz,
-# patch, cc with a static libcap (libcap-dev), sha256sum, and GUEST_BASE, a root from
-# image/guest-base.sh, whose /bin/sh, /bin/bash and coreutils are copied in with their libraries.
+# Run as root (chroot). Needs: Go (unless FORWARDER_BIN is set), curl (unless both tarballs are
+# set), openssl, tar, xz, patch, sha256sum, chroot, and GUEST_BASE, a root from image/guest-base.sh,
+# whose /bin/sh, /bin/bash and coreutils are copied in with their libraries and whose gcc compiles bwrap.
 # CODEX_TARBALL=<file> and BWRAP_TARBALL=<file> use local copies of the pinned tarballs instead of
 # downloading them; each is still checked against its pinned hash.
 # Hook for #809 (the runsc measurement of guest/codex/ASSUMPTIONS.md C1-C15): register OUT_DIR as
@@ -35,7 +35,8 @@ if [ -e "$1" ] && [ -n "$(ls -A "$1")" ]; then
 fi
 out=$(mkdir -p "$1" && cd "$1" && pwd)
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+src=
+trap 'rm -rf "$work" ${src:+"$src"}' EXIT
 
 if [ -n "${CODEX_TARBALL:-}" ]; then
 	cp "$CODEX_TARBALL" "$work/codex.tgz"
@@ -51,12 +52,19 @@ else
 	curl -fsSLo "$work/bwrap.tar.xz" "$BWRAP_URL"
 fi
 echo "$BWRAP_SHA256  $work/bwrap.tar.xz" | sha256sum -c --quiet - || { echo "bwrap tarball hash" >&2; exit 1; }
-mkdir "$work/bwrap"
-tar -xJf "$work/bwrap.tar.xz" -C "$work/bwrap" --strip-components=1
-(cd "$work/bwrap" && patch -p1 --quiet <"$here/bwrap-loopback.patch")
-printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$work/bwrap/config.h"
-(cd "$work/bwrap" && cc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c \
-	-l:libcap.a -o bwrap)
+# bwrap's sources go to a fixed path inside the base, removed on exit.
+base=${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}
+src=$base/tmp/agentos-bwrap
+rm -rf "$src"
+mkdir "$src"
+tar -xJf "$work/bwrap.tar.xz" -C "$src" --strip-components=1
+(cd "$src" && patch -p1 --quiet <"$here/bwrap-loopback.patch")
+printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$src/config.h"
+# Compiled by the base's gcc against its static libc and libcap, all from the image's pinned apt
+# sources (#5571), never the build host's cc: two runners on different runner images would link
+# different bytes. A clean environment, so nothing of the caller's reaches the compiler.
+chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agentos-bwrap
+	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap'
 
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \
@@ -69,8 +77,8 @@ tar -xzf "$work/codex.tgz" -C opt/codex --strip-components=1 \
 	"$VENDOR/codex-resources/bwrap" "$VENDOR/codex-path/rg"
 v=/opt/codex/vendor/x86_64-unknown-linux-musl
 ln -s "$v/bin/codex" usr/local/bin/codex
-install -m 0755 "$work/bwrap/bwrap" usr/bin/bwrap
-install -m 0755 "$work/bwrap/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+install -m 0755 "$src/bwrap" usr/bin/bwrap
+install -m 0755 "$src/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 
 # The managed layers (they beat CODEX_HOME and the command line: ASSUMPTIONS C1, C12), the tool
 # wrapper and the launch spec, all root-owned.
@@ -96,7 +104,7 @@ fi
 # The shell and a few tools, with every library they load (the CLI itself is static), from
 # GUEST_BASE, the Debian root image/guest-base.sh installs from the image's pinned apt sources, never
 # from the build host (#5570).
-sh "$here/../../image/guest-userland.sh" "${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}" "$out" \
+sh "$here/../../image/guest-userland.sh" "$base" "$out" \
 	/bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep
 
 printf 'root:x:0:0:root:/root:/bin/sh\n' >etc/passwd

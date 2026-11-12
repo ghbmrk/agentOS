@@ -7,6 +7,7 @@
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -162,13 +163,29 @@ class WiringTest(unittest.TestCase):
                 code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
                 self.assertNotRegex(code, r"\bldd\b")
                 self.assertNotIn("cp -L", code)
-                self.assertIn('sh "$here/../../image/guest-userland.sh" "${GUEST_BASE:?', code)
+                self.assertRegex(code, r'sh "\$here/\.\./\.\./image/guest-userland\.sh" "(\$\{GUEST_BASE:\?|\$base")')
+                if '"$base"' in code:
+                    self.assertIn("base=${GUEST_BASE:?", code)
 
     def test_base_reads_the_image_s_own_apt_sources(self):
         text = BASE_SH.read_text()
         self.assertIn("/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", text)
-        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6 trixie", text)
+        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev trixie", text)
         self.assertIn("libpcre2-8-0", text)
+
+    def test_codex_bwrap_is_compiled_in_the_base_not_on_the_host(self):
+        # #5571: the only compiler call is the one run by chroot in GUEST_BASE, and no workflow
+        # installs a host libcap-dev for it any more.
+        text = (ROOT / "guest/codex/build-rootfs.sh").read_text()
+        code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        calls = re.findall(r"(?<![\w./-])(?:cc|gcc|clang|c99|ld)(?= )", code)
+        self.assertEqual(calls, ["gcc"])
+        jail = code.index('chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C')
+        self.assertLess(jail, code.index("gcc "))
+        self.assertEqual(code[jail:code.index("gcc ")].count("'"), 1)  # gcc runs in chroot's sh -c
+        for wf in ("ci.yml", "image.yml"):
+            with self.subTest(wf):
+                self.assertNotIn("libcap-dev", (ROOT / ".github/workflows" / wf).read_text())
 
     def test_image_build_makes_the_base_before_both_guests_and_drops_it_after(self):
         b = (ROOT / "image/build.sh").read_text()
@@ -194,7 +211,9 @@ class WiringTest(unittest.TestCase):
 
     def test_ci_guest_builds_name_a_base(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn('sudo GUEST_BASE="$RUNNER_TEMP/image-tools" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs', ci)
+        unit = 'sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"'
+        rootfs = 'sudo GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs'
+        self.assertLess(ci.index(unit), ci.index(rootfs))
         self.assertIn("sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest", ci)
         self.assertIn("GUEST_BASE=/tmp/guest-base sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
         self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
