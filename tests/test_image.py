@@ -1395,10 +1395,9 @@ class DriveIdTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_id(self, mode):
+    def run_id(self, mode, shell=("sh",), script=MK / "mkosi.extra/usr/lib/agentos/drive-id"):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
-        return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/drive-id"), mode], env=env,
-                              capture_output=True, text=True)
+        return subprocess.run(list(shell) + [str(script), mode], env=env, capture_output=True, text=True)
 
     def sfdisk_calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -1470,6 +1469,28 @@ class DriveIdTest(unittest.TestCase):
                                                "%s --part-uuid /dev/vda 6 %s" % (nr, u),
                                                "sync -f %s/var/lib/agentos/drive-id" % self.root])
         self.assertTrue((self.root / "var/lib/agentos/drive-id").exists())
+
+    def test_assign_reports_a_marker_it_cannot_create(self):
+        # DRIVE-ID-soft-create: a directory at the marker path makes the create fail. The script's
+        # own FAIL line runs under sh and bash --posix, and no success is reported. With ': >'
+        # restored, a special builtin's redirect error exits the shell before that line.
+        (self.root / "var/lib/agentos/drive-id").mkdir(parents=True)
+        src = (MK / "mkosi.extra/usr/lib/agentos/drive-id").read_text()
+        old = src.replace('true >"$R/var/lib/agentos/drive-id"', ': >"$R/var/lib/agentos/drive-id"')
+        self.assertNotEqual(old, src)
+        restored = self.root.parent / "drive-id-colon"
+        restored.write_text(old)
+        for shell in (("sh",), ("bash", "--posix")):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                r = self.run_id("assign", shell)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but the marker was not written", r.stdout)
+                self.assertNotIn("assigned", r.stdout)
+                self.assertNotIn("sync", "\n".join(self.sfdisk_calls()))
+                r = self.run_id("assign", shell, restored)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("FAIL", r.stdout)
 
     def test_check_passes_later_in_the_boot_that_assigned(self):
         # #1716: udev shows the new GUIDs at once while the boot loader still names the old ESP
