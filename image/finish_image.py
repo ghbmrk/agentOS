@@ -196,16 +196,20 @@ def partition_violations(partitions, defs=REPART_DIR, runtime=REPART_D):
 # The /usr steps on the way to systemd-repart's /usr definitions: each must be a plain directory, so
 # no link points a definition directory elsewhere in /usr. lib/repart.d must exist; the rest may not.
 USR_REPART_STEPS = ("lib", "lib/repart.d", "local", "local/lib", "local/lib/repart.d")
-# systemd-confext merges the images in these /usr directories over /etc (discover-image.c, v257), so an
-# image there could add a repart.d or a unit the checks here never read (#5418). /usr ships neither.
-USR_CONFEXTS = ("lib/confexts", "local/lib/confexts")
+# systemd-sysext merges the images in these /usr directories over /usr and systemd-confext merges its
+# over /etc (discover-image.c, v257: /usr/lib and /usr/local/lib, each with extensions or confexts), so an
+# image there could add a repart.d or a unit the checks here never read (#5418, #5488). /usr ships none.
+USR_IMAGE_DIRS = {"lib/extensions": "systemd-sysext would merge it over /usr",
+                  "local/lib/extensions": "systemd-sysext would merge it over /usr",
+                  "lib/confexts": "systemd-confext would merge it over /etc",
+                  "local/lib/confexts": "systemd-confext would merge it over /etc"}
 
 
 def usr_repart_violations(rows, runtime=REPART_D):
     """The /usr list rows (path, type, ..., digest) that let systemd-repart read a definition other than
     mkosi.extra's repart.d files, byte for byte: a changed, added or missing file under lib/repart.d or
     local/lib/repart.d, or a step on the way to either that is not a plain directory; or that give
-    systemd-confext an image to merge over /etc (USR_CONFEXTS)."""
+    systemd-sysext or systemd-confext an image to merge (USR_IMAGE_DIRS)."""
     want = {"lib/repart.d/" + f.name: sha256(f) for f in pathlib.Path(runtime).glob("*.conf")}
     out, seen = [], set()
     kinds = {r[0]: r[1] for r in rows}
@@ -214,8 +218,9 @@ def usr_repart_violations(rows, runtime=REPART_D):
             out.append("/usr/%s: not a plain directory (%s)" % (step, kinds.get(step, "missing")))
     for r in rows:
         path, kind, digest = r[0], r[1], r[-1]
-        if any(path == c or path.startswith(c + "/") for c in USR_CONFEXTS):
-            out.append("/usr/%s: systemd-confext would merge it over /etc" % path)
+        for c, reader in USR_IMAGE_DIRS.items():
+            if path == c or path.startswith(c + "/"):
+                out.append("/usr/%s: %s" % (path, reader))
         if not path.startswith(("lib/repart.d/", "local/lib/repart.d/")):
             continue
         seen.add(path)
@@ -656,8 +661,9 @@ INITRD_CREDSTORES = tuple("%s/%s" % (top, n) for top in ("etc", "usr/local/lib",
 INITRD_CREDS_ALLOWED = ("usr/lib/credstore/firstboot.keymap", "usr/lib/credstore/firstboot.locale",
                         "usr/lib/credstore/firstboot.timezone", "usr/lib/credstore/passwd.hashed-password.root")
 INITRD_GENERATOR_DIRS = ("etc/systemd/system-generators", "usr/local/lib/systemd/system-generators")
-INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", ".extra/sysext", "run/confexts",
-                     "var/lib/confexts", "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
+INITRD_IMAGE_DIRS = ("etc/extensions", "run/extensions", "var/lib/extensions", "usr/lib/extensions",
+                     "usr/local/lib/extensions", ".extra/sysext", "run/confexts", "var/lib/confexts",
+                     "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
 # An enablement link or mask; never one that turns on systemd-sysext or systemd-confext (L3 6804604094: in
 # v257 both run in the initrd, and mkosi-initrd's preset, disable *, is all that leaves them off).
 # The target is a unit file (a unit-type suffix), so a link to a directory under it is refused (L3 6805882795).
