@@ -246,33 +246,23 @@ FSTAB_FIX = "; write the line as plain ASCII with no escape and no '..' step, it
 FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute path"
 
 
-# #5547 (Security 6824314705 on #5544): every setting whose value names a host path, by its parser in systemd v257's
-# load-fragment-gperf.gperf.in (unit_path_printf, unit_path_strv_printf, namespace_path_strv, bind_paths,
-# temporary_filesystems, mount_images, extension_images, working_directory, exec_directories, load_credential,
-# unit_mounts_for, pid_file, socket_listen (bar ListenNetlink=), path_spec, unit_env_file, colon_separated_paths,
-# open_file, device_allow, io_device_*, io_limit, blockio_*, exec_input, exec_output, mount_node), plus Options=
-# (libmount reads its overlay and x-mount paths). PID1_NAMES holds none of them, so a refusal of one offers no
-# PID1_NAMES remedy (value_fix).
-PATH_KEYS = frozenset((
-    "WorkingDirectory", "RootDirectory", "RootImage", "RootVerity", "ExtensionDirectories", "ExtensionImages",
-    "MountImages", "TTYPath", "ReadWriteDirectories", "ReadOnlyDirectories", "InaccessibleDirectories",
-    "ReadWritePaths", "ReadOnlyPaths", "InaccessiblePaths", "ExecPaths", "NoExecPaths", "BindPaths",
-    "BindReadOnlyPaths", "TemporaryFileSystem", "NetworkNamespacePath", "IPCNamespacePath", "LoadCredential",
-    "LoadCredentialEncrypted", "SourcePath", "RequiresMountsFor", "WantsMountsFor", "PIDFile",
-    "USBFunctionDescriptors", "USBFunctionStrings", "ListenStream", "ListenDatagram", "ListenSequentialPacket",
-    "ListenFIFO", "ListenSpecial", "ListenMessageQueue", "ListenUSBFunction", "Symlinks", "Where",
-    "What", "Options", "PathExists", "PathExistsGlob", "PathChanged", "PathModified", "DirectoryNotEmpty",
-    "EnvironmentFile", "ExecSearchPath", "OpenFile", "DeviceAllow", "IODeviceWeight", "IODeviceLatencyTargetSec",
-    "IOReadBandwidthMax", "IOWriteBandwidthMax", "IOReadIOPSMax", "IOWriteIOPSMax", "BlockIODeviceWeight",
-    "BlockIOReadBandwidth", "BlockIOWriteBandwidth", "StandardInput", "StandardOutput", "StandardError")
-    + tuple(UNIT_MADE_DIRS))
+# #5552 (Lens R1 on #5550): the PID1_NAMES remedy is offered only for a key on this allow-list, the settings whose
+# value is text or names and never a host path, by their parsers in systemd v257's load-fragment-gperf.gperf.in
+# (config_parse_environ, config_parse_log_extra_fields, config_parse_set_credential, config_parse_strv,
+# config_parse_log_namespace); any other key, the v257 path keys the old deny-list missed (IPIngressFilterPath=,
+# IPEgressFilterPath=, BPFProgram=, RootHash=, RootHashSignature=) and any key a later systemd adds, gets the plain-path
+# fix alone. Read from systemd NAME_ONLY_SYSTEMD; a different systemd fails ImageToolTest until the list is read again:
+#   grep -E '^\.(Service|Unit|Socket|Mount)\.' load-fragment-gperf.gperf.in   (v257 tag; list the parser per key)
+NAME_ONLY_SYSTEMD = "257"
+NAME_ONLY_KEYS = frozenset(("Environment", "PassEnvironment", "UnsetEnvironment", "LogExtraFields", "SetCredential",
+                            "SetCredentialEncrypted", "LogNamespace"))
 
 
 def value_fix(key):
-    """#5253, #5547: the clause a #5167 refusal of a KEY= value in a unit file ends with. The PID1_NAMES remedy is
-    offered only for a key off PATH_KEYS, and states its bar: the systemd source line, quoted as proof."""
+    """#5253, #5547, #5552: the clause a #5167 refusal of a KEY= value in a unit file ends with. The PID1_NAMES remedy
+    is offered only for a key on NAME_ONLY_KEYS, and states its bar: the systemd source line, quoted as proof."""
     fix = "; write %s= as plain absolute paths (no specifier, quote, escape or '..')" % key
-    if key in PATH_KEYS:
+    if key not in NAME_ONLY_KEYS:
         return fix
     return fix + (", or, if %s= never names a host path, add %s to PID1_NAMES, quoting in the change as proof the "
                   "systemd source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that "
