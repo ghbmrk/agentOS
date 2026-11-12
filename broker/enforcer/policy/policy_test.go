@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -1386,6 +1387,9 @@ func TestEveryOpResultPassesCheck(t *testing.T) {
 			t.Errorf("%+v: Encode: %v", op, err)
 			continue
 		}
+		if ind := sha256.Sum256(b); hashOf(b) != hex.EncodeToString(ind[:]) {
+			t.Errorf("%+v: hashOf differs from an independent sha256", op)
+		}
 		if h, err := Hash(got); err != nil || h != hashOf(b) {
 			t.Errorf("%+v: Hash %q %v, hashOf(Encode) %q", op, h, err, hashOf(b))
 		}
@@ -1400,5 +1404,29 @@ func TestEveryOpResultPassesCheck(t *testing.T) {
 		if !covered {
 			t.Errorf("no op of kind %q applies to the fixture: add one to candidates' coverage here", k)
 		}
+	}
+}
+
+// The policy hash is the SHA-256 of the canonical encoding, pinned two ways
+// (#5549): against an independent sha256 of Encode's bytes, and against a
+// golden literal for home(1), so a truncated or shifted hash fails.
+func TestPolicyHashPinned(t *testing.T) {
+	const golden = "5777d8d874846d5b58371132c1e05518d65b319fe04bf66e7381b3b7a390bcef"
+	d := home(1)
+	b, err := Encode(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ind := sha256.Sum256(b)
+	e, _, _ := opened(t)
+	cd, ch := e.CurrentHash()
+	if h, err := Hash(d); err != nil || h != hex.EncodeToString(ind[:]) || h != golden {
+		t.Errorf("Hash %q %v, independent %x, golden %s", h, err, ind, golden)
+	}
+	if want, _ := Hash(cd); ch != want || ch != golden {
+		t.Errorf("CurrentHash %q, Hash %q, golden %s", ch, want, golden)
+	}
+	if len(golden) != 64 {
+		t.Fatal("golden is not a SHA-256 in hex")
 	}
 }
