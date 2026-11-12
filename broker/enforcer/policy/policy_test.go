@@ -1256,3 +1256,69 @@ func TestCapChangesAreLoosenings(t *testing.T) {
 		t.Errorf("cutting the TV's cloud with caps set: %+v", c)
 	}
 }
+
+// CurrentHash returns the policy in force with policy.Hash of it, with no
+// error to handle, after every place the engine puts a document in force:
+// an empty Open, Propose and Tick (opened), an asserted tightening, an
+// unsigned one, Open replaying a base and both kinds of step, Rekey, Open
+// on the rekeyed base, and Tick landing a loosening over a step (#5535).
+func TestCurrentHashIsProven(t *testing.T) {
+	proven := func(site string, e *Engine) {
+		t.Helper()
+		d, h := e.CurrentHash()
+		want, err := Hash(e.Current())
+		if err != nil || h != want || !reflect.DeepEqual(d, e.Current()) {
+			t.Errorf("%s: CurrentHash %q %+v, Hash %q %v", site, h, d, want, err)
+		}
+	}
+	empty, err := Open(newAuthenticator(t, rp).Public(), &memStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proven("empty open", empty)
+	e, a, store := opened(t)
+	proven("propose and tick", e)
+	p := Proposal{Doc: edit(2, func(d *Document) { dev(d, "lock").VendorCloud = false }), Diff: []byte("cut the lock's cloud")}
+	if out, err := a.propose(t, e, p, Wait); err != nil || !out.Applied {
+		t.Fatalf("asserted tightening: %+v %v", out, err)
+	}
+	proven("asserted tightening", e)
+	if err := e.Tighten(Op{Kind: CutVendorCloud, Device: "tv"}, Wait); err != nil {
+		t.Fatal(err)
+	}
+	proven("tighten", e)
+	if e, err = Open(a.Public(), store); err != nil {
+		t.Fatal(err)
+	}
+	proven("open with steps", e)
+	b := newAuthenticator(t, rp)
+	keep := e.Current()
+	keep.Version = 20
+	p = Proposal{Doc: keep, Diff: []byte("keep")}
+	if err := e.Rekey(b.Public(), p, sign(t, b, b.Public(), p)); err != nil {
+		t.Fatal(err)
+	}
+	proven("rekey", e)
+	if e, err = Open(b.Public(), store); err != nil {
+		t.Fatal(err)
+	}
+	proven("open on the rekeyed base", e)
+	loose := e.Current()
+	loose.Version = 21
+	loose.Destinations = append(loose.Destinations, "x.example")
+	p = Proposal{Doc: loose, Diff: []byte("allow x")}
+	if out, err := b.propose(t, e, p, Wait); err != nil || out.Pending == "" {
+		t.Fatalf("loosening: %+v %v", out, err)
+	}
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: "b.example"}, Wait); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.CurrentHash()
+	if got, err := e.Tick(2 * Wait); err != nil || len(got) != 1 {
+		t.Fatalf("tick: %v %v", got, err)
+	}
+	proven("tick over a step", e)
+	if after, _ := e.CurrentHash(); reflect.DeepEqual(after, before) || !slices.Contains(after.Destinations, "x.example") {
+		t.Fatalf("the loosening did not land: %+v", after)
+	}
+}
