@@ -694,6 +694,9 @@ class KeeperTreeTest(unittest.TestCase):
         # A value PID 1 acts on that holds a specifier, a quote, a backslash or a byte it does not model is
         # refused whole, wherever it sits in a word (Security 6760938141: %i, %R and %B may expand to "", and
         # systemd unquotes and unescapes words before it makes the path).
+        # #5557: a key off NAME_ONLY_KEYS is told the way onto it, with its v257 parser as proof.
+        onto = (", or, if %s= never names a host path, add %s to NAME_ONLY_KEYS, quoting as proof its parser in "
+                "systemd v257's load-fragment-gperf.gperf.in")
         for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'",
                      "StandardError=truncate:%S/x", "Symlinks=%i/run/sy", "Symlinks=%R/run/sy", "Symlinks=%B/run/sy",
                      "ListenFIFO=%i/run/sy", 'Symlinks="/run/sy"', "Symlinks='/run/sy'", "Symlinks=\\/run/sy",
@@ -713,11 +716,11 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(len(got), 1, got)
                     self.assertTrue(got[0].startswith("%sx.socket: %s=" % (SYSTEM, key)), got)
                     # #5253: each refusal ends saying what the builder changes. #5547: these keys name host paths,
-                    # so the only fix offered is a plain path, never PID1_NAMES.
+                    # so the fix offered is a plain path, never PID1_NAMES; #5557: and the way onto NAME_ONLY_KEYS.
                     self.assertTrue(got[0].endswith(
                         ": the tree check does not model it; the tree check never passes a unit file whose paths it "
                         "cannot read (#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')"
-                        % key), got)
+                        "%s" % (key, onto % (key, key))), got)
                     self.assertNotIn("PID1_NAMES", got[0])
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
@@ -732,7 +735,7 @@ class KeeperTreeTest(unittest.TestCase):
                "the value), not an assertion")
         for text, remedy in (("IPIngressFilterPath=%i/x", False), ("IPEgressFilterPath=%i/x", False),
                              ("BPFProgram=%i:/x", False), ("RootHash=%i", False), ("RootHashSignature=%i", False),
-                             ("InventedKeyV999=%i", False), ("Environment=A=%i", True), ("LogExtraFields=K=%n", True),
+                             ("InventedKeyV999=%i", False), ("Nice=%i", False), ("Environment=A=%i", True), ("LogExtraFields=K=%n", True),
                              ("Environment=A=/run/x/../y", True), ("SetCredential=c:a/b", True)):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.service", "[Service]\n%s\n" % text)
@@ -744,7 +747,8 @@ class KeeperTreeTest(unittest.TestCase):
                         self.assertTrue(got[0].endswith(bar % (key, key, key)), got)
                     else:
                         self.assertTrue(got[0].endswith(
-                            "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')" % key), got)
+                            "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')%s"
+                            % (key, onto % (key, key))), got)
                         self.assertNotIn("PID1_NAMES", got[0])
                     self.assertIn(got[0], check.violations(self.root))
                 finally:

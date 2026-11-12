@@ -272,8 +272,8 @@ class InitrdTest(unittest.TestCase):
         self.assertNotIn("libtirpc3t64", drop.INITRD_DROP)
 
     def test_no_initrd_record_accepts_an_initrd_dropped_source(self):
-        # A stale record would quietly accept the advisory again if the package came back, and the
-        # scan only prints "unused record:" (Security finding 1 on #4899).
+        # A stale record would quietly accept the advisory again if the package came back (Security
+        # finding 1 on #4899). The scan now fails on it too; this check needs no image build.
         records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
         gone = {src for p, (src, _) in drop.INITRD_DROP.items() if p not in drop.INITRD_PARTIAL}
         self.assertTrue({drop.INITRD_DROP[p][0] for p in drop.INITRD_PARTIAL}.isdisjoint(gone))

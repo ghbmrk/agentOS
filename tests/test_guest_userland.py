@@ -116,6 +116,42 @@ class UserlandCopyTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not an absolute path", r.stderr)
 
+    def build(self, guest_path, *flags, lib=None):
+        """A small program at GUEST_PATH in the base, linked with FLAGS, and (with LIB) needing
+        libpin.so at the base path LIB. The linker sets PT_INTERP and RUNPATH as patchelf would."""
+        src = self.tmp / "src"
+        src.mkdir(exist_ok=True)
+        (src / "pin.c").write_text("int pin(void) { return 7; }\n")
+        (src / "main.c").write_text("int pin(void);\nint main(void) { return %s; }\n" % ("pin()" if lib else "0"))
+        args = []
+        if lib:
+            (self.base / lib).mkdir(parents=True)
+            subprocess.run(["cc", "-shared", "-fPIC", "-o", str(self.base / lib / "libpin.so"), str(src / "pin.c")],
+                           check=True)
+            args = ["-L", str(self.base / lib), "-lpin"]
+        subprocess.run(["cc", "-o", str(self.base / guest_path.lstrip("/")), str(src / "main.c"), *args, *flags],
+                       check=True)
+
+    def test_a_program_asking_for_another_loader_fails(self):
+        # A 32-bit or musl program would land in the guest with no loader and fail only there.
+        self.build("/usr/bin/foreign", "-Wl,--dynamic-linker=/lib/ld-musl-x86_64.so.1")
+        r = self.run_userland("/bin/foreign")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/bin/foreign asks for loader /lib/ld-musl-x86_64.so.1", r.stderr)
+        # The same program with the base's loader copies: the loader alone is refused.
+        shutil.rmtree(self.out)
+        self.build("/usr/bin/foreign")
+        self.assertEqual(self.run_userland("/bin/foreign").returncode, 0)
+
+    def test_a_library_inside_the_base_but_outside_its_library_directory_fails(self):
+        # A RUNPATH into the base: put() sees no host path, so only the library-directory check stops it.
+        self.build("/usr/bin/pinned", "-Wl,--enable-new-dtags", "-Wl,-rpath," + str(self.base / "opt/pin"),
+                   lib="opt/pin")
+        r = self.run_userland("/bin/pinned")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/bin/pinned: libpin.so not found in %s/%s (got " % (self.base.resolve(), MULTIARCH), r.stderr)
+        self.assertFalse((self.out / MULTIARCH / "libpin.so").exists())
+
 
 class WiringTest(unittest.TestCase):
     """Every guest build reads the one base; nothing copies from the host."""

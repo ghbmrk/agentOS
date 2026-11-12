@@ -174,6 +174,28 @@ class RecordsTest(unittest.TestCase):
         self.assertIn("unused record: GO-7", out.getvalue())
         self.assertTrue(vulncheck.summary(fs[:1], [], [], io.StringIO()))
 
+    def test_an_unused_record_fails_the_scan(self):
+        # #5093 follow-up: a record that accepts nothing fails, even with no failing finding; left
+        # in place it would accept the same ID again, unreviewed, if its package came back.
+        fs = [fail("GO-1")]
+        recs = [{"id": "GO-1", "issue": 10, "why": "x", **M}, {"id": "GO-7", "issue": 12, "why": "x", **M}]
+        unused = vulncheck.apply_records(fs, recs)
+        out = io.StringIO()
+        self.assertEqual(vulncheck.verdict(fs[0]), "accepted #10")
+        self.assertFalse(vulncheck.summary(fs, [], unused, out))
+        self.assertIn("unused record: GO-7 (issue #12) matches no finding; remove it", out.getvalue())
+        self.assertIn("fix: remove each unused record", out.getvalue())
+        self.assertTrue(vulncheck.summary(fs, [], [], io.StringIO()))
+
+    def test_unused_records_behind_a_problem_point_at_the_problem(self):
+        # #5178 UX: a problem can hide a tree's findings, so every record of that tree reads unused;
+        # the closing fix line then points at the problem, not at deleting valid records.
+        recs = [{"id": "GO-7", "issue": 12, "why": "x", **M}]
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([], ["initrd: no status file"], recs, out))
+        self.assertIn("fix: clear the problems above first", out.getvalue())
+        self.assertNotIn("fix: remove each unused record", out.getvalue())
+
     def test_a_record_accepts_only_its_package_and_version(self):
         # #4153 (Security finding 2 on #4152): a record for minimatch 10.2.5 must not accept
         # an upgraded or other copy that the same advisory is later widened to cover.
@@ -1300,6 +1322,17 @@ class WorkflowTest(unittest.TestCase):
             grants = re.findall(r"(?m)^\s+(contents|issues|pull-requests|actions|checks|statuses):\s*(\w+)", wf)
             self.assertTrue(grants)
             self.assertEqual({g for _, g in grants}, {"read"})
+
+    def test_a_records_change_builds_and_scans_the_image(self):
+        # #5093 follow-up: a change to assurance/vulncheck.json alone runs image-vulncheck, on pull
+        # requests and on main, so an image record is checked against a build before it merges.
+        # Whole lines only: a commented-out `# - "assurance/vulncheck.json"` must not count.
+        wf = IMAGE_WORKFLOW.read_text()
+        for event in ("pull_request", "push"):
+            block = wf[wf.index(f"\n  {event}:"):]
+            block = block[:re.search(r"\n  \S|\n\S", block[1:]).start() + 1]
+            with self.subTest(event=event):
+                self.assertRegex(block, r'(?m)^ +- "assurance/vulncheck\.json"$')
 
     def test_image_build_is_scanned_after_the_control(self):
         # TN-vulncheck-6: every image build scans its own package list, with the same pins.
