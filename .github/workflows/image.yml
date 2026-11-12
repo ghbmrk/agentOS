@@ -96,7 +96,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 jobs:
+  # IMG-repro-security-pin (#5021): one debian-security snapshot for the whole run, chosen before
+  # either build starts, so builds a and b (the image, its initrd and both guest roots) install the
+  # same security packages, and the run still takes every security fix published before it.
+  security-snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      timestamp: ${{ steps.resolve.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve the debian-security snapshot
+        id: resolve
+        # The script prints only a timestamp it has checked (YYYYMMDDTHHMMSSZ), or fails.
+        run: |
+          ts=$(sh image/security-snapshot.sh resolve)
+          echo "timestamp=$ts" >> "$GITHUB_OUTPUT"
   build:
+    needs: security-snapshot
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +205,9 @@ jobs:
           nohup sh -c 'while :; do "$RUNNER_TEMP/disk-used" >> "$RUNNER_TEMP/disk.samples"; sleep 1; done' >/dev/null 2>&1 &
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
-        run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
+        env:
+          AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}  # the same for a and b (#5021)
+        run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
       - name: Show the tree check's refusals
         # The tree check's refusals as annotations, so a tmpfiles.d line missing from
         # image/mkosi/tmpfiles.allow can be reviewed (and its entry copied) without the full log (#1543).
@@ -288,6 +309,8 @@ jobs:
           cp "$RUNNER_TEMP"/out/*.release.json "$RUNNER_TEMP"/out/SHA256SUMS "$RUNNER_TEMP"/out/*.manifest "$RUNNER_TEMP/rec/" || true
           cp "$RUNNER_TEMP"/out/*.usr.list "$RUNNER_TEMP/rec/" || true
           cp "$RUNNER_TEMP"/out/agentos.dpkg-status "$RUNNER_TEMP"/out/agentos.os-release "$RUNNER_TEMP/rec/" || true
+          # The apt sources the image and the guest roots installed from (#5021), compared by the reproduce job.
+          cp "$RUNNER_TEMP"/out/agentos.sources "$RUNNER_TEMP/rec/" || true
           cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/" || true
           # The guests' Debian package list (image/guest-base.sh, #5570), compared by the reproduce job.
           cp -R "$RUNNER_TEMP"/out/guest "$RUNNER_TEMP/rec/" || true
@@ -362,6 +385,8 @@ jobs:
           # The guests' packages (#5570): each build's Debian userland for the OpenClaw and Codex roots,
           # so a guest file that differs names the package version behind it.
           python3 image/compare_manifests.py rec/release-a/guest rec/release-b/guest || ok=0
+          # One debian-security snapshot for both builds (#5021): the same apt sources, byte for byte.
+          cmp rec/release-a/agentos.sources rec/release-b/agentos.sources || ok=0
           [ $ok = 1 ]
   # Not named vulncheck: that is vulncheck.yml's required check.
   image-vulncheck:

@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import re
+from shlex import quote as shlex_quote
 import shutil
 import subprocess
 import tempfile
@@ -711,6 +712,8 @@ class ReproduceJobTest(unittest.TestCase):
         (rec / "guest").mkdir()
         (rec / "guest/agentos-guest.manifest").write_text(json.dumps({"packages": [{"name": "libpcre2-8-0", "version": "10.45-1"}]}))
         (rec / "agentos_1.usr.list").write_text(usr if usr is not None else self.usr)
+        # The apt sources both builds installed from, on the run's one security snapshot (#5021).
+        (rec / "agentos.sources").write_text("URIs: https://snapshot.debian.org/archive/debian-security/20261112T180512Z/\n")
         rel = {"usrhash": usrhash, "boot_entry": {"sha256": "cd" * 32},
                "boot": {"agentos/vmlinuz": "ef" * 32, "agentos/initrd": hashlib.sha256(initrd).hexdigest()}}
         if edit:
@@ -745,6 +748,24 @@ class ReproduceJobTest(unittest.TestCase):
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("MISMATCH package manifest", r.stdout)
+
+    def test_missing_or_differing_security_snapshot_fails(self):
+        # #5021: builds a and b must have read the same apt sources, so the same security snapshot.
+        for change in ("differ", "missing"):
+            with self.subTest(change=change):
+                shutil.rmtree(self.d / "rec", ignore_errors=True)
+                self.side("release-a", self.initrd)
+                self.side("release-b", self.initrd)
+                src = self.d / "rec/release-b/agentos.sources"
+                if change == "missing":
+                    src.unlink()
+                else:
+                    src.write_text(src.read_text().replace("20261112T180512Z", "20261112T000512Z"))
+                if not (self.d / "image").exists():
+                    (self.d / "image").symlink_to(IMG)
+                r = subprocess.run(["bash", "-e", "-c", compare_step()], cwd=self.d, capture_output=True, text=True)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertNotIn("20261112T", r.stdout + r.stderr)  # #4648: cmp prints no content
 
     def test_differing_initrd_fails_and_names_the_member(self):
         self.side("release-a", self.initrd)
@@ -963,6 +984,154 @@ class ReproduceJobTest(unittest.TestCase):
         rec = wf[wf.index("- name: Release record"):]
         rec = rec[:rec.index("- uses:")]
         self.assertIn('cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/"', rec)
+
+
+SNAP = IMG / "security-snapshot.sh"
+SOURCES = MK / "mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+LIVE = "URIs: http://security.debian.org/debian-security"
+
+
+def fake_tools(d, **scripts):
+    """A PATH directory in D holding each NAME=body as an executable sh script, plus the real PATH."""
+    b = pathlib.Path(d, "bin")
+    b.mkdir()
+    for name, body in scripts.items():
+        f = b / name.replace("_", "-")
+        f.write_text("#!/bin/sh\n" + body)
+        f.chmod(0o755)
+    return "%s:%s" % (b, os.environ["PATH"])
+
+
+class SecuritySnapshotTest(unittest.TestCase):
+    """IMG-repro-security-pin (#5021): one debian-security snapshot per run, for the image and both guest roots."""
+    # REQ: UPD-1a
+
+    def run_snap(self, *args, path=None):
+        env = {"PATH": path or os.environ["PATH"]}
+        return subprocess.run(["sh", str(SNAP), *args], capture_output=True, text=True, env=env)
+
+    def test_sources_read_security_from_the_one_snapshot(self):
+        # The image's apt sources with exactly one line changed: the security stanza's URI, onto that
+        # snapshot; the main archive's stanza and every other line stay byte for byte.
+        p = self.run_snap("sources", "20261112T180512Z")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        want = SOURCES.read_text().replace(LIVE, "URIs: https://snapshot.debian.org/archive/debian-security/20261112T180512Z/")
+        self.assertEqual(p.stdout, want)
+        self.assertEqual(SOURCES.read_text().count(LIVE + "\n"), 1)
+        self.assertNotIn("security.debian.org", p.stdout.replace("snapshot.debian.org/archive/debian-security", ""))
+
+    def test_sources_refuse_anything_but_one_timestamp(self):
+        for bad in ("", "2026", "20261112T180512", "20261112T180512Z/", "20261112T180512Z\nx",
+                    "../20261112T180512Z", "2026111xT180512Z"):
+            with self.subTest(bad=bad):
+                p = self.run_snap("sources", bad)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+        for args in ((), ("sources",), ("sources", "20261112T180512Z", "x"), ("resolve", "x"), ("other",)):
+            with self.subTest(args=args):
+                p = self.run_snap(*args)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+
+    def test_sources_refuse_a_file_without_one_live_security_stanza(self):
+        with tempfile.TemporaryDirectory() as d:
+            img = pathlib.Path(d, "image")
+            src = img / SOURCES.relative_to(IMG)
+            src.parent.mkdir(parents=True)
+            shutil.copy(SNAP, img)
+            for text in (SOURCES.read_text().replace(LIVE, "URIs: http://deb.debian.org/debian-security"),
+                         SOURCES.read_text() + "\nTypes: deb\n" + LIVE + "\n"):
+                src.write_text(text)
+                p = subprocess.run(["sh", str(img / SNAP.name), "sources", "20261112T180512Z"], capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+
+    def resolve(self, answer, status=0):
+        with tempfile.TemporaryDirectory() as d:
+            log = pathlib.Path(d, "args")
+            # curl's -w format, with %{redirect_url} as ANSWER, as the only output; the arguments logged.
+            py = ("import pathlib, sys\na = sys.argv[1:]\npathlib.Path(%r).write_text('\\n'.join(a))\n"
+                  "sys.stdout.write(a[a.index('-w') + 1].replace('%%{redirect_url}', %r))\nsys.exit(%d)\n"
+                  % (str(log), answer, status))
+            path = fake_tools(d, curl="exec python3 -I -c %s \"$@\"\n" % shlex_quote(py))
+            p = self.run_snap("resolve", path=path)
+            return p, (log.read_text().splitlines() if log.exists() else [])
+
+    def test_resolve_takes_the_snapshot_the_mirror_redirects_to(self):
+        # snapshot.debian.org answers a time between two mirror runs with a redirect to the earlier
+        # run's own timestamp; that timestamp, not the asked time, names a snapshot that never changes.
+        p, args = self.resolve("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/")
+        self.assertEqual((p.returncode, p.stdout), (0, "20261112T180512Z\n"), p.stderr)
+        self.assertEqual(args[0], "-q")
+        self.assertIn("-f", "".join(a for a in args if re.fullmatch(r"-[A-Za-z]+", a)))
+        self.assertEqual(args[args.index("--proto") + 1], "=https")
+        self.assertNotIn("-L", args)
+        self.assertNotIn("--location", args)
+        self.assertRegex(args[-1], r"\Ahttps://snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/\Z")
+        self.assertIn("--retry", args)
+
+    def test_resolve_refuses_any_other_answer(self):
+        for answer, status in (("", 0), ("https://snapshot.debian.org/archive/debian/20261112T180512Z/", 0),
+                               ("https://evil.example/archive/debian-security/20261112T180512Z/", 0),
+                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/x/", 0),
+                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z", 0),
+                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/\n", 0),
+                               ("http://snapshot.debian.org/archive/debian-security/20261112T180512Z/", 0),
+                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/", 22)):
+            with self.subTest(answer=answer, status=status):
+                p, _ = self.resolve(answer, status)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertEqual(p.stdout, "")
+                self.assertNotIn("evil", p.stderr)  # #4648: nothing the mirror sent reaches the log
+
+    def test_guest_base_reads_the_sources_it_is_given(self):
+        # Both guest roots come from guest-base.sh's one root, so the sources it is handed decide
+        # their security packages; with two arguments (ci.yml's test roots) it reads the image's file.
+        for extra in ((), ("/given/agentos.sources",)):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                log = pathlib.Path(d, "mm")
+                path = fake_tools(d, mmdebstrap='printf "%%s\\n" "$@" > %s\n' % log, timeout='shift; exec "$@"\n',
+                                  dpkg_query="exit 0\n")
+                p = subprocess.run(["sh", str(IMG / "guest-base.sh"), str(pathlib.Path(d, "root")),
+                                    str(pathlib.Path(d, "m.json")), *extra], capture_output=True, text=True,
+                                   env={"PATH": path})
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(log.read_text().splitlines()[-1], extra[0] if extra else str(SOURCES))
+        p = subprocess.run(["sh", str(IMG / "guest-base.sh"), "r", "m", "s", "x"], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 2)
+
+    def test_build_hands_one_snapshot_to_the_image_and_the_guests(self):
+        b = (IMG / "build.sh").read_text()
+        self.assertIn('SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}', b)
+        self.assertIn('[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" resolve)', b)
+        write = b.index('sh "$HERE/security-snapshot.sh" sources "$SECURITY_SNAPSHOT" >"$OUT/agentos.sources"')
+        tree = b.index('install -D -m 0644 "$OUT/agentos.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"')
+        guest = b.index('sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest" "$OUT/agentos.sources"\n')
+        mk = b.index('$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" ')
+        self.assertLess(write, tree)
+        self.assertLess(tree, guest)
+        self.assertLess(guest, mk)
+        self.assertEqual(b.count("guest-base.sh\""), 1)
+        self.assertEqual(b.count("$MKOSI "), 1)
+        # mkosi v24.3 appends a command-line tree after mkosi.pkgmngr and copies trees in order, so
+        # this file replaces the committed one for the image and its initrd alike.
+        self.assertNotIn("security.debian.org", b.replace("debian-security", ""))
+
+    def test_workflow_resolves_once_for_both_builds(self):
+        wf = WORKFLOW.read_text()
+        job = wf[wf.index("\n  security-snapshot:\n"):wf.index("\n  build:\n")]
+        self.assertIn("timestamp: ${{ steps.resolve.outputs.timestamp }}", job)
+        self.assertIn('ts=$(sh image/security-snapshot.sh resolve)', job)
+        self.assertIn('echo "timestamp=$ts" >> "$GITHUB_OUTPUT"', job)
+        self.assertNotIn("matrix", job)
+        build = wf[wf.index("\n  build:\n"):wf.index("\n  reproduce:\n")]
+        self.assertIn("    needs: security-snapshot\n", build)
+        self.assertIn("AGENTOS_SECURITY_SNAPSHOT: ${{ needs.security-snapshot.outputs.timestamp }}", build)
+        self.assertIn('sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" ', build)
+        self.assertEqual(build.count('MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out"'), 1)
+        self.assertIn('"$RUNNER_TEMP"/out/agentos.sources', build[build.index("- name: Release record"):])
+        # The reproduce job holds both builds to the same apt sources, security snapshot included.
+        self.assertIn("cmp rec/release-a/agentos.sources rec/release-b/agentos.sources || ok=0", compare_step())
 
 
 if __name__ == "__main__":
