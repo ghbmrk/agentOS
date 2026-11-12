@@ -66,7 +66,7 @@ tools)
 	fwd stub "$W/tools.jsonl"
 	for img in root root-off; do
 		for ws in default live; do
-			: >"$W/tools.jsonl"
+			true >"$W/tools.jsonl"
 			extra=()
 			[ $ws = live ] && extra=(-c 'web_search="live"')
 			echo "Reply ok." | timeout 90 "$0" _inm "$W/$img" codex exec "${extra[@]}" --json \
@@ -77,7 +77,7 @@ tools)
 	done
 	;;
 plan)
-	: >"$W/plan.jsonl"
+	true >"$W/plan.jsonl"
 	fwd relay "$W/plan.jsonl"
 	mkdir -p "$W/work"
 	cat >"$W/work/session.sh" <<'EOF'

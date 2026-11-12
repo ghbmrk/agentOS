@@ -1015,8 +1015,9 @@ APT = re.compile(r"\b(?:apt|apt-get|aptitude)\s.*\b(?:install|reinstall|download
 DPKG = re.compile(r"\bdpkg\s(?:.*\s)?(?:-[A-Za-z]*i\b|--install\b|--unpack\b)")
 # CI-hostcheck-mirror-wording (#5525): a curl command; curl honours -q (read no .curlrc) only as its first
 # argument, so a .curlrc from CURL_HOME, XDG_CONFIG_HOME or HOME could otherwise add options the
-# bound checks never see (retry-all-errors, say).
-CURL = re.compile(r"(?<![\w.+/-])curl(?![\w.+-])")
+# bound checks never see (retry-all-errors, say). SHELL-CURL-lint-fu (#5533): by any path to it
+# (/usr/bin/curl, ./curl, curl.exe); a URL's /curl is not one, since a path has no ':' or '/' before it.
+CURL = re.compile(r"(?<![\w.+/:~-])(?:[\w.+~-]*(?:/[\w.+-]+)*/)?curl(?:\.exe)?(?![\w.+-])")
 
 
 # CI-hostcheck-fetch-retry (#5321): the hostcheck job's guest-kernel fetch, as ci.yml must hold it; each
@@ -1293,6 +1294,9 @@ class HostcheckJobTest(unittest.TestCase):
             "curl elsewhere reads .curlrc": ("        run: |\n          if [ -e /dev/kvm ]; then\n",
                                              "        run: |\n          curl -fsSLO https://example.com/x\n"
                                              "          if [ -e /dev/kvm ]; then\n"),
+            "curl by path reads .curlrc": ("        run: |\n          if [ -e /dev/kvm ]; then\n",
+                                           "        run: |\n          /usr/bin/curl -fsSLO https://example.com/x\n"
+                                           "          if [ -e /dev/kvm ]; then\n"),
             "fewer tries": ("--retry 8 ", "--retry 3 "),
             "unbounded": ("--retry-max-time 600 ", ""),
             "fixed delay": ("--retry 8 ", "--retry 8 --retry-delay 5 "),
@@ -1325,6 +1329,17 @@ class HostcheckJobTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertIn(old, self.ci)
                 self.assertNotEqual(self.problems(self.ci.replace(old, new, 1)), [])
+
+    def test_curl_is_seen_by_any_path(self):
+        # #5533 item 1: the lint's -q check reaches every curl command, and no URL or other word.
+        for line in ("curl -fsSL x", "/usr/bin/curl -fsSL x", "./curl x", "bin/curl x", "~/bin/curl x",
+                     "curl.exe x", "$(curl x)", 'v="$(/usr/bin/curl x)"', "a;curl x", "a|curl x"):
+            with self.subTest(line=line):
+                self.assertEqual(len(CURL.findall(line)), 1)
+        for line in ("echo https://example.com/curl", "curl-config x", "libcurl x", "curlx x", "x.curl y",
+                     "http:/a/curl x", "a//curl x", "dpkg-curl x", "/usr/bin/curlish x"):
+            with self.subTest(line=line):
+                self.assertEqual(CURL.findall(line), [])
 
     def test_runner_package_commands_are_told_apart(self):
         for line in ("sudo apt install -yq swtpm", "apt-get -yq install x", "sudo aptitude install y",
