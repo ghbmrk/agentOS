@@ -1552,9 +1552,12 @@ SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
 SHELL_META = " \t\n;&|()<>"
 SHELL_REDIR = re.compile(r"[<>]+[&|]?")
 SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
-SHELL_LIMITS = ("The lint does not read aliases or functions named like a builtin, the text that eval, sh -c "
-                "or a trap runs, escapes that spell a name in $'...', or a case whose 'in' is on a later line; "
-                "it reads a ' inside \"${...}\" as dash does (as text), not as bash does (as a quote).")
+SHELL_LIMITS = ("The lint reads tracked shell files only (*.sh, or a sh, bash or dash #! line), not shell held "
+                "in other files (sh -c strings, workflow run: blocks; #5538). It does not read aliases or "
+                "functions named like a builtin, the text that eval, sh -c or a trap runs, escapes that spell a "
+                "name in $'...', a case whose 'in' is on a later line, bash's &> and &>>, the 'function name' "
+                "form, or nested backquotes; it reads a ' inside \"${...}\" as dash does (as text), not as bash "
+                "does (as a quote).")
 
 
 def command_words(words):
@@ -2003,6 +2006,9 @@ class ImageShellLintTest(unittest.TestCase):
         ("case $x in\n# : >c\na) y;;\nesac\n: >f", [(5, ":")]),
         ("case $x in\na) case $y in b) z;; esac;;\nc) w;;\nesac\nexec >f", [(5, "exec")]),
         ("case $x in a) y; esac\n: >f", [(2, ":")]),
+        ("case $x in\n# it's\na) : >f;;\nesac", [(3, ":")]),
+        ('case x in "a)") : >f;; esac', [(1, ":")]),
+        ("case x in 'a)') : >f;; esac", [(1, ":")]),
         (": >a; : >b\n\nexec 9>x", [(1, ":"), (3, "exec")]),
     )
 
@@ -2061,9 +2067,10 @@ class ImageShellLintTest(unittest.TestCase):
                 hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
         self.assertEqual([hit for line, hit in hits if line not in SHELL_ALLOWED], [],
                          "put `command` in front (`command . ./lib >x`), or `true >file` for `:`: a failed redirect "
-                         "on a special builtin exits the shell before a handler runs. " + SHELL_LIMITS)
+                         "on a special builtin exits the shell before a handler runs.\n" + SHELL_LIMITS)
         self.assertEqual(sorted(SHELL_ALLOWED.keys() - {line for line, _ in hits}), [],
-                         "an allowed line no longer hits: remove its SHELL_ALLOWED entry")
+                         "an allowed line no longer hits: remove its SHELL_ALLOWED entry, or update its key if the "
+                         "line's text changed")
 
 
 class ConfigTest(unittest.TestCase):
