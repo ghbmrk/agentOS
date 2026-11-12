@@ -2084,6 +2084,8 @@ class ImageShellLintTest(unittest.TestCase):
         'v=`echo \\`: >x\\``',
         'v=`echo \\`a \\\\\\`: >x\\\\\\`\\``',
         'v="`echo \\"\\`: >x\\`\\"`"',
+        'v=`echo \\"; : >x\\"`',
+        'v=`echo "\\$(: >x)"`',
         # An exec that runs a command too: bash (not in POSIX mode) runs the handler after a failed
         # redirect there, while dash exits.
         'exec cat >x',
@@ -2163,6 +2165,7 @@ class ImageShellLintTest(unittest.TestCase):
         'function : { true; }',
         'echo `echo \\`a; : b\\`` >x',
         'v=`echo \\$: >x`',
+        'v="`echo \\"; : >x\\"`"',
     )
     # Unterminated, so each is clean on its own and swallows what follows.
     OPEN = (
@@ -2250,16 +2253,18 @@ class ImageShellLintTest(unittest.TestCase):
                      # Item 1: Python and workflows.
                      "p1.py": "x\n", "p2": "#!/usr/bin/env python3\n", "p3": "#!/usr/bin/python3.12 -I\n",
                      "reviews/p4.py": "x\n", ".github/workflows/w1.yml": "x\n", ".github/actions/a/action.yaml": "x\n",
-                     "w2.yml": "x\n"}
+                     "w2.yml": "x\n", "p5": "#!/usr/bin/env -S python3 -u\n", "p6": "#!/bin/mypython\n",
+                     "s2": "#!/usr/bin/env  sh\n", "s3": "#!/bin/busybox  ash\n", "s4": "#!/usr/bin/env -S  sh\n",
+                     "p7": "#!/usr/bin/env  python3\n", "p8": "#!/usr/bin/env -S  python3\n", "p9": "#!/usr/bin/env /usr/bin/python3\n"}
             for name, body in files.items():
                 (d / name).parent.mkdir(parents=True, exist_ok=True)
                 (d / name).write_text(body)
             (d / "link.sh").symlink_to(d / "a.sh")
             (d / "dir.sh").mkdir()
             self.assertEqual({kind: [str(f.relative_to(d)) for f in fs] for kind, fs in scanned_files(d).items()},
-                             {"shell": ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "r", "s", "sub/b", "t", "u", "v",
+                             {"shell": ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "r", "s", "s2", "s3", "s4", "sub/b", "t", "u", "v",
                                         "w", "x/reviews/q.sh"],
-                              "python": ["h", "i.py", "p1.py", "p2", "p3"],
+                              "python": ["h", "i.py", "p1.py", "p2", "p3", "p5", "p7", "p8", "p9"],
                               "workflow": [".github/actions/a/action.yaml", ".github/workflows/w1.yml"]})
 
     # #5538 item 1: the shell a Python program runs, as (source, the (line, builtin) of each hit).
@@ -2280,6 +2285,14 @@ class ImageShellLintTest(unittest.TestCase):
         ('os.popen("exec 3<x")', [(1, "exec")]),
         ('subprocess.getoutput(": >x")', [(1, ":")]),
         ('subprocess.getstatusoutput(": >x")', [(1, ":")]),
+        ('run(["sh", "-c", "-e", ": >x"])', [(1, ":")]),
+        ('run(["bash", "--restricted", ": >x"])', []),
+        ('s = ": >x"\ndef s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nasync def s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nimport s\nrun(["sh", "-c", s])', []),
+        ('run("true", ": >x", shell=True)', []),
+        ('s: str = ": >x"\nrun(["sh", "-c", s])', [(1, ":")]),
+        ('s = "true"\ns = ": >x"\nrun(["sh", "-c", s])', []),
         ('run(["sh", "-c", "true >x"])', []),
         ('run(["sh", ": >x"])', []),
         ('run(["sh", "-e", ": >x"])', []),
@@ -2303,6 +2316,9 @@ class ImageShellLintTest(unittest.TestCase):
         ("steps:\n  - run: >\n      a\n        : >x\n", [(4, ":")]),
         ("steps:\n  - run: a\n      ; : >x\n", [(2, ":")]),
         ("steps:\n  - run: ': >x' # c\n  - run: \"exec 9>y\"\n", [(2, ":"), (3, "exec")]),
+        ("steps:\n  - run: \"exec 9>y\" # c\n", [(2, "exec")]),
+        ("steps:\n  - run: >\n      a\n        b\n      exec 9>x\n", [(5, "exec")]),
+        ("steps:\n  -  run: : >x\n", [(2, ":")]),
         ("steps:\n  - run: 'echo '': >x'''\n", []),
         ("steps:\n  - run: echo # ; : >x\n", []),
         ("steps:\n  - run: true >x\n", []),
