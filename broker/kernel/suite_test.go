@@ -324,3 +324,52 @@ func TestAddedCaseAnchors(t *testing.T) {
 		t.Fatal("a log rolled back past a case opened")
 	}
 }
+
+// A drop's hold starts at the reading's Latest, so a wide reading never
+// shortens the owner's notice (TIM-1, KEY-4).
+// REQ: TIM-1, KEY-4
+func TestTIM1ASecurityDropStartsAtLatest(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.AddSecurityCase(1, secCase("a")))
+	must(t, r.k.AddSecurityCase(1, secCase("b")))
+	n, _ := r.k.State().SecurityDrop("a")
+	wide(r, 10)
+	must(t, r.k.DropSecurityCase(10, "a", key.Approve(r.owner.pass, kernel.SecurityDropHash(n, "a"))))
+	r.boot(11)
+	due := 10 + hour + kernel.GrantHold
+	if ids, dropped := suiteIDs(r.k.State(), due-1); len(ids) != 2 || dropped != 0 {
+		t.Fatalf("in the hold from Latest: %v, %d dropped", ids, dropped)
+	}
+	if ids, dropped := suiteIDs(r.k.State(), due); !reflect.DeepEqual(ids, []string{"b"}) || dropped != 1 {
+		t.Fatalf("after the hold: %v, %d dropped", ids, dropped)
+	}
+}
+
+// A drop is pending until Earliest reaches its end: the owner may still keep
+// the case, and it still fills the suite (TIM-1, KEY-4).
+// REQ: TIM-1, KEY-4
+func TestTIM1ASecurityDropEndsOnEarliest(t *testing.T) {
+	r := newRig(t)
+	for i := range kernel.MaxSecurityCases {
+		id := "c"
+		for n := i; ; n /= 26 {
+			id += string(rune('a' + n%26))
+			if n < 26 {
+				break
+			}
+		}
+		must(t, r.k.AddSecurityCase(1, secCase(id)))
+	}
+	for _, id := range []string{"ca", "cb"} {
+		n, _ := r.k.State().SecurityDrop(id)
+		must(t, r.k.DropSecurityCase(2, id, key.Approve(r.owner.pass, kernel.SecurityDropHash(n, id))))
+	}
+	wide(r, 2+kernel.GrantHold-1)
+	if err := r.k.AddSecurityCase(0, secCase("new")); !errors.Is(err, kernel.ErrSecurityFull) {
+		t.Fatalf("a case dropping by Latest only left room: %v", err)
+	}
+	must(t, r.k.KeepSecurityCase(0, "ca"))
+	if ids, dropped := suiteIDs(r.k.State(), 2+kernel.GrantHold); len(ids) != kernel.MaxSecurityCases-1 || dropped != 1 {
+		t.Fatalf("after the hold: %d cases, %d dropped", len(ids), dropped)
+	}
+}

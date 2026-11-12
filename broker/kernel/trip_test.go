@@ -651,8 +651,9 @@ func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
 // resume. Catches an owner-side breach that stops only one request.
 func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	r := newRig(t)
+	m1 := modelKey(r, "m1", key.LimitSpendTask(100))
 	tb := r.decoys()
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	modelPlan(r, "t1", m1)
 	exhaust(r, "t1", 100)
 	honey, hk, _ := honeyKey(t, tb, "t1")
 	other := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "other"}), 1<<40)
@@ -713,9 +714,10 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 // funding a held plan live while planning is stopped (#4241).
 func TestHoneyKeyAtExtendPausesTheEarlierExtension(t *testing.T) {
 	r := newRig(t)
-	tb := r.decoys()
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	env := envelope(r, 500, 800)
+	m1 := modelKey(r, "m1", key.LimitSpendTask(100))
+	tb := r.decoys()
+	modelPlan(r, "t1", m1)
 	exhaust(r, "t1", 100)
 	ext := extension(r, env, key.LimitSpendTask(300))
 	must(t, r.k.Extend(3, ext, "t1"))
@@ -862,8 +864,9 @@ func TestOwnerPauseAfterTripOutlivesResume(t *testing.T) {
 func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 	for _, op := range []string{kernel.OpExtend, kernel.OpIssue} {
 		r := newRig(t)
+		m1 := modelKey(r, "m1", key.LimitSpendTask(100))
 		tb := r.decoys()
-		modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+		modelPlan(r, "t1", m1)
 		exhaust(r, "t1", 100)
 		honey, hk, _ := honeyKey(t, tb, "t1\xff")
 		var logged key.Key
@@ -909,8 +912,9 @@ func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
 // a cited plan ID pausing an unrelated active plan's keys (#4283 item 5).
 func TestHoneyKeyAtExtendOfAnUnheldPlanPausesOnlyItself(t *testing.T) {
 	r := newRig(t)
+	m1 := modelKey(r, "m1", key.LimitSpendTask(100))
 	tb := r.decoys()
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	modelPlan(r, "t1", m1)
 	_, hk, _ := honeyKey(t, tb, "t1")
 	var rf *key.Refusal
 	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {

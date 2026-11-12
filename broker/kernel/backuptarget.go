@@ -259,7 +259,7 @@ func (s *State) applyBackup(e Entry) error {
 
 // BackupTarget adds t on an anchor's signature c over
 // BackupTargetHash(State.TargetsAdded(), t). It is a widening, so it anchors.
-func (k *Kernel) BackupTarget(now int64, t BackupTarget, c key.Cosign) error {
+func (k *Kernel) BackupTarget(at int64, t BackupTarget, c key.Cosign) error {
 	b := backupTarget{t, c}
 	if !t.addable() {
 		return ErrTarget
@@ -267,25 +267,25 @@ func (k *Kernel) BackupTarget(now int64, t BackupTarget, c key.Cosign) error {
 	if err := k.s.targetOK(b); err != nil {
 		return err
 	}
-	return k.owner(now, TBackupTarget, b)
+	return k.owner(k.read(at), TBackupTarget, b)
 }
 
 // Untarget stops new backups to the current target name. It narrows, so it
 // needs no signature; the target stays listed as removed.
-func (k *Kernel) Untarget(now int64, name string) error {
+func (k *Kernel) Untarget(at int64, name string) error {
 	if t := k.s.target(name); t == nil || t.Removed {
 		return ErrNoTarget
 	}
-	return k.owner(now, TBackupUntarget, backupUntarget{name})
+	return k.owner(k.read(at), TBackupUntarget, backupUntarget{name})
 }
 
 // BackupTaken logs b before its key table leaves, then anchors the head,
 // so a log rollback the anchor catches cannot drop it (LOG-4). The entry
 // is not a widening, so Open keeps it unanchored too: an anchor error
 // leaves it logged.
-func (k *Kernel) BackupTaken(now int64, b BackupTaken) error {
+func (k *Kernel) BackupTaken(at int64, b BackupTaken) error {
 	if err := k.s.takenOK(b, uint64(k.log.Len())+1); err != nil {
 		return err
 	}
-	return k.owner(now, TBackupTaken, b)
+	return k.owner(k.read(at), TBackupTaken, b)
 }

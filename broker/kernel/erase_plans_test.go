@@ -24,6 +24,7 @@ import (
 // by a later entry a crash could lose.
 func TestEraseCancelsTheReadersLaterPlans(t *testing.T) {
 	r := newRig(t)
+	m1 := modelKey(r, "m1", key.LimitSpendTask(100))
 	if _, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestEraseCancelsTheReadersLaterPlans(t *testing.T) {
 		t.Fatalf("the reader's step is %s before the erase, want held", ph)
 	}
 	// After the tick: the rig has no model clerk, so a tick would cancel it.
-	modelPlan(r, "agent/spend", modelKey(r, "m1", key.LimitSpendTask(100)))
+	modelPlan(r, "agent/spend", m1)
 	env := envelope(r, 500, 800)
 	exhaust(r, "agent/spend", 100)
 	n := len(r.k.Log().Entries())

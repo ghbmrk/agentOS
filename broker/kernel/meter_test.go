@@ -77,12 +77,13 @@ func TestUsageOverAnAdmissionIsStillRecorded(t *testing.T) {
 // asked for, never wraps the window's sum back under one (Defect: KEY).
 func TestSpendThatOverflowsIsRefused(t *testing.T) {
 	r := newRig(t)
+	m2 := modelKey(r, "m2", key.LimitSpendTask(100))
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	must(t, r.meter(1, "t1", "api", 1, "provider"))
 	if rf := r.admit(2, "t1", math.MaxInt64); !spendRefused(rf) {
 		t.Fatalf("MaxInt64 after 1 spent: %v", rf)
 	}
-	modelPlan(r, "t2", modelKey(r, "m2", key.LimitSpendTask(100)))
+	modelPlan(r, "t2", m2)
 	must(t, r.meter(3, "t2", "api", math.MaxInt64, "provider"))
 	if rf := r.admit(4, "t2", 1); !spendRefused(rf) {
 		t.Fatalf("1 after MaxInt64 metered: %v", rf)
@@ -217,6 +218,7 @@ func (r *rig) meter(at int64, plan, route string, amount int64, source string) e
 // (LOG-7, #2613 item 1).
 func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 	r := newRig(t)
+	day := modelKey(r, "m2", key.LimitSpendDay(100))
 	k := modelKey(r, "m1", key.LimitSpendTask(100))
 	modelPlan(r, "t1", k)
 	modelPlan(r, "t2", k)
@@ -230,7 +232,6 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 	if _, rf := r.k.AdmitSpend(1, "t1", 101); rf == nil || rf.Code != key.RSpendTask {
 		t.Fatalf("a call that cannot fit once the first settles: %v", rf)
 	}
-	day := modelKey(r, "m2", key.LimitSpendDay(100))
 	modelPlan(r, "d1", day)
 	modelPlan(r, "d2", day)
 	if _, rf := r.k.AdmitSpend(1, "d1", 60); rf != nil {
@@ -271,9 +272,9 @@ func TestAdmissionsReserveTheirWorstCase(t *testing.T) {
 // item 1).
 func TestASettlementChargesTheKeyItWasAdmittedUnder(t *testing.T) {
 	r := newRig(t)
+	env := envelope(r, 500, 800)
 	k := modelKey(r, "m1", key.LimitSpendTask(100))
 	modelPlan(r, "t1", k)
-	env := envelope(r, 500, 800)
 	a, rf := r.k.AdmitSpend(1, "t1", 40)
 	if rf != nil {
 		t.Fatal(rf)
@@ -317,4 +318,34 @@ func sum(us []key.Use) (n int64) {
 		n += u.Amount
 	}
 	return n
+}
+
+// A model call's use ages out of its day from the reading's Latest: under a
+// wide reading, a reservation left unsettled and a metered use each count
+// for a full day of true time (TIM-1, LOG-7).
+// REQ: TIM-1, LOG-7
+func TestTIM1AModelUseAgesFromLatest(t *testing.T) {
+	for _, settle := range []bool{false, true} {
+		r := newRig(t)
+		k := modelKey(r, "m1", key.LimitSpendDay(100))
+		modelPlan(r, "t1", k)
+		modelPlan(r, "t2", k)
+		wide(r, 1)
+		a, rf := r.k.AdmitSpend(1, "t1", 60)
+		if rf != nil {
+			t.Fatal(rf)
+		}
+		if settle {
+			must(t, r.k.Meter(1, a, "api", 60, "provider"))
+		}
+		end := 1 + hour + key.DayMS
+		r.k.UseClock(func() kernel.Reading { return kernel.At(end - 1) })
+		if _, rf := r.k.AdmitSpend(end-1, "t2", 41); rf == nil {
+			t.Fatalf("settled %v: a use logged on [1, 1 + 1 h] aged out of its day before Latest + a day", settle)
+		}
+		r.k.UseClock(func() kernel.Reading { return kernel.At(end) })
+		if _, rf := r.k.AdmitSpend(end, "t2", 41); rf != nil {
+			t.Fatalf("settled %v: the use ages out a day after Latest: %v", settle, rf)
+		}
+	}
 }

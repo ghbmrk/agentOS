@@ -431,12 +431,12 @@ func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int6
 		}
 	}
 	k.keys, k.stores = keys, stores
-	return rep, k.confirmErases(now)
+	return rep, k.confirmErases(k.read(now))
 }
 
 // OpenSubject opens a new subject: a random ID and data key, the key put in
 // the table before subject.opened is logged. An ID is never reopened.
-func (k *Kernel) OpenSubject(now int64) (string, error) {
+func (k *Kernel) OpenSubject(at int64) (string, error) {
 	if k.keys == nil {
 		return "", ErrContentClosed
 	}
@@ -456,7 +456,7 @@ func (k *Kernel) OpenSubject(now int64) (string, error) {
 		return "", err
 	}
 	// A key whose entry is not written is listed by the next OpenContent.
-	if _, err := k.emit(now, TSubjectOpened, subjectOpened{sub, dataKeyID(dk)}); err != nil {
+	if _, err := k.emit(k.read(at), TSubjectOpened, subjectOpened{sub, dataKeyID(dk)}); err != nil {
 		return "", err
 	}
 	return sub, nil
@@ -489,7 +489,7 @@ func (k *Kernel) subjectKey(subject string) (*subjectState, SubjectKey, error) {
 // puts it in store under the hash of its ciphertext, then logs it. An item
 // put but not logged is unreferenced, and unreadable once its subject's key
 // goes.
-func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte) (Hash, error) {
+func (k *Kernel) Seal(at int64, subject, store, class string, plaintext []byte) (Hash, error) {
 	_, dk, err := k.subjectKey(subject)
 	if err != nil {
 		return Hash{}, err
@@ -511,7 +511,7 @@ func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte)
 	if err := cs.Put(h, ct); err != nil {
 		return Hash{}, err
 	}
-	if _, err := k.emit(now, TContentStored, contentStored{subject, store, h, class}); err != nil {
+	if _, err := k.emit(k.read(at), TContentStored, contentStored{subject, store, h, class}); err != nil {
 		return Hash{}, err
 	}
 	return h, nil
@@ -558,7 +558,7 @@ func (k *Kernel) Read(h Hash) ([]byte, error) {
 // first, so a delivery always leaves a record an erase can rewind; when the
 // entry is not written nothing is returned. An erased or unknown item is
 // refused before anything is logged.
-func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
+func (k *Kernel) ReadFor(at int64, h Hash, lineage string) ([]byte, error) {
 	if !validLineage(lineage) {
 		return nil, ErrLineage
 	}
@@ -572,7 +572,7 @@ func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
 	if _, _, err := k.subjectKey(it.subject); err != nil {
 		return nil, err
 	}
-	if _, err := k.emit(now, TContentRead, contentRead{h, lineage}); err != nil {
+	if _, err := k.emit(k.read(at), TContentRead, contentRead{h, lineage}); err != nil {
 		return nil, err
 	}
 	return k.Read(h)
@@ -694,7 +694,8 @@ func (k *Kernel) OpenBackups(b Backups) { k.backups = b }
 // goes when OpenContent runs. Every older backup that gives the subject's
 // key is named StillHeld: the caller re-seals them without the lock
 // (Reseals) and asks Confirm again.
-func (k *Kernel) Erase(now int64, subject string) (Confirmation, error) {
+func (k *Kernel) Erase(at int64, subject string) (Confirmation, error) {
+	now := k.read(at)
 	st := k.s.subjects[subject]
 	switch {
 	case st == nil:
@@ -778,16 +779,16 @@ type (
 	}
 )
 
-// held reports whether the delete of ref was tried and failed too recently.
-// A now before that try (a wall clock stepped back) holds nothing, so a
-// clock correction cannot keep a key on disk past RetryMax.
-func (k *Kernel) held(ref eraseRef, now int64) bool {
+// held reports whether the delete of ref was tried and failed too recently,
+// on Earliest. A now before that try (a wall clock stepped back) holds
+// nothing, so a clock correction cannot keep a key on disk past RetryMax.
+func (k *Kernel) held(ref eraseRef, now Reading) bool {
 	b, ok := k.retry[ref]
-	return ok && b.last <= now && now < b.last+b.wait
+	return ok && b.last <= now.Earliest && now.Earliest < b.last+b.wait
 }
 
 // failed pushes the next try of ref back, doubling its wait.
-func (k *Kernel) failed(ref eraseRef, now int64, err error) {
+func (k *Kernel) failed(ref eraseRef, now Reading, err error) {
 	if k.retry == nil {
 		k.retry = map[eraseRef]backoff{}
 	}
@@ -795,14 +796,14 @@ func (k *Kernel) failed(ref eraseRef, now int64, err error) {
 	if b, ok := k.retry[ref]; ok {
 		w = min(2*b.wait, RetryMax)
 	}
-	k.retry[ref] = backoff{now, w, err}
+	k.retry[ref] = backoff{now.Earliest, w, err}
 }
 
 // confirm deletes subject's key and its items in each store not yet
 // confirmed and not backing off, and logs each that does. One that fails
 // stays unconfirmed and backs off: keyErr is the key delete's error, err a
 // log error.
-func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
+func (k *Kernel) confirm(now Reading, subject string) (keyErr, err error) {
 	st := k.s.subjects[subject]
 	for _, store := range st.unconfirmed() {
 		ref := eraseRef{subject, store}
@@ -839,7 +840,7 @@ func (k *Kernel) confirm(now int64, subject string) (keyErr, err error) {
 
 // confirmErases retries every erase not yet confirmed whose stores are not
 // backing off. Only a log error is returned.
-func (k *Kernel) confirmErases(now int64) error {
+func (k *Kernel) confirmErases(now Reading) error {
 	for _, u := range k.s.Unerased() {
 		if _, err := k.confirm(now, u.Subject); err != nil {
 			return err
@@ -870,7 +871,8 @@ var errNotRun = errors.New("kernel: the re-seal did not run")
 // Reseals hands out a re-seal of each backup that gives an erased
 // subject's key and is neither backing off nor already handed out. One
 // whose Prepare fails backs off.
-func (k *Kernel) Reseals(now int64) []*Reseal {
+func (k *Kernel) Reseals(at int64) []*Reseal {
+	now := k.read(at)
 	if k.backups == nil || k.keys == nil {
 		return nil
 	}
@@ -897,7 +899,8 @@ func (k *Kernel) Reseals(now int64) []*Reseal {
 // Resealed commits r, which Run has run, and backs its backup off from
 // now, the time Run finished, if that fails, unless RetryBackup ran
 // while r was out (#3339).
-func (k *Kernel) Resealed(now int64, r *Reseal) {
+func (k *Kernel) Resealed(at int64, r *Reseal) {
+	now := k.read(at)
 	moved := k.resealing[r.Backup]
 	delete(k.resealing, r.Backup)
 	ref, err := eraseRef{store: r.Backup}, errNotRun
@@ -923,9 +926,9 @@ func (k *Kernel) RetryBackup(backup string) {
 
 // ResealBackups runs every re-seal due in place, for a caller that holds
 // no lock other callers wait on (Tick).
-func (k *Kernel) ResealBackups(now int64) {
-	for _, r := range k.Reseals(now) {
+func (k *Kernel) ResealBackups(at int64) {
+	for _, r := range k.Reseals(at) {
 		r.Run()
-		k.Resealed(now, r)
+		k.Resealed(at, r)
 	}
 }

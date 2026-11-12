@@ -44,7 +44,8 @@ type forgetAsk struct {
 
 // AskForget holds every live subject under label until the owner's YES,
 // and returns the text that asks for it.
-func (k *Kernel) AskForget(now int64, label string) (string, error) {
+func (k *Kernel) AskForget(at int64, label string) (string, error) {
+	now := k.read(at)
 	k.forget = nil
 	if k.s.Stopped {
 		return "", ErrForgetStop
@@ -87,18 +88,19 @@ func (k *Kernel) AskForget(now int64, label string) (string, error) {
 	if _, err := io.ReadFull((*k.log.p).cfg.Rand, b[:]); err != nil {
 		return "", err
 	}
-	k.forget = &forgetAsk{subjects, fmt.Sprintf("%06d", binary.BigEndian.Uint64(b[:])%1_000_000), now + ForgetAskFor}
+	k.forget = &forgetAsk{subjects, fmt.Sprintf("%06d", binary.BigEndian.Uint64(b[:])%1_000_000), now.Earliest + ForgetAskFor}
 	return fmt.Sprintf("Forget %s under “%s”, %s? Reply YES %s to forget it. Any other reply, or none within 10 minutes, forgets nothing.",
 		all, label, items, k.forget.code), nil
 }
 
 // ForgetReply ends the waiting ask and, if reply is "YES <code>" from its
 // text (any case and punctuation) in time, returns its subjects for Erase.
-func (k *Kernel) ForgetReply(now int64, reply string) ([]string, error) {
+func (k *Kernel) ForgetReply(at int64, reply string) ([]string, error) {
+	now := k.read(at)
 	a := k.forget
 	k.forget = nil
 	f := strings.FieldsFunc(strings.ToUpper(reply), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
-	if a == nil || now >= a.until || len(f) != 2 || f[0] != "YES" || subtle.ConstantTimeCompare([]byte(f[1]), []byte(a.code)) != 1 {
+	if a == nil || now.Latest >= a.until || len(f) != 2 || f[0] != "YES" || subtle.ConstantTimeCompare([]byte(f[1]), []byte(a.code)) != 1 {
 		return nil, ErrForgetReply
 	}
 	return a.subjects, nil

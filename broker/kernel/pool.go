@@ -249,7 +249,7 @@ func (s *State) applyPool(e Entry) error {
 		}
 		if s.lowerOK(e.At, b) == nil {
 			p := s.Pools[b.Pool].live(e.At)
-			p.Lowering, p.Changes = &Lowering{b.Reserve, e.At + GrantHold}, p.Changes+1
+			p.Lowering, p.Changes = &Lowering{b.Reserve, e.reading().Latest + GrantHold}, p.Changes+1
 			s.Pools[b.Pool] = p
 		}
 	}
@@ -259,10 +259,10 @@ func (s *State) applyPool(e Entry) error {
 // resetIfDue logs the reopening of each window at the reserve whose reset
 // time the provider gave has passed, so a restart that loses it closes the
 // window again (RES-5, KRN-7).
-func (k *Kernel) resetIfDue(now int64, pool string) error {
+func (k *Kernel) resetIfDue(now Reading, pool string) error {
 	var due []string
 	for id := range k.s.Pools[pool].Windows {
-		if k.s.WindowDue(now, pool, id) {
+		if k.s.WindowDue(now.Earliest, pool, id) {
 			due = append(due, id)
 		}
 	}
@@ -281,7 +281,8 @@ func (k *Kernel) resetIfDue(now int64, pool string) error {
 // out keeps its last figure. A reset time that is missing or already past is
 // replaced by PoolWindowMS from now (the clerk gives the window's declared
 // length first), so a full window always has a way back.
-func (k *Kernel) ReadPool(now int64, pool string, windows []WindowReading) error {
+func (k *Kernel) ReadPool(at int64, pool string, windows []WindowReading) error {
+	now := k.read(at)
 	if len(windows) == 0 {
 		return errors.New("kernel: a reading names a window")
 	}
@@ -295,8 +296,8 @@ func (k *Kernel) ReadPool(now int64, pool string, windows []WindowReading) error
 			return errors.New("kernel: a reading names each window once")
 		}
 		seen[w.Window] = true
-		if w.ResetAt <= now {
-			w.ResetAt = now + PoolWindowMS
+		if w.ResetAt <= now.Earliest {
+			w.ResetAt = now.Latest + PoolWindowMS
 		}
 		rs[i] = w
 	}
@@ -314,15 +315,16 @@ func (k *Kernel) ReadPool(now int64, pool string, windows []WindowReading) error
 // ErrReserveSig and nothing is logged, and a second, one an anchor, when it
 // is big, else ErrNeedsCosign. A signed lowering is logged at once and is
 // live only from now plus GrantHold; a later one replaces it.
-func (k *Kernel) Reserve(now int64, pool string, reserve int64, cos ...key.Cosign) error {
+func (k *Kernel) Reserve(at int64, pool string, reserve int64, cos ...key.Cosign) error {
+	now := k.read(at)
 	if reserve < 0 || reserve > PoolFull {
 		return errors.New("kernel: a reserve is a share of the pool")
 	}
-	if reserve >= k.s.Pools[pool].live(now).Reserve {
+	if reserve >= k.s.Pools[pool].live(now.Earliest).Reserve {
 		return k.owner(now, TReserveUp, poolReserve{pool, reserve})
 	}
 	b := poolLowered{pool, reserve, cos}
-	if err := k.s.lowerOK(now, b); err != nil {
+	if err := k.s.lowerOK(now.Earliest, b); err != nil {
 		return err
 	}
 	return k.owner(now, TReserveDown, b)
@@ -331,7 +333,8 @@ func (k *Kernel) Reserve(now int64, pool string, reserve int64, cos ...key.Cosig
 // AdmitPool refuses work on a pool with a window at the owner's reserve
 // until that window resets. Past the reset time the provider gave, the
 // reopening is logged as a widening.
-func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
+func (k *Kernel) AdmitPool(at int64, pool string) *key.Refusal {
+	now := k.read(at)
 	if (*k.log.p).broken {
 		// The pool may have been reopened by a widening whose anchor failed
 		// (KRN-5, #2613 item 13).
@@ -340,7 +343,7 @@ func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
 	if err := k.resetIfDue(now, pool); err != nil {
 		return &key.Refusal{Code: CPool, Detail: pool + ": " + err.Error()}
 	}
-	if k.s.PoolOpen(now, pool) {
+	if k.s.PoolOpen(now.Earliest, pool) {
 		return nil
 	}
 	return &key.Refusal{Code: CPool, Detail: pool}

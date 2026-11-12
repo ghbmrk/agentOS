@@ -379,3 +379,23 @@ func TestStatusListsCoveredSubmits(t *testing.T) {
 	}
 	r.replays()
 }
+
+// A probe and an unsent step's resend wait until Earliest reaches their
+// time: a wide reading does not hurry them (TIM-1, KRN-7, KRN-8).
+// REQ: TIM-1, KRN-7, KRN-8
+func TestTIM1AProbesAndResendsWaitForEarliest(t *testing.T) {
+	r := newRig(t)
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	must(t, r.k.Answer(1, r.calls(1, 1)[0], kernel.Result{Outcome: kernel.OUnsent}))
+	r.plan("p2", r.ck, st(key.Trash, "m2"))
+	must(t, r.k.Answer(2, r.calls(2, 1)[0], kernel.Result{Outcome: "lost"}))
+	if ph := r.phase("p2").Phase; ph != kernel.PUnknown {
+		t.Fatalf("p2 %s, want unknown", ph)
+	}
+	wide(r, kernel.UnsentWait) // p1 is due at 1 + UnsentWait
+	r.calls(0, 0)
+	wide(r, 1+kernel.ProbeEvery) // p2's probe is due at 2 + ProbeEvery
+	if c := r.calls(0, 1)[0]; c.Kind != kernel.ActDispatch || c.Req.Plan.ID != "p1" {
+		t.Fatalf("call %+v, want p1's resend alone", c)
+	}
+}

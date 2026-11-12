@@ -57,6 +57,25 @@ var sweep = sync.OnceValues(func() (Result, error) {
 					traced[op]++
 				}
 			}
+			// The clock faults trace the offsets they set: a step back of
+			// 1 to 48 hours, a disagreement of 0 to 3 hours each way.
+			_, rest, _ := strings.Cut(l, " ")
+			if h, ok := strings.CutPrefix(rest, "kernel clock steps back "); ok {
+				traced["steps back"]++
+				if n, err := strconv.Atoi(strings.TrimSuffix(h, "h")); err != nil || n < 1 || n > 48 {
+					traced["clock offsets out of range"]++
+				}
+			}
+			if d, ok := strings.CutPrefix(rest, "clock sources disagree by -"); ok {
+				e, la, _ := strings.Cut(strings.TrimSuffix(d, "h"), "h +")
+				ne, err := strconv.Atoi(e)
+				nl, err2 := strconv.Atoi(la)
+				if err != nil || err2 != nil || ne < 0 || ne > 3 || nl < 0 || nl > 3 {
+					traced["clock offsets out of range"]++
+				}
+				traced["sources behind"] += min(ne, 1)
+				traced["sources ahead"] += min(nl, 1)
+			}
 		}
 	}
 	return sum, nil
@@ -89,13 +108,47 @@ func TestSameSeedGivesTheSameLog(t *testing.T) {
 	}
 }
 
+// Each mutant is caught within 100 seeds, on a seed the unmutated sim
+// passes, so a fault of the sim's own is never counted as a catch. The
+// seeds run four at a time, each run on its own state, so the race build's
+// run stays inside its timeout. Seed 75 at 200 ops once failed unmutated: the
+// cut-off judged a grant's hold on the sim's clock, not the kernel's.
 func TestMutantsAreCaught(t *testing.T) {
-	for _, m := range []Mutant{MutantClerkTrusts, MutantNoDedupe} {
-		caught := false
-		for seed := 0; seed < 100 && !caught; seed++ {
-			_, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: m})
-			caught = err != nil
+	var clean [100]func() error
+	for i := range clean {
+		clean[i] = sync.OnceValue(func() error { _, err := Run(Config{Seed: uint64(i), Ops: 200}); return err })
+	}
+	if err := clean[75](); err != nil {
+		t.Fatalf("seed 75 unmutated: %v", err)
+	}
+	for _, m := range []Mutant{MutantClerkTrusts, MutantNoDedupe, MutantNoClock} {
+		var mu sync.Mutex
+		next, caught := 0, false
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				for {
+					mu.Lock()
+					seed := next
+					next++
+					done := caught || seed >= 100
+					mu.Unlock()
+					if done {
+						return
+					}
+					if _, err := Run(Config{Seed: uint64(seed), Ops: 200, Mutant: m}); err != nil {
+						if base := clean[seed](); base != nil {
+							t.Errorf("seed %d fails unmutated: %v", seed, base)
+							continue
+						}
+						mu.Lock()
+						caught = true
+						mu.Unlock()
+					}
+				}
+			})
 		}
+		wg.Wait()
 		if !caught {
 			t.Errorf("mutant %q survived 100 seeds", m)
 		}
@@ -135,10 +188,16 @@ func TestSweepFaultsTakeEffect(t *testing.T) {
 		"traced RESUMEs at once":                       traced["resume at once"],
 		"traced task opens":                            traced["open task"],
 		"traced task ends":                             traced["end task"],
+		"kernel clock steps back":                      traced["steps back"],
+		"a guard source behind the kernel's clock":     traced["sources behind"],
+		"a guard source ahead of the kernel's clock":   traced["sources ahead"],
 	} {
 		if n <= 0 {
 			t.Errorf("the sweep never reached: %s", name)
 		}
+	}
+	if n := traced["clock offsets out of range"]; n > 0 {
+		t.Errorf("%d clock faults set an offset out of their range", n)
 	}
 	// Half the STOPs that land are resumed at once, and each such RESUME is
 	// logged right after its STOP (taskOp).

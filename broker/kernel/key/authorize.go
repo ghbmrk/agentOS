@@ -57,7 +57,11 @@ type Changes struct {
 
 // Context is everything Authorize reads besides the key and the step.
 type Context struct {
-	Now     int64 // unix ms
+	Now int64 // unix ms: the earliest the time may be
+	// Late is the latest the time may be (TIM-1); below Now it is Now. An
+	// expiry is past once Late reaches it, so a clock that may be behind
+	// keeps no key alive; a use ages out of a day only by Now.
+	Late    int64
 	Changes *Changes
 	Ledger  Ledger
 }
@@ -120,7 +124,7 @@ func (v *Verified) Live(c Context) *Refusal {
 			return refuse(RPaused, "%s", id)
 		}
 	}
-	if l := v.Limits; l.NotAfter != nil && c.Now >= *l.NotAfter {
+	if l := v.Limits; l.NotAfter != nil && max(c.Now, c.Late) >= *l.NotAfter {
 		return refuse(RExpired, "expired at %d", *l.NotAfter)
 	}
 	return nil

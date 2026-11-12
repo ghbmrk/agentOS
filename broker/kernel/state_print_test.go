@@ -27,6 +27,7 @@ var logKey = [32]byte{0x5e, 0xc7, 0x3e, 0x7a, 0x11, 0x0f, 0xa5, 0x5e, 0xc7, 0x3e
 // (DECOY-a-7, CLK-1, #4505, #4574).
 func TestStatePrintsNoDecoy(t *testing.T) {
 	r := newRig(t)
+	m1 := modelKey(r, "m1", key.LimitSpendTask(100))
 	tb := r.decoys()
 	secrets := [][]byte{r.head.priv, logKey[:]}
 	for _, e := range tb.Entries() {
@@ -52,7 +53,7 @@ func TestStatePrintsNoDecoy(t *testing.T) {
 
 	// After honey-key trips at a plan, at Extend and in an Issue batch, the
 	// paused scope and the trips name no honey key's ID.
-	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	modelPlan(r, "t1", m1)
 	exhaust(r, "t1", 100)
 	honey, hk, intruder := honeyKey(t, tb, "t1")
 	must(t, r.k.Submit(1, kernel.SignPlan(kernel.Plan{ID: "h", Key: hk, Steps: []kernel.PlanStep{st(key.Trash, "m")}}, intruder.priv)))

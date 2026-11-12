@@ -443,6 +443,19 @@ func TestOwnerApprovedFollowRunsOnce(t *testing.T) {
 // owner's own approval of that switch, never a standing key's.
 func TestUnapprovedFollowRefused(t *testing.T) {
 	r := newClerkRig(t)
+	// The standing key is granted first, at the rig's setup time: the kernel
+	// logs nothing before its last entry (TIM-1).
+	hpub, hpriv := seedPair(2)
+	_, opriv := seedPair(1)
+	_, bpriv := seedPair(12)
+	ck, err := key.ClerkKey(r.root, key.Ed25519Signer(opriv), hpub, r.at, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := []key.Key{ck}
+	if err := r.k.Issue(r.at, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
+		t.Fatal(err)
+	}
 	d := r.describe(r.fork)
 	unchanged := func(what string) {
 		t.Helper()
@@ -463,17 +476,6 @@ func TestUnapprovedFollowRefused(t *testing.T) {
 		t.Fatalf("a stranger's plan ran: %+v", st)
 	}
 	unchanged("unsigned")
-	hpub, hpriv := seedPair(2)
-	_, opriv := seedPair(1)
-	_, bpriv := seedPair(12)
-	ck, err := key.ClerkKey(r.root, key.Ed25519Signer(opriv), hpub, r.at, 1<<40)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch := []key.Key{ck}
-	if err := r.k.Issue(r.at, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
-		t.Fatal(err)
-	}
 	st, err := r.run(kernel.SignPlan(kernel.Plan{ID: "standing", Key: ck, Steps: []kernel.PlanStep{followclerk.Step(d, "Acme")}}, hpriv))
 	// No passkey approved the step, so it waits its worth (KEY-9) before the
 	// clerk refuses it (follow's TestStepWithoutOwnerApprovalRefused).

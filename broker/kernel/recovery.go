@@ -91,7 +91,7 @@ func (s *State) applyRotate(e Entry) error {
 // RouteLost. A phone passkey's, a missing or another change's signature is
 // ErrRotateSig and logs nothing. It is a widening, so it anchors, and a
 // failed anchor is returned: the caller then signs no approval.
-func (k *Kernel) RecoveryRotate(now int64, old, next string, c key.Cosign) error {
+func (k *Kernel) RecoveryRotate(at int64, old, next string, c key.Cosign) error {
 	b := recoveryRotate{Route: RouteCard, Old: old, Next: next, Cosign: c}
 	if next == "" {
 		b.Route = RouteLost
@@ -99,7 +99,7 @@ func (k *Kernel) RecoveryRotate(now int64, old, next string, c key.Cosign) error
 	if err := k.s.rotateOK(b); err != nil {
 		return err
 	}
-	return k.owner(now, TRecoveryRotate, b)
+	return k.owner(k.read(at), TRecoveryRotate, b)
 }
 
 // DomainRecoveryCard starts the message an anchor signs to see the

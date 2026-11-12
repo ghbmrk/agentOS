@@ -453,3 +453,78 @@ func ownDir(t *testing.T) string {
 	}
 	return d
 }
+
+// The kernel process's Earliest runs on the monotonic clock from the later of
+// the log's last time and the box clock at the start; the box clock raises
+// only Latest. A start behind the log reads the log's time and moves on, and
+// a step of the box clock while running, back or forward, leaves Earliest
+// where the monotonic clock has it (TIM-1, KEY-7, KEY-8, #5147).
+//
+// REQ: TIM-1, KEY-7, KEY-8
+func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	l, err := kernel.Open(kernel.Config{Store: &kernel.MemStore{}, Anchor: &kernel.MemAnchor{}, Pub: pub, Sign: priv, Rand: rand.Reader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const last = int64(1_000_000_000_000)
+	if _, err := l.Append(last, kernel.TStop, 1, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	box := int64(0) // a flat CMOS battery: the clock restarted in the past
+	c := onLog(l, func() kernel.Reading { return kernel.At(box) })
+	if r := c(); r.Earliest < last || r.Latest < r.Earliest {
+		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
+	}
+	// The monotonic clock carries it on: a stopped time spins to the test's timeout.
+	for r := c(); r.Earliest == last; r = c() {
+	}
+	box = 3 * last // a forward step while running
+	if r := c(); r.Earliest >= 2*last || r.Latest != box {
+		t.Fatalf("a forward step read %+v: it moved Earliest, or Latest is not the box clock", r)
+	}
+	box = 0 // and back
+	if r := c(); r.Earliest <= last || r.Latest != r.Earliest {
+		t.Fatalf("a step back read %+v", r)
+	}
+	box = 5 * last // a start ahead of the log starts there
+	if r := onLog(l, func() kernel.Reading { return kernel.At(box) })(); r.Earliest < box {
+		t.Fatalf("a start ahead of the log read %+v", r)
+	}
+	// A source whose Latest is past its Earliest starts at its Latest, and
+	// Latest follows the source's Latest.
+	src := kernel.Reading{Earliest: last, Latest: 6 * last}
+	w := onLog(l, func() kernel.Reading { return src })
+	if r := w(); r.Earliest < 6*last {
+		t.Fatalf("a wide source at the start read %+v: Earliest is not its Latest", r)
+	}
+	src = kernel.Reading{Earliest: 7 * last, Latest: 8 * last}
+	if r := w(); r.Latest != 8*last {
+		t.Fatalf("a wide source while running read %+v: Latest is not its Latest", r)
+	}
+}
+
+// OpenKernel reads a configured clock through onLog: a forward step of the
+// box clock after boot does not move the time the kernel logs at (TIM-1).
+//
+// REQ: TIM-1, KEY-8
+func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	box := b.now
+	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
+	b.restart()
+	box = 1 << 50 // a forward step while running
+	err := b.h.With(func(k *kernel.Kernel) error {
+		if err := k.Stop(b.now); err != nil {
+			return err
+		}
+		es := k.Log().Entries()
+		if at := es[len(es)-1].At; at >= box {
+			t.Fatalf("a forward step of the box clock moved the logged time to %d", at)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

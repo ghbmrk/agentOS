@@ -83,16 +83,17 @@ func (p *power) day() int64 {
 
 type holderAt struct{ clerk, holder string }
 
-// powers folds the grants live at at, those still in their hold too when
-// pending, and keys, into each holder's power. A paused grant is none.
-func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*power {
+// powers folds the grants live by at.Earliest and not lapsed by at.Latest,
+// those still in their hold too when pending, and keys, into each holder's
+// power. A paused grant is none.
+func (s *State) powers(at Reading, pending bool, keys []key.Key) map[holderAt]*power {
 	out := map[holderAt]*power{}
 	add := func(k key.Key) {
 		w := holderAt{k.Root.Clerk, ""}
 		day := int64(0)
 		if len(k.Links) > 0 {
 			exp := lapse(k.Links[0].Caveats)
-			if exp != nil && *exp <= at {
+			if exp != nil && *exp <= at.Latest {
 				return
 			}
 			w.holder = string(k.Links[0].Holder)
@@ -109,7 +110,7 @@ func (s *State) powers(at int64, pending bool, keys []key.Key) map[holderAt]*pow
 		p.days[rootOf(k)] = max(p.days[rootOf(k)], day)
 	}
 	for id, g := range s.Grants {
-		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || s.Changes.Paused[id] || g.From > at && !pending {
+		if s.Changes.Revoked[id] || s.Changes.Revoked[rootOf(g.Key)] || s.Changes.Paused[id] || g.From > at.Earliest && !pending {
 			continue
 		}
 		add(g.Key)
@@ -141,7 +142,7 @@ func spendDay(cs []key.Caveat) int64 {
 // would have adds the grants still in their hold, so raises in one hold
 // cannot each pass as small: a renewal's cap replaces its root's, and a new
 // root's adds to the budget.
-func (s *State) big(keys []key.Key, at int64) bool {
+func (s *State) big(keys []key.Key, at Reading) bool {
 	before := s.powers(at, false, nil)
 	for w, a := range s.powers(at, true, keys) {
 		b := before[w]
@@ -164,7 +165,7 @@ func (s *State) big(keys []key.Key, at int64) bool {
 // proves (KEY-9): a new key of rank 3 (identity, safety or uncapped money)
 // asks the hardware key, so its batch needs the co-sign a big one does. A
 // grant already in the log or a same-limit renewal widens nothing.
-func (s *State) priced(keys []key.Key, at int64) bool {
+func (s *State) priced(keys []key.Key, at Reading) bool {
 	return slices.ContainsFunc(keys, func(k key.Key) bool {
 		w, _ := key.Worth(k) // a malformed key is worth the most
 		_, had := s.Grants[k.Tip()]
@@ -205,11 +206,15 @@ func (s *State) lineOK(b lineSet) error {
 // OneOffLine is the most a one-off under root may spend without a second
 // passkey: the line times the largest daily cap of a live clerk key under
 // it, so with none, any spend needs one.
-func (s *State) OneOffLine(root key.ID, now int64) int64 {
+func (s *State) OneOffLine(root key.ID, now int64) int64 { return s.oneOffLine(root, At(now)) }
+
+// oneOffLine is OneOffLine at a reading: a grant counts once Earliest is past
+// its hold and until Latest reaches its expiry.
+func (s *State) oneOffLine(root key.ID, now Reading) int64 {
 	day := int64(0)
 	for id, g := range s.Grants {
-		if len(g.Key.Links) == 1 && rootOf(g.Key) == root && g.From <= now && !s.Changes.Revoked[id] && !s.Changes.Revoked[root] {
-			if exp := lapse(g.Key.Links[0].Caveats); exp != nil && *exp > now {
+		if len(g.Key.Links) == 1 && rootOf(g.Key) == root && g.From <= now.Earliest && !s.Changes.Revoked[id] && !s.Changes.Revoked[root] {
+			if exp := lapse(g.Key.Links[0].Caveats); exp != nil && *exp > now.Latest {
 				day = max(day, spendDay(g.Key.Links[0].Caveats))
 			}
 		}
@@ -223,6 +228,11 @@ func (s *State) OneOffLine(root key.ID, now int64) int64 {
 // OneOff refuses a one-off under a bare root whose spend is past the line
 // unless a second passkey, one of the two an anchor, co-signed it.
 func OneOff(v View, owners, anchors []key.PublicKey, p Plan, now int64) *key.Refusal {
+	return oneOff(v.OneOffLine(p.Key.Tip(), now), owners, anchors, p)
+}
+
+// oneOff is OneOff against line, the root's OneOffLine.
+func oneOff(line int64, owners, anchors []key.PublicKey, p Plan) *key.Refusal {
 	if len(p.Key.Links) > 0 {
 		return nil
 	}
@@ -230,7 +240,7 @@ func OneOff(v View, owners, anchors []key.PublicKey, p Plan, now int64) *key.Ref
 	for i := range p.Steps {
 		total = min(total+min(max(p.Step(i).Amount, 0), math.MaxInt64/2), math.MaxInt64/2) // both halves, so no wrap
 	}
-	if total <= v.OneOffLine(p.Key.Tip(), now) {
+	if total <= line {
 		return nil
 	}
 	signer := key.UseSigner(p.Key, owners, p.use(), p.Sig)
