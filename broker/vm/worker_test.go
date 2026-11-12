@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -890,5 +891,119 @@ func TestOP6HeldForkAndRollbackStartNothing(t *testing.T) {
 	}
 	if _, err := e.m.Fork(resume, "wk-a1", []string{"wk-f1"}); err != nil || !admitted("wk-f1") {
 		t.Fatalf("fork under a false hold: %v, admitted %v", err, admitted("wk-f1"))
+	}
+}
+
+// A fork held before its checkpoint never pauses the source; one held, or
+// failing, after it leaves no checkpoint and gives the source its newest
+// snapshot back, unless a fork that could not be undone still uses it
+// (STOP-queued-start-fu).
+func TestOP6HeldForkPausesNothingAndKeepsNoCheckpoint(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a1", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	base, err := e.m.Checkpoint(bg, "wk-a1")
+	must(t, err)
+	var paused, held atomic.Bool
+	e.rt.onPause = func(string) { paused.Store(true) }
+	hold := WithHold(bg, held.Load)
+	same := func(what string) {
+		t.Helper()
+		ss := e.m.Snapshots("wk-a1")
+		w, _ := e.m.Get("wk-a1")
+		if len(ss) != 1 || ss[0].ID != base.ID || w.Last != base.ID {
+			t.Fatalf("%s: snapshots %v, last %q; want only %s", what, ss, w.Last, base.ID)
+		}
+		for _, f := range []string{"wk-f1", "wk-f2"} {
+			if _, err := e.m.Get(f); err == nil {
+				t.Fatalf("%s: left %s", what, f)
+			}
+		}
+	}
+
+	held.Store(true)
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) || paused.Load() {
+		t.Fatalf("held fork: %v, paused %v", err, paused.Load())
+	}
+	same("held before the checkpoint")
+
+	held.Store(false)
+	e.rt.onPause = func(string) { held.Store(true) }
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) {
+		t.Fatalf("fork held after the checkpoint: %v", err)
+	}
+	same("held after the checkpoint")
+
+	held.Store(false)
+	e.rt.onPause = nil
+	e.rt.onStart = func(id string) {
+		if id == "wk-f1" {
+			held.Store(true)
+		}
+	}
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) {
+		t.Fatalf("fork held after one fork started: %v", err)
+	}
+	same("held after one fork started")
+
+	held.Store(false)
+	e.rt.onStart = nil
+	e.rt.failNext = errors.New("fake: start failed")
+	if _, err := e.m.Fork(bg, "wk-a1", []string{"wk-f1"}); err == nil {
+		t.Fatal("a fork whose start failed succeeded")
+	}
+	same("start failed")
+
+	// A started fork that cannot be undone keeps the checkpoint it runs
+	// from, and the refusal says the undo failed beside the hold.
+	e.rt.onStart = func(id string) {
+		if id == "wk-f1" {
+			held.Store(true)
+		}
+	}
+	e.rt.refuseKill = errors.New("fake: kill refused")
+	_, err = e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"})
+	if !errors.Is(err, ErrHeld) || err == ErrHeld || !strings.Contains(err.Error(), "undoing fork wk-f1") {
+		t.Fatalf("fork held with an undo that failed: %v", err)
+	}
+	f1, gerr := e.m.Get("wk-f1")
+	if gerr != nil || f1.ForkBase == "" {
+		t.Fatalf("the fork not undone: %v, %+v", gerr, f1)
+	}
+	if _, err := e.m.Snapshot(f1.ForkBase); err != nil {
+		t.Fatalf("the base of a fork not undone was dropped: %v", err)
+	}
+}
+
+// A wake whose context is held starts nothing, restored or cold, and keeps
+// the sleep checkpoint, so the wake after RESUME still restores memory
+// (STOP-queued-start-fu).
+func TestOP6HeldWakeStartsNothingAndKeepsTheCheckpoint(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("agent", admission.Foreground, 1600)
+	e.rt.work("agent", 7)
+	cp := sleep(t, e, "agent")
+	stop := WithHold(bg, func() bool { return true })
+	asleep := func(what string) {
+		t.Helper()
+		if mc, _ := e.m.Get("agent"); mc.State == Running {
+			t.Fatalf("%s started the machine", what)
+		}
+		if _, ok := e.rt.memOf("agent"); ok {
+			t.Fatalf("%s left the guest running", what)
+		}
+	}
+	if w, err := e.m.ResumeFromCheckpoint(stop, "agent", cp.ID); !errors.Is(err, ErrHeld) || w.Restored || w.Cold != "" {
+		t.Fatalf("held restore: %+v, %v", w, err)
+	}
+	asleep("a held restore")
+	if w, err := e.m.ResumeFromCheckpoint(stop, "agent", "s-none"); !errors.Is(err, ErrHeld) || w.Restored {
+		t.Fatalf("held cold start: %+v, %v", w, err)
+	}
+	asleep("a held cold start")
+	w, err := e.m.ResumeFromCheckpoint(bg, "agent", cp.ID)
+	if mem, _ := e.rt.memOf("agent"); err != nil || !w.Restored || mem != 7 {
+		t.Fatalf("wake after RESUME: %+v, %v, memory %d", w, err, mem)
 	}
 }

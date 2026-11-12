@@ -33,6 +33,8 @@ import (
 )
 
 // Machines is the part of the machine manager (vm.Manager) the tools use.
+// An implementation passes each call's context on, never a fresh one: STOP
+// rides it as vm.WithHold, and a dropped hold fails open with no error.
 type Machines interface {
 	Get(id string) (vm.Machine, error)
 	TryGet(id string) (vm.Machine, bool)
@@ -466,7 +468,7 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	w, err := t.M.CreateWorker(vm.WithHold(ctx, t.Stopped), id, c.lineage, s)
 	made = err == nil
 	if err != nil {
-		return nil, startErr(a.Name, err)
+		return nil, startErr(c, toolCreate, a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "label": w.Label.String(), "mem_mb": w.Spec.MemMB}, nil
 }
@@ -729,7 +731,7 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	s, err := t.M.Fork(vm.WithHold(ctx, t.Stopped), w.ID, ids)
 	made = err == nil
 	if err != nil {
-		return nil, startErr(a.Name, err)
+		return nil, startErr(c, toolFork, a.Name, err)
 	}
 	out := map[string]any{"snapshot": s.ID, "workers": a.Into}
 	if a.UpToFit {
@@ -789,15 +791,20 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 	}
 	// Asked again at the restore, as for a fork (STOP-queued-start).
 	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
-		return nil, startErr(a.Name, err)
+		return nil, startErr(c, toolRollback, a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil
 }
 
-// startErr says what to do when admission has no room (UX-146-2).
-func startErr(name string, err error) error {
+// startErr says what to do when admission has no room (UX-146-2). A STOP
+// refusal that came with another failure, such as undoing a fork that had
+// started, says that failure too, as a ref (STOP-queued-start-fu UX 4).
+func startErr(c caller, tool, name string, err error) error {
 	if errors.Is(err, vm.ErrHeld) {
-		return errStartStopped
+		if err == vm.ErrHeld {
+			return errStartStopped
+		}
+		return say("%s; undoing what had started %s", errStartStopped, logged(c.machine, tool, err))
 	}
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
 		return say("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", named(name))

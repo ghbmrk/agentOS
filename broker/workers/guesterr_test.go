@@ -323,3 +323,25 @@ func TestTheGuardCatchesAnErrorPassedAsText(t *testing.T) {
 		}
 	}
 }
+
+// A STOP refusal alone reads as the STOP text; one that came with another
+// failure, such as undoing a fork that had started, also gives a ref whose
+// log line has that failure, and no host detail (STOP-queued-start-fu UX 4).
+func TestStopRefusalSaysAnUndoThatFailed(t *testing.T) {
+	logged := captureLog(t)
+	c := caller{machine: "agent"}
+	if err := startErr(c, toolFork, "w", vm.ErrHeld); err != errStartStopped {
+		t.Fatalf("STOP alone: %v", err)
+	}
+	undo := &os.PathError{Op: "kill", Path: canary, Err: syscall.EIO}
+	got := guestErr("agent", toolFork, startErr(c, toolFork, "w", fmt.Errorf("%w; undoing fork x: %w", vm.ErrHeld, undo))).Error()
+	re := regexp.MustCompile(`^` + regexp.QuoteMeta(errStartStopped.s) + `; undoing what had started failed \(ref ([0-9a-f]{8})\); the broker's log has the detail$`)
+	mm := re.FindStringSubmatch(got)
+	if mm == nil {
+		t.Fatalf("STOP with a failed undo: %q", got)
+	}
+	noLeak(t, "the answer", got)
+	if !strings.Contains(logged.String(), mm[1]) || !strings.Contains(logged.String(), canary) {
+		t.Fatalf("log lacks the ref or the undo's detail: %s", logged)
+	}
+}
