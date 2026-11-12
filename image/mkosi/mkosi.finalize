@@ -356,13 +356,33 @@ UNIT_KEYS = frozenset((
     "Unit", "UnsetEnvironment", "UpheldBy", "Upholds", "User", "UtmpIdentifier", "UtmpMode", "WakeSystem",
     "WantedBy", "Wants", "WantsMountsFor", "WatchdogSec", "WatchdogSignal", "What", "Where", "WorkingDirectory",
     "Writable"))
+# #5588 (Security on #5584): the [Install] keys. load-fragment-gperf.gperf.in holds them with a NULL parser (PID 1
+# ignores them, so they sit in UNIT_KEYS with no parser to read a refusal against); systemctl enable parses them in
+# systemd NAME_ONLY_SYSTEMD's src/shared/install.c (unit_file_load's items[]), read once with what each names:
+#   grep -A8 'ConfigTableItem items\[\]' src/shared/install.c   (read at v257.13, the Debian pool's v257 source)
+# None names a host path: install_name_printf expands each word, and the result must pass unit_name_is_valid
+# (install_info_add, install_info_symlink_wants), unit_instance_is_valid (config_parse_default_instance) or
+# unit_file_verify_alias, whose only '/' form is a "<unit>.wants/" or "<unit>.requires/" link, made under the unit
+# directory. A refusal on one says what it names and never offers the way onto NAME_ONLY_KEYS (value_fix).
+INSTALL_KEYS = {
+    "Alias": "another name for this unit, or a <unit>.wants/ or <unit>.requires/ link to it in the unit directory",
+    "WantedBy": "units whose .wants/ directory systemctl enable links this unit into",
+    "RequiredBy": "units whose .requires/ directory systemctl enable links this unit into",
+    "UpheldBy": "units whose .upholds/ directory systemctl enable links this unit into",
+    "DefaultInstance": "the instance name systemctl enable gives this template",
+    "Also": "units systemctl enable enables with this one",
+}
 
 
 def value_fix(key):
     """#5253, #5547, #5552: the clause a #5167 refusal of a KEY= value in a unit file ends with. The PID1_NAMES remedy
     is offered only for a key on NAME_ONLY_KEYS, and states its bar: the systemd source line, quoted as proof. Any
     other key off UNIT_KEYS is told the way onto NAME_ONLY_KEYS, its parser and the code that uses the value as
-    proof (#5557, #5191); a key on UNIT_KEYS gets the plain-path fix alone (#5191)."""
+    proof (#5557, #5191); a key on UNIT_KEYS gets the plain-path fix alone (#5191), and an [Install] key
+    (INSTALL_KEYS) is told what it names, by install.c, and never the route (#5588)."""
+    if key in INSTALL_KEYS:
+        return ("; write %s= as plain names, with no specifier, quote, escape or '/': it names %s, never a host "
+                "path (systemd v%s's install.c; PID 1 ignores it)" % (key, INSTALL_KEYS[key], NAME_ONLY_SYSTEMD))
     fix = "; write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it names one)" % key
     if key in NAME_ONLY_KEYS:
         return fix + (", or, if %s= never names a host path, add %s to PID1_NAMES, quoting in the change as proof the "
