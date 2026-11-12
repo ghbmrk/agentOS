@@ -1547,8 +1547,7 @@ class DriveIdTest(unittest.TestCase):
 # read). A command is flagged when, after leading reserved words, 'function', 'time -p' and
 # assignments, its command word is a special builtin and it carries a redirection that can fail
 # (closing an fd with >&- or <&- cannot; a here-document can, since bash may write it to a temporary
-# file). An exec that runs a command is not flagged: a failed exec exits the shell too, so no handler
-# runs either way. The scan reads every shell file outside the record directories, and the shell
+# file). The scan reads every shell file outside the record directories, and the shell
 # that Python files and workflows hold (#5538). SHELL_LIMITS names what the lint does not read, and
 # the failure message repeats it.
 SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
@@ -1556,17 +1555,20 @@ SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
 SHELL_META = " \t\n;&|()<>"
 SHELL_REDIR = re.compile(r"&?[<>]+[&|]?")
 SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
-SHELL_LIMITS = ("The lint reads shell files (*.sh, or a sh, bash, dash, ash or ksh #! line, also through env "
-                "or busybox), the shell a Python file runs (an argv literal with a shell, its options and -c; "
-                "shell=True; os.system, os.popen, subprocess.getoutput) when the script is a string literal or a "
-                "name bound once in the file to one, and the run: steps under .github/ (as sh or bash). It does "
-                "not read files in record directories (reviews/, briefs/ and the rest in tools/ci_scope.py), since "
-                "listing one counts as reading records (tests/records_audit.py); a script built at run time (a "
-                "format, a +, an f-string, a parameter) or held in any other string; aliases or functions named "
-                "like a builtin; the text that eval, sh -c or a trap runs inside shell; escapes that spell a name "
-                "in $'...'; or a case whose 'in' is on a later line. It reads an exec whose operands expand to "
-                "nothing as running a command, and a ' inside \"${...}\" as dash does (as text), not as bash does "
-                "(as a quote).")
+SHELL_LIMITS = """What the lint reads and does not read:
+- reads: shell files (*.sh, or a sh, bash, dash, ash or ksh #! line, also through env or busybox).
+- reads: the shell a Python file runs (an argv literal with a shell, its options and -c; shell=True; os.system,
+  os.popen, subprocess.getoutput), when the script is a string literal or a name bound once in the file to one.
+- reads: the run: steps of the workflows and actions under .github/, as sh or bash.
+- does not read: files in record directories (reviews/, briefs/ and the rest in tools/ci_scope.py), since
+  listing one counts as reading records (tests/records_audit.py).
+- does not read: a script built at run time (a format, a +, an f-string, a parameter) or held in any other string.
+- does not read: aliases or functions named like a builtin, or the text that eval, sh -c or a trap runs
+  inside shell.
+- does not read: escapes that spell a name in $'...' (exec spelled $'\\x65xec'), or a case whose 'in' is on
+  a later line.
+- reads as dash does: in "${a:-'}'}" a ' is text, so the first } ends the expansion (bash reads '}' as a
+  quote)."""
 
 
 def command_words(words):
@@ -1797,7 +1799,7 @@ def redirected_specials(text):
     hits = set()
     for words, redirected, start in ShellReader(text).commands:
         cmd = command_words(words)
-        if redirected and cmd and cmd[0] in SPECIAL_BUILTINS and not (cmd[0] == "exec" and len(cmd) > 1):
+        if redirected and cmd and cmd[0] in SPECIAL_BUILTINS:
             hits.add((bisect.bisect_right(lines, start), cmd[0]))
     return sorted(hits)
 
@@ -2082,6 +2084,10 @@ class ImageShellLintTest(unittest.TestCase):
         'v=`echo \\`: >x\\``',
         'v=`echo \\`a \\\\\\`: >x\\\\\\`\\``',
         'v="`echo \\"\\`: >x\\`\\"`"',
+        # An exec that runs a command too: bash (not in POSIX mode) runs the handler after a failed
+        # redirect there, while dash exits.
+        'exec cat >x',
+        'exec "$@" 0</dev/null 2>&1',
     )
     CLEAN = (
         '#!/bin/sh',
@@ -2150,9 +2156,7 @@ class ImageShellLintTest(unittest.TestCase):
         'case $x in a|exec) ;; *) ;; esac',
         'v="$(case x in a) echo \'"\';; esac) : >f"',
         'case $x in a) y;; esac >f',
-        # #5538: an exec that runs a command; &> after a command; the 'function name' form; nested backquotes.
-        'exec cat >x',
-        'exec "$@" 0</dev/null 2>&1',
+        # #5538: &> after a command; the 'function name' form; nested backquotes.
         'a &>x',
         'a &>>x :',
         'function exec { true >x; }',
@@ -2344,16 +2348,18 @@ class ImageShellLintTest(unittest.TestCase):
                 rel = f.relative_to(ROOT)
                 text = f.read_text(errors="replace").split("\n")
                 scripts, bad = file_scripts(f, kind)
-                unread += ["%s:%d" % (rel, n) for n in bad]
+                unread += ["%s:%d: run: a quoted value on more than one line" % (rel, n) for n in bad]
                 if kind == "workflow":
                     # Each run: is read as sh or bash: a step that names another shell needs its own reader.
-                    unread += ["%s:%d: shell: %s" % (rel, n, m.group(1)) for n, line in enumerate(text, 1)
+                    unread += ["%s:%d: shell: %s is not sh or bash" % (rel, n, m.group(1)) for n, line in enumerate(text, 1)
                                for m in [SHELL_KEY.match(line)] if m and os.path.basename(m.group(1)) not in SHELL_NAMES]
                 for script, lines in scripts:
                     for n, name in redirected_specials(script):
                         n = lines[n - 1]
                         hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
-        self.assertEqual(unread, [], "the lint cannot read these run: steps")
+        self.assertEqual(unread, [], "the lint cannot read these steps. A quoted run: value continued on another line: "
+                         "write it as a `run: |` block. A shell: other than sh or bash: use sh or bash, or teach "
+                         "workflow_scripts that shell.")
         self.assertEqual([hit for line, hit in hits if line not in SHELL_ALLOWED], [],
                          "put `command` in front (`command . ./lib >x`), or `true >file` for `:`: a failed redirect "
                          "on a special builtin exits the shell before a handler runs.\n" + SHELL_LIMITS)
