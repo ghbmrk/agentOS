@@ -374,15 +374,17 @@ class ImageTest(unittest.TestCase):
 
     def scan(self, records, found, src="x"):
         """scan_image with each tree's findings FOUND (by where) and no file problems."""
-        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status
+        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
             [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
         vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
+        vulncheck.guest_problems = lambda src: []
         try:
             return vulncheck.scan_image({"accepted": records}, src)
         finally:
-            vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status = saved
+            (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status,
+             vulncheck.guest_problems) = saved
 
     def image_dir(self):
         tmp = tempfile.TemporaryDirectory()
@@ -480,6 +482,7 @@ class ImageTest(unittest.TestCase):
         # Combined review 6376479024: scan_image must apply manifest_problems, not only have it.
         d = self.manifest_dir(lambda pkgs: pkgs.pop(0))
         shutil.copytree(self.image_dir() / vulncheck.INITRDS, d / vulncheck.INITRDS)
+        shutil.copytree(self.image_dir() / vulncheck.GUESTS, d / vulncheck.GUESTS)
         saved = vulncheck.run_image
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
         try:
@@ -506,18 +509,94 @@ class ImageTest(unittest.TestCase):
         finally:
             vulncheck.run_image = saved
         self.assertEqual(probs, [])
-        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes())])
-        self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs], [("image", "FAIL"), ("image/initrd", "FAIL")])
+        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes()),
+                                 ("image/guest", None)])
+        self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs],
+                         [("image", "FAIL"), ("image/initrd", "FAIL"), ("image/guest", "FAIL")])
+
+    def test_the_guests_packages_are_scanned_as_their_own_tree(self):
+        # REQ: EVL-5. #5572: the guests' Debian packages, from their own status file beside the base
+        # root's manifest (DIR/guest), are queried like the main tree's, and a problem with that
+        # directory is reported, never a scan of nothing.
+        d, srcs = self.image_dir(), []
+
+        def run(src, env=None, offline=False, where="image", status=None):
+            srcs.append((where, pathlib.Path(src)))
+            return [], []
+        saved = vulncheck.run_image
+        vulncheck.run_image = run
+        try:
+            self.assertEqual(vulncheck.scan_image({"accepted": []}, d)[1], [])
+            self.assertIn(("image/guest", d / vulncheck.GUESTS), srcs)
+            (d / vulncheck.GUESTS / vulncheck.DPKG_STATUS).unlink()
+            srcs.clear()
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
+        finally:
+            vulncheck.run_image = saved
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("#5572", probs[0])
+        self.assertNotIn("image/guest", [w for w, _ in srcs])
+
+    def guest_dir(self, status=None, edit=None):
+        """The fixture's image with its guests' STATUS (text) and manifest packages after EDIT."""
+        d = self.image_dir() / vulncheck.GUESTS
+        if status is not None:
+            (d / vulncheck.DPKG_STATUS).write_text(status)
+        if edit:
+            m = json.loads((d / "agentos-guest.manifest").read_text())
+            edit(m["packages"])
+            (d / "agentos-guest.manifest").write_text(json.dumps(m))
+        return d.parent
+
+    def test_the_guests_status_lists_only_base_packages_at_their_versions(self):
+        # #5572: the scanned list is tied to the base root's manifest, which the reproduce job
+        # compares across runners; it may list fewer packages (only those the guests carry), not others.
+        self.assertEqual(vulncheck.guest_problems(vulncheck.FIXTURE / "image"), [])
+        st = (vulncheck.FIXTURE / "image" / vulncheck.GUESTS / vulncheck.DPKG_STATUS).read_text()
+        self.assertEqual(vulncheck.dpkg_installed(st), {("agentos-nofix", "2.0-1"), ("libguest1", "1.0-1")})
+        cases = {
+            "libguest1": dict(edit=lambda pkgs: pkgs.pop(2)),  # carried, not in the base
+            "9.9-9": dict(edit=lambda pkgs: pkgs[0].update(version="9.9-9")),  # another version
+            "lists no installed package": dict(status="Package: x\nStatus: deinstall ok config-files\n"),
+        }
+        for want, kw in cases.items():
+            with self.subTest(want):
+                probs = vulncheck.guest_problems(self.guest_dir(**kw))
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn(want, probs[0])
+        for name in (vulncheck.DPKG_STATUS, vulncheck.OS_RELEASE, "agentos-guest.manifest"):
+            with self.subTest(missing=name):
+                d = self.guest_dir()
+                (d / vulncheck.GUESTS / name).unlink()
+                probs = vulncheck.guest_problems(d)
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn("rebuild it", probs[0])
+        d = self.guest_dir()
+        (d / vulncheck.GUESTS / "agentos-guest.manifest").write_text("{")
+        self.assertIn("unreadable manifest", vulncheck.guest_problems(d)[0])
+
+    def test_the_build_writes_the_guests_status_where_the_scan_reads(self):
+        # #5572: image/build.sh writes the status into OUT/GUESTS, which the release record copies whole.
+        build = (ROOT / "image" / "build.sh").read_text()
+        self.assertIn('sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/%s"' % vulncheck.GUESTS, build)
+        self.assertIn('"$OUT/%s/agentos-guest.manifest"' % vulncheck.GUESTS, build)
+        shipped = (ROOT / "image" / "guest-shipped.sh").read_text()
+        self.assertIn('"$dir/%s"' % vulncheck.DPKG_STATUS, shipped)
+        self.assertIn('"$dir/%s"' % vulncheck.OS_RELEASE, shipped)
+        self.assertIn('cp -R "$RUNNER_TEMP"/out/%s "$RUNNER_TEMP/rec/"' % vulncheck.GUESTS, IMAGE_WORKFLOW.read_text())
 
     def test_a_record_accepts_an_image_advisory_only_in_its_own_tree(self):
-        # #4000: a main-tree acceptance must not hide the same advisory in the initrd, nor the reverse.
+        # #4000, #5572: an acceptance in one tree (main, initrd, guests) must not hide the same
+        # advisory in another.
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
-                {"id": "DSA-2", "issue": 2, "why": "x", "where": "image/initrd", "package": "m"}]
-        found = [{**fail(i), "where": w} for w in ("image", "image/initrd") for i in ("DSA-1", "DSA-2")]
+                {"id": "DSA-2", "issue": 2, "why": "x", "where": "image/initrd", "package": "m"},
+                {"id": "DSA-3", "issue": 3, "why": "x", "where": "image/guest", "package": "m"}]
+        trees = ("image", "image/initrd", "image/guest")
+        found = [{**fail(i), "where": w} for w in trees for i in ("DSA-1", "DSA-2", "DSA-3")]
         fs, probs, unused = self.scan(recs, found)
         self.assertEqual(([(f["where"], f["id"], vulncheck.verdict(f)) for f in fs], probs, unused), (
-            [("image", "DSA-1", "accepted #1"), ("image", "DSA-2", "FAIL"),
-             ("image/initrd", "DSA-1", "FAIL"), ("image/initrd", "DSA-2", "accepted #2")], [], []))
+            [(w, i, f"accepted #{n}" if w == trees[n - 1] else "FAIL")
+             for w in trees for n, i in enumerate(("DSA-1", "DSA-2", "DSA-3"), 1)], [], []))
 
     def test_the_initrd_archive_holds_the_initrds_status(self):
         tmp = tempfile.TemporaryDirectory()

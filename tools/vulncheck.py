@@ -53,9 +53,13 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          no package metadata and writes no manifest, so image/mkosi/initrd/mkosi.postinst
          copies its dpkg status into it (INITRD_STATUS), and exactly one initrd under
          DIR/initrd (image/build.sh copies the entry's there) must hold that file. Any
-         vulnerability fails. Only records whose where is "image" or "image/initrd" apply here
+         vulnerability fails. Only records whose where is an image tree (below) apply here
          (`run` ignores them), each only to its own tree; each names its source package, and
-         accepts only an advisory with no Debian fix.
+         accepts only an advisory with no Debian fix. The guests' Debian packages are a third
+         tree, "image/guest" (#5572): DIR/guest holds the dpkg status and os-release of the
+         packages whose files the guests carry (image/guest-shipped.sh) beside the manifest of
+         the whole root they are copied from (image/guest-base.sh), and each scanned package
+         must be in that manifest at its version.
 reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
          closing a cited issue withdraws its records' acceptance and fails every scan that
          applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
@@ -122,15 +126,19 @@ PRUNED_KEYS = {"where", "holder", "path", "why"}
 # The lockfiles whose guest build may prune installed files (D-308). OpenClaw only: a plan CLI
 # guest (Codex) runs as its provider ships it (CLK-7).
 PRUNABLE = {"guest/openclaw/package-lock.json"}
-# The `where` of every image finding, and of every record that accepts one: the main tree, and
-# the default initrd's (#4000). A record accepts a finding only in its own tree.
-IMAGE, INITRD = "image", "image/initrd"
-IMAGE_TREES = (IMAGE, INITRD)
+# The `where` of every image finding, and of every record that accepts one: the main tree, the
+# default initrd's (#4000), and the Debian packages the guests carry (#5572). A record accepts a
+# finding only in its own tree.
+IMAGE, INITRD, GUEST = "image", "image/initrd", "image/guest"
+IMAGE_TREES = (IMAGE, INITRD, GUEST)
 # What mkosi.postinst writes to the image build's output directory.
 DPKG_STATUS, OS_RELEASE = "agentos.dpkg-status", "agentos.os-release"
 # Where the image's initrds are, under the build's output directory (image/build.sh), and the
 # initrd member image/mkosi/initrd/mkosi.postinst writes the initrd's dpkg status to.
 INITRDS, INITRD_STATUS = "initrd", "usr/share/agentos/initrd.dpkg-status"
+# Where image/build.sh puts the guests' package lists (image/guest-base.sh's manifest of the whole
+# base root, and image/guest-shipped.sh's status and os-release of the packages the guests carry).
+GUESTS = "guest"
 # A package the image scan adds to every query: source curl at version 0, which every Debian
 # advisory against curl affects. osv-scanner's image scan reports packages with no
 # vulnerabilities when its OSV query fails, and exits 0; a canary with no advisory is that.
@@ -180,12 +188,17 @@ CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined i
 # advisory has no fix, which the fixture's record accepts. agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
 # which has its own advisory) is not installed, so none of them may be reported. The initrd
 # (#4000; CONTROL_INITRD) holds agentos-nofix too, and agentos-early, which the main tree lacks.
+# The guests (#5572; FIXTURE/image/guest) carry agentos-nofix and libguest1 (source
+# agentos-guestonly); their base root's manifest also lists agentos-toolchain, which they do not
+# carry, so its advisory (DEB-7) must not be reported.
 CONTROL_IMAGE_FAILS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4"),
-                       (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5")}
+                       (INITRD, "AGENTOS-VULNCHECK-DEB-4"), (INITRD, "AGENTOS-VULNCHECK-DEB-5"),
+                       (GUEST, "AGENTOS-VULNCHECK-DEB-4"), (GUEST, "AGENTOS-VULNCHECK-DEB-6")}
 # With the fixture's records: the fixed advisory still fails and its record goes unused, and the
-# main tree's record for agentos-nofix does not accept the same advisory in the initrd.
+# main tree's record for agentos-nofix does not accept the same advisory in the initrd or the guests.
 CONTROL_IMAGE_VERDICTS = {(IMAGE, "AGENTOS-VULNCHECK-DEB-1", "FAIL"), (IMAGE, "AGENTOS-VULNCHECK-DEB-4", "accepted #1"),
-                          (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1")}
+                          (INITRD, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (INITRD, "AGENTOS-VULNCHECK-DEB-5", "accepted #1"),
+                          (GUEST, "AGENTOS-VULNCHECK-DEB-4", "FAIL"), (GUEST, "AGENTOS-VULNCHECK-DEB-6", "accepted #1")}
 # The initrd's status file in the fixture, which the control packs into an initrd (control_image).
 CONTROL_INITRD = FIXTURE / "initrd" / "dpkg-status"
 CONTROL_CONFIG = {
@@ -221,6 +234,8 @@ CONTROL_CONFIG = {
          "where": IMAGE, "package": "agentos-nofix"},
         {"id": "AGENTOS-VULNCHECK-DEB-5", "issue": 1, "why": "control: only the initrd has it",
          "where": INITRD, "package": "agentos-early"},
+        {"id": "CVE-0000-0107", "issue": 1, "why": "control: only the guests carry it; accepted by alias",
+         "where": GUEST, "package": "agentos-guestonly"},
     ],
 }
 
@@ -1250,6 +1265,34 @@ def manifest_problems(src):
             f"{missing[:5]}{'...' if len(missing) > 5 else ''}"]
 
 
+def guest_problems(src):
+    """The guests' status file (GUESTS) must list only packages of the base root's manifest beside
+    it, at their versions: the reproduce job compares that manifest across runners. The status
+    holds fewer, only those whose files the guests carry (image/guest-shipped.sh)."""
+    d = pathlib.Path(src) / GUESTS
+    found = sorted(d.glob("*.manifest"))
+    if len(found) != 1 or not (d / DPKG_STATUS).is_file() or not (d / OS_RELEASE).is_file():
+        return [f"{d}: expected the guests' {DPKG_STATUS}, {OS_RELEASE} and one *.manifest, found "
+                f"{sorted(p.name for p in d.iterdir()) if d.is_dir() else 'no directory'}; an image built "
+                "before #5572 has no status there, so rebuild it (image/build.sh runs image/guest-shipped.sh)"]
+    try:
+        manifest = {(p["name"], p["version"]) for p in json.loads(found[0].read_text())["packages"]}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"{found[0]}: unreadable manifest: {e}"]
+    status = dpkg_installed((d / DPKG_STATUS).read_text())
+    if not status:
+        return [f"{d / DPKG_STATUS}: lists no installed package"]
+    versions = {}
+    for name, version in manifest:
+        versions.setdefault(name, []).append(version)
+    extra = [f"{n} {v} (the manifest has {', '.join(sorted(versions[n])) if n in versions else 'none'})"
+             for n, v in sorted(status - manifest)]
+    if extra:
+        return [f"{d / DPKG_STATUS} lists packages the base root's manifest does not: "
+                f"{'; '.join(extra[:5])}{'...' if len(extra) > 5 else ''}"]
+    return []
+
+
 def debian_fix(pkg, ids, name, eco):
     """The version that fixes one of IDS in source package NAME in ECO, from the advisory
     entries in one package of an osv-scanner report; "" when Debian has no fix there."""
@@ -1374,8 +1417,8 @@ def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
 
 
 def scan_image(config, src, osv_env=None, offline=False):
-    """Findings and problems for one image's packages, its main tree's and its initrd's; each
-    tree's records applied to it alone.
+    """Findings and problems for one image's packages, its main tree's, its initrd's and its
+    guests'; each tree's records applied to it alone.
 
     A record accepts only an advisory Debian has not fixed in the image's release: once a fix
     ships, the finding fails until the image is rebuilt with it, and the record goes unused."""
@@ -1391,6 +1434,12 @@ def scan_image(config, src, osv_env=None, offline=False):
         found, probs = run_image(src, osv_env, offline, INITRD, status)
         findings += found
         problems += [f"initrd: {p}" for p in probs]
+    probs = guest_problems(src)
+    problems += probs
+    if not probs:
+        found, probs = run_image(pathlib.Path(src) / GUESTS, osv_env, offline, GUEST)
+        findings += found
+        problems += [f"guest: {p}" for p in probs]
     return findings, problems, apply_records([f for f in findings if not f["fixed"]], records)
 
 
