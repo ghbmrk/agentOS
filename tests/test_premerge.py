@@ -24,6 +24,8 @@ def git(cwd, *args):
 EDITED = lambda kind: ["edited-verdict", kind + ":", *"a verdict edited after posting never counts, post a new comment".split()]
 UNPARSED = lambda kind, pr=7: ["unparsed-record", kind + ":",
     *f'Record line must be "Record: PR #{pr} · package <ID-without-spaces> · head <sha>"'.split()]
+MISPLACED = lambda kind: ["misplaced-marker", kind + ":",
+    *"a <!-- record: <kind> --> marker must sit directly under the Record line, not above it or elsewhere".split()]
 UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha,
     *"resolves to no single commit here, post a new verdict naming the reviewed head".split()]
 
@@ -1486,13 +1488,29 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.lens_run([l3, lens, sec, spread("fix-list", "<!-- record: security -->", "3")]), need)
         lensy = {**sec, "body": f"Verdict: accept\n\nprose\n\n{rec}\n<!-- record: security -->\n\nNext: arm\n"}
         self.assertEqual(self.lens_run([l3, lens, lensy]), (0, ["same"]))
-        # an accept with no marker in its record block has a misplaced one: it reads as unparsed and supersedes
-        UN = UNPARSED("security")
+        # an accept with no marker in its record block has a misplaced one: it is named so (#5541) and supersedes
+        UN, MIS = UNPARSED("security"), MISPLACED("security")
         late = lambda v: self.rec(v, sha, "\nprose\n\n<!-- record: security -->\n", at="3")
-        self.assertEqual(self.lens_run([l3, lens, late("accept")]), (1, UN))
-        self.assertEqual(self.lens_run([l3, lens, sec, late("accept")]), (1, UN))
+        self.assertEqual(self.lens_run([l3, lens, late("accept")]), (1, MIS))
+        self.assertEqual(self.lens_run([l3, lens, sec, late("accept")]), (1, MIS))
         self.assertEqual(self.lens_run([self.rec("accept", sha, "prose\n<!-- record: combined -->\n", at="0")]),
-                         (1, UNPARSED("l3")))
+                         (1, MISPLACED("l3")))
+        # #5539's shape: the marker directly above a good Record line is still misplaced, and never accepts
+        above = lambda mark, at: {**sec, "created_at": at, "updated_at": at, "body": f"Verdict: accept\n{mark}\n{rec}\n"}
+        self.assertEqual(self.lens_run([l3, lens, above("<!-- record: security -->", "3")]), (1, MIS))
+        self.assertEqual(self.lens_run([l3, lens, sec, above("<!-- record: security -->", "3")]), (1, MIS))
+        self.assertEqual(premerge.verdict([sec, above("<!-- record: security -->", "3")], 7, security=True),
+                         ("misplaced", None))
+        self.assertEqual(self.lens_run([l3, above("<!-- record: ux -->\n<!-- record: potency -->", "3"), sec]),
+                         (1, MISPLACED("ux,potency")))
+        self.assertEqual(self.lens_run([above("<!-- record: combined -->", "0"), lens, sec]), (1, MISPLACED("l3")))
+        # a misplaced marker over a Record line for another PR, or a malformed one, still names the Record line
+        self.assertEqual(self.lens_run([l3, lens, {**above("<!-- record: security -->", "3"),
+                                                   "body": f"Verdict: accept\n<!-- record: security -->\n{rec.replace('#7', '#8')}\n"}]),
+                         (1, UN))
+        self.assertEqual(self.lens_run([l3, lens, {**above("<!-- record: security -->", "3"),
+                                                   "body": f"Verdict: accept\n<!-- record: security -->\n{rec.replace('X-1', 'X 1')}\n"}]),
+                         (1, UN))
         other = f"```\nRecord: PR #8 · package X-1 · head {sha[:7]}\n```\n"
         norec = {**sec, "body": "Verdict: accept\n<!-- record: security -->\n\n" + other}
         self.assertEqual(self.lens_run([l3, lens, norec]), (1, UN))
