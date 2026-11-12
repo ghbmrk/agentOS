@@ -434,6 +434,24 @@ class DrillTest(unittest.TestCase):
                     self.assertIn("record not written: likely /var is full or failing" if "start" in ln
                                   else "): likely /var is full or failing. The reboot goes ahead", ln)
 
+    def test_a_missed_promise_from_an_earlier_try_is_not_carried_over(self):
+        # #5521 L3 1: try 1 fails with unrecorded written (the line promises a missed report), try 2's
+        # record is written and removes unrecorded, then unrecorded cannot be created and try 3 fails.
+        # Nothing stands for a boot to report, so the last FAIL line makes no promise.
+        self.mvfails.write_text("1\n3\n")
+        self.inhibit.write_text("2\n")
+        stub(self.bin, "systemctl", 'echo "systemctl $*" >>"{l}"\n'
+             'n=$(cat "{i}"); [ "$n" = 1 ] && mkdir -p "{d}"\n'
+             '[ "$n" -gt 0 ] || exit 0; echo $((n - 1)) >"{i}"; exit 1'
+             .format(l=self.log, i=self.inhibit, d=self.drill / "unrecorded"))
+        out, _ = self.reboot()
+        stamps = [ln for ln in out.splitlines() if "FAIL drill record not written" in ln]
+        self.assertEqual(len(stamps), 2, out)
+        self.assertTrue(stamps[0].endswith("; the next boot reports the drill missed"), stamps[0])
+        self.assertTrue(stamps[1].endswith("): likely /var is full or failing. The reboot goes ahead"), stamps[1])
+        self.assertFalse((self.drill / "pending").exists())
+        self.assertTrue((self.drill / "unrecorded").is_dir())
+
     def test_an_ordinary_reboot_leaves_nothing_to_report(self):
         write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
         out, _ = self.reboot()
