@@ -1078,16 +1078,77 @@ class PruneBuildTest(unittest.TestCase):
         self.assertTrue(all(p.endswith("/control-ui/") or p == "dist/extensions/imap/" for p in paths), paths)
 
     def test_the_imap_plugin_is_pruned_only_while_no_plugin_is_enabled(self):
-        # #5368: the IMAP plugin is off by default and starts only when the profile enables it; the
-        # profile has no top-level plugins or channels key and the guest cannot change it.
+        # #5368: the IMAP plugin is off by default and starts only when the profile enables it, and
+        # the shipped profile has no top-level plugins or channels key, so pruning it removes nothing
+        # the guest uses. The profile is not the containment: the guest is root and can rewrite it
+        # (ARC-7); the prune is, since an edited profile then finds no IMAP code to load (#5370).
         cfg = json.loads(vulncheck.CONFIG.read_text())
         self.assertIn("dist/extensions/imap/", {e["path"] for e in cfg.get("pruned", [])})
         profile = (ROOT / "guest" / "openclaw" / "openclaw.json5").read_text()
-        self.assertNotRegex(profile, r"(?m)^  (plugins|channels)\s*:")
+        keys = json5_top_keys(profile)
+        self.assertTrue({"tools", "commands", "gateway"} <= keys, keys)
+        self.assertFalse({"plugins", "channels"} & keys, keys)
         self.assertRegex(profile, r'deny:\s*\[[^\]]*"plugins"')
         self.assertRegex(profile, r"commands:\s*\{[^}]*plugins:\s*false")
         launch = json.loads((ROOT / "guest" / "openclaw" / "launch.json").read_text())
         self.assertIn("OPENCLAW_CONFIG_READONLY=1", launch["env"])
+
+def json5_top_keys(text):
+    """The keys of TEXT's top-level JSON5 object: quoted or not, at any indent, several to a line,
+    skipping comments, string values and nested objects (#5370)."""
+    keys, depth, i, n = set(), 0, 0, len(text)
+    skip = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/)*", re.S)
+    while i < n:
+        i = skip.match(text, i).end()
+        if i >= n:
+            break
+        c = text[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            tok, i = text[i + 1:j], j + 1
+        elif c.isalnum() or c in "_$":
+            j = re.compile(r"[\w$]+").match(text, i).end()
+            tok, i = text[i:j], j
+        else:
+            depth += (c in "{[") - (c in "}]")
+            i += 1
+            continue
+        if depth == 1 and text[skip.match(text, i).end():][:1] == ":":
+            keys.add(tok)
+    return keys
+
+
+class Json5TopKeysTest(unittest.TestCase):
+    # REQ: EVL-5. #5370: the imap prune guard reads the profile's top-level keys in every JSON5
+    # spelling; each case below enabled the plugin and passed the old two-space regex.
+    BASE = "{\n  tools: { deny: [\"plugins\"] },\n  commands: { plugins: false },\n  telemetry: { enabled: false },\n}\n"
+
+    def keys(self, old, new):
+        self.assertIn(old, self.BASE)
+        return json5_top_keys(self.BASE.replace(old, new, 1))
+
+    def test_the_shipped_shape_has_no_plugins_key(self):
+        self.assertEqual(json5_top_keys(self.BASE), {"tools", "commands", "telemetry"})
+
+    def test_a_quoted_key_counts(self):
+        self.assertIn("plugins", self.keys("  telemetry", '  "plugins": { allow: ["imap"] },\n  telemetry'))
+        self.assertIn("channels", self.keys("  telemetry", "  'channels': {},\n  telemetry"))
+
+    def test_a_deeper_indent_counts(self):
+        self.assertIn("plugins", self.keys("  telemetry", "    plugins: { entries: { imap: { enabled: true } } },\n  telemetry"))
+
+    def test_a_key_after_another_on_one_line_counts(self):
+        self.assertIn("plugins", self.keys("{ enabled: false },", '{ enabled: false }, plugins: { allow: ["imap"] },'))
+        self.assertIn("channels", self.keys("{\n  tools", "{ channels: {},\n  tools"))
+
+    def test_nested_keys_comments_and_strings_do_not_count(self):
+        keys = self.keys("  telemetry", '  // plugins: {}\n  /* channels: {} */\n  telemetry')
+        self.assertEqual(keys, {"tools", "commands", "telemetry"})
+        self.assertEqual(self.keys("[\"plugins\"]", '["plugins:", "channels"]'), {"tools", "commands", "telemetry"})
+        self.assertEqual(self.keys('"plugins"', '"a\\"plugins: b"'), {"tools", "commands", "telemetry"})
+
 
 def lits(tag, n=6):
     """N string literals of FP_LEN characters that read as text, unique to TAG."""
