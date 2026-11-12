@@ -360,6 +360,13 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(len(got), 1, got)
         self.assertIn("through /run/0123abcd, under a box mount, which %s line 3 makes mode 0755 for svc:svc" % tmpf,
                       got[0])
+        # L3 on #5584: a link a tmpfiles.d L line makes under a box mount is not a step of its own way, so the tree's
+        # copy of it (Debian's run/shm, once tmpfiles has run) is not refused by its own line.
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + "L /run/a - - - - /dev/b\n")
+        (self.root / "run").mkdir(exist_ok=True)
+        (self.root / "run/a").symlink_to("/dev/b")
+        self.assertEqual([v for v in check.violations(self.root) if "#5191" in v], [])
+        (self.root / "run/a").unlink()
         # A root-owned line, and the stock L /var/run line, leave /run's steps root's.
         write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock)
         for line in ("BindReadOnlyPaths=/run/r/y:/z", "ReadOnlyPaths=/var/run/r/y", "BindReadOnlyPaths=/run/svc/y:/z"):

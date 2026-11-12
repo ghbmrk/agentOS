@@ -251,7 +251,7 @@ FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute
 # (config_parse_environ, config_parse_pass_environ, config_parse_unset_environ, config_parse_log_extra_fields,
 # config_parse_set_credential, config_parse_log_namespace); any other key, the v257 path keys the old deny-list missed
 # (IPIngressFilterPath=, IPEgressFilterPath=, BPFProgram=, RootHash=, RootHashSignature=) and any key a later systemd
-# adds, gets the plain-path fix and the route onto this list (#5557). Read from systemd NAME_ONLY_SYSTEMD, as shipped by
+# adds, gets the plain-path fix, and only a key off UNIT_KEYS the route onto this list (#5557, #5191). Read from systemd NAME_ONLY_SYSTEMD, as shipped by
 # the Debian snapshot NAME_ONLY_SNAPSHOT: a different snapshot fails ConfigTest on every run, and a different systemd
 # fails ImageToolTest where the image's systemd runs, until the list is read again:
 #   grep -E '^\{\{type\}\}\.' load-fragment-gperf.gperf.in   (v257 tag; list the parser per key)
@@ -625,7 +625,9 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, True)
         if why:
             return why
-    why = chain_refusal(root, parts, target, not path.startswith("/"))
+    # #5191: the link's own path is weighed by the rules above, not as a step of its way: a link the tree holds
+    # under a box mount (Debian's run/shm, once tmpfiles has run) chases to itself there, and is hidden by the mount.
+    why = chain_refusal(root, parts, target, not path.startswith("/"), skip=frozenset((rel,)))
     if why:
         return why
     if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):
