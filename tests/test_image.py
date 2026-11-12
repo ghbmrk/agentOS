@@ -2629,6 +2629,7 @@ class ConfFilesTest(unittest.TestCase):
         # Beside the mutant, where it looks for its allowlist, so its whole check can run.
         for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW, check.MADE_ALLOW):
             (pathlib.Path(tmp.name) / name).write_text((MK / name).read_text())
+        shutil.copytree(MK / "mkosi.repart", pathlib.Path(tmp.name) / "mkosi.repart")  # #5474
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()
         m.TREE_GROUP = os.getegid()
@@ -5210,7 +5211,7 @@ class TreeAccessTest(unittest.TestCase):
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev"))
+                         "allow_path", "allow_entries", "script_net_dev", "repart_build", "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 

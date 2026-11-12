@@ -34,7 +34,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import pathlib
 import re
 import stat
 import sys
@@ -2163,30 +2162,46 @@ REPART_TREE = ("etc/repart.d", "usr/local/lib/repart.d", "usr/lib/repart.d")
 
 def repart_build():
     """The build's mkosi.repart directory: beside this script, else under $SRCDIR (mkosi v24.3 mounts the script
-    alone at /work/finalize and the configuration directory at /work/src, as allow_path); None if neither has it."""
+    alone at /work/finalize and the configuration directory at /work/src, as allow_path); None if neither has it.
+    Like allow_path, it reads the repository's files, not the tree."""
     for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
         if d and os.path.isdir(os.path.join(d, "mkosi.repart")):
-            return pathlib.Path(d, "mkosi.repart")
+            return os.path.join(d, "mkosi.repart")
     return None
+
+
+def build_definitions(build):
+    """(name, bytes) for each *.conf in the build's mkosi.repart directory BUILD, in name order. It is the checkout,
+    not the tree, so it is read as it is; OSError if it cannot be listed or read."""
+    out = []
+    for n in sorted(os.listdir(build)):
+        if n.endswith(".conf"):
+            with open(os.path.join(build, n), "rb") as f:
+                out.append((n, f.read()))
+    return out
 
 
 def repart_types(root):
     """(where, [Type= values], why unreadable or None) for each repart definition systemd-repart reads from the
     tree (REPART_TREE, held to the tree's rules) and in the build's own mkosi.repart directory (repart_build; the
-    caller refuses a build without one), which is the checkout, not the tree: read as it is, by name order."""
-    files, out = conf_files(root, REPART_TREE), []
+    caller refuses a build without one)."""
+    read, out = [], []
+    for f in conf_files(root, REPART_TREE):
+        try:
+            read.append((f.name, f.content()))
+        except OSError as e:
+            out.append((f.name, [], e.strerror))
     build = repart_build()
     if build is not None:
         try:
-            files += [pathlib.Path(build, n) for n in sorted(os.listdir(build)) if n.endswith(".conf")]
+            read += build_definitions(build)
         except OSError as e:
-            out.append((build.name, [], e.strerror))
-    for f in files:
+            out.append((os.path.basename(build), [], e.strerror))
+    for name, data in read:
         try:
-            data = f.content() if isinstance(f, Conf) else f.read_bytes()
-            out.append((f.name, [v for s, k, v in config_lines(data) if (s, k) == ("Partition", "Type")], None))
-        except (OSError, Unparsable) as e:
-            out.append((f.name, [], e.strerror if isinstance(e, OSError) else str(e)))
+            out.append((name, [v for s, k, v in config_lines(data) if (s, k) == ("Partition", "Type")], None))
+        except Unparsable as e:
+            out.append((name, [], str(e)))
     return out
 
 

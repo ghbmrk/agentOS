@@ -449,7 +449,7 @@ class KeeperTreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "mkosi.repart").mkdir()
             (pathlib.Path(d) / "mkosi.repart/10-v.conf").write_text("[Partition]\nType=var\n")
-            with unittest.mock.patch.object(check, "repart_build", return_value=pathlib.Path(d) / "mkosi.repart"):
+            with unittest.mock.patch.object(check, "repart_build", return_value=str(pathlib.Path(d) / "mkosi.repart")):
                 self.assertEqual(len(check.gpt_auto_violations(self.root)), 1)
                 self.assertTrue([v for v in check.violations(self.root) if "(#5474)" in v])
         # mkosi v24.3 runs the script alone at /work/finalize with the configuration at $SRCDIR: the build's definitions
@@ -462,6 +462,7 @@ class KeeperTreeTest(unittest.TestCase):
             loader = importlib.machinery.SourceFileLoader("lone_finalize", str(script))
             lonely = importlib.util.module_from_spec(importlib.util.spec_from_loader("lone_finalize", loader))
             loader.exec_module(lonely)
+            lonely.TREE_OWNER, lonely.TREE_GROUP = os.geteuid(), os.getegid()
             with unittest.mock.patch.dict(os.environ):
                 os.environ.pop("SRCDIR", None)
                 self.assertIsNone(lonely.repart_build())
@@ -470,7 +471,7 @@ class KeeperTreeTest(unittest.TestCase):
                 self.assertIn("mkosi.repart: not beside this script or under $SRCDIR", got[0])
                 self.assertEqual(lonely.gpt_auto_mounts(self.root)[0], {})
                 os.environ["SRCDIR"] = str(MK)
-                self.assertEqual(lonely.repart_build(), MK / "mkosi.repart")
+                self.assertEqual(lonely.repart_build(), str(MK / "mkosi.repart"))
                 self.assertEqual(lonely.gpt_auto_violations(self.root), [])
                 self.assertEqual(sorted(lonely.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
         # The build's mkosi.repart is the checkout, not the tree: CI's checkout root is owned by another uid than 0, so
@@ -490,7 +491,7 @@ class KeeperTreeTest(unittest.TestCase):
             (build / "10-esp.conf").write_text("[Partition]\nType=esp\n")
             (build / "20-home.conf.bak").write_text("[Partition]\nType=home\n")
             (build / "30-home.txt").write_text("[Partition]\nType=home\n")
-            with unittest.mock.patch.object(check, "repart_build", return_value=build):
+            with unittest.mock.patch.object(check, "repart_build", return_value=str(build)):
                 self.assertEqual(check.gpt_auto_violations(self.root), [])
                 self.assertEqual(sorted(check.gpt_auto_mounts(self.root)[0]), [("boot",), ("efi",)])
                 (build / "20-home.conf").write_text("[Partition]\nType=home\n")
