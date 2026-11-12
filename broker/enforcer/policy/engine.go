@@ -2,8 +2,6 @@ package policy
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,13 +241,12 @@ func (e *Engine) Current() Document { return e.cur.normal() }
 // removes allows, devices, pairs and rules. So it is not checked again and
 // the hash has no error: it is the SHA-256 of the canonical encoding,
 // which for a normal document that passes check is exactly what Encode
-// writes. Marshal cannot fail on a Document, which holds only strings,
+// writes, hashed by the same hashOf as Hash. Marshal cannot fail on a Document, which holds only strings,
 // integers, booleans, slices and string-keyed maps.
 func (e *Engine) CurrentHash() (Document, string) {
 	d := e.Current()
 	b, _ := json.Marshal(d)
-	h := sha256.Sum256(b)
-	return d, hex.EncodeToString(h[:])
+	return d, hashOf(b)
 }
 
 // Pending is the loosening waiting, if any.

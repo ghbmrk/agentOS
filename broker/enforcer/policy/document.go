@@ -333,8 +333,14 @@ func Hash(d Document) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:]), nil
+	return hashOf(b), nil
+}
+
+// hashOf is the one definition of the policy hash: the SHA-256, in hex, of a
+// canonical encoding. Hash and Engine.CurrentHash both end here.
+func hashOf(canon []byte) string {
+	h := sha256.Sum256(canon)
+	return hex.EncodeToString(h[:])
 }
 
 // Device is the device with id, or nil.

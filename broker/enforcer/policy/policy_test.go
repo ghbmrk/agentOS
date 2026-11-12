@@ -3,6 +3,7 @@ package policy
 // REQ: STO-4, NET-4, NET-2
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -11,6 +12,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"slices"
 	"strings"
@@ -1320,5 +1324,81 @@ func TestCurrentHashIsProven(t *testing.T) {
 	proven("tick over a step", e)
 	if after, _ := e.CurrentHash(); reflect.DeepEqual(after, before) || !slices.Contains(after.Destinations, "x.example") {
 		t.Fatalf("the loosening did not land: %+v", after)
+	}
+}
+
+// Every result of every engine op passes check, and hashes the same two ways
+// (#5549). The kinds come from the const block in classify.go, so a new kind
+// fails here until an op of it is in the list below and applies to the
+// fixture. Apply is the one place an op changes a document: Tighten and
+// Open's replay both go through it.
+func TestEveryOpResultPassesCheck(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "classify.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, decl := range f.Decls {
+		g, ok := decl.(*ast.GenDecl)
+		if !ok || g.Tok != token.CONST {
+			continue
+		}
+		for _, sp := range g.Specs {
+			for _, v := range sp.(*ast.ValueSpec).Values {
+				if l, ok := v.(*ast.BasicLit); ok && l.Kind == token.STRING {
+					kinds[strings.Trim(l.Value, `"`)] = false
+				}
+			}
+		}
+	}
+	if len(kinds) == 0 {
+		t.Fatal("no op kinds found in classify.go")
+	}
+	e, _, _ := opened(t)
+	base := e.Current()
+	narrow := base
+	narrow.Standing = slices.Clone(base.Standing)
+	for i := range narrow.Standing {
+		narrow.Standing[i].FromMS++
+		narrow.Standing[i].ToMS--
+	}
+	ops := candidates(base, narrow)
+	for _, d := range base.Devices {
+		ops = append(ops, Op{Kind: RemoveDestination, Device: d.ID, Host: "absent.example"}) // refused
+	}
+	applied := 0
+	for _, op := range ops {
+		got, ok := Apply(base, op)
+		if !ok {
+			continue
+		}
+		applied++
+		if _, seen := kinds[op.Kind]; !seen {
+			t.Fatalf("op kind %q is not in classify.go's list", op.Kind)
+		}
+		kinds[op.Kind] = true
+		if err := got.check(); err != nil {
+			t.Errorf("%+v: result fails check: %v", op, err)
+			continue
+		}
+		b, err := Encode(got)
+		if err != nil {
+			t.Errorf("%+v: Encode: %v", op, err)
+			continue
+		}
+		if h, err := Hash(got); err != nil || h != hashOf(b) {
+			t.Errorf("%+v: Hash %q %v, hashOf(Encode) %q", op, h, err, hashOf(b))
+		}
+		if m, _ := json.Marshal(got); !bytes.Equal(m, b) {
+			t.Errorf("%+v: the normal form marshals differently from Encode", op)
+		}
+	}
+	if applied == 0 {
+		t.Fatal("no op applied")
+	}
+	for k, covered := range kinds {
+		if !covered {
+			t.Errorf("no op of kind %q applies to the fixture: add one to candidates' coverage here", k)
+		}
 	}
 }
