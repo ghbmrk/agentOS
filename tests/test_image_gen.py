@@ -546,6 +546,13 @@ class InitrdTest(unittest.TestCase):
                 got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [(d + "/x.raw", self.F, b"x")])))
                 self.assertEqual(got, ["%s/x.raw: an image systemd-sysext or systemd-confext would merge" % d])
 
+    def test_sysext_and_confext_lists_differ_on_purpose(self):
+        # #5488: systemd v257 (discover-image.c) never searches /usr for sysext images ("we don't allow storing
+        # extensions under /usr/") but does for confexts, so no /usr/.../extensions entry has a reader.
+        usr = [d for d in finish.INITRD_IMAGE_DIRS if d.startswith("usr/")]
+        self.assertEqual(sorted(usr), ["usr/lib/confexts", "usr/local/lib/confexts"])
+        self.assertEqual(finish.USR_CONFEXTS, ("lib/confexts", "local/lib/confexts"))
+
     def test_initrd_ships_no_extension_image(self):
         # Security 6804479798 release b: systemd-sysext's and systemd-confext's initrd search paths.
         for d in finish.INITRD_IMAGE_DIRS:

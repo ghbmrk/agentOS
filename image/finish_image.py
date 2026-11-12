@@ -198,6 +198,8 @@ def partition_violations(partitions, defs=REPART_DIR, runtime=REPART_D):
 USR_REPART_STEPS = ("lib", "lib/repart.d", "local", "local/lib", "local/lib/repart.d")
 # systemd-confext merges the images in these /usr directories over /etc (discover-image.c, v257), so an
 # image there could add a repart.d or a unit the checks here never read (#5418). /usr ships neither.
+# Only confext: systemd-sysext never searches /usr ("we don't allow storing extensions under /usr/",
+# discover-image.c, v257), so the sysext lists (ROOT_READS, INITRD_IMAGE_DIRS) have no /usr entry on purpose (#5488).
 USR_CONFEXTS = ("lib/confexts", "local/lib/confexts")
 
 
