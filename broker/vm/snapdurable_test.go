@@ -412,7 +412,15 @@ func TestCAP3ForgetTellsOfUnreadDeleted(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("told of %v although nothing was deleted", calls)
 	}
-	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	// The record unpublished but the directory not removed: still deleted
+	// as far as the owner is concerned, so counted.
+	realRemove := removeAll
+	removeAll = func(string) error { return errors.New("remove failed") }
+	err := e.m.ForgetSince(bg, mc.Lineage, time.Now())
+	removeAll = realRemove
+	if err == nil {
+		t.Fatal("forget succeeded although a directory stayed")
+	}
 	if len(calls) != 1 || calls[0] != (told{2, true}) {
 		t.Fatalf("told %v, want one notice of 2 deleted by a forget", calls)
 	}
@@ -475,6 +483,25 @@ func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
 	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 1 {
 		t.Fatalf("second prune: %v (%v), told %v", gone, err, calls)
 	}
+	// The record unpublished but the directory not removed: counted.
+	e.m.mu.Lock()
+	e.m.unread[old] = true
+	e.m.mu.Unlock()
+	// A failure before the record is unpublished: still listed, not counted.
+	realSync := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	_, err = e.m.Prune(p)
+	syncSnapDir = realSync
+	if err == nil || len(calls) != 1 || !slices.Contains(e.m.Unread(), old) {
+		t.Fatalf("a prune that could not unpublish: %v, told %v, unread %v", err, calls, e.m.Unread())
+	}
+	realRemove := removeAll
+	removeAll = func(string) error { return errors.New("remove failed") }
+	_, err = e.m.Prune(p)
+	removeAll = realRemove
+	if err == nil || len(calls) != 2 || calls[1] != (told{1, false}) {
+		t.Fatalf("a prune whose directory stayed: %v, told %v, want one more notice", err, calls)
+	}
 }
 
 // CAP-3 (#5481, Security 1 on #5480): a snapshot recorded before Instance
@@ -507,5 +534,31 @@ func TestCAP3LegacyUnreadSnapshotNotInheritedByReplacement(t *testing.T) {
 	}
 	if got := e.guestRead("m", "who"); got != "successor" {
 		t.Fatalf("who = %q, want the successor's", got)
+	}
+}
+
+// CAP-3 (#5481): a snapshot kept unread whose directory cannot be statted
+// for a reason other than absence is not known to be old: a prune keeps it
+// and tells nothing. Here a file stands where the snapshots directory was
+// (ENOTDIR).
+func TestCAP3PruneKeepsUnreadWhenStatFails(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	id := snapName(3)
+	snaps := filepath.Join(e.cfg.StateDir, "snapshots")
+	must(t, os.MkdirAll(filepath.Join(snaps, id, "meta.json"), 0o700))
+	told := 0
+	e.cfg.UnreadGone = func(int, bool) { told++ }
+	e.restart("m")
+	must(t, os.Rename(snaps, snaps+".away"))
+	must(t, os.WriteFile(snaps, []byte("x"), 0o600))
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	gone, err := e.m.Prune(PrunePolicy{LowWaterBytes: 1 << 30})
+	must(t, err)
+	if len(gone) != 0 || told != 0 {
+		t.Fatalf("pruned %v, told %d times, although its directory could not be statted", gone, told)
+	}
+	if got := e.m.Unread(); len(got) != 1 || got[0] != id {
+		t.Fatalf("unread after the prune = %v, want [%s]", got, id)
 	}
 }

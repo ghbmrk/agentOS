@@ -88,9 +88,9 @@ func unreadLine(ids []string) string {
 	case 0:
 		return ""
 	case 1:
-		return "Restore points: one could not be read and is not offered; Any Forget removes it."
+		return "Restore points: one could not be read and is not offered; any Forget removes it."
 	}
-	return fmt.Sprintf("Restore points: %d could not be read and are not offered; Any Forget removes them.", len(ids))
+	return fmt.Sprintf("Restore points: %d could not be read and are not offered; any Forget removes them.", len(ids))
 }
 
 // unreadGoneNotice is what the owner is told when restore points whose record

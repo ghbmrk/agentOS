@@ -77,7 +77,10 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 	for _, id := range m.Unread() {
 		if err := m.removeSnapshot(id); err != nil {
 			errs = append(errs, err)
-		} else {
+		}
+		if !m.stillUnread(id) {
+			// Gone from the table, even if the last directory removal
+			// failed: the record is unpublished and the owner is told.
 			lost++
 		}
 	}
@@ -225,7 +228,14 @@ func (m *Manager) removeSnapshot(id string) error {
 	delete(m.snaps, id)
 	delete(m.unread, id)
 	m.mu.Unlock()
-	return os.RemoveAll(dir)
+	return removeAll(dir)
+}
+
+// stillUnread reports whether id is still listed unread.
+func (m *Manager) stillUnread(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.unread[id]
 }
 
 // restoreTarget is the snapshot ForgetSince takes mc back to: its newest

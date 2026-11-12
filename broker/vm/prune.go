@@ -162,10 +162,10 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 			if fi, err := os.Stat(m.snapDir(id)); err != nil && !os.IsNotExist(err) || err == nil && !fi.ModTime().Before(cutoff) {
 				continue
 			}
-			if err := m.removeSnapshot(id); err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+			if err := m.removeSnapshot(id); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			if m.stillUnread(id) {
 				continue
 			}
 			lost++

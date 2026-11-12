@@ -610,11 +610,11 @@ func TestUnreadRestorePointLine(t *testing.T) {
 		t.Fatalf("nothing unread: %q", got)
 	}
 	unread = []string{"s0000000007"}
-	if got := s.unreadLine(); got != "Restore points: one could not be read and is not offered; Any Forget removes it." {
+	if got := s.unreadLine(); got != "Restore points: one could not be read and is not offered; any Forget removes it." {
 		t.Fatalf("one unread: %q", got)
 	}
 	unread = append(unread, "s0000000123")
-	if got := s.unreadLine(); got != "Restore points: 2 could not be read and are not offered; Any Forget removes them." {
+	if got := s.unreadLine(); got != "Restore points: 2 could not be read and are not offered; any Forget removes them." {
 		t.Fatalf("two unread: %q", got)
 	}
 	for _, l := range []string{unreadLine([]string{"s0000000007"}), unreadLine(unread)} {
