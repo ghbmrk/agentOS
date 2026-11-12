@@ -1046,40 +1046,75 @@ class SecuritySnapshotTest(unittest.TestCase):
                 self.assertNotEqual(p.returncode, 0)
                 self.assertEqual(p.stdout, "")
 
-    def resolve(self, answer, status=0):
-        with tempfile.TemporaryDirectory() as d:
-            log = pathlib.Path(d, "args")
-            # curl's -w format, with %{redirect_url} as ANSWER, as the only output; the arguments logged.
-            py = ("import pathlib, sys\na = sys.argv[1:]\npathlib.Path(%r).write_text('\\n'.join(a))\n"
-                  "sys.stdout.write(a[a.index('-w') + 1].replace('%%{redirect_url}', %r))\nsys.exit(%d)\n"
-                  % (str(log), answer, status))
-            path = fake_tools(d, curl="exec python3 -I -c %s \"$@\"\n" % shlex_quote(py))
-            p = self.run_snap("resolve", path=path)
-            return p, (log.read_text().splitlines() if log.exists() else [])
+    MIRROR = """import json, pathlib, sys
+a = sys.argv[1:]
+state = pathlib.Path(sys.argv[0]).with_name("calls")
+calls = json.loads(state.read_text()) if state.exists() else []
+calls.append(a)
+state.write_text(json.dumps(calls))
+runs, answers, status, missing = json.loads(pathlib.Path(sys.argv[0]).with_name("mirror.json").read_text())
+url = a[-1]
+base = "https://snapshot.debian.org/archive/debian-security/"
+if url.endswith("/Packages.xz"):
+    sys.exit(22 if url[len(base):len(base) + 16] in missing else 0)
+n = sum(1 for c in calls if not c[-1].endswith("/Packages.xz")) - 1
+if n < len(answers) and answers[n] is not None:
+    loc = answers[n]
+else:
+    asked = url[len(base):-1]
+    loc = base + max(r for r in runs if r <= asked) + "/"
+sys.stdout.write(a[a.index("-w") + 1].replace("%{redirect_url}", loc))
+sys.exit(status[n] if n < len(status) else 0)
+"""
 
-    def test_resolve_takes_the_snapshot_the_mirror_redirects_to(self):
+    def resolve(self, runs=("20201112T120000Z", "20201112T180512Z"), answers=(), status=(), missing=()):
+        """Run resolve against a model snapshot.debian.org holding RUNS; ANSWERS and STATUS override the
+        redirect calls' answers and exit codes in order, and MISSING runs have no Packages.xz."""
+        with tempfile.TemporaryDirectory() as d:
+            path = fake_tools(d, curl='exec python3 -I "$(dirname "$0")/mirror.py" "$@"\n')
+            pathlib.Path(d, "bin/mirror.py").write_text(self.MIRROR)
+            pathlib.Path(d, "bin/mirror.json").write_text(json.dumps([runs, answers, status, missing]))
+            p = self.run_snap("resolve", path=path)
+            calls = pathlib.Path(d, "bin/calls")
+            return p, (json.loads(calls.read_text()) if calls.exists() else [])
+
+    def test_resolve_takes_the_run_before_the_newest(self):
         # snapshot.debian.org answers a time between two mirror runs with a redirect to the earlier
-        # run's own timestamp; that timestamp, not the asked time, names a snapshot that never changes.
-        p, args = self.resolve("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/")
-        self.assertEqual((p.returncode, p.stdout), (0, "20261112T180512Z\n"), p.stderr)
-        self.assertEqual(args[0], "-q")
-        self.assertIn("-f", "".join(a for a in args if re.fullmatch(r"-[A-Za-z]+", a)))
-        self.assertEqual(args[args.index("--proto") + 1], "=https")
-        self.assertNotIn("-L", args)
-        self.assertNotIn("--location", args)
-        self.assertRegex(args[-1], r"\Ahttps://snapshot\.debian\.org/archive/debian-security/\d{8}T\d{6}Z/\Z")
-        self.assertIn("--retry", args)
+        # run's own timestamp, a snapshot that never changes. The newest run may still be importing
+        # (#5606: InRelease served, Packages 404), so the pin is the run before it, checked whole.
+        p, calls = self.resolve()
+        self.assertEqual((p.returncode, p.stdout), (0, "20201112T120000Z\n"), p.stderr)
+        base = "https://snapshot.debian.org/archive/debian-security/"
+        self.assertRegex(calls[0][-1], r"\A" + re.escape(base) + r"\d{8}T\d{6}Z/\Z")
+        self.assertEqual(calls[1][-1], base + "20201112T180511Z/")
+        self.assertEqual(calls[2][-1], base + "20201112T120000Z/dists/trixie-security/main/binary-amd64/Packages.xz")
+        self.assertEqual(len(calls), 3)
+        for args in calls:
+            self.assertEqual(args[0], "-q")
+            self.assertIn("f", "".join(a for a in args if re.fullmatch(r"-[A-Za-z]+", a)))
+            self.assertEqual(args[args.index("--proto") + 1], "=https")
+            self.assertNotIn("-L", args)
+            self.assertNotIn("--location", args)
+            self.assertIn("--retry", args)
+        # A day's first run steps back across midnight.
+        p, calls = self.resolve(runs=("20201111T235000Z", "20201112T000000Z"))
+        self.assertEqual((p.returncode, p.stdout), (0, "20201111T235000Z\n"), p.stderr)
+        self.assertEqual(calls[1][-1], base + "20201111T235959Z/")
 
     def test_resolve_refuses_any_other_answer(self):
-        for answer, status in (("", 0), ("https://snapshot.debian.org/archive/debian/20261112T180512Z/", 0),
-                               ("https://evil.example/archive/debian-security/20261112T180512Z/", 0),
-                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/x/", 0),
-                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z", 0),
-                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/\n", 0),
-                               ("http://snapshot.debian.org/archive/debian-security/20261112T180512Z/", 0),
-                               ("https://snapshot.debian.org/archive/debian-security/20261112T180512Z/", 22)):
-            with self.subTest(answer=answer, status=status):
-                p, _ = self.resolve(answer, status)
+        good = "https://snapshot.debian.org/archive/debian-security/20201112T180512Z/"
+        bad = ("", "https://snapshot.debian.org/archive/debian/20201112T180512Z/",
+               "https://evil.example/archive/debian-security/20201112T180512Z/",
+               "https://snapshot.debian.org/archive/debian-security/20201112T180512Z/x/",
+               "https://snapshot.debian.org/archive/debian-security/20201112T180512Z",
+               "https://snapshot.debian.org/archive/debian-security/20201112T180512Z/\n",
+               "http://snapshot.debian.org/archive/debian-security/20201112T180512Z/")
+        cases = [dict(answers=(b,)) for b in bad] + [dict(answers=(None, b)) for b in bad]
+        cases += [dict(answers=(good,), status=(22,)), dict(answers=(None, good), status=(0, 22)),
+                  dict(missing=("20201112T120000Z",))]
+        for case in cases:
+            with self.subTest(**case):
+                p, _ = self.resolve(**case)
                 self.assertNotEqual(p.returncode, 0)
                 self.assertEqual(p.stdout, "")
                 self.assertNotIn("evil", p.stderr)  # #4648: nothing the mirror sent reaches the log
