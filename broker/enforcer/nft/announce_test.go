@@ -4,6 +4,7 @@ package nft
 
 import (
 	"errors"
+	"math/rand/v2"
 	"reflect"
 	"slices"
 	"strings"
@@ -106,5 +107,66 @@ func TestHears(t *testing.T) {
 	}
 	if _, ok := l.DeviceIface("guest"); ok {
 		t.Error("a name that is not a VLAN has an interface")
+	}
+}
+
+// TestHearsRefusesWhatCompileRefuses: the relay is given no interfaces
+// from a layout the ruleset refuses.
+func TestHearsRefusesWhatCompileRefuses(t *testing.T) {
+	l := fixtureLayout()
+	l.Trunk = ""
+	if got, err := Hears(fixturePolicy(), l); !errors.Is(err, ErrLayout) {
+		t.Errorf("hears %v (err %v)", got, err)
+	}
+}
+
+// TestEveryPathEndIsHeard (property, #5014 from the #5238 deletion): over
+// many documents drawn from the fixture's devices, plus an Owner and a
+// Household device, with each device isolated or not, unpatched or not,
+// and random pairs among them, every end of every path the ruleset opens
+// is an interface the relay hears. Hears adds no path end of its own, so
+// a pair whose end it missed would pass records nowhere (NET-3 Casting).
+func TestEveryPathEndIsHeard(t *testing.T) {
+	l := fixtureLayout()
+	r := rand.New(rand.NewPCG(5014, 5238))
+	opened := 0
+	for range 4000 {
+		d := fixturePolicy()
+		d.Devices = append(d.Devices, policy.Device{ID: "phone", Network: policy.NetOwner}, policy.Device{ID: "tablet", Network: policy.NetHousehold})
+		for i := range d.Devices {
+			d.Devices[i].Isolated = r.IntN(3) == 0
+		}
+		d.Holds = nil
+		for _, v := range d.Devices {
+			if v.Network == policy.NetDevices && r.IntN(5) == 0 {
+				d.Holds = append(d.Holds, policy.Hold{Device: v.ID, Kind: policy.HoldFirmware})
+			}
+		}
+		d.Pairs = nil
+		for range r.IntN(6) {
+			a, b := d.Devices[r.IntN(len(d.Devices))].ID, d.Devices[r.IntN(len(d.Devices))].ID
+			if a != b {
+				d.Pairs = append(d.Pairs, policy.Pair{A: a, B: b})
+			}
+		}
+		paths, err := Paths(d, l)
+		if err != nil {
+			continue // a document the ruleset refuses has no paths
+		}
+		hears, err := Hears(d, l)
+		if err != nil {
+			t.Fatalf("hears refused what paths took: %v", err)
+		}
+		for _, p := range paths {
+			opened++
+			for _, end := range []string{p.From, p.To} {
+				if !slices.Contains(hears, end) {
+					t.Fatalf("path %v: end %q not heard (hears %q) in pairs %v", p, end, hears, d.Pairs)
+				}
+			}
+		}
+	}
+	if opened < 1000 {
+		t.Fatalf("only %d paths drawn: the property is barely tested", opened)
 	}
 }

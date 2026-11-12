@@ -22,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
@@ -33,9 +34,9 @@ import (
 )
 
 // Silence is how long the core may send the enforcer nothing before the
-// page shows it down: two missed beats of a heartbeat sent each summary
-// interval (KRN-12 Silence; ASSUMPTIONS ENF-l-7).
-const Silence = 2 * wire.SummaryInterval
+// page shows it down: two missed beats of the heartbeat the format
+// definition fixes (KRN-12 Silence; ASSUMPTIONS ENF-l-7).
+const Silence = 2 * wire.HeartbeatInterval
 
 // MaxCoreConns is how many channel connections may be open at once: the
 // one in use and a reconnect that replaces it. Any more is closed before
@@ -50,7 +51,7 @@ const helloTimeout = 10 * time.Second
 // idleTimeout ends an authenticated session that sent nothing for two
 // heartbeats and a margin, so a half-open or superseded connection frees
 // its slot (#4755 items 2 and 4). An honest core speaks each
-// wire.SummaryInterval.
+// wire.HeartbeatInterval.
 const idleTimeout = Silence + helloTimeout
 
 // fireTimeout bounds one firewall load, so a hung nft cannot stall the
@@ -72,6 +73,7 @@ type firewall interface {
 // resolver is the dnsmasq instances (broker/enforcer/dns/run.Set).
 type resolver interface {
 	Apply(f dns.Files, load func() error) error
+	Flapping() []dnsrun.Flap
 	Close()
 }
 
@@ -129,6 +131,7 @@ type Enforcer struct {
 	ch     *channel.Channel
 	chCfg  channel.Config
 	cut    *cut
+	edge   *edgeCut
 	core   ed25519.PublicKey
 	coreCA []byte
 
@@ -154,14 +157,13 @@ type Enforcer struct {
 	conns         atomic.Int32
 	changed       chan struct{}
 	lastLit       time.Time
-	// The page's core and recovery state as last told to the alerts:
-	// Tick tells them only a change, since each call re-shows the light
-	// and coming up re-offers every unsent alert (ENF-h-a5). upMu holds
-	// toldUp, which a hello also writes, so a core shown up by a hello
-	// is shown down by the next tick that finds it silent (#4755 item 8).
-	upMu         sync.Mutex
-	toldUp       bool
-	toldRecovery bool
+	// The page's core state as last told to the alerts: Tick tells them
+	// only a change, since each call re-shows the light and coming up
+	// re-offers every unsent alert (ENF-h-a5). upMu holds toldUp, which a
+	// hello also writes, so a core shown up by a hello is shown down by
+	// the next tick that finds it silent (#4755 item 8).
+	upMu   sync.Mutex
+	toldUp bool
 
 	// fresh is the byte caps' fresh day (state.go); freshStop carries
 	// errFreshDay to the daemon's loop once its day is saved.
@@ -212,6 +214,9 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 	if d.cut, err = openCut(d.store(fileCut), d.alerts, dp.Logf); err != nil {
 		return nil, err
 	}
+	if d.edge, err = openEdgeCut(d.store(fileEdgeCut), d.alerts, dp.Logf); err != nil {
+		return nil, err
+	}
 	if d.cert, err = pageCert(d.store(fileCert), cfg.Name, dp.Now()); err != nil {
 		return nil, fmt.Errorf("page certificate: %w", err)
 	}
@@ -230,8 +235,6 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 		return nil, err
 	}
 	d.openFresh()
-	d.toldRecovery = d.recoveryPending()
-	d.alerts.Recovery(d.toldRecovery) // the alerts start with the core down (toldUp false)
 	// Nothing is served until the policy in force is loaded: the box may
 	// have booted with any ruleset, so a refused first load is a failed
 	// start, and the service manager starts the daemon again (P4, P5,
@@ -263,7 +266,7 @@ func (d *Enforcer) openChannel(at func(string) string) error {
 	d.chCfg = channel.Config{
 		Core: d.core, Key: priv, Revoked: d.heads.Revoked,
 		Policy: lockedPolicy{d}, Radio: d.dp.Radio, Heads: d.heads, Alerts: d.alerts, Cut: d.cut,
-		Log: d.event, Now: d.dp.Now, Elapsed: d.dp.Elapsed,
+		Log: d.event, Connected: d.connected, Now: d.dp.Now, Elapsed: d.dp.Elapsed,
 		Traffic: d.trafficRead, Counts: d.counts,
 	}
 	if d.ch, err = channel.New(d.chCfg); err != nil {
@@ -296,28 +299,27 @@ func (d *Enforcer) event(e channel.Event) {
 		d.coreSeen.Store(int64(d.dp.Elapsed()) + 1)
 	}
 	d.dp.Logf(e.At.In(d.cfg.zone).Format("2006-01-02 15:04 MST") + " channel " + e.Line())
-	if e.Kind == channel.KindHello && e.Code != wire.Refused {
-		// A session the core just authenticated: offer it every alert no
-		// session took, even when Tick never saw the core go down (a
-		// reconnect inside Silence). The log runs outside the channel's
-		// lock, so the offer may use the channel. toldUp records it, so
-		// a tick that then finds the core silent shows it down.
-		d.upMu.Lock()
-		d.toldUp = true
-		d.alerts.Core(true)
-		d.upMu.Unlock()
-	}
+}
+
+// connected is the channel's hook for a session the core just
+// authenticated: the core is seen, and every alert no session took is
+// offered to it, even when Tick never saw the core go down (a reconnect
+// inside Silence) and when a cut core's bucket dropped the hello's log
+// line (#4903). It runs outside the channel's lock, so the offer may use
+// the channel. toldUp records it, so a tick that then finds the core
+// silent shows it down.
+func (d *Enforcer) connected() {
+	d.coreSeen.Store(int64(d.dp.Elapsed()) + 1)
+	d.upMu.Lock()
+	d.toldUp = true
+	d.alerts.Core(true)
+	d.upMu.Unlock()
 }
 
 // coreUp reports whether the core spoke within Silence.
 func (d *Enforcer) coreUp() bool {
 	s := d.coreSeen.Load()
 	return s != 0 && d.dp.Elapsed()-time.Duration(s-1) < Silence
-}
-
-func (d *Enforcer) recoveryPending() bool {
-	_, ok := d.book.Recovery()
-	return ok
 }
 
 // kick asks the run loop to bring the firewall up to the policy in force.
@@ -335,12 +337,8 @@ func (d *Enforcer) kick() {
 // is tried again at the next tick.
 func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	d.mu.Lock()
-	doc := d.engine.Current()
+	doc, h := d.engine.CurrentHash()
 	d.mu.Unlock()
-	h, err := policy.Hash(doc)
-	if err != nil {
-		return err
-	}
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	if h == d.loaded && !d.net.reload {
@@ -363,10 +361,6 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if _, err := d.book.Tick(); err != nil {
 		d.dp.Logf("enrolment: " + err.Error())
 	}
-	if r := d.recoveryPending(); r != d.toldRecovery {
-		d.toldRecovery = r
-		d.alerts.Recovery(r)
-	}
 	d.mu.Lock()
 	_, err := d.engine.Tick(now.UnixMilli())
 	d.mu.Unlock()
@@ -378,6 +372,9 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	}
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip still not saved: " + err.Error())
+	}
+	if err := d.edge.Persist(); err != nil {
+		d.dp.Logf("edge cut: trip still not saved: " + err.Error())
 	}
 	d.tickFresh(ctx, now)
 	d.tickNetwork(ctx, now)
@@ -412,9 +409,8 @@ func (d *Enforcer) renewCert(now time.Time) bool {
 	r, err := d.cert.Renew(d.cfg.Name, now)
 	if err != nil {
 		d.dp.Logf("page certificate: " + err.Error())
-		return false
 	}
-	if leafEqual(r, d.cert) {
+	if err != nil || leafEqual(r, d.cert) {
 		return false
 	}
 	if err := saveCert(d.store(fileCert), r); err != nil {
@@ -439,7 +435,7 @@ func (d *Enforcer) rebuildPage() error {
 		Addrs: d.cfg.Page, Allow: d.cfg.PageAllow, Policy: pagePolicy{d}, Lock: &d.mu,
 		Log: d.dp.Logf, Zone: d.cfg.zone, Cert: cert.Leaf, Now: d.dp.Now,
 		Heard:  mdns.HeardBy(d.net.filter, d.cfg.Layout),
-		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d},
+		Alerts: pageAlerts{d.alerts}, Caps: pageCaps{d}, Resolver: pageResolver{d}, Edge: pageEdge{d},
 	}
 	if d.ch != nil {
 		pc.Channel, pc.Core = d.cut, pageCore{d}
@@ -487,11 +483,13 @@ func (d *Enforcer) Close() {
 	if err := d.cut.Persist(); err != nil {
 		d.dp.Logf("cut: trip not saved at close: " + err.Error())
 	}
+	if err := d.edge.Persist(); err != nil {
+		d.dp.Logf("edge cut: trip not saved at close: " + err.Error())
+	}
 	d.pageMu.Lock()
 	for _, ln := range d.pageLns {
 		ln.Close()
 	}
-	d.pageLns = nil
 	d.pageMu.Unlock()
 	d.closeFresh()
 	d.closeNetwork()
@@ -560,16 +558,14 @@ func (d *Enforcer) ServeChannel(ln net.Listener) error {
 func (d *Enforcer) serveConn(t *tls.Conn) {
 	hello := time.Now().Add(d.dp.HelloWait)
 	t.SetDeadline(hello)
-	if err := t.Handshake(); err != nil {
+	if t.Handshake() != nil {
 		return
 	}
-	t.SetDeadline(time.Time{})
+	// deadlineConn sets each read's and write's deadline from here on.
 	cs := t.ConnectionState()
-	exp, err := cs.ExportKeyingMaterial(wire.ExporterLabel, nil, wire.ExporterLen)
-	if err != nil {
-		return
+	if exp, err := cs.ExportKeyingMaterial(wire.ExporterLabel, nil, wire.ExporterLen); err == nil {
+		_ = d.ch.Serve(&deadlineConn{Conn: t, hello: hello, idle: d.dp.IdleWait}, exp)
 	}
-	_ = d.ch.Serve(&deadlineConn{Conn: t, hello: hello, idle: d.dp.IdleWait}, exp)
 }
 
 // deadlineConn bounds a channel session's reads and writes (#4755 items 2
@@ -631,10 +627,7 @@ func ephemeralCert(r io.Reader) (tls.Certificate, error) {
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(r, t, t, pub, priv)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, nil
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, err
 }
 
 // lockedPolicy is the engine as the channel reaches it: every call under

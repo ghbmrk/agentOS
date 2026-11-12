@@ -48,6 +48,11 @@ var All = []Change{
 	// the drive carries a newer revocation policy than the PC (shim 15.7
 	// and later); it can stop older Linux boot media on that PC.
 	{"sbat-level", UEFI},
+	// After a power cut or forced reset only: the memory-overwrite request
+	// (MemoryOverwriteRequestControl) the kernel's EFI stub sets at every
+	// boot, so the firmware wipes memory once at the next start. An orderly
+	// shutdown wipes the image's secrets, then clears it (P2-1, #4794).
+	{"mor", UEFI},
 	// A possible Windows recovery-key prompt at the next Windows start.
 	{"windows-recovery-prompt", Windows},
 }

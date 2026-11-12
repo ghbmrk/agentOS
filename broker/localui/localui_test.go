@@ -665,7 +665,7 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 	r.startChannel(carrier.Line(boxNum))
 	// Spoofed wrong codes put the channel into challenge mode.
 	for i := 0; i < owner.WrongToChallenge; i++ {
-		r.ch.Handle(context.Background(), ownerNum, "status "+strings.Repeat(string(rune('1'+i%9)), 6))
+		r.ch.Handle(context.Background(), ownerNum, strings.Repeat(string(rune('1'+i%9)), 6))
 	}
 	if !r.ch.LocalStatus().Challenged {
 		t.Fatal("setup: not challenged")
@@ -1136,10 +1136,10 @@ func TestLockSignsDevicesOut(t *testing.T) {
 	if err := r.ch.RequireUnlock(); err != nil {
 		t.Fatal(err)
 	}
-	// A later unlock by text does not sign the device back in.
+	// No code by text opens a session (CH-14), so none signs it back in.
 	r.ch.Handle(context.Background(), ownerNum, r.code())
-	if !r.ch.SessionUnlocked(r.clock()) {
-		t.Fatal("text unlock failed")
+	if r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("a texted code opened a session")
 	}
 	if w := r.do("GET", "/home", nil); w.Code != http.StatusSeeOther {
 		t.Fatal("device still signed in after the session locked")

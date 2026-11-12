@@ -23,7 +23,7 @@ The owner calls the box's number and asks, in plain speech, what is in the mail 
 | VOICE-ro-a | `broker/call/**`, its line in `tools/risk_tier.py` (tier A, criterion c), C18 in `broker/modem/at/S2-CONFIRM.md` | The call loop: line, recognizer, answerer and synthesizer as interfaces; sentence cut and check; barge-in; 0 is STOP; reading the speed-dial token and the call's rung; turn timing | nothing |
 | VOICE-ro-t | `broker/kernel/**` (token slot), the owner page | The token: made at home on the owner page with the passkey, held sealed by the kernel, checked in constant time with tries limited across calls, and answers replay of a static token seen in the call's key events (rotation from the owner page, or a counter part); the page shows the contact to save on the handset (number, pause, token, `#`) | a; S2's C18 on a real call |
 | VOICE-ro-b | `broker/speech/**`, `broker/cmd/agentos-speech/**` | The recognizer and synthesizer as one sandboxed untrusted process (a small streaming recognizer and a local synthesizer, both public weights, tuned on telephone audio, never the owner's calls), timed on the M6 Ultra | a |
-| VOICE-ro-c | `broker/clerk/plan/**` read side, `broker/cmd/agentosd/**` (serial, D-111) | The answerer: the planner's reads of mail, calendar, due items and STATUS, labels checked against the call's rung | a, the planner's read path |
+| VOICE-ro-c | `broker/call/answer/**`, `broker/cmd/agentosd/**` (serial, D-111) | The answerer: the planner's reads of mail, calendar, due items and STATUS, labels checked against the call's rung (the label gate is part p0, #4948) | a, the planner's read path |
 | VOICE-ro-d | `broker/cmd/agentos-modem/**`, `broker/modem/bridge/**` | Wiring: owner calls reach the loop in the modem bridge; text to the answerer over the bridge socket | a, b, c, t; live run on S2 |
 
 **Acceptance tests:** VOICE-ro-a, `go test ./broker/call/...`:
@@ -34,3 +34,26 @@ The owner calls the box's number and asks, in plain speech, what is in the mail 
 - `TestOneMomentCoversASlowAnswer`, `TestOneMomentCoversEverySlowPart`, `TestClipWaitCountsFromTheEndOfSpeech`, `TestClipIsNotContent`, `TestTurnTimesArePercentiles` (rule 5)
 - `TestSpeechDuringTheTokenIsAnswered`, `TestTokenWaitTurnCarriesAcrossBargeIn`, `TestCarryIsAskedOnce`, `TestZeroDropsTheCarry`, `TestStopWordDropsTheCarry`, `TestEmptyFinalAsksNothing` (rule 4)
 - `TestOneClipDeadlineCoversEveryWait` (rule 5, on a moving clock)
+
+## VOICE-ro-c, part p0: the answerer holds P0 by data labels (#4948)
+
+`broker/call/answer` is a `call.Answerer`: its reads return facts with their data labels (PLN-3), and the writer (the model that words the answer) is given only the facts the ask's rung may hear. P2 hears every fact; any other rung hears only facts labelled `status` alone, so an unlabelled or mixed fact is private. `broker/clerk/plan` was named here before: it is the plan-login clerk, not the planner.
+
+**Acceptance tests:** VOICE-ro-c-p0, `go test ./broker/call/answer/...`: `TestP0AskForMailOrCalendarGetsNoPrivateContent`, `TestOnlyP2IsFull`, `TestUnlabelledAndMixedFactsArePrivate`, `TestP2HearsMailAndCalendar`, `TestReadsSeeTheAsk`, `TestFailedReadFailsTheTurn` (rule 4)
+
+## VOICE-ro-b, part b1: the speech process's wire and the box-side client (#5171)
+
+The process is untrusted (a model runs in it), so the box-side client treats every frame it sends as a claim, like the transcript itself. Part b1 builds the wire (`broker/speech/wire`), the client (`broker/speech`, implementing `call.Recognizer` and `call.Synthesizer`), and the program's serve loop behind an engine interface (`broker/cmd/agentos-speech`). Part b2 (the pinned public-weight recognizer and synthesizer, tuned on telephone audio, timed on the M6 Ultra) needs the hardware and is its own row.
+
+1. **A bad frame ends the session.** An unknown type, an oversize frame, text that is not UTF-8 or carries a control character, odd-length PCM, a reply to a sentence not asked, or an end of speech past the audio sent closes the transcript channel and fails every pending and later `Speak`, so the loop plays its failed clip. Nothing is repaired or skipped.
+2. **End of speech is on the box's clock.** The process names the sample at which speech ended; the client maps it to when the box forwarded that audio and never later than when the transcript arrived, so a slow or lying recognizer cannot hold back the one-moment clip.
+3. **Audio is bounded by its text.** A sentence's audio is at most 1 s plus 250 ms per rune (40 s in all), whole samples; longer audio fails that sentence rather than being cut.
+4. **A cancelled sentence stays cancelled.** A `Speak` whose context ends returns at once, and its late audio is dropped, never played as the next sentence.
+5. **The process sees only audio and checked sentences.** The wire carries nothing else to it; an untagged build has no engine and exits non-zero, failing closed.
+
+**Acceptance tests:** VOICE-ro-b, `go test ./broker/speech/... ./broker/cmd/agentos-speech/...`:
+- `TestBadFrameEndsTheSession`, `TestControlCharacterEndsTheSession`, `TestUnaskedReplyEndsTheSession`, `FuzzClient` (rule 1)
+- `TestEndIsTheBoxClock`, `TestEndPastTheAudioEndsTheSession` (rule 2)
+- `TestAudioBoundedByText`, `TestOddAudioEndsTheSession` (rule 3)
+- `TestCancelledSentenceIsDropped` (rule 4)
+- `TestServeRoundTrip`, `TestNoEngineFailsClosed` (rule 5)

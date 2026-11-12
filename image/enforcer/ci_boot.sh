@@ -6,14 +6,17 @@
 #  1. First boot: a USB stick on an xHCI controller, a network card standing in for the WAN, and a
 #     credential drop-in that tries to load the simulated Wi-Fi driver (mac80211_hwsim) before the
 #     self-check. The self-check passes under Secure Boot with Wi-Fi and USB storage off, the watchdog
-#     armed and rp_filter read back as 0 on "all" and the card (#4810); the entry is blessed; the
-#     state partition grew and is noexec; the stick stayed unauthorised.
+#     armed, rp_filter read back as 0 on "all" and the card (#4810) and accept_redirects as 0 on "all",
+#     "default" and the card in both families (#5164); the entry is blessed; the
+#     state partition grew and is noexec; the stick stayed unauthorised; the card, standing in for
+#     the WAN, has its router-advertisement handling set (#5189, ci_wan.sh).
 #  2. Rollback: the drive gets a previous release's entry, and the self-check is forced to fail on
 #     counted boots. The new entry's three tries run down and the previous release boots and passes.
 # ENF-m-b adds the open-port set and an update whose self-check fails (briefs/ENF.md acceptance 1).
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-fallback.log.
 set -eu
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/enforcer-boot}"); mkdir -p "$W"
+HERE=$(dirname "$(realpath "$0")")
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
 
 copy() { cp --sparse=always "$IMG" "$1"; truncate -s +2G "$1"; }
@@ -56,13 +59,19 @@ fail=0
 has() { grep -aqF "$2" "$1" && echo "ok   $2" || { echo "MISS $2"; fail=1; }; }
 hasnt() { grep -aqF "$2" "$1" && { echo "UNEXPECTED $2"; fail=1; } || echo "ok   no \"$2\""; }
 
+# #5189, #5330 (ENF-l-21): the WAN's router-advertisement handling, checked by ci_wan.sh. Its probe
+# runs before the boot report and prints what it read on the network card.
+WANRA=$(sed "/^#/d" "$HERE/ci_wan.sh" | base64 -w0)
+WANRA_UNIT="[Service]\nExecStartPre=-/bin/sh -c 'echo $WANRA | base64 -d | sh -s probe'\n"
+
 # 1. First boot.
 D=$W/drive.raw
 copy "$D"
 truncate -s 64M "$W/stick.raw"
 HWSIM="[Service]\nExecStartPre=-/bin/sh -c 'modprobe mac80211_hwsim radios=1 && echo enforcer-ci: hwsim loaded || echo enforcer-ci: hwsim refused'\n"
 EXTRA="-device qemu-xhci,id=xhci -drive if=none,id=stick,format=raw,file=$W/stick.raw -device usb-storage,bus=xhci.0,drive=stick \
--netdev user,id=wan,restrict=on -device virtio-net-pci,netdev=wan$(smbios_cred systemd.unit-dropin.enforcer-health.service "$HWSIM")" \
+-netdev user,id=wan,restrict=on -device virtio-net-pci,netdev=wan$(smbios_cred systemd.unit-dropin.enforcer-health.service "$HWSIM")\
+$(smbios_cred systemd.unit-dropin.enforcer-boot-report.service "$WANRA_UNIT")" \
 	boot "$W/console.log" "$D"
 show "$W/console.log"
 has "$W/console.log" "enforcer-ci: hwsim refused"
@@ -80,6 +89,18 @@ if printf '%s\n' "$rpf" | grep -qx all && printf '%s\n' "$rpf" | grep -qx defaul
 else
 	echo "MISS rp_filter 0 on all, default and the network card (read: $(printf '%s' "$rpf" | tr '\n' ' '))"; fail=1
 fi
+# #5164 R3: the self-check read accept_redirects as 0 on "all" and "default" in both families and on
+# the card in both, so no interface took a redirect from boot, before agentos-enforcer runs.
+red=$(grep -ao 'enforcer-health: PASS .* redirects=0:[^ ]*' "$W/console.log" | head -n 1 | tr -d '\r' | sed 's/.* redirects=0://' | tr ',' '\n')
+card=$(printf '%s\n' "$red" | sed -n 's#^ipv4/##p' | grep -vx 'all\|default\|lo' | head -n 1)
+if [ -n "$card" ] && (for k in ipv4/all ipv4/default ipv6/all ipv6/default "ipv4/$card" "ipv6/$card"; do
+	printf '%s\n' "$red" | grep -qxF "$k" || exit 1; done); then
+	echo "ok   accept_redirects 0 on $(printf '%s' "$red" | tr '\n' ' ')"
+else
+	echo "MISS accept_redirects 0 on all, default and the network card, IPv4 and IPv6 (read: $(printf '%s' "$red" | tr '\n' ' '))"; fail=1
+fi
+# #5189: the WAN's router-advertisement handling is set: accept_ra=2 on it, or an IPv6 default route.
+sh "$HERE/ci_wan.sh" verdict "$W/console.log" || fail=1
 # The state partition grew into the drive's extra 2 GiB.
 rb=$(grep -ao 'root_bytes=[0-9]*' "$W/console.log" | head -n 1 | cut -d= -f2)
 [ "${rb:-0}" -gt $((2 * 1024 * 1024 * 1024)) ] && echo "ok   state partition grew ($rb bytes)" ||

@@ -55,7 +55,7 @@ func TestLockedStopLedReactionKeepsTheStopHint(t *testing.T) {
 	r := newRig(t, nil)
 	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
 	got := r.say("STOP “Your sign-in code is 482913.”")
-	if !strings.Contains(got, "held for") || !strings.Contains(got, "To pause everything, reply STOP.") || strings.Contains(got, "482913") {
+	if !strings.Contains(got, waitingReply) || !strings.Contains(got, "To pause everything, reply STOP.") || strings.Contains(got, "482913") {
 		t.Fatalf("locked STOP-led reaction replied %q, want held plus the STOP hint", got)
 	}
 }

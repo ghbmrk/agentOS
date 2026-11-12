@@ -159,6 +159,10 @@ type Machine struct {
 	// first loaded), never reused, so a machine given a destroyed one's
 	// ID, even in the same lineage, is told apart from it (#1561).
 	Instance string `json:",omitempty"`
+	// Created is when this life began, with Instance. A snapshot recorded
+	// before Instance that is older than it is of an earlier life under the
+	// same ID (stampLegacy). Zero: recorded before it was.
+	Created time.Time `json:",omitzero"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -313,6 +317,11 @@ type Config struct {
 	// and has not been rolled back yet (recall W10): its machines are not
 	// forked or merged, so what it holds spreads no further. Nil: none is.
 	Contained func(lineage string) bool
+	// UnreadGone tells the owner's side that snapshots whose record did not
+	// read were deleted, so what they held is gone unseen: by a forget
+	// (forgotten) or because the state disk was short of room (not). Nil:
+	// nobody is told. It is called after the delete, with no lock held.
+	UnreadGone func(n int, forgotten bool)
 }
 
 var (
@@ -468,6 +477,9 @@ type Manager struct {
 	machines map[string]*machine
 	snaps    map[string]Snapshot
 	seq      int
+	// unread are the snapshots kept on disk whose record did not read
+	// at open: not offered, retried at the next open.
+	unread map[string]bool
 
 	// afterGet, set only by tests, runs between a lookup and the caller
 	// locking what it found: where a destroy can retire the handle.
@@ -609,7 +621,7 @@ func Open(ctx context.Context, cfg Config) (*Manager, error) {
 			return nil, err
 		}
 	}
-	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, live: map[uint32]int64{}}
+	m := &Manager{cfg: cfg, machines: map[string]*machine{}, snaps: map[string]Snapshot{}, unread: map[string]bool{}, live: map[uint32]int64{}}
 	if err := m.load(ctx); err != nil {
 		return nil, err
 	}
@@ -723,6 +735,11 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	// Asked under the lock, just before the boot: a provider run whose
+	// STOP came after its entry check starts nothing (STOP-queued-start-fu).
+	if err == nil && heldBy(ctx) {
+		err = ErrHeld
+	}
 	tried := false
 	if err == nil {
 		var h *diskHold
@@ -826,7 +843,7 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 	if err != nil {
 		return nil, err
 	}
-	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage, Instance: inst}}
+	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage, Instance: inst, Created: time.Now().UTC()}}
 	mc.label.Store(uint32(l))
 	if m.cfg.Quota != nil {
 		mc.Project = m.nextProjectLocked()
@@ -1321,16 +1338,21 @@ func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return m.takeOf(ctx, mc, t)
+	return m.takeOf(ctx, mc, t, false)
 }
 
 // takeOf is take for a handle the caller holds already, so a check it made
-// on that machine still holds for the snapshot taken.
-func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+// on that machine still holds for the snapshot taken. With ask, the hold
+// ctx carries (WithHold) is asked after the wait for the lock, before the
+// pause: a held fork never pauses its source (STOP-queued-start-fu).
+func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier, ask bool) (Snapshot, error) {
 	if err := mc.lockLive(); err != nil {
 		return Snapshot{}, err
 	}
 	defer mc.mu.Unlock()
+	if ask && heldBy(ctx) {
+		return Snapshot{}, ErrHeld
+	}
 	if mc.State != Running {
 		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, mc.ID, mc.State)
 	}
@@ -1556,6 +1578,19 @@ func (h *diskHold) release() {
 	h.m.diskMu.Unlock()
 }
 
+// Unread lists the snapshots kept unread at open, in no order: each
+// holds a restore point whose record did not read, and loads at the next
+// open once it does.
+func (m *Manager) Unread() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.unread))
+	for id := range m.unread {
+		out = append(out, id)
+	}
+	return out
+}
+
 func (m *Manager) nextSnapID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1585,7 +1620,8 @@ func ownSnap(mc *machine, s Snapshot) bool {
 // Rollback returns a machine to snapshot snapID (REV-4). A full checkpoint
 // restores memory too; a file-system snapshot restarts the guest on that
 // file system. The machine's label does not fall (REV-5). A preempted or
-// stopped machine is re-admitted first.
+// stopped machine is re-admitted first. A hold ctx carries (WithHold)
+// refuses it with ErrHeld while it says true.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err := refuseProvider(id); err != nil {
 		return err
@@ -1623,6 +1659,11 @@ func (m *Manager) rollbackTo(ctx context.Context, mc *machine, s Snapshot) error
 	}
 	mc.mu.Lock()
 	err := claimLocked(mc)
+	// Asked after every wait for the lock, just before the restore
+	// (STOP-queued-start).
+	if err == nil && heldBy(ctx) {
+		err = ErrHeld
+	}
 	if err == nil && s.Label > mc.Label {
 		// Saved before the snapshot's content reaches the layer (LABEL-durable).
 		err = m.raiseLocked(mc, s.Label)
@@ -1744,7 +1785,8 @@ func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
 // from that checkpoint, memory included (REV-4 fork(n), CAP-1). Each fork
 // inherits the source's image, class, budget, and label (REV-5), and is
 // admitted on its own budget, because forks share no memory (S3). Either all
-// forks start or none do.
+// forks start or none do. A hold ctx carries (WithHold) refuses it with
+// ErrHeld while it says true.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
 	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
 		return Snapshot{}, err
@@ -1834,7 +1876,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	src.mu.Unlock()
 	// Taken of src itself: a new machine given the ID meanwhile is not
 	// what the forks were labelled and lineaged from.
-	s, err := m.takeOf(ctx, src, Full)
+	s, err := m.takeOf(ctx, src, Full, true)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1856,6 +1898,12 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 		m.setForkBase(mc, s.ID)
 		mc.Label = maxLabel(mc.Label, s.Label)
 		err := claimLocked(mc)
+		// Asked after every wait on the source, just before each fork
+		// starts; a held one is undone as any failed start is
+		// (STOP-queued-start).
+		if err == nil && heldBy(ctx) {
+			err = ErrHeld
+		}
 		tried := err == nil
 		if tried {
 			err = m.startFrom(ctx, mc, &s)
@@ -1885,12 +1933,24 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			}
 			for _, done := range reserved[:i] {
 				if derr := m.destroy(ctx, done); derr != nil {
+					live = errors.Join(live, derr)
 					err = errors.Join(err, fmt.Errorf("undoing fork %s: %w", done.ID, derr))
 				}
 			}
 			for _, f := range undone {
 				m.release(f)
 				m.unreserve(f)
+			}
+			// With every fork undone, nothing uses the checkpoint, so it
+			// goes as on a refusal before any start: a held or failed fork
+			// leaves nothing behind. A fork still live keeps it as its base.
+			// A drop that worked adds nothing: a clean hold stays the bare
+			// ErrHeld, which callers read as STOP alone. One that failed is
+			// named as the drop, for the broker's log (STOP-queued-start-fu2).
+			if live == nil {
+				if derr := m.dropSnapshot(src, s.ID, prevLast); derr != nil {
+					err = errors.Join(err, fmt.Errorf("dropping checkpoint %s: %w", s.ID, derr))
+				}
 			}
 			return Snapshot{}, err
 		}
@@ -1995,7 +2055,7 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
 	// Taken of sm itself, which the containment and fork-point checks read.
-	ss, err := m.takeOf(ctx, sm, FS)
+	ss, err := m.takeOf(ctx, sm, FS, false)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -2390,16 +2450,33 @@ func (m *Manager) load(ctx context.Context) error {
 		return err
 	}
 	for _, e := range snaps {
+		if n, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "s")); err == nil && n > m.seq {
+			// Every name taken, loaded or not: a new snapshot never lands
+			// on a kept one.
+			m.seq = n
+		}
+		if !e.IsDir() {
+			// Not a snapshot, and not the broker's: left alone.
+			continue
+		}
 		var s Snapshot
-		if err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s); err != nil || s.ID != e.Name() {
+		err := readJSON(filepath.Join(m.snapDir(e.Name()), "meta.json"), &s)
+		var pe *fs.PathError
+		if errors.As(err, &pe) && !errors.Is(err, fs.ErrNotExist) {
+			// A read that fails for another reason than absence may be
+			// transient: the snapshot may be published, so keep it, unread,
+			// for the next open, and open without it. Persistent, it would
+			// otherwise fail every open. ForgetSince deletes it.
+			log.Printf("vm: snapshot %s kept unread: %v", e.Name(), err)
+			m.unread[e.Name()] = true
+			continue
+		}
+		if err != nil || s.ID != e.Name() {
 			// A snapshot without metadata was never published: drop it.
 			os.RemoveAll(m.snapDir(e.Name()))
 			continue
 		}
 		m.snaps[s.ID] = s
-		if n, err := strconv.Atoi(strings.TrimPrefix(s.ID, "s")); err == nil && n > m.seq {
-			m.seq = n
-		}
 	}
 	ms, err := os.ReadDir(filepath.Join(m.cfg.StateDir, "machines"))
 	if err != nil {
@@ -2452,17 +2529,19 @@ func (m *Manager) load(ctx context.Context) error {
 
 // stampLegacy gives each snapshot recorded before Instance one, once, at
 // load (security S-N1 on #1575). The machine of its ID gets it when the
-// snapshot is of its lineage (or recorded before lineages): it was that
-// machine's to use before the upgrade, and stays so. Any other gets an
-// Instance no machine has. So a machine destroyed and replaced under its
-// ID after the upgrade leaves its old snapshots behind, as one of this
-// release does.
+// snapshot is of its lineage (or recorded before lineages) and was taken in
+// its life, not before the machine began: it was that machine's to use
+// before the upgrade, and stays so. Any other gets an Instance no machine
+// has, so a machine destroyed and replaced while the snapshot was unread
+// (read only at a later open) does not inherit it. So a machine destroyed
+// and replaced under its ID after the upgrade leaves its old snapshots
+// behind, as one of this release does.
 func (m *Manager) stampLegacy() error {
 	for id, s := range m.snaps {
 		if s.Instance != "" {
 			continue
 		}
-		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) {
+		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) && !mc.Created.After(s.Taken) {
 			s.Instance = mc.Instance
 		} else {
 			inst, err := newInstance()

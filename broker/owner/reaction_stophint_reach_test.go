@@ -103,7 +103,7 @@ func TestLockedStopLedCutFormGetsTheStopHintFirst(t *testing.T) {
 	r := newRig(t, nil)
 	r.ch.recent.add(sentText{text: "Your sign-in code is 482913.", at: r.now})
 	got := r.say("STOP “Your sign-in code is 4829")
-	if !strings.Contains(got, "held for") {
+	if !strings.Contains(got, waitingReply) {
 		t.Fatalf("locked reaction replied %q, want it held", got)
 	}
 	hintFirst(t, "locked STOP-led cut form", got)
@@ -122,7 +122,7 @@ func TestLockedStopLedFormOnAForgottenReplyGetsTheStopHintFirst(t *testing.T) {
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
 	got := r.say("STOP “" + forgottenReply + "”")
-	if !strings.Contains(got, "held for") {
+	if !strings.Contains(got, waitingReply) {
 		t.Fatalf("locked reaction replied %q, want it held", got)
 	}
 	hintFirst(t, "locked STOP-led form on a forgotten reply", got)

@@ -33,6 +33,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
@@ -247,6 +248,12 @@ type fakeDNS struct {
 	applied []dns.Files
 	inside  bool // a load ran inside Apply
 	closed  int
+	// running is the files the instances run: an Apply's once its load
+	// is done, and as they were when it is refused (dns/run starts the
+	// ones it stopped again).
+	running dns.Files
+	// flaps is what Flapping reports: the instances that keep exiting.
+	flaps []dnsrun.Flap
 }
 
 func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
@@ -258,12 +265,14 @@ func (f *fakeDNS) Apply(files dns.Files, load func() error) error {
 	defer f.mu.Unlock()
 	f.inside = false
 	if err == nil {
-		f.applied = append(f.applied, files)
+		f.applied, f.running = append(f.applied, files), files
 	}
 	return err
 }
 
 func (f *fakeDNS) Close() { f.mu.Lock(); f.closed++; f.mu.Unlock() }
+
+func (f *fakeDNS) Flapping() []dnsrun.Flap { f.mu.Lock(); defer f.mu.Unlock(); return f.flaps }
 
 func (f *fakeDNS) last() dns.Files {
 	f.mu.Lock()
@@ -397,7 +406,7 @@ func newBox(t *testing.T, withCore bool) *box {
 	if err := os.Chmod(x.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := enrol.Provision(fileStore{path: filepath.Join(x.dir, fileEnrol)}, caseCode, nil); err != nil {
+	if err := provisionState(x.dir, caseCode); err != nil {
 		t.Fatal(err)
 	}
 	if withCore {
@@ -559,6 +568,12 @@ func (x *box) enforced() string {
 // in the same transaction, the byte caps' drop at no bytes sent.
 func (x *box) fullLoad(doc policy.Document) string {
 	x.t.Helper()
+	return x.seededLoad(doc, "")
+}
+
+// seededLoad is fullLoad with seed (nft.Seed's text) after the ruleset.
+func (x *box) seededLoad(doc policy.Document, seed string) string {
+	x.t.Helper()
 	text, err := nft.Reload(doc, x.cfg.Layout, nil)
 	if err != nil {
 		x.t.Fatal(err)
@@ -572,7 +587,7 @@ func (x *box) fullLoad(doc policy.Document) string {
 	if err != nil {
 		x.t.Fatal(err)
 	}
-	return joinRules(text, drops)
+	return joinRules(joinRules(text, seed), drops)
 }
 
 func (x *box) opened(k alert.Kind) bool {
@@ -1045,6 +1060,16 @@ func TestLifecycle(t *testing.T) {
 	// a restart keeps it so, and only the page's passkey resume lifts it.
 	t.Run("channel burst", func(t *testing.T) {
 		x, a := enrolled(t, true)
+		// Clear the enrolment's alert first, so "off" below means no
+		// Alerts section at all (#5162).
+		for _, r := range x.d.alerts.Status().Open {
+			if r.Kind != alert.Enrolment {
+				t.Fatalf("alert %d (kind %d) open before the burst", r.ID, r.Kind)
+			}
+			if w := x.b.act(a, "clear", strconv.FormatUint(r.ID, 10)); w.Code != http.StatusOK {
+				t.Fatalf("clear the enrolment's alert: %d %s", w.Code, w.Body)
+			}
+		}
 		c, _ := x.dial(x.serve(), x.core)
 		for range wire.Rate(wire.RateRead).Burst {
 			if code := c.read(); code != wire.OK {
@@ -1183,7 +1208,7 @@ func TestLifecycle(t *testing.T) {
 		if r["due"] == nil {
 			t.Fatalf("a recovery that does not wait: %v", r)
 		}
-		if !x.logged(alert.RecoveryCodeUsed) || !x.d.alerts.Status().Recovery {
+		if _, ok := x.d.book.Recovery(); !x.logged(alert.RecoveryCodeUsed) || !ok {
 			t.Fatal("the recovery is neither texted nor on the page")
 		}
 		if x.light.c != alert.Off {
@@ -1195,7 +1220,7 @@ func TestLifecycle(t *testing.T) {
 			t.Fatal("the replacement came into force before its wait")
 		}
 		x.advance(2 * time.Minute)
-		if x.d.book.Owner() != b.Public() || x.d.alerts.Status().Recovery {
+		if _, ok := x.d.book.Recovery(); x.d.book.Owner() != b.Public() || ok {
 			t.Fatal("the replacement did not come into force after its wait")
 		}
 		if w := x.b.approve(a, home()); w.Code == http.StatusOK {
@@ -1274,12 +1299,25 @@ func (x *box) page(field string) string {
 			return "down"
 		}
 		return "up"
-	case "Light":
-		if m := regexp.MustCompile(`The light is ([a-z]+)`).FindStringSubmatch(body); m != nil {
-			return m[1]
-		}
-	case "Key":
+	case "Light": // home names only a red light (#5106)
 		switch {
+		case strings.Contains(body, "The light is red"):
+			return "red"
+		case strings.Contains(body, "<h2>Alerts</h2>"): // not red, yet alerts show (#5162)
+			return "alerts"
+		}
+		return "off"
+	case "Key":
+		// Every revocation button asks the owner to confirm, the re-tap
+		// that saves an unsaved revocation too (ENF-page-status-2, #5162).
+		for _, b := range regexp.MustCompile(`<button[^>]*data-action="revoke-core"[^>]*>`).FindAllString(body, -1) {
+			if !strings.Contains(b, `data-confirm="`) {
+				return "unconfirmed"
+			}
+		}
+		switch {
+		case strings.Contains(body, "the revocation was not saved"):
+			return "unsaved"
 		case strings.Contains(body, "key is revoked"):
 			return "revoked"
 		case strings.Contains(body, `data-action="revoke-core"`):
@@ -1299,4 +1337,52 @@ func waitFor(t *testing.T, f func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out")
+}
+
+// TestCutCoreReconnectGetsUnsentAlert (NET-2 Texts and calls; #4903): a
+// core cut by a burst sends past KindPaused's bucket, so the next
+// hello's log line is dropped; an alert raised while no session was open
+// is still offered to the session that reconnects, the kernel's taking
+// it is recorded, and the core counts as up a Silence after its last line
+// logged, since the reconnect itself counts it seen. Catches the re-offer
+// or the core's seen time riding on the hello's log line (#4755 item 7).
+func TestCutCoreReconnectGetsUnsentAlert(t *testing.T) {
+	x, _ := enrolled(t, true)
+	addr := x.serve()
+	c, _ := x.dial(addr, x.core)
+	for range wire.Rate(wire.RateRead).Burst {
+		if code := c.read(); code != wire.OK {
+			t.Fatalf("a read inside the rate: %v", code)
+		}
+	}
+	c.read() // past the rate: a burst
+	waitFor(t, func() bool { return x.d.cut.Stage() == channel.Tripped })
+	for range channel.DefaultLimit(channel.KindPaused).Burst + 1 {
+		if code := c.read(); code != wire.Paused {
+			t.Fatalf("a request after the trip: %v", code)
+		}
+	}
+	c.conn.Close()
+	waitFor(t, func() bool { return x.d.conns.Load() == 0 })
+	unsent := func() bool {
+		return slices.ContainsFunc(x.d.alerts.Log(), func(r alert.Record) bool { return r.Kind == alert.HeadFork && !r.Sent })
+	}
+	x.d.alerts.Raise(alert.HeadFork, "")
+	if !unsent() {
+		t.Fatal("an alert counted as sent with no session open")
+	}
+	x.advance(30 * time.Second) // under a minute: the paused bucket stays empty
+	c, _ = x.dial(addr, x.core)
+	if code := c.read(); code != wire.Paused {
+		t.Fatalf("a request from the reconnected cut core: %v", code)
+	}
+	if c.alerts == 0 || unsent() {
+		t.Fatalf("the alert raised while the cut core was gone was not offered on its reconnect (%d alerts read)", c.alerts)
+	}
+	// Past Silence since the core's last line logged, inside it since the
+	// reconnect: the core is up.
+	x.advance(Silence - 15*time.Second)
+	if x.d.alerts.Status().CoreDown || x.page("Core") != "up" {
+		t.Fatal("a cut core that reconnected inside Silence counts as down: its dropped hello did not count it seen")
+	}
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,17 +13,23 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/dns"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
+	"golang.org/x/sys/unix"
 )
 
 // The network side of the daemon (ENF-l-b1, #3670): the resolver's
@@ -58,13 +67,23 @@ type network struct {
 	// the last reading count (Potency 6656993166). nil when none.
 	prevDoc *policy.Document
 
-	edgeMu  sync.Mutex
-	edgeDay uint32 // the day the edge's overrun was last logged
-
 	// merging is each counted port that merges segments, or could not be
 	// read: its error, logged when it starts or changes. Its caps are
 	// held spent while it lasts (ENF-l-16). d.fwMu guards it and reload.
 	merging map[string]string
+	// edgeMerged: the edge's port merges segments, or did since the last
+	// full load the firewall took, whose quota still runs spent; the
+	// edge is held meanwhile (holdDrop, #5399 item 5). d.fwMu guards it.
+	edgeMerged bool
+	// unread: the last full load taken could not read the table it
+	// replaced, so the bytes since the last reading count nowhere; every
+	// cap is held spent and the edge held until a full load that read
+	// its table is taken, which the first reading's listing that reads
+	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
+	unread bool
+	// unreadShown is unread as the page reads it, under resMu, so the
+	// page never waits on a load (pageCaps.Day, #5445 item 4).
+	unreadShown bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -73,6 +92,27 @@ type network struct {
 	// "" while they are: no resolver instance runs meanwhile (ENF-l-21).
 	// d.fwMu guards it.
 	unserved string
+	// The resolver as the page shows it (pageResolver, #5164 R1), each
+	// set under d.fwMu and read under resMu, so the page never waits on a
+	// load: whether its instances run (the files the last taken load
+	// started, or none since the served check stopped them), the served
+	// check's failure, the policy in force's typed causes, and the step
+	// that refused the last load (LoadTaken once one is taken).
+	resMu      sync.Mutex
+	resRuns    bool
+	stopServed error
+	stopPolicy []page.PolicyCause
+	stopLoad   page.LoadStep
+	// unseeded is when the last taken load seeded no lease because the
+	// lease file could not be read whole (zero: it seeded what the file
+	// holds), shown on home until every host has renewed (#5394).
+	unseeded time.Time
+	// heldAt is when a reading last found the address server's answers
+	// held (nft.LeaseHeld) risen, shown on home for a lease after it
+	// (#5528); heldTable and held are the table and count it read last,
+	// under d.fwMu.
+	heldAt          time.Time
+	heldTable, held uint64
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -135,10 +175,8 @@ func (d *Enforcer) openNetwork() error {
 	case b == nil:
 		d.net.counter = traffic.NewCounter(d.dp.Now, caps)
 	default:
+		// Restore's only error is traffic.ErrState: the saved day does not read back.
 		if d.net.counter, err = traffic.Restore(d.dp.Now, caps, b); err != nil {
-			if !errors.Is(err, traffic.ErrState) {
-				return fmt.Errorf("byte caps: %w", err)
-			}
 			d.net.counter, d.net.spent = nil, true
 			d.dp.Logf("byte caps: saved day unreadable, every capped send stays dropped until " + fileTraffic + " is replaced: " + err.Error())
 		}
@@ -176,22 +214,27 @@ func (d *Enforcer) ServeWake(ctx context.Context) error {
 // The running table is read on every load, the first after a restart
 // included, so the resolver's answers survive a restart (#4754 Potency
 // point 1).
-func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
+func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err error) {
+	defer func() {
+		// A refused load leaves the resolver as it was, stopped
+		// included, so the page names the refusal (#5243 L3 item 1).
+		if err != nil {
+			d.net.resMu.Lock()
+			d.net.stopLoad = loadStep(err)
+			d.net.resMu.Unlock()
+		}
+	}()
 	l := d.cfg.Layout
+	// One compile check refuses all three: a document that does not
+	// compile touches neither the resolver nor the ruleset.
 	paths, err := nft.Paths(doc, l)
-	if err != nil {
-		return err
+	ann, aerr := nft.Announces(doc, l)
+	hears, herr := nft.Hears(doc, l)
+	if err := cmp.Or(err, aerr, herr); err != nil {
+		return compiled(err)
 	}
-	ann, err := nft.Announces(doc, l)
-	if err != nil {
-		return err
-	}
-	hears, err := nft.Hears(doc, l)
-	if err != nil {
-		return err
-	}
-	files, err := dns.Generate(doc, l, d.cfg.DNS)
-	if err != nil {
+	files, genErr := dns.Generate(doc, l, d.cfg.DNS)
+	if err := genErr; err != nil {
 		// A document the resolver cannot serve still loads, so a
 		// tightening is never held back; every instance stops, so no
 		// list resolves at all until one can be served (ENF-l-11).
@@ -200,15 +243,49 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 	}
 	if d.servedLocked(); d.net.unserved != "" {
 		// No instance starts on an interface that could hold a prefix or
-		// route the upstream check did not see (ENF-l-21).
+		// route the upstream check did not see (ENF-l-21). They stop
+		// before the load, not inside it: a refused load starts the
+		// instances it stopped again (dns/run Apply), which would bring
+		// back the old ones while the check fails (#5164 item 7). Its
+		// only failure, a closed set, fails the load's Apply below too.
+		d.dp.DNS.Apply(dns.Files{}, func() error { return nil })
 		files = dns.Files{}
+		d.net.resMu.Lock()
+		d.net.resRuns = false
+		d.net.resMu.Unlock()
 	}
 	caps := traffic.CapsOf(doc)
-	load := func() error {
+	var unseeded bool
+	load := func() (err error) {
+		// A full load starts the edge's quota and TripSet afresh, so it
+		// holds the edge only while its port merges now; one the firewall
+		// does not take leaves the spent quota running, and the hold.
+		merged, unread := d.net.edgeMerged, d.net.unread
+		_, d.net.edgeMerged = d.net.merging[l.Edge]
+		defer func() {
+			if err != nil {
+				d.net.edgeMerged = merged
+				d.setUnread(unread)
+			}
+		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
-		if err != nil {
+		// A table this process loaded that does not read (#5399 item 6)
+		// takes its bytes since the last reading and the edge in TripSet
+		// with it. The load still goes ahead, so a cut or a tightening is
+		// never held back, with every cap held spent until a full load
+		// that read its table is taken (holdDrop). The first load after a
+		// start has none to read when nft says the table is absent (ENOENT,
+		// load.ErrNoTable): a reboot leaves no table. Any other failure
+		// there is unread, crash restart included (#5491).
+		absent := err != nil && d.loaded == "" && errors.Is(err, load.ErrNoTable)
+		d.setUnread(err != nil && !absent)
+		if err != nil && !absent {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
+		}
+		if err != nil {
 			running = nil
+		} else {
+			d.noteHeld(running) // answers held since the last reading
 		}
 		// A full load starts new counters (a new Gen), so the bytes since
 		// the last reading are read from the table it replaces first, or
@@ -227,24 +304,30 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 			if err != nil {
 				d.dp.Logf("byte caps: before the load: " + err.Error())
 			}
-			// Tripped off this goroutine: the load holds fwMu, and a trip
-			// must never wait on it (cut.Trip takes no firewall lock; an
-			// edge cut that does must keep it so).
+			// Tripped off this goroutine: the load holds fwMu, which
+			// cut.Trip never takes and the edge's trip takes after its
+			// record (tripEdge), so neither waits on the load.
 			for _, o := range over {
 				go d.overrun(o)
 			}
 		}
 		text, err := nft.Reload(doc, l, running)
 		if err != nil {
-			return err
+			return compiled(err)
 		}
 		drops, err := nft.Drops(doc, l, nil, d.drop(caps))
 		if err != nil {
-			return err
+			return compiled(err)
 		}
 		lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 		defer cancel()
-		return d.dp.Fire.Load(lctx, joinRules(text, drops))
+		var seeds []nft.Lease
+		seeds, unseeded = d.leases()
+		seed := nft.Seed(l, seeds)
+		if err := d.dp.Fire.Load(lctx, joinRules(joinRules(text, seed), drops)); err != nil {
+			return fireErr{err}
+		}
+		return nil
 	}
 	if err := d.dp.DNS.Apply(files, load); err != nil {
 		if d.net.counter != nil && d.loaded != "" {
@@ -252,6 +335,20 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 		}
 		return err
 	}
+	// The policy in force is doc only once its load is taken; a refused
+	// one leaves the resolver on the old policy's files, or none.
+	var why []page.PolicyCause
+	if genErr != nil {
+		why = refusedCauses(genErr)
+	}
+	d.net.resMu.Lock()
+	d.net.resRuns = len(dnsrun.Names(files)) > 0
+	d.net.stopPolicy, d.net.stopLoad = why, page.LoadTaken
+	d.net.unseeded = time.Time{}
+	if unseeded {
+		d.net.unseeded = d.dp.Now()
+	}
+	d.net.resMu.Unlock()
 	b, err := policy.Encode(doc)
 	if err == nil {
 		err = d.store(fileLoaded).Save(b)
@@ -263,12 +360,187 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) error {
 	return nil
 }
 
+// compileErr is a load refused before the firewall saw it: the document
+// did not compile to a ruleset (nft.ErrPolicy). fireErr is one the firewall refused. The
+// page words each apart (#5164 R5 d); any other is untyped.
+type compileErr struct{ error }
+type fireErr struct{ error }
+
+func (e compileErr) Unwrap() error { return e.error }
+func (e fireErr) Unwrap() error    { return e.error }
+
+// compiled types err as a compile refusal when nft says the policy does
+// not compile (nft.ErrPolicy), and leaves any other failure of the same
+// step, such as a running table it could not read, untyped (Security on
+// #5318).
+func compiled(err error) error {
+	if errors.Is(err, nft.ErrPolicy) {
+		return compileErr{err}
+	}
+	return err
+}
+
+// loadStep is the step that refused a load, as the page words it.
+func loadStep(err error) page.LoadStep {
+	var c compileErr
+	var f fireErr
+	switch {
+	case errors.As(err, &c):
+		return page.LoadCompile
+	case errors.As(err, &f):
+		return page.LoadFirewall
+	}
+	return page.LoadUntyped
+}
+
+// Home's words for the reasons it does not list say the log names as
+// many as it does (#5431): this fails to compile when the two differ.
+const _ = uint(dns.RefusedShown-page.PolicyShown) + uint(page.PolicyShown-dns.RefusedShown)
+
+// refusedCauses is err, dns.Generate's refusal of a document, as every
+// typed cause it carries, in its order (#5307, #5352, #5405): each device
+// on a Wi-Fi network the setup serves no network for, and each listed
+// name that is not a DNS host name, read from the refusal, never from the
+// document, and a fault in the enforcer's own setup (dns.BadSetup, #5431),
+// which carries no text to the page. Any other is untyped, and the page
+// says so without the error's text.
+func refusedCauses(err error) []page.PolicyCause {
+	errs := []error{err}
+	var r dns.Refused
+	if errors.As(err, &r) {
+		errs = r
+	}
+	out := make([]page.PolicyCause, len(errs))
+	for i, err := range errs {
+		var dev dns.UnservedDevice
+		var name dns.BadName
+		var setup dns.BadSetup
+		switch {
+		case errors.As(err, &setup):
+			out[i] = page.PolicyCause{Kind: page.PolicySetup}
+		case errors.As(err, &dev):
+			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
+		case errors.As(err, &name):
+			out[i] = page.PolicyCause{Kind: page.PolicyName, Name: name.Name}
+		}
+	}
+	return out
+}
+
 // joinRules appends the drop's text to a full load's, in one transaction.
 func joinRules(text, drops string) string {
 	if text != "" && !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
 	return text + drops
+}
+
+// leases is what the DHCP server's lease file holds for the shared
+// segments now, for a full load to seed (nft.Seed, ENF-l-23, #5295), so a
+// restart or reboot does not cut every leased IPv4 host off until it
+// renews, up to half a lease later. A missing file (a first boot) seeds
+// nothing. One that cannot be read, or not read whole (leaseFile), seeds
+// nothing, is logged, and unread says so for home (#5394). Neither fails
+// the load, whose hosts then wait for their next renewal (fails closed).
+func (d *Enforcer) leases() (ls []nft.Lease, unread bool) {
+	b, err := leaseFile(func() ([]byte, error) { return os.ReadFile(d.cfg.DNS.LeaseFile) })
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.dp.Logf("firewall: lease file unreadable, no lease seeded: " + err.Error())
+		return nil, true
+	}
+	return leasesOf(b, d.cfg.DNS.Nets, d.cfg.Layout, d.dp.Now().Unix()), false
+}
+
+var errTorn = errors.New("it changed while read, three times in a row")
+
+// leaseFile is the lease file, read whole twice in a row and taken only
+// when both reads are equal and it ends with a whole line (#5394). The
+// DHCP server rewrites the file in place, so a read that lands while it
+// does can splice the old file's start onto the new one's end, which can
+// pair an address with another line's hardware address, or stop short.
+// Two equal reads with no change between them hold no splice; two that
+// both stop short at a line's end hold fewer leases, never a wrong one.
+// It tries three times.
+func leaseFile(read func() ([]byte, error)) ([]byte, error) {
+	for range 3 {
+		a, err := read()
+		if err != nil {
+			return nil, err
+		}
+		b, err := read()
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(a, b) && (len(a) == 0 || a[len(a)-1] == '\n') {
+			return a, nil
+		}
+	}
+	return nil, errTorn
+}
+
+// leasesOf is the IPv4 leases in lease file b (dnsmasq's lines, each
+// "expiry mac ip hostname clientid", expiry in Unix seconds) with time
+// left, each on the shared segment (Guests, Owner, Household) whose DHCP
+// subnet in nets holds its address. A line seeds nothing when its address
+// is in no subnet, in more than one, in a subnet that is not a
+// DHCP-served shared segment's, or outside that subnet's lease range
+// (dns.Hosts4, which the network, broadcast and enforcer's own addresses
+// are outside); nor does a line that is not exactly five fields, a
+// hardware address that is not Ethernet, an infinite lease (expiry 0) or
+// one run out. An address on two lines seeds nothing (#5394): the server
+// writes each once, and neither line can be told the true holder.
+//
+// Time left is counted from now, or from the latest moment the file
+// proves the clock has passed, if later (#5394): no lease is longer than
+// nft.LeaseTimeout, so every lease was granted at or after its expiry
+// minus that, by the clock that wrote it. A clock behind after a reboot
+// therefore seeds no lease for longer than it has left from its newest
+// grant; so no lease seeds more than LeaseTimeout either.
+func leasesOf(b []byte, nets []dns.Net, l nft.Layout, now int64) []nft.Lease {
+	type line struct {
+		expiry int64
+		hw     net.HardwareAddr
+		a      netip.Addr
+	}
+	var lines []line
+	times := map[netip.Addr]int{}
+	for _, s := range strings.Split(string(b), "\n") {
+		f := strings.Fields(s)
+		if len(f) != 5 {
+			continue
+		}
+		expiry, eerr := strconv.ParseInt(f[0], 10, 64)
+		hw, herr := net.ParseMAC(f[1])
+		a, aerr := netip.ParseAddr(f[2])
+		if eerr != nil || herr != nil || aerr != nil {
+			continue
+		}
+		times[a]++
+		now = max(now, expiry-nft.LeaseTimeout)
+		lines = append(lines, line{expiry, hw, a})
+	}
+	shared := map[string]bool{l.Guests: true, l.Owner: true, l.Household: true}
+	var out []nft.Lease
+	for _, ln := range lines {
+		a := ln.a
+		if times[a] != 1 || len(ln.hw) != 6 || ln.expiry <= now {
+			continue
+		}
+		var in []dns.Net
+		for _, n := range nets {
+			if n.Prefix4.Contains(a) { // never an IPv6 or IPv4-mapped address
+				in = append(in, n)
+			}
+		}
+		if len(in) != 1 || !in[0].DHCP || !shared[in[0].Iface] {
+			continue
+		}
+		if first, last := dns.Hosts4(in[0].Prefix4); a.Less(first) || last.Less(a) {
+			continue
+		}
+		out = append(out, nft.Lease{Iface: in[0].Iface, Addr: a, HW: ln.hw, Left: ln.expiry - now})
+	}
+	return out
 }
 
 // drop is the byte caps' drop for caps: the counter's day, or, when the
@@ -288,7 +560,7 @@ func (d *Enforcer) drop(caps traffic.Caps) nft.Drop {
 		p.EdgeCount = p.EdgeCap
 	}
 	p.Past = d.net.past
-	d.spendMerging(&p)
+	d.holdDrop(&p)
 	return p
 }
 
@@ -368,7 +640,7 @@ func (d *Enforcer) tickNetwork(ctx context.Context, now time.Time) {
 	}
 	if msg != d.net.refreshErr {
 		if msg != "" {
-			d.dp.Logf("resolver answers: not refreshed, the answers since the last refresh take new connections until one is: " + msg)
+			d.dp.Logf("resolver answers: not refreshed, the answers since the last refresh take new connections until one is, for at most " + fmt.Sprint(nft.AnswerTimeout) + " s from their first answer: " + msg)
 		} else {
 			d.dp.Logf("resolver answers: refreshed again")
 		}
@@ -393,11 +665,43 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.noteHeld(running)
+	// The table reads again: a full load that reads it ends the caps
+	// held spent since one that could not (holdDrop).
+	d.net.reload = d.net.reload || d.net.unread
 	text, err := nft.Refresh(d.loadedDoc, d.cfg.Layout, running)
 	if err != nil || text == "" {
 		return err
 	}
 	return d.dp.Fire.Update(lctx, text)
+}
+
+// noteHeld reads nft.LeaseHeld in running, the running table; d.fwMu is
+// held. A count risen since the last reading of the same table, or above
+// 0 in a new one (a load starts it at 0), means the server's answer to a
+// host was held since (ENF-shared-src-1): home shows it for a lease. The
+// first reading since the daemon started (heldTable 0: the kernel numbers
+// tables from 1) is only where counting starts, since a table that
+// outlived the last run counted at times this run cannot tell.
+func (d *Enforcer) noteHeld(running []byte) {
+	table, held, err := nft.Held(running)
+	if err != nil {
+		return // the step that read the listing fails on it too, and logs it
+	}
+	n := &d.net
+	switch {
+	case n.heldTable == 0:
+		n.held = held
+	case table != n.heldTable:
+		n.held = 0
+	}
+	n.heldTable = table
+	if held > n.held {
+		n.resMu.Lock()
+		n.heldAt = d.dp.Now()
+		n.resMu.Unlock()
+	}
+	n.held = held
 }
 
 // counted are the ports whose received bytes the byte caps count: the
@@ -432,6 +736,9 @@ func (d *Enforcer) offloads() bool {
 		changed = changed || bad != still
 	}
 	d.net.merging = now
+	if _, ok := now[d.cfg.Layout.Edge]; ok {
+		d.net.edgeMerged = true
+	}
 	d.net.reload = d.net.reload || changed
 	return changed
 }
@@ -444,9 +751,13 @@ func (d *Enforcer) offloads() bool {
 // resolver's instances (ENF-l-21). d.fwMu is held.
 func (d *Enforcer) servedLocked() bool {
 	msg := ""
-	if err := d.dp.Served(d.cfg.DNS.Nets); err != nil {
+	err := d.dp.Served(d.cfg.DNS.Nets)
+	if err != nil {
 		msg = err.Error()
 	}
+	d.net.resMu.Lock()
+	d.net.stopServed = err
+	d.net.resMu.Unlock()
 	changed := msg != d.net.unserved
 	switch {
 	case changed && msg != "":
@@ -459,6 +770,29 @@ func (d *Enforcer) servedLocked() bool {
 	return changed
 }
 
+// strayAddr is an address hold found on a served interface outside its
+// network: the page names the interface and the address (#5164 R1).
+type strayAddr struct {
+	iface string
+	addr  netip.Prefix
+	nets  string
+}
+
+func (s strayAddr) Error() string {
+	return fmt.Sprintf("served interface %s holds %s, outside %s", s.iface, s.addr, s.nets)
+}
+
+// unsetErr is any other failure hold finds: its cause typed for the page
+// (#5284), so the page's words never hang on this error's text, and the
+// error as the log shows it.
+type unsetErr struct {
+	cause page.Unset
+	err   error
+}
+
+func (u unsetErr) Error() string { return u.err.Error() }
+func (u unsetErr) Unwrap() error { return u.err }
+
 // procNet is the kernel's network settings (sysctl net.*).
 const procNet = "/proc/sys/net"
 
@@ -467,29 +801,45 @@ const procNet = "/proc/sys/net"
 func served(nets []dns.Net) error { return hold(procNet, nets, ifaceAddrs) }
 
 // noRedirects are the per-interface settings hold turns off, under
-// procNet: IPv4 and IPv6 redirects and IPv6 router advertisements.
-var noRedirects = []string{"ipv4/conf/%s/accept_redirects", "ipv6/conf/%s/accept_redirects", "ipv6/conf/%s/accept_ra"}
+// procNet: IPv4 and IPv6 redirects and IPv6 router advertisements, each
+// with the setting the page names.
+var noRedirects = []struct {
+	key string
+	set page.Setting
+}{{"ipv4/conf/%s/accept_redirects", page.Redirects4}, {"ipv6/conf/%s/accept_redirects", page.Redirects6}, {"ipv6/conf/%s/accept_ra", page.RouterAds}}
+
+// allRedirects is the IPv4 redirect setting the kernel combines with
+// each interface's own (either one on, or both with forwarding on), so
+// hold turns it off too (#5164 item 4). It is the only "all" key: IPv6
+// accept_redirects and accept_ra act per interface, the kernel never
+// combines "all" with them, and some kernels spread a write of an IPv6
+// "all" key to every interface, the WAN included, whose own settings
+// hold never writes (ASSUMPTIONS ENF-l-21).
+const allRedirects = "ipv4/conf/all/accept_redirects"
 
 // hold turns router advertisements and redirects off (noRedirects, under
 // root) on each served interface and on "default", which every interface
-// made later starts from, and reads each back; then it checks that every
-// address on each served interface lies in its Net's prefixes, with a
-// prefix no wider, or is the kernel's IPv6 link-local one. So no prefix
-// or route the upstream check (dns ASSUMPTIONS ENF-f-5) did not see is on
-// a served segment while the resolver runs, with or without a ruleset
-// loaded (#4222). An interface not there yet is passed: it starts from
-// "default", and the next reading sets and checks it. A kernel without
-// IPv6 has no IPv6 settings to turn off.
+// made later starts from, turns allRedirects off, and reads each back;
+// then it checks that every address on each served interface lies in its
+// Net's prefixes, with a prefix no wider, or is the kernel's IPv6
+// link-local one. So no prefix or route the upstream check (dns
+// ASSUMPTIONS ENF-f-5) did not see is on a served segment while the
+// resolver runs, with or without a ruleset loaded (#4222). An interface
+// not there yet is passed: it starts from "default", and the next reading
+// sets and checks it. No other interface's own settings are written: the
+// WAN, made later, also starts from "default", so its link configuration
+// sets its own router advertisements (ASSUMPTIONS ENF-l-21). A kernel
+// without IPv6 has no IPv6 settings to turn off.
 func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error)) error {
 	_, err := os.Stat(filepath.Join(root, "ipv6"))
 	v6 := err == nil
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return unsetErr{page.Unset{Kind: page.UnsetIPv6}, err}
 	}
 	ifaces := []string{"default"}
 	for _, n := range nets {
 		if n.Iface == "" || n.Iface == "." || n.Iface == ".." || n.Iface == "all" || n.Iface == "default" || strings.ContainsAny(n.Iface, "/\x00") {
-			return fmt.Errorf("served interface %q: not an interface name", n.Iface)
+			return unsetErr{page.Unset{Kind: page.UnsetName, Iface: n.Iface}, fmt.Errorf("served interface %q: not an interface name", n.Iface)}
 		}
 		// Not there yet, it is passed; any other stat error is a there
 		// whose settings then fail to set.
@@ -497,18 +847,27 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 			ifaces = append(ifaces, n.Iface)
 		}
 	}
-	var errs []error
+	type setting struct {
+		key   string
+		cause page.Unset
+	}
+	keys := []setting{{allRedirects, page.Unset{Kind: page.UnsetSetting, Iface: "all", Setting: page.Redirects4}}}
 	for _, iface := range ifaces {
-		for _, key := range noRedirects {
-			if !v6 && strings.HasPrefix(key, "ipv6/") {
-				continue
+		for _, k := range noRedirects {
+			if v6 || !strings.HasPrefix(k.key, "ipv6/") {
+				keys = append(keys, setting{fmt.Sprintf(k.key, iface), page.Unset{Kind: page.UnsetSetting, Iface: iface, Setting: k.set}})
 			}
-			path := filepath.Join(root, fmt.Sprintf(key, iface))
-			werr := os.WriteFile(path, []byte("0\n"), 0)
-			b, rerr := os.ReadFile(path)
-			if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
-				errs = append(errs, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err))
-			}
+		}
+	}
+	var errs []error
+	for _, k := range keys {
+		// The value read back must be the one written: a setting that
+		// takes the write and reads back anything else fails.
+		path := filepath.Join(root, k.key)
+		werr := os.WriteFile(path, []byte("0\n"), 0)
+		b, rerr := os.ReadFile(path)
+		if err := errors.Join(werr, rerr); err != nil || strings.TrimSpace(string(b)) != "0" {
+			errs = append(errs, unsetErr{k.cause, fmt.Errorf("%s not set to 0 (reads %q): %v", path, b, err)})
 		}
 	}
 	for _, n := range nets {
@@ -517,11 +876,17 @@ func hold(root string, nets []dns.Net, addrs func(string) ([]netip.Prefix, error
 		}
 		have, err := addrs(n.Iface) // none on an error
 		if err != nil {
-			errs = append(errs, fmt.Errorf("served interface %s: addresses: %w", n.Iface, err))
+			// Addresses that changed while read are read again at the
+			// next reading; any other failure may last.
+			kind := page.UnsetAddrs
+			if errors.Is(err, errDumpIntr) || errors.As(err, new(madeAgain)) {
+				kind = page.UnsetChanged
+			}
+			errs = append(errs, unsetErr{page.Unset{Kind: kind, Iface: n.Iface}, fmt.Errorf("served interface %s: addresses: %w", n.Iface, err)})
 		}
 		for _, p := range have {
 			if !inNet(p, n) {
-				errs = append(errs, fmt.Errorf("served interface %s holds %s, outside %s", n.Iface, p, netsOf(n)))
+				errs = append(errs, strayAddr{n.Iface, p, netsOf(n)})
 			}
 		}
 	}
@@ -554,37 +919,135 @@ func netsOf(n dns.Net) string {
 }
 
 // ifaceAddrs is the addresses the kernel holds on iface, each with its
-// prefix length.
-func ifaceAddrs(iface string) ([]netip.Prefix, error) {
-	i, err := net.InterfaceByName(iface)
-	var as []net.Addr
-	if err == nil {
-		as, err = i.Addrs()
+// prefix length, from one dump of every address (RTM_GETADDR).
+func ifaceAddrs(iface string) ([]netip.Prefix, error) { return addrsOn(iface, ifaceIndex, addrDump) }
+
+// ifaceIndex is the kernel's number for the interface named name.
+func ifaceIndex(name string) (int, error) {
+	i, err := net.InterfaceByName(name)
+	if err != nil {
+		return 0, err
 	}
+	return i.Index, nil
+}
+
+// addrsOn is the addresses on the interface named iface in a dump, its
+// index looked up before the dump and again after it. An interface made
+// again in between has a new index (the kernel numbers each new one past
+// the last), and
+// fails: its new addresses are not in the dump read for the old index, so
+// it is never read as holding none (#5188 item 1).
+func addrsOn(iface string, index func(string) (int, error), dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	i, err := index(iface)
 	if err != nil {
 		return nil, err
 	}
-	return prefixes(as)
-}
-
-// prefixes is each of as, an interface's addresses, with its prefix
-// length; anything but an address with a whole mask is an error.
-func prefixes(as []net.Addr) ([]netip.Prefix, error) {
-	var out []netip.Prefix
-	for _, a := range as {
-		n, _ := a.(*net.IPNet)
-		if n == nil {
-			return nil, fmt.Errorf("an address of type %T", a)
-		}
-		ip, ok := netip.AddrFromSlice(n.IP)
-		ones, bits := n.Mask.Size()
-		if !ok || bits == 0 {
-			return nil, fmt.Errorf("an unreadable address %v", n)
-		}
-		out = append(out, netip.PrefixFrom(ip.Unmap(), ones))
+	out, err := addrsOf(i, dump)
+	if err != nil {
+		return nil, err
+	}
+	j, err := index(iface)
+	if err != nil {
+		return nil, err
+	}
+	if j != i {
+		return nil, madeAgain{iface, i, j}
 	}
 	return out, nil
 }
+
+// madeAgain is an interface made again while its addresses were read:
+// its old index, then its new one.
+type madeAgain struct {
+	iface string
+	i, j  int
+}
+
+func (m madeAgain) Error() string {
+	return fmt.Sprintf("interface %s was made again while its addresses were read (index %d, then %d)", m.iface, m.i, m.j)
+}
+
+// addrDump is the kernel's dump of every address, as it sent it.
+func addrDump() ([]byte, error) { return syscall.NetlinkRIB(syscall.RTM_GETADDR, syscall.AF_UNSPEC) }
+
+// errDumpIntr is an address dump the kernel marked inconsistent
+// (NLM_F_DUMP_INTR): the addresses changed while it was read, so one
+// could be missing from it.
+var errDumpIntr = errors.New("the kernel's address dump was interrupted by a change")
+
+// addrsOf is the addresses on the interface numbered index in a dump. A
+// dump marked interrupted is taken once more, and a second one marked so
+// fails: an address missing from it is never read as none (#5164
+// item 8; offload ENF-gro-3 is the same for links).
+func addrsOf(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	out, err := readAddrs(index, dump)
+	if errors.Is(err, errDumpIntr) {
+		out, err = readAddrs(index, dump)
+	}
+	return out, err
+}
+
+// readAddrs reads one dump: each local and peer address (IFA_LOCAL,
+// IFA_ADDRESS) on index, with the message's prefix length. Any message
+// that does not parse, an end carrying an error, or no end is an error.
+func readAddrs(index int, dump func() ([]byte, error)) ([]netip.Prefix, error) {
+	b, err := dump()
+	if err != nil {
+		return nil, err
+	}
+	// A dump with a message that does not parse is read as none, so it
+	// fails below as one with no end, with the parse's error.
+	msgs, perr := syscall.ParseNetlinkMessage(b)
+	var out []netip.Prefix
+	intr, end := false, false
+	for _, m := range msgs {
+		intr = intr || m.Header.Flags&unix.NLM_F_DUMP_INTR != 0
+		if m.Header.Type == syscall.NLMSG_DONE {
+			// The dump's end carries the kernel's error code: one it ended
+			// in error is not every address (offload's take, #5103).
+			if len(m.Data) < 4 || ne.Uint32(m.Data) != 0 {
+				return nil, fmt.Errorf("the kernel's address dump ended in error (%x)", m.Data)
+			}
+			end = true
+		}
+		if m.Header.Type != syscall.RTM_NEWADDR {
+			continue
+		}
+		if len(m.Data) < syscall.SizeofIfAddrmsg {
+			return nil, errors.New("a short address message")
+		}
+		if int(ne.Uint32(m.Data[4:8])) != index {
+			continue
+		}
+		attrs, err := syscall.ParseNetlinkRouteAttr(&m)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range attrs {
+			if a.Attr.Type != syscall.IFA_ADDRESS && a.Attr.Type != syscall.IFA_LOCAL {
+				continue
+			}
+			ip, _ := netip.AddrFromSlice(a.Value) // invalid unless 4 or 16 bytes
+			p := netip.PrefixFrom(ip, int(m.Data[1]))
+			if !p.IsValid() {
+				return nil, fmt.Errorf("an unreadable address %x/%d", a.Value, m.Data[1])
+			}
+			if !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	if intr {
+		return nil, errDumpIntr
+	}
+	if !end {
+		return nil, errors.Join(errors.New("the kernel's address dump has no end"), perr)
+	}
+	return out, nil
+}
+
+// ne is the kernel's byte order for netlink's integers.
+var ne = binary.NativeEndian
 
 // readCaps takes one reading of the byte caps' counters (#4376 wiring
 // note): it adds it to the day's counts, trips the core or flags the edge
@@ -592,45 +1055,69 @@ func prefixes(as []net.Addr) ([]netip.Prefix, error) {
 // saves the day. A cap passed again at the next reading trips again,
 // which a tripped core takes at no cost (cut.Trip).
 func (d *Enforcer) readCaps(ctx context.Context) error {
-	over, err := d.readCapsLocked(ctx)
+	over, kernelCut, err := d.readCapsLocked(ctx)
 	for _, o := range over {
 		d.overrun(o)
+	}
+	if kernelCut != "" {
+		d.tripEdge(kernelCut)
 	}
 	return err
 }
 
-func (d *Enforcer) readCapsLocked(ctx context.Context) ([]traffic.Overrun, error) {
+// readCapsLocked takes a reading and writes the drop from it. kernelCut
+// is why the kernel cuts the edge on the text written, by TripSet, when
+// the record does not say it is cut: the record then follows, so the
+// kernel's cut always has a card and a lift (#5399 item 2).
+func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, kernelCut string, err error) {
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	c := d.net.counter
 	if c == nil || d.loaded == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	lctx, cancel := context.WithTimeout(ctx, d.dp.FireWait)
 	defer cancel()
 	listing, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return nil, fmt.Errorf("reading: %w", err)
+		return nil, "", fmt.Errorf("reading: %w", err)
 	}
-	over, err := d.addReading(d.loadedDoc, listing)
+	over, err = d.addReading(d.loadedDoc, listing)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	p := c.Drop()
 	p.Past, p.Read = d.net.past, listing
-	d.spendMerging(&p)
+	d.holdDrop(&p)
 	running, err := d.dp.Fire.List(lctx, nft.Table)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
 	}
 	text, err := nft.Drops(d.loadedDoc, d.cfg.Layout, running, p)
 	if err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, "", fmt.Errorf("drop: %w", err)
+	}
+	if !p.EdgeCut && !p.EdgeHold {
+		tripped, err := nft.EdgeTripped(running, d.cfg.Layout, p)
+		if err != nil {
+			return over, "", fmt.Errorf("drop: %w", err)
+		}
+		if tripped {
+			kernelCut = fmt.Sprintf("the firewall cut it at the first byte past its byte cap of %d bytes today", p.EdgeCap)
+		}
 	}
 	if err := d.dp.Fire.Update(lctx, text); err != nil {
-		return over, fmt.Errorf("drop: %w", err)
+		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
-	return over, nil
+	return over, kernelCut, nil
+}
+
+// setUnread sets net.unread and what the page reads of it; d.fwMu is held.
+func (d *Enforcer) setUnread(v bool) {
+	d.net.unread = v
+	d.net.resMu.Lock()
+	d.net.unreadShown = v
+	d.net.resMu.Unlock()
 }
 
 // addReading adds the reading in listing, the running table compiled
@@ -650,9 +1137,8 @@ func (d *Enforcer) addReading(doc policy.Document, listing []byte) ([]traffic.Ov
 	return over, nil
 }
 
-// overrun is one cap passed: the core's cuts the core (KRN-12); the
-// edge's is held by the in-kernel drop, and raised and logged, since no
-// edge cut is built yet (ENF-l-15).
+// overrun is one cap passed: the core's cuts the core (KRN-12), the
+// edge's cuts the edge (edgecut.go, ENF-l-15).
 func (d *Enforcer) overrun(o traffic.Overrun) {
 	why := fmt.Sprintf("byte cap passed: %d of %d bytes today", o.Count, o.Cap)
 	if len(o.Dests) > 0 {
@@ -664,18 +1150,7 @@ func (d *Enforcer) overrun(o traffic.Overrun) {
 	case traffic.BoxCore:
 		d.cut.Trip(why)
 	default:
-		// No edge cut exists yet (#5014), so no alert: its text would
-		// name steps the edge does not have, and nothing would clear it
-		// (UX 6656586767). The drop holds the edge at its cap; the log
-		// says so once a day.
-		day := traffic.Day(d.dp.Now())
-		d.net.edgeMu.Lock()
-		first := d.net.edgeDay != day
-		d.net.edgeDay = day
-		d.net.edgeMu.Unlock()
-		if first {
-			d.dp.Logf("byte caps: edge: " + why + "; held at its cap by the drop until the day ends")
-		}
+		d.tripEdge(why)
 	}
 }
 
@@ -706,11 +1181,14 @@ func (d *Enforcer) counts() (wire.Counts, error) {
 	}
 	// The channel asks from its read loop: a cap passed is tripped off it,
 	// since a trip raises an alert, which the channel sends.
-	over, err := d.readCapsLocked(context.Background())
-	if len(over) > 0 {
+	over, kernelCut, err := d.readCapsLocked(context.Background())
+	if len(over) > 0 || kernelCut != "" {
 		go func() {
 			for _, o := range over {
 				d.overrun(o)
+			}
+			if kernelCut != "" {
+				d.tripEdge(kernelCut)
 			}
 		}()
 	}

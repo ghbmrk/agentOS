@@ -147,6 +147,34 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 			firstErr = err
 		}
 	}
+	// A snapshot kept unread is offered to nothing, and a reader that never
+	// reads it again leaves its disk out of reach: while the state disk is
+	// short of room, those older than MinAge go too, with a notice. With
+	// room they stay, named in STATUS, and a forget removes them.
+	if pressured {
+		lost := 0
+		for _, id := range m.Unread() {
+			// A live machine's fork base stays, as for a readable one. A
+			// directory that cannot be statted is not known to be old.
+			if forkBases[id] {
+				continue
+			}
+			if fi, err := os.Stat(m.snapDir(id)); err != nil && !os.IsNotExist(err) || err == nil && !fi.ModTime().Before(cutoff) {
+				continue
+			}
+			if err := m.removeSnapshot(id); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			if m.stillUnread(id) {
+				continue
+			}
+			lost++
+			gone = append(gone, id)
+		}
+		if lost > 0 && m.cfg.UnreadGone != nil {
+			m.cfg.UnreadGone(lost, false)
+		}
+	}
 	sort.Strings(gone)
 	return gone, firstErr
 }

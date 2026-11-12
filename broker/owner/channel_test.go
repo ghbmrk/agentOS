@@ -164,12 +164,35 @@ func (r *rig) totp() string {
 	return totpAt(testSecrets.TOTPSeed, r.clock().Unix())
 }
 
-// unlock opens the session with a code-generator code.
+// unlock opens the session as the page's sign-in does (LocalSignIn's
+// code check), without the sign-in's texts, which local_test.go covers:
+// no code by text opens one (CH-14, D-311).
 func (r *rig) unlock() {
 	r.t.Helper()
-	if got := r.say(r.totp()); !strings.HasPrefix(got, "Unlocked until") {
-		r.t.Fatalf("unlock: %q", got)
+	code := r.totp()
+	r.ch.mu.Lock()
+	res, _, err := r.ch.codes.checkStrong(code, r.clock(), strongOpts{unlock: r.ch.cfg.UnlockFor, proof: true})
+	r.ch.mu.Unlock()
+	if err != nil || res != strongOK {
+		r.t.Fatalf("unlock: %v %v", res, err)
 	}
+}
+
+// runHeld is the owner's tap on the page that runs every held message, in
+// a session the page opened (CH-14); it returns how many ran.
+func (r *rig) runHeld() int {
+	r.t.Helper()
+	msgs, _, _ := r.ch.LocalHeld()
+	var ids []string
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+	n, err := r.ch.LocalRunHeld(ids, ids)
+	if err != nil {
+		r.t.Fatalf("run held: %v", err)
+	}
+	r.ch.WaitSends()
+	return n
 }
 
 // inbox returns the next text the box sent to the owner's phone.
@@ -205,7 +228,6 @@ func (r *rig) decisions() []Decision {
 
 var (
 	lowCodeRe = regexp.MustCompile(`YES ([A-Z][0-9]{1,2}) ([0-9]{6})`)
-	gridRe    = regexp.MustCompile(`grid cell ([A-J][0-9]{1,2})`)
 )
 
 func lowItem(ref string) Item {
@@ -237,14 +259,17 @@ func TestTextsReachTheBrokerFromTheModemAndControlWordsWorkWithModelsDown(t *tes
 		t.Fatalf("HELP: %q", got)
 	}
 	_ = r.phone.Send(boxNum, "STATUS")
-	if got := r.inbox(); !strings.Contains(got, "code generator") {
-		t.Fatalf("locked STATUS should ask for a code: %q", got)
+	if got := r.inbox(); !strings.HasPrefix(got, "Locked.") || !strings.Contains(got, "Wi-Fi page") {
+		t.Fatalf("locked STATUS should wait for the page: %q", got)
 	}
 	_ = r.phone.Send(boxNum, r.totp())
-	if got := r.inbox(); !strings.HasPrefix(got, "Unlocked until Oct 11") || !strings.Contains(got, `Held: "STATUS". Reply RUN`) {
-		t.Fatalf("unlock: %q", got)
+	if got := r.inbox(); !strings.Contains(got, "no code by text opens a session") || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatalf("code by text: %q", got)
 	}
-	_ = r.phone.Send(boxNum, "run")
+	r.unlock()
+	if n := r.runHeld(); n != 1 {
+		t.Fatalf("ran %d held", n)
+	}
 	if got := r.inbox(); !strings.HasPrefix(got, "Stopped. 0 may have happened") {
 		t.Fatalf("held STATUS did not run: %q", got)
 	}
@@ -283,11 +308,11 @@ func TestOtherNumbersAreNeverControlWordsChatOrApprovals(t *testing.T) {
 func TestTierMatrix(t *testing.T) {
 	r := newRig(t, nil)
 	// Task chat and STATUS need an unlocked session.
-	if got := r.say("book a table for two"); !strings.Contains(got, "held") || len(r.agent.got()) != 0 {
+	if got := r.say("book a table for two"); got != waitingReply || len(r.agent.got()) != 0 {
 		t.Fatalf("locked chat: %q", got)
 	}
 	r.unlock()
-	r.say("RUN")
+	r.runHeld()
 	if got := r.agent.got(); len(got) != 1 || got[0] != "book a table for two" {
 		t.Fatalf("held message not run: %v", got)
 	}
@@ -326,35 +351,36 @@ func TestTierMatrix(t *testing.T) {
 func TestGridCellsAndGeneratorStepsAreSingleUseAcrossRestarts(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "owner.json")}
 	r := newRig(t, store)
-	prompt := r.say("status")
-	cell := gridRe.FindStringSubmatch(prompt)
-	if cell == nil {
-		t.Fatalf("no grid challenge: %q", prompt)
+	// The page asks for a cell (CH-14: locked texts no longer do).
+	cell := r.ch.LocalGridCell()
+	if cell == "" {
+		t.Fatal("no grid challenge")
 	}
-	val := GridCell(testSecrets.GridSeed, cell[1])
-	if got := r.say(val); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("grid unlock: %q", got)
+	val := GridCell(testSecrets.GridSeed, cell)
+	if got := r.say(val); !strings.Contains(got, "That code is right") {
+		t.Fatalf("grid cell: %q", got)
 	}
 	code := totpAt(testSecrets.TOTPSeed, r.clock().Unix())
-	r.ch.RequireUnlock()
-	if got := r.say(code); !strings.HasPrefix(got, "Unlocked") {
-		t.Fatalf("generator unlock: %q", got)
+	if got := r.say(code); !strings.Contains(got, "That code is right") {
+		t.Fatalf("generator code: %q", got)
 	}
 
 	// Restart: the used cell and step stay used.
 	r.ch = r.open()
-	r.ch.RequireUnlock()
-	r.say("status") // new challenge
+	r.ch.LocalGridCell() // new challenge
 	if got := r.say(code); !strings.HasPrefix(got, "Wrong code") {
 		t.Fatalf("replayed generator code accepted: %q", got)
 	}
-	r.ch.codes.challenge = cell[1] // even if the same cell were asked again
+	r.ch.codes.challenge = cell // even if the same cell were asked again
 	if got := r.say(val); !strings.HasPrefix(got, "Wrong code") {
 		t.Fatalf("reused grid cell accepted: %q", got)
 	}
 	r.ch.codes.challenge = ""
-	if c := r.ch.codes.gridChallenge(); c == cell[1] {
+	if c := r.ch.codes.gridChallenge(); c == cell {
 		t.Fatal("spent cell challenged again")
+	}
+	if r.ch.SessionUnlocked(r.clock()) {
+		t.Fatal("a code by text opened a session")
 	}
 }
 
@@ -584,39 +610,44 @@ func TestLongBatchFitsThreeSegmentsAndPointsToMore(t *testing.T) {
 
 // REQ: CH-14, CH-19
 
-func TestInlineUnlockHoldsTheMessageAndAcceptsAnAppendedCode(t *testing.T) {
+func TestCodesByTextNeverOpenASessionAndAnAppendedCodeIsStripped(t *testing.T) {
 	r := newRig(t, nil)
-	if got := r.say("what's on my calendar"); !strings.Contains(got, "held for 15 min") {
+	if got := r.say("what's on my calendar"); got != waitingReply {
 		t.Fatalf("hold: %q", got)
 	}
-	if got := r.say(r.totp()); got != `Unlocked until Oct 11 12:00. Held: "what's on my calendar". Reply RUN to send it.` {
-		t.Fatalf("unlock: %q", got)
+	// A right code alone is checked but opens no session (D-311), and
+	// runs nothing held.
+	if got := r.say(r.totp()); !strings.Contains(got, "no code by text opens a session") || r.ch.SessionUnlocked(r.clock()) {
+		t.Fatalf("code alone: %q", got)
 	}
 	if len(r.agent.got()) != 0 {
-		t.Fatal("a code-only unlock ran the held message")
+		t.Fatal("a code by text ran the held message")
 	}
-	r.say("RUN")
-	if got := r.agent.got(); len(got) != 1 || got[0] != "what's on my calendar" {
-		t.Fatalf("held: %v", got)
+	// A code appended to a message is stripped before the message is held.
+	code := r.totp()
+	r.say("summarize my mail " + code)
+	msgs, _, _ := r.ch.LocalHeld()
+	for _, m := range msgs {
+		if strings.Contains(m.Text, code) {
+			t.Fatalf("appended code was held: %q", m.Text)
+		}
 	}
-	if got := r.say("run"); got != "Nothing is held." || len(r.agent.got()) != 1 {
-		t.Fatalf("RUN with nothing held: %q", got)
+	if len(msgs) != 2 || msgs[1].Text != "summarize my mail" || r.ch.SessionUnlocked(r.clock()) || len(r.agent.got()) != 0 {
+		t.Fatalf("appended code: held %+v", msgs)
 	}
-	// The unlock lasts the default 7 days.
+	// The page's session lasts the default 7 days.
+	r.unlock()
 	r.advance(7*24*time.Hour - time.Minute)
 	r.say("still there?")
+	if got := r.agent.got(); len(got) != 1 || got[0] != "still there?" {
+		t.Fatalf("chat in session: %v", got)
+	}
 	r.advance(2 * time.Minute)
-	if got := r.say("and now?"); !strings.Contains(got, "held") {
-		t.Fatalf("unlock outlived 7 days: %q", got)
-	}
-	// A code appended to a message unlocks and is stripped.
-	if got := r.say("summarize my mail " + r.totp()); !strings.HasPrefix(got, "Unlocked until") {
-		t.Fatalf("appended code: %q", got)
-	}
-	if got := r.agent.got(); got[len(got)-1] != "summarize my mail" {
-		t.Fatalf("appended code reached the agent: %v", got)
+	if got := r.say("and now?"); got != waitingReply {
+		t.Fatalf("session outlived 7 days: %q", got)
 	}
 	// While unlocked, numbers are chat: not checked, not stripped.
+	r.unlock()
 	if got := r.say("remind me about 482913"); got != "" || r.agent.got()[len(r.agent.got())-1] != "remind me about 482913" {
 		t.Fatalf("number in unlocked chat: %q", got)
 	}
@@ -624,21 +655,9 @@ func TestInlineUnlockHoldsTheMessageAndAcceptsAnAppendedCode(t *testing.T) {
 	r.ch.RequireUnlock()
 	r.eng.stopped = true
 	resume := r.say("RESUME")
-	code := regexp.MustCompile(`[0-9]{6}`).FindString(resume)
-	if got := r.say(code); !strings.HasPrefix(got, "Wrong code") {
+	rc := regexp.MustCompile(`[0-9]{6}`).FindString(resume)
+	if got := r.say(rc); !strings.HasPrefix(got, "Wrong code") || r.ch.SessionUnlocked(r.clock()) {
 		t.Fatalf("texted code unlocked the session: %q", got)
-	}
-}
-
-func TestStaleHeldMessageIsNotRun(t *testing.T) {
-	r := newRig(t, nil)
-	r.say("send the report")
-	r.advance(20 * time.Minute)
-	if got := r.say(r.totp()); got != "Unlocked until Oct 11 12:20." {
-		t.Fatalf("unlock: %q", got)
-	}
-	if len(r.agent.got()) != 0 {
-		t.Fatal("stale held message ran")
 	}
 }
 

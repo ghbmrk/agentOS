@@ -37,26 +37,96 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-// LeaseHours is the lease every dhcp-range offers, in hours. A shared
-// segment's address hold (nft.ClaimTimeout) must be at most half of it, so
-// a departed host's hold has run out before its address can be leased
-// again (ENF-shared-src-1, #4702): the constant below fails to compile when
-// it is not, and TestLeaseCoversHold reads the lines written. A client may
-// still request a shorter lease, which dnsmasq grants down to 120 s; that
-// case is ENF-shared-src-1's residual.
+// LeaseHours is the lease every dhcp-range offers, in hours. It must be
+// nft.LeaseTimeout, the longest lease whose ACK a shared segment's IPv4
+// holds follow, and which nft keeps at least twice its IPv6 hold
+// (nft.ClaimTimeout) (ENF-shared-src-1, #4702, #5294): the constant below
+// fails to compile when it is not, and TestLeaseCoversHold reads the lines
+// written. A client may still request a shorter lease, which dnsmasq
+// grants down to 120 s (nft.MinLease); the IPv6 hold of such a client is
+// ENF-shared-src-1's residual.
 const LeaseHours = 12
 
-const _ uint = LeaseHours*3600 - 2*nft.ClaimTimeout
+const _ = uint(LeaseHours*3600-nft.LeaseTimeout) + uint(nft.LeaseTimeout-LeaseHours*3600)
 
 // lease is LeaseHours as dnsmasq's lease field.
 var lease = strconv.Itoa(LeaseHours) + "h"
 
 var ErrConfig = errors.New("dns: configuration refused")
+
+// UnservedDevice and BadName are Generate's refusals of a document for
+// its own content, the ones left once it compiles: device ID is on Wi-Fi
+// network WiFi, whose interface Iface the setup serves no network on, or
+// a listed name is not a DNS host name. Each carries what Generate
+// refused and wraps ErrConfig, so a caller names the refused item from
+// the error, never by checking the document again (#5352).
+type UnservedDevice struct{ ID, WiFi, Iface string }
+
+type BadName struct{ Name string }
+
+func (e UnservedDevice) Error() string {
+	return fmt.Sprintf("%v: device %q on Wi-Fi network %q: no network for %q, which an instance answers on", ErrConfig, e.ID, e.WiFi, e.Iface)
+}
+
+func (e BadName) Error() string {
+	return fmt.Sprintf("%v: %q is not a DNS host name", ErrConfig, e.Name)
+}
+
+func (UnservedDevice) Unwrap() error { return ErrConfig }
+func (BadName) Unwrap() error        { return ErrConfig }
+
+// BadSetup is Generate's refusal of the setup itself (check): it wraps
+// the fault, which wraps ErrConfig, so a caller tells a setup fault from
+// any other refusal by its type, never by its text (#5431).
+type BadSetup struct{ Err error }
+
+func (e BadSetup) Error() string { return e.Err.Error() }
+func (e BadSetup) Unwrap() error { return e.Err }
+
+// Refused is every refusal Generate finds in one document and setup, so
+// the owner fixes them all from one report (#5405): a setup fault
+// (BadSetup) first, then each UnservedDevice in the document's order,
+// then each BadName sorted. Its text is one line, each refusal's joined
+// by "; ", the first RefusedShown of them and then how many more, so the
+// log line stays bounded however many a document holds (#5431).
+type Refused []error
+
+// RefusedShown is how many refusals Refused's text names, and
+// RefusedTextMax the most bytes of each one's text, cut at a character's
+// start, then "..." (#5431). A refusal of a signed policy is far shorter,
+// since the policy's names are at most 253 bytes; the cap bounds the line
+// whatever a refusal carries.
+const (
+	RefusedShown   = 20
+	RefusedTextMax = 1024
+)
+
+func (r Refused) Error() string {
+	s := make([]string, 0, min(len(r), RefusedShown)+1)
+	for _, err := range r[:min(len(r), RefusedShown)] {
+		t := err.Error()
+		if len(t) > RefusedTextMax {
+			n := RefusedTextMax
+			for n > 0 && !utf8.RuneStart(t[n]) {
+				n--
+			}
+			t = t[:n] + "..."
+		}
+		s = append(s, t)
+	}
+	if n := len(r) - RefusedShown; n > 0 {
+		s = append(s, "and "+strconv.Itoa(n)+" more")
+	}
+	return strings.Join(s, "; ")
+}
+
+func (r Refused) Unwrap() []error { return r }
 
 // MaxTTL caps the TTL the listed instance hands out, so a device asks
 // again within this many seconds, and an answer that missed a ruleset
@@ -110,8 +180,9 @@ type Listed struct {
 }
 
 // Generate is the configuration for one policy document on one layout. The
-// same inputs give the same bytes. A document whose names are not DNS host
-// names is refused, so the previous configuration stays.
+// same inputs give the same bytes. A document the setup cannot serve is
+// refused with every reason (Refused), so the previous configuration
+// stays.
 func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	sets, err := nft.AllowSets(d, l)
 	if err != nil {
@@ -127,26 +198,43 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	}
 	views := []Listed{{Iface: l.Core}}
 	viewSets := []nft.AllowSet{setOf[nft.CoreSet(false)]}
+	var devs []policy.Device // devs[i] is views[i+1]'s
 	for _, dev := range d.Devices {
 		if n, ok := nft.VLAN(dev.WiFi); ok && dev.Network == policy.NetDevices {
 			views = append(views, Listed{Iface: l.Trunk + "." + strconv.Itoa(n)})
 			viewSets = append(viewSets, setOf[nft.DeviceSet(n, false)])
+			devs = append(devs, dev)
 		}
 	}
 	peopleIfaces := []string{l.Owner, l.Household, l.Guests, l.Admin}
-	answered := slices.Clone(peopleIfaces)
-	for _, v := range views {
-		answered = append(answered, v.Iface)
+	// Every refusal, not the first: a setup fault, each device on a VLAN
+	// the setup does not serve (a device's VLAN is answered on only when
+	// it is), and each listed name that is not a DNS host name.
+	var refused Refused
+	if err := s.check(l); err != nil {
+		refused = append(refused, BadSetup{err})
 	}
-	if err := s.check(l, answered); err != nil {
-		return Files{}, err
+	for i, dev := range devs {
+		iface := views[i+1].Iface
+		if !slices.ContainsFunc(s.Nets, func(n Net) bool { return n.Iface == iface }) {
+			refused = append(refused, UnservedDevice{ID: dev.ID, WiFi: dev.WiFi, Iface: iface})
+		}
+	}
+	var names []string
+	for _, set := range viewSets {
+		names = append(names, set.Names...)
+	}
+	slices.Sort(names)
+	for _, n := range slices.Compact(names) {
+		if !Hostname(n) {
+			refused = append(refused, BadName{Name: n})
+		}
+	}
+	if refused != nil {
+		return Files{}, refused
 	}
 	for i, set := range viewSets {
-		conf, err := s.listed(views[i].Iface, set)
-		if err != nil {
-			return Files{}, err
-		}
-		views[i].Conf = conf
+		views[i].Conf = s.listed(views[i].Iface, set)
 	}
 
 	var people lines
@@ -173,7 +261,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	dhcp.add("dhcp-option=option:dns-server,0.0.0.0")
 	v6 := false
 	for _, n := range leased {
-		first, last := hosts4(n.Prefix4)
+		first, last := Hosts4(n.Prefix4)
 		// dnsmasq serves a range on the interface whose address is in it.
 		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + "," + lease)
 		if n.Prefix6.IsValid() {
@@ -194,8 +282,9 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 }
 
 // listed is the listed instance for one view: it answers on iface alone
-// and forwards only set's names, each filling set alone.
-func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
+// and forwards only set's names, each filling set alone. Generate has
+// refused any name that is not a DNS host name.
+func (s Setup) listed(iface string, set nft.AllowSet) string {
 	names := slices.Clone(set.Names)
 	slices.Sort(names)
 	names = slices.Compact(names)
@@ -204,9 +293,6 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 	w.add("cache-size=0")
 	w.add("max-ttl=" + strconv.Itoa(MaxTTL))
 	for _, n := range names {
-		if !Hostname(n) {
-			return "", fmt.Errorf("%w: %q is not a DNS host name", ErrConfig, n)
-		}
 		for _, u := range s.Upstream {
 			w.add("server=/" + n + "/" + upstream(u))
 		}
@@ -227,16 +313,16 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 		}
 		w.add("nftset=/" + n + "/" + strings.Join(sets, ","))
 	}
-	return w.String(), nil
+	return w.String()
 }
 
 // check refuses a setup that names an interface the layout does not serve
 // (the edge's segment, the WAN and the access point's management
-// interface among them), leaves out one an instance answers on (answered),
-// marks no network for DHCP, holds a prefix that is not a masked private
+// interface among them), leaves out one of the people's networks or the
+// core's, marks no network for DHCP, holds a prefix that is not a masked private
 // block, an upstream that is not a global address or is on a served
 // network, or a lease file path that needs quoting.
-func (s Setup) check(l nft.Layout, answered []string) error {
+func (s Setup) check(l nft.Layout) error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrConfig}, a...)...) }
 	if len(s.Upstream) == 0 {
 		return bad("no upstream resolver")
@@ -275,7 +361,7 @@ func (s Setup) check(l nft.Layout, answered []string) error {
 	if !slices.ContainsFunc(s.Nets, func(n Net) bool { return n.DHCP }) {
 		return bad("no network is served DHCP")
 	}
-	for _, i := range answered {
+	for _, i := range served {
 		if !slices.Contains(seen, i) {
 			return bad("no network for %q, which an instance answers on", i)
 		}
@@ -334,9 +420,9 @@ func upstream(u netip.AddrPort) string {
 	return u.Addr().String() + "#" + strconv.Itoa(int(u.Port()))
 }
 
-// hosts4 is the lease range of p: its tenth host to its last before the
-// broadcast address.
-func hosts4(p netip.Prefix) (first, last netip.Addr) {
+// Hosts4 is the lease range of p, the only addresses DHCP leases there:
+// its tenth host to its last before the broadcast address.
+func Hosts4(p netip.Prefix) (first, last netip.Addr) {
 	b := p.Addr().As4()
 	n := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 	size := uint32(1) << (32 - p.Bits())

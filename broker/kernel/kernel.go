@@ -322,6 +322,7 @@ type Kernel struct {
 	resealing map[string]bool
 	// checker is the checker process's key, from the store's pins (PinChecker).
 	checker ed25519.PublicKey
+	forget  *forgetAsk // the Forget waiting for the owner's YES (forget.go)
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")
@@ -618,7 +619,7 @@ func (k *Kernel) Unpause(now int64, id key.ID) error {
 	}
 	return k.owner(now, TKeyResumed, keyID{id})
 }
-func (k *Kernel) Stop(now int64) error { return k.owner(now, TStop, struct{}{}) }
+func (k *Kernel) Stop(now int64) error { k.forget = nil; return k.owner(now, TStop, struct{}{}) }
 
 // ErrStaleResume refuses a RESUME sent before a STOP the kernel has since
 // logged: an owner told that STOP holds must not see it lifted (#3078).

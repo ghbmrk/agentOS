@@ -27,12 +27,19 @@ func (j *journal) Truncate(n int) error  { j.b = j.b[:n]; return nil }
 type bulb struct {
 	mu    sync.Mutex
 	shown []Colour
+	// hook, if set, runs after each Show is recorded, with the count of
+	// colours shown so far, outside mu.
+	hook func(n int)
 }
 
 func (b *bulb) Show(c Colour) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.shown = append(b.shown, c)
+	n, hook := len(b.shown), b.hook
+	b.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 	return nil
 }
 
@@ -283,7 +290,7 @@ func TestWordsFixed(t *testing.T) {
 		if s.delivery == Text && !strings.Contains(w, "enforcer's page at home") {
 			t.Fatalf("kind %d's text does not send the owner to the page: %q", k, w)
 		}
-		if strings.Contains(w, "light") != (k == Trip) {
+		if strings.Contains(w, "light") != k.lights() {
 			t.Fatalf("kind %d's text and the light: %q", k, w)
 		}
 		want := Text
@@ -335,16 +342,13 @@ func TestOnlyTripsLight(t *testing.T) {
 	}
 	r.a.Paused()
 	off("paused channel")
-	r.a.Recovery(true)
-	off("recovery pending")
 	r.a.Core(false)
 	off("core silent")
 	st := r.a.Status()
-	if len(st.Open) != 12 || !st.Recovery || !st.CoreDown {
-		t.Fatalf("not on the page: %d open, recovery %v, core down %v", len(st.Open), st.Recovery, st.CoreDown)
+	if len(st.Open) != 12 || !st.CoreDown {
+		t.Fatalf("not on the page: %d open, core down %v", len(st.Open), st.CoreDown)
 	}
 	r.a.Core(true)
-	r.a.Recovery(false)
 
 	red := func(what string) {
 		t.Helper()
@@ -402,6 +406,35 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	off("core cut lifted")
+
+	// #5399: a box's missing cut record is a known attack too: it lights
+	// the bulb, and lifting that box's cut resolves it.
+	if RecordMissing != FactoryReset+1 {
+		t.Fatalf("RecordMissing is %d, want %d: journalled kinds would change meaning", RecordMissing, FactoryReset+1)
+	}
+	if d, ok := RecordMissing.Delivery(); !ok || d != Text {
+		t.Fatalf("RecordMissing's delivery %d %v", d, ok)
+	}
+	if _, err := r.a.Raise(RecordMissing, "edge"); err != nil {
+		t.Fatal(err)
+	}
+	red("edge record missing")
+	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+		t.Fatalf("missing record text: %q", w)
+	}
+	// The core reads as the page names it, not by its device ID (#5445
+	// item 5).
+	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+		t.Fatalf("missing record text for the core: %q, %v", w, err)
+	}
+	if err := r.a.Lifted("core"); err != nil {
+		t.Fatal(err)
+	}
+	red("another box's cut lifted")
+	if err := r.a.Lifted("edge"); err != nil {
+		t.Fatal(err)
+	}
+	off("edge cut lifted")
 
 	// A paused channel still resolves only by resuming it.
 	p := r.a.Status().Open
@@ -660,5 +693,234 @@ func TestFailedCutBackKeepsSavedRecord(t *testing.T) {
 	}
 	if !slices.ContainsFunc(b.Log(), func(r Record) bool { return r.ID == saved.ID && r.Device == "back-door" }) {
 		t.Fatalf("a saved record was lost to a later cut-back: %+v", b.Log())
+	}
+}
+
+// TestOneOfferPerTelling (NET-2 Texts and calls; #4903): two callers
+// that find the same alert unsent, two Core(true) calls or a Raise and a
+// Core, offer it once between them. The kernel's first Send blocks until
+// the second caller has had time to reach Send too; it still takes one
+// copy, and an alert resolved before the kernel took it is not offered,
+// even when it is resolved after Core collected it. A Core that offers a
+// Raise's new telling before the Raise reaches the offer lock leaves the
+// Raise nothing to send; a telling raised again while Core offers the
+// older one is still offered; a core going down offers nothing.
+// Catches collecting an unsent alert outside the offer lock.
+func TestOneOfferPerTelling(t *testing.T) {
+	type gate struct {
+		mu      sync.Mutex
+		refuse  bool
+		block   bool
+		got     int
+		entered chan struct{}
+		release chan struct{}
+		light   Light            // nil is a plain bulb
+		now     func() time.Time // nil is time.Now
+	}
+	newAlerts := func(g *gate) *Alerts {
+		g.entered, g.release = make(chan struct{}), make(chan struct{})
+		send := func(wire.Alert) error {
+			g.mu.Lock()
+			if g.refuse {
+				g.mu.Unlock()
+				return channel.ErrNoSession
+			}
+			g.got++
+			first := g.block
+			g.block = false
+			g.mu.Unlock()
+			if first {
+				close(g.entered)
+				<-g.release
+			}
+			return nil
+		}
+		light := g.light
+		if light == nil {
+			light = &bulb{}
+		}
+		a, err := New(Config{Send: send, Light: light, Journal: &journal{}, Now: g.now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	race := func(g *gate, first, second func()) {
+		t.Helper()
+		var wg sync.WaitGroup
+		wg.Go(first)
+		select {
+		case <-g.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the first offer never reached Send")
+		}
+		wg.Go(second)
+		time.Sleep(100 * time.Millisecond) // the second caller reaches Send or the offer lock
+		close(g.release)
+		wg.Wait()
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.got != 1 {
+			t.Fatalf("the kernel took %d copies of one alert, want 1", g.got)
+		}
+	}
+
+	// Two Core(true) calls, as a hello and a tick, for an alert the
+	// kernel refused while the core was gone.
+	g := &gate{refuse: true}
+	a := newAlerts(g)
+	if r, _ := a.Raise(HeadFork, ""); r.Sent {
+		t.Fatal("a refused text counts as sent")
+	}
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	race(g, func() { a.Core(true) }, func() { a.Core(true) })
+
+	// A Raise offering a new alert and a Core coming up.
+	g = &gate{block: true}
+	a = newAlerts(g)
+	race(g, func() { _, _ = a.Raise(DoorForced, "front-door") }, func() { a.Core(true) })
+	if r := a.Status().Open; len(r) != 1 || !r[0].Sent {
+		t.Fatalf("the offered alert: %+v", r)
+	}
+
+	// An alert the owner resolved before the kernel took it is not
+	// offered when the core comes back: there is nothing left to act on.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	r, _ := a.Raise(HeadFork, "")
+	if err := a.Resolve(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	g.refuse = false
+	g.mu.Unlock()
+	a.Core(true)
+	if g.got != 0 {
+		t.Fatalf("a resolved alert was offered %d times", g.got)
+	}
+
+	// Resolved while Core offers the alert before it: Core collected both,
+	// and offers only the one still open.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	_, _ = a.Raise(HeadFork, "")
+	r, _ = a.Raise(UnusualUnlock, "front-door")
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	done := make(chan struct{})
+	go func() { a.Core(true); close(done) }()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first offer never reached Send")
+	}
+	if err := a.Resolve(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(g.release)
+	<-done
+	g.mu.Lock()
+	if g.got != 1 {
+		t.Fatalf("the kernel took %d texts, want only the open alert's", g.got)
+	}
+	g.mu.Unlock()
+
+	wait := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("waiting for " + what)
+		}
+	}
+	until := func(a *Alerts, ok func(Record) bool, what string) {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); !slices.ContainsFunc(a.Log(), ok); {
+			if time.Now().After(end) {
+				t.Fatal("waiting for " + what)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Core sends a Raise's new telling first: Core's light is held until
+	// the Raise has put its record, and the Raise's light until Core has
+	// returned, so Core collects and offers the record before the Raise
+	// takes the offer lock. The Raise then finds it taken.
+	b := &bulb{}
+	g = &gate{light: b}
+	a = newAlerts(g)
+	coreShown, releaseCore, coreDone, raised := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	b.mu.Lock()
+	base := len(b.shown)
+	b.hook = func(n int) {
+		switch n - base {
+		case 1: // Core's
+			close(coreShown)
+			<-releaseCore
+		case 2: // the Raise's
+			<-coreDone
+		}
+	}
+	b.mu.Unlock()
+	go func() { a.Core(true); close(coreDone) }()
+	wait(coreShown, "Core's light")
+	go func() { _, _ = a.Raise(DoorForced, "front-door"); close(raised) }()
+	until(a, func(r Record) bool { return r.Kind == DoorForced }, "the Raise's record")
+	close(releaseCore)
+	wait(raised, "the Raise")
+	g.mu.Lock()
+	if g.got != 1 {
+		t.Fatalf("Core offered a Raise's telling first, and the kernel took %d copies, want 1", g.got)
+	}
+	g.mu.Unlock()
+
+	// A newer telling lands while Core offers the older one: the older
+	// offer does not mark it sent, so the Raise offers it too.
+	var clockMu sync.Mutex
+	clock := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	g = &gate{refuse: true, now: func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }}
+	a = newAlerts(g)
+	_, _ = a.Raise(DoorForced, "front-door")
+	g.mu.Lock()
+	g.refuse, g.block = false, true
+	g.mu.Unlock()
+	coreDone, raised = make(chan struct{}), make(chan struct{})
+	go func() { a.Core(true); close(coreDone) }()
+	wait(g.entered, "Core's offer")
+	clockMu.Lock()
+	clock = clock.Add(FoldCall)
+	clockMu.Unlock()
+	go func() { _, _ = a.Raise(DoorForced, "front-door"); close(raised) }()
+	until(a, func(r Record) bool { return r.Kind == DoorForced && r.Count == 2 }, "the newer telling")
+	close(g.release)
+	wait(coreDone, "Core")
+	wait(raised, "the Raise")
+	g.mu.Lock()
+	if g.got != 2 {
+		t.Fatalf("the kernel took %d calls for two tellings, want 2", g.got)
+	}
+	g.mu.Unlock()
+	if r := a.Status().Open; len(r) != 1 || !r[0].Sent || r[0].Count != 2 {
+		t.Fatalf("the re-told alert: %+v", r)
+	}
+
+	// A core going down offers nothing; coming up offers the unsent alert.
+	g = &gate{refuse: true}
+	a = newAlerts(g)
+	_, _ = a.Raise(HeadFork, "")
+	g.mu.Lock()
+	g.refuse = false
+	g.mu.Unlock()
+	a.Core(false)
+	if g.got != 0 {
+		t.Fatalf("a core going down was offered %d texts", g.got)
+	}
+	a.Core(true)
+	if g.got != 1 {
+		t.Fatalf("a core coming up was offered %d texts, want 1", g.got)
 	}
 }

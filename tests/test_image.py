@@ -4,6 +4,8 @@
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
 import ast
 import base64
+import bisect
+import collections
 import contextlib
 import errno
 import fnmatch
@@ -47,6 +49,7 @@ check = load("image_check", MK / "mkosi.finalize")
 check.TREE_OWNER = os.geteuid()
 check.TREE_GROUP = os.getegid()
 finish = load("image_finish", IMG / "finish_image.py")
+hostcheck = load("hostcheck", ROOT / "tools" / "hostcheck.py")
 
 
 def ini(path):
@@ -805,12 +808,15 @@ def stub(d, name, body):
 
 
 def newc(names, trailer=True):
-    """A newc cpio archive holding NAMES, each a one-byte file, as cpio --format=newc writes it."""
-    out = b""
-    for i, n in enumerate(list(names) + (["TRAILER!!!"] if trailer else [])):
-        body = b"" if n == "TRAILER!!!" else b"x"
+    """A newc cpio archive holding NAMES, each a one-byte file but a directory where a later name is
+    under it, as cpio --format=newc writes it."""
+    out, names = b"", list(names)
+    for i, n in enumerate(names + (["TRAILER!!!"] if trailer else [])):
+        is_dir = any(m.startswith(n + "/") for m in names)
+        body = b"" if n == "TRAILER!!!" or is_dir else b"x"
         name = n.encode() + b"\0"
-        hdr = b"070701" + b"".join(b"%08X" % v for v in (i, 0o100644, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
+        mode = 0o040755 if is_dir else 0o100644
+        hdr = b"070701" + b"".join(b"%08X" % v for v in (i, mode, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name), 0))
         out += hdr + name
         out += b"\0" * (-len(out) % 4) + body
         out += b"\0" * (-len(out) % 4)
@@ -927,7 +933,8 @@ class InitrdBluetoothTest(unittest.TestCase):
         self.assertEqual(finish.initrd_files(two), ["debian/6.12.48+deb13-amd64/initrd",
                                                     "agentos/6.12.48+deb13-amd64/kernel-modules.initrd"])
         src = (IMG / "finish_image.py").read_text()
-        self.assertIn("if p in initrd_files(text):\n            check_initrd(p, data_)", src)
+        self.assertIn("if p in initrd_files(text):\n            members += check_initrd(p, data_, archive)\n"
+                      "    check_initrd_tree(initrd_files(text), members)", src)
 
     def test_check_initrd_exits_on_bluetooth_or_no_files(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -938,6 +945,39 @@ class InitrdBluetoothTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as e:
                     finish.check_initrd("agentos/initrd", data)
                 self.assertIn("could bring up Bluetooth (#1475)", str(e.exception.code))
+
+    # systemd v257's unit types (src/basic/unit-def.c unit_type_table), held here, not read from any list
+    # under test, so dropping an entry from one of them fails (#5489).
+    SYSTEMD_UNIT_TYPES = ("service", "socket", "target", "device", "mount", "automount", "swap", "timer", "path",
+                          "slice", "scope")
+
+    def test_each_initrd_unit_type_is_pinned(self):
+        # #5489 (from #5487 Potency): an enablement link to a unit file of each type is accepted, and a
+        # link to a directory under /usr/lib/systemd/system named after it is refused as one, so an entry
+        # dropped from INITRD_UNIT_TYPES fails here.
+        where = "etc/systemd/system/multi-user.target.wants/x."
+        link = stat.S_IFLNK | 0o777
+        for t in self.SYSTEMD_UNIT_TYPES:
+            with self.subTest(t=t):
+                ok = finish.initrd_violations([(where + t, link, b"/usr/lib/systemd/system/x." + t.encode(), None)])
+                self.assertEqual(ok, [])
+                bad = finish.initrd_violations([(where + t, link, b"/usr/lib/systemd/system/x.%s.d" % t.encode(), None)])
+                self.assertEqual(bad, ["%s%s: links to a directory, not a unit file, under /usr/lib/systemd/system"
+                                       % (where, t)])
+        self.assertEqual(finish.INITRD_UNIT_TYPES, self.SYSTEMD_UNIT_TYPES)
+
+    def test_unit_type_lists_agree(self):
+        # #5489 (from #5487 L3): three files list unit types. Each stays in its own module (unit_rules.py
+        # and unlock_graph.py are loaded alone by the image build), so they are pinned to one list here:
+        # a change to one that is not made in the others fails. unit_rules.py lists the types a unit file
+        # in a unit directory may define there; it lacks only .scope, which no file loads (#5507).
+        graph = load("unlock_graph_types", IMG / "unlock_graph.py")
+        rules = load("unit_rules_types", IMG / "unit_rules.py")
+        named = re.fullmatch(r".*\\\.\(([a-z|]+)\)\\Z", graph.UNIT_NAME.pattern).group(1).split("|")
+        self.assertEqual(named, list(self.SYSTEMD_UNIT_TYPES))
+        self.assertEqual(sorted(t[1:] for t in rules.TYPES),
+                         sorted(set(self.SYSTEMD_UNIT_TYPES) - {"scope"}))
+        self.assertEqual(finish.INITRD_UNIT_TYPES, self.SYSTEMD_UNIT_TYPES)
 
 
 def manifest_dir(root, side, text):
@@ -1356,10 +1396,9 @@ class DriveIdTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_id(self, mode):
+    def run_id(self, mode, shell=("sh",), script=MK / "mkosi.extra/usr/lib/agentos/drive-id"):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
-        return subprocess.run(["sh", str(MK / "mkosi.extra/usr/lib/agentos/drive-id"), mode], env=env,
-                              capture_output=True, text=True)
+        return subprocess.run(list(shell) + [str(script), mode], env=env, capture_output=True, text=True)
 
     def sfdisk_calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -1432,6 +1471,28 @@ class DriveIdTest(unittest.TestCase):
                                                "sync -f %s/var/lib/agentos/drive-id" % self.root])
         self.assertTrue((self.root / "var/lib/agentos/drive-id").exists())
 
+    def test_assign_reports_a_marker_it_cannot_create(self):
+        # DRIVE-ID-soft-create: a directory at the marker path makes the create fail. The script's
+        # own FAIL line runs under sh and bash --posix, and no success is reported. With ': >'
+        # restored, a special builtin's redirect error exits the shell before that line.
+        (self.root / "var/lib/agentos/drive-id").mkdir(parents=True)
+        src = (MK / "mkosi.extra/usr/lib/agentos/drive-id").read_text()
+        old = src.replace('true >"$R/var/lib/agentos/drive-id"', ': >"$R/var/lib/agentos/drive-id"')
+        self.assertNotEqual(old, src)
+        restored = self.root.parent / "drive-id-colon"
+        restored.write_text(old)
+        for shell in (("sh",), ("bash", "--posix")):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                r = self.run_id("assign", shell)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but /var/lib/agentos/drive-id was not written", r.stdout)
+                self.assertNotIn("assigned", r.stdout)
+                self.assertNotIn("sync", "\n".join(self.sfdisk_calls()))
+                r = self.run_id("assign", shell, restored)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("FAIL", r.stdout)
+
     def test_check_passes_later_in_the_boot_that_assigned(self):
         # #1716: udev shows the new GUIDs at once while the boot loader still names the old ESP
         # GUID; a broker or vault start later in that boot (the claim restarts the vault) passes.
@@ -1472,6 +1533,855 @@ class DriveIdTest(unittest.TestCase):
         self.assertEqual(self.sfdisk_calls(), [])
         self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
         self.assertFalse((self.root / "run/agentos-drive-id").exists())
+
+
+# POSIX special builtins (':', '.', exec, eval, set, trap and the rest): a redirection error on one
+# exits a non-interactive shell before any '||' handler or 'set -e' report runs (#5464, #5524). A
+# regular command runs its handler: 'true >f' for ':', and the 'command' prefix, which drops the
+# special properties, for the rest ('command exec 9>f || fail ...'). ShellReader reads a whole file as
+# the shell does (#5533): backslash-newlines join, quotes (also $'...') run across lines, ${...} and
+# $((...)) stay inside their word with quotes read in them, $(...) and `...` are read as commands of
+# their own (a `...` after its backslashes are removed, so a nested one is read too), '#' starts a
+# comment only where a word would start, a case arm's pattern and its ')' are not commands, bash's &>
+# and &>> are redirections, and here-document bodies are text (an unquoted one's substitutions are
+# read). A command is flagged when, after leading reserved words, 'function', 'time -p' and
+# assignments, its command word is a special builtin and it carries a redirection that can fail
+# (closing an fd with >&- or <&- cannot; a here-document can, since bash may write it to a temporary
+# file). The scan reads every shell file outside the record directories, and the shell
+# that Python files and workflows hold (#5538). SHELL_LIMITS names what the lint does not read, and
+# the failure message repeats it.
+SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
+SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
+SHELL_META = " \t\n;&|()<>"
+SHELL_REDIR = re.compile(r"&?[<>]+[&|]?")
+SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
+SHELL_LIMITS = """What the lint reads and does not read:
+- reads: shell files (*.sh, or a sh, bash, dash, ash or ksh #! line, also through env or busybox).
+- reads: the shell a Python file runs (an argv literal with a shell, its options and -c; shell=True; os.system,
+  os.popen, subprocess.getoutput), when the script is a string literal or a name bound once in the file to one.
+- reads: the run: steps of the workflows and actions under .github/, as sh or bash.
+- does not read: files in record directories (reviews/, briefs/ and the rest in tools/ci_scope.py), since
+  listing one counts as reading records (tests/records_audit.py).
+- does not read: a script built at run time (a format, a +, an f-string, a parameter) or held in any other string.
+- does not read: aliases or functions named like a builtin, or the text that eval, sh -c or a trap runs
+  inside shell.
+- does not read: escapes that spell a name in $'...' (exec spelled $'\\x65xec'), or a case whose 'in' is on
+  a later line.
+- reads as dash does: in "${a:-'}'}" a ' is text, so the first } ends the expansion (bash reads '}' as a
+  quote)."""
+
+
+def command_words(words):
+    """The values of a simple command's words from its command word on."""
+    prev = None
+    for n, (text, value) in enumerate(words):
+        if not (text in SHELL_RESERVED or SHELL_ASSIGN.match(text) or (prev == "time" and text == "-p")
+                or text == "function" or prev == "function"):
+            return [v for _, v in words[n:]]
+        prev = text
+    return []
+
+
+class ShellReader:
+    """Reads shell text; each simple command goes to self.commands as (words, redirected, start): each
+    word's (text, value), whether a redirection that can fail is on it, and the offset it starts at. A
+    word's value has its quotes removed and each expansion as a NUL."""
+
+    def __init__(self, s):
+        self.s, self.commands, self.heredocs = s, [], []
+        self.scan(0, "")
+
+    def word(self, i, stop):
+        s, start, value = self.s, i, []
+        while i < len(s) and s[i] not in SHELL_META and s[i] != stop:
+            c = s[i]
+            if c == "\\":
+                value.append(s[i + 1:i + 2].replace("\n", ""))
+                i += 2
+            elif c == "'":
+                end = s.find("'", i + 1)
+                end = len(s) if end < 0 else end
+                value.append(s[i + 1:end])
+                i = end + 1
+            elif s.startswith("$'", i):
+                i = self.ansi_c(i + 2, value)
+            elif c == '"':
+                i = self.dquote(i + 1, value)
+            elif c in "$`":
+                i = self.expansion(i, False)
+                value.append("\0")
+            else:
+                value.append(c)
+                i += 1
+        return s[start:i], "".join(value), i
+
+    def ansi_c(self, i, value):
+        s = self.s
+        while i < len(s) and s[i] != "'":
+            if s[i] == "\\":
+                c = s[i + 1:i + 2]
+                value.append(c if c and c in "'\"\\?" else "\\")  # an escape spells no builtin's name
+                i += 2
+            else:
+                value.append(s[i])
+                i += 1
+        return i + 1
+
+    def dquote(self, i, value):
+        s = self.s
+        while i < len(s) and s[i] != '"':
+            if s[i] == "\\":
+                if s[i + 1:i + 2] != "\n":
+                    value.append("\\")  # no special builtin's name has a backslash in it
+                i += 2
+            elif s[i] in "$`":
+                i = self.expansion(i, True)
+                value.append("\0")
+            else:
+                value.append(s[i])
+                i += 1
+        return i + 1
+
+    def expansion(self, i, quoted):
+        """Skips the expansion at s[i] ($x, ${...}, $((...)), $(...) or `...`) and returns its end; the
+        commands of a substitution are read. QUOTED: it is inside double quotes."""
+        s = self.s
+        if s[i] == "`":
+            return self.backquote(i + 1, quoted)
+        if s.startswith("$((", i) or s.startswith("${", i):
+            opener, depth, i = s[i + 1], 0, i + 1
+            closer = ")" if opener == "(" else "}"
+            while i < len(s):
+                c = s[i]
+                if c == "\\":
+                    i += 2
+                elif c == "'" and not quoted:
+                    end = s.find("'", i + 1)
+                    i = len(s) if end < 0 else end + 1
+                elif c == '"':
+                    i = self.dquote(i + 1, [])
+                elif c in "$`":
+                    i = self.expansion(i, quoted)
+                else:
+                    depth += (c == opener) - (c == closer)
+                    i += 1
+                    if depth == 0:
+                        break
+            return i
+        if s.startswith("$(", i):
+            return self.scan(i + 2, ")")
+        return i + 1
+
+    def backquote(self, i, quoted):
+        """Reads the `...` whose text starts at s[i] as the shell does: \\, \\` and \\$ (and \\" inside
+        double quotes) lose their backslash, and the result is read as commands, so a nested `...` is read
+        too. Returns the index after the closing backquote."""
+        s, text, at = self.s, [], []
+        while i < len(s) and s[i] != "`":
+            if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in "$`\\" + '"' * quoted:
+                i += 1
+            text.append(s[i:i + 1])
+            at.append(i)
+            i += 1
+        inner = ShellReader("".join(text))
+        self.commands += [(words, redirected, at[start]) for words, redirected, start in inner.commands]
+        return i + 1
+
+    def scan(self, i, stop):
+        """Reads commands from s[i] up to an unquoted STOP character and returns the index after it."""
+        s, case, parens = self.s, [], 0
+        words, redirected, start = [], False, None
+
+        def end():
+            nonlocal words, redirected, start
+            if start is not None:
+                self.commands.append((words, redirected, start))
+            words, redirected, start = [], False, None
+
+        while i < len(s):
+            if case and case[-1] == "pattern":
+                i = self.pattern(i, case)
+                continue
+            c = s[i]
+            if c == stop and not (c == ")" and parens):
+                break
+            if s.startswith("\\\n", i):
+                i += 2
+            elif c in " \t":
+                i += 1
+            elif c == "#":
+                end_ = s.find("\n", i)
+                i = len(s) if end_ < 0 else end_
+            elif c == "\n":
+                end()
+                i = self.bodies(i + 1)
+            elif case and (s.startswith(";;", i) or s.startswith(";&", i)):
+                end()
+                i += 3 if s.startswith(";;&", i) else 2
+                case[-1] = "pattern"
+            elif c in ";&|()" and not s.startswith("&>", i):
+                parens += (c == "(") - (c == ")" and parens > 0)
+                end()
+                i += 1
+            elif c in "<>&":
+                start = i if start is None else start
+                op = SHELL_REDIR.match(s, i).group()
+                i += len(op)
+                strip = op == "<<" and s.startswith("-", i)
+                i += strip
+                while i < len(s) and s[i] in " \t":
+                    i += 1
+                target, value, i = self.word(i, stop)
+                if op == "<<":
+                    self.heredocs.append((value, strip, any(q in target for q in "'\"\\")))
+                redirected |= not (op.endswith("&") and target == "-")
+            else:
+                start = i if start is None else start
+                text, value, i = self.word(i, stop)
+                if text.isdigit() and i < len(s) and s[i] in "<>":
+                    continue
+                words.append((text, value))
+                cmd = command_words(words)
+                if len(cmd) == 3 and cmd[0] == "case" and cmd[2] == "in":
+                    end()
+                    case.append("pattern")
+        end()
+        return i + 1
+
+    def pattern(self, i, case):
+        """Reads a case arm's pattern up to its ')', or the 'esac' that ends the case."""
+        s = self.s
+        while i < len(s) and s[i] in " \t\n;":
+            i = self.bodies(i + 1) if s[i] == "\n" else i + 1
+        if s.startswith("#", i):
+            end = s.find("\n", i)
+            return len(s) if end < 0 else end
+        text, _, j = self.word(i, ")")
+        if text == "esac":
+            case.pop()
+            return j
+        i += s.startswith("(", i)
+        while i < len(s) and s[i] != ")":
+            i = max(self.word(i, ")")[2], i + 1)
+        case[-1] = "body"
+        return i + 1
+
+    def bodies(self, i):
+        """Skips the bodies of the here-documents opened on the line that ended before s[i]."""
+        s = self.s
+        pending, self.heredocs = self.heredocs, []
+        for delim, strip, quoted in pending:
+            while i < len(s):
+                eol = s.find("\n", i)
+                eol = len(s) if eol < 0 else eol
+                line = s[i:eol]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    i = eol + 1
+                    break
+                j = i
+                while not quoted and j < eol:
+                    if s[j] == "\\":
+                        j += 2
+                    elif s[j] in "$`":
+                        j = self.expansion(j, True)
+                    else:
+                        j += 1
+                if j > eol:
+                    eol = s.find("\n", j)
+                    eol = len(s) if eol < 0 else eol
+                i = eol + 1
+        return i
+
+
+def redirected_specials(text):
+    """The (line, builtin) of each command in TEXT that redirects a special builtin."""
+    lines = [0] + [m.end() for m in re.finditer("\n", text)]
+    hits = set()
+    for words, redirected, start in ShellReader(text).commands:
+        cmd = command_words(words)
+        if redirected and cmd and cmd[0] in SPECIAL_BUILTINS:
+            hits.add((bisect.bisect_right(lines, start), cmd[0]))
+    return sorted(hits)
+
+
+CI_SCOPE = load("image_ci_scope", ROOT / "tools/ci_scope.py")
+
+
+SHELL_NAMES = frozenset("sh bash dash ash ksh".split())
+SHELL_SHEBANG = re.compile(rb"#!\s*\S*/(?:env\s+(?:-S\s*)?(?:\S*/)?|busybox\s+)?(?:ba|da|a|k)?sh\b")
+PYTHON_SHEBANG = re.compile(rb"#!\s*\S*/(?:env\s+(?:-S\s*)?(?:\S*/)?)?python[\d.]*\b")
+# The calls that run their first argument with /bin/sh -c.
+PYTHON_SHELL_CALLS = {("os", "system"), ("os", "popen"), ("subprocess", "getoutput"), ("subprocess", "getstatusoutput")}
+RUN_KEY = re.compile(r"(\s*(?:-\s+)?)run:[ \t]*(.*)$")
+SHELL_KEY = re.compile(r"\s*(?:-\s+)?shell:[ \t]*(\S*)")
+
+
+def scanned_files(root=ROOT):
+    """The files under ROOT that hold shell, by kind: "shell" (*.sh, or a sh, bash, dash, ash or ksh #!
+    line, also through env or busybox), "python" (*.py, or a python #! line) and "workflow" (a .yml or
+    .yaml file under .github/). The walk opens no record (ci_scope: a record file or directory, or .git):
+    tests/records_audit.py counts a listed record directory as a read record, and CI's records-only step
+    does not run this module."""
+    out = {"shell": [], "python": [], "workflow": []}
+    for top, dirs, files in os.walk(root):
+        rel = pathlib.Path(top).relative_to(root).as_posix()
+        rel = "" if rel == "." else rel + "/"
+        dirs[:] = sorted(d for d in dirs if not (rel + d == ".git" or (rel + d + "/").startswith(CI_SCOPE.RECORD_DIRS)))
+        for name in files:
+            f = pathlib.Path(top, name)
+            if f.is_symlink() or not f.is_file() or CI_SCOPE.is_record(rel + name):
+                continue
+            with f.open("rb") as fh:
+                head = fh.readline()
+            if f.suffix == ".sh" or SHELL_SHEBANG.match(head):
+                out["shell"].append(f)
+            elif f.suffix == ".py" or PYTHON_SHEBANG.match(head):
+                out["python"].append(f)
+            elif f.suffix in (".yml", ".yaml") and rel.startswith(".github/"):
+                out["workflow"].append(f)
+    return {kind: sorted(fs) for kind, fs in out.items()}
+
+
+def shell_script_arg(args):
+    """The argument a shell runs as its script in ARGS, a Python argv's nodes: the first operand after
+    a shell's options when they hold -c; None if there is none, or an option before it is not a literal."""
+    words = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None for a in args]
+    for k, w in enumerate(words):
+        if w is None or os.path.basename(w) not in SHELL_NAMES:
+            continue
+        c = skip = False
+        opts = True
+        for arg, w in zip(args[k + 1:], words[k + 1:]):
+            if skip:  # the name after -o
+                skip = False
+            elif opts and w == "--":
+                opts = False
+            elif opts and w is not None and w[:1] in "-+" and len(w) > 1:
+                if not w.startswith("--"):
+                    c, skip = c or "c" in w, "o" in w
+            else:
+                return arg if c else None
+    return None
+
+
+def python_scripts(source):
+    """(script, line of each script line) for each shell script SOURCE, a Python program, runs whose text
+    is a string literal or a name bound once in the file, to a string literal."""
+    tree = ast.parse(source)
+    bound, value = collections.Counter(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bound[node.id] += 1
+        elif isinstance(node, ast.arg):
+            bound[node.arg] += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound[node.name] += 1
+        elif isinstance(node, ast.alias):
+            bound[(node.asname or node.name).split(".")[0]] += 1
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name):
+                    value[target.id] = node.value
+    out = []
+    for node in ast.walk(tree):
+        args = []
+        if isinstance(node, (ast.List, ast.Tuple)):
+            args = [shell_script_arg(node.elts)]
+        elif isinstance(node, ast.Call):
+            f = node.func
+            shell = any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True
+                        for k in node.keywords)
+            if shell or (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                         and (f.value.id, f.attr) in PYTHON_SHELL_CALLS):
+                args = node.args[:1]
+            args.append(shell_script_arg(node.args))
+        for arg in args:
+            if isinstance(arg, ast.Name) and bound[arg.id] == 1:
+                arg = value.get(arg.id)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                n = arg.value.count("\n")
+                exact = arg.end_lineno - arg.lineno == n  # else a \n escape or literals joined across lines
+                out.append((arg.value, [arg.lineno + (i if exact else 0) for i in range(n + 1)]))
+    return out
+
+
+def fold(lines):
+    """YAML's folding of LINES, (line, text) pairs: a line joins the one before it with a space, unless
+    either is more indented or a blank line separates them."""
+    out, gap = [], True
+    for n, text in lines:
+        if not text.strip():
+            gap = True
+        elif gap or text[:1] in " \t" or out[-1][1][:1] in " \t":
+            out.append([n, text])
+            gap = False
+        else:
+            out[-1][1] += " " + text
+    return [tuple(x) for x in out]
+
+
+def workflow_scripts(text):
+    """(scripts, unread) for TEXT, a workflow or action: (script, line of each script line) for each
+    run: key with a scalar value, and the line of each run: whose form the reader does not know (a
+    quoted scalar continued on another line). A run: whose value is empty, a [...] or a {...} is not a
+    step's script (defaults: run:, a matrix key)."""
+    lines = text.split("\n")
+    scripts, unread = [], []
+    for k, line in enumerate(lines):
+        m = RUN_KEY.fullmatch(line)
+        if not m or m.group(2)[:1] in ("", "[", "{", "#"):
+            continue
+        col, v = len(m.group(1)), m.group(2)
+        body = []
+        for j in range(k + 1, len(lines)):
+            if lines[j].strip() and len(lines[j]) - len(lines[j].lstrip(" ")) <= col:
+                break
+            body.append((j + 1, lines[j]))
+        while body and not body[-1][1].strip():
+            body.pop()
+        if v[0] in "|>":
+            indent = min((len(t) - len(t.lstrip(" ")) for _, t in body if t.strip()), default=0)
+            body = [(n, t[indent:]) for n, t in body]
+            body = body if v[0] == "|" else fold(body)
+        elif v[0] in "'\"":
+            if body or not re.fullmatch(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"", v.split(" #")[0].rstrip()):
+                unread.append(k + 1)
+                continue
+            v = v.split(" #")[0].rstrip()
+            body = [(k + 1, v[1:-1].replace("''", "'") if v[0] == "'" else json.loads(v))]
+        else:
+            body = fold([(k + 1, re.sub(r"\s+#.*", "", v))] + [(n, t.strip()) for n, t in body])
+        scripts.append(("\n".join(t for _, t in body), [n for n, _ in body]))
+    return scripts, unread
+
+
+def file_scripts(f, kind):
+    """(scripts, unread) for file F of KIND (scanned_files): (script, line of each script line) for each
+    shell script it holds, and the line of each run: the reader cannot read."""
+    text = f.read_text(errors="replace")
+    if kind == "shell":
+        return [(text, list(range(1, text.count("\n") + 2)))], []
+    if kind == "python":
+        return python_scripts(text), []
+    return workflow_scripts(text)
+
+
+# Hits in another lane's files, each with the row that fixes it; an entry that no longer hits fails, so
+# the fixing PR removes its entry.
+SHELL_ALLOWED = {
+    "guest/builder/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+    "guest/codex/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+    "guest/openclaw/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+}
+
+
+class ImageShellLintTest(unittest.TestCase):
+    FLAGGED = (
+        ': >"$W/a"',
+        '\t: >>log',
+        'x && :>y',
+        'a || : >x',
+        'a; : >x',
+        'a | : >x',
+        '{ : >x; }',
+        '( : >x )',
+        'v=$(: <in)',
+        '  a) : >x ;;',
+        'v=`: >x`',
+        'if : >x; then y; fi',
+        'if a; then : 2>/dev/null; fi',
+        'if a; then b; elif : >x; then c; fi',
+        'if a; then b; else : >x; fi',
+        'while : >x; do y; done',
+        'until : >x; do y; done',
+        'for i in 1; do : >x; done',
+        '! : >x',
+        'time : >x',
+        'x=1 : >x',
+        'x=1 y=2 : >x',
+        '2>/dev/null : >x',
+        '>x :',
+        '2>&1 :',
+        ': "${X:=d}" >f',
+        ': x#y >f',
+        ': a b >f',
+        ': >&2',
+        # #5524 item 5: the leading-redirect forms.
+        '<&3 :',
+        'x= : >f',
+        '>>log :',
+        '> x :',
+        '2>/dev/null x=1 :',
+        # Items 2 and 6: a ' #' inside double quotes is not a comment.
+        'echo " # "; : >x',
+        'echo "a #b"; : >x',
+        # Item 3: a substitution stays inside its word, and its own commands are read.
+        ': $(cat) >x',
+        ': `cat` >x',
+        ': "$(cat)" >x',
+        ': $((1 + (2))) >x',
+        ': ${a:-${b}} >x',
+        'v="$(: >x)"',
+        'v=$(a "$(: >x)")',
+        # Item 1: the other special builtins.
+        'exec 9>"$R/run/x.lock"',
+        'exec >log 2>&1',
+        'exec 3<in',
+        '. ./lib >x',
+        'eval "$c" 2>/dev/null',
+        'set -x 2>/dev/null',
+        'trap - EXIT >x',
+        'if a; then exec 9>x; fi',
+        '":" >x',
+        "\\exec >x",
+        "e'x'ec >x",
+        "e''xec >x",
+        'break >x',
+        'continue 2>/dev/null',
+        'exit 1 >x',
+        'export A >x',
+        'readonly A >x',
+        'return 1 >x',
+        'shift >x',
+        'times >x',
+        'unset A >x',
+        'a;: >x',
+        'a&&: >x',
+        'a||: >x',
+        'exec >x 9>&-',
+        '3<in :',
+        '>|x :',
+        '>\tx :',
+        ': $>x',
+        'v="`: >x`"',
+        ': >',
+        # #5533 item 9: a tab separates words.
+        'exec\t9>x',
+        # Items 3 and 11: quotes inside ${...} (as dash reads them inside double quotes) and $'...'.
+        ": ${a:-'}'} >x",
+        ': ${a:-"}"} >x',
+        ': "${a:-\'}" >x',
+        "echo $'\\''; : >x",
+        "$'exec' >x",
+        # Item 4: time -p.
+        'time -p : >x',
+        # Item 5: a case arm inside $(...).
+        'v=$(case x in a) : >f;; esac)',
+        'v="$(case x in a) echo \'"\';; esac)"; : >f',
+        'v=$(case x in (a|b) y;; esac; : >f)',
+        # A subshell's ')' inside $(...) does not end it.
+        'v="$( (a); echo \'"\')"; : >f',
+        # Item 7: a here-document is a redirection too (bash may write it to a temporary file).
+        ': <<EOF',
+        'cat <<EOF; : >x',
+        # #5538 item 2: bash's &> and &>>, the 'function name' form, and nested backquotes.
+        ': &>x',
+        ': &>>x',
+        'a; : &>"$x"',
+        '&>x :',
+        'function f { : >x; }',
+        'function f() { exec 9>x; }',
+        'v=`echo \\`: >x\\``',
+        'v=`echo \\`a \\\\\\`: >x\\\\\\`\\``',
+        'v="`echo \\"\\`: >x\\`\\"`"',
+        'v=`echo \\"; : >x\\"`',
+        'v=`echo "\\$(: >x)"`',
+        # An exec that runs a command too: bash (not in POSIX mode) runs the handler after a failed
+        # redirect there, while dash exits.
+        'exec cat >x',
+        'exec "$@" 0</dev/null 2>&1',
+    )
+    CLEAN = (
+        '#!/bin/sh',
+        '# then : >x',
+        '\t# : >comment',
+        ': # >x',
+        'true >"$W/a"',
+        ': "${X:=default}"',
+        'echo "a: >b"',
+        "echo 'a; : >b'",
+        "awk '$2 == \":\" { print > \"f\" }'",
+        'case $x in a:b) ;; esac',
+        'undo :>x',
+        'doing : >x',
+        'thenx : >x',
+        'do: >x',
+        'timer : >x',
+        ':foo >x',
+        ': ; echo >x',
+        'x || :; y >x',
+        ': | cat >x',
+        ': & y >x',
+        ': && y >x',
+        '{ :; } >f',
+        'x=1:2 >f',
+        '1x=2 : >f',
+        'echo >x',
+        'y 2>&1 && :',
+        '> :',
+        ': "a > b"',
+        ": 'a > b'",
+        ': a\\>b',
+        'echo " # " >x',
+        'echo "$(:)" >x',
+        'command exec 9>"$R/run/x.lock" || fail',
+        'command . ./lib >x',
+        'command eval "$c" 2>/dev/null',
+        'exec 9>&-',
+        'exec 3<&-',
+        'exec "$@"',
+        'echo exec >x',
+        'execute >x',
+        './run >x',
+        '.x >x',
+        'export A=1',
+        'evalx >x',
+        'echo "a\\" : >x"',
+        '":\\"" >x',
+        'echo ${a:-;: >x}',
+        ': $((1 > 2))',
+        ': # >',
+        'shift 2',
+        '${x}: >y',
+        '"${x}": >y',
+        'echo `a;: b` >x',
+        # #5533 item 9: a tab separates words.
+        'a\t:\t>x',
+        # Item 3: a quoted '}' does not end ${...}.
+        "echo ${a:-'}'}",
+        'echo "${a:-"}"}"',
+        "echo $'a\\' : >x'",
+        # Item 4: time -p.
+        'time -p true >x',
+        # Item 5: a case arm's pattern and its ')' are not commands, nor a ';;' or ')' in quotes.
+        'case $x in (a) ;; esac',
+        'case $x in a|exec) ;; *) ;; esac',
+        'v="$(case x in a) echo \'"\';; esac) : >f"',
+        'case $x in a) y;; esac >f',
+        # #5538: &> after a command; the 'function name' form; nested backquotes.
+        'a &>x',
+        'a &>>x :',
+        'function exec { true >x; }',
+        'function : { true; }',
+        'echo `echo \\`a; : b\\`` >x',
+        'v=`echo \\$: >x`',
+        'v="`echo \\"; : >x\\"`"',
+    )
+    # Unterminated, so each is clean on its own and swallows what follows.
+    OPEN = (
+        'echo "a; : >x',
+        "echo 'a; : >x",
+        'echo ${a; : >x',
+        ': ${a >',
+    )
+    # Items 6, 7 and 10: text across lines, with the (line, builtin) of each hit.
+    LINES = (
+        (': \\\n>f', [(1, ":")]),
+        ('exec \\\n 9>f', [(1, "exec")]),
+        ('e\\\nxec >f', [(1, "exec")]),
+        ('x=1 \\\n  : >f', [(1, ":")]),
+        ('echo a \\\n b; : >f', [(2, ":")]),
+        ('echo "a\nb"; : >f', [(2, ":")]),
+        ("echo 'a\nb'; : >f", [(2, ":")]),
+        ("echo 'a\n: >x\nb'", []),
+        ('echo "a\\\n: >x"', []),
+        ('# a \\\n: >f', [(2, ":")]),
+        ("v=$(\n: >f\n)", [(2, ":")]),
+        ("cat <<EOF\n: >x\nEOF\n: >y", [(4, ":")]),
+        ("cat <<'EOF'\n$(: >x)\nEOF", []),
+        ('cat <<"EOF"\n`: >x`\nEOF', []),
+        ("cat <<\\EOF\n$(: >x)\nEOF", []),
+        ("cat <<EOF\n$(: >x)\nEOF", [(2, ":")]),
+        ("cat <<EOF\nx $(\n: >x\n) y\nEOF\n: >z", [(3, ":"), (6, ":")]),
+        ("cat <<EOF\n$(echo '\n$(: >x)\n')\nEOF", []),
+        ("cat <<-EOF\n\t: >x\n\tEOF\n: >y", [(4, ":")]),
+        ("cat <<EOF\n\tEOF\n: >x\nEOF", []),
+        ("cat <<EOF\nEOF x\n: >x\nEOF", []),
+        ("cat <<A <<'B'\n: >x\nA\n: >y\nB\n: >z", [(6, ":")]),
+        ("cat <<A; cat <<B\n: >x\nA\n: >y\nB\n. ./l >z", [(6, ".")]),
+        ("v=$(cat <<EOF\n: >x\nEOF\n)", []),
+        ("case $x in\na) : >f;;\nb)\n  exec 9>g\n  ;;\nesac", [(2, ":"), (4, "exec")]),
+        ("case $x in\n# : >c\na) y;;\nesac\n: >f", [(5, ":")]),
+        ("case $x in\na) case $y in b) z;; esac;;\nc) w;;\nesac\nexec >f", [(5, "exec")]),
+        ("case $x in a) y; esac\n: >f", [(2, ":")]),
+        ("case $x in\n# it's\na) : >f;;\nesac", [(3, ":")]),
+        ('case x in "a)") : >f;; esac', [(1, ":")]),
+        ("case x in 'a)') : >f;; esac", [(1, ":")]),
+        (": >a; : >b\n\nexec 9>x", [(1, ":"), (3, "exec")]),
+        ("v=`a\n\\`: >x\\``\n: >y", [(2, ":"), (3, ":")]),
+        ("function f\n{ : >x; }", [(2, ":")]),
+    )
+
+    def test_lint_flags_a_redirected_special_builtin(self):
+        for line in self.FLAGGED:
+            with self.subTest(line=line):
+                self.assertEqual([n for n, _ in redirected_specials(line)], [1])
+        self.assertEqual(redirected_specials("\n".join(self.CLEAN + ("x; exec 9>x",) + self.CLEAN)),
+                         [(len(self.CLEAN) + 1, "exec")])
+
+    def test_lint_passes_clean_shell(self):
+        for line in self.CLEAN + self.OPEN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line), [])
+        for line in self.OPEN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line + "\n: >x"), [])
+
+    def test_lint_reads_across_lines(self):
+        for text, hits in self.LINES:
+            with self.subTest(text=text):
+                self.assertEqual(redirected_specials(text), hits)
+
+    def test_lint_names_the_builtin(self):
+        for line, name in (('exec 9>x', "exec"), (': >x', ":"), ('. ./l >x', "."), ("e'v'al x 2>y", "eval"),
+                           ('x=1 time -p set -x 2>y', "set")):
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line), [(1, name)])
+
+    def test_scanned_files_are_the_files_outside_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
+                     "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
+                     "i.py": "#!/bin/shx\n", "j": "echo\n", "k": "#!/bin/bash -p\n", "docs/l.sh": "echo\n",
+                     ".git/hooks/m.sh": "echo\n", "reviews/ux/n.sh": "echo\n", "briefs/o": "#!/bin/sh\n",
+                     "docs/security/p.sh": "echo\n", "README.md": "#!/bin/sh\n", "x/reviews/q.sh": "echo\n",
+                     # #5538 item 3: ash, ksh, busybox and env -S.
+                     "r": "#!/bin/ash\n", "s": "#!/bin/ksh\n", "t": "#!/bin/busybox sh\n", "u": "#!/bin/busybox ash\n",
+                     "v": "#!/usr/bin/env -S sh -e\n", "w": "#!/usr/bin/env -S bash\n", "y": "#!/bin/zsh\n",
+                     "z": "#!/bin/busybox wget\n",
+                     # Item 1: Python and workflows.
+                     "p1.py": "x\n", "p2": "#!/usr/bin/env python3\n", "p3": "#!/usr/bin/python3.12 -I\n",
+                     "reviews/p4.py": "x\n", ".github/workflows/w1.yml": "x\n", ".github/actions/a/action.yaml": "x\n",
+                     "w2.yml": "x\n", "p5": "#!/usr/bin/env -S python3 -u\n", "p6": "#!/bin/mypython\n",
+                     "s2": "#!/usr/bin/env  sh\n", "s3": "#!/bin/busybox  ash\n", "s4": "#!/usr/bin/env -S  sh\n",
+                     "p7": "#!/usr/bin/env  python3\n", "p8": "#!/usr/bin/env -S  python3\n", "p9": "#!/usr/bin/env /usr/bin/python3\n"}
+            for name, body in files.items():
+                (d / name).parent.mkdir(parents=True, exist_ok=True)
+                (d / name).write_text(body)
+            (d / "link.sh").symlink_to(d / "a.sh")
+            (d / "dir.sh").mkdir()
+            self.assertEqual({kind: [str(f.relative_to(d)) for f in fs] for kind, fs in scanned_files(d).items()},
+                             {"shell": ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "r", "s", "s2", "s3", "s4", "sub/b", "t", "u", "v",
+                                        "w", "x/reviews/q.sh"],
+                              "python": ["h", "i.py", "p1.py", "p2", "p3", "p5", "p7", "p8", "p9"],
+                              "workflow": [".github/actions/a/action.yaml", ".github/workflows/w1.yml"]})
+
+    # #5538 item 1: the shell a Python program runs, as (source, the (line, builtin) of each hit).
+    PYTHON = (
+        ('run(["sh", "-c", ": >x"])', [(1, ":")]),
+        ('run(("/bin/bash", "-e", "-c", "exec 9>x"))', [(1, "exec")]),
+        ('run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", ": >x"])', [(1, ":")]),
+        ('run(["busybox", "ash", "-ec", ": >x", "name"])', [(1, ":")]),
+        ('run(["unshare", "-r", "dash", "-c", ": >x"])', [(1, ":")]),
+        ('runsc("exec", cid, "/bin/sh", "-c", ": >x")', [(1, ":")]),
+        ('run(["ksh", "-c", "--", ": >x"])', [(1, ":")]),
+        ('run(["sh", "-c", "--", "--", ": >x"])', []),  # the script is '--'
+        ('run(["sh", "--norc", "-c", s, ": >x"])', []),
+        ('S = """set -e\n: >x\n"""\nrun(["sh", "-c", S, "name"])', [(2, ":")]),
+        ('def f():\n    s = (": >a; "\n         ": >b")\n    run(["sh", "-c", s])', [(2, ":")]),
+        ('run("a\\n: >x", shell=True)', [(1, ":")]),
+        ('os.system(": >x")', [(1, ":")]),
+        ('os.popen("exec 3<x")', [(1, "exec")]),
+        ('subprocess.getoutput(": >x")', [(1, ":")]),
+        ('subprocess.getstatusoutput(": >x")', [(1, ":")]),
+        ('run(["sh", "-c", "-e", ": >x"])', [(1, ":")]),
+        ('run(["bash", "--restricted", ": >x"])', []),
+        ('s = ": >x"\ndef s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nasync def s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nimport s\nrun(["sh", "-c", s])', []),
+        ('run("true", ": >x", shell=True)', []),
+        ('s: str = ": >x"\nrun(["sh", "-c", s])', [(1, ":")]),
+        ('s = "true"\ns = ": >x"\nrun(["sh", "-c", s])', []),
+        ('run(["sh", "-c", "true >x"])', []),
+        ('run(["sh", ": >x"])', []),
+        ('run(["sh", "-e", ": >x"])', []),
+        ('run(["sh", "-o", "c", ": >x"])', []),
+        ('run(["echo", "-c", ": >x"])', []),
+        ('run(["sh", opt, "-c", ": >x"])', []),
+        ('run(": >x", shell=False)', []),
+        ('run(": >x")', []),
+        ('x.system(": >x")', []),
+        ('s = ": >x"\ns = "true"\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\ndef f(s):\n    run(["sh", "-c", s])', []),
+        ('run(["sh", "-c", f": >{x}"])', []),
+        ('"run([\\"sh\\", \\"-c\\", \\": >x\\"])"', []),
+    )
+    # The run: steps of a workflow, as (text, the (line, builtin) of each hit).
+    WORKFLOW = (
+        ("steps:\n  - run: : >x\n", [(2, ":")]),
+        ("steps:\n  - run: |\n      a\n      : >x\n    name: n\n  - run: echo >x\n", [(4, ":")]),
+        ("steps:\n  - name: n\n    run: |-\n      a\n\n      exec 9>x\n", [(6, "exec")]),
+        ("steps:\n  - run: >-\n      echo\n      : >x\n  - run: >\n      a\n\n      : >x\n", [(8, ":")]),
+        ("steps:\n  - run: >\n      a\n        : >x\n", [(4, ":")]),
+        ("steps:\n  - run: a\n      ; : >x\n", [(2, ":")]),
+        ("steps:\n  - run: ': >x' # c\n  - run: \"exec 9>y\"\n", [(2, ":"), (3, "exec")]),
+        ("steps:\n  - run: \"exec 9>y\" # c\n", [(2, "exec")]),
+        ("steps:\n  - run: >\n      a\n        b\n      exec 9>x\n", [(5, "exec")]),
+        ("steps:\n  -  run: : >x\n", [(2, ":")]),
+        ("steps:\n  - run: 'echo '': >x'''\n", []),
+        ("steps:\n  - run: echo # ; : >x\n", []),
+        ("steps:\n  - run: true >x\n", []),
+        ("jobs:\n  a:\n    defaults:\n      run:\n        shell: bash\n    strategy:\n      matrix:\n        run: [a, b]\n", []),
+        ("run: |\n  : >x\nrun: : >y\n", [(2, ":"), (3, ":")]),
+    )
+
+    def scripts_hits(self, scripts):
+        return [(lines[n - 1], name) for text, lines in scripts for n, name in redirected_specials(text)]
+
+    def test_lint_reads_python_shell(self):
+        for source, hits in self.PYTHON:
+            with self.subTest(source=source):
+                self.assertEqual(self.scripts_hits(python_scripts(source)), hits)
+
+    def test_lint_reads_workflow_shell(self):
+        for text, hits in self.WORKFLOW:
+            with self.subTest(text=text):
+                scripts, unread = workflow_scripts(text)
+                self.assertEqual((self.scripts_hits(scripts), unread), (hits, []))
+        self.assertEqual(workflow_scripts("steps:\n  - run: 'a\n      b'\n  - run: \"a\n      b\"\n")[1], [2, 4])
+
+    def test_lint_finds_offline_systemd_manager_lines(self):
+        # The manager shell's two ':' lines (#5538) were found by this scan; 'true' fixes them.
+        text = (ROOT / "image/offline_systemd.py").read_text()
+        fixed = [n for n, line in enumerate(text.split("\n"), 1) if 'true >"$N/dev/' in line]
+        self.assertEqual(len(fixed), 2)
+        self.assertEqual(self.scripts_hits(python_scripts(text)), [])
+        self.assertEqual(self.scripts_hits(python_scripts(text.replace('true >"$N/dev/', ': >"$N/dev/'))),
+                         [(fixed[0], ":"), (fixed[1], ":")])
+
+    def test_repository_shell_has_no_redirected_special_builtin(self):
+        files = scanned_files()
+        for f in (IMG / "ci_boot.sh", MK / "mkosi.extra/usr/lib/agentos/drive-id", AGENTOS_LIB / "egress-setup",
+                  ROOT / "broker/vm/gvisor/testdata/fakerunsc.sh", ROOT / "spikes/S8-live/run.sh"):
+            self.assertIn(f, files["shell"])
+        self.assertIn(ROOT / "image/offline_systemd.py", files["python"])
+        self.assertIn(ROOT / ".github/workflows/ci.yml", files["workflow"])
+        self.assertIn(ROOT / ".github/actions/scope/action.yml", files["workflow"])
+        hits, unread = [], []  # hits: (the line as SHELL_ALLOWED names it, the hit as the failure message shows it)
+        for kind, fs in files.items():
+            for f in fs:
+                rel = f.relative_to(ROOT)
+                text = f.read_text(errors="replace").split("\n")
+                scripts, bad = file_scripts(f, kind)
+                unread += ["%s:%d: run: a quoted value on more than one line" % (rel, n) for n in bad]
+                if kind == "workflow":
+                    # Each run: is read as sh or bash: a step that names another shell needs its own reader.
+                    unread += ["%s:%d: shell: %s is not sh or bash" % (rel, n, m.group(1)) for n, line in enumerate(text, 1)
+                               for m in [SHELL_KEY.match(line)] if m and os.path.basename(m.group(1)) not in SHELL_NAMES]
+                for script, lines in scripts:
+                    for n, name in redirected_specials(script):
+                        n = lines[n - 1]
+                        hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
+        self.assertEqual(unread, [], "the lint cannot read these steps. A quoted run: value continued on another line: "
+                         "write it as a `run: |` block. A shell: other than sh or bash: use sh or bash, or teach "
+                         "workflow_scripts that shell.")
+        self.assertEqual([hit for line, hit in hits if line not in SHELL_ALLOWED], [],
+                         "put `command` in front (`command . ./lib >x`), or `true >file` for `:`: a failed redirect "
+                         "on a special builtin exits the shell before a handler runs.\n" + SHELL_LIMITS)
+        self.assertEqual(sorted(SHELL_ALLOWED.keys() - {line for line, _ in hits}), [],
+                         "an allowed line no longer hits: remove its SHELL_ALLOWED entry, or update its key if the "
+                         "line's text changed")
 
 
 class ConfigTest(unittest.TestCase):
@@ -1850,15 +2760,24 @@ class ConfigTest(unittest.TestCase):
         exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
         self.assertNotIn("-worker-argv", exe)
         worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe).group(1)
-        loop = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
-                    if l.startswith("for b in /bin/sh "))
-        self.assertIn("/bin/" + argv.split()[0], loop.removesuffix("; do").split()[3:])
+        tools = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
+                     if l.startswith("\t/bin/sh "))
+        self.assertIn("/bin/" + argv.split()[0], tools.removesuffix(" \\").split())
 
     def test_broker_reads_onboarding_s_settings(self):
         # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["EnvironmentFile"], "-/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
+
+    def test_gpt_auto_types_agree(self):
+        # #5489 (from #5495): mkosi.finalize's GPT_AUTO_MOUNTS lists every partition type gpt-auto mounts
+        # (a definition of any other type is refused); finish_image.py's REPART_TYPES the four the built
+        # disk may hold. They differ on purpose, so the difference is pinned: a type added to or dropped
+        # from either list that is not made in the other fails here.
+        self.assertLessEqual(set(finish.REPART_TYPES), set(check.GPT_AUTO_MOUNTS))
+        self.assertEqual(sorted(set(check.GPT_AUTO_MOUNTS) - set(finish.REPART_TYPES)),
+                         ["home", "root-verity", "root-verity-sig", "srv", "tmp", "usr-verity-sig", "var", "xbootldr"])
 
 
 class NoDumpTest(unittest.TestCase):
@@ -1945,7 +2864,9 @@ class NoDumpTest(unittest.TestCase):
                 f.unlink()
         write(self.root, "etc/fstab", "# no swap here\nUUID=x / ext4 defaults,noexec 0 1\n"
               + (MK / "mkosi.extra/etc/fstab").read_text())
-        self.assertEqual(check.violations(self.root), [])
+        # The PID 1 path allowlist refuses the unlisted root line (MadeAllowTest); the swap rule is under test.
+        with unittest.mock.patch.object(check, "made_allow_violations", return_value=[]):
+            self.assertEqual(check.violations(self.root), [])
 
     def test_no_swap_partition_and_generators_off(self):
         # Built disk: no partition carries the swap type, and gpt-auto and fstab make no swap
@@ -2520,10 +3441,30 @@ class ConfFilesTest(unittest.TestCase):
                     finally:
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
-            "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private", "run/agentos-egress", "run/agentos-localui", "run/agentos-mail",
-            "var/lib/agentos-mail", "run/agentos-link", "run/agentos-camera", "var/lib/agentos-camera",
-            "run/agentos-homekit", "var/lib/agentos-homekit")))
+            "home", "run/user", "var/lib/agentos-mail", "var/lib/agentos-camera", "var/lib/agentos-homekit")))
+        # #5167: and every directory the manager makes for a unit that runs as a service user, stock or ours.
+        rel, target = "etc/udev/rules.d/99-x.rules", "/var/lib/systemd/timesync/x.rules"
+        f = link(self.root, rel, target)
+        self.assertNotIn(rel, self.v())
+        write(self.root, "usr/lib/systemd/system/systemd-timesyncd.service",
+              "[Service]\nStateDirectory=systemd/timesync\nUser=systemd-timesync\n")
+        self.assertIn("%s: a link to %s, inside /var/lib/systemd/timesync," % (rel, target), self.v())
+        f.unlink()
+        # A link the tree holds inside one is refused by the holder rule, even with the directory in the tree:
+        # that unit's user can replace the link (L3 6758443448, the surviving mutant on the holder lookup).
+        rel = "var/lib/systemd/timesync/held"
+        f = link(self.root, rel, "/usr/lib/os-release")
+        self.assertTrue((self.root / "var/lib/systemd/timesync").is_dir())
+        self.assertIn("%s: a link to /usr/lib/os-release, inside /var/lib/systemd/timesync, a directory systemd makes "
+                      "for a unit at runtime (StateDirectory= in usr/lib/systemd/system/systemd-timesyncd.service); "
+                      "that unit's user would decide what it reads (#5167)" % rel, self.v())
+        f.unlink()
+        # A template's directory is not expanded: its specifier fails the build (Security 6760938141).
+        write(self.root, "usr/lib/systemd/system/cap@.service", "[Service]\nStateDirectory=capsules/c-%i\n")
+        self.assertIn("usr/lib/systemd/system/cap@.service: StateDirectory=capsules/c-%i: the tree check does not model "
+                      "it; the tree check never passes a unit file whose directories it cannot read (#5167); write it as "
+                      "plain directory names under its top (no specifier, quote, escape, glob, '..' or leading '/')",
+                      self.v())
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
@@ -2601,8 +3542,9 @@ class ConfFilesTest(unittest.TestCase):
         mut = pathlib.Path(tmp.name) / "mutant.py"
         mut.write_text(src.replace(old, new))
         # Beside the mutant, where it looks for its allowlist, so its whole check can run.
-        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW):
+        for name in (check.TMPFILES_ALLOW, check.EXEC_ALLOW, check.MADE_ALLOW):
             (pathlib.Path(tmp.name) / name).write_text((MK / name).read_text())
+        shutil.copytree(MK / "mkosi.repart", pathlib.Path(tmp.name) / "mkosi.repart")  # #5474
         m = load("image_check_mutant", mut)
         m.TREE_OWNER = os.geteuid()
         m.TREE_GROUP = os.getegid()
@@ -3302,12 +4244,20 @@ def image_tool(case, name):
     tests compare against. The root's own loader runs the binary on the root's own libraries
     (--inhibit-cache: not the runner's ld.so.cache), so no root or namespace is needed and paths the
     tool is given stay the runner's. --argv0 gives kmod the name it dispatches on. Missing, it skips
-    or fails as reference_tool does."""
+    or fails as reference_tool does.
+    --library-path still falls back to the loader's built-in runner directories, so, as hostcheck's
+    stack does (#5055), the tool runs with no runner environment but PATH and with the loader's record
+    of what it loads in a directory of the case's own; when the case ends, every record must name only
+    paths in the root, and there must be one (#5231). `env -i` is in the argv, so no caller can run the
+    tool without its record. systemd's generator paths name an empty directory: `verify` runs the
+    environment generators, and the runner's are runner binaries (#5312's checks job ran one)."""
     root = os.environ.get("AGENTOS_REFERENCE_ROOT", "")
     rel = IMAGE_TOOLS[name][1]
     why = None
     if not root:
         why = "AGENTOS_REFERENCE_ROOT is not set"
+    elif "=" in root:
+        why = "AGENTOS_REFERENCE_ROOT %s holds '=', which env would read as a variable" % root
     else:
         for p in (IMAGE_LOADER, rel):
             if os.path.islink(os.path.join(root, p)) or not os.path.isfile(os.path.join(root, p)):
@@ -3317,9 +4267,33 @@ def image_tool(case, name):
         if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
             case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s (%s)" % (why, name))
         case.skipTest("%s; this test is skipped without the image's %s" % (why, name))
-    return [os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
+    records = tempfile.TemporaryDirectory()
+    case.addCleanup(records.cleanup)
+    log = os.path.join(records.name, "tool")
+    case.addCleanup(hostcheck.audit_records, root, log)  # cleanups run last first: before the directory goes
+    none = os.path.join(records.name, "no-generators")
+    os.mkdir(none)
+    env = dict(hostcheck.loader_env(log), SYSTEMD_GENERATOR_PATH=none, SYSTEMD_ENVIRONMENT_GENERATOR_PATH=none)
+    return ["/usr/bin/env", "-i"] + ["%s=%s" % kv for kv in sorted(env.items())] + [
+            os.path.join(root, IMAGE_LOADER), "--inhibit-cache",
             "--library-path", ":".join(os.path.join(root, d) for d in IMAGE_LIBS),
             "--argv0", name, os.path.join(root, rel)]
+
+
+def own_generator_dirs(case, argv):
+    """The directory both of systemd's generator paths in ARGV (an image_tool argv) name, failing CASE
+    unless it is one empty directory, no link, made inside the case's own record directory (#5322)."""
+    env = dict(a.split("=", 1) for a in argv[2:argv.index("--inhibit-cache") - 1])
+    own = os.path.dirname(env["AGENTOS_LOADER_RECORD"])
+    paths = {env[v] for v in ("SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH")}
+    case.assertEqual(len(paths), 1, paths)
+    path = paths.pop()
+    case.assertTrue(os.path.isabs(path) and ":" not in path, path)
+    case.assertEqual(os.path.dirname(path), own, path)
+    case.assertFalse(os.path.islink(path), path)
+    case.assertTrue(os.path.isdir(path), path)
+    case.assertEqual(os.listdir(path), [], path)
+    return [path]
 
 
 def dpkg_version(root, package):
@@ -3819,8 +4793,8 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
                                         if rel == "usr/lib/x/r" else real(root, rel)):
             self.assertIn("through /usr/lib/x/r, which carries a POSIX ACL", self.v())
         self.assertNotIn("etc/udev/rules.d:", self.v())
-        m = self.mutant('        why = step_refusal(root, d, target, not path.startswith("/"), st, gid=gid)\n',
-                        '        why = step_refusal(root, d, target, not path.startswith("/") and k < len(parts), st, gid=gid)\n')
+        m = self.mutant('        why = step_refusal(root, d, target, held, st, gid=gid)\n',
+                        '        why = step_refusal(root, d, target, held and k < len(parts), st, gid=gid)\n')
         with unittest.mock.patch.object(m, "tree_xattrs", lambda root, rel: [check.ACL_XATTRS[0]]
                                         if rel == "usr/lib/x/r" else []):
             self.assertEqual(m.world_writable_link(str(self.root), self.RULES), [])
@@ -4109,42 +5083,28 @@ class TreeLinkTmpfilesTest(unittest.TestCase):
             self.assertGreater(makers.call_count, 2)
         self.assertIsNone(check._MAKERS)
 
-    # SERVICE_DIRS lists every directory a unit's service user owns.
+    # #5167: every directory a shipped unit file names counts, whoever runs the unit.
 
     # The image's units and those build.sh installs from their commands' directories.
     UNITS = sorted(list((MK / "mkosi.extra/usr/lib/systemd/system").glob("*.service"))
                    + [u for u in (ROOT / "broker/cmd").glob("*/*.service")
                       if '"$REPO/%s"' % u.relative_to(ROOT) in (IMG / "build.sh").read_text()])
-    UNIT_DIRS = {"StateDirectory": "var/lib", "RuntimeDirectory": "run", "CacheDirectory": "var/cache",
-                 "LogsDirectory": "var/log"}
 
-    def service_dirs_missing(self, service_dirs):
-        out = []
-        for u in self.UNITS:
-            keys = {}
-            for ln in u.read_text().split("\n"):
-                k, _, val = ln.strip().partition("=")
-                keys.setdefault(k.strip(), []).append(val.strip())
-            dyn = (keys.get("DynamicUser") or ["no"])[-1].lower() in ("yes", "true", "1", "on")
-            user = (keys.get("User") or ["root"])[-1]
-            if not dyn and user in ("", "root", "0"):
-                continue
-            for key, top in self.UNIT_DIRS.items():
-                for val in keys.get(key, []):
-                    for d in val.split():
-                        d = top + "/" + d.split(":")[0].strip("/")
-                        if not any(d == s or d.startswith(s + "/") for s in service_dirs):
-                            out.append("%s: %s" % (u.name, d))
-        return out
-
-    def test_every_service_users_directory_is_in_service_dirs(self):
+    def test_every_directory_a_shipped_unit_names_is_unit_made(self):
         self.assertIn("agentos-egress.service", [u.name for u in self.UNITS])
         self.assertIn("agentos-localui.service", [u.name for u in self.UNITS])
-        self.assertEqual(self.service_dirs_missing(check.SERVICE_DIRS), [])
-        # The check sees a dropped entry.
-        for gone in ("var/lib/agentos-egress", "run/agentos-egress", "var/lib/agentos-localui"):
-            with self.subTest(gone=gone):
-                self.assertNotEqual(self.service_dirs_missing([s for s in check.SERVICE_DIRS if s != gone]), [])
+        with tempfile.TemporaryDirectory() as t:
+            for u in self.UNITS:
+                write(pathlib.Path(t), "usr/lib/systemd/system/" + u.name, u.read_text())
+            made, out = check.unit_made_dirs(t)
+            refused = check.unit_made_refusals(t)
+        self.assertEqual(out, [])
+        self.assertEqual(refused, [])
+        # Pinned: the eight agentos entries SERVICE_DIRS no longer lists, and the two root units' own.
+        self.assertEqual(sorted(made), sorted((
+            "var/lib/agentos-localui", "var/lib/agentos-egress", "run/agentos-egress", "run/agentos-localui",
+            "run/agentos-mail", "run/agentos-link", "run/agentos-camera", "run/agentos-homekit",
+            "var/lib/agentos-store", "var/lib/agentos/modem")))
 
 
 class ReferenceToolTest(unittest.TestCase):
@@ -4339,14 +5299,89 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                     out[rel] = ("dir",)
         return out
 
-    def test_passed_lines_change_nothing_guarded(self):
-        tool = image_tool(self, "systemd-tmpfiles")
+    # systemd-tmpfiles' own exit statuses (systemd 257 src/tmpfiles/tmpfiles.c run(), through
+    # DEFINE_MAIN_FUNCTION_WITH_POSITIVE_FAILURE): 0, 1 (an error, or out of resources), EX_DATAERR (a line
+    # it refused: a missing user or credential) and EX_CANTCREAT (a path it could not make). A line may
+    # earn any of them; any other status, 127 above all (env or the loader found no tool to run, #5322),
+    # means the tool never ran the line, and a run that wrote nothing would pass as a line that wrote nothing.
+    STATUSES = (0, 1, os.EX_DATAERR, os.EX_CANTCREAT)
+
+    def tmpfiles(self, tool, tmp):
+        p = subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
+        self.assertIn(p.returncode, self.STATUSES, "systemd-tmpfiles did not run: %r" % p.stderr[-2000:])
+
+    def test_a_tool_that_does_not_run_fails_the_case(self):
+        # #5322: the argv image_tool builds (env -i, then the root's loader) with no loader or tool where it
+        # names one exits 127, as does a loader that cannot map the tool's libraries; a signal or a status
+        # tmpfiles never returns fails too. Each tmpfiles status passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
+                       "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
+            # The oracle is written out, not read from STATUSES, so a status added there fails here.
+            self.assertEqual(self.STATUSES, (0, 1, 65, 73))
+            for argv, ok in [(missing, False)] + [(["/bin/sh", "-c", "exit %d" % n, "sh"], n in (0, 1, 65, 73))
+                                                  for n in (0, 1, 2, 65, 73, 126, 127, 255)] + [
+                    (["/bin/sh", "-c", "kill -SEGV $$", "sh"], False)]:
+                with self.subTest(argv=argv):
+                    if ok:
+                        self.tmpfiles(argv, tmp)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "did not run"):
+                            self.tmpfiles(argv, tmp)
+            self.assertEqual(subprocess.run(missing, capture_output=True).returncode, 127)
+
+    def not_run_misses(self, tmpfiles=None):
+        # #5333, #5353: runs test_passed_lines_change_nothing_guarded with a tool that exits 127 and
+        # returns the cases (file, line) that did NOT fail as "not run". TMPFILES may stand in for the
+        # class's tmpfiles, as a mutant of the guarded test would.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin", os.path.join(tmp, "no-loader"), "--argv0",
+                       "systemd-tmpfiles", os.path.join(tmp, "no-tool")]
+            result = unittest.TestResult()
+            with unittest.mock.patch.object(sys.modules[__name__], "image_tool", lambda case, tool: missing), \
+                    unittest.mock.patch.object(TmpfilesDiffTest, "tmpfiles", tmpfiles or TmpfilesDiffTest.tmpfiles):
+                TmpfilesDiffTest("test_passed_lines_change_nothing_guarded").run(result)
+        self.assertEqual(result.errors, [])
+        not_run = collections.Counter((t.params["file"], t.params["line"]) for t, tb in result.failures
+                                      if getattr(t, "params", None) and "systemd-tmpfiles did not run" in tb)
+        cases = collections.Counter(self.guarded_cases())
+        self.assertGreater(len(cases), 0)
+        self.assertEqual(not_run - cases, collections.Counter())
+        return sorted((cases - not_run).elements())
+
+    def test_the_guarded_run_takes_the_status_guard(self):
+        # #5333: test_passed_lines_change_nothing_guarded runs each case through self.tmpfiles, so a
+        # tool that exits 127 fails every case as not run. A bare subprocess call there would fail
+        # only the vacuous-oracle check at the end, and a check=True call would error, not fail.
+        # #5353: every case, the allow_groups ones too, so a guard dropped from some cases fails here.
+        self.assertEqual(self.not_run_misses(), [])
+
+    def test_a_case_without_the_guard_fails_the_pin(self):
+        # #5353: one allow_groups case run bare (the status guard dropped from it alone) is reported,
+        # and only it, while every other case still fails as not run.
+        rel = sorted(allow_groups())[0]
+        guarded = TmpfilesDiffTest.tmpfiles
+
+        def tmpfiles(case, tool, tmp):
+            if os.path.exists(os.path.join(tmp, rel)):
+                subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True,
+                               timeout=60)
+            else:
+                guarded(case, tool, tmp)
+        self.assertEqual(self.not_run_misses(tmpfiles), [(rel, "\n".join(allow_groups()[rel]))])
+
+    def guarded_cases(self):
+        """The (file, text) cases test_passed_lines_change_nothing_guarded runs: each passed or probe
+        line alone, then every allowlisted file whole, under its own path, so that an entry added to
+        tmpfiles.allow is run too (#1543 P/UX P1): the tree then passes the allowlist as well as the guard."""
         lines = TMPFILES_PASS + tuple(ln for ln in AGENTOS_TMPFILES.read_text().splitlines()
                                       if ln and not ln.startswith("#")) + TMPFILES_PROBES
-        # Every allowlisted file whole, under its own path, so that an entry added to tmpfiles.allow
-        # is run too (#1543 P/UX P1): the tree then passes the allowlist as well as the guard.
-        cases = [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
+        return [("usr/lib/tmpfiles.d/x.conf", ln) for ln in lines] + [
             (rel, "\n".join(group)) for rel, group in sorted(allow_groups().items())]
+
+    def test_passed_lines_change_nothing_guarded(self):
+        tool = image_tool(self, "systemd-tmpfiles")
+        cases = self.guarded_cases()
         changed = set()
         # #4694: every case starts from a copy of one clean tree, checked once, rather than building
         # and whole-checking the same tree again for each case (0.3 s each, over 250 cases).
@@ -4363,9 +5398,8 @@ class TmpfilesDiffTest(MustRun, unittest.TestCase):
                 f = write(root, rel, ln + "\n")
                 passed = not check.tmpfiles_violations(root)
                 before = self.snapshot(tmp)
-                # --root keeps every path inside the scratch tree; the exit code is the line's own
-                # business (a missing user or credential), what it did to the tree is the test.
-                subprocess.run(tool + ["--root=" + tmp, "--create", "--remove", "--boot"], capture_output=True, timeout=60)
+                # --root keeps every path inside the scratch tree; what the line did to the tree is the test.
+                self.tmpfiles(tool, tmp)
                 if self.snapshot(tmp) != before:
                     changed.add(ln)
                 self.assertEqual(passed, ln not in TMPFILES_PROBES)
@@ -5092,7 +6126,7 @@ class TreeAccessTest(unittest.TestCase):
     calls a file-reading or stat API fails here, however it names it."""
     # REQ: HW-1, DEV-2
     ALLOWED = frozenset(("tree_lstat", "tree_listdir", "tree_readlink", "tree_read", "tree_xattrs",
-                         "allow_path", "allow_entries", "script_net_dev"))
+                         "allow_path", "allow_entries", "script_net_dev", "repart_build", "build_definitions"))
     READERS = {"tree_read": frozenset(("Conf.content", "has_key"))}
     SOURCE = (MK / "mkosi.finalize").read_text()
 
@@ -5233,6 +6267,101 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     # "kmod version 34.2": the upstream part of the Debian version.
                     self.assertEqual(first, "kmod version " + want.split(":")[-1].rsplit("-", 1)[0], out)
 
+    def test_name_only_keys_were_read_from_this_systemd(self):
+        # #5552: NAME_ONLY_KEYS was read from one systemd's load-fragment-gperf.gperf.in; a different image
+        # systemd fails here until the list is read again and NAME_ONLY_SYSTEMD changed with it.
+        tool = image_tool(self, "systemd-analyze")
+        out = subprocess.run(tool + ["--version"], capture_output=True, text=True, timeout=60).stdout
+        # "systemd 257 (257.9-1~deb13u1)": the major version is the second word.
+        self.assertEqual(out.split("\n", 1)[0].split(" ")[1], check.NAME_ONLY_SYSTEMD, out)
+
+    def test_a_library_from_outside_the_root_fails_the_case(self):
+        # #5231: --library-path falls back to the runner's directories, so a root without a library the
+        # tool links still runs it, on the runner's copy; the loader's record fails the case. The tool is
+        # the runner's ls (libselinux beside libc on Ubuntu) in a root of the runner's loader and libc, and,
+        # for the control, every library ls links. A case that never runs the tool it took fails too.
+        out = subprocess.run(["ldd", "/usr/bin/ls"], capture_output=True, text=True, check=True).stdout
+        libs = [a or b for a, b in re.findall(r"=> (/\S+)|^\s*(/\S+)", out, re.M)]
+        self.assertTrue(any("libselinux" in lib for lib in libs), libs)
+        for whole, runs, want in ((True, True, None), (False, True, r"outside the tools root.*libselinux"),
+                                  (True, False, "kept no record")):
+            with self.subTest(whole=whole, runs=runs), tempfile.TemporaryDirectory() as root:
+                for lib in libs:
+                    if whole or re.search(r"/(ld-linux-x86-64\.so\.2|libc\.so\.6)$", lib):
+                        dst = pathlib.Path(root, IMAGE_LIBS[0], os.path.basename(lib))
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(os.path.realpath(lib), dst)
+                dst = pathlib.Path(root, IMAGE_TOOLS["systemd-analyze"][1])
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy("/usr/bin/ls", dst)
+
+                class Case(unittest.TestCase):
+                    def test_tool(case):
+                        tool = image_tool(case, "systemd-analyze")
+                        if runs:
+                            p = subprocess.run(tool + [root], capture_output=True, timeout=60)
+                            case.assertEqual(p.returncode, 0, p.stderr)  # it runs: only the record tells
+
+                result = unittest.TestResult()
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                    Case("test_tool").run(result)
+                failed = [tb for _, tb in result.errors + result.failures]
+                if want:
+                    self.assertEqual(len(failed), 1, failed)
+                    self.assertRegex(failed[0], want)
+                else:
+                    self.assertEqual(failed, [])
+        # No runner environment, and systemd finds no generator to run: the runner's would run on the
+        # runner's loader (#5312).
+        with tempfile.TemporaryDirectory() as root:
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            seen, dirs, refused = [], [], []
+
+            class Argv(unittest.TestCase):
+                def test_tool(case):
+                    argv = image_tool(case, "systemd-analyze")  # never run: its own case fails, unrecorded
+                    seen.append(argv)
+                    dirs.extend(own_generator_dirs(case, argv))
+                    # #5322: each path must be the case's own empty directory. A path anywhere else (the
+                    # runner's generators, another case's empty directory, a link out of the case's, a
+                    # directory that holds a generator) fails.
+                    path = dirs[-1]
+                    refused.append({})
+                    with tempfile.TemporaryDirectory() as other:
+                        os.symlink(other, path + "-link")
+                        for name, to in (("runner", "/usr/lib/systemd/system-environment-generators"),
+                                         ("other case", other), ("link", path + "-link"), ("held", path)):
+                            if name == "held":
+                                pathlib.Path(path, "gen").write_text("#!/bin/sh\n")
+                            mutant = [a.replace("=" + path, "=" + to) if a.startswith("SYSTEMD_") else a for a in argv]
+                            try:
+                                own_generator_dirs(case, mutant)
+                                refused[-1][name] = False
+                            except AssertionError:
+                                refused[-1][name] = True
+
+            for _ in range(2):
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root}):
+                    Argv("test_tool").run(unittest.TestResult())
+            self.assertEqual([argv[:2] for argv in seen], [["/usr/bin/env", "-i"]] * 2)  # none of the runner's environment
+            self.assertEqual(refused, [dict.fromkeys(("runner", "other case", "link", "held"), True)] * 2)
+            self.assertEqual(len(dirs), 2)
+            self.assertNotEqual(dirs[0], dirs[1])  # each case its own
+            for path in dirs:
+                self.assertFalse(os.path.lexists(path), path)  # and it goes with the case
+        # A root holding "=" would be read by env as a variable, not run: refused by name (#5310).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "a=b")
+            for rel in (IMAGE_LOADER, IMAGE_TOOLS["systemd-analyze"][1]):
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                shutil.copy("/usr/bin/ls", os.path.join(root, rel))
+            with unittest.mock.patch.dict(os.environ, {"AGENTOS_REFERENCE_ROOT": root,
+                                                       "AGENTOS_REQUIRE_REFERENCE_TOOLS": ""}):
+                with self.assertRaisesRegex(unittest.SkipTest, "holds '='"):
+                    image_tool(self, "systemd-analyze")
+
 
 class UplinkTest(unittest.TestCase):
     """#1416 (P2-1 uplink): plugging an Ethernet cable into the home router is all it takes to go
@@ -5283,6 +6412,20 @@ class UplinkTest(unittest.TestCase):
         # gid 8 can write, so the tree check refuses it; the box runs no mail, so the link goes.
         removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
         self.assertIn("/var/spool/mail", removed)
+
+    def test_journal_namespace_units_are_removed_from_the_image(self):
+        # REQ: STO-2 (#5167): stock journald@.service's LogsDirectory=journal/%m.%i sits under /var/log/journal,
+        # which tmpfiles.d gives group systemd-journal and an ACL, so the tree check refuses its way as not
+        # root's alone; no unit sets LogNamespace=, so its four units go. capsule@.service's capsules/%i may
+        # simplify to capsules, above every other capsule's directory; the box runs no capsules.
+        removed = ini(MK / "mkosi.conf")["Content"]["RemoveFiles"].split()
+        for unit in ("systemd-journald@.service", "systemd-journald@.socket", "systemd-journald-varlink@.socket",
+                     "systemd-journald-sync@.service", "capsule@.service"):
+            self.assertIn("/usr/lib/systemd/system/" + unit, removed)
+        # build.sh installs the broker's units beside mkosi.extra's.
+        for f in (list(MK.glob("mkosi.extra/**/*.service")) + list(MK.glob("mkosi.extra/**/*.conf"))
+                  + list((ROOT / "broker/cmd").glob("*/*.service"))):
+            self.assertNotIn("LogNamespace", f.read_text(errors="replace"), f)
 
     def test_uplink_tells_the_lan_nothing_about_the_box(self):
         # REQ: DEV-2 (#1479): no hostname in DHCP (every box is "agentos"), and IPv6 addresses that
@@ -5549,7 +6692,7 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
-        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+        self.assertIn('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n\te2e_console', e2e)
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
@@ -5633,7 +6776,7 @@ class UplinkTest(unittest.TestCase):
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                       for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
-        block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
+        block = s[s.index('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "console-e2e.log").write_bytes(console)
             p = subprocess.run(["sh", "-c", fns + 'W="$1"; fail="$2"\n' + block + 'echo "rc=$fail"\n', "-", d, fail],
@@ -6017,9 +7160,9 @@ class EgressSetupTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_setup(self, *args):
+    def run_setup(self, *args, shell=(), script=AGENTOS_LIB / "egress-setup"):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
-        r = subprocess.run([str(AGENTOS_LIB / "egress-setup")] + list(args), env=env, capture_output=True, text=True)
+        r = subprocess.run(list(shell) + [str(script)] + list(args), env=env, capture_output=True, text=True)
         log = self.log.read_text() if self.log.exists() else ""
         if self.log.exists():
             self.log.unlink()
@@ -6065,6 +7208,27 @@ class EgressSetupTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("init held", log)
         self.assertIn("restart free", log)
+
+    def test_a_lock_it_cannot_open_is_named(self):
+        # #5524: a directory at the lock path makes the open fail. The script's own FAIL line runs
+        # under sh and bash --posix and no vault is made. With the 'command' prefix dropped, exec's
+        # redirect error exits the shell before that line.
+        (self.root / "run/agentos-egress-setup.lock").mkdir()
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        src = (AGENTOS_LIB / "egress-setup").read_text()
+        bare = src.replace("command exec 9>", "exec 9>")
+        self.assertNotEqual(bare, src)
+        restored = self.root.parent / "egress-setup-bare"
+        restored.write_text(bare)
+        for shell in (("sh",), ("bash", "--posix")):
+            with self.subTest(shell=shell):
+                r, log = self.run_setup(shell=shell)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("egress-setup: FAIL cannot open the lock %s/run/agentos-egress-setup.lock" % self.root, r.stdout)
+                self.assertNotIn("egress", log)
+                r, log = self.run_setup(shell=shell, script=restored)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("FAIL", r.stdout)
 
     def test_only_a_bounded_claim_is_read(self):
         stub(self.root / "usr/lib/agentos", "agentos-egress", 'wc -c <"$4" >>"%s"' % self.log)

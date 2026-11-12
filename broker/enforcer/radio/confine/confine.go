@@ -433,23 +433,45 @@ func (p *Proc) InNet(fn func() error) error {
 // keep must outlive it.
 func inNetns(ns *os.File, fn func() error, keep <-chan struct{}) error {
 	errc := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread() // never unlocked: the thread exits with this goroutine
-		if ns != nil {
-			if err := setns(ns, syscall.CLONE_NEWNET); err != nil {
-				errc <- fmt.Errorf("setns: %w", err)
-				return
-			}
-		}
-		errc <- fn()
-		if keep != nil {
-			<-keep
-		}
-	}()
+	go step(ns, fn, keep, errc)
 	return <-errc
 }
 
-func setns(f *os.File, kind int) error {
+// step is inNetns's goroutine. The runtime never ends the main thread: a
+// goroutine that exits locked there parks it for good, so a namespace set
+// there would outlive the step (#5286). On the main thread, step holds it
+// while a goroutine of its own, which the runtime must then start on
+// another thread, runs the step; it frees the main thread untouched. So
+// confine needs no lock on the main thread in the binary that links it.
+func step(ns *os.File, fn func() error, keep <-chan struct{}, errc chan<- error) {
+	runtime.LockOSThread() // never unlocked off the main thread: the thread exits with this goroutine
+	if onMainThread() {
+		moved := make(chan error, 1)
+		go step(ns, fn, keep, moved)
+		err := <-moved
+		runtime.UnlockOSThread()
+		errc <- err
+		return
+	}
+	if ns != nil {
+		if err := setns(ns, syscall.CLONE_NEWNET); err != nil {
+			errc <- fmt.Errorf("setns: %w", err)
+			return
+		}
+	}
+	errc <- fn()
+	if keep != nil {
+		<-keep
+	}
+}
+
+// onMainThread reports whether the calling goroutine's thread is the
+// process's main thread, whose id is the process's.
+var onMainThread = func() bool { return syscall.Gettid() == syscall.Getpid() }
+
+// setns moves the calling thread into f's namespace of kind; a variable
+// so a test can see which thread enters.
+var setns = func(f *os.File, kind int) error {
 	if _, _, e := syscall.RawSyscall(sysSetns, f.Fd(), uintptr(kind), 0); e != 0 {
 		return e
 	}

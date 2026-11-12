@@ -14,9 +14,11 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -356,6 +358,11 @@ func TestChannelAcceptBackoff(t *testing.T) {
 	if !other.closed.Load() {
 		t.Fatal("a connection off the core's segment was left open")
 	}
+	select {
+	case <-other.read:
+		t.Fatal("a connection off the core's segment was read: a handshake began")
+	case <-time.After(100 * time.Millisecond):
+	}
 	want := []time.Duration{5 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond, 5 * time.Millisecond}
 	var got []string
 	x.mu.Lock()
@@ -489,5 +496,41 @@ func TestHandoverFailureReachesLog(t *testing.T) {
 	}
 	if n := x.logs("enrol: the passkey enrolled, but the policy hand-over failed"); n != 1 {
 		t.Fatalf("hand-over failure reached the log %d times: %q", n, x.log)
+	}
+}
+
+// TestSilenceIsTwoHeartbeats (#4753; KRN-12 Silence, D-255): the page
+// shows the core down after two missed beats of the interval the format
+// definition fixes, a minute. Catches a daemon that keeps its own interval
+// or counts some other number of beats; wire's TestHeartbeatIntervalIsAMinute
+// pins the other end.
+func TestSilenceIsTwoHeartbeats(t *testing.T) {
+	if Silence != 2*wire.HeartbeatInterval {
+		t.Errorf("Silence = %v, want two beats of wire.HeartbeatInterval (%v)", Silence, wire.HeartbeatInterval)
+	}
+	if Silence != 2*time.Minute {
+		t.Errorf("Silence = %v, want two minutes", Silence)
+	}
+}
+
+// TestNoStackStepRunsOnTheMainThread (NET-2 Confined radio stacks;
+// #5159): a goroutine that locks its thread and exits locked, as each of
+// confine's steps in a stack's network namespace does, never runs on the
+// process's main thread, so the runtime ends its thread rather than
+// parking the main one, for good, in the stack's namespace. Its main
+// goroutine holds the main thread from init on (main.go), in this test
+// binary too. Catches an init that no longer locks the main thread: the
+// runtime then hands it to such a goroutine within the first few.
+func TestNoStackStepRunsOnTheMainThread(t *testing.T) {
+	pid := syscall.Getpid()
+	for i := range 200 {
+		tid := make(chan int)
+		go func() {
+			runtime.LockOSThread() // never unlocked, as confine's inNetns
+			tid <- syscall.Gettid()
+		}()
+		if got := <-tid; got == pid {
+			t.Fatalf("step %d ran on the main thread (%d)", i, pid)
+		}
 	}
 }

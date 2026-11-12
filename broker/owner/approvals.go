@@ -787,9 +787,7 @@ func (c *Channel) expireLocked(now time.Time) []Decision {
 		c.closeLocked(r, func(int) (bool, bool) { return true, false }, "expired", now, &out)
 	}
 	c.addExpiredLocked(out)
-	if c.held != nil && !now.Before(c.held.expires) {
-		c.held = nil
-	}
+	c.expireWaitingLocked(now)
 	if c.resume != nil && !now.Before(c.resume.expires) {
 		c.resume = nil
 	}

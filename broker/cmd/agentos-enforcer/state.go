@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/heads"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
@@ -65,9 +67,12 @@ func (p pageCore) Revoke(sig []byte) error {
 	return err
 }
 
-// Revoked is a revocation the head store saved: one in force but not
-// saved is offered again, so the owner's next tap saves it.
-func (p pageCore) Revoked() bool { return p.d.heads.Revoked(p.d.core) && !p.d.revokeUnsaved.Load() }
+// Revoked is the head store's revocation of the pinned key and whether a
+// tap saved it: one in force but not saved is offered again, so the
+// owner's next tap saves it.
+func (p pageCore) Revoked() (revoked, saved bool) {
+	return p.d.heads.Revoked(p.d.core), !p.d.revokeUnsaved.Load()
+}
 
 // The byte caps' fresh day (#5013, ASSUMPTIONS ENF-l-19). While the saved
 // day does not read back (ENF-l-14), traffic.json is also the one record
@@ -133,7 +138,10 @@ func (p pageCaps) Day() page.CapsDay {
 	f := &p.d.fresh
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return page.CapsDay{Spent: p.d.net.spent, DueMS: f.due, Starting: f.starting || f.started,
+	p.d.net.resMu.Lock()
+	unread := p.d.net.unreadShown
+	p.d.net.resMu.Unlock()
+	return page.CapsDay{Spent: p.d.net.spent, Unread: unread, DueMS: f.due, Starting: f.starting || f.started,
 		Retrying: f.starting, Unsaved: f.unsaved != nil}
 }
 
@@ -289,4 +297,70 @@ func (d *Enforcer) closeFresh() {
 	if f.unsaved != nil {
 		d.saveFresh(f.unsaved)
 	}
+}
+
+// pageResolver is the resolver as the page shows it: stopped while no
+// instance runs, and then why: each stray address hold found with its
+// interface, every other failure of the served check by its typed cause
+// (#5284), each typed cause of the policy in force's that dns.Generate
+// refused (#5307, #5405), and the step that refused the last load (ENF-l-11,
+// ENF-l-21; #5164 R1, R5 d).
+// While instances run, each that keeps exiting or failing to start is
+// shown instead (R5 b), read from dns/run, which the page waits on only
+// for its own lock.
+type pageResolver struct{ d *Enforcer }
+
+func (p pageResolver) Stopped() page.ResolverStop {
+	n := &p.d.net
+	n.resMu.Lock()
+	runs, served, why, load, unseeded, heldAt := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.unseeded, n.heldAt
+	n.resMu.Unlock()
+	// A host the load did not seed has renewed by half a lease after it
+	// (nft.LeaseTimeout, the lease every range offers); an address held
+	// for its old holder is free within a lease (a zero heldAt is
+	// centuries ago).
+	now := p.d.dp.Now()
+	unread := !unseeded.IsZero() && now.Sub(unseeded) < nft.LeaseTimeout/2*time.Second
+	held := now.Sub(heldAt) < nft.LeaseTimeout*time.Second
+	if runs {
+		out := page.ResolverStop{Unseeded: unread, Held: held}
+		for _, f := range p.d.dp.DNS.Flapping() {
+			out.Restarting = append(out.Restarting, restartOf(f))
+		}
+		return out
+	}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, Unseeded: unread, Held: held}
+	errs := []error{served}
+	if j, ok := served.(interface{ Unwrap() []error }); ok {
+		errs = j.Unwrap()
+	}
+	for _, err := range errs {
+		var s strayAddr
+		var u unsetErr
+		switch {
+		case err == nil:
+		case errors.As(err, &s):
+			out.Strays = append(out.Strays, page.Stray{Iface: s.iface, Addr: s.addr, Nets: s.nets})
+		case errors.As(err, &u):
+			out.Unset = append(out.Unset, u.cause)
+		default:
+			// Untyped: the page's generic line; the log has the text.
+			out.Unset = append(out.Unset, page.Unset{})
+		}
+	}
+	return out
+}
+
+// restartOf is one instance that keeps exiting or failing to start as the
+// page words it, by dns/run's instance names (dnsrun.Names).
+func restartOf(f dnsrun.Flap) page.Restart {
+	r := page.Restart{Exits: f.Exits}
+	if iface, ok := strings.CutPrefix(f.Name, "listed-"); ok {
+		r.Part, r.Iface = page.PartListed, iface
+	} else if f.Name == "people" {
+		r.Part = page.PartPeople
+	} else if f.Name == "dhcp" {
+		r.Part = page.PartDHCP
+	}
+	return r
 }

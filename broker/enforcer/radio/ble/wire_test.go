@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"reflect"
@@ -94,30 +95,58 @@ func TestWireRoundTrip(t *testing.T) {
 	}
 }
 
-// bigEndian encodes m in the big-endian order, by encoding it with a
-// big-endian encoder (test only: the stack sends little-endian).
-func bigEndian(t *testing.T, m *Message) []byte {
-	t.Helper()
-	old := le
-	defer func() { le = old }()
-	le = bigOrder{}
-	b := mustEncode(t, m)
-	b[0] = 'B'
-	return b
+// TestWireOrderPerEncoder encodes little-endian on another goroutine
+// while the test encodes big-endian, as a fake peer left by an earlier
+// test did when the order was a package variable (#5423). Under -race
+// a shared order is a reported race; without it, a little-endian
+// message flagged 'B' or a big-endian one flagged 'l'.
+func TestWireOrderPerEncoder(t *testing.T) {
+	m := &Message{Type: typeSignal, Serial: 0x01020304, Path: "/x", Interface: "a.b", Member: "C", Sig: "u", Body: []any{uint32(7)}}
+	stop, done := make(chan struct{}), make(chan error)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			b, err := m.Encode()
+			if err == nil && (b[0] != 'l' || binary.LittleEndian.Uint32(b[8:]) != m.Serial) {
+				err = fmt.Errorf("little-endian encode came out as % x", b[:12])
+			}
+			if err != nil {
+				<-stop
+				done <- err
+				return
+			}
+		}
+	}()
+	for range 200 {
+		b := bigEndian(t, m)
+		if b[0] != 'B' || binary.BigEndian.Uint32(b[8:]) != m.Serial {
+			close(stop)
+			<-done
+			t.Fatalf("big-endian encode came out as % x", b[:12])
+		}
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
-type bigOrder struct{ binary.ByteOrder }
-
-func (bigOrder) Uint16(b []byte) uint16                 { return binary.BigEndian.Uint16(b) }
-func (bigOrder) Uint32(b []byte) uint32                 { return binary.BigEndian.Uint32(b) }
-func (bigOrder) Uint64(b []byte) uint64                 { return binary.BigEndian.Uint64(b) }
-func (bigOrder) PutUint16(b []byte, v uint16)           { binary.BigEndian.PutUint16(b, v) }
-func (bigOrder) PutUint32(b []byte, v uint32)           { binary.BigEndian.PutUint32(b, v) }
-func (bigOrder) PutUint64(b []byte, v uint64)           { binary.BigEndian.PutUint64(b, v) }
-func (bigOrder) AppendUint16(b []byte, v uint16) []byte { return binary.BigEndian.AppendUint16(b, v) }
-func (bigOrder) AppendUint32(b []byte, v uint32) []byte { return binary.BigEndian.AppendUint32(b, v) }
-func (bigOrder) AppendUint64(b []byte, v uint64) []byte { return binary.BigEndian.AppendUint64(b, v) }
-func (bigOrder) String() string                         { return "big" }
+// bigEndian encodes m in the big-endian order (test only: the stack
+// sends little-endian). The order is the encoder's own, so a goroutine
+// encoding at the same moment is untouched.
+func bigEndian(t *testing.T, m *Message) []byte {
+	t.Helper()
+	b, err := m.encode(binary.BigEndian)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 // TestWireRefusesMalformed: each fault a hostile or broken peer could put
 // on the bus is refused, not decoded into something else.
@@ -179,8 +208,8 @@ func TestWireRefusesMalformed(t *testing.T) {
 // withField encodes m with one extra header field.
 func withField(t *testing.T, m *Message, code byte, sig Signature, v any) []byte {
 	t.Helper()
-	e := &encoder{b: []byte{'l', m.Type, 0, 1, 0, 0, 0, 0}}
-	e.b = le.AppendUint32(e.b, m.Serial)
+	e := &encoder{b: []byte{'l', m.Type, 0, 1, 0, 0, 0, 0}, o: binary.LittleEndian}
+	e.b = binary.LittleEndian.AppendUint32(e.b, m.Serial)
 	fields := []any{
 		[]any{uint8(1), Variant{Sig: "o", Value: m.Path}},
 		[]any{uint8(2), Variant{Sig: "s", Value: m.Interface}},
@@ -198,7 +227,7 @@ func withField(t *testing.T, m *Message, code byte, sig Signature, v any) []byte
 // signature, unchecked: the faults an encoder never makes.
 func raw(t *testing.T, sig string, body []byte) []byte {
 	t.Helper()
-	e := &encoder{b: []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}}
+	e := &encoder{b: []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}, o: binary.LittleEndian}
 	fields := []any{
 		[]any{uint8(1), Variant{Sig: "o", Value: ObjectPath("/")}},
 		[]any{uint8(2), Variant{Sig: "s", Value: "a.b"}},
@@ -211,7 +240,7 @@ func raw(t *testing.T, sig string, body []byte) []byte {
 		t.Fatal(err)
 	}
 	e.pad(8)
-	le.PutUint32(e.b[4:], uint32(len(body)))
+	binary.LittleEndian.PutUint32(e.b[4:], uint32(len(body)))
 	return append(e.b, body...)
 }
 
@@ -286,7 +315,7 @@ func TestWireBounds(t *testing.T) {
 		t.Error("encoded MaxMessage+1 bytes")
 	}
 	b = append(b, 0)
-	le.PutUint32(b[4:], le.Uint32(b[4:])+1)
+	binary.LittleEndian.PutUint32(b[4:], binary.LittleEndian.Uint32(b[4:])+1)
 	bad("MaxMessage+1 bytes", b)
 	if _, _, err := frameLen(b[:16]); err == nil {
 		t.Error("frameLen took MaxMessage+1")
@@ -298,8 +327,8 @@ func TestWireBounds(t *testing.T) {
 		head   int64
 		err    error
 	}{{maxHeader, 16 + maxHeader, nil}, {maxHeader + 1, 16 + maxHeader + 8, errTooLong}, {1, 24, nil}} {
-		le.PutUint32(h[4:], 3)
-		le.PutUint32(h[12:], c.fields)
+		binary.LittleEndian.PutUint32(h[4:], 3)
+		binary.LittleEndian.PutUint32(h[12:], c.fields)
 		head, n, err := frameLen(h)
 		if head != c.head || n != c.head+3 || !errors.Is(err, c.err) {
 			t.Errorf("header fields of %d bytes: %d, %d, %v", c.fields, head, n, err)
@@ -315,8 +344,8 @@ func TestWireBounds(t *testing.T) {
 // the reader inside the frame, reading a forged body as the next message.
 func TestReadSkipsLargestDeclaredFrame(t *testing.T) {
 	h := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(h[4:], math.MaxUint32)
-	le.PutUint32(h[12:], math.MaxUint32)
+	binary.LittleEndian.PutUint32(h[4:], math.MaxUint32)
+	binary.LittleEndian.PutUint32(h[12:], math.MaxUint32)
 	const head = 16 + math.MaxUint32 + 1 // fields padded to 8
 	const n = head + math.MaxUint32
 	if gh, gn, err := frameLen(h); gh != head || gn != n || !errors.Is(err, errTooLong) {
@@ -379,4 +408,233 @@ func FuzzDecode(f *testing.F) {
 		s := newFuzzStack()
 		s.signal(m)
 	})
+}
+
+// frame is a message of type typ with the given header fields and body
+// bytes, unchecked: the faults an encoder never makes. The body starts
+// at a multiple of 8, as the header's padding leaves it.
+func frame(t *testing.T, typ byte, fields []any, body []byte) []byte {
+	t.Helper()
+	e := &encoder{b: []byte{'l', typ, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}, o: binary.LittleEndian}
+	if err := e.value(headerTyp, fields); err != nil {
+		t.Fatal(err)
+	}
+	e.pad(8)
+	binary.LittleEndian.PutUint32(e.b[4:], uint32(len(body)))
+	return append(e.b, body...)
+}
+
+// hf is one header field for frame.
+func hf(code byte, sig Signature, v any) any { return []any{code, Variant{Sig: sig, Value: v}} }
+
+// TestWireRefusesBadBodies: each value that runs short, carries a fault
+// after the decoder has consumed it, or leaves bytes over is refused,
+// where reading on from the fault would land exactly at the body's end
+// and decode something else. Catches a decoder that drops an error and
+// keeps reading.
+func TestWireRefusesBadBodies(t *testing.T) {
+	for _, c := range []struct {
+		name, sig string
+		body      []byte
+	}{
+		{"byte missing", "y", nil},
+		{"bool missing", "b", nil},
+		{"int16 missing", "n", nil},
+		{"uint16 missing", "q", nil},
+		{"int64 missing", "x", nil},
+		{"uint64 missing", "t", nil},
+		{"double missing", "d", nil},
+		{"string length short", "s", []byte{0}},
+		{"string past the end", "s", []byte{5, 0, 0, 0}},
+		{"string unterminated", "s", []byte{1, 0, 0, 0, 'a', 1}},
+		{"path unterminated", "o", []byte{2, 0, 0, 0, '/', 'a', 1}},
+		{"signature missing", "g", nil},
+		{"signature unterminated", "g", []byte{1, 'y', 1}},
+		{"signature unknown type", "g", []byte{1, 'h', 0}},
+		{"variant missing", "v", nil},
+		{"variant of two types", "v", []byte{2, 'y', 'y', 0, 7}},
+		{"array length missing", "ay", nil},
+		{"byte array past the end", "ay", []byte{5, 0, 0, 0}},
+		{"array of a bad bool", "ab", []byte{4, 0, 0, 0, 2, 0, 0, 0}},
+		{"struct of a bad bool", "(b)", []byte{2, 0, 0, 0}},
+		{"dict key a bad bool", "a{bb}", []byte{8, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0}},
+		{"dict value a bad bool", "a{bb}", []byte{8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0}},
+		{"array length not whole elements", "au", []byte{3, 0, 0, 0, 1, 0, 0, 0}},
+		{"nonzero padding", "yu", []byte{1, 1, 0, 0, 0}},
+		{"byte left over", "y", []byte{1, 2}},
+	} {
+		if m, err := Decode(raw(t, c.sig, c.body)); !errors.Is(err, ErrWire) {
+			t.Errorf("%s: %+v, %v", c.name, m, err)
+		}
+	}
+	// The same shapes, sound, decode: the faults above are what fails.
+	for _, c := range []struct{ sig, body string }{
+		{"y", "\x01"}, {"s", "\x01\x00\x00\x00a\x00"}, {"g", "\x01y\x00"}, {"v", "\x01y\x00\x07"},
+		{"ab", "\x04\x00\x00\x00\x01\x00\x00\x00"}, {"(b)", "\x01\x00\x00\x00"}, {"yu", "\x01\x00\x00\x00\x05\x00\x00\x00"},
+		{"a{bb}", "\x08\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00"},
+	} {
+		if _, err := Decode(raw(t, c.sig, []byte(c.body))); err != nil {
+			t.Errorf("sound %q: %v", c.sig, err)
+		}
+	}
+	// body checks the signature itself, not only through the header.
+	if err := (&Message{Sig: "h"}).body(&decoder{order: binary.LittleEndian}); !errors.Is(err, ErrWire) {
+		t.Errorf("body under signature h: %v", err)
+	}
+}
+
+// TestWireAlignment: each type sits at the specification's alignment
+// after a single byte, checked against hand-laid bytes, so the codec
+// does not only agree with itself.
+func TestWireAlignment(t *testing.T) {
+	for _, c := range []struct {
+		sig  Signature
+		v    any
+		want string // the body after the leading byte 0x09
+	}{
+		{"n", int16(-2), "\x00\xfe\xff"},
+		{"q", uint16(3), "\x00\x03\x00"},
+		{"b", true, "\x00\x00\x00\x01\x00\x00\x00"},
+		{"u", uint32(5), "\x00\x00\x00\x05\x00\x00\x00"},
+		{"t", uint64(7), "\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00"},
+		{"g", Signature("y"), "\x01y\x00"},
+		{"v", Variant{Sig: "y", Value: uint8(4)}, "\x01y\x00\x04"},
+	} {
+		m := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "y" + c.sig, Body: []any{uint8(9), c.v}}
+		b := mustEncode(t, m)
+		body := b[len(b)-int(binary.LittleEndian.Uint32(b[4:])):]
+		if want := "\x09" + c.want; string(body) != want {
+			t.Errorf("%s after a byte encodes as %x, want %x", c.sig, body, want)
+		}
+		got, err := Decode(raw(t, "y"+string(c.sig), []byte("\x09"+c.want)))
+		if err != nil || !reflect.DeepEqual(got.Body, m.Body) {
+			t.Errorf("%s after a byte decodes as %+v, %v", c.sig, got, err)
+		}
+	}
+}
+
+// TestWireEncoderRefusesWrongValues: the encoder writes a value only
+// under its own type, so a Go value of another type, or one the type
+// cannot hold, is an error and not a zero on the wire.
+func TestWireEncoderRefusesWrongValues(t *testing.T) {
+	// Each error names the fault: the misplaced Go value and its type
+	// code, or the signature at fault.
+	for _, c := range []struct {
+		sig  Signature
+		v    any
+		says string
+	}{
+		{"y", int8(1), "int8 for type 'y'"}, {"b", 1, "int for type 'b'"}, {"n", uint16(1), "uint16 for type 'n'"},
+		{"q", int16(1), "int16 for type 'q'"}, {"i", uint32(1), "uint32 for type 'i'"}, {"u", int32(1), "int32 for type 'u'"},
+		{"x", uint64(1), "uint64 for type 'x'"}, {"t", int64(1), "int64 for type 't'"}, {"d", float32(1), "float32 for type 'd'"},
+		{"s", ObjectPath("/a"), "ble.ObjectPath for type 's'"}, {"s", 1, "int for type 's'"}, {"s", "\xff", "bad string"},
+		{"o", "/a", "string for type 'o'"}, {"o", ObjectPath("a"), "ble.ObjectPath for type 'o'"},
+		{"g", "y", "string for type 'g'"}, {"g", Signature("h"), "type 'h'"},
+		{"v", uint8(1), "uint8 for type 'v'"}, {"v", Variant{Sig: "h", Value: uint8(1)}, "type 'h'"},
+		{"v", Variant{Sig: "yy", Value: uint8(1)}, "one complete type"}, {"v", Variant{Sig: "s", Value: "a\x00"}, "NUL"},
+		{"ay", []any{uint8(1)}, "[]interface {} for type 'a'"}, {"au", []byte{1}, "[]uint8 for type 'a'"},
+		{"(y)", uint8(1), "uint8 for type '('"}, {"(yy)", []any{uint8(1)}, "[]interface {} for type '('"},
+		{"a{yy}", []any{[]any{uint8(1), uint8(2)}}, "[]interface {} for type '{'"},
+	} {
+		m := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: c.sig, Body: []any{c.v}}
+		if b, err := m.Encode(); !errors.Is(err, ErrWire) || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s holding %#v: %x, %v; want an error saying %q", c.sig, c.v, b, err, c.says)
+		}
+	}
+	for name, m := range map[string]*Message{
+		"type 0":           {Type: 0, Serial: 1, Path: "/", Member: "C"},
+		"type 5":           {Type: typeSignal + 1, Serial: 1, Path: "/", Interface: "a.b", Member: "C"},
+		"serial 0":         {Type: typeSignal, Path: "/", Interface: "a.b", Member: "C"},
+		"body too short":   {Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "yy", Body: []any{uint8(1)}},
+		"body too long":    {Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "y", Body: []any{uint8(1), uint8(2)}},
+		"header path":      {Type: typeSignal, Serial: 1, Path: "a", Interface: "a.b", Member: "C"},
+		"header string":    {Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C\x00"},
+		"header signature": {Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "a"},
+	} {
+		if b, err := m.Encode(); !errors.Is(err, ErrWire) {
+			t.Errorf("%s: %x, %v", name, b, err)
+		}
+	}
+	// A signature that does not parse is named as such, not as a body of
+	// the wrong length.
+	bad := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "h", Body: []any{uint32(0)}}
+	if _, err := bad.Encode(); !errors.Is(err, ErrWire) || !strings.Contains(err.Error(), "type 'h'") {
+		t.Errorf("signature h: %v", err)
+	}
+}
+
+// TestWireRequiredHeaders: each message type needs its header fields
+// (the specification's table), on the way out and on the way in, and a
+// header field may appear once; header fields past maxHeader, and
+// nonzero padding after them, are refused even where the rest of the
+// frame would read.
+func TestWireRequiredHeaders(t *testing.T) {
+	full := &Message{Type: typeCall, Serial: 1, Path: "/", Interface: "a.b", Member: "C", ErrorName: "e.E", ReplySerial: 1}
+	need := map[byte][]string{
+		typeCall:   {"Path", "Member"},
+		typeReturn: {"ReplySerial"},
+		typeError:  {"ReplySerial", "ErrorName"},
+		typeSignal: {"Path", "Interface", "Member"},
+	}
+	for typ, fields := range need {
+		m := *full
+		m.Type = typ
+		if _, err := m.Encode(); err != nil {
+			t.Fatalf("type %d with every field: %v", typ, err)
+		}
+		for _, f := range fields {
+			m := m
+			reflect.ValueOf(&m).Elem().FieldByName(f).SetZero()
+			if _, err := m.Encode(); !errors.Is(err, ErrWire) {
+				t.Errorf("type %d without %s encodes: %v", typ, f, err)
+			}
+		}
+	}
+	// A call without a member, as a peer could send it.
+	if _, err := Decode(frame(t, typeCall, []any{hf(1, "o", ObjectPath("/"))}, nil)); !errors.Is(err, ErrWire) {
+		t.Errorf("a call without a member decodes: %v", err)
+	}
+	if _, err := Decode(frame(t, typeCall, []any{hf(1, "o", ObjectPath("/")), hf(3, "s", "C")}, nil)); err != nil {
+		t.Errorf("a call with path and member: %v", err)
+	}
+	// A member twice.
+	if _, err := Decode(frame(t, typeCall, []any{hf(1, "o", ObjectPath("/")), hf(3, "s", "C"), hf(3, "s", "D")}, nil)); !errors.Is(err, ErrWire) {
+		t.Errorf("a member twice decodes: %v", err)
+	}
+	// Header fields one byte past maxHeader, in a frame that otherwise reads.
+	long := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b"}
+	for n := 1; ; n++ {
+		long.Member = strings.Repeat("C", n)
+		if b := mustEncode(t, long); binary.LittleEndian.Uint32(b[12:]) == maxHeader+1 {
+			if _, err := Decode(b); !errors.Is(err, errTooLong) {
+				t.Errorf("header fields of %d bytes: %v", maxHeader+1, err)
+			}
+			long.Member = long.Member[1:]
+			if _, err := Decode(mustEncode(t, long)); err != nil {
+				t.Errorf("header fields of %d bytes: %v", maxHeader, err)
+			}
+			break
+		} else if binary.LittleEndian.Uint32(b[12:]) > maxHeader+1 {
+			t.Fatalf("no member gives header fields of %d bytes", maxHeader+1)
+		}
+	}
+	// Nonzero header padding that, read as the body's first value, would
+	// hold exactly the body: an array of bytes whose length is the pad.
+	for n := 1; n < 9; n++ {
+		b := frame(t, typeSignal, []any{hf(1, "o", ObjectPath("/")), hf(2, "s", "a.b"), hf(8, "g", Signature("ay")), hf(3, "s", strings.Repeat("C", n))},
+			[]byte{1, 0, 0, 0, 7})
+		head := 16 + int(binary.LittleEndian.Uint32(b[12:]))
+		if head%8 != 4 {
+			continue
+		}
+		if _, err := Decode(b); err != nil {
+			t.Fatalf("the sound frame: %v", err)
+		}
+		binary.LittleEndian.PutUint32(b[head:], 5) // the 4 pad bytes now read as a length of 5
+		if m, err := Decode(b); !errors.Is(err, ErrWire) {
+			t.Errorf("nonzero header padding: %+v, %v", m, err)
+		}
+		return
+	}
+	t.Fatal("no member leaves 4 bytes of header padding")
 }

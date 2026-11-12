@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,6 +47,16 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 	"github.com/ghbmrk/agentos/broker/enforcer/wol"
 )
+
+// init keeps the main goroutine on the main thread, and every other
+// goroutine off it. confine runs each step inside a radio stack's network
+// namespace on a goroutine that locks its thread, moves it there and
+// exits locked, so the runtime ends that thread; it never ends the main
+// thread, though, and would park it for good in the stack's namespace,
+// which then outlives the stack and is what /proc/<pid>/net shows (#5159).
+func init() {
+	runtime.LockOSThread()
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -78,7 +89,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return enrol.Provision(fileStore{path: filepath.Join(*state, fileEnrol)}, strings.TrimSpace(string(b)), nil)
+		return provisionState(*state, strings.TrimSpace(string(b)))
 	case *pub:
 		k, err := channelKey(fileStore{path: filepath.Join(*state, fileChannelKey)}, nil)
 		if err != nil {

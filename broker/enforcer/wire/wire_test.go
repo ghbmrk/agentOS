@@ -227,7 +227,7 @@ func TestHello(t *testing.T) {
 // TestImportsStandardLibraryOnly: the package imports only the standard
 // library and nothing that opens a socket, a file or a process, so both
 // ends link the same small codec (brief code layout: "standard library
-// only"; time only for SummaryInterval and the rates). Revert mutant: an "os" or "net"
+// only"; time only for SummaryInterval, HeartbeatInterval and the rates). Revert mutant: an "os" or "net"
 // import in a non-test file.
 func TestImportsStandardLibraryOnly(t *testing.T) {
 	allowed := map[string]bool{
@@ -256,5 +256,19 @@ func TestImportsStandardLibraryOnly(t *testing.T) {
 				t.Errorf("%s imports %s", name, p)
 			}
 		}
+	}
+}
+
+// TestHeartbeatIntervalIsAMinute (#4753; KRN-12 Silence, D-255): the
+// format definition fixes the core's heartbeat at a minute, and not by
+// reading SummaryInterval, which a trip pauses while the beat flows
+// (ASSUMPTIONS ENF-d-w8). Catches any other value at this end; the
+// daemon's TestSilenceIsTwoHeartbeats and the kernel client's test (ENF-o)
+// read this one constant.
+// REQ: KRN-12
+func TestHeartbeatIntervalIsAMinute(t *testing.T) {
+	const minute = 60_000_000_000 // nanoseconds; this file imports no "time"
+	if HeartbeatInterval != minute {
+		t.Fatalf("HeartbeatInterval = %v, want a minute", HeartbeatInterval)
 	}
 }

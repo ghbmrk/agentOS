@@ -18,8 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-
-	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -27,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 func fixtureLayout() nft.Layout {
@@ -594,5 +593,60 @@ func drain(c *net.UDPConn) {
 		if _, _, err := c.ReadFromUDP(buf); err != nil {
 			return
 		}
+	}
+}
+
+// TestPlanSortsAndListsEveryEnd (#5140): a plan's routes are sorted
+// however its paths come, and Ifaces names both ends of every path and
+// what it hears. Catches an unsorted route or an end left out.
+func TestPlanSortsAndListsEveryEnd(t *testing.T) {
+	p := NewPlan([]nft.Path{{From: "x", To: "z"}, {From: "x", To: "y"}, {From: "w", To: "x", Both: true}}, nil).Hearing([]string{"v"})
+	if got := p.Route("x", nft.MDNSPort, header(false)); !slices.Equal(got, []string{"w", "y", "z"}) {
+		t.Errorf("x's queries go to %v, want [w y z]", got)
+	}
+	if got := p.Ifaces(); !slices.Equal(got, []string{"v", "w", "x", "y", "z"}) {
+		t.Errorf("ifaces %v", got)
+	}
+}
+
+// TestHandleDropsMalformedEmptyAndLarge (#5140): handle relays nothing
+// for a message with bytes after its last record, or one left empty by
+// the filter; it relays a rebuilt message of exactly maxPacket bytes and
+// drops one a byte longer. HeardBy names nothing for a device the relay
+// hears nowhere, whatever was heard on no interface. Catches a parse
+// failure, an empty rebuild or the size bound passed over, and a lookup
+// failure read as an interface.
+func TestHandleDropsMalformedEmptyAndLarge(t *testing.T) {
+	link := func(string) []netip.Prefix { return printerLink }
+	answer := response([]record{a("printer-answer.local", "10.13.0.2", 120)}, nil).bytes()
+	if out, outs := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, answer, t0); out == nil || len(outs) == 0 {
+		t.Fatalf("the printer's answer went nowhere")
+	}
+	if out, outs := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, append(answer, 0), t0); out != nil || outs != nil {
+		t.Errorf("a message with a trailing byte went to %v", outs)
+	}
+	foreign := response([]record{a("other.local", "10.99.0.2", 120)}, nil).bytes()
+	if out, outs := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, foreign, t0); out != nil || outs != nil {
+		t.Errorf("a message the filter left empty went to %v", outs)
+	}
+	sized := func(n int) []byte {
+		return response([]record{
+			a("printer-answer.local", "10.13.0.2", 120),
+			srv("Printer._ipp._tcp.local", "printer-answer.local", 120),
+			{name: dn("Printer._ipp._tcp.local"), typ: typeTXT, class: 0x8001, ttl: 120, data: make([]byte, n)},
+		}, nil).bytes()
+	}
+	out, _ := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, sized(1), t0)
+	n := 1 + maxPacket - len(out)
+	if out, outs := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, sized(n), t0); len(out) != maxPacket || len(outs) == 0 {
+		t.Errorf("a %d-byte rebuild went to %v, want relayed at maxPacket %d", len(out), outs, maxPacket)
+	}
+	if out, outs := newRelayer(plan(t), link, t0).handle("ap0.105", 5353, sized(n+1), t0); out != nil || outs != nil {
+		t.Errorf("a rebuild past maxPacket went to %v", outs)
+	}
+	f := NewFilter()
+	f.Prove("", printerLink, response([]record{a("printer-answer.local", "10.13.0.2", 120)}, nil), time.Now()) // HeardBy reads the clock
+	if got := HeardBy(f, fixtureLayout())("guests", "", nil); got != nil {
+		t.Errorf("a device heard nowhere has names %q", got)
 	}
 }

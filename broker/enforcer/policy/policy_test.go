@@ -3,14 +3,19 @@ package policy
 // REQ: STO-4, NET-4, NET-2
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"reflect"
 	"slices"
 	"strings"
@@ -366,7 +371,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// Every field has a row: adding a field to the document without one
 	// fails here.
 	covered := map[string][]string{
-		"Document":     {"Version", "Destinations", "Caps", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
+		"Document":     {"Version", "Destinations", "Caps", "Basis", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
 		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
@@ -1164,6 +1169,58 @@ func TestByteCapsCanonical(t *testing.T) {
 	if _, err := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1} })); err != nil {
 		t.Errorf("caps summing to 2^64-1: %v", err)
 	}
+	// Each cap's basis (#4578) is signed beside it, from the closed list,
+	// only for a cap, with one encoding: none is no field.
+	sized := edit(1, func(d *Document) {
+		d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}
+		d.Basis = map[string]string{"mail.example": BasisDeclared, "models.example": BasisBackup}
+	})
+	b, err = Encode(sized)
+	if err != nil || !strings.Contains(string(b), `"basis":{"mail.example":"declared","models.example":"backup"}`) {
+		t.Errorf("basis encoding %s: %v", b, err)
+	}
+	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, sized.normal()) {
+		t.Errorf("basis round trip: %v", err)
+	}
+	n := sized.normal()
+	n.Basis["mail.example"] = BasisImage
+	if sized.Basis["mail.example"] != BasisDeclared {
+		t.Error("normal shares the basis map")
+	}
+	noBasis, _ := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7}; d.Basis = map[string]string{} }))
+	if strings.Contains(string(noBasis), "basis") {
+		t.Errorf("no basis encodes as %s", noBasis)
+	}
+	for _, b := range []string{BasisImage, BasisDeclared, BasisBackup} {
+		if _, err := Encode(edit(1, func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": b}
+		})); err != nil {
+			t.Errorf("basis %q: %v", b, err)
+		}
+	}
+	for name, f := range map[string]func(d *Document){
+		"a basis off the list": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": "guess"}
+		},
+		"an empty basis": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"mail.example": ""}
+		},
+		"a basis for no cap": func(d *Document) {
+			d.Caps = map[string]uint64{"mail.example": 7}
+			d.Basis = map[string]string{"models.example": BasisImage}
+		},
+		"a basis with no caps": func(d *Document) { d.Basis = map[string]string{"mail.example": BasisImage} },
+	} {
+		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
+	}
+	if _, err := Decode([]byte(`{"version":1,"destinations":["a"],"caps":{"a":1},"basis":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`)); err == nil {
+		t.Error("an empty basis map decoded")
+	}
 	for name, bad := range map[string][]byte{
 		"explicit zero": []byte(`{"version":1,"destinations":["a"],"caps":{"a":0},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 		"empty caps":    []byte(`{"version":1,"destinations":["a"],"caps":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
@@ -1189,6 +1246,7 @@ func TestCapChangesAreLoosenings(t *testing.T) {
 		"cap another listing":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1} },
 		"raise the edge's cap": func(d *Document) { d.EdgeCap = 101 },
 		"lower the edge's cap": func(d *Document) { d.EdgeCap = 99 },
+		"name a cap's basis":   func(d *Document) { d.Basis = map[string]string{"mail.example": BasisDeclared} },
 	} {
 		next := base.normal()
 		f(&next)
@@ -1201,5 +1259,174 @@ func TestCapChangesAreLoosenings(t *testing.T) {
 	next, _ := Apply(base, Op{Kind: CutVendorCloud, Device: "tv"})
 	if c := Classify(base, next); !c.Tightening {
 		t.Errorf("cutting the TV's cloud with caps set: %+v", c)
+	}
+}
+
+// CurrentHash returns the policy in force with policy.Hash of it, with no
+// error to handle, after every place the engine puts a document in force:
+// an empty Open, Propose and Tick (opened), an asserted tightening, an
+// unsigned one, Open replaying a base and both kinds of step, Rekey, Open
+// on the rekeyed base, and Tick landing a loosening over a step (#5535).
+func TestCurrentHashIsProven(t *testing.T) {
+	proven := func(site string, e *Engine) {
+		t.Helper()
+		d, h := e.CurrentHash()
+		want, err := Hash(e.Current())
+		if err != nil || h != want || !reflect.DeepEqual(d, e.Current()) {
+			t.Errorf("%s: CurrentHash %q %+v, Hash %q %v", site, h, d, want, err)
+		}
+	}
+	empty, err := Open(newAuthenticator(t, rp).Public(), &memStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proven("empty open", empty)
+	e, a, store := opened(t)
+	proven("propose and tick", e)
+	p := Proposal{Doc: edit(2, func(d *Document) { dev(d, "lock").VendorCloud = false }), Diff: []byte("cut the lock's cloud")}
+	if out, err := a.propose(t, e, p, Wait); err != nil || !out.Applied {
+		t.Fatalf("asserted tightening: %+v %v", out, err)
+	}
+	proven("asserted tightening", e)
+	if err := e.Tighten(Op{Kind: CutVendorCloud, Device: "tv"}, Wait); err != nil {
+		t.Fatal(err)
+	}
+	proven("tighten", e)
+	if e, err = Open(a.Public(), store); err != nil {
+		t.Fatal(err)
+	}
+	proven("open with steps", e)
+	b := newAuthenticator(t, rp)
+	keep := e.Current()
+	keep.Version = 20
+	p = Proposal{Doc: keep, Diff: []byte("keep")}
+	if err := e.Rekey(b.Public(), p, sign(t, b, b.Public(), p)); err != nil {
+		t.Fatal(err)
+	}
+	proven("rekey", e)
+	if e, err = Open(b.Public(), store); err != nil {
+		t.Fatal(err)
+	}
+	proven("open on the rekeyed base", e)
+	loose := e.Current()
+	loose.Version = 21
+	loose.Destinations = append(loose.Destinations, "x.example")
+	p = Proposal{Doc: loose, Diff: []byte("allow x")}
+	if out, err := b.propose(t, e, p, Wait); err != nil || out.Pending == "" {
+		t.Fatalf("loosening: %+v %v", out, err)
+	}
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: "b.example"}, Wait); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.CurrentHash()
+	if got, err := e.Tick(2 * Wait); err != nil || len(got) != 1 {
+		t.Fatalf("tick: %v %v", got, err)
+	}
+	proven("tick over a step", e)
+	if after, _ := e.CurrentHash(); reflect.DeepEqual(after, before) || !slices.Contains(after.Destinations, "x.example") {
+		t.Fatalf("the loosening did not land: %+v", after)
+	}
+}
+
+// Every result of every engine op passes check, and hashes the same two ways
+// (#5549). The kinds come from the const block in classify.go, so a new kind
+// fails here until an op of it is in the list below and applies to the
+// fixture. Apply is the one place an op changes a document: Tighten and
+// Open's replay both go through it.
+func TestEveryOpResultPassesCheck(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "classify.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, decl := range f.Decls {
+		g, ok := decl.(*ast.GenDecl)
+		if !ok || g.Tok != token.CONST {
+			continue
+		}
+		for _, sp := range g.Specs {
+			for _, v := range sp.(*ast.ValueSpec).Values {
+				if l, ok := v.(*ast.BasicLit); ok && l.Kind == token.STRING {
+					kinds[strings.Trim(l.Value, `"`)] = false
+				}
+			}
+		}
+	}
+	if len(kinds) == 0 {
+		t.Fatal("no op kinds found in classify.go")
+	}
+	e, _, _ := opened(t)
+	base := e.Current()
+	narrow := base
+	narrow.Standing = slices.Clone(base.Standing)
+	for i := range narrow.Standing {
+		narrow.Standing[i].FromMS++
+		narrow.Standing[i].ToMS--
+	}
+	ops := candidates(base, narrow)
+	for _, d := range base.Devices {
+		ops = append(ops, Op{Kind: RemoveDestination, Device: d.ID, Host: "absent.example"}) // refused
+	}
+	applied := 0
+	for _, op := range ops {
+		got, ok := Apply(base, op)
+		if !ok {
+			continue
+		}
+		applied++
+		if _, seen := kinds[op.Kind]; !seen {
+			t.Fatalf("op kind %q is not in classify.go's list", op.Kind)
+		}
+		kinds[op.Kind] = true
+		if err := got.check(); err != nil {
+			t.Errorf("%+v: result fails check: %v", op, err)
+			continue
+		}
+		b, err := Encode(got)
+		if err != nil {
+			t.Errorf("%+v: Encode: %v", op, err)
+			continue
+		}
+		if ind := sha256.Sum256(b); hashOf(b) != hex.EncodeToString(ind[:]) {
+			t.Errorf("%+v: hashOf differs from an independent sha256", op)
+		}
+		if h, err := Hash(got); err != nil || h != hashOf(b) {
+			t.Errorf("%+v: Hash %q %v, hashOf(Encode) %q", op, h, err, hashOf(b))
+		}
+		if m, _ := json.Marshal(got); !bytes.Equal(m, b) {
+			t.Errorf("%+v: the normal form marshals differently from Encode", op)
+		}
+	}
+	if applied == 0 {
+		t.Fatal("no op applied")
+	}
+	for k, covered := range kinds {
+		if !covered {
+			t.Errorf("no op of kind %q applies to the fixture: add one to candidates' coverage here", k)
+		}
+	}
+}
+
+// The policy hash is the SHA-256 of the canonical encoding, pinned two ways
+// (#5549): against an independent sha256 of Encode's bytes, and against a
+// golden literal for home(1), so a truncated or shifted hash fails.
+func TestPolicyHashPinned(t *testing.T) {
+	const golden = "5777d8d874846d5b58371132c1e05518d65b319fe04bf66e7381b3b7a390bcef"
+	d := home(1)
+	b, err := Encode(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ind := sha256.Sum256(b)
+	e, _, _ := opened(t)
+	cd, ch := e.CurrentHash()
+	if h, err := Hash(d); err != nil || h != hex.EncodeToString(ind[:]) || h != golden {
+		t.Errorf("Hash %q %v, independent %x, golden %s", h, err, ind, golden)
+	}
+	if want, _ := Hash(cd); ch != want || ch != golden {
+		t.Errorf("CurrentHash %q, Hash %q, golden %s", ch, want, golden)
+	}
+	if len(golden) != 64 {
+		t.Fatal("golden is not a SHA-256 in hex")
 	}
 }

@@ -84,21 +84,56 @@ func segments(l Layout) []segment {
 	return []segment{{"guests", l.Guests}, {"owner", l.Owner}, {"household", l.Household}}
 }
 
-// HeldSet and ClaimSet bind each address a host on segment seg sends from
-// to the hardware address it first sent from (claim): HeldSet holds the
-// addresses, ClaimSet each address with its hardware address. A packet
-// from a shared segment passes only from the hardware address that holds
-// its source address, or from a free address, which its hardware address
-// then holds. Each hold lasts ClaimTimeout from the address's last
-// forwarded packet, which is at most half the configured DHCP lease
-// (dns.LeaseHours; dns fails to compile, and its TestLeaseCoversHold fails,
-// otherwise), so an address the DHCP server gives again after its lease ran
-// out is free by then, unless the client had requested a shorter lease
-// (ENF-shared-src-1); each set holds at most HostSize addresses.
-func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }
-func ClaimSet(seg string, v6 bool) string { return "claim_" + seg + fam(v6) }
+// LeaseSet and LeasedSet follow the IPv4 leases the enforcer's own DHCP
+// server grants on shared segment seg: LeaseSet holds each leased address
+// with its client's hardware address, LeasedSet each leased hardware
+// address. The output chain reads both from the server's DHCPACK as it
+// leaves on the segment's interface, before the client has it (snoop), and
+// a load seeds them from the server's lease file (Seed) and carries them
+// (Reload). An IPv4 packet from a shared segment passes only from an
+// address and hardware address LeaseSet holds (claim, ENF-shared-src-1).
+// An element never lasts longer than its lease (snoop). The server can
+// end a lease early (a client's RELEASE or DECLINE, or a REQUEST that
+// moves the client or is refused), so LeaseAddrSet holds each address
+// LeaseSet holds, and an answer from the server that would give such an
+// address to another hardware address never leaves (snoop): an address is
+// another host's only once its element has run out; each such answer is
+// counted on LeaseHeld. nft cannot type a
+// payload field read at an offset, so the three sets (and MACSet, which
+// LeasedSet is checked beside) are typed by their raw fields, the IPv4
+// source (@nh,96,32) and the hardware source (@ll,48,48), and nft lists
+// their elements as integers.
+func LeaseSet(seg string) string     { return "lease_" + seg + "_4" }
+func LeaseAddrSet(seg string) string { return "leaseaddr_" + seg + "_4" }
+func LeasedSet(seg string) string    { return "leased_" + seg }
+
+// LeaseTimeout is the lease, in seconds, every dhcp-range offers, and the
+// longest one the snoop reads: dns.LeaseHours, which dns pins to it, so
+// dns fails to compile when the two differ.
+const LeaseTimeout = 12 * 3600
+
+// HeldSet, ClaimSet and MACSet bind each IPv6 address a host on segment seg
+// sends from to the hardware address it first sent from (claim), one
+// address per hardware address, and only for a hardware address with an
+// IPv4 lease (LeasedSet): HeldSet holds the addresses, ClaimSet each
+// address with its hardware address, MACSet the hardware addresses that
+// hold one. An IPv6 packet from a shared segment passes only from the
+// hardware address that holds its source address, or from a free address
+// when its hardware address is leased and holds none, which it then
+// holds. Each hold lasts ClaimTimeout from the address's last forwarded
+// packet, at most half the DHCPv6 lease (the constant below fails to
+// compile otherwise), so an address the server gives again after its
+// lease ran out is free by then, unless the client had requested a
+// shorter lease (ENF-shared-src-1); each set holds at most HostSize
+// elements. The shared segments' IPv6 is stateful DHCPv6 only (dns), so a
+// host has one address to send from.
+func HeldSet(seg string) string  { return "held_" + seg + "_6" }
+func ClaimSet(seg string) string { return "claim_" + seg + "_6" }
+func MACSet(seg string) string   { return "mac6_" + seg }
 
 const ClaimTimeout = 6 * 3600 // seconds
+
+const _ uint = LeaseTimeout - 2*ClaimTimeout
 
 // HostSet is the set that records, for each connection a host on shared
 // segment seg started, the connection's conntrack ID and original source,
@@ -119,7 +154,10 @@ func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 // AnswerTimeout is how long, in seconds, an answer lets a new connection
 // open to its addresses: a Recent set's timeout, counted from the Refresh
-// after the answer, so at least this long from the answer itself. dns
+// after the answer, so at least this long from the answer itself. It is
+// the Fresh set's timeout too, counted from the answer's first add since
+// the last Refresh that moved it, so an answer no Refresh moves (the step
+// keeps failing) takes new connections for no longer than this. dns
 // keeps it at least twice the longest TTL its resolver hands out, so a
 // device that dials an answer within its TTL, or retries for as long
 // again, is never dropped.
@@ -157,9 +195,87 @@ func hostKey(v6 bool) string {
 }
 
 // claimKey is a ClaimSet element as nft reads it from a packet.
-func claimKey(v6 bool) string {
-	f := family(v6)
-	return f + " saddr . ether saddr"
+const claimKey = "ip6 saddr . ether saddr"
+
+// hwField is a packet's hardware source address as a raw field, and
+// leaseKey a LeaseSet element read from an IPv4 packet: its source
+// address, then hwField.
+const (
+	hwField   = "@ll,48,48"
+	addrField = "@nh,96,32"
+	leaseKey  = addrField + " . " + hwField
+)
+
+// snoop is the rules that read a lease into segment seg's sets from the
+// server's DHCPACK as it leaves on iface. The ACK is a BOOTP reply (op 2,
+// Ethernet, hardware address length 6, at UDP payload offset 0) with the
+// DHCP magic cookie, and dnsmasq writes its first options in one order:
+// the message type (53, ACK), the server identifier (54, an IPv4 address)
+// and the lease time (51). The lease is yiaddr (payload offset 16) with
+// chaddr (offset 28); an ACK with no address (one to an INFORM) carries
+// none. A client may ask for a shorter lease than LeaseTimeout, which
+// dnsmasq grants down to 120 s, and nft cannot take a timeout from the
+// packet, so there is one rule per band of lease times (leaseBands): its
+// elements last the band's floor, never longer than the lease, and at
+// least two thirds of it, so a renewal at half the lease refreshes them
+// before they run out. update refreshes a renewed lease's elements. The
+// offsets are measured against real dnsmasq (ASSUMPTIONS
+// ENF-shared-src-1).
+//
+// First, any answer from the server (an OFFER or ACK) whose address
+// LeaseAddrSet holds for another hardware address is dropped and counted
+// on LeaseHeld, so the server cannot give an address it freed early to
+// another host while the old holder may still send from it
+// (ENF-shared-src-1, #5300). Each rule
+// updates LeaseAddrSet before LeaseSet: if the first set is full, no
+// element is added; if only the second is, the address is held by no
+// one's lease and its answers are dropped until it runs out (fails
+// closed).
+func snoop(seg, iface string) []string {
+	const (
+		yiaddr = "@th,192,32"
+		chaddr = "@th,288,48"
+	)
+	out := []string{"oifname " + iface + " udp sport 67 udp dport 68 @th,64,24 0x020106 " + yiaddr + " @" + LeaseAddrSet(seg) +
+		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " counter name " + strconv.Quote(LeaseHeld) + " drop"}
+	for _, b := range leaseBands() {
+		times := strconv.Itoa(b[0])
+		if b[1] > b[0] {
+			times += "-" + strconv.Itoa(b[1])
+		}
+		out = append(out, "oifname "+iface+" udp sport 67 udp dport 68"+
+			" @th,64,24 0x020106 "+yiaddr+" != 0 @th,1952,32 0x63825363"+
+			" @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 "+times+
+			" update @"+LeaseAddrSet(seg)+" { "+yiaddr+" timeout "+secs(b[0])+" }"+
+			" update @"+LeaseSet(seg)+" { "+yiaddr+" . "+chaddr+" timeout "+secs(b[0])+" }"+
+			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }")
+	}
+	return out
+}
+
+// MinLease is the shortest lease dnsmasq grants, in seconds.
+const MinLease = 120
+
+// leaseFloors are the floors of the lease bands, in seconds, from
+// MinLease to LeaseTimeout: after MinLease, each is two thirds of the next
+// one, rounded up, so each band's top (one below the next floor) is under
+// one and a half times its floor. A table, not a loop, so no change to it
+// can spin; TestLeaseBandsCoverEveryLease checks it.
+var leaseFloors = []int{MinLease, 149, 223, 334, 500, 750, 1125, 1687, 2530, 3794, 5690, 8534, 12800, 19200, 28800, LeaseTimeout}
+
+// leaseBands are the lease times, in seconds, each snoop rule reads: each
+// band is its floor and its top (both included), every top below one and
+// a half times its floor, and the last band LeaseTimeout alone.
+func leaseBands() [][2]int {
+	out := make([][2]int, len(leaseFloors))
+	for i, lo := range leaseFloors {
+		top := LeaseTimeout
+		if i+1 < len(leaseFloors) {
+			top = leaseFloors[i+1] - 1
+		}
+		out[i] = [2]int{lo, top}
+	}
+	return out
 }
 
 // secs is a timeout of n seconds as nft reads it.
@@ -197,6 +313,7 @@ const (
 	GuestsConns = "guests_conns"
 	Inbound     = "inbound"      // new connections from the internet
 	Blocked     = "blocked"      // forwarded traffic no rule allowed
+	Expired     = "expired"      // new connections to an address a listed name answered, but not within AnswerTimeout
 	CoreDevice  = "core_device"  // connections the core starts to a device's control port
 	CoreStream  = "core_stream"  // connections the core starts to a camera's or microphone's stream port
 	EdgeDevice  = "edge_device"  // connections the edge starts to a device
@@ -208,6 +325,8 @@ const (
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
+	EdgeCut     = "edge_cut"     // every packet to or from the edge's segment while the edge is cut (Drop.EdgeCut)
+	LeaseHeld   = "lease_held"   // the address server's answers giving a host an address another still holds (snoop), on every shared segment
 	LogLines    = "log_lines"    // lines written to the kernel log (logged)
 )
 
@@ -225,6 +344,7 @@ const (
 	LogCoreEdge   = "enf core-edge "
 	LogDNS        = "enf dns "
 	LogDrop       = "enf drop "
+	LogExpired    = "enf expired "
 	LogEdgeDevice = "enf edge-dev "
 	LogCoreDevice = "enf core-dev "
 	LogCoreStream = "enf core-stream "
@@ -239,7 +359,7 @@ type prefix struct{ prefix, counter, verdict string }
 var (
 	refusals = []prefix{
 		{LogInbound, Inbound, "drop"}, {LogAPAdmin, APAdminDrop, "drop"}, {LogISP, ISPDrop, "drop"}, {LogNonGlobal, Blocked, "drop"},
-		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogCap, CapDrop, "drop"},
+		{LogCoreEdge, CoreEdge, "drop"}, {LogDNS, DNSOutside, "drop"}, {LogDrop, Blocked, "drop"}, {LogExpired, Expired, "drop"}, {LogCap, CapDrop, "drop"},
 	}
 	accepts = []prefix{{LogEdgeDevice, EdgeDevice, "accept"}, {LogCoreDevice, CoreDevice, "accept"}, {LogCoreStream, CoreStream, "accept"}}
 )
@@ -269,7 +389,7 @@ func logged(p string) string { return "log_" + slug(p) }
 func lines(p string) string  { return "lines_" + slug(p) }
 func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, LogLines}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, EdgeCut, LeaseHeld, LogLines}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -472,9 +592,11 @@ func Paths(d policy.Document, l Layout) ([]Path, error) {
 // address in the fresh set or the recent set (Recent), so an address no
 // answer has returned for AnswerTimeout takes no new connection, while a
 // connection already open to it goes on. The fresh set holds the answers
-// since the last Refresh, with no timeout; Refresh moves them into the
-// recent set with a full AnswerTimeout each, which re-adding to a set
-// with a timeout never gives (dns ASSUMPTIONS ENF-f-3).
+// since the last Refresh; Refresh moves them into the recent set with a
+// full AnswerTimeout each, which re-adding to a set with a timeout never
+// gives (dns ASSUMPTIONS ENF-f-3). The fresh set's own AnswerTimeout,
+// which a re-added answer does not restart, ends an answer's first-packet
+// admission when no Refresh moves it (#5116).
 type AllowSet struct {
 	Set4, Set6 string
 	Names      []string
@@ -489,7 +611,8 @@ func (a AllowSet) Named(name string, v6 bool) string {
 }
 
 // Fresh is the set of the family's answers since the last Refresh, which
-// the resolver fills alongside the allow set.
+// the resolver fills alongside the allow set, each for at most
+// AnswerTimeout from when it was first added.
 func (a AllowSet) Fresh(v6 bool) string { return a.set(v6) + "_f" }
 
 // Recent is the set of the family's addresses some listed name answered in
@@ -596,12 +719,13 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		for _, v6 := range []bool{false, true} {
 			typ := map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6]
 			w.set(a.set(v6), typ, "timeout", nil)
-			w.set(a.Fresh(v6), typ, "", nil)
-			w.open("set " + a.Recent(v6))
-			w.line("type " + typ + ";")
-			w.line("flags timeout;")
-			w.line("timeout " + secs(AnswerTimeout) + ";")
-			w.close()
+			for _, s := range []string{a.Fresh(v6), a.Recent(v6)} {
+				w.open("set " + s)
+				w.line("type " + typ + ";")
+				w.line("flags timeout;")
+				w.line("timeout " + secs(AnswerTimeout) + ";")
+				w.close()
+			}
 			for _, n := range a.names() {
 				w.set(a.Named(n, v6), typ, "timeout", nil)
 			}
@@ -612,22 +736,14 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	loggedDecls(w, devs)
 	for _, sg := range segments(l) {
 		for _, v6 := range []bool{false, true} {
-			for _, s := range []struct {
-				name, key string
-				timeout   int
-			}{
-				{HostSet(sg.name, v6), hostKey(v6), HostTimeout},
-				{HeldSet(sg.name, v6), family(v6) + " saddr", ClaimTimeout},
-				{ClaimSet(sg.name, v6), claimKey(v6), ClaimTimeout},
-			} {
-				w.open("set " + s.name)
-				w.line("typeof " + s.key + ";")
-				w.line("size " + strconv.Itoa(HostSize) + ";")
-				w.line("flags dynamic,timeout;")
-				w.line("timeout " + secs(s.timeout) + ";")
-				w.close()
-			}
+			w.dynamic(HostSet(sg.name, v6), hostKey(v6), HostTimeout)
 		}
+		w.dynamic(LeaseSet(sg.name), leaseKey, LeaseTimeout)
+		w.dynamic(LeaseAddrSet(sg.name), addrField, LeaseTimeout)
+		w.dynamic(LeasedSet(sg.name), hwField, LeaseTimeout)
+		w.dynamic(HeldSet(sg.name), "ip6 saddr", ClaimTimeout)
+		w.dynamic(ClaimSet(sg.name), claimKey, ClaimTimeout)
+		w.dynamic(MACSet(sg.name), hwField, ClaimTimeout)
 	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
@@ -692,6 +808,18 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// The edge's segment hears nothing (NET-2 Segments): no DHCP, DNS, NTP,
 	// mDNS, page or other listener, before any other rule can answer it.
 	w.line("iifname " + edge + " counter name " + q(EdgeIn) + " drop")
+	// A DHCPRELEASE from a shared segment, its message type the first
+	// option as dhclient, udhcpc and dhcpcd write it, never reaches the server,
+	// even on a connection a renewal opened: the lease, and the address
+	// with it, lasts its full time, as the lease sets do. One written
+	// otherwise reaches the server and frees the address there, but snoop
+	// still keeps it from any other host until its element runs out
+	// (ENF-shared-src-1, #5300).
+	var sharedIfs []string
+	for _, sg := range segments(l) {
+		sharedIfs = append(sharedIfs, q(sg.iface))
+	}
+	w.line("iifname { " + strings.Join(sharedIfs, ", ") + " } udp dport 67 @th,1952,56 0x63825363350107 drop")
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
 	w.line("icmpv6 type nd-router-advert iifname != " + wan + " counter name " + q(RADropped) + " drop")
@@ -710,14 +838,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// passing them on (NET-2, NET-3, D-266, #4411).
 	w.line("iifname " + core + " udp dport " + strconv.Itoa(WoLPort) + " accept")
 	var ends []string
-	for _, e := range hears(devs, paths, l) {
+	for _, e := range hears(devs, l) {
 		ends = append(ends, q(e))
 	}
-	if len(ends) > 0 {
-		slices.Sort(ends)
-		w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
-		w.line("iifname { " + strings.Join(ends, ", ") + " } ip6 daddr " + MDNSGroup6 + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
-	}
+	w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
+	w.line("iifname { " + strings.Join(ends, ", ") + " } ip6 daddr " + MDNSGroup6 + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
 	w.close()
 
 	// A device's DNS to anywhere is answered by the enforcer's own
@@ -765,14 +890,19 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	add(edge, wan, "accept")
 	// An answer's addresses take new connections while it is fresh or
 	// recent, and an open connection lives while its name is listed
-	// (AllowSet); the second rule's live form would be the first's.
+	// (AllowSet); the second rule's live form would be the first's. A new
+	// connection to an address a listed name answered, but not within
+	// AnswerTimeout, is refused with its own reason (LogExpired, #5116);
+	// it judges first packets only, so the live chains are as before.
 	answered := func(in string, a AllowSet) {
 		for _, v6 := range []bool{false, true} {
 			f := family(v6)
 			k := "ct original " + f + " daddr @" + a.set(v6)
 			add(in, wan, "accept", match{f + " daddr @" + a.Recent(v6), k})
 			add(in, wan, "accept", match{f + " daddr @" + a.Fresh(v6), k})
-			fwd[len(fwd)-1].twin = true
+			fwd[len(fwd)-1].firstOnly = true
+			refused(in, wan, LogExpired, daddr(v6, "@"+a.set(v6)))
+			fwd[len(fwd)-1].firstOnly = true
 		}
 	}
 	answered(core, AllowSet{Set4: CoreSet(false), Set6: CoreSet(true)})
@@ -878,6 +1008,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
+	// A cut edge (Drop.EdgeCut) is cut before any other rule, established
+	// and related packets included, so its open connections end with it.
+	for _, r := range cutJumps(l) {
+		w.line(r)
+	}
 	// Guests: counted only as a whole network, never per device or per
 	// destination, and never logged (NET-3).
 	w.line("iifname " + g + " counter name " + q(GuestsOut))
@@ -963,19 +1098,21 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.line("drop")
 		w.close()
 
-		// An address is held by the hardware address it was first sent
-		// from: a packet from its holder refreshes the hold, one from any
-		// other hardware address is dropped, and a free address is taken
-		// by the packet's hardware address (its claim first, so a held set
-		// with no room leaves no hold without its claim).
+		// IPv4 passes only from a lease. An IPv6 address is held by the
+		// hardware address it was first sent from: a packet from its
+		// holder refreshes the hold, one from any other hardware address
+		// is dropped, and a free address is taken by a leased hardware
+		// address that holds none (its claim first, so a set with no room
+		// leaves no hold without its claim).
 		w.open("chain " + claim(sg.name))
-		for _, v6 := range []bool{false, true} {
-			pre := "meta nfproto " + nfproto(v6) + " "
-			k, cs, hs, a := claimKey(v6), ClaimSet(sg.name, v6), HeldSet(sg.name, v6), family(v6)+" saddr"
-			w.line(pre + k + " @" + cs + " update @" + cs + " { " + k + " } update @" + hs + " { " + a + " } return")
-			w.line(pre + a + " @" + hs + " drop")
-			w.line(pre + "add @" + cs + " { " + k + " } add @" + hs + " { " + a + " } return")
-		}
+		w.line("meta nfproto ipv4 " + leaseKey + " @" + LeaseSet(sg.name) + " return")
+		pre := "meta nfproto ipv6 "
+		cs, hs, ms := ClaimSet(sg.name), HeldSet(sg.name), MACSet(sg.name)
+		w.line(pre + claimKey + " @" + cs + " update @" + cs + " { " + claimKey + " } update @" + hs + " { ip6 saddr } update @" + ms + " { " + hwField + " } return")
+		w.line(pre + "ip6 saddr @" + hs + " drop")
+		w.line(pre + hwField + " != @" + LeasedSet(sg.name) + " drop")
+		w.line(pre + hwField + " @" + ms + " drop")
+		w.line(pre + "add @" + cs + " { " + claimKey + " } add @" + hs + " { ip6 saddr } add @" + ms + " { " + hwField + " } return")
 		w.line("drop")
 		w.close()
 	}
@@ -1017,11 +1154,16 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		}
 	}
 
-	capChains(w)
+	capChains(w, l)
 
 	w.open("chain output")
 	w.line("type filter hook output priority filter; policy accept;")
 	w.line("oifname " + edge + " drop")
+	for _, sg := range segments(l) {
+		for _, r := range snoop(sg.name, q(sg.iface)) {
+			w.line(r)
+		}
+	}
 	w.close()
 
 	w.open("chain postrouting")
@@ -1130,5 +1272,17 @@ func (w *writer) set(name, typ, flags string, elems []string) {
 	if len(elems) > 0 {
 		w.line("elements = { " + strings.Join(elems, ", ") + " }")
 	}
+	w.close()
+}
+
+// dynamic declares a set the ruleset's rules fill, of elements typed as key
+// reads them, each lasting timeout seconds unless refreshed, HostSize at
+// most.
+func (w *writer) dynamic(name, key string, timeout int) {
+	w.open("set " + name)
+	w.line("typeof " + key + ";")
+	w.line("size " + strconv.Itoa(HostSize) + ";")
+	w.line("flags dynamic,timeout;")
+	w.line("timeout " + secs(timeout) + ";")
 	w.close()
 }

@@ -120,17 +120,44 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 	agent.a.Store(&guest.OwnerAgent{Plane: plane, Machine: "agent"})
 	b := &broker{plane: plane}
 
+	defer func() {
+		for _, m := range carrier.Log() {
+			t.Logf("%s -> %s: %q", m.From, m.To, m.Text)
+		}
+	}()
+	// The agent's machine has open services before the owner texts, as
+	// it does once the machine runs. Without them the owner's message is
+	// refused with "Your agent is not running" and never queued (#5425).
+	if _, err := plane.Open("agent"); err != nil {
+		t.Fatal(err)
+	}
+	// The machine starts public, so the label check below fails unless
+	// the owner's message raised it (REV-5).
+	if l := ms.label("agent"); l != "public" {
+		t.Fatalf("agent starts %s, want public", l)
+	}
+	// The session opens on the page (CH-14, D-311); task chat then goes
+	// by text. A code in unlocked chat is stripped (owner's own tests).
 	code := totp(seed, time.Now())
-	phone.Send(box.Number(), "plan my week "+code)
+	if _, _, err := d.Owner().LocalSignIn(code); err != nil {
+		t.Fatalf("page sign-in: %v", err)
+	}
+	phone.Send(box.Number(), "plan my week")
+	// Each /owner/next is held open until a message arrives (up to the
+	// plane's poll wait), so this loops only on a 204 or an error.
+	const ownerChatWait = 60 * time.Second
 	var msg struct{ ID, Text string }
-	deadline := time.Now().Add(10 * time.Second)
-	for msg.ID == "" && time.Now().Before(deadline) {
-		if st, body := guestCall(t, b, "agent", "GET", "/owner/next", ""); st == 200 {
+	var st int
+	var body string
+	for deadline := time.Now().Add(ownerChatWait); msg.ID == "" && time.Now().Before(deadline); {
+		if st, body = guestCall(t, b, "agent", "GET", "/owner/next", ""); st == 200 {
 			json.Unmarshal([]byte(body), &msg)
+		} else {
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 	if !strings.Contains(msg.Text, "plan my week") || strings.Contains(msg.Text, code) {
-		t.Fatalf("guest got %q", msg.Text)
+		t.Fatalf("guest got %q (last /owner/next: %d %q)", msg.Text, st, body)
 	}
 	if ms.label("agent") != "private" {
 		t.Fatal("owner chat reached a machine still labelled public")
@@ -141,14 +168,14 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 			t.Fatalf("reply: %d %s", st, body)
 		}
 	}
-	// The session-unlock confirmation races the guest's answers; skip it.
+	// The page sign-in's alert races the guest's answers; skip it.
 	next := func() string {
 		for {
 			got := recv(t, phone)
 			if strings.Contains(got, "482913") {
 				t.Fatalf("a secret-shaped guest reply went out: %q", got)
 			}
-			if !strings.HasPrefix(got, "Unlocked") {
+			if !strings.Contains(got, "signed in on my Wi-Fi") {
 				return got
 			}
 		}
@@ -164,11 +191,6 @@ func TestARC6OwnerChatReachesTheGuestAndBack(t *testing.T) {
 		json.Unmarshal([]byte(body), &msg)
 	}
 	reply("Monday: dentist. Tuesday: free.")
-	defer func() {
-		for _, m := range carrier.Log() {
-			t.Logf("%s -> %s: %q", m.From, m.To, m.Text)
-		}
-	}()
 	if got := next(); !strings.Contains(got, "dentist") {
 		t.Fatalf("owner got %q", got)
 	}

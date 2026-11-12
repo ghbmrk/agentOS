@@ -94,6 +94,20 @@ func (c *clock) Advance(d time.Duration) {
 // at the deadline exactly, never before, once, and the answer follows at
 // the call's rung (rule 5; UX on #4944).
 func TestOneClipDeadlineCoversEveryWait(t *testing.T) {
+	// Every hand-off is bounded, so a call left waiting (a Serve that
+	// never ends its token read keeps the next one from starting) fails
+	// here, naming the wait, not at the package timeout (#5316).
+	const wait = 5 * time.Second
+	key := func(name string, r *rig, keys string) {
+		t.Helper()
+		for _, k := range []byte(keys) {
+			select {
+			case r.l.keys <- k:
+			case <-time.After(wait):
+				t.Fatalf("%s: key %q of %q was not read within %v: the token is not read", name, k, keys, wait)
+			}
+		}
+	}
 	for _, c := range []struct {
 		name string
 		// keys are the token's keys and when they arrive, after the owner
@@ -141,10 +155,18 @@ func TestOneClipDeadlineCoversEveryWait(t *testing.T) {
 			r.cfg.Token = func(k string) bool { return k == "4071" }
 			r.serve()
 		}
-		<-r.rec.ctx
+		select {
+		case <-r.rec.ctx:
+		case <-time.After(wait):
+			t.Fatalf("%s: the call did not start listening within %v: it is not served", c.name, wait)
+		}
 		start := clk.Now()
 		end := start.Add(-c.ago)
-		r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: end}
+		select {
+		case r.rec.out <- call.Heard{Text: "what's in my mail", Final: true, End: end}:
+		case <-time.After(wait):
+			t.Fatalf("%s: the question was not heard within %v", c.name, wait)
+		}
 		clk.waitFor(t, end.Add(time.Second)) // the turn's clip deadline
 		if r.cfg.Token != nil {
 			clk.waitFor(t, start.Add(6*time.Second)) // the token window
@@ -152,9 +174,7 @@ func TestOneClipDeadlineCoversEveryWait(t *testing.T) {
 		due := time.Second - c.ago
 		if c.keys != "-" && c.keys != "" && c.at < due {
 			clk.Advance(c.at)
-			for _, k := range []byte(c.keys) {
-				r.l.keys <- k
-			}
+			key(c.name, r, c.keys)
 			due -= c.at
 		}
 		clk.Advance(due - time.Millisecond)
@@ -165,9 +185,7 @@ func TestOneClipDeadlineCoversEveryWait(t *testing.T) {
 		}
 		if c.keys != "-" && c.keys != "" && c.at >= time.Second-c.ago {
 			clk.Advance(c.at - (time.Second - c.ago))
-			for _, k := range []byte(c.keys) {
-				r.l.keys <- k
-			}
+			key(c.name, r, c.keys)
 		}
 		if c.keys == "" {
 			clk.Advance(6 * time.Second) // the token window ends: P0

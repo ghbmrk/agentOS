@@ -3,6 +3,7 @@ package model
 // REQ: CLK-3
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/hostiletext"
@@ -18,4 +19,55 @@ func TestKeyHeadersRefuseTheCorpus(t *testing.T) {
 		d.Header = h
 		return d.validate() == nil
 	}, hostiletext.Exactly(t, keyHeaders, "Authorization", "X-Api-Key")...)
+}
+
+// A declaration's own header is its provider's name and a word declHeaders
+// holds exactly, and its value is visible ASCII, unpadded: the header
+// corpus's credential, request-reshaping, hop-by-hop and broken names, in
+// any case, and the value corpus are refused (#4914). Catches a provider
+// declaring X-Http-Method-Override or X-Signature, another provider's
+// header, or a value that adds a header line.
+func TestDeclaredHeadersRefuseTheCorpus(t *testing.T) {
+	declares := func(h, v string) bool {
+		d := Shipped[0]
+		d.Headers = map[string]string{h: v}
+		return d.validate() == nil
+	}
+	hostiletext.RunHeaders(t, func(h string) bool { return declares(h, "2023-06-01") },
+		"Anthropic-"+hostiletext.Exactly(t, declHeaders, "Version")[0])
+	hostiletext.RunHeaderValues(t, func(v string) bool { return declares("Anthropic-Version", v) })
+	// Each refusal names the rule that fired (#5278).
+	why := func(h, v string) string {
+		d := Shipped[0]
+		d.Headers = map[string]string{h: v}
+		if err := d.validate(); err != nil {
+			return err.Error()
+		}
+		return ""
+	}
+	for v, rule := range map[string]string{
+		"":        "the value is empty",
+		" v":      "the value begins or ends with a space",
+		"v ":      "the value begins or ends with a space",
+		"v\t":     "the value holds a control character",
+		"v\u00e9": "a byte outside visible ASCII",
+	} {
+		if got := why("Anthropic-Version", v); !strings.HasPrefix(got, `model: anthropic: header "Anthropic-Version": `) || !strings.Contains(got, rule) {
+			t.Errorf("the value %q: got %q, want a refusal saying %q", v, got, rule)
+		}
+	}
+	if got := why("X-Signature", "v"); got != `model: anthropic: header "X-Signature" is not on the allowlist: a declaration may set only ["Anthropic-Version"]` {
+		t.Errorf("an unlisted name: got %q", got)
+	}
+	// Inner spaces and every visible byte, '~' included, are a value.
+	for _, v := range []string{"2023-06-01 v", "~v~"} {
+		if !declares("Anthropic-Version", v) {
+			t.Errorf("the value %q was refused", v)
+		}
+	}
+	for _, h := range []string{"Openai-Version", "Version", "Anthropic-Beta"} {
+		if declares(h, "v") {
+			t.Errorf("the anthropic declaration may set %q", h)
+		}
+	}
 }

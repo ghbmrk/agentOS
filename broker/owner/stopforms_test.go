@@ -86,7 +86,7 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 				r.eng.mu.Unlock()
 				gen, sent := r.ch.stops.Load(), len(r.agent.got())
 				st := r.ch.codes.st
-				wrong, held := len(st.Wrong), r.ch.held
+				wrong, held := len(st.Wrong), len(st.Waiting)
 				got := r.say(text)
 				if got != bare || !r.eng.Stopped() {
 					t.Fatalf("%q: %q (bare STOP: %q), stopped %v", text, got, bare, r.eng.Stopped())
@@ -101,10 +101,10 @@ func TestEveryStopFormStopsAndLeaksNoCode(t *testing.T) {
 				}
 				now := r.ch.codes.st
 				if len(r.agent.got()) != sent || len(now.Wrong) != wrong || !now.UnlockedUntil.Equal(st.UnlockedUntil) ||
-					now.LastStep != st.LastStep || now.Challenged != st.Challenged || r.ch.held != held {
+					now.LastStep != st.LastStep || now.Challenged != st.Challenged || len(now.Waiting) != held {
 					t.Fatalf("%q: a code was checked or passed on: agent %v, wrong %d->%d, unlocked until %v->%v, step %d->%d, challenged %v->%v, held changed %v",
 						text, r.agent.got(), wrong, len(now.Wrong), st.UnlockedUntil, now.UnlockedUntil,
-						st.LastStep, now.LastStep, st.Challenged, now.Challenged, r.ch.held != held)
+						st.LastStep, now.LastStep, st.Challenged, now.Challenged, len(now.Waiting) != held)
 				}
 				// Challenge mode ignores codes outright, so leave it to
 				// show the RESUME code itself is void.
@@ -224,5 +224,82 @@ func TestStopFormKeepsEveryOldStop(t *testing.T) {
 	}
 	if found < 1000 {
 		t.Fatalf("only %d old STOP messages drawn; the generator is too narrow", found)
+	}
+}
+
+// arabicIndic writes s's ASCII digits as Arabic-Indic digits.
+func arabicIndic(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r - '0' + '٠'
+		}
+		return r
+	}, s)
+}
+
+// REQ: CH-10, CH-11
+// TestUnicodeDigitResumeCodeIsQuarantined: the live RESUME code re-sent
+// in non-ASCII digits or letters, locked, unlocked and challenged, gets
+// the fixed unclear reply: it never reaches the agent or the held queue,
+// is never checked or counted, and never resumes, so the ASCII code stays
+// unspent and still works (CTL-unicode-code, #5454).
+func TestUnicodeDigitResumeCodeIsQuarantined(t *testing.T) {
+	forms := []struct {
+		name string
+		text func(code string) string
+	}{
+		{"full-width digits", func(c string) string { return "RESUME " + fullWidth(c) }},
+		{"arabic-indic digits", func(c string) string { return "resume " + arabicIndic(c) }},
+		{"arabic-indic with words", func(c string) string { return "RESUME " + arabicIndic(c) + " please" }},
+		{"full-width word and digits", func(c string) string { return fullWidth("RESUME " + c) }},
+		{"full-width word and words", func(c string) string { return fullWidth("RESUME "+c) + " now please" }},
+		{"YES with arabic-indic", func(c string) string { return "YES 1 " + arabicIndic(c) }},
+		{"full-width NO", func(c string) string { return fullWidth("NO " + c) }},
+	}
+	for _, mode := range []string{"locked", "unlocked", "challenged"} {
+		for _, f := range forms {
+			t.Run(mode+"/"+f.name, func(t *testing.T) {
+				r := newRig(t, nil)
+				if mode == "unlocked" {
+					r.unlock()
+				}
+				r.say("STOP")
+				resume := regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
+				if mode == "challenged" {
+					r.ch.codes.st.Challenged = true
+				}
+				text := f.text(resume)
+				sent := len(r.agent.got())
+				st := r.ch.codes.st
+				wrong, held := len(st.Wrong), len(st.Waiting)
+				if got := r.say(text); got != control.UnclearReply {
+					t.Fatalf("%q: %q, want the unclear reply", text, got)
+				}
+				now := r.ch.codes.st
+				if len(r.agent.got()) != sent || len(now.Wrong) != wrong || len(now.Waiting) != held || !r.eng.Stopped() {
+					t.Fatalf("%q: passed on, counted, held or resumed: agent %v, wrong %d->%d, held %d->%d, stopped %v",
+						text, r.agent.got(), wrong, len(now.Wrong), held, len(now.Waiting), r.eng.Stopped())
+				}
+				r.ch.codes.st.Challenged = false
+				if got := r.say("RESUME " + resume); r.eng.Stopped() {
+					t.Fatalf("%q spent the ASCII code: %q", text, got)
+				}
+			})
+		}
+	}
+}
+
+// REQ: CH-11
+// TestFoldedCodeWordWithoutNumberStaysChat: a full-width RESUME or NO
+// with no number holds no code, so it is not quarantined: unlocked, the
+// agent gets it as chat (CTL-unicode-code, #5454).
+func TestFoldedCodeWordWithoutNumberStaysChat(t *testing.T) {
+	for _, text := range []string{fullWidth("RESUME"), fullWidth("no")} {
+		r := newRig(t, nil)
+		r.unlock()
+		sent := len(r.agent.got())
+		if got := r.say(text); got == control.UnclearReply || len(r.agent.got()) != sent+1 {
+			t.Fatalf("%q: %q, agent %v; want it passed on as chat", text, got, r.agent.got())
+		}
 	}
 }

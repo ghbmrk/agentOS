@@ -465,6 +465,37 @@ class Shape(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue((pathlib.Path(d) / "rel" / "hint.json").exists())
 
+    def run_silent_stub(self, says, code=0):
+        """mutgate.py run with a stub gremlins that prints says, writes no -o file and exits code."""
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "gremlins").write_text(f"#!/bin/sh\nprintf '%s' '{says}'\nexit {code}\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            out = pathlib.Path(d) / "out"
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out",
+                                str(out)], capture_output=True, text=True, env=env)
+            dest = out / "hint.json"
+            return r, json.loads(dest.read_text()) if dest.exists() else None
+
+    def test_run_reads_no_results_as_zero_mutants(self):
+        # #5173: gremlins finding no mutant prints this, exits 0 and writes no -o file.
+        r, data = self.run_silent_stub("Starting...\n\nNo results to report.\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("No results to report.", r.stdout)  # its output still shows
+        self.assertEqual(data, {"files": [], "mutants_total": 0, "mutants_lived": 0})
+
+    def test_run_fails_closed_on_any_other_missing_result(self):
+        for says, code in (("Starting...\n", 0),                          # no file, no word why
+                           ("No results to report.\n", 1),                # it failed after saying so
+                           ("a test said No results to report.\n", 0)):   # not gremlins' own line
+            with self.subTest(says=says, code=code):
+                r, data = self.run_silent_stub(says, code)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"gremlins failed on hint (exit {code})", r.stderr)
+                self.assertIsNone(data)
+
     def test_skipped_added_reads_only_skips_on_lines_the_gate_reads(self):
         added = mutgate.added_lines(DIFF)[0]
         data = {"files": [
@@ -2143,7 +2174,7 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("continue-on-error", self.text)
 
     def test_summary_fails_unless_the_claim_ran_and_each_package_passed(self):
-        script = job(self.text, "mutgate").split("run: |\n", 1)[1]
+        script = job(self.text, "mutgate").split("name: The claim ran", 1)[1].split("run: |\n", 1)[1]
         script = re.split(r"\n      [-#] ", script, maxsplit=1)[0]
         script = "\n".join(l[10:] for l in script.split("\n"))
         cases = [
@@ -2212,8 +2243,10 @@ class Workflow(unittest.TestCase):
 
     def test_mutgate_job_verifies_the_artifacts_from_a_fresh_checkout(self):
         body = job(self.text, "mutgate")
-        steps = body.split("\n      - ")[1:]
+        # The first step reads the PR's head (#5409); tests/test_workflows.py pins it.
+        steps = body.split("\n      - ")[2:]
         names = [st.split("\n", 1)[0] for st in steps]
+        self.assertEqual(body.split("\n      - ")[1].split("\n", 1)[0], "name: This run's head is still the PR's current head")
         self.assertEqual(names, [
             "name: The claim ran and every claimed package passed",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",

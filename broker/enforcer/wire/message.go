@@ -78,6 +78,16 @@ const (
 // kernel both read it here, never a copy (ASSUMPTIONS ENF-d-w5).
 const SummaryInterval = time.Minute
 
+// HeartbeatInterval is the interval at which the core beats on the
+// channel, which this format definition fixes (KRN-12 Silence, D-255):
+// the core's client sends the enforcer at least one message each
+// interval, and the enforcer shows the core down after two missed beats
+// (broker/cmd/agentos-enforcer Silence). It is its own constant, not
+// SummaryInterval: the beat flows while a trip pauses the summaries, so a
+// change to one must not move the other. Both ends read it here, never a
+// copy (ASSUMPTIONS ENF-d-w8).
+const HeartbeatInterval = time.Minute
+
 // PastCap is whether a byte count is past its cap: the count the enforcer
 // drops and trips on, and the one the kernel's check stops short of
 // (NET-2 Byte caps, D-255). A count at the cap is not past it. Both sides

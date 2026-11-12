@@ -120,10 +120,9 @@ type Network interface {
 
 // Alerts is the part of the enforcer's alerts (alert.Alerts) enrolment
 // drives: a text and page alert for each enrolment and each use of the
-// recovery code, and the page's recovery-pending state.
+// recovery code.
 type Alerts interface {
 	Raise(k alert.Kind, device string) (alert.Record, error)
-	Recovery(pending bool)
 }
 
 // Config is what the daemon (slice l) wires in.
@@ -295,7 +294,6 @@ func Open(cfg Config) (*Book, error) {
 	if err := b.st.check(cfg.Name); err != nil {
 		return nil, err
 	}
-	b.cfg.Alerts.Recovery(b.st.Pending != nil)
 	return b, nil
 }
 
@@ -556,7 +554,6 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		if err := b.save(st); err != nil {
 			return Result{}, err
 		}
-		b.cfg.Alerts.Recovery(true)
 		return Result{Recovery: code, Due: time.UnixMilli(due)}, nil
 	}
 	return Result{}, ErrPhase
@@ -617,7 +614,6 @@ func (b *Book) Cancel() (string, error) {
 	if err := b.save(st); err != nil {
 		return "", err
 	}
-	b.cfg.Alerts.Recovery(false)
 	return code, nil
 }
 
@@ -660,7 +656,6 @@ func (b *Book) Tick() (bool, error) {
 	if err := b.take(&st); err != nil {
 		return false, err
 	}
-	b.cfg.Alerts.Recovery(false)
 	b.cfg.Alerts.Raise(alert.Enrolment, "")
 	return true, nil
 }
@@ -701,7 +696,6 @@ func (b *Book) FactoryReset(caseCode string) error {
 	if err := b.save(st); err != nil {
 		return err
 	}
-	b.cfg.Alerts.Recovery(false)
 	return nil
 }
 

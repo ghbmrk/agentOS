@@ -581,11 +581,13 @@ func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
 // seen is a character that shows: not a space, nor one invisible refuses.
 func seen(c rune) bool { return !unicode.IsSpace(c) && !invisible(c) }
 
-// sameLabel compares labels after folding case and collapsing runs of
-// whitespace, so "alice  smith" reads "Alice Smith". Fuzzier matching is
+// sameLabel compares labels after folding case, collapsing runs of
+// whitespace and reading a curly apostrophe as a straight one, so "alice
+// o’hara" reads "Alice O'Hara". Fuzzier matching is
 // later (PLN-7).
 func sameLabel(a, b string) bool {
-	return strings.EqualFold(strings.Join(strings.Fields(a), " "), strings.Join(strings.Fields(b), " "))
+	f := func(s string) string { return strings.Join(strings.Fields(strings.ReplaceAll(s, "’", "'")), " ") }
+	return strings.EqualFold(f(a), f(b))
 }
 
 // Named lists the live subjects one of whose labels reads label (sameLabel), and

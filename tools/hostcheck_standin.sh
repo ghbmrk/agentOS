@@ -7,7 +7,11 @@
 #     task PLANTS   the session's task; PLANTS is "-" (read the host disk,
 #                   write nothing) or a comma list of planted writes for the
 #                   harness's negative test: disk, uefi, nv, rtc
+#     alive NONCE   print HOSTCHECK-ALIVE NONCE: hostcheck's power cut waits
+#                   for it, so the guest was running when QEMU quit
 #     reboot | poweroff
+#     halt          the negative test's halting guest: stops the CPUs with no
+#                   QEMU event and no MOR clear, so MOR stays set as after a cut
 # windows.img: a GPT disk laid out like a Windows install (ESP, MSR, NTFS),
 #   all synthetic.
 set -eu
@@ -19,7 +23,7 @@ trap 'rm -rf "$tmp"' EXIT
 root=$tmp/root
 mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/usr/bin"
 cp "$(command -v busybox)" "$root/bin/busybox"
-for app in sh mount echo printf dd sync reboot poweroff hwclock read cat sleep ln mkdir od; do
+for app in sh mount echo printf dd sync reboot poweroff halt hwclock read cat sleep ln mkdir od; do
 	ln -s busybox "$root/bin/$app"
 done
 tpm2=$(readlink -f "$(command -v tpm2)")
@@ -54,8 +58,11 @@ plant() {
 # The kernel's EFI stub sets MOR's ClearMemory bit at boot (RESET_ATTACK_MITIGATION) wherever the
 # firmware has the variable, as Debian's OVMF does (#4906). An orderly shutdown clears it, as the
 # image's agentos-mor.service does (HW-8, #4794): only bit 0, keeping the attributes and other bits.
+# Every way out of the guest (reboot, poweroff, end of input) clears it first: tests/test_hostcheck.py
+# pins those lines and runs this function on a file, since the stub sets the bit again at each boot.
+MOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
 mor_clear() {
-	v=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+	v=$1
 	[ -e "$v" ] || return 0
 	set -- $(od -An -tu1 -v "$v")
 	[ $# = 5 ] || { echo "HOSTCHECK-MOR-FAILED size"; return 0; }
@@ -66,7 +73,7 @@ mor_clear() {
 }
 while :; do
 	echo HOSTCHECK-READY
-	read -r cmd arg || { sync; mor_clear; exec poweroff -f; }
+	read -r cmd arg || { sync; mor_clear "$MOR"; exec poweroff -f; }
 	case $cmd in
 	task)
 		dd if=/dev/vda of=/dev/null bs=512 count=34 2>/dev/null
@@ -75,8 +82,10 @@ while :; do
 		fi
 		sync
 		echo HOSTCHECK-DONE ;;
-	reboot) sync; mor_clear; reboot -f ;;
-	poweroff) sync; mor_clear; poweroff -f ;;
+	alive) echo "HOSTCHECK-ALIVE $arg" ;;
+	reboot) sync; mor_clear "$MOR"; reboot -f ;;
+	poweroff) sync; mor_clear "$MOR"; poweroff -f ;;
+	halt) sync; halt -f ;;
 	esac
 done
 EOF

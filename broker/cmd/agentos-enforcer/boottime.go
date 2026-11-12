@@ -1,15 +1,19 @@
 package main
 
 import (
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// lastBoot is the last CLOCK_BOOTTIME reading, which bootTime returns if
-// a read ever fails, so the rate clock never steps back.
-var lastBoot atomic.Int64
+// lastBoot is the largest CLOCK_BOOTTIME reading bootTime has returned,
+// which it returns again if a read fails or comes back smaller, so the
+// rate clock never steps back. bootMu guards it.
+var (
+	bootMu   sync.Mutex
+	lastBoot time.Duration
+)
 
 // bootTime is the channel's rate clock (channel.Config.Elapsed, #4507):
 // Linux's CLOCK_BOOTTIME, which never steps back and keeps counting while
@@ -17,17 +21,11 @@ var lastBoot atomic.Int64
 // kernel's check, on the core's clock, saw pass (chancheck KRN-chan-4).
 func bootTime() time.Duration {
 	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-		return time.Duration(lastBoot.Load())
+	err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts)
+	bootMu.Lock()
+	defer bootMu.Unlock()
+	if err == nil {
+		lastBoot = max(lastBoot, time.Duration(ts.Nano()))
 	}
-	n := ts.Nano()
-	for {
-		old := lastBoot.Load()
-		if n <= old {
-			return time.Duration(old)
-		}
-		if lastBoot.CompareAndSwap(old, n) {
-			return time.Duration(n)
-		}
-	}
+	return lastBoot
 }

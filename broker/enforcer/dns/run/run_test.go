@@ -22,7 +22,7 @@ import (
 // The test binary is the fake dnsmasq: started with the set's arguments,
 // it appends "start <file content>" to ./events (the set's directory),
 // and "stop <content>" when it is sent SIGTERM. A file holding "crash"
-// exits at once with status 1.
+// exits at once with status 1, and one holding "lasts" after 700 ms.
 func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == "--keep-in-foreground" && os.Args[2] == "--pid-file=" {
 		fakeDnsmasq(strings.TrimPrefix(os.Args[3], "--conf-file="))
@@ -69,7 +69,15 @@ func fakeDnsmasq(path string) {
 	if strings.Contains(conf, "crash") {
 		os.Exit(1)
 	}
-	<-sig
+	if strings.Contains(conf, "lasts") {
+		select {
+		case <-sig:
+		case <-time.After(700 * time.Millisecond):
+			os.Exit(1)
+		}
+	} else {
+		<-sig
+	}
 	event("stop " + conf)
 	os.Exit(0)
 }
@@ -210,6 +218,10 @@ func TestWriteFailure(t *testing.T) {
 	if slices.Contains(events(t, dir), "start_core-a") {
 		t.Fatal("started on a file that was not written")
 	}
+	// It has never run, so it is not running (#5164 R5 b).
+	if got := s.Flapping(); len(got) != 1 || got[0] != (Flap{Name: "listed-core0", Exits: 1}) {
+		t.Fatalf("an instance whose file could not be written: Flapping = %v", got)
+	}
 	os.Remove(blocker)
 	waitEvents(t, dir, "start_core-a")
 	if err := s.Apply(files("core-b", "tv-a"), func() error { return nil }); err != nil {
@@ -255,9 +267,19 @@ func TestApplyFailedLoad(t *testing.T) {
 	if err := s.Apply(files("core-b", "tv-a"), func() error { return refused }); !errors.Is(err, refused) {
 		t.Fatalf("Apply = %v, want the load's error", err)
 	}
-	got := waitEvents(t, dir, "stop_core-a")
+	waitEvents(t, dir, "stop_core-a")
+	// Apply has started the old instance again before it returns, but the
+	// instance writes its start event itself, later: wait for it (#5365).
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Count(strings.Join(events(t, dir), " "), "start_core-a") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the old core list's instance did not start again after the refused load: %v", events(t, dir))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A settle only for what must not appear.
 	time.Sleep(50 * time.Millisecond)
-	got = events(t, dir)
+	got := events(t, dir)
 	if n := strings.Count(strings.Join(got, " "), "start_core-a"); n != 2 {
 		t.Errorf("the old core list's instance started %d times, want 2 (again after the refused load): %v", n, got)
 	}
@@ -564,5 +586,134 @@ func TestLineLogCuts(t *testing.T) {
 	l.Write([]byte("w"))
 	if want := []string{"p: ", "p: after", "p: " + strings.Repeat("w", 512)}; !slices.Equal(got, want) {
 		t.Errorf("lines %q, want %q", got, want)
+	}
+}
+
+// TestFlapping (#5164 R5 b): an instance that exits on its own reads as
+// flapping, with its exits in a row, until a process of it has stayed up
+// StayUp; an exit after that starts the count again, and a new file
+// clears it. The others, which stay up, never read so.
+func TestFlapping(t *testing.T) {
+	stayUp = 400 * time.Millisecond
+	defer func() { stayUp = StayUp }()
+	s, dir := newSet(t)
+	if got := s.Flapping(); len(got) != 0 {
+		t.Fatalf("an empty set flaps: %v", got)
+	}
+	if err := s.Apply(files("core-crash", "tv-lasts"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	waitEvents(t, dir, "start_core-crash", "start_tv-lasts")
+	flap := func(name string) (int, bool) {
+		for _, f := range s.Flapping() {
+			if f.Name == name {
+				return f.Exits, true
+			}
+		}
+		return 0, false
+	}
+	// tv-lasts is up and has not exited: not flapping.
+	if n, ok := flap("listed-vlan10"); ok {
+		t.Fatalf("a running instance that never exited flaps (%d)", n)
+	}
+	// core-crash: exits in a row, counted while it never stays up.
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if n, ok := flap("listed-core0"); ok && n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a crash loop does not count its exits in a row: %v", s.Flapping())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, f := range s.Flapping() {
+		if f.Name == "people" || f.Name == "dhcp" {
+			t.Fatalf("an instance that stays up flaps: %v", s.Flapping())
+		}
+	}
+	// tv-lasts ran past StayUp before each exit: it flaps after its first
+	// exit, no longer once its next process has stayed up StayUp, and
+	// after its next exit counts 1 again, not 2.
+	deadline = time.Now().Add(8 * time.Second)
+	phase := 0 // 0: before its first exit, 1: flapping, 2: cleared, 3: flapping again
+	for phase < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance that stays up between exits stopped at phase %d: %v", phase, s.Flapping())
+		}
+		n, ok := flap("listed-vlan10")
+		if ok && n != 1 {
+			t.Fatalf("an instance that stayed up before each exit counts %d in a row, want 1", n)
+		}
+		if ok == (phase%2 == 0) {
+			phase++
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A refused load puts core-crash's file back in force, and its count
+	// with it; a new file in force clears the count at once.
+	n, _ := flap("listed-core0")
+	if err := s.Apply(files("core-b", "tv-b"), func() error { return errors.New("refused") }); err == nil {
+		t.Fatal("fixture: the load was not refused")
+	}
+	if m, ok := flap("listed-core0"); !ok || m < n {
+		t.Fatalf("a refused load restarted the count of the file it put back: %d, was %d", m, n)
+	}
+	if err := s.Apply(files("core-b", "tv-b"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Flapping(); len(got) != 0 {
+		t.Fatalf("instances on new files still flap: %v", got)
+	}
+}
+
+// TestRestartWaitStartsAgain (#5319): an instance whose process stays
+// up StayUp before each exit is started again after RestartMin each time,
+// not after a wait doubled by its earlier exits.
+func TestRestartWaitStartsAgain(t *testing.T) {
+	stayUp = 400 * time.Millisecond
+	defer func() { stayUp = StayUp }()
+	s, _, logs := newLoggedSet(t, os.Args[0])
+	if err := s.Apply(files("core-a", "tv-lasts"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	const again = "dns: listed-vlan10: starting it again in "
+	deadline := time.Now().Add(8 * time.Second)
+	for strings.Count(logs(), again) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance was not started again 3 times:\n%s", logs())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.HasPrefix(l, again) && l != again+RestartMin.String() {
+			t.Fatalf("an instance that stayed up before each exit waited %q, want %s", strings.TrimPrefix(l, again), RestartMin)
+		}
+	}
+}
+
+// TestFlappingNeverStarted (#5164 R5 b, L3 and Security on #5318): an
+// instance whose start keeps failing has never served, so Flapping names
+// it with each failed start counted, the first at once and the next at
+// its retry.
+func TestFlappingNeverStarted(t *testing.T) {
+	s, _, logs := newLoggedSet(t, "/nonexistent/dnsmasq")
+	if err := s.Apply(files("core-a", "tv-a"), func() error { return nil }); err != nil {
+		t.Fatalf("Apply = %v: a failed start read as a refused load", err)
+	}
+	want := []Flap{{"dhcp", 1}, {"listed-core0", 1}, {"listed-vlan10", 1}, {"people", 1}}
+	if got := s.Flapping(); !slices.Equal(got, want) {
+		t.Fatalf("instances that could not start: Flapping = %v, want %v", got, want)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := s.Flapping()
+		if len(got) == 4 && got[0].Exits >= 2 && got[1].Exits >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a failed retry is not counted: %v\n%s", got, logs())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

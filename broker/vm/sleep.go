@@ -105,7 +105,9 @@ type Wake struct {
 // layer (Resume). Either way the sleep checkpoint is deleted: it is
 // restored at most once. A checkpoint the owner took, or another
 // machine's, is never deleted. The label never falls (REV-5). It reports
-// how the machine woke; err is the cold resume's.
+// how the machine woke; err is the cold resume's. While a hold ctx carries
+// (WithHold) says true, it starts nothing, cold or restored, and refuses
+// with ErrHeld; a checkpoint it could have restored is kept.
 func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (Wake, error) {
 	mc, err := m.get(id)
 	if err != nil {
@@ -125,8 +127,13 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 	}
 	s, serr := m.Snapshot(snapID)
 	own := serr == nil && s.Sleep && ownSnap(mc, s)
+	keep := false // a held wake keeps the checkpoint for the wake after RESUME
 	if own {
-		defer m.dropSnapshot(mc, s.ID, "")
+		defer func() {
+			if !keep {
+				m.dropSnapshot(mc, s.ID, "")
+			}
+		}()
 	}
 	var cold string
 	switch {
@@ -143,8 +150,15 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 		h(id)
 	}
 	if cold == "" {
-		if err := m.rollbackTo(ctx, mc, s); err == nil {
+		err := m.rollbackTo(ctx, mc, s)
+		if err == nil {
 			return Wake{Restored: true}, nil
+		}
+		// A hold ctx carries (WithHold) refused the restore: the machine
+		// stays asleep, not started cold (STOP-queued-start-fu).
+		if errors.Is(err, ErrHeld) {
+			keep = true
+			return Wake{}, err
 		}
 		// The restore failed: whatever it left, the machine starts cold.
 		cold = ColdFailed
@@ -154,6 +168,10 @@ func (m *Manager) ResumeFromCheckpoint(ctx context.Context, id, snapID string) (
 		if running {
 			return Wake{Cold: cold}, nil
 		}
+	}
+	// A cold start is a start too: a hold refuses it.
+	if heldBy(ctx) {
+		return Wake{}, ErrHeld
 	}
 	// The cold start gets a context of its own, bounded by ColdResumeFor:
 	// a restore that ran out the caller's must still leave the machine

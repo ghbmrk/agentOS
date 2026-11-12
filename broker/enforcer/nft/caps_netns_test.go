@@ -198,6 +198,7 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 		traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"b.example"}, Cap: 100, Count: 101})
 
 	// The edge: six 50-byte datagrams are its 300; the seventh is past.
+	// The edge's segment is IPv4 only (ENF-e-6).
 	for range 6 {
 		r.send("edge", nft.NetOther, 22, true, "edge within its cap")
 	}
@@ -205,7 +206,14 @@ func TestCapDropsPastTheCapToTheByte(t *testing.T) {
 	if slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge }) {
 		t.Errorf("edge at its cap tripped: %+v", over)
 	}
+	cuts := r.h.Counter(nft.EdgeCut)
 	r.send("edge", nft.NetOther, 22, false, "edge past its cap")
+	// The byte the quota stopped cut the edge in the kernel (#5282): its
+	// next packet ends in the cut chain.
+	r.send("edge", nft.NetOther, 1, false, "edge cut by the kernel")
+	if r.h.Counter(nft.EdgeCut) == cuts {
+		t.Error("past its cap, the edge's next packet was not dropped by the kernel's cut")
+	}
 	over = r.read()
 	if !slices.ContainsFunc(over, func(o traffic.Overrun) bool { return o.Box == traffic.BoxEdge && o.Cap == 300 && o.Count == 350 }) {
 		t.Errorf("edge past its cap: overruns %+v, want the edge at 350 of 300", over)
@@ -576,16 +584,34 @@ func TestCapCountsEverySegmentHeader(t *testing.T) {
 			c.SetDeadline(time.Now().Add(5 * time.Second))
 			io.Copy(io.Discard, c)
 		})
+		// sentAndOther reads the box's IP bytes sent and its other counter
+		// as one: a packet elsewhere (an MLD report, at a time the kernel
+		// picks) sent between two lone reads counts in one and not the
+		// other, which once read as 76 bytes the port never counted. So
+		// other is read on both sides of TxIP until it holds still.
+		sentAndOther := func() (tx, o uint64) {
+			for range 20 {
+				a := other()
+				tx = r.h.TxIP(tc.box)
+				if o = other(); o == a {
+					return tx, o
+				}
+			}
+			t.Fatalf("%s: its other counter never held still across a reading", tc.box)
+			return 0, 0
+		}
 		send := func() (counted, sent uint64) {
 			r.read()
-			before, tx, o := tc.count(r.c.Counts()), r.h.TxIP(tc.box), other()
+			before := tc.count(r.c.Counts())
+			tx, o := sentAndOther()
 			r.h.Dial(tc.box, tc.to, port, 5*time.Second, func(c net.Conn) int {
 				n, _ := c.Write(make([]byte, 8<<20))
 				return n
 			})
 			time.Sleep(100 * time.Millisecond) // the last segments cross the enforcer
-			rest := other() - o
-			sent = r.h.TxIP(tc.box) - tx - rest
+			tx2, o2 := sentAndOther()
+			rest := o2 - o
+			sent = tx2 - tx - rest
 			t.Logf("%s sent %d IP bytes elsewhere in the window", tc.box, rest)
 			r.read()
 			return tc.count(r.c.Counts()) - before, sent

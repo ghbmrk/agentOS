@@ -112,6 +112,7 @@ TIER_A_BROKER = {
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check
     "call",                       # the owner's call: transcripts, keys, and the CH-21 check before speech (VOICE-ro-a, #4934)
+    "speech",                     # parses the untrusted speech process's transcripts and audio for the owner's call (VOICE-ro-b, #5171)
     "modem", "modemlink", "owner",
     "photo",                      # owner photos; also (b): runs their decoder in a one-shot sandbox
     "question",                   # the owner's texted answers

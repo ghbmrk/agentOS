@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 )
 
 // The enforcer's state files, each under the state directory (ASSUMPTIONS
@@ -16,6 +18,7 @@ const (
 	fileEnrol      = "enrol.json"    // enrol.Book: passkey, codes' verifiers, phase
 	filePolicy     = "policy.json"   // policy.Engine: signed versions, steps, pending
 	fileCut        = "cut.json"      // the core trip (cut.go)
+	fileEdgeCut    = "edgecut.json"  // the edge's cut (edgecut.go)
 	fileCert       = "page-tls.json" // the page's root and leaf (page.Cert)
 	fileChannelKey = "channel.key"   // the enforcer's Ed25519 channel key
 	fileCoreKey    = "core.pub"      // the kernel's channel sub-key, pinned at set-up
@@ -23,6 +26,24 @@ const (
 	fileAlerts     = "alerts.jsonl"  // alert.Alerts journal
 	fileHeads      = "heads.jsonl"   // heads.Store journal
 )
+
+// provisionState provisions a fresh state directory at first boot: enrolment
+// with the case code (enrol.Provision refuses a store that holds
+// anything), then the core's and the edge's cuts, written uncut. A cut
+// record is never removed after this, so one missing at start is a cut
+// (openCut, openEdgeCut); a first boot that stops between the two writes
+// starts both cut, and the owner resumes them on the page.
+func provisionState(dir, caseCode string) error {
+	if err := enrol.Provision(fileStore{path: filepath.Join(dir, fileEnrol)}, caseCode, nil); err != nil {
+		return err
+	}
+	for _, name := range []string{fileCut, fileEdgeCut} {
+		if err := (fileStore{path: filepath.Join(dir, name)}).Save([]byte("{}")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 var errStateDir = errors.New("state directory must be a directory owned by this user with no group or other access")
 
@@ -73,6 +94,13 @@ func (f fileStore) Save(b []byte) error {
 	return f.after(f.path)
 }
 
+// syncFile is every fsync the state files take: the temporary file and
+// its directory in Save, the journal's file in Append and Truncate. The
+// store tests replace it to see each one taken and to fail it.
+var syncFile = (*os.File).Sync
+
+// writeAtomic writes b beside path and renames it over path. CreateTemp
+// makes the file mode 0600, so no other user reads it meanwhile.
 func writeAtomic(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
@@ -81,15 +109,11 @@ func writeAtomic(path string, b []byte) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name) // no-op after the rename
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -108,7 +132,7 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer d.Close()
-	return d.Sync()
+	return syncFile(d)
 }
 
 // fileJournal is an alert.Journal and a heads.Journal: one append-only
@@ -133,7 +157,7 @@ func (j fileJournal) Append(b []byte) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -149,7 +173,7 @@ func (j fileJournal) Truncate(n int) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncFile(f); err != nil {
 		f.Close()
 		return err
 	}

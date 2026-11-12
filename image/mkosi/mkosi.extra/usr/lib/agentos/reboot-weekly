@@ -22,6 +22,14 @@ due() { [ -z "$(find "$D/last.json" -mtime -27 2>/dev/null)" ]; }
 image=
 if due; then
 	start=$(date +%s)
+	# unrecorded stands until a drill's record is written, so the next healthy boot reports a drill whose
+	# record never was (a full or failing disk, a power cut during the check) as missed (#5455). A record
+	# still standing from an earlier drill is superseded, so it cannot stand in for this one.
+	mkdir -p -m 0700 "$D"
+	rm -f "$D/pending" "$D/pending.new"
+	# true, not ":": a redirection error on a special builtin exits the shell, which would skip the reboot.
+	true 2>/dev/null >"$D/unrecorded" ||
+		echo "agentos-reboot: FAIL drill start record not written: likely /var is full or failing. If the drill's record is lost too, no boot reports this drill"
 	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
 	st=$(veritysetup status usr 2>/dev/null)
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')
@@ -39,19 +47,38 @@ if due; then
 		fi
 	fi
 	secs=$(($(date +%s) - start))
-	mkdir -p -m 0700 "$D"
 	echo "agentos-reboot: drill image=$image in ${secs}s; the reboot is the clean start"
 fi
 # The drill's record, rewritten just before each reboot is asked for, so a wait on an inhibitor is not
-# counted in the time to a clean core.
+# counted in the time to a clean core. A record that cannot be written is said so, and the reboot goes
+# ahead: the week's bound outranks the report, and the next weekly reboot drills again (#5455). It is
+# said once, not on every 5-minute retry, and once more just before the reboot (#5466). A record
+# written on an earlier try and not on this one is removed: its reboot_at would count the wait since,
+# so the next healthy boot reports the drill missed instead. That is promised only when unrecorded was
+# written: with it lost too, no boot reports this drill (#5513).
+failed= said= now= missed=
+fail() { echo "agentos-reboot: FAIL drill record not written (image=$image): likely /var is full or failing. The reboot goes ahead${missed:+; the next boot reports the drill missed}"; }
 stamp() {
+	now=
 	[ -n "$image" ] || return 0
-	printf 'image=%s image_seconds=%s reboot_at=%s\n' "$image" "$secs" "$(date +%s)" >"$D/pending.new" &&
-		mv -f "$D/pending.new" "$D/pending"
+	if { printf 'image=%s image_seconds=%s reboot_at=%s\n' "$image" "$secs" "$(date +%s)" >"$D/pending.new"; } 2>/dev/null &&
+		mv -fT "$D/pending.new" "$D/pending" 2>/dev/null; then
+		rm -f "$D/unrecorded"
+		failed=
+		return 0
+	fi
+	rm -f "$D/pending" "$D/pending.new" 2>/dev/null
+	missed=
+	true 2>/dev/null >"$D/unrecorded" && missed=1
+	failed=1
+	[ -n "$said" ] || { said=1 now=1; fail; }
 }
+# Just before the reboot: a failure said on an earlier try is said again.
+last() { [ -z "$failed" ] || [ -n "$now" ] || fail; }
 while [ "$(up)" -lt "$WEEK" ]; do
 	stamp
 	if systemctl reboot --check-inhibitors=yes; then
+		last
 		echo "agentos-reboot: rebooting"
 		exit 0
 	fi
@@ -60,4 +87,5 @@ while [ "$(up)" -lt "$WEEK" ]; do
 done
 echo "agentos-reboot: up a week; rebooting through any inhibitor"
 stamp
+last
 exec systemctl reboot --check-inhibitors=no

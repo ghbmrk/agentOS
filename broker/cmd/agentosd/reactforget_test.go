@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,16 +21,28 @@ func TestADeletionForgetsTheOwnerChannelsRecentReplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.sent()
-	say := func(s string) string { return strings.Join(r.ch.Handle(context.Background(), ownerNum, s), " | ") }
 	quote := "Liked “The Acme contract renews…”"
-	if got := say(quote); !strings.Contains(got, "reaction is held") {
-		t.Fatalf("locked reaction: %q", got)
+	// A locked reaction waits for the page (CH-14, D-311); a deletion
+	// drops a held one, since it may quote a forgotten text.
+	held := heldOn(t, r.ch, ownerNum)
+	if n := held(quote); n != 1 {
+		t.Fatalf("locked reaction: %d held", n)
 	}
 	if _, err := ev.kept.forget(); err != nil {
 		t.Fatal(err)
 	}
-	if got := say(quote); strings.Contains(got, "both were dropped") || !strings.Contains(got, "reaction is held") {
-		t.Fatalf("a reaction after the deletion: %q, want it held alone (the earlier one dropped)", got)
+	if n := held(quote); n != 1 {
+		t.Fatalf("a reaction after the deletion: %d held, want it alone (the earlier one dropped)", n)
+	}
+}
+
+// heldOn returns a sender that texts s from the owner and returns how many
+// messages then wait for the page.
+func heldOn(t *testing.T, ch *ownerch.Channel, from string) func(string) int {
+	return func(s string) int {
+		ch.Handle(context.Background(), from, s)
+		msgs, _, _ := ch.LocalHeld()
+		return len(msgs)
 	}
 }
 
@@ -43,7 +54,7 @@ func TestAReplyInFlightAcrossADeletionIsForgottenOnSettle(t *testing.T) {
 	r := pacedOwner(t, ownerch.Pacing{}, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
 	ev := newEvRig(t).ev
 	ev.wireOwner(func() *ownerch.Channel { return r.ch })
-	say := func(s string) string { return strings.Join(r.ch.Handle(context.Background(), ownerNum, s), " | ") }
+	held := heldOn(t, r.ch, ownerNum)
 	quote := "Liked “The Acme contract renews…”"
 
 	ev.kept.fmu.Lock()
@@ -56,22 +67,19 @@ func TestAReplyInFlightAcrossADeletionIsForgottenOnSettle(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.sent()
-	if got := say(quote); !strings.Contains(got, "reaction is held") {
-		t.Fatalf("locked reaction: %q", got)
+	if n := held(quote); n != 1 {
+		t.Fatalf("locked reaction: %d held", n)
 	}
 	ev.kept.settle(gen + 1)
-	if got := say(quote); !strings.Contains(got, "both were dropped") {
-		t.Fatalf("settle with no deletion in between: %q, want the held reaction kept", got)
+	if n := held(quote); n != 2 {
+		t.Fatalf("settle with no deletion in between: %d held, want the held reaction kept", n)
 	}
 	if err := r.ch.Converse("The Acme contract renews on the third of March at forty dollars a seat."); err != nil {
 		t.Fatal(err)
 	}
 	r.sent()
-	if got := say(quote); !strings.Contains(got, "reaction is held") {
-		t.Fatalf("locked reaction: %q", got)
-	}
 	ev.kept.settle(gen)
-	if got := say(quote); strings.Contains(got, "both were dropped") || !strings.Contains(got, "reaction is held") {
-		t.Fatalf("a reaction after settle: %q, want it held alone (the earlier one dropped)", got)
+	if n := held(quote); n != 1 {
+		t.Fatalf("a reaction after settle: %d held, want it alone (the earlier ones dropped)", n)
 	}
 }

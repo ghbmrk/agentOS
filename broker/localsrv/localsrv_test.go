@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,9 @@ const good = "123456"
 
 type fakeOwner struct {
 	mu       sync.Mutex
+	held     []owner.WaitingMsg
+	ran      []string
+	runErr   error
 	now      *time.Time
 	locks    uint64
 	stopped  bool
@@ -83,7 +87,12 @@ func (f *fakeOwner) LocalResume(locks uint64, _ int64) (string, error) {
 func (f *fakeOwner) LocalRequests() []owner.LocalRequest {
 	return []owner.LocalRequest{{ID: "K7", Sum: "s1"}}
 }
-func (f *fakeOwner) LocalWaiting() string        { return "1 waiting for you on my Wi-Fi page." }
+func (f *fakeOwner) LocalWaiting() string                      { return "1 waiting for you on my Wi-Fi page." }
+func (f *fakeOwner) LocalHeld() ([]owner.WaitingMsg, int, int) { return f.held, 0, 0 }
+func (f *fakeOwner) LocalRunHeld(shown, run []string) (int, error) {
+	f.ran = append(f.ran, run...)
+	return len(run), f.runErr
+}
 func (f *fakeOwner) LocalStatusLines() string    { return "Running. 0 may have happened." }
 func (f *fakeOwner) UnlockPeriod() time.Duration { return 7 * 24 * time.Hour }
 func (f *fakeOwner) LocalAnswer(id, sum string, approve bool, code string) (string, error) {
@@ -219,6 +228,8 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpResume:          localapi.Resume{Token: tok},
 		localapi.OpRequests:        localapi.Auth{Token: tok},
 		localapi.OpWaiting:         localapi.Auth{Token: tok},
+		localapi.OpInbox:           localapi.Auth{Token: tok},
+		localapi.OpRunInbox:        localapi.RunInbox{Token: tok, Shown: []string{"1"}},
 		localapi.OpAnswer:          localapi.Answer{Token: tok, ID: "K7", Sum: "s1", Approve: false},
 		localapi.OpFollowRoot:      localapi.FollowRoot{Token: tok, Root: []byte("root")},
 		localapi.OpFollow:          localapi.Follow{Token: tok, Name: "Acme", Digest: digest},
@@ -587,6 +598,10 @@ type planted struct {
 
 func (p *planted) LocalStatusLines() string { return "Running. 1 awaiting a decision: " + p.canary }
 func (p *planted) LocalWaiting() string     { return "1 waiting: " + p.canary }
+func (p *planted) LocalHeld() ([]owner.WaitingMsg, int, int) {
+	return []owner.WaitingMsg{{ID: "1", Text: p.canary}}, 0, 0
+}
+func (p *planted) LocalRunHeld(_, _ []string) (int, error) { return 0, nil }
 func (p *planted) LocalRequests() []owner.LocalRequest {
 	return []owner.LocalRequest{{ID: "K7", Sum: "s1", Items: []owner.Item{{Object: p.canary, Recipient: "recipient@example.com"}}}}
 }
@@ -787,5 +802,63 @@ func TestAPausedGrantIsAskedToResumeFromASession(t *testing.T) {
 		if _, err := r.call(op, args); code(err) != localapi.ErrFailed {
 			t.Errorf("%s with no hook: %v", op, err)
 		}
+	}
+}
+
+// REQ: CH-14
+// The page's inbox: a signed-in client lists the held messages in full and
+// runs the marked ones; malformed lists are refused before the channel.
+func TestTheInboxRunsOnlyWellFormedTaps(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	r.own.mu.Lock()
+	r.own.held = []owner.WaitingMsg{{ID: "1", Text: "book a table"}}
+	r.own.mu.Unlock()
+	out, err := r.call(localapi.OpInbox, localapi.Auth{Token: tok})
+	if in, ok := out.(localapi.Inbox); err != nil || !ok || len(in.Msgs) != 1 || in.Msgs[0].Text != "book a table" {
+		t.Fatalf("inbox %+v, %v", out, err)
+	}
+	for _, bad := range []localapi.RunInbox{
+		{Token: tok},
+		{Token: tok, Shown: []string{""}},
+		{Token: tok, Shown: []string{"1"}, Run: []string{"1", "2"}},
+		{Token: tok, Shown: []string{strings.Repeat("9", localapi.MaxID+1)}},
+	} {
+		if _, err := r.call(localapi.OpRunInbox, bad); code(err) != localapi.ErrBadArgs {
+			t.Fatalf("%+v: %v", bad, err)
+		}
+	}
+	out, err = r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: []string{"1"}, Run: []string{"1"}})
+	if a, ok := out.(localapi.Answered); err != nil || !ok || a.Text != "Sent 1 message." {
+		t.Fatalf("run %+v, %v", out, err)
+	}
+	r.own.runErr = owner.ErrHeldChanged
+	out, _ = r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: []string{"1"}})
+	if a := out.(localapi.Answered); a.Refusal != localapi.RefusedChanged {
+		t.Fatalf("changed %+v", a)
+	}
+}
+
+// REQ: CH-14. The page's run takes a full page and the longest ID, says
+// how many ran, and answers a run without a session as unauthorized
+// (mutgate on #5194).
+func TestTheInboxRunTakesTheBoundsAndNamesTheCount(t *testing.T) {
+	r := newRig(t)
+	tok := r.signIn()
+	full := make([]string, localapi.MaxInbox)
+	for i := range full {
+		full[i] = strconv.Itoa(i + 1)
+	}
+	full[0] = strings.Repeat("9", localapi.MaxID)
+	out, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: full, Run: full})
+	if a, ok := out.(localapi.Answered); err != nil || !ok || a.Text != "Sent 64 messages." {
+		t.Fatalf("full page %+v, %v", out, err)
+	}
+	if _, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: append(full, "x")}); code(err) != localapi.ErrBadArgs {
+		t.Fatalf("over a page: %v", err)
+	}
+	r.own.runErr = owner.ErrLocked
+	if _, err := r.call(localapi.OpRunInbox, localapi.RunInbox{Token: tok, Shown: []string{"1"}}); code(err) != localapi.ErrUnauthorized {
+		t.Fatalf("locked: %v", err)
 	}
 }

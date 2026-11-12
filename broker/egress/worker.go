@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/header"
 	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -97,12 +98,10 @@ type PlanRoute struct {
 	RefusedLogin []string
 	// RequestHeaders a run worker may send; SignInHeaders a sign-in
 	// worker. Authorization is never on either: the route writes it.
-	RequestHeaders []string
-	SignInHeaders  []string
-	// ResponseHeaders and ResponsePrefixes are returned to the worker,
-	// redacted.
-	ResponseHeaders  []string
-	ResponsePrefixes []string
+	RequestHeaders, SignInHeaders []string
+	// ResponseHeaders are returned to the worker, redacted, each by its
+	// exact name.
+	ResponseHeaders []string
 }
 
 // DeclaredTool is one tool a plan route allows. Namespace is the namespace
@@ -185,9 +184,8 @@ func Codex() PlanRoute {
 			"Accept", "Content-Type", "User-Agent", "Openai-Beta", "Originator", "Version",
 			"Session_id", "Conversation_id", "Chatgpt-Account-Id", "X-Openai-Internal-Codex-Responses-Lite",
 		},
-		SignInHeaders:    []string{"Accept", "Content-Type", "User-Agent", "Originator"},
-		ResponseHeaders:  []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model"},
-		ResponsePrefixes: []string{"X-Codex-"},
+		SignInHeaders:   []string{"Accept", "Content-Type", "User-Agent", "Originator"},
+		ResponseHeaders: []string{"Content-Type", "Retry-After", "X-Request-Id", "Openai-Model", "X-Codex-Primary-Used-Percent", "X-Codex-Primary-Window-Minutes", "X-Codex-Primary-Reset-At", "X-Codex-Secondary-Used-Percent", "X-Codex-Secondary-Window-Minutes", "X-Codex-Secondary-Reset-At", "X-Codex-Credits-Has-Credits", "X-Codex-Credits-Unlimited", "X-Codex-Credits-Balance", "X-Codex-Rate-Limit-Reached-Type"},
 	}
 }
 
@@ -370,38 +368,17 @@ func (r PlanRoute) validate() error {
 			}
 		}
 	}
-	for _, h := range append(append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...), r.ResponseHeaders...) {
-		if planForbiddenHeader(http.CanonicalHeaderKey(h)) {
-			return fmt.Errorf("plan route %s: may not forward header %s", r.Provider, h)
+	for _, h := range append(append([]string(nil), r.RequestHeaders...), r.SignInHeaders...) {
+		if err := header.Request(h); err != nil {
+			return fmt.Errorf("plan route %s: %w", r.Provider, err)
 		}
 	}
-	for _, p := range r.ResponsePrefixes {
-		if p == "" || planForbiddenHeader(http.CanonicalHeaderKey(p)) {
-			return fmt.Errorf("plan route %s: response prefix %q", r.Provider, p)
+	for _, h := range r.ResponseHeaders {
+		if err := header.Answer(h); err != nil {
+			return fmt.Errorf("plan route %s: answer %w", r.Provider, err)
 		}
 	}
 	return nil
-}
-
-// planForbiddenHeader names headers no plan route forwards: credentials,
-// cookies, encodings the redactor cannot read, hop-by-hop and framing
-// headers, redirects, and the broker's own signals. It is narrower than
-// forbiddenHeader because the CLI's own session_id names a conversation,
-// not a login.
-func planForbiddenHeader(c string) bool {
-	switch c {
-	case "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "Location",
-		"Accept-Encoding", "Content-Encoding", "Transfer-Encoding", "Content-Length",
-		"Host", "Connection", "Upgrade", "Te", "Trailer", "Keep-Alive":
-		return true
-	}
-	l := strings.ToLower(c)
-	for _, w := range []string{"agentos", "auth", "token", "key", "cookie", "secret", "password"} {
-		if strings.Contains(l, w) {
-			return true
-		}
-	}
-	return false
 }
 
 // SignInLink checks the verification link and code the CLI printed before
@@ -645,7 +622,7 @@ func (w *workerRoute) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	red := vault.NewRedactor(injected)
-	for _, h := range w.responseHeaders(resp.Header) {
+	for _, h := range w.c.Route.ResponseHeaders {
 		for _, v := range resp.Header.Values(h) {
 			rw.Header().Add(h, string(red.Redact([]byte(v))))
 		}
@@ -1182,25 +1159,6 @@ func headerHasToken(h http.Header, name, token string) bool {
 		}
 	}
 	return false
-}
-
-func (w *workerRoute) responseHeaders(h http.Header) []string {
-	var names []string
-	for _, n := range w.c.Route.ResponseHeaders {
-		names = append(names, http.CanonicalHeaderKey(n))
-	}
-	for k := range h {
-		if planForbiddenHeader(k) {
-			continue
-		}
-		for _, p := range w.c.Route.ResponsePrefixes {
-			if strings.HasPrefix(k, http.CanonicalHeaderKey(p)) {
-				names = append(names, k)
-				break
-			}
-		}
-	}
-	return names
 }
 
 // readQuota turns the provider's quota headers into one reading per pool.

@@ -9,6 +9,13 @@
 set -u
 R=${AGENTOS_HEALTH_ROOT:-}
 D=$R/var/lib/agentos/drill
+# A drill whose record was never written (reboot-weekly leaves unrecorded until it is): FAIL, and no
+# last.json, so the next weekly reboot drills again (#5455).
+if [ ! -e "$D/pending" ] && [ -e "$D/unrecorded" ]; then
+	rm -f "$D/unrecorded"
+	echo "agentos-drill: FAIL missed: the drill's record was not written before its reboot (likely a full or failing disk under /var, or a power cut during the check); the next weekly reboot drills again"
+	exit 1
+fi
 p=$(cat "$D/pending" 2>/dev/null) || p=
 # One number or word per key, from reboot-weekly's one line; anything else reads as missing.
 get() { printf '%s\n' "$p" | tr ' ' '\n' | sed -n "s/^$1=\([a-z0-9]*\)\$/\1/p" | head -n 1; }
@@ -27,7 +34,7 @@ printf '{"at":%s,"result":"%s","image":"%s","image_seconds":%s,"restart_seconds"
 	"$now" "$(echo "$result" | tr A-Z a-z)" "${image:-none}" "${secs:-null}" "${restart:-null}" "${clean:-null}" >"$D/last.json.new" &&
 	mv -fT "$D/last.json.new" "$D/last.json" && written=yes
 # A record that could not be written (a full disk) fails the drill; pending stays for the next boot.
-[ "$written" = yes ] && rm -f "$D/pending" || result=FAIL
+[ "$written" = yes ] && rm -f "$D/pending" "$D/unrecorded" || result=FAIL
 # One line, one write (image/ASSUMPTIONS.md I24).
 echo "agentos-drill: $result image=${image:-none} clean_core_seconds=${clean:-none} image_seconds=${secs:-none} restart_seconds=${restart:-none} backup=none log=none (no backup: this drive is the only copy)"
 [ "$result" = pass ]

@@ -89,11 +89,11 @@ allow broker/vm/vm.go removeAll os.RemoveAll a retired machine directory in root
 allow broker/vm/vm.go removeAll os.Remove unlink: a snapshot's meta.json, at the top of its root-held directory, which only the broker writes
 allow broker/vm/vm.go publishSnap os.Remove the snapshot's meta.json, at the top of its root-held directory
 allow broker/vm/vm.go publishSnap os.RemoveAll the root-held snapshot directory whose publish failed
+allow broker/vm/prune.go Manager.Prune os.Stat the modification time of an unread snapshot directory in root-held snapshots/; read only, and any failure but absence keeps the snapshot
 allow broker/vm/vm.go readJSON os.ReadFile a machine's or snapshot's meta.json, at the top of its root-held directory, which only the broker writes
 allow broker/vm/vm.go Manager.load os.ReadDir lists root-held snapshots/ and machines/ in StateDir, made 0700 inside root-held /var/lib/agentos
 allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory, root-held
-allow broker/vm/forget.go Manager.removeSnapshot os.Remove the snapshot's meta.json, at the top of its root-held directory
-allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the root-held snapshot directory
+allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the snapshot's meta.json, at the top of its root-held directory, and the root-held snapshot directory
 allow broker/vm/prune.go Manager.Prune os.RemoveAll snapshot directories in root-held snapshots/
 allow broker/vm/sleep.go treeHash os.Open a file WalkDir found (it follows no link) and d.Info, an lstat, showed regular, in a root-held snapshot no guest runs on
 allow broker/vm/gvisor/gvisor.go Runtime.launch os.MkdirAll r.StateDir, runsc's --root: agentosd's machines/runsc, root-held
@@ -207,7 +207,8 @@ allow broker/clerk/seal/seal.go syncDir os.Open the store's directory, root's 07
 allow broker/cmd/agentosd/cgroot.go delegatedRoot os.ReadFile /proc/self/cgroup (liveCgroups.ProcSelf), served by the kernel; /proc/self is procfs's own link and no uid plants one in procfs
 allow broker/cmd/agentosd/cgroot.go ioWeightNote os.Stat io.weight of the broker's group in agentosd's delegated cgroup2 group, where no uid can make a link
 allow broker/cmd/agentosd/cgroot.go ioWeightNote os.ReadFile io.cost.qos in the cgroup2 root, /sys/fs/cgroup, where no uid can make a link
-allow broker/cmd/agentosd/main.go openPool os.MkdirAll the broker's group in agentosd's delegated cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cmd/agentosd/main.go removeBrokerDir os.Remove rmdir(2) of the broker's group in agentosd's delegated cgroup2 group; rmdir follows no final link and cgroup2 holds none
+allow broker/cmd/agentosd/main.go newBrokerGroup os.Mkdir the broker's group in agentosd's delegated cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
 allow broker/cmd/agentosd/infer.go inferenceLeaf os.ReadFile memory.max of the inference leaf beside the machine pool, in agentosd's delegated cgroup2 group, where no uid can make a link
 allow broker/cmd/agentosd/main.go main os.ReadFile /proc/meminfo, served by the kernel; no uid plants a link in procfs
 allow broker/cmd/agentosd/lostcard.go bootedAt os.ReadFile /proc/uptime, served by the kernel; no uid plants a link in procfs

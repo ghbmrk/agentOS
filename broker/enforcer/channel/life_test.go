@@ -1553,3 +1553,37 @@ func TestFlushDuringTrip(t *testing.T) {
 	b.conn.Close()
 	waitDone(t, b, "the connection closed")
 }
+
+// TestConnectedPastPausedBucket (NET-2 Texts and calls; #4903): a cut
+// core that reconnects past KindPaused's bucket, so its hello's line is
+// dropped, still has every accepted hello told to Config.Connected, which
+// the daemon's alert re-offer hangs on; a refused hello is not told.
+// Catches the re-offer riding on the hello's log line.
+func TestConnectedPastPausedBucket(t *testing.T) {
+	told := make(chan struct{}, 64)
+	r := newRig(t, func(c *Config) { c.Connected = func() { told <- struct{}{} } })
+	r.cut.set(Tripped)
+	dials := DefaultLimit(KindPaused).Burst + 3
+	n := len(r.events())
+	for i := range dials {
+		cl := r.dial()
+		waitFor(t, told, fmt.Sprintf("hello %d told to Connected", i+1))
+		cl.conn.Close()
+		waitDone(t, cl, "the connection closed")
+	}
+	var hellos int
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindHello && e.Reason == "core connected" {
+			hellos++
+		}
+	}
+	if hellos >= dials {
+		t.Fatalf("%d hello lines for %d reconnects of a cut core: the bucket dropped none", hellos, dials)
+	}
+	failHello(t, r)
+	select {
+	case <-told:
+		t.Fatal("a refused hello was told to Connected")
+	case <-time.After(50 * time.Millisecond):
+	}
+}

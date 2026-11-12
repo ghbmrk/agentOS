@@ -101,7 +101,12 @@ const (
 // strongOpts says what a successful strong code does besides being spent.
 type strongOpts struct {
 	// unlock extends the session unlock to now+unlock (0: no change).
+	// Only the page's sign-in sets it: no code by text opens a session
+	// (CH-14, D-311).
 	unlock time.Duration
+	// clear lifts the low-tier lock and challenge mode (O4), as unlock
+	// does too.
+	clear bool
 	// count records a failure as a wrong code.
 	count bool
 	// silent is an O5 check of a code in chat: the vault process bounds
@@ -209,6 +214,9 @@ func (c *codes) checkStrong(got string, now time.Time, o strongOpts) (res strong
 				if t := now.Add(o.unlock); t.After(s.UnlockedUntil) {
 					s.UnlockedUntil = t
 				}
+				s.WaitingTold = false
+			}
+			if o.unlock > 0 || o.clear {
 				s.LowLocked = false
 				s.Challenged = false
 				s.ClearedAt = now

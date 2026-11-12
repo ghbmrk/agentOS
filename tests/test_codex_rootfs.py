@@ -75,8 +75,9 @@ class RootfsScriptTest(unittest.TestCase):
         # idle command and the CLI runs beside it by exec (#1721): the image must ship it.
         idle = json.loads((CODEX / "launch.json").read_text())["idle"]
         self.assertEqual(idle, ["/bin/sleep", "infinity"])
-        loop = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("for b in /bin/sh "))
-        self.assertIn(idle[0], loop.removesuffix("; do").split()[3:])
+        # The guest-userland.sh call's path line (#5570): every word on it is a guest path.
+        tools = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("\t/bin/sh "))
+        self.assertIn(idle[0], tools.removesuffix(" \\").split())
 
     # REQ: CRED-5, A14
     def test_wrong_tarball_is_refused_before_anything_is_installed(self):

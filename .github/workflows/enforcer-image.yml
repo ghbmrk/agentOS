@@ -31,9 +31,13 @@ env:
   GOWORK: "off"
 permissions:
   contents: read
+# CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
+# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
+# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
+# replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -50,6 +54,10 @@ jobs:
         run: python3 image/enforcer/test_finish_image.py -v
       - name: Tree check unit tests
         run: python3 image/enforcer/test_finalize.py -v
+      - name: Boot self-check unit tests
+        run: python3 image/enforcer/test_health.py -v
+      - name: WAN router-advertisement check unit tests
+        run: python3 image/enforcer/test_ci_wan.py -v
       - name: Throwaway feeds, and the key separation on them
         run: image/enforcer/throwaway_feeds.sh "$RUNNER_TEMP/feeds"
       - name: Install build and boot tools

@@ -163,3 +163,36 @@ func TestEndCommandsEndsAProviderRunInFlight(t *testing.T) {
 		t.Fatalf("provider worker is %s after its command ended", w.State)
 	}
 }
+
+// A held context starts no provider worker and runs no command in one: the
+// boot is refused before the runtime starts and keeps no admission, and a
+// command in a running provider worker is refused before it reaches the
+// runtime; a false hold changes nothing (STOP-queued-start-fu).
+func TestOP6HeldProviderWorkerBootsAndRunsNothing(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.open()
+	stop := WithHold(bg, func() bool { return true })
+	resume := WithHold(bg, func() bool { return false })
+	seed := map[string][]byte{"auth.json": []byte(placeholderAuth)}
+	if _, err := e.m.CreateProviderWorker(stop, "pw-h1", workerSpec(Private), seed); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held boot: %v, want ErrHeld", err)
+	}
+	if _, err := e.m.Get("pw-h1"); err == nil {
+		t.Fatal("held boot left a machine")
+	}
+	if _, ok := e.adm.Snapshot().Running["pw-h1"]; ok {
+		t.Fatal("held boot kept its admission")
+	}
+	if _, err := e.m.CreateProviderWorker(resume, "pw-h1", workerSpec(Private), seed); err != nil {
+		t.Fatalf("boot under a false hold: %v", err)
+	}
+	if _, err := e.m.Exec(stop, "pw-h1", Command{As: Private, Argv: []string{"write", "ran"}, Stdin: []byte("x")}, time.Second); !errors.Is(err, ErrHeld) {
+		t.Fatalf("held command: %v, want ErrHeld", err)
+	}
+	if _, err := e.m.Exec(resume, "pw-h1", Command{As: Private, Argv: []string{"cat", "ran"}}, time.Second); err != nil {
+		t.Fatalf("command under a false hold: %v", err)
+	}
+	if got := e.guestRead("pw-h1", "ran"); got != "" {
+		t.Fatalf("the held command wrote %q", got)
+	}
+}

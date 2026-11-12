@@ -128,8 +128,9 @@ func TestCH15AgentReplyInWindowIsConversation(t *testing.T) {
 		}
 		say := func(s string) string { return strings.Join(ch.Handle(context.Background(), ownerNum, s), " | ") }
 		r.set(start.Add(30 * time.Second))
-		if got := say(chatCode(r.clock())); !strings.HasPrefix(got, "Unlocked until") {
-			t.Fatalf("unlock: %q", got)
+		// Sessions open on the page, never by text (CH-14, D-311).
+		if _, _, err := ch.LocalSignIn(chatCode(r.clock())); err != nil {
+			t.Fatalf("unlock: %v", err)
 		}
 		if tc.chat != 0 {
 			if got := say(fmt.Sprintf("CHAT %d", tc.chat)); !strings.HasPrefix(got, "Chat set") {

@@ -121,6 +121,12 @@ type Config struct {
 	// Caps is the byte caps' day and the owner's fresh start of it; nil
 	// with no byte caps.
 	Caps Caps
+	// Resolver is why the enforcer's resolver is stopped, which home
+	// shows; nil shows nothing.
+	Resolver Resolver
+	// Edge is the edge's cut, which home shows and lifts after a tap; nil
+	// shows none.
+	Edge Edge
 	// Act carries out the owner's asserted actions on safety-list devices
 	// (slice s); nil serves none. ActTimeout bounds each call, and so how
 	// long a tap holds Lock: zero means action.Timeout, and more is refused.

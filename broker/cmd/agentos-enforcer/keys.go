@@ -106,10 +106,7 @@ func saveCert(store fileStore, c page.Cert) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(certFile{Root: c.Root, RootKey: rk, Leaf: c.Leaf.Certificate, LeafKey: lk})
-	if err != nil {
-		return err
-	}
+	b, _ := json.Marshal(certFile{Root: c.Root, RootKey: rk, Leaf: c.Leaf.Certificate, LeafKey: lk}) // byte slices only
 	return store.Save(b)
 }
 
@@ -118,14 +115,9 @@ func decodeCert(b []byte) (page.Cert, error) {
 	if err := json.Unmarshal(b, &f); err != nil || len(f.Leaf) == 0 {
 		return page.Cert{}, errKeyFile
 	}
-	rk, err := x509.ParsePKCS8PrivateKey(f.RootKey)
-	if err != nil {
-		return page.Cert{}, errKeyFile
-	}
-	lk, err := x509.ParsePKCS8PrivateKey(f.LeafKey)
-	if err != nil {
-		return page.Cert{}, errKeyFile
-	}
+	// A key that does not parse is nil, which is no crypto.Signer.
+	rk, _ := x509.ParsePKCS8PrivateKey(f.RootKey)
+	lk, _ := x509.ParsePKCS8PrivateKey(f.LeafKey)
 	rs, ok1 := rk.(crypto.Signer)
 	ls, ok2 := lk.(crypto.Signer)
 	if !ok1 || !ok2 {

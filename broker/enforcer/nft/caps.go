@@ -61,7 +61,21 @@ const LogCap = "enf cap "
 const (
 	edgeChain     = "cap_edge"
 	dropEdgeChain = "capd_edge"
+	// cutChain is where the forward chain sends every packet to or from
+	// the edge's segment first: empty while the edge is not cut, so each
+	// returns; Drops fills it while it is (Drop.EdgeCut), and otherwise
+	// with the rules that cut the edge once TripSet holds it.
+	cutChain = "cut_edge"
+	// overEdgeChain is where the edge's quota sends the first byte past
+	// its cap and every one after: it puts the edge in TripSet, which cuts
+	// it in the kernel at that byte, then drops the packet as a cap does.
+	overEdgeChain = "over_edge"
 )
+
+// TripSet holds the edge's interface once its quota has stopped a byte
+// (#5282): the kernel cuts the edge itself, at the byte past its cap,
+// before any reading or write of the daemon's (Drop.EdgeHold).
+const TripSet = "edge_trip"
 
 func capChain(v6 bool) string     { return "cap" + fam(v6) }
 func capDropChain(v6 bool) string { return "capd" + fam(v6) }
@@ -77,6 +91,20 @@ type Drop struct {
 	Groups    []DropGroup
 	EdgeCap   uint64
 	EdgeCount uint64
+	// EdgeCut cuts the edge's segment (#5014, KRN-12): every packet it
+	// sends or is sent through the enforcer is counted on EdgeCut and
+	// dropped, on every path, open connections included. The daemon sets
+	// it from its own record of the cut, which only the owner lifts, so
+	// every text it loads, full or on its own, carries the cut.
+	EdgeCut bool
+	// EdgeHold leaves the edge uncut by TripSet: its quota drops what
+	// passes it but does not cut the edge. The daemon sets it while the
+	// edge's quota is not its count (a counted port that merges segments,
+	// ENF-l-16, or a day unreadable, ENF-l-14), so an edge within its cap
+	// is never cut, and on the day the owner lifted a cut, which holds for
+	// the rest of that day. Otherwise the kernel cuts the edge at the first
+	// byte past its cap, whether or not a write of the cut follows.
+	EdgeHold bool
 	// Past is this kernel's quota edge (load.Loader.QuotaPast): true where
 	// "over N" matches once the count is past N, false where it matches
 	// once it reaches N. Each quota's N is the cap, or the cap plus one, so
@@ -153,10 +181,13 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 			return "", err
 		}
 	}
+	qe := edgeQuota(p.Day, p.EdgeCap)
 	w := &writer{}
 	w.line(DropHeader)
 	w.line("flush chain inet " + Table + " " + capDropChain(true))
 	w.line("flush chain inet " + Table + " " + dropEdgeChain)
+	w.line("flush chain inet " + Table + " " + cutChain)
+	w.edgeCut(l, p, qe, have)
 
 	want := map[string]bool{}
 	byDest := map[string]string{}
@@ -169,7 +200,6 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 		_, q := groupNames(p.Day, g)
 		want[q] = true
 	}
-	qe := edgeQuota(p.Day, p.EdgeCap)
 	want[qe] = true
 	// carried is what the running quotas this text deletes charged since
 	// the reading, of those pick takes.
@@ -242,7 +272,7 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 			continue
 		}
 		w.line("add chain inet " + Table + " " + c)
-		for _, r := range capped(chains[c], capOf(p, c)) {
+		for _, r := range capped(chains[c], capOf(p, c), logged(LogCap)) {
 			w.line("add rule inet " + Table + " " + c + " " + r)
 		}
 	}
@@ -252,7 +282,7 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 		}
 		w.line("add chain inet " + Table + " " + m)
 		for _, c := range shared[m] {
-			for _, r := range capped(chains[c], capOf(p, c)) {
+			for _, r := range capped(chains[c], capOf(p, c), logged(LogCap)) {
 				w.line("add rule inet " + Table + " " + m + " " + r)
 			}
 		}
@@ -276,20 +306,105 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 		}
 		w.line("add rule inet " + Table + " " + ch + " drop")
 	}
-	for _, r := range capped(qe, p.EdgeCap) {
+	for _, r := range capped(qe, p.EdgeCap, overEdgeChain) {
 		w.line("add rule inet " + Table + " " + dropEdgeChain + " " + r)
 	}
 	return w.b.String(), nil
 }
 
+// edgeCut writes the cut chain's rules: with p.EdgeCut, one counted drop
+// of every packet; otherwise, unless p.EdgeHold, a counted drop of every
+// packet once TripSet holds the edge. TripSet is emptied when the edge's
+// running quota is replaced (a new day or cap: the cut belongs to the
+// quota that stopped the byte), and holds the edge at once when p's count
+// is already past its cap, as a full load starts it with the quota past.
+func (w *writer) edgeCut(l Layout, p Drop, qe string, have map[string]bool) {
+	rule := func(match string) {
+		w.line("add rule inet " + Table + " " + cutChain + " " + match + "counter name " + strconv.Quote(EdgeCut) + " drop")
+	}
+	switch {
+	case p.EdgeCut:
+		rule("")
+	case !p.EdgeHold:
+		rule("iifname @" + TripSet + " ")
+		rule("oifname @" + TripSet + " ")
+	}
+	for name := range have {
+		if strings.HasPrefix(name, "qe_") && name != qe {
+			w.line("flush set inet " + Table + " " + TripSet)
+			break
+		}
+	}
+	if p.EdgeCount > p.EdgeCap {
+		w.line("add element inet " + Table + " " + TripSet + " { " + strconv.Quote(l.Edge) + " }")
+	}
+}
+
+// EdgeTripped reports whether the kernel cuts the edge on the running
+// table once the Drops text for p is applied to it: TripSet holds the
+// edge's interface and the text keeps the set, as it does while the
+// running edge quota is p's (edgeCut empties it when it replaces another).
+// The daemon records such a cut, so a cut in the kernel always has a card
+// and a lift even while its readings lag (#5399 item 2). p must not be
+// held (Drop.EdgeHold), or the set cuts nothing.
+func EdgeTripped(running []byte, l Layout, p Drop) (bool, error) {
+	sets, err := listed(running)
+	if err != nil {
+		return false, err
+	}
+	have, err := capObjects(running)
+	if err != nil {
+		return false, err
+	}
+	qe := edgeQuota(p.Day, p.EdgeCap)
+	for name := range have {
+		if strings.HasPrefix(name, "qe_") && name != qe {
+			return false, nil
+		}
+	}
+	found := false
+	for _, s := range sets {
+		if s.Name != TripSet {
+			continue
+		}
+		for _, raw := range s.Elem {
+			var v string
+			if json.Unmarshal(raw, &v) != nil {
+				var o struct {
+					Elem struct {
+						Val string `json:"val"`
+					} `json:"elem"`
+				}
+				if json.Unmarshal(raw, &o) != nil {
+					// TripSet holds only interface names: one that does
+					// not read, or names none, leaves the kernel's cut
+					// unknown.
+					return false, fmt.Errorf("nft: %s element %s", TripSet, raw)
+				}
+				v = o.Elem.Val
+			}
+			if v == "" {
+				// An element with no name reads as none: it must not be
+				// skipped, or the answer would depend on its place among
+				// the elements (#5445 item 3).
+				return false, fmt.Errorf("nft: %s element %s", TripSet, raw)
+			}
+			// Every element is read before the answer, so a bad one is an
+			// error wherever it sits.
+			found = found || v == l.Edge
+		}
+	}
+	return found, nil
+}
+
 // capped is the rules of a chain that charges a packet to quota q of cap:
-// past it, the packet goes to the drop; none for a cap the kernel's quota
-// cannot hold, which then only trips.
-func capped(q string, limit uint64) []string {
+// past it, the packet goes to chain past; none for a cap the kernel's
+// quota cannot hold, which then only trips.
+func capped(q string, limit uint64, past string) []string {
 	if limit > MaxDropCap {
 		return nil
 	}
-	return []string{"quota name " + strconv.Quote(q) + " goto " + logged(LogCap)}
+	return []string{"quota name " + strconv.Quote(q) + " goto " + past}
 }
 
 // sharedName is the chain that charges an address to each of the groups
@@ -522,8 +637,13 @@ func capObjects(listing []byte) (map[string]bool, error) {
 	return out, nil
 }
 
-// capDecls declares the counting sets.
+// capDecls declares the counting sets and the edge's TripSet.
 func capDecls(w *writer) {
+	w.open("set " + TripSet)
+	w.line("type ifname;")
+	w.line("size 1;")
+	w.line("flags dynamic;")
+	w.close()
 	for _, v6 := range []bool{false, true} {
 		w.open("set " + CapSet(v6))
 		w.line("type " + map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6] + ";")
@@ -540,7 +660,7 @@ func capDecls(w *writer) {
 // count is exactly what the core or the edge may send. The core's sends
 // count per address in its counting set; an address the full set cannot
 // take is dropped, so no byte goes uncounted.
-func capChains(w *writer) {
+func capChains(w *writer, l Layout) {
 	q := strconv.Quote
 	for _, v6 := range []bool{false, true} {
 		f, s := family(v6), fam(v6)
@@ -569,6 +689,21 @@ func capChains(w *writer) {
 	w.open("chain " + dropEdgeChain)
 	w.line("drop")
 	w.close()
+	// The set's add is a rule of its own, so a failed add (the set full)
+	// still drops the packet.
+	w.open("chain " + overEdgeChain)
+	w.line("add @" + TripSet + " { " + q(l.Edge) + " }")
+	w.line("goto " + logged(LogCap))
+	w.close()
+	w.open("chain " + cutChain)
+	w.close()
+}
+
+// cutJumps is the forward chain's first rules: every packet the edge's
+// segment sends or is sent goes through the cut chain.
+func cutJumps(l Layout) []string {
+	edge := strconv.Quote(l.Edge)
+	return []string{"iifname " + edge + " jump " + cutChain, "oifname " + edge + " jump " + cutChain}
 }
 
 // capJumps is the forward chain's rules that send the core's packets to

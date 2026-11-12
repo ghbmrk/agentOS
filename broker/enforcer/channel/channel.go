@@ -144,6 +144,13 @@ type Config struct {
 	// channel's lock, so it may call the channel, and concurrently for
 	// several connections (ENF-d-7).
 	Log func(Event)
+	// Connected is told each connection whose hello the channel
+	// accepted, once the enforcer's hello is written, so the daemon
+	// counts the core seen and offers it the alerts no session took
+	// (#4903). It runs outside the channel's lock, so it may call the
+	// channel, whether or not a cut core's bucket dropped the hello's
+	// line. nil tells nothing.
+	Connected func()
 	// Now is the wall clock the log lines and the policy's times read;
 	// nil is time.Now. Now and Elapsed are called from several
 	// connections at once. No rate reads it, so a step of the wall clock
@@ -373,6 +380,9 @@ func (c *Channel) Serve(rw Conn, exporter []byte) error {
 	}
 	c.mu.Lock()
 	c.logCut(Event{At: c.cfg.Now(), Kind: KindHello, Reason: "core connected"})
+	if c.cfg.Connected != nil {
+		c.queued = append(c.queued, c.cfg.Connected)
+	}
 	c.release()
 
 	for {

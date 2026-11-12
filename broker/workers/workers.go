@@ -33,6 +33,8 @@ import (
 )
 
 // Machines is the part of the machine manager (vm.Manager) the tools use.
+// An implementation passes each call's context on, never a fresh one: STOP
+// rides it as vm.WithHold, and a dropped hold fails open with no error.
 type Machines interface {
 	Get(id string) (vm.Machine, error)
 	TryGet(id string) (vm.Machine, bool)
@@ -460,10 +462,13 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	// its call (security F2 on SR2-3f).
 	made := false
 	defer func() { t.settle([]string{id}, made) }()
-	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
+	// Asked again just before the boot, under the machine's lock: a create
+	// that waited on admission while STOP came starts nothing
+	// (STOP-queued-start-fu).
+	w, err := t.M.CreateWorker(vm.WithHold(ctx, t.Stopped), id, c.lineage, s)
 	made = err == nil
 	if err != nil {
-		return nil, startErr(a.Name, err)
+		return nil, startErr(c, toolCreate, a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "label": w.Label.String(), "mem_mb": w.Spec.MemMB}, nil
 }
@@ -721,10 +726,12 @@ func (t *Tools) fork(ctx context.Context, c caller, raw json.RawMessage) (any, e
 	}
 	made := false
 	defer func() { t.settle(ids, made) }()
-	s, err := t.M.Fork(ctx, w.ID, ids)
+	// STOP is asked again as each fork starts: a fork that waited on the
+	// worker while STOP came starts nothing (STOP-queued-start).
+	s, err := t.M.Fork(vm.WithHold(ctx, t.Stopped), w.ID, ids)
 	made = err == nil
 	if err != nil {
-		return nil, startErr(a.Name, err)
+		return nil, startErr(c, toolFork, a.Name, err)
 	}
 	out := map[string]any{"snapshot": s.ID, "workers": a.Into}
 	if a.UpToFit {
@@ -782,14 +789,26 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 	if _, err := t.snapshot(c, a.Snapshot); err != nil {
 		return nil, err
 	}
-	if err := t.M.Rollback(ctx, w.ID, a.Snapshot); err != nil {
-		return nil, startErr(a.Name, err)
+	// Asked again at the restore, as for a fork (STOP-queued-start).
+	if err := t.M.Rollback(vm.WithHold(ctx, t.Stopped), w.ID, a.Snapshot); err != nil {
+		return nil, startErr(c, toolRollback, a.Name, err)
 	}
 	return map[string]any{"name": a.Name, "snapshot": a.Snapshot}, nil
 }
 
-// startErr says what to do when admission has no room (UX-146-2).
-func startErr(name string, err error) error {
+// startErr says what to do when admission has no room (UX-146-2). A STOP
+// refusal that came with another failure, such as undoing a fork that had
+// started or dropping the checkpoint the forks were to start from, says
+// that failure too, as a ref (STOP-queued-start-fu UX 4); one wording fits
+// both, and it names worker_list, which shows what was left
+// (STOP-queued-start-fu2).
+func startErr(c caller, tool, name string, err error) error {
+	if errors.Is(err, vm.ErrHeld) {
+		if err == vm.ErrHeld {
+			return errStartStopped
+		}
+		return say("%s; cleaning up the refused start %s; worker_list shows what is left", errStartStopped, logged(c.machine, tool, err))
+	}
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
 		return say("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", named(name))
 	}

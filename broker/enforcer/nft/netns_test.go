@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // The netns tests run the compiled ruleset in network namespaces: the test
@@ -33,52 +34,20 @@ const childEnv = "AGENTOS_NFT_NETNS"
 
 // required is true in CI, where a missing tool or kernel feature fails the
 // test instead of skipping it.
-func required() bool { return os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1" }
-
-func haveNetns(t *testing.T) bool {
-	t.Helper()
-	for _, tool := range []string{"unshare", "nsenter", "ip", "nft"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			if required() {
-				t.Fatalf("%s missing", tool)
-			}
-			t.Skipf("%s missing", tool)
-			return false
-		}
-	}
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
-		if required() {
-			t.Fatalf("no unprivileged user namespaces: %v", err)
-		}
-		t.Skipf("no unprivileged user namespaces: %v", err)
-		return false
-	}
-	return true
-}
+func required() bool { return netnstest.Required() }
 
 // inNetns runs the calling test inside a fresh user and network namespace
 // and reports whether this process is that child. The parent returns false
-// after relaying the child's result.
+// after judging the child's run; a skip in it fails the test in CI (#5152).
 func inNetns(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv(childEnv) == "1" {
-		return true
-	}
-	if !haveNetns(t) {
-		return false
-	}
-	args := []string{"-rn", "--", os.Args[0], "-test.run", "^" + t.Name() + "$", "-test.count=1"}
-	if testing.Verbose() {
-		args = append(args, "-test.v")
-	}
-	cmd := exec.Command("unshare", args...)
-	cmd.Env = append(os.Environ(), childEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("in the enforcer's namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("netns run failed: %v", err)
-	}
-	return false
+	return netnstest.Run(t, childEnv, combined, "nsenter", "ip", "nft")
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 // host is one namespace: a box, a segment's stand-in host, or a device.
@@ -95,6 +64,10 @@ type home struct {
 	vlans bool // device links are real VLANs on a trunk
 	v6    bool // the kernel has IPv6
 	procs []*exec.Cmd
+	// unleased: a load seeds no lease, nor does share; by default every
+	// host on a shared segment holds a full lease of its address there,
+	// as the daemon seeds them at every load (Seed, #5295).
+	unleased bool
 }
 
 func run(t *testing.T, name string, args ...string) string {
@@ -353,6 +326,9 @@ func (h *home) load(text string) {
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {
 		h.t.Fatal(err)
+	}
+	if !h.unleased && strings.Contains(text, "table inet "+Table+" {") {
+		text += Seed(fixtureLayout(), h.leases())
 	}
 	if err := (load.Loader{Bin: nftBin}).Load(context.Background(), text); err != nil {
 		h.t.Fatal(err)

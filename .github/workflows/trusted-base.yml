@@ -9,7 +9,9 @@ name: trusted-base
 # cannot keep an older, larger budget (KRN-2cap-harden, #2945); a merge that conflicts fails
 # the step. Both trees are checked out as worktrees and only listed by `go list` (vendored,
 # offline, GOTOOLCHAIN=local); no PR code is built or run. `edited` reruns it when the body
-# changes. Two more steps (REV-PROOF-claims, #4909) hold text a tool computes to the tool: a
+# changes. CI-ceiling-fall (#5174): the base is the base branch's tip when the job runs, not the
+# event's base.sha, so when trusted-base-rerun.yml reruns this run after main grows, the PR is
+# measured against the new main and a PR that no longer fits under a ceiling turns red. Two more steps (REV-PROOF-claims, #4909) hold text a tool computes to the tool: a
 # trusted-core growth decision the PR adds must carry `trusted_base.py measure --sentence` output
 # for the PR it names (fetched by number, listed by `go list` the same way), and a body that
 # closes an issue must name a follow-up for any part of it the body defers (tools/claims.py).
@@ -17,6 +19,13 @@ name: trusted-base
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
+# CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
+# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
+# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
+# replaces the current head's run.
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 permissions:
   contents: read
 jobs:
@@ -29,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }} # the live tip, also on a rerun
           fetch-depth: 0 # history for the merge with the PR head
           persist-credentials: false
       - name: Go version (the base's broker/go.mod toolchain line)

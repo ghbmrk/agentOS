@@ -12,11 +12,13 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# A newer push to the same PR cancels the older run; pushes to main
-# and scheduled runs always finish.
+# CI-cancel-superseded (#5345, #5348): a PR's first-attempt run cancels that PR's older first
+# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
+# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
+# replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 # Builds never download a Go toolchain: setup-go installs the one go.mod's
 # toolchain line names (setup-go's go-version-file reads only the go line),
 # each job checks it, and an offline build fails rather than fetch one. GOWORK=off: a
@@ -62,7 +64,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         if: steps.scope.outputs.records != 'true'
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         if: steps.scope.outputs.records != 'true'
@@ -101,22 +103,29 @@ jobs:
         # without them (#1531), and fail on any skip among them (#1543).
         # Each module runs in its own process tree under strace, which logs every file opened in it
         # for tests/records_audit.py (CI-PATHS); tools/unit_tests.py runs one module per core at
-        # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree.
+        # once (CI-par). -buildvcs=false: go's VCS stamp reads the worktree. It runs as root, and each
+        # module as a user of its own (#5413), which needs search permission down to the worktree.
         env:
           AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"
           AGENTOS_REFERENCE_ROOT: ${{ runner.temp }}/image-tools
           GOFLAGS: -buildvcs=false
         run: |
-          # erofs-utils: the /usr list tests build erofs images (#4470).
-          pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
+          # erofs-utils: the /usr list tests build erofs images (#4470). acl: the modules' shared Go caches.
+          pkgs=$(for t in strace:strace mkfs.erofs:erofs-utils setfacl:acl; do command -v "${t%%:*}" >/dev/null || echo "${t#*:}"; done)
           [ -z "$pkgs" ] || { sudo apt-get update -q && sudo apt-get install -y -q $pkgs; }
-          python tools/unit_tests.py "$RUNNER_TEMP/reads"
+          d="$GITHUB_WORKSPACE"; while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
+          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"
       - name: The records-only step runs every test that reads a record (CI-PATHS)
         if: steps.scope.outputs.records != 'true'
         run: python tests/records_audit.py "$RUNNER_TEMP/reads"
       - name: No two unit-test units write one path or bind one address (CI-par-clash)
         if: steps.scope.outputs.records != 'true'
         run: python tests/clash_audit.py "$RUNNER_TEMP/reads"
+      - name: Each module reaches no trace and no other module (#5413)
+        if: steps.scope.outputs.records != 'true'
+        # The uid boundary end to end, as root as tools/unit_tests.py runs; under it, as a module's
+        # user, that test skips. The variable makes it fail rather than skip here.
+        run: sudo -E env "PATH=$PATH" AGENTOS_REQUIRE_UID_BOUNDARY=1 python -m unittest tests.test_unit_tests -v
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
         # full CI's record-read audit fails when a test that reads one is missing here.
@@ -137,10 +146,12 @@ jobs:
         # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
         # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
         # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that). The
-        # build compiles the patched bwrap statically, so it needs libcap-dev (#1720).
+        # build compiles the patched bwrap statically, so it needs libcap-dev (#1720). The shell and
+        # tools come from the image-tools root above, an essential root from the image's apt sources
+        # as image/guest-base.sh installs it, never from the runner (#5570).
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+          sudo GUEST_BASE="$RUNNER_TEMP/image-tools" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Old core only shrinks (D-139 ratchet; markers, lines and imports against the base)
@@ -153,7 +164,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # HEAD^1 is the base side of the PR's test merge.
         run: |
-          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || : > "$RUNNER_TEMP/base-baseline.txt"
+          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || true > "$RUNNER_TEMP/base-baseline.txt"
           python tools/doclint.py --base-baseline "$RUNNER_TEMP/base-baseline.txt"
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: steps.scope.outputs.records != 'true'
@@ -247,7 +258,7 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         if: steps.scope.outputs.records != 'true'
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         if: steps.scope.outputs.records != 'true'
@@ -341,7 +352,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
@@ -436,7 +447,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
-          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          go-version: "1.26.11" # = broker/go.mod's toolchain line; checked below
           cache: false
       - name: Go is the toolchain go.mod names
         run: |
@@ -644,11 +655,16 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
+      - name: The guests' Debian userland, from the image's apt sources (#5570)
+        # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
         run: |
-          sh guest/openclaw/build-rootfs.sh /tmp/ocroot
+          GUEST_BASE=/tmp/guest-base sh guest/openclaw/build-rootfs.sh /tmp/ocroot
           # With no_new_privs, as agentosd.service runs runsc (L7-6).
           cd broker
           rc=0
@@ -666,7 +682,7 @@ jobs:
         # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache GUEST_BASE=/tmp/guest-base \
             sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker
           rc=0
@@ -742,16 +758,36 @@ jobs:
       # dated snapshot, checked by SHA-256, never the runner's archive, whose kernel moves about weekly
       # (EFI stub writes, #4794; built-in virtio-blk/tpm_crb/efivarfs: the stand-in initrd loads no
       # modules, so a Debian kernel does not fit). Moving it = new URL + hash in one reviewed PR.
-      - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a dated snapshot)
+      # CI-hostcheck-fetch-retry (#5321): the snapshot answers 503/504 or times out for minutes at
+      # a time. The fetch retries a timeout, a refused connect, 408, 429, 500, 502, 503 or 504 up to
+      # 8 times, waiting 1 s doubling (255 s in all), starts no retry after 600 s, gives each try 180 s
+      # (30 s to connect), then fails with the host's last status. Any other 4xx or 5xx fails at once.
+      # CI-hostcheck-kernel-mirror (#5463): the same file is a release asset of this repository, fetched
+      # first; the snapshot is the second source, for an outage of either host. The hash decides, not
+      # the host: bytes from either that miss the pin fail the step, with no further source tried.
+      # CI-hostcheck-mirror-bound (#5470): the mirror gets 3 tries (waits 1 s, 2 s), starts no retry
+      # after 20 s and gives each try 60 s, so a 5xx mirror falls through to the snapshot in seconds
+      # and a slow or hung one within about 80 s (a retry started near 20 s may run its full 60 s); the
+      # full #5321 schedule is the snapshot's, the last source. CI-hostcheck-mirror-wording (#5525):
+      # curl's first argument is -q, so it reads no .curlrc (CURL_HOME, XDG_CONFIG_HOME, HOME).
+      - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a release asset or a dated snapshot)
         env:
+          KERNEL_MIRROR_URL: https://github.com/ghbmrk/agentOS/releases/download/guest-kernel-6.8.0-149.149/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
           KERNEL_URL: https://snapshot.ubuntu.com/ubuntu/20261107T000000Z/pool/main/l/linux-signed/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
           KERNEL_SHA256: b8757670b7ec8aead358d4fba420064b9f31d344c3393548105aca2b3956d2ab
           KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic
         run: |
           deb="$RUNNER_TEMP/guest-kernel.deb"
-          curl --proto '=https' -fsSL --retry 3 --retry-delay 5 -o "$deb" "$KERNEL_URL"
+          src=
+          bound=(--retry 2 --retry-max-time 20 --max-time 60)
+          for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"; do
+            curl -q --proto '=https' -fsSL "${bound[@]}" --retry-connrefused --connect-timeout 30 -o "$deb" "$url" && { src=$url; break; }
+            echo "::warning::the guest kernel did not download from $url"
+            bound=(--retry 8 --retry-max-time 600 --max-time 180)
+          done
+          [ -n "$src" ] || { echo "::error::the guest kernel did not download from either source"; exit 1; }
           got=$(sha256sum "$deb" | cut -d' ' -f1)
-          echo "guest kernel: $KERNEL_URL sha256 $got (pinned: $KERNEL_SHA256)"
+          echo "guest kernel: $src sha256 $got (pinned: $KERNEL_SHA256)"
           [ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }
           dpkg-deb -x "$deb" "$RUNNER_TEMP/k"
           test -f "$RUNNER_TEMP/k/$KERNEL_VMLINUZ"

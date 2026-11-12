@@ -1061,7 +1061,19 @@ class PruneBuildTest(unittest.TestCase):
         self.assertIn("dist/control-ui/", paths)
         profile = (ROOT / "guest" / "openclaw" / "openclaw.json5").read_text()
         self.assertRegex(profile, r"controlUi:\s*\{\s*enabled:\s*false\s*\}")
-        self.assertTrue(all(p.endswith("/control-ui/") for p in paths), paths)
+        self.assertTrue(all(p.endswith("/control-ui/") or p == "dist/extensions/imap/" for p in paths), paths)
+
+    def test_the_imap_plugin_is_pruned_only_while_no_plugin_is_enabled(self):
+        # #5368: the IMAP plugin is off by default and starts only when the profile enables it; the
+        # profile has no top-level plugins or channels key and the guest cannot change it.
+        cfg = json.loads(vulncheck.CONFIG.read_text())
+        self.assertIn("dist/extensions/imap/", {e["path"] for e in cfg.get("pruned", [])})
+        profile = (ROOT / "guest" / "openclaw" / "openclaw.json5").read_text()
+        self.assertNotRegex(profile, r"(?m)^  (plugins|channels)\s*:")
+        self.assertRegex(profile, r'deny:\s*\[[^\]]*"plugins"')
+        self.assertRegex(profile, r"commands:\s*\{[^}]*plugins:\s*false")
+        launch = json.loads((ROOT / "guest" / "openclaw" / "launch.json").read_text())
+        self.assertIn("OPENCLAW_CONFIG_READONLY=1", launch["env"])
 
 def lits(tag, n=6):
     """N string literals of FP_LEN characters that read as text, unique to TAG."""

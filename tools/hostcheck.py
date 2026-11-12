@@ -22,16 +22,24 @@ Subcommands:
             (baseline and firmware noise), then each phase in its own QEMU
             process, a snapshot after each. The image is an input: the
             stand-in guest (tools/hostcheck_standin.sh) today, P2-1's later.
+            The phase named `unclean` is one boot cut off by a power cut (QMP
+            quit as soon as the guest answers a fresh liveness check on its
+            console) with no orderly shutdown or reboot in it, and is the only
+            one judged with the unclean-end flag, so MOR may stay set after it
+            alone (HW-8).
 
 Exit status: 0 the host is as it was, 1 a difference HW-8 does not allow,
 2 the check could not be made.
 """
 import argparse
+import atexit
+import functools
 import hashlib
 import json
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -53,18 +61,23 @@ class HostcheckError(Exception):
     pass
 
 
-# ---- the VM stack (CI-hostcheck-image-tools, #4906) ----
+# ---- the VM stack (CI-hostcheck-image-tools, #4906, #5055) ----
 # With --tools-root, qemu, swtpm and OVMF come from a root installed from pinned apt sources (CI
 # builds it from the image's Debian snapshot with mmdebstrap), never the host's own packages, so a
 # runner package update cannot change what hostcheck boots. The root's own loader runs each
 # binary on the root's own libraries (--inhibit-cache: not the host's ld.so.cache), as
 # tests/test_image.py image_tool does for systemd and kmod (#4776); paths stay the host's.
+# --library-path still falls back to the loader's built-in host directories, so the loader also
+# records every name it looks for, tries or maps (LD_AUDIT, AUDITOR), and a path outside the root,
+# from a search, a dlopen or a preload, fails the run (#5055). glibc's LD_DEBUG text printed names
+# raw, so a name holding a newline or the text's own separators could forge it (#5231).
 TOOLS_LOADER = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
 TOOLS_LIBS = ("usr/lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu/swtpm")
 TOOLS = {"qemu-system-x86_64": "usr/bin/qemu-system-x86_64", "swtpm": "usr/bin/swtpm",
          "swtpm_ioctl": "usr/bin/swtpm_ioctl"}
 TOOLS_OVMF = ("usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "usr/share/OVMF/OVMF_VARS_4M.fd")
 STACK = ("qemu-system-x86", "ovmf", "swtpm", "swtpm-tools")
+AUDITOR = pathlib.Path(__file__).with_name("hostcheck_audit.c")  # the loader's record, NUL-delimited names
 
 
 def _root_file(root, rel):
@@ -79,17 +92,99 @@ def tool_argv(root, name):
     if not root:
         return [name]
     return [_root_file(root, TOOLS_LOADER), "--inhibit-cache",
-            "--library-path", ":".join(os.path.join(root, d) for d in TOOLS_LIBS),
+            "--library-path", ":".join(os.path.join(os.path.abspath(root), d) for d in TOOLS_LIBS),
             "--argv0", name, _root_file(root, TOOLS[name])]
 
 
-def qemu_data_args(root):
-    """QEMU's firmware/ROM directory and module directory in the root: run through the loader,
-    QEMU would look for them relative to the loader's path."""
+def tool_env(root, ld_log):
+    """The stack's environment: the host's without a root. With one, nothing of the host's but PATH:
+    QEMU's module directory in the root (run through the loader, QEMU would look beside the loader),
+    and the loader's record of what it looks for and maps, in LD_LOG.PID (a child it execs writes its own,
+    one it forks appends to its parent's)."""
     if not root:
-        return [], None
-    env = dict(os.environ, QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))
-    return ["-L", os.path.join(root, "usr/share/qemu")], env
+        return None
+    return dict(loader_env(ld_log), QEMU_MODULE_DIR=os.path.join(root, "usr/lib/x86_64-linux-gnu/qemu"))
+
+
+def loader_env(ld_log):
+    """PATH alone of the host's, and the loader's record of what it looks for and maps, in LD_LOG.PID:
+    the environment of any tool run from a root that audit_records then checks (tests/test_image.py's
+    image_tool too)."""
+    return {"PATH": "/usr/sbin:/usr/bin", "LD_AUDIT": auditor(), "AGENTOS_LOADER_RECORD": str(ld_log)}
+
+
+@functools.cache
+def auditor():
+    """AUDITOR built once per process with the host's cc into a private directory; the root's loader
+    loads it (#5231)."""
+    out = pathlib.Path(tempfile.mkdtemp(prefix="hostcheck-audit-"), "audit.so")
+    atexit.register(shutil.rmtree, out.parent, True)
+    if ":" in str(out):
+        raise HostcheckError(f"LD_AUDIT would split the audit module's path {out} at its ':'")
+    try:
+        run(["cc", "-shared", "-fPIC", "-O2", "-Wall", "-Werror", "-o", str(out), str(AUDITOR)])
+    except OSError as e:
+        raise HostcheckError(f"cannot build the loader audit module {AUDITOR}: {e}")
+    return str(out)
+
+
+def audit_loads(root, ld_log, pid):
+    """Fail unless stack process PID left a record, and audit_records passes."""
+    if not root:
+        return
+    path = pathlib.Path(f"{ld_log}.{pid}")
+    if not path.is_file():
+        raise HostcheckError(f"the loader kept no record of what it loaded ({path})")
+    audit_records(root, ld_log)
+
+
+def audit_records(root, ld_log):
+    """Fail unless there is a record LD_LOG.*, and every one (each process's and any child's) names
+    only paths in ROOT, at least one each. A name without a / is a soname the loader searches for (its
+    candidates are in the record) or no file (the vDSO, the main program in its own record)."""
+    if not root:
+        return
+    log = pathlib.Path(ld_log)
+    recs = sorted(p for p in log.parent.iterdir() if p.name.startswith(log.name + "."))
+    if not recs:
+        raise HostcheckError(f"the loader kept no record of what it loaded ({log}.*)")
+    base = os.fsencode(os.path.realpath(root)) + b"/"
+    outside = set()
+    for rec in recs:
+        *names, end = rec.read_bytes().split(b"\0")
+        if end:
+            raise HostcheckError(f"the loader's record {rec} ends inside a name: {end!r}")
+        seen = [n for n in names if b"/" in n]
+        if not seen:
+            raise HostcheckError(f"the loader's record {rec} names no shared object")
+        outside |= {n for n in seen if not os.path.isabs(n) or not os.path.realpath(n).startswith(base)}
+    if outside:
+        raise HostcheckError(f"a binary run from the tools root {root} looked for or loaded shared objects outside the "
+                             f"tools root (add the directory to its library path, or the package to the root): "
+                             f"{sorted(map(os.fsdecode, outside))[:5]}")
+
+
+def qemu_data_args(root):
+    """QEMU's firmware/ROM directory in the root: run through the loader, QEMU would look for it
+    relative to the loader's path."""
+    return ["-L", os.path.join(root, "usr/share/qemu")] if root else []
+
+
+def foreign_data_dirs(root, listing):
+    """The directories in QEMU's `-L help` LISTING outside ROOT that exist on the host: QEMU would
+    take a ROM the root lacks from them."""
+    base = os.path.realpath(root) + os.sep
+    return [d for d in listing.splitlines()
+            if d.strip() and not os.path.realpath(d).startswith(base) and os.path.exists(d)]
+
+
+def stack_popen(args, name, argv, **kw):
+    """Start stack tool NAME with ARGV; stack_done checks what its loader loaded once it ends."""
+    return subprocess.Popen(tool_argv(args.tools_root, name) + argv, env=tool_env(args.tools_root, args.ld_log), **kw)
+
+
+def stack_done(args, proc):
+    audit_loads(args.tools_root, args.ld_log, proc.pid)
 
 
 def resolve_tools(args):
@@ -105,7 +200,11 @@ def stack_versions(root):
     """The installed version of each STACK package in ROOT's dpkg status, for the report."""
     if not root:
         return "runner"
-    status = pathlib.Path(root, "var/lib/dpkg/status").read_text(errors="replace")
+    path = pathlib.Path(root, "var/lib/dpkg/status")
+    try:
+        status = path.read_text(errors="replace")
+    except OSError as e:
+        raise HostcheckError(f"the tools root {root} has no dpkg status ({path}): {e.strerror}")
     found = {}
     for stanza in status.split("\n\n"):
         f = dict(re.findall(r"^([A-Za-z-]+): (.*)$", stanza, re.M))
@@ -238,7 +337,7 @@ def _matches(rule, f, flags):
         return False
     if rule.get("requires") and rule["requires"] not in flags:
         return False
-    if "key" in rule and not re.search(rule["key"], f["key"]):
+    if "key" in rule and not re.fullmatch(rule["key"], f["key"]):  # `$` alone admits a trailing newline
         return False
     if "range" in rule:
         lo, hi = (int(x, 16) for x in rule["range"])
@@ -273,22 +372,23 @@ def evaluate(before, after, allow, flags=(), noise=(), rtc_writes=()):
 
 class Qemu:
     """One QEMU process with OVMF, swtpm and the host's disks, driven through
-    QMP (events: RTC_CHANGE, SHUTDOWN) and its serial console."""
+    QMP (events: RTC_CHANGE, RESET, SHUTDOWN, and the STOP that marks each OS
+    start) and its serial console."""
 
     def __init__(self, args, work, label, boot=None):
         self.work, self.label = work, label
         self.events, self.console = [], bytearray()
-        self.chunks, self.os_starts = [], []  # (console offset, arrival time); OS start times
+        self.os_marks = 0  # STOP events the os steps asked for
         sock_dir = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # unix socket paths stay short
         self.sock_dir = sock_dir
         tpm_sock = os.path.join(sock_dir, "tpm")
-        self.swtpm = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
-                                       "--ctrl", f"type=unixio,path={tpm_sock}", "--terminate"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.args = args
+        self.swtpm = stack_popen(args, "swtpm", ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+                                                 "--ctrl", f"type=unixio,path={tpm_sock}", "--terminate"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _wait_path(tpm_sock)
         accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
-        data, env = qemu_data_args(args.tools_root)
-        cmd = tool_argv(args.tools_root, "qemu-system-x86_64") + data + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
+        cmd = qemu_data_args(args.tools_root) + ["-machine", "q35,smm=on", "-accel", accel, "-cpu", "max",
                "-smp", "2", "-m", "1024", "-nodefaults", "-display", "none", "-nic", "none",
                "-rtc", "base=utc,clock=host",
                "-global", "driver=cfi.pflash01,property=secure,value=on",
@@ -308,14 +408,15 @@ class Qemu:
                     "ahci": ["-device", f"ide-hd,drive=hd{i},bus=ide.{i}"]}[bus]
         if boot:
             cmd += boot
-        self.proc = subprocess.Popen(cmd, stdout=open(work / f"qemu-{label}.log", "wb"), stderr=subprocess.STDOUT,
-                                     env=env)
+        self.proc = stack_popen(args, "qemu-system-x86_64", cmd, stdout=open(work / f"qemu-{label}.log", "wb"),
+                                stderr=subprocess.STDOUT)
         self.qmp = _connect(f"{sock_dir}/qmp", self.proc)
         self.serial = _connect(f"{sock_dir}/serial", self.proc)  # QEMU starts once both are connected
         self.qmp_file = self.qmp.makefile("rwb")
         self.qmp_file.readline()  # greeting
         self._qmp_send({"execute": "qmp_capabilities"})
-        threading.Thread(target=self._read_qmp, daemon=True).start()
+        self.qmp_reader = threading.Thread(target=self._read_qmp, daemon=True)
+        self.qmp_reader.start()
         threading.Thread(target=self._read_serial, daemon=True).start()
 
     def _qmp_send(self, msg):
@@ -323,6 +424,7 @@ class Qemu:
         self.qmp_file.flush()
 
     def _read_qmp(self):
+        self.qmp_error = None
         try:
             for line in self.qmp_file:
                 msg = json.loads(line)
@@ -330,37 +432,57 @@ class Qemu:
                     self.events.append(msg)
         except OSError:
             pass  # QEMU quit
+        except Exception as e:  # noqa: BLE001 - any other end leaves events unread: _qmp_done fails the boot
+            self.qmp_error = e
+
+    def _qmp_done(self):
+        """Once QEMU has exited: fail unless the reader read every event QEMU sent, to EOF."""
+        self.qmp_reader.join(timeout=30)
+        if self.qmp_reader.is_alive() or self.qmp_error is not None:
+            raise HostcheckError(f"{self.label}: QMP events not read to the end "
+                                 f"({'reader still running' if self.qmp_reader.is_alive() else self.qmp_error!r})")
 
     def _read_serial(self):
         with open(self.work / f"console-{self.label}.log", "ab") as log:
             try:
                 while b := self.serial.recv(4096):
-                    self.chunks.append((len(self.console), time.time()))
                     self.console += b
                     log.write(b)
                     log.flush()
             except OSError:
                 pass
 
+    def _await(self, pattern, pos, deadline):
+        rx = re.compile(pattern.encode())
+        while not (m := rx.search(self.console, pos)):
+            if self.proc.poll() is not None:
+                raise HostcheckError(f"{self.label}: QEMU exited before {pattern!r}")
+            if time.monotonic() > deadline:
+                raise HostcheckError(f"{self.label}: no {pattern!r} on the console in time")
+            time.sleep(POLL)
+        return m.end()
+
     def drive(self, steps, deadline):
         """Steps are (regex, action): wait for the regex on the console after
-        the previous match, then send `serial:TEXT` or `qmp:COMMAND`, or for
-        `os` note the time the OS started: RTC writes from then until the
-        next reset are the guest's. Its regex is the OS's first output."""
+        the previous match, then send `serial:TEXT` or `qmp:COMMAND`; for
+        `os`, mark the OS's start in QEMU's own event stream (a STOP, then
+        cont): RTC writes from then until the next reset are the guest's, and
+        its regex is the OS's first output. POWER_CUT quits QEMU as soon as
+        the guest has answered a liveness check sent after the regex matched."""
         pos = 0
         for pattern, action in steps:
-            rx = re.compile(pattern.encode())
-            while not (m := rx.search(self.console, pos)):
-                if self.proc.poll() is not None:
-                    raise HostcheckError(f"{self.label}: QEMU exited before {pattern!r}")
-                if time.monotonic() > deadline:
-                    raise HostcheckError(f"{self.label}: no {pattern!r} on the console in time")
-                time.sleep(0.2)
-            pos = m.end()
+            pos = self._await(pattern, pos, deadline)
             if action and action.startswith("serial:"):
                 self.serial.sendall(action[7:].encode())
             elif action == "os":
-                self.os_starts.append(max(t for off, t in self.chunks if off <= m.start()))
+                self.os_marks += 1
+                self._qmp_send({"execute": "stop"})
+                self._qmp_send({"execute": "cont"})
+            elif action == POWER_CUT:
+                nonce = secrets.token_hex(8)
+                self.serial.sendall(f"alive {nonce}\n".encode())
+                pos = self._await(f"{ALIVE} {nonce}", pos, min(deadline, time.monotonic() + ALIVE_WAIT))
+                self._qmp_send({"execute": "quit"})
             elif action:
                 self._qmp_send({"execute": action[4:]})
 
@@ -374,9 +496,15 @@ class Qemu:
             self.swtpm.wait(timeout=30)
             shutil.rmtree(self.sock_dir, ignore_errors=True)
         (self.work / f"events-{self.label}.json").write_text(json.dumps(self.events, indent=1))
+        stack_done(self.args, self.swtpm)
+        stack_done(self.args, self.proc)
+        self._qmp_done()
         if self.proc.returncode:
             raise HostcheckError(f"{self.label}: QEMU exited {self.proc.returncode}")
-        return guest_rtc_writes(self.events, self.os_starts)
+        if (stops := sum(e["event"] == "STOP" for e in self.events)) != self.os_marks:
+            raise HostcheckError(f"{self.label}: {stops} STOP events for {self.os_marks} OS starts, "
+                                 "so the OS starts cannot be told from them")
+        return guest_rtc_writes(self.events)
 
 
 def _wait_path(path, timeout=30):
@@ -401,17 +529,30 @@ def _connect(path, proc, timeout=60):
             time.sleep(0.05)
 
 
-def guest_rtc_writes(events, os_starts):
-    """The RTC_CHANGE events after an OS start and before the next reset. The
-    firmware sets the clock's registers on every power-on self-test, before
-    the OS starts. QEMU throttles the event to one a second but keeps the
-    last write's timestamp, so a guest write is never dated before it."""
+# A guest that could not do what a phase asked of it (the stand-in's mor_clear or a planted write)
+# says so on its console; the phase does not pass, and the line is shown with its result.
+GUEST_ERROR = re.compile(rb"HOSTCHECK-[A-Z]+-FAILED[^\r\n]*")
+
+
+def guest_errors(console):
+    return [m.group().decode(errors="replace") for m in GUEST_ERROR.finditer(console)]
+
+
+def with_guest_errors(result, errors):
+    """A phase's result with the guest's own failures: a phase whose guest failed does not pass."""
+    return dict(result, guest_errors=errors, **{"pass": result["pass"] and not errors})
+
+
+def guest_rtc_writes(events):
+    """The RTC_CHANGE events after an OS start (the STOP its os step asked for)
+    and before the next reset. The firmware sets the clock's registers on
+    every power-on self-test, before the OS starts. QEMU throttles the event
+    to one a second, so it can arrive after a later event, but it keeps the
+    last write's timestamp: every stamp here is QEMU's own clock."""
     stamp = lambda e: e["timestamp"]["seconds"] + e["timestamp"]["microseconds"] / 1e6
-    timeline = sorted([(t, 0, None) for t in os_starts] + [(stamp(e), 1, e) for e in events],
-                      key=lambda x: x[:2])
     out, guest = [], False
-    for _, kind, e in timeline:
-        if kind == 0:
+    for e in sorted(events, key=stamp):  # stable: a tie keeps QEMU's order
+        if e["event"] == "STOP":
             guest = True
         elif e["event"] == "RESET":
             guest = False
@@ -422,21 +563,24 @@ def guest_rtc_writes(events, os_starts):
 
 def qemu_tpm(args, work):
     """Read the host TPM from outside the guest: swtpm on the same state."""
-    ioctl = tool_argv(args.tools_root, "swtpm_ioctl")
     d = tempfile.mkdtemp(prefix="hc", dir="/tmp")
     sock = os.path.join(d, "s")
-    p = subprocess.Popen(tool_argv(args.tools_root, "swtpm") + ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
-                          "--server", f"type=unixio,path={sock}", "--ctrl", f"type=unixio,path={sock}.ctrl",
-                          "--flags", "not-need-init,startup-clear"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = stack_popen(args, "swtpm", ["socket", "--tpm2", "--tpmstate", f"dir={work / 'tpm'}",
+                                    "--server", f"type=unixio,path={sock}", "--ctrl", f"type=unixio,path={sock}.ctrl",
+                                    "--flags", "not-need-init,startup-clear"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         _wait_path(sock)
         _wait_path(sock + ".ctrl")
         yield f"swtpm:path={sock}"
     finally:
-        subprocess.run(ioctl + ["--unix", sock + ".ctrl", "-s"], capture_output=True)
+        stop = stack_popen(args, "swtpm_ioctl", ["--unix", sock + ".ctrl", "-s"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stop.wait(timeout=30)
         p.wait(timeout=30)
         shutil.rmtree(d, ignore_errors=True)
+    stack_done(args, stop)
+    stack_done(args, p)
 
 
 def qemu_snapshot(args, work):
@@ -453,6 +597,47 @@ def qemu_snapshot(args, work):
 # command line from the console. Firmware-only boots end at the UEFI shell or
 # OVMF's "no bootable device" screen and are powered off over QMP.
 FIRMWARE_ONLY = [(r"Shell> |No bootable option or device was found", "qmp:quit")]
+# HW-8 allows MOR left set only after a power cut or forced reset. The phase of this name is one
+# boot cut off by a QMP quit with the guest still running, and only its snapshot is judged with the
+# flag; every orderly phase, including one after it, must find MOR cleared again. Its steps may send
+# the guest text, but the guest's own shutdown or reboot shows in QEMU's events, and any fails it.
+# A halt shows in no event, so the cut sends `alive NONCE` and quits only once the guest has printed
+# ALIVE NONCE: a guest that halted or hung never answers, and the run fails naming the line.
+UNCLEAN_PHASE, UNCLEAN_FLAG, POWER_CUT = "unclean", "unclean-end", "power-cut"
+ALIVE, ALIVE_WAIT, POLL = "HOSTCHECK-ALIVE", 30, 0.02
+
+
+def phase_flags(name, steps, flags):
+    """The run flags phase NAME is judged with."""
+    if name != UNCLEAN_PHASE:
+        return list(flags)
+    actions = [action for _, action in steps]
+    if not actions or actions[-1] != POWER_CUT:
+        raise HostcheckError(f"phase {name!r} must end in {POWER_CUT!r}, a power cut of a guest that "
+                             f"answers {ALIVE}")
+    if actions[0] != "os" or actions.count("os") != 1:
+        raise HostcheckError(f"phase {name!r} must be one boot: its first step os and no other")
+    if bad := [a for a in actions[1:-1] if a and not a.startswith("serial:")]:
+        raise HostcheckError(f"phase {name!r} may only send the guest text before its power cut, not {bad}")
+    return list(flags) + [UNCLEAN_FLAG]
+
+
+def power_cut_only(name, events):
+    """Fail unless phase NAME's boot ended in the QMP quit, its last event and only shutdown, with no
+    reset after the OS started (firmware resets before it are the firmware's). The OS start is the
+    STOP its os step asked for, and QEMU sends RESET, STOP and SHUTDOWN unthrottled, in the order they
+    happen: their order in the stream is the order, with no clock read."""
+    last = events[-1] if events else {}
+    if last.get("event") != "SHUTDOWN" or last.get("data", {}).get("reason") != "host-qmp-quit":
+        raise HostcheckError(f"phase {name!r} did not end in the QMP quit's SHUTDOWN, so not in a power cut")
+    if sum(e["event"] == "SHUTDOWN" for e in events) != 1:
+        raise HostcheckError(f"phase {name!r} shut down more than once, so not in a power cut")
+    started = False
+    for e in events:
+        started = started or e["event"] == "STOP"
+        if e["event"] == "RESET" and started:
+            reason = e.get("data", {}).get("reason")
+            raise HostcheckError(f"phase {name!r} rebooted ({reason}), so not in a power cut")
 
 
 def standin_phases(plant):
@@ -462,6 +647,7 @@ def standin_phases(plant):
                  ("HOSTCHECK-READY", "serial:poweroff\n")],
         "restart": [os_start, ("HOSTCHECK-READY", "serial:reboot\n"),
                     os_start, ("HOSTCHECK-READY", "serial:poweroff\n")],
+        UNCLEAN_PHASE: [os_start, ("HOSTCHECK-READY", POWER_CUT)],
     }
 
 
@@ -477,6 +663,19 @@ def seed_tpm(args, work):
         next(gen, None)
 
 
+def boot_once(args, work, label, steps, boot):
+    """One QEMU process driven through STEPS: its guest RTC writes, guest errors and QMP events."""
+    deadline = time.monotonic() + args.timeout
+    q = Qemu(args, work, label, boot)
+    try:
+        q.drive(steps, deadline)
+        rtc = q.wait(deadline)
+    except BaseException:
+        q.proc.kill()
+        raise
+    return {"rtc": rtc, "errors": guest_errors(q.console), "events": q.events}
+
+
 def cmd_qemu(args):
     resolve_tools(args)
     stack = stack_versions(args.tools_root)
@@ -484,6 +683,17 @@ def cmd_qemu(args):
         tool_argv(args.tools_root, name)  # a missing root tool fails before any state is made
     work = pathlib.Path(args.work)
     work.mkdir(parents=True, exist_ok=False)
+    (work / "ld").mkdir()
+    args.ld_log = work / "ld" / "stack"
+    if args.tools_root:
+        listing = stack_popen(args, "qemu-system-x86_64", qemu_data_args(args.tools_root) + ["-L", "help"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out = listing.communicate(timeout=60)[0]
+        stack_done(args, listing)
+        if listing.returncode or not out.strip():
+            raise HostcheckError(f"qemu-system-x86_64 -L help failed ({listing.returncode})")
+        if foreign := foreign_data_dirs(args.tools_root, out):
+            raise HostcheckError(f"QEMU would take a ROM the tools root lacks from the host's {foreign}: remove them")
     (work / "disks").mkdir()
     (work / "tpm").mkdir()
     args.host_disks_bus = []
@@ -497,26 +707,16 @@ def cmd_qemu(args):
     seed_tpm(args, work)
     if args.kernel:
         boot = ["-kernel", args.kernel, "-initrd", args.initrd, "-append", "console=ttyS0 rdinit=/init"]
-        phases = standin_phases(args.plant)
     else:
         boot = ["-drive", f"if=none,id=agentos,format=raw,file={args.image}",
                 "-device", "qemu-xhci", "-device", "usb-storage,drive=agentos"]
+    if args.phases_file:
         phases = {k: [tuple(s) for s in v] for k, v in json.loads(pathlib.Path(args.phases_file).read_text()).items()}
-    timeout = args.timeout
-
-    def boot_once(label, steps, with_drive):
-        deadline = time.monotonic() + timeout
-        q = Qemu(args, work, label, boot if with_drive else None)
-        try:
-            q.drive(steps, deadline)
-            return q.wait(deadline)
-        except BaseException:
-            q.proc.kill()
-            raise
-
+    else:
+        phases = standin_phases(args.plant)
     snaps = {}
     for label in ("firmware-1", "firmware-2"):
-        boot_once(label, FIRMWARE_ONLY, False)
+        boot_once(args, work, label, FIRMWARE_ONLY, None)
         snaps[label] = qemu_snapshot(args, work)
     noise = {(f["kind"], f["key"]) for f in diff(snaps["firmware-1"], snaps["firmware-2"])}
     unstable = sorted(k for k in noise if k[0] != "uefi")
@@ -530,15 +730,21 @@ def cmd_qemu(args):
             raise HostcheckError(f"unknown phase {phase!r}")
         if not any(action == "os" for _, action in phases[phase]):
             raise HostcheckError(f"phase {phase!r} has no os step, so guest RTC writes could not be told apart")
-        rtc = [{"phase": phase, "offset": e["data"]["offset"]}
-               for e in boot_once(phase, phases[phase], True)]
+        flags = phase_flags(phase, phases[phase], args.flag)
+        ran = boot_once(args, work, phase, phases[phase], boot)
+        if phase == UNCLEAN_PHASE:
+            power_cut_only(phase, ran["events"])
+        rtc = [{"phase": phase, "offset": e["data"]["offset"]} for e in ran["rtc"]]
         after = qemu_snapshot(args, work)
-        r = evaluate(baseline, after, load_allow(), flags=args.flag, noise=noise, rtc_writes=rtc)
-        report["phases"].append(dict(r, phase=phase, rtc_writes=rtc, snapshot=after))
+        r = evaluate(baseline, after, load_allow(), flags=flags, noise=noise, rtc_writes=rtc)
+        report["phases"].append(dict(with_guest_errors(r, ran["errors"]), phase=phase, rtc_writes=rtc, snapshot=after))
+    audit_records(args.tools_root, args.ld_log)  # once more, for a record written after its process was checked
     report["pass"] = all(p["pass"] for p in report["phases"])
     (work / "report.json").write_text(json.dumps(report, indent=1, sort_keys=True))
     for p in report["phases"]:
         print(f"{p['phase']}: {'PASS' if p['pass'] else 'FAIL'}", file=sys.stderr)
+        for e in p["guest_errors"]:
+            print(f"  guest {e}", file=sys.stderr)
         for f in p["flagged"]:
             print(f"  flagged {f['kind']} {f['key']} {f['change']}", file=sys.stderr)
         for f in p["disclosed"]:
@@ -574,7 +780,8 @@ def main(argv=None):
     d = sub.add_parser("diff")
     d.add_argument("before")
     d.add_argument("after")
-    d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order"])
+    d.add_argument("--flag", action="append", default=[], choices=["owner-boot-order", UNCLEAN_FLAG],
+                   help=f"{UNCLEAN_FLAG}: the session ended in a power cut or forced reset")
     d.add_argument("--rtc-written", action="store_true", help="the operator saw the hardware clock written")
     q = sub.add_parser("qemu")
     q.add_argument("--work", required=True, help="new directory for state, logs and report.json")
@@ -582,10 +789,11 @@ def main(argv=None):
     src.add_argument("--kernel", help="stand-in guest kernel (with --initrd)")
     src.add_argument("--image", help="a raw agentOS drive image, attached as a USB disk (with --phases-file)")
     q.add_argument("--initrd")
-    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...]; "
-                   "action os marks the OS's first output in each boot")
+    q.add_argument("--phases-file", help="JSON: phase -> [[regex, action], ...], in place of the stand-in's; "
+                   f"action os marks the OS's first output in each boot, {POWER_CUT} ends the unclean phase")
     q.add_argument("--host-disk", action="append", required=True, metavar="NAME=PATH[,bus=nvme|virtio|ahci]")
-    q.add_argument("--phases", default="task,restart")
+    q.add_argument("--phases", default="task,restart",
+                   help=f"comma list; {UNCLEAN_PHASE!r} ends in a power cut (stand-in: task,restart,unclean)")
     q.add_argument("--plant", default="", help="stand-in only: disk,uefi,nv,rtc (negative test)")
     q.add_argument("--flag", action="append", default=[], choices=["owner-boot-order"])
     q.add_argument("--tools-root", help="a root holding qemu, swtpm and OVMF from pinned apt sources "

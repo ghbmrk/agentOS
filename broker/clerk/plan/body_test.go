@@ -226,9 +226,9 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 			d.Body.ToolTypes = []string{"function"}
 			d.Body.Tools = []plan.Tool{{Namespace: "functions", Name: "wait", Type: "function"}}
 		},
-		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
-		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
-		"client_metadata with no keys":             func(d *plan.Declaration) { d.Body.Meta = nil },
+		"an answer header naming X-Forwarded-For": func(d *plan.Declaration) { d.ResponseHeaders = []string{"X-Forwarded-For"} },
+		"an answer header naming a proxy header":  func(d *plan.Declaration) { d.ResponseHeaders = []string{"Proxy-Authorization"} },
+		"client_metadata with no keys":            func(d *plan.Declaration) { d.Body.Meta = nil },
 		"metadata keys with no client_metadata": func(d *plan.Declaration) {
 			d.Body.Keys = []string{"model", "input", "store", "stream"}
 		},
@@ -523,7 +523,7 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 
 	// A quick read moves to a gateway with no external address read yet, and
 	// its full read waits: every public destination is held.
-	reading, release := make(chan struct{}), make(chan struct{})
+	reading, release := make(chan struct{}, 1), make(chan struct{})
 	var connects atomic.Int32
 	d := f.decl(t)
 	guard := netguard.New(netguard.Config{
@@ -554,7 +554,11 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 	go func() { guard.Watch(wctx, events); close(watched) }()
 	t.Cleanup(func() { close(release); wstop(); <-watched })
 	events <- struct{}{}
-	<-reading // the quick read has opened the hold
+	select { // the quick read has opened the hold
+	case <-reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the guard's full read never started: no hold to cancel in")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(50*time.Millisecond, cancel)
@@ -569,11 +573,15 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 		t.Fatalf("a held call cancelled before connect settled %+v, want once, not sent", u)
 	}
 
-	// The same cancel once the provider has the call: it was sent.
+	// The same cancel once the provider has the call: it was sent. The
+	// provider never answers: it drops the connection once the caller has
+	// gone, since an answer written then can still reach the transport ahead
+	// of its own close and be returned as the call's answer (#5381).
 	arrived := make(chan struct{})
 	f.stream = func(w http.ResponseWriter, r *http.Request) {
 		close(arrived)
 		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
 	}
 	ctx, cancel = context.WithCancel(context.Background())
 	go func() { <-arrived; cancel() }()
@@ -583,6 +591,58 @@ func TestPlanHeldModelCallCancelledBeforeConnectIsNotSent(t *testing.T) {
 	}
 	if u := rec.settled(); len(u) != 1 || !u[0].Sent {
 		t.Fatalf("a call cancelled at the provider settled %+v, want once, sent", u)
+	}
+}
+
+// A model call its caller cancels partway through the provider's answer
+// was sent. The guest gets the answer as far as it came and then the
+// cancel, never an end that reads as the whole answer, and the call settles
+// once, when the cut reaches the meter: sent, not done, with no usage
+// reported and the bytes that came (LOG-7). The cancel comes only once the
+// part is read, so no timing decides the test.
+func TestPlanModelCallCancelledMidAnswer(t *testing.T) {
+	f := newPlanFix(t)
+	part := strings.SplitAfter(sse(10, 20), "\n\n")
+	head := part[0] + part[1] // created and a delta; no completed event
+	f.stream = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, head)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		panic(http.ErrAbortHandler) // the rest of the answer never comes
+	}
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + g.Tokens["access_token"]}
+	rec := &recorder{}
+	resp, det := p.Do(ctx, "g", req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`, h), rec.meter)
+	if det != "" {
+		t.Fatalf("model call: %s", det)
+	}
+	defer resp.Body.Close()
+	got := make([]byte, len(head))
+	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != head {
+		t.Fatalf("the answer's first part: %q %v, want %q", got, err, head)
+	}
+	if u := rec.settled(); len(u) != 0 {
+		t.Fatalf("a call still answering settled %+v", u)
+	}
+
+	cancel()
+	rest, err := io.ReadAll(resp.Body)
+	if len(rest) != 0 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("after the cancel the guest read %q, %v; want nothing more and the cancel", rest, err)
+	}
+	want := plan.Used{Sent: true, Bytes: int64(len(head))}
+	if u := rec.settled(); len(u) != 1 || u[0] != want {
+		t.Fatalf("a call cancelled mid-answer settled %+v, want once, %+v", u, want)
+	}
+	resp.Body.Close()
+	if u := rec.settled(); len(u) != 1 {
+		t.Fatalf("closing a cut answer settled it again: %+v", u)
 	}
 }
 

@@ -36,19 +36,21 @@ func Required() bool {
 // skips t.
 func Run(t *testing.T, childEnv string, run Exec, tools ...string) bool {
 	t.Helper()
+	return RunAs(t, childEnv, run, []string{"-rn"}, tools...)
+}
+
+// RunAs is Run with unshare's namespace flags given, for a test that needs
+// another namespace than a fresh user and network one (radio/ble's maps
+// the runner's subordinate ids and keeps the network).
+func RunAs(t *testing.T, childEnv string, run Exec, flags []string, tools ...string) bool {
+	t.Helper()
 	if os.Getenv(childEnv) == "1" {
 		return true
 	}
-	for _, tool := range append([]string{"unshare"}, tools...) {
-		if !onPath(tool) {
-			missing(t, "%s missing", tool)
-		}
-	}
-	if out, err := run(os.Environ(), "unshare", "-rn", "true"); err != nil {
-		missing(t, "no unprivileged user namespaces: %v\n%s", err, out)
-	}
-	out, err := run(append(os.Environ(), childEnv+"=1"), "unshare", "-rn", "--", os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
-	t.Logf("in a fresh user and network namespace:\n%s", out)
+	Ready(t, run, flags, tools...)
+	args := append(append(append([]string{}, flags...), "--", os.Args[0]), "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
+	out, err := run(append(os.Environ(), childEnv+"=1"), "unshare", args...)
+	t.Logf("in a fresh namespace (unshare %s):\n%s", strings.Join(flags, " "), out)
 	skipped, err := judge(t.Name(), out, err, Required())
 	switch {
 	case err != nil:
@@ -57,6 +59,21 @@ func Run(t *testing.T, childEnv string, run Exec, tools ...string) bool {
 		t.Skipf("skipped in the namespace: %s", skipped)
 	}
 	return false
+}
+
+// Ready checks that unshare and tools are on the path and that unshare
+// with flags can make its namespaces. If not, it fails t when Required
+// and skips it otherwise; it returns only when all are there.
+func Ready(t *testing.T, run Exec, flags []string, tools ...string) {
+	t.Helper()
+	for _, tool := range append([]string{"unshare"}, tools...) {
+		if !onPath(tool) {
+			missing(t, "%s missing", tool)
+		}
+	}
+	if out, err := run(os.Environ(), "unshare", append(append([]string{}, flags...), "true")...); err != nil {
+		missing(t, "unshare %s cannot make its namespaces: %v\n%s", strings.Join(flags, " "), err, out)
+	}
 }
 
 // judge reads the namespaced run of test name. It returns an error when
@@ -96,12 +113,14 @@ func missing(t *testing.T, format string, args ...any) {
 	t.Skipf(format, args...)
 }
 
-// onPath reports whether name is an executable file in a directory of
-// PATH, as exec.LookPath finds it.
+// onPath reports whether name is an executable file in an absolute
+// directory of PATH. Unlike exec.LookPath it skips an empty entry, which
+// POSIX reads as the current directory, and a relative one ("." or
+// "bin"): a test's working directory is not where its tools come from.
 func onPath(name string) bool {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			dir = "."
+		if !filepath.IsAbs(dir) {
+			continue
 		}
 		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
 			return true

@@ -3,6 +3,7 @@ package plan_test
 // REQ: CLK-1, CLK-3, CLK-4, CLK-7, PLN-5
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +54,8 @@ type planFix struct {
 	device func(w http.ResponseWriter, r *http.Request, body string) bool
 	// stream, if set, answers a model call instead of the fake's own.
 	stream func(w http.ResponseWriter, r *http.Request)
+	// list, if set, answers the models read instead of the fake's own.
+	list func(w http.ResponseWriter, r *http.Request)
 }
 
 func sealer(t *testing.T) clerk.Sealer {
@@ -160,6 +164,10 @@ func (f *planFix) serve(w http.ResponseWriter, r *http.Request) {
 	case "/backend-api/codex/responses", "/backend-api/codex/models":
 		if f.stream != nil && r.URL.Path == "/backend-api/codex/responses" {
 			f.stream(w, r)
+			return
+		}
+		if f.list != nil && r.URL.Path == "/backend-api/codex/models" {
+			f.list(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -794,14 +802,13 @@ func TestPlanClerkHoldsOneSlot(t *testing.T) {
 	}
 	for _, mod := range []func(*plan.Declaration){
 		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "Set-Cookie") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Set-") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "X-") },
-		func(d *plan.Declaration) { d.ResponsePrefixes = append(d.ResponsePrefixes, "Proxy-Auth") },
+		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "X-Codex-Session-Token") },
+		func(d *plan.Declaration) { d.ResponseHeaders = append(d.ResponseHeaders, "Session_id") },
 	} {
 		d = f.decl(t)
 		mod(&d)
 		if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err == nil {
-			t.Errorf("a declaration passing a forbidden answer header was taken: %v %v", d.ResponseHeaders, d.ResponsePrefixes)
+			t.Errorf("a declaration passing a forbidden answer header was taken: %v", d.ResponseHeaders)
 		}
 	}
 }
@@ -1124,5 +1131,1099 @@ func TestPlanDeclarationHoldsTheRefresh(t *testing.T) {
 	d.Endpoints = keep
 	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err != nil {
 		t.Fatalf("no code exchange, no client_id: %v", err)
+	}
+}
+
+// The answer to a token exchange reaches the guest as JSON, and a
+// credential the provider sends that is part of the guest's placeholder is
+// not swapped into it: the placeholder would carry the credential (CLK-7).
+func TestPlanExchangeAnswerHoldsNoCredential(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("signin"); err != nil {
+		t.Fatal(err)
+	}
+	resp, d := p.Do(context.Background(), "signin", req("POST", "/oauth/token", deviceSteps(t, p, "signin"), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
+	if d != "" {
+		t.Fatalf("code exchange: %s", d)
+	}
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("the exchange answer's Content-Type is %q", ct)
+	}
+	g, _ := p.Guest("g")
+	f.answerWith(200, `{"access_token":"agentos-ph-access","id_token":"`+idToken("acct-1")+`"}`)
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DUnswappable {
+		t.Fatalf("a credential inside a placeholder: %v %q", resp != nil, d)
+	}
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp == nil || d != "" {
+		t.Fatalf("the refresh after it: %q", d)
+	}
+}
+
+// A refused login the slot could not record is held in memory, and a new
+// sign-in answers it there too.
+func TestPlanSignInAnswersAHeldRefusal(t *testing.T) {
+	f := newPlanFix(t)
+	var fail atomic.Bool
+	f.sec = plan.NewStore(sealer(t), func([]byte) error {
+		if fail.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	fail.Store(true)
+	f.answerWith(401, `{"error":{"code":"refresh_token_expired"}}`)
+	refreshReq(p, "g", g.Tokens["refresh_token"])
+	if p.Stopped() != plan.StopRefused {
+		t.Fatalf("Stopped = %q, want a held refusal", p.Stopped())
+	}
+	fail.Store(false)
+	signIn(t, p, "signin-2")
+	if p.Stopped() != "" {
+		t.Fatalf("a new sign-in left the route %q", p.Stopped())
+	}
+}
+
+// sealProbe is a sealer whose Seal can be made to fail, whose Open can be
+// made to fail while still handing back what it opened, and which keeps
+// every plaintext it was handed or handed back. failIn names a Login method
+// whose own loads of the slot fail, and onOpen, if set, runs at each Open
+// with the method that loaded.
+type sealProbe struct {
+	clerk.Sealer
+	failSeal, failOpen atomic.Bool
+	mu                 sync.Mutex
+	opened, sealed     [][]byte
+	failIn             string
+	onOpen             func(by string)
+}
+
+func (s *sealProbe) Seal(plain, aad []byte) ([]byte, error) {
+	s.mu.Lock()
+	s.sealed = append(s.sealed, plain)
+	s.mu.Unlock()
+	if s.failSeal.Load() {
+		return nil, errors.New("seal fails")
+	}
+	return s.Sealer.Seal(plain, aad)
+}
+
+func (s *sealProbe) Open(blob, aad []byte) ([]byte, error) {
+	by := loadedBy()
+	plain, err := s.Sealer.Open(blob, aad)
+	s.mu.Lock()
+	s.opened = append(s.opened, plain)
+	failIn, onOpen := s.failIn, s.onOpen
+	s.mu.Unlock()
+	if onOpen != nil {
+		onOpen(by)
+	}
+	if s.failOpen.Load() || failIn != "" && by == failIn {
+		return plain, errors.New("open fails")
+	}
+	return plain, err
+}
+
+// loadedBy is the Login method that loaded the slot an Open serves.
+func loadedBy() string {
+	pc := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pc[:runtime.Callers(2, pc)])
+	for f, more := frames.Next(); more; f, more = frames.Next() {
+		if strings.HasSuffix(f.Function, ".(*Login).load") {
+			f, _ = frames.Next()
+			return f.Function[strings.LastIndex(f.Function, ".")+1:]
+		}
+	}
+	return ""
+}
+
+// wiped reports whether every plaintext in got was zeroed.
+func wiped(got [][]byte) bool {
+	for _, b := range got {
+		if len(b) == 0 || bytes.Count(b, []byte{0}) != len(b) {
+			return false
+		}
+	}
+	return len(got) > 0
+}
+
+// returns fails t unless fn returns within a few seconds: a lock left held
+// would hang it.
+func returns(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); fn() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return", what)
+	}
+}
+
+// The login's slot: a login that cannot be sealed is not stored, and the
+// one stored stays; a slot that does not open is not read, whatever the
+// sealer handed back; every plaintext opened is wiped once read (CLK-1).
+func TestPlanSlotSealsOpensAndWipes(t *testing.T) {
+	f := newPlanFix(t)
+	s := &sealProbe{Sealer: f.seal}
+	f.sec = plan.NewStore(s, nil)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	before, _ := f.sec.MarshalBinary()
+
+	s.failSeal.Store(true)
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DSave {
+		t.Fatalf("a refresh that cannot be sealed: %v %q", resp != nil, d)
+	}
+	s.failSeal.Store(false)
+	if after, _ := f.sec.MarshalBinary(); !bytes.Equal(after, before) || !p.Signed() {
+		t.Fatal("a login that could not be sealed changed the stored one")
+	}
+
+	returns(t, "a Resume after a login that could not be sealed", func() { p.Resume() })
+	s.mu.Lock()
+	if !wiped(s.opened) || !wiped(s.sealed) {
+		t.Fatalf("a plaintext was not wiped: opened %q, sealed %q", s.opened, s.sealed)
+	}
+	s.mu.Unlock()
+
+	s.failOpen.Store(true)
+	if _, err := plan.New(f.decl(t), f.sec, f.roots); err == nil {
+		t.Fatal("a slot that did not open was read")
+	}
+}
+
+// A declaration is refused for the rule it breaks, each rule on its own: no
+// later rule stands in for an earlier one, and a declaration with no pool is
+// no pool to name.
+func TestPlanDeclarationNamesTheRuleItBreaks(t *testing.T) {
+	f := newPlanFix(t)
+	cases := []struct {
+		name, want string
+		edit       func(d *plan.Declaration)
+	}{
+		{"a name that is not plain", "a plain name and a version", func(d *plan.Declaration) { d.Name = "co dex" }},
+		{"no version", "a plain name and a version", func(d *plan.Declaration) { d.Version = "" }},
+		{"an unknown mode", `mode "x"`, func(d *plan.Declaration) { d.Mode = "x" }},
+		{"an unknown endpoint kind", `kind "x"`, func(d *plan.Declaration) { d.Endpoints[0].Kind = "x" }},
+		{"an unnamed endpoint", "is out of shape", func(d *plan.Declaration) { d.Endpoints[1].Name = "" }},
+		{"a lower-case method", "is out of shape", func(d *plan.Declaration) { d.Endpoints[1].Method = "get" }},
+		{"a path out of shape", "is out of shape", func(d *plan.Declaration) { d.Endpoints[1].Path = "/a b" }},
+		{"a host out of shape", "is out of shape", func(d *plan.Declaration) { d.Endpoints[1].Host = "Example.com" }},
+		{"a read by POST", "a read is a GET", func(d *plan.Declaration) { d.Endpoints[1].Method = "POST" }},
+		{"a GET that is not a read", "a read is a GET", func(d *plan.Declaration) { d.Endpoints[0].Method = "GET" }},
+		{"a repeated request", "repeats a request", func(d *plan.Declaration) {
+			e := d.Endpoints[1]
+			e.Name = "models-2"
+			d.Endpoints = append(d.Endpoints, e)
+		}},
+		{"a repeated token field", "unnamed or repeated", func(d *plan.Declaration) { d.Token = append(d.Token, d.Token[3]) }},
+		{"an unnamed token field", "unnamed or repeated", func(d *plan.Declaration) { d.Token[3].Name = "" }},
+		{"a credential with a pattern", "only text takes a pattern", func(d *plan.Declaration) { d.Token[0].Pattern = "x" }},
+		{"a number with a pattern", "only text takes a pattern", func(d *plan.Declaration) { d.Token[3].Pattern = "x" }},
+		{"text with no pattern", "text needs a valid pattern", func(d *plan.Declaration) { d.Token[4].Pattern = "" }},
+		{"text with a broken pattern", "text needs a valid pattern", func(d *plan.Declaration) { d.Token[4].Pattern = "(" }},
+		{"an unknown field kind", `kind "x"`, func(d *plan.Declaration) { d.Token[3].Kind = "x" }},
+		{"a credential that is no token", "only the access, refresh and id tokens are credentials", func(d *plan.Declaration) {
+			d.Token[3].Kind = plan.FieldCredential
+		}},
+		{"a token that is no credential", "only the access, refresh and id tokens are credentials", func(d *plan.Declaration) {
+			d.Token[2].Kind, d.Token[2].Pattern = plan.FieldText, "x"
+		}},
+		{"no access token", "declares an access token", func(d *plan.Declaration) { d.Token = d.Token[1:] }},
+		{"an optional access token", "declares an access token", func(d *plan.Declaration) { d.Token[0].Optional = true }},
+		{"no id token", "declares an access token", func(d *plan.Declaration) { d.Token = append(d.Token[:2:2], d.Token[3:]...) }},
+		{"no account claim", "declares an access token", func(d *plan.Declaration) { d.AccountClaim = nil }},
+		{"no body keys", "declares its keys, input types and content types", func(d *plan.Declaration) { d.Body.Keys = nil }},
+		{"no input types", "declares its keys, input types and content types", func(d *plan.Declaration) { d.Body.InputTypes = nil }},
+		{"no content types", "declares its keys, input types and content types", func(d *plan.Declaration) { d.Body.ContentTypes = nil }},
+		{"no store key", "declares store", func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "stream", "client_metadata"}
+		}},
+		{"a stream with no stream key", "declares its stream key", func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "store", "client_metadata"}
+		}},
+		{"a pool with no name", "needs its ID and name", func(d *plan.Declaration) { d.Pool.Name = "" }},
+	}
+	for _, c := range cases {
+		d := f.decl(t)
+		d.Endpoints = append([]plan.Endpoint(nil), d.Endpoints...)
+		d.Token = append([]plan.Field(nil), d.Token...)
+		c.edit(&d)
+		_, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: New said %v, want %q", c.name, err, c.want)
+		}
+	}
+	if _, err := plan.New(f.decl(t), nil, f.roots); err == nil || !strings.Contains(err.Error(), "needs its sealed store") {
+		t.Errorf("no store: New said %v", err)
+	}
+	d := f.decl(t)
+	d.Pool = plan.Pool{}
+	if _, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots); err != nil {
+		t.Errorf("a declaration with no pool: %v", err)
+	}
+}
+
+// Loading an empty at-rest form leaves the store empty (CLK-1).
+func TestPlanStoreLoadsNothingAsEmpty(t *testing.T) {
+	s := plan.NewStore(sealer(t), nil)
+	s.Load([]byte("sealed"))
+	s.Load(nil)
+	if b, _ := s.MarshalBinary(); len(b) != 0 {
+		t.Fatalf("an empty load kept %q", b)
+	}
+}
+
+// Do refuses a request out of its declared form, each by its own answer,
+// before anything is sent; a declared one goes as the declaration says: its
+// query in the clerk's encoding, the declared headers only, the real token,
+// and a body of known length (CLK-3, CLK-7).
+func TestPlanDoHoldsTheRequestToItsForm(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	bearer := map[string]string{"Authorization": "Bearer " + ph}
+	big := refreshBody(g.Tokens["refresh_token"]) + strings.Repeat(" ", 64<<10)
+	n := f.hits()
+	for name, c := range map[string]struct {
+		r    *http.Request
+		want string
+	}{
+		"a query that does not parse":    {req("GET", "/backend-api/codex/models?client_version=1&x=%zz", "", bearer), plan.DUndeclared},
+		"an upgrade by Connection alone": {req("GET", "/backend-api/codex/models", "", map[string]string{"Authorization": "Bearer " + ph, "Connection": "keep-alive, Upgrade"}), plan.DUndeclared},
+		"an undeclared path":             {req("POST", "/backend-api/codex/other", "{}", bearer), plan.DUndeclared},
+		"an encoded body": {req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`,
+			map[string]string{"Authorization": "Bearer " + ph, "Content-Encoding": "gzip"}), plan.DEncoded},
+		"a refresh past an exchange's bound": {req("POST", "/oauth/token", big, map[string]string{"Content-Type": "application/json"}), plan.DUndeclared},
+		"a placeholder with no Bearer":       {req("GET", "/backend-api/codex/models", "", map[string]string{"Authorization": ph}), plan.DPlaceholder},
+	} {
+		if resp, d := p.Do(context.Background(), "g", c.r, free); resp != nil || d != c.want {
+			t.Errorf("%s: %v %q, want %q", name, resp != nil, d, c.want)
+		}
+	}
+	if f.hits() != n {
+		t.Fatal("a refused request reached the provider")
+	}
+	h := map[string]string{"Authorization": "Bearer " + ph, "Originator": "codex_cli_rs", "Cookie": "c=1"}
+	resp, d := p.Do(context.Background(), "g", req("GET", "/backend-api/codex/models?client_version=0.162.1", "", h), nil)
+	if d != "" {
+		t.Fatalf("models read: %s", d)
+	}
+	read(t, resp)
+	if up, _ := f.last(); up.URL.RawQuery != "client_version=0.162.1" || up.Header.Get("Originator") != "codex_cli_rs" ||
+		up.Header.Get("Cookie") != "" || up.Header.Get("Authorization") != "Bearer real-access-1" {
+		t.Fatalf("the models read went as %q %v", up.URL.RawQuery, up.Header)
+	}
+	resp, d = p.Do(context.Background(), "g", req("POST", "/backend-api/codex/responses", `{"model":"m","stream":true}`, h), free)
+	if d != "" {
+		t.Fatalf("model call: %s", d)
+	}
+	read(t, resp)
+	if up, body := f.last(); up.Header.Get("Authorization") != "Bearer real-access-1" || up.Header.Get("Originator") != "codex_cli_rs" ||
+		up.ContentLength != int64(len(body)) {
+		t.Fatalf("the model call went with length %d for %q, %v", up.ContentLength, body, up.Header)
+	}
+}
+
+// A provider that cannot be reached answers no request: each kind gets the
+// clerk's no-answer detail and nothing else (CLK-3).
+func TestPlanUnreachableProviderAnswersNothing(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "s")
+	f.srv.Close()
+	for name, c := range map[string]struct {
+		guest string
+		r     *http.Request
+	}{
+		"a code exchange": {"s", formReq(form)},
+		"a device step":   {"s", jsonReq("/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`)},
+		"a refresh":       {"g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"})},
+		"a models read":   {"g", req("GET", "/backend-api/codex/models", "", map[string]string{"Authorization": "Bearer " + g.Tokens["access_token"]})},
+	} {
+		if resp, d := p.Do(context.Background(), c.guest, c.r, nil); resp != nil || !strings.HasPrefix(d, clerk.DNoAnswer) {
+			t.Errorf("%s: %v %q", name, resp != nil, d)
+		}
+	}
+}
+
+// A dial the home-network policy denies is reported as blocked (DEV-2).
+func TestPlanDeniedDialIsBlocked(t *testing.T) {
+	f := newPlanFix(t)
+	signIn(t, f.login(t), "signin")
+	d := f.decl(t)
+	d.Guard = netguard.New(netguard.Config{Resolver: resolver(netip.MustParseAddr("169.254.169.254"))})
+	p, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := p.Guest("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := map[string]string{"Authorization": "Bearer " + g.Tokens["access_token"]}
+	if resp, det := p.Do(context.Background(), "g", req("GET", "/backend-api/codex/models", "", h), nil); resp != nil || det != clerk.DBlocked {
+		t.Fatalf("a denied dial: %v %q", resp != nil, det)
+	}
+}
+
+// An answer that is encoded is dropped and closed, so the provider's
+// connection does not stay open; one cut short is no answer (CLK-3).
+func TestPlanEncodedOrCutAnswerIsDropped(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	closed, end := make(chan struct{}, 1), make(chan struct{})
+	t.Cleanup(func() { close(end) })
+	encoded := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(200)
+		w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			closed <- struct{}{}
+		case <-end:
+		}
+	}
+	f.stream, f.list = encoded, encoded
+	var cut atomic.Bool
+	f.answer = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+		if !cut.Load() {
+			encoded(w, r)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "100")
+		w.Write([]byte(`{"access_token":`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "s")
+	ph := g.Tokens["access_token"]
+	for name, do := range map[string]func() (*http.Response, string){
+		"code exchange": func() (*http.Response, string) { return p.Do(context.Background(), "s", formReq(form), nil) },
+		"model call":    func() (*http.Response, string) { return model(p, "g", ph) },
+		"models read": func() (*http.Response, string) {
+			return p.Do(context.Background(), "g", req("GET", "/backend-api/codex/models", "", map[string]string{"Authorization": "Bearer " + ph}), nil)
+		},
+		"refresh": func() (*http.Response, string) { return refreshReq(p, "g", g.Tokens["refresh_token"]) },
+	} {
+		if resp, d := do(); resp != nil || d != plan.DEncoded {
+			t.Fatalf("an encoded %s answer: %v %q", name, resp != nil, d)
+		}
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the encoded %s answer was left open", name)
+		}
+	}
+	cut.Store(true)
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || !strings.HasPrefix(d, clerk.DNoAnswer) {
+		t.Fatalf("a refresh answer cut short: %v %q", resp != nil, d)
+	}
+}
+
+// breakable is a connection whose writes can be made to fail.
+type breakable struct {
+	net.Conn
+	broken atomic.Bool
+}
+
+func (c *breakable) Write(b []byte) (int, error) {
+	if c.broken.Load() {
+		return 0, errors.New("connection broken")
+	}
+	return c.Conn.Write(b)
+}
+
+// A model call whose reused connection fails before a byte is written is
+// sent again, whole, on a new connection (CLK-3).
+func TestPlanModelCallIsResentWhole(t *testing.T) {
+	f := newPlanFix(t)
+	var mu sync.Mutex
+	var conns []*breakable
+	d := f.decl(t)
+	d.Guard = netguard.New(netguard.Config{Resolver: resolver(netip.MustParseAddr("8.8.8.8")), Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		c, err := (&net.Dialer{}).DialContext(ctx, network, f.srv.Listener.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		b := &breakable{Conn: c}
+		mu.Lock()
+		conns = append(conns, b)
+		mu.Unlock()
+		return b, nil
+	}})
+	p, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	resp, det := model(p, "g", g.Tokens["access_token"])
+	if det != "" {
+		t.Fatal(det)
+	}
+	read(t, resp)
+	mu.Lock()
+	for _, c := range conns {
+		c.broken.Store(true)
+	}
+	n := len(conns)
+	mu.Unlock()
+	resp, det = model(p, "g", g.Tokens["access_token"])
+	if det != "" {
+		t.Fatalf("a model call on a broken connection: %q", det)
+	}
+	read(t, resp)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, body := f.last(); len(conns) == n || body != `{"model":"m","store":false,"stream":true}` {
+		t.Fatalf("sent again on %d new connections as %q", len(conns)-n, body)
+	}
+}
+
+// A device step goes to the provider as the clerk's own JSON, whatever type
+// the guest named, with its text as written; its answer has a known length;
+// a body that is not a JSON object, or an answer too large to read, passes
+// nothing; and with no secret declared, an answer that is no JSON object is
+// still dropped (CLK-1, CLK-3).
+func TestPlanDeviceStepIsSentAndAnsweredAsJSON(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	const uc = "/api/accounts/deviceauth/usercode"
+	resp, d := p.Do(context.Background(), "s", req("POST", uc, `{"client_id":"app<x>&"}`, map[string]string{"Content-Type": "text/plain"}), nil)
+	if d != "" {
+		t.Fatalf("usercode: %s", d)
+	}
+	if body := read(t, resp); resp.ContentLength != int64(len(body)) {
+		t.Fatalf("the answer's length is %d for %d bytes", resp.ContentLength, len(body))
+	}
+	if up, sent := f.last(); up.Header.Get("Content-Type") != "application/json" || sent != `{"client_id":"app<x>&"}` {
+		t.Fatalf("the device step went as %q %q", up.Header.Get("Content-Type"), sent)
+	}
+	if resp, d := p.Do(context.Background(), "s", jsonReq(uc, "client_id=app_x"), nil); resp != nil || d != plan.DUndeclared {
+		t.Fatalf("a body that is no JSON object: %v %q", resp != nil, d)
+	}
+	f.usercode = func(w http.ResponseWriter) bool {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"device_auth_id":"real-device-1","user_code":"ABCD-1234","pad":"` + strings.Repeat("x", 64<<10) + `"}`))
+		return true
+	}
+	if resp, d := p.Do(context.Background(), "s", jsonReq(uc, `{"client_id":"app_x"}`), nil); resp != nil || d != plan.DUndeclared {
+		t.Fatalf("an answer too large to read: %v %q", resp != nil, d)
+	}
+	dc := f.decl(t)
+	dc.Endpoints[3].Secret, dc.Endpoints[4].Takes = nil, nil
+	q, err := plan.New(dc, plan.NewStore(sealer(t), nil), f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	f.usercode = func(w http.ResponseWriter) bool {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not json"))
+		return true
+	}
+	if resp, d := q.Do(context.Background(), "s", jsonReq(uc, `{"client_id":"app_x"}`), nil); resp != nil || d != plan.DSecret {
+		t.Fatalf("an answer that is no JSON object: %v %q", resp != nil, d)
+	}
+}
+
+// A code exchange passes only in its exact form: the form type, each key
+// once, no other key; it goes to the provider as a form of that exact type
+// (CLK-1).
+func TestPlanCodeExchangeIsHeldToItsForm(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "s")
+	ct := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	n := f.exchanges.Load()
+	for name, r := range map[string]*http.Request{
+		"another type":  req("POST", "/oauth/token", form, map[string]string{"Content-Type": "text/plain"}),
+		"an extra key":  req("POST", "/oauth/token", form+"&scope=x", ct),
+		"a key twice":   req("POST", "/oauth/token", form+"&code=x", ct),
+		"an empty form": req("POST", "/oauth/token", "", ct),
+	} {
+		if resp, d := p.Do(context.Background(), "s", r, nil); resp != nil || d != plan.DUndeclared {
+			t.Errorf("%s: %v %q", name, resp != nil, d)
+		}
+	}
+	if f.exchanges.Load() != n {
+		t.Fatal("a code exchange out of form was sent")
+	}
+	resp, d := p.Do(context.Background(), "s", req("POST", "/oauth/token", form, map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"}), nil)
+	if d != "" {
+		t.Fatalf("code exchange: %s", d)
+	}
+	read(t, resp)
+	if up, _ := f.last(); up.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+		t.Fatalf("the code exchange went as %q", up.Header.Get("Content-Type"))
+	}
+}
+
+// A token answer is held to its declared shape: JSON, with an id_token
+// whose account claim reads whole and within its bound, and both tokens a
+// login needs; a declared flag passes (CLK-7).
+func TestPlanTokenAnswerIsHeldToItsShape(t *testing.T) {
+	f := newPlanFix(t)
+	d := f.decl(t)
+	d.Token = append(d.Token, plan.Field{Name: "fresh", Kind: plan.FieldBool, Optional: true})
+	claims, _ := json.Marshal(map[string]any{"https://api.openai.com/auth": map[string]string{"chatgpt_account_id": "acct-1"}})
+	for len(claims)%3 != 0 {
+		claims = append(claims, ' ')
+	}
+	cut := "e30." + base64.RawURLEncoding.EncodeToString(claims) + "*.sig"
+	tok := func(id string, drop string, add map[string]any) string {
+		m := map[string]any{"access_token": "real-access-9", "refresh_token": "real-refresh-9", "id_token": id}
+		delete(m, drop)
+		for k, v := range add {
+			m[k] = v
+		}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	for _, c := range []struct {
+		name, ct, body, want string
+	}{
+		{"an id_token cut short", "application/json", tok(cut, "", nil), plan.DUnswappable},
+		{"an account past its bound", "application/json", tok(idToken(strings.Repeat("a", 257)), "", nil), plan.DUnswappable},
+		{"an answer that is not JSON", "text/plain", tok(idToken("acct-1"), "", nil), plan.DUnswappable},
+		{"no refresh token", "application/json", tok(idToken("acct-1"), "refresh_token", nil), plan.DUnswappable},
+		{"a declared flag", "application/json", tok(idToken("acct-1"), "", map[string]any{"fresh": true}), ""},
+	} {
+		p, err := plan.New(d, plan.NewStore(sealer(t), nil), f.roots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.BeginSignIn("s"); err != nil {
+			t.Fatal(err)
+		}
+		form := deviceSteps(t, p, "s")
+		f.answer = func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+			w.Header().Set("Content-Type", c.ct)
+			w.Write([]byte(c.body))
+			return true
+		}
+		resp, det := p.Do(context.Background(), "s", formReq(form), nil)
+		if det != c.want || (resp != nil) != (c.want == "") {
+			t.Errorf("%s: %v %q, want %q", c.name, resp != nil, det, c.want)
+		}
+		if stop := map[bool]string{true: "", false: plan.StopUnswappable}[c.want == ""]; p.Stopped() != stop {
+			t.Errorf("%s: the route reads %q, want %q", c.name, p.Stopped(), stop)
+		}
+		if resp != nil {
+			read(t, resp)
+		}
+	}
+	f.answer = nil
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	f.answerWith(200, tok(idToken("acct-1"), "access_token", nil))
+	if resp, det := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || det != plan.DUnswappable {
+		t.Fatalf("a refresh answer with no access token: %v %q", resp != nil, det)
+	}
+}
+
+// A guest has a name, and its id_token placeholder carries an expiry the
+// CLI reads as live.
+func TestPlanGuestNamesAndItsIDTokenExpiry(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	if _, err := p.Guest(""); err == nil {
+		t.Fatal("a guest with no name got tokens")
+	}
+	if err := p.BeginSignIn(""); err == nil || p.Signing("") {
+		t.Fatal("a sign-in guest with no name began")
+	}
+	g, _ := p.Guest("g")
+	parts := strings.Split(g.Tokens["id_token"], ".")
+	raw, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var c struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil || c.Exp < time.Now().Add(364*24*time.Hour).Unix() {
+		t.Fatalf("the id_token placeholder's claims %s (%v)", raw, err)
+	}
+}
+
+// A slot that does not open lets nothing through: Stopped reads it as
+// unswappable, Guest and Resume return its error, and a commit drops the
+// answer (CLK-1).
+func TestPlanSlotThatDoesNotOpenHoldsAll(t *testing.T) {
+	f := newPlanFix(t)
+	s := &sealProbe{Sealer: f.seal}
+	f.sec = plan.NewStore(s, nil)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	failIn := func(m string) {
+		s.mu.Lock()
+		s.failIn = m
+		s.mu.Unlock()
+	}
+	failIn("Guest")
+	if _, err := p.Guest("g"); err == nil || errors.Is(err, plan.ErrNoLogin) {
+		t.Fatalf("a slot that did not open for Guest: %v", err)
+	}
+	failIn("swap")
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DSave {
+		t.Fatalf("a commit to a slot that did not open: %v %q", resp != nil, d)
+	}
+	failIn("")
+	s.failOpen.Store(true)
+	if st := p.Stopped(); st != plan.StopUnswappable {
+		t.Fatalf("a slot that does not open reads as %q", st)
+	}
+	if err := p.Resume(); err == nil {
+		t.Fatal("Resume read a slot that does not open")
+	}
+}
+
+// outOfShapeSignIn has a new sign-in guest's code exchange answered out of
+// shape, which stops the route as unswappable.
+func outOfShapeSignIn(t *testing.T, f *planFix, p *plan.Login, guest string) {
+	t.Helper()
+	if err := p.BeginSignIn(guest); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, guest)
+	f.answerWith(200, `{"access_token":"x"}`)
+	if resp, d := p.Do(context.Background(), guest, formReq(form), nil); resp != nil || d != plan.DUnswappable {
+		t.Fatalf("an out-of-shape sign-in: %v %q", resp != nil, d)
+	}
+}
+
+const refusedBody = `{"error":{"code":"refresh_token_expired"}}`
+
+// An unswappable stop outranks a refusal already recorded, and removing the
+// login keeps it: only the stop is stored (CLK-7).
+func TestPlanUnswappableOutranksARefusal(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	f.answerWith(401, refusedBody)
+	refreshReq(p, "g", g.Tokens["refresh_token"])
+	if p.Stopped() != plan.StopRefused {
+		t.Fatalf("Stopped = %q, want refused", p.Stopped())
+	}
+	outOfShapeSignIn(t, f, p, "s2")
+	if p.Stopped() != plan.StopUnswappable {
+		t.Fatalf("an unswappable stop over a refusal reads %q", p.Stopped())
+	}
+	if err := p.Remove(); err != nil || p.Signed() || p.Stopped() != plan.StopUnswappable {
+		t.Fatalf("Remove under an unswappable stop: %v, signed %v, %q", err, p.Signed(), p.Stopped())
+	}
+}
+
+// A refresh the provider answers after the route was stopped as
+// unswappable changes nothing: a good answer is not committed, and a
+// refusal does not rewrite the stop (CLK-7).
+func TestPlanRefreshAnsweredAfterAnUnswappableStop(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"a good answer", 200, plan.DStopped + " " + plan.StopUnswappable},
+		{"a refusal", 401, plan.DExchange + " http 401"},
+	} {
+		f := newPlanFix(t)
+		p := f.login(t)
+		signIn(t, p, "signin")
+		g, _ := p.Guest("g")
+		hold := make(chan struct{})
+		f.answer = func(w http.ResponseWriter, r *http.Request, _ string) bool {
+			w.Header().Set("Content-Type", "application/json")
+			if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+				w.Write([]byte(`{"access_token":"x"}`)) // the sign-in's exchange: out of shape
+				return true
+			}
+			<-hold
+			if c.status == 200 {
+				return false
+			}
+			w.WriteHeader(c.status)
+			w.Write([]byte(refusedBody))
+			return true
+		}
+		n := f.exchanges.Load()
+		got := make(chan string, 1)
+		go func() {
+			resp, d := refreshReq(p, "g", g.Tokens["refresh_token"])
+			if resp != nil {
+				resp.Body.Close()
+			}
+			got <- d
+		}()
+		for f.exchanges.Load() == n {
+			time.Sleep(time.Millisecond)
+		}
+		if err := p.BeginSignIn("s2"); err != nil {
+			t.Fatal(err)
+		}
+		form := deviceSteps(t, p, "s2")
+		if resp, d := p.Do(context.Background(), "s2", formReq(form), nil); resp != nil || d != plan.DUnswappable {
+			t.Fatalf("an out-of-shape sign-in: %v %q", resp != nil, d)
+		}
+		before, _ := f.sec.MarshalBinary()
+		close(hold)
+		if d := <-got; d != c.want {
+			t.Errorf("%s: the refresh got %q, want %q", c.name, d, c.want)
+		}
+		if after, _ := f.sec.MarshalBinary(); !bytes.Equal(before, after) {
+			t.Errorf("%s: an answer to a stopped route rewrote the slot", c.name)
+		}
+		returns(t, "a Resume after it", func() { p.Resume() })
+	}
+}
+
+// Remove and Resume clear what they own: a Remove that cannot be written
+// changes nothing; a refusal the slot could not record is held until
+// Resume; one it recorded goes with the login, and so do the sign-in marks,
+// the user code and every placeholder (CLK-1, CH-10).
+func TestPlanRemoveAndResumeClearWhatTheyOwn(t *testing.T) {
+	f := newPlanFix(t)
+	var fail atomic.Bool
+	f.sec = plan.NewStore(sealer(t), func([]byte) error {
+		if fail.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	fail.Store(true)
+	var err error
+	returns(t, "a Remove that cannot be written", func() { err = p.Remove() })
+	if err == nil || !p.Signed() {
+		t.Fatalf("a Remove that cannot be written: %v, signed %v", err, p.Signed())
+	}
+	fail.Store(false)
+	resp, d := model(p, "g", g.Tokens["access_token"])
+	if d != "" {
+		t.Fatalf("the placeholders went with a Remove that failed: %q", d)
+	}
+	read(t, resp)
+
+	fail.Store(true)
+	f.answerWith(401, refusedBody)
+	refreshReq(p, "g", g.Tokens["refresh_token"])
+	fail.Store(false)
+	if p.Stopped() != plan.StopRefused {
+		t.Fatalf("Stopped = %q, want a held refusal", p.Stopped())
+	}
+	if err := p.Resume(); err != nil || p.Stopped() != "" {
+		t.Fatalf("Resume left %q (%v)", p.Stopped(), err)
+	}
+
+	f.answerWith(401, refusedBody)
+	refreshReq(p, "g", g.Tokens["refresh_token"])
+	if p.Stopped() != plan.StopRefused || p.UserCode("signin") == "" || !p.Signing("signin") {
+		t.Fatalf("before Remove: %q %q %v", p.Stopped(), p.UserCode("signin"), p.Signing("signin"))
+	}
+	if err := p.Remove(); err != nil || p.Stopped() != "" || p.Signing("signin") || p.UserCode("signin") != "" {
+		t.Fatalf("after Remove: %v %q %q %v", err, p.Stopped(), p.UserCode("signin"), p.Signing("signin"))
+	}
+	signIn(t, p, "signin-2")
+	if resp, d := model(p, "g", g.Tokens["access_token"]); resp != nil || d != plan.DPlaceholder {
+		t.Fatalf("a placeholder from before Remove: %v %q", resp != nil, d)
+	}
+}
+
+// A refresh with another guest's placeholder is refused at once, even while
+// a refresh of the login is in flight: it never joins it. A guest that
+// joined a flight and gives up gets its own answer at once (CLK-7).
+func TestPlanRefreshJoinsAFlightOnlyAsItsOwnGuest(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	a, _ := p.Guest("a")
+	b, _ := p.Guest("b")
+	f.gate = make(chan struct{})
+	n := f.exchanges.Load()
+	led := make(chan string, 1)
+	go func() {
+		resp, d := refreshReq(p, "a", a.Tokens["refresh_token"])
+		if resp != nil {
+			resp.Body.Close()
+		}
+		led <- d
+	}()
+	for f.exchanges.Load() == n {
+		time.Sleep(time.Millisecond)
+	}
+	returns(t, "a refresh with another guest's placeholder", func() {
+		if resp, d := refreshReq(p, "b", a.Tokens["refresh_token"]); resp != nil || d != plan.DPlaceholder {
+			t.Errorf("another guest's placeholder: %v %q", resp != nil, d)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	joined := make(chan string, 1)
+	go func() {
+		resp, d := p.Do(ctx, "b", req("POST", "/oauth/token", refreshBody(b.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"}), nil)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		joined <- d
+	}()
+	cancel()
+	returns(t, "a joined refresh that gave up", func() {
+		if d := <-joined; d != plan.DExchange {
+			t.Errorf("a joined refresh that gave up got %q", d)
+		}
+	})
+	close(f.gate)
+	if d := <-led; d != "" {
+		t.Fatalf("the flight's leader got %q", d)
+	}
+}
+
+// A refresh whose caller gave up before its flight ended still gets the
+// answer it led, every time (ASSUMPTIONS a7).
+func TestPlanCancelledLeaderGetsItsAnswer(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := range 24 {
+		resp, d := p.Do(ctx, "g", req("POST", "/oauth/token", refreshBody(g.Tokens["refresh_token"]), map[string]string{"Content-Type": "application/json"}), nil)
+		if resp == nil {
+			t.Fatalf("refresh %d, led by a caller that gave up: %q", i, d)
+		}
+		read(t, resp)
+	}
+}
+
+// A refresh is checked again inside its flight: a login removed after the
+// first check sends nothing (CLK-7).
+func TestPlanRefreshIsRecheckedInItsFlight(t *testing.T) {
+	f := newPlanFix(t)
+	s := &sealProbe{Sealer: f.seal}
+	f.sec = plan.NewStore(s, nil)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	var once sync.Once
+	s.mu.Lock()
+	s.onOpen = func(by string) {
+		if by == "resolve" {
+			once.Do(func() { p.Remove() })
+		}
+	}
+	s.mu.Unlock()
+	n := f.exchanges.Load()
+	if resp, d := refreshReq(p, "g", g.Tokens["refresh_token"]); resp != nil || d != plan.DPlaceholder {
+		t.Fatalf("a refresh of a login removed after its check: %v %q", resp != nil, d)
+	}
+	if f.exchanges.Load() != n {
+		t.Fatal("a refresh of a removed login was sent")
+	}
+}
+
+// waitLocked waits until a goroutine in fn waits on a mutex.
+func waitLocked(t *testing.T, fn string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "[sync.Mutex.Lock") && strings.Contains(g, fn) {
+				return
+			}
+		}
+	}
+	t.Fatalf("no goroutine in %s waited on a lock", fn)
+}
+
+// A refresh answer that waited for the commit lock while the owner removed
+// the login is stale once it holds the lock: it stops nothing (CLK-7).
+func TestPlanRefreshIsStaleOnceItHoldsTheCommitLock(t *testing.T) {
+	f := newPlanFix(t)
+	s := &sealProbe{Sealer: f.seal}
+	f.sec = plan.NewStore(s, nil)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	hold := make(chan struct{})
+	f.answer = func(http.ResponseWriter, *http.Request, string) bool { <-hold; return false }
+	n := f.exchanges.Load()
+	got := make(chan string, 1)
+	go func() {
+		resp, d := refreshReq(p, "g", g.Tokens["refresh_token"])
+		if resp != nil {
+			resp.Body.Close()
+		}
+		got <- d
+	}()
+	for f.exchanges.Load() == n {
+		time.Sleep(time.Millisecond)
+	}
+	var once sync.Once
+	s.mu.Lock()
+	s.onOpen = func(by string) {
+		if by == "Remove" {
+			once.Do(func() {
+				close(hold)
+				waitLocked(t, ".(*Login).swap(")
+			})
+		}
+	}
+	s.mu.Unlock()
+	if err := p.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if d := <-got; d != plan.DStale || p.Stopped() != "" {
+		t.Fatalf("a refresh answer to a login removed meanwhile: %q, stopped %q", d, p.Stopped())
+	}
+	returns(t, "a Remove after it", func() { p.Remove() })
+}
+
+// deep is a value nested n objects deep.
+func deep(n int) any {
+	var v any = "x"
+	for range n {
+		v = map[string]any{"a": v}
+	}
+	return v
+}
+
+// A model body is held to each rule of its shape on its own, wherever the
+// value sits (PLN-5(a), CLK-7).
+func TestPlanModelBodyHeldToEachRule(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ns := func(tools ...any) []any {
+		return []any{map[string]any{"type": "namespace", "name": "functions", "tools": tools}}
+	}
+	msg := func(k string, v any) []any { return []any{map[string]any{"type": "message", "role": "user", k: v}} }
+	tools := map[string]any{"tools": []any{}}
+	for _, c := range []struct {
+		name, want string
+		edit       func(m map[string]any)
+	}{
+		{"a tool choice of a declared type", "", func(m map[string]any) { m["tool_choice"] = map[string]any{"type": "function"} }},
+		{"a tool choice that is a number", "choice", func(m map[string]any) { m["tool_choice"] = 5 }},
+		{"input that is text", "input", func(m map[string]any) { m["input"] = "x" }},
+		{"an input item that is text", "input", func(m map[string]any) { m["input"] = []any{"x"} }},
+		{"tools inside an input item", "tool", func(m map[string]any) { m["input"] = msg("meta", tools) }},
+		{"additional_tools with no tools", "input", func(m map[string]any) { m["input"] = []any{map[string]any{"type": "additional_tools"}} }},
+		{"content that is text", "", func(m map[string]any) { m["input"] = msg("content", "x") }},
+		{"content that is a number", "content", func(m map[string]any) { m["input"] = msg("content", 5) }},
+		{"a content part that is text", "content", func(m map[string]any) { m["input"] = msg("content", []any{"x"}) }},
+		{"tools inside a content part", "tool", func(m map[string]any) {
+			m["input"] = msg("content", []any{map[string]any{"type": "input_text", "meta": tools}})
+		}},
+		{"tools that are an object", "tool", func(m map[string]any) { m["tools"] = map[string]any{} }},
+		{"a tool that is text", "tool", func(m map[string]any) { m["tools"] = []any{"x"} }},
+		{"tools inside a list", "tool", func(m map[string]any) { m["include"] = []any{tools} }},
+		{"a function schema nested too deep", "depth", func(m map[string]any) {
+			m["text"] = map[string]any{"type": "function", "parameters": deep(40)}
+		}},
+		{"a tool nested too deep", "depth", func(m map[string]any) {
+			m["tools"] = ns(map[string]any{"type": "custom", "name": "exec", "format": deep(40)})
+		}},
+		{"an address in a function's schema", "", func(m map[string]any) {
+			m["tools"] = ns(map[string]any{"type": "function", "name": "wait",
+				"parameters": map[string]any{"examples": []any{map[string]any{"url": "https://example.com/x"}}}})
+		}},
+	} {
+		m := capture(t)
+		c.edit(m)
+		want := ""
+		if c.want != "" {
+			want = plan.DBody + " " + c.want
+		}
+		resp, d := callWith(p, "g", g.Tokens["access_token"], encode(t, m), free)
+		if d != want {
+			t.Errorf("%s: %q, want %q", c.name, d, want)
+		}
+		if resp != nil {
+			read(t, resp)
+		}
+	}
+}
+
+// A JSON text in client_metadata is one JSON value: an empty text is
+// refused even where the shape inside admits null.
+func TestPlanMetadataJSONTextIsOneValue(t *testing.T) {
+	f := newPlanFix(t)
+	d := f.decl(t)
+	d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 64, Each: &plan.Value{Kind: plan.KindBool, Null: true}}}
+	p, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	for v, want := range map[string]string{"true": "", "null": "", "": plan.DBody + " meta"} {
+		body := encode(t, map[string]any{"model": "m", "stream": true, "client_metadata": map[string]any{"j": v}})
+		resp, det := callWith(p, "g", g.Tokens["access_token"], body, free)
+		if det != want {
+			t.Errorf("client_metadata %q: %q, want %q", v, det, want)
+		}
+		if resp != nil {
+			read(t, resp)
+		}
+	}
+}
+
+// An input item or a content part that is no object is refused, even under
+// a declaration that lists an empty type (PLN-5(a)).
+func TestPlanBodyItemsAreObjects(t *testing.T) {
+	f := newPlanFix(t)
+	d := f.decl(t)
+	d.Body.InputTypes = append(d.Body.InputTypes, "")
+	d.Body.ContentTypes = append(d.Body.ContentTypes, "")
+	p, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	for name, c := range map[string]struct {
+		input any
+		want  string
+	}{
+		"an input item that is text":  {[]any{"x"}, "input"},
+		"a content part that is text": {[]any{map[string]any{"type": "message", "role": "user", "content": []any{"x"}}}, "content"},
+	} {
+		body := encode(t, map[string]any{"model": "m", "stream": true, "input": c.input})
+		if resp, det := callWith(p, "g", g.Tokens["access_token"], body, free); resp != nil || det != plan.DBody+" "+c.want {
+			t.Errorf("%s: %v %q", name, resp != nil, det)
+		}
 	}
 }

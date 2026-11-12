@@ -378,8 +378,22 @@ func TestPlanOwnerSocket(t *testing.T) {
 	if n, _ := cli2.started(); n != 0 {
 		t.Fatal("a sandbox was started")
 	}
-	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn {
+	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn || st.Last != DSignInStopped {
 		t.Fatalf("state while unswappable: %+v %v", st, err)
+	}
+}
+
+// A zero bound takes its default.
+func TestPlanSignInTimesDefaults(t *testing.T) {
+	if got := (SignInTimes{}).orDefault(); got != (SignInTimes{Poll: time.Second, Link: 45 * time.Second, Wall: 15 * time.Minute}) {
+		t.Fatalf("defaults: %+v", got)
+	}
+}
+
+// Each sign-in guest has a random name of its own.
+func TestPlanSignInGuestsAreDistinct(t *testing.T) {
+	if a, b := signInGuest(), signInGuest(); a == b {
+		t.Fatalf("two sign-in guests named %q", a)
 	}
 }
 
@@ -536,25 +550,62 @@ func TestPlanSignInStuckHost(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("Remove waited on a stuck start")
 		}
-		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
-			t.Fatalf("begun: %+v", b)
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInStopped}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Begin never returned after the remove ended the stuck start")
+		}
+	})
+	t.Run("a caller that gives up during the start", func(t *testing.T) {
+		times := quick
+		times.Link = time.Minute
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: &stuckCLI{fakeCLI: newFakeCLI(login, ""), stuck: true}, Times: times}
+		ctx, cancel := context.WithCancel(context.Background())
+		begun := make(chan PlanBegun, 1)
+		go func() { begun <- h.Begin(ctx) }()
+		until(t, "the sign-in to start", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.cur != nil })
+		cancel()
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInTimedOut}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Begin ran on after its caller gave up")
 		}
 	})
 	t.Run("a remove once the code is printed", func(t *testing.T) {
-		cli := &stuckCLI{fakeCLI: newFakeCLI(login, codexPrinted), reading: make(chan struct{}), release: make(chan struct{})}
+		cli := &stuckCLI{fakeCLI: newFakeCLI(login, codexPrinted), reading: make(chan struct{}, 1), release: make(chan struct{})}
 		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
 		begun := make(chan PlanBegun, 1)
 		go func() { begun <- h.Begin(context.Background()) }()
-		<-cli.reading
+		select { // the read has begun: the code is about to print
+		case <-cli.reading:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the sign-in never read its output: no printed code to remove after")
+		}
 		removed := make(chan error, 1)
 		go func() { removed <- h.Remove() }()
 		until(t, "the remove to begin", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.removing > 0 })
 		close(cli.release)
-		if b := <-begun; b != (PlanBegun{Detail: DSignInStopped}) {
-			t.Fatalf("begun: %+v", b)
+		select {
+		case b := <-begun:
+			if b != (PlanBegun{Detail: DSignInStopped}) {
+				t.Fatalf("begun: %+v", b)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Begin never returned after the remove released the stuck read")
 		}
-		if err := <-removed; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-removed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Remove never returned after the stuck read was released")
 		}
 		if st := h.State(); st.Signing || st.Code != "" || st.Last != DSignInStopped {
 			t.Fatalf("after: %+v", st)
@@ -985,14 +1036,20 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 			t.Fatalf("begun: %+v", b)
 		}
 		_, guest := cli.started()
-		if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.SignedIn(guest) {
+		// The watcher may forget the guest as soon as the commit lands, so
+		// the stored login is read, not the guest's mark.
+		if code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest)); code != 200 || !login.Signed() {
 			t.Fatalf("the CLI's code exchange: %d", code)
 		}
 	}
 
 	t.Run("after a signed-in sign-in", func(t *testing.T) {
 		cli := newFakeCLI(login, codexPrinted)
-		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		// Wall is an hour, so the sandbox goes within waitStopped's bound
+		// only because the watcher reads the commit, not at the wall.
+		times := quick
+		times.Wall = time.Hour
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: times}
 		signInOnce(h, cli)
 		cli.waitStopped(t)
 		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
@@ -1036,6 +1093,25 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 		}
 		if st := h.State(); st.Last != "" || st.SignedIn {
 			t.Fatalf("after the remove: %+v", st)
+		}
+	})
+	t.Run("a failed remove ending an uncommitted sign-in", func(t *testing.T) {
+		cli := newFakeCLI(login, codexPrinted)
+		h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+		if b := h.Begin(context.Background()); b.Code == "" {
+			t.Fatalf("begun: %+v", b)
+		}
+		failing.Store(true)
+		if err := h.Remove(); err == nil {
+			t.Fatal("a Remove whose delete failed answered nil")
+		}
+		cli.waitStopped(t)
+		if st := h.State(); st.Last != DSignInStopped || st.Signing {
+			t.Fatalf("after a failed remove: %+v", st)
+		}
+		failing.Store(false)
+		if err := h.Remove(); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("a failed remove does not hold off the next sign-in", func(t *testing.T) {

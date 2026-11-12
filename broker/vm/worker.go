@@ -79,8 +79,31 @@ type Command struct {
 	Hold func() bool
 }
 
-// ErrHeld refuses a command while its Hold says so.
+// ErrHeld refuses a command while its Hold says so, and a fork or rollback
+// while the hold its context carries (WithHold) does.
 var ErrHeld = errors.New("vm: commands are held")
+
+type holdKey struct{}
+
+// WithHold returns ctx carrying hold. Its readers ask it after every wait
+// for a lock, and refuse with ErrHeld,
+// starting nothing, while it says true: a machine's create (Create,
+// CreateWorker, CreateProviderWorker) just before the boot; Exec before a
+// command; Rollback just before the restore; Fork before pausing the source
+// for its checkpoint and before each fork starts, dropping the checkpoint
+// when refused after it; ResumeFromCheckpoint before a restore or cold
+// start (STOP-queued-start, STOP-queued-start-fu). Nothing else reads it.
+// It rides the context so that every wrapper of a Manager passes it on. A
+// nil hold never holds.
+func WithHold(ctx context.Context, hold func() bool) context.Context {
+	return context.WithValue(ctx, holdKey{}, hold)
+}
+
+// heldBy asks the hold ctx carries, if any.
+func heldBy(ctx context.Context) bool {
+	h, _ := ctx.Value(holdKey{}).(func() bool)
+	return h != nil && h()
+}
 
 // WorkerFull refuses a command or snapshot of a worker whose files are
 // over its layer cap (Config.WorkerLayerBytes). It is an ErrQuota.
@@ -252,7 +275,10 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	defer cancel()
 	mc.execCancel.Store(&cancel)
 	defer mc.execCancel.Store(nil)
-	if c.Hold != nil && c.Hold() {
+	// The context's hold covers a caller that cannot set one per command: a
+	// provider run's agent CLI is the one that reaches the model route
+	// (STOP-queued-start-fu).
+	if (c.Hold != nil && c.Hold()) || heldBy(ctx) {
 		return ExecResult{}, ErrHeld
 	}
 	r, err := m.awaitExec(ctx, ex, id, c)

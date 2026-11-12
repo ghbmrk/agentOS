@@ -156,10 +156,14 @@ func (f ownerFunc) StopGen() int64                      { return f().StopGen() }
 func (f ownerFunc) LocalResume(locks uint64, gen int64) (string, error) {
 	return f().LocalResume(locks, gen)
 }
-func (f ownerFunc) LocalRequests() []owner.LocalRequest { return f().LocalRequests() }
-func (f ownerFunc) LocalWaiting() string                { return f().LocalWaiting() }
-func (f ownerFunc) LocalStatusLines() string            { return f().LocalStatusLines() }
-func (f ownerFunc) UnlockPeriod() time.Duration         { return f().UnlockPeriod() }
+func (f ownerFunc) LocalRequests() []owner.LocalRequest       { return f().LocalRequests() }
+func (f ownerFunc) LocalWaiting() string                      { return f().LocalWaiting() }
+func (f ownerFunc) LocalHeld() ([]owner.WaitingMsg, int, int) { return f().LocalHeld() }
+func (f ownerFunc) LocalRunHeld(shown, run []string) (int, error) {
+	return f().LocalRunHeld(shown, run)
+}
+func (f ownerFunc) LocalStatusLines() string    { return f().LocalStatusLines() }
+func (f ownerFunc) UnlockPeriod() time.Duration { return f().UnlockPeriod() }
 func (f ownerFunc) LocalAnswer(id, sum string, a bool, c string) (string, error) {
 	return f().LocalAnswer(id, sum, a, c)
 }

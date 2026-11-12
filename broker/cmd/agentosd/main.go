@@ -793,7 +793,7 @@ func main() {
 		}
 		vmc.ProviderRoutes = signIns
 		md.set(&vmc)
-		m, err := vm.Open(ctx, vmc)
+		m, err := openVM(ctx, vmc, caps, informOwner(d.Owner))
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			caps.agentOff(agentNoMachines)
@@ -1159,8 +1159,8 @@ func agentSpec(imgs images, image, launch string, memMB int64) (vm.Spec, error) 
 // children of a group that still holds a process (systemd Delegate=yes
 // starts the broker in root itself).
 func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
-	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
-	if err := os.MkdirAll(b.Path, 0o755); err != nil {
+	b, err := newBrokerGroup(root)
+	if err != nil {
 		return nil, err
 	}
 	if err := b.Join(os.Getpid()); err != nil {
@@ -1175,6 +1175,27 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 		return nil, err
 	}
 	return gs.Machines, nil
+}
+
+// removeBrokerDir is the rmdir newBrokerGroup uses; tests replace it.
+var removeBrokerDir = os.Remove
+
+// newBrokerGroup makes the broker's own group, root/broker, new at every
+// start. A clone3 child lives only if its new group's kill count matches
+// the starter's (cgroup ASSUMPTIONS CGROUP-kc3-1), and a broker/ an
+// earlier run left may carry one: systemd's stop can write cgroup.kill to
+// the unit's group. So a leftover is removed first, and one that will not
+// go (it holds a process or a group) is an error naming the cause, never
+// reused: reused, every clone3 child would die of SIGKILL at birth (#5143).
+func newBrokerGroup(root string) (*cgroup.Group, error) {
+	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
+	if err := removeBrokerDir(b.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("the broker's group %s, left by an earlier run, cannot be removed because something is still in it; restart the computer to clear it (reused, it could stop every service and machine from starting): %w", b.Path, err)
+	}
+	if err := os.Mkdir(b.Path, 0o755); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // sweepInboxTemps removes the temporary files a crash left beside the guest

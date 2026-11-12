@@ -3,18 +3,25 @@ name: testkit-image
 # Runs here because GitHub's runners can reach deb.debian.org; the cloud agent sessions cannot.
 on:
   workflow_dispatch:
+  # Block-style paths: premerge.py's pr_paths reads only this form, and reads any other as unfiltered (#5432 L3).
   pull_request:
-    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+    paths:
+      - "spikes/S1S2-testkit/**"
+      - ".github/workflows/testkit.yml"
   push:
     branches: [main]
-    paths: ["spikes/S1S2-testkit/**", ".github/workflows/testkit.yml"]
+    paths:
+      - "spikes/S1S2-testkit/**"
+      - ".github/workflows/testkit.yml"
 permissions:
   contents: read
-# A newer push to the same PR cancels the older run; pushes to main
-# and scheduled runs always finish.
+# CI-cancel-superseded (#5345, #5348, #5361): a PR's first-attempt run cancels that PR's older first
+# attempts, so a superseded head never holds the queue. A rerun (attempt 2 or later) and every push,
+# merge-queue, schedule or dispatch run is a group of its own (run id), so it never cancels or
+# replaces the current head's run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}
 jobs:
   image:
     runs-on: ubuntu-24.04

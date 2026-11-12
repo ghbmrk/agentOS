@@ -244,8 +244,9 @@ CI_PREAMBLE_LINES = [
     'permissions:',
     '  contents: read',
     'concurrency:',
-    '  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}',
-    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+    "  group: ${{ github.workflow }}-${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 && "
+    "format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
+    "  cancel-in-progress: ${{ startsWith(github.event_name, 'pull_request') && github.run_attempt == 1 }}",
     'env:',
     '  GOTOOLCHAIN: local',
     '  GOWORK: "off"',
@@ -266,7 +267,7 @@ MACHINES_LINES = [
     '          persist-credentials: false',
     '      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0',
     '        with:',
-    '          go-version: "1.26.10" # = broker/go.mod\'s toolchain line; checked below',
+    '          go-version: "1.26.11" # = broker/go.mod\'s toolchain line; checked below',
     '          cache: false',
     '      - name: Go is the toolchain go.mod names',
     '        run: |',
@@ -532,7 +533,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn("        if: steps.scope.outputs.records != 'true'\n", unit)
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
         # tools/unit_tests.py runs each module under strace into its own trace (test_unit_tests).
-        self.assertTrue(unit.endswith('          python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
+        self.assertTrue(unit.endswith('          sudo -E env "PATH=$PATH" python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
         self.assertEqual(check.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                          '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 

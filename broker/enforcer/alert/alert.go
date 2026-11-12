@@ -11,8 +11,8 @@
 // alert: the enforcer's own log and page are the record. The light, a
 // Thread bulb only the enforcer drives, is saved for a known attack
 // (D-254): it shows red only while a trip at the enforcer (KRN-12) is
-// unresolved, whatever happened to its text. Every other alert, a pending
-// recovery and a silent core show on the page.
+// unresolved, whatever happened to its text. Every other alert and a
+// silent core show on the page.
 //
 // It is enforcer code: it imports the standard library and
 // broker/enforcer/wire only (broker/daemon/arc2_test.go). Its assumptions
@@ -57,8 +57,13 @@ const (
 	// that lights the bulb. Appended, so journalled kinds keep their numbers.
 	Trip
 	// A factory reset by the case code dropped the passkey (NET-2
-	// Hardening): a text, never the light (D-254). Appended last.
+	// Hardening): a text, never the light (D-254). Appended after Trip.
 	FactoryReset
+	// The enforcer's record of a box's cut is missing or does not read
+	// back (#5399): provisioning wrote it and nothing removes it, so its
+	// loss means root on the enforcer or lost state. The box stays cut;
+	// like Trip it lights the bulb until the cut lifts. Appended last.
+	RecordMissing
 )
 
 // Delivery is how a kind reaches the owner.
@@ -92,6 +97,7 @@ var kinds = map[Kind]spec{
 	RoutineLock:      {LogOnly, true, "%s locked."},
 	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
 	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
+	RecordMissing:    {Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window
@@ -116,6 +122,10 @@ func (k Kind) Delivery() (d Delivery, ok bool) {
 	return s.delivery, ok
 }
 
+// lights reports whether an open alert of kind k turns the light red: a
+// known attack (D-254), which only lifting its cut resolves (Lifted).
+func (k Kind) lights() bool { return k == Trip || k == RecordMissing }
+
 // Words is the fixed text for k about device.
 func Words(k Kind, device string) (string, error) {
 	s, ok := kinds[k]
@@ -124,10 +134,24 @@ func Words(k Kind, device string) (string, error) {
 		return "", ErrKind
 	case s.device != (device != ""), s.device && !wire.Name(device):
 		return "", ErrDevice
+	case k == RecordMissing:
+		return fmt.Sprintf(s.words, boxName(device)), nil
 	case s.device:
 		return fmt.Sprintf(s.words, device), nil
 	}
 	return s.words, nil
+}
+
+// boxName is a box as the page names it, so the owner reads no device
+// ID: the edge box and the core (#5445 item 5).
+func boxName(device string) string {
+	switch device {
+	case "edge":
+		return "the edge box"
+	case "core":
+		return "the core"
+	}
+	return device
 }
 
 // Colour is what the light shows.
@@ -172,7 +196,6 @@ type Record struct {
 // Status is the page's view and what the light shows.
 type Status struct {
 	Open     []Record
-	Recovery bool
 	CoreDown bool
 	Colour   Colour
 }
@@ -181,7 +204,8 @@ type Status struct {
 // required.
 type Config struct {
 	// Send hands a text or call to the kernel for the owner line:
-	// channel.Channel.Alert.
+	// channel.Channel.Alert. It is called under the offer lock, so it
+	// must not raise a text or call itself.
 	Send func(wire.Alert) error
 	// Light is the bulb.
 	Light   Light
@@ -209,7 +233,6 @@ type Alerts struct {
 	log      []Record
 	byID     map[uint64]int
 	next     uint64
-	recovery bool
 	coreDown bool
 
 	// size is the journal's length after its last good append, so a
@@ -223,6 +246,12 @@ type Alerts struct {
 
 	// lightMu orders light updates so a stale colour never lands last.
 	lightMu sync.Mutex
+
+	// offerMu makes reading whether an alert is unsent and offering it
+	// one step: held from that read until the kernel's answer is
+	// recorded, so two callers (Raise, Core) never offer the same
+	// telling twice (#4903). It is taken before mu, never under it.
+	offerMu sync.Mutex
 }
 
 // New builds the alerts from the journal and shows the light. The core
@@ -328,7 +357,9 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	if d != LogOnly {
 		a.show()
 		if tell {
-			r = a.send(r)
+			a.offerMu.Lock()
+			r = a.offer(r.ID)
+			a.offerMu.Unlock()
 		}
 	}
 	return r, werr
@@ -343,33 +374,37 @@ func (a *Alerts) open(k Kind, device string) int {
 	return -1
 }
 
-// send offers r to the kernel and records whether it took it. A refusal
-// changes nothing else: the alert stays open (a trip's light red), and
-// Core offers it again when the core is back.
-func (a *Alerts) send(r Record) Record {
+// offer offers alert id to the kernel, unless it is resolved or the
+// kernel took its latest telling already, records whether it took it, and returns the alert's latest
+// state. A refusal changes nothing else: the alert
+// stays open (a trip's light red), and Core offers it again when the core
+// is back. The caller holds offerMu, so the unsent state it reads stays
+// unsent until the kernel's answer is recorded.
+func (a *Alerts) offer(id uint64) Record {
+	a.mu.Lock()
+	r := a.log[a.byID[id]]
+	a.mu.Unlock()
+	if !r.Open || r.Sent {
+		return r
+	}
 	d, _ := r.Kind.Delivery()
 	w := wire.Alert{Kind: wire.AlertText, Text: r.Text}
 	if d == Call {
 		w.Kind = wire.AlertCall
 	}
-	if a.cfg.Send(w) != nil {
-		return r
-	}
+	err := a.cfg.Send(w)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	i, ok := a.byID[r.ID]
-	if !ok {
-		return r
-	}
-	if a.log[i].Sent || !a.log[i].Told.Equal(r.Told) {
-		return a.log[i] // already taken, or a newer telling owns the flag
+	i := a.byID[id]
+	if err != nil || !a.log[i].Told.Equal(r.Told) {
+		return a.log[i] // refused, or a Raise's newer telling owns the flag
 	}
 	s := a.log[i]
 	s.Sent = true
 	if a.write(s) == nil {
 		a.put(s)
 	}
-	return a.log[a.byID[r.ID]]
+	return a.log[i]
 }
 
 // SafetyOff is the channel's hook: a channel command turned a heater off
@@ -429,14 +464,14 @@ func (a *Alerts) resolve(i int) error {
 	return nil
 }
 
-// Lifted resolves every open trip from device; the page calls it once
-// the owner's passkey has lifted that cut in full (NET-4). The light goes
-// off when no trip is left open.
+// Lifted resolves every open trip and missing record from device; the
+// page calls it once the owner's passkey has lifted that cut in full
+// (NET-4). The light goes off when none is left open.
 func (a *Alerts) Lifted(device string) error {
 	a.mu.Lock()
 	var err error
 	for i := range a.log {
-		if r := a.log[i]; r.Open && r.Kind == Trip && r.Device == device {
+		if r := a.log[i]; r.Open && r.Kind.lights() && r.Device == device {
 			err = errors.Join(err, a.resolve(i))
 		}
 	}
@@ -445,48 +480,46 @@ func (a *Alerts) Lifted(device string) error {
 	return err
 }
 
-// Recovery sets whether a recovery is pending (slice c), for the page; the
-// light does not show it (D-254).
-func (a *Alerts) Recovery(pending bool) {
-	a.mu.Lock()
-	a.recovery = pending
-	a.mu.Unlock()
-	a.show()
-}
-
 // Core sets whether the core is up (slice l, from the channel and the
 // heartbeat), for the page; the light does not show it (D-254). Coming
-// up, every open alert the kernel never took is offered again.
+// up, every open alert the kernel never took is offered again, under the
+// offer lock, so one a concurrent Raise or Core is offering is not
+// offered twice.
 func (a *Alerts) Core(up bool) {
 	a.mu.Lock()
 	a.coreDown = !up
-	var unsent []Record
-	if up {
-		for _, r := range a.log {
-			if r.Open && !r.Sent {
-				unsent = append(unsent, r)
-			}
+	a.mu.Unlock()
+	a.show()
+	if !up {
+		return
+	}
+	a.offerMu.Lock()
+	defer a.offerMu.Unlock()
+	a.mu.Lock()
+	var unsent []uint64
+	for _, r := range a.log {
+		if r.Open && !r.Sent {
+			unsent = append(unsent, r.ID)
 		}
 	}
 	a.mu.Unlock()
-	a.show()
-	for _, r := range unsent {
-		a.send(r)
+	for _, id := range unsent {
+		a.offer(id)
 	}
 }
 
-// Status is what the page shows: open alerts, a pending recovery, the
-// core down, and the light's colour.
+// Status is what the page shows: open alerts, the core down, and the
+// light's colour.
 func (a *Alerts) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := Status{Recovery: a.recovery, CoreDown: a.coreDown}
+	s := Status{CoreDown: a.coreDown}
 	for _, r := range a.log {
 		if r.Open {
 			s.Open = append(s.Open, r)
 		}
 	}
-	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind == Trip }) {
+	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind.lights() }) {
 		s.Colour = Red
 	}
 	return s

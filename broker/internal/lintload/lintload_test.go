@@ -1,6 +1,9 @@
 package lintload
 
 import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -210,6 +213,19 @@ func TestLoadTests(t *testing.T) {
 	}
 }
 
+// sysoObject is the smallest ELF object the go command accepts as a .syso:
+// from go1.26.11 go list rejects a .syso that is not a well-formed object
+// (cmd/go/internal/work/security.go), so an empty file no longer lists.
+func sysoObject() string {
+	h := elf.Header64{Type: uint16(elf.ET_REL), Machine: uint16(elf.EM_X86_64), Version: uint32(elf.EV_CURRENT), Shoff: 64, Ehsize: 64, Shentsize: 64, Shnum: 1}
+	copy(h.Ident[:], elf.ELFMAG)
+	h.Ident[elf.EI_CLASS], h.Ident[elf.EI_DATA], h.Ident[elf.EI_VERSION] = byte(elf.ELFCLASS64), byte(elf.ELFDATA2LSB), byte(elf.EV_CURRENT)
+	var b bytes.Buffer
+	_ = binary.Write(&b, binary.LittleEndian, h)
+	_ = binary.Write(&b, binary.LittleEndian, elf.Section64{}) // the null section an ET_REL needs
+	return b.String()
+}
+
 // Unread names each kind of file a lint could pass over (Security R1 on
 // #4268), and not a file only another platform or no build compiles.
 func TestUnread(t *testing.T) {
@@ -222,7 +238,7 @@ func TestUnread(t *testing.T) {
 		"a/cgotag.go":      "//go:build cgo && agentos_r\n\npackage a\n",
 		"a/cgo.go":         "package a\n\nimport \"C\"\n",
 		"a/asm_amd64.s":    "",
-		"a/blob.syso":      "",
+		"a/blob.syso":      sysoObject(),
 		"a/other.go":       "//go:build !linux\n\npackage a\n",
 		"a/a_darwin.go":    "package a\n",
 		"a/gen.go":         "//go:build ignore\n\npackage main\n",

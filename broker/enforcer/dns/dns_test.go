@@ -14,9 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/*.conf")
@@ -394,9 +396,90 @@ func TestGenerateRefuses(t *testing.T) {
 			t.Errorf("%s: refused by another check: %v, want %q", name, err, c.want)
 		}
 	}
+	// The refusal carries every item Generate refused (#5352, #5405): both
+	// bad names, sorted; both devices on networks the setup leaves out, in
+	// the document's order; and with a setup fault, the fault first and
+	// the devices still. Each still reads as ErrConfig, and the text is one
+	// line.
+	d := fixturePolicy()
+	d.Destinations = append(d.Destinations, "Zed.example", "Abc.example")
+	d.Caps["Zed.example"], d.Caps["Abc.example"] = 1<<40, 1<<40
+	var got Refused
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Abc.example"}, BadName{"Zed.example"}}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two bad names: %#v, %v", got, err)
+	}
+	// A bad name in two lists is one refusal: the core's and a device's.
+	d = fixturePolicy()
+	d.Destinations = append(d.Destinations, "Zed.example")
+	d.Caps["Zed.example"] = 1 << 40
+	d.Devices[0].Allow = append(d.Devices[0].Allow, "Zed.example")
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{BadName{"Zed.example"}}) {
+		t.Errorf("a bad name in two lists: %#v, %v", got, err)
+	}
+	d = fixturePolicy()
+	d.Devices = append(d.Devices, policy.Device{ID: "lamp", Network: policy.NetDevices, WiFi: "vlan109"}, policy.Device{ID: "fan", Network: policy.NetDevices, WiFi: "vlan110"})
+	lamp, fan := UnservedDevice{"lamp", "vlan109", l.Trunk + ".109"}, UnservedDevice{"fan", "vlan110", l.Trunk + ".110"}
+	if _, err := Generate(d, l, fixtureSetup()); !errors.As(err, &got) || !slices.Equal(got, Refused{lamp, fan}) || !errors.Is(err, ErrConfig) {
+		t.Errorf("two unserved devices: %#v, %v", got, err)
+	}
+	s := fixtureSetup()
+	s.Upstream = nil
+	_, err := Generate(d, l, s)
+	if !errors.As(err, &got) || len(got) != 3 || got[0].Error() != ErrConfig.Error()+": no upstream resolver" || !slices.Equal(got[1:], Refused{lamp, fan}) {
+		t.Errorf("a setup fault hides the devices: %#v", got)
+	}
+	if want := ErrConfig.Error() + `: no upstream resolver; ` + lamp.Error() + "; " + fan.Error(); err.Error() != want {
+		t.Errorf("Refused reads %q, want %q", err, want)
+	}
+	// The setup fault is typed apart from every other refusal (#5431),
+	// and still reads as ErrConfig with its text.
+	var setup BadSetup
+	if !errors.As(got[0], &setup) || !errors.Is(got[0], ErrConfig) || errors.As(got[1], &setup) {
+		t.Errorf("the setup fault is not typed BadSetup: %#v", got)
+	}
+	// Refused's text names the first RefusedShown refusals and counts the
+	// rest exactly, so the log line stays bounded (#5431).
+	var many Refused
+	for i := range RefusedShown + 7 {
+		many = append(many, BadName{"N" + strconv.Itoa(i) + ".example"})
+	}
+	if txt := many.Error(); !strings.HasSuffix(txt, `"N`+strconv.Itoa(RefusedShown-1)+`.example" is not a DNS host name; and 7 more`) || strings.Count(txt, "is not a DNS host name") != RefusedShown || strings.Contains(txt, "\n") {
+		t.Errorf("Refused of %d reads %q", len(many), txt)
+	}
+	// Each refusal's text is cut at RefusedTextMax bytes, at a character's
+	// start, then "..." (#5431).
+	huge := BadName{strings.Repeat("\u00e9", 1<<15)}
+	if txt := (Refused{huge, BadName{"Abc.example"}}).Error(); !strings.HasSuffix(txt, `...; `+BadName{"Abc.example"}.Error()) || len(txt) > RefusedTextMax+len(`...; `+BadName{"Abc.example"}.Error()) || !utf8.ValidString(txt) || len(txt) < RefusedTextMax-1 {
+		t.Errorf("a long refusal is not cut at %d bytes: %d bytes, %.80q", RefusedTextMax, len(txt), txt)
+	}
+	// A text of no character start at all cuts to "...", and no refusal
+	// reads "" (mutgate on #5478).
+	if txt := (Refused{errors.New(strings.Repeat("\x80", 2*RefusedTextMax))}).Error(); txt != "..." {
+		t.Errorf("a refusal of continuation bytes reads %.40q", txt)
+	}
+	if txt := (Refused{}).Error(); txt != "" {
+		t.Errorf("no refusal reads %q", txt)
+	}
+	at, over := strings.Repeat("x", RefusedTextMax), strings.Repeat("x", RefusedTextMax+1)
+	if txt := (Refused{errors.New(at), errors.New(over)}).Error(); txt != at+"; "+at+"..." {
+		t.Errorf("refusals of %d and %d bytes read %d bytes", RefusedTextMax, RefusedTextMax+1, len(txt))
+	}
+	// One past the cap is counted, never dropped.
+	if txt := many[:RefusedShown+1].Error(); !strings.HasSuffix(txt, ".example\" is not a DNS host name; and 1 more") || strings.Count(txt, "is not a DNS host name") != RefusedShown {
+		t.Errorf("Refused of %d reads %q", RefusedShown+1, txt)
+	}
+	if txt := many[:RefusedShown].Error(); strings.Contains(txt, "more") || strings.Count(txt, "is not a DNS host name") != RefusedShown {
+		t.Errorf("Refused of %d reads %q", RefusedShown, txt)
+	}
+	for range 5000 {
+		many = append(many, BadName{"Long-name-that-is-refused.example"})
+	}
+	if txt := many.Error(); len(txt) > 4<<10 || !strings.HasSuffix(txt, "; and "+strconv.Itoa(len(many)-RefusedShown)+" more") {
+		t.Errorf("Refused of %d reads %d bytes: %.200q", len(many), len(txt), txt)
+	}
 	// A name the policy accepts but this package refuses still refuses a
 	// whole version, so the previous configuration stays.
-	d := fixturePolicy()
+	d = fixturePolicy()
 	d.Devices[1].Allow = []string{"Speaker.example"} // on a device with no set: not reached
 	if _, err := Generate(d, l, fixtureSetup()); err != nil {
 		t.Errorf("a name on a device with no allow set is never written: %v", err)
@@ -507,7 +590,7 @@ func TestDnsmasqAccepts(t *testing.T) {
 
 // required is true in CI, where a missing tool or kernel feature fails the
 // test instead of skipping it.
-func required() bool { return os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1" }
+func required() bool { return netnstest.Required() }
 
 func dnsmasq(t *testing.T) string {
 	t.Helper()

@@ -234,6 +234,21 @@ func (e *Engine) check(s Signed) (Document, error) {
 // version applied.
 func (e *Engine) Current() Document { return e.cur.normal() }
 
+// CurrentHash is Current with its Hash, read together. Every document the
+// engine puts in force already passed check: Open and Tick reach it by
+// decoding or verifying a stored version and replaying closed-list steps,
+// Propose and Rekey encode it before they save it, and Tighten's Apply only
+// removes allows, devices, pairs and rules. So it is not checked again and
+// the hash has no error: it is the SHA-256 of the canonical encoding,
+// which for a normal document that passes check is exactly what Encode
+// writes, hashed by the same hashOf as Hash. Marshal cannot fail on a Document, which holds only strings,
+// integers, booleans, slices and string-keyed maps.
+func (e *Engine) CurrentHash() (Document, string) {
+	d := e.Current()
+	b, _ := json.Marshal(d)
+	return d, hashOf(b)
+}
+
 // Pending is the loosening waiting, if any.
 func (e *Engine) Pending() []Pending { return slices.Clone(e.st.Pending) }
 

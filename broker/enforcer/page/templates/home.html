@@ -6,27 +6,57 @@
 <body>
 <h1>Home enforcer</h1>
 <p>Policy version {{.Version}}.</p>
-{{if .Shown}}
+{{if and .Shown (or .Red .Alerts (and .CoreDown .Core))}}
 <h2>Alerts</h2>
-{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off when the cut lifts or you clear its alert below.</p>
-{{else}}<p>The light is off: no known attack is open.</p>{{end}}
-{{if .CoreDown}}<p class="warn">The core is down: the enforcer has not heard from it lately. Your rules here stay as they are, but the enforcer's texts cannot reach your phone while the core is down, so check this page.</p>{{end}}
+{{if .Red}}<p class="warn">The light is red: a known attack is not resolved. It goes off when the cut lifts or you clear its alert below.</p>{{end}}
+{{if and .CoreDown .Core}}<p class="warn">The core is down: the enforcer has not heard from it lately. Your rules here stay as they are, but the enforcer's texts cannot reach your phone while the core is down, so check this page.</p>{{end}}
 {{range .Alerts}}<div class="pending warn">
 <p>{{.Text}}</p>
 <p>Since {{when .At.UnixMilli}}{{if gt .Count 1}}, {{.Count}} times{{end}}. {{if .Sent}}Handed to the core to text you; the core may not have sent it.{{else}}Not texted: the core has not taken it.{{end}}</p>
-{{if and .Revoke $.Core (not $.Revoked)}}<p>Choose: if you trust the core, clear this and keep it. If you do not, <a href="#revoke">revoke the core's key</a> below, then clear this.</p>{{end}}
+{{if and .Revoke $.Core (not $.Revoked) (not $.RevokeUnsaved)}}<p>Choose: if you trust the core, clear this and keep it. If you do not, <a href="#revoke">revoke the core's key</a> below, then clear this.</p>{{end}}
 {{if not .Fixed}}<button class="act" data-action="clear" data-target="{{.ID}}" data-rp="{{$.Name}}">Clear with your passkey</button>{{end}}
 </div>
-{{else}}<p>No open alerts.</p>{{end}}
 {{end}}
-{{with .Caps}}<h2>Byte caps</h2>
+{{end}}
+{{with .EdgeCut}}<h2>Edge box</h2>
 <div class="pending warn">
-<p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
+<p>The edge box is cut off: {{.}}</p>
+<p>It reaches nothing through the enforcer, neither the internet nor your devices, and stays cut after a restart until you lift the cut here. Lifted, it gets back what your rules give it, and its internet bytes stay held at its cap for the rest of the day.</p>
+<button class="act" data-action="lift-edge" data-target="" data-rp="{{$.Name}}">Lift the edge's cut with your passkey</button>
+</div>
+{{end}}
+{{if or .CapsUnread .Caps}}<h2>Byte caps</h2>
+<div class="pending warn">
+{{if and .CapsUnread .Caps}}<p>The enforcer could not read the firewall's count of today's bytes, nor its own record of them, so agentOS and the edge are blocked from every service with a byte cap. It tries again for the firewall's count every 10 seconds and that part goes away by itself; the record needs the step below. If the count stays unread, the enforcer's log has the detail.</p>
+{{else if .CapsUnread}}<p>The enforcer could not read the firewall's count of today's bytes, so agentOS and the edge are blocked from every service with a byte cap until it can. It tries again every 10 seconds and this goes away by itself. If it stays, the enforcer's log has the detail.</p>
+{{end}}{{with .Caps}}<p>{{if not $.CapsUnread}}The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. {{end}}Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
 {{if .Retrying}}<p>The wait is over, but the fresh day could not be saved. The enforcer tries again every second, and every cap stays spent until it is saved.</p>
 {{else if .Starting}}<p>The wait is over and the fresh day is saved. The enforcer restarts to take it up.</p>
 {{else if not .DueMS}}<button class="act" data-action="fresh-day" data-target="" data-rp="{{$.Name}}">Start the day afresh with your passkey</button>{{end}}
 {{if .Unsaved}}<p>Your last step here is in force, but the disk has not confirmed it yet. The enforcer keeps saving it. If the enforcer restarts before then, check this page again.</p>{{end}}
-</div>
+{{end}}</div>
+{{end}}
+{{with .Resolver}}<h2>Names and addresses</h2>
+<div class="pending warn">
+<p>The enforcer has stopped answering name lookups and handing out addresses on every home network: no device, agentOS included, gets a name answered, and a device that joins or renews gets no address. A device already joined keeps its address until its lease ends, within 12 hours. Your rules stay in force.</p>
+{{range .Strays}}<p>Interface {{.Iface}} holds the address {{.Addr}}, outside its network {{.Nets}}. Nothing in your rules put it there. The enforcer serves names and addresses again within 10 seconds of the last such address being removed.</p>
+{{end}}{{range .Unset}}<p>{{.}}</p>
+{{end}}{{range .Policy}}<p>{{.}}</p>
+{{end}}{{if .Policy}}<p>The policy still applies; names and addresses come back with the next policy the enforcer can serve.</p>
+{{end}}{{if not (or .Strays .Unset .Policy)}}{{with .Load}}<p>{{.}}</p>
+{{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
+{{end}}</div>
+{{end}}
+{{if or .Unseeded .Held}}<h2>Addresses handed out</h2>
+<div class="pending warn">
+{{if .Unseeded}}<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
+{{end}}{{if .Held}}<p>In the last 12 hours, a device on the Owner, Household or Guests network was offered an address another device had until recently and may still use, so the enforcer held that offer back. Such a device cannot join until the address is free, within 12 hours. To join it sooner, turn its private (random) Wi-Fi address off, or on, for that network and join again: it then usually gets another address.</p>
+{{end}}</div>
+{{end}}
+{{with .Restarting}}<h2>Names and addresses</h2>
+<div class="pending warn">
+{{range .}}<p>{{.}}</p>
+{{end}}</div>
 {{end}}
 {{if .Recovery}}
 <div class="pending warn">
@@ -70,9 +100,13 @@
 <h2>agentOS channel</h2>
 <p>The channel is {{.Channel}}.</p>
 {{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
-{{if .Core}}<div id="revoke">{{if .Revoked}}<p>The core's channel key is revoked: the enforcer takes no message from the core over its channel. The core's network access stays as your rules set it.</p>
-{{else}}<p>If the core box was stolen or you no longer trust it, revoke its key here. The enforcer then takes no message from the core over its channel: no rule change, count read or log copy, and the core cannot stop this. The core's network access stays as your rules set it. The enforcer's texts stop too, since they go through the core. It cannot be undone: the core works with the enforcer again only once a new core key is set up.</p>
-<button class="act" data-action="revoke-core" data-target="" data-rp="{{.Name}}" data-confirm="Revoke the core's key? The enforcer will take no message from the core over its channel, its texts to you stop, and this cannot be undone.">Revoke the core's key with your passkey</button>{{end}}</div>{{end}}
+{{if .Core}}{{if .Revoked}}<p id="revoke">The core's channel key is revoked: the enforcer takes no message from the core over its channel. The core's network access stays as your rules set it.</p>
+{{else if .RevokeUnsaved}}<div id="revoke" class="pending warn"><p>The core's channel key is revoked only until the enforcer restarts: the revocation was not saved, so after a restart the enforcer may take the core's messages again. Revoke it again to save it.</p>
+<button class="act" data-action="revoke-core" data-target="" data-rp="{{.Name}}" data-confirm="Save the revocation of the core's key? Even after a restart, the enforcer will take no message from the core over its channel, and this cannot be undone.">Revoke the core's key again with your passkey</button></div>
+{{else}}<details id="revoke"{{if .Fork}} open{{end}}><summary>Revoke the core's key</summary>
+<p>If the core box was stolen or you no longer trust it, revoke its key here. The enforcer then takes no message from the core over its channel: no rule change, count read or log copy, and the core cannot stop this. The core's network access stays as your rules set it. The enforcer's texts stop too, since they go through the core. It cannot be undone: the core works with the enforcer again only once a new core key is set up.</p>
+<button class="act" data-action="revoke-core" data-target="" data-rp="{{.Name}}" data-confirm="Revoke the core's key? The enforcer will take no message from the core over its channel, its texts to you stop, and this cannot be undone.">Revoke the core's key with your passkey</button></details>{{end}}
+{{else if .Shown}}<p>No core is set up, so the enforcer's texts cannot reach your phone: this page is the record.</p>{{end}}
 
 {{if .Offers}}<h2>Names heard</h2>
 {{range .Offers}}<div class="pending">

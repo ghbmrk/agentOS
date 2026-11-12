@@ -32,6 +32,19 @@ type line struct {
 	overlap bool
 	sayErr  error
 	empty   bool
+	hungUp  bool
+	// hangErr and hangLeft are the hang-up ctx's error and the time left
+	// to its deadline (0 with none) as Hangup got it; with hangStuck,
+	// Hangup then waits for that ctx to end.
+	hangStuck bool
+	hangCtx   context.Context
+	hangErr   error
+	hangLeft  time.Duration
+	stuck     bool
+	answerErr error
+	// answerWait delays a failing Answer; answerCtx is the ctx it got.
+	answerWait time.Duration
+	answerCtx  context.Context
 }
 
 func newLine() *line {
@@ -41,13 +54,39 @@ func newLine() *line {
 	return l
 }
 
-func (l *line) Active() <-chan struct{}      { return l.active }
-func (l *line) Ended() <-chan struct{}       { return l.ended }
-func (l *line) Speech() <-chan []byte        { return l.speech }
-func (l *line) Keys() <-chan byte            { return l.keys }
-func (l *line) Hangup(context.Context) error { return nil }
-func (l *line) Number() string               { return l.number }
-func (l *line) Answer(context.Context) error { l.answered = true; return nil }
+func (l *line) Active() <-chan struct{} { return l.active }
+func (l *line) Ended() <-chan struct{}  { return l.ended }
+func (l *line) Speech() <-chan []byte   { return l.speech }
+func (l *line) Keys() <-chan byte       { return l.keys }
+func (l *line) Hangup(ctx context.Context) error {
+	l.mu.Lock()
+	l.hungUp, l.hangCtx, l.hangErr = true, ctx, ctx.Err()
+	if d, ok := ctx.Deadline(); ok {
+		l.hangLeft = time.Until(d)
+	}
+	stuck := l.hangStuck
+	l.mu.Unlock()
+	if stuck {
+		<-ctx.Done()
+	}
+	return nil
+}
+func (l *line) Number() string { return l.number }
+func (l *line) Answer(ctx context.Context) error {
+	l.mu.Lock()
+	l.answerCtx = ctx
+	l.mu.Unlock()
+	if l.stuck { // answers nothing until ctx ends
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if l.answerErr != nil {
+		time.Sleep(l.answerWait)
+		return l.answerErr
+	}
+	l.answered = true
+	return nil
+}
 func (l *line) Say(ctx context.Context, pcm []byte) error {
 	l.mu.Lock()
 	gate, err := l.gate, l.sayErr
@@ -101,14 +140,24 @@ func (r recognizer) Listen(ctx context.Context, _ <-chan []byte) <-chan call.Hea
 
 // answerer returns the scripted chunks for each turn's text.
 type answerer struct {
-	mu     sync.Mutex
-	asks   []call.Ask
+	mu   sync.Mutex
+	asks []asked
+	// kept are the Asks as given, to read once the call is over.
+	kept   []call.Ask
 	script func(call.Ask) []string
+}
+
+// asked is an Ask as the answerer read it, rung and all, during the call.
+type asked struct {
+	Text string
+	Rung call.Rung
+	Turn int
 }
 
 func (a *answerer) Answer(ctx context.Context, q call.Ask) (<-chan string, error) {
 	a.mu.Lock()
-	a.asks = append(a.asks, q)
+	a.asks = append(a.asks, asked{q.Text, q.Rung(), q.Turn})
+	a.kept = append(a.kept, q)
 	a.mu.Unlock()
 	out := make(chan string)
 	go func() {
@@ -163,7 +212,7 @@ func (r *rig) run(rung call.Rung) { r.runCtx(context.Background(), rung) }
 
 func (r *rig) runCtx(ctx context.Context, rung call.Rung) {
 	go func() {
-		rep, err := call.Run(ctx, r.cfg, r.l, rung)
+		rep, err := call.RunAt(ctx, r.cfg, r.l, rung)
 		r.err <- err
 		r.rep <- rep
 	}()
@@ -396,7 +445,7 @@ func TestZeroStopsSpeech(t *testing.T) {
 	}
 }
 
-// Run's rung is known before its first turn starts, so every turn asks the
+// RunAt's rung is known before its first turn starts, so every turn asks the
 // answerer at once and a barge-in carries nothing: carry is only for a
 // question stopped while a speed-dial token is still read. The owner's
 // words are already waiting when the loop starts, the case where a loop
@@ -424,7 +473,7 @@ func TestRunKnowsItsRungBeforeTheFirstTurn(t *testing.T) {
 		r.turnEnds(ends, 2)
 		r.hangup()
 		r.ans.mu.Lock()
-		asks := append([]call.Ask(nil), r.ans.asks...)
+		asks := append([]asked(nil), r.ans.asks...)
 		r.ans.mu.Unlock()
 		for _, a := range asks {
 			if a.Rung != call.P2 || (a.Text != "first" && a.Text != "second") {
@@ -529,6 +578,28 @@ func TestOtherCallerIsNotAnswered(t *testing.T) {
 	}
 	if r.l.answered {
 		t.Fatal("answered a call that is not the owner's")
+	}
+}
+
+// A call the line fails to answer ends there with the line's error: nothing
+// listens and no turn runs.
+func TestAFailedAnswerEndsTheCall(t *testing.T) {
+	r := newRig(t, fixed("x"))
+	boom := errors.New("ATA failed")
+	r.l.answerErr = boom
+	r.serve()
+	select {
+	case err := <-r.err:
+		if rep := <-r.rep; !errors.Is(err, boom) || len(rep.Turns) != 0 {
+			t.Fatalf("err %v, turns %+v", err, rep.Turns)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a call the line failed to answer went on")
+	}
+	select {
+	case <-r.rec.ctx:
+		t.Fatal("listened on a call that was not answered")
+	default:
 	}
 }
 

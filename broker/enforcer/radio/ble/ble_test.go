@@ -25,6 +25,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/radio"
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/confine"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // exited is the process of a stack served inside the test's own process:
@@ -55,8 +56,27 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == stackArg {
 		os.Exit(testStack(os.Args[2], os.Args[3]))
 	}
+	// A mutant that allocates without end (an encoder padding forever, a
+	// signature parsed without depth) dies at this bound in its own run
+	// instead of taking the runner's memory, and the runner, with it.
+	// An inherited hard limit below it stays: only root may raise one.
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_DATA, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "ble: data limit: %v\n", err)
+		os.Exit(1)
+	}
+	lim.Max = min(lim.Max, dataLimit)
+	lim.Cur = lim.Max
+	if err := syscall.Setrlimit(syscall.RLIMIT_DATA, &lim); err != nil {
+		fmt.Fprintf(os.Stderr, "ble: data limit: %v\n", err)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }
+
+// dataLimit bounds the suite's data (its heap): many times what it uses,
+// far below a runner's memory.
+const dataLimit = 1 << 30
 
 // testStack is the stack as the enforcer runs it, after probes of what an
 // exploit inside it would try first: a raw HCI socket, and, by probe, its
@@ -420,7 +440,7 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 // (32 MiB limit) delivers from any peer.
 func oversized() []byte {
 	b := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(b[4:], MaxMessage-16+1)
+	binary.LittleEndian.PutUint32(b[4:], MaxMessage-16+1)
 	return append(b, make([]byte, MaxMessage-16+1)...)
 }
 
@@ -438,10 +458,10 @@ func malformed() []byte {
 func TestReadSkipsWhatDoesNotDecode(t *testing.T) {
 	good := mustEncode(t, propsChanged(2, bluezName, measurePath, []byte{1}))
 	longHead := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
-	le.PutUint32(longHead[12:], maxHeader+1)
+	binary.LittleEndian.PutUint32(longHead[12:], maxHeader+1)
 	longHead = append(longHead, make([]byte, maxHeader+8)...)
 	badHead := withField(t, &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C"}, 1, "s", "/x")
-	le.PutUint32(badHead[4:], 8)
+	binary.LittleEndian.PutUint32(badHead[4:], 8)
 	badHead = append(badHead, make([]byte, 8)...)
 	refused := mustEncode(t, propsChanged(3, ":1.9", measurePath, []byte{1}))
 	r := bytes.NewReader(slices.Concat(oversized(), longHead, badHead, malformed(), refused, good, []byte("x234567890123456")))
@@ -788,7 +808,9 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 // forgets every subscription, ends the stack, so its supervisor restarts
 // it rather than it serving stale state.
 func TestStackEndsWhenBluezRestarts(t *testing.T) {
+	var log bytes.Buffer
 	s := newFuzzStack()
+	s.log = &log
 	b := s.bus
 	s.signal(&Message{Type: typeSignal, Sender: busDriver, Interface: busDriver, Member: "NameOwnerChanged",
 		Sig: "sss", Body: []any{bluez, bluezName, ":1.8"}})
@@ -796,6 +818,9 @@ func TestStackEndsWhenBluezRestarts(t *testing.T) {
 	case <-b.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stack kept serving after BlueZ changed owner")
+	}
+	if !strings.Contains(log.String(), "BlueZ changed owner") {
+		t.Errorf("logged %q", log.String())
 	}
 }
 
@@ -1158,28 +1183,20 @@ const nestedEnv = "AGENTOS_BLE_USERNS"
 // asRoot runs the calling test as root: directly when it is, otherwise
 // again as root of a user namespace that maps the runner's subordinate ids
 // (as radio's TestRadioCannotChangeRule does), so the stack can drop to
-// another user. It reports whether this process should run the test.
+// another user. It reports whether this process should run the test; a
+// skip inside the namespaced run fails the test in CI (#5152).
 func asRoot(t *testing.T) bool {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		return true
 	}
-	required := os.Getenv("CI") != "" || os.Getenv("AGENTOS_REQUIRE_NETNS") == "1"
-	if _, err := exec.LookPath("newuidmap"); err != nil {
-		if required {
-			t.Fatalf("newuidmap missing: %v", err)
-		}
-		t.Skip("needs root or subordinate ids (newuidmap)")
-	}
-	cmd := exec.Command("unshare", "--map-root-user", "--map-auto", "--",
-		os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.count=1", "-test.v")
-	cmd.Env = append(os.Environ(), nestedEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("as root of a user namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("user namespace run failed: %v", err)
-	}
-	return false
+	return netnstest.RunAs(t, nestedEnv, combined, []string{"--map-root-user", "--map-auto"}, "newuidmap")
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 type testLog struct{ t *testing.T }

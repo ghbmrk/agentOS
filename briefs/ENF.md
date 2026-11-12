@@ -221,7 +221,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Scope:** `image/enforcer/` (new), `.github/workflows/enforcer-image.yml` (new).
 **Builds:** the mkosi profile (decision 7), services limited to NET-2 Hardening's list, unused USB ports and the Wi-Fi radio off, hardware watchdog, automatic signed security fixes with rollback on a failed self-check, feature and policy-engine changes only with the owner's key, writable state on its own partition (sealed to the TPM if the V1410's is usable; the builder checks and records it in ASSUMPTIONS), and a QEMU Secure Boot boot in CI.
 **Acceptance tests:**
-1. NET-2 Hardening: `image/enforcer/ci_boot.sh` checks the open-port set equals the list, Wi-Fi and USB storage are off, `rp_filter` reads 0 on `all` and a network card (#4810), and a self-check failure rolls back. Catches an extra service, a WAN that never leases, or a stuck bad update.
+1. NET-2 Hardening: `image/enforcer/ci_boot.sh` checks the open-port set equals the list, Wi-Fi and USB storage are off, `rp_filter` reads 0 on `all` and a network card (#4810), the WAN's router-advertisement handling is set (ENF-m-b's WAN link configuration sets networkd `IPv6AcceptRA=` or sysctl.d `accept_ra=2` on the WAN, since the daemon holds `default.accept_ra=0` and with forwarding on the kernel ignores 1; the check needs `accept_ra=2` or an IPv6 default route on the card once the real daemon unit ships; #5189, ENF-l-21), and a self-check failure rolls back. Catches an extra service, a WAN that never leases or gets no IPv6, or a stuck bad update.
 2. NET-2 Channel: `image/enforcer/finish_image.py` refuses an image signed with the core's key or carrying any agentOS release key. Catches a shared update source.
 **Size:** about 130k. **Depends on:** ENF-l.
 
@@ -239,6 +239,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Acceptance tests:**
 1. DEV-2: `kernel/enforcer::TestOnlyWireKinds`. Catches a core that can send what the enforcer must refuse anyway (defence in depth, and a clean A18 log).
 2. STO-1: `kernel/enforcer::TestEveryHeadSent`. Catches a missing anchor.
+3. KRN-12 Silence: `kernel/enforcer::TestBeatsEachHeartbeatInterval`. The client sends at least one message each `wire.HeartbeatInterval` (#4753, wire ENF-d-w8). Catches a client that beats at another interval, so the enforcer's page shows an honest core down or a silent one up too long.
 **Size:** about 100k. **Depends on:** ENF-d.
 
 ### ENF-p (#3674): wire the client into agentosd (serial slot, D-111)
@@ -290,6 +291,16 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 2. NET-2: `radio::TestStackOnlyDeclaredOps` for each of the three. Catches a wide adapter.
 3. NET-2: `radio::TestSrpReachesController`: a simulated Thread node's SRP registration is resolvable by the Matter process inside the namespace, with no LAN interface. Catches the spike's one unverified inference.
 **Size:** about 130k; split per stack if larger. **Depends on:** ENF-k, question 3.
+
+### NET-2-cap-sizing (#4578): caps sized at signing (NET-2 Byte caps, CLK-14, KRN-12)
+
+**Scope:** `broker/enforcer/policy/` (the signed `Basis`), the page's cap lines in `broker/enforcer/page/render.go`, `broker/clerk/enflist/` (new), `broker/backup/` (`Size`), `broker/daemon/arc2_test.go` (the core's line for `enforcer/policy`).
+**Builds:** the core's composer: each destination's cap equals its stated figure (a declaration's daily bytes, the image's figure, the next full backup's size), the edge's its declared total, and a destination stating none is refused by name; each cap's basis is signed and named on the confirm screen. Sub B's call site in cmd/agentosd calls the frozen `enflist` seam.
+**Acceptance tests:**
+1. NET-2: `enflist::TestCapsAreTheStatedFigures` and `page::TestCapLines`: a stated figure is the signed cap, shown with its basis.
+2. NET-2: `enflist::TestNoDailyBytesIsRefused`.
+3. NET-2: `enflist::TestCapsAreTheStatedFigures` (backup basis) and `backup::TestManifestCarriesPageCAOnly` (`Size` is the backup's exact size).
+4. NET-2: `enflist::TestCapsAreTheStatedFigures` (the edge's one cap).
 
 ## Questions for Decisions (also on the work items)
 

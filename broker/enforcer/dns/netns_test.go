@@ -27,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
+	"github.com/ghbmrk/agentos/broker/internal/netnstest"
 )
 
 // The netns tests run real dnsmasq and the real ruleset in network
@@ -39,38 +40,23 @@ import (
 
 const childEnv = "AGENTOS_DNS_NETNS"
 
+// inNetns re-runs the calling test as root of a fresh user and network
+// namespace, the enforcer's; a skip inside that run fails the test in CI
+// (#5152). Only the parent looks for dnsmasq first: the child's own
+// dnsmasq start looks again (#5234).
 func inNetns(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(childEnv) == "1" {
 		return true
 	}
-	for _, tool := range []string{"unshare", "nsenter", "ip", "nft"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			if required() {
-				t.Fatalf("%s missing", tool)
-			}
-			t.Skipf("%s missing", tool)
-		}
-	}
 	dnsmasq(t)
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
-		if required() {
-			t.Fatalf("no unprivileged user namespaces: %v", err)
-		}
-		t.Skipf("no unprivileged user namespaces: %v", err)
-	}
-	args := []string{"-rn", "--", os.Args[0], "-test.run", "^" + t.Name() + "$", "-test.count=1"}
-	if testing.Verbose() {
-		args = append(args, "-test.v")
-	}
-	cmd := exec.Command("unshare", args...)
-	cmd.Env = append(os.Environ(), childEnv+"=1")
-	out, err := cmd.CombinedOutput()
-	t.Logf("in the enforcer's namespace:\n%s", out)
-	if err != nil {
-		t.Fatalf("netns run failed: %v", err)
-	}
-	return false
+	return netnstest.Run(t, childEnv, combined, "nsenter", "ip", "nft")
+}
+
+func combined(env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 type host struct {

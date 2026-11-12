@@ -452,6 +452,64 @@ func TestPlanGuestNeedsAContextWindow(t *testing.T) {
 	}
 }
 
+// A guest is answered with the provider's own status, its declared headers
+// and its body, flushed as it arrives; a guest that stops reading ends the
+// provider's answer instead of leaving it open.
+func TestPlanGuestGetsTheProvidersAnswer(t *testing.T) {
+	var calls atomic.Int32
+	var reads atomic.Int32
+	ended, stop := make(chan struct{}, 1), make(chan struct{})
+	tokens := tokenProvider(&calls, nil)
+	login, _ := planLoginAt(t, plan.Permitted, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/models" {
+			tokens.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"slow down"}`)
+		if reads.Add(1) == 1 {
+			return
+		}
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			ended <- struct{}{}
+		case <-stop:
+		}
+	}))
+	t.Cleanup(func() { close(stop) })
+	codeExchange(t, login, "s")
+	login.Forget("s")
+	tok, err := login.Guest("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := PlanGuest{Login: login, Guest: "g"}
+
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, modelsRead(tok.Tokens["access_token"]))
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Content-Type") != "application/json" ||
+		rec.Body.String() != `{"error":"slow down"}` || !rec.Flushed {
+		t.Fatalf("the answer: %d %v %q, flushed %v", rec.Code, rec.Header(), rec.Body.String(), rec.Flushed)
+	}
+
+	// A guest whose connection is gone: its first write fails.
+	pr, pw := io.Pipe()
+	pr.Close()
+	type answer struct{ http.ResponseWriter }
+	type gone struct {
+		io.Writer
+		answer
+	}
+	g.ServeHTTP(gone{pw, answer{httptest.NewRecorder()}}, modelsRead(tok.Tokens["access_token"]))
+	select {
+	case <-ended:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the provider's answer stayed open after the guest stopped reading")
+	}
+}
+
 // A body that is not JSON cannot be searched for an image, so it is
 // admitted at the whole window. meter gets the clerk's own re-encoding, so
 // no call reaches this today; it is the safe default (#3148 item 3).
@@ -476,5 +534,96 @@ func TestPlanStatusFromDetail(t *testing.T) {
 		if got := planStatus(d); got != want {
 			t.Errorf("%q: %d, want %d", d, got, want)
 		}
+	}
+}
+
+// The owner socket sends the key calls to the API keys and each plan call
+// to its plan, answers no other call, passes a refused Resume's error on,
+// and answers a Remove with no result (MIG-4-exit m1).
+func TestPlanOwnerSocketCalls(t *testing.T) {
+	var calls atomic.Int32
+	var refuse, failing atomic.Bool
+	login, _ := planLoginWrite(t, plan.Permitted, refusedRefresh(&calls, &refuse), func([]byte) error {
+		if failing.Load() {
+			return errors.New("disk full")
+		}
+		return nil
+	})
+	k := make([]byte, 32)
+	rand.Read(k)
+	sealer, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apis, err := model.NewAPIs(model.Shipped, model.NewKeys(sealer, nil), netguard.New(netguard.Config{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(shortDir(t), "owner.sock")
+	ln, err := ListenPlanOwner(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	h := &PlanHost{Plan: "codex", Login: login, Prompt: CodexSignIn(), Workers: newFakeCLI(login, codexPrinted), Times: quick}
+	go ServePlanOwner(ln, apis, h)
+	o := PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}
+
+	if st, err := o.KeyState(); err != nil || len(st) == 0 {
+		t.Fatalf("key state: %+v %v", st, err)
+	}
+	if err := o.Call("apikeyset", "not an object", nil); err == nil || !strings.Contains(err.Error(), "has no call apikeyset") {
+		t.Fatalf("a key call with no arguments: %v", err)
+	}
+	if err := o.Call("planbogus", planArgs{"codex"}, nil); err == nil || !strings.Contains(err.Error(), "has no call planbogus") {
+		t.Fatalf("an unknown call naming a plan: %v", err)
+	}
+
+	tok := signedIn(t, login, "g")
+	refuse.Store(true)
+	serve(PlanGuest{Login: login, Guest: "g"}, refreshRequest(tok.Tokens["refresh_token"]))
+	if login.Stopped() != plan.StopRefused {
+		t.Fatalf("stopped: %q", login.Stopped())
+	}
+	failing.Store(true)
+	if d, err := o.Resume("codex"); err == nil || d != "" {
+		t.Fatalf("a resume whose write failed: %q %v", d, err)
+	}
+	failing.Store(false)
+
+	// A key store that no longer opens answers the state read with
+	// errKeyStore, naming no value.
+	swap := &opens{Sealer: sealer}
+	broken, err := model.NewAPIs(model.Shipped, model.NewKeys(swap, nil), netguard.New(netguard.Config{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broken.SetKey(model.Shipped[0].Provider, "canary-key-0001", true); err != nil {
+		t.Fatal(err)
+	}
+	other := make([]byte, 32)
+	rand.Read(other)
+	if swap.Sealer, err = clerk.NewAESSealer(other); err != nil {
+		t.Fatal(err)
+	}
+	sock2 := filepath.Join(shortDir(t), "owner.sock")
+	ln2, err := ListenPlanOwner(sock2, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln2.Close() })
+	go ServePlanOwner(ln2, broken, h)
+	if st, err := (PlanOwner{proc.Conn{Socket: sock2, UID: os.Getuid()}}).KeyState(); err == nil || err.Error() != errKeyStore.Error() {
+		t.Fatalf("a key store that does not open: %+v %v", st, err)
+	}
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, `{"op":"planremove","args":{"plan":"codex"}}`+"\n")
+	if line, err := io.ReadAll(conn); err != nil || strings.TrimSpace(string(line)) != "{}" {
+		t.Fatalf("remove answered %q %v, want no result", line, err)
 	}
 }

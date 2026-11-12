@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // The capability-off lines (OP-9, OP9-status-a): each capability that is
@@ -76,12 +77,60 @@ const (
 	forgetNotErased = "Forget: old learning data not fully erased; " + fixRestart + "."
 )
 
+// unreadLine is STATUS's line for restore points whose record did not
+// read at the machines' open (CAP-3): kept on disk, not offered, and
+// read again at each start. It names them by count, in the owner's words
+// (an internal ID tells the owner nothing), and gives the step that
+// works: a forget removes them. Any forget does: the record that would say
+// what they belong to is the one that did not read.
+func unreadLine(ids []string) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return "Restore points: one could not be read and is not offered; any Forget removes it."
+	}
+	return fmt.Sprintf("Restore points: %d could not be read and are not offered; any Forget removes them.", len(ids))
+}
+
+// unreadGoneNotice is what the owner is told when restore points whose record
+// did not read were deleted: with a forget, or because the disk ran short.
+// What they held is not known, so the notice says that.
+func unreadGoneNotice(n int, forgotten bool) string {
+	what, held := "one restore point that could not be read was", "it held"
+	if n > 1 {
+		what, held = fmt.Sprintf("%d restore points that could not be read were", n), "they held"
+	}
+	if forgotten {
+		return "Forget: " + what + " deleted along with what you forgot, and I could not tell what " + held + "."
+	}
+	return "Disk space: " + what + " deleted to make room, and I could not tell what " + held + "."
+}
+
+// openVM opens the agent machines with cfg and wires what the owner
+// reads of their unread restore points: the STATUS line, and the notice
+// when any are deleted (main's seam, as openMachineDisk).
+func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(string) error) (*vm.Manager, error) {
+	cfg.UnreadGone = func(n int, forgotten bool) {
+		if err := inform(unreadGoneNotice(n, forgotten)); err != nil {
+			log.Printf("vm: telling the owner of deleted unread snapshots: %v", err)
+		}
+	}
+	m, err := vm.Open(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	caps.snapsUnread(m.Unread)
+	return m, nil
+}
+
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotErased,
 		forgetRecordUnread, forgetReadsUnknown, forgetUnreached, forgetHeldLine([]string{"helper.1"}), forgetHeldLine([]string{"a", "b"}),
-		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}})}
+		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}}),
+		unreadLine([]string{"s0000000007"}), unreadLine([]string{"s0000000007", "s0000000123"})}
 }
 
 // forgetHeldLine is STATUS's line for agents that read erased content and
@@ -165,6 +214,7 @@ func newCapLines(s *capState) *capLines {
 	r.add("questions", capHost, s.questionsLine)
 	r.add("workers", capConfig, s.workersLine)
 	r.add("update-checks", capHeld, s.updatesLine)
+	r.add("restore-points", capHost, s.unreadLine)
 	return r
 }
 
@@ -246,13 +296,14 @@ func ownerWorded(l string) error {
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
 type capState struct {
-	agent        atomic.Pointer[string] // C1's line, nil while the agent can run
-	held         atomic.Bool            // the agent line already says why it is off (lateStatus.off)
-	model        *modelProbe            // C2
-	recallOff    atomic.Bool            // C7
-	questionsOff atomic.Bool            // C9
-	workersOff   atomic.Bool            // C10
-	updates      atomic.Bool            // C11: an update check runs
+	agent        atomic.Pointer[string]          // C1's line, nil while the agent can run
+	held         atomic.Bool                     // the agent line already says why it is off (lateStatus.off)
+	model        *modelProbe                     // C2
+	recallOff    atomic.Bool                     // C7
+	questionsOff atomic.Bool                     // C9
+	workersOff   atomic.Bool                     // C10
+	updates      atomic.Bool                     // C11: an update check runs
+	unread       atomic.Pointer[func() []string] // the machines' restore points kept unread (vm Unread)
 }
 
 func newCapState(modelSocket string) *capState {
@@ -284,6 +335,16 @@ func (s *capState) workers(on bool)     { s.workersOff.Store(!on) }
 // updateChecks records whether an update check runs (W5b). None is built,
 // so main never sets it and STATUS says update checks are not running.
 func (s *capState) updateChecks(on bool) { s.updates.Store(on) }
+
+// snapsUnread wires the restore-point line to the machines' live list.
+func (s *capState) snapsUnread(list func() []string) { s.unread.Store(&list) }
+
+func (s *capState) unreadLine() string {
+	if l := s.unread.Load(); l != nil {
+		return unreadLine((*l)())
+	}
+	return ""
+}
 
 func (s *capState) agentLine() string {
 	if l := s.agent.Load(); l != nil && !s.held.Load() {

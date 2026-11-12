@@ -3,7 +3,7 @@
 
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
   tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
-  tools/premerge.py --check <comments.json> <pr-number> [--base origin/main] [head]
+  tools/premerge.py --check <comments.json> <pr-number> [--runs runs.json] [--base origin/main] [head]
   tools/premerge.py --bot <head-ref> --run <run.json> --output <artifact.zip> [--base origin/main] [head]
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
@@ -42,8 +42,14 @@ the newest trusted verdicts marked `ux` and `potency` (one comment may carry bot
 `potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts: while it is the newest of
 its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105), until a newer comment supersedes
 it. Likewise a verdict comment whose `Record:` line does not parse (a package ID with spaces, a missing line;
-#3611) prints `unparsed-record <kind>` until a newer comment supersedes it. An accept whose Record head names no commit here prints
+#3611) prints `unparsed-record <kind>` until a newer comment supersedes it, and an accept with a good Record line whose
+marker sits outside its record block prints `misplaced-marker <kind>` (#5541). An accept whose Record head names no commit here prints
 `unresolved-record <kind>` the same way (#3856). Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+Last, every verdict being in, it holds the checks main's ruleset does not require (HELD, #5366), since GitHub merges
+an armed PR past a cancelled one: `--runs` is the head's and merge base's Actions runs (`checks_held`), and each held
+workflow's newest pull_request run on the head must pass, else it prints `needs-check <workflow>:<state> ...` and
+exits 1. Without `--runs` it prints `needs-runs` and exits 1, so no caller reads `same` with the checks unread;
+`tools/premerge_runs.sh` builds the runs file, for premerge.yml and for a local check alike (#5386).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
@@ -117,7 +123,8 @@ _FENCE = re.compile(r"(`{3,}|~{3,})[^`]*$")
 
 
 def _record_block(body):
-    """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
+    """(text, placed, line): where a comment's Record line and markers are read from, whether that is its record block,
+    and its first unfenced `Record:` line (None without one).
 
     The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
     under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
@@ -133,12 +140,12 @@ def _record_block(body):
             fence = None
     at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
     if at is None:
-        return body, False
+        return body, False, None
     end = at + 1
     while end < len(lines) and _HEADER.match(lines[end]):
         end += 1
     own = "\n".join(lines[at:end])
-    return (own, True) if _MARKER.search(own) else (body, False)
+    return (own, True, lines[at]) if _MARKER.search(own) else (body, False, lines[at])
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -159,7 +166,8 @@ def verdict(comments, pr, security=False, lens=None):
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
     An accept's markers and Record line count only in the comment's record block, and an accept whose marker is only
-    outside it reads as `unparsed` (`_record_block`, #4261); any other verdict reads the whole comment, so it fails closed.
+    outside it reads as `misplaced` when its first unfenced Record line is a well-formed one for this PR, else as
+    `unparsed` (`_record_block`, #4261, #5541); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
@@ -169,12 +177,13 @@ def verdict(comments, pr, security=False, lens=None):
         first = body.split("\n", 1)[0].strip()
         if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
             continue
-        own, placed = _record_block(body)
+        own, placed, line = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
         # quoted or misplaced marker or record can only make it count, which fails closed.
         accept = first.split(":", 1)[-1].strip().lower() == "accept"
         read = own if accept else body
-        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", read, re.M)
+        ours = re.compile(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", re.M)
+        rec = ours.search(read)
         if lens:
             marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", read, re.M)
         else:
@@ -184,7 +193,7 @@ def verdict(comments, pr, security=False, lens=None):
         misplaced = accept and not placed
         if marked and (misplaced or not rec):
             if misplaced or not _RECORD.search(read):
-                found = ("unparsed", None)
+                found = ("misplaced" if misplaced and ours.match(line or "") else "unparsed", None)
         elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
@@ -533,10 +542,14 @@ EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a
 
 # #3611: a Record line with a spaced package never parsed, so the accept read as absent; name that too.
 UNPARSED = 'unparsed-record {}: Record line must be "Record: PR #{} · package <ID-without-spaces> · head <sha>"'
+# #5541 (seen twice on #5539): a marker above a good Record line read as unparsed, which blamed the Record line.
+# Every named cause fits premerge.yml's 120-character status cut with its longest real argument (#5543).
+MISPLACED = "misplaced-marker {}: put each <!-- record: <kind> --> marker directly under the Record line"
 
 
 # #3856 (seen on #3842): a Record head no `git rev-parse` resolves crashed --check with a traceback; name it as never accepting.
-UNRESOLVED = "unresolved-record {}: Record head {} resolves to no single commit here, post a new verdict naming the reviewed head"
+# The head shows as its first 7 characters, so a full 40-character head still fits the status cut (#5543).
+UNRESOLVED = "unresolved-record {}: Record head {} is no single commit here, post a new verdict naming the reviewed head"
 
 
 def _resolves(sha):
@@ -546,12 +559,178 @@ def _resolves(sha):
 def _named(v, kind, pr):
     """The named cause a verdict `v` of `kind` never accepts, or None."""
     if v and v[0] == "accept" and not _resolves(v[1]):
-        return UNRESOLVED.format(kind, v[1])
+        return UNRESOLVED.format(kind, v[1][:7])
     if v and v[0] == "edited":
         return EDITED.format(kind)
     if v and v[0] == "unparsed":
         return UNPARSED.format(kind, int(pr))
+    if v and v[0] == "misplaced":
+        return MISPLACED.format(kind)
     return None
+
+
+# PREMERGE-cancelled-checks (#5366): workflows main's ruleset does not require, so GitHub merges past a cancelled or
+# missing run of them; --check holds each to its latest PR run on the head, less the jobs named here (image-vulncheck
+# waits on Mark's #2919 paste). PREMERGE-held-rest (#5385) holds every other PR-triggered workflow file too, the slow
+# image and real-model ones included: a long run only delays the merge, while an unheld one merges past a cancel.
+HELD = {"assurance": (), "vulncheck": (), "image": ("image-vulncheck",), "lane-gate": (), "word-budget": (),
+        "formal": (), "keycheck": (), "mutgate": (), "infer-real": (), "vision-real": (), "testkit": (),
+        "enforcer-image": (), "camnode-image": (), "drone-sitl": ()}
+# The PR-triggered workflow files left out of HELD: every job of ci and trusted-base is a required check of main's
+# ruleset, and premerge is the gate itself. A workflow file with a PR trigger is in exactly one of the two (#5385).
+UNHELD = ("ci", "trusted-base", "premerge")
+PASSED = ("success", "skipped")
+NO_RUNS = "needs-runs: every verdict is in; pass --runs <runs.json> (tools/premerge_runs.sh builds it) to read the held checks"
+_GLOB = re.compile(r"[A-Za-z0-9._/*-]+")
+_ITEM = re.compile(r"""\s*-\s*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?""")
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block(lines, at):
+    """The lines indented under lines[at], skipping blank and comment lines."""
+    out = []
+    for line in lines[at + 1:]:
+        if line.strip() and not line.strip().startswith("#"):
+            if _indent(line) <= _indent(lines[at]):
+                break
+            out.append(line)
+    return out
+
+
+def pr_paths(text, event="pull_request"):
+    """The globs a workflow's `event` trigger (pull_request or pull_request_target) is filtered by: None without that
+    trigger, [] when it runs on every PR. Read from this repository's block style only; any other form (a flow-style `on:`,
+    `paths-ignore`, a negated or unusual glob) reads as [], so the run is owed and an absent one holds the merge."""
+    lines = text.splitlines()
+    at = next((i for i, line in enumerate(lines) if re.fullmatch(r"on:\s*(?:#.*)?", line)), None)
+    if at is None:
+        return [] if re.search(rf"\b{event}\b", text) else None
+    on = _block(lines, at)
+    found, globs = False, []
+    for i, line in enumerate(on):
+        key = re.fullmatch(r"(\s*)(pull_request(?:_target)?):\s*(#.*)?", line)
+        if not key and re.match(r"\s*pull_request", line):
+            return []  # `pull_request: {...}` and the like
+        if not key or key.group(2) != event or _indent(line) != _indent(on[0]):
+            continue
+        found, sub = True, _block(on, i)
+        if any(re.match(r"\s*(?:paths-ignore|branches-ignore)\s*:", s) for s in sub):
+            return []
+        p = next((j for j, s in enumerate(sub) if re.match(r"\s*paths\s*:", s)), None)
+        if p is None or not re.fullmatch(r"\s*paths:\s*(?:#.*)?", sub[p]):
+            return []
+        items = _block(sub, p)
+        for item in items:
+            m = _ITEM.fullmatch(item)
+            glob = m and next(g for g in m.groups() if g is not None)
+            if not glob or not _GLOB.fullmatch(glob):
+                return []
+            globs.append(glob)
+        if not items:
+            return []
+    return globs if found else None
+
+
+def _glob_re(glob):
+    """GitHub's path filter syntax for the characters `pr_paths` lets through: `**` crosses `/`, `*` does not."""
+    out = re.escape(glob).replace(r"\*\*/", "\0").replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
+    return re.compile(out.replace("\0", "(?:.*/)?"), re.DOTALL)
+
+
+def _owed(cwd, head, base, path, files):
+    """Whether a run of workflow `path` is expected for a PR from `head` into `base` changing `files`: GitHub reads a
+    pull_request trigger from the head's copy of the workflow and a pull_request_target trigger from the base's."""
+    for ref, event in ((head, "pull_request"), (base, "pull_request_target")):
+        shown = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=cwd, capture_output=True)
+        globs = None if shown.returncode else pr_paths(shown.stdout.decode(errors="replace"), event)
+        if globs is not None and (not globs or any(_glob_re(g).fullmatch(f) for g in globs for f in files)):
+            return True
+    return False
+
+
+def _bind(run, pr, repo):
+    """How a head run binds to this PR (#5380 review): `ours`, `foreign` or `unbound`. Another PR, a fork's included, can
+    carry the same head commit, so a run binds by its head repository and branch, and a same-repository run also by
+    naming only this PR into main. A fork PR's runs name no PR, so a fork's head repository and branch are the binding
+    there. A same-repository run on this PR's branch whose `pull_requests` is empty, malformed, or names any other PR
+    or base is `unbound` (#5392): it holds as `<workflow>:unbound`, not `missing`, since the run exists but GitHub's
+    list does not tie it to this PR alone. A PR named twice is one PR (dedupe by number and base)."""
+    if (run.get("head_repository") or {}).get("full_name") != pr["repo"] or run.get("head_branch") != pr["branch"]:
+        return "foreign"
+    if pr["repo"] != repo:
+        return "ours"
+    prs = run.get("pull_requests")
+    if not (isinstance(prs, list) and all(isinstance(p, dict) and isinstance(p.get("number"), int)
+                                          and isinstance(p.get("base"), dict) and isinstance(p["base"].get("ref"), str)
+                                          for p in prs)):
+        return "unbound"
+    named = {(p["number"], p["base"]["ref"]) for p in prs}
+    return "ours" if named == {(pr["number"], "main")} else "unbound"
+
+
+def _jobs(run, attempt):
+    """The run's jobs of `attempt` as (name, conclusion), or None when they were not supplied."""
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    mine = [j for j in jobs if j.get("run_id") == run.get("id") and j.get("run_attempt") == attempt]
+    return [(j.get("name"), j.get("conclusion")) for j in mine] if len(mine) == len(jobs) else None
+
+
+def _base_failed(runs, path, onto, repo):
+    """Job names that failed in main's own first-attempt push or scheduled run of `path` on the merge base
+    (PREMERGE-inherited, #3532): a pusher can rerun a base run, so only attempt 1 counts."""
+    mine = [r for r in runs if r.get("path") == path and r.get("head_sha") == onto and r.get("head_branch") == "main"
+            and r.get("event") in ("push", "schedule") and (r.get("head_repository") or {}).get("full_name") == repo]
+    if not mine:
+        return set()
+    r = max(mine, key=lambda r: r.get("id") or 0)
+    if r.get("run_attempt") != 1 or r.get("conclusion") != "failure":
+        return set()
+    return {n for n, c in _jobs(r, 1) or [] if c == "failure"}
+
+
+def checks_held(cwd, runs, head="HEAD", base="origin/main"):
+    """`<workflow>:<state>` for each HELD workflow whose newest pull_request run on `head` did not pass.
+
+    `runs` is {"repo": ..., "pr": {"number", "repo", "branch"}, "head": [...], "base": [...]}: this repository, the PR's
+    number and head repository and branch, and the Actions runs (API JSON) on the head and on the merge base, each
+    failed one with a `jobs` list (the head's latest attempt, the base's first). Only this PR's runs count (`_bind`). A run passes on `success` or
+    `skipped`, or on `failure` when every failed job is one HELD exempts or one that failed on the merge base too.
+    A queued, running, cancelled or timed-out run holds, and so does a missing one the workflow's PR trigger owes, as
+    `unbound` when only this branch's runs that name no PR or another PR are on the head."""
+    pr = runs.get("pr") if isinstance(runs, dict) else None
+    if not (isinstance(pr, dict) and isinstance(pr.get("number"), int) and all(isinstance(pr.get(k), str) for k in ("repo", "branch"))
+            and isinstance(runs.get("repo"), str) and all(isinstance(runs.get(k), list) for k in ("head", "base"))):
+        raise ValueError("runs must be {\"repo\": str, \"pr\": {\"number\": int, \"repo\": str, \"branch\": str}, \"head\": [...], \"base\": [...]}")
+    sha = _git(cwd, "rev-parse", f"{head}^{{commit}}").decode().strip()
+    onto = _git(cwd, "merge-base", base, head).decode().strip()
+    files = [f for f in _git(cwd, *DIFF, onto, sha).decode(errors="surrogateescape").split("\0") if f]
+    held = []
+    for name, exempt in HELD.items():
+        path = f".github/workflows/{name}.yml"
+        bound = [(_bind(r, pr, runs["repo"]), r) for r in runs["head"] if r.get("path") == path
+                 and r.get("head_sha") == sha and r.get("event") in ("pull_request", "pull_request_target")]
+        mine = [r for b, r in bound if b == "ours"]
+        if not mine:
+            if _owed(cwd, sha, base, path, files):
+                held.append(f"{name}:{'unbound' if any(b == 'unbound' for b, _ in bound) else 'missing'}")
+            continue
+        r = max(mine, key=lambda r: r.get("id") or 0)
+        state = r.get("conclusion") if r.get("status") == "completed" else r.get("status")
+        if state in PASSED:
+            continue
+        if state == "failure":
+            jobs = _jobs(r, r.get("run_attempt"))
+            excused = set(exempt) | _base_failed(runs["base"], path, onto, runs["repo"])
+            bad = [(n, c) for n, c in jobs or [] if c not in PASSED]
+            if bad and all(c == "failure" and n in excused for n, c in bad):
+                continue
+        held.append(f"{name}:{state or 'unknown'}")
+    return held
 
 
 def main(argv):
@@ -562,9 +741,13 @@ def main(argv):
         if len(args) < 3:
             print(__doc__)
             return 2
-        comments, pr, args = json.load(open(args[1])), args[2], args[3:]
-        if args[:1] == ["--base"]:
-            base, args = args[1], args[2:]
+        comments, pr, args, runs = json.load(open(args[1])), args[2], args[3:], None
+        while args[:1] in (["--base"], ["--runs"]) and len(args) > 1:
+            if args[0] == "--base":
+                base = args[1]
+            else:
+                runs = json.load(open(args[1]))
+            args = args[2:]
         v = verdict(comments, pr)
         if v is None or v[0] != "accept" or _named(v, "l3", pr):
             print("no-verdict" if v is None else _named(v, "l3", pr) or "not-accepted")
@@ -577,7 +760,7 @@ def main(argv):
         files = mark_range(".", base, head)
         owed = {x: verdict(comments, pr, lens=x) for x in lenses_owed(files)}
         lenses = [x for x, lv in owed.items() if not _accepted(lv, head, base)]
-        for state in ("edited", "unparsed"):
+        for state in ("edited", "unparsed", "misplaced"):
             hit = [x for x in lenses if owed[x] and owed[x][0] == state]
             if hit:
                 print(_named((state,), ",".join(hit), pr))
@@ -594,6 +777,13 @@ def main(argv):
         sec = verdict(comments, pr, security=True)
         if owed and not _accepted(sec, head, base):
             print(_named(sec, "security", pr) or "needs-security " + " ".join(owed))
+            return 1
+        if runs is None:
+            print(NO_RUNS)
+            return 1
+        held = checks_held(".", runs, head, base)
+        if held:
+            print("needs-check " + " ".join(held))
             return 1
         print("same")
         return 0

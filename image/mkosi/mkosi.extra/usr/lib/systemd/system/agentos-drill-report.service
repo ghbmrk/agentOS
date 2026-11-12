@@ -4,8 +4,10 @@ Documentation=file:/usr/lib/agentos/drill-report
 # The first healthy boot after the drill's reboot (reboot-weekly writes pending): Requires= as well
 # as After=, so a boot whose health check fails never reports, and pending waits for the healthy boot
 # that follows (systemd.special(7), as agentos-drive-id.service). Before the boot report, so its line
-# reaches the console ahead of the serial login (image/ASSUMPTIONS.md I24).
-ConditionPathExists=/var/lib/agentos/drill/pending
+# reaches the console ahead of the serial login (image/ASSUMPTIONS.md I24). Or unrecorded, a drill whose
+# record was never written, reported as missed (#5455); a boot with neither (no drill) skips.
+ConditionPathExists=|/var/lib/agentos/drill/pending
+ConditionPathExists=|/var/lib/agentos/drill/unrecorded
 Requires=boot-complete.target
 After=boot-complete.target
 Before=agentos-boot-report.service

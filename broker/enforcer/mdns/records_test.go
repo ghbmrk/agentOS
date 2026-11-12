@@ -1073,3 +1073,160 @@ func TestPinAlone(t *testing.T) {
 		t.Error("no pins kept records")
 	}
 }
+
+// TestParseCountsEverySection (#5140): parse takes maxRecords records
+// however the sections share them, and refuses one more held by any one
+// section; it refuses a record whose data runs past the message, and an
+// SRV at the message's end too short for its fixed fields, and keeps a
+// TXT record's data. Catches a count that subtracts a section, a bound
+// off by one, or a length left unchecked.
+func TestParseCountsEverySection(t *testing.T) {
+	many := func(n int) []record {
+		rs := make([]record, n)
+		for i := range rs {
+			rs[i] = a(fmt.Sprintf("h%d.local", i), "10.13.0.2", 120)
+		}
+		return rs
+	}
+	// A bare 12-byte header parses and 11 bytes do not (#5152).
+	if _, ok := parse(make([]byte, 12)); !ok {
+		t.Error("a 12-byte header with no sections refused")
+	}
+	if _, ok := parse(make([]byte, 11)); ok {
+		t.Error("11 bytes parsed")
+	}
+	if _, ok := parse((&message{flags: 0x8400, answers: many(maxRecords / 2), additional: many(maxRecords / 2)}).bytes()); !ok {
+		t.Error("maxRecords records refused")
+	}
+	for _, m := range []*message{{flags: 0x8400, authority: many(maxRecords + 1)}, {flags: 0x8400, additional: many(maxRecords + 1)}} {
+		if _, ok := parse(m.bytes()); ok {
+			t.Errorf("%d authority and %d additional records parsed", len(m.authority), len(m.additional))
+		}
+	}
+	long := response([]record{a("h.local", "10.13.0.2", 120)}, nil).bytes()
+	long = slices.Clip(long)
+	long[len(long)-5]++ // the A record's data length: one past the message
+	if _, ok := parse(long); ok {
+		t.Error("a record running past the message parsed")
+	}
+	short := slices.Clip(response([]record{{name: dn("s._ipp._tcp.local"), typ: typeSRV, class: 1, ttl: 120, data: []byte{0, 0}}}, nil).bytes())
+	if _, ok := parse(short); ok {
+		t.Error("an SRV shorter than its fixed fields parsed")
+	}
+	if m, ok := parse(response([]record{txt("o._ipp._tcp.local", 120)}, nil).bytes()); !ok || !bytes.Equal(m.answers[0].data, []byte("\x08txtvers1")) {
+		t.Errorf("a TXT record parsed as %+v, %v", m, ok)
+	}
+}
+
+// TestNameBoundsExact (#5140): a message whose names take exactly
+// maxSteps labels parses and one more label does not; a chain of maxHops
+// pointers parses and one more does not; key folds A and Z; local needs a
+// label under local, and an empty name is under nothing. Catches each
+// bound off by one.
+func TestNameBoundsExact(t *testing.T) {
+	questions := func(sizes ...int) []byte {
+		b := []byte{0, 0, 0, 0, 0, byte(len(sizes)), 0, 0, 0, 0, 0, 0}
+		for _, n := range sizes {
+			for range n {
+				b = append(b, 1, 'a')
+			}
+			b = append(b, 0, 0, 1, 0, 1)
+		}
+		return b
+	}
+	full := slices.Repeat([]int{127}, 32) // 4064 labels, each name 255 bytes
+	if _, ok := parse(questions(append(full, maxSteps-32*127)...)); !ok {
+		t.Error("names of exactly maxSteps labels refused")
+	}
+	if _, ok := parse(questions(append(full, maxSteps-32*127+1)...)); ok {
+		t.Error("names past maxSteps labels parsed")
+	}
+	chain := func(n int) []byte { // question i points at question i-1: i-1 hops
+		b := []byte{0, 0, 0, 0, 0, byte(n), 0, 0, 0, 0, 0, 0, 1, 'a', 0, 0, 1, 0, 1}
+		prev := 12
+		for range n - 1 {
+			at := len(b)
+			b = append(b, 0xC0, byte(prev), 0, 1, 0, 1)
+			prev = at
+		}
+		return b
+	}
+	if _, ok := parse(chain(maxHops + 1)); !ok {
+		t.Error("a chain of maxHops pointers refused")
+	}
+	if _, ok := parse(chain(maxHops + 2)); ok {
+		t.Error("a chain past maxHops pointers parsed")
+	}
+	if dn("AZ.local").key() != dn("az.local").key() || dn("@[.local").key() == dn("`{.local").key() {
+		t.Error("key folds other than A to Z")
+	}
+	if dn("local").local() || !dn("x.local").local() || (name{}).under("local") {
+		t.Error("local or under read a name without its labels")
+	}
+}
+
+// TestProveGoodbyes (#5140): a goodbye (TTL 0) for a proved host ends it
+// in both the table and what the sender said, and is itself never held;
+// a host's goodbye in a packet proves no instance on it. Catches a
+// goodbye that leaves either record, is held as a name, or reads as the
+// host still live.
+func TestProveGoodbyes(t *testing.T) {
+	f := NewFilter()
+	k := dn("Printer.local").key()
+	f.Prove("ap0.105", printerLink, response([]record{a("Printer.local", "10.13.0.2", 120)}, nil), t0)
+	if !f.proved["ap0.105"].has(k, t0) {
+		t.Fatal("the host was not proved")
+	}
+	f.Prove("ap0.105", printerLink, response([]record{a("Printer.local", "10.13.0.2", 0)}, nil), t0.Add(time.Second))
+	if _, said := f.said["ap0.105"][k]; said || f.proved["ap0.105"].has(k, t0.Add(time.Second)) || len(f.proved["ap0.105"]) != 0 {
+		t.Errorf("after its goodbye the host is held %v, said %v", f.proved["ap0.105"], said)
+	}
+	g := NewFilter()
+	g.Prove("ap0.105", printerLink, response([]record{
+		a("Printer.local", "10.13.0.2", 0),
+		srv("Office._ipp._tcp.local", "Printer.local", 120),
+	}, nil), t0)
+	if g.proved["ap0.105"].has(dn("Office._ipp._tcp.local").key(), t0) {
+		t.Error("an instance on a host saying goodbye was proved")
+	}
+	// An SRV's goodbye alone ends its instance while its host stays held
+	// (#5152): catches the goodbye loop's SRV test negated.
+	h := NewFilter()
+	ik := dn("Office._ipp._tcp.local").key()
+	h.Prove("ap0.105", printerLink, response([]record{
+		a("Printer.local", "10.13.0.2", 120),
+		srv("Office._ipp._tcp.local", "Printer.local", 120),
+	}, nil), t0)
+	if !h.proved["ap0.105"].has(ik, t0) {
+		t.Fatal("the instance was not proved")
+	}
+	h.Prove("ap0.105", printerLink, response([]record{srv("Office._ipp._tcp.local", "Printer.local", 0)}, nil), t0.Add(time.Second))
+	if _, said := h.said["ap0.105"][ik]; said || h.proved["ap0.105"].has(ik, t0.Add(time.Second)) {
+		t.Errorf("after its SRV's goodbye the instance is held, said %v", said)
+	}
+	if !h.proved["ap0.105"].has(k, t0.Add(time.Second)) {
+		t.Error("the instance's goodbye took its host with it")
+	}
+}
+
+// TestMineRefusesNonUnicastAndEdges (#5140): mine refuses an address
+// that is not global unicast even inside a link prefix, and an IPv4
+// prefix's network and broadcast addresses up to /30, not on a /31.
+// Catches the unicast check dropped, or the /30 bound off by one.
+func TestMineRefusesNonUnicastAndEdges(t *testing.T) {
+	for _, c := range []struct {
+		link, addr string
+		want       bool
+	}{
+		{"127.0.0.1/8", "127.0.0.2", false},
+		{"224.0.0.1/4", "224.0.0.251", false},
+		{"10.0.0.1/30", "10.0.0.0", false},
+		{"10.0.0.1/30", "10.0.0.3", false},
+		{"10.0.0.1/30", "10.0.0.2", true},
+		{"10.0.0.1/31", "10.0.0.0", true},
+	} {
+		if got := mine([]netip.Prefix{netip.MustParsePrefix(c.link)}, netip.MustParseAddr(c.addr).AsSlice()); got != c.want {
+			t.Errorf("%s on %s: %v, want %v", c.addr, c.link, got, c.want)
+		}
+	}
+}

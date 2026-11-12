@@ -127,6 +127,28 @@ func TestClipIsNotContent(t *testing.T) {
 // What the owner says while the token is read is heard, and answered once
 // the rung is known, at that rung.
 func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
+	// Every hand-off is bounded, so a call that never takes what it is
+	// handed (a line left held, a failed Answer read as success) fails
+	// here, naming the wait, not at the package timeout (#5316).
+	const wait = 5 * time.Second
+	say := func(r *rig, text string) {
+		t.Helper()
+		select {
+		case r.rec.out <- call.Heard{Text: text, Final: true}:
+		case <-time.After(wait):
+			t.Fatalf("%q was not heard within %v: the call is not served", text, wait)
+		}
+	}
+	key := func(r *rig, keys string) {
+		t.Helper()
+		for _, k := range []byte(keys) {
+			select {
+			case r.l.keys <- k:
+			case <-time.After(wait):
+				t.Fatalf("key %q of %q was not read within %v: the token is not read", k, keys, wait)
+			}
+		}
+	}
 	for _, c := range []struct {
 		keys string
 		want call.Rung
@@ -142,12 +164,10 @@ func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
 		r.cfg.Token = func(k string) bool { return k == "4071" }
 		r.l.keys = make(chan byte)
 		r.serve()
-		r.say("hi there")
-		r.say("what's new")
+		say(r, "hi there")
+		say(r, "what's new")
 		r.quiet() // no answer before the rung is known
-		for _, k := range []byte(c.keys) {
-			r.l.keys <- k
-		}
+		key(r, c.keys)
 		if c.keys == "" {
 			window <- time.Time{}
 		}
@@ -158,17 +178,22 @@ func TestSpeechDuringTheTokenIsAnswered(t *testing.T) {
 		if rep.Rung != c.want || len(r.ans.asks) != 1 || r.ans.asks[0].Rung != c.want || r.ans.asks[0].Text != "hi there what's new" {
 			t.Fatalf("%q: rung %v, asks %+v", c.keys, rep.Rung, r.ans.asks)
 		}
+		// The Ask outlives the call, but its rung does not (#5225 re-plan).
+		if got := r.ans.kept[0].Rung(); got != call.P0 {
+			t.Fatalf("%q: an Ask kept from an ended call says %v", c.keys, got)
+		}
+	}
+	if got := (call.Ask{Text: "hi"}).Rung(); got != call.P0 {
+		t.Fatalf("an Ask built outside the package says %v", got)
 	}
 	// "Stop" while the token is read drops what was asked.
 	r := newRig(t, fixed("Hello."))
 	r.cfg.Token = func(string) bool { return true }
 	r.l.keys = make(chan byte)
 	r.serve()
-	r.say("read my mail")
-	r.say("stop")
-	for _, k := range []byte("1#") {
-		r.l.keys <- k
-	}
+	say(r, "read my mail")
+	say(r, "stop")
+	key(r, "1#")
 	r.quiet()
 	r.hangup()
 	if len(r.ans.asks) != 0 {
@@ -343,4 +368,42 @@ func TestTokenReadEndsWithTheLoop(t *testing.T) {
 	if _, err := r.end(); err != call.ErrDeaf { // end checks no goroutine outlives the call
 		t.Fatalf("err = %v", err)
 	}
+}
+
+// The turn reads its clip deadline once: a clock whose channel has a
+// second value (Config.After is injected) does not fire the deadline
+// again, so the loop never spins on a spent deadline.
+func TestTheClipDeadlineFiresOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newRig(t, nil)
+		r.bubble = true
+		r.cfg.Answerer = answerFunc(func(ctx context.Context, _ call.Ask) (<-chan string, error) {
+			<-ctx.Done() // slow: the clip covers it
+			return nil, ctx.Err()
+		})
+		moment := make(chan time.Time)
+		r.cfg.After = func(time.Duration) <-chan time.Time { return moment }
+		r.run(call.P2)
+		r.say("q")
+		moment <- time.Time{}
+		if got := r.next(); got != "CLIP:moment" {
+			t.Fatalf("first audio %q", got)
+		}
+		again, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			select {
+			case moment <- time.Time{}:
+				close(again)
+			case <-done:
+			}
+		}()
+		synctest.Wait()
+		select {
+		case <-again:
+			t.Fatal("the turn read its deadline a second time")
+		default:
+		}
+		close(done)
+		r.hangup()
+	})
 }
