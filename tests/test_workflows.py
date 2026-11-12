@@ -209,7 +209,7 @@ PREMERGE_LINES = [
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \\',
     '              --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
-    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | python3 -I -c \'import sys; sys.stdout.buffer.write("".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\\u00b7")[:120].encode())\')',
+    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | python3 -I -c \'import sys;s="".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\\u00b7");t=s[:120];i=t.rfind("/") if t.count(" ") < 2 else t.rfind(" ");sys.stdout.buffer.write((t if len(s) <= 120 or s[120] in " /" or i < 0 else t[:i+1].rstrip()).encode())\')',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
     '          if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \\',
@@ -1690,7 +1690,7 @@ class PremergeRunTest(unittest.TestCase):
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
                  descriptions=None, trailer="41\n", calls=None, pr="7", head="o/r", open_prs=(), lists=None,
-                 open_after=None):
+                 open_after=None, env_extra=None, raw=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1708,12 +1708,15 @@ class PremergeRunTest(unittest.TestCase):
                    "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer,
                    "HEAD_FULL": head, "OPEN_PRS": json.dumps(list(open_prs)),
                    "OPEN_PRS_AFTER": "" if open_after is None else json.dumps(list(open_after))}
+            env.update(env_extra or {})
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
             if tokens is not None:
                 tokens.extend((stubs / "post-tokens").read_text().split())
+            if raw is not None and (stubs / "posts").exists():
+                raw.append((stubs / "posts").read_bytes())
             if descriptions is not None:
                 descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
@@ -1966,6 +1969,15 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_gate("same", fail_at="runs"), (0, ["failure"]))  # PREMERGE-runs-local (#5386)
         code, states = self.run_gate("same", fail_at="post")
         self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_status_middle_dot_reaches_gh_intact(self):
+        # PREMERGE-status-bytes (#5553): the status step's U+00B7 is two bytes, C2 B7, in the argument `gh api` receives,
+        # under a UTF-8 locale and under LC_ALL=C (the filter decodes by itself, not by the shell's locale).
+        verdict = "unparsed-record 7: Record: PR #7 \u00b7 package x \u00b7 head f"
+        for env in ({"LC_ALL": "C.UTF-8"}, {"LC_ALL": "C"}, {"LC_ALL": "POSIX", "LANG": "C"}):
+            raw = []
+            self.assertEqual(self.run_gate(verdict, env_extra=env, raw=raw)[1], ["failure"], env)
+            self.assertIn(b"description=unparsed-record 7: Record: PR #7 \xc2\xb7 package x \xc2\xb7 head f ", raw[0], env)
 
     def test_status_is_posted_with_the_app_token(self):
         # PREMERGE-source-a (#1943): the post uses STATUS_TOKEN (the App's, which the ruleset

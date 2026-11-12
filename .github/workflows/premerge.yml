@@ -194,7 +194,7 @@ jobs:
           ) && state=success
           # The status keeps printable ASCII plus the middle dot the Record format needs, cut at 120 characters, not bytes,
           # so the unparsed-record status quotes a Record line a poster can copy (PREMERGE-record-format-ascii, #5545).
-          out=$(printf '%s' "${out:-error}" | tail -n 1 | python3 -I -c 'import sys; sys.stdout.buffer.write("".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\u00b7")[:120].encode())')
+          out=$(printf '%s' "${out:-error}" | tail -n 1 | python3 -I -c 'import sys;s="".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\u00b7");t=s[:120];i=t.rfind("/") if t.count(" ") < 2 else t.rfind(" ");sys.stdout.buffer.write((t if len(s) <= 120 or s[120] in " /" or i < 0 else t[:i+1].rstrip()).encode())')
           echo "premerge $HEAD_SHA: $state ($out)"
           post "$state" "$out"
           if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \
