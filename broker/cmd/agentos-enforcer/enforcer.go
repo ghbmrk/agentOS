@@ -337,12 +337,8 @@ func (d *Enforcer) kick() {
 // is tried again at the next tick.
 func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	d.mu.Lock()
-	doc := d.engine.Current()
+	doc, h := d.engine.CurrentHash()
 	d.mu.Unlock()
-	h, err := policy.Hash(doc)
-	if err != nil {
-		return err
-	}
 	d.fwMu.Lock()
 	defer d.fwMu.Unlock()
 	if h == d.loaded && !d.net.reload {
