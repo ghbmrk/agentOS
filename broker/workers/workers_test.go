@@ -960,6 +960,31 @@ func TestOP6QueuedForkDoesNotStartAfterStop(t *testing.T) {
 	}
 }
 
+// A fork STOP refuses after its checkpoint, with every fork undone cleanly,
+// answers the STOP text alone, and leaves no snapshot (STOP-queued-start-fu).
+func TestOP6ForkHeldAfterItsCheckpointAnswersStopAlone(t *testing.T) {
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	a := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	w := workerID(a.Lineage, "w")
+	before := len(r.m.Snapshots(w))
+	g.arm()
+	done := make(chan error, 1)
+	go func() { done <- r.call("agent", toolFork, m{"name": "w", "into": []string{"f"}}, nil) }()
+	<-g.paused
+	stopped.Store(true)
+	close(g.release)
+	if err := <-done; err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("fork held after its checkpoint: %v, want only the STOP text", err)
+	}
+	if n := len(r.m.Snapshots(w)); n != before {
+		t.Fatalf("the held fork left %d snapshots, want %d", n, before)
+	}
+}
+
 // A rollback that waited on its worker while STOP came restores nothing and
 // leaves the worker running as it was; after RESUME it restores
 // (STOP-queued-start).

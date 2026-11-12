@@ -1338,16 +1338,21 @@ func (m *Manager) take(ctx context.Context, id string, t Tier) (Snapshot, error)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return m.takeOf(ctx, mc, t)
+	return m.takeOf(ctx, mc, t, false)
 }
 
 // takeOf is take for a handle the caller holds already, so a check it made
-// on that machine still holds for the snapshot taken.
-func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier) (Snapshot, error) {
+// on that machine still holds for the snapshot taken. With ask, the hold
+// ctx carries (WithHold) is asked after the wait for the lock, before the
+// pause: a held fork never pauses its source (STOP-queued-start-fu).
+func (m *Manager) takeOf(ctx context.Context, mc *machine, t Tier, ask bool) (Snapshot, error) {
 	if err := mc.lockLive(); err != nil {
 		return Snapshot{}, err
 	}
 	defer mc.mu.Unlock()
+	if ask && heldBy(ctx) {
+		return Snapshot{}, ErrHeld
+	}
 	if mc.State != Running {
 		return Snapshot{}, fmt.Errorf("%w: %s is %s", ErrState, mc.ID, mc.State)
 	}
@@ -1615,7 +1620,8 @@ func ownSnap(mc *machine, s Snapshot) bool {
 // Rollback returns a machine to snapshot snapID (REV-4). A full checkpoint
 // restores memory too; a file-system snapshot restarts the guest on that
 // file system. The machine's label does not fall (REV-5). A preempted or
-// stopped machine is re-admitted first.
+// stopped machine is re-admitted first. A hold ctx carries (WithHold)
+// refuses it with ErrHeld while it says true.
 func (m *Manager) Rollback(ctx context.Context, id, snapID string) error {
 	if err := refuseProvider(id); err != nil {
 		return err
@@ -1779,7 +1785,8 @@ func (m *Manager) resumeOf(ctx context.Context, mc *machine) error {
 // from that checkpoint, memory included (REV-4 fork(n), CAP-1). Each fork
 // inherits the source's image, class, budget, and label (REV-5), and is
 // admitted on its own budget, because forks share no memory (S3). Either all
-// forks start or none do.
+// forks start or none do. A hold ctx carries (WithHold) refuses it with
+// ErrHeld while it says true.
 func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, error) {
 	if err := refuseProvider(append([]string{id}, ids...)...); err != nil {
 		return Snapshot{}, err
@@ -1869,7 +1876,7 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 	src.mu.Unlock()
 	// Taken of src itself: a new machine given the ID meanwhile is not
 	// what the forks were labelled and lineaged from.
-	s, err := m.takeOf(ctx, src, Full)
+	s, err := m.takeOf(ctx, src, Full, true)
 	if err != nil {
 		undo()
 		return Snapshot{}, err
@@ -1926,12 +1933,23 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			}
 			for _, done := range reserved[:i] {
 				if derr := m.destroy(ctx, done); derr != nil {
+					live = errors.Join(live, derr)
 					err = errors.Join(err, fmt.Errorf("undoing fork %s: %w", done.ID, derr))
 				}
 			}
 			for _, f := range undone {
 				m.release(f)
 				m.unreserve(f)
+			}
+			// With every fork undone, nothing uses the checkpoint, so it
+			// goes as on a refusal before any start: a held or failed fork
+			// leaves nothing behind. A fork still live keeps it as its base.
+			// A drop that worked adds nothing: a clean hold stays the bare
+			// ErrHeld, which callers read as STOP alone.
+			if live == nil {
+				if derr := m.dropSnapshot(src, s.ID, prevLast); derr != nil {
+					err = errors.Join(err, derr)
+				}
 			}
 			return Snapshot{}, err
 		}
@@ -2036,7 +2054,7 @@ func (m *Manager) Merge(ctx context.Context, dst, src string) (Snapshot, error) 
 		return Snapshot{}, fmt.Errorf("%w: %s was not forked from %s", ErrLineage, src, dst)
 	}
 	// Taken of sm itself, which the containment and fork-point checks read.
-	ss, err := m.takeOf(ctx, sm, FS)
+	ss, err := m.takeOf(ctx, sm, FS, false)
 	if err != nil {
 		return Snapshot{}, err
 	}
