@@ -13,7 +13,7 @@ D=$R/var/lib/agentos/drill
 # last.json, so the next weekly reboot drills again (#5455).
 if [ ! -e "$D/pending" ] && [ -e "$D/unrecorded" ]; then
 	rm -f "$D/unrecorded"
-	echo "agentos-drill: FAIL missed: the drill's record was not written before its reboot; the next weekly reboot drills again"
+	echo "agentos-drill: FAIL missed: the drill's record was not written before its reboot (likely a full or failing disk under /var, or a power cut during the check); the next weekly reboot drills again"
 	exit 1
 fi
 p=$(cat "$D/pending" 2>/dev/null) || p=
