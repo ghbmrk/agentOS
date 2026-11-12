@@ -508,6 +508,22 @@ class KeeperTreeTest(unittest.TestCase):
                     got = check.gpt_auto_violations(self.root)
                 self.assertEqual(len(got), 1, got)
                 self.assertTrue(got[0].startswith("mkosi.repart: could not be read (Permission denied)"), got)
+        # A definition systemd fails to parse (a bad section header) is refused as unreadable, in the tree or the build.
+        remove = self.place({"usr/lib/repart.d/60-x.conf": "[Partition\nType=root\n"})
+        try:
+            got = check.gpt_auto_violations(self.root)
+            self.assertEqual(len(got), 1, got)
+            self.assertTrue(got[0].startswith("60-x.conf: could not be read ("), got)
+        finally:
+            remove()
+        with tempfile.TemporaryDirectory() as d:
+            build = pathlib.Path(d) / "mkosi.repart"
+            build.mkdir()
+            (build / "10-bad.conf").write_text("[Partition\nType=root\n")
+            with unittest.mock.patch.object(check, "repart_build", return_value=str(build)):
+                got = check.gpt_auto_violations(self.root)
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith("10-bad.conf: could not be read ("), got)
         # systemd-repart also reads /run/repart.d, which the box mounts: a tree entry there is refused.
         remove = self.place({"run/repart.d/60-x.conf": "[Partition]\nType=home\n"})
         try:
