@@ -794,35 +794,29 @@ func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
 
 // A command queued on a busy worker's lock when STOP comes does not start
 // once the lock frees: STOP is checked again under the lock (L3 MUST-2 on
-// #150).
+// #150). Ordered by the queued call's first ask of Stopped, not by time
+// (STOP-queued-start-fu); after RESUME the same write lands.
 func TestOP6QueuedCommandDoesNotStartAfterStop(t *testing.T) {
-	r := newRig(t, 8000)
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
 	var stopped atomic.Bool
 	r.tools.Stopped = stopped.Load
 	r.agent("agent", vm.Public)
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
-	first := make(chan error, 1)
-	go func() {
-		first <- r.call("agent", toolExec, m{"name": "w", "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
-	}()
-	time.Sleep(20 * time.Millisecond) // the first command holds the worker
-	queued := make(chan error, 1)
-	go func() {
-		queued <- r.call("agent", toolWrite, m{"name": "w", "path": "/f", "content": "after stop"}, nil)
-	}()
-	time.Sleep(20 * time.Millisecond) // the second waits on the lock
-	stopped.Store(true)
-	r.m.EndCommands()
-	if err := <-first; err == nil {
-		t.Fatal("the command in flight survived STOP")
-	}
-	if err := <-queued; err == nil || !strings.Contains(err.Error(), "STOP") {
+	write := m{"name": "w", "path": "/f", "content": "after stop"}
+	err := queueBehindCheckpoint(t, r, g, &stopped, toolWrite, write)
+	if err == nil || err.Error() != errStopped.Error() {
 		t.Fatalf("queued command after STOP: %v", err)
 	}
 	stopped.Store(false)
 	var read struct{ Content string }
 	if err := r.call("agent", toolRead, m{"name": "w", "path": "/f"}, &read); err == nil && read.Content != "" {
 		t.Fatalf("the queued command wrote %q", read.Content)
+	}
+	r.must("agent", toolWrite, write, nil)
+	r.must("agent", toolRead, m{"name": "w", "path": "/f"}, &read)
+	if read.Content != "after stop" {
+		t.Fatalf("write after RESUME: %q", read.Content)
 	}
 }
 
@@ -877,5 +871,195 @@ func TestWorkerCallInFlightKeepsTheCallerBusy(t *testing.T) {
 	}
 	if r.tools.Busy("agent") {
 		t.Fatal("still busy after the call returned")
+	}
+}
+
+// pauseGate blocks the first Pause after arm until release closes, so a
+// checkpoint holds the worker's lock while other calls queue on it.
+type pauseGate struct {
+	*runtime
+	armed   atomic.Bool
+	paused  chan struct{}
+	release chan struct{}
+}
+
+func (p *pauseGate) arm() {
+	p.paused, p.release = make(chan struct{}), make(chan struct{})
+	p.armed.Store(true)
+}
+
+func (p *pauseGate) Pause(context.Context, string) error {
+	if p.armed.CompareAndSwap(true, false) {
+		close(p.paused)
+		<-p.release
+	}
+	return nil
+}
+
+// queueBehindCheckpoint runs tool on worker w while a checkpoint holds w's
+// lock, sets STOP once tool has passed the entry gate (its first ask of
+// Stopped; a checkpoint asks none), and returns tool's answer. Ordered by
+// that ask, not by time, so the entry gate can never be the one refusing.
+func queueBehindCheckpoint(t *testing.T, r *rig, g *pauseGate, stopped *atomic.Bool, tool string, args m) error {
+	t.Helper()
+	g.arm()
+	ckpt := make(chan error, 1)
+	go func() { ckpt <- r.call("agent", toolCkpt, m{"name": "w"}, nil) }()
+	<-g.paused
+	entered := make(chan struct{})
+	var once sync.Once
+	r.tools.Stopped = func() bool {
+		s := stopped.Load()
+		once.Do(func() { close(entered) })
+		return s
+	}
+	defer func() { r.tools.Stopped = stopped.Load }()
+	queued := make(chan error, 1)
+	go func() { queued <- r.call("agent", tool, args, nil) }()
+	<-entered
+	stopped.Store(true)
+	close(g.release)
+	if err := <-ckpt; err != nil {
+		t.Fatal(err)
+	}
+	return <-queued
+}
+
+func admitted(r *rig, id string) bool {
+	_, ok := r.adm.Snapshot().Running[id]
+	return ok
+}
+
+// A fork that waited on its worker while STOP came starts no fork and
+// keeps no admission; after RESUME the same fork starts (STOP-queued-start).
+func TestOP6QueuedForkDoesNotStartAfterStop(t *testing.T) {
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	a := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	f := workerID(a.Lineage, "f")
+	err := queueBehindCheckpoint(t, r, g, &stopped, toolFork, m{"name": "w", "into": []string{"f"}})
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("queued fork after STOP: %v", err)
+	}
+	if _, err := r.m.Get(f); err == nil {
+		t.Fatal("the queued fork made its worker")
+	}
+	g.mu.Lock()
+	_, ran := g.running[f]
+	g.mu.Unlock()
+	if ran || admitted(r, f) {
+		t.Fatalf("refused fork: running %v, admitted %v", ran, admitted(r, f))
+	}
+	stopped.Store(false)
+	r.must("agent", toolFork, m{"name": "w", "into": []string{"f"}}, nil)
+	if !admitted(r, f) {
+		t.Fatal("fork after RESUME is not admitted")
+	}
+}
+
+// A fork STOP refuses after its checkpoint, with every fork undone cleanly,
+// answers the STOP text alone, and leaves no snapshot (STOP-queued-start-fu).
+func TestOP6ForkHeldAfterItsCheckpointAnswersStopAlone(t *testing.T) {
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	a := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	w := workerID(a.Lineage, "w")
+	before := len(r.m.Snapshots(w))
+	g.arm()
+	done := make(chan error, 1)
+	go func() { done <- r.call("agent", toolFork, m{"name": "w", "into": []string{"f"}}, nil) }()
+	<-g.paused
+	stopped.Store(true)
+	close(g.release)
+	if err := <-done; err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("fork held after its checkpoint: %v, want only the STOP text", err)
+	}
+	if n := len(r.m.Snapshots(w)); n != before {
+		t.Fatalf("the held fork left %d snapshots, want %d", n, before)
+	}
+}
+
+// A rollback that waited on its worker while STOP came restores nothing and
+// leaves the worker running as it was; after RESUME it restores
+// (STOP-queued-start).
+func TestOP6QueuedRollbackDoesNotRestoreAfterStop(t *testing.T) {
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
+	var stopped atomic.Bool
+	r.tools.Stopped = stopped.Load
+	r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	var snap struct{ Snapshot string }
+	r.must("agent", toolCkpt, m{"name": "w"}, &snap)
+	r.must("agent", toolWrite, m{"name": "w", "path": "/after", "content": "kept"}, nil)
+	err := queueBehindCheckpoint(t, r, g, &stopped, toolRollback, m{"name": "w", "snapshot": snap.Snapshot})
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("queued rollback after STOP: %v", err)
+	}
+	stopped.Store(false)
+	var read struct{ Content string }
+	r.must("agent", toolRead, m{"name": "w", "path": "/after"}, &read)
+	if read.Content != "kept" {
+		t.Fatalf("the refused rollback restored the worker: /after is %q", read.Content)
+	}
+	r.must("agent", toolRollback, m{"name": "w", "snapshot": snap.Snapshot}, nil)
+	if err := r.call("agent", toolRead, m{"name": "w", "path": "/after"}, &read); err == nil && read.Content == "kept" {
+		t.Fatal("rollback after RESUME did not restore")
+	}
+}
+
+// A create whose STOP comes after the entry gate boots nothing and keeps no
+// admission or name; after RESUME the same create starts (STOP-queued-start-fu).
+func TestOP6CreateRefusedWhenStopLandsAfterTheEntryGate(t *testing.T) {
+	r := newRig(t, 8000)
+	a := r.agent("agent", vm.Public)
+	id := workerID(a.Lineage, "w")
+	asks := 0
+	r.tools.Stopped = func() bool { asks++; return asks > 1 } // the entry gate passes
+	err := r.call("agent", toolCreate, m{"name": "w"}, nil)
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("create refused at the boot: %v", err)
+	}
+	if _, err := r.m.Get(id); err == nil || admitted(r, id) {
+		t.Fatalf("refused create left a worker (get %v, admitted %v)", err, admitted(r, id))
+	}
+	r.tools.Stopped = nil
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	if !admitted(r, id) {
+		t.Fatal("create after RESUME is not admitted")
+	}
+}
+
+// A parked worker's rollback admits it before the restore: refused at the
+// restore, it gives that admission back and stays parked. STOP comes after
+// the entry gate, as when the call waited (STOP-queued-start).
+func TestOP6RefusedRollbackReleasesAdmission(t *testing.T) {
+	r := newRig(t, 8000)
+	a := r.agent("agent", vm.Public)
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	id := workerID(a.Lineage, "w")
+	s, err := r.m.Park(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asks := 0
+	r.tools.Stopped = func() bool { asks++; return asks > 1 } // the entry gate passes
+	err = r.call("agent", toolRollback, m{"name": "w", "snapshot": s.ID}, nil)
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("rollback refused at the restore: %v", err)
+	}
+	if w, _ := r.m.Get(id); w.State == vm.Running || admitted(r, id) {
+		t.Fatalf("refused rollback: state %v, admitted %v", w.State, admitted(r, id))
+	}
+	r.tools.Stopped = nil
+	r.must("agent", toolRollback, m{"name": "w", "snapshot": s.ID}, nil)
+	if w, _ := r.m.Get(id); w.State != vm.Running || !admitted(r, id) {
+		t.Fatalf("rollback after RESUME: state %v, admitted %v", w.State, admitted(r, id))
 	}
 }

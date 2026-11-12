@@ -187,9 +187,9 @@ func recent(sets []listedSet) map[string][]aging {
 	return out
 }
 
-// carried is one shared segment's set (HostSet, LeaseSet, LeasedSet,
-// HeldSet, ClaimSet, MACSet) with its elements as add element reads them,
-// each with the time it has left.
+// carried is one shared segment's set (HostSet, LeaseSet, LeaseAddrSet,
+// LeasedSet, HeldSet, ClaimSet, MACSet) with its elements as add element
+// reads them, each with the time it has left.
 type carried struct {
 	set   string
 	elems []string
@@ -239,8 +239,10 @@ func records(sets []listedSet, l Layout) []carried {
 				return []string{fmt.Sprintf("%d . %s . %s . %s", id, orig, src, hw)}, ok1 && ok2 && ok3
 			}, HostTimeout, HostTCPTimeout}
 		}
-		leases := []string{LeaseSet(sg.name), LeasedSet(sg.name)}
-		by[LeaseSet(sg.name)] = carry{leases[:1], func(raw json.RawMessage) ([]string, bool) {
+		// LeaseAddrSet is not read: each load writes it again from the
+		// leases it carries, so it holds exactly their addresses.
+		leases := []string{LeaseSet(sg.name), LeaseAddrSet(sg.name), LeasedSet(sg.name)}
+		by[LeaseSet(sg.name)] = carry{leases[:2], func(raw json.RawMessage) ([]string, bool) {
 			c, ok := concat(raw, 2)
 			if !ok {
 				return nil, false
@@ -250,9 +252,9 @@ func records(sets []listedSet, l Layout) []carried {
 			if json.Unmarshal(c[0], &a) != nil || a == 0 || json.Unmarshal(c[1], &hw) != nil || hw>>48 != 0 {
 				return nil, false
 			}
-			return []string{leaseElem(a, hw)}, true
+			return []string{leaseElem(a, hw), addrElem(a)}, true
 		}, LeaseTimeout, LeaseTimeout}
-		by[LeasedSet(sg.name)] = carry{leases[1:], rawHW, LeaseTimeout, LeaseTimeout}
+		by[LeasedSet(sg.name)] = carry{leases[2:], rawHW, LeaseTimeout, LeaseTimeout}
 		// The IPv4 claims of a running table from before the leases.
 		by["claim_"+sg.name+"_4"] = carry{leases, func(raw json.RawMessage) ([]string, bool) {
 			c, ok := concat(raw, 2)
@@ -268,8 +270,8 @@ func records(sets []listedSet, l Layout) []carried {
 			if err1 != nil || err2 != nil || !ip.Is4() || ip.IsUnspecified() || len(mac) != 6 {
 				return nil, false
 			}
-			v, h := lease(ip, mac)
-			return []string{v, h}, true
+			v, x, h := lease(ip, mac)
+			return []string{v, x, h}, true
 		}, LeaseTimeout, ClaimTimeout}
 		by[HeldSet(sg.name)] = carry{[]string{HeldSet(sg.name)}, func(raw json.RawMessage) ([]string, bool) {
 			a, ok := addrOf(raw, true)
@@ -387,14 +389,15 @@ type Lease struct {
 }
 
 // Seed is the text that puts leases in their segments' lease sets
-// (LeaseSet, LeasedSet), each for the time it has left, so a load that
-// follows it in the same transaction (after Compile's or Reload's text)
-// passes every leased host at once, rather than only after its next
-// renewal, up to half a lease later. A lease on no shared segment's
-// interface, of no IPv4 address (or 0.0.0.0) or Ethernet hardware address, with
-// no time left or with more than LeaseTimeout, is left out: its host waits
-// for its next renewal (fails closed). Like records, the text goes only to
-// nft's input (NET-1, NET-3). Empty for no leases.
+// (LeaseSet, LeaseAddrSet, LeasedSet), each for the time it has left, so
+// a load that follows it in the same transaction (after Compile's or
+// Reload's text) passes every leased host at once, rather than only after
+// its next renewal, up to half a lease later. A lease on no shared
+// segment's interface, of no IPv4 address (or 0.0.0.0) or Ethernet
+// hardware address, with no time left or with more than LeaseTimeout, is
+// left out: its host waits for its next renewal (fails closed). Like
+// records, the text goes only to nft's input (NET-1, NET-3). Empty for
+// no leases.
 func Seed(l Layout, leases []Lease) string {
 	w := elems{}
 	for _, sg := range segments(l) {
@@ -402,8 +405,9 @@ func Seed(l Layout, leases []Lease) string {
 			if ls.Iface != sg.iface || !ls.Addr.Is4() || ls.Addr.IsUnspecified() || len(ls.HW) != 6 || ls.Left <= 0 || ls.Left > LeaseTimeout {
 				continue
 			}
-			v, h := lease(ls.Addr, ls.HW)
+			v, x, h := lease(ls.Addr, ls.HW)
 			w.add(LeaseSet(sg.name), v, ls.Left, LeaseTimeout)
+			w.add(LeaseAddrSet(sg.name), x, ls.Left, LeaseTimeout)
 			w.add(LeasedSet(sg.name), h, ls.Left, LeaseTimeout)
 		}
 	}
@@ -414,12 +418,12 @@ func Seed(l Layout, leases []Lease) string {
 	return b.String()
 }
 
-// lease is a LeaseSet element and a LeasedSet element, as nft reads the
-// sets' raw fields.
-func lease(a netip.Addr, hw net.HardwareAddr) (string, string) {
+// lease is a LeaseSet, a LeaseAddrSet and a LeasedSet element, as nft
+// reads the sets' raw fields.
+func lease(a netip.Addr, hw net.HardwareAddr) (string, string, string) {
 	b := a.As4()
-	h := hwInt(hw)
-	return leaseElem(uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3]), h), hwElem(h)
+	v, h := uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3]), hwInt(hw)
+	return leaseElem(v, h), addrElem(v), hwElem(h)
 }
 
 // hwInt is hardware address hw as nft reads hwField.
@@ -433,6 +437,7 @@ func hwInt(hw net.HardwareAddr) uint64 {
 
 func leaseElem(a uint32, hw uint64) string { return fmt.Sprintf("0x%08x . %s", a, hwElem(hw)) }
 func hwElem(hw uint64) string              { return fmt.Sprintf("0x%012x", hw) }
+func addrElem(a uint32) string             { return fmt.Sprintf("0x%08x", a) }
 
 // addrOf is a listed address of the family v6 picks, as nft reads it.
 func addrOf(raw json.RawMessage, v6 bool) (string, bool) {
@@ -502,6 +507,38 @@ func listed(listing []byte) ([]listedSet, error) {
 		}
 	}
 	return out, nil
+}
+
+// Held reads LeaseHeld in a JSON listing of the running table: table is
+// the table's handle, which the kernel gives each new table, so each load
+// (which starts the counter at 0) has its own, and held is how many of the
+// address server's answers the snoop has held since. A table with no such
+// counter (one loaded before it existed) holds none.
+func Held(listing []byte) (table, held uint64, err error) {
+	var doc struct {
+		Nftables []struct {
+			Table *struct {
+				Family, Name string
+				Handle       uint64
+			} `json:"table"`
+			Counter *struct {
+				Family, Table, Name string
+				Packets             uint64
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(listing, &doc); err != nil {
+		return 0, 0, fmt.Errorf("nft: running table listing: %v", err)
+	}
+	for _, o := range doc.Nftables {
+		switch t, c := o.Table, o.Counter; {
+		case t != nil && t.Family == "inet" && t.Name == Table:
+			table = t.Handle
+		case c != nil && c.Family == "inet" && c.Table == Table && c.Name == LeaseHeld:
+			held = c.Packets
+		}
+	}
+	return table, held, nil
 }
 
 // elements is each listed set with its plain address elements. An element

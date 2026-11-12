@@ -25,14 +25,16 @@
 <button class="act" data-action="lift-edge" data-target="" data-rp="{{$.Name}}">Lift the edge's cut with your passkey</button>
 </div>
 {{end}}
-{{with .Caps}}<h2>Byte caps</h2>
+{{if or .CapsUnread .Caps}}<h2>Byte caps</h2>
 <div class="pending warn">
-<p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
+{{if and .CapsUnread .Caps}}<p>The enforcer could not read the firewall's count of today's bytes, nor its own record of them, so agentOS and the edge are blocked from every service with a byte cap. It tries again for the firewall's count every 10 seconds and that part goes away by itself; the record needs the step below. If the count stays unread, the enforcer's log has the detail.</p>
+{{else if .CapsUnread}}<p>The enforcer could not read the firewall's count of today's bytes, so agentOS and the edge are blocked from every service with a byte cap until it can. It tries again every 10 seconds and this goes away by itself. If it stays, the enforcer's log has the detail.</p>
+{{end}}{{with .Caps}}<p>{{if not $.CapsUnread}}The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. {{end}}Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
 {{if .Retrying}}<p>The wait is over, but the fresh day could not be saved. The enforcer tries again every second, and every cap stays spent until it is saved.</p>
 {{else if .Starting}}<p>The wait is over and the fresh day is saved. The enforcer restarts to take it up.</p>
 {{else if not .DueMS}}<button class="act" data-action="fresh-day" data-target="" data-rp="{{$.Name}}">Start the day afresh with your passkey</button>{{end}}
 {{if .Unsaved}}<p>Your last step here is in force, but the disk has not confirmed it yet. The enforcer keeps saving it. If the enforcer restarts before then, check this page again.</p>{{end}}
-</div>
+{{end}}</div>
 {{end}}
 {{with .Resolver}}<h2>Names and addresses</h2>
 <div class="pending warn">
@@ -45,10 +47,11 @@
 {{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
 {{end}}</div>
 {{end}}
-{{if .Unseeded}}<h2>Addresses handed out</h2>
+{{if or .Unseeded .Held}}<h2>Addresses handed out</h2>
 <div class="pending warn">
-<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
-</div>
+{{if .Unseeded}}<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
+{{end}}{{if .Held}}<p>In the last 12 hours, a device on the Owner, Household or Guests network was offered an address another device had until recently and may still use, so the enforcer held that offer back. Such a device cannot join until the address is free, within 12 hours. To join it sooner, turn its private (random) Wi-Fi address off, or on, for that network and join again: it then usually gets another address.</p>
+{{end}}</div>
 {{end}}
 {{with .Restarting}}<h2>Names and addresses</h2>
 <div class="pending warn">

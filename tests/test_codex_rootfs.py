@@ -33,9 +33,21 @@ INSTALLED = {
 }
 
 
-def build(out, tarball):
+def build(out, tarball, path=None):
     env = dict(os.environ, CODEX_TARBALL=tarball) if tarball else dict(os.environ)
+    if path:
+        env["PATH"] = path
     return subprocess.run(["sh", str(SCRIPT), str(out)], env=env, capture_output=True, text=True)
+
+
+def failing_host_tools(d):
+    """A PATH whose tar, xz and patch log their call to d/ran and fail (#5582)."""
+    bin_ = pathlib.Path(d) / "shims"
+    bin_.mkdir()
+    for t in ("tar", "xz", "patch"):
+        (bin_ / t).write_text(f'#!/bin/sh\necho "host {t} $*" >>"{d}/ran"\nexit 97\n')
+        (bin_ / t).chmod(0o755)
+    return f"{bin_}:{os.environ['PATH']}"
 
 
 class RootfsScriptTest(unittest.TestCase):
@@ -75,8 +87,9 @@ class RootfsScriptTest(unittest.TestCase):
         # idle command and the CLI runs beside it by exec (#1721): the image must ship it.
         idle = json.loads((CODEX / "launch.json").read_text())["idle"]
         self.assertEqual(idle, ["/bin/sleep", "infinity"])
-        loop = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("for b in /bin/sh "))
-        self.assertIn(idle[0], loop.removesuffix("; do").split()[3:])
+        # The guest-userland.sh call's path line (#5570): every word on it is a guest path.
+        tools = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("\t/bin/sh "))
+        self.assertIn(idle[0], tools.removesuffix(" \\").split())
 
     # REQ: CRED-5, A14
     def test_wrong_tarball_is_refused_before_anything_is_installed(self):
@@ -109,7 +122,10 @@ class RootfsBuildTest(unittest.TestCase):
         cls.tmp = pathlib.Path(tempfile.mkdtemp(prefix="agentos-codex-rootfs-"))
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.out = cls.tmp / "rootfs"
-        r = build(cls.out, tarball)
+        # The host's tar, xz and patch fail if run: the base's unpack and patch (#5582).
+        r = build(cls.out, tarball, failing_host_tools(cls.tmp))
+        if (cls.tmp / "ran").exists():
+            raise AssertionError("build-rootfs.sh ran a host tool:\n" + (cls.tmp / "ran").read_text())
         if r.returncode != 0:
             raise AssertionError("build-rootfs.sh failed:\n" + r.stderr[-2000:])
 
@@ -148,6 +164,38 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertTrue(os.access(self.out / "usr/bin/bwrap", os.X_OK))
         self.assertFalse((self.out / VENDOR / "codex-resources/voice").exists())
         self.assertTrue((self.out / "bin/bash").is_file())
+
+    # REQ: UPD-1a
+    def test_bwrap_is_compiled_by_the_base_s_toolchain(self):
+        # #5571: a runner image update moved the host's gcc and libcap-dev between builds a and b,
+        # so the static bwrap must come from GUEST_BASE's own gcc, libc and libcap. Each object
+        # compiled into it records its compiler in .comment: all of them must be Debian's, and the
+        # base's gcc must be among them (an Ubuntu runner's compiler says "Ubuntu").
+        base = pathlib.Path(os.environ["GUEST_BASE"])
+        major = re.fullmatch(r"(?:x86_64-linux-gnu-)?gcc-(\d+)", os.readlink(base / "usr/bin/gcc")).group(1)
+        ver = subprocess.run(["dpkg-query", f"--admindir={base}/var/lib/dpkg", "-W", "-f", "${Version}", f"gcc-{major}"],
+                             capture_output=True, text=True, check=True).stdout
+        bwrap = (self.out / "usr/bin/bwrap").read_bytes()
+        self.assertEqual((self.out / VENDOR / "codex-resources/bwrap").read_bytes(), bwrap)
+        compilers = set(re.findall(rb"GCC: \(([^)\n]*)\)", bwrap))
+        self.assertIn(f"Debian {ver}".encode(), compilers)
+        self.assertEqual({c for c in compilers if not c.startswith(b"Debian ")}, set())
+        # The build leaves nothing in the base the next guest build reads.
+        self.assertFalse((base / "tmp/agentos-codex-build").exists())
+        # #5572: the packages whose archives the linker read into bwrap are recorded as shipped,
+        # with those of every file the guest copies, so the image vulnerability check scans them.
+        record = os.environ.get("GUEST_SHIPPED")
+        self.assertTrue(record, "set GUEST_SHIPPED, the file the build records shipped packages in")
+        shipped = set(pathlib.Path(record).read_text().split())
+        self.assertLessEqual({"libc6-dev", "libcap-dev", "libc6", "dash", "bash"}, shipped)
+
+    # REQ: UPD-1a
+    def test_no_host_tar_xz_or_patch_runs(self):
+        # #5582: setUpClass built with a tar, xz and patch on PATH that log any call and fail, so
+        # both tarballs were unpacked, and bwrap patched, by the base's own tools.
+        self.assertFalse((self.tmp / "ran").exists())
+        self.assertTrue((self.out / "usr/bin/bwrap").is_file())
+        self.assertTrue((self.out / VENDOR / "bin/codex").is_file())
 
     # REQ: CAP-11, A14
     def test_idle_command_runs_in_the_built_tree(self):

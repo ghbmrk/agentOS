@@ -707,6 +707,9 @@ class ReproduceJobTest(unittest.TestCase):
         (rec / "initrd/agentos/initrd").write_bytes(initrd)
         (rec / "SHA256SUMS").write_text("x\n")
         (rec / "agentos_1.manifest").write_text(json.dumps({"packages": [{"name": "systemd", "version": "257"}]}))
+        # The guests' Debian package list (image/guest-base.sh, #5570).
+        (rec / "guest").mkdir()
+        (rec / "guest/agentos-guest.manifest").write_text(json.dumps({"packages": [{"name": "libpcre2-8-0", "version": "10.45-1"}]}))
         (rec / "agentos_1.usr.list").write_text(usr if usr is not None else self.usr)
         rel = {"usrhash": usrhash, "boot_entry": {"sha256": "cd" * 32},
                "boot": {"agentos/vmlinuz": "ef" * 32, "agentos/initrd": hashlib.sha256(initrd).hexdigest()}}
@@ -726,6 +729,22 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertIn('same "agentos/initrd"', r.stdout)
         self.assertIn('same "agentos/vmlinuz"', r.stdout)
         self.assertIn("every output identical", r.stdout)
+
+    def test_missing_or_differing_guest_packages(self):
+        # #5570: a build without its guest package list fails; a differing list names the package.
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        lst = self.d / "rec/release-b/guest/agentos-guest.manifest"
+        lst.write_text(lst.read_text().replace("10.45-1", "10.45-2"))
+        r = self.run_step()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("libpcre2-8-0", r.stdout)
+        self.assertIn("10.45-2", r.stdout)
+        lst.unlink()
+        (self.d / "image").unlink()
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("MISMATCH package manifest", r.stdout)
 
     def test_differing_initrd_fails_and_names_the_member(self):
         self.side("release-a", self.initrd)

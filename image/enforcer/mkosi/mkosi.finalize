@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening): a Wi-Fi
-package, a missing module block or a blocked module installed. Refuse one that
-enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
-dump to a file (#4459), or that leaves the kernel's reverse-path filter (#4810) or ICMP redirects
-(#5164) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
-build log. The running box checks the same
-(agentos-enforcer/health); this catches it before an image exists."""
+package, a missing module block or a blocked module installed. Refuse one that enables a unit
+outside the enforcer's preset (only the services it needs), or that would write a core dump to a
+file (#4459), or that leaves the kernel's reverse-path filter (#4810), ICMP redirects (#5164) or IPv4
+source routing (#5560) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a
+line of the build log. The running box's agentos-enforcer/health checks the effects: no Wi-Fi radio,
+the Wi-Fi and USB storage modules not loaded, core dumps, rp_filter and ICMP redirects. Only this
+build check sees the installed packages, the modprobe.d lines, a blocked module's installed .ko file,
+the unit preset and source routing (ENF-m-14), and it catches each before an image exists."""
 import fnmatch
 import os
 import pathlib
@@ -33,7 +35,8 @@ RPF = ("net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter", "net/ip
 # that names or globs an interface's accept_redirects in either family (iface_key).
 REDIRECTS = tuple("net/%s/conf/%s/accept_redirects" % (f, i) for f in ("ipv4", "ipv6") for i in ("all", "default", "*"))
 # Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
-# name lower down, and the files are read in name order.
+# name lower down, and the files are read in name order. systemd-sysctl never reads /etc/sysctl.conf
+# itself (the core's mkosi.finalize says the same); the 99-sysctl.conf link to it is refused below.
 SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
 
 
@@ -104,7 +107,8 @@ def sysctls(root):
                 files.setdefault(f.name, f)
     vals = {}
     for name in sorted(files, key=os.fsencode):
-        for raw in re.split(rb"[\n\r\x00]", files[name].read_bytes()):
+        f = files[name]
+        for raw in re.split(rb"[\n\r\x00]", f.read_bytes()):
             ln = raw.strip(b" \t").decode(errors="replace")
             if not ln or ln[0] in "#;":
                 continue
@@ -159,6 +163,12 @@ def violations(root):
     out += ["%s; accept_redirects must be 0" % said(k, vals.get(k))
             for k in sorted(set(REDIRECTS) | {k for k in vals if any(iface_key(k, f, "accept_redirects") for f in ("ipv4", "ipv6"))})
             if vals.get(k) != "0"]
+    # #5560: no key turns IPv4 source routing on. The kernel takes a source-routed packet only when
+    # "all" and the interface's own value are both non-zero (ip_input.c, IN_DEV_ANDCONF); "all" is 0
+    # unless set, and systemd's 50-default.conf sets "default" and "*" to 0. A key left unset keeps
+    # those; one set to anything but 0 is refused. IPv6 is not checked: above 0 it acts as 0.
+    out += ["%s; accept_source_route must be 0" % said(k, v) for k, v in sorted(vals.items())
+            if v is not None and v != "0" and iface_key(k, "ipv4", "accept_source_route")]
     return out
 
 

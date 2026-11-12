@@ -4,8 +4,8 @@
 # image build (P2-1). Everything it downloads is pinned by version and hash.
 #
 # Usage: build-rootfs.sh OUT_DIR    (MODEL=<provider model id> to set the model)
-# Needs: curl, xz, sha256sum, go, and the host's /bin/sh and coreutils, which
-# are copied in with their libraries for OpenClaw's exec tool.
+# Needs: curl, xz, sha256sum, go, and GUEST_BASE, a root from image/guest-base.sh,
+# whose /bin/sh and coreutils are copied in with their libraries for OpenClaw's exec tool.
 set -eu
 NODE_VERSION=v24.22.2
 NODE_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
@@ -45,20 +45,12 @@ PATH="$out/usr/local/bin:$PATH" node "$here/prune.js" "$repo/assurance/vulncheck
 	"$out/opt/openclaw"
 ln -sf /opt/openclaw/node_modules/.bin/openclaw usr/local/bin/openclaw
 
-# The host's shell and a few tools, with every library they and node load.
-copy() {
-	for f in "$@"; do
-		d=$(dirname "$f")
-		mkdir -p ".$d"
-		cp -L "$f" ".$f"
-	done
-}
-for b in /bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep; do
-	[ -e "$b" ] || continue
-	copy "$b"
-	copy $(ldd "$b" | awk '/=>/ {print $3} /^\t\// {print $1}')
-done
-copy $(ldd usr/local/bin/node | awk '/=>/ {print $3} /^\t\// {print $1}')
+# The shell and a few tools, with every library they and node load, from GUEST_BASE, the Debian
+# root image/guest-base.sh installs from the image's pinned apt sources, never from the build host
+# (#5570).
+sh "$here/../../image/guest-userland.sh" "${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}" "$out" \
+	/bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep \
+	/usr/local/bin/node
 
 # The bridge (guest code: it runs as PID 1 and starts OpenClaw).
 (cd "$repo/broker" && CGO_ENABLED=0 go build -trimpath -o "$out/usr/local/bin/agentos-guest-bridge" ./cmd/agentos-guest-bridge)

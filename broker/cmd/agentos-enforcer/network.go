@@ -23,6 +23,7 @@ import (
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
@@ -80,6 +81,9 @@ type network struct {
 	// its table is taken, which the first reading's listing that reads
 	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
 	unread bool
+	// unreadShown is unread as the page reads it, under resMu, so the
+	// page never waits on a load (pageCaps.Day, #5445 item 4).
+	unreadShown bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -103,6 +107,12 @@ type network struct {
 	// lease file could not be read whole (zero: it seeded what the file
 	// holds), shown on home until every host has renewed (#5394).
 	unseeded time.Time
+	// heldAt is when a reading last found the address server's answers
+	// held (nft.LeaseHeld) risen, shown on home for a lease after it
+	// (#5528); heldTable and held are the table and count it read last,
+	// under d.fwMu.
+	heldAt          time.Time
+	heldTable, held uint64
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -254,7 +264,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		_, d.net.edgeMerged = d.net.merging[l.Edge]
 		defer func() {
 			if err != nil {
-				d.net.edgeMerged, d.net.unread = merged, unread
+				d.net.edgeMerged = merged
+				d.setUnread(unread)
 			}
 		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
@@ -263,11 +274,18 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// with it. The load still goes ahead, so a cut or a tightening is
 		// never held back, with every cap held spent until a full load
 		// that read its table is taken (holdDrop). The first load after a
-		// start has none to read: a reboot leaves no table.
-		d.net.unread = err != nil && d.loaded != ""
-		if err != nil {
+		// start has none to read when nft says the table is absent (ENOENT,
+		// load.ErrNoTable): a reboot leaves no table. Any other failure
+		// there is unread, crash restart included (#5491).
+		absent := err != nil && d.loaded == "" && errors.Is(err, load.ErrNoTable)
+		d.setUnread(err != nil && !absent)
+		if err != nil && !absent {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
+		}
+		if err != nil {
 			running = nil
+		} else {
+			d.noteHeld(running) // answers held since the last reading
 		}
 		// A full load starts new counters (a new Gen), so the bytes since
 		// the last reading are read from the table it replaces first, or
@@ -375,11 +393,16 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
+// Home's words for the reasons it does not list say the log names as
+// many as it does (#5431): this fails to compile when the two differ.
+const _ = uint(dns.RefusedShown-page.PolicyShown) + uint(page.PolicyShown-dns.RefusedShown)
+
 // refusedCauses is err, dns.Generate's refusal of a document, as every
 // typed cause it carries, in its order (#5307, #5352, #5405): each device
 // on a Wi-Fi network the setup serves no network for, and each listed
 // name that is not a DNS host name, read from the refusal, never from the
-// document. Any other, a setup fault among them, is untyped, and the page
+// document, and a fault in the enforcer's own setup (dns.BadSetup, #5431),
+// which carries no text to the page. Any other is untyped, and the page
 // says so without the error's text.
 func refusedCauses(err error) []page.PolicyCause {
 	errs := []error{err}
@@ -391,7 +414,10 @@ func refusedCauses(err error) []page.PolicyCause {
 	for i, err := range errs {
 		var dev dns.UnservedDevice
 		var name dns.BadName
+		var setup dns.BadSetup
 		switch {
+		case errors.As(err, &setup):
+			out[i] = page.PolicyCause{Kind: page.PolicySetup}
 		case errors.As(err, &dev):
 			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
 		case errors.As(err, &name):
@@ -639,6 +665,7 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.noteHeld(running)
 	// The table reads again: a full load that reads it ends the caps
 	// held spent since one that could not (holdDrop).
 	d.net.reload = d.net.reload || d.net.unread
@@ -647,6 +674,34 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 		return err
 	}
 	return d.dp.Fire.Update(lctx, text)
+}
+
+// noteHeld reads nft.LeaseHeld in running, the running table; d.fwMu is
+// held. A count risen since the last reading of the same table, or above
+// 0 in a new one (a load starts it at 0), means the server's answer to a
+// host was held since (ENF-shared-src-1): home shows it for a lease. The
+// first reading since the daemon started (heldTable 0: the kernel numbers
+// tables from 1) is only where counting starts, since a table that
+// outlived the last run counted at times this run cannot tell.
+func (d *Enforcer) noteHeld(running []byte) {
+	table, held, err := nft.Held(running)
+	if err != nil {
+		return // the step that read the listing fails on it too, and logs it
+	}
+	n := &d.net
+	switch {
+	case n.heldTable == 0:
+		n.held = held
+	case table != n.heldTable:
+		n.held = 0
+	}
+	n.heldTable = table
+	if held > n.held {
+		n.resMu.Lock()
+		n.heldAt = d.dp.Now()
+		n.resMu.Unlock()
+	}
+	n.held = held
 }
 
 // counted are the ports whose received bytes the byte caps count: the
@@ -1055,6 +1110,14 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, 
 		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
 	return over, kernelCut, nil
+}
+
+// setUnread sets net.unread and what the page reads of it; d.fwMu is held.
+func (d *Enforcer) setUnread(v bool) {
+	d.net.unread = v
+	d.net.resMu.Lock()
+	d.net.unreadShown = v
+	d.net.resMu.Unlock()
 }
 
 // addReading adds the reading in listing, the running table compiled

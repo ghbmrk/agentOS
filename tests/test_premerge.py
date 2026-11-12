@@ -3,6 +3,7 @@
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,8 +25,10 @@ def git(cwd, *args):
 EDITED = lambda kind: ["edited-verdict", kind + ":", *"a verdict edited after posting never counts, post a new comment".split()]
 UNPARSED = lambda kind, pr=7: ["unparsed-record", kind + ":",
     *f'Record line must be "Record: PR #{pr} · package <ID-without-spaces> · head <sha>"'.split()]
-UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha,
-    *"resolves to no single commit here, post a new verdict naming the reviewed head".split()]
+MISPLACED = lambda kind: ["misplaced-marker", kind + ":",
+    *"put each <!-- record: <kind> --> marker directly under the Record line".split()]
+UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha[:7],
+    *"is no single commit here, post a new verdict naming the reviewed head".split()]
 
 
 REPO = "o/agentOS"
@@ -34,6 +37,15 @@ REPO = "o/agentOS"
 def bundle(head=(), base=(), pr=7, repo=REPO, branch="pr"):
     """A --runs document for PR `pr` from `repo`'s `branch` into this repository."""
     return {"repo": REPO, "pr": {"number": pr, "repo": repo, "branch": branch}, "head": list(head), "base": list(base)}
+
+
+def status_of(*lines):
+    """The premerge status each --check output becomes, through premerge.yml's own filter step run as written (#5545)."""
+    step = [x.strip() for x in (ROOT / ".github/workflows/premerge.yml").read_text().splitlines()
+            if x.strip().startswith("out=$(printf '%s' \"${out:-error}\"")]
+    assert len(step) == 1, step
+    return [subprocess.run(["bash", "-c", 'out=$1; ' + step[0] + '; printf %s "$out"', "-", line],
+                           capture_output=True, check=True).stdout.decode() for line in lines]
 
 
 class PremergeTest(unittest.TestCase):
@@ -603,6 +615,70 @@ class PremergeTest(unittest.TestCase):
         bad = run()
         self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["changed", "b.txt"]))
 
+    def test_named_causes_fit_the_status_cut(self):
+        # #5543: premerge.yml cuts the status at 120 characters, so every named cause must fit whole with its longest real
+        # argument: the longest kind join --check prints, a 5-digit PR, a 40-character head. #5545: the status is the text
+        # premerge.yml's own filter step makes, run here as written, so a filter that drops the Record format's middle
+        # dots fails this test instead of telling the poster a Record line that never parses.
+        joined = ",".join(premerge.lenses_owed(["tools/premerge.py"]))
+        self.assertEqual(joined, "ux,potency")  # lenses_owed's longest list; l3 and security are never joined
+        kinds = ("l3", "security", "combined", "ux", "potency")
+        with mock.patch.object(premerge, "_resolves", return_value=False):
+            lines = [premerge._named((state,), kind, 99999) for state in ("edited", "unparsed", "misplaced")
+                     for kind in (*kinds, joined)]
+            lines += [premerge._named(("accept", "f" * 40), kind, 99999) for kind in kinds]
+        self.assertEqual(len(lines), 23)
+        for line, shown in zip(lines, status_of(*lines)):
+            self.assertEqual(shown, line)
+            self.assertLessEqual(len(shown), 120, line)
+            if line.startswith("unparsed-record "):
+                fmt = re.search(r'"(Record: [^"]*)"', shown).group(1)
+                copied = fmt.replace("<ID-without-spaces>", "PREMERGE-x").replace("<sha>", "f" * 40)
+                self.assertTrue(premerge._RECORD.fullmatch(copied), shown)
+                self.assertEqual(premerge.verdict([{"author_association": "OWNER", "created_at": "t", "updated_at": "t",
+                                                    "body": "Verdict: accept\n" + copied + "\n<!-- record: l3 -->"}],
+                                                  99999), ("accept", "f" * 40))
+
+    def test_status_filter_keeps_only_ascii_and_the_middle_dot(self):
+        # #5545: the widened filter still drops control, bidi and other non-ASCII characters, keeps the last line only,
+        # and cuts by characters, so a middle dot at the cut never leaves half a UTF-8 sequence in the status.
+        self.assertEqual(status_of("first\nlast \u202eevil\x1b[0m \u00e9t\u00e9 \u00b7 ok\n"), ["last evil[0m t \u00b7 ok"])
+        self.assertEqual(status_of("\u00b7" * 200), ["\u00b7" * 120])
+        self.assertEqual(status_of(""), ["error"])
+        self.assertEqual(status_of("same"), ["same"])
+
+    def test_long_path_lists_keep_their_leading_cause(self):
+        # #5546 review, #5553: needs-security, changed and mark list every path and are not bounded; the status cuts at
+        # 120 characters on a path boundary (a space or a slash), never inside a name, and keeps the leading cause.
+        paths = [f"tools/some_long_gate_file_{n:03}.py" for n in range(40)]
+        long = "/".join(["directory_name_%d" % n for n in range(12)]) + "/file.py"
+        for cause in ("needs-security", "changed", "mark"):
+            line = cause + " " + " ".join(paths)
+            shown, = status_of(line)
+            self.assertLessEqual(len(shown), 120)
+            self.assertTrue(shown.startswith(cause + " " + paths[0]), shown)
+            self.assertEqual(shown.split(), line.split()[:len(shown.split())])  # whole paths only
+            # a first path longer than the whole status is cut after a slash, not mid-name
+            shown, = status_of(cause + " " + long + " other.py")
+            self.assertLessEqual(len(shown), 120)
+            self.assertTrue(shown.startswith(cause + " directory_name_0/") and shown.endswith("/"), shown)
+            self.assertTrue(long.startswith(shown.split(" ", 1)[1]), shown)
+            # an exact fit and a cut that lands on a boundary lose nothing
+            fit = cause + " " + "a" * (119 - len(cause))
+            self.assertEqual(status_of(fit), [fit])
+            self.assertEqual(status_of(fit + " bbb"), [fit])
+            # PREMERGE-status-cut-pins (#5561): a word-boundary cut leaves no trailing space; a list of many paths whose
+            # 121st character is a space, and one path whose 121st character is a slash, keep all 120 characters.
+            shown, = status_of(line)
+            self.assertEqual(shown, shown.rstrip())
+            first = "p/" + "a" * ((120 - len(cause) - 1 - 2) % 11)
+            line = cause + " " + " ".join([first] + [f"dir/f{n:02}.py" for n in range(20)])
+            self.assertEqual((line[120], line[:120].count(" ") > 2), (" ", True))
+            self.assertEqual(status_of(line), [line[:120]])
+            line = cause + " top/" + "d" * (120 - len(cause) - 5) + "/file.py"
+            self.assertEqual(line[120], "/")
+            self.assertEqual(status_of(line), [line[:120]])
+
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
                   "tools/risk_tier.py", "tools/premerge.py", "tools/ci_scope.py", "tools/ci_scope_x.py",
@@ -1052,13 +1128,26 @@ class PremergeTest(unittest.TestCase):
         onto, sha = self.held_repo()
         wf = lambda id, c, **k: self.wf(id, "vulncheck", c, sha, **k)
         held = lambda *runs, **k: premerge.checks_held(self.r, bundle(runs, **k), "HEAD", "main")
-        foreign = ({"repo": "outsider/agentOS", "prs": ()}, {"branch": "other"}, {"prs": ((8, "main"),)},
-                   {"prs": ((7, "pkg/old"),)}, {"prs": ((7, "main"), (8, "pkg/old"))}, {"prs": ()})
-        for k in foreign:
-            # a newer foreign run neither holds this PR's pass nor clears its cancel
+        foreign = ({"repo": "outsider/agentOS", "prs": ()}, {"branch": "other"})
+        # #5392: a run on this PR's own branch whose list is empty or names another PR or base is unbound, not missing
+        unbound = ({"prs": ((8, "main"),)}, {"prs": ((7, "pkg/old"),)}, {"prs": ((7, "main"), (8, "pkg/old"))},
+                   {"prs": ((7, "main"), (8, "main"))}, {"prs": ()})
+        for k in foreign + unbound:
+            # a newer foreign or unbound run neither holds this PR's pass nor clears its cancel
             self.assertEqual(held(wf(1, "success"), wf(2, "action_required", **k)), [], k)
             self.assertEqual(held(wf(1, "cancelled"), wf(2, "success", **k)), ["vulncheck:cancelled"], k)
-            self.assertEqual(held(wf(2, "success", **k)), ["vulncheck:missing"], k)
+            self.assertEqual(held(wf(2, "success", **k)), ["vulncheck:unbound" if k in unbound else "vulncheck:missing"], k)
+        # an unbound run beside a foreign one still names the hold unbound; an unowed workflow is not held for one
+        self.assertEqual(held(wf(2, "success", prs=()), wf(3, "success", branch="other")), ["vulncheck:unbound"])
+        self.assertEqual(held(wf(1, "success"), self.wf(2, "formal", "success", sha, prs=())), [])
+        # a list naming this PR twice is one PR (dedupe by number and base)
+        self.assertEqual(held(wf(1, "success", prs=((7, "main"), (7, "main")))), [])
+        self.assertEqual(held(wf(1, "cancelled", prs=((7, "main"), (7, "main")))), ["vulncheck:cancelled"])
+        # a malformed list is unbound, never a crash and never a pass
+        for prs in (None, "7", [7], [{"number": "7", "base": {"ref": "main"}}], [{"number": 7}],
+                    [{"number": 7, "base": "main"}], [{"number": [7], "base": {"ref": "main"}}],
+                    [{"number": 7, "base": {"ref": ["main"]}}]):
+            self.assertEqual(held({**wf(1, "success"), "pull_requests": prs}), ["vulncheck:unbound"], prs)
         missing = {**wf(1, "success"), "head_repository": None}
         self.assertEqual(held(missing), ["vulncheck:missing"])
         # a fork PR's runs name no PR: its head repository and branch bind them
@@ -1473,13 +1562,29 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.lens_run([l3, lens, sec, spread("fix-list", "<!-- record: security -->", "3")]), need)
         lensy = {**sec, "body": f"Verdict: accept\n\nprose\n\n{rec}\n<!-- record: security -->\n\nNext: arm\n"}
         self.assertEqual(self.lens_run([l3, lens, lensy]), (0, ["same"]))
-        # an accept with no marker in its record block has a misplaced one: it reads as unparsed and supersedes
-        UN = UNPARSED("security")
+        # an accept with no marker in its record block has a misplaced one: it is named so (#5541) and supersedes
+        UN, MIS = UNPARSED("security"), MISPLACED("security")
         late = lambda v: self.rec(v, sha, "\nprose\n\n<!-- record: security -->\n", at="3")
-        self.assertEqual(self.lens_run([l3, lens, late("accept")]), (1, UN))
-        self.assertEqual(self.lens_run([l3, lens, sec, late("accept")]), (1, UN))
+        self.assertEqual(self.lens_run([l3, lens, late("accept")]), (1, MIS))
+        self.assertEqual(self.lens_run([l3, lens, sec, late("accept")]), (1, MIS))
         self.assertEqual(self.lens_run([self.rec("accept", sha, "prose\n<!-- record: combined -->\n", at="0")]),
-                         (1, UNPARSED("l3")))
+                         (1, MISPLACED("l3")))
+        # #5539's shape: the marker directly above a good Record line is still misplaced, and never accepts
+        above = lambda mark, at: {**sec, "created_at": at, "updated_at": at, "body": f"Verdict: accept\n{mark}\n{rec}\n"}
+        self.assertEqual(self.lens_run([l3, lens, above("<!-- record: security -->", "3")]), (1, MIS))
+        self.assertEqual(self.lens_run([l3, lens, sec, above("<!-- record: security -->", "3")]), (1, MIS))
+        self.assertEqual(premerge.verdict([sec, above("<!-- record: security -->", "3")], 7, security=True),
+                         ("misplaced", None))
+        self.assertEqual(self.lens_run([l3, above("<!-- record: ux -->\n<!-- record: potency -->", "3"), sec]),
+                         (1, MISPLACED("ux,potency")))
+        self.assertEqual(self.lens_run([above("<!-- record: combined -->", "0"), lens, sec]), (1, MISPLACED("l3")))
+        # a misplaced marker over a Record line for another PR, or a malformed one, still names the Record line
+        self.assertEqual(self.lens_run([l3, lens, {**above("<!-- record: security -->", "3"),
+                                                   "body": f"Verdict: accept\n<!-- record: security -->\n{rec.replace('#7', '#8')}\n"}]),
+                         (1, UN))
+        self.assertEqual(self.lens_run([l3, lens, {**above("<!-- record: security -->", "3"),
+                                                   "body": f"Verdict: accept\n<!-- record: security -->\n{rec.replace('X-1', 'X 1')}\n"}]),
+                         (1, UN))
         other = f"```\nRecord: PR #8 · package X-1 · head {sha[:7]}\n```\n"
         norec = {**sec, "body": "Verdict: accept\n<!-- record: security -->\n\n" + other}
         self.assertEqual(self.lens_run([l3, lens, norec]), (1, UN))

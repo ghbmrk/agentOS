@@ -44,7 +44,8 @@ func TestImageBuildsDecoderAlone(t *testing.T) {
 	}
 	const line = "go build -tags libavcodec,netgo,osusergo -trimpath"
 	if strings.Count(src, "-tags") != 1 || strings.Count(src, "go build") != 1 || !strings.Contains(src, line) ||
-		!strings.Contains(src, "-o \"$ROOT/agentos-camdecode\" ./cmd/agentos-camdecode)") {
+		!strings.Contains(src, "-o \"$lib/agentos-camdecode\" ./cmd/agentos-camdecode)") ||
+		!strings.Contains(src, "install -m 0755 \"$base$lib/agentos-camdecode\" \"$ROOT/agentos-camdecode\"\n") {
 		t.Fatal("image/camdecode.sh no longer builds agentos-camdecode alone with the line this test pins")
 	}
 	bs, err := os.ReadFile("../../../image/build.sh")

@@ -10,6 +10,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -97,7 +98,7 @@ PREMERGE_LINES = [
     'name: premerge',
     'on:',
     '  pull_request_target:',
-    '    types: [opened, synchronize, reopened, edited]',
+    '    types: [opened, synchronize, reopened, edited, closed]',
     '  issue_comment:',
     '    types: [created, edited, deleted]',
     '  workflow_run:',
@@ -117,7 +118,7 @@ PREMERGE_LINES = [
     'jobs:',
     '  premerge-gate:',
     '    name: premerge-gate',
-    "    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
+    "    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'",
     '    runs-on: ubuntu-24.04',
     '    timeout-minutes: 5',
     '    environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY',
@@ -125,6 +126,7 @@ PREMERGE_LINES = [
     '      merge-head: ${{ steps.gate.outputs.merge-head }}',
     '      merge-repo: ${{ steps.gate.outputs.merge-repo }}',
     '      merge-ref: ${{ steps.gate.outputs.merge-ref }}',
+    '      rerun: ${{ steps.gate.outputs.rerun }}',
     '    permissions:',
     '      contents: read',
     '      issues: read',
@@ -157,15 +159,29 @@ PREMERGE_LINES = [
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
-    '          posted=no',
+    '          posted=no skipped=no fork=no',
+    '          ours() {',
+    '            n=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \\',
+    '              --jq ".[] | select(.head.sha == \\"$HEAD_SHA\\" and .head.repo.full_name == \\"$REPO\\" and .number != $PR_NUMBER) | .number") || return 1',
+    '            grep -Eqx \'[1-9][0-9]{0,9}\' <<< "$n"',
+    '          }',
     '          post() {',
+    '            if [ "$fork" = yes ] && ours; then',
+    '              echo "::notice::#$PR_NUMBER is a fork PR on the head of an open PR from $REPO; that PR\'s gate posts premerge"',
+    '              posted=yes skipped=yes; return',
+    '            fi',
     '            GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \\',
     '              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
     '            posted=yes',
+    '            if [ "$fork" = yes ] && ours; then',
+    '              echo "::notice::#$PR_NUMBER posted on the head of open PR(s)" $n "from $REPO; handoff reruns their gate"',
+    '              printf \'rerun=%s\\n\' "$(tr \'\\n\' \' \' <<< "$n")" >> "$GITHUB_OUTPUT"; skipped=yes',
+    '            fi',
     '          }',
     '          trap \'[ "$posted" = yes ] || post failure error\' EXIT',
     '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
     '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
+    '          [ "$HEAD_REPO" = "$REPO" ] || fork=yes',
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
     '          state=failure',
     '          out=$(',
@@ -193,10 +209,11 @@ PREMERGE_LINES = [
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \\',
     '              --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
-    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
+    '          verdict=$out',
+    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | python3 -I -c \'import sys;s="".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\\u00b7");t=s[:120];i=t.rfind("/") if t.count(" ") < 2 else t.rfind(" ");sys.stdout.buffer.write((t if len(s) <= 120 or s[120] in " /" or i < 0 else t[:i+1].rstrip()).encode())\')',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
-    '          if [ "$state" = success ] && [ "$out" = same ] && \\',
+    '          if [ "$state" = success ] && [ "$verdict" = same ] && [ "$skipped" = no ] && \\',
     '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
     '            printf \'merge-head=%s\\nmerge-repo=%s\\nmerge-ref=%s\\n\' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"',
     '          fi',
@@ -290,6 +307,51 @@ PREMERGE_LINES = [
     '          [[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]]',
     '          gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null',
     '          echo "reran the gate for #$pr"',
+    # PREMERGE-status-bind-fu (#5515): `handoff`, the second job holding `actions: write`.
+    '  handoff:',
+    '    name: handoff',
+    '    needs: premerge-gate',
+    "    if: ${{ !cancelled() && (needs.premerge-gate.outputs.rerun != '' || (github.event_name == 'pull_request_target' && (github.event.action == 'closed' || github.event.action == 'synchronize' || github.event.changes.base.ref.from))) }}",
+    '    runs-on: ubuntu-24.04',
+    '    timeout-minutes: 5',
+    '    permissions:',
+    '      pull-requests: read',
+    '      actions: write # dispatch premerge.yml on main for the other open PRs on a shared head, nothing else',
+    '    steps:',
+    '      - name: Rerun the gate for the other open PRs on a head this PR left or shares',
+    '        shell: bash # -eo pipefail: a failed read must stop the step, never read as no PR',
+    '        env:',
+    '          GH_TOKEN: ${{ github.token }}',
+    '          REPO: ${{ github.repository }}',
+    '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}',
+    '          RERUN: ${{ needs.premerge-gate.outputs.rerun }}',
+    '          EVENT: ${{ github.event_name }}',
+    '          ACTION: ${{ github.event.action }}',
+    '          BEFORE: ${{ github.event.before }}',
+    '          HEAD_SHA: ${{ github.event.pull_request.head.sha }}',
+    '          RETARGETED: ${{ github.event.changes.base.ref.from }}',
+    '        run: |',
+    '          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }',
+    '          left=none',
+    '          if [ "$EVENT" = pull_request_target ]; then',
+    '            case "$ACTION" in',
+    '              synchronize) left=$BEFORE ;;',
+    '              closed) left=$HEAD_SHA ;;',
+    '              edited) [ -z "$RETARGETED" ] || left=$HEAD_SHA ;;',
+    '            esac',
+    '          fi',
+    '          prs=$(tr \' \' \'\\n\' <<< "$RERUN")',
+    '          if [ "$left" != none ]; then',
+    '            [[ "$left" =~ ^[0-9a-f]{40}$ ]] || { echo "not a sha: $left"; exit 1; }',
+    '            listed=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \\',
+    '              --jq ".[] | select(.head.sha == \\"$left\\" and .number != $PR_NUMBER) | .number")',
+    "            prs+=$'\\n'$listed",
+    '          fi',
+    '          if grep -Evx \'([1-9][0-9]{0,9})?\' <<< "$prs"; then echo "not a PR number on the lines above"; exit 1; fi',
+    '          for pr in $(sort -nu <<< "$prs"); do',
+    '            gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null',
+    '            echo "reran the gate for #$pr"',
+    '          done',
 ]
 
 
@@ -1422,7 +1484,7 @@ class WorkflowTest(unittest.TestCase):
                      # ARM-on-accept (#3103): only a `same` from --check merges (not `bot`), only an open,
                      # non-draft, unarmed PR, only with every check green, pinned to the gate's head,
                      # with the main-only bot token.
-                     ('[ "$out" = same ]', '[ "$out" != error ]'),
+                     ('[ "$verdict" = same ]', '[ "$out" != error ]'),
                      ('.draft == false and .auto_merge == null', '.auto_merge == null'),
                      ('IN("success", "skipped", "neutral")', 'IN("success", "skipped", "neutral", "failure")'),
                      ('select(.status != "completed" or ', 'select('),
@@ -1442,6 +1504,15 @@ class WorkflowTest(unittest.TestCase):
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
+                     # PREMERGE-status-bind (#5442): only a fork PR, only beside an open repository PR into main on its
+                     # head, holds its post back, and then hands the merge job nothing.
+                     ('[ "$HEAD_REPO" = "$REPO" ] || fork=yes', '[ "$HEAD_REF" = "$REPO" ] || fork=yes'),
+                     ('if [ "$fork" = yes ] && ours; then', 'if ours; then'),
+                     ('.head.repo.full_name == \\"$REPO\\" and ', ''),
+                     ('select(.head.sha == \\"$HEAD_SHA\\" and ', 'select('),
+                     ("state=open&base=main&per_page=100", "state=open&per_page=100"),
+                     (') | .number") || return 1', ') | .number")'),
+                     ('[ "$verdict" = same ] && [ "$skipped" = no ] && ', '[ "$verdict" = same ] && '),
                      # PREMERGE-fork-rerun (#5383): the dispatched run joins the PR's group, reads only a number, and
                      # only the job that dispatches holds `actions: write`, for runs that name no PR.
                      ("|| inputs.pr || github.run_id }}", "|| github.run_id }}"),
@@ -1453,6 +1524,22 @@ class WorkflowTest(unittest.TestCase):
                      ('!= 1 ]; then', '-lt 1 ]; then'),
                      ('-f ref=main -f "inputs[pr]=$pr"', '-f ref="$HEAD_BRANCH" -f "inputs[pr]=$pr"'),
                      ("GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}", "GH_TOKEN: ${{ secrets.BOT_PR_TOKEN || github.token }}"),
+                     # PREMERGE-status-bind-fu (#5515): a close reaches `handoff` but never the gate; a fork's post reads the
+                     # list again and hands its finds to `handoff` and nothing to the merge job; only `handoff` may dispatch
+                     # besides fork-pr, on main, for the PRs on the head this PR left.
+                     ("    types: [opened, synchronize, reopened, edited, closed]", "    types: [opened, synchronize, reopened, edited]"),
+                     ("(github.event_name == 'pull_request_target' && github.event.action != 'closed')", "github.event_name == 'pull_request_target'"),
+                     ("      rerun: ${{ steps.gate.outputs.rerun }}\n", ""),
+                     ('"$GITHUB_OUTPUT"; skipped=yes', '"$GITHUB_OUTPUT"'),
+                     ("${{ !cancelled() && (", "${{ ("),
+                     ("      actions: write # dispatch premerge.yml on main for the other",
+                      "      contents: write\n      actions: write # dispatch premerge.yml on main for the other"),
+                     ("synchronize) left=$BEFORE ;;", "synchronize) left=$HEAD_SHA ;;"),
+                     ('[ -z "$RETARGETED" ] || left=$HEAD_SHA', "left=$HEAD_SHA"),
+                     ('select(.head.sha == \\"$left\\" and .number != $PR_NUMBER)', 'select(.number != $PR_NUMBER)'),
+                     ("grep -Evx '([1-9][0-9]{0,9})?'", "grep -Evx '.*'"),
+                     ('-f ref=main -f "inputs[pr]=$pr" > /dev/null\n            echo "reran the gate for #$pr"\n          done',
+                      '-f ref="$HEAD_SHA" -f "inputs[pr]=$pr" > /dev/null\n            echo "reran the gate for #$pr"\n          done'),
                      ):
             with self.subTest(edit[0]):
                 self.assertIn(edit[0], text)
@@ -1500,9 +1587,13 @@ case "$*" in
   "api repos/o/r/actions/runs/41") [ "$FAIL_AT" = run ] && exit 1; echo '{"id":41}' ;;
   "api repos/o/r/actions/artifacts/"*"/zip") [ "$FAIL_AT" = zip ] && exit 1; echo "$*" >> "$STUBS/zips" ;;
   "api --paginate repos/o/r/actions/runs?"*) [ "$FAIL_AT" = runs ] && exit 1; echo "$*" >> "$STUBS/runs" ;;
+  "api --paginate repos/o/r/pulls?state=open&base=main&per_page=100 --jq "*) echo "$*" >> "$STUBS/lists"
+     [ "$FAIL_AT" = list ] && exit 1; [ -e "$STUBS/posts" ] && [ "$FAIL_AT" = relist ] && exit 1
+     prs=$OPEN_PRS; [ -e "$STUBS/posts" ] && [ -n "$OPEN_PRS_AFTER" ] && prs=$OPEN_PRS_AFTER
+     printf '%s' "$prs" | "$REAL_JQ" -r "$5" ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
-                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
+                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"'"$HEAD_FULL"'"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
   *) exit 2 ;;
 esac
 """
@@ -1510,9 +1601,11 @@ STUB_JQ = r"""#!/bin/sh
 [ "$FAIL_AT" = jq ] && [ "$2" = .head.ref ] && exit 1
 exec "$REAL_JQ" "$@"
 """
+# #5545: the status filter step runs the real interpreter, so these tests post the text premerge.yml's filter makes.
 STUB_PY = r"""#!/bin/sh
+[ "$1" = -I ] && [ "$2" = -c ] && exec "$REAL_PY" "$@"
 echo "$*" >> "$STUBS/py"
-echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
+printf '%s\n' "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ] || [ -n "$VERDICT_OK" ]
 """
 # MAIN-PROT-3 (#757): `git log` answers the head commit's Bot-Run trailer; every other git call succeeds silently.
 STUB_GIT = r"""#!/bin/sh
@@ -1573,13 +1666,32 @@ esac
 """
 
 
+def handoff_script():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    run = lines.index("        run: |", lines.index("  handoff:"))
+    return step_argv(lines, run), run_block(lines, run + 1)
+
+
+# PREMERGE-status-bind-fu (#5515): `gh` for the handoff job records each call's arguments one per line, answers the
+# open-PR list from $PRS through the call's own --jq filter and accepts the dispatch.
+STUB_HANDOFF_GH = r"""#!/bin/sh
+{ printf '%s\n' "$@"; echo --; } >> "$STUBS/calls"
+case "$1 $2" in
+  "api --paginate") [ "$FAIL_AT" = list ] && exit 1; printf '%s' "$PRS" | "$REAL_JQ" -r "$5" ;;
+  "api -X") [ "$FAIL_AT" = dispatch ] && exit 1; : ;;
+  *) exit 2 ;;
+esac
+"""
+
+
 class PremergeRunTest(unittest.TestCase):
     SHA = "a" * 40
 
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 descriptions=None, trailer="41\n", calls=None, pr="7"):
+                 descriptions=None, trailer="41\n", calls=None, pr="7", head="o/r", open_prs=(), lists=None,
+                 open_after=None, env_extra=None, raw=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1591,20 +1703,27 @@ class PremergeRunTest(unittest.TestCase):
             # The step runs from the base checkout, so its runs fetch is that checkout's tools/premerge_runs.sh (#5386).
             (stubs / "tools").mkdir()
             shutil.copy(WORKFLOWS.parent.parent / "tools/premerge_runs.sh", stubs / "tools")
-            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "REAL_PY": sys.executable, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
-                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
+                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer,
+                   "HEAD_FULL": head, "OPEN_PRS": json.dumps(list(open_prs)),
+                   "OPEN_PRS_AFTER": "" if open_after is None else json.dumps(list(open_after))}
+            env.update(env_extra or {})
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
             if tokens is not None:
                 tokens.extend((stubs / "post-tokens").read_text().split())
+            if raw is not None and (stubs / "posts").exists():
+                raw.append((stubs / "posts").read_bytes())
             if descriptions is not None:
                 descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
+            if lists is not None:
+                lists.extend((stubs / "lists").read_text().splitlines() if (stubs / "lists").exists() else [])
             if calls is not None:
                 for f in ("zips", "py", "runs"):
                     calls.extend((stubs / f).read_text().splitlines() if (stubs / f).exists() else [])
@@ -1625,6 +1744,80 @@ class PremergeRunTest(unittest.TestCase):
         q = "api --paginate repos/o/r/actions/runs?%s&per_page=100 --jq .workflow_runs[]"
         self.assertEqual(calls[1:], [q % f"head_sha={a}", q % f"head_sha={b}&event=push", q % f"head_sha={b}&event=schedule"])
         self.assertRegex(calls[0], r"^-I tools/premerge\.py --check \S+/comments\.json 7 --runs \S+/runs\.json --base refs/remotes/pr/base " + a + "$")
+
+    @staticmethod
+    def open_pr(number, sha, repo):
+        return {"number": number, "head": {"sha": sha, "repo": {"full_name": repo}}}
+
+    def test_fork_pr_leaves_a_shared_head_to_the_repository_pr(self):
+        # PREMERGE-status-bind (#5442): a fork PR on the head of an open PR into main from this repository posts
+        # nothing and hands the merge job nothing, whatever its verdict or error, so its `failure` cannot land
+        # after that PR's `success`. The list is read just before each post, with this sha and PR number.
+        ours = [self.open_pr(8, self.SHA, "o/r"), self.open_pr(7, self.SHA, "f/r")]
+        for verdict, kw in (("same", {}), ("no-verdict", {}), ("same", {"fail_at": "comments"}), ("same", {"base": "stacked"})):
+            with self.subTest(verdict=verdict, **kw):
+                out, lists = [], []
+                self.assertEqual(self.run_gate(verdict, head="f/r", open_prs=ours, outputs=out, lists=lists, **kw), (0, []))
+                self.assertEqual(out, [])
+                self.assertEqual(len(lists), 1)
+                self.assertIn('select(.head.sha == "%s" and .head.repo.full_name == "o/r" and .number != 7)' % self.SHA, lists[0])
+        # A fork PR alone on its head, or beside other forks, or beside a repository PR on another head, posts as before.
+        b = "b" * 40
+        for others in ([], [self.open_pr(7, self.SHA, "f/r")], [self.open_pr(9, self.SHA, "g/r")], [self.open_pr(8, b, "o/r")],
+                       [{"number": 8, "head": {"sha": self.SHA, "repo": None}}]):
+            with self.subTest(others=others):
+                out = []
+                self.assertEqual(self.run_gate("same", head="f/r", open_prs=others, outputs=out), (0, ["success"]))
+                self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=f/r", "merge-ref=feature"])
+                self.assertEqual(self.run_gate("no-verdict", head="f/r", open_prs=others), (0, ["failure"]))
+        # A fork whose head repository was deleted is a fork too.
+        self.assertEqual(self.run_gate("no-verdict", head="", open_prs=ours[:1]), (0, []))
+
+    def test_status_bind_fails_closed(self):
+        # PREMERGE-status-bind (#5442): a repository PR always posts, without reading the list, even when another
+        # repository PR shares its head; a failed list read, or an error before the head's repository is known,
+        # posts `failure` as before.
+        ours = [self.open_pr(8, self.SHA, "o/r")]
+        for verdict, state in (("same", "success"), ("fix-list", "failure")):
+            lists = []
+            self.assertEqual(self.run_gate(verdict, open_prs=ours, lists=lists), (0, [state]))
+            self.assertEqual(lists, [])
+        self.assertEqual(self.run_gate("no-verdict", head="f/r", open_prs=ours, fail_at="list"), (0, ["failure"]))
+        self.assertEqual(self.run_gate("same", head="f/r", open_prs=ours, fail_at="list"), (0, ["success"]))
+        code, states = self.run_gate("same", head="f/r", open_prs=ours, fail_at="jq")
+        self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_fork_post_reruns_a_repository_pr_the_first_read_missed(self):
+        # PREMERGE-status-bind-fu (#5515): a repository PR that opens on the head while a fork PR's post is on its way
+        # (or that a lagging list left out) would keep the fork's verdict. The fork run reads the list again after
+        # its post, hands that PR to `handoff` to rerun its gate after this post, and hands the merge job nothing.
+        late = [self.open_pr(8, self.SHA, "o/r"), self.open_pr(7, self.SHA, "f/r")]
+        for verdict, state in (("same", "success"), ("no-verdict", "failure")):
+            with self.subTest(verdict=verdict):
+                out, lists = [], []
+                self.assertEqual(self.run_gate(verdict, head="f/r", open_after=late, outputs=out, lists=lists), (0, [state]))
+                self.assertEqual(out, ["rerun=8"])
+                self.assertEqual(len(lists), 2)
+                self.assertEqual(lists[0], lists[1])
+        out = []
+        self.assertEqual(self.run_gate("same", head="f/r", open_after=late + [self.open_pr(9, self.SHA, "o/r")], outputs=out),
+                         (0, ["success"]))
+        self.assertEqual(out, ["rerun=8", "9"])
+        # The error path's post reads again too.
+        out = []
+        self.assertEqual(self.run_gate("same", head="f/r", fail_at="comments", open_after=late, outputs=out), (0, ["failure"]))
+        self.assertEqual(out, ["rerun=8"])
+        # Nothing new on the head, a fork or another head's PR, or a failed second read: the post stands as before.
+        b = "b" * 40
+        for after, fail_at in (([], ""), ([self.open_pr(9, self.SHA, "g/r")], ""), ([self.open_pr(8, b, "o/r")], ""), (late, "relist")):
+            with self.subTest(after=after, fail_at=fail_at):
+                out = []
+                self.assertEqual(self.run_gate("same", head="f/r", open_after=after, fail_at=fail_at, outputs=out), (0, ["success"]))
+                self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=f/r", "merge-ref=feature"])
+        # A repository PR never reads the list, before or after its post.
+        lists, out = [], []
+        self.assertEqual(self.run_gate("same", open_after=late, lists=lists, outputs=out), (0, ["success"]))
+        self.assertEqual((lists, out[0]), ([], "merge-head=" + self.SHA))
 
     def test_gate_reads_only_a_pr_number(self):
         # PREMERGE-fork-rerun (#5383): a dispatch carries its PR as an input, so the number is checked before any read.
@@ -1704,6 +1897,70 @@ class PremergeRunTest(unittest.TestCase):
                 self.assertEqual(self.run_fork_pr([self.pr_(number=number)])[0::2], (1, []))
         self.assertEqual(self.run_gate("bot", ref="bot/trace"), (0, ["success"]))
 
+    def run_handoff(self, prs=(), action="closed", event="pull_request_target", before="b" * 40, head="a" * 40, retargeted="",
+                    rerun="", pr="7", fail_at=""):
+        """Run premerge.yml's handoff step; return its exit code, its list reads and the PRs it dispatched the gate for."""
+        real_jq = shutil.which("jq")
+        self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
+        argv, script = handoff_script()
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            (stubs / "gh").write_text(STUB_HANDOFF_GH)
+            (stubs / "gh").chmod(0o755)
+            (stubs / "jq").symlink_to(real_jq)
+            (stubs / "run.sh").write_text(script)
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "GH_TOKEN": "synthetic", "REPO": "o/r",
+                   "PR_NUMBER": pr, "RERUN": rerun, "EVENT": event, "ACTION": action, "BEFORE": before, "HEAD_SHA": head,
+                   "RETARGETED": retargeted, "PRS": json.dumps(list(prs)), "FAIL_AT": fail_at}
+            proc = subprocess.run(argv + [str(stubs / "run.sh")], env=env, cwd=d, capture_output=True, text=True, timeout=30)
+            calls = (stubs / "calls").read_text().split("--\n")[:-1] if (stubs / "calls").exists() else []
+        calls = [c.splitlines() for c in calls]
+        lists = [c for c in calls if c[:2] == ["api", "--paginate"]]
+        posts = [c for c in calls if c[:3] == ["api", "-X", "POST"]]
+        for c in posts:
+            self.assertEqual(c[:6], ["api", "-X", "POST", "repos/o/r/actions/workflows/premerge.yml/dispatches", "-f", "ref=main"])
+        return proc.returncode, lists, [c[7].removeprefix("inputs[pr]=") for c in posts]
+
+    def test_handoff_reruns_the_gate_for_the_prs_left_on_a_head(self):
+        # PREMERGE-status-bind-fu (#5515): a PR that closes, pushes past a head or moves off main leaves its last
+        # `premerge` on that head, where a fork PR would read it as its own until its next event. `handoff` dispatches
+        # the gate for every other open PR into main on the head it left, so each posts its own verdict.
+        a, b = "a" * 40, "b" * 40
+        left = [PremergeRunTest.open_pr(9, a, "f/r"), PremergeRunTest.open_pr(10, a, "g/r"), PremergeRunTest.open_pr(7, a, "o/r"),
+                PremergeRunTest.open_pr(11, b, "f/r")]
+        for kw, sha, want in ((dict(action="closed"), a, ["9", "10"]), (dict(action="synchronize"), b, ["11"]),
+                              (dict(action="edited", retargeted="main"), a, ["9", "10"])):
+            with self.subTest(**kw):
+                code, lists, dispatched = self.run_handoff(left, **kw)
+                self.assertEqual((code, dispatched), (0, want))
+                self.assertEqual(lists, [["api", "--paginate", "repos/o/r/pulls?state=open&base=main&per_page=100", "--jq",
+                                          '.[] | select(.head.sha == "%s" and .number != 7) | .number' % sha]])
+        # A PR that stays on its head leaves nothing: no read and no dispatch.
+        for kw in (dict(action="opened"), dict(action="reopened"), dict(action="edited"), dict(event="issue_comment", action="edited"),
+                   dict(event="workflow_dispatch", action=""), dict(event="workflow_run", action="completed")):
+            with self.subTest(**kw):
+                self.assertEqual(self.run_handoff(left, **kw), (0, [], []))
+        # The gate's `rerun` PRs are dispatched on any event, once each beside the PRs left behind.
+        self.assertEqual(self.run_handoff(left, event="workflow_dispatch", action="", rerun="8 12 ")[0::2], (0, ["8", "12"]))
+        self.assertEqual(self.run_handoff(left, rerun="10 8")[0::2], (0, ["8", "9", "10"]))
+
+    def test_handoff_fails_on_a_failed_read_or_dispatch(self):
+        # PREMERGE-status-bind-fu (#5515): a failed list read never reads as no PR left, a sha or number that is not one
+        # dispatches nothing, and a refused dispatch turns the job red.
+        left = [PremergeRunTest.open_pr(9, "a" * 40, "f/r")]
+        self.assertEqual(self.run_handoff(left, fail_at="list", rerun="8")[0::2], (1, []))
+        self.assertNotEqual(self.run_handoff(left, fail_at="dispatch")[0], 0)
+        for kw in (dict(head="A" * 40), dict(head="a" * 39), dict(head=""), dict(action="synchronize", before="b" * 41),
+                   dict(action="synchronize", before=""), dict(action="edited", retargeted="dev", head=""),
+                   dict(rerun="8 0"), dict(rerun="8 08"), dict(rerun="8 8a"), dict(rerun="8 -1"), dict(rerun="8 $(id)"), dict(rerun="*"),
+                   dict(pr=""), dict(pr="07"), dict(pr="7 ")):
+            with self.subTest(**kw):
+                code, _, dispatched = self.run_handoff(left, **kw)
+                self.assertEqual((code, dispatched), (1, []))
+        for number in ("1 2", "8\n9x", 0, None, 1.5):
+            with self.subTest(number=number):
+                self.assertEqual(self.run_handoff([{"number": number, "head": {"sha": "a" * 40}}])[0::2], (1, []))
+
     def test_error_after_head_known_posts_failure(self):
         # The #1946 path: a rerun that dies outside the guarded block must not leave the head's
         # earlier `success` standing. The job stays red so the error is visible.
@@ -1713,6 +1970,28 @@ class PremergeRunTest(unittest.TestCase):
         self.assertEqual(self.run_gate("same", fail_at="runs"), (0, ["failure"]))  # PREMERGE-runs-local (#5386)
         code, states = self.run_gate("same", fail_at="post")
         self.assertEqual((code != 0, states), (True, ["failure"]))
+
+    def test_status_middle_dot_reaches_gh_intact(self):
+        # PREMERGE-status-bytes (#5553): the status step's U+00B7 is two bytes, C2 B7, in the argument `gh api` receives,
+        # under a UTF-8 locale and under LC_ALL=C (the filter decodes by itself, not by the shell's locale).
+        verdict = "unparsed-record 7: Record: PR #7 \u00b7 package x \u00b7 head f"
+        for env in ({"LC_ALL": "C.UTF-8"}, {"LC_ALL": "C"}, {"LC_ALL": "POSIX", "LANG": "C"}):
+            raw = []
+            self.assertEqual(self.run_gate(verdict, env_extra=env, raw=raw)[1], ["failure"], env)
+            self.assertIn(b"description=unparsed-record 7: Record: PR #7 \xc2\xb7 package x \xc2\xb7 head f ", raw[0], env)
+
+    def test_only_a_whole_same_output_arms_the_merge(self):
+        # PREMERGE-status-cut-pins (#5561): the cut status of `same`, two spaces and a long token is `same`, and the filter
+        # strips control characters; neither reaches the merge job, which reads the whole output. VERDICT_OK stands in
+        # for a success exit, since premerge.py prints no such line today. A multi-line output ending in `same` shows
+        # `same` too, since the status keeps the last line, and must not arm (PREMERGE-merge-whole-output-fu, #5563).
+        for verdict, shown in (("same  " + "x" * 115, "same"), ("same\x07", "same"), ("x\nsame", "same"), ("same", "same")):
+            with self.subTest(verdict=verdict):
+                out, desc = [], []
+                self.assertEqual(self.run_gate(verdict, env_extra={"VERDICT_OK": "1"}, outputs=out, descriptions=desc),
+                                 (0, ["success"]))
+                self.assertEqual(desc, [shown])
+                self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=o/r", "merge-ref=feature"] if verdict == "same" else [])
 
     def test_status_is_posted_with_the_app_token(self):
         # PREMERGE-source-a (#1943): the post uses STATUS_TOKEN (the App's, which the ruleset

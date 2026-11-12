@@ -146,10 +146,12 @@ jobs:
         # Downloads the pinned @openai/codex tarball, checks npm's integrity hash, builds the
         # rootfs and checks its contents, with codex doctor in a namespace (sudo: the runner may bar
         # unprivileged user namespaces). Nothing runs under runsc here (#809 measures that). The
-        # build compiles the patched bwrap statically, so it needs libcap-dev (#1720).
+        # shell and tools come from the root image/guest-base.sh installs from the image's apt
+        # sources, never from the runner (#5570), and its gcc compiles the patched bwrap (#5571).
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
+          sudo GUEST_BASE="$RUNNER_TEMP/guest-base" GUEST_SHIPPED="$RUNNER_TEMP/guest-shipped" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Old core only shrinks (D-139 ratchet; markers, lines and imports against the base)
@@ -162,7 +164,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # HEAD^1 is the base side of the PR's test merge.
         run: |
-          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || : > "$RUNNER_TEMP/base-baseline.txt"
+          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || true > "$RUNNER_TEMP/base-baseline.txt"
           python tools/doclint.py --base-baseline "$RUNNER_TEMP/base-baseline.txt"
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: steps.scope.outputs.records != 'true'
@@ -412,11 +414,22 @@ jobs:
           done
       - name: Camera H.264 decoder on the pinned libavcodec, with FuzzH264Feed for 20s (CAM-clerk b2, #3514)
         # go test ./... has no libavcodec, so the decoder's tests run here, against the same pinned
-        # H.264-only build image/camdecode.sh links into agentos-camdecode.
+        # H.264-only build image/camdecode.sh links into agentos-camdecode, compiled as it is, in the
+        # root image/guest-base.sh installs from the image's apt sources (#5582).
         run: |
-          sh ../image/libavcodec.sh "$RUNNER_TEMP/libavcodec"
-          export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libavcodec" \
-            PKG_CONFIG_PATH="$RUNNER_TEMP/libavcodec/opt/agentos-libavcodec/lib/pkgconfig"
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh ../image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
+          sudo sh ../image/libavcodec.sh "$RUNNER_TEMP/guest-base" /tmp/agentos-libavcodec
+          # The image's own decoder build in that root, with a host tar, xz and patch that fail if run.
+          (cd .. && sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
+            GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CAMDECODE_BUILD=1 python3 -m unittest tests.test_camdecode_build -v)
+          # Copied out to the path main's runs used: go's build cache keys cgo packages on the
+          # pkg-config modules, not on the -L path pkg-config prints, so a restored entry names it.
+          lib="$RUNNER_TEMP/libavcodec"
+          sudo cp -R "$RUNNER_TEMP/guest-base/tmp/agentos-libavcodec" "$lib"
+          sudo chown -R "$(id -u):$(id -g)" "$lib"
+          export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$lib" \
+            PKG_CONFIG_PATH="$lib/opt/agentos-libavcodec/lib/pkgconfig"
           status=0
           go test -count=1 -json ./cmd/agentos-camdecode/camdecode > "$RUNNER_TEMP/camdecode.json" || status=$?
           p=github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode
@@ -653,11 +666,16 @@ jobs:
             [ "$rc" -eq 0 ] || fail=1
           done 3< "$RUNNER_TEMP/root-plan"
           [ "$fail" -eq 0 ]
+      - name: The guests' Debian userland, from the image's apt sources (#5570)
+        # Both guest roots below copy their shell, tools and libraries from it, never from the runner.
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
         run: |
-          sh guest/openclaw/build-rootfs.sh /tmp/ocroot
+          GUEST_BASE=/tmp/guest-base GUEST_SHIPPED=/tmp/guest-shipped sh guest/openclaw/build-rootfs.sh /tmp/ocroot
           # With no_new_privs, as agentosd.service runs runsc (L7-6).
           cd broker
           rc=0
@@ -674,9 +692,8 @@ jobs:
         # Built as root, as the rootfs test builds it: inside the CLI's user namespace root keeps no override
         # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
-            sh guest/codex/build-rootfs.sh /tmp/cxroot
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache GUEST_BASE=/tmp/guest-base \
+            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker
           rc=0
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
@@ -755,16 +772,32 @@ jobs:
       # a time. The fetch retries a timeout, a refused connect, 408, 429, 500, 502, 503 or 504 up to
       # 8 times, waiting 1 s doubling (255 s in all), starts no retry after 600 s, gives each try 180 s
       # (30 s to connect), then fails with the host's last status. Any other 4xx or 5xx fails at once.
-      - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a dated snapshot)
+      # CI-hostcheck-kernel-mirror (#5463): the same file is a release asset of this repository, fetched
+      # first; the snapshot is the second source, for an outage of either host. The hash decides, not
+      # the host: bytes from either that miss the pin fail the step, with no further source tried.
+      # CI-hostcheck-mirror-bound (#5470): the mirror gets 3 tries (waits 1 s, 2 s), starts no retry
+      # after 20 s and gives each try 60 s, so a 5xx mirror falls through to the snapshot in seconds
+      # and a slow or hung one within about 80 s (a retry started near 20 s may run its full 60 s); the
+      # full #5321 schedule is the snapshot's, the last source. CI-hostcheck-mirror-wording (#5525):
+      # curl's first argument is -q, so it reads no .curlrc (CURL_HOME, XDG_CONFIG_HOME, HOME).
+      - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a release asset or a dated snapshot)
         env:
+          KERNEL_MIRROR_URL: https://github.com/ghbmrk/agentOS/releases/download/guest-kernel-6.8.0-149.149/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
           KERNEL_URL: https://snapshot.ubuntu.com/ubuntu/20261107T000000Z/pool/main/l/linux-signed/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
           KERNEL_SHA256: b8757670b7ec8aead358d4fba420064b9f31d344c3393548105aca2b3956d2ab
           KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic
         run: |
           deb="$RUNNER_TEMP/guest-kernel.deb"
-          curl --proto '=https' -fsSL --retry 8 --retry-connrefused --retry-max-time 600 --connect-timeout 30 --max-time 180 -o "$deb" "$KERNEL_URL"
+          src=
+          bound=(--retry 2 --retry-max-time 20 --max-time 60)
+          for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"; do
+            curl -q --proto '=https' -fsSL "${bound[@]}" --retry-connrefused --connect-timeout 30 -o "$deb" "$url" && { src=$url; break; }
+            echo "::warning::the guest kernel did not download from $url"
+            bound=(--retry 8 --retry-max-time 600 --max-time 180)
+          done
+          [ -n "$src" ] || { echo "::error::the guest kernel did not download from either source"; exit 1; }
           got=$(sha256sum "$deb" | cut -d' ' -f1)
-          echo "guest kernel: $KERNEL_URL sha256 $got (pinned: $KERNEL_SHA256)"
+          echo "guest kernel: $src sha256 $got (pinned: $KERNEL_SHA256)"
           [ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }
           dpkg-deb -x "$deb" "$RUNNER_TEMP/k"
           test -f "$RUNNER_TEMP/k/$KERNEL_VMLINUZ"

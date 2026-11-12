@@ -593,12 +593,34 @@ class NamesTest(unittest.TestCase):
                              ["a.service", "getty@tty1.service", "t@agentos-unit-lint.service",
                               "t@b.service", "t@tty1.service"])  # each template as every instance name
 
+    def test_a_device_unit_file_and_its_drop_ins_are_named(self):
+        # #5507: systemd loads a .device unit's file and drop-ins (device.c device_load), so a unit file of
+        # ours for one, or a drop-in directory naming one, is asked about
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {ETC + "dev-x.device": "[Unit]\nWants=e.service\n",
+                         ETC + "sys-subsystem-net-devices-y.device.d/50.conf": "[Unit]\nWants=e.service\n",
+                         ETC + "dev-z.device.wants/e.service": "-> " + LIB + "e.service", LIB + "e.service": ""})
+            self.assertEqual(r.names(v, r.unit_dirs(v)),
+                             ["dev-x.device", "e.service", "sys-subsystem-net-devices-y.device"])
+            dirs = r.unit_dirs(v)
+            prov = r.Provenance(v, dirs, lambda p: p == LIB + "e.service")
+            got = r.records(v, shown({"dev-x.device": ("loaded", ETC + "dev-x.device", []),
+                                      "sys-subsystem-net-devices-y.device": (
+                                          "loaded", "", [ETC + "sys-subsystem-net-devices-y.device.d/50.conf"]),
+                                      "e.service": ("loaded", LIB + "e.service", [])}), dirs, prov)
+            self.assertEqual([(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]],
+                             [("dev-x.device", False, [(ETC + "dev-x.device", True)]),
+                              ("e.service", False, [(LIB + "e.service", False)]),
+                              ("sys-subsystem-net-devices-y.device", True,
+                               [(ETC + "sys-subsystem-net-devices-y.device.d/50.conf", True)])])
+
     def test_shared_directories(self):
         # dropin.c unit_file_find_dirs reaches another name only through a template or a name whose part
         # before the @ or the type ends in -
-        for n in (".service", "x-.service", "x@.service", "x-@.service", "x-@i.service", "-.slice", "x.device"):
+        for n in (".service", "x-.service", "x@.service", "x-@.service", "x-@i.service", "-.slice", "x-.device",
+                  "x.scope"):
             self.assertTrue(r.shared(n), n)
-        for n in ("x.service", "x-y.service", "x@i.service", "x@i-.service", "x-y@i.service"):
+        for n in ("x.service", "x-y.service", "x@i.service", "x@i-.service", "x-y@i.service", "x.device"):
             self.assertFalse(r.shared(n), n)
 
     def test_a_name_systemctl_could_not_carry_is_refused(self):

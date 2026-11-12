@@ -110,7 +110,7 @@ deadpanic)
 	parent=$$
 	(
 		while kill -0 "$parent" 2>/dev/null; do sleep 0.01; done
-		: >"$FAKE_RUNSC_MARK"
+		true >"$FAKE_RUNSC_MARK"
 		i=0
 		while [ -e "$FAKE_RUNSC_MARK" ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i + 1)); done
 	) &
@@ -120,13 +120,13 @@ killpanic)
 	echo 7 >"$pid"
 	echo "guest out"
 	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
-	: >"$FAKE_RUNSC_MARK"
+	true >"$FAKE_RUNSC_MARK"
 	exec sleep 30
 	;;
 killquiet)
 	echo 7 >"$pid"
 	echo "guest out"
-	: >"$FAKE_RUNSC_MARK"
+	true >"$FAKE_RUNSC_MARK"
 	exec sleep 30
 	;;
 fullpanic)
@@ -182,7 +182,7 @@ waitdelaytext)
 	echo 7 >"$pid"
 	echo "guest out"
 	printf 'panic: open %s: permission denied\n\ngoroutine 1 [running]:\nmain.main()\n' "$c" >&2
-	: >"$FAKE_RUNSC_MARK"
+	true >"$FAKE_RUNSC_MARK"
 	(
 		i=0
 		while [ -e "$FAKE_RUNSC_MARK" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i + 1)); done

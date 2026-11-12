@@ -29,6 +29,7 @@ import (
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
@@ -325,7 +326,32 @@ func TestRunningTableUnreadable(t *testing.T) {
 	if !strings.Contains(x.logText(), "running table unreadable") {
 		t.Fatal("an unreadable running table was not logged")
 	}
+	// #5491 (ENF-l-15): at a restart, a table that does not read holds the
+	// caps spent and shows it on home; one that is absent (ENOENT) holds
+	// nothing, as after a reboot; a table this process loaded that is
+	// absent is still unread.
+	if !x.d.net.unread || !(pageCaps{x.d}).Day().Unread {
+		t.Fatal("a first load over a table that does not read holds nothing")
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = fmt.Errorf("load: listing enforcer: %w: Error: No such file or directory", load.ErrNoTable)
+	x.fire.mu.Unlock()
+	logged := x.logs("firewall: running table unreadable")
+	x.restart()
+	if x.d.net.unread || (pageCaps{x.d}).Day().Unread {
+		t.Fatal("a first load over an absent table holds the caps")
+	}
+	if x.logs("firewall: running table unreadable") != logged {
+		t.Fatal("an absent table at a first load was logged as unreadable")
+	}
 	x.enforced()
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	held := x.d.net.unread
+	x.d.fwMu.Unlock()
+	if err != nil || !held {
+		t.Fatalf("a later load over a table that went absent: %v, held %v", err, held)
+	}
 }
 
 // TestLoadSeedsLeases (ENF-l-23, #5295): every full load, the first after
@@ -381,7 +407,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		{Iface: l.Household, Addr: netip.MustParseAddr("10.20.0.21"), HW: hw("02:00:00:00:00:02"), Left: 700},
 		{Iface: l.Owner, Addr: netip.MustParseAddr("10.10.0.22"), HW: hw("02:00:00:00:00:03"), Left: 800},
 	})
-	if strings.Count(seed, "add element") != 6 {
+	if strings.Count(seed, "add element") != 9 { // lease, address and leased sets of three segments
 		t.Fatalf("fixture: seed %q", seed)
 	}
 	if got, want := x.fire.last(), x.seededLoad(x.current(), seed); got != want {
@@ -600,6 +626,82 @@ func TestLeaseFileUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(x.fire.last(), "add element inet enforcer lease_guests_4 { 0x0a1e0014 . 0x020000000001 expires 600s }") || (pageResolver{x.d}).Stopped().Unseeded {
 		t.Fatalf("a lease file read whole did not seed, or home still shows it unread:\n%s", x.fire.last())
+	}
+}
+
+// TestHeldHostShown (#5528; nft ASSUMPTIONS ENF-shared-src-1): home
+// shows a host the firewall kept from an address (nft.LeaseHeld) for a
+// lease after the count last rose, read at the resolver's step and at a
+// load. The daemon's first reading only starts the count (a table that
+// outlived the last run counted at unknown times). A count that stays, or a new table's count of 0, shows nothing; a
+// new table's count above 0 (a load starts it again) is a rise however it
+// compares with the old one; a listing that does not read leaves it as
+// it was.
+func TestHeldHostShown(t *testing.T) {
+	x, _ := enrolled(t, false)
+	listing := func(table, held int) {
+		x.fire.mu.Lock()
+		x.fire.listing = fmt.Appendf(nil, `{"nftables": [{"table": {"family": "inet", "name": "enforcer", "handle": %d}}, {"counter": {"family": "inet", "table": "enforcer", "name": "lease_held", "packets": %d, "bytes": 0}}]}`, table, held)
+		x.fire.mu.Unlock()
+	}
+	step := func() bool {
+		x.d.refreshAnswers(context.Background())
+		return (pageResolver{x.d}).Stopped().Held
+	}
+	listing(5, 3)
+	if step() {
+		t.Fatal("home shows a held host counted before the daemon started")
+	}
+	listing(5, 3)
+	if step() {
+		t.Fatal("home shows a held host with none held since the last reading")
+	}
+	listing(5, 4)
+	if !step() {
+		t.Fatal("home does not show a held host")
+	}
+	x.advance(nft.LeaseTimeout*time.Second - time.Second)
+	if !step() {
+		t.Fatal("home stops showing a held host within a lease of it")
+	}
+	x.advance(time.Second)
+	if step() {
+		t.Fatal("home still shows a held host a lease after it, with the count unchanged")
+	}
+	listing(6, 2)
+	if !step() {
+		t.Fatal("home does not show a host held in a new table below the old count")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	listing(7, 0)
+	if step() {
+		t.Fatal("home shows a held host for a new table that held none")
+	}
+	listing(7, 2)
+	if !step() {
+		t.Fatal("home does not show a host held in the same table")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	x.fire.mu.Lock()
+	x.fire.listing = []byte("{")
+	x.fire.mu.Unlock()
+	if step() {
+		t.Fatal("a listing that does not read shows a held host")
+	}
+	listing(7, 3)
+	if !step() {
+		t.Fatal("a rise across a listing that does not read is not shown: the listing was taken for a new table or a restart")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	listing(7, 4)
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(pageResolver{x.d}).Stopped().Held {
+		t.Fatal("a host held since the last reading is not shown after a load replaced its table")
 	}
 }
 
@@ -1068,8 +1170,10 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || trips != 1 {
 		t.Fatalf("an overrun after the lift: cut %v, %d trips", cut, trips)
 	}
-	// Every cap held spent counts as past: the table's bytes lost, or the
-	// day unreadable.
+	// The day unreadable holds every cap spent, which counts as past. The
+	// table unread does not (#5445 item 1): its spend is the drop's, and a
+	// lift in that window would otherwise hold the whole day after the
+	// table reads again.
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
 	x.d.fwMu.Lock()
 	c := x.d.net.counter
@@ -1084,8 +1188,8 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	x.d.fwMu.Lock()
 	x.d.net.counter = c
 	x.d.fwMu.Unlock()
-	if !unread || !spent {
-		t.Fatalf("caps held spent: past %v with the table unread, %v with the day unreadable", unread, spent)
+	if unread || !spent {
+		t.Fatalf("past %v with the table unread (want false), %v with the day unreadable (want true)", unread, spent)
 	}
 }
 
@@ -2752,9 +2856,11 @@ func TestStoppedResolverOnPage(t *testing.T) {
 // compiled document reaches the page and the log as every item Generate
 // refused, read from the error: each device on a Wi-Fi network the setup
 // serves no network for, and each listed name that is not a DNS host
-// name. With a setup fault too, the fault is one untyped cause and the
-// devices are still named; any other refusal is untyped, whatever its
-// text.
+// name. With a setup fault too, the fault is its own cause, whose words
+// on home carry none of its text, and the devices are still named; any
+// other refusal is untyped, whatever its text (#5431). However many items
+// Generate refuses, home and the log line name a bounded number and
+// count the rest exactly (#5431).
 func TestRefusedCause(t *testing.T) {
 	x, _ := enrolled(t, false)
 	l, s := x.cfg.Layout, x.cfg.DNS
@@ -2816,19 +2922,69 @@ func TestRefusedCause(t *testing.T) {
 			}
 		}
 	}
-	// A setup fault beside the unserved devices: the fault is untyped and
-	// both devices are still named, as before #5396 (#5405).
+	// A setup fault beside the unserved devices: the fault is its own
+	// cause and both devices are still named (#5405, #5431).
 	bad := s
 	bad.Upstream = nil
 	_, err := dns.Generate(vlans, l, bad)
-	if got := refusedCauses(err); !slices.Equal(got, append([]page.PolicyCause{{Kind: page.PolicyUntyped}}, both...)) {
+	setup := append([]page.PolicyCause{{Kind: page.PolicySetup}}, both...)
+	if got := refusedCauses(err); !slices.Equal(got, setup) {
 		t.Errorf("a setup fault beside unserved devices: %+v", got)
 	}
 	untyped := []page.PolicyCause{{Kind: page.PolicyUntyped}}
-	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil} {
+	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil, dns.Refused{errors.New("no upstream resolver")}} {
 		if got := refusedCauses(err); !slices.Equal(got, untyped) {
 			t.Errorf("refusedCauses(%v) = %+v, want untyped", err, got)
 		}
+	}
+	// On home, the setup fault reads in its own words, apart from an
+	// untyped refusal's, and never with its text (#5431).
+	x.d.net.resMu.Lock()
+	x.d.net.stopPolicy = refusedCauses(err)
+	x.d.net.resMu.Unlock()
+	h := view()
+	if !strings.Contains(h, "The network setup could not be applied") || strings.Contains(h, "upstream") || strings.Contains(h, dns.ErrConfig.Error()) || strings.Contains(h, "names something the enforcer cannot serve") || !strings.Contains(h, "plug") {
+		t.Errorf("home does not word the setup fault apart, without its text:\n%s", h)
+	}
+	x.d.net.resMu.Lock()
+	x.d.net.stopPolicy = refusedCauses(errors.New("no upstream resolver"))
+	x.d.net.resMu.Unlock()
+	if h := view(); strings.Contains(h, "could not be applied") || !strings.Contains(h, "names something the enforcer cannot serve") || strings.Contains(h, "upstream") {
+		t.Errorf("home words an untyped refusal as a setup fault:\n%s", h)
+	}
+	// More refused names than either cap: home and the log line each name
+	// the first ones and count the rest exactly, and stay bounded (#5431).
+	many := home()
+	const n = 300
+	for i := range n {
+		many.Destinations = append(many.Destinations, "N"+strconv.Itoa(1000+i)+".example")
+	}
+	x.mu.Lock()
+	x.log = nil
+	x.mu.Unlock()
+	x.d.fwMu.Lock()
+	err = x.d.loadNetwork(context.Background(), many)
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := (pageResolver{x.d}).Stopped(); len(got.Policy) != n {
+		t.Fatalf("the daemon holds %d causes, want %d", len(got.Policy), n)
+	}
+	h = view()
+	x.mu.Lock()
+	var logged []string
+	for _, line := range x.log {
+		if strings.HasPrefix(line, "dns: the policy in force cannot be served") {
+			logged = append(logged, line)
+		}
+	}
+	x.mu.Unlock()
+	if len(logged) != 1 || !strings.HasSuffix(logged[0], "; and "+strconv.Itoa(n-dns.RefusedShown)+" more") || strings.Count(logged[0], "is not a DNS host name") != dns.RefusedShown || len(logged[0]) > 4<<10 {
+		t.Errorf("the log line is not bounded with the exact count: %q", logged)
+	}
+	if strings.Count(h, "which is not a name the enforcer can look up") != page.PolicyShown || !strings.Contains(h, "There are "+strconv.Itoa(n-page.PolicyShown)+" more reasons the policy in force cannot be served") || strings.Contains(h, "N"+strconv.Itoa(1000+page.PolicyShown)+".example") {
+		t.Errorf("home is not bounded with the exact count:\n%s", h)
 	}
 	// Typed, wrapped, the refusal still reads as ErrConfig and keeps its
 	// causes.

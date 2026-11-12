@@ -793,7 +793,7 @@ func main() {
 		}
 		vmc.ProviderRoutes = signIns
 		md.set(&vmc)
-		m, err := vm.Open(ctx, vmc)
+		m, err := openVM(ctx, vmc, caps, informOwner(d.Owner))
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
 			caps.agentOff(agentNoMachines)

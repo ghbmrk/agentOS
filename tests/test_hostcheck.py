@@ -8,6 +8,7 @@
 # a tool is missing. HOSTCHECK_KERNEL names the guest kernel; HOSTCHECK_TOOLS_ROOT, if set,
 # a root holding qemu, swtpm and OVMF (CI: the image's Debian snapshot, #4906).
 import argparse
+import hashlib
 import http.server
 import json
 import os
@@ -1012,11 +1013,36 @@ ROOT_STEP = [
 # A command that installs or fetches packages for the runner: apt, apt-get or aptitude, or dpkg.
 APT = re.compile(r"\b(?:apt|apt-get|aptitude)\s.*\b(?:install|reinstall|download)\b")
 DPKG = re.compile(r"\bdpkg\s(?:.*\s)?(?:-[A-Za-z]*i\b|--install\b|--unpack\b)")
+# CI-hostcheck-mirror-wording (#5525): a curl command; curl honours -q (read no .curlrc) only as its first
+# argument, so a .curlrc from CURL_HOME, XDG_CONFIG_HOME or HOME could otherwise add options the
+# bound checks never see (retry-all-errors, say). SHELL-CURL-lint-fu (#5533): by any path to it
+# (/usr/bin/curl, ./curl, curl.exe); a URL's /curl is not one, since a path has no ':' or '/' before it.
+CURL = re.compile(r"(?<![\w.+/:~-])(?:[\w.+~-]*(?:/[\w.+-]+)*/)?curl(?:\.exe)?(?![\w.+-])")
 
 
-# CI-hostcheck-fetch-retry (#5321): the hostcheck job's guest-kernel fetch, as ci.yml must hold it.
-KERNEL_FETCH = ("curl --proto '=https' -fsSL --retry 8 --retry-connrefused --retry-max-time 600 "
-                "--connect-timeout 30 --max-time 180 -o \"$deb\" \"$KERNEL_URL\"")
+# CI-hostcheck-fetch-retry (#5321): the hostcheck job's guest-kernel fetch, as ci.yml must hold it; each
+# source's retry bound comes from BOUND.
+KERNEL_FETCH = ("curl -q --proto '=https' -fsSL \"${bound[@]}\" --retry-connrefused --connect-timeout 30 "
+                "-o \"$deb\" \"$url\" && { src=$url; break; }")
+# CI-hostcheck-mirror-bound (#5470): the mirror's short bound, so a 5xx mirror falls through in seconds;
+# then #5321's full schedule, for the snapshot.
+MIRROR_BOUND = "bound=(--retry 2 --retry-max-time 20 --max-time 60)"
+SNAPSHOT_BOUND = "bound=(--retry 8 --retry-max-time 600 --max-time 180)"
+# CI-hostcheck-kernel-mirror (#5463): this repository's release asset first, the snapshot second, then
+# the pin decides; the lines from the source loop to the hash check, in order.
+KERNEL_SOURCES = [
+    "src=",
+    MIRROR_BOUND,
+    'for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"; do',
+    KERNEL_FETCH,
+    'echo "::warning::the guest kernel did not download from $url"',
+    SNAPSHOT_BOUND,
+    "done",
+    '[ -n "$src" ] || { echo "::error::the guest kernel did not download from either source"; exit 1; }',
+    'got=$(sha256sum "$deb" | cut -d\' \' -f1)',
+    'echo "guest kernel: $src sha256 $got (pinned: $KERNEL_SHA256)"',
+    '[ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned $KERNEL_SHA256"; exit 1; }',
+]
 
 
 class HostcheckJobTest(unittest.TestCase):
@@ -1037,6 +1063,8 @@ class HostcheckJobTest(unittest.TestCase):
                 out.append(f"{pkg} installed from the runner's archive")
         if any(DPKG.search(line) for line in lines):
             out.append("the job installs a package file with dpkg")
+        if any(not line[m.end():].startswith(" -q ") for line in lines for m in CURL.finditer(line)):
+            out.append("a curl in the job reads a config file (-q is not its first argument, #5525)")
         root = [b for _, b in steps if re.search(r"(?m)^\s*(?:run:\s*)?(?:sudo\s+)?mmdebstrap\s", b)]
         if len(root) != 1:
             out.append("no single mmdebstrap step builds the tools root")
@@ -1095,7 +1123,18 @@ class HostcheckJobTest(unittest.TestCase):
             out.append("the guest kernel has no SHA-256 pin")
         if not url or env.get("KERNEL_VMLINUZ") != f"boot/vmlinuz-{url.group(1)}-generic":
             out.append("the guest kernel path is not the pinned package's vmlinuz")
+        # #5463: the mirror is this repository's release of exactly that package, tagged by its version.
+        deb = env.get("KERNEL_URL", "").rsplit("/", 1)[-1]
+        ver = re.fullmatch(r"linux-image-[\w.+~-]+_([\w.+~-]+)_amd64\.deb", deb)
+        if not ver or env.get("KERNEL_MIRROR_URL") != ("https://github.com/ghbmrk/agentOS/releases/download/"
+                                                       f"guest-kernel-{ver.group(1)}/{deb}"):
+            out.append("the guest kernel mirror is not this repository's release of the pinned package")
         lines = [ln.strip() for ln in b.splitlines()]
+        start = lines.index(KERNEL_SOURCES[0]) if KERNEL_SOURCES[0] in lines else -1
+        if start < 0 or lines[start:start + len(KERNEL_SOURCES)] != KERNEL_SOURCES:
+            out.append("the guest kernel is not fetched from the mirror, then the snapshot, then hash-checked")
+        if sum("curl " in ln for ln in lines) != 1:
+            out.append("the guest kernel has a fetch outside the source loop")
         want = ['got=$(sha256sum "$deb" | cut -d\' \' -f1)',
                 '[ "$got" = "$KERNEL_SHA256" ] || { echo "::error::the guest kernel hashes to $got, pinned '
                 '$KERNEL_SHA256"; exit 1; }',
@@ -1105,50 +1144,111 @@ class HostcheckJobTest(unittest.TestCase):
         idx = [lines.index(w) if w in lines else -1 for w in want]
         if -1 in idx or idx != sorted(idx):
             out.append("the guest kernel is not hash-checked before it is unpacked and named")
-        if not any(ln.startswith("curl --proto '=https' ") and ln.endswith('-o "$deb" "$KERNEL_URL"') for ln in lines):
-            out.append("the guest kernel is not fetched from the pinned URL over HTTPS")
+        if not any(ln.startswith("curl -q --proto '=https' ") and ln.endswith('-o "$deb" "$url" && { src=$url; break; }')
+                   for ln in lines):
+            out.append("the guest kernel is not fetched from the pinned URLs over HTTPS")
         if KERNEL_FETCH not in lines:
             out.append("the guest kernel fetch is not the bounded retry (#5321)")
+        if [ln for ln in lines if ln.startswith("bound=")] != [MIRROR_BOUND, SNAPSHOT_BOUND]:
+            out.append("the mirror is not tried on its short bound, then the snapshot on the full one (#5470)")
         return out
 
-    def fetch(self, answers):
-        """Run the job's fetch line against a local server giving ANSWERS in turn: (exit, statuses served)."""
-        served = []
+    def fetch(self, answers, mirror=(404,), body=b"ok", pin=None, timeout=60, curlrc=None):
+        """Run the job's source loop and hash check against two local servers, the mirror giving MIRROR
+        and the snapshot ANSWERS in turn (each serving BODY): (exit, snapshot statuses, stderr, mirror
+        statuses; stderr carries stdout too). PIN defaults to BODY's SHA-256. CURLRC, if given, is
+        written as .curlrc in a directory that CURL_HOME, XDG_CONFIG_HOME and HOME all name."""
+        servers = []
+        for want in (mirror, answers):
+            served = []
 
-        class H(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                code = answers[min(len(served), len(answers) - 1)]
-                served.append(code)
-                self.send_response(code)
-                self.send_header("Content-Length", "2")
-                self.end_headers()
-                self.wfile.write(b"ok")
+            class H(http.server.BaseHTTPRequestHandler):
+                def do_GET(self, want=want, served=served):
+                    code = want[min(len(served), len(want) - 1)]
+                    served.append(code)
+                    self.send_response(code)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
 
-            def log_message(self, *a):
-                pass
+                def log_message(self, *a):
+                    pass
 
-        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        line = next(ln.strip() for _, b in job_steps(self.ci, "hostcheck") for ln in b.splitlines()
-                     if ln.strip().startswith("curl ") and "$KERNEL_URL" in ln)
+            srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            servers.append((srv, served))
+        lines = [ln.strip() for _, b in job_steps(self.ci, "hostcheck") if "HOSTCHECK_KERNEL=" in b
+                 for ln in b.splitlines()]
+        start = lines.index("src=")
+        end = next(i for i, ln in enumerate(lines) if ln.startswith('[ "$got" = "$KERNEL_SHA256" ]'))
+        script = "\n".join(lines[start:end + 1]).replace("'=https'", "'=http'")
+        (m, m_served), (s, s_served) = servers
         try:
             with tempfile.TemporaryDirectory() as d:
-                p = subprocess.run(["bash", "-c", 'deb="$D/k.deb"; ' + line.replace("'=https'", "'=http'")],
-                                   env={"PATH": os.environ["PATH"], "D": d,
-                                        "KERNEL_URL": f"http://127.0.0.1:{srv.server_port}/k.deb"},
-                                   capture_output=True, text=True, timeout=60)
+                rc = {}
+                if curlrc is not None:
+                    pathlib.Path(d, ".curlrc").write_text(curlrc)
+                    rc = {"CURL_HOME": d, "XDG_CONFIG_HOME": d, "HOME": d}
+                p = subprocess.run(["bash", "-e", "-c", 'deb="$D/k.deb"\n' + script],
+                                   env={"PATH": os.environ["PATH"], "D": d, **rc,
+                                        "KERNEL_SHA256": pin or hashlib.sha256(body).hexdigest(),
+                                        "KERNEL_MIRROR_URL": f"http://127.0.0.1:{m.server_port}/k.deb",
+                                        "KERNEL_URL": f"http://127.0.0.1:{s.server_port}/k.deb"},
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
         finally:
-            srv.shutdown()
-            srv.server_close()
-        return p.returncode, served, p.stderr
+            for srv, _ in servers:
+                srv.shutdown()
+                srv.server_close()
+        return p.returncode, s_served, p.stdout, m_served
 
     def test_the_kernel_fetch_retries_an_outage_and_not_a_wrong_pin(self):
         # #5321: snapshot.ubuntu.com's 503/504 runs reddened hostcheck on PRs that never moved the pin.
-        rc, served, err = self.fetch([503, 504, 200])
+        rc, served, err, _ = self.fetch([503, 504, 200])
         self.assertEqual((rc, served), (0, [503, 504, 200]), err)
-        rc, served, err = self.fetch([404, 200])  # a moved pin is the PR's fault: no retry
-        self.assertEqual((rc, served), (22, [404]), err)
+        rc, served, err, _ = self.fetch([404, 200])  # a moved pin is the PR's fault: no retry
+        self.assertEqual((rc, served), (1, [404]), err)
         self.assertIn("404", err)
+        self.assertIn("did not download from either source", err)
+
+    def test_the_kernel_comes_from_the_mirror_first_and_the_pin_decides(self):
+        # #5463: the release asset first; the snapshot only when the asset does not download.
+        rc, served, err, mirror = self.fetch([200], mirror=[200])
+        self.assertEqual((rc, mirror, served), (0, [200], []), err)
+        rc, served, err, mirror = self.fetch([200], mirror=[503, 200])  # the mirror's own retry
+        self.assertEqual((rc, mirror, served), (0, [503, 200], []), err)
+        rc, served, err, mirror = self.fetch([200], mirror=[404])  # no asset: the snapshot serves
+        self.assertEqual((rc, mirror, served), (0, [404], [200]), err)
+        self.assertIn("did not download from http://127.0.0.1:", err)
+        # Bytes off the pin fail the step, from whichever host, and no other source is tried.
+        rc, served, err, mirror = self.fetch([200], mirror=[200], pin="0" * 64)
+        self.assertEqual((rc, mirror, served), (1, [200], []), err)
+        self.assertIn("hashes to", err)
+        rc, served, err, mirror = self.fetch([200], mirror=[404], pin="0" * 64)
+        self.assertEqual((rc, mirror, served), (1, [404], [200]), err)
+
+    def test_a_down_mirror_falls_through_in_seconds(self):
+        # #5470: a mirror answering 5xx gets 3 tries (waits 1 s and 2 s), then the snapshot serves; on the
+        # full #5321 schedule it would take 9 tries and 255 s, past this run's 30 s limit.
+        t0 = time.monotonic()
+        rc, served, err, mirror = self.fetch([200], mirror=[503], timeout=30)
+        self.assertEqual((rc, mirror, served), (0, [503] * 3, [200]), err)
+        self.assertLess(time.monotonic() - t0, 20, err)
+        # The snapshot, the last source, keeps the full schedule behind a down mirror.
+        rc, served, err, mirror = self.fetch([503, 504, 502, 200], mirror=[500])
+        self.assertEqual((rc, mirror, served), (0, [500] * 3, [503, 504, 502, 200]), err)
+
+    def test_the_kernel_fetch_reads_no_curlrc(self):
+        # #5525: a .curlrc asking to retry every error would retry a 404 mirror; -q first ignores it.
+        rc, served, err, mirror = self.fetch([200], mirror=[404, 200], curlrc="retry-all-errors\n")
+        self.assertEqual((rc, mirror, served), (0, [404], [200]), err)
+        # The same .curlrc does reach a curl without -q, so the case above tests -q, not the file.
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, ".curlrc").write_text("bogus-option-from-curlrc\n")
+            env = {"PATH": os.environ["PATH"], "CURL_HOME": d, "XDG_CONFIG_HOME": d, "HOME": d}
+            read = subprocess.run(["curl", "-sS", "--version"], env=env, capture_output=True, text=True)
+            skipped = subprocess.run(["curl", "-q", "-sS", "--version"], env=env, capture_output=True, text=True)
+        self.assertIn("bogus-option-from-curlrc", read.stderr)
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
 
     def test_vm_stack_comes_from_the_snapshot(self):
         self.assertEqual(self.problems(self.ci), [])
@@ -1188,18 +1288,58 @@ class HostcheckJobTest(unittest.TestCase):
             "globbed vmlinuz": ("KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic", "KERNEL_VMLINUZ: boot/vmlinuz-*"),
             "other vmlinuz": ("KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-149-generic",
                               "KERNEL_VMLINUZ: boot/vmlinuz-6.8.0-150-generic"),
-            "plain http": ("curl --proto '=https' ", "curl "),
+            "plain http": ("curl -q --proto '=https' ", "curl -q "),
+            "reads .curlrc": ("curl -q --proto ", "curl --proto "),
+            "-q not first": ("curl -q --proto '=https' -fsSL ", "curl --proto '=https' -q -fsSL "),
+            "curl elsewhere reads .curlrc": ("        run: |\n          if [ -e /dev/kvm ]; then\n",
+                                             "        run: |\n          curl -fsSLO https://example.com/x\n"
+                                             "          if [ -e /dev/kvm ]; then\n"),
+            "curl by path reads .curlrc": ("        run: |\n          if [ -e /dev/kvm ]; then\n",
+                                           "        run: |\n          /usr/bin/curl -fsSLO https://example.com/x\n"
+                                           "          if [ -e /dev/kvm ]; then\n"),
             "fewer tries": ("--retry 8 ", "--retry 3 "),
             "unbounded": ("--retry-max-time 600 ", ""),
             "fixed delay": ("--retry 8 ", "--retry 8 --retry-delay 5 "),
             "retry a 404": ("--retry-connrefused ", "--retry-all-errors "),
-            "no try timeout": ("--max-time 180 ", ""),
+            "no try timeout": (" --max-time 180)", ")"),
+            "mirror on the full schedule": ("bound=(--retry 2 --retry-max-time 20 --max-time 60)",
+                                            "bound=(--retry 8 --retry-max-time 600 --max-time 180)"),
+            "mirror unbounded": ("          bound=(--retry 2 --retry-max-time 20 --max-time 60)\n", ""),
+            "mirror more tries": ("bound=(--retry 2 ", "bound=(--retry 5 "),
+            "mirror longer": ("--retry-max-time 20 ", "--retry-max-time 600 "),
+            "mirror try longer": ("--max-time 60)", "--max-time 180)"),
+            "snapshot on the short bound": ("            bound=(--retry 8 --retry-max-time 600 --max-time 180)\n", ""),
+            "bound outside curl": ('-fsSL "${bound[@]}" ', "-fsSL "),
+            "no mirror": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"', 'for url in "$KERNEL_URL"'),
+            "no second source": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"', 'for url in "$KERNEL_MIRROR_URL"'),
+            "snapshot first": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"',
+                               'for url in "$KERNEL_URL" "$KERNEL_MIRROR_URL"'),
+            "third source": ('for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"',
+                             'for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL" "$X"'),
+            "other mirror": ("https://github.com/ghbmrk/agentOS/releases/", "https://example.com/ghbmrk/agentOS/releases/"),
+            "other mirror tag": ("download/guest-kernel-6.8.0-149.149/", "download/guest-kernel-6.8.0-150.150/"),
+            "other mirror file": ("149.149/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb\n",
+                                  "149.149/linux-image-6.8.0-150-generic_6.8.0-150.150_amd64.deb\n"),
+            "no source guard": ('          [ -n "$src" ] ||', "          true ||"),
+            "retry on a bad hash": ('-o "$deb" "$url" && { src=$url; break; }', '-o "$deb" "$url" && src=$url'),
+            "a fetch outside the loop": ("          src=\n", '          src=\n          curl -fsSL -o "$deb" "$X"\n'),
             "kernel env elsewhere": ('echo "HOSTCHECK_KERNEL=$RUNNER_TEMP/k/$KERNEL_VMLINUZ" >> "$GITHUB_ENV"',
                                      'echo "HOSTCHECK_KERNEL=$(ls "$RUNNER_TEMP"/k/boot/vmlinuz-*)" >> "$GITHUB_ENV"'),
         }.items():
             with self.subTest(name):
                 self.assertIn(old, self.ci)
                 self.assertNotEqual(self.problems(self.ci.replace(old, new, 1)), [])
+
+    def test_curl_is_seen_by_any_path(self):
+        # #5533 item 1: the lint's -q check reaches every curl command, and no URL or other word.
+        for line in ("curl -fsSL x", "/usr/bin/curl -fsSL x", "./curl x", "bin/curl x", "~/bin/curl x",
+                     "curl.exe x", "$(curl x)", 'v="$(/usr/bin/curl x)"', "a;curl x", "a|curl x"):
+            with self.subTest(line=line):
+                self.assertEqual(len(CURL.findall(line)), 1)
+        for line in ("echo https://example.com/curl", "curl-config x", "libcurl x", "curlx x", "x.curl y",
+                     "http:/a/curl x", "a//curl x", "dpkg-curl x", "/usr/bin/curlish x"):
+            with self.subTest(line=line):
+                self.assertEqual(CURL.findall(line), [])
 
     def test_runner_package_commands_are_told_apart(self):
         for line in ("sudo apt install -yq swtpm", "apt-get -yq install x", "sudo aptitude install y",

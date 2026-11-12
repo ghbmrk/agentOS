@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -79,6 +80,7 @@ type Caps interface {
 // CapsDay is the byte caps' day as the page shows it.
 type CapsDay struct {
 	Spent    bool  // the saved day did not read back: every cap counts as spent
+	Unread   bool  // the firewall's table did not read at the last load: every cap is held spent until it does (#5445)
 	DueMS    int64 // a fresh day waits until then; 0: none waits
 	Starting bool  // the wait is over: the fresh day is being saved and taken up
 	Retrying bool  // the start's save failed and is tried again every second
@@ -125,6 +127,12 @@ type ResolverStop struct {
 	// since (#5394): until it does, the firewall passes nothing of it.
 	// It shows whether or not the instances run.
 	Unseeded bool
+	// Held is whether, within a lease (12 hours), the firewall kept the
+	// address service from giving a host an address it ended early for
+	// another host, which may still use it (nft ASSUMPTIONS
+	// ENF-shared-src-1, #5528): the host asking gets no address until that
+	// address is free. It shows whether or not the instances run.
+	Held bool
 }
 
 // LoadStep is the step of a load that refused it.
@@ -156,7 +164,32 @@ const (
 	PolicyUntyped PolicyKind = iota // a refusal the daemon did not type
 	PolicyVLAN                      // a device on a Wi-Fi network the setup serves no names on
 	PolicyName                      // a name to look up that is not a DNS host name
+	PolicySetup                     // the enforcer's own network setup, refused
 )
+
+// PolicyShown is how many reasons the policy in force cannot be served
+// home lists; one line after them counts the rest (#5431), so the page
+// stays bounded however many the policy holds.
+const PolicyShown = 20
+
+// PolicyNameMax is the most bytes of a name a reason shows (#5431): a
+// longer one shows its first PolicyNameMax bytes, cut at a character's
+// start, then "...". It is the longest DNS name, and the longest name a
+// signed policy holds (policy's name check), so a name the policy can
+// hold is never cut; the page bounds its own lines whatever it is handed.
+const PolicyNameMax = 253
+
+// clip is s cut to PolicyNameMax bytes as above.
+func clip(s string) string {
+	if len(s) <= PolicyNameMax {
+		return s
+	}
+	n := PolicyNameMax
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
+}
 
 // Restart is one resolver instance that has exited on its own Exits
 // times in a row and has not stayed up since.
@@ -351,7 +384,9 @@ func (s *Server) status() map[string]any {
 		}
 	}
 	if s.cfg.Caps != nil {
-		if day := s.cfg.Caps.Day(); day.Spent {
+		day := s.cfg.Caps.Day()
+		out["CapsUnread"] = day.Unread
+		if day.Spent {
 			out["Caps"] = day
 			if day.DueMS != 0 {
 				out["FreshDue"] = s.when(day.DueMS)
@@ -360,7 +395,7 @@ func (s *Server) status() map[string]any {
 	}
 	if s.cfg.Resolver != nil {
 		r := s.cfg.Resolver.Stopped()
-		out["Unseeded"] = r.Unseeded
+		out["Unseeded"], out["Held"] = r.Unseeded, r.Held
 		if r.Stopped {
 			out["Resolver"] = plainStop(r)
 		} else if len(r.Restarting) > 0 {
@@ -387,10 +422,28 @@ type plainResolver struct {
 // chose, so no name reaches the page outside printable ASCII.
 func plainStop(r ResolverStop) plainResolver {
 	out := plainResolver{Load: plainLoad(r.Load)}
+	// The first PolicyShown reasons, each once, then how many more there
+	// are, counted once each too (#5431).
+	seen, more := map[string]bool{}, 0
 	for _, p := range r.Policy {
-		if p := plainPolicy(p); !slices.Contains(out.Policy, p) {
+		switch p := plainPolicy(p); {
+		case seen[p]:
+		case len(seen) < PolicyShown:
+			seen[p] = true
 			out.Policy = append(out.Policy, p)
+		default:
+			seen[p] = true
+			more++
 		}
+	}
+	// The log names as many as home (dns.RefusedShown, held equal at the
+	// daemon), so neither says the rest are anywhere.
+	rest := "This page and the enforcer's log name only the first " + strconv.Itoa(PolicyShown) + "; the rest are named once those are fixed."
+	switch {
+	case more == 1:
+		out.Policy = append(out.Policy, "There is 1 more reason the policy in force cannot be served. "+rest)
+	case more > 1:
+		out.Policy = append(out.Policy, "There are "+strconv.Itoa(more)+" more reasons the policy in force cannot be served. "+rest)
 	}
 	for _, x := range r.Strays {
 		out.Strays = append(out.Strays, Stray{Iface: ascii(x.Iface), Addr: x.Addr, Nets: sentence(x.Nets)})
@@ -452,11 +505,14 @@ func plainUnset(u Unset) string {
 // owner's words, from its typed cause (#5307). A refusal with no words is
 // one generic line pointing at the log, never its text.
 func plainPolicy(p PolicyCause) string {
+	p.Name, p.WiFi = clip(p.Name), clip(p.WiFi)
 	switch p.Kind {
 	case PolicyVLAN:
 		return "The policy in force puts device " + ascii(p.Name) + " on Wi-Fi network " + ascii(p.WiFi) + ", and the enforcer's setup serves no names or addresses there."
 	case PolicyName:
 		return "The policy in force lists " + strconv.QuoteToASCII(p.Name) + ", which is not a name the enforcer can look up."
+	case PolicySetup:
+		return "The network setup could not be applied: the enforcer's own setup of its names and addresses is not one it can serve. The enforcer's log has the detail."
 	}
 	return "The policy in force names something the enforcer cannot serve; the enforcer's log has the detail."
 }

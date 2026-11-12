@@ -58,9 +58,24 @@ name: premerge
 # env strings, checks nothing out and runs no repository code. A dispatch from any other branch
 # runs that branch's copy, which the `premerge` environment refuses its key, as for any branch
 # workflow (PREMERGE-source); anyone who may dispatch may already comment, which reruns the gate.
+# PREMERGE-status-bind (#5442): the status is keyed by sha alone, so a fork PR opened on another PR's head would post
+# its own `failure` there last. A fork PR's gate posts nothing while an open PR into main from this repository has
+# its head; that PR's gate posts for the sha. It looks just before each post and only a read that names such a PR
+# holds it back, so a failed read, or an error before the head's repository is read, posts as before (fail closed).
+# Same-repository PRs and a lone fork PR always post, and a held-back post hands the merge job nothing.
+# PREMERGE-status-bind-fu (#5515): the status must also be settled again when the PR that set it stops owning the sha.
+# When a PR leaves a head (it closes, pushes past it, or is retargeted off main), the `handoff` job reruns the gate for
+# every other open PR into main on that head, so a fork PR left behind posts its own verdict instead of keeping the
+# departed PR's. After a fork PR posts, its gate reads the list again: a repository PR on the head that the first read
+# missed (it opened meanwhile, or the list lagged) gets its gate rerun after that post, so its own verdict lands last,
+# and the fork run hands the merge job nothing. Dispatching takes `actions: write`, held by `handoff` only, which reads
+# the event as env strings and runs no repository code. A failed list read turns `handoff` red and leaves the status as
+# it was. Bound, stated: two fork PRs on one head with no repository PR each post their own verdict and the last one
+# stands. That fails closed: a `success` there needs an accept on one of them for this same diff, and arming reads each
+# PR's own --check. Any rule over a sha-keyed status lets a second PR on a head hold the first; a new commit frees it.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened, edited, closed]
   issue_comment:
     types: [created, edited, deleted]
   workflow_run:
@@ -80,7 +95,7 @@ concurrency:
 jobs:
   premerge-gate:
     name: premerge-gate
-    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'pull_request_target' && github.event.action != 'closed') || github.event.issue.pull_request || github.event.workflow_run.pull_requests[0] || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: premerge # deployment branches: main only; holds PREMERGE_APP_KEY
@@ -88,6 +103,7 @@ jobs:
       merge-head: ${{ steps.gate.outputs.merge-head }}
       merge-repo: ${{ steps.gate.outputs.merge-repo }}
       merge-ref: ${{ steps.gate.outputs.merge-ref }}
+      rerun: ${{ steps.gate.outputs.rerun }}
     permissions:
       contents: read
       issues: read
@@ -121,15 +137,29 @@ jobs:
           gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
-          posted=no
+          posted=no skipped=no fork=no
+          ours() {
+            n=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+              --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .head.repo.full_name == \"$REPO\" and .number != $PR_NUMBER) | .number") || return 1
+            grep -Eqx '[1-9][0-9]{0,9}' <<< "$n"
+          }
           post() {
+            if [ "$fork" = yes ] && ours; then
+              echo "::notice::#$PR_NUMBER is a fork PR on the head of an open PR from $REPO; that PR's gate posts premerge"
+              posted=yes skipped=yes; return
+            fi
             GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \
               -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
             posted=yes
+            if [ "$fork" = yes ] && ours; then
+              echo "::notice::#$PR_NUMBER posted on the head of open PR(s)" $n "from $REPO; handoff reruns their gate"
+              printf 'rerun=%s\n' "$(tr '\n' ' ' <<< "$n")" >> "$GITHUB_OUTPUT"; skipped=yes
+            fi
           }
           trap '[ "$posted" = yes ] || post failure error' EXIT
           HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")
           HEAD_REPO=$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/pr.json")
+          [ "$HEAD_REPO" = "$REPO" ] || fork=yes
           BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")
           state=failure
           # errexit does not apply inside a substitution that is part of `&&`, so each step exits on its own failure.
@@ -162,10 +192,15 @@ jobs:
             exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \
               --base refs/remotes/pr/base "$HEAD_SHA"
           ) && state=success
-          out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
+          # PREMERGE-status-cut-pins (#5561): the merge reads the whole output, not the cut status, so no longer line or
+          # stripped character can read as `same`.
+          verdict=$out
+          # The status keeps printable ASCII plus the middle dot the Record format needs, cut at 120 characters, not bytes,
+          # so the unparsed-record status quotes a Record line a poster can copy (PREMERGE-record-format-ascii, #5545).
+          out=$(printf '%s' "${out:-error}" | tail -n 1 | python3 -I -c 'import sys;s="".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\u00b7");t=s[:120];i=t.rfind("/") if t.count(" ") < 2 else t.rfind(" ");sys.stdout.buffer.write((t if len(s) <= 120 or s[120] in " /" or i < 0 else t[:i+1].rstrip()).encode())')
           echo "premerge $HEAD_SHA: $state ($out)"
           post "$state" "$out"
-          if [ "$state" = success ] && [ "$out" = same ] && \
+          if [ "$state" = success ] && [ "$verdict" = same ] && [ "$skipped" = no ] && \
             jq -e '.state == "open" and .draft == false and .auto_merge == null' "$RUNNER_TEMP/pr.json" > /dev/null; then
             printf 'merge-head=%s\nmerge-repo=%s\nmerge-ref=%s\n' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"
           fi
@@ -273,3 +308,49 @@ jobs:
           [[ "$pr" =~ ^[1-9][0-9]{0,9}$ ]]
           gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null
           echo "reran the gate for #$pr"
+  handoff:
+    name: handoff
+    needs: premerge-gate
+    if: ${{ !cancelled() && (needs.premerge-gate.outputs.rerun != '' || (github.event_name == 'pull_request_target' && (github.event.action == 'closed' || github.event.action == 'synchronize' || github.event.changes.base.ref.from))) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      actions: write # dispatch premerge.yml on main for the other open PRs on a shared head, nothing else
+    steps:
+      - name: Rerun the gate for the other open PRs on a head this PR left or shares
+        shell: bash # -eo pipefail: a failed read must stop the step, never read as no PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
+          RERUN: ${{ needs.premerge-gate.outputs.rerun }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RETARGETED: ${{ github.event.changes.base.ref.from }}
+        run: |
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "not a PR number: $PR_NUMBER"; exit 1; }
+          # The head this PR left: the old head on a push, the head on a close or a move off main.
+          left=none
+          if [ "$EVENT" = pull_request_target ]; then
+            case "$ACTION" in
+              synchronize) left=$BEFORE ;;
+              closed) left=$HEAD_SHA ;;
+              edited) [ -z "$RETARGETED" ] || left=$HEAD_SHA ;;
+            esac
+          fi
+          prs=$(tr ' ' '\n' <<< "$RERUN")
+          if [ "$left" != none ]; then
+            [[ "$left" =~ ^[0-9a-f]{40}$ ]] || { echo "not a sha: $left"; exit 1; }
+            listed=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+              --jq ".[] | select(.head.sha == \"$left\" and .number != $PR_NUMBER) | .number")
+            prs+=$'\n'$listed
+          fi
+          # One PR number per line, or none; anything else dispatches nothing.
+          if grep -Evx '([1-9][0-9]{0,9})?' <<< "$prs"; then echo "not a PR number on the lines above"; exit 1; fi
+          for pr in $(sort -nu <<< "$prs"); do
+            gh api -X POST "repos/$REPO/actions/workflows/premerge.yml/dispatches" -f ref=main -f "inputs[pr]=$pr" > /dev/null
+            echo "reran the gate for #$pr"
+          done

@@ -138,7 +138,10 @@ func (p pageCaps) Day() page.CapsDay {
 	f := &p.d.fresh
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return page.CapsDay{Spent: p.d.net.spent, DueMS: f.due, Starting: f.starting || f.started,
+	p.d.net.resMu.Lock()
+	unread := p.d.net.unreadShown
+	p.d.net.resMu.Unlock()
+	return page.CapsDay{Spent: p.d.net.spent, Unread: unread, DueMS: f.due, Starting: f.starting || f.started,
 		Retrying: f.starting, Unsaved: f.unsaved != nil}
 }
 
@@ -310,19 +313,23 @@ type pageResolver struct{ d *Enforcer }
 func (p pageResolver) Stopped() page.ResolverStop {
 	n := &p.d.net
 	n.resMu.Lock()
-	runs, served, why, load, unseeded := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.unseeded
+	runs, served, why, load, unseeded, heldAt := n.resRuns, n.stopServed, n.stopPolicy, n.stopLoad, n.unseeded, n.heldAt
 	n.resMu.Unlock()
 	// A host the load did not seed has renewed by half a lease after it
-	// (nft.LeaseTimeout, the lease every range offers).
-	unread := !unseeded.IsZero() && p.d.dp.Now().Sub(unseeded) < nft.LeaseTimeout/2*time.Second
+	// (nft.LeaseTimeout, the lease every range offers); an address held
+	// for its old holder is free within a lease (a zero heldAt is
+	// centuries ago).
+	now := p.d.dp.Now()
+	unread := !unseeded.IsZero() && now.Sub(unseeded) < nft.LeaseTimeout/2*time.Second
+	held := now.Sub(heldAt) < nft.LeaseTimeout*time.Second
 	if runs {
-		out := page.ResolverStop{Unseeded: unread}
+		out := page.ResolverStop{Unseeded: unread, Held: held}
 		for _, f := range p.d.dp.DNS.Flapping() {
 			out.Restarting = append(out.Restarting, restartOf(f))
 		}
 		return out
 	}
-	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, Unseeded: unread}
+	out := page.ResolverStop{Stopped: true, Policy: why, Load: load, Unseeded: unread, Held: held}
 	errs := []error{served}
 	if j, ok := served.(interface{ Unwrap() []error }); ok {
 		errs = j.Unwrap()

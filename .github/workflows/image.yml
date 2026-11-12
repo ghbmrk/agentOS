@@ -44,6 +44,9 @@ on:
       - "broker/clerk/**"
       - "evals/slice-inbox/**"
       - "tests/test_slice_inbox_slice.py"
+      # The image's vulnerability records: image-vulncheck applies them to each build, and fails
+      # on one that accepts no finding, so a change to them alone is scanned here.
+      - "assurance/vulncheck.json"
   push:
     branches: [main]
     paths:
@@ -78,6 +81,9 @@ on:
       - "broker/clerk/**"
       - "evals/slice-inbox/**"
       - "tests/test_slice_inbox_slice.py"
+      # The image's vulnerability records: image-vulncheck applies them to each build, and fails
+      # on one that accepts no finding, so a change to them alone is scanned here.
+      - "assurance/vulncheck.json"
 env:
   GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
 permissions:
@@ -121,8 +127,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
-            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin libcap-dev \
-            qemu-system-x86 ovmf swtpm swtpm-tools
+            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
+            qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
@@ -283,6 +289,8 @@ jobs:
           cp "$RUNNER_TEMP"/out/*.usr.list "$RUNNER_TEMP/rec/" || true
           cp "$RUNNER_TEMP"/out/agentos.dpkg-status "$RUNNER_TEMP"/out/agentos.os-release "$RUNNER_TEMP/rec/" || true
           cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/" || true
+          # The guests' Debian package list (image/guest-base.sh, #5570), compared by the reproduce job.
+          cp -R "$RUNNER_TEMP"/out/guest "$RUNNER_TEMP/rec/" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
@@ -351,13 +359,19 @@ jobs:
           python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0
           # The /usr files (#4059), root hash, boot entry, kernel and initrds (IMG-2).
           python3 image/compare_manifests.py --release rec/release-a rec/release-b || ok=0
+          # The guests' packages (#5570): each build's Debian userland for the OpenClaw and Codex roots,
+          # so a guest file that differs names the package version behind it.
+          python3 image/compare_manifests.py rec/release-a/guest rec/release-b/guest || ok=0
           [ $ok = 1 ]
   # Not named vulncheck: that is vulncheck.yml's required check.
   image-vulncheck:
     # SPEC EVL-5 (#2886): a known vulnerability in a Debian package the image ships fails unless
     # an open issue named in assurance/vulncheck.json (a record whose where is "image") records
     # why it is accepted. Build a's package list (mkosi.postinst), which vulncheck.py checks
-    # against build a's mkosi manifest; the reproduce job checks b's manifest lists the same. The scanners and their pins are vulncheck.yml's, and the control
+    # against build a's mkosi manifest; the reproduce job checks b's manifest lists the same. The
+    # guests' packages are scanned as their own tree, "image/guest" (#5572): the status of the
+    # packages whose files the guests carry (image/guest-shipped.sh), checked against the base
+    # root's manifest the reproduce job compares. The scanners and their pins are vulncheck.yml's, and the control
     # runs first, so a clean scan counts only because the same scanners caught every plant.
     # vulncheck.yml rescans main's latest image daily, for advisories published after a build.
     needs: build
@@ -404,7 +418,7 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Control (planted vulnerabilities, offline databases)
         run: python3 tools/vulncheck.py control
-      - name: Known vulnerabilities in the image's packages (EVL-5)
+      - name: Known vulnerabilities in the image's, initrd's and guests' packages (EVL-5)
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/vulncheck.py image rec --check-issues --report image-vulncheck-report.json

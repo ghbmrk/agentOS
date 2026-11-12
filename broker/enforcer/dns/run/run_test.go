@@ -667,6 +667,31 @@ func TestFlapping(t *testing.T) {
 	}
 }
 
+// TestRestartWaitStartsAgain (#5319): an instance whose process stays
+// up StayUp before each exit is started again after RestartMin each time,
+// not after a wait doubled by its earlier exits.
+func TestRestartWaitStartsAgain(t *testing.T) {
+	stayUp = 400 * time.Millisecond
+	defer func() { stayUp = StayUp }()
+	s, _, logs := newLoggedSet(t, os.Args[0])
+	if err := s.Apply(files("core-a", "tv-lasts"), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	const again = "dns: listed-vlan10: starting it again in "
+	deadline := time.Now().Add(8 * time.Second)
+	for strings.Count(logs(), again) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the instance was not started again 3 times:\n%s", logs())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, l := range strings.Split(logs(), "\n") {
+		if strings.HasPrefix(l, again) && l != again+RestartMin.String() {
+			t.Fatalf("an instance that stayed up before each exit waited %q, want %s", strings.TrimPrefix(l, again), RestartMin)
+		}
+	}
+}
+
 // TestFlappingNeverStarted (#5164 R5 b, L3 and Security on #5318): an
 // instance whose start keeps failing has never served, so Flapping names
 // it with each failed start counted, the first at once and the next at

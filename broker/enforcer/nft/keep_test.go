@@ -318,3 +318,29 @@ func TestElementsLine(t *testing.T) {
 		t.Errorf("the caller's addresses became %v", addrs)
 	}
 }
+
+// NET-3 (#5528): Held reads the enforcer table's handle and its LeaseHeld
+// packets, never a counter of that name in another table or family nor
+// another counter, and holds none for a table without one. A listing that
+// does not read is an error.
+func TestHeldReadsTheTablesCounter(t *testing.T) {
+	// Each distractor stands both before and after the real entries, so
+	// a match on any field alone reads it, whichever match wins.
+	const wrong = `{"table": {"family": "ip", "name": "enforcer", "handle": 3}},
+		{"table": {"family": "inet", "name": "other", "handle": 4}},
+		{"counter": {"family": "ip", "table": "enforcer", "name": "lease_held", "packets": 50, "bytes": 1}},
+		{"counter": {"family": "inet", "table": "other", "name": "lease_held", "packets": 60, "bytes": 1}},
+		{"counter": {"family": "inet", "table": "enforcer", "name": "edge_in", "packets": 70, "bytes": 1}}`
+	const doc = `{"nftables": [{"metainfo": {"json_schema_version": 1}}, ` + wrong + `,
+		{"table": {"family": "inet", "name": "enforcer", "handle": 9}},
+		{"counter": {"family": "inet", "table": "enforcer", "name": "lease_held", "packets": 7, "bytes": 2100}}, ` + wrong + `]}`
+	if tb, n, err := Held([]byte(doc)); tb != 9 || n != 7 || err != nil {
+		t.Errorf("Held: table %d, held %d, %v; want 9, 7", tb, n, err)
+	}
+	if tb, n, err := Held([]byte(`{"nftables": [{"table": {"family": "inet", "name": "enforcer", "handle": 2}}]}`)); tb != 2 || n != 0 || err != nil {
+		t.Errorf("Held of a table without the counter: %d, %d, %v", tb, n, err)
+	}
+	if _, _, err := Held([]byte("{")); err == nil {
+		t.Error("Held read a listing that does not read")
+	}
+}

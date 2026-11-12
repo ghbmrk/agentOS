@@ -71,7 +71,10 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
-	res, err := t.Provider.Run(ctx, ProviderRequest{
+	// The run's boot and each command ask STOP again under the machine's
+	// lock, so a STOP that lands after the entry check starts nothing and
+	// never reaches the model route (STOP-queued-start-fu).
+	res, err := t.Provider.Run(vm.WithHold(ctx, t.Stopped), ProviderRequest{
 		Provider: a.Provider, Brief: a.Brief, TaskClass: a.TaskClass,
 		Machine: c.machine, Label: c.label, Class: workerClass(c), MemMB: c.spec.MemMB,
 	})
@@ -80,6 +83,11 @@ func (t *Tools) providerRun(ctx context.Context, c caller, raw json.RawMessage) 
 		if errors.As(err, &ref) {
 			// The closed reason, never the wrapped cause. A reason this
 			// table lacks leaves as a logged ref.
+			// A run that failed while STOP holds failed because of it (the
+			// boot or command was held): say STOP, not "shorten the brief".
+			if ref.Reason == "failed" && t.Stopped != nil && t.Stopped() {
+				return nil, errStartStopped
+			}
 			if r, ok := providerReasons[ref.Reason]; ok {
 				return nil, r
 			}

@@ -362,6 +362,7 @@ func EdgeTripped(running []byte, l Layout, p Drop) (bool, error) {
 			return false, nil
 		}
 	}
+	found := false
 	for _, s := range sets {
 		if s.Name != TripSet {
 			continue
@@ -376,17 +377,24 @@ func EdgeTripped(running []byte, l Layout, p Drop) (bool, error) {
 				}
 				if json.Unmarshal(raw, &o) != nil {
 					// TripSet holds only interface names: one that does
-					// not read leaves the kernel's cut unknown.
+					// not read, or names none, leaves the kernel's cut
+					// unknown.
 					return false, fmt.Errorf("nft: %s element %s", TripSet, raw)
 				}
 				v = o.Elem.Val
 			}
-			if v == l.Edge {
-				return true, nil
+			if v == "" {
+				// An element with no name reads as none: it must not be
+				// skipped, or the answer would depend on its place among
+				// the elements (#5445 item 3).
+				return false, fmt.Errorf("nft: %s element %s", TripSet, raw)
 			}
+			// Every element is read before the answer, so a bad one is an
+			// error wherever it sits.
+			found = found || v == l.Edge
 		}
 	}
-	return false, nil
+	return found, nil
 }
 
 // capped is the rules of a chain that charges a packet to quota q of cap:

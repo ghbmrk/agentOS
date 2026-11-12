@@ -40,7 +40,8 @@ const StopWait = 5 * time.Second
 var stopWait = StopWait // the tests' seam
 
 // Restart bounds the wait before an instance that exited on its own is
-// started again: it starts at RestartMin and doubles up to RestartMax.
+// started again: it starts at RestartMin and doubles up to RestartMax,
+// and starts at RestartMin again once a process has stayed up StayUp.
 const (
 	RestartMin = time.Second
 	RestartMax = 30 * time.Second
@@ -271,7 +272,8 @@ func (s *Set) start(name, conf string, backoff time.Duration) error {
 
 // watch logs an instance's output and, when it exits without being asked
 // to, starts it again on the same file after a wait that doubles each
-// time, up to RestartMax. It is not started again once its file is no
+// time, up to RestartMax, and is RestartMin again after a process that
+// stayed up StayUp (#5319). It is not started again once its file is no
 // longer the one in force (Set.want).
 func (s *Set) watch(name string, p *proc, backoff time.Duration) {
 	err := p.cmd.Wait()
@@ -282,6 +284,7 @@ func (s *Set) watch(name string, p *proc, backoff time.Duration) {
 		delete(s.procs, name)
 		if time.Since(p.started) >= stayUp {
 			s.exits[name] = 0
+			backoff = RestartMin
 		}
 		s.exits[name]++
 	}

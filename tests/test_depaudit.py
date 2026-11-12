@@ -265,8 +265,10 @@ class ScratchDirTest(unittest.TestCase):
         with depaudit._scratch_dir("depaudit-test-") as d:
             os.makedirs(os.path.join(d, "go-build1"))
             # Detached, as a tracee that strace let go of: it keeps creating files for ~1s.
-            subprocess.Popen(["sh", "-c", 'for i in 1 2 3 4 5 6 7 8 9 10; do touch "$0/go-build1/f$i"; sleep 0.1; done',
-                              d], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            p = subprocess.Popen(["sh", "-c", 'for i in 1 2 3 4 5 6 7 8 9 10; do touch "$0/go-build1/f$i"; sleep 0.1; done',
+                                  d], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            self.addCleanup(p.wait)  # nothing outlives the module (tools/unit_tests.py, #5475)
+            self.addCleanup(p.kill)
         self.assertFalse(os.path.exists(d))
 
     def test_a_directory_that_never_empties_still_raises(self):
