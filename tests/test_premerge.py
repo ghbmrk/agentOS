@@ -648,13 +648,25 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(status_of("same"), ["same"])
 
     def test_long_path_lists_keep_their_leading_cause(self):
-        # #5546 review: needs-security and changed list every path and are not bounded; the 120-character cut keeps the
-        # leading cause, and the full list is what a local `--check` prints. Pinned here so a reorder cannot cut the cause.
+        # #5546 review, #5553: needs-security, changed and mark list every path and are not bounded; the status cuts at
+        # 120 characters on a path boundary (a space or a slash), never inside a name, and keeps the leading cause.
         paths = [f"tools/some_long_gate_file_{n:03}.py" for n in range(40)]
+        long = "/".join(["directory_name_%d" % n for n in range(12)]) + "/file.py"
         for cause in ("needs-security", "changed", "mark"):
-            shown, = status_of(cause + " " + " ".join(paths))
-            self.assertEqual(len(shown), 120)
+            line = cause + " " + " ".join(paths)
+            shown, = status_of(line)
+            self.assertLessEqual(len(shown), 120)
             self.assertTrue(shown.startswith(cause + " " + paths[0]), shown)
+            self.assertEqual(shown.split(), line.split()[:len(shown.split())])  # whole paths only
+            # a first path longer than the whole status is cut after a slash, not mid-name
+            shown, = status_of(cause + " " + long + " other.py")
+            self.assertLessEqual(len(shown), 120)
+            self.assertTrue(shown.startswith(cause + " directory_name_0/") and shown.endswith("/"), shown)
+            self.assertTrue(long.startswith(shown.split(" ", 1)[1]), shown)
+            # an exact fit and a cut that lands on a boundary lose nothing
+            fit = cause + " " + "a" * (119 - len(cause))
+            self.assertEqual(status_of(fit), [fit])
+            self.assertEqual(status_of(fit + " bbb"), [fit])
 
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
