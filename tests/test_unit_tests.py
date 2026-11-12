@@ -131,6 +131,23 @@ class CommandTest(unittest.TestCase):
             with mock.patch.dict(unit_tests.ENV, {"HOME": root_home}, clear=True):
                 self.assertEqual([unit_tests._runners(v) for v in ("", "/", f"{h}/.nvm", "/x/../y")], [False] * 4, root_home)
 
+    def test_runners_checks_every_list_entry_and_resolves_relative_ones(self):
+        # #5484: every entry of a :-separated list is matched, not only the first, and a relative entry
+        # is taken from the worktree (where the module runs) before the same prefix match.
+        h, ws = "/home/runner", "/home/runner/work/agentOS/agentOS"
+        with mock.patch.dict(unit_tests.ENV, {"HOME": h, "RUNNER_TEMP": f"{h}/work/_temp"}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path(ws)):
+            for escapes in (f"{ws}/a:{h}/.nvm", f"/usr/lib::{h}/.cargo", f"x:y:{h}", f"{ws}:{h}/work/_temp/../.config",
+                            "../../../.config", "./../../..", "x/../../../../.nvm", f"{ws}/a:../../.cargo", "../x"):
+                self.assertTrue(unit_tests._runners(escapes), escapes)
+            for inside in (f"{ws}/a:/usr/lib", f"{ws}:{h}/work/_temp/a", "tools/x", "./x", "x/../y", ".", "",
+                           ":", "a::b", f"tools/x:{ws}/y:/tmp", "s", "x/../../agentOS/z"):
+                self.assertFalse(unit_tests._runners(inside), inside)
+        with mock.patch.dict(unit_tests.ENV, {"HOME": h}, clear=True), \
+             mock.patch.object(unit_tests, "ROOT", pathlib.Path("/srv/ws")):  # a worktree outside home
+            self.assertEqual([unit_tests._runners(v) for v in ("x", "../..", f"../..{h}/.nvm", f"/srv:../../{h}")],
+                             [False, False, True, True])
+
     def test_the_runner_refuses_to_run_as_a_user(self):
         # #5413: only root can run strace over another user and make the modules' users.
         with mock.patch("os.geteuid", return_value=1000), self.assertRaisesRegex(OSError, "run as root"):
