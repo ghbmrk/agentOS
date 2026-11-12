@@ -15,6 +15,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 USERLAND = ROOT / "image/guest-userland.sh"
+SHIPPED_SH = ROOT / "image/guest-shipped.sh"
 BASE_SH = ROOT / "image/guest-base.sh"
 GUESTS = ("openclaw", "codex")
 MULTIARCH = "usr/lib/x86_64-linux-gnu"
@@ -51,9 +52,73 @@ class UserlandCopyTest(unittest.TestCase):
         shutil.copy(HOST_LD, lib / HOST_LD.name)
         self.out = self.tmp / "out"
 
-    def run_userland(self, *paths):
+    def stage_dpkg(self, unowned=()):
+        """A dpkg database in the base: each program under usr/bin is its own package, every other
+        file belongs to staged-libs, except the base paths in UNOWNED."""
+        db = self.base / "var/lib/dpkg"
+        shutil.rmtree(db, True)
+        (db / "info").mkdir(parents=True)
+        owners = {}
+        for f in sorted(p for p in self.base.rglob("*") if p.is_file() and not p.is_symlink()):
+            rel = "/" + str(f.relative_to(self.base))
+            if rel.startswith("/var/lib/dpkg/") or rel in unowned:
+                continue
+            pkg = f.name if rel.startswith("/usr/bin/") else "staged-libs"
+            owners.setdefault(pkg, []).append(rel)
+        stanzas = []
+        for pkg, files in owners.items():
+            (db / "info" / (pkg + ".list")).write_text("\n".join(files) + "\n")
+            stanzas.append("Package: %s\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1.0-1\n"
+                           "Maintainer: agentOS test <test@example.invalid>\nDescription: staged\n" % pkg)
+        (db / "status").write_text("\n".join(stanzas))
+        (self.base / "usr/lib/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
+
+    def run_userland(self, *paths, unowned=()):
+        self.stage_dpkg(unowned)
+        self.shipped = self.tmp / "shipped"
         return subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), *paths],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
+
+    def recorded(self):
+        return set(self.shipped.read_text().split()) if self.shipped.exists() else set()
+
+    def test_records_the_package_of_each_copied_file(self):
+        # #5572: the image vulnerability check scans exactly the packages whose files a guest
+        # carries; a program already in the root (Node, a pinned download) is no package's.
+        (self.out / "usr/local/bin").mkdir(parents=True)
+        shutil.copy(self.base / "usr/bin/bash", self.out / "usr/local/bin/tool")
+        r = self.run_userland("/bin/sh", "/usr/local/bin/tool")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.recorded(), {"dash", "staged-libs"})
+        st = self.tmp / "status"
+        r = subprocess.run(["sh", str(SHIPPED_SH), "--status", str(self.base), str(st)], capture_output=True,
+                           text=True, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        status = (st / "agentos.dpkg-status").read_text()
+        self.assertEqual(sorted(re.findall(r"(?m)^Package: (\S+)$", status)), ["dash", "staged-libs"])
+        self.assertIn("Status: install ok installed", status)
+        self.assertEqual((st / "agentos.os-release").read_text(), (self.base / "usr/lib/os-release").read_text())
+
+    def test_a_copied_file_no_package_owns_fails(self):
+        # Fail closed: a file with no owner would ship with no package scanned for it.
+        r = self.run_userland("/bin/sh", unowned=("/usr/bin/dash",))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/usr/bin/dash (/usr/bin/dash): no Debian package", r.stderr)
+        self.assertFalse((self.out / "bin/sh").exists())
+
+    def test_recording_needs_a_named_file_and_the_status_needs_a_record(self):
+        env = {k: v for k, v in os.environ.items() if k != "GUEST_SHIPPED"}
+        self.stage_dpkg()
+        r = subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), "/bin/sh"], capture_output=True,
+                           text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("GUEST_SHIPPED", r.stderr)
+        empty = self.tmp / "empty"
+        empty.write_text("")
+        r = subprocess.run(["sh", str(SHIPPED_SH), "--status", str(self.base), str(self.tmp / "st")],
+                           capture_output=True, text=True, env={**env, "GUEST_SHIPPED": str(empty)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no package recorded", r.stderr)
 
     def test_copies_programs_and_their_libraries_from_the_base(self):
         r = self.run_userland("/bin/sh", "/bin/bash")
@@ -198,6 +263,21 @@ class WiringTest(unittest.TestCase):
         self.assertLess(export, min(guests))
         self.assertLess(max(guests), drop)
         self.assertLess(drop, mkosi)
+        # #5572: each guest build records its packages in one file, and their status is written
+        # where the release record and tools/vulncheck.py read it, before the base is dropped.
+        shipped = b.index('export GUEST_SHIPPED="$OUT/guest-base.shipped"')
+        status = b.index('sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/guest"')
+        self.assertLess(shipped, min(guests))
+        self.assertLess(max(guests), status)
+        self.assertLess(status, drop)
+
+    def test_codex_records_what_its_bwrap_links(self):
+        # #5572: the static bwrap carries libc6-dev's, libcap-dev's and gcc's archive code; the linker
+        # lists every input (-t) and each one outside the build's /tmp is recorded as shipped.
+        code = (ROOT / "guest/codex/build-rootfs.sh").read_text()
+        self.assertIn("-l:libcap.a -o bwrap -Wl,-t >link.trace'", code)
+        self.assertIn('sh "$here/../../image/guest-shipped.sh" "$base" $linked', code)
+        self.assertLess(code.index("link.trace'"), code.index("guest-shipped.sh\" \"$base\" $linked"))
 
     def test_reproduce_compares_the_guest_packages(self):
         wf = (ROOT / ".github/workflows/image.yml").read_text()
@@ -212,11 +292,11 @@ class WiringTest(unittest.TestCase):
     def test_ci_guest_builds_name_a_base(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         unit = 'sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"'
-        rootfs = 'sudo GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs'
+        rootfs = 'sudo GUEST_BASE="$RUNNER_TEMP/guest-base" GUEST_SHIPPED="$RUNNER_TEMP/guest-shipped" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs'
         self.assertLess(ci.index(unit), ci.index(rootfs))
         self.assertIn("sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest", ci)
-        self.assertIn("GUEST_BASE=/tmp/guest-base sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
-        self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
+        self.assertIn("GUEST_BASE=/tmp/guest-base GUEST_SHIPPED=/tmp/guest-shipped sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
+        self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
         self.assertLess(ci.index("sudo sh image/guest-base.sh"), ci.index("sh guest/openclaw/build-rootfs.sh"))
 
 

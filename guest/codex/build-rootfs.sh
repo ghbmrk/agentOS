@@ -62,9 +62,16 @@ tar -xJf "$work/bwrap.tar.xz" -C "$src" --strip-components=1
 printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$src/config.h"
 # Compiled by the base's gcc against its static libc and libcap, all from the image's pinned apt
 # sources (#5571), never the build host's cc: two runners on different runner images would link
-# different bytes. A clean environment, so nothing of the caller's reaches the compiler.
+# different bytes. A clean environment, so nothing of the caller's reaches the compiler. The linker
+# lists each file it reads (-t), and the Debian package of each one outside the build's /tmp is
+# recorded as shipped (image/guest-shipped.sh, #5572): bwrap carries their code, so the image
+# vulnerability check scans them.
 chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agentos-bwrap
-	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap'
+	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap -Wl,-t >link.trace'
+linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/link.trace" | sort -u)
+[ -n "$linked" ] || { echo "bwrap: the linker listed no input outside /tmp" >&2; exit 1; }
+# shellcheck disable=SC2086  # one path per word
+sh "$here/../../image/guest-shipped.sh" "$base" $linked
 
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \

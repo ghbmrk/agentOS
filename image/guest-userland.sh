@@ -9,9 +9,11 @@
 # stays as it is and only its libraries are copied; any other is copied from BASE, at the same path.
 # BASE's own loader resolves the libraries, from BASE's library directory only (no host cache);
 # it goes to /lib64, where every x86-64 program asks for it. A library found anywhere else, a
-# missing one, another loader, or a link that leaves BASE fails the build.
+# missing one, another loader, or a link that leaves BASE fails the build, and so does a copied file
+# no Debian package in BASE owns.
 set -eu
 [ $# -ge 3 ] || { echo "usage: guest-userland.sh BASE OUT PATH..." >&2; exit 2; }
+here=$(cd "$(dirname "$0")" && pwd)
 base=$(cd "$1" && pwd -P)
 out=$2
 shift 2
@@ -19,11 +21,13 @@ lib=$base/usr/lib/x86_64-linux-gnu
 ld=$lib/ld-linux-x86-64.so.2
 interp=/lib64/ld-linux-x86-64.so.2
 fail() { echo "guest-userland.sh: $*" >&2; exit 1; }
-# put SRC DST: SRC, every link in it resolved, must stay inside BASE.
+# put SRC DST: SRC, every link in it resolved, must stay inside BASE. The Debian package that owns
+# it is recorded (image/guest-shipped.sh), so the image vulnerability check scans it (#5572).
 put() {
 	r=$(readlink -f "$1") || fail "$1: unresolvable"
 	case $r in "$base"/*) ;; *) fail "$1 resolves to $r, outside $base" ;; esac
 	[ -f "$r" ] || fail "$1: not a file"
+	sh "$here/guest-shipped.sh" "$base" "${r#"$base"}"
 	mkdir -p "$out$(dirname "$2")"
 	cp "$r" "$out$2"
 }

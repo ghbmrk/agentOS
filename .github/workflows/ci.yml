@@ -151,7 +151,7 @@ jobs:
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
           sudo sh image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
-          sudo GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
+          sudo GUEST_BASE="$RUNNER_TEMP/guest-base" GUEST_SHIPPED="$RUNNER_TEMP/guest-shipped" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs -v
       - name: Traceability (markers cite known IDs; checked on a regenerated TRACE.md)
         run: python tools/trace.py && python tools/trace.py --check
       - name: Old core only shrinks (D-139 ratchet; markers, lines and imports against the base)
@@ -664,7 +664,7 @@ jobs:
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.
         run: |
-          GUEST_BASE=/tmp/guest-base sh guest/openclaw/build-rootfs.sh /tmp/ocroot
+          GUEST_BASE=/tmp/guest-base GUEST_SHIPPED=/tmp/guest-shipped sh guest/openclaw/build-rootfs.sh /tmp/ocroot
           # With no_new_privs, as agentosd.service runs runsc (L7-6).
           cd broker
           rc=0
@@ -682,7 +682,7 @@ jobs:
         # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache GUEST_BASE=/tmp/guest-base \
-            sh guest/codex/build-rootfs.sh /tmp/cxroot
+            GUEST_SHIPPED=/tmp/guest-shipped-codex sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker
           rc=0
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \

@@ -1,0 +1,22 @@
+Package: agentos-nofix
+Status: install ok installed
+Priority: optional
+Section: misc
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: all
+Version: 2.0-1
+Description: planted package the main tree also has, whose advisory Debian has not fixed
+ tools/vulncheck.py control: the main tree's record must not accept it in the guests.
+
+Package: libguest1
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 1
+Maintainer: agentOS control <control@example.invalid>
+Architecture: amd64
+Source: agentos-guestonly (1.0-1)
+Version: 1.0-1
+Description: planted package only the guests carry, whose advisory Debian has not fixed
+ tools/vulncheck.py control: the guests' own scan must report it (#5572).
