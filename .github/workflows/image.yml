@@ -121,7 +121,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
-            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin libcap-dev \
+            systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin \
             qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

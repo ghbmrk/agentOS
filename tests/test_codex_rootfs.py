@@ -150,6 +150,24 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertFalse((self.out / VENDOR / "codex-resources/voice").exists())
         self.assertTrue((self.out / "bin/bash").is_file())
 
+    # REQ: UPD-1a
+    def test_bwrap_is_compiled_by_the_base_s_toolchain(self):
+        # #5571: a runner image update moved the host's gcc and libcap-dev between builds a and b,
+        # so the static bwrap must come from GUEST_BASE's own gcc, libc and libcap. Each object
+        # compiled into it records its compiler in .comment: all of them must be Debian's, and the
+        # base's gcc must be among them (an Ubuntu runner's compiler says "Ubuntu").
+        base = pathlib.Path(os.environ["GUEST_BASE"])
+        major = re.fullmatch(r"(?:x86_64-linux-gnu-)?gcc-(\d+)", os.readlink(base / "usr/bin/gcc")).group(1)
+        ver = subprocess.run(["dpkg-query", f"--admindir={base}/var/lib/dpkg", "-W", "-f", "${Version}", f"gcc-{major}"],
+                             capture_output=True, text=True, check=True).stdout
+        bwrap = (self.out / "usr/bin/bwrap").read_bytes()
+        self.assertEqual((self.out / VENDOR / "codex-resources/bwrap").read_bytes(), bwrap)
+        compilers = set(re.findall(rb"GCC: \(([^)\n]*)\)", bwrap))
+        self.assertIn(f"Debian {ver}".encode(), compilers)
+        self.assertEqual({c for c in compilers if not c.startswith(b"Debian ")}, set())
+        # The build leaves nothing in the base the next guest build reads.
+        self.assertFalse((base / "tmp/agentos-bwrap").exists())
+
     # REQ: CAP-11, A14
     def test_idle_command_runs_in_the_built_tree(self):
         idle = json.loads((CODEX / "launch.json").read_text())["idle"]
