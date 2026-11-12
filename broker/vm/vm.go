@@ -726,6 +726,11 @@ func (m *Manager) create(ctx context.Context, id string, s Spec, seed map[string
 	}
 	mc.mu.Lock()
 	err = claimLocked(mc)
+	// Asked under the lock, just before the boot: a provider run whose
+	// STOP came after its entry check starts nothing (STOP-queued-start-fu).
+	if err == nil && heldBy(ctx) {
+		err = ErrHeld
+	}
 	tried := false
 	if err == nil {
 		var h *diskHold
