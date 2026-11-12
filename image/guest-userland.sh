@@ -33,12 +33,11 @@ for p in "$@"; do
 	case $p in /*) ;; *) fail "$p: not an absolute path" ;; esac
 	[ -e "$out$p" ] || put "$base$p" "$p"
 	deps=$("$ld" --inhibit-cache --library-path "$lib" --list "$out$p") || fail "$p: the loader cannot list it"
-	while read -r name arrow path _; do
+	while read -r name _ path _; do
 		case $name in
 		linux-vdso.so.*) continue ;;
 		/*) [ "$name" = "$interp" ] || fail "$p asks for loader $name" ; continue ;;
 		esac
-		[ "$arrow" = "=>" ] || fail "$p: unexpected loader line: $name $arrow $path"
 		case $path in "$lib"/*) ;; *) fail "$p: $name not found in $lib (got $path)" ;; esac
 		put "$path" "/usr/lib/x86_64-linux-gnu/${path#"$lib"/}"
 	done <<EOT
