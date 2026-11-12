@@ -53,7 +53,7 @@ class CommandTest(unittest.TestCase):
         # then setpriv runs it as its own user, with no new privileges, before Python (and so any
         # site hook) starts.
         self.assertEqual(cmd[cmd.index("-o") + 2:],
-                         ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh",
+                         ["/bin/sh", "-c", 'command exec "$@" 0</dev/null 2>&1', "sh",
                           "setpriv", "--reuid=ut-x", "--regid=ut-x", "--init-groups", "--no-new-privs", "--",
                           sys.executable, "-c",
                           "import runpy, sys; runpy.run_module(sys.argv.pop(1), run_name='__main__', "

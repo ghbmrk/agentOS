@@ -1541,32 +1541,42 @@ class DriveIdTest(unittest.TestCase):
 # special properties, for the rest ('command exec 9>f || fail ...'). ShellReader reads a whole file as
 # the shell does (#5533): backslash-newlines join, quotes (also $'...') run across lines, ${...} and
 # $((...)) stay inside their word with quotes read in them, $(...) and `...` are read as commands of
-# their own, '#' starts a comment only where a word would start, a case arm's pattern and its ')' are
-# not commands, and here-document bodies are text (an unquoted one's substitutions are read). A
-# command is flagged when, after leading reserved words, 'time -p' and assignments, its command word
-# is a special builtin and it carries a redirection that can fail (closing an fd with >&- or <&-
-# cannot; a here-document can, since bash may write it to a temporary file). SHELL_LIMITS names what
-# the lint does not read, and the failure message repeats it. The scan covers every shell file outside
-# the record directories.
+# their own (a `...` after its backslashes are removed, so a nested one is read too), '#' starts a
+# comment only where a word would start, a case arm's pattern and its ')' are not commands, bash's &>
+# and &>> are redirections, and here-document bodies are text (an unquoted one's substitutions are
+# read). A command is flagged when, after leading reserved words, 'function', 'time -p' and
+# assignments, its command word is a special builtin and it carries a redirection that can fail
+# (closing an fd with >&- or <&- cannot; a here-document can, since bash may write it to a temporary
+# file). The scan reads every shell file outside the record directories, and the shell
+# that Python files and workflows hold (#5538). SHELL_LIMITS names what the lint does not read, and
+# the failure message repeats it.
 SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
 SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
 SHELL_META = " \t\n;&|()<>"
-SHELL_REDIR = re.compile(r"[<>]+[&|]?")
+SHELL_REDIR = re.compile(r"&?[<>]+[&|]?")
 SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
-SHELL_LIMITS = ("The lint reads shell files only (*.sh, or a sh, bash or dash #! line), not shell held in "
-                "other files (sh -c strings, workflow run: blocks; #5538), nor files in record directories "
-                "(reviews/, briefs/ and the rest in tools/ci_scope.py), which this test may not open. It does not read aliases or "
-                "functions named like a builtin, the text that eval, sh -c or a trap runs, escapes that spell a "
-                "name in $'...', a case whose 'in' is on a later line, bash's &> and &>>, the 'function name' "
-                "form, or nested backquotes; it reads a ' inside \"${...}\" as dash does (as text), not as bash "
-                "does (as a quote).")
+SHELL_LIMITS = """What the lint reads and does not read:
+- reads: shell files (*.sh, or a sh, bash, dash, ash or ksh #! line, also through env or busybox).
+- reads: the shell a Python file runs (an argv literal with a shell, its options and -c; shell=True; os.system,
+  os.popen, subprocess.getoutput), when the script is a string literal or a name bound once in the file to one.
+- reads: the run: steps of the workflows and actions under .github/, as sh or bash.
+- does not read: files in record directories (reviews/, briefs/ and the rest in tools/ci_scope.py), since
+  listing one counts as reading records (tests/records_audit.py).
+- does not read: a script built at run time (a format, a +, an f-string, a parameter) or held in any other string.
+- does not read: aliases or functions named like a builtin, or the text that eval, sh -c or a trap runs
+  inside shell.
+- does not read: escapes that spell a name in $'...' (exec spelled $'\\x65xec'), or a case whose 'in' is on
+  a later line.
+- reads as dash does: in "${a:-'}'}" a ' is text, so the first } ends the expansion (bash reads '}' as a
+  quote)."""
 
 
 def command_words(words):
     """The values of a simple command's words from its command word on."""
     prev = None
     for n, (text, value) in enumerate(words):
-        if not (text in SHELL_RESERVED or SHELL_ASSIGN.match(text) or (prev == "time" and text == "-p")):
+        if not (text in SHELL_RESERVED or SHELL_ASSIGN.match(text) or (prev == "time" and text == "-p")
+                or text == "function" or prev == "function"):
             return [v for _, v in words[n:]]
         prev = text
     return []
@@ -1637,7 +1647,7 @@ class ShellReader:
         commands of a substitution are read. QUOTED: it is inside double quotes."""
         s = self.s
         if s[i] == "`":
-            return self.scan(i + 1, "`")
+            return self.backquote(i + 1, quoted)
         if s.startswith("$((", i) or s.startswith("${", i):
             opener, depth, i = s[i + 1], 0, i + 1
             closer = ")" if opener == "(" else "}"
@@ -1660,6 +1670,21 @@ class ShellReader:
             return i
         if s.startswith("$(", i):
             return self.scan(i + 2, ")")
+        return i + 1
+
+    def backquote(self, i, quoted):
+        """Reads the `...` whose text starts at s[i] as the shell does: \\, \\` and \\$ (and \\" inside
+        double quotes) lose their backslash, and the result is read as commands, so a nested `...` is read
+        too. Returns the index after the closing backquote."""
+        s, text, at = self.s, [], []
+        while i < len(s) and s[i] != "`":
+            if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in "$`\\" + '"' * quoted:
+                i += 1
+            text.append(s[i:i + 1])
+            at.append(i)
+            i += 1
+        inner = ShellReader("".join(text))
+        self.commands += [(words, redirected, at[start]) for words, redirected, start in inner.commands]
         return i + 1
 
     def scan(self, i, stop):
@@ -1694,11 +1719,11 @@ class ShellReader:
                 end()
                 i += 3 if s.startswith(";;&", i) else 2
                 case[-1] = "pattern"
-            elif c in ";&|()":
+            elif c in ";&|()" and not s.startswith("&>", i):
                 parens += (c == "(") - (c == ")" and parens > 0)
                 end()
                 i += 1
-            elif c in "<>":
+            elif c in "<>&":
                 start = i if start is None else start
                 op = SHELL_REDIR.match(s, i).group()
                 i += len(op)
@@ -1782,11 +1807,22 @@ def redirected_specials(text):
 CI_SCOPE = load("image_ci_scope", ROOT / "tools/ci_scope.py")
 
 
-def shell_files(root=ROOT):
-    """The shell files under ROOT: *.sh, or a #!/bin/sh, bash or dash line. The walk opens no record
-    (ci_scope: a record file or directory, or .git), since CI's records-only step does not run this
-    module (tests/records_audit.py)."""
-    out = []
+SHELL_NAMES = frozenset("sh bash dash ash ksh".split())
+SHELL_SHEBANG = re.compile(rb"#!\s*\S*/(?:env\s+(?:-S\s*)?(?:\S*/)?|busybox\s+)?(?:ba|da|a|k)?sh\b")
+PYTHON_SHEBANG = re.compile(rb"#!\s*\S*/(?:env\s+(?:-S\s*)?(?:\S*/)?)?python[\d.]*\b")
+# The calls that run their first argument with /bin/sh -c.
+PYTHON_SHELL_CALLS = {("os", "system"), ("os", "popen"), ("subprocess", "getoutput"), ("subprocess", "getstatusoutput")}
+RUN_KEY = re.compile(r"(\s*(?:-\s+)?)run:[ \t]*(.*)$")
+SHELL_KEY = re.compile(r"\s*(?:-\s+)?shell:[ \t]*(\S*)")
+
+
+def scanned_files(root=ROOT):
+    """The files under ROOT that hold shell, by kind: "shell" (*.sh, or a sh, bash, dash, ash or ksh #!
+    line, also through env or busybox), "python" (*.py, or a python #! line) and "workflow" (a .yml or
+    .yaml file under .github/). The walk opens no record (ci_scope: a record file or directory, or .git):
+    tests/records_audit.py counts a listed record directory as a read record, and CI's records-only step
+    does not run this module."""
+    out = {"shell": [], "python": [], "workflow": []}
     for top, dirs, files in os.walk(root):
         rel = pathlib.Path(top).relative_to(root).as_posix()
         rel = "" if rel == "." else rel + "/"
@@ -1797,9 +1833,137 @@ def shell_files(root=ROOT):
                 continue
             with f.open("rb") as fh:
                 head = fh.readline()
-            if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
-                out.append(f)
-    return sorted(out)
+            if f.suffix == ".sh" or SHELL_SHEBANG.match(head):
+                out["shell"].append(f)
+            elif f.suffix == ".py" or PYTHON_SHEBANG.match(head):
+                out["python"].append(f)
+            elif f.suffix in (".yml", ".yaml") and rel.startswith(".github/"):
+                out["workflow"].append(f)
+    return {kind: sorted(fs) for kind, fs in out.items()}
+
+
+def shell_script_arg(args):
+    """The argument a shell runs as its script in ARGS, a Python argv's nodes: the first operand after
+    a shell's options when they hold -c; None if there is none, or an option before it is not a literal."""
+    words = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None for a in args]
+    for k, w in enumerate(words):
+        if w is None or os.path.basename(w) not in SHELL_NAMES:
+            continue
+        c = skip = False
+        opts = True
+        for arg, w in zip(args[k + 1:], words[k + 1:]):
+            if skip:  # the name after -o
+                skip = False
+            elif opts and w == "--":
+                opts = False
+            elif opts and w is not None and w[:1] in "-+" and len(w) > 1:
+                if not w.startswith("--"):
+                    c, skip = c or "c" in w, "o" in w
+            else:
+                return arg if c else None
+    return None
+
+
+def python_scripts(source):
+    """(script, line of each script line) for each shell script SOURCE, a Python program, runs whose text
+    is a string literal or a name bound once in the file, to a string literal."""
+    tree = ast.parse(source)
+    bound, value = collections.Counter(), {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bound[node.id] += 1
+        elif isinstance(node, ast.arg):
+            bound[node.arg] += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound[node.name] += 1
+        elif isinstance(node, ast.alias):
+            bound[(node.asname or node.name).split(".")[0]] += 1
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name):
+                    value[target.id] = node.value
+    out = []
+    for node in ast.walk(tree):
+        args = []
+        if isinstance(node, (ast.List, ast.Tuple)):
+            args = [shell_script_arg(node.elts)]
+        elif isinstance(node, ast.Call):
+            f = node.func
+            shell = any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True
+                        for k in node.keywords)
+            if shell or (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                         and (f.value.id, f.attr) in PYTHON_SHELL_CALLS):
+                args = node.args[:1]
+            args.append(shell_script_arg(node.args))
+        for arg in args:
+            if isinstance(arg, ast.Name) and bound[arg.id] == 1:
+                arg = value.get(arg.id)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                n = arg.value.count("\n")
+                exact = arg.end_lineno - arg.lineno == n  # else a \n escape or literals joined across lines
+                out.append((arg.value, [arg.lineno + (i if exact else 0) for i in range(n + 1)]))
+    return out
+
+
+def fold(lines):
+    """YAML's folding of LINES, (line, text) pairs: a line joins the one before it with a space, unless
+    either is more indented or a blank line separates them."""
+    out, gap = [], True
+    for n, text in lines:
+        if not text.strip():
+            gap = True
+        elif gap or text[:1] in " \t" or out[-1][1][:1] in " \t":
+            out.append([n, text])
+            gap = False
+        else:
+            out[-1][1] += " " + text
+    return [tuple(x) for x in out]
+
+
+def workflow_scripts(text):
+    """(scripts, unread) for TEXT, a workflow or action: (script, line of each script line) for each
+    run: key with a scalar value, and the line of each run: whose form the reader does not know (a
+    quoted scalar continued on another line). A run: whose value is empty, a [...] or a {...} is not a
+    step's script (defaults: run:, a matrix key)."""
+    lines = text.split("\n")
+    scripts, unread = [], []
+    for k, line in enumerate(lines):
+        m = RUN_KEY.fullmatch(line)
+        if not m or m.group(2)[:1] in ("", "[", "{", "#"):
+            continue
+        col, v = len(m.group(1)), m.group(2)
+        body = []
+        for j in range(k + 1, len(lines)):
+            if lines[j].strip() and len(lines[j]) - len(lines[j].lstrip(" ")) <= col:
+                break
+            body.append((j + 1, lines[j]))
+        while body and not body[-1][1].strip():
+            body.pop()
+        if v[0] in "|>":
+            indent = min((len(t) - len(t.lstrip(" ")) for _, t in body if t.strip()), default=0)
+            body = [(n, t[indent:]) for n, t in body]
+            body = body if v[0] == "|" else fold(body)
+        elif v[0] in "'\"":
+            if body or not re.fullmatch(r"'(?:[^']|'')*'|\"(?:[^\"\\]|\\.)*\"", v.split(" #")[0].rstrip()):
+                unread.append(k + 1)
+                continue
+            v = v.split(" #")[0].rstrip()
+            body = [(k + 1, v[1:-1].replace("''", "'") if v[0] == "'" else json.loads(v))]
+        else:
+            body = fold([(k + 1, re.sub(r"\s+#.*", "", v))] + [(n, t.strip()) for n, t in body])
+        scripts.append(("\n".join(t for _, t in body), [n for n, _ in body]))
+    return scripts, unread
+
+
+def file_scripts(f, kind):
+    """(scripts, unread) for file F of KIND (scanned_files): (script, line of each script line) for each
+    shell script it holds, and the line of each run: the reader cannot read."""
+    text = f.read_text(errors="replace")
+    if kind == "shell":
+        return [(text, list(range(1, text.count("\n") + 2)))], []
+    if kind == "python":
+        return python_scripts(text), []
+    return workflow_scripts(text)
 
 
 # Hits in another lane's files, each with the row that fixes it; an entry that no longer hits fails, so
@@ -1910,6 +2074,22 @@ class ImageShellLintTest(unittest.TestCase):
         # Item 7: a here-document is a redirection too (bash may write it to a temporary file).
         ': <<EOF',
         'cat <<EOF; : >x',
+        # #5538 item 2: bash's &> and &>>, the 'function name' form, and nested backquotes.
+        ': &>x',
+        ': &>>x',
+        'a; : &>"$x"',
+        '&>x :',
+        'function f { : >x; }',
+        'function f() { exec 9>x; }',
+        'v=`echo \\`: >x\\``',
+        'v=`echo \\`a \\\\\\`: >x\\\\\\`\\``',
+        'v="`echo \\"\\`: >x\\`\\"`"',
+        'v=`echo \\"; : >x\\"`',
+        'v=`echo "\\$(: >x)"`',
+        # An exec that runs a command too: bash (not in POSIX mode) runs the handler after a failed
+        # redirect there, while dash exits.
+        'exec cat >x',
+        'exec "$@" 0</dev/null 2>&1',
     )
     CLEAN = (
         '#!/bin/sh',
@@ -1978,6 +2158,14 @@ class ImageShellLintTest(unittest.TestCase):
         'case $x in a|exec) ;; *) ;; esac',
         'v="$(case x in a) echo \'"\';; esac) : >f"',
         'case $x in a) y;; esac >f',
+        # #5538: &> after a command; the 'function name' form; nested backquotes.
+        'a &>x',
+        'a &>>x :',
+        'function exec { true >x; }',
+        'function : { true; }',
+        'echo `echo \\`a; : b\\`` >x',
+        'v=`echo \\$: >x`',
+        'v="`echo \\"; : >x\\"`"',
     )
     # Unterminated, so each is clean on its own and swallows what follows.
     OPEN = (
@@ -2020,6 +2208,8 @@ class ImageShellLintTest(unittest.TestCase):
         ('case x in "a)") : >f;; esac', [(1, ":")]),
         ("case x in 'a)') : >f;; esac", [(1, ":")]),
         (": >a; : >b\n\nexec 9>x", [(1, ":"), (3, "exec")]),
+        ("v=`a\n\\`: >x\\``\n: >y", [(2, ":"), (3, ":")]),
+        ("function f\n{ : >x; }", [(2, ":")]),
     )
 
     def test_lint_flags_a_redirected_special_builtin(self):
@@ -2048,33 +2238,144 @@ class ImageShellLintTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(redirected_specials(line), [(1, name)])
 
-    def test_shell_files_are_the_shell_files_outside_records(self):
+    def test_scanned_files_are_the_files_outside_records(self):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
                      "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
                      "i.py": "#!/bin/shx\n", "j": "echo\n", "k": "#!/bin/bash -p\n", "docs/l.sh": "echo\n",
                      ".git/hooks/m.sh": "echo\n", "reviews/ux/n.sh": "echo\n", "briefs/o": "#!/bin/sh\n",
-                     "docs/security/p.sh": "echo\n", "README.md": "#!/bin/sh\n", "x/reviews/q.sh": "echo\n"}
+                     "docs/security/p.sh": "echo\n", "README.md": "#!/bin/sh\n", "x/reviews/q.sh": "echo\n",
+                     # #5538 item 3: ash, ksh, busybox and env -S.
+                     "r": "#!/bin/ash\n", "s": "#!/bin/ksh\n", "t": "#!/bin/busybox sh\n", "u": "#!/bin/busybox ash\n",
+                     "v": "#!/usr/bin/env -S sh -e\n", "w": "#!/usr/bin/env -S bash\n", "y": "#!/bin/zsh\n",
+                     "z": "#!/bin/busybox wget\n",
+                     # Item 1: Python and workflows.
+                     "p1.py": "x\n", "p2": "#!/usr/bin/env python3\n", "p3": "#!/usr/bin/python3.12 -I\n",
+                     "reviews/p4.py": "x\n", ".github/workflows/w1.yml": "x\n", ".github/actions/a/action.yaml": "x\n",
+                     "w2.yml": "x\n", "p5": "#!/usr/bin/env -S python3 -u\n", "p6": "#!/bin/mypython\n",
+                     "s2": "#!/usr/bin/env  sh\n", "s3": "#!/bin/busybox  ash\n", "s4": "#!/usr/bin/env -S  sh\n",
+                     "p7": "#!/usr/bin/env  python3\n", "p8": "#!/usr/bin/env -S  python3\n", "p9": "#!/usr/bin/env /usr/bin/python3\n"}
             for name, body in files.items():
                 (d / name).parent.mkdir(parents=True, exist_ok=True)
                 (d / name).write_text(body)
             (d / "link.sh").symlink_to(d / "a.sh")
             (d / "dir.sh").mkdir()
-            self.assertEqual([str(f.relative_to(d)) for f in shell_files(d)],
-                             ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "sub/b", "x/reviews/q.sh"])
+            self.assertEqual({kind: [str(f.relative_to(d)) for f in fs] for kind, fs in scanned_files(d).items()},
+                             {"shell": ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "r", "s", "s2", "s3", "s4", "sub/b", "t", "u", "v",
+                                        "w", "x/reviews/q.sh"],
+                              "python": ["h", "i.py", "p1.py", "p2", "p3", "p5", "p7", "p8", "p9"],
+                              "workflow": [".github/actions/a/action.yaml", ".github/workflows/w1.yml"]})
+
+    # #5538 item 1: the shell a Python program runs, as (source, the (line, builtin) of each hit).
+    PYTHON = (
+        ('run(["sh", "-c", ": >x"])', [(1, ":")]),
+        ('run(("/bin/bash", "-e", "-c", "exec 9>x"))', [(1, "exec")]),
+        ('run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", ": >x"])', [(1, ":")]),
+        ('run(["busybox", "ash", "-ec", ": >x", "name"])', [(1, ":")]),
+        ('run(["unshare", "-r", "dash", "-c", ": >x"])', [(1, ":")]),
+        ('runsc("exec", cid, "/bin/sh", "-c", ": >x")', [(1, ":")]),
+        ('run(["ksh", "-c", "--", ": >x"])', [(1, ":")]),
+        ('run(["sh", "-c", "--", "--", ": >x"])', []),  # the script is '--'
+        ('run(["sh", "--norc", "-c", s, ": >x"])', []),
+        ('S = """set -e\n: >x\n"""\nrun(["sh", "-c", S, "name"])', [(2, ":")]),
+        ('def f():\n    s = (": >a; "\n         ": >b")\n    run(["sh", "-c", s])', [(2, ":")]),
+        ('run("a\\n: >x", shell=True)', [(1, ":")]),
+        ('os.system(": >x")', [(1, ":")]),
+        ('os.popen("exec 3<x")', [(1, "exec")]),
+        ('subprocess.getoutput(": >x")', [(1, ":")]),
+        ('subprocess.getstatusoutput(": >x")', [(1, ":")]),
+        ('run(["sh", "-c", "-e", ": >x"])', [(1, ":")]),
+        ('run(["bash", "--restricted", ": >x"])', []),
+        ('s = ": >x"\ndef s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nasync def s(): pass\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\nimport s\nrun(["sh", "-c", s])', []),
+        ('run("true", ": >x", shell=True)', []),
+        ('s: str = ": >x"\nrun(["sh", "-c", s])', [(1, ":")]),
+        ('s = "true"\ns = ": >x"\nrun(["sh", "-c", s])', []),
+        ('run(["sh", "-c", "true >x"])', []),
+        ('run(["sh", ": >x"])', []),
+        ('run(["sh", "-e", ": >x"])', []),
+        ('run(["sh", "-o", "c", ": >x"])', []),
+        ('run(["echo", "-c", ": >x"])', []),
+        ('run(["sh", opt, "-c", ": >x"])', []),
+        ('run(": >x", shell=False)', []),
+        ('run(": >x")', []),
+        ('x.system(": >x")', []),
+        ('s = ": >x"\ns = "true"\nrun(["sh", "-c", s])', []),
+        ('s = ": >x"\ndef f(s):\n    run(["sh", "-c", s])', []),
+        ('run(["sh", "-c", f": >{x}"])', []),
+        ('"run([\\"sh\\", \\"-c\\", \\": >x\\"])"', []),
+    )
+    # The run: steps of a workflow, as (text, the (line, builtin) of each hit).
+    WORKFLOW = (
+        ("steps:\n  - run: : >x\n", [(2, ":")]),
+        ("steps:\n  - run: |\n      a\n      : >x\n    name: n\n  - run: echo >x\n", [(4, ":")]),
+        ("steps:\n  - name: n\n    run: |-\n      a\n\n      exec 9>x\n", [(6, "exec")]),
+        ("steps:\n  - run: >-\n      echo\n      : >x\n  - run: >\n      a\n\n      : >x\n", [(8, ":")]),
+        ("steps:\n  - run: >\n      a\n        : >x\n", [(4, ":")]),
+        ("steps:\n  - run: a\n      ; : >x\n", [(2, ":")]),
+        ("steps:\n  - run: ': >x' # c\n  - run: \"exec 9>y\"\n", [(2, ":"), (3, "exec")]),
+        ("steps:\n  - run: \"exec 9>y\" # c\n", [(2, "exec")]),
+        ("steps:\n  - run: >\n      a\n        b\n      exec 9>x\n", [(5, "exec")]),
+        ("steps:\n  -  run: : >x\n", [(2, ":")]),
+        ("steps:\n  - run: 'echo '': >x'''\n", []),
+        ("steps:\n  - run: echo # ; : >x\n", []),
+        ("steps:\n  - run: true >x\n", []),
+        ("jobs:\n  a:\n    defaults:\n      run:\n        shell: bash\n    strategy:\n      matrix:\n        run: [a, b]\n", []),
+        ("run: |\n  : >x\nrun: : >y\n", [(2, ":"), (3, ":")]),
+    )
+
+    def scripts_hits(self, scripts):
+        return [(lines[n - 1], name) for text, lines in scripts for n, name in redirected_specials(text)]
+
+    def test_lint_reads_python_shell(self):
+        for source, hits in self.PYTHON:
+            with self.subTest(source=source):
+                self.assertEqual(self.scripts_hits(python_scripts(source)), hits)
+
+    def test_lint_reads_workflow_shell(self):
+        for text, hits in self.WORKFLOW:
+            with self.subTest(text=text):
+                scripts, unread = workflow_scripts(text)
+                self.assertEqual((self.scripts_hits(scripts), unread), (hits, []))
+        self.assertEqual(workflow_scripts("steps:\n  - run: 'a\n      b'\n  - run: \"a\n      b\"\n")[1], [2, 4])
+
+    def test_lint_finds_offline_systemd_manager_lines(self):
+        # The manager shell's two ':' lines (#5538) were found by this scan; 'true' fixes them.
+        text = (ROOT / "image/offline_systemd.py").read_text()
+        fixed = [n for n, line in enumerate(text.split("\n"), 1) if 'true >"$N/dev/' in line]
+        self.assertEqual(len(fixed), 2)
+        self.assertEqual(self.scripts_hits(python_scripts(text)), [])
+        self.assertEqual(self.scripts_hits(python_scripts(text.replace('true >"$N/dev/', ': >"$N/dev/'))),
+                         [(fixed[0], ":"), (fixed[1], ":")])
 
     def test_repository_shell_has_no_redirected_special_builtin(self):
-        files = shell_files()
+        files = scanned_files()
         for f in (IMG / "ci_boot.sh", MK / "mkosi.extra/usr/lib/agentos/drive-id", AGENTOS_LIB / "egress-setup",
                   ROOT / "broker/vm/gvisor/testdata/fakerunsc.sh", ROOT / "spikes/S8-live/run.sh"):
-            self.assertIn(f, files)
-        hits = []  # (the line as SHELL_ALLOWED names it, the hit as the failure message shows it)
-        for f in files:
-            text = f.read_text(errors="replace").splitlines()
-            for n, name in redirected_specials("\n".join(text)):
+            self.assertIn(f, files["shell"])
+        self.assertIn(ROOT / "image/offline_systemd.py", files["python"])
+        self.assertIn(ROOT / ".github/workflows/ci.yml", files["workflow"])
+        self.assertIn(ROOT / ".github/actions/scope/action.yml", files["workflow"])
+        hits, unread = [], []  # hits: (the line as SHELL_ALLOWED names it, the hit as the failure message shows it)
+        for kind, fs in files.items():
+            for f in fs:
                 rel = f.relative_to(ROOT)
-                hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
+                text = f.read_text(errors="replace").split("\n")
+                scripts, bad = file_scripts(f, kind)
+                unread += ["%s:%d: run: a quoted value on more than one line" % (rel, n) for n in bad]
+                if kind == "workflow":
+                    # Each run: is read as sh or bash: a step that names another shell needs its own reader.
+                    unread += ["%s:%d: shell: %s is not sh or bash" % (rel, n, m.group(1)) for n, line in enumerate(text, 1)
+                               for m in [SHELL_KEY.match(line)] if m and os.path.basename(m.group(1)) not in SHELL_NAMES]
+                for script, lines in scripts:
+                    for n, name in redirected_specials(script):
+                        n = lines[n - 1]
+                        hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
+        self.assertEqual(unread, [], "the lint cannot read these steps. A quoted run: value continued on another line: "
+                         "write it as a `run: |` block. A shell: other than sh or bash: use sh or bash, or teach "
+                         "workflow_scripts that shell.")
         self.assertEqual([hit for line, hit in hits if line not in SHELL_ALLOWED], [],
                          "put `command` in front (`command . ./lib >x`), or `true >file` for `:`: a failed redirect "
                          "on a special builtin exits the shell before a handler runs.\n" + SHELL_LIMITS)

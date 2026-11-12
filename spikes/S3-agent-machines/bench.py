@@ -248,7 +248,7 @@ class Gvisor:
         subprocess.run(self.runsc("delete", "-force", self.cid(mid)), stderr=subprocess.DEVNULL)
 
     def probe(self, mid, timeout=120):
-        sh = ("rm -f /root/probe.out; : > /root/probe; "
+        sh = ("rm -f /root/probe.out; true > /root/probe; "
               "while [ ! -s /root/probe.out ]; do sleep 0.005; done; cat /root/probe.out")
         try:
             r = subprocess.run(self.runsc("exec", self.cid(mid), "/bin/sh", "-c", sh),

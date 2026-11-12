@@ -96,7 +96,7 @@ ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # starts. So no process of the module ever holds strace's stderr, on which alone a fault is read
 # (#5407), or its trace, and no site hook (.pth, sitecustomize, usercustomize) runs before the
 # join. When an attempt ends, every process of the module's user is killed (sweep()).
-JOIN = ["/bin/sh", "-c", 'exec "$@" 0</dev/null 2>&1', "sh"]
+JOIN = ["/bin/sh", "-c", 'command exec "$@" 0</dev/null 2>&1', "sh"]
 GROUP = "agentos-tests"  # every module's user is in it, for the Go caches the modules share (go_dir())
 LONG_POLE = 1.25
 FLOOR = 60  # seconds: a module shorter than this never fails the long-pole check
