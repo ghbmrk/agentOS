@@ -162,7 +162,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # HEAD^1 is the base side of the PR's test merge.
         run: |
-          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || : > "$RUNNER_TEMP/base-baseline.txt"
+          git show HEAD^1:tools/brief_acceptance_baseline.txt > "$RUNNER_TEMP/base-baseline.txt" 2>/dev/null || true > "$RUNNER_TEMP/base-baseline.txt"
           python tools/doclint.py --base-baseline "$RUNNER_TEMP/base-baseline.txt"
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: steps.scope.outputs.records != 'true'
