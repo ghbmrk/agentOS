@@ -169,7 +169,9 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertFalse((base / "tmp/agentos-bwrap").exists())
         # #5572: the packages whose archives the linker read into bwrap are recorded as shipped,
         # with those of every file the guest copies, so the image vulnerability check scans them.
-        shipped = set(pathlib.Path(os.environ["GUEST_SHIPPED"]).read_text().split())
+        record = os.environ.get("GUEST_SHIPPED")
+        self.assertTrue(record, "set GUEST_SHIPPED, the file the build records shipped packages in")
+        shipped = set(pathlib.Path(record).read_text().split())
         self.assertLessEqual({"libc6-dev", "libcap-dev", "libc6", "dash", "bash"}, shipped)
 
     # REQ: CAP-11, A14

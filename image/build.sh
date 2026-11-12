@@ -85,7 +85,7 @@ sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"
 export GUEST_BASE="$OUT/guest-base"
 # Each guest build records here the Debian packages whose files it copies (image/guest-shipped.sh).
 export GUEST_SHIPPED="$OUT/guest-base.shipped"
-: >"$GUEST_SHIPPED"
+true >"$GUEST_SHIPPED"
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
