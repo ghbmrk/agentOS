@@ -9,7 +9,9 @@ set -eu
 R=${AGENTOS_HEALTH_ROOT:-}
 keys=$R/var/lib/agentos-egress/vault.keys
 claim=$R/var/lib/agentos-localui/claim.json
-exec 9>"$R/run/agentos-egress-setup.lock"
+# command: exec is a special builtin, so a failed redirect on it would exit the shell before the FAIL line.
+command exec 9>"$R/run/agentos-egress-setup.lock" ||
+	{ echo "egress-setup: FAIL cannot open the lock $R/run/agentos-egress-setup.lock, so no setup vault is made"; exit 1; }
 flock 9
 if [ -e "$keys" ] || [ ! -f "$claim" ] || [ ! -d "$R/var/lib/agentos-egress" ]; then
 	exit 0

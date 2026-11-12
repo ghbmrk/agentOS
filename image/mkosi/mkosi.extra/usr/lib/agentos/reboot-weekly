@@ -29,7 +29,7 @@ if due; then
 	rm -f "$D/pending" "$D/pending.new"
 	# true, not ":": a redirection error on a special builtin exits the shell, which would skip the reboot.
 	true 2>/dev/null >"$D/unrecorded" ||
-		echo "agentos-reboot: FAIL drill start not recorded: is /var full or failing? If its record is lost too, no boot reports this drill"
+		echo "agentos-reboot: FAIL drill start record not written: likely /var is full or failing. If the drill's record is lost too, no boot reports this drill"
 	want=$(tr ' ' '\n' <"$R/proc/cmdline" | sed -n 's/^usrhash=//p' | tail -n 1)
 	st=$(veritysetup status usr 2>/dev/null)
 	data=$(printf '%s\n' "$st" | sed -n 's/^ *data device: *//p')
@@ -54,9 +54,10 @@ fi
 # ahead: the week's bound outranks the report, and the next weekly reboot drills again (#5455). It is
 # said once, not on every 5-minute retry, and once more just before the reboot (#5466). A record
 # written on an earlier try and not on this one is removed: its reboot_at would count the wait since,
-# so the next healthy boot reports the drill missed instead.
-failed= said= now=
-fail() { echo "agentos-reboot: FAIL drill record not written (image=$image): is /var full or failing? The reboot goes ahead; the next boot reports the drill missed"; }
+# so the next healthy boot reports the drill missed instead. That is promised only when unrecorded was
+# written: with it lost too, no boot reports this drill (#5513).
+failed= said= now= missed=
+fail() { echo "agentos-reboot: FAIL drill record not written (image=$image): likely /var is full or failing. The reboot goes ahead${missed:+; the next boot reports the drill missed}"; }
 stamp() {
 	now=
 	[ -n "$image" ] || return 0
@@ -67,7 +68,8 @@ stamp() {
 		return 0
 	fi
 	rm -f "$D/pending" "$D/pending.new" 2>/dev/null
-	true 2>/dev/null >"$D/unrecorded"
+	missed=
+	true 2>/dev/null >"$D/unrecorded" && missed=1
 	failed=1
 	[ -n "$said" ] || { said=1 now=1; fail; }
 }

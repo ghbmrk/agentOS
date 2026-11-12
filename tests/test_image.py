@@ -1485,7 +1485,7 @@ class DriveIdTest(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 r = self.run_id("assign", shell)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but the marker was not written", r.stdout)
+                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but /var/lib/agentos/drive-id was not written", r.stdout)
                 self.assertNotIn("assigned", r.stdout)
                 self.assertNotIn("sync", "\n".join(self.sfdisk_calls()))
                 r = self.run_id("assign", shell, restored)
@@ -1532,6 +1532,309 @@ class DriveIdTest(unittest.TestCase):
         self.assertEqual(self.sfdisk_calls(), [])
         self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
         self.assertFalse((self.root / "run/agentos-drive-id").exists())
+
+
+# POSIX special builtins (':', '.', exec, eval, set, trap and the rest): a redirection error on one
+# exits a non-interactive shell before any '||' handler or 'set -e' report runs (#5464, #5524). A
+# regular command runs its handler: 'true >f' for ':', and the 'command' prefix, which drops the
+# special properties, for the rest ('command exec 9>f || fail ...'). Each line is read as the shell
+# reads it: quotes, backslashes, ${...} and $((...)) stay inside their word, $(...) and `...` are read
+# as commands of their own, and '#' starts a comment only where a word would start. A command is
+# flagged when, after leading reserved words and assignments, its command word is a special builtin
+# and it carries a redirection that can fail (closing an fd with >&- or <&- cannot). Here-document
+# bodies and backslash-newline continuations are read as lines of their own.
+SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
+SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
+SHELL_META = " \t;&|()<>"
+SHELL_REDIR = re.compile(r"[<>]+[&|]?")
+SHELL_SQUOTE = re.compile(r"'([^']*)'?")
+
+
+def shell_word(s, i, stop, out):
+    """Reads the word at s[i]: its text, its value (quotes removed, each expansion a NUL) and its end."""
+    start, value = i, []
+    while i < len(s) and s[i] not in SHELL_META and s[i] != stop:
+        c = s[i]
+        if c == "\\":
+            value.append(s[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            m = SHELL_SQUOTE.match(s, i)
+            value.append(m.group(1))
+            i = m.end()
+        elif c == '"':
+            i += 1
+            while i < len(s) and s[i] != '"':
+                if s[i] == "\\":
+                    value.append("\\")  # no special builtin's name has a backslash in it
+                    i += 2
+                elif s[i] in "$`":
+                    i = shell_expansion(s, i, out)
+                    value.append("\0")
+                else:
+                    value.append(s[i])
+                    i += 1
+            i += 1
+        elif c in "$`":
+            i = shell_expansion(s, i, out)
+            value.append("\0")
+        else:
+            value.append(c)
+            i += 1
+    return s[start:i], "".join(value), i
+
+
+def shell_expansion(s, i, out):
+    """Skips the expansion at s[i] ($x, ${...}, $((...)), $(...) or `...`) and returns its end; the
+    commands of a substitution go to out."""
+    if s[i] == "`":
+        return shell_scan(s, i + 1, "`", out)
+    if s.startswith("$((", i) or s.startswith("${", i):
+        opener, depth, i = s[i + 1], 0, i + 1
+        closer = ")" if opener == "(" else "}"
+        while i < len(s):
+            depth += (s[i] == opener) - (s[i] == closer)
+            i += 1
+            if depth == 0:
+                break
+        return i
+    if s.startswith("$(", i):
+        return shell_scan(s, i + 2, ")", out)
+    return i + 1
+
+
+def shell_scan(s, i, stop, out):
+    """Adds the simple commands in s[i:], up to an unquoted stop character, to out as (words,
+    redirected): each word's (text, value), and whether a redirection that can fail is on it.
+    Returns the index after the stop."""
+    words, redirected = [], False
+    while i < len(s) and s[i] != stop:
+        if s[i] in " \t":
+            i += 1
+        elif s[i] == "#":
+            i = len(s)
+        elif s[i] in ";&|()":
+            out.append((words, redirected))
+            words, redirected = [], False
+            i += 1
+        elif s[i] in "<>":
+            op = SHELL_REDIR.match(s, i).group()
+            i += len(op)
+            while i < len(s) and s[i] in " \t":
+                i += 1
+            target, _, i = shell_word(s, i, stop, out)
+            redirected |= not (op.endswith("&") and target == "-")
+        else:
+            text, value, i = shell_word(s, i, stop, out)
+            if not (text.isdigit() and i < len(s) and s[i] in "<>"):
+                words.append((text, value))
+    out.append((words, redirected))
+    return i + 1
+
+
+def special_redirected(words, redirected):
+    command = [value for text, value in words if text not in SHELL_RESERVED and not re.match(r"[A-Za-z_]\w*=", text)]
+    return redirected and bool(command) and command[0] in SPECIAL_BUILTINS
+
+
+def redirected_specials(text):
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        commands = []
+        shell_scan(line, 0, "", commands)
+        if any(special_redirected(*c) for c in commands):
+            out.append(n)
+    return out
+
+
+def image_shell(root=IMG):
+    out = []
+    for f in sorted(root.rglob("*")):
+        if not f.is_file() or f.is_symlink():
+            continue
+        with f.open("rb") as fh:
+            head = fh.readline()
+        if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
+            out.append(f)
+    return out
+
+
+class ImageShellLintTest(unittest.TestCase):
+    FLAGGED = (
+        ': >"$W/a"',
+        '\t: >>log',
+        'x && :>y',
+        'a || : >x',
+        'a; : >x',
+        'a | : >x',
+        '{ : >x; }',
+        '( : >x )',
+        'v=$(: <in)',
+        '  a) : >x ;;',
+        'v=`: >x`',
+        'if : >x; then y; fi',
+        'if a; then : 2>/dev/null; fi',
+        'if a; then b; elif : >x; then c; fi',
+        'if a; then b; else : >x; fi',
+        'while : >x; do y; done',
+        'until : >x; do y; done',
+        'for i in 1; do : >x; done',
+        '! : >x',
+        'time : >x',
+        'x=1 : >x',
+        'x=1 y=2 : >x',
+        '2>/dev/null : >x',
+        '>x :',
+        '2>&1 :',
+        ': "${X:=d}" >f',
+        ': x#y >f',
+        ': a b >f',
+        ': >&2',
+        # #5524 item 5: the leading-redirect forms.
+        '<&3 :',
+        'x= : >f',
+        '>>log :',
+        '> x :',
+        '2>/dev/null x=1 :',
+        # Items 2 and 6: a ' #' inside double quotes is not a comment.
+        'echo " # "; : >x',
+        'echo "a #b"; : >x',
+        # Item 3: a substitution stays inside its word, and its own commands are read.
+        ': $(cat) >x',
+        ': `cat` >x',
+        ': "$(cat)" >x',
+        ': $((1 + (2))) >x',
+        ': ${a:-${b}} >x',
+        'v="$(: >x)"',
+        'v=$(a "$(: >x)")',
+        # Item 1: the other special builtins.
+        'exec 9>"$R/run/x.lock"',
+        'exec >log 2>&1',
+        'exec 3<in',
+        '. ./lib >x',
+        'eval "$c" 2>/dev/null',
+        'set -x 2>/dev/null',
+        'trap - EXIT >x',
+        'if a; then exec 9>x; fi',
+        '":" >x',
+        "\\exec >x",
+        "e'x'ec >x",
+        "e''xec >x",
+        'break >x',
+        'continue 2>/dev/null',
+        'exit 1 >x',
+        'export A >x',
+        'readonly A >x',
+        'return 1 >x',
+        'shift >x',
+        'times >x',
+        'unset A >x',
+        'a;: >x',
+        'a&&: >x',
+        'a||: >x',
+        'exec >x 9>&-',
+        '3<in :',
+        '>|x :',
+        '>\tx :',
+        ': $>x',
+        'v="`: >x`"',
+        ': >',
+    )
+    CLEAN = (
+        '#!/bin/sh',
+        '# then : >x',
+        '\t# : >comment',
+        ': # >x',
+        'true >"$W/a"',
+        ': "${X:=default}"',
+        'echo "a: >b"',
+        "echo 'a; : >b'",
+        "awk '$2 == \":\" { print > \"f\" }'",
+        'case $x in a:b) ;; esac',
+        'undo :>x',
+        'doing : >x',
+        'thenx : >x',
+        'do: >x',
+        'timer : >x',
+        ':foo >x',
+        ': ; echo >x',
+        'x || :; y >x',
+        ': | cat >x',
+        ': & y >x',
+        ': && y >x',
+        '{ :; } >f',
+        'x=1:2 >f',
+        '1x=2 : >f',
+        'echo >x',
+        'y 2>&1 && :',
+        '> :',
+        ': "a > b"',
+        ": 'a > b'",
+        ': a\\>b',
+        'echo " # " >x',
+        'echo "$(:)" >x',
+        'command exec 9>"$R/run/x.lock" || fail',
+        'command . ./lib >x',
+        'command eval "$c" 2>/dev/null',
+        'exec 9>&-',
+        'exec 3<&-',
+        'exec "$@"',
+        'echo exec >x',
+        'execute >x',
+        './run >x',
+        '.x >x',
+        'export A=1',
+        'evalx >x',
+        'echo "a; : >x',
+        'echo "a\\" : >x"',
+        '":\\"" >x',
+        "echo 'a; : >x",
+        'echo ${a; : >x',
+        'echo ${a:-;: >x}',
+        ': $((1 > 2))',
+        ': # >',
+        'shift 2',
+        '${x}: >y',
+        '"${x}": >y',
+        'echo `a;: b` >x',
+        ': ${a >',
+    )
+
+    def test_lint_flags_a_redirected_special_builtin(self):
+        for line in self.FLAGGED:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line), [1])
+        self.assertEqual(redirected_specials("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
+                         [len(self.CLEAN) + 1])
+
+    def test_lint_passes_clean_shell(self):
+        for line in self.CLEAN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line), [])
+
+    def test_image_shell_picks_shell_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
+                     "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
+                     "i.py": "#!/bin/shx\n", "j": "echo\n"}
+            for name, body in files.items():
+                (d / name).parent.mkdir(parents=True, exist_ok=True)
+                (d / name).write_text(body)
+            (d / "link.sh").symlink_to(d / "a.sh")
+            (d / "dir.sh").mkdir()
+            self.assertEqual([str(f.relative_to(d)) for f in image_shell(d)],
+                             ["a.sh", "c", "e", "f", "g", "sub/b"])
+
+    def test_image_shell_has_no_redirected_special_builtin(self):
+        files = image_shell()
+        self.assertIn(IMG / "ci_boot.sh", files)
+        self.assertIn(MK / "mkosi.extra/usr/lib/agentos/drive-id", files)
+        self.assertIn(AGENTOS_LIB / "egress-setup", files)
+        hits = ["%s:%d" % (f.relative_to(ROOT), n) for f in files
+                for n in redirected_specials(f.read_text(errors="replace"))]
+        self.assertEqual(hits, [], "use 'true >file' for ':' and 'command exec ...' for the others: a failed "
+                                   "redirect on a special builtin exits the shell before a handler runs")
 
 
 class ConfigTest(unittest.TestCase):
@@ -5832,7 +6135,7 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
-        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+        self.assertIn('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n\te2e_console', e2e)
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
@@ -5916,7 +6219,7 @@ class UplinkTest(unittest.TestCase):
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                       for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
-        block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
+        block = s[s.index('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "console-e2e.log").write_bytes(console)
             p = subprocess.run(["sh", "-c", fns + 'W="$1"; fail="$2"\n' + block + 'echo "rc=$fail"\n', "-", d, fail],
@@ -6300,9 +6603,9 @@ class EgressSetupTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_setup(self, *args):
+    def run_setup(self, *args, shell=(), script=AGENTOS_LIB / "egress-setup"):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
-        r = subprocess.run([str(AGENTOS_LIB / "egress-setup")] + list(args), env=env, capture_output=True, text=True)
+        r = subprocess.run(list(shell) + [str(script)] + list(args), env=env, capture_output=True, text=True)
         log = self.log.read_text() if self.log.exists() else ""
         if self.log.exists():
             self.log.unlink()
@@ -6348,6 +6651,27 @@ class EgressSetupTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("init held", log)
         self.assertIn("restart free", log)
+
+    def test_a_lock_it_cannot_open_is_named(self):
+        # #5524: a directory at the lock path makes the open fail. The script's own FAIL line runs
+        # under sh and bash --posix and no vault is made. With the 'command' prefix dropped, exec's
+        # redirect error exits the shell before that line.
+        (self.root / "run/agentos-egress-setup.lock").mkdir()
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        src = (AGENTOS_LIB / "egress-setup").read_text()
+        bare = src.replace("command exec 9>", "exec 9>")
+        self.assertNotEqual(bare, src)
+        restored = self.root.parent / "egress-setup-bare"
+        restored.write_text(bare)
+        for shell in (("sh",), ("bash", "--posix")):
+            with self.subTest(shell=shell):
+                r, log = self.run_setup(shell=shell)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("egress-setup: FAIL cannot open the lock %s/run/agentos-egress-setup.lock" % self.root, r.stdout)
+                self.assertNotIn("egress", log)
+                r, log = self.run_setup(shell=shell, script=restored)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("FAIL", r.stdout)
 
     def test_only_a_bounded_claim_is_read(self):
         stub(self.root / "usr/lib/agentos", "agentos-egress", 'wc -c <"$4" >>"%s"' % self.log)
