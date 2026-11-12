@@ -4,8 +4,10 @@ package, a missing module block or a blocked module installed. Refuse one that e
 outside the enforcer's preset (only the services it needs), or that would write a core dump to a
 file (#4459), or that leaves the kernel's reverse-path filter (#4810), ICMP redirects (#5164) or IPv4
 source routing (#5560) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a
-line of the build log. The running box checks the same, except source routing (ENF-m-14), in
-agentos-enforcer/health; this catches it before an image exists."""
+line of the build log. The running box's agentos-enforcer/health checks the effects: no Wi-Fi radio,
+the Wi-Fi and USB storage modules not loaded, core dumps, rp_filter and ICMP redirects. Only this
+build check sees the installed packages, the modprobe.d lines, the unit preset and source routing
+(ENF-m-14), and it catches each before an image exists."""
 import fnmatch
 import os
 import pathlib
