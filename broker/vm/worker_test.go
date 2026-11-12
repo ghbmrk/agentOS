@@ -999,6 +999,14 @@ func TestOP6HeldWakeStartsNothingAndKeepsTheCheckpoint(t *testing.T) {
 		t.Fatalf("held restore: %+v, %v", w, err)
 	}
 	asleep("a held restore")
+	// A restore refused once stays refused: a hold that lets go after the
+	// refusal does not turn the wake into a cold start.
+	var asked atomic.Int32
+	once := WithHold(bg, func() bool { return asked.Add(1) == 1 })
+	if w, err := e.m.ResumeFromCheckpoint(once, "agent", cp.ID); err != ErrHeld || w.Restored || w.Cold != "" {
+		t.Fatalf("restore held once: %+v, %v", w, err)
+	}
+	asleep("a restore held once")
 	if w, err := e.m.ResumeFromCheckpoint(stop, "agent", "s-none"); !errors.Is(err, ErrHeld) || w.Restored {
 		t.Fatalf("held cold start: %+v, %v", w, err)
 	}
