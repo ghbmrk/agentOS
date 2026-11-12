@@ -663,13 +663,18 @@ func TestHeldHostShown(t *testing.T) {
 	if step() {
 		t.Fatal("home still shows a held host a lease after it, with the count unchanged")
 	}
-	listing(6, 0)
+	listing(6, 2)
+	if !step() {
+		t.Fatal("home does not show a host held in a new table below the old count")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	listing(7, 0)
 	if step() {
 		t.Fatal("home shows a held host for a new table that held none")
 	}
 	listing(7, 2)
 	if !step() {
-		t.Fatal("home does not show a host held in a new table below the old count")
+		t.Fatal("home does not show a host held in the same table")
 	}
 	x.advance(nft.LeaseTimeout * time.Second)
 	x.fire.mu.Lock()
