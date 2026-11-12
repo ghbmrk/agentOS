@@ -363,7 +363,7 @@ def value_fix(key):
     is offered only for a key on NAME_ONLY_KEYS, and states its bar: the systemd source line, quoted as proof. Any
     other key off UNIT_KEYS is told the way onto NAME_ONLY_KEYS, its parser and the code that uses the value as
     proof (#5557, #5191); a key on UNIT_KEYS gets the plain-path fix alone (#5191)."""
-    fix = "; write %s= as plain absolute paths (no specifier, quote, escape or '..')" % key
+    fix = "; write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it names one)" % key
     if key in NAME_ONLY_KEYS:
         return fix + (", or, if %s= never names a host path, add %s to PID1_NAMES, quoting in the change as proof the "
                       "systemd source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that "
@@ -3466,7 +3466,11 @@ TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L 
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
-                       "V": "/var/tmp", "h": "/root", "%": "%"}
+                       "V": "/var/tmp", "h": "/root", "%": "%",
+                       # #5191 (Security on #5584): the machine and boot IDs, 32 hex digits, never empty and never a
+                       # '/', so a glob component. Every other specifier (%u, %U, %g, %o, %a, %H, %A, %B, which may be
+                       # empty and drop a component, and any a later systemd adds) is refused (tmpfiles_specifier).
+                       "m": "*", "b": "*"}
 C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
 
 
@@ -3507,6 +3511,14 @@ def tmpfiles_words(ln, n=6):
 def tmpfiles_expand(p):
     """P with systemd-tmpfiles' specifiers expanded (TMPFILES_SPECIFIERS)."""
     return re.sub(r"%(.)", lambda m: TMPFILES_SPECIFIERS.get(m.group(1), m.group(0)), p)
+
+
+def tmpfiles_specifier(p):
+    """#5191 (Security on #5584): the first specifier in tmpfiles.d path P that TMPFILES_SPECIFIERS does not
+    expand ('%' alone at the end included), or None. A line naming one is refused whole (tmpfiles_refusals),
+    so no rule reads a path systemd-tmpfiles would expand to another one."""
+    m = re.search(r"%(?:[^%" + "".join(TMPFILES_SPECIFIERS) + r"]|$)", re.sub("%%", "", p), re.S)
+    return m and m.group(0)
 
 
 def path_parts(p):
@@ -3653,7 +3665,7 @@ def tmpfiles_refusals(root):
             if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
                 continue
             (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
-            path = tmpfiles_expand(path)
+            raw_path, path = path, tmpfiles_expand(path)
             names, sources = [path], []
             if typ[:1] in ("L", "C"):
                 words = tmpfiles_words(arg, 1)[0]
@@ -3663,7 +3675,12 @@ def tmpfiles_refusals(root):
                     if a in ("", "-"):
                         a = "/usr/share/factory/" + path
                     names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
-            if ".." in path.split("/"):
+            unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
+                tmpfiles_specifier, {arg, (tmpfiles_words(arg, 1)[0] or [arg])[0]})), None))
+            if unread:
+                why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
+                       "the path without it (#5191)" % unread)
+            elif ".." in path.split("/"):
                 why = "a path with a '..' component (#1530)"
             elif any(".." in a.split("/") for a in sources):
                 why = "a link target or copy source with a '..' component (#1543)"

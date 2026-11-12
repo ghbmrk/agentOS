@@ -340,6 +340,26 @@ class KeeperTreeTest(unittest.TestCase):
                       "0755 for svc:svc on the box; the line decides who can write it (#5191)" % tmpf,
                       "\n".join(check.violations(self.root)))
         (self.root / "srv/t").unlink()
+        # Security on #5584: a specifier the check does not expand (%u is root, %U 0, %o debian, %a the architecture;
+        # %A and %B are empty on trixie and drop a component) is refused whole, under a box mount or in the tree,
+        # and so is one in a link's target; the machine and boot IDs are a glob component.
+        for line, spec in (("d /run/%u 0755 svc svc -", "%u"), ("d /run/%U 0755 svc svc -", "%U"),
+                           ("d /run/%o 0755 svc svc -", "%o"), ("d /run/%a 0755 svc svc -", "%a"),
+                           ("d /run/%A/q 0755 svc svc -", "%A"), ("d /run/q%B 0755 svc svc -", "%B"),
+                           ("d /srv/%u 0755 svc svc -", "%u"), ("d /run/q%%%u 0755 root root -", "%u"),
+                           ("d /run/q% 0755 root root -", "%"), ("d /run/\\x25u 0755 svc svc -", "%u"),
+                           ("L /run/lk2 - - - - /srv/%u", "%u"), ("z /srv/%g 0755 root root -", "%g")):
+            with self.subTest(line):
+                write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + line + "\n")
+                self.assertIn("usr/lib/tmpfiles.d/zz-probe.conf: line 3: %s; a specifier the tree check does not "
+                              "expand (%s), so it cannot tell what the line names; write the path without it (#5191)"
+                              % (line, spec), check.violations(self.root))
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + "d /run/%m 0755 svc svc -\nd /run/q%%u 0755 root root -\n")
+        self.assertEqual([v for v in check.violations(self.root) if "#5191" in v and "tmpfiles.allow" not in v], [])
+        got = self.probe("BindReadOnlyPaths=/run/0123abcd/y:/z")
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("through /run/0123abcd, under a box mount, which %s line 3 makes mode 0755 for svc:svc" % tmpf,
+                      got[0])
         # A root-owned line, and the stock L /var/run line, leave /run's steps root's.
         write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock)
         for line in ("BindReadOnlyPaths=/run/r/y:/z", "ReadOnlyPaths=/var/run/r/y", "BindReadOnlyPaths=/run/svc/y:/z"):
@@ -759,7 +779,8 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(key, check.UNIT_KEYS)
                     self.assertTrue(got[0].endswith(
                         ": the tree check does not model it; the tree check never passes a unit file whose paths it "
-                        "cannot read (#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')"
+                        "cannot read (#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it "
+                        "names one)"
                         % key), got)
                     self.assertNotIn("PID1_NAMES", got[0])
                     self.assertNotIn("NAME_ONLY_KEYS", got[0])
@@ -774,7 +795,8 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(len(check.UNIT_KEYS), 484)
         self.assertLessEqual(check.NAME_ONLY_KEYS | set(check.PID1_NAMES) | set(check.PID1_READS)
                              | set(check.UNIT_MADE_DIRS) | set(check.PID1_NAMESPACE_MAKES), check.UNIT_KEYS)
-        bar = ("(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..'), or, if %s= "
+        bar = ("(#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it names "
+               "one), or, if %s= "
                "never names a host path, add %s to PID1_NAMES, quoting in the change as proof the systemd "
                "source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that uses "
                "the value), not an assertion")
@@ -796,7 +818,8 @@ class KeeperTreeTest(unittest.TestCase):
                         self.assertTrue(got[0].endswith(bar % (key, key, key)), got)
                     else:
                         self.assertTrue(got[0].endswith(
-                            "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')%s"
+                            "(#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, "
+                            "where it names one)%s"
                             % (key, "" if remedy is None else onto % (key, key))), got)
                         self.assertNotIn("PID1_NAMES", got[0])
                         self.assertEqual("NAME_ONLY_KEYS" in got[0], remedy is False, got)
