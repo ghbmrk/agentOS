@@ -750,7 +750,8 @@ if [ -n "${E2E:-}" ]; then
 	# The guest writes this console, so none of it is trusted as it stands: e2e_console echoes each
 	# driver line sanitised and prefixed, and accepts the log only with exactly one strictly
 	# anchored DONE, last, whose counts match the step lines before it.
-	: >"$W/e2e-done.log"
+	# true, not ':': a failed redirect on a special builtin exits the shell before any handler runs.
+	true >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }
 	e2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1
 	has "$W/console-e2e.log" "agentos-e2e: DONE"
 	has "$W/e2e-done.log" " fail=0 "

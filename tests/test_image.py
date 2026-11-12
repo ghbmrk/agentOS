@@ -1485,7 +1485,7 @@ class DriveIdTest(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 r = self.run_id("assign", shell)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but the marker was not written", r.stdout)
+                self.assertIn("agentos-drive-id: FAIL new GUIDs are on vda but /var/lib/agentos/drive-id was not written", r.stdout)
                 self.assertNotIn("assigned", r.stdout)
                 self.assertNotIn("sync", "\n".join(self.sfdisk_calls()))
                 r = self.run_id("assign", shell, restored)
@@ -1532,6 +1532,58 @@ class DriveIdTest(unittest.TestCase):
         self.assertEqual(self.sfdisk_calls(), [])
         self.assertFalse((self.root / "var/lib/agentos/drive-id").exists())
         self.assertFalse((self.root / "run/agentos-drive-id").exists())
+
+
+# ':' is a POSIX special builtin: a redirection error on it exits a non-interactive shell before any
+# '||' handler or 'set -e' report runs (#5464). 'true' is a regular builtin, so its handler runs. A
+# ':' in command position (line start, after ; & | ( { or a reserved word) with a redirection
+# before the command ends is flagged; comment lines are skipped.
+REDIRECTED_COLON = re.compile(r"(?:^|[;&|({]|\b(?:then|do|else|if|elif|while|until)\b|!)\s*:(?=[\s<>]|$)"
+                              r"[^;&|#\n]*?[<>]")
+
+
+def redirected_colons(text):
+    return [n for n, line in enumerate(text.splitlines(), 1)
+            if not line.lstrip().startswith("#") and REDIRECTED_COLON.search(line)]
+
+
+def image_shell():
+    out = []
+    for f in sorted(IMG.rglob("*")):
+        if not f.is_file() or f.is_symlink():
+            continue
+        with f.open("rb") as fh:
+            head = fh.readline()
+        if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
+            out.append(f)
+    return out
+
+
+class ImageShellLintTest(unittest.TestCase):
+    def test_lint_flags_a_redirected_colon(self):
+        fixture = "\n".join((
+            '#!/bin/sh', 'set -eu',
+            ': >"$W/a"',                      # 3
+            '\t: >>log',                      # 4
+            'x && :>y',                       # 5
+            'if true; then : 2>/dev/null; fi',  # 6
+            'v=$(: <in)',                     # 7
+            '# : >comment',
+            'true >"$W/a"',
+            ': "${X:=default}"',
+            'echo "a: >b"',
+            'awk \'$2 == ":" { print > "f" }\'',
+            'case $x in a:b) ;; esac',
+        ))
+        self.assertEqual(redirected_colons(fixture), [3, 4, 5, 6, 7])
+
+    def test_image_shell_has_no_redirected_colon(self):
+        files = image_shell()
+        self.assertIn(IMG / "ci_boot.sh", files)
+        self.assertIn(MK / "mkosi.extra/usr/lib/agentos/drive-id", files)
+        hits = ["%s:%d" % (f.relative_to(ROOT), n) for f in files
+                for n in redirected_colons(f.read_text(errors="replace"))]
+        self.assertEqual(hits, [], "use 'true >file': a failed redirect on ':' exits the shell before a handler runs")
 
 
 class ConfigTest(unittest.TestCase):
@@ -5832,7 +5884,7 @@ class UplinkTest(unittest.TestCase):
         # REQ: HW-10. The console is checked before its DONE line is trusted; a miss fails the run,
         # and the DONE file exists (empty) so the verdict still prints.
         self.assertIn('\te2e_console "$W/console-e2e.log" "$W/e2e-done.log" || fail=1\n', e2e)
-        self.assertIn('\t: >"$W/e2e-done.log"\n\te2e_console', e2e)
+        self.assertIn('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n\te2e_console', e2e)
 
     def e2e_console(self, console):
         s = (IMG / "ci_boot.sh").read_text()
@@ -5916,7 +5968,7 @@ class UplinkTest(unittest.TestCase):
         fns = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                       for f in ("clean", "e2e_console", "g1_verdict"))
         fns += "".join(l + "\n" for l in s.splitlines() if l.startswith(("has() ", "hasnt() ")))
-        block = s[s.index('\t: >"$W/e2e-done.log"\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
+        block = s[s.index('\ttrue >"$W/e2e-done.log" || { echo "MISS e2e-done.log created"; fail=1; }\n'):s.index('\trm -f "$W/e2e.raw" "$W/e2e-done.log"\n')]
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "console-e2e.log").write_bytes(console)
             p = subprocess.run(["sh", "-c", fns + 'W="$1"; fail="$2"\n' + block + 'echo "rc=$fail"\n', "-", d, fail],
