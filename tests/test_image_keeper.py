@@ -2481,7 +2481,7 @@ class KeeperUnitsTest(unittest.TestCase):
             # An id that fails if it holds descriptor 3, and a command that says whether it does; the
             # outer shell opens descriptor 3 as the service manager's OpenFile= does.
             write(pathlib.Path(d), "id", "#!/bin/sh\n[ -e /proc/self/fd/3 ] && exit 9\necho 7\n", 0o755)
-            out = subprocess.run(["sh", "-c", 'exec 3</dev/null; exec "$0" "$@"', str(WITH_UIDS),
+            out = subprocess.run(["sh", "-c", 'command exec 3</dev/null; exec "$0" "$@"', str(WITH_UIDS),
                                   "sh", "-c", 'echo "$1 $2"; [ -e /proc/self/fd/3 ] && echo held', "-",
                                   "@uid:x", "m=/s,@uid:x"], capture_output=True, text=True,
                                  env={"PATH": d + ":/usr/bin:/bin"})

@@ -60,14 +60,14 @@ mount -t tmpfs -o mode=755 tmpfs "$N/sys"
 mkdir -p "$N/sys/fs/cgroup"
 mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$N/dev"
-for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
+for n in null zero full random urandom; do true >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
 # A devpts of its own, /dev/ptmx and /dev/shm, as on a booted box: a unit's PrivateDevices= binds them into its
 # private /dev and fails (226/NAMESPACE) without them (systemd 257 namespace.c mount_private_dev; #4392).
 mkdir "$N/dev/pts" "$N/dev/shm"
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,nosuid,noexec devpts "$N/dev/pts"
 ln -s pts/ptmx "$N/dev/ptmx"
 mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$N/dev/shm"
-: >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
+true >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
 chmod 1777 "$N/tmp"
 # pivot_root, not chroot: the kernel refuses a user namespace to a chrooted process (EPERM), and a unit's
