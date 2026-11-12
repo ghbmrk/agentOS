@@ -722,22 +722,30 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
-        # #5547: a key that names a host path is never a name-only key.
-        self.assertEqual(check.PATH_KEYS & set(check.PID1_NAMES), set())
-        # #5547 (Lens R1 on #5544): a key off PATH_KEYS may be a name-only key, so its refusal also offers
-        # PID1_NAMES and states the bar: the systemd source line, quoted as proof, not an assertion.
-        for text in ("Environment=A=%i", "LogExtraFields=K=%n", "Environment=A=/run/x/../y", "SetCredential=c:a/b"):
+        # #5552: the PID1_NAMES remedy is an allow-list. The v257 path keys the old deny-list missed and an invented
+        # key get the plain-path fix alone; a name-only key keeps the remedy with its proof bar.
+        self.assertEqual(check.NAME_ONLY_KEYS & set(check.PID1_NAMES), set())
+        self.assertEqual(check.NAME_ONLY_KEYS & set(check.PID1_READS), set())
+        bar = ("(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..'), or, if %s= "
+               "never names a host path, add %s to PID1_NAMES, quoting in the change as proof the systemd "
+               "source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that uses "
+               "the value), not an assertion")
+        for text, remedy in (("IPIngressFilterPath=%i/x", False), ("IPEgressFilterPath=%i/x", False),
+                             ("BPFProgram=%i:/x", False), ("RootHash=%i", False), ("RootHashSignature=%i", False),
+                             ("InventedKeyV999=%i", False), ("Environment=A=%i", True), ("LogExtraFields=K=%n", True),
+                             ("Environment=A=/run/x/../y", True), ("SetCredential=c:a/b", True)):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.service", "[Service]\n%s\n" % text)
                 try:
                     key = text.split("=", 1)[0]
                     got = check.unit_made_paths(self.root)[2]
                     self.assertEqual(len(got), 1, got)
-                    self.assertTrue(got[0].endswith(
-                        "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..'), or, if %s= "
-                        "never names a host path, add %s to PID1_NAMES, quoting in the change as proof the systemd "
-                        "source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that uses "
-                        "the value), not an assertion" % (key, key, key)), got)
+                    if remedy:
+                        self.assertTrue(got[0].endswith(bar % (key, key, key)), got)
+                    else:
+                        self.assertTrue(got[0].endswith(
+                            "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')" % key), got)
+                        self.assertNotIn("PID1_NAMES", got[0])
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()

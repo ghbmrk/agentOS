@@ -6267,6 +6267,14 @@ class ImageToolTest(MustRun, unittest.TestCase):
                     # "kmod version 34.2": the upstream part of the Debian version.
                     self.assertEqual(first, "kmod version " + want.split(":")[-1].rsplit("-", 1)[0], out)
 
+    def test_name_only_keys_were_read_from_this_systemd(self):
+        # #5552: NAME_ONLY_KEYS was read from one systemd's load-fragment-gperf.gperf.in; a different image
+        # systemd fails here until the list is read again and NAME_ONLY_SYSTEMD changed with it.
+        image_tool(self, "systemd-analyze")
+        want = dpkg_version(os.environ["AGENTOS_REFERENCE_ROOT"], "systemd")
+        self.assertTrue(want)
+        self.assertEqual(want.split(".", 1)[0], check.NAME_ONLY_SYSTEMD, want)
+
     def test_a_library_from_outside_the_root_fails_the_case(self):
         # #5231: --library-path falls back to the runner's directories, so a root without a library the
         # tool links still runs it, on the runner's copy; the loader's record fails the case. The tool is
