@@ -92,14 +92,19 @@ func segments(l Layout) []segment {
 // a load seeds them from the server's lease file (Seed) and carries them
 // (Reload). An IPv4 packet from a shared segment passes only from an
 // address and hardware address LeaseSet holds (claim, ENF-shared-src-1).
-// An element never lasts longer than its lease (snoop), so the server
-// gives the address to another host only after it has run out. nft
-// cannot type a payload field read at an offset, so both sets
-// (and MACSet, which LeasedSet is checked beside) are typed by their raw
-// fields, the IPv4 source (@nh,96,32) and the hardware source (@ll,48,48),
-// and nft lists their elements as integers.
-func LeaseSet(seg string) string  { return "lease_" + seg + "_4" }
-func LeasedSet(seg string) string { return "leased_" + seg }
+// An element never lasts longer than its lease (snoop). The server can
+// end a lease early (a client's RELEASE or DECLINE, or a REQUEST that
+// moves the client or is refused), so LeaseAddrSet holds each address
+// LeaseSet holds, and an answer from the server that would give such an
+// address to another hardware address never leaves (snoop): an address is
+// another host's only once its element has run out. nft cannot type a
+// payload field read at an offset, so the three sets (and MACSet, which
+// LeasedSet is checked beside) are typed by their raw fields, the IPv4
+// source (@nh,96,32) and the hardware source (@ll,48,48), and nft lists
+// their elements as integers.
+func LeaseSet(seg string) string     { return "lease_" + seg + "_4" }
+func LeaseAddrSet(seg string) string { return "leaseaddr_" + seg + "_4" }
+func LeasedSet(seg string) string    { return "leased_" + seg }
 
 // LeaseTimeout is the lease, in seconds, every dhcp-range offers, and the
 // longest one the snoop reads: dns.LeaseHours, which dns pins to it, so
@@ -195,8 +200,9 @@ const claimKey = "ip6 saddr . ether saddr"
 // leaseKey a LeaseSet element read from an IPv4 packet: its source
 // address, then hwField.
 const (
-	hwField  = "@ll,48,48"
-	leaseKey = "@nh,96,32 . " + hwField
+	hwField   = "@ll,48,48"
+	addrField = "@nh,96,32"
+	leaseKey  = addrField + " . " + hwField
 )
 
 // snoop is the rules that read a lease into segment seg's sets from the
@@ -214,12 +220,22 @@ const (
 // before they run out. update refreshes a renewed lease's elements. The
 // offsets are measured against real dnsmasq (ASSUMPTIONS
 // ENF-shared-src-1).
+//
+// First, any answer from the server (an OFFER or ACK) whose address
+// LeaseAddrSet holds for another hardware address is dropped, so the
+// server cannot give an address it freed early to another host while the
+// old holder may still send from it (ENF-shared-src-1, #5300). Each rule
+// updates LeaseAddrSet before LeaseSet: if the first set is full, no
+// element is added; if only the second is, the address is held by no
+// one's lease and its answers are dropped until it runs out (fails
+// closed).
 func snoop(seg, iface string) []string {
 	const (
 		yiaddr = "@th,192,32"
 		chaddr = "@th,288,48"
 	)
-	var out []string
+	out := []string{"oifname " + iface + " udp sport 67 udp dport 68 @th,64,24 0x020106 " + yiaddr + " @" + LeaseAddrSet(seg) +
+		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " drop"}
 	for _, b := range leaseBands() {
 		times := strconv.Itoa(b[0])
 		if b[1] > b[0] {
@@ -228,6 +244,7 @@ func snoop(seg, iface string) []string {
 		out = append(out, "oifname "+iface+" udp sport 67 udp dport 68"+
 			" @th,64,24 0x020106 "+yiaddr+" != 0 @th,1952,32 0x63825363"+
 			" @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 "+times+
+			" update @"+LeaseAddrSet(seg)+" { "+yiaddr+" timeout "+secs(b[0])+" }"+
 			" update @"+LeaseSet(seg)+" { "+yiaddr+" . "+chaddr+" timeout "+secs(b[0])+" }"+
 			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }")
 	}
@@ -238,9 +255,10 @@ func snoop(seg, iface string) []string {
 const MinLease = 120
 
 // leaseFloors are the floors of the lease bands, in seconds, from
-// MinLease to LeaseTimeout: each the least that keeps the band below it
-// under one and a half times its floor. A table, not a loop, so no change
-// to it can spin; TestLeaseBandsCoverEveryLease checks it.
+// MinLease to LeaseTimeout: after MinLease, each is two thirds of the next
+// one, rounded up, so each band's top (one below the next floor) is under
+// one and a half times its floor. A table, not a loop, so no change to it
+// can spin; TestLeaseBandsCoverEveryLease checks it.
 var leaseFloors = []int{MinLease, 149, 223, 334, 500, 750, 1125, 1687, 2530, 3794, 5690, 8534, 12800, 19200, 28800, LeaseTimeout}
 
 // leaseBands are the lease times, in seconds, each snoop rule reads: each
@@ -718,6 +736,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 			w.dynamic(HostSet(sg.name, v6), hostKey(v6), HostTimeout)
 		}
 		w.dynamic(LeaseSet(sg.name), leaseKey, LeaseTimeout)
+		w.dynamic(LeaseAddrSet(sg.name), addrField, LeaseTimeout)
 		w.dynamic(LeasedSet(sg.name), hwField, LeaseTimeout)
 		w.dynamic(HeldSet(sg.name), "ip6 saddr", ClaimTimeout)
 		w.dynamic(ClaimSet(sg.name), claimKey, ClaimTimeout)
@@ -786,6 +805,18 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// The edge's segment hears nothing (NET-2 Segments): no DHCP, DNS, NTP,
 	// mDNS, page or other listener, before any other rule can answer it.
 	w.line("iifname " + edge + " counter name " + q(EdgeIn) + " drop")
+	// A DHCPRELEASE from a shared segment, its message type the first
+	// option as dhclient and udhcpc write it, never reaches the server,
+	// even on a connection a renewal opened: the lease, and the address
+	// with it, lasts its full time, as the lease sets do. One written
+	// otherwise reaches the server and frees the address there, but snoop
+	// still keeps it from any other host until its element runs out
+	// (ENF-shared-src-1, #5300).
+	var sharedIfs []string
+	for _, sg := range segments(l) {
+		sharedIfs = append(sharedIfs, q(sg.iface))
+	}
+	w.line("iifname { " + strings.Join(sharedIfs, ", ") + " } udp dport 67 @th,1952,56 0x63825363350107 drop")
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
 	w.line("icmpv6 type nd-router-advert iifname != " + wan + " counter name " + q(RADropped) + " drop")
