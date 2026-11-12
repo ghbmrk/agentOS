@@ -1945,10 +1945,11 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			// goes as on a refusal before any start: a held or failed fork
 			// leaves nothing behind. A fork still live keeps it as its base.
 			// A drop that worked adds nothing: a clean hold stays the bare
-			// ErrHeld, which callers read as STOP alone.
+			// ErrHeld, which callers read as STOP alone. One that failed is
+			// named as the drop, for the broker's log (STOP-queued-start-fu2).
 			if live == nil {
 				if derr := m.dropSnapshot(src, s.ID, prevLast); derr != nil {
-					err = errors.Join(err, derr)
+					err = errors.Join(err, fmt.Errorf("dropping checkpoint %s: %w", s.ID, derr))
 				}
 			}
 			return Snapshot{}, err

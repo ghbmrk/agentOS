@@ -798,13 +798,16 @@ func (t *Tools) rollback(ctx context.Context, c caller, raw json.RawMessage) (an
 
 // startErr says what to do when admission has no room (UX-146-2). A STOP
 // refusal that came with another failure, such as undoing a fork that had
-// started, says that failure too, as a ref (STOP-queued-start-fu UX 4).
+// started or dropping the checkpoint the forks were to start from, says
+// that failure too, as a ref (STOP-queued-start-fu UX 4); one wording fits
+// both, and it names worker_list, which shows what was left
+// (STOP-queued-start-fu2).
 func startErr(c caller, tool, name string, err error) error {
 	if errors.Is(err, vm.ErrHeld) {
 		if err == vm.ErrHeld {
 			return errStartStopped
 		}
-		return say("%s; undoing what had started %s", errStartStopped, logged(c.machine, tool, err))
+		return say("%s; cleaning up the refused start %s; worker_list shows what is left", errStartStopped, logged(c.machine, tool, err))
 	}
 	if errors.Is(err, admission.ErrNoRoom) || errors.Is(err, admission.ErrPressure) {
 		return say("no room for worker %s now: destroy a worker, or ask for less memory with mem_mb", named(name))
