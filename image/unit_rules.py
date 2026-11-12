@@ -67,7 +67,9 @@ UNIT_DIRS = ("/etc/systemd/system.control", "/run/systemd/system.control", "/run
              "/run/systemd/system", "/run/systemd/system.attached", "/run/systemd/generator",
              "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system",
              "/run/systemd/generator.late")
-TYPES = (".service", ".socket", ".mount", ".swap", ".target", ".path", ".timer", ".slice", ".automount")
+# Every type whose units load a unit file or drop-in (unit_load_fragment_and_dropin; .device too, #5507).
+# .scope does not: scope_load refuses any unit not made at runtime, so no file of the tree loads one.
+TYPES = (".service", ".socket", ".device", ".mount", ".swap", ".target", ".path", ".timer", ".slice", ".automount")
 DEP_DIRS = (".wants", ".requires", ".upholds")
 # Every name in a unit directory, a drop-in directory or a dependency directory: the bytes a unit
 # name may hold (unit-name.c) and a drop-in's. A name with any other byte (a space, a newline) could

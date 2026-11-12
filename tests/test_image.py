@@ -969,13 +969,13 @@ class InitrdBluetoothTest(unittest.TestCase):
         # #5489 (from #5487 L3): three files list unit types. Each stays in its own module (unit_rules.py
         # and unlock_graph.py are loaded alone by the image build), so they are pinned to one list here:
         # a change to one that is not made in the others fails. unit_rules.py lists the types a unit file
-        # in a unit directory may define there; it lacks .device and .scope (see the second assertion).
+        # in a unit directory may define there; it lacks only .scope, which no file loads (#5507).
         graph = load("unlock_graph_types", IMG / "unlock_graph.py")
         rules = load("unit_rules_types", IMG / "unit_rules.py")
         named = re.fullmatch(r".*\\\.\(([a-z|]+)\)\\Z", graph.UNIT_NAME.pattern).group(1).split("|")
         self.assertEqual(named, list(self.SYSTEMD_UNIT_TYPES))
         self.assertEqual(sorted(t[1:] for t in rules.TYPES),
-                         sorted(set(self.SYSTEMD_UNIT_TYPES) - {"device", "scope"}))
+                         sorted(set(self.SYSTEMD_UNIT_TYPES) - {"scope"}))
         self.assertEqual(finish.INITRD_UNIT_TYPES, self.SYSTEMD_UNIT_TYPES)
 
 
