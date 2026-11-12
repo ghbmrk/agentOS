@@ -33,9 +33,9 @@ RPF = ("net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter", "net/ip
 # that names or globs an interface's accept_redirects in either family (iface_key).
 REDIRECTS = tuple("net/%s/conf/%s/accept_redirects" % (f, i) for f in ("ipv4", "ipv6") for i in ("all", "default", "*"))
 # Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
-# name lower down, and the files are read in name order. /etc/sysctl.conf is read after all of them.
+# name lower down, and the files are read in name order. systemd-sysctl never reads /etc/sysctl.conf
+# itself (the core's mkosi.finalize says the same); the 99-sysctl.conf link to it is refused below.
 SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
-SYSCTL_LAST = "etc/sysctl.conf"
 
 
 def installed(root):
@@ -87,8 +87,7 @@ def iface_key(key, family, leaf):
 
 def sysctls(root):
     """What systemd-sysctl sets, key by key (sysctl_key), and the refusals: a link anywhere in
-    sysctl.d or as /etc/sysctl.conf (read last), which the box could resolve differently from this
-    check. Lines end at LF, CR or NUL, "#" and ";" start comments, a leading "-" only ignores errors,
+    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL, "#" and ";" start comments, a leading "-" only ignores errors,
     and the last assignment wins. A glob key that matches a NODUMP key counts as setting it."""
     files, out = {}, []
     for d in SYSCTL_DIRS:
@@ -103,14 +102,9 @@ def sysctls(root):
                 out.append("%s/%s is a link" % (d, f.name))
             elif f.name.endswith(".conf") and not f.name.startswith("."):
                 files.setdefault(f.name, f)
-    ordered = [files[n] for n in sorted(files, key=os.fsencode)]
-    last = root / SYSCTL_LAST
-    if last.is_symlink():
-        out.append("%s is a link" % SYSCTL_LAST)
-    elif last.is_file():
-        ordered.append(last)
     vals = {}
-    for f in ordered:
+    for name in sorted(files, key=os.fsencode):
+        f = files[name]
         for raw in re.split(rb"[\n\r\x00]", f.read_bytes()):
             ln = raw.strip(b" \t").decode(errors="replace")
             if not ln or ln[0] in "#;":
