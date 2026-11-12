@@ -273,21 +273,15 @@ class GptAutoTest(unittest.TestCase):
                 finish.debugfs_ls(str(pathlib.Path(d) / "none.img"), 0, "/")
 
     def test_usr_ships_no_confext(self):
-        # systemd-confext merges /usr/lib/confexts and /usr/local/lib/confexts over /etc, and systemd-sysext
-        # /usr/lib/extensions and /usr/local/lib/extensions over /usr (#5488).
+        # systemd-confext merges /usr/lib/confexts and /usr/local/lib/confexts over /etc.
         f = finish.REPART_D / "50-root.conf"
         row = ["lib/repart.d/50-root.conf", "f", "0644", 0, 0, 0, 1, f.stat().st_size, finish.sha256(f)]
         rows = [["lib", "d", "0755", 0, 0, 0, 0, 0, ""], ["lib/repart.d", "d", "0755", 0, 0, 0, 0, 0, ""], row]
-        for extra, reader in ((["lib/confexts", "d"], "confext"), (["lib/confexts/x.raw", "f"], "confext"),
-                              (["local/lib/confexts", "l"], "confext"),
-                              (["local/lib/confexts/x/etc/repart.d/a.conf", "f"], "confext"),
-                              (["lib/extensions", "d"], "sysext"), (["lib/extensions/x.raw", "f"], "sysext"),
-                              (["local/lib/extensions", "l"], "sysext"),
-                              (["local/lib/extensions/x/usr/lib/repart.d/a.conf", "f"], "sysext")):
+        for extra in (["lib/confexts", "d"], ["lib/confexts/x.raw", "f"], ["local/lib/confexts", "l"],
+                      ["local/lib/confexts/x/etc/repart.d/a.conf", "f"]):
             with self.subTest(extra[0]):
                 v = finish.usr_repart_violations(rows + [extra + row[2:]])
-                over = "/etc" if reader == "confext" else "/usr"
-                self.assertEqual(v, ["/usr/%s: systemd-%s would merge it over %s" % (extra[0], reader, over)])
+                self.assertEqual(v, ["/usr/%s: systemd-confext would merge it over /etc" % extra[0]])
 
     def test_build_stops_on_an_undefined_partition(self):
         class Proc:
@@ -542,19 +536,22 @@ class InitrdTest(unittest.TestCase):
                 self.assertEqual(got, [] if ok else [wants + "/a: links to a directory, not a unit file, under "
                                                      "/usr/lib/systemd/system"])
 
-    def test_initrd_image_dirs_are_these_eleven(self):
+    def test_initrd_image_dirs_are_these_nine(self):
         # Lens R2: each entry is pinned by name, so dropping one fails here and the loop below cannot pass without it.
-        # systemd v257's search paths (discover-image.c): sysext /etc, /run, /var/lib, /usr/lib and
-        # /usr/local/lib extensions; confext /run, /var/lib, /usr/lib and /usr/local/lib confexts; and
-        # systemd-stub's .extra (#5488: the sysext /usr ones were missing).
-        eleven = ("etc/extensions", "run/extensions", "var/lib/extensions", "usr/lib/extensions",
-                  "usr/local/lib/extensions", ".extra/sysext", "run/confexts", "var/lib/confexts",
-                  "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
-        self.assertEqual(sorted(finish.INITRD_IMAGE_DIRS), sorted(eleven))
-        for d in eleven:
+        nine = ("etc/extensions", "run/extensions", "var/lib/extensions", ".extra/sysext", "run/confexts",
+                "var/lib/confexts", "usr/local/lib/confexts", "usr/lib/confexts", ".extra/confext")
+        self.assertEqual(sorted(finish.INITRD_IMAGE_DIRS), sorted(nine))
+        for d in nine:
             with self.subTest(d):
                 got = finish.initrd_violations(finish.cpio_members(newc(self.STOCK + [(d + "/x.raw", self.F, b"x")])))
                 self.assertEqual(got, ["%s/x.raw: an image systemd-sysext or systemd-confext would merge" % d])
+
+    def test_sysext_and_confext_lists_differ_on_purpose(self):
+        # #5488: systemd v257 (discover-image.c) never searches /usr for sysext images ("we don't allow storing
+        # extensions under /usr/") but does for confexts, so no /usr/.../extensions entry has a reader.
+        usr = [d for d in finish.INITRD_IMAGE_DIRS if d.startswith("usr/")]
+        self.assertEqual(sorted(usr), ["usr/lib/confexts", "usr/local/lib/confexts"])
+        self.assertEqual(finish.USR_CONFEXTS, ("lib/confexts", "local/lib/confexts"))
 
     def test_initrd_ships_no_extension_image(self):
         # Security 6804479798 release b: systemd-sysext's and systemd-confext's initrd search paths.
