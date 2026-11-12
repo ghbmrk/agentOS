@@ -251,7 +251,7 @@ FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute
 # (config_parse_environ, config_parse_pass_environ, config_parse_unset_environ, config_parse_log_extra_fields,
 # config_parse_set_credential, config_parse_log_namespace); any other key, the v257 path keys the old deny-list missed
 # (IPIngressFilterPath=, IPEgressFilterPath=, BPFProgram=, RootHash=, RootHashSignature=) and any key a later systemd
-# adds, gets the plain-path fix and the route onto this list (#5557). Read from systemd NAME_ONLY_SYSTEMD, as shipped by
+# adds, gets the plain-path fix, and only a key off UNIT_KEYS the route onto this list (#5557, #5191). Read from systemd NAME_ONLY_SYSTEMD, as shipped by
 # the Debian snapshot NAME_ONLY_SNAPSHOT: a different snapshot fails ConfigTest on every run, and a different systemd
 # fails ImageToolTest where the image's systemd runs, until the list is read again:
 #   grep -E '^\{\{type\}\}\.' load-fragment-gperf.gperf.in   (v257 tag; list the parser per key)
@@ -260,19 +260,119 @@ NAME_ONLY_SYSTEMD = "257"
 NAME_ONLY_SNAPSHOT = "20261001T000000Z"
 NAME_ONLY_KEYS = frozenset(("Environment", "PassEnvironment", "UnsetEnvironment", "LogExtraFields", "SetCredential",
                             "SetCredentialEncrypted", "LogNamespace"))
+# #5191 (Lens R1 on #5566): every key systemd NAME_ONLY_SYSTEMD's unit file parser knows, read with NAME_ONLY_KEYS from
+# the same load-fragment-gperf.gperf.in (v257.9 tag; every section, every build option's branch):
+#   grep -oE '^[A-Za-z{}]+\.[A-Za-z0-9]+,' load-fragment-gperf.gperf.in | sed -E 's/^[^.]*\.//; s/,$//' | sort -u
+# The route onto NAME_ONLY_KEYS is offered only for a key off this table (value_fix): one this systemd ignores, or
+# one a later systemd adds. A key on it already has the parser its refusal can be read against, so a path key
+# (ListenStream=, Symlinks=, Where=, RootHash=) is never invited onto the allow-list.
+UNIT_KEYS = frozenset((
+    "Accept", "AccuracySec", "After", "Alias", "AllowIsolate", "AllowedCPUs", "AllowedMemoryNodes", "Also",
+    "AmbientCapabilities", "AppArmorProfile", "AssertACPower", "AssertArchitecture", "AssertCPUFeature",
+    "AssertCPUPressure", "AssertCPUs", "AssertCapability", "AssertControlGroupController", "AssertCredential",
+    "AssertDirectoryNotEmpty", "AssertEnvironment", "AssertFileIsExecutable", "AssertFileNotEmpty",
+    "AssertFirstBoot", "AssertGroup", "AssertHost", "AssertIOPressure", "AssertKernelCommandLine",
+    "AssertKernelVersion", "AssertMemory", "AssertMemoryPressure", "AssertNeedsUpdate", "AssertOSRelease",
+    "AssertPathExists", "AssertPathExistsGlob", "AssertPathIsDirectory", "AssertPathIsEncrypted",
+    "AssertPathIsMountPoint", "AssertPathIsReadWrite", "AssertPathIsSymbolicLink", "AssertSecurity", "AssertUser",
+    "AssertVirtualization", "BPFProgram", "Backlog", "Before", "BindIPv6Only", "BindLogSockets", "BindPaths",
+    "BindReadOnlyPaths", "BindTo", "BindToDevice", "BindsTo", "BlockIOAccounting", "BlockIODeviceWeight",
+    "BlockIOReadBandwidth", "BlockIOWeight", "BlockIOWriteBandwidth", "Broadcast", "BusName", "BusPolicy",
+    "CPUAccounting", "CPUAffinity", "CPUQuota", "CPUQuotaPeriodSec", "CPUSchedulingPolicy", "CPUSchedulingPriority",
+    "CPUSchedulingResetOnFork", "CPUShares", "CPUWeight", "CacheDirectory", "CacheDirectoryMode", "Capabilities",
+    "CapabilityBoundingSet", "CollectMode", "ConditionACPower", "ConditionArchitecture", "ConditionCPUFeature",
+    "ConditionCPUPressure", "ConditionCPUs", "ConditionCapability", "ConditionControlGroupController",
+    "ConditionCredential", "ConditionDirectoryNotEmpty", "ConditionEnvironment", "ConditionFileIsExecutable",
+    "ConditionFileNotEmpty", "ConditionFirmware", "ConditionFirstBoot", "ConditionGroup", "ConditionHost",
+    "ConditionIOPressure", "ConditionKernelCommandLine", "ConditionKernelVersion", "ConditionMemory",
+    "ConditionMemoryPressure", "ConditionNeedsUpdate", "ConditionOSRelease", "ConditionPathExists",
+    "ConditionPathExistsGlob", "ConditionPathIsDirectory", "ConditionPathIsEncrypted", "ConditionPathIsMountPoint",
+    "ConditionPathIsReadWrite", "ConditionPathIsSymbolicLink", "ConditionSecurity", "ConditionUser",
+    "ConditionVirtualization", "ConfigurationDirectory", "ConfigurationDirectoryMode", "Conflicts",
+    "CoredumpFilter", "CoredumpReceive", "DefaultDependencies", "DefaultInstance", "DefaultMemoryLow",
+    "DefaultMemoryMin", "DefaultStartupMemoryLow", "DeferAcceptSec", "DeferReactivation", "Delegate",
+    "DelegateSubgroup", "Description", "DeviceAllow", "DevicePolicy", "DirectoryMode", "DirectoryNotEmpty",
+    "DisableControllers", "Documentation", "DynamicUser", "Environment", "EnvironmentFile", "ExecCondition",
+    "ExecPaths", "ExecReload", "ExecSearchPath", "ExecStart", "ExecStartPost", "ExecStartPre", "ExecStop",
+    "ExecStopPost", "ExecStopPre", "ExitType", "ExtensionDirectories", "ExtensionImagePolicy", "ExtensionImages",
+    "ExtraOptions", "FailureAction", "FailureActionExitStatus", "FileDescriptorName", "FileDescriptorStoreMax",
+    "FileDescriptorStorePreserve", "FinalKillSignal", "FixedRandomDelay", "FlushPending", "ForceUnmount",
+    "FreeBind", "Group", "GuessMainPID", "IOAccounting", "IODeviceLatencyTargetSec", "IODeviceWeight",
+    "IOReadBandwidthMax", "IOReadIOPSMax", "IOSchedulingClass", "IOSchedulingPriority", "IOWeight",
+    "IOWriteBandwidthMax", "IOWriteIOPSMax", "IPAccounting", "IPAddressAllow", "IPAddressDeny", "IPCNamespacePath",
+    "IPEgressFilterPath", "IPIngressFilterPath", "IPTOS", "IPTTL", "IgnoreOnIsolate", "IgnoreOnSnapshot",
+    "IgnoreSIGPIPE", "ImportCredential", "InaccessibleDirectories", "InaccessiblePaths", "JobRunningTimeoutSec",
+    "JobTimeoutAction", "JobTimeoutRebootArgument", "JobTimeoutSec", "JoinsNamespaceOf", "KeepAlive",
+    "KeepAliveIntervalSec", "KeepAliveProbes", "KeepAliveTimeSec", "KeyringMode", "KillMode", "KillSignal",
+    "LazyUnmount", "LimitAS", "LimitCORE", "LimitCPU", "LimitDATA", "LimitFSIZE", "LimitLOCKS", "LimitMEMLOCK",
+    "LimitMSGQUEUE", "LimitNICE", "LimitNOFILE", "LimitNPROC", "LimitRSS", "LimitRTPRIO", "LimitRTTIME",
+    "LimitSIGPENDING", "LimitSTACK", "ListenDatagram", "ListenFIFO", "ListenMessageQueue", "ListenNetlink",
+    "ListenSequentialPacket", "ListenSpecial", "ListenStream", "ListenUSBFunction", "LoadCredential",
+    "LoadCredentialEncrypted", "LockPersonality", "LogExtraFields", "LogFilterPatterns", "LogLevelMax",
+    "LogNamespace", "LogRateLimitBurst", "LogRateLimitIntervalSec", "LogsDirectory", "LogsDirectoryMode",
+    "MakeDirectory", "ManagedOOMMemoryPressure", "ManagedOOMMemoryPressureDurationSec",
+    "ManagedOOMMemoryPressureLimit", "ManagedOOMPreference", "ManagedOOMSwap", "Mark", "MaxConnections",
+    "MaxConnectionsPerSource", "MemoryAccounting", "MemoryDenyWriteExecute", "MemoryHigh", "MemoryKSM",
+    "MemoryLimit", "MemoryLow", "MemoryMax", "MemoryMin", "MemoryPressureThresholdSec", "MemoryPressureWatch",
+    "MemorySwapMax", "MemoryZSwapMax", "MemoryZSwapWriteback", "MessageQueueMaxMessages", "MessageQueueMessageSize",
+    "MountAPIVFS", "MountFlags", "MountImagePolicy", "MountImages", "NFTSet", "NUMAMask", "NUMAPolicy", "NetClass",
+    "NetworkNamespacePath", "Nice", "NoDelay", "NoExecPaths", "NoNewPrivileges", "NonBlocking", "NotifyAccess",
+    "OOMPolicy", "OOMScoreAdjust", "OnActiveSec", "OnBootSec", "OnCalendar", "OnClockChange", "OnFailure",
+    "OnFailureIsolate", "OnFailureJobMode", "OnStartupSec", "OnSuccess", "OnSuccessJobMode", "OnTimezoneChange",
+    "OnUnitActiveSec", "OnUnitInactiveSec", "OpenFile", "Options", "PAMName", "PIDFile", "PartOf",
+    "PassCredentials", "PassEnvironment", "PassFileDescriptorsToExec", "PassPacketInfo", "PassSecurity",
+    "PathChanged", "PathExists", "PathExistsGlob", "PathModified", "PermissionsStartOnly", "Persistent",
+    "Personality", "PipeSize", "PollLimitBurst", "PollLimitIntervalSec", "Priority", "PrivateDevices", "PrivateIPC",
+    "PrivateMounts", "PrivateNetwork", "PrivatePIDs", "PrivateTmp", "PrivateUsers", "ProcSubset",
+    "PropagateReloadFrom", "PropagateReloadTo", "PropagatesReloadTo", "PropagatesStopTo", "ProtectClock",
+    "ProtectControlGroups", "ProtectHome", "ProtectHostname", "ProtectKernelLogs", "ProtectKernelModules",
+    "ProtectKernelTunables", "ProtectProc", "ProtectSystem", "RandomizedDelaySec", "ReadOnlyDirectories",
+    "ReadOnlyPaths", "ReadWriteDirectories", "ReadWriteOnly", "ReadWritePaths", "RebootArgument", "ReceiveBuffer",
+    "RefuseManualStart", "RefuseManualStop", "ReloadPropagatedFrom", "ReloadSignal", "RemainAfterElapse",
+    "RemainAfterExit", "RemoveIPC", "RemoveOnStop", "RequiredBy", "Requires", "RequiresMountsFor",
+    "RequiresOverridable", "Requisite", "RequisiteOverridable", "Restart", "RestartForceExitStatus",
+    "RestartKillSignal", "RestartMaxDelaySec", "RestartMode", "RestartPreventExitStatus", "RestartSec",
+    "RestartSteps", "RestrictAddressFamilies", "RestrictFileSystems", "RestrictNamespaces",
+    "RestrictNetworkInterfaces", "RestrictRealtime", "RestrictSUIDSGID", "ReusePort", "RootDirectory",
+    "RootDirectoryStartOnly", "RootEphemeral", "RootHash", "RootHashSignature", "RootImage", "RootImageOptions",
+    "RootImagePolicy", "RootVerity", "RuntimeDirectory", "RuntimeDirectoryMode", "RuntimeDirectoryPreserve",
+    "RuntimeMaxSec", "RuntimeRandomizedExtraSec", "SELinuxContext", "SELinuxContextFromNet", "SecureBits",
+    "SendBuffer", "SendSIGHUP", "SendSIGKILL", "Service", "SetCredential", "SetCredentialEncrypted",
+    "SetLoginEnvironment", "Slice", "SloppyOptions", "SmackLabel", "SmackLabelIPIn", "SmackLabelIPOut",
+    "SmackProcessLabel", "SocketBindAllow", "SocketBindDeny", "SocketGroup", "SocketMode", "SocketProtocol",
+    "SocketUser", "Sockets", "SourcePath", "StandardError", "StandardInput", "StandardInputData",
+    "StandardInputText", "StandardOutput", "StartLimitAction", "StartLimitBurst", "StartLimitInterval",
+    "StartLimitIntervalSec", "StartupAllowedCPUs", "StartupAllowedMemoryNodes", "StartupBlockIOWeight",
+    "StartupCPUShares", "StartupCPUWeight", "StartupIOWeight", "StartupMemoryHigh", "StartupMemoryLow",
+    "StartupMemoryMax", "StartupMemorySwapMax", "StartupMemoryZSwapMax", "StateDirectory", "StateDirectoryMode",
+    "StopPropagatedFrom", "StopWhenUnneeded", "SuccessAction", "SuccessActionExitStatus", "SuccessExitStatus",
+    "SupplementaryGroups", "SurviveFinalKillSignal", "Symlinks", "SysVStartPriority", "SyslogFacility",
+    "SyslogIdentifier", "SyslogLevel", "SyslogLevelPrefix", "SystemCallArchitectures", "SystemCallErrorNumber",
+    "SystemCallFilter", "SystemCallLog", "TCPCongestion", "TTYColumns", "TTYPath", "TTYReset", "TTYRows",
+    "TTYVHangup", "TTYVTDisallocate", "TasksAccounting", "TasksMax", "TemporaryFileSystem", "TimeoutAbortSec",
+    "TimeoutCleanSec", "TimeoutIdleSec", "TimeoutSec", "TimeoutStartFailureMode", "TimeoutStartSec",
+    "TimeoutStopFailureMode", "TimeoutStopSec", "TimerSlackNSec", "Timestamping", "Transparent",
+    "TriggerLimitBurst", "TriggerLimitIntervalSec", "Type", "UMask", "USBFunctionDescriptors", "USBFunctionStrings",
+    "Unit", "UnsetEnvironment", "UpheldBy", "Upholds", "User", "UtmpIdentifier", "UtmpMode", "WakeSystem",
+    "WantedBy", "Wants", "WantsMountsFor", "WatchdogSec", "WatchdogSignal", "What", "Where", "WorkingDirectory",
+    "Writable"))
 
 
 def value_fix(key):
     """#5253, #5547, #5552: the clause a #5167 refusal of a KEY= value in a unit file ends with. The PID1_NAMES remedy
     is offered only for a key on NAME_ONLY_KEYS, and states its bar: the systemd source line, quoted as proof. Any
-    other key is told the way onto NAME_ONLY_KEYS, its v257 parser as proof (#5557)."""
-    fix = "; write %s= as plain absolute paths (no specifier, quote, escape or '..')" % key
-    if key not in NAME_ONLY_KEYS:
-        return fix + (", or, if %s= never names a host path, add %s to NAME_ONLY_KEYS, quoting as proof its parser in "
-                      "systemd v%s's load-fragment-gperf.gperf.in" % (key, key, NAME_ONLY_SYSTEMD))
-    return fix + (", or, if %s= never names a host path, add %s to PID1_NAMES, quoting in the change as proof the "
-                  "systemd source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that "
-                  "uses the value), not an assertion" % (key, key))
+    other key off UNIT_KEYS is told the way onto NAME_ONLY_KEYS, its parser and the code that uses the value as
+    proof (#5557, #5191); a key on UNIT_KEYS gets the plain-path fix alone (#5191)."""
+    fix = "; write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it names one)" % key
+    if key in NAME_ONLY_KEYS:
+        return fix + (", or, if %s= never names a host path, add %s to PID1_NAMES, quoting in the change as proof the "
+                      "systemd source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that "
+                      "uses the value), not an assertion" % (key, key))
+    if key in UNIT_KEYS:
+        return fix
+    return fix + (", or, if %s= never names a host path, add %s to NAME_ONLY_KEYS, quoting as proof its parser in "
+                  "systemd v%s's load-fragment-gperf.gperf.in and the code that uses the value"
+                  % (key, key, NAME_ONLY_SYSTEMD))
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
@@ -497,7 +597,7 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
     if held or made:
         # #1829 (Security R1 gap 5): the directories holding the link, as far as the tree holds them
         # without a link. A link the tree holds under a box mount is hidden by the mount; one a
-        # tmpfiles.d line makes there is held to the world-writable and service_dir rules only.
+        # tmpfiles.d line makes there is held to the world-writable, service_dir and tmpfiles.d rules only (#5191).
         holders, gid = rel.split("/")[:-1], TREE_GROUP
         for k in range(1, len(holders) + 1):
             d = "/".join(holders[:k])
@@ -525,7 +625,9 @@ def link_refusal(root, rel, target, path, made=False, walked=()):
         why = step_refusal(root, d, target, True)
         if why:
             return why
-    why = chain_refusal(root, parts, target, not path.startswith("/"))
+    # #5191: the link's own path is weighed by the rules above, not as a step of its way: a link the tree holds
+    # under a box mount (Debian's run/shm, once tmpfiles has run) chases to itself there, and is hidden by the mount.
+    why = chain_refusal(root, parts, target, not path.startswith("/"), skip=frozenset((rel,)))
     if why:
         return why
     if path.startswith("/") and (made or rel.split("/", 1)[0] not in BOX_MOUNTS):
@@ -608,6 +710,15 @@ def step_refusal(root, d, target, held, st=False, via="through", gid=None):
             or st is not None and stat.S_ISDIR(st.st_mode) and st.st_mode & 0o002:
         return ("a link to %s, inside /%s, which anyone on the box can write, or a service user owns; "
                 "a local user would decide what it reads (#1543, #1702)" % (target, d))
+    if not held:
+        # #5191: under a box mount the box makes every step, so a tmpfiles.d line that makes one for a user other
+        # than root, gives it a group, or makes it a link (tmpfiles_maker) decides who writes it, as a unit's own
+        # directory would. Its parent is the box's root-owned mount, so root's gid is weighed.
+        made = tmpfiles_maker(root, path_parts(d), os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, TREE_GROUP, 0, 0, 0, 0)),
+                              lacks=True)
+        if made:
+            return ("a link to %s, %s /%s, under a box mount, which %s line %d makes %s on the box; the line decides "
+                    "who can write it (#5191)" % ((target, via, d) + made))
     if st is not None and held:
         # #1803: who owns each step, and whether an ACL lets anyone else write it. A step the
         # tree check cannot read the attributes of is refused, not passed.
@@ -2503,7 +2614,8 @@ def path_refusal(root, path, above):
     refused through (step_refusal, chain_refusal): whoever can write that directory can put a link
     there at runtime and decide where the path leads (#5154). Its way is every directory tree_chase
     steps into (WALKED) and those of the resolved path; the last step is not on it. As for a link, a
-    step under a box mount is held to WORLD_WRITABLE and service_dir only (chain_refusal's HELD)."""
+    step under a box mount is held to WORLD_WRITABLE, service_dir and the tmpfiles.d lines that make it
+    (chain_refusal's HELD, #5191)."""
     if any(c in path for c in UNMODELLED):
         return ": the tree check does not model it"
     walked = [None]
@@ -3356,7 +3468,11 @@ TMPFILES_STOCK = ("L /var/run - - - - ../run", "L+ /var/run - - - - ../run", "L 
 # systemd-tmpfiles 257.13's path specifiers for the system manager (src/tmpfiles/tmpfiles.c); the
 # others expand to names without a slash.
 TMPFILES_SPECIFIERS = {"t": "/run", "S": "/var/lib", "C": "/var/cache", "L": "/var/log", "T": "/tmp",
-                       "V": "/var/tmp", "h": "/root", "%": "%"}
+                       "V": "/var/tmp", "h": "/root", "%": "%",
+                       # #5191 (Security on #5584): the machine and boot IDs, 32 hex digits, never empty and never a
+                       # '/', so a glob component. Every other specifier (%u, %U, %g, %o, %a, %H, %A, %B, which may be
+                       # empty and drop a component, and any a later systemd adds) is refused (tmpfiles_specifier).
+                       "m": "*", "b": "*"}
 C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "s": " "}
 
 
@@ -3397,6 +3513,14 @@ def tmpfiles_words(ln, n=6):
 def tmpfiles_expand(p):
     """P with systemd-tmpfiles' specifiers expanded (TMPFILES_SPECIFIERS)."""
     return re.sub(r"%(.)", lambda m: TMPFILES_SPECIFIERS.get(m.group(1), m.group(0)), p)
+
+
+def tmpfiles_specifier(p):
+    """#5191 (Security on #5584): the first specifier in tmpfiles.d path P that TMPFILES_SPECIFIERS does not
+    expand ('%' alone at the end included), or None. A line naming one is refused whole (tmpfiles_refusals),
+    so no rule reads a path systemd-tmpfiles would expand to another one."""
+    m = re.search(r"%(?:[^%" + "".join(TMPFILES_SPECIFIERS) + r"]|$)", re.sub("%%", "", p), re.S)
+    return m and m.group(0)
 
 
 def path_parts(p):
@@ -3543,7 +3667,7 @@ def tmpfiles_refusals(root):
             if not ln or ln.startswith("#") or re.sub(r"[ \t]+", " ", ln) in TMPFILES_STOCK:
                 continue
             (typ, path, *_), arg = tmpfiles_words(ln) if len(tmpfiles_words(ln)[0]) >= 2 else ([ln, ""], "")
-            path = tmpfiles_expand(path)
+            raw_path, path = path, tmpfiles_expand(path)
             names, sources = [path], []
             if typ[:1] in ("L", "C"):
                 words = tmpfiles_words(arg, 1)[0]
@@ -3553,7 +3677,12 @@ def tmpfiles_refusals(root):
                     if a in ("", "-"):
                         a = "/usr/share/factory/" + path
                     names.append(a if a.startswith("/") else path.rsplit("/", 1)[0] + "/" + a)
-            if ".." in path.split("/"):
+            unread = tmpfiles_specifier(raw_path) or (typ[:1] in ("L", "C") and next(filter(None, map(
+                tmpfiles_specifier, {arg, (tmpfiles_words(arg, 1)[0] or [arg])[0]})), None))
+            if unread:
+                why = ("a specifier the tree check does not expand (%s), so it cannot tell what the line names; write "
+                       "the path without it (#5191)" % unread)
+            elif ".." in path.split("/"):
                 why = "a path with a '..' component (#1530)"
             elif any(".." in a.split("/") for a in sources):
                 why = "a link target or copy source with a '..' component (#1543)"

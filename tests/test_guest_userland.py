@@ -73,11 +73,11 @@ class UserlandCopyTest(unittest.TestCase):
         (db / "status").write_text("\n".join(stanzas))
         (self.base / "usr/lib/os-release").write_text('ID=debian\nVERSION_ID="13"\n')
 
-    def run_userland(self, *paths, unowned=()):
+    def run_userland(self, *paths, unowned=(), cwd=None):
         self.stage_dpkg(unowned)
         self.shipped = self.tmp / "shipped"
-        return subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), *paths],
-                              capture_output=True, text=True, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
+        return subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), *paths], capture_output=True,
+                              text=True, cwd=cwd, env={**os.environ, "GUEST_SHIPPED": str(self.shipped)})
 
     def recorded(self):
         return set(self.shipped.read_text().split()) if self.shipped.exists() else set()
@@ -217,6 +217,22 @@ class UserlandCopyTest(unittest.TestCase):
         self.assertIn("/bin/pinned: libpin.so not found in %s/%s (got " % (self.base.resolve(), MULTIARCH), r.stderr)
         self.assertFalse((self.out / MULTIARCH / "libpin.so").exists())
 
+
+    def test_a_library_named_by_a_relative_path_fails(self):
+        # A NEEDED name with a slash is opened from the build's working directory, and the loader
+        # lists it with no "=>" and no path: the library-directory check refuses it, naming it.
+        src = self.tmp / "src"
+        (src / "sub").mkdir(parents=True)
+        (src / "pin.c").write_text("int pin(void) { return 7; }\n")
+        (src / "main.c").write_text("int pin(void);\nint main(void) { return pin(); }\n")
+        subprocess.run(["cc", "-shared", "-fPIC", "-Wl,-soname,sub/libpin.so", "-o", str(src / "sub/libpin.so"),
+                        str(src / "pin.c")], check=True)
+        subprocess.run(["cc", "-o", str(self.base / "usr/bin/rel"), str(src / "main.c"), str(src / "sub/libpin.so")],
+                       check=True, cwd=src)
+        r = self.run_userland("/bin/rel", cwd=src)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/bin/rel: sub/libpin.so not found in %s/%s (got )" % (self.base.resolve(), MULTIARCH), r.stderr)
+        self.assertFalse((self.out / MULTIARCH / "libpin.so").exists())
 
 class WiringTest(unittest.TestCase):
     """Every guest build reads the one base; nothing copies from the host."""
