@@ -610,11 +610,11 @@ func TestUnreadRestorePointLine(t *testing.T) {
 		t.Fatalf("nothing unread: %q", got)
 	}
 	unread = []string{"s0000000007"}
-	if got := s.unreadLine(); got != "Restore points: one could not be read and is not offered; Forget removes it." {
+	if got := s.unreadLine(); got != "Restore points: one could not be read and is not offered; Any Forget removes it." {
 		t.Fatalf("one unread: %q", got)
 	}
 	unread = append(unread, "s0000000123")
-	if got := s.unreadLine(); got != "Restore points: 2 could not be read and are not offered; Forget removes them." {
+	if got := s.unreadLine(); got != "Restore points: 2 could not be read and are not offered; Any Forget removes them." {
 		t.Fatalf("two unread: %q", got)
 	}
 	for _, l := range []string{unreadLine([]string{"s0000000007"}), unreadLine(unread)} {
@@ -626,17 +626,17 @@ func TestUnreadRestorePointLine(t *testing.T) {
 		}
 	}
 	for forgotten, want := range map[bool]string{
-		true:  "Forget: 2 saved points that could not be read were deleted with them, and I could not tell what they held.",
-		false: "Disk space: 2 saved points that could not be read were deleted to make room, and I could not tell what they held.",
+		true:  "Forget: 2 restore points that could not be read were deleted along with what you forgot, and I could not tell what they held.",
+		false: "Disk space: 2 restore points that could not be read were deleted to make room, and I could not tell what they held.",
 	} {
 		if got := unreadGoneNotice(2, forgotten); got != want {
 			t.Errorf("notice (forgotten %v) = %q, want %q", forgotten, got, want)
 		}
 	}
-	if got := unreadGoneNotice(1, true); got != "Forget: one saved point that could not be read was deleted with it, and I could not tell what it held." {
+	if got := unreadGoneNotice(1, true); got != "Forget: one restore point that could not be read was deleted along with what you forgot, and I could not tell what it held." {
 		t.Errorf("one lost: %q", got)
 	}
-	if got := unreadGoneNotice(1, false); got != "Disk space: one saved point that could not be read was deleted to make room, and I could not tell what it held." {
+	if got := unreadGoneNotice(1, false); got != "Disk space: one restore point that could not be read was deleted to make room, and I could not tell what it held." {
 		t.Errorf("one pruned: %q", got)
 	}
 }

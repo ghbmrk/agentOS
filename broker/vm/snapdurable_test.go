@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -424,14 +425,16 @@ func TestCAP3ForgetTellsOfUnreadDeleted(t *testing.T) {
 func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
 	e := newEnv(t, 4096)
 	e.create("m", admission.Accepted, 500)
-	old, young := snapName(3), snapName(4)
-	for _, id := range []string{old, young} {
+	old, young, base := snapName(3), snapName(4), snapName(5)
+	for _, id := range []string{old, young, base} {
 		dir := filepath.Join(e.cfg.StateDir, "snapshots", id)
 		must(t, os.MkdirAll(filepath.Join(dir, "meta.json"), 0o700))
 		must(t, os.WriteFile(filepath.Join(dir, "disk.img"), []byte("layer"), 0o600))
 	}
 	longAgo := time.Now().Add(-time.Hour)
-	must(t, os.Chtimes(filepath.Join(e.cfg.StateDir, "snapshots", old), longAgo, longAgo))
+	for _, id := range []string{old, base} {
+		must(t, os.Chtimes(filepath.Join(e.cfg.StateDir, "snapshots", id), longAgo, longAgo))
+	}
 	type told struct {
 		n         int
 		forgotten bool
@@ -439,6 +442,13 @@ func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
 	var calls []told
 	e.cfg.UnreadGone = func(n int, forgotten bool) { calls = append(calls, told{n, forgotten}) }
 	e.restart("m")
+	// A live machine forked from the unread snapshot: it stays, as a
+	// readable fork base does (Security on #5499).
+	mc, err := e.m.get("m")
+	must(t, err)
+	mc.mu.Lock()
+	mc.ForkBase = base
+	mc.mu.Unlock()
 	p := PrunePolicy{LowWaterBytes: 1 << 30}
 	e.m.cfg.FreeBytes = func(string) (int64, error) { return 1 << 50, nil }
 	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 0 {
@@ -456,8 +466,8 @@ func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(e.cfg.StateDir, "snapshots", young)); err != nil {
 		t.Fatalf("a young unread snapshot removed: %v", err)
 	}
-	if got := e.m.Unread(); len(got) != 1 || got[0] != young {
-		t.Fatalf("unread after the prune = %v, want [%s]", got, young)
+	if got := e.m.Unread(); len(got) != 2 || !slices.Contains(got, young) || !slices.Contains(got, base) {
+		t.Fatalf("unread after the prune = %v, want [%s %s]", got, young, base)
 	}
 	if len(calls) != 1 || calls[0] != (told{1, false}) {
 		t.Fatalf("told %v, want one notice of 1 pruned", calls)

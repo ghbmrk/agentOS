@@ -154,7 +154,12 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 	if pressured {
 		lost := 0
 		for _, id := range m.Unread() {
-			if fi, err := os.Stat(m.snapDir(id)); err == nil && !fi.ModTime().Before(cutoff) {
+			// A live machine's fork base stays, as for a readable one. A
+			// directory that cannot be statted is not known to be old.
+			if forkBases[id] {
+				continue
+			}
+			if fi, err := os.Stat(m.snapDir(id)); err != nil && !os.IsNotExist(err) || err == nil && !fi.ModTime().Before(cutoff) {
 				continue
 			}
 			if err := m.removeSnapshot(id); err != nil {

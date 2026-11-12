@@ -88,21 +88,21 @@ func unreadLine(ids []string) string {
 	case 0:
 		return ""
 	case 1:
-		return "Restore points: one could not be read and is not offered; Forget removes it."
+		return "Restore points: one could not be read and is not offered; Any Forget removes it."
 	}
-	return fmt.Sprintf("Restore points: %d could not be read and are not offered; Forget removes them.", len(ids))
+	return fmt.Sprintf("Restore points: %d could not be read and are not offered; Any Forget removes them.", len(ids))
 }
 
-// unreadGoneNotice is what the owner is told when saved points whose record
+// unreadGoneNotice is what the owner is told when restore points whose record
 // did not read were deleted: with a forget, or because the disk ran short.
 // What they held is not known, so the notice says that.
 func unreadGoneNotice(n int, forgotten bool) string {
-	what, it, held := "one saved point that could not be read was", "it", "it held"
+	what, held := "one restore point that could not be read was", "it held"
 	if n > 1 {
-		what, it, held = fmt.Sprintf("%d saved points that could not be read were", n), "them", "they held"
+		what, held = fmt.Sprintf("%d restore points that could not be read were", n), "they held"
 	}
 	if forgotten {
-		return "Forget: " + what + " deleted with " + it + ", and I could not tell what " + held + "."
+		return "Forget: " + what + " deleted along with what you forgot, and I could not tell what " + held + "."
 	}
 	return "Disk space: " + what + " deleted to make room, and I could not tell what " + held + "."
 }
