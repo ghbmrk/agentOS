@@ -6270,10 +6270,10 @@ class ImageToolTest(MustRun, unittest.TestCase):
     def test_name_only_keys_were_read_from_this_systemd(self):
         # #5552: NAME_ONLY_KEYS was read from one systemd's load-fragment-gperf.gperf.in; a different image
         # systemd fails here until the list is read again and NAME_ONLY_SYSTEMD changed with it.
-        image_tool(self, "systemd-analyze")
-        want = dpkg_version(os.environ["AGENTOS_REFERENCE_ROOT"], "systemd")
-        self.assertTrue(want)
-        self.assertEqual(want.split(".", 1)[0], check.NAME_ONLY_SYSTEMD, want)
+        tool = image_tool(self, "systemd-analyze")
+        out = subprocess.run(tool + ["--version"], capture_output=True, text=True, timeout=60).stdout
+        # "systemd 257 (257.9-1~deb13u1)": the major version is the second word.
+        self.assertEqual(out.split("\n", 1)[0].split(" ")[1], check.NAME_ONLY_SYSTEMD, out)
 
     def test_a_library_from_outside_the_root_fails_the_case(self):
         # #5231: --library-path falls back to the runner's directories, so a root without a library the
