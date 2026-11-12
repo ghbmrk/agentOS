@@ -157,8 +157,17 @@ PREMERGE_LINES = [
     '          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"',
     '          HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")',
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
-    '          posted=no',
+    '          posted=no skipped=no fork=no',
+    '          ours() {',
+    '            n=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \\',
+    '              --jq ".[] | select(.head.sha == \\"$HEAD_SHA\\" and .head.repo.full_name == \\"$REPO\\" and .number != $PR_NUMBER) | .number") || return 1',
+    '            grep -Eqx \'[1-9][0-9]{0,9}\' <<< "$n"',
+    '          }',
     '          post() {',
+    '            if [ "$fork" = yes ] && ours; then',
+    '              echo "::notice::#$PR_NUMBER is a fork PR on the head of an open PR from $REPO; that PR\'s gate posts premerge"',
+    '              posted=yes skipped=yes; return',
+    '            fi',
     '            GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \\',
     '              -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null',
     '            posted=yes',
@@ -166,6 +175,7 @@ PREMERGE_LINES = [
     '          trap \'[ "$posted" = yes ] || post failure error\' EXIT',
     '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
     '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
+    '          [ "$HEAD_REPO" = "$REPO" ] || fork=yes',
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
     '          state=failure',
     '          out=$(',
@@ -196,7 +206,7 @@ PREMERGE_LINES = [
     '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
-    '          if [ "$state" = success ] && [ "$out" = same ] && \\',
+    '          if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \\',
     '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
     '            printf \'merge-head=%s\\nmerge-repo=%s\\nmerge-ref=%s\\n\' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"',
     '          fi',
@@ -1442,6 +1452,15 @@ class WorkflowTest(unittest.TestCase):
                      ('-f merge_method=merge -f sha="$HEAD_SHA"', "-f merge_method=merge"),
                      ("    environment: bot", "    # environment: bot"),
                      ("    permissions: {}", "    permissions:\n      contents: write"),
+                     # PREMERGE-status-bind (#5442): only a fork PR, only beside an open repository PR into main on its
+                     # head, holds its post back, and then hands the merge job nothing.
+                     ('[ "$HEAD_REPO" = "$REPO" ] || fork=yes', '[ "$HEAD_REF" = "$REPO" ] || fork=yes'),
+                     ('if [ "$fork" = yes ] && ours; then', 'if ours; then'),
+                     ('.head.repo.full_name == \\"$REPO\\" and ', ''),
+                     ('select(.head.sha == \\"$HEAD_SHA\\" and ', 'select('),
+                     ("state=open&base=main&per_page=100", "state=open&per_page=100"),
+                     (') | .number") || return 1', ') | .number")'),
+                     ('[ "$out" = same ] && [ "$skipped" = no ] && ', '[ "$out" = same ] && '),
                      # PREMERGE-fork-rerun (#5383): the dispatched run joins the PR's group, reads only a number, and
                      # only the job that dispatches holds `actions: write`, for runs that name no PR.
                      ("|| inputs.pr || github.run_id }}", "|| github.run_id }}"),
@@ -1500,9 +1519,11 @@ case "$*" in
   "api repos/o/r/actions/runs/41") [ "$FAIL_AT" = run ] && exit 1; echo '{"id":41}' ;;
   "api repos/o/r/actions/artifacts/"*"/zip") [ "$FAIL_AT" = zip ] && exit 1; echo "$*" >> "$STUBS/zips" ;;
   "api --paginate repos/o/r/actions/runs?"*) [ "$FAIL_AT" = runs ] && exit 1; echo "$*" >> "$STUBS/runs" ;;
+  "api --paginate repos/o/r/pulls?state=open&base=main&per_page=100 --jq "*) echo "$*" >> "$STUBS/lists"
+     [ "$FAIL_AT" = list ] && exit 1; printf '%s' "$OPEN_PRS" | "$REAL_JQ" -r "$5" ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
-                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
+                 echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"'"$HEAD_FULL"'"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
   *) exit 2 ;;
 esac
 """
@@ -1579,7 +1600,7 @@ class PremergeRunTest(unittest.TestCase):
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 descriptions=None, trailer="41\n", calls=None, pr="7"):
+                 descriptions=None, trailer="41\n", calls=None, pr="7", head="o/r", open_prs=(), lists=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -1594,7 +1615,8 @@ class PremergeRunTest(unittest.TestCase):
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
-                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
+                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer,
+                   "HEAD_FULL": head, "OPEN_PRS": json.dumps(list(open_prs))}
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
@@ -1605,6 +1627,8 @@ class PremergeRunTest(unittest.TestCase):
                 descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
+            if lists is not None:
+                lists.extend((stubs / "lists").read_text().splitlines() if (stubs / "lists").exists() else [])
             if calls is not None:
                 for f in ("zips", "py", "runs"):
                     calls.extend((stubs / f).read_text().splitlines() if (stubs / f).exists() else [])
@@ -1625,6 +1649,48 @@ class PremergeRunTest(unittest.TestCase):
         q = "api --paginate repos/o/r/actions/runs?%s&per_page=100 --jq .workflow_runs[]"
         self.assertEqual(calls[1:], [q % f"head_sha={a}", q % f"head_sha={b}&event=push", q % f"head_sha={b}&event=schedule"])
         self.assertRegex(calls[0], r"^-I tools/premerge\.py --check \S+/comments\.json 7 --runs \S+/runs\.json --base refs/remotes/pr/base " + a + "$")
+
+    @staticmethod
+    def open_pr(number, sha, repo):
+        return {"number": number, "head": {"sha": sha, "repo": {"full_name": repo}}}
+
+    def test_fork_pr_leaves_a_shared_head_to_the_repository_pr(self):
+        # PREMERGE-status-bind (#5442): a fork PR on the head of an open PR into main from this repository posts
+        # nothing and hands the merge job nothing, whatever its verdict or error, so its `failure` cannot land
+        # after that PR's `success`. The list is read just before each post, with this sha and PR number.
+        ours = [self.open_pr(8, self.SHA, "o/r"), self.open_pr(7, self.SHA, "f/r")]
+        for verdict, kw in (("same", {}), ("no-verdict", {}), ("same", {"fail_at": "comments"}), ("same", {"base": "stacked"})):
+            with self.subTest(verdict=verdict, **kw):
+                out, lists = [], []
+                self.assertEqual(self.run_gate(verdict, head="f/r", open_prs=ours, outputs=out, lists=lists, **kw), (0, []))
+                self.assertEqual(out, [])
+                self.assertEqual(len(lists), 1)
+                self.assertIn('select(.head.sha == "%s" and .head.repo.full_name == "o/r" and .number != 7)' % self.SHA, lists[0])
+        # A fork PR alone on its head, or beside other forks, or beside a repository PR on another head, posts as before.
+        b = "b" * 40
+        for others in ([], [self.open_pr(7, self.SHA, "f/r")], [self.open_pr(9, self.SHA, "g/r")], [self.open_pr(8, b, "o/r")],
+                       [{"number": 8, "head": {"sha": self.SHA, "repo": None}}]):
+            with self.subTest(others=others):
+                out = []
+                self.assertEqual(self.run_gate("same", head="f/r", open_prs=others, outputs=out), (0, ["success"]))
+                self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=f/r", "merge-ref=feature"])
+                self.assertEqual(self.run_gate("no-verdict", head="f/r", open_prs=others), (0, ["failure"]))
+        # A fork whose head repository was deleted is a fork too.
+        self.assertEqual(self.run_gate("no-verdict", head="", open_prs=ours[:1]), (0, []))
+
+    def test_status_bind_fails_closed(self):
+        # PREMERGE-status-bind (#5442): a repository PR always posts, without reading the list, even when another
+        # repository PR shares its head; a failed list read, or an error before the head's repository is known,
+        # posts `failure` as before.
+        ours = [self.open_pr(8, self.SHA, "o/r")]
+        for verdict, state in (("same", "success"), ("fix-list", "failure")):
+            lists = []
+            self.assertEqual(self.run_gate(verdict, open_prs=ours, lists=lists), (0, [state]))
+            self.assertEqual(lists, [])
+        self.assertEqual(self.run_gate("no-verdict", head="f/r", open_prs=ours, fail_at="list"), (0, ["failure"]))
+        self.assertEqual(self.run_gate("same", head="f/r", open_prs=ours, fail_at="list"), (0, ["success"]))
+        code, states = self.run_gate("same", head="f/r", open_prs=ours, fail_at="jq")
+        self.assertEqual((code != 0, states), (True, ["failure"]))
 
     def test_gate_reads_only_a_pr_number(self):
         # PREMERGE-fork-rerun (#5383): a dispatch carries its PR as an input, so the number is checked before any read.

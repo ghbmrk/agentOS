@@ -58,6 +58,11 @@ name: premerge
 # env strings, checks nothing out and runs no repository code. A dispatch from any other branch
 # runs that branch's copy, which the `premerge` environment refuses its key, as for any branch
 # workflow (PREMERGE-source); anyone who may dispatch may already comment, which reruns the gate.
+# PREMERGE-status-bind (#5442): the status is keyed by sha alone, so a fork PR opened on another PR's head would post
+# its own `failure` there last. A fork PR's gate posts nothing while an open PR into main from this repository has
+# its head; that PR's gate posts for the sha. It looks just before each post and only a read that names such a PR
+# holds it back, so a failed read, or an error before the head's repository is read, posts as before (fail closed).
+# Same-repository PRs and a lone fork PR always post, and a held-back post hands the merge job nothing.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -121,8 +126,17 @@ jobs:
           gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
           HEAD_SHA=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
           echo "$HEAD_SHA" | grep -Eqx '[0-9a-f]{40}'
-          posted=no
+          posted=no skipped=no fork=no
+          ours() {
+            n=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" \
+              --jq ".[] | select(.head.sha == \"$HEAD_SHA\" and .head.repo.full_name == \"$REPO\" and .number != $PR_NUMBER) | .number") || return 1
+            grep -Eqx '[1-9][0-9]{0,9}' <<< "$n"
+          }
           post() {
+            if [ "$fork" = yes ] && ours; then
+              echo "::notice::#$PR_NUMBER is a fork PR on the head of an open PR from $REPO; that PR's gate posts premerge"
+              posted=yes skipped=yes; return
+            fi
             GH_TOKEN="$STATUS_TOKEN" gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$1" -f context=premerge \
               -f description="$2" -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID" > /dev/null
             posted=yes
@@ -130,6 +144,7 @@ jobs:
           trap '[ "$posted" = yes ] || post failure error' EXIT
           HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")
           HEAD_REPO=$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/pr.json")
+          [ "$HEAD_REPO" = "$REPO" ] || fork=yes
           BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")
           state=failure
           # errexit does not apply inside a substitution that is part of `&&`, so each step exits on its own failure.
@@ -165,7 +180,7 @@ jobs:
           out=$(printf '%s' "${out:-error}" | tail -n 1 | tr -cd '\40-\176' | cut -c 1-120)
           echo "premerge $HEAD_SHA: $state ($out)"
           post "$state" "$out"
-          if [ "$state" = success ] && [ "$out" = same ] && \
+          if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \
             jq -e '.state == "open" and .draft == false and .auto_merge == null' "$RUNNER_TEMP/pr.json" > /dev/null; then
             printf 'merge-head=%s\nmerge-repo=%s\nmerge-ref=%s\n' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"
           fi
