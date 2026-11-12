@@ -709,7 +709,7 @@ func TestProviderSweepRunsBeforeAnyProviderWorker(t *testing.T) {
 	if sweep < 0 || strings.Count(s, "signIns.Sweep()") != 1 {
 		t.Fatal("main.go does not call signIns.Sweep() exactly once")
 	}
-	for _, before := range []string{"\tsignInHost.Close(cctx)\n", "\tm, err := vm.Open(ctx, vmc)\n", "\tsignIns.M = m\n"} {
+	for _, before := range []string{"\tsignInHost.Close(cctx)\n", "\tm, err := openVM(ctx, vmc, caps, informOwner(d.Owner))\n", "\tsignIns.M = m\n"} {
 		if i := strings.Index(s, before); i < 0 || i > sweep {
 			t.Fatalf("%q at %d, not before the sweep at %d", before, i, sweep)
 		}

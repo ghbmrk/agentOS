@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // REQ: OP-9
@@ -594,9 +596,10 @@ func TestOwnerLinesNameTheWiFiPage(t *testing.T) {
 // KRN-forget b: an erase a store or the key still owes gives one STATUS
 // line by count and store, never by name; nothing owed gives none; an
 // unreachable kernel gives one line, not silence; forgetNotRunning is gone.
-// CAP-3 (#5461): restore points kept unread at open name themselves in one
-// owner-worded line, one by its ID and more by count, from the machines'
-// live list; none, no line.
+// CAP-3 (#5461, #5481): restore points kept unread at open name themselves
+// in one owner-worded line by count, never by internal ID, ending on the
+// step that works (a forget removes them), from the machines' live list;
+// none, no line. The notice for deleted ones is owner-worded too.
 func TestUnreadRestorePointLine(t *testing.T) {
 	var unread []string
 	s := &capState{}
@@ -608,17 +611,84 @@ func TestUnreadRestorePointLine(t *testing.T) {
 		t.Fatalf("nothing unread: %q", got)
 	}
 	unread = []string{"s0000000007"}
-	if got := s.unreadLine(); got != "Restore points: s0000000007 could not be read, so it is not offered; I retry it at each start." {
+	if got := s.unreadLine(); got != "Restore points: one could not be read and is not offered; any Forget removes it." {
 		t.Fatalf("one unread: %q", got)
 	}
 	unread = append(unread, "s0000000123")
-	if got := s.unreadLine(); got != "Restore points: 2 could not be read, so they are not offered; I retry them at each start." {
+	if got := s.unreadLine(); got != "Restore points: 2 could not be read and are not offered; any Forget removes them." {
 		t.Fatalf("two unread: %q", got)
 	}
 	for _, l := range []string{unreadLine([]string{"s0000000007"}), unreadLine(unread)} {
 		if err := ownerWorded(l); err != nil {
 			t.Errorf("%q: %v", l, err)
 		}
+		if strings.Contains(l, "s0000000") {
+			t.Errorf("%q names an internal ID", l)
+		}
+	}
+	for forgotten, want := range map[bool]string{
+		true:  "Forget: 2 restore points that could not be read were deleted along with what you forgot, and I could not tell what they held.",
+		false: "Disk space: 2 restore points that could not be read were deleted to make room, and I could not tell what they held.",
+	} {
+		if got := unreadGoneNotice(2, forgotten); got != want {
+			t.Errorf("notice (forgotten %v) = %q, want %q", forgotten, got, want)
+		}
+	}
+	if got := unreadGoneNotice(1, true); got != "Forget: one restore point that could not be read was deleted along with what you forgot, and I could not tell what it held." {
+		t.Errorf("one lost: %q", got)
+	}
+	if got := unreadGoneNotice(1, false); got != "Disk space: one restore point that could not be read was deleted to make room, and I could not tell what it held." {
+		t.Errorf("one pruned: %q", got)
+	}
+}
+
+// CAP-3 (#5481): the seam main opens the machines through wires the
+// restore-point line to the live list and the notice to the owner's
+// channel: an unread snapshot at open shows in STATUS, and a forget that
+// deletes it tells the owner.
+func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
+	state := t.TempDir()
+	meta := filepath.Join(state, "snapshots", "s0000000007", "meta.json")
+	must(t, os.MkdirAll(meta, 0o700)) // a directory where the record is: unread, not absent
+	var m *vm.Manager
+	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+	must(t, err)
+	var told []string
+	caps := &capState{}
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+	m, err = openVM(context.Background(), vm.Config{
+		StateDir: state, Images: map[string]string{"base": t.TempDir()},
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+	}, caps, func(text string) error { told = append(told, text); return errors.New("no owner channel") })
+	must(t, err)
+	if got := caps.unreadLine(); got != unreadLine([]string{"s0000000007"}) {
+		t.Fatalf("STATUS line = %q, want the unread one", got)
+	}
+	must(t, m.ForgetSince(context.Background(), "x.0", time.Now()))
+	if !strings.Contains(logged.String(), "telling the owner of deleted unread snapshots: no owner channel") {
+		t.Fatalf("a failed notice not logged: %q", logged.String())
+	}
+	if len(told) != 1 || told[0] != unreadGoneNotice(1, true) {
+		t.Fatalf("owner told %q, want the forget notice", told)
+	}
+	if got := caps.unreadLine(); got != "" {
+		t.Fatalf("STATUS line after the forget = %q", got)
+	}
+}
+
+// CAP-3 (#5481): a machines open that fails returns the error and wires
+// nothing: no manager, no restore-point line.
+func TestOpenVMFailureWiresNothing(t *testing.T) {
+	caps := &capState{}
+	m, err := openVM(context.Background(), vm.Config{StateDir: t.TempDir()}, caps, func(string) error { return nil })
+	if err == nil || m != nil {
+		t.Fatalf("open without a runtime: %v, %v", m, err)
+	}
+	if caps.unread.Load() != nil {
+		t.Fatal("the restore-point line was wired to machines that did not open")
 	}
 }
 

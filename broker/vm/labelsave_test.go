@@ -151,6 +151,14 @@ func (e *env) privateSnapOfDestroyed() Snapshot {
 	s.Lineage, s.Instance = "", ""
 	must(e.t, writeJSON(filepath.Join(e.m.snapDir(s.ID), "meta.json"), s))
 	e.create("a", admission.Accepted, 500)
+	// The replacement too was recorded before the upgrade, with no begin
+	// time: the snapshot is stamped as its own.
+	mc, err := e.m.get("a")
+	must(e.t, err)
+	mc.mu.Lock()
+	mc.Created = time.Time{}
+	must(e.t, writeJSON(filepath.Join(e.m.machineDir("a"), "meta.json"), mc.Machine))
+	mc.mu.Unlock()
 	e.adm.Release("a")
 	e.open() // the upgrade
 	if l := e.labelOf("a"); l != Public {
