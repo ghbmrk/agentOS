@@ -326,6 +326,36 @@ class CommandTest(unittest.TestCase):
             time.sleep(0.1)
         self.assertFalse(alive(pid), f"pid {pid}, a setsid child of {name}, outlived run_one")
 
+    def test_a_child_left_running_under_real_strace_fails_the_module_by_name(self):
+        # #5475: under real strace -f, a child of the module that left its session and never ends
+        # would hold strace, so the step would wait for the job's timeout. run_one kills it once the
+        # module's first process has ended, and the module fails, naming what it left running.
+        if boundary_unready() and os.environ.get("AGENTOS_REQUIRE_UID_BOUNDARY") != "1":
+            self.skipTest(boundary_unready())
+        self.assertIsNone(boundary_unready())
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        os.chmod(root, 0o755)
+        (root / "tests").mkdir()
+        name, trace_dir = "test_zz_stray_hold", root / "reads"
+        (root / "tests" / f"{name}.py").write_text(textwrap.dedent("""\
+            import subprocess, unittest
+            class Leave(unittest.TestCase):
+                def test_leave(self):
+                    subprocess.Popen(["sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            """))
+        unit_tests.prepare([name], trace_dir)
+        self.addCleanup(shutil.rmtree, unit_tests.scratch(trace_dir), True)
+        _, rc, secs, out = unit_tests.run_one(name, str(trace_dir), root=root)
+        self.assertEqual(rc, 1, out)
+        self.assertLess(secs, 60, out)
+        self.assertRegex(out, rf"unit_tests: {name} left 1 process\(es\) running after its first process ended")
+        self.assertRegex(out, r"\n  \d+ \['sleep', '300'\]\n")
+        self.assertIn("OK", out)  # its test passed: the leftover alone fails it
+        self.assertEqual(unit_tests.left(name), [])
+        self.assertTrue(records_audit.finished((trace_dir / f"{name}.trace").read_text()))
+
 
 class RunTest(unittest.TestCase):
     def fake(self, fail=(), log=None, delay=0.05):
@@ -619,7 +649,7 @@ class StraceFaultTest(unittest.TestCase):
     def setUp(self):
         # These fake strace and run as whoever runs the tests: no module user to drop to or sweep
         # (the real boundary: test_a_module_reaches_no_trace_stream_and_no_other_module).
-        for name, fake in (("drop", lambda module: []), ("sweep", lambda module: None)):
+        for name, fake in (("drop", lambda module: []), ("sweep", lambda module: None), ("left", lambda module: [])):
             patcher = mock.patch.object(unit_tests, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -675,7 +705,7 @@ class StraceFaultTest(unittest.TestCase):
         d = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d)
         (d / "test_x.trace.cut").write_text("an earlier run's")
-        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n", "")):
+        with mock.patch.object(unit_tests, "attempt", return_value=(0, "OK\n", "", [])):
             self.assertEqual(unit_tests.run_one("test_x", str(d))[1], 0)
         self.assertFalse((d / "test_x.trace.cut").exists())
 
@@ -889,6 +919,126 @@ class StraceFaultTest(unittest.TestCase):
 
 
 R = str(unit_tests.ROOT)
+
+
+class HeldTest(unittest.TestCase):
+    """#5475: strace -f ends only when every process it traces has, so a module's process still
+    running once the module's first process has ended holds the run: attempt() kills it, and
+    run_one fails the module, naming it. A stand-in strace that, like strace -f, goes on while the
+    first process's child does; processes carrying MARK stand for the module's user's."""
+    # REQ: CI-PATHS
+    MARK = "unit-tests-held-pin"
+
+    def setUp(self):
+        mark = f"{self.MARK}-{os.getpid()}-{self.id()}"
+        self.mark = mark
+
+        def left(module):
+            found = []
+            for pid, state, _, _ in unit_tests._procs():
+                try:
+                    argv = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().decode().split("\0")[:-1]
+                except OSError:
+                    continue
+                if state not in "ZX" and mark in argv:
+                    found.append(f"{pid} {argv!r}")
+            return found
+
+        def sweep(module):
+            for f in left(module):
+                try:
+                    os.kill(int(f.split()[0]), 9)
+                except ProcessLookupError:
+                    pass
+        for name, fake in (("left", left), ("sweep", sweep)):
+            patcher = mock.patch.object(unit_tests, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(sweep, None)
+
+    def stand_in(self, top):
+        """A stand-in strace -f: runs top, then goes on while the child top named in its pid file
+        does, as strace -f waits for a child that left the first process's session."""
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        fake = d / "strace"
+        fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+            import pathlib, subprocess, sys, time
+            pidfile = pathlib.Path({str(d / "pid")!r})
+            rc = subprocess.run([sys.executable, "-c", {top!r}, str(pidfile), {self.mark!r}]).returncode
+            def alive(pid):
+                try:
+                    return pathlib.Path(f"/proc/{{pid}}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+                except OSError:
+                    return False
+            while pidfile.exists() and alive(int(pidfile.read_text())):
+                time.sleep(0.05)
+            print("ran")
+            sys.exit(rc)
+            """))
+        fake.chmod(0o755)
+        start = time.monotonic()
+        rc, out, err, held = unit_tests.attempt([str(fake)], module="test_x")
+        return rc, out, held, time.monotonic() - start, d / "pid"
+
+    LEAVE = ("import pathlib, subprocess, sys\n"
+             "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)', sys.argv[2]], start_new_session=True)\n"
+             "pathlib.Path(sys.argv[1]).write_text(str(p.pid))\n")
+
+    def test_a_process_left_running_is_killed_and_named(self):
+        rc, out, held, secs, pidfile = self.stand_in(self.LEAVE)
+        self.assertLess(secs, 30)
+        self.assertEqual((rc, out), (0, "ran\n"))
+        pid = pidfile.read_text()
+        self.assertEqual(len(held), 1, held)
+        self.assertTrue(held[0].startswith(pid + " ") and self.mark in held[0], held)
+        self.assertEqual(unit_tests.left("test_x"), [])
+
+    def test_children_the_first_process_waits_for_hold_nothing(self):
+        rc, out, held, secs, _ = self.stand_in(
+            "import subprocess, sys\n"
+            "subprocess.run([sys.executable, '-c', 'import time; time.sleep(0.6)', sys.argv[2]])\n")
+        self.assertEqual((rc, out, held), (0, "ran\n", []))
+
+    def test_a_child_is_seen_with_or_without_procs_children_list(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertTrue(unit_tests._children(os.getpid()))
+        read = pathlib.Path.read_text
+
+        def no_list(path, *a, **k):
+            if path.name == "children":
+                raise FileNotFoundError(path)
+            return read(path, *a, **k)
+        with mock.patch.object(pathlib.Path, "read_text", no_list):
+            self.assertTrue(unit_tests._children(os.getpid()))
+            self.assertFalse(unit_tests._children(child.pid))
+        self.assertFalse(unit_tests._children(child.pid))
+
+    def test_without_a_module_nothing_is_looked_for(self):
+        with mock.patch.object(unit_tests, "left", side_effect=AssertionError("looked")):
+            self.assertEqual(unit_tests.attempt([sys.executable, "-c", "print('x')"])[1:], ("x\n", "", []))
+
+    def run_with(self, *attempts):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        with mock.patch.object(unit_tests, "attempt", side_effect=list(attempts)) as a:
+            _, rc, _, out = unit_tests.run_one("test_x", str(d))
+        return rc, out, a.call_count
+
+    def test_run_one_fails_a_module_that_held_strace_naming_what_it_left(self):
+        rc, out, calls = self.run_with((0, "test_a ... ok\n\nOK\n", "", ["42 ['sleep', '300']"]))
+        self.assertEqual((rc, calls), (1, 1))
+        self.assertTrue(out.endswith("unit_tests: test_x left 1 process(es) running after its first process ended, "
+                                     "which held strace -f open; killed, and the module fails (#5475):\n"
+                                     "  42 ['sleep', '300']\n"), out)
+
+    def test_a_held_attempt_strace_also_cut_is_not_rerun(self):
+        rc, out, calls = self.run_with((0, "test_a ... ok\n", StraceFaultTest.CUT + "\n", ["42 ['sleep', '300']"]),
+                                       (0, "OK\n", "", []))
+        self.assertEqual((rc, calls), (1, 1))
+        self.assertIn("it had left a process running, so the module fails without a rerun", out)
 
 
 class RecordsAuditTest(unittest.TestCase):
