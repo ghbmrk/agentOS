@@ -379,3 +379,123 @@ func TestCAP3RetiredSnapshotStaysGone(t *testing.T) {
 		t.Fatal("retired snapshot loaded after a crash")
 	}
 }
+
+// CAP-3 (#5481): a forget that deletes snapshots kept unread tells the
+// owner's side how many, as a forget (not a prune); a forget that could not
+// delete them tells nothing, and one that deletes none tells nothing.
+func TestCAP3ForgetTellsOfUnreadDeleted(t *testing.T) {
+	e := newEnv(t, 4096)
+	mc := e.create("m", admission.Accepted, 500)
+	type told struct {
+		n         int
+		forgotten bool
+	}
+	var calls []told
+	e.cfg.UnreadGone = func(n int, forgotten bool) { calls = append(calls, told{n, forgotten}) }
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	e.restart("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	if len(calls) != 0 {
+		t.Fatalf("told of %v with nothing unread", calls)
+	}
+	for _, n := range []int{3, 4} {
+		must(t, os.MkdirAll(filepath.Join(e.cfg.StateDir, "snapshots", snapName(n), "meta.json"), 0o700))
+	}
+	e.restart("m")
+	real := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	if err := e.m.ForgetSince(bg, mc.Lineage, time.Now()); err == nil {
+		t.Fatal("forget succeeded with unread snapshots left")
+	}
+	syncSnapDir = real
+	if len(calls) != 0 {
+		t.Fatalf("told of %v although nothing was deleted", calls)
+	}
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	if len(calls) != 1 || calls[0] != (told{2, true}) {
+		t.Fatalf("told %v, want one notice of 2 deleted by a forget", calls)
+	}
+}
+
+// CAP-3 (#5481): a snapshot kept unread is not pruned while the state disk
+// has room, and is pruned, with a notice, while it is short of room and the
+// snapshot is older than MinAge; its directory is gone, and a younger one
+// stays.
+func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	old, young := snapName(3), snapName(4)
+	for _, id := range []string{old, young} {
+		dir := filepath.Join(e.cfg.StateDir, "snapshots", id)
+		must(t, os.MkdirAll(filepath.Join(dir, "meta.json"), 0o700))
+		must(t, os.WriteFile(filepath.Join(dir, "disk.img"), []byte("layer"), 0o600))
+	}
+	longAgo := time.Now().Add(-time.Hour)
+	must(t, os.Chtimes(filepath.Join(e.cfg.StateDir, "snapshots", old), longAgo, longAgo))
+	type told struct {
+		n         int
+		forgotten bool
+	}
+	var calls []told
+	e.cfg.UnreadGone = func(n int, forgotten bool) { calls = append(calls, told{n, forgotten}) }
+	e.restart("m")
+	p := PrunePolicy{LowWaterBytes: 1 << 30}
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 1 << 50, nil }
+	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 0 {
+		t.Fatalf("pruned %v (%v), told %v with room on the disk", gone, err, calls)
+	}
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	gone, err := e.m.Prune(p)
+	must(t, err)
+	if len(gone) != 1 || gone[0] != old {
+		t.Fatalf("pruned %v, want only %s (the %s is younger than MinAge)", gone, old, young)
+	}
+	if _, err := os.Lstat(filepath.Join(e.cfg.StateDir, "snapshots", old)); !os.IsNotExist(err) {
+		t.Fatalf("pruned unread snapshot left on disk: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(e.cfg.StateDir, "snapshots", young)); err != nil {
+		t.Fatalf("a young unread snapshot removed: %v", err)
+	}
+	if got := e.m.Unread(); len(got) != 1 || got[0] != young {
+		t.Fatalf("unread after the prune = %v, want [%s]", got, young)
+	}
+	if len(calls) != 1 || calls[0] != (told{1, false}) {
+		t.Fatalf("told %v, want one notice of 1 pruned", calls)
+	}
+	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 1 {
+		t.Fatalf("second prune: %v (%v), told %v", gone, err, calls)
+	}
+}
+
+// CAP-3 (#5481, Security 1 on #5480): a snapshot recorded before Instance
+// that is unread at one open, while its machine is destroyed and created
+// anew under the ID, and reads at the next, is not the new machine's: it
+// began after the snapshot was taken.
+func TestCAP3LegacyUnreadSnapshotNotInheritedByReplacement(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "who", "predecessor")
+	s, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	s.Lineage, s.Instance = "", ""
+	meta := filepath.Join(e.m.snapDir(s.ID), "meta.json")
+	must(t, writeJSON(meta, s))
+	saved, err := os.ReadFile(meta)
+	must(t, err)
+	must(t, os.Remove(meta))
+	must(t, os.Mkdir(meta, 0o700))
+	e.restart("m") // the snapshot is unread
+	must(t, e.m.Destroy(bg, "m"))
+	e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "who", "successor")
+	must(t, os.Remove(meta))
+	must(t, os.WriteFile(meta, saved, 0o600))
+	e.restart("m") // the record reads
+	e.guestWrite("m", "who", "successor")
+	if err := e.m.Rollback(bg, "m", s.ID); !errors.Is(err, ErrLineage) {
+		t.Fatalf("the replacement's rollback to its predecessor's legacy snapshot: %v, want ErrLineage", err)
+	}
+	if got := e.guestRead("m", "who"); got != "successor" {
+		t.Fatalf("who = %q, want the successor's", got)
+	}
+}

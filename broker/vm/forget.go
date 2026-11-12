@@ -73,10 +73,16 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 	// A snapshot kept unread has no lineage or time this broker can
 	// read: deleted rather than kept, or it would come back at a later
 	// open holding what was forgotten.
+	lost := 0
 	for _, id := range m.Unread() {
 		if err := m.removeSnapshot(id); err != nil {
 			errs = append(errs, err)
+		} else {
+			lost++
 		}
+	}
+	if lost > 0 && m.cfg.UnreadGone != nil {
+		m.cfg.UnreadGone(lost, true)
 	}
 	return errors.Join(errs...)
 }

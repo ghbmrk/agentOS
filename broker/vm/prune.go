@@ -147,6 +147,29 @@ func (m *Manager) Prune(p PrunePolicy) ([]string, error) {
 			firstErr = err
 		}
 	}
+	// A snapshot kept unread is offered to nothing, and a reader that never
+	// reads it again leaves its disk out of reach: while the state disk is
+	// short of room, those older than MinAge go too, with a notice. With
+	// room they stay, named in STATUS, and a forget removes them.
+	if pressured {
+		lost := 0
+		for _, id := range m.Unread() {
+			if fi, err := os.Stat(m.snapDir(id)); err == nil && !fi.ModTime().Before(cutoff) {
+				continue
+			}
+			if err := m.removeSnapshot(id); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			lost++
+			gone = append(gone, id)
+		}
+		if lost > 0 && m.cfg.UnreadGone != nil {
+			m.cfg.UnreadGone(lost, false)
+		}
+	}
 	sort.Strings(gone)
 	return gone, firstErr
 }

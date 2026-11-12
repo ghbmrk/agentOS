@@ -15,6 +15,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
+	"github.com/ghbmrk/agentos/broker/vm"
 )
 
 // The capability-off lines (OP-9, OP9-status-a): each capability that is
@@ -78,15 +79,49 @@ const (
 
 // unreadLine is STATUS's line for restore points whose record did not
 // read at the machines' open (CAP-3): kept on disk, not offered, and
-// read again at each start, so restarting is the step that works.
+// read again at each start. It names them by count, in the owner's words
+// (an internal ID tells the owner nothing), and gives the step that
+// works: a forget removes them. Any forget does: the record that would say
+// what they belong to is the one that did not read.
 func unreadLine(ids []string) string {
 	switch len(ids) {
 	case 0:
 		return ""
 	case 1:
-		return "Restore points: " + ids[0] + " could not be read, so it is not offered; I retry it at each start."
+		return "Restore points: one could not be read and is not offered; Forget removes it."
 	}
-	return fmt.Sprintf("Restore points: %d could not be read, so they are not offered; I retry them at each start.", len(ids))
+	return fmt.Sprintf("Restore points: %d could not be read and are not offered; Forget removes them.", len(ids))
+}
+
+// unreadGoneNotice is what the owner is told when saved points whose record
+// did not read were deleted: with a forget, or because the disk ran short.
+// What they held is not known, so the notice says that.
+func unreadGoneNotice(n int, forgotten bool) string {
+	what, it, held := "one saved point that could not be read was", "it", "it held"
+	if n > 1 {
+		what, it, held = fmt.Sprintf("%d saved points that could not be read were", n), "them", "they held"
+	}
+	if forgotten {
+		return "Forget: " + what + " deleted with " + it + ", and I could not tell what " + held + "."
+	}
+	return "Disk space: " + what + " deleted to make room, and I could not tell what " + held + "."
+}
+
+// openVM opens the agent machines with cfg and wires what the owner
+// reads of their unread restore points: the STATUS line, and the notice
+// when any are deleted (main's seam, as openMachineDisk).
+func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(string) error) (*vm.Manager, error) {
+	cfg.UnreadGone = func(n int, forgotten bool) {
+		if err := inform(unreadGoneNotice(n, forgotten)); err != nil {
+			log.Printf("vm: telling the owner of deleted unread snapshots: %v", err)
+		}
+	}
+	m, err := vm.Open(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	caps.snapsUnread(m.Unread)
+	return m, nil
 }
 
 // capLineTexts are every line the registry can show, for the wording test.

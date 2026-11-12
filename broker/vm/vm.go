@@ -159,6 +159,10 @@ type Machine struct {
 	// first loaded), never reused, so a machine given a destroyed one's
 	// ID, even in the same lineage, is told apart from it (#1561).
 	Instance string `json:",omitempty"`
+	// Created is when this life began, with Instance. A snapshot recorded
+	// before Instance that is older than it is of an earlier life under the
+	// same ID (stampLegacy). Zero: recorded before it was.
+	Created time.Time `json:",omitzero"`
 }
 
 // Snapshot is a broker-held snapshot's record.
@@ -313,6 +317,11 @@ type Config struct {
 	// and has not been rolled back yet (recall W10): its machines are not
 	// forked or merged, so what it holds spreads no further. Nil: none is.
 	Contained func(lineage string) bool
+	// UnreadGone tells the owner's side that snapshots whose record did not
+	// read were deleted, so what they held is gone unseen: by a forget
+	// (forgotten) or because the state disk was short of room (not). Nil:
+	// nobody is told. It is called after the delete, with no lock held.
+	UnreadGone func(n int, forgotten bool)
 }
 
 var (
@@ -834,7 +843,7 @@ func (m *Manager) reserve(id string, s Spec, l Label, forkBase, lineage string) 
 	if err != nil {
 		return nil, err
 	}
-	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage, Instance: inst}}
+	mc := &machine{Machine: Machine{ID: id, Spec: s, Label: l, State: Stopped, ForkBase: forkBase, Lineage: lineage, Instance: inst, Created: time.Now().UTC()}}
 	mc.label.Store(uint32(l))
 	if m.cfg.Quota != nil {
 		mc.Project = m.nextProjectLocked()
@@ -2501,17 +2510,19 @@ func (m *Manager) load(ctx context.Context) error {
 
 // stampLegacy gives each snapshot recorded before Instance one, once, at
 // load (security S-N1 on #1575). The machine of its ID gets it when the
-// snapshot is of its lineage (or recorded before lineages): it was that
-// machine's to use before the upgrade, and stays so. Any other gets an
-// Instance no machine has. So a machine destroyed and replaced under its
-// ID after the upgrade leaves its old snapshots behind, as one of this
-// release does.
+// snapshot is of its lineage (or recorded before lineages) and was taken in
+// its life, not before the machine began: it was that machine's to use
+// before the upgrade, and stays so. Any other gets an Instance no machine
+// has, so a machine destroyed and replaced while the snapshot was unread
+// (read only at a later open) does not inherit it. So a machine destroyed
+// and replaced under its ID after the upgrade leaves its old snapshots
+// behind, as one of this release does.
 func (m *Manager) stampLegacy() error {
 	for id, s := range m.snaps {
 		if s.Instance != "" {
 			continue
 		}
-		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) {
+		if mc, ok := m.machines[s.Machine]; ok && (s.Lineage == "" || s.Lineage == mc.Lineage) && !mc.Created.After(s.Taken) {
 			s.Instance = mc.Instance
 		} else {
 			inst, err := newInstance()
