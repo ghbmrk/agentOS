@@ -333,8 +333,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
-| ENF-shared-quota-c | ENF-shared-quota-c: a lease the DHCP server ends early (release, or a client moved to another address) leaves the shared segment's lease set. Release; from #5294. | #5294, #4703 | queued (release; tier A; lane primary) |
+| ENF-shared-quota-c | ENF-shared-quota-c: a lease the DHCP server ends early (release, or a client moved to another address) leaves the shared segment's lease set. Release; from #5294. | #5294, #4703 | building (release; tier A; lane primary) |
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
+| ENF-shared-quota-c-fu | ENF-shared-quota-c-fu: dhcpcd's RELEASE order is measured and pinned, a held guest has a counter and an owner step, and the IPv6 and two-holder gaps are noted. Release; from #5527. | #5300, #5527 | queued (release; tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -446,35 +447,25 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VOICE-ro-d-ending-boundary | VOICE-ro-d-ending-boundary: the call-limit notice waits, bounded, for the sentence playing to end. Release (UX); from #5299. | #5299, #5262 | queued (release; tier A) |
 | VOICE-ro-d-failed-empty | VOICE-ro-d-failed-empty: an unset Failed clip plays nothing when the recognizer stops. Release; from #5299. | #5299, #5262 | queued (release; tier A) |
 | CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | queued (release; tier A) |
-| ENF-dns-backoff | ENF-dns-backoff: dns/run starts an instance's restart wait again from 1 s once it has stayed up. Release; from #5318. | #5318, #5164 | queued (release; tier A) |
 | CLK-run-mut-mail | CLK-run-mut-mail: kill or waive the old mutgate deletion survivors in the mail host and seen set (45). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | CLK-run-mut-senders | CLK-run-mut-senders: kill or waive the old mutgate deletion survivors in senders, the sign-in socket and the world (50). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | VULN-openclaw-held-r3 | VULN-openclaw-held-r3: the vulncheck record and its test say what holds (the prune, not a read-only config), and the plugins/channels test parses quoted, indented and same-line keys. Release; from #5369. | #5369, #5368 | queued (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
-| TEST-plan-cancel-mid-answer | TEST-plan-cancel-mid-answer: test a model call cancelled partway through an answer in broker/clerk/plan. Release; from #5388. | #5381, #5388 | building (release; tier A) |
 | KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | queued (release; tier A) |
 | TEST-flake-arc6-owner-chat | TEST-flake-arc6-owner-chat: TestARC6OwnerChatReachesTheGuestAndBack gets an empty message under broker-race (2nd sighting). Release; from #5424. | #5235, #5424 | building (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
-| PREMERGE-status-bind | PREMERGE-status-bind: a fork PR on the same head commit cannot overwrite another PR's `premerge` status. Release; from #5384. | #5384 | queued (release; tier A; gate files) |
-| CI-unit-runners-norm | CI-unit-runners-norm: _runners normalises .. before its prefix match. Release; from #5438 (Security). | #5413, #5438 | building (release; tier B) |
 | LOG-open-anchor-first | LOG-open-anchor-first: kernel log Open checks the anchor before truncating an unread tail, so a refused open keeps every byte (LOG-2). | #5387 | queued (release; tier A; after #5387) |
 | CTL-unicode-chat-code | CTL-unicode-chat-code: a trailing code in non-ASCII digits in chat or UNLOCK is stripped or quarantined before the agent; codes stay ASCII-only. | none | queued (release; tier A) |
-| DRIVE-ID-soft-create | DRIVE-ID-soft-create: drive-id's failed create does not exit the script (true, not a redirected ':'). | none | queued (release; tier A) |
-| STOP-queued-start-fu | STOP-queued-start-fu: the queued-STOP tests are deterministic, a STOP-refused fork pauses and keeps nothing, and create and provider_run recheck STOP at the actual start. | STOP-queued-start | queued (release; tier A) |
-| DRILL-stamp-wording | DRILL-stamp-wording: one stamp-failure line per reboot with a cause hint; a later failed stamp leaves no stale timing. | none | queued (release; tier A) |
-| CI-hostcheck-mirror-bound | CI-hostcheck-mirror-bound: a 5xx from the release-asset mirror falls through to the snapshot in seconds, not after the full 600 s retry schedule. Release; from #5469 (Lens R2). | #5463, #5469 | queued (release; tier A) |
-| CI-hostcheck-apt-resilience | CI-hostcheck-apt-resilience: hostcheck's apt step no longer depends on the live Ubuntu archive at run time (pinned .deb assets with a hash check, archive second), or at least fails fast. Release; found in the 2026-11-11 outage. | #5463, #5469, #5471 | queued (release; tier A) |
-| IMG-keeper-gpt-auto-mounts | IMG-keeper-gpt-auto-mounts: the keeper's hidden-mount rule also refuses a gpt-auto mount (named by no unit or fstab line) that lands on a protected or box-mount path. Release; from #5437 (Security). | #5400, #5437, #4738 | building (release; tier A) |
-| CI-unit-stray-hold | CI-unit-stray-hold: a module child that left its session holds strace -f, so the step waits for the job timeout; sweep it and name the module. Release; from #5449. | #5413, #5449 | queued (release; tier B) |
-| VM-snap-unread-fu | VM-snap-unread-fu: caps.snapsUnread is pinned, the unread-snapshot line speaks in the owner's words with a step, forgetting an unread point gives a notice, never-readable points are pruned or named, old-format records read, and unread points' disk is freed. Release; from #5480. | #5461, #5480 | queued (release; tier A) |
-| CI-unit-runners-lists | CI-unit-runners-lists: _runners checks every entry of a colon-separated list and resolves relative paths before the prefix match. Release; from #5483 (L3). | #5450, #5483 | queued (release; tier B) |
-| IMG-initrd-sysext-paths | IMG-initrd-sysext-paths: the sysext and confext sides of the initrd image check search the same directories (usr/lib/extensions and usr/local/lib/extensions included) as the image's systemd does. Release; from #5487 (Security). | #5482, #5487 | queued (release; tier A) |
-| IMG-initrd-unit-types-pin | IMG-initrd-unit-types-pin: a pin test for each INITRD_UNIT_TYPES entry. Release; low priority; from #5487 (Potency). | #5482, #5487 | queued (release; tier B) |
-| ENF-edge-cut-fu4 | ENF-edge-cut-fu4: an absent nft table is told from an unreadable one by ENOENT (ENF-l-15 corrected, the crash-restart residual closed), and home shows one card when the saved day and the table are both unreadable. Release; from #5490. | #5445, #5490 | building (release; tier A) |
+| VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
+| IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
+| VULN-debian-r6 | VULN-debian-r6: accept (or clear by a snapshot bump) glibc's two new Debian 13 advisories DEBIAN-CVE-2026-100290 and DEBIAN-CVE-2026-115819 so image-vulncheck passes again. Release; second glibc round after openssl. | #2919, #5338 | queued (release; tier A; Mark pastes the IDs into #2919) |
+| PREMERGE-status-bind-fu | PREMERGE-status-bind-fu: a closed repository PR's lingering `success` on a sha does not stand as a fork PR's `premerge` status. Release; from #5512. | #5442, #5512 | building (release; tier A; gate files) |
+| DRIVE-ID-lint-fu | DRIVE-ID-lint-fu: the redirected-special-builtin lint covers exec and the other special builtins, strips comments outside quotes only, and reads command substitutions and quoted redirects correctly. Release; from #5519. | #5518, #5519 | building (release; tier A) |
+| CI-hostcheck-mirror-wording | CI-hostcheck-mirror-wording: the kernel mirror's worst-case bound is stated as about 80 s, not a minute, and its curl reads no config (-q). Release; from #5522. | #5470, #5522 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -518,5 +509,4 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
-issue #5467: a second issue for STOP-queued-start-fu (first is #5465)
 ```
