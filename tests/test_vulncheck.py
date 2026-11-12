@@ -195,6 +195,11 @@ class RecordsTest(unittest.TestCase):
         self.assertFalse(vulncheck.summary([], ["initrd: no status file"], recs, out))
         self.assertIn("fix: clear the problems above first", out.getvalue())
         self.assertNotIn("fix: remove each unused record", out.getvalue())
+        # #5580: with no unused record, a problem alone does not print the unused-record hint.
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([], ["p"], [], out))
+        self.assertIn("problem: p", out.getvalue())
+        self.assertNotIn("clear the problems", out.getvalue())
 
     def test_a_record_accepts_only_its_package_and_version(self):
         # #4153 (Security finding 2 on #4152): a record for minimatch 10.2.5 must not accept
