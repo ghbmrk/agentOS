@@ -4,6 +4,7 @@
 # REQ: HW-1, HW-5, UPD-1, UPD-1a
 import ast
 import base64
+import bisect
 import collections
 import contextlib
 import errno
@@ -1537,119 +1538,248 @@ class DriveIdTest(unittest.TestCase):
 # POSIX special builtins (':', '.', exec, eval, set, trap and the rest): a redirection error on one
 # exits a non-interactive shell before any '||' handler or 'set -e' report runs (#5464, #5524). A
 # regular command runs its handler: 'true >f' for ':', and the 'command' prefix, which drops the
-# special properties, for the rest ('command exec 9>f || fail ...'). Each line is read as the shell
-# reads it: quotes, backslashes, ${...} and $((...)) stay inside their word, $(...) and `...` are read
-# as commands of their own, and '#' starts a comment only where a word would start. A command is
-# flagged when, after leading reserved words and assignments, its command word is a special builtin
-# and it carries a redirection that can fail (closing an fd with >&- or <&- cannot). Here-document
-# bodies and backslash-newline continuations are read as lines of their own.
+# special properties, for the rest ('command exec 9>f || fail ...'). ShellReader reads a whole file as
+# the shell does (#5533): backslash-newlines join, quotes (also $'...') run across lines, ${...} and
+# $((...)) stay inside their word with quotes read in them, $(...) and `...` are read as commands of
+# their own, '#' starts a comment only where a word would start, a case arm's pattern and its ')' are
+# not commands, and here-document bodies are text (an unquoted one's substitutions are read). A
+# command is flagged when, after leading reserved words, 'time -p' and assignments, its command word
+# is a special builtin and it carries a redirection that can fail (closing an fd with >&- or <&-
+# cannot; a here-document can, since bash may write it to a temporary file). SHELL_LIMITS names what
+# the lint does not read, and the failure message repeats it. The scan covers every tracked shell file.
 SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
 SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
-SHELL_META = " \t;&|()<>"
+SHELL_META = " \t\n;&|()<>"
 SHELL_REDIR = re.compile(r"[<>]+[&|]?")
-SHELL_SQUOTE = re.compile(r"'([^']*)'?")
+SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
+SHELL_LIMITS = ("The lint does not read aliases or functions named like a builtin, the text that eval, sh -c "
+                "or a trap runs, escapes that spell a name in $'...', or a case whose 'in' is on a later line; "
+                "it reads a ' inside \"${...}\" as dash does (as text), not as bash does (as a quote).")
 
 
-def shell_word(s, i, stop, out):
-    """Reads the word at s[i]: its text, its value (quotes removed, each expansion a NUL) and its end."""
-    start, value = i, []
-    while i < len(s) and s[i] not in SHELL_META and s[i] != stop:
-        c = s[i]
-        if c == "\\":
-            value.append(s[i + 1:i + 2])
-            i += 2
-        elif c == "'":
-            m = SHELL_SQUOTE.match(s, i)
-            value.append(m.group(1))
-            i = m.end()
-        elif c == '"':
-            i += 1
-            while i < len(s) and s[i] != '"':
-                if s[i] == "\\":
-                    value.append("\\")  # no special builtin's name has a backslash in it
-                    i += 2
-                elif s[i] in "$`":
-                    i = shell_expansion(s, i, out)
-                    value.append("\0")
-                else:
-                    value.append(s[i])
-                    i += 1
-            i += 1
-        elif c in "$`":
-            i = shell_expansion(s, i, out)
-            value.append("\0")
-        else:
-            value.append(c)
-            i += 1
-    return s[start:i], "".join(value), i
+def command_words(words):
+    """The values of a simple command's words from its command word on."""
+    prev = None
+    for n, (text, value) in enumerate(words):
+        if not (text in SHELL_RESERVED or SHELL_ASSIGN.match(text) or (prev == "time" and text == "-p")):
+            return [v for _, v in words[n:]]
+        prev = text
+    return []
 
 
-def shell_expansion(s, i, out):
-    """Skips the expansion at s[i] ($x, ${...}, $((...)), $(...) or `...`) and returns its end; the
-    commands of a substitution go to out."""
-    if s[i] == "`":
-        return shell_scan(s, i + 1, "`", out)
-    if s.startswith("$((", i) or s.startswith("${", i):
-        opener, depth, i = s[i + 1], 0, i + 1
-        closer = ")" if opener == "(" else "}"
-        while i < len(s):
-            depth += (s[i] == opener) - (s[i] == closer)
-            i += 1
-            if depth == 0:
-                break
-        return i
-    if s.startswith("$(", i):
-        return shell_scan(s, i + 2, ")", out)
-    return i + 1
+class ShellReader:
+    """Reads shell text; each simple command goes to self.commands as (words, redirected, start): each
+    word's (text, value), whether a redirection that can fail is on it, and the offset it starts at. A
+    word's value has its quotes removed and each expansion as a NUL."""
 
+    def __init__(self, s):
+        self.s, self.commands, self.heredocs = s, [], []
+        self.scan(0, "")
 
-def shell_scan(s, i, stop, out):
-    """Adds the simple commands in s[i:], up to an unquoted stop character, to out as (words,
-    redirected): each word's (text, value), and whether a redirection that can fail is on it.
-    Returns the index after the stop."""
-    words, redirected = [], False
-    while i < len(s) and s[i] != stop:
-        if s[i] in " \t":
-            i += 1
-        elif s[i] == "#":
-            i = len(s)
-        elif s[i] in ";&|()":
-            out.append((words, redirected))
-            words, redirected = [], False
-            i += 1
-        elif s[i] in "<>":
-            op = SHELL_REDIR.match(s, i).group()
-            i += len(op)
-            while i < len(s) and s[i] in " \t":
+    def word(self, i, stop):
+        s, start, value = self.s, i, []
+        while i < len(s) and s[i] not in SHELL_META and s[i] != stop:
+            c = s[i]
+            if c == "\\":
+                value.append(s[i + 1:i + 2].replace("\n", ""))
+                i += 2
+            elif c == "'":
+                end = s.find("'", i + 1)
+                end = len(s) if end < 0 else end
+                value.append(s[i + 1:end])
+                i = end + 1
+            elif s.startswith("$'", i):
+                i = self.ansi_c(i + 2, value)
+            elif c == '"':
+                i = self.dquote(i + 1, value)
+            elif c in "$`":
+                i = self.expansion(i, False)
+                value.append("\0")
+            else:
+                value.append(c)
                 i += 1
-            target, _, i = shell_word(s, i, stop, out)
-            redirected |= not (op.endswith("&") and target == "-")
-        else:
-            text, value, i = shell_word(s, i, stop, out)
-            if not (text.isdigit() and i < len(s) and s[i] in "<>"):
+        return s[start:i], "".join(value), i
+
+    def ansi_c(self, i, value):
+        s = self.s
+        while i < len(s) and s[i] != "'":
+            if s[i] == "\\":
+                c = s[i + 1:i + 2]
+                value.append(c if c and c in "'\"\\?" else "\\")  # an escape spells no builtin's name
+                i += 2
+            else:
+                value.append(s[i])
+                i += 1
+        return i + 1
+
+    def dquote(self, i, value):
+        s = self.s
+        while i < len(s) and s[i] != '"':
+            if s[i] == "\\":
+                if s[i + 1:i + 2] != "\n":
+                    value.append("\\")  # no special builtin's name has a backslash in it
+                i += 2
+            elif s[i] in "$`":
+                i = self.expansion(i, True)
+                value.append("\0")
+            else:
+                value.append(s[i])
+                i += 1
+        return i + 1
+
+    def expansion(self, i, quoted):
+        """Skips the expansion at s[i] ($x, ${...}, $((...)), $(...) or `...`) and returns its end; the
+        commands of a substitution are read. QUOTED: it is inside double quotes."""
+        s = self.s
+        if s[i] == "`":
+            return self.scan(i + 1, "`")
+        if s.startswith("$((", i) or s.startswith("${", i):
+            opener, depth, i = s[i + 1], 0, i + 1
+            closer = ")" if opener == "(" else "}"
+            while i < len(s):
+                c = s[i]
+                if c == "\\":
+                    i += 2
+                elif c == "'" and not quoted:
+                    end = s.find("'", i + 1)
+                    i = len(s) if end < 0 else end + 1
+                elif c == '"':
+                    i = self.dquote(i + 1, [])
+                elif c in "$`":
+                    i = self.expansion(i, quoted)
+                else:
+                    depth += (c == opener) - (c == closer)
+                    i += 1
+                    if depth == 0:
+                        break
+            return i
+        if s.startswith("$(", i):
+            return self.scan(i + 2, ")")
+        return i + 1
+
+    def scan(self, i, stop):
+        """Reads commands from s[i] up to an unquoted STOP character and returns the index after it."""
+        s, case, parens = self.s, [], 0
+        words, redirected, start = [], False, None
+
+        def end():
+            nonlocal words, redirected, start
+            if start is not None:
+                self.commands.append((words, redirected, start))
+            words, redirected, start = [], False, None
+
+        while i < len(s):
+            if case and case[-1] == "pattern":
+                i = self.pattern(i, case)
+                continue
+            c = s[i]
+            if c == stop and not (c == ")" and parens):
+                break
+            if s.startswith("\\\n", i):
+                i += 2
+            elif c in " \t":
+                i += 1
+            elif c == "#":
+                end_ = s.find("\n", i)
+                i = len(s) if end_ < 0 else end_
+            elif c == "\n":
+                end()
+                i = self.bodies(i + 1)
+            elif case and (s.startswith(";;", i) or s.startswith(";&", i)):
+                end()
+                i += 3 if s.startswith(";;&", i) else 2
+                case[-1] = "pattern"
+            elif c in ";&|()":
+                parens += (c == "(") - (c == ")" and parens > 0)
+                end()
+                i += 1
+            elif c in "<>":
+                start = i if start is None else start
+                op = SHELL_REDIR.match(s, i).group()
+                i += len(op)
+                strip = op == "<<" and s.startswith("-", i)
+                i += strip
+                while i < len(s) and s[i] in " \t":
+                    i += 1
+                target, value, i = self.word(i, stop)
+                if op == "<<":
+                    self.heredocs.append((value, strip, any(q in target for q in "'\"\\")))
+                redirected |= not (op.endswith("&") and target == "-")
+            else:
+                start = i if start is None else start
+                text, value, i = self.word(i, stop)
+                if text.isdigit() and i < len(s) and s[i] in "<>":
+                    continue
                 words.append((text, value))
-    out.append((words, redirected))
-    return i + 1
+                cmd = command_words(words)
+                if len(cmd) == 3 and cmd[0] == "case" and cmd[2] == "in":
+                    end()
+                    case.append("pattern")
+        end()
+        return i + 1
 
+    def pattern(self, i, case):
+        """Reads a case arm's pattern up to its ')', or the 'esac' that ends the case."""
+        s = self.s
+        while i < len(s) and s[i] in " \t\n;":
+            i = self.bodies(i + 1) if s[i] == "\n" else i + 1
+        if s.startswith("#", i):
+            end = s.find("\n", i)
+            return len(s) if end < 0 else end
+        text, _, j = self.word(i, ")")
+        if text == "esac":
+            case.pop()
+            return j
+        i += s.startswith("(", i)
+        while i < len(s) and s[i] != ")":
+            i = max(self.word(i, ")")[2], i + 1)
+        case[-1] = "body"
+        return i + 1
 
-def special_redirected(words, redirected):
-    command = [value for text, value in words if text not in SHELL_RESERVED and not re.match(r"[A-Za-z_]\w*=", text)]
-    return redirected and bool(command) and command[0] in SPECIAL_BUILTINS
+    def bodies(self, i):
+        """Skips the bodies of the here-documents opened on the line that ended before s[i]."""
+        s = self.s
+        pending, self.heredocs = self.heredocs, []
+        for delim, strip, quoted in pending:
+            while i < len(s):
+                eol = s.find("\n", i)
+                eol = len(s) if eol < 0 else eol
+                line = s[i:eol]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    i = eol + 1
+                    break
+                j = i
+                while not quoted and j < eol:
+                    if s[j] == "\\":
+                        j += 2
+                    elif s[j] in "$`":
+                        j = self.expansion(j, True)
+                    else:
+                        j += 1
+                if j > eol:
+                    eol = s.find("\n", j)
+                    eol = len(s) if eol < 0 else eol
+                i = eol + 1
+        return i
 
 
 def redirected_specials(text):
-    out = []
-    for n, line in enumerate(text.splitlines(), 1):
-        commands = []
-        shell_scan(line, 0, "", commands)
-        if any(special_redirected(*c) for c in commands):
-            out.append(n)
-    return out
+    """The (line, builtin) of each command in TEXT that redirects a special builtin."""
+    lines = [0] + [m.end() for m in re.finditer("\n", text)]
+    hits = set()
+    for words, redirected, start in ShellReader(text).commands:
+        cmd = command_words(words)
+        if redirected and cmd and cmd[0] in SPECIAL_BUILTINS:
+            hits.add((bisect.bisect_right(lines, start), cmd[0]))
+    return sorted(hits)
 
 
-def image_shell(root=IMG):
+def shell_files(root=ROOT):
+    """The shell files git tracks under ROOT: *.sh, or a #!/bin/sh, bash or dash line."""
+    names = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True).stdout
     out = []
-    for f in sorted(root.rglob("*")):
+    for name in sorted(n.decode() for n in names.split(b"\0") if n):
+        f = root / name
         if not f.is_file() or f.is_symlink():
             continue
         with f.open("rb") as fh:
@@ -1657,6 +1787,15 @@ def image_shell(root=IMG):
         if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
             out.append(f)
     return out
+
+
+# Hits in another lane's files, each with the row that fixes it; an entry that no longer hits fails, so
+# the fixing PR removes its entry.
+SHELL_ALLOWED = {
+    "guest/builder/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+    "guest/codex/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+    "guest/openclaw/build-rootfs.sh: : >etc/resolv.conf # no resolver: the machine has no network but its socket": "#5536",
+}
 
 
 class ImageShellLintTest(unittest.TestCase):
@@ -1739,6 +1878,25 @@ class ImageShellLintTest(unittest.TestCase):
         ': $>x',
         'v="`: >x`"',
         ': >',
+        # #5533 item 9: a tab separates words.
+        'exec\t9>x',
+        # Items 3 and 11: quotes inside ${...} (as dash reads them inside double quotes) and $'...'.
+        ": ${a:-'}'} >x",
+        ': ${a:-"}"} >x',
+        ': "${a:-\'}" >x',
+        "echo $'\\''; : >x",
+        "$'exec' >x",
+        # Item 4: time -p.
+        'time -p : >x',
+        # Item 5: a case arm inside $(...).
+        'v=$(case x in a) : >f;; esac)',
+        'v="$(case x in a) echo \'"\';; esac)"; : >f',
+        'v=$(case x in (a|b) y;; esac; : >f)',
+        # A subshell's ')' inside $(...) does not end it.
+        'v="$( (a); echo \'"\')"; : >f',
+        # Item 7: a here-document is a redirection too (bash may write it to a temporary file).
+        ': <<EOF',
+        'cat <<EOF; : >x',
     )
     CLEAN = (
         '#!/bin/sh',
@@ -1785,11 +1943,8 @@ class ImageShellLintTest(unittest.TestCase):
         '.x >x',
         'export A=1',
         'evalx >x',
-        'echo "a; : >x',
         'echo "a\\" : >x"',
         '":\\"" >x',
-        "echo 'a; : >x",
-        'echo ${a; : >x',
         'echo ${a:-;: >x}',
         ': $((1 > 2))',
         ': # >',
@@ -1797,44 +1952,118 @@ class ImageShellLintTest(unittest.TestCase):
         '${x}: >y',
         '"${x}": >y',
         'echo `a;: b` >x',
+        # #5533 item 9: a tab separates words.
+        'a\t:\t>x',
+        # Item 3: a quoted '}' does not end ${...}.
+        "echo ${a:-'}'}",
+        'echo "${a:-"}"}"',
+        "echo $'a\\' : >x'",
+        # Item 4: time -p.
+        'time -p true >x',
+        # Item 5: a case arm's pattern and its ')' are not commands, nor a ';;' or ')' in quotes.
+        'case $x in (a) ;; esac',
+        'case $x in a|exec) ;; *) ;; esac',
+        'v="$(case x in a) echo \'"\';; esac) : >f"',
+        'case $x in a) y;; esac >f',
+    )
+    # Unterminated, so each is clean on its own and swallows what follows.
+    OPEN = (
+        'echo "a; : >x',
+        "echo 'a; : >x",
+        'echo ${a; : >x',
         ': ${a >',
+    )
+    # Items 6, 7 and 10: text across lines, with the (line, builtin) of each hit.
+    LINES = (
+        (': \\\n>f', [(1, ":")]),
+        ('exec \\\n 9>f', [(1, "exec")]),
+        ('e\\\nxec >f', [(1, "exec")]),
+        ('x=1 \\\n  : >f', [(1, ":")]),
+        ('echo a \\\n b; : >f', [(2, ":")]),
+        ('echo "a\nb"; : >f', [(2, ":")]),
+        ("echo 'a\nb'; : >f", [(2, ":")]),
+        ("echo 'a\n: >x\nb'", []),
+        ('echo "a\\\n: >x"', []),
+        ('# a \\\n: >f', [(2, ":")]),
+        ("v=$(\n: >f\n)", [(2, ":")]),
+        ("cat <<EOF\n: >x\nEOF\n: >y", [(4, ":")]),
+        ("cat <<'EOF'\n$(: >x)\nEOF", []),
+        ('cat <<"EOF"\n`: >x`\nEOF', []),
+        ("cat <<\\EOF\n$(: >x)\nEOF", []),
+        ("cat <<EOF\n$(: >x)\nEOF", [(2, ":")]),
+        ("cat <<EOF\nx $(\n: >x\n) y\nEOF\n: >z", [(3, ":"), (6, ":")]),
+        ("cat <<EOF\n$(echo '\n$(: >x)\n')\nEOF", []),
+        ("cat <<-EOF\n\t: >x\n\tEOF\n: >y", [(4, ":")]),
+        ("cat <<EOF\n\tEOF\n: >x\nEOF", []),
+        ("cat <<EOF\nEOF x\n: >x\nEOF", []),
+        ("cat <<A <<'B'\n: >x\nA\n: >y\nB\n: >z", [(6, ":")]),
+        ("cat <<A; cat <<B\n: >x\nA\n: >y\nB\n. ./l >z", [(6, ".")]),
+        ("v=$(cat <<EOF\n: >x\nEOF\n)", []),
+        ("case $x in\na) : >f;;\nb)\n  exec 9>g\n  ;;\nesac", [(2, ":"), (4, "exec")]),
+        ("case $x in\n# : >c\na) y;;\nesac\n: >f", [(5, ":")]),
+        ("case $x in\na) case $y in b) z;; esac;;\nc) w;;\nesac\nexec >f", [(5, "exec")]),
+        ("case $x in a) y; esac\n: >f", [(2, ":")]),
+        (": >a; : >b\n\nexec 9>x", [(1, ":"), (3, "exec")]),
     )
 
     def test_lint_flags_a_redirected_special_builtin(self):
         for line in self.FLAGGED:
             with self.subTest(line=line):
-                self.assertEqual(redirected_specials(line), [1])
-        self.assertEqual(redirected_specials("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
-                         [len(self.CLEAN) + 1])
+                self.assertEqual([n for n, _ in redirected_specials(line)], [1])
+        self.assertEqual(redirected_specials("\n".join(self.CLEAN + ("x; exec 9>x",) + self.CLEAN)),
+                         [(len(self.CLEAN) + 1, "exec")])
 
     def test_lint_passes_clean_shell(self):
-        for line in self.CLEAN:
+        for line in self.CLEAN + self.OPEN:
             with self.subTest(line=line):
                 self.assertEqual(redirected_specials(line), [])
+        for line in self.OPEN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line + "\n: >x"), [])
 
-    def test_image_shell_picks_shell_files(self):
+    def test_lint_reads_across_lines(self):
+        for text, hits in self.LINES:
+            with self.subTest(text=text):
+                self.assertEqual(redirected_specials(text), hits)
+
+    def test_lint_names_the_builtin(self):
+        for line, name in (('exec 9>x', "exec"), (': >x', ":"), ('. ./l >x', "."), ("e'v'al x 2>y", "eval"),
+                           ('x=1 time -p set -x 2>y', "set")):
+            with self.subTest(line=line):
+                self.assertEqual(redirected_specials(line), [(1, name)])
+
+    def test_shell_files_are_the_tracked_shell_files(self):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
                      "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
-                     "i.py": "#!/bin/shx\n", "j": "echo\n"}
+                     "i.py": "#!/bin/shx\n", "j": "echo\n", "k": "#!/bin/bash -p\n"}
             for name, body in files.items():
                 (d / name).parent.mkdir(parents=True, exist_ok=True)
                 (d / name).write_text(body)
             (d / "link.sh").symlink_to(d / "a.sh")
-            (d / "dir.sh").mkdir()
-            self.assertEqual([str(f.relative_to(d)) for f in image_shell(d)],
-                             ["a.sh", "c", "e", "f", "g", "sub/b"])
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+            subprocess.run(["git", "-C", str(d), "add", "."], check=True)
+            (d / "untracked.sh").write_text(": >x\n")
+            self.assertEqual([str(f.relative_to(d)) for f in shell_files(d)],
+                             ["a.sh", "c", "e", "f", "g", "k", "sub/b"])
 
-    def test_image_shell_has_no_redirected_special_builtin(self):
-        files = image_shell()
-        self.assertIn(IMG / "ci_boot.sh", files)
-        self.assertIn(MK / "mkosi.extra/usr/lib/agentos/drive-id", files)
-        self.assertIn(AGENTOS_LIB / "egress-setup", files)
-        hits = ["%s:%d" % (f.relative_to(ROOT), n) for f in files
-                for n in redirected_specials(f.read_text(errors="replace"))]
-        self.assertEqual(hits, [], "use 'true >file' for ':' and 'command exec ...' for the others: a failed "
-                                   "redirect on a special builtin exits the shell before a handler runs")
+    def test_repository_shell_has_no_redirected_special_builtin(self):
+        files = shell_files()
+        for f in (IMG / "ci_boot.sh", MK / "mkosi.extra/usr/lib/agentos/drive-id", AGENTOS_LIB / "egress-setup",
+                  ROOT / "broker/vm/gvisor/testdata/fakerunsc.sh", ROOT / "spikes/S8-live/run.sh"):
+            self.assertIn(f, files)
+        hits = []  # (the line as SHELL_ALLOWED names it, the hit as the failure message shows it)
+        for f in files:
+            text = f.read_text(errors="replace").splitlines()
+            for n, name in redirected_specials("\n".join(text)):
+                rel = f.relative_to(ROOT)
+                hits.append(("%s: %s" % (rel, text[n - 1].strip()), "%s:%d: %s" % (rel, n, name)))
+        self.assertEqual([hit for line, hit in hits if line not in SHELL_ALLOWED], [],
+                         "put `command` in front (`command . ./lib >x`), or `true >file` for `:`: a failed redirect "
+                         "on a special builtin exits the shell before a handler runs. " + SHELL_LIMITS)
+        self.assertEqual(sorted(SHELL_ALLOWED.keys() - {line for line, _ in hits}), [],
+                         "an allowed line no longer hits: remove its SHELL_ALLOWED entry")
 
 
 class ConfigTest(unittest.TestCase):
