@@ -70,6 +70,23 @@ func (m *Manager) ForgetSince(ctx context.Context, lineage string, since time.Ti
 			errs = append(errs, err)
 		}
 	}
+	// A snapshot kept unread has no lineage or time this broker can
+	// read: deleted rather than kept, or it would come back at a later
+	// open holding what was forgotten.
+	lost := 0
+	for _, id := range m.Unread() {
+		if err := m.removeSnapshot(id); err != nil {
+			errs = append(errs, err)
+		}
+		if !m.stillUnread(id) {
+			// Gone from the table, even if the last directory removal
+			// failed: the record is unpublished and the owner is told.
+			lost++
+		}
+	}
+	if lost > 0 && m.cfg.UnreadGone != nil {
+		m.cfg.UnreadGone(lost, true)
+	}
 	return errors.Join(errs...)
 }
 
@@ -200,7 +217,8 @@ var syncSnapDir = durable.SyncDir
 // (CAP-3, #1240); a failed sync is returned, and the reset stays retryable.
 func (m *Manager) removeSnapshot(id string) error {
 	dir := m.snapDir(id)
-	if err := os.Remove(filepath.Join(dir, "meta.json")); err != nil && !os.IsNotExist(err) {
+	// RemoveAll: the record of a snapshot kept unread may not be a file.
+	if err := os.RemoveAll(filepath.Join(dir, "meta.json")); err != nil {
 		return err
 	}
 	if err := syncSnapDir(dir); err != nil && !os.IsNotExist(err) {
@@ -208,8 +226,16 @@ func (m *Manager) removeSnapshot(id string) error {
 	}
 	m.mu.Lock()
 	delete(m.snaps, id)
+	delete(m.unread, id)
 	m.mu.Unlock()
-	return os.RemoveAll(dir)
+	return removeAll(dir)
+}
+
+// stillUnread reports whether id is still listed unread.
+func (m *Manager) stillUnread(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.unread[id]
 }
 
 // restoreTarget is the snapshot ForgetSince takes mc back to: its newest

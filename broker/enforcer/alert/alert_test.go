@@ -419,8 +419,13 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	red("edge record missing")
-	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of edge's cut is missing or unreadable, so edge stays cut. Someone may have tampered with the enforcer: check it before you let edge back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+	if w := r.core.got[len(r.core.got)-1].Text; w != "Enforcer: its record of the edge box's cut is missing or unreadable, so the edge box stays cut. Someone may have tampered with the enforcer: check it before you let the edge box back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
 		t.Fatalf("missing record text: %q", w)
+	}
+	// The core reads as the page names it, not by its device ID (#5445
+	// item 5).
+	if w, err := Words(RecordMissing, "core"); err != nil || w != "Enforcer: its record of the core's cut is missing or unreadable, so the core stays cut. Someone may have tampered with the enforcer: check it before you let the core back on the enforcer's page at home. Its light stays red until you do or you clear this there." {
+		t.Fatalf("missing record text for the core: %q, %v", w, err)
 	}
 	if err := r.a.Lifted("core"); err != nil {
 		t.Fatal(err)

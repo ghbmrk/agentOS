@@ -88,7 +88,8 @@ type holdKey struct{}
 // WithHold returns ctx carrying hold for Fork and Rollback: each asks it
 // under the machine's lock just before a start or restore, after every wait
 // for a lock, and refuses with ErrHeld, starting nothing, while it says true
-// (STOP-queued-start). It rides the context so that every wrapper of a
+// (STOP-queued-start), and CreateProviderWorker and Exec for a provider
+// run (STOP-queued-start-fu). It rides the context so that every wrapper of a
 // Manager passes it on. A nil hold never holds.
 func WithHold(ctx context.Context, hold func() bool) context.Context {
 	return context.WithValue(ctx, holdKey{}, hold)
@@ -270,7 +271,10 @@ func (m *Manager) Exec(ctx context.Context, id string, c Command, timeout time.D
 	defer cancel()
 	mc.execCancel.Store(&cancel)
 	defer mc.execCancel.Store(nil)
-	if c.Hold != nil && c.Hold() {
+	// The context's hold covers a caller that cannot set one per command: a
+	// provider run's agent CLI is the one that reaches the model route
+	// (STOP-queued-start-fu).
+	if (c.Hold != nil && c.Hold()) || heldBy(ctx) {
 		return ExecResult{}, ErrHeld
 	}
 	r, err := m.awaitExec(ctx, ex, id, c)

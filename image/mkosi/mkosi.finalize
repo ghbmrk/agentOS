@@ -372,7 +372,7 @@ def _violations(root):
             + exec_allow_violations(root) + made_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + manager_environment_violations(root)
             + cached(unit_made_dirs, root)[1] + cached(unit_made_paths, root)[2] + unit_made_refusals(root)
-            + inside_refusals(root)
+            + inside_refusals(root) + gpt_auto_violations(root)
             + noexec_violations(root)
             + keeper_violations(root) + clerk_key_violations(root)
             + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
@@ -1713,8 +1713,10 @@ def unit_made_dirs(root):
     to; a mask is skipped. Every assignment of each key counts, in any section, whatever a later one
     sets, and whoever runs the unit. No name, alias, precedence or user is resolved: for any name
     systemd loads, every file it reads is one of these, so its directories are a subset of these, and
-    adding a file or link only adds to them (the re-plan on #5167; generators' and transient units
-    are not covered). Each word, and each side of a:b, counts (made_steps); a value holding a specifier
+    adding a file or link only adds to them (the re-plan on #5167). Units a generator makes are held by
+    finish_image.py on the built disk (partition_violations, usr_repart_violations, root_repart_violations,
+    cmdline_violations, check_initrd; #5289, #5418), and a transient unit comes only from a process asking
+    PID 1 at runtime. Each word, and each side of a:b, counts (made_steps); a value holding a specifier
     is refused, not expanded (Security 6760938141)."""
     root = str(root)
     files, out, _ = cached(unit_files, root)
@@ -2092,8 +2094,8 @@ def unit_made_refusals(root):
        DirectoryMode= others can write, no named path has a parent PID 1 may make (umask 0) on the way.
     A link systemd itself makes for a unit (a:b, or a dynamic user's <dir> -> private/<dir>) lands
     only on a unit-made directory, which every rule here and the link rules already treat as a
-    service user's. A path PID 1 acts on inside the directory is inside_refusals' (#5233). Generators and
-    transient units are not covered (unit_made_dirs). In front of these
+    service user's. A path PID 1 acts on inside the directory is inside_refusals' (#5233). Generators' and
+    transient units are finish_image.py's and runtime's (unit_made_dirs). In front of these
     rules, every line PID 1 may make, link or mount a host path for is on made.allow (made_allow_violations),
     so a route these rules do not model (a mount that aliases a way) still needs a reviewed entry."""
     out = []
@@ -2146,6 +2148,105 @@ def made_way_refusal(root, form):
     return None if why is None else "below a step another user can write or remake: " + why
 
 
+# #5474 (from #5437 Security): systemd-gpt-auto-generator writes mount units from the boot disk's partition
+# types, so no unit or etc/fstab line in the tree names them. The partition definitions decide which can
+# exist: this maps each repart Type= the generator mounts to where (systemd 257, gpt-auto-generator.c). A
+# Type= this table lacks is refused (fail closed). /usr is the verity slot built from this tree, so the tree
+# check reads what it holds; every other mount point holds a filesystem the check does not read.
+GPT_AUTO_MOUNTS = {"esp": ("boot", "efi"), "xbootldr": ("boot",), "home": ("home",), "srv": ("srv",),
+                   "var": ("var",), "tmp": ("var/tmp",), "usr": ("usr",), "root": (), "root-verity": (),
+                   "root-verity-sig": (), "usr-verity": (), "usr-verity-sig": ()}
+GPT_AUTO_TREE = ("usr",)
+REPART_TREE = ("etc/repart.d", "usr/local/lib/repart.d", "usr/lib/repart.d")
+
+
+def repart_build():
+    """The build's mkosi.repart directory: beside this script, else under $SRCDIR (mkosi v24.3 mounts the script
+    alone at /work/finalize and the configuration directory at /work/src, as allow_path); None if neither has it.
+    Like allow_path, it reads the repository's files, not the tree."""
+    for d in (os.path.dirname(os.path.abspath(__file__)), os.environ.get("SRCDIR")):
+        if d and os.path.isdir(os.path.join(d, "mkosi.repart")):
+            return os.path.join(d, "mkosi.repart")
+    return None
+
+
+def build_definitions(build):
+    """(name, bytes) for each *.conf in the build's mkosi.repart directory BUILD, in name order. It is the checkout,
+    not the tree, so it is read as it is; OSError if it cannot be listed or read."""
+    out = []
+    for n in sorted(os.listdir(build)):
+        if n.endswith(".conf"):
+            with open(os.path.join(build, n), "rb") as f:
+                out.append((n, f.read()))
+    return out
+
+
+def repart_types(root):
+    """(where, [Type= values], why unreadable or None) for each repart definition systemd-repart reads from the
+    tree (REPART_TREE, held to the tree's rules) and in the build's own mkosi.repart directory (repart_build; the
+    caller refuses a build without one)."""
+    read, out = [], []
+    for f in conf_files(root, REPART_TREE):
+        try:
+            read.append((f.name, f.content()))
+        except OSError as e:
+            out.append((f.name, [], e.strerror))
+    build = repart_build()
+    if build is not None:
+        try:
+            read += build_definitions(build)
+        except OSError as e:
+            out.append((os.path.basename(build), [], e.strerror))
+    for name, data in read:
+        try:
+            out.append((name, [v for s, k, v in config_lines(data) if (s, k) == ("Partition", "Type")], None))
+        except Unparsable as e:
+            out.append((name, [], str(e)))
+    return out
+
+
+def gpt_auto_mounts(root):
+    """({mount point steps: definition names} gpt-auto can mount a filesystem the tree check does not read at,
+    one violation line per definition it cannot place (unreadable, no or several Type=, a Type= not on
+    GPT_AUTO_MOUNTS) or whose mount point lands on a path the keeper protects or the box mounts itself): #5474."""
+    where, bad = {}, []
+    protected = BOX_MOUNTS + WORLD_WRITABLE + SERVICE_DIRS
+    if repart_build() is None:
+        bad.append("mkosi.repart: not beside this script or under $SRCDIR, so the partitions gpt-auto-generator mounts "
+                   "from the built disk are unknown; the build's definitions must be readable (#5474)")
+    if entry_mode(root, "run/repart.d"):  # systemd-repart reads /run/repart.d too; the box mounts /run, so none ships
+        bad.append("run/repart.d: systemd-repart reads definitions here, but the box mounts /run at boot, so the tree "
+                   "check cannot read what it will hold; ship none (#5474)")
+    for name, types, why in repart_types(root):
+        if why is not None:
+            bad.append("%s: could not be read (%s), so the mounts gpt-auto-generator makes from it are unknown (#5474)"
+                       % (name, why))
+            continue
+        if len(types) != 1:
+            bad.append("%s: has %s; gpt-auto-generator's mounts follow it, so name exactly one (#5474)"
+                       % (name, "no Type= line" if not types else "%d Type= lines" % len(types)))
+            continue
+        paths = GPT_AUTO_MOUNTS.get(types[0].lower())
+        if paths is None:
+            bad.append("%s: Type=%s is not one gpt-auto-generator's mounts are known for (%s); name one of them (#5474)"
+                       % (name, types[0], ", ".join(sorted(GPT_AUTO_MOUNTS))))
+            continue
+        for m in paths:
+            hit = next((p for p in protected if m == p or m.startswith(p + "/") or p.startswith(m + "/")), None)
+            if hit is not None:
+                bad.append("%s: Type=%s: systemd-gpt-auto-generator mounts it at /%s, which holds or covers /%s, a path "
+                           "the keeper protects or the box mounts itself, and the tree check does not read what "
+                           "gpt-auto mounts there; drop the partition or give it a path that no protected path holds "
+                           "(#5474)" % (name, types[0], m, hit))
+            if m not in GPT_AUTO_TREE:
+                where.setdefault(tuple(m.split("/")), []).append(name)
+    return where, bad
+
+
+def gpt_auto_violations(root):
+    return gpt_auto_mounts(root)[1]
+
+
 def inside_refusals(root):
     """#5233: one violation per path PID 1 may make, link, bind or mount (unit_made_paths, a path it only
     watches aside) inside a directory another user may write: a WORLD_WRITABLE one, a SERVICE_DIRS one, or
@@ -2170,7 +2271,7 @@ def inside_refusals(root):
                  if len(f) > 1 and not f[0].startswith("#") and not box_own_line(f)}
     except OSError:
         loose = set()  # fstab_noexec_violations refuses an unreadable one
-    mounts = set()
+    mounts = set(gpt_auto_mounts(root)[0])
     for s, w, k in named:
         if k != "mount" or not s:
             continue
@@ -2184,7 +2285,7 @@ def inside_refusals(root):
             continue
         hid = next((m for m in mounts if len(m) < len(steps) and tuple(steps[:len(m)]) == m), None)
         if hid is not None:
-            out.append("%s: /%s is below /%s, where a unit or etc/fstab mounts a filesystem the tree check does not "
+            out.append("%s: /%s is below /%s, where a unit, etc/fstab or gpt-auto mounts a filesystem the tree check does not "
                        "read; the mount, not the tree, decides who can write that way, and PID 1 makes, links, binds or "
                        "chowns the path following any link on it; name a path outside the mount (#5400)"
                        % (where, "/".join(steps).split(",", 1)[0], "/".join(hid)))

@@ -37,6 +37,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -80,16 +81,47 @@ func (e BadName) Error() string {
 func (UnservedDevice) Unwrap() error { return ErrConfig }
 func (BadName) Unwrap() error        { return ErrConfig }
 
+// BadSetup is Generate's refusal of the setup itself (check): it wraps
+// the fault, which wraps ErrConfig, so a caller tells a setup fault from
+// any other refusal by its type, never by its text (#5431).
+type BadSetup struct{ Err error }
+
+func (e BadSetup) Error() string { return e.Err.Error() }
+func (e BadSetup) Unwrap() error { return e.Err }
+
 // Refused is every refusal Generate finds in one document and setup, so
-// the owner fixes them all from one report (#5405): a setup fault first,
-// then each UnservedDevice in the document's order, then each BadName
-// sorted. Its text is one line, each refusal's joined by "; ".
+// the owner fixes them all from one report (#5405): a setup fault
+// (BadSetup) first, then each UnservedDevice in the document's order,
+// then each BadName sorted. Its text is one line, each refusal's joined
+// by "; ", the first RefusedShown of them and then how many more, so the
+// log line stays bounded however many a document holds (#5431).
 type Refused []error
 
+// RefusedShown is how many refusals Refused's text names, and
+// RefusedTextMax the most bytes of each one's text, cut at a character's
+// start, then "..." (#5431). A refusal of a signed policy is far shorter,
+// since the policy's names are at most 253 bytes; the cap bounds the line
+// whatever a refusal carries.
+const (
+	RefusedShown   = 20
+	RefusedTextMax = 1024
+)
+
 func (r Refused) Error() string {
-	s := make([]string, len(r))
-	for i, err := range r {
-		s[i] = err.Error()
+	s := make([]string, 0, min(len(r), RefusedShown)+1)
+	for _, err := range r[:min(len(r), RefusedShown)] {
+		t := err.Error()
+		if len(t) > RefusedTextMax {
+			n := RefusedTextMax
+			for n > 0 && !utf8.RuneStart(t[n]) {
+				n--
+			}
+			t = t[:n] + "..."
+		}
+		s = append(s, t)
+	}
+	if n := len(r) - RefusedShown; n > 0 {
+		s = append(s, "and "+strconv.Itoa(n)+" more")
 	}
 	return strings.Join(s, "; ")
 }
@@ -180,7 +212,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	// it is), and each listed name that is not a DNS host name.
 	var refused Refused
 	if err := s.check(l); err != nil {
-		refused = append(refused, err)
+		refused = append(refused, BadSetup{err})
 	}
 	for i, dev := range devs {
 		iface := views[i+1].Iface

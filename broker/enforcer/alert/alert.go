@@ -134,10 +134,24 @@ func Words(k Kind, device string) (string, error) {
 		return "", ErrKind
 	case s.device != (device != ""), s.device && !wire.Name(device):
 		return "", ErrDevice
+	case k == RecordMissing:
+		return fmt.Sprintf(s.words, boxName(device)), nil
 	case s.device:
 		return fmt.Sprintf(s.words, device), nil
 	}
 	return s.words, nil
+}
+
+// boxName is a box as the page names it, so the owner reads no device
+// ID: the edge box and the core (#5445 item 5).
+func boxName(device string) string {
+	switch device {
+	case "edge":
+		return "the edge box"
+	case "core":
+		return "the core"
+	}
+	return device
 }
 
 // Colour is what the light shows.
