@@ -632,7 +632,8 @@ func TestLeaseFileUnreadable(t *testing.T) {
 // TestHeldHostShown (#5528; nft ASSUMPTIONS ENF-shared-src-1): home
 // shows a host the firewall kept from an address (nft.LeaseHeld) for a
 // lease after the count last rose, read at the resolver's step and at a
-// load. A count that stays, or a new table's count of 0, shows nothing; a
+// load. The daemon's first reading only starts the count (a table that
+// outlived the last run counted at unknown times). A count that stays, or a new table's count of 0, shows nothing; a
 // new table's count above 0 (a load starts it again) is a rise however it
 // compares with the old one; a listing that does not read leaves it as
 // it was.
@@ -647,11 +648,15 @@ func TestHeldHostShown(t *testing.T) {
 		x.d.refreshAnswers(context.Background())
 		return (pageResolver{x.d}).Stopped().Held
 	}
-	listing(5, 0)
+	listing(5, 3)
 	if step() {
-		t.Fatal("home shows a held host with none held")
+		t.Fatal("home shows a held host counted before the daemon started")
 	}
 	listing(5, 3)
+	if step() {
+		t.Fatal("home shows a held host with none held since the last reading")
+	}
+	listing(5, 4)
 	if !step() {
 		t.Fatal("home does not show a held host")
 	}

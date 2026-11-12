@@ -679,16 +679,23 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 // noteHeld reads nft.LeaseHeld in running, the running table; d.fwMu is
 // held. A count risen since the last reading of the same table, or above
 // 0 in a new one (a load starts it at 0), means the server's answer to a
-// host was held since (ENF-shared-src-1): home shows it for a lease.
+// host was held since (ENF-shared-src-1): home shows it for a lease. The
+// first reading since the daemon started (heldTable 0: the kernel numbers
+// tables from 1) is only where counting starts, since a table that
+// outlived the last run counted at times this run cannot tell.
 func (d *Enforcer) noteHeld(running []byte) {
 	table, held, err := nft.Held(running)
 	if err != nil {
 		return // the step that read the listing fails on it too, and logs it
 	}
 	n := &d.net
-	if table != n.heldTable {
-		n.heldTable, n.held = table, 0
+	switch {
+	case n.heldTable == 0:
+		n.held = held
+	case table != n.heldTable:
+		n.held = 0
 	}
+	n.heldTable = table
 	if held > n.held {
 		n.resMu.Lock()
 		n.heldAt = d.dp.Now()
