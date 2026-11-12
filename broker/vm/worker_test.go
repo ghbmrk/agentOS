@@ -923,14 +923,15 @@ func TestOP6HeldForkPausesNothingAndKeepsNoCheckpoint(t *testing.T) {
 	}
 
 	held.Store(true)
-	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) || paused.Load() {
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); err != ErrHeld || paused.Load() {
 		t.Fatalf("held fork: %v, paused %v", err, paused.Load())
 	}
 	same("held before the checkpoint")
 
 	held.Store(false)
 	e.rt.onPause = func(string) { held.Store(true) }
-	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) {
+	// A clean hold is the bare ErrHeld: nothing else failed.
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); err != ErrHeld {
 		t.Fatalf("fork held after the checkpoint: %v", err)
 	}
 	same("held after the checkpoint")
@@ -942,7 +943,7 @@ func TestOP6HeldForkPausesNothingAndKeepsNoCheckpoint(t *testing.T) {
 			held.Store(true)
 		}
 	}
-	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); !errors.Is(err, ErrHeld) {
+	if _, err := e.m.Fork(hold, "wk-a1", []string{"wk-f1", "wk-f2"}); err != ErrHeld {
 		t.Fatalf("fork held after one fork started: %v", err)
 	}
 	same("held after one fork started")

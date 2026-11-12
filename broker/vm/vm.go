@@ -1944,8 +1944,12 @@ func (m *Manager) Fork(ctx context.Context, id string, ids []string) (Snapshot, 
 			// With every fork undone, nothing uses the checkpoint, so it
 			// goes as on a refusal before any start: a held or failed fork
 			// leaves nothing behind. A fork still live keeps it as its base.
+			// A drop that worked adds nothing: a clean hold stays the bare
+			// ErrHeld, which callers read as STOP alone.
 			if live == nil {
-				err = errors.Join(err, m.dropSnapshot(src, s.ID, prevLast))
+				if derr := m.dropSnapshot(src, s.ID, prevLast); derr != nil {
+					err = errors.Join(err, derr)
+				}
 			}
 			return Snapshot{}, err
 		}
