@@ -89,7 +89,7 @@ allow broker/vm/vm.go removeAll os.RemoveAll a retired machine directory in root
 allow broker/vm/vm.go removeAll os.Remove unlink: a snapshot's meta.json, at the top of its root-held directory, which only the broker writes
 allow broker/vm/vm.go publishSnap os.Remove the snapshot's meta.json, at the top of its root-held directory
 allow broker/vm/vm.go publishSnap os.RemoveAll the root-held snapshot directory whose publish failed
-allow broker/vm/prune.go Manager.Prune os.Stat the modification time of an unread snapshot directory in root-held snapshots/; read only, and a failure keeps the snapshot
+allow broker/vm/prune.go Manager.Prune os.Stat the modification time of an unread snapshot directory in root-held snapshots/; read only, and any failure but absence keeps the snapshot
 allow broker/vm/vm.go readJSON os.ReadFile a machine's or snapshot's meta.json, at the top of its root-held directory, which only the broker writes
 allow broker/vm/vm.go Manager.load os.ReadDir lists root-held snapshots/ and machines/ in StateDir, made 0700 inside root-held /var/lib/agentos
 allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory, root-held

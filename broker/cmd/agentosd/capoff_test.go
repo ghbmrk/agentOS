@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -654,6 +655,9 @@ func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
 	must(t, err)
 	var told []string
 	caps := &capState{}
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
 	m, err = openVM(context.Background(), vm.Config{
 		StateDir: state, Images: map[string]string{"base": t.TempDir()},
 		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
@@ -664,11 +668,27 @@ func TestOpenVMWiresUnreadLineAndNotice(t *testing.T) {
 		t.Fatalf("STATUS line = %q, want the unread one", got)
 	}
 	must(t, m.ForgetSince(context.Background(), "x.0", time.Now()))
+	if !strings.Contains(logged.String(), "telling the owner of deleted unread snapshots: no owner channel") {
+		t.Fatalf("a failed notice not logged: %q", logged.String())
+	}
 	if len(told) != 1 || told[0] != unreadGoneNotice(1, true) {
 		t.Fatalf("owner told %q, want the forget notice", told)
 	}
 	if got := caps.unreadLine(); got != "" {
 		t.Fatalf("STATUS line after the forget = %q", got)
+	}
+}
+
+// CAP-3 (#5481): a machines open that fails returns the error and wires
+// nothing: no manager, no restore-point line.
+func TestOpenVMFailureWiresNothing(t *testing.T) {
+	caps := &capState{}
+	m, err := openVM(context.Background(), vm.Config{StateDir: t.TempDir()}, caps, func(string) error { return nil })
+	if err == nil || m != nil {
+		t.Fatalf("open without a runtime: %v, %v", m, err)
+	}
+	if caps.unread.Load() != nil {
+		t.Fatal("the restore-point line was wired to machines that did not open")
 	}
 }
 
