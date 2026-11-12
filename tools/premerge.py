@@ -42,7 +42,8 @@ the newest trusted verdicts marked `ux` and `potency` (one comment may carry bot
 `potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts: while it is the newest of
 its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105), until a newer comment supersedes
 it. Likewise a verdict comment whose `Record:` line does not parse (a package ID with spaces, a missing line;
-#3611) prints `unparsed-record <kind>` until a newer comment supersedes it. An accept whose Record head names no commit here prints
+#3611) prints `unparsed-record <kind>` until a newer comment supersedes it, and an accept with a good Record line whose
+marker sits outside its record block prints `misplaced-marker <kind>` (#5541). An accept whose Record head names no commit here prints
 `unresolved-record <kind>` the same way (#3856). Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 Last, every verdict being in, it holds the checks main's ruleset does not require (HELD, #5366), since GitHub merges
 an armed PR past a cancelled one: `--runs` is the head's and merge base's Actions runs (`checks_held`), and each held
@@ -122,7 +123,8 @@ _FENCE = re.compile(r"(`{3,}|~{3,})[^`]*$")
 
 
 def _record_block(body):
-    """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
+    """(text, placed, line): where a comment's Record line and markers are read from, whether that is its record block,
+    and its first unfenced `Record:` line (None without one).
 
     The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
     under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
@@ -138,12 +140,12 @@ def _record_block(body):
             fence = None
     at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
     if at is None:
-        return body, False
+        return body, False, None
     end = at + 1
     while end < len(lines) and _HEADER.match(lines[end]):
         end += 1
     own = "\n".join(lines[at:end])
-    return (own, True) if _MARKER.search(own) else (body, False)
+    return (own, True, lines[at]) if _MARKER.search(own) else (body, False, lines[at])
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -164,7 +166,8 @@ def verdict(comments, pr, security=False, lens=None):
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
     An accept's markers and Record line count only in the comment's record block, and an accept whose marker is only
-    outside it reads as `unparsed` (`_record_block`, #4261); any other verdict reads the whole comment, so it fails closed.
+    outside it reads as `misplaced` when its first unfenced Record line is a well-formed one for this PR, else as
+    `unparsed` (`_record_block`, #4261, #5541); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
@@ -174,12 +177,13 @@ def verdict(comments, pr, security=False, lens=None):
         first = body.split("\n", 1)[0].strip()
         if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
             continue
-        own, placed = _record_block(body)
+        own, placed, line = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
         # quoted or misplaced marker or record can only make it count, which fails closed.
         accept = first.split(":", 1)[-1].strip().lower() == "accept"
         read = own if accept else body
-        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", read, re.M)
+        ours = re.compile(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", re.M)
+        rec = ours.search(read)
         if lens:
             marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", read, re.M)
         else:
@@ -189,7 +193,7 @@ def verdict(comments, pr, security=False, lens=None):
         misplaced = accept and not placed
         if marked and (misplaced or not rec):
             if misplaced or not _RECORD.search(read):
-                found = ("unparsed", None)
+                found = ("misplaced" if misplaced and ours.match(line or "") else "unparsed", None)
         elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
@@ -538,6 +542,8 @@ EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a
 
 # #3611: a Record line with a spaced package never parsed, so the accept read as absent; name that too.
 UNPARSED = 'unparsed-record {}: Record line must be "Record: PR #{} · package <ID-without-spaces> · head <sha>"'
+# #5541 (seen twice on #5539): a marker above a good Record line read as unparsed, which blamed the Record line.
+MISPLACED = "misplaced-marker {}: a <!-- record: <kind> --> marker must sit directly under the Record line, not above it or elsewhere"
 
 
 # #3856 (seen on #3842): a Record head no `git rev-parse` resolves crashed --check with a traceback; name it as never accepting.
@@ -556,6 +562,8 @@ def _named(v, kind, pr):
         return EDITED.format(kind)
     if v and v[0] == "unparsed":
         return UNPARSED.format(kind, int(pr))
+    if v and v[0] == "misplaced":
+        return MISPLACED.format(kind)
     return None
 
 
@@ -750,7 +758,7 @@ def main(argv):
         files = mark_range(".", base, head)
         owed = {x: verdict(comments, pr, lens=x) for x in lenses_owed(files)}
         lenses = [x for x, lv in owed.items() if not _accepted(lv, head, base)]
-        for state in ("edited", "unparsed"):
+        for state in ("edited", "unparsed", "misplaced"):
             hit = [x for x in lenses if owed[x] and owed[x][0] == state]
             if hit:
                 print(_named((state,), ",".join(hit), pr))
