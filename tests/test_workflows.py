@@ -209,10 +209,11 @@ PREMERGE_LINES = [
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \\',
     '              --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
+    '          verdict=$out',
     '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | python3 -I -c \'import sys;s="".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\\u00b7");t=s[:120];i=t.rfind("/") if t.count(" ") < 2 else t.rfind(" ");sys.stdout.buffer.write((t if len(s) <= 120 or s[120] in " /" or i < 0 else t[:i+1].rstrip()).encode())\')',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
-    '          if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \\',
+    '          if [ "$state" = success ] && [ "$verdict" = same ] && [ "$skipped" = no ] && \\',
     '            jq -e \'.state == "open" and .draft == false and .auto_merge == null\' "$RUNNER_TEMP/pr.json" > /dev/null; then',
     '            printf \'merge-head=%s\\nmerge-repo=%s\\nmerge-ref=%s\\n\' "$HEAD_SHA" "$HEAD_REPO" "$HEAD_REF" >> "$GITHUB_OUTPUT"',
     '          fi',
@@ -1483,7 +1484,7 @@ class WorkflowTest(unittest.TestCase):
                      # ARM-on-accept (#3103): only a `same` from --check merges (not `bot`), only an open,
                      # non-draft, unarmed PR, only with every check green, pinned to the gate's head,
                      # with the main-only bot token.
-                     ('[ "$out" = same ]', '[ "$out" != error ]'),
+                     ('[ "$verdict" = same ]', '[ "$out" != error ]'),
                      ('.draft == false and .auto_merge == null', '.auto_merge == null'),
                      ('IN("success", "skipped", "neutral")', 'IN("success", "skipped", "neutral", "failure")'),
                      ('select(.status != "completed" or ', 'select('),
@@ -1511,7 +1512,7 @@ class WorkflowTest(unittest.TestCase):
                      ('select(.head.sha == \\"$HEAD_SHA\\" and ', 'select('),
                      ("state=open&base=main&per_page=100", "state=open&per_page=100"),
                      (') | .number") || return 1', ') | .number")'),
-                     ('[ "$out" = same ] && [ "$skipped" = no ] && ', '[ "$out" = same ] && '),
+                     ('[ "$verdict" = same ] && [ "$skipped" = no ] && ', '[ "$verdict" = same ] && '),
                      # PREMERGE-fork-rerun (#5383): the dispatched run joins the PR's group, reads only a number, and
                      # only the job that dispatches holds `actions: write`, for runs that name no PR.
                      ("|| inputs.pr || github.run_id }}", "|| github.run_id }}"),
@@ -1604,7 +1605,7 @@ exec "$REAL_JQ" "$@"
 STUB_PY = r"""#!/bin/sh
 [ "$1" = -I ] && [ "$2" = -c ] && exec "$REAL_PY" "$@"
 echo "$*" >> "$STUBS/py"
-echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
+printf '%s\n' "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ] || [ -n "$VERDICT_OK" ]
 """
 # MAIN-PROT-3 (#757): `git log` answers the head commit's Bot-Run trailer; every other git call succeeds silently.
 STUB_GIT = r"""#!/bin/sh
@@ -1978,6 +1979,18 @@ class PremergeRunTest(unittest.TestCase):
             raw = []
             self.assertEqual(self.run_gate(verdict, env_extra=env, raw=raw)[1], ["failure"], env)
             self.assertIn(b"description=unparsed-record 7: Record: PR #7 \xc2\xb7 package x \xc2\xb7 head f ", raw[0], env)
+
+    def test_only_a_whole_same_output_arms_the_merge(self):
+        # PREMERGE-status-cut-pins (#5561): the cut status of `same`, two spaces and a long token is `same`, and the filter
+        # strips control characters; neither reaches the merge job, which reads the whole output. VERDICT_OK stands in
+        # for a success exit, since premerge.py prints no such line today.
+        for verdict, shown in (("same  " + "x" * 115, "same"), ("same\x07", "same"), ("same", "same")):
+            with self.subTest(verdict=verdict):
+                out, desc = [], []
+                self.assertEqual(self.run_gate(verdict, env_extra={"VERDICT_OK": "1"}, outputs=out, descriptions=desc),
+                                 (0, ["success"]))
+                self.assertEqual(desc, [shown])
+                self.assertEqual(out, ["merge-head=" + self.SHA, "merge-repo=o/r", "merge-ref=feature"] if verdict == "same" else [])
 
     def test_status_is_posted_with_the_app_token(self):
         # PREMERGE-source-a (#1943): the post uses STATUS_TOKEN (the App's, which the ruleset

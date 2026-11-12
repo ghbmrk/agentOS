@@ -667,6 +667,17 @@ class PremergeTest(unittest.TestCase):
             fit = cause + " " + "a" * (119 - len(cause))
             self.assertEqual(status_of(fit), [fit])
             self.assertEqual(status_of(fit + " bbb"), [fit])
+            # PREMERGE-status-cut-pins (#5561): a word-boundary cut leaves no trailing space; a list of many paths whose
+            # 121st character is a space, and one path whose 121st character is a slash, keep all 120 characters.
+            shown, = status_of(line)
+            self.assertEqual(shown, shown.rstrip())
+            first = "p/" + "a" * ((120 - len(cause) - 1 - 2) % 11)
+            line = cause + " " + " ".join([first] + [f"dir/f{n:02}.py" for n in range(20)])
+            self.assertEqual((line[120], line[:120].count(" ") > 2), (" ", True))
+            self.assertEqual(status_of(line), [line[:120]])
+            line = cause + " top/" + "d" * (120 - len(cause) - 5) + "/file.py"
+            self.assertEqual(line[120], "/")
+            self.assertEqual(status_of(line), [line[:120]])
 
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
