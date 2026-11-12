@@ -3,6 +3,7 @@
 No requirement IDs: PLAN.md tooling, not SPEC.md behaviour. All data is synthetic.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,9 +26,9 @@ EDITED = lambda kind: ["edited-verdict", kind + ":", *"a verdict edited after po
 UNPARSED = lambda kind, pr=7: ["unparsed-record", kind + ":",
     *f'Record line must be "Record: PR #{pr} · package <ID-without-spaces> · head <sha>"'.split()]
 MISPLACED = lambda kind: ["misplaced-marker", kind + ":",
-    *"a <!-- record: <kind> --> marker must sit directly under the Record line, not above it or elsewhere".split()]
-UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha,
-    *"resolves to no single commit here, post a new verdict naming the reviewed head".split()]
+    *"put each <!-- record: <kind> --> marker directly under the Record line".split()]
+UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha[:7],
+    *"is no single commit here, post a new verdict naming the reviewed head".split()]
 
 
 REPO = "o/agentOS"
@@ -604,6 +605,22 @@ class PremergeTest(unittest.TestCase):
         self.commit("later")
         bad = run()
         self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["changed", "b.txt"]))
+
+    def test_named_causes_fit_the_status_cut(self):
+        # #5543: premerge.yml keeps printable ASCII and cuts the status at 120 characters, so every named cause must fit
+        # whole with its longest real argument: the longest kind join --check prints, a 5-digit PR, a 40-character head
+        cut = int(re.search(r"cut -c 1-(\d+)", (ROOT / ".github/workflows/premerge.yml").read_text()).group(1))
+        status = lambda line: "".join(ch for ch in line if " " <= ch <= "~")
+        joined = ",".join(premerge.lenses_owed(["tools/premerge.py"]))
+        self.assertEqual(joined, "ux,potency")  # lenses_owed's longest list; l3 and security are never joined
+        kinds = ("l3", "security", "combined", "ux", "potency")
+        with mock.patch.object(premerge, "_resolves", return_value=False):
+            lines = [premerge._named((state,), kind, 99999) for state in ("edited", "unparsed", "misplaced")
+                     for kind in (*kinds, joined)]
+            lines += [premerge._named(("accept", "f" * 40), kind, 99999) for kind in kinds]
+        self.assertEqual(len(lines), 23)
+        for line in lines:
+            self.assertLessEqual(len(status(line)), cut, line)
 
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
