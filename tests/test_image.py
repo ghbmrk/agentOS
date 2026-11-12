@@ -3462,7 +3462,9 @@ class ConfFilesTest(unittest.TestCase):
         # A template's directory is not expanded: its specifier fails the build (Security 6760938141).
         write(self.root, "usr/lib/systemd/system/cap@.service", "[Service]\nStateDirectory=capsules/c-%i\n")
         self.assertIn("usr/lib/systemd/system/cap@.service: StateDirectory=capsules/c-%i: the tree check does not model "
-                      "it; the tree check never passes a unit file whose directories it cannot read (#5167)", self.v())
+                      "it; the tree check never passes a unit file whose directories it cannot read (#5167); write it as "
+                      "plain directory names under its top (no specifier, quote, escape, glob, '..' or leading '/')",
+                      self.v())
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is

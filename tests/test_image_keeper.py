@@ -685,7 +685,9 @@ class KeeperTreeTest(unittest.TestCase):
                     key, val = text.split("=", 1)
                     self.assertEqual(check.unit_made_dirs(self.root)[1], [
                         "%sx.service: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                        "whose directories it cannot read (#5167)" % (SYSTEM, key, val if val.isprintable() else repr(val))])
+                        "whose directories it cannot read (#5167); write it as plain directory names under its top (no "
+                        "specifier, quote, escape, glob, '..' or leading '/')"
+                        % (SYSTEM, key, val if val.isprintable() else repr(val))])
                     self.assertIn(check.unit_made_dirs(self.root)[1][0], check.violations(self.root))
                 finally:
                     d.unlink()
@@ -710,8 +712,12 @@ class KeeperTreeTest(unittest.TestCase):
                     got = check.unit_made_paths(self.root)[2]
                     self.assertEqual(len(got), 1, got)
                     self.assertTrue(got[0].startswith("%sx.socket: %s=" % (SYSTEM, key)), got)
-                    self.assertTrue(got[0].endswith(": the tree check does not model it; the tree check never passes a "
-                                                    "unit file whose paths it cannot read (#5167)"), got)
+                    # #5253: each refusal ends saying what the builder changes.
+                    self.assertTrue(got[0].endswith(
+                        ": the tree check does not model it; the tree check never passes a unit file whose paths it "
+                        "cannot read (#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..'), "
+                        "or, if %s= never names a host path, add %s to PID1_NAMES with its systemd source"
+                        % (key, key, key)), got)
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
@@ -938,20 +944,27 @@ class KeeperTreeTest(unittest.TestCase):
                     fstab.write_text(kept + line + "\n")
                     want = ("etc/fstab: %s: a line that is not plain text with a mount point opening with '/' and no '..': "
                             "the tree check does not model it; the tree check never passes an fstab line whose paths it "
-                            "cannot read (#5167)" % line)
+                            "cannot read (#5167); write the line as plain ASCII with no escape and no '..' step, its mount "
+                            "point an absolute path" % line)
                     self.assertEqual(check.unit_made_paths(self.root)[2], [want])
                     self.assertIn(want, check.violations(self.root))
             fstab.write_text(kept + "tmpfs\n")
             self.assertEqual(len(check.unit_made_paths(self.root)[2]), 1)
             # A relative bind source or overlay dir (PID 1 makes it from /), and a '..' step, are refused too.
-            for line in ("/var/lib/f\\040q /srv/b none bind 0 0", "var/lib/fq /srv/b none bind 0 0",
-                         "overlay /srv/o overlay lowerdir=/usr,upperdir=var/lib/fq,workdir=/srv/w 0 0",
-                         "/var/lib/x/../fq /srv/b none bind 0 0", "tmpfs /var/lib/x/../fq tmpfs noexec 0 0"):
+            # #5253: each refusal ends saying what the builder changes.
+            whole = ("cannot read (#5167); write the line as plain ASCII with no escape and no '..' step, its mount point "
+                     "an absolute path")
+            paths = "cannot read (#5167); write every bind source and option path in it as an absolute path"
+            for line, fix in (("/var/lib/f\\040q /srv/b none bind 0 0", whole), ("var/lib/fq /srv/b none bind 0 0", paths),
+                              ("overlay /srv/o overlay lowerdir=/usr,upperdir=var/lib/fq,workdir=/srv/w 0 0", paths),
+                              ("/var/lib/x/../fq /srv/b none bind 0 0", whole),
+                              ("tmpfs /var/lib/x/../fq tmpfs noexec 0 0", whole)):
                 with self.subTest(line):
                     fstab.write_text(kept + line + "\n")
                     got = check.unit_made_paths(self.root)[2]
                     self.assertEqual(len(got), 1, got)
                     self.assertTrue(got[0].startswith("etc/fstab: %s: " % line), got)
+                    self.assertTrue(got[0].endswith(fix), got)
                     self.assertIn(got[0], check.violations(self.root))
             # A bind source and an overlay dir are paths PID 1 makes (L3 6761389633).
             for line in ("/var/lib/fq /srv/b none bind 0 0", "overlay /srv/o overlay lowerdir=/usr,upperdir=/var/lib/fq,workdir=/srv/w 0 0"):
@@ -969,7 +982,8 @@ class KeeperTreeTest(unittest.TestCase):
             try:
                 self.assertEqual(check.unit_made_paths(self.root)[2], [
                     "%s%s: a mount unit name with an escape or a '..': the tree check does not model it; the tree "
-                    "check never passes a unit file whose paths it cannot read (#5167)" % (SYSTEM, name)])
+                    "check never passes a unit file whose paths it cannot read (#5167); mount at a path whose unit name "
+                    "needs no escape (steps of letters, digits, ':', '_' and '.', none of them '..')" % (SYSTEM, name)])
             finally:
                 remove()
 

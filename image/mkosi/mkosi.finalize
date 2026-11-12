@@ -237,6 +237,19 @@ PID1_NAMES = ("After", "Before", "Wants", "Requires", "Requisite", "BindsTo", "P
 # file is what the chown would hand over, so there they count like any other setting; below one another
 # user holds, that user's links lead the way (inside_refusals, #5233).
 PID1_NAMESPACE_MAKES = ("BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem", "MountImages")
+# #5253 (Lens on #5247): the clause each #5167 "does not model it" refusal ends with, saying what the builder
+# changes. A setting that only names units, users or numbers belongs on PID1_NAMES, never on PID1_READS.
+DIR_FIX = "; write it as plain directory names under its top (no specifier, quote, escape, glob, '..' or leading '/')"
+MOUNT_NAME_FIX = ("; mount at a path whose unit name needs no escape (steps of letters, digits, ':', '_' and '.', none "
+                  "of them '..')")
+FSTAB_FIX = "; write the line as plain ASCII with no escape and no '..' step, its mount point an absolute path"
+FSTAB_PATH_FIX = "; write every bind source and option path in it as an absolute path"
+
+
+def value_fix(key):
+    """#5253: the clause a #5167 refusal of a KEY= value in a unit file ends with."""
+    return ("; write %s= as plain absolute paths (no specifier, quote, escape or '..'), or, if %s= never names a "
+            "host path, add %s to PID1_NAMES with its systemd source" % (key, key, key))
 MASK = "/dev/null"
 TOP_LINKS = {"lib": ("usr/lib", "/usr/lib")}
 READ_CONF = ("sysctl.d", "tmpfiles.d", "systemd/network", "systemd/system", "systemd/system.control",
@@ -1734,7 +1747,8 @@ def unit_made_dirs(root):
                 got = [d for w in made_dir_words(key, v) for d in w]
             except ValueError:
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                           "whose directories it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                           "whose directories it cannot read (#5167)%s" % (rel, key, v if v.isprintable() else repr(v),
+                                                                           DIR_FIX))
                 continue
             for d in got:
                 made.setdefault(d, "%s= in %s" % (key, rel))
@@ -1968,7 +1982,7 @@ def unit_made_paths(root):
         if re.fullmatch(r"[^@]+\.(auto)?mount", name):
             if "\\" in name or ".." in name.split("-"):
                 out.append("%s: a mount unit name with an escape or a '..': the tree check does not model it; the tree check "
-                           "never passes a unit file whose paths it cannot read (#5167)" % rel)
+                           "never passes a unit file whose paths it cannot read (#5167)%s" % (rel, MOUNT_NAME_FIX))
             else:
                 paths.append((path_parts(name.rsplit(".", 1)[0].replace("-", "/")), "the name of %s" % rel, "mount"))
         for _, key, v in lines:
@@ -1976,7 +1990,8 @@ def unit_made_paths(root):
                 continue
             if any(not " " <= c <= "~" and c != "\t" or c in "\"'\\" for c in v) or "%" in v.replace("%%", ""):
                 out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                           "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                           "whose paths it cannot read (#5167)%s" % (rel, key, v if v.isprintable() else repr(v),
+                                                                     value_fix(key)))
                 continue
             if key in PID1_NAMESPACE_MAKES:
                 # Only the mount point is made: BindPaths=SRC:DST's DST (SRC alone mounts on itself and makes
@@ -1989,12 +2004,13 @@ def unit_made_paths(root):
             if words is None:
                 out.append("%s: %s=%s: a '/' that opens no absolute path (PID 1 makes a relative path from /): the "
                            "tree check does not model it; the tree check never passes a unit file whose paths it "
-                           "cannot read (#5167)" % (rel, key, v))
+                           "cannot read (#5167)%s" % (rel, key, v, value_fix(key)))
                 continue
             for w in words:
                 if "%" in w or ".." in w.split("/"):
                     out.append("%s: %s=%s: the tree check does not model it; the tree check never passes a unit file "
-                               "whose paths it cannot read (#5167)" % (rel, key, v if v.isprintable() else repr(v)))
+                               "whose paths it cannot read (#5167)%s" % (rel, key, v if v.isprintable() else repr(v),
+                                                                         value_fix(key)))
                     break
                 kind = ("mount" if key == "Where" else "namespace" if key in PID1_NAMESPACE_MAKES
                         else "watch" if key in PATH_WATCHES and unit_only_watches(root, path, key) else "")
@@ -2011,7 +2027,7 @@ def unit_made_paths(root):
                 or any(not " " <= c <= "~" and c != "\t" or c == "\\" for c in ln)):
             out.append("etc/fstab: %s: a line that is not plain text with a mount point opening with '/' and no '..': "
                        "the tree check does not model it; the tree check never passes an fstab line whose paths it "
-                       "cannot read (#5167)" % (ln if ln.isprintable() else repr(ln)))
+                       "cannot read (#5167)%s" % (ln if ln.isprintable() else repr(ln), FSTAB_FIX))
         else:
             paths.append((path_parts(f[1]), "etc/fstab", "mount"))
             # A bind source and overlay dirs PID 1 makes too (mount_enter_mounting), read as unit values are.
@@ -2019,7 +2035,7 @@ def unit_made_paths(root):
             if words is None:
                 out.append("etc/fstab: %s: a '/' that opens no absolute path (PID 1 makes a relative path from /): "
                            "the tree check does not model it; the tree check never passes an fstab line whose paths "
-                           "it cannot read (#5167)" % ln)
+                           "it cannot read (#5167)%s" % (ln, FSTAB_PATH_FIX))
             else:
                 paths += [(path_parts(w), "etc/fstab", "") for w in words]
     # PID 1 makes each path following the links on its way (mkdir_p_label), so each counts as written and as
