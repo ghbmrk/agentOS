@@ -688,11 +688,12 @@ func TestHeldHostShown(t *testing.T) {
 	if step() {
 		t.Fatal("a listing that does not read shows a held host")
 	}
-	listing(7, 2)
-	if step() {
-		t.Fatal("a listing that does not read was taken for a new table")
-	}
 	listing(7, 3)
+	if !step() {
+		t.Fatal("a rise across a listing that does not read is not shown: the listing was taken for a new table or a restart")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	listing(7, 4)
 	x.d.fwMu.Lock()
 	err := x.d.loadNetwork(context.Background(), x.current())
 	x.d.fwMu.Unlock()
