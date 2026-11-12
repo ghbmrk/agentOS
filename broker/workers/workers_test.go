@@ -794,35 +794,29 @@ func TestCAP8OverTheCapSaysRollBackOrDestroy(t *testing.T) {
 
 // A command queued on a busy worker's lock when STOP comes does not start
 // once the lock frees: STOP is checked again under the lock (L3 MUST-2 on
-// #150).
+// #150). Ordered by the queued call's first ask of Stopped, not by time
+// (STOP-queued-start-fu); after RESUME the same write lands.
 func TestOP6QueuedCommandDoesNotStartAfterStop(t *testing.T) {
-	r := newRig(t, 8000)
+	g := &pauseGate{runtime: &runtime{running: map[string]vm.Launch{}}}
+	r := newRigOn(t, 8000, 0, g)
 	var stopped atomic.Bool
 	r.tools.Stopped = stopped.Load
 	r.agent("agent", vm.Public)
 	r.must("agent", toolCreate, m{"name": "w"}, nil)
-	first := make(chan error, 1)
-	go func() {
-		first <- r.call("agent", toolExec, m{"name": "w", "argv": []string{"sleep"}, "timeout_seconds": 600}, nil)
-	}()
-	time.Sleep(20 * time.Millisecond) // the first command holds the worker
-	queued := make(chan error, 1)
-	go func() {
-		queued <- r.call("agent", toolWrite, m{"name": "w", "path": "/f", "content": "after stop"}, nil)
-	}()
-	time.Sleep(20 * time.Millisecond) // the second waits on the lock
-	stopped.Store(true)
-	r.m.EndCommands()
-	if err := <-first; err == nil {
-		t.Fatal("the command in flight survived STOP")
-	}
-	if err := <-queued; err == nil || !strings.Contains(err.Error(), "STOP") {
+	write := m{"name": "w", "path": "/f", "content": "after stop"}
+	err := queueBehindCheckpoint(t, r, g, &stopped, toolWrite, write)
+	if err == nil || err.Error() != errStopped.Error() {
 		t.Fatalf("queued command after STOP: %v", err)
 	}
 	stopped.Store(false)
 	var read struct{ Content string }
 	if err := r.call("agent", toolRead, m{"name": "w", "path": "/f"}, &read); err == nil && read.Content != "" {
 		t.Fatalf("the queued command wrote %q", read.Content)
+	}
+	r.must("agent", toolWrite, write, nil)
+	r.must("agent", toolRead, m{"name": "w", "path": "/f"}, &read)
+	if read.Content != "after stop" {
+		t.Fatalf("write after RESUME: %q", read.Content)
 	}
 }
 
@@ -992,6 +986,28 @@ func TestOP6QueuedRollbackDoesNotRestoreAfterStop(t *testing.T) {
 	r.must("agent", toolRollback, m{"name": "w", "snapshot": snap.Snapshot}, nil)
 	if err := r.call("agent", toolRead, m{"name": "w", "path": "/after"}, &read); err == nil && read.Content == "kept" {
 		t.Fatal("rollback after RESUME did not restore")
+	}
+}
+
+// A create whose STOP comes after the entry gate boots nothing and keeps no
+// admission or name; after RESUME the same create starts (STOP-queued-start-fu).
+func TestOP6CreateRefusedWhenStopLandsAfterTheEntryGate(t *testing.T) {
+	r := newRig(t, 8000)
+	a := r.agent("agent", vm.Public)
+	id := workerID(a.Lineage, "w")
+	asks := 0
+	r.tools.Stopped = func() bool { asks++; return asks > 1 } // the entry gate passes
+	err := r.call("agent", toolCreate, m{"name": "w"}, nil)
+	if err == nil || err.Error() != errStartStopped.Error() {
+		t.Fatalf("create refused at the boot: %v", err)
+	}
+	if _, err := r.m.Get(id); err == nil || admitted(r, id) {
+		t.Fatalf("refused create left a worker (get %v, admitted %v)", err, admitted(r, id))
+	}
+	r.tools.Stopped = nil
+	r.must("agent", toolCreate, m{"name": "w"}, nil)
+	if !admitted(r, id) {
+		t.Fatal("create after RESUME is not admitted")
 	}
 }
 

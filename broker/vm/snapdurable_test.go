@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -142,10 +143,12 @@ func TestCAP3CrashedStageNotLoaded(t *testing.T) {
 	}
 }
 
-// CAP-3 (#5452): a published snapshot whose metadata fails to read for a
-// reason other than absence is kept, and the restart returns the error;
-// once the metadata reads again a restart takes it back. A snapshot with
-// no metadata was never published and is still dropped.
+// CAP-3 (#5452, #5461): a published snapshot whose metadata fails to read
+// for a reason other than absence is kept on disk, unread and not offered,
+// and the open succeeds, so a persistent fault does not fail every
+// restart; no new snapshot takes its ID. Once the metadata reads again a
+// restart takes it back. A snapshot with no metadata was never published
+// and is still dropped.
 func TestCAP3SnapshotKeptOnMetadataReadError(t *testing.T) {
 	e := newEnv(t, 4096)
 	e.create("m", admission.Accepted, 500)
@@ -158,21 +161,34 @@ func TestCAP3SnapshotKeptOnMetadataReadError(t *testing.T) {
 	// A directory where the file was: the read fails with EISDIR, not absence.
 	must(t, os.Remove(meta))
 	must(t, os.Mkdir(meta, 0o700))
-	e.adm.Release("m")
-	e.rt = newFake()
-	e.cfg.Runtime = e.rt
-	if _, err := Open(bg, e.cfg); err == nil || errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("open with an unreadable snapshot record: %v, want a read error", err)
+	for range 2 { // persistent: every restart opens
+		e.restart("m")
+		if got := e.m.Snapshots("m"); len(got) != 0 {
+			t.Fatalf("an unread snapshot offered: %+v", got)
+		}
+		if got := e.m.Unread(); len(got) != 1 || got[0] != s.ID {
+			t.Fatalf("unread = %v, want [%s]", got, s.ID)
+		}
+		if _, err := os.Stat(e.m.snapDir(s.ID)); err != nil {
+			t.Fatalf("snapshot removed after a read error: %v", err)
+		}
 	}
-	if _, err := os.Stat(e.m.snapDir(s.ID)); err != nil {
-		t.Fatalf("snapshot removed after a read error: %v", err)
+	must(t, e.m.Resume(bg, "m"))
+	later, err := e.m.Step(bg, "m")
+	must(t, err)
+	if later.ID <= s.ID {
+		t.Fatalf("new snapshot %s not after the kept %s", later.ID, s.ID)
 	}
 	must(t, os.Remove(meta))
 	must(t, os.WriteFile(meta, saved, 0o600))
-	e.open()
-	if got := e.m.Snapshots("m"); len(got) != 1 || got[0].ID != s.ID {
+	e.restart("m")
+	if got := e.m.Snapshots("m"); len(got) != 2 || got[0].ID != s.ID {
 		t.Fatalf("snapshots after the record reads again: %+v", got)
 	}
+	if got := e.m.Unread(); len(got) != 0 {
+		t.Fatalf("unread after the record reads again: %v", got)
+	}
+	must(t, e.m.Resume(bg, "m"))
 	e.guestWrite("m", "notes", "later")
 	must(t, e.m.Rollback(bg, "m", s.ID))
 	if got := e.guestRead("m", "notes"); got != "kept" {
@@ -181,11 +197,105 @@ func TestCAP3SnapshotKeptOnMetadataReadError(t *testing.T) {
 	// Absent metadata: never published, dropped.
 	must(t, os.Remove(meta))
 	e.restart("m")
-	if got := e.m.Snapshots("m"); len(got) != 0 {
+	if got := e.m.Snapshots("m"); len(got) != 1 || got[0].ID != later.ID {
 		t.Fatalf("unpublished snapshot loaded: %+v", got)
 	}
 	if _, err := os.Lstat(e.m.snapDir(s.ID)); !os.IsNotExist(err) {
 		t.Fatalf("unpublished snapshot left on disk: %v", err)
+	}
+}
+
+// CAP-3 (#5461): a snapshot kept unread has no lineage or time to read, so
+// any ForgetSince deletes it; it never comes back at a later open.
+func TestCAP3ForgetDeletesUnreadSnapshot(t *testing.T) {
+	e := newEnv(t, 4096)
+	mc := e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "notes", "secret")
+	s, err := e.m.Step(bg, "m")
+	must(t, err)
+	meta := filepath.Join(e.m.snapDir(s.ID), "meta.json")
+	saved, err := os.ReadFile(meta)
+	must(t, err)
+	must(t, os.Remove(meta))
+	must(t, os.Mkdir(meta, 0o700))
+	must(t, os.WriteFile(filepath.Join(meta, "x"), saved, 0o600)) // not empty: os.Remove fails
+	e.restart("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now().Add(time.Hour)))
+	if got := e.m.Unread(); len(got) != 0 {
+		t.Fatalf("unread after a forget: %v", got)
+	}
+	if _, err := os.Lstat(e.m.snapDir(s.ID)); !os.IsNotExist(err) {
+		t.Fatalf("unread snapshot left on disk after a forget: %v", err)
+	}
+	e.restart("m")
+	if got := e.m.Snapshots("m"); len(got) != 0 {
+		t.Fatalf("a forgotten snapshot came back: %+v", got)
+	}
+}
+
+// CAP-3 (#5461): a forget that cannot delete an unread snapshot fails,
+// so the erase stays retryable, and the snapshot stays listed unread.
+func TestCAP3ForgetFailsWhenUnreadSnapshotStays(t *testing.T) {
+	e := newEnv(t, 4096)
+	mc := e.create("m", admission.Accepted, 500)
+	id := snapName(9)
+	must(t, os.MkdirAll(filepath.Join(e.cfg.StateDir, "snapshots", id, "meta.json"), 0o700))
+	e.restart("m")
+	real := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	t.Cleanup(func() { syncSnapDir = real })
+	if err := e.m.ForgetSince(bg, mc.Lineage, time.Now()); err == nil {
+		t.Fatal("forget succeeded with an unread snapshot left")
+	}
+	if got := e.m.Unread(); len(got) != 1 || got[0] != id {
+		t.Fatalf("unread after a failed forget = %v, want [%s]", got, id)
+	}
+}
+
+// CAP-3 (#5461): an entry under snapshots/ that is not a directory is not
+// a snapshot: the open succeeds, nothing is loaded from it, and it is left
+// alone; no new snapshot takes its name.
+func TestCAP3StrayFileUnderSnapshots(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	stray := filepath.Join(e.cfg.StateDir, "snapshots", snapName(5))
+	must(t, os.WriteFile(stray, []byte("{}"), 0o600))
+	e.restart("m")
+	if got := e.m.Snapshots("m"); len(got) != 0 {
+		t.Fatalf("a stray file loaded: %+v", got)
+	}
+	if got := e.m.Unread(); len(got) != 0 {
+		t.Fatalf("a stray file kept as unread: %v", got)
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatalf("stray file: %v", err)
+	}
+	must(t, e.m.Resume(bg, "m"))
+	s, err := e.m.Step(bg, "m")
+	must(t, err)
+	if s.ID <= snapName(5) {
+		t.Fatalf("new snapshot %s not after the stray %s", s.ID, snapName(5))
+	}
+}
+
+// CAP-3 (Lens R1 on #5457): a meta.json that reads but does not decode was
+// written atomically, so it is not a transient fault: the snapshot is
+// dropped from the list and from disk, not kept.
+func TestCAP3UndecodableSnapshotDropped(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	s, err := e.m.Step(bg, "m")
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(e.m.snapDir(s.ID), "meta.json"), []byte("{not json"), 0o600))
+	e.restart("m")
+	if got := e.m.Snapshots("m"); len(got) != 0 {
+		t.Fatalf("an undecodable snapshot loaded: %+v", got)
+	}
+	if got := e.m.Unread(); len(got) != 0 {
+		t.Fatalf("an undecodable snapshot kept unread: %v", got)
+	}
+	if _, err := os.Lstat(e.m.snapDir(s.ID)); !os.IsNotExist(err) {
+		t.Fatalf("an undecodable snapshot left on disk: %v", err)
 	}
 }
 
@@ -268,5 +378,187 @@ func TestCAP3RetiredSnapshotStaysGone(t *testing.T) {
 	e.restart("m")
 	if _, err := e.m.Snapshot(s.ID); err == nil {
 		t.Fatal("retired snapshot loaded after a crash")
+	}
+}
+
+// CAP-3 (#5481): a forget that deletes snapshots kept unread tells the
+// owner's side how many, as a forget (not a prune); a forget that could not
+// delete them tells nothing, and one that deletes none tells nothing.
+func TestCAP3ForgetTellsOfUnreadDeleted(t *testing.T) {
+	e := newEnv(t, 4096)
+	mc := e.create("m", admission.Accepted, 500)
+	type told struct {
+		n         int
+		forgotten bool
+	}
+	var calls []told
+	e.cfg.UnreadGone = func(n int, forgotten bool) { calls = append(calls, told{n, forgotten}) }
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	e.restart("m")
+	must(t, e.m.ForgetSince(bg, mc.Lineage, time.Now()))
+	if len(calls) != 0 {
+		t.Fatalf("told of %v with nothing unread", calls)
+	}
+	for _, n := range []int{3, 4} {
+		must(t, os.MkdirAll(filepath.Join(e.cfg.StateDir, "snapshots", snapName(n), "meta.json"), 0o700))
+	}
+	e.restart("m")
+	real := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	if err := e.m.ForgetSince(bg, mc.Lineage, time.Now()); err == nil {
+		t.Fatal("forget succeeded with unread snapshots left")
+	}
+	syncSnapDir = real
+	if len(calls) != 0 {
+		t.Fatalf("told of %v although nothing was deleted", calls)
+	}
+	// The record unpublished but the directory not removed: still deleted
+	// as far as the owner is concerned, so counted.
+	realRemove := removeAll
+	removeAll = func(string) error { return errors.New("remove failed") }
+	err := e.m.ForgetSince(bg, mc.Lineage, time.Now())
+	removeAll = realRemove
+	if err == nil {
+		t.Fatal("forget succeeded although a directory stayed")
+	}
+	if len(calls) != 1 || calls[0] != (told{2, true}) {
+		t.Fatalf("told %v, want one notice of 2 deleted by a forget", calls)
+	}
+}
+
+// CAP-3 (#5481): a snapshot kept unread is not pruned while the state disk
+// has room, and is pruned, with a notice, while it is short of room and the
+// snapshot is older than MinAge; its directory is gone, and a younger one
+// stays.
+func TestCAP3PruneFreesUnreadUnderPressure(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	old, young, base := snapName(3), snapName(4), snapName(5)
+	for _, id := range []string{old, young, base} {
+		dir := filepath.Join(e.cfg.StateDir, "snapshots", id)
+		must(t, os.MkdirAll(filepath.Join(dir, "meta.json"), 0o700))
+		must(t, os.WriteFile(filepath.Join(dir, "disk.img"), []byte("layer"), 0o600))
+	}
+	longAgo := time.Now().Add(-time.Hour)
+	for _, id := range []string{old, base} {
+		must(t, os.Chtimes(filepath.Join(e.cfg.StateDir, "snapshots", id), longAgo, longAgo))
+	}
+	type told struct {
+		n         int
+		forgotten bool
+	}
+	var calls []told
+	e.cfg.UnreadGone = func(n int, forgotten bool) { calls = append(calls, told{n, forgotten}) }
+	e.restart("m")
+	// A live machine forked from the unread snapshot: it stays, as a
+	// readable fork base does (Security on #5499).
+	mc, err := e.m.get("m")
+	must(t, err)
+	mc.mu.Lock()
+	mc.ForkBase = base
+	mc.mu.Unlock()
+	p := PrunePolicy{LowWaterBytes: 1 << 30}
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 1 << 50, nil }
+	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 0 {
+		t.Fatalf("pruned %v (%v), told %v with room on the disk", gone, err, calls)
+	}
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	gone, err := e.m.Prune(p)
+	must(t, err)
+	if len(gone) != 1 || gone[0] != old {
+		t.Fatalf("pruned %v, want only %s (the %s is younger than MinAge)", gone, old, young)
+	}
+	if _, err := os.Lstat(filepath.Join(e.cfg.StateDir, "snapshots", old)); !os.IsNotExist(err) {
+		t.Fatalf("pruned unread snapshot left on disk: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(e.cfg.StateDir, "snapshots", young)); err != nil {
+		t.Fatalf("a young unread snapshot removed: %v", err)
+	}
+	if got := e.m.Unread(); len(got) != 2 || !slices.Contains(got, young) || !slices.Contains(got, base) {
+		t.Fatalf("unread after the prune = %v, want [%s %s]", got, young, base)
+	}
+	if len(calls) != 1 || calls[0] != (told{1, false}) {
+		t.Fatalf("told %v, want one notice of 1 pruned", calls)
+	}
+	if gone, err := e.m.Prune(p); err != nil || len(gone) != 0 || len(calls) != 1 {
+		t.Fatalf("second prune: %v (%v), told %v", gone, err, calls)
+	}
+	// The record unpublished but the directory not removed: counted.
+	e.m.mu.Lock()
+	e.m.unread[old] = true
+	e.m.mu.Unlock()
+	// A failure before the record is unpublished: still listed, not counted.
+	realSync := syncSnapDir
+	syncSnapDir = func(string) error { return errors.New("sync failed") }
+	_, err = e.m.Prune(p)
+	syncSnapDir = realSync
+	if err == nil || len(calls) != 1 || !slices.Contains(e.m.Unread(), old) {
+		t.Fatalf("a prune that could not unpublish: %v, told %v, unread %v", err, calls, e.m.Unread())
+	}
+	realRemove := removeAll
+	removeAll = func(string) error { return errors.New("remove failed") }
+	_, err = e.m.Prune(p)
+	removeAll = realRemove
+	if err == nil || len(calls) != 2 || calls[1] != (told{1, false}) {
+		t.Fatalf("a prune whose directory stayed: %v, told %v, want one more notice", err, calls)
+	}
+}
+
+// CAP-3 (#5481, Security 1 on #5480): a snapshot recorded before Instance
+// that is unread at one open, while its machine is destroyed and created
+// anew under the ID, and reads at the next, is not the new machine's: it
+// began after the snapshot was taken.
+func TestCAP3LegacyUnreadSnapshotNotInheritedByReplacement(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "who", "predecessor")
+	s, err := e.m.Checkpoint(bg, "m")
+	must(t, err)
+	s.Lineage, s.Instance = "", ""
+	meta := filepath.Join(e.m.snapDir(s.ID), "meta.json")
+	must(t, writeJSON(meta, s))
+	saved, err := os.ReadFile(meta)
+	must(t, err)
+	must(t, os.Remove(meta))
+	must(t, os.Mkdir(meta, 0o700))
+	e.restart("m") // the snapshot is unread
+	must(t, e.m.Destroy(bg, "m"))
+	e.create("m", admission.Accepted, 500)
+	e.guestWrite("m", "who", "successor")
+	must(t, os.Remove(meta))
+	must(t, os.WriteFile(meta, saved, 0o600))
+	e.restart("m") // the record reads
+	e.guestWrite("m", "who", "successor")
+	if err := e.m.Rollback(bg, "m", s.ID); !errors.Is(err, ErrLineage) {
+		t.Fatalf("the replacement's rollback to its predecessor's legacy snapshot: %v, want ErrLineage", err)
+	}
+	if got := e.guestRead("m", "who"); got != "successor" {
+		t.Fatalf("who = %q, want the successor's", got)
+	}
+}
+
+// CAP-3 (#5481): a snapshot kept unread whose directory cannot be statted
+// for a reason other than absence is not known to be old: a prune keeps it
+// and tells nothing. Here a file stands where the snapshots directory was
+// (ENOTDIR).
+func TestCAP3PruneKeepsUnreadWhenStatFails(t *testing.T) {
+	e := newEnv(t, 4096)
+	e.create("m", admission.Accepted, 500)
+	id := snapName(3)
+	snaps := filepath.Join(e.cfg.StateDir, "snapshots")
+	must(t, os.MkdirAll(filepath.Join(snaps, id, "meta.json"), 0o700))
+	told := 0
+	e.cfg.UnreadGone = func(int, bool) { told++ }
+	e.restart("m")
+	must(t, os.Rename(snaps, snaps+".away"))
+	must(t, os.WriteFile(snaps, []byte("x"), 0o600))
+	e.m.cfg.FreeBytes = func(string) (int64, error) { return 0, nil }
+	gone, err := e.m.Prune(PrunePolicy{LowWaterBytes: 1 << 30})
+	must(t, err)
+	if len(gone) != 0 || told != 0 {
+		t.Fatalf("pruned %v, told %d times, although its directory could not be statted", gone, told)
+	}
+	if got := e.m.Unread(); len(got) != 1 || got[0] != id {
+		t.Fatalf("unread after the prune = %v, want [%s]", got, id)
 	}
 }

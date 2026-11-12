@@ -460,7 +460,10 @@ func (t *Tools) create(ctx context.Context, c caller, raw json.RawMessage) (any,
 	// its call (security F2 on SR2-3f).
 	made := false
 	defer func() { t.settle([]string{id}, made) }()
-	w, err := t.M.CreateWorker(ctx, id, c.lineage, s)
+	// Asked again just before the boot, under the machine's lock: a create
+	// that waited on admission while STOP came starts nothing
+	// (STOP-queued-start-fu).
+	w, err := t.M.CreateWorker(vm.WithHold(ctx, t.Stopped), id, c.lineage, s)
 	made = err == nil
 	if err != nil {
 		return nil, startErr(a.Name, err)

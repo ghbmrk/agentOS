@@ -1068,8 +1068,10 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	if cut, _ := x.d.edge.Cut(); !cut || trips != 1 {
 		t.Fatalf("an overrun after the lift: cut %v, %d trips", cut, trips)
 	}
-	// Every cap held spent counts as past: the table's bytes lost, or the
-	// day unreadable.
+	// The day unreadable holds every cap spent, which counts as past. The
+	// table unread does not (#5445 item 1): its spend is the drop's, and a
+	// lift in that window would otherwise hold the whole day after the
+	// table reads again.
 	x.setListing(listingOf(t, x, doc, 7, 10, 6000, true))
 	x.d.fwMu.Lock()
 	c := x.d.net.counter
@@ -1084,8 +1086,8 @@ func TestDayZeroLiftWithinCap(t *testing.T) {
 	x.d.fwMu.Lock()
 	x.d.net.counter = c
 	x.d.fwMu.Unlock()
-	if !unread || !spent {
-		t.Fatalf("caps held spent: past %v with the table unread, %v with the day unreadable", unread, spent)
+	if unread || !spent {
+		t.Fatalf("past %v with the table unread (want false), %v with the day unreadable (want true)", unread, spent)
 	}
 }
 
@@ -2752,9 +2754,11 @@ func TestStoppedResolverOnPage(t *testing.T) {
 // compiled document reaches the page and the log as every item Generate
 // refused, read from the error: each device on a Wi-Fi network the setup
 // serves no network for, and each listed name that is not a DNS host
-// name. With a setup fault too, the fault is one untyped cause and the
-// devices are still named; any other refusal is untyped, whatever its
-// text.
+// name. With a setup fault too, the fault is its own cause, whose words
+// on home carry none of its text, and the devices are still named; any
+// other refusal is untyped, whatever its text (#5431). However many items
+// Generate refuses, home and the log line name a bounded number and
+// count the rest exactly (#5431).
 func TestRefusedCause(t *testing.T) {
 	x, _ := enrolled(t, false)
 	l, s := x.cfg.Layout, x.cfg.DNS
@@ -2816,19 +2820,69 @@ func TestRefusedCause(t *testing.T) {
 			}
 		}
 	}
-	// A setup fault beside the unserved devices: the fault is untyped and
-	// both devices are still named, as before #5396 (#5405).
+	// A setup fault beside the unserved devices: the fault is its own
+	// cause and both devices are still named (#5405, #5431).
 	bad := s
 	bad.Upstream = nil
 	_, err := dns.Generate(vlans, l, bad)
-	if got := refusedCauses(err); !slices.Equal(got, append([]page.PolicyCause{{Kind: page.PolicyUntyped}}, both...)) {
+	setup := append([]page.PolicyCause{{Kind: page.PolicySetup}}, both...)
+	if got := refusedCauses(err); !slices.Equal(got, setup) {
 		t.Errorf("a setup fault beside unserved devices: %+v", got)
 	}
 	untyped := []page.PolicyCause{{Kind: page.PolicyUntyped}}
-	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil} {
+	for _, err := range []error{fmt.Errorf("%w: device \"plug\" vlan109 \"Upper.example\"", dns.ErrConfig), errors.New("other"), nil, dns.Refused{errors.New("no upstream resolver")}} {
 		if got := refusedCauses(err); !slices.Equal(got, untyped) {
 			t.Errorf("refusedCauses(%v) = %+v, want untyped", err, got)
 		}
+	}
+	// On home, the setup fault reads in its own words, apart from an
+	// untyped refusal's, and never with its text (#5431).
+	x.d.net.resMu.Lock()
+	x.d.net.stopPolicy = refusedCauses(err)
+	x.d.net.resMu.Unlock()
+	h := view()
+	if !strings.Contains(h, "The network setup could not be applied") || strings.Contains(h, "upstream") || strings.Contains(h, dns.ErrConfig.Error()) || strings.Contains(h, "names something the enforcer cannot serve") || !strings.Contains(h, "plug") {
+		t.Errorf("home does not word the setup fault apart, without its text:\n%s", h)
+	}
+	x.d.net.resMu.Lock()
+	x.d.net.stopPolicy = refusedCauses(errors.New("no upstream resolver"))
+	x.d.net.resMu.Unlock()
+	if h := view(); strings.Contains(h, "could not be applied") || !strings.Contains(h, "names something the enforcer cannot serve") || strings.Contains(h, "upstream") {
+		t.Errorf("home words an untyped refusal as a setup fault:\n%s", h)
+	}
+	// More refused names than either cap: home and the log line each name
+	// the first ones and count the rest exactly, and stay bounded (#5431).
+	many := home()
+	const n = 300
+	for i := range n {
+		many.Destinations = append(many.Destinations, "N"+strconv.Itoa(1000+i)+".example")
+	}
+	x.mu.Lock()
+	x.log = nil
+	x.mu.Unlock()
+	x.d.fwMu.Lock()
+	err = x.d.loadNetwork(context.Background(), many)
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := (pageResolver{x.d}).Stopped(); len(got.Policy) != n {
+		t.Fatalf("the daemon holds %d causes, want %d", len(got.Policy), n)
+	}
+	h = view()
+	x.mu.Lock()
+	var logged []string
+	for _, line := range x.log {
+		if strings.HasPrefix(line, "dns: the policy in force cannot be served") {
+			logged = append(logged, line)
+		}
+	}
+	x.mu.Unlock()
+	if len(logged) != 1 || !strings.HasSuffix(logged[0], "; and "+strconv.Itoa(n-dns.RefusedShown)+" more") || strings.Count(logged[0], "is not a DNS host name") != dns.RefusedShown || len(logged[0]) > 4<<10 {
+		t.Errorf("the log line is not bounded with the exact count: %q", logged)
+	}
+	if strings.Count(h, "which is not a name the enforcer can look up") != page.PolicyShown || !strings.Contains(h, "There are "+strconv.Itoa(n-page.PolicyShown)+" more reasons the policy in force cannot be served") || strings.Contains(h, "N"+strconv.Itoa(1000+page.PolicyShown)+".example") {
+		t.Errorf("home is not bounded with the exact count:\n%s", h)
 	}
 	// Typed, wrapped, the refusal still reads as ErrConfig and keeps its
 	// causes.

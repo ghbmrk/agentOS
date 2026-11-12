@@ -80,6 +80,9 @@ type network struct {
 	// its table is taken, which the first reading's listing that reads
 	// asks for (refreshAnswers, #5399 item 6). d.fwMu guards it.
 	unread bool
+	// unreadShown is unread as the page reads it, under resMu, so the
+	// page never waits on a load (pageCaps.Day, #5445 item 4).
+	unreadShown bool
 	// reload asks syncFirewall for a full load of the policy in force,
 	// so the quotas start again from the counts with merging's caps
 	// spent or no longer spent: a running quota keeps its own count.
@@ -254,7 +257,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		_, d.net.edgeMerged = d.net.merging[l.Edge]
 		defer func() {
 			if err != nil {
-				d.net.edgeMerged, d.net.unread = merged, unread
+				d.net.edgeMerged = merged
+				d.setUnread(unread)
 			}
 		}()
 		running, err := d.dp.Fire.List(ctx, nft.Table)
@@ -264,7 +268,7 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		// never held back, with every cap held spent until a full load
 		// that read its table is taken (holdDrop). The first load after a
 		// start has none to read: a reboot leaves no table.
-		d.net.unread = err != nil && d.loaded != ""
+		d.setUnread(err != nil && d.loaded != "")
 		if err != nil {
 			d.dp.Logf("firewall: running table unreadable, resolver answers start empty: " + err.Error())
 			running = nil
@@ -375,11 +379,16 @@ func loadStep(err error) page.LoadStep {
 	return page.LoadUntyped
 }
 
+// Home's words for the reasons it does not list say the log names as
+// many as it does (#5431): this fails to compile when the two differ.
+const _ = uint(dns.RefusedShown-page.PolicyShown) + uint(page.PolicyShown-dns.RefusedShown)
+
 // refusedCauses is err, dns.Generate's refusal of a document, as every
 // typed cause it carries, in its order (#5307, #5352, #5405): each device
 // on a Wi-Fi network the setup serves no network for, and each listed
 // name that is not a DNS host name, read from the refusal, never from the
-// document. Any other, a setup fault among them, is untyped, and the page
+// document, and a fault in the enforcer's own setup (dns.BadSetup, #5431),
+// which carries no text to the page. Any other is untyped, and the page
 // says so without the error's text.
 func refusedCauses(err error) []page.PolicyCause {
 	errs := []error{err}
@@ -391,7 +400,10 @@ func refusedCauses(err error) []page.PolicyCause {
 	for i, err := range errs {
 		var dev dns.UnservedDevice
 		var name dns.BadName
+		var setup dns.BadSetup
 		switch {
+		case errors.As(err, &setup):
+			out[i] = page.PolicyCause{Kind: page.PolicySetup}
 		case errors.As(err, &dev):
 			out[i] = page.PolicyCause{Kind: page.PolicyVLAN, Name: dev.ID, WiFi: dev.WiFi}
 		case errors.As(err, &name):
@@ -1055,6 +1067,14 @@ func (d *Enforcer) readCapsLocked(ctx context.Context) (over []traffic.Overrun, 
 		return over, kernelCut, fmt.Errorf("drop: %w", err)
 	}
 	return over, kernelCut, nil
+}
+
+// setUnread sets net.unread and what the page reads of it; d.fwMu is held.
+func (d *Enforcer) setUnread(v bool) {
+	d.net.unread = v
+	d.net.resMu.Lock()
+	d.net.unreadShown = v
+	d.net.resMu.Unlock()
 }
 
 // addReading adds the reading in listing, the running table compiled

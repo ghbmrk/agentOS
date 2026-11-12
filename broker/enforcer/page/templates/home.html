@@ -25,6 +25,11 @@
 <button class="act" data-action="lift-edge" data-target="" data-rp="{{$.Name}}">Lift the edge's cut with your passkey</button>
 </div>
 {{end}}
+{{if .CapsUnread}}<h2>Byte caps</h2>
+<div class="pending warn">
+<p>The enforcer could not read the firewall's count of today's bytes, so agentOS and the edge are blocked from every service with a byte cap until it can. It tries again every 10 seconds and this goes away by itself. If it stays, the enforcer's log has the detail.</p>
+</div>
+{{end}}
 {{with .Caps}}<h2>Byte caps</h2>
 <div class="pending warn">
 <p>The enforcer could not read its record of today's bytes, so agentOS and the edge are blocked from every service with a byte cap. Starting the day afresh lets each cap be used in full again today, so like any loosening it waits {{$.Wait}}.</p>
