@@ -629,6 +629,71 @@ func TestLeaseFileUnreadable(t *testing.T) {
 	}
 }
 
+// TestHeldHostShown (#5528; nft ASSUMPTIONS ENF-shared-src-1): home
+// shows a host the firewall kept from an address (nft.LeaseHeld) for a
+// lease after the count last rose, read at the resolver's step and at a
+// load. A count that stays, or a new table's count of 0, shows nothing; a
+// new table's count above 0 (a load starts it again) is a rise however it
+// compares with the old one; a listing that does not read leaves it as
+// it was.
+func TestHeldHostShown(t *testing.T) {
+	x, _ := enrolled(t, false)
+	listing := func(table, held int) {
+		x.fire.mu.Lock()
+		x.fire.listing = fmt.Appendf(nil, `{"nftables": [{"table": {"family": "inet", "name": "enforcer", "handle": %d}}, {"counter": {"family": "inet", "table": "enforcer", "name": "lease_held", "packets": %d, "bytes": 0}}]}`, table, held)
+		x.fire.mu.Unlock()
+	}
+	step := func() bool {
+		x.d.refreshAnswers(context.Background())
+		return (pageResolver{x.d}).Stopped().Held
+	}
+	listing(5, 0)
+	if step() {
+		t.Fatal("home shows a held host with none held")
+	}
+	listing(5, 3)
+	if !step() {
+		t.Fatal("home does not show a held host")
+	}
+	x.advance(nft.LeaseTimeout*time.Second - time.Second)
+	if !step() {
+		t.Fatal("home stops showing a held host within a lease of it")
+	}
+	x.advance(time.Second)
+	if step() {
+		t.Fatal("home still shows a held host a lease after it, with the count unchanged")
+	}
+	listing(6, 0)
+	if step() {
+		t.Fatal("home shows a held host for a new table that held none")
+	}
+	listing(7, 2)
+	if !step() {
+		t.Fatal("home does not show a host held in a new table below the old count")
+	}
+	x.advance(nft.LeaseTimeout * time.Second)
+	x.fire.mu.Lock()
+	x.fire.listing = []byte("{")
+	x.fire.mu.Unlock()
+	if step() {
+		t.Fatal("a listing that does not read shows a held host")
+	}
+	listing(7, 2)
+	if step() {
+		t.Fatal("a listing that does not read was taken for a new table")
+	}
+	listing(7, 3)
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	x.d.fwMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(pageResolver{x.d}).Stopped().Held {
+		t.Fatal("a host held since the last reading is not shown after a load replaced its table")
+	}
+}
+
 // TestUnservableLogged: the log says why the resolver stopped.
 func TestUnservableLogged(t *testing.T) {
 	x, _ := enrolled(t, false)

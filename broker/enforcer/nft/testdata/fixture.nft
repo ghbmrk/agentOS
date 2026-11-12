@@ -21,6 +21,7 @@ table inet enforcer {
 	counter edge_out { }
 	counter cap_drop { }
 	counter edge_cut { }
+	counter lease_held { }
 	counter log_lines { }
 	counter t101_out { }
 	counter t101_in { }
@@ -1180,7 +1181,7 @@ table inet enforcer {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "edge0" drop
-		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_guests_4 @th,192,32 . @th,288,48 != @lease_guests_4 drop
+		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_guests_4 @th,192,32 . @th,288,48 != @lease_guests_4 counter name "lease_held" drop
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_guests_4 { @th,192,32 timeout 120s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 120s } update @leased_guests { @th,288,48 timeout 120s }
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_guests_4 { @th,192,32 timeout 149s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 149s } update @leased_guests { @th,288,48 timeout 149s }
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_guests_4 { @th,192,32 timeout 223s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 223s } update @leased_guests { @th,288,48 timeout 223s }
@@ -1197,7 +1198,7 @@ table inet enforcer {
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 19200-28799 update @leaseaddr_guests_4 { @th,192,32 timeout 19200s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 19200s } update @leased_guests { @th,288,48 timeout 19200s }
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 28800-43199 update @leaseaddr_guests_4 { @th,192,32 timeout 28800s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 28800s } update @leased_guests { @th,288,48 timeout 28800s }
 		oifname "gst0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 43200 update @leaseaddr_guests_4 { @th,192,32 timeout 43200s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 43200s } update @leased_guests { @th,288,48 timeout 43200s }
-		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_owner_4 @th,192,32 . @th,288,48 != @lease_owner_4 drop
+		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_owner_4 @th,192,32 . @th,288,48 != @lease_owner_4 counter name "lease_held" drop
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_owner_4 { @th,192,32 timeout 120s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 120s } update @leased_owner { @th,288,48 timeout 120s }
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_owner_4 { @th,192,32 timeout 149s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 149s } update @leased_owner { @th,288,48 timeout 149s }
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_owner_4 { @th,192,32 timeout 223s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 223s } update @leased_owner { @th,288,48 timeout 223s }
@@ -1214,7 +1215,7 @@ table inet enforcer {
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 19200-28799 update @leaseaddr_owner_4 { @th,192,32 timeout 19200s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 19200s } update @leased_owner { @th,288,48 timeout 19200s }
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 28800-43199 update @leaseaddr_owner_4 { @th,192,32 timeout 28800s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 28800s } update @leased_owner { @th,288,48 timeout 28800s }
 		oifname "own0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 43200 update @leaseaddr_owner_4 { @th,192,32 timeout 43200s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 43200s } update @leased_owner { @th,288,48 timeout 43200s }
-		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_household_4 @th,192,32 . @th,288,48 != @lease_household_4 drop
+		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 @leaseaddr_household_4 @th,192,32 . @th,288,48 != @lease_household_4 counter name "lease_held" drop
 		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_household_4 { @th,192,32 timeout 120s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 120s } update @leased_household { @th,288,48 timeout 120s }
 		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_household_4 { @th,192,32 timeout 149s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 149s } update @leased_household { @th,288,48 timeout 149s }
 		oifname "hh0" udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_household_4 { @th,192,32 timeout 223s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 223s } update @leased_household { @th,288,48 timeout 223s }

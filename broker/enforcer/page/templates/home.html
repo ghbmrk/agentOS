@@ -47,10 +47,11 @@
 {{end}}{{end}}{{if not (or .Strays .Unset .Policy .Load)}}<p>The enforcer serves names and addresses again with its next load of your rules, within 10 seconds.</p>
 {{end}}</div>
 {{end}}
-{{if .Unseeded}}<h2>Addresses handed out</h2>
+{{if or .Unseeded .Held}}<h2>Addresses handed out</h2>
 <div class="pending warn">
-<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
-</div>
+{{if .Unseeded}}<p>When the enforcer last loaded your rules, it could not read its list of the addresses it had handed out, so a device on the Owner, Household or Guests network may reach nothing until it next asks for its address, which every device does within 6 hours. The enforcer's log has the detail.</p>
+{{end}}{{if .Held}}<p>In the last 12 hours, a device on the Owner, Household or Guests network was offered an address another device had until recently and may still use, so the enforcer held that offer back. Such a device cannot join until the address is free, within 12 hours. To join it sooner, turn its private (random) Wi-Fi address off, or on, for that network and join again: it then usually gets another address.</p>
+{{end}}</div>
 {{end}}
 {{with .Restarting}}<h2>Names and addresses</h2>
 <div class="pending warn">

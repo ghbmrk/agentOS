@@ -97,7 +97,8 @@ func segments(l Layout) []segment {
 // moves the client or is refused), so LeaseAddrSet holds each address
 // LeaseSet holds, and an answer from the server that would give such an
 // address to another hardware address never leaves (snoop): an address is
-// another host's only once its element has run out. nft cannot type a
+// another host's only once its element has run out; each such answer is
+// counted on LeaseHeld. nft cannot type a
 // payload field read at an offset, so the three sets (and MACSet, which
 // LeasedSet is checked beside) are typed by their raw fields, the IPv4
 // source (@nh,96,32) and the hardware source (@ll,48,48), and nft lists
@@ -222,9 +223,10 @@ const (
 // ENF-shared-src-1).
 //
 // First, any answer from the server (an OFFER or ACK) whose address
-// LeaseAddrSet holds for another hardware address is dropped, so the
-// server cannot give an address it freed early to another host while the
-// old holder may still send from it (ENF-shared-src-1, #5300). Each rule
+// LeaseAddrSet holds for another hardware address is dropped and counted
+// on LeaseHeld, so the server cannot give an address it freed early to
+// another host while the old holder may still send from it
+// (ENF-shared-src-1, #5300). Each rule
 // updates LeaseAddrSet before LeaseSet: if the first set is full, no
 // element is added; if only the second is, the address is held by no
 // one's lease and its answers are dropped until it runs out (fails
@@ -235,7 +237,7 @@ func snoop(seg, iface string) []string {
 		chaddr = "@th,288,48"
 	)
 	out := []string{"oifname " + iface + " udp sport 67 udp dport 68 @th,64,24 0x020106 " + yiaddr + " @" + LeaseAddrSet(seg) +
-		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " drop"}
+		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " counter name " + strconv.Quote(LeaseHeld) + " drop"}
 	for _, b := range leaseBands() {
 		times := strconv.Itoa(b[0])
 		if b[1] > b[0] {
@@ -324,6 +326,7 @@ const (
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
 	EdgeCut     = "edge_cut"     // every packet to or from the edge's segment while the edge is cut (Drop.EdgeCut)
+	LeaseHeld   = "lease_held"   // the address server's answers giving a host an address another still holds (snoop), on every shared segment
 	LogLines    = "log_lines"    // lines written to the kernel log (logged)
 )
 
@@ -386,7 +389,7 @@ func logged(p string) string { return "log_" + slug(p) }
 func lines(p string) string  { return "lines_" + slug(p) }
 func slug(p string) string   { return strings.NewReplacer("enf ", "", " ", "", "-", "_").Replace(p) }
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, EdgeCut, LogLines}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, Expired, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop, EdgeCut, LeaseHeld, LogLines}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -806,7 +809,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// mDNS, page or other listener, before any other rule can answer it.
 	w.line("iifname " + edge + " counter name " + q(EdgeIn) + " drop")
 	// A DHCPRELEASE from a shared segment, its message type the first
-	// option as dhclient and udhcpc write it, never reaches the server,
+	// option as dhclient, udhcpc and dhcpcd write it, never reaches the server,
 	// even on a connection a renewal opened: the lease, and the address
 	// with it, lasts its full time, as the lease sets do. One written
 	// otherwise reaches the server and frees the address there, but snoop
