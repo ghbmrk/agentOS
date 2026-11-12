@@ -122,7 +122,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends debian-archive-keyring systemd-boot systemd-boot-efi \
             systemd-container erofs-utils dosfstools mtools e2fsprogs cpio zstd kmod bubblewrap cryptsetup-bin libcap-dev \
-            qemu-system-x86 ovmf swtpm swtpm-tools
+            qemu-system-x86 ovmf swtpm swtpm-tools mmdebstrap
           # Ubuntu 24.04 confines user namespaces via AppArmor, which breaks mkosi's bubblewrap sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
@@ -283,6 +283,8 @@ jobs:
           cp "$RUNNER_TEMP"/out/*.usr.list "$RUNNER_TEMP/rec/" || true
           cp "$RUNNER_TEMP"/out/agentos.dpkg-status "$RUNNER_TEMP"/out/agentos.os-release "$RUNNER_TEMP/rec/" || true
           cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/" || true
+          # The guests' Debian package list (image/guest-base.sh, #5570), compared by the reproduce job.
+          cp -R "$RUNNER_TEMP"/out/guest "$RUNNER_TEMP/rec/" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
@@ -351,6 +353,9 @@ jobs:
           python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0
           # The /usr files (#4059), root hash, boot entry, kernel and initrds (IMG-2).
           python3 image/compare_manifests.py --release rec/release-a rec/release-b || ok=0
+          # The guests' packages (#5570): each build's Debian userland for the OpenClaw and Codex roots,
+          # so a guest file that differs names the package version behind it.
+          python3 image/compare_manifests.py rec/release-a/guest rec/release-b/guest || ok=0
           [ $ok = 1 ]
   # Not named vulncheck: that is vulncheck.yml's required check.
   image-vulncheck:

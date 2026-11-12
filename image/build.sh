@@ -5,7 +5,7 @@
 # (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this:
 # .github/workflows/image.yml
 # Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,
-# cmake, pkg-config, mtools, erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring.
+# cmake, pkg-config, mtools, erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring, mmdebstrap.
 #
 # Usage: build.sh [OUT [VERSION [DRIVERS]]]
 # Output in OUT: agentos_VERSION.raw (the whole drive), the release (agentos_VERSION.usr.raw,
@@ -78,12 +78,19 @@ sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/sh
 # (INFER-image, D-230), built by its own script (image/infer.sh); agentosd leaves it off (-infer).
 sh "$HERE/infer.sh" "$STAGE" "$OUT/infer"
 
+# The guests' shell, tools and libraries (#5570): a Debian root from the image's own apt sources, never
+# the build host's, so two runners give the guests the same bytes (IMG-2). Its package list goes to
+# OUT/guest/ for the reproduce job; the root is deleted once both guests are built.
+sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"
+export GUEST_BASE="$OUT/guest-base"
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
 # agentosd registers it (-image codex=); the CLI is pinned by npm's integrity hash.
 sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
 sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"
+rm -rf --one-file-system "$GUEST_BASE"
+unset GUEST_BASE
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).

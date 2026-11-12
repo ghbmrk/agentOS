@@ -2760,9 +2760,9 @@ class ConfigTest(unittest.TestCase):
         exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
         self.assertNotIn("-worker-argv", exe)
         worker = re.search(r"(?:^|\s)-worker-image\s+(\S+)", exe).group(1)
-        loop = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
-                    if l.startswith("for b in /bin/sh "))
-        self.assertIn("/bin/" + argv.split()[0], loop.removesuffix("; do").split()[3:])
+        tools = next(l for l in (ROOT / "guest" / worker / "build-rootfs.sh").read_text().splitlines()
+                     if l.startswith("\t/bin/sh "))
+        self.assertIn("/bin/" + argv.split()[0], tools.removesuffix(" \\").split())
 
     def test_broker_reads_onboarding_s_settings(self):
         # It no longer waits for them (SetupServicesTest): a preloaded box starts it in setup mode.

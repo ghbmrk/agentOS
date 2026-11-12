@@ -1,0 +1,169 @@
+# The guests' shell, tools and libraries come from one pinned Debian root, never the build host
+# (IMG-reproduce-pcre2, #5570): builds a and b on different runner images put different
+# libpcre2-8.so.0 bytes in both guests, because build-rootfs.sh copied the runner's own copy with
+# ldd. image/guest-base.sh installs the root from the image's apt sources; image/guest-userland.sh
+# copies from it with the root's own loader and fails on anything that resolves outside it.
+# REQ: UPD-1a
+import os
+import pathlib
+import platform
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+USERLAND = ROOT / "image/guest-userland.sh"
+BASE_SH = ROOT / "image/guest-base.sh"
+GUESTS = ("openclaw", "codex")
+MULTIARCH = "usr/lib/x86_64-linux-gnu"
+HOST_LD = pathlib.Path("/lib64/ld-linux-x86-64.so.2")
+
+
+def host_libs(prog):
+    """PROG's libraries as the host loader resolves them (only to stage a fake base)."""
+    out = subprocess.run(["ldd", prog], capture_output=True, text=True, check=True).stdout
+    return [l.split("=>")[1].split()[0] for l in out.splitlines() if "=>" in l]
+
+
+@unittest.skipUnless(platform.system() == "Linux" and platform.machine() == "x86_64" and HOST_LD.exists()
+                     and shutil.which("ldd"), "needs an x86-64 glibc host to stage a base root")
+class UserlandCopyTest(unittest.TestCase):
+    """guest-userland.sh against a staged base root: a merged-/usr tree holding dash and bash."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="agentos-guest-userland-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.base = self.tmp / "base"
+        lib = self.base / MULTIARCH
+        lib.mkdir(parents=True)
+        (self.base / "usr/bin").mkdir()
+        (self.base / "bin").symlink_to("usr/bin")
+        for prog in ("dash", "bash"):
+            src = shutil.which(prog)
+            if not src:
+                self.skipTest("no %s on this host" % prog)
+            shutil.copy(src, self.base / "usr/bin" / prog)
+            for l in host_libs(src):
+                shutil.copy(l, lib / pathlib.Path(l).name)
+        (self.base / "usr/bin/sh").symlink_to("dash")
+        shutil.copy(HOST_LD, lib / HOST_LD.name)
+        self.out = self.tmp / "out"
+
+    def run_userland(self, *paths):
+        return subprocess.run(["sh", str(USERLAND), str(self.base), str(self.out), *paths],
+                              capture_output=True, text=True)
+
+    def test_copies_programs_and_their_libraries_from_the_base(self):
+        r = self.run_userland("/bin/sh", "/bin/bash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.out / "bin/sh").read_bytes(), (self.base / "usr/bin/dash").read_bytes())
+        self.assertEqual((self.out / "lib64/ld-linux-x86-64.so.2").read_bytes(),
+                         (self.base / MULTIARCH / HOST_LD.name).read_bytes())
+        libs = sorted(p.name for p in (self.out / MULTIARCH).iterdir())
+        self.assertIn("libc.so.6", libs)
+        for name in libs:
+            self.assertFalse((self.out / MULTIARCH / name).is_symlink(), name)
+            self.assertEqual((self.out / MULTIARCH / name).read_bytes(), (self.base / MULTIARCH / name).read_bytes(), name)
+        # Nothing else: no host path, no file the base did not hold.
+        files = sorted(str(p.relative_to(self.out)) for p in self.out.rglob("*") if p.is_file())
+        self.assertEqual(files, sorted(["bin/sh", "bin/bash", "lib64/ld-linux-x86-64.so.2"]
+                                       + [MULTIARCH + "/" + n for n in libs]))
+        # The copied shell runs on the copied loader and libraries alone.
+        run = subprocess.run([str(self.out / "lib64/ld-linux-x86-64.so.2"), "--inhibit-cache", "--library-path",
+                              str(self.out / MULTIARCH), str(self.out / "bin/bash"), "-c", "echo ok"],
+                             capture_output=True, text=True)
+        self.assertEqual(run.stdout, "ok\n", run.stderr)
+
+    def test_a_library_missing_from_the_base_fails_though_the_host_has_it(self):
+        # The #5570 path: the runner's own copy must never fill a gap in the base.
+        victim = next(n for n in (pathlib.Path(l).name for l in host_libs(shutil.which("bash"))) if n != "libc.so.6")
+        (self.base / MULTIARCH / victim).unlink()
+        r = self.run_userland("/bin/bash")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(victim, r.stderr)
+
+    def test_a_link_that_leaves_the_base_fails(self):
+        # Debian ships absolute links; resolved on the host they would read the host's file.
+        (self.base / "usr/bin/sh").unlink()
+        (self.base / "usr/bin/sh").symlink_to(shutil.which("dash"))
+        r = self.run_userland("/bin/sh")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("outside", r.stderr)
+        self.assertFalse((self.out / "bin/sh").exists())
+
+    def test_a_missing_program_fails(self):
+        # The old loop skipped a missing tool; the guest would then lack it silently.
+        r = self.run_userland("/bin/sh", "/bin/nonesuch")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("/bin/nonesuch", r.stderr)
+
+    def test_a_program_already_in_the_root_keeps_its_bytes(self):
+        # Node is a pinned download: only its libraries come from the base.
+        (self.out / "usr/local/bin").mkdir(parents=True)
+        own = self.out / "usr/local/bin/tool"
+        shutil.copy(self.base / "usr/bin/bash", own)
+        with open(own, "ab") as f:
+            f.write(b"pinned-download-marker")
+        r = self.run_userland("/usr/local/bin/tool")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(own.read_bytes().endswith(b"pinned-download-marker"))
+        self.assertTrue((self.out / MULTIARCH / "libc.so.6").exists())
+
+    def test_a_relative_path_fails(self):
+        r = self.run_userland("bin/sh")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not an absolute path", r.stderr)
+
+
+class WiringTest(unittest.TestCase):
+    """Every guest build reads the one base; nothing copies from the host."""
+
+    def test_guest_builds_copy_only_from_guest_base(self):
+        for g in GUESTS:
+            with self.subTest(g):
+                text = (ROOT / "guest" / g / "build-rootfs.sh").read_text()
+                code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+                self.assertNotRegex(code, r"\bldd\b")
+                self.assertNotIn("cp -L", code)
+                self.assertIn('sh "$here/../../image/guest-userland.sh" "${GUEST_BASE:?', code)
+
+    def test_base_reads_the_image_s_own_apt_sources(self):
+        text = BASE_SH.read_text()
+        self.assertIn("/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", text)
+        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6 trixie", text)
+        self.assertIn("libpcre2-8-0", text)
+
+    def test_image_build_makes_the_base_before_both_guests_and_drops_it_after(self):
+        b = (ROOT / "image/build.sh").read_text()
+        base = b.index('sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"')
+        export = b.index('export GUEST_BASE="$OUT/guest-base"')
+        guests = [b.index('sh "$REPO/guest/%s/build-rootfs.sh"' % g) for g in GUESTS]
+        drop = b.index('rm -rf --one-file-system "$GUEST_BASE"')
+        mkosi = b.index('$MKOSI -C "$HERE/mkosi"')
+        self.assertLess(base, export)
+        self.assertLess(export, min(guests))
+        self.assertLess(max(guests), drop)
+        self.assertLess(drop, mkosi)
+
+    def test_reproduce_compares_the_guest_packages(self):
+        wf = (ROOT / ".github/workflows/image.yml").read_text()
+        build, job = wf[:wf.index("  reproduce:")], wf[wf.index("  reproduce:"):]
+        self.assertIn('cp -R "$RUNNER_TEMP"/out/guest "$RUNNER_TEMP/rec/"', build)
+        self.assertRegex(build, r"install -y -q --no-install-recommends [^\n]*\\\n(?:[^\n]*\\\n)*[^\n]*\bmmdebstrap\b")
+        line = "python3 image/compare_manifests.py rec/release-a/guest rec/release-b/guest || ok=0"
+        self.assertIn(line, job)
+        self.assertLess(job.index("ok=1"), job.index(line))
+        self.assertLess(job.index(line), job.index("[ $ok = 1 ]"))
+
+    def test_ci_guest_builds_name_a_base(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn('sudo GUEST_BASE="$RUNNER_TEMP/image-tools" AGENTOS_CODEX_DOWNLOAD=1 python3 -m unittest tests.test_codex_rootfs', ci)
+        self.assertIn("sudo sh image/guest-base.sh /tmp/guest-base /tmp/guest-base.manifest", ci)
+        self.assertIn("GUEST_BASE=/tmp/guest-base sh guest/openclaw/build-rootfs.sh /tmp/ocroot", ci)
+        self.assertIn("GUEST_BASE=/tmp/guest-base \\\n            sh guest/codex/build-rootfs.sh /tmp/cxroot", ci)
+        self.assertLess(ci.index("sudo sh image/guest-base.sh"), ci.index("sh guest/openclaw/build-rootfs.sh"))
+
+
+if __name__ == "__main__":
+    unittest.main()

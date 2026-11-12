@@ -6,8 +6,8 @@
 #
 # Usage: build-rootfs.sh OUT_DIR
 # Needs: Go (unless FORWARDER_BIN is set), curl (unless both tarballs are set), openssl, tar, xz,
-# patch, cc with a static libcap (libcap-dev), sha256sum, and the host's /bin/sh, /bin/bash and
-# coreutils, which are copied in with their libraries.
+# patch, cc with a static libcap (libcap-dev), sha256sum, and GUEST_BASE, a root from
+# image/guest-base.sh, whose /bin/sh, /bin/bash and coreutils are copied in with their libraries.
 # CODEX_TARBALL=<file> and BWRAP_TARBALL=<file> use local copies of the pinned tarballs instead of
 # downloading them; each is still checked against its pinned hash.
 # Hook for #809 (the runsc measurement of guest/codex/ASSUMPTIONS.md C1-C15): register OUT_DIR as
@@ -93,19 +93,11 @@ else
 		-o "$out/usr/local/bin/agentos-codex-forwarder" ./egress/cmd/agentos-codex-forwarder)
 fi
 
-# The host's shell and a few tools, with every library they load (the CLI itself is static).
-copy() {
-	for f in "$@"; do
-		d=$(dirname "$f")
-		mkdir -p ".$d"
-		cp -L "$f" ".$f"
-	done
-}
-for b in /bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep; do
-	[ -e "$b" ] || continue
-	copy "$b"
-	copy $(ldd "$b" | awk '/=>/ {print $3} /^\t\// {print $1}')
-done
+# The shell and a few tools, with every library they load (the CLI itself is static), from
+# GUEST_BASE, the Debian root image/guest-base.sh installs from the image's pinned apt sources, never
+# from the build host (#5570).
+sh "$here/../../image/guest-userland.sh" "${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}" "$out" \
+	/bin/sh /bin/bash /usr/bin/env /usr/bin/uname /usr/bin/id /bin/ls /bin/cat /bin/mkdir /bin/rm /bin/sleep
 
 printf 'root:x:0:0:root:/root:/bin/sh\n' >etc/passwd
 printf 'root:x:0:\n' >etc/group
