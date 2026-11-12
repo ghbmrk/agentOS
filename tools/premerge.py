@@ -543,11 +543,13 @@ EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a
 # #3611: a Record line with a spaced package never parsed, so the accept read as absent; name that too.
 UNPARSED = 'unparsed-record {}: Record line must be "Record: PR #{} · package <ID-without-spaces> · head <sha>"'
 # #5541 (seen twice on #5539): a marker above a good Record line read as unparsed, which blamed the Record line.
-MISPLACED = "misplaced-marker {}: a <!-- record: <kind> --> marker must sit directly under the Record line, not above it or elsewhere"
+# Every named cause fits premerge.yml's 120-character status cut with its longest real argument (#5543).
+MISPLACED = "misplaced-marker {}: put each <!-- record: <kind> --> marker directly under the Record line"
 
 
 # #3856 (seen on #3842): a Record head no `git rev-parse` resolves crashed --check with a traceback; name it as never accepting.
-UNRESOLVED = "unresolved-record {}: Record head {} resolves to no single commit here, post a new verdict naming the reviewed head"
+# The head shows as its first 7 characters, so a full 40-character head still fits the status cut (#5543).
+UNRESOLVED = "unresolved-record {}: Record head {} is no single commit here, post a new verdict naming the reviewed head"
 
 
 def _resolves(sha):
@@ -557,7 +559,7 @@ def _resolves(sha):
 def _named(v, kind, pr):
     """The named cause a verdict `v` of `kind` never accepts, or None."""
     if v and v[0] == "accept" and not _resolves(v[1]):
-        return UNRESOLVED.format(kind, v[1])
+        return UNRESOLVED.format(kind, v[1][:7])
     if v and v[0] == "edited":
         return EDITED.format(kind)
     if v and v[0] == "unparsed":
