@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Refuse an enforcer tree that could turn Wi-Fi on or mount USB storage (NET-2 Hardening): a Wi-Fi
-package, a missing module block or a blocked module installed. Refuse one that
-enables a unit outside the enforcer's preset (only the services it needs), or that would write a core
-dump to a file (#4459), or that leaves the kernel's reverse-path filter (#4810) or ICMP redirects
-(#5164) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a line of the
-build log. The running box checks the same
+package, a missing module block or a blocked module installed. Refuse one that enables a unit
+outside the enforcer's preset (only the services it needs), or that would write a core dump to a
+file (#4459), or that leaves the kernel's reverse-path filter (#4810), ICMP redirects (#5164) or IPv4
+source routing (#5560) on anywhere. mkosi runs this with the tree in $BUILDROOT; each refusal is a
+line of the build log. The running box checks the same but source routing
 (agentos-enforcer/health); this catches it before an image exists."""
 import fnmatch
 import os
@@ -87,8 +87,9 @@ def iface_key(key, family, leaf):
 
 def sysctls(root):
     """What systemd-sysctl sets, key by key (sysctl_key), and the refusals: a link anywhere in
-    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL, "#" and ";" start comments, a leading "-" only ignores errors,
-    and the last assignment wins. A glob key that matches a NODUMP key counts as setting it."""
+    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL,
+    "#" and ";" start comments, a leading "-" only ignores errors, and the last assignment wins. A
+    glob key that matches a NODUMP key counts as setting it."""
     files, out = {}, []
     for d in SYSCTL_DIRS:
         p = root / d
@@ -160,6 +161,12 @@ def violations(root):
     out += ["%s; accept_redirects must be 0" % said(k, vals.get(k))
             for k in sorted(set(REDIRECTS) | {k for k in vals if any(iface_key(k, f, "accept_redirects") for f in ("ipv4", "ipv6"))})
             if vals.get(k) != "0"]
+    # #5560: no key turns IPv4 source routing on. The kernel takes a source-routed packet only when
+    # "all" and the interface's own value are both non-zero (ip_input.c, IN_DEV_ANDCONF); "all" is 0
+    # unless set, and systemd's 50-default.conf sets "default" and "*" to 0. A key left unset keeps
+    # those; one set to anything but 0 is refused. IPv6 is not checked: above 0 it acts as 0.
+    out += ["%s; accept_source_route must be 0" % said(k, v) for k, v in sorted(vals.items())
+            if v is not None and v != "0" and iface_key(k, "ipv4", "accept_source_route")]
     return out
 
 
