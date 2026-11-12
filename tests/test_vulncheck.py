@@ -1093,11 +1093,26 @@ class PruneBuildTest(unittest.TestCase):
         launch = json.loads((ROOT / "guest" / "openclaw" / "launch.json").read_text())
         self.assertIn("OPENCLAW_CONFIG_READONLY=1", launch["env"])
 
+JSON5_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(\r\n|[\n\r\u2028\u2029])|(.))", re.S)
+JSON5_SINGLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "0": "\0"}
+
+
+def json5_unescape(raw):
+    """RAW with JSON5's escapes decoded: \\uXXXX, \\xXX, line continuations and single characters."""
+    def one(m):
+        u, x, cont, ch = m.groups()
+        if u or x:
+            return chr(int(u or x, 16))
+        return "" if cont else JSON5_SINGLE.get(ch, ch)
+    return JSON5_ESCAPE.sub(one, raw)
+
+
 def json5_top_keys(text):
-    """The keys of TEXT's top-level JSON5 object: quoted or not, at any indent, several to a line,
-    skipping comments, string values and nested objects (#5370)."""
+    """The decoded keys of TEXT's top-level JSON5 object: quoted or not, escaped or not, at any
+    indent, several to a line, skipping comments, string values and nested values (#5370)."""
     keys, depth, i, n = set(), 0, 0, len(text)
     skip = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/)*", re.S)
+    ident = re.compile(r"(?:[\w$]|\\u[0-9a-fA-F]{4})+")
     while i < n:
         i = skip.match(text, i).end()
         if i >= n:
@@ -1108,15 +1123,15 @@ def json5_top_keys(text):
             while j < n and text[j] != c:
                 j += 2 if text[j] == "\\" else 1
             tok, i = text[i + 1:j], j + 1
-        elif c.isalnum() or c in "_$":
-            j = re.compile(r"[\w$]+").match(text, i).end()
+        elif c.isalnum() or c in "_$" or text.startswith("\\u", i):
+            j = ident.match(text, i).end()
             tok, i = text[i:j], j
         else:
             depth += (c in "{[") - (c in "}]")
             i += 1
             continue
         if depth == 1 and text[skip.match(text, i).end():][:1] == ":":
-            keys.add(tok)
+            keys.add(json5_unescape(tok))
     return keys
 
 
@@ -1148,6 +1163,25 @@ class Json5TopKeysTest(unittest.TestCase):
         self.assertEqual(keys, {"tools", "commands", "telemetry"})
         self.assertEqual(self.keys("[\"plugins\"]", '["plugins:", "channels"]'), {"tools", "commands", "telemetry"})
         self.assertEqual(self.keys('"plugins"', '"a\\"plugins: b"'), {"tools", "commands", "telemetry"})
+
+    def test_an_escaped_key_counts(self):
+        # #5591 Security: JSON5 decodes escapes in quoted and bare keys.
+        for spelled in ['"plu\\u0067ins"', "'plu\\x67ins'", '"plu\\\ngins"', '"\\plugins"', "plu\\u0067ins",
+                        "\\u0070lugins", "\\u0063hannels", '"chan\\u006Eels"']:
+            with self.subTest(spelled=spelled):
+                self.assertTrue({"plugins", "channels"} & self.keys("  telemetry", f"  {spelled}: {{}},\n  telemetry"))
+
+    def test_a_root_array_has_no_top_level_keys(self):
+        # #5591 L3 mutant: brackets count toward depth.
+        self.assertEqual(json5_top_keys('[{ plugins: {} }, { channels: [] }]'), set())
+
+    def test_underscore_and_dollar_keys_keep_their_first_character(self):
+        # #5591 L3 mutant: _ and $ start a bare key.
+        self.assertEqual(json5_top_keys("{ _plugins: 1, $channels: 2 }"), {"_plugins", "$channels"})
+
+    def test_a_string_value_before_a_comma_is_not_a_key(self):
+        # #5591 L3 mutant: only a colon makes a key.
+        self.assertEqual(json5_top_keys('{ a: "plugins", b: \'channels\' }'), {"a", "b"})
 
 
 def lits(tag, n=6):
