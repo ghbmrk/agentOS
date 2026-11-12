@@ -466,6 +466,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | PREMERGE-status-bind-fu | PREMERGE-status-bind-fu: a closed repository PR's lingering `success` on a sha does not stand as a fork PR's `premerge` status. Release; from #5512. | #5442, #5512 | building (release; tier A; gate files) |
 | DRIVE-ID-lint-fu | DRIVE-ID-lint-fu: the redirected-special-builtin lint covers exec and the other special builtins, strips comments outside quotes only, and reads command substitutions and quoted redirects correctly. Release; from #5519. | #5518, #5519 | building (release; tier A) |
 | CI-hostcheck-mirror-wording | CI-hostcheck-mirror-wording: the kernel mirror's worst-case bound is stated as about 80 s, not a minute, and its curl reads no config (-q). Release; from #5522. | #5470, #5522 | building (release; tier A) |
+| SHELL-CURL-lint-fu | SHELL-CURL-lint-fu: the hostcheck curl lint sees /usr/bin/curl, the image shell lint reads quotes in expansions, time -p, case arms, continuations and here-docs, and its hits name the builtin. Release; from #5530 and #5532. | #5525, #5524 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
