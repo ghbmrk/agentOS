@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -974,6 +975,39 @@ func TestOP6HeldForkPausesNothingAndKeepsNoCheckpoint(t *testing.T) {
 	}
 	if _, err := e.m.Snapshot(f1.ForkBase); err != nil {
 		t.Fatalf("the base of a fork not undone was dropped: %v", err)
+	}
+}
+
+// A held fork whose checkpoint drop failed is not the bare ErrHeld: the
+// refusal carries the drop beside the hold, named as the checkpoint drop,
+// so the broker's answer says cleaning up failed (STOP-queued-start-fu2).
+func TestOP6HeldForkSaysACheckpointDropThatFailed(t *testing.T) {
+	e := newEnv(t, 4096)
+	agent := e.create("agent", admission.Experiment, 500)
+	_, err := e.m.CreateWorker(bg, "wk-a1", agent.Lineage, workerSpec(Public))
+	must(t, err)
+	var held atomic.Bool
+	e.rt.onStart = func(id string) {
+		if id == "wk-f1" {
+			held.Store(true)
+		}
+	}
+	real := removeAll
+	removeAll = func(p string) error {
+		if filepath.Base(filepath.Dir(p)) == "snapshots" {
+			return errors.New("synthetic: snapshot removal failed")
+		}
+		return real(p)
+	}
+	t.Cleanup(func() { removeAll = real })
+	_, err = e.m.Fork(WithHold(bg, held.Load), "wk-a1", []string{"wk-f1", "wk-f2"})
+	if !errors.Is(err, ErrHeld) || err == ErrHeld || !strings.Contains(err.Error(), "dropping checkpoint ") || !strings.Contains(err.Error(), "synthetic: snapshot removal failed") {
+		t.Fatalf("fork held with a drop that failed: %v", err)
+	}
+	for _, f := range []string{"wk-f1", "wk-f2"} {
+		if _, gerr := e.m.Get(f); gerr == nil {
+			t.Fatalf("left %s", f)
+		}
 	}
 }
 
