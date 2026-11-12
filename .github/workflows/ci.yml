@@ -759,8 +759,10 @@ jobs:
       # first; the snapshot is the second source, for an outage of either host. The hash decides, not
       # the host: bytes from either that miss the pin fail the step, with no further source tried.
       # CI-hostcheck-mirror-bound (#5470): the mirror gets 3 tries (waits 1 s, 2 s), starts no retry
-      # after 20 s and gives each try 60 s, so a 5xx or hung mirror falls through to the snapshot in
-      # seconds, a minute at most; the full #5321 schedule is the snapshot's, the last source.
+      # after 20 s and gives each try 60 s, so a 5xx mirror falls through to the snapshot in seconds
+      # and a hung one in about 80 s at most (a retry started near 20 s may run its full 60 s); the
+      # full #5321 schedule is the snapshot's, the last source. CI-hostcheck-mirror-wording (#5525):
+      # curl's first argument is -q, so no .curlrc (CURL_HOME, XDG_CONFIG_HOME, HOME) adds options.
       - name: Stand-in guest kernel (one pinned Ubuntu kernel, from a release asset or a dated snapshot)
         env:
           KERNEL_MIRROR_URL: https://github.com/ghbmrk/agentOS/releases/download/guest-kernel-6.8.0-149.149/linux-image-6.8.0-149-generic_6.8.0-149.149_amd64.deb
@@ -772,7 +774,7 @@ jobs:
           src=
           bound=(--retry 2 --retry-max-time 20 --max-time 60)
           for url in "$KERNEL_MIRROR_URL" "$KERNEL_URL"; do
-            curl --proto '=https' -fsSL "${bound[@]}" --retry-connrefused --connect-timeout 30 -o "$deb" "$url" && { src=$url; break; }
+            curl -q --proto '=https' -fsSL "${bound[@]}" --retry-connrefused --connect-timeout 30 -o "$deb" "$url" && { src=$url; break; }
             echo "::warning::the guest kernel did not download from $url"
             bound=(--retry 8 --retry-max-time 600 --max-time 180)
           done
