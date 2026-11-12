@@ -414,11 +414,15 @@ jobs:
           done
       - name: Camera H.264 decoder on the pinned libavcodec, with FuzzH264Feed for 20s (CAM-clerk b2, #3514)
         # go test ./... has no libavcodec, so the decoder's tests run here, against the same pinned
-        # H.264-only build image/camdecode.sh links into agentos-camdecode.
+        # H.264-only build image/camdecode.sh links into agentos-camdecode, compiled as it is, in the
+        # root image/guest-base.sh installs from the image's apt sources (#5582).
         run: |
-          sh ../image/libavcodec.sh "$RUNNER_TEMP/libavcodec"
-          export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libavcodec" \
-            PKG_CONFIG_PATH="$RUNNER_TEMP/libavcodec/opt/agentos-libavcodec/lib/pkgconfig"
+          sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
+          sudo sh ../image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
+          sudo sh ../image/libavcodec.sh "$RUNNER_TEMP/guest-base" /tmp/agentos-libavcodec
+          lib="$RUNNER_TEMP/guest-base/tmp/agentos-libavcodec"
+          export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$lib" \
+            PKG_CONFIG_PATH="$lib/opt/agentos-libavcodec/lib/pkgconfig"
           status=0
           go test -count=1 -json ./cmd/agentos-camdecode/camdecode > "$RUNNER_TEMP/camdecode.json" || status=$?
           p=github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode

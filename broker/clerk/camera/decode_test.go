@@ -609,7 +609,7 @@ func TestDecoderLinkHasNoNetworkCall(t *testing.T) {
 		"for f in --cflags --libs '--libs --static'; do",
 		"pkg-config $f " + modules + "))\" = \"$want\" ]",
 		"-Wl,-Map=$lib/camdecode.map,--cref",
-		"faults=$(linkfaults \"$lib/camdecode.map\")\n[ -z \"$faults\" ] || {",
+		"faults=$(linkfaults \"$base$lib/camdecode.map\")\n[ -z \"$faults\" ] || {",
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("image/camdecode.sh no longer holds %q", want)
