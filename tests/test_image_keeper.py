@@ -845,6 +845,43 @@ class KeeperTreeTest(unittest.TestCase):
         finally:
             d.unlink()
 
+    def test_an_install_key_refusal_says_what_it_names(self):
+        # #5588 (Security on #5584): the [Install] keys are parsed by systemd v257's install.c (unit_file_load's
+        # items[]), not by load-fragment-gperf.gperf.in, which holds them with a NULL parser. Each is pinned with
+        # what it names; a refusal on one says that and never offers the way onto NAME_ONLY_KEYS.
+        # REQ: DEV-2, HW-1
+        self.assertEqual(set(check.INSTALL_KEYS),
+                         {"Alias", "WantedBy", "RequiredBy", "UpheldBy", "DefaultInstance", "Also"})
+        self.assertLessEqual(set(check.INSTALL_KEYS), check.UNIT_KEYS)
+        self.assertEqual(set(check.INSTALL_KEYS) & check.NAME_ONLY_KEYS, set())
+        for key, names in check.INSTALL_KEYS.items():
+            with self.subTest(key):
+                self.assertEqual(check.value_fix(key), "; write %s= as plain names, with no specifier, quote, escape "
+                                 "or '/': it names %s, never a host path (systemd v257's install.c; PID 1 ignores "
+                                 "it)" % (key, names))
+                self.assertNotIn("NAME_ONLY_KEYS", check.value_fix(key))
+                self.assertNotIn("PID1_NAMES", check.value_fix(key))
+        self.assertIn("unit", check.INSTALL_KEYS["Alias"])
+        self.assertIn("instance name", check.INSTALL_KEYS["DefaultInstance"])
+        # End to end: the keys PID 1 does not take as names are refused when the check cannot read them, with
+        # that text, wherever in [Install] they sit.
+        for text in ("Alias=%p-x.service", "Alias=x.wants/y.service", "Alias='y.service'",
+                     "DefaultInstance=%H", "DefaultInstance=a\\x2db"):
+            with self.subTest(text):
+                d = write(self.root, SYSTEM + "x@.service", "[Service]\nExecStart=/bin/true\n[Install]\n%s\n" % text)
+                try:
+                    key = text.split("=", 1)[0]
+                    got = check.unit_made_paths(self.root)[2]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].endswith(check.value_fix(key)), got)
+                    self.assertIn(check.INSTALL_KEYS[key], got[0])
+                    self.assertNotIn("NAME_ONLY_KEYS", got[0])
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    d.unlink()
+        # A key on neither table still gets the route.
+        self.assertIn("add InventedKeyV999 to NAME_ONLY_KEYS", check.value_fix("InventedKeyV999"))
+
     def test_a_unit_made_directorys_way_is_roots_alone(self):
         # #5167 re-plan 2: systemd 257's setup_exec_directory makes the missing steps, then chmods and chowns
         # what it finds at the last step to the unit's user, following a link at any step, the last included.
