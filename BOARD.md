@@ -444,7 +444,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-run-mut-mail | CLK-run-mut-mail: kill or waive the old mutgate deletion survivors in the mail host and seen set (45). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | CLK-run-mut-senders | CLK-run-mut-senders: kill or waive the old mutgate deletion survivors in senders, the sign-in socket and the world (50). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
-| VULN-openclaw-held-r3 | VULN-openclaw-held-r3: the vulncheck record and its test say what holds (the prune, not a read-only config), and the plugins/channels test parses quoted, indented and same-line keys. Release; from #5369. | #5369, #5368 | building (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
 | KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
@@ -461,6 +460,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | IMG-camdecode-toolchain | IMG-camdecode-toolchain: the camera decoder and its libavcodec are compiled with the pinned root's toolchain, not the runner's cc. | #5571 | building (release; tier A) |
 | IMG-keeper-install-keys | IMG-keeper-install-keys: the keeper's unit-key check handles the [Install] keys (Alias=, WantedBy=, Also=, DefaultInstance=) explicitly, not through the NAME_ONLY_KEYS route. Release; from #5584. | #5191, #5584 | building (release; tier A; gate file) |
+| IMG-keeper-install-keys-fu | IMG-keeper-install-keys-fu: the four [Install] description texts are pinned as literals, and the Alias= text says why the slash form is refused. Release; from #5595. | #5588, #5595 | queued (release; tier A; gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
