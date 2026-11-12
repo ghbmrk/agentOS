@@ -1535,21 +1535,41 @@ class DriveIdTest(unittest.TestCase):
 
 
 # ':' is a POSIX special builtin: a redirection error on it exits a non-interactive shell before any
-# '||' handler or 'set -e' report runs (#5464). 'true' is a regular builtin, so its handler runs. A
-# ':' in command position (line start, after ; & | ( { or a reserved word) with a redirection
-# before the command ends is flagged; comment lines are skipped.
-REDIRECTED_COLON = re.compile(r"(?:^|[;&|({]|\b(?:then|do|else|if|elif|while|until)\b|!)\s*:(?=[\s<>]|$)"
-                              r"[^;&|#\n]*?[<>]")
+# '||' handler or 'set -e' report runs (#5464). 'true' is a regular builtin, so its handler runs. Per
+# line, single-quoted text, ${...} expansions and comments are dropped, the rest is cut into simple
+# commands at ; & (not >& or <&) | ( ) { and backquotes (so after &&, ||, a case arm, $(...) and
+# `...`), and a command is flagged when, after leading reserved words, time, !, assignments and
+# redirections, its command word is ':' and it carries a redirection anywhere. Here-document bodies
+# are not parsed.
+SHELL_SEP = re.compile(r"[;|(){`]|(?<![<>])&")
+SHELL_PREFIX = re.compile(r"\s*(?:(?:then|do|else|if|elif|while|until|time|!)(?=\s)"
+                          r"|[A-Za-z_]\w*=\S*|(?P<redir>\d*[<>]+&?\s*[^\s<>;&|]+))")
+SHELL_COLON = re.compile(r"\s*:(?=[\s<>]|$)")
+
+
+def colon_redirected(command):
+    pos, redirected = 0, False
+    while m := SHELL_PREFIX.match(command, pos):
+        redirected |= m.group("redir") is not None
+        pos = m.end()
+    m = SHELL_COLON.match(command, pos)
+    return bool(m) and (redirected or bool(re.search(r"[<>]", command[m.end():])))
 
 
 def redirected_colons(text):
-    return [n for n, line in enumerate(text.splitlines(), 1)
-            if not line.lstrip().startswith("#") and REDIRECTED_COLON.search(line)]
-
-
-def image_shell():
     out = []
-    for f in sorted(IMG.rglob("*")):
+    for n, line in enumerate(text.splitlines(), 1):
+        line = re.sub(r"'[^']*'", "''", line)
+        line = re.sub(r"\$\{[^}]*\}", "$P", line)
+        line = re.sub(r"(?:^|\s)#.*", "", line)
+        if any(colon_redirected(c) for c in SHELL_SEP.split(line)):
+            out.append(n)
+    return out
+
+
+def image_shell(root=IMG):
+    out = []
+    for f in sorted(root.rglob("*")):
         if not f.is_file() or f.is_symlink():
             continue
         with f.open("rb") as fh:
@@ -1560,22 +1580,91 @@ def image_shell():
 
 
 class ImageShellLintTest(unittest.TestCase):
+    FLAGGED = (
+        ': >"$W/a"',
+        '\t: >>log',
+        'x && :>y',
+        'a || : >x',
+        'a; : >x',
+        'a | : >x',
+        '{ : >x; }',
+        '( : >x )',
+        'v=$(: <in)',
+        '  a) : >x ;;',
+        'v=`: >x`',
+        'if : >x; then y; fi',
+        'if a; then : 2>/dev/null; fi',
+        'if a; then b; elif : >x; then c; fi',
+        'if a; then b; else : >x; fi',
+        'while : >x; do y; done',
+        'until : >x; do y; done',
+        'for i in 1; do : >x; done',
+        '! : >x',
+        'time : >x',
+        'x=1 : >x',
+        'x=1 y=2 : >x',
+        '2>/dev/null : >x',
+        '>x :',
+        '2>&1 :',
+        ': "${X:=d}" >f',
+        ': x#y >f',
+        ': a b >f',
+        ': >&2',
+    )
+    CLEAN = (
+        '#!/bin/sh',
+        '# then : >x',
+        '\t# : >comment',
+        ': # >x',
+        'true >"$W/a"',
+        ': "${X:=default}"',
+        'echo "a: >b"',
+        "echo 'a; : >b'",
+        "awk '$2 == \":\" { print > \"f\" }'",
+        'case $x in a:b) ;; esac',
+        'undo :>x',
+        'doing : >x',
+        'thenx : >x',
+        'do: >x',
+        'timer : >x',
+        ':foo >x',
+        ': ; echo >x',
+        'x || :; y >x',
+        ': | cat >x',
+        ': & y >x',
+        ': && y >x',
+        '{ :; } >f',
+        'x=1:2 >f',
+        '1x=2 : >f',
+        'echo >x',
+        'y 2>&1 && :',
+    )
+
     def test_lint_flags_a_redirected_colon(self):
-        fixture = "\n".join((
-            '#!/bin/sh', 'set -eu',
-            ': >"$W/a"',                      # 3
-            '\t: >>log',                      # 4
-            'x && :>y',                       # 5
-            'if true; then : 2>/dev/null; fi',  # 6
-            'v=$(: <in)',                     # 7
-            '# : >comment',
-            'true >"$W/a"',
-            ': "${X:=default}"',
-            'echo "a: >b"',
-            'awk \'$2 == ":" { print > "f" }\'',
-            'case $x in a:b) ;; esac',
-        ))
-        self.assertEqual(redirected_colons(fixture), [3, 4, 5, 6, 7])
+        for line in self.FLAGGED:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_colons(line), [1])
+        self.assertEqual(redirected_colons("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
+                         [len(self.CLEAN) + 1])
+
+    def test_lint_passes_clean_shell(self):
+        for line in self.CLEAN:
+            with self.subTest(line=line):
+                self.assertEqual(redirected_colons(line), [])
+
+    def test_image_shell_picks_shell_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
+                     "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
+                     "i.py": "#!/bin/shx\n", "j": "echo\n"}
+            for name, body in files.items():
+                (d / name).parent.mkdir(parents=True, exist_ok=True)
+                (d / name).write_text(body)
+            (d / "link.sh").symlink_to(d / "a.sh")
+            (d / "dir.sh").mkdir()
+            self.assertEqual([str(f.relative_to(d)) for f in image_shell(d)],
+                             ["a.sh", "c", "e", "f", "g", "sub/b"])
 
     def test_image_shell_has_no_redirected_colon(self):
         files = image_shell()
