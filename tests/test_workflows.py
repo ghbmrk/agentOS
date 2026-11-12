@@ -10,6 +10,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -208,7 +209,7 @@ PREMERGE_LINES = [
     '            exec python3 -I tools/premerge.py --check "$RUNNER_TEMP/comments.json" "$PR_NUMBER" --runs "$RUNNER_TEMP/runs.json" \\',
     '              --base refs/remotes/pr/base "$HEAD_SHA"',
     '          ) && state=success',
-    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | tr -cd \'\\40-\\176\' | cut -c 1-120)',
+    '          out=$(printf \'%s\' "${out:-error}" | tail -n 1 | python3 -I -c \'import sys; sys.stdout.buffer.write("".join(c for c in sys.stdin.buffer.read().decode(errors="replace") if " " <= c <= "~" or c == "\\u00b7")[:120].encode())\')',
     '          echo "premerge $HEAD_SHA: $state ($out)"',
     '          post "$state" "$out"',
     '          if [ "$state" = success ] && [ "$out" = same ] && [ "$skipped" = no ] && \\',
@@ -1599,7 +1600,9 @@ STUB_JQ = r"""#!/bin/sh
 [ "$FAIL_AT" = jq ] && [ "$2" = .head.ref ] && exit 1
 exec "$REAL_JQ" "$@"
 """
+# #5545: the status filter step runs the real interpreter, so these tests post the text premerge.yml's filter makes.
 STUB_PY = r"""#!/bin/sh
+[ "$1" = -I ] && [ "$2" = -c ] && exec "$REAL_PY" "$@"
 echo "$*" >> "$STUBS/py"
 echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
 """
@@ -1699,7 +1702,7 @@ class PremergeRunTest(unittest.TestCase):
             # The step runs from the base checkout, so its runs fetch is that checkout's tools/premerge_runs.sh (#5386).
             (stubs / "tools").mkdir()
             shutil.copy(WORKFLOWS.parent.parent / "tools/premerge_runs.sh", stubs / "tools")
-            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
+            env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "REAL_PY": sys.executable, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": pr,
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
                    "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer,

@@ -39,6 +39,15 @@ def bundle(head=(), base=(), pr=7, repo=REPO, branch="pr"):
     return {"repo": REPO, "pr": {"number": pr, "repo": repo, "branch": branch}, "head": list(head), "base": list(base)}
 
 
+def status_of(*lines):
+    """The premerge status each --check output becomes, through premerge.yml's own filter step run as written (#5545)."""
+    step = [x.strip() for x in (ROOT / ".github/workflows/premerge.yml").read_text().splitlines()
+            if x.strip().startswith("out=$(printf '%s' \"${out:-error}\"")]
+    assert len(step) == 1, step
+    return [subprocess.run(["bash", "-c", 'out=$1; ' + step[0] + '; printf %s "$out"', "-", line],
+                           capture_output=True, check=True).stdout.decode() for line in lines]
+
+
 class PremergeTest(unittest.TestCase):
     def setUp(self):
         self._d = tempfile.TemporaryDirectory()
@@ -607,10 +616,10 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual((bad.returncode, bad.stdout.split()), (1, ["changed", "b.txt"]))
 
     def test_named_causes_fit_the_status_cut(self):
-        # #5543: premerge.yml keeps printable ASCII and cuts the status at 120 characters, so every named cause must fit
-        # whole with its longest real argument: the longest kind join --check prints, a 5-digit PR, a 40-character head
-        cut = int(re.search(r"cut -c 1-(\d+)", (ROOT / ".github/workflows/premerge.yml").read_text()).group(1))
-        status = lambda line: "".join(ch for ch in line if " " <= ch <= "~")
+        # #5543: premerge.yml cuts the status at 120 characters, so every named cause must fit whole with its longest real
+        # argument: the longest kind join --check prints, a 5-digit PR, a 40-character head. #5545: the status is the text
+        # premerge.yml's own filter step makes, run here as written, so a filter that drops the Record format's middle
+        # dots fails this test instead of telling the poster a Record line that never parses.
         joined = ",".join(premerge.lenses_owed(["tools/premerge.py"]))
         self.assertEqual(joined, "ux,potency")  # lenses_owed's longest list; l3 and security are never joined
         kinds = ("l3", "security", "combined", "ux", "potency")
@@ -619,8 +628,33 @@ class PremergeTest(unittest.TestCase):
                      for kind in (*kinds, joined)]
             lines += [premerge._named(("accept", "f" * 40), kind, 99999) for kind in kinds]
         self.assertEqual(len(lines), 23)
-        for line in lines:
-            self.assertLessEqual(len(status(line)), cut, line)
+        for line, shown in zip(lines, status_of(*lines)):
+            self.assertEqual(shown, line)
+            self.assertLessEqual(len(shown), 120, line)
+            if line.startswith("unparsed-record "):
+                fmt = re.search(r'"(Record: [^"]*)"', shown).group(1)
+                copied = fmt.replace("<ID-without-spaces>", "PREMERGE-x").replace("<sha>", "f" * 40)
+                self.assertTrue(premerge._RECORD.fullmatch(copied), shown)
+                self.assertEqual(premerge.verdict([{"author_association": "OWNER", "created_at": "t", "updated_at": "t",
+                                                    "body": "Verdict: accept\n" + copied + "\n<!-- record: l3 -->"}],
+                                                  99999), ("accept", "f" * 40))
+
+    def test_status_filter_keeps_only_ascii_and_the_middle_dot(self):
+        # #5545: the widened filter still drops control, bidi and other non-ASCII characters, keeps the last line only,
+        # and cuts by characters, so a middle dot at the cut never leaves half a UTF-8 sequence in the status.
+        self.assertEqual(status_of("first\nlast \u202eevil\x1b[0m \u00e9t\u00e9 \u00b7 ok\n"), ["last evil[0m t \u00b7 ok"])
+        self.assertEqual(status_of("\u00b7" * 200), ["\u00b7" * 120])
+        self.assertEqual(status_of(""), ["error"])
+        self.assertEqual(status_of("same"), ["same"])
+
+    def test_long_path_lists_keep_their_leading_cause(self):
+        # #5546 review: needs-security and changed list every path and are not bounded; the 120-character cut keeps the
+        # leading cause, and the full list is what a local `--check` prints. Pinned here so a reorder cannot cut the cause.
+        paths = [f"tools/some_long_gate_file_{n:03}.py" for n in range(40)]
+        for cause in ("needs-security", "changed", "mark"):
+            shown, = status_of(cause + " " + " ".join(paths))
+            self.assertEqual(len(shown), 120)
+            self.assertTrue(shown.startswith(cause + " " + paths[0]), shown)
 
     def test_mark_press_merge_paths(self):
         for f in ("CLAUDE.md", "docs/OPERATING.md", ".claude/settings.json", ".github/workflows/ci.yml",
