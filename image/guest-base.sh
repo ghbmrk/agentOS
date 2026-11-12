@@ -4,10 +4,11 @@
 # trixie-security, mkosi.pkgmngr's mkosi.sources), so the shell, tools and libraries the OpenClaw
 # and Codex roots carry never come from the build host. Two runners on different runner images
 # built different guest bytes from their own copies (#5570: libpcre2-8.so.0); image/guest-userland.sh
-# copies from this root instead. The Codex worker's static bwrap is compiled inside this root too
-# (IMG-guest-bwrap-toolchain, #5571), by its gcc against libc6-dev's and libcap-dev's static
-# libraries, never the build host's cc. No guest carries the toolchain, but it decides bwrap's bytes,
-# so its packages are in the manifest as well.
+# copies from this root instead. The Codex worker's static bwrap (IMG-guest-bwrap-toolchain, #5571)
+# and the camera decoder with its libavcodec (IMG-camdecode-toolchain, #5582) are unpacked, patched
+# and compiled inside this root too, by its tar, xz, patch, make, pkg-config and gcc against
+# libc6-dev's and libcap-dev's static libraries, never the build host's. No guest carries the
+# toolchain, but it decides those binaries' bytes, so its packages are in the manifest as well.
 #
 # Usage: guest-base.sh ROOT MANIFEST    (as root; needs mmdebstrap and debian-archive-keyring)
 # ROOT is created afresh. MANIFEST gets the root's packages in mkosi's manifest shape, so the
@@ -22,13 +23,13 @@ sources=$(cd "$(dirname "$0")" && pwd)/mkosi/mkosi.pkgmngr/etc/apt/sources.list.
 for wait in 15 30 60 last; do
 	rm -rf --one-file-system "$root"
 	err=0
-	timeout 240 mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev trixie "$root" "$sources" || err=$?
+	timeout 240 mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie "$root" "$sources" || err=$?
 	[ "$err" -ne 0 ] || break
 	[ "$wait" != last ] || exit "$err"
 	echo "guest-base.sh: mmdebstrap exited $err (snapshot.debian.org outage?); retrying in ${wait}s" >&2
 	sleep "$wait"
 done
-dpkg-query --admindir="$root/var/lib/dpkg" -W libpcre2-8-0 libc6 libstdc++6 bash coreutils dash gcc libc6-dev libcap-dev
+dpkg-query --admindir="$root/var/lib/dpkg" -W libpcre2-8-0 libc6 libstdc++6 bash coreutils dash gcc libc6-dev libcap-dev make pkgconf xz-utils patch
 mkdir -p "$(dirname "$manifest")"
 dpkg-query --admindir="$root/var/lib/dpkg" -W -f '${Package}\t${Version}\t${Architecture}\n' |
 	python3 -I -c 'import json, sys

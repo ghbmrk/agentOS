@@ -6,8 +6,9 @@
 #
 # Usage: build-rootfs.sh OUT_DIR
 # Run as root (chroot). Needs: Go (unless FORWARDER_BIN is set), curl (unless both tarballs are
-# set), openssl, tar, xz, patch, sha256sum, chroot, and GUEST_BASE, a root from image/guest-base.sh,
-# whose /bin/sh, /bin/bash and coreutils are copied in with their libraries and whose gcc compiles bwrap.
+# set), openssl, sha256sum, chroot, and GUEST_BASE, a root from image/guest-base.sh, whose /bin/sh,
+# /bin/bash and coreutils are copied in with their libraries, and whose tar, xz, patch and gcc unpack
+# both tarballs and patch and compile bwrap: no host tar, xz or patch runs (#5582).
 # CODEX_TARBALL=<file> and BWRAP_TARBALL=<file> use local copies of the pinned tarballs instead of
 # downloading them; each is still checked against its pinned hash.
 # Hook for #809 (the runsc measurement of guest/codex/ASSUMPTIONS.md C1-C15): register OUT_DIR as
@@ -52,23 +53,32 @@ else
 	curl -fsSLo "$work/bwrap.tar.xz" "$BWRAP_URL"
 fi
 echo "$BWRAP_SHA256  $work/bwrap.tar.xz" | sha256sum -c --quiet - || { echo "bwrap tarball hash" >&2; exit 1; }
-# bwrap's sources go to a fixed path inside the base, removed on exit.
+# Both tarballs are unpacked, and bwrap patched and compiled, inside the base at a fixed path
+# removed on exit, by the base's tar, xz, patch and gcc, the last against its static libc and
+# libcap, all from the image's pinned apt sources (#5571, #5582), never the build host's: two
+# runners on different runner images would link different bytes. Each tarball reaches the base's
+# tar on its stdin from the very file checked above. A clean environment, so nothing of the
+# caller's reaches them; sh -e stops on a rejected hunk.
 base=${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}
-src=$base/tmp/agentos-bwrap
+src=$base/tmp/agentos-codex-build
 rm -rf "$src"
-mkdir "$src"
-tar -xJf "$work/bwrap.tar.xz" -C "$src" --strip-components=1
-(cd "$src" && patch -p1 --quiet <"$here/bwrap-loopback.patch")
-printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$src/config.h"
-# Compiled by the base's gcc against its static libc and libcap, all from the image's pinned apt
-# sources (#5571), never the build host's cc: two runners on different runner images would link
-# different bytes. A clean environment, so nothing of the caller's reaches the compiler. The linker
-# lists each file it reads (-t), and the Debian package of each one outside the build's /tmp is
-# recorded as shipped (image/guest-shipped.sh, #5572): bwrap carries their code, so the image
+mkdir -p "$src/codex" "$src/bwrap"
+cp "$here/bwrap-loopback.patch" "$src/bwrap-loopback.patch"
+printf '#define PACKAGE_STRING "bubblewrap %s (agentOS loopback patch)"\n' "$BWRAP_VERSION" >"$src/bwrap/config.h"
+# Only what a headless turn needs leaves the CLI's tarball: the CLI, the helper it starts from
+# beside its binary, its bwrap and ripgrep. The voice libraries and zsh are left out.
+chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C tar -xzf - -C /tmp/agentos-codex-build/codex \
+	--strip-components=1 "$VENDOR/codex-package.json" "$VENDOR/bin/codex" "$VENDOR/bin/codex-code-mode-host" \
+	"$VENDOR/codex-resources/bwrap" "$VENDOR/codex-path/rg" <"$work/codex.tgz"
+chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agentos-codex-build/bwrap
+	tar -xJf - --strip-components=1
+	patch -p1 --quiet <../bwrap-loopback.patch
+	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap -Wl,-t >link.trace' \
+	<"$work/bwrap.tar.xz"
+# The linker listed each file it read (-t), and the Debian package of each one outside the build's
+# /tmp is recorded as shipped (image/guest-shipped.sh, #5572): bwrap carries their code, so the image
 # vulnerability check scans them.
-chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agentos-bwrap
-	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap -Wl,-t >link.trace'
-linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/link.trace" | sort -u)
+linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/bwrap/link.trace" | sort -u)
 [ -n "$linked" ] || { echo "bwrap: the linker listed no input outside /tmp" >&2; exit 1; }
 # shellcheck disable=SC2086  # one path per word
 sh "$here/../../image/guest-shipped.sh" "$base" $linked
@@ -76,16 +86,13 @@ sh "$here/../../image/guest-shipped.sh" "$base" $linked
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \
 	var/lib/agentos-codex/tmp var/lib/agentos-work tmp proc dev sys run/agentos root
-# Only what a headless turn needs: the CLI, the helper it starts from beside its binary, its
-# bwrap and ripgrep. The voice libraries and zsh are left out. The bundled bwrap is replaced by the
-# patched build at both paths the CLI looks in (PATH first, then codex-resources).
-tar -xzf "$work/codex.tgz" -C opt/codex --strip-components=1 \
-	"$VENDOR/codex-package.json" "$VENDOR/bin/codex" "$VENDOR/bin/codex-code-mode-host" \
-	"$VENDOR/codex-resources/bwrap" "$VENDOR/codex-path/rg"
+# The CLI as unpacked in the base. Its bundled bwrap is replaced by the patched build at both paths
+# the CLI looks in (PATH first, then codex-resources).
+cp -a "$src/codex/." opt/codex/
 v=/opt/codex/vendor/x86_64-unknown-linux-musl
 ln -s "$v/bin/codex" usr/local/bin/codex
-install -m 0755 "$src/bwrap" usr/bin/bwrap
-install -m 0755 "$src/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+install -m 0755 "$src/bwrap/bwrap" usr/bin/bwrap
+install -m 0755 "$src/bwrap/bwrap" "opt/codex/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
 
 # The managed layers (they beat CODEX_HOME and the command line: ASSUMPTIONS C1, C12), the tool
 # wrapper and the launch spec, all root-owned.

@@ -251,7 +251,7 @@ class WiringTest(unittest.TestCase):
     def test_base_reads_the_image_s_own_apt_sources(self):
         text = BASE_SH.read_text()
         self.assertIn("/mkosi/mkosi.pkgmngr/etc/apt/sources.list.d/mkosi.sources", text)
-        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev trixie", text)
+        self.assertIn("mmdebstrap --mode=root --variant=essential --include=libstdc++6,gcc,libc6-dev,libcap-dev,make,pkgconf,xz-utils,patch trixie", text)
         self.assertIn("libpcre2-8-0", text)
 
     def test_codex_bwrap_is_compiled_in_the_base_not_on_the_host(self):

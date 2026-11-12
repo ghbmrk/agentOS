@@ -70,22 +70,24 @@ mkdir -p "$PHOTO/proc" "$PHOTO/dev" "$PHOTO/sys"
 	-o "$PHOTO/agentos-photo" ./cmd/agentos-photo)
 chmod 0755 "$PHOTO/agentos-photo"
 
-# The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode on the
-# pinned libavcodec, built by its own script (image/camdecode.sh), and libavcodec's licence text.
-sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/share/licenses" "$OUT/libavcodec"
-
-# The local inference service, its pinned llama-server and embedding model, and their licence texts
-# (INFER-image, D-230), built by its own script (image/infer.sh); agentosd leaves it off (-infer).
-sh "$HERE/infer.sh" "$STAGE" "$OUT/infer"
-
-# The guests' shell, tools and libraries (#5570): a Debian root from the image's own apt sources, never
-# the build host's, so two runners give the guests the same bytes (IMG-2). Its package list goes to
-# OUT/guest/ for the reproduce job; the root is deleted once both guests are built.
+# The Debian root from the image's own apt sources (#5570) that the guests' shell, tools and libraries
+# come from, and whose toolchain compiles the camera decoder (#5582) and the Codex worker's bwrap
+# (#5571), never the build host's, so two runners give the same bytes (IMG-2). Its package list goes
+# to OUT/guest/ for the reproduce job; the root is deleted once the guests are built.
 sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"
 export GUEST_BASE="$OUT/guest-base"
 # Each guest build records here the Debian packages whose files it copies (image/guest-shipped.sh).
 export GUEST_SHIPPED="$OUT/guest-base.shipped"
 true >"$GUEST_SHIPPED"
+# The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode on the
+# pinned libavcodec, built in the base by its own script (image/camdecode.sh), and libavcodec's
+# licence text.
+sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/share/licenses"
+
+# The local inference service, its pinned llama-server and embedding model, and their licence texts
+# (INFER-image, D-230), built by its own script (image/infer.sh); agentosd leaves it off (-infer).
+sh "$HERE/infer.sh" "$STAGE" "$OUT/infer"
+
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
 # The Codex provider worker's (S8-W1, #1721): provagent's codex declaration names this image, and
