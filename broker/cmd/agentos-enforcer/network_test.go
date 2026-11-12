@@ -29,6 +29,7 @@ import (
 	dnsrun "github.com/ghbmrk/agentos/broker/enforcer/dns/run"
 	"github.com/ghbmrk/agentos/broker/enforcer/mdns"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/page"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
@@ -325,7 +326,32 @@ func TestRunningTableUnreadable(t *testing.T) {
 	if !strings.Contains(x.logText(), "running table unreadable") {
 		t.Fatal("an unreadable running table was not logged")
 	}
+	// #5491 (ENF-l-15): at a restart, a table that does not read holds the
+	// caps spent and shows it on home; one that is absent (ENOENT) holds
+	// nothing, as after a reboot; a table this process loaded that is
+	// absent is still unread.
+	if !x.d.net.unread || !(pageCaps{x.d}).Day().Unread {
+		t.Fatal("a first load over a table that does not read holds nothing")
+	}
+	x.fire.mu.Lock()
+	x.fire.listErr = fmt.Errorf("load: listing enforcer: %w: Error: No such file or directory", load.ErrNoTable)
+	x.fire.mu.Unlock()
+	logged := x.logs("firewall: running table unreadable")
+	x.restart()
+	if x.d.net.unread || (pageCaps{x.d}).Day().Unread {
+		t.Fatal("a first load over an absent table holds the caps")
+	}
+	if x.logs("firewall: running table unreadable") != logged {
+		t.Fatal("an absent table at a first load was logged as unreadable")
+	}
 	x.enforced()
+	x.d.fwMu.Lock()
+	err := x.d.loadNetwork(context.Background(), x.current())
+	held := x.d.net.unread
+	x.d.fwMu.Unlock()
+	if err != nil || !held {
+		t.Fatalf("a later load over a table that went absent: %v, held %v", err, held)
+	}
 }
 
 // TestLoadSeedsLeases (ENF-l-23, #5295): every full load, the first after

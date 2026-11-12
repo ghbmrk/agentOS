@@ -297,14 +297,23 @@ func TestFreshDayPage(t *testing.T) {
 	// #5445 item 4: a table the last load could not read holds every cap
 	// spent, with a line of its own and no button: it clears by itself.
 	ca.day.Unread = true
-	if h := g.homeHTML(); !strings.Contains(h, "could not read the firewall's count of today's bytes") || strings.Contains(h, `data-action="fresh-day"`) {
+	if h := g.homeHTML(); !strings.Contains(h, "could not read the firewall's count of today's bytes") || strings.Contains(h, `data-action="fresh-day"`) || strings.Contains(h, "nor its own record") {
 		t.Errorf("home does not say the caps are held while the table is unread:\n%s", h)
 	}
 	ca.day.Unread = false
 	if h := g.homeHTML(); strings.Contains(h, "could not read the firewall's count") {
 		t.Error("home still says the table is unread")
 	}
-	ca.day.Spent = true
+	// #5491 item 2: the day and the table both unread are one card under
+	// one heading, with the step for the day.
+	ca.day.Unread, ca.day.Spent = true, true
+	if h := g.homeHTML(); strings.Count(h, "<h2>Byte caps</h2>") != 1 || strings.Count(h, `class="pending warn"`) != 1 ||
+		!strings.Contains(h, "nor its own record of them") || !strings.Contains(h, `data-action="fresh-day"`) {
+		t.Errorf("home does not show one card for the day and the table both unread:\n%s", h)
+	} else if strings.Count(h, "<p>")+strings.Count(h, "<p ") != strings.Count(h, "</p>") {
+		t.Errorf("home's paragraphs do not balance with the day and the table both unread (%d open, %d close):\n%s", strings.Count(h, "<p>")+strings.Count(h, "<p "), strings.Count(h, "</p>"), h)
+	}
+	ca.day.Unread = false
 	h := g.homeHTML()
 	if !strings.Contains(h, "could not read its record of today's bytes") || !strings.Contains(h, "it waits 10 minutes") ||
 		!strings.Contains(h, `data-action="fresh-day"`) || strings.Contains(h, `data-action="cancel-fresh"`) {

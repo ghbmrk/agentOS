@@ -468,9 +468,9 @@ func TestFailedListingBytesDropped(t *testing.T) {
 	}
 	failing(true)
 	x.d.Close()
-	x.start() // its first load: nothing to read
-	if x.fire.last() != x.fullLoad(x.current()) || x.d.net.unread {
-		t.Fatal("the first load read the bytes of a failed listing, or held its caps")
+	x.start() // its first load: a table that does not read (#5491)
+	if x.fire.last() == x.fullLoad(x.current()) || !x.d.net.unread {
+		t.Fatal("the first load read the bytes of a failed listing, or did not hold its caps")
 	}
 	if x.logs("firewall: running table unreadable") == 0 {
 		t.Fatal("the unreadable running table was not logged")
