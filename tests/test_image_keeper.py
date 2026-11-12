@@ -850,8 +850,16 @@ class KeeperTreeTest(unittest.TestCase):
         # items[]), not by load-fragment-gperf.gperf.in, which holds them with a NULL parser. Each is pinned with
         # what it names; a refusal on one says that and never offers the way onto NAME_ONLY_KEYS.
         # REQ: DEV-2, HW-1
-        self.assertEqual(set(check.INSTALL_KEYS),
-                         {"Alias", "WantedBy", "RequiredBy", "UpheldBy", "DefaultInstance", "Also"})
+        # #5596: each description is pinned as a literal here, so a swapped or replaced one fails.
+        self.assertEqual(check.INSTALL_KEYS, {
+            "Alias": "another name for this unit (systemd also takes a <unit>.wants/ or <unit>.requires/ link, which "
+                     "the tree check does not read)",
+            "WantedBy": "units whose .wants/ directory systemctl enable links this unit into",
+            "RequiredBy": "units whose .requires/ directory systemctl enable links this unit into",
+            "UpheldBy": "units whose .upholds/ directory systemctl enable links this unit into",
+            "DefaultInstance": "the instance name systemctl enable gives this template",
+            "Also": "units systemctl enable enables with this one",
+        })
         self.assertLessEqual(set(check.INSTALL_KEYS), check.UNIT_KEYS)
         self.assertEqual(set(check.INSTALL_KEYS) & check.NAME_ONLY_KEYS, set())
         for key, names in check.INSTALL_KEYS.items():
@@ -861,8 +869,11 @@ class KeeperTreeTest(unittest.TestCase):
                                  "it)" % (key, names))
                 self.assertNotIn("NAME_ONLY_KEYS", check.value_fix(key))
                 self.assertNotIn("PID1_NAMES", check.value_fix(key))
-        self.assertIn("unit", check.INSTALL_KEYS["Alias"])
-        self.assertIn("instance name", check.INSTALL_KEYS["DefaultInstance"])
+        # #5596: the Alias= text says why its slash form is refused rather than describing it as allowed.
+        self.assertTrue(check.value_fix("Alias").startswith(
+            "; write Alias= as plain names, with no specifier, quote, escape or '/': it names another name for this "
+            "unit (systemd also takes a <unit>.wants/ or <unit>.requires/ link, which the tree check does not read), "
+            "never a host path"))
         # End to end: the keys PID 1 does not take as names are refused when the check cannot read them, with
         # that text, wherever in [Install] they sit.
         for text in ("Alias=%p-x.service", "Alias=x.wants/y.service", "Alias='y.service'",

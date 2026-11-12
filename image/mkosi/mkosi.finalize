@@ -365,7 +365,8 @@ UNIT_KEYS = frozenset((
 # unit_file_verify_alias, whose only '/' form is a "<unit>.wants/" or "<unit>.requires/" link, made under the unit
 # directory. A refusal on one says what it names and never offers the way onto NAME_ONLY_KEYS (value_fix).
 INSTALL_KEYS = {
-    "Alias": "another name for this unit, or a <unit>.wants/ or <unit>.requires/ link to it in the unit directory",
+    "Alias": ("another name for this unit (systemd also takes a <unit>.wants/ or <unit>.requires/ link, which the "
+              "tree check does not read)"),
     "WantedBy": "units whose .wants/ directory systemctl enable links this unit into",
     "RequiredBy": "units whose .requires/ directory systemctl enable links this unit into",
     "UpheldBy": "units whose .upholds/ directory systemctl enable links this unit into",
