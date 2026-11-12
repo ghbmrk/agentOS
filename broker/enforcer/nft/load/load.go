@@ -21,10 +21,11 @@ import (
 
 var ErrLoad = errors.New("load: ruleset refused; the previous one stays")
 
-// ErrNoTable is a listing of a table that is not there: nft exited 1 with
-// "Error: No such file or directory" (ENOENT). Every other failure to list
-// (EPERM, a deadline, a killed nft, a missing binary) is not it, so the
-// table may be there and unread (ENF-l-15).
+// ErrNoTable is a listing of a table that is not there: nft exited 1 and its
+// first stderr line is exactly "Error: No such file or directory" (ENOENT).
+// Every other failure to list (EPERM, a longer message that ends the same
+// way, a deadline, a killed nft, a missing binary) is not it, so the table
+// may be there and unread (ENF-l-15).
 var ErrNoTable = errors.New("load: table absent")
 
 // Loader runs nft. Bin is the absolute path of the image's nft binary; it
