@@ -460,7 +460,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TEST-flake-arc6-owner-chat | TEST-flake-arc6-owner-chat: TestARC6OwnerChatReachesTheGuestAndBack gets an empty message under broker-race (2nd sighting). Release; from #5424. | #5235, #5424 | building (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | PREMERGE-status-bind | PREMERGE-status-bind: a fork PR on the same head commit cannot overwrite another PR's `premerge` status. Release; from #5384. | #5384 | queued (release; tier A; gate files) |
-| ENF-edge-cut-fu3 | ENF-edge-cut-fu3: an unread edge trip is not past, an empty trip element is an error, the net.unread spend-all hold shows on home, and RecordMissing speaks plainly. Release; from #5434. | #5399, #5434 | building (release; tier A) |
 | CI-unit-runners-norm | CI-unit-runners-norm: _runners normalises .. before its prefix match. Release; from #5438 (Security). | #5413, #5438 | building (release; tier B) |
 | LOG-open-anchor-first | LOG-open-anchor-first: kernel log Open checks the anchor before truncating an unread tail, so a refused open keeps every byte (LOG-2). | #5387 | queued (release; tier A; after #5387) |
 | CTL-unicode-chat-code | CTL-unicode-chat-code: a trailing code in non-ASCII digits in chat or UNLOCK is stripped or quarantined before the agent; codes stay ASCII-only. | none | queued (release; tier A) |
@@ -475,7 +474,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CI-unit-runners-lists | CI-unit-runners-lists: _runners checks every entry of a colon-separated list and resolves relative paths before the prefix match. Release; from #5483 (L3). | #5450, #5483 | queued (release; tier B) |
 | IMG-initrd-sysext-paths | IMG-initrd-sysext-paths: the sysext and confext sides of the initrd image check search the same directories (usr/lib/extensions and usr/local/lib/extensions included) as the image's systemd does. Release; from #5487 (Security). | #5482, #5487 | queued (release; tier A) |
 | IMG-initrd-unit-types-pin | IMG-initrd-unit-types-pin: a pin test for each INITRD_UNIT_TYPES entry. Release; low priority; from #5487 (Potency). | #5482, #5487 | queued (release; tier B) |
-| ENF-edge-cut-fu4 | ENF-edge-cut-fu4: an absent nft table is told from an unreadable one by ENOENT (ENF-l-15 corrected, the crash-restart residual closed), and home shows one card when the saved day and the table are both unreadable. Release; from #5490. | #5445, #5490 | queued (release; tier A) |
+| ENF-edge-cut-fu4 | ENF-edge-cut-fu4: an absent nft table is told from an unreadable one by ENOENT (ENF-l-15 corrected, the crash-restart residual closed), and home shows one card when the saved day and the table are both unreadable. Release; from #5490. | #5445, #5490 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
