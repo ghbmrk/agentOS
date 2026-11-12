@@ -73,7 +73,15 @@ chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C tar -xzf - -C /tmp/ag
 chroot "$base" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C sh -ec 'cd /tmp/agentos-codex-build/bwrap
 	tar -xJf - --strip-components=1
 	patch -p1 --quiet <../bwrap-loopback.patch
-	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap' <"$work/bwrap.tar.xz"
+	gcc -static -O2 -D_GNU_SOURCE -I. bubblewrap.c bind-mount.c network.c utils.c -l:libcap.a -o bwrap -Wl,-t >link.trace' \
+	<"$work/bwrap.tar.xz"
+# The linker listed each file it read (-t), and the Debian package of each one outside the build's
+# /tmp is recorded as shipped (image/guest-shipped.sh, #5572): bwrap carries their code, so the image
+# vulnerability check scans them.
+linked=$(sed -n 's/(.*$//; /^\/tmp\//d; /^\//p' "$src/bwrap/link.trace" | sort -u)
+[ -n "$linked" ] || { echo "bwrap: the linker listed no input outside /tmp" >&2; exit 1; }
+# shellcheck disable=SC2086  # one path per word
+sh "$here/../../image/guest-shipped.sh" "$base" $linked
 
 cd "$out"
 mkdir -p usr/local/bin usr/bin bin lib64 etc/codex opt/codex usr/lib/agentos/codex \

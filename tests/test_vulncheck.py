@@ -195,6 +195,11 @@ class RecordsTest(unittest.TestCase):
         self.assertFalse(vulncheck.summary([], ["initrd: no status file"], recs, out))
         self.assertIn("fix: clear the problems above first", out.getvalue())
         self.assertNotIn("fix: remove each unused record", out.getvalue())
+        # #5580: with no unused record, a problem alone does not print the unused-record hint.
+        out = io.StringIO()
+        self.assertFalse(vulncheck.summary([], ["p"], [], out))
+        self.assertIn("problem: p", out.getvalue())
+        self.assertNotIn("clear the problems", out.getvalue())
 
     def test_a_record_accepts_only_its_package_and_version(self):
         # #4153 (Security finding 2 on #4152): a record for minimatch 10.2.5 must not accept
@@ -369,15 +374,17 @@ class ImageTest(unittest.TestCase):
 
     def scan(self, records, found, src="x"):
         """scan_image with each tree's findings FOUND (by where) and no file problems."""
-        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status
+        saved = vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status, vulncheck.guest_problems
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: (
             [dict(f) for f in found if f["where"] == where], [])
         vulncheck.manifest_problems = lambda src: []
         vulncheck.initrd_status = lambda src: (b"Package: x\n", [])
+        vulncheck.guest_problems = lambda src: []
         try:
             return vulncheck.scan_image({"accepted": records}, src)
         finally:
-            vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status = saved
+            (vulncheck.run_image, vulncheck.manifest_problems, vulncheck.initrd_status,
+             vulncheck.guest_problems) = saved
 
     def image_dir(self):
         tmp = tempfile.TemporaryDirectory()
@@ -475,6 +482,7 @@ class ImageTest(unittest.TestCase):
         # Combined review 6376479024: scan_image must apply manifest_problems, not only have it.
         d = self.manifest_dir(lambda pkgs: pkgs.pop(0))
         shutil.copytree(self.image_dir() / vulncheck.INITRDS, d / vulncheck.INITRDS)
+        shutil.copytree(self.image_dir() / vulncheck.GUESTS, d / vulncheck.GUESTS)
         saved = vulncheck.run_image
         vulncheck.run_image = lambda src, env=None, offline=False, where="image", status=None: ([], [])
         try:
@@ -501,18 +509,94 @@ class ImageTest(unittest.TestCase):
         finally:
             vulncheck.run_image = saved
         self.assertEqual(probs, [])
-        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes())])
-        self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs], [("image", "FAIL"), ("image/initrd", "FAIL")])
+        self.assertEqual(calls, [("image", None), ("image/initrd", vulncheck.CONTROL_INITRD.read_bytes()),
+                                 ("image/guest", None)])
+        self.assertEqual([(f["where"], vulncheck.verdict(f)) for f in fs],
+                         [("image", "FAIL"), ("image/initrd", "FAIL"), ("image/guest", "FAIL")])
+
+    def test_the_guests_packages_are_scanned_as_their_own_tree(self):
+        # REQ: EVL-5. #5572: the guests' Debian packages, from their own status file beside the base
+        # root's manifest (DIR/guest), are queried like the main tree's, and a problem with that
+        # directory is reported, never a scan of nothing.
+        d, srcs = self.image_dir(), []
+
+        def run(src, env=None, offline=False, where="image", status=None):
+            srcs.append((where, pathlib.Path(src)))
+            return [], []
+        saved = vulncheck.run_image
+        vulncheck.run_image = run
+        try:
+            self.assertEqual(vulncheck.scan_image({"accepted": []}, d)[1], [])
+            self.assertIn(("image/guest", d / vulncheck.GUESTS), srcs)
+            (d / vulncheck.GUESTS / vulncheck.DPKG_STATUS).unlink()
+            srcs.clear()
+            _, probs, _ = vulncheck.scan_image({"accepted": []}, d)
+        finally:
+            vulncheck.run_image = saved
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("#5572", probs[0])
+        self.assertNotIn("image/guest", [w for w, _ in srcs])
+
+    def guest_dir(self, status=None, edit=None):
+        """The fixture's image with its guests' STATUS (text) and manifest packages after EDIT."""
+        d = self.image_dir() / vulncheck.GUESTS
+        if status is not None:
+            (d / vulncheck.DPKG_STATUS).write_text(status)
+        if edit:
+            m = json.loads((d / "agentos-guest.manifest").read_text())
+            edit(m["packages"])
+            (d / "agentos-guest.manifest").write_text(json.dumps(m))
+        return d.parent
+
+    def test_the_guests_status_lists_only_base_packages_at_their_versions(self):
+        # #5572: the scanned list is tied to the base root's manifest, which the reproduce job
+        # compares across runners; it may list fewer packages (only those the guests carry), not others.
+        self.assertEqual(vulncheck.guest_problems(vulncheck.FIXTURE / "image"), [])
+        st = (vulncheck.FIXTURE / "image" / vulncheck.GUESTS / vulncheck.DPKG_STATUS).read_text()
+        self.assertEqual(vulncheck.dpkg_installed(st), {("agentos-nofix", "2.0-1"), ("libguest1", "1.0-1")})
+        cases = {
+            "libguest1": dict(edit=lambda pkgs: pkgs.pop(2)),  # carried, not in the base
+            "9.9-9": dict(edit=lambda pkgs: pkgs[0].update(version="9.9-9")),  # another version
+            "lists no installed package": dict(status="Package: x\nStatus: deinstall ok config-files\n"),
+        }
+        for want, kw in cases.items():
+            with self.subTest(want):
+                probs = vulncheck.guest_problems(self.guest_dir(**kw))
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn(want, probs[0])
+        for name in (vulncheck.DPKG_STATUS, vulncheck.OS_RELEASE, "agentos-guest.manifest"):
+            with self.subTest(missing=name):
+                d = self.guest_dir()
+                (d / vulncheck.GUESTS / name).unlink()
+                probs = vulncheck.guest_problems(d)
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn("rebuild it", probs[0])
+        d = self.guest_dir()
+        (d / vulncheck.GUESTS / "agentos-guest.manifest").write_text("{")
+        self.assertIn("unreadable manifest", vulncheck.guest_problems(d)[0])
+
+    def test_the_build_writes_the_guests_status_where_the_scan_reads(self):
+        # #5572: image/build.sh writes the status into OUT/GUESTS, which the release record copies whole.
+        build = (ROOT / "image" / "build.sh").read_text()
+        self.assertIn('sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/%s"' % vulncheck.GUESTS, build)
+        self.assertIn('"$OUT/%s/agentos-guest.manifest"' % vulncheck.GUESTS, build)
+        shipped = (ROOT / "image" / "guest-shipped.sh").read_text()
+        self.assertIn('"$dir/%s"' % vulncheck.DPKG_STATUS, shipped)
+        self.assertIn('"$dir/%s"' % vulncheck.OS_RELEASE, shipped)
+        self.assertIn('cp -R "$RUNNER_TEMP"/out/%s "$RUNNER_TEMP/rec/"' % vulncheck.GUESTS, IMAGE_WORKFLOW.read_text())
 
     def test_a_record_accepts_an_image_advisory_only_in_its_own_tree(self):
-        # #4000: a main-tree acceptance must not hide the same advisory in the initrd, nor the reverse.
+        # #4000, #5572: an acceptance in one tree (main, initrd, guests) must not hide the same
+        # advisory in another.
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
-                {"id": "DSA-2", "issue": 2, "why": "x", "where": "image/initrd", "package": "m"}]
-        found = [{**fail(i), "where": w} for w in ("image", "image/initrd") for i in ("DSA-1", "DSA-2")]
+                {"id": "DSA-2", "issue": 2, "why": "x", "where": "image/initrd", "package": "m"},
+                {"id": "DSA-3", "issue": 3, "why": "x", "where": "image/guest", "package": "m"}]
+        trees = ("image", "image/initrd", "image/guest")
+        found = [{**fail(i), "where": w} for w in trees for i in ("DSA-1", "DSA-2", "DSA-3")]
         fs, probs, unused = self.scan(recs, found)
         self.assertEqual(([(f["where"], f["id"], vulncheck.verdict(f)) for f in fs], probs, unused), (
-            [("image", "DSA-1", "accepted #1"), ("image", "DSA-2", "FAIL"),
-             ("image/initrd", "DSA-1", "FAIL"), ("image/initrd", "DSA-2", "accepted #2")], [], []))
+            [(w, i, f"accepted #{n}" if w == trees[n - 1] else "FAIL")
+             for w in trees for n, i in enumerate(("DSA-1", "DSA-2", "DSA-3"), 1)], [], []))
 
     def test_the_initrd_archive_holds_the_initrds_status(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1073,16 +1157,111 @@ class PruneBuildTest(unittest.TestCase):
         self.assertTrue(all(p.endswith("/control-ui/") or p == "dist/extensions/imap/" for p in paths), paths)
 
     def test_the_imap_plugin_is_pruned_only_while_no_plugin_is_enabled(self):
-        # #5368: the IMAP plugin is off by default and starts only when the profile enables it; the
-        # profile has no top-level plugins or channels key and the guest cannot change it.
+        # #5368: the IMAP plugin is off by default and starts only when the profile enables it, and
+        # the shipped profile has no top-level plugins or channels key, so pruning it removes nothing
+        # the guest uses. The profile is not the containment: the guest is root and can rewrite it
+        # (ARC-7); the prune is, since an edited profile then finds no IMAP code to load (#5370).
         cfg = json.loads(vulncheck.CONFIG.read_text())
         self.assertIn("dist/extensions/imap/", {e["path"] for e in cfg.get("pruned", [])})
         profile = (ROOT / "guest" / "openclaw" / "openclaw.json5").read_text()
-        self.assertNotRegex(profile, r"(?m)^  (plugins|channels)\s*:")
+        keys = json5_top_keys(profile)
+        self.assertTrue({"tools", "commands", "gateway"} <= keys, keys)
+        self.assertFalse({"plugins", "channels"} & keys, keys)
         self.assertRegex(profile, r'deny:\s*\[[^\]]*"plugins"')
         self.assertRegex(profile, r"commands:\s*\{[^}]*plugins:\s*false")
         launch = json.loads((ROOT / "guest" / "openclaw" / "launch.json").read_text())
         self.assertIn("OPENCLAW_CONFIG_READONLY=1", launch["env"])
+
+JSON5_ESCAPE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(\r\n|[\n\r\u2028\u2029])|(.))", re.S)
+JSON5_SINGLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "0": "\0"}
+
+
+def json5_unescape(raw):
+    """RAW with JSON5's escapes decoded: \\uXXXX, \\xXX, line continuations and single characters."""
+    def one(m):
+        u, x, cont, ch = m.groups()
+        if u or x:
+            return chr(int(u or x, 16))
+        return "" if cont else JSON5_SINGLE.get(ch, ch)
+    return JSON5_ESCAPE.sub(one, raw)
+
+
+def json5_top_keys(text):
+    """The decoded keys of TEXT's top-level JSON5 object: quoted or not, escaped or not, at any
+    indent, several to a line, skipping comments, string values and nested values (#5370)."""
+    keys, depth, i, n = set(), 0, 0, len(text)
+    skip = re.compile(r"(?:\s+|//[^\n]*|/\*.*?\*/)*", re.S)
+    ident = re.compile(r"(?:[\w$]|\\u[0-9a-fA-F]{4})+")
+    while i < n:
+        i = skip.match(text, i).end()
+        if i >= n:
+            break
+        c = text[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            tok, i = text[i + 1:j], j + 1
+        elif c.isalnum() or c in "_$" or text.startswith("\\u", i):
+            j = ident.match(text, i).end()
+            tok, i = text[i:j], j
+        else:
+            depth += (c in "{[") - (c in "}]")
+            i += 1
+            continue
+        if depth == 1 and text[skip.match(text, i).end():][:1] == ":":
+            keys.add(json5_unescape(tok))
+    return keys
+
+
+class Json5TopKeysTest(unittest.TestCase):
+    # REQ: EVL-5. #5370: the imap prune guard reads the profile's top-level keys in every JSON5
+    # spelling; each case below enabled the plugin and passed the old two-space regex.
+    BASE = "{\n  tools: { deny: [\"plugins\"] },\n  commands: { plugins: false },\n  telemetry: { enabled: false },\n}\n"
+
+    def keys(self, old, new):
+        self.assertIn(old, self.BASE)
+        return json5_top_keys(self.BASE.replace(old, new, 1))
+
+    def test_the_shipped_shape_has_no_plugins_key(self):
+        self.assertEqual(json5_top_keys(self.BASE), {"tools", "commands", "telemetry"})
+
+    def test_a_quoted_key_counts(self):
+        self.assertIn("plugins", self.keys("  telemetry", '  "plugins": { allow: ["imap"] },\n  telemetry'))
+        self.assertIn("channels", self.keys("  telemetry", "  'channels': {},\n  telemetry"))
+
+    def test_a_deeper_indent_counts(self):
+        self.assertIn("plugins", self.keys("  telemetry", "    plugins: { entries: { imap: { enabled: true } } },\n  telemetry"))
+
+    def test_a_key_after_another_on_one_line_counts(self):
+        self.assertIn("plugins", self.keys("{ enabled: false },", '{ enabled: false }, plugins: { allow: ["imap"] },'))
+        self.assertIn("channels", self.keys("{\n  tools", "{ channels: {},\n  tools"))
+
+    def test_nested_keys_comments_and_strings_do_not_count(self):
+        keys = self.keys("  telemetry", '  // plugins: {}\n  /* channels: {} */\n  telemetry')
+        self.assertEqual(keys, {"tools", "commands", "telemetry"})
+        self.assertEqual(self.keys("[\"plugins\"]", '["plugins:", "channels"]'), {"tools", "commands", "telemetry"})
+        self.assertEqual(self.keys('"plugins"', '"a\\"plugins: b"'), {"tools", "commands", "telemetry"})
+
+    def test_an_escaped_key_counts(self):
+        # #5591 Security: JSON5 decodes escapes in quoted and bare keys.
+        for spelled in ['"plu\\u0067ins"', "'plu\\x67ins'", '"plu\\\ngins"', '"\\plugins"', "plu\\u0067ins",
+                        "\\u0070lugins", "\\u0063hannels", '"chan\\u006Eels"']:
+            with self.subTest(spelled=spelled):
+                self.assertTrue({"plugins", "channels"} & self.keys("  telemetry", f"  {spelled}: {{}},\n  telemetry"))
+
+    def test_a_root_array_has_no_top_level_keys(self):
+        # #5591 L3 mutant: brackets count toward depth.
+        self.assertEqual(json5_top_keys('[{ plugins: {} }, { channels: [] }]'), set())
+
+    def test_underscore_and_dollar_keys_keep_their_first_character(self):
+        # #5591 L3 mutant: _ and $ start a bare key.
+        self.assertEqual(json5_top_keys("{ _plugins: 1, $channels: 2 }"), {"_plugins", "$channels"})
+
+    def test_a_string_value_before_a_comma_is_not_a_key(self):
+        # #5591 L3 mutant: only a colon makes a key.
+        self.assertEqual(json5_top_keys('{ a: "plugins", b: \'channels\' }'), {"a", "b"})
+
 
 def lits(tag, n=6):
     """N string literals of FP_LEN characters that read as text, unique to TAG."""

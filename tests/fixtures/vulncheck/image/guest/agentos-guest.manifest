@@ -1,0 +1,19 @@
+{
+ "packages": [
+  {
+   "name": "agentos-nofix",
+   "version": "2.0-1",
+   "architecture": "all"
+  },
+  {
+   "name": "agentos-toolchain",
+   "version": "1.0-1",
+   "architecture": "amd64"
+  },
+  {
+   "name": "libguest1",
+   "version": "1.0-1",
+   "architecture": "amd64"
+  }
+ ]
+}

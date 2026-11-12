@@ -303,13 +303,77 @@ class KeeperTreeTest(unittest.TestCase):
                      "BindReadOnlyPaths=/usr/lib/agentos/agentos-imapconn", "BindReadOnlyPaths=/usr/lib/x/y:/z",
                      "ReadOnlyPaths=/tmp", "BindReadOnlyPaths=/srv/open:/y",
                      "BindReadOnlyPaths=/run/agentos-e2e/share:/x", "StateDirectory=agentos-localui",
-                     # Under a box mount a step is held to the named directories only, as a link's is:
-                     # trixie's own L /var/run line names /run.
+                     # Under a box mount a step is held to the named directories and tmpfiles.d's makers only,
+                     # as a link's is (#5191): trixie's own L /var/run line names /var/run, not /run.
                      "RuntimeDirectory=agentos-x",
                      # A link the tree holds is followed, not taken as a step, though a tmpfiles.d line keeps it.
                      "BindReadOnlyPaths=/srv/lk/x:/y"):
             with self.subTest(line):
                 self.assertEqual(self.probe(line), [])
+
+    def test_a_path_through_a_directory_tmpfiles_makes_under_a_box_mount_is_refused(self):
+        # #5191: under a box mount the box makes every step at boot, so a tmpfiles.d line that makes one for a user
+        # other than root, gives it a group, or makes it a link decides who can plant a link in it at runtime
+        # (y -> /var/lib/agentos-store), as a unit's own directory would; trixie's L /var/run line names no /run step.
+        stock = "L /var/run - - - - ../run\nd /run/r 0755 root root -\n"
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + "d /run/svc 0755 svc svc -\n"
+              "d /run/grp 0775 root svc -\nL /run/lnk - - - - /srv\nd /var/run/old 0700 svc - -\n")
+        tmpf = "usr/lib/tmpfiles.d/zz-probe.conf"
+        refused = {"BindReadOnlyPaths=/run/svc/y:/z": ("/run/svc", 3, "mode 0755 for svc:svc"),
+                   "ReadOnlyPaths=/var/run/svc/y": ("/run/svc", 3, "mode 0755 for svc:svc"),
+                   "BindReadOnlyPaths=/run/grp/y:/z": ("/run/grp", 4, "mode 0775 for root:svc"),
+                   "EnvironmentFile=/run/lnk/y": ("/run/lnk", 5, "a link"),
+                   "ReadOnlyPaths=/run/old/y": ("/run/old", 6, "mode 0700 for svc:-")}
+        for line, (d, n, what) in refused.items():
+            with self.subTest(line):
+                got = self.probe(line)
+                self.assertEqual(len(got), 1, got)
+                path = line.split("=", 1)[1].split(":")[0]
+                self.assertEqual(got[0], "agentos-boot-report.service: %s, which the box resolves when the unit starts, "
+                                 "so a link to it is held to the link rules (#5154): a link to %s, through %s, under a "
+                                 "box mount, which %s line %d makes %s on the box; the line decides who can write it "
+                                 "(#5191) (D-154)" % (line, path, d, tmpf, n, what))
+        # A tree link through such a directory is held the same way.
+        (self.root / "srv").mkdir(exist_ok=True)
+        (self.root / "srv/t").symlink_to("/run/svc/y")
+        self.assertIn("srv/t: a link to /run/svc/y, through /run/svc, under a box mount, which %s line 3 makes mode "
+                      "0755 for svc:svc on the box; the line decides who can write it (#5191)" % tmpf,
+                      "\n".join(check.violations(self.root)))
+        (self.root / "srv/t").unlink()
+        # Security on #5584: a specifier the check does not expand (%u is root, %U 0, %o debian, %a the architecture;
+        # %A and %B are empty on trixie and drop a component) is refused whole, under a box mount or in the tree,
+        # and so is one in a link's target; the machine and boot IDs are a glob component.
+        for line, spec in (("d /run/%u 0755 svc svc -", "%u"), ("d /run/%U 0755 svc svc -", "%U"),
+                           ("d /run/%o 0755 svc svc -", "%o"), ("d /run/%a 0755 svc svc -", "%a"),
+                           ("d /run/%A/q 0755 svc svc -", "%A"), ("d /run/q%B 0755 svc svc -", "%B"),
+                           ("d /srv/%u 0755 svc svc -", "%u"), ("d /run/q%%%u 0755 root root -", "%u"),
+                           ("d /run/q% 0755 root root -", "%"), ("d /run/\\x25u 0755 svc svc -", "%u"),
+                           ("L /run/lk2 - - - - /srv/%u", "%u"), ("z /srv/%g 0755 root root -", "%g")):
+            with self.subTest(line):
+                write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + line + "\n")
+                self.assertIn("usr/lib/tmpfiles.d/zz-probe.conf: line 3: %s; a specifier the tree check does not "
+                              "expand (%s), so it cannot tell what the line names; write the path without it (#5191)"
+                              % (line, spec), check.violations(self.root))
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + "d /run/%m 0755 svc svc -\nd /run/q%%u 0755 root root -\n")
+        self.assertEqual([v for v in check.violations(self.root) if "#5191" in v and "tmpfiles.allow" not in v], [])
+        got = self.probe("BindReadOnlyPaths=/run/0123abcd/y:/z")
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("through /run/0123abcd, under a box mount, which %s line 3 makes mode 0755 for svc:svc" % tmpf,
+                      got[0])
+        # L3 on #5584: a link a tmpfiles.d L line makes under a box mount is not a step of its own way, so the tree's
+        # copy of it (Debian's run/shm, once tmpfiles has run) is not refused by its own line.
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock + "L /run/a - - - - /dev/b\n")
+        (self.root / "run").mkdir(exist_ok=True)
+        (self.root / "run/a").symlink_to("/dev/b")
+        self.assertEqual([v for v in check.violations(self.root) if "#5191" in v], [])
+        (self.root / "run/a").unlink()
+        # A root-owned line, and the stock L /var/run line, leave /run's steps root's.
+        write(self.root, "usr/lib/tmpfiles.d/zz-probe.conf", stock)
+        for line in ("BindReadOnlyPaths=/run/r/y:/z", "ReadOnlyPaths=/var/run/r/y", "BindReadOnlyPaths=/run/svc/y:/z"):
+            with self.subTest(line):
+                self.assertEqual(self.probe(line), [])
+        # (The probe file itself is off tmpfiles.allow; nothing else is refused.)
+        self.assertEqual([v for v in check.violations(self.root) if "tmpfiles.allow" not in v], [])
 
     def test_a_path_through_a_stock_service_users_directory_is_refused(self):
         # #5167: systemd makes each *Directory= a unit file names, stock or ours, so systemd-resolved's user can
@@ -694,9 +758,10 @@ class KeeperTreeTest(unittest.TestCase):
         # A value PID 1 acts on that holds a specifier, a quote, a backslash or a byte it does not model is
         # refused whole, wherever it sits in a word (Security 6760938141: %i, %R and %B may expand to "", and
         # systemd unquotes and unescapes words before it makes the path).
-        # #5557: a key off NAME_ONLY_KEYS is told the way onto it, with its v257 parser as proof.
+        # #5557, #5191: a key off v257's unit file table is told the way onto NAME_ONLY_KEYS, with its parser and the
+        # code that uses the value as proof; a key on the table, path keys among them, is not.
         onto = (", or, if %s= never names a host path, add %s to NAME_ONLY_KEYS, quoting as proof its parser in "
-                "systemd v257's load-fragment-gperf.gperf.in")
+                "systemd v257's load-fragment-gperf.gperf.in and the code that uses the value")
         for text in ("ListenStream=%t/x.sock", "Symlinks=/run/a /run/b%i", "Where=/var/lib/'q'",
                      "StandardError=truncate:%S/x", "Symlinks=%i/run/sy", "Symlinks=%R/run/sy", "Symlinks=%B/run/sy",
                      "ListenFIFO=%i/run/sy", 'Symlinks="/run/sy"', "Symlinks='/run/sy'", "Symlinks=\\/run/sy",
@@ -716,12 +781,16 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(len(got), 1, got)
                     self.assertTrue(got[0].startswith("%sx.socket: %s=" % (SYSTEM, key)), got)
                     # #5253: each refusal ends saying what the builder changes. #5547: these keys name host paths,
-                    # so the fix offered is a plain path, never PID1_NAMES; #5557: and the way onto NAME_ONLY_KEYS.
+                    # so the fix offered is a plain path, never PID1_NAMES; #5191 (Lens R1 on #5566): and never the
+                    # way onto NAME_ONLY_KEYS, since v257's table holds each with its path parser.
+                    self.assertIn(key, check.UNIT_KEYS)
                     self.assertTrue(got[0].endswith(
                         ": the tree check does not model it; the tree check never passes a unit file whose paths it "
-                        "cannot read (#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')"
-                        "%s" % (key, onto % (key, key))), got)
+                        "cannot read (#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it "
+                        "names one)"
+                        % key), got)
                     self.assertNotIn("PID1_NAMES", got[0])
+                    self.assertNotIn("NAME_ONLY_KEYS", got[0])
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
@@ -729,14 +798,23 @@ class KeeperTreeTest(unittest.TestCase):
         # key get the plain-path fix alone; a name-only key keeps the remedy with its proof bar.
         self.assertEqual(check.NAME_ONLY_KEYS & set(check.PID1_NAMES), set())
         self.assertEqual(check.NAME_ONLY_KEYS & set(check.PID1_READS), set())
-        bar = ("(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..'), or, if %s= "
+        # #5191: the table holds every key the check names, so it was read whole.
+        self.assertEqual(len(check.UNIT_KEYS), 484)
+        self.assertLessEqual(check.NAME_ONLY_KEYS | set(check.PID1_NAMES) | set(check.PID1_READS)
+                             | set(check.UNIT_MADE_DIRS) | set(check.PID1_NAMESPACE_MAKES), check.UNIT_KEYS)
+        bar = ("(#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, where it names "
+               "one), or, if %s= "
                "never names a host path, add %s to PID1_NAMES, quoting in the change as proof the systemd "
                "source line that shows it (its parser in load-fragment-gperf.gperf.in and the code that uses "
                "the value), not an assertion")
-        for text, remedy in (("IPIngressFilterPath=%i/x", False), ("IPEgressFilterPath=%i/x", False),
-                             ("BPFProgram=%i:/x", False), ("RootHash=%i", False), ("RootHashSignature=%i", False),
-                             ("InventedKeyV999=%i", False), ("Nice=%i", False), ("Environment=A=%i", True), ("LogExtraFields=K=%n", True),
-                             ("Environment=A=/run/x/../y", True), ("SetCredential=c:a/b", True)):
+        # #5191: a key on v257's table but off NAME_ONLY_KEYS (the path keys, and Nice=, whose parser
+        # config_parse_exec_nice is on the table to be read) gets the plain-path fix alone; only a key off the table
+        # gets the way onto NAME_ONLY_KEYS.
+        for text, remedy in (("IPIngressFilterPath=%i/x", None), ("IPEgressFilterPath=%i/x", None),
+                             ("BPFProgram=%i:/x", None), ("RootHash=%i", None), ("RootHashSignature=%i", None),
+                             ("InventedKeyV999=%i", False), ("Nice=%i", None), ("Environment=A=%i", True),
+                             ("LogExtraFields=K=%n", True), ("Environment=A=/run/x/../y", True),
+                             ("SetCredential=c:a/b", True)):
             with self.subTest(text):
                 d = write(self.root, SYSTEM + "x.service", "[Service]\n%s\n" % text)
                 try:
@@ -747,9 +825,11 @@ class KeeperTreeTest(unittest.TestCase):
                         self.assertTrue(got[0].endswith(bar % (key, key, key)), got)
                     else:
                         self.assertTrue(got[0].endswith(
-                            "(#5167); write %s= as plain absolute paths (no specifier, quote, escape or '..')%s"
-                            % (key, onto % (key, key))), got)
+                            "(#5167); write %s= with no specifier, quote, escape or '..' (as plain absolute paths, "
+                            "where it names one)%s"
+                            % (key, "" if remedy is None else onto % (key, key))), got)
                         self.assertNotIn("PID1_NAMES", got[0])
+                        self.assertEqual("NAME_ONLY_KEYS" in got[0], remedy is False, got)
                     self.assertIn(got[0], check.violations(self.root))
                 finally:
                     d.unlink()
@@ -764,6 +844,43 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(check.unit_made_paths(self.root)[2], [])
         finally:
             d.unlink()
+
+    def test_an_install_key_refusal_says_what_it_names(self):
+        # #5588 (Security on #5584): the [Install] keys are parsed by systemd v257's install.c (unit_file_load's
+        # items[]), not by load-fragment-gperf.gperf.in, which holds them with a NULL parser. Each is pinned with
+        # what it names; a refusal on one says that and never offers the way onto NAME_ONLY_KEYS.
+        # REQ: DEV-2, HW-1
+        self.assertEqual(set(check.INSTALL_KEYS),
+                         {"Alias", "WantedBy", "RequiredBy", "UpheldBy", "DefaultInstance", "Also"})
+        self.assertLessEqual(set(check.INSTALL_KEYS), check.UNIT_KEYS)
+        self.assertEqual(set(check.INSTALL_KEYS) & check.NAME_ONLY_KEYS, set())
+        for key, names in check.INSTALL_KEYS.items():
+            with self.subTest(key):
+                self.assertEqual(check.value_fix(key), "; write %s= as plain names, with no specifier, quote, escape "
+                                 "or '/': it names %s, never a host path (systemd v257's install.c; PID 1 ignores "
+                                 "it)" % (key, names))
+                self.assertNotIn("NAME_ONLY_KEYS", check.value_fix(key))
+                self.assertNotIn("PID1_NAMES", check.value_fix(key))
+        self.assertIn("unit", check.INSTALL_KEYS["Alias"])
+        self.assertIn("instance name", check.INSTALL_KEYS["DefaultInstance"])
+        # End to end: the keys PID 1 does not take as names are refused when the check cannot read them, with
+        # that text, wherever in [Install] they sit.
+        for text in ("Alias=%p-x.service", "Alias=x.wants/y.service", "Alias='y.service'",
+                     "DefaultInstance=%H", "DefaultInstance=a\\x2db"):
+            with self.subTest(text):
+                d = write(self.root, SYSTEM + "x@.service", "[Service]\nExecStart=/bin/true\n[Install]\n%s\n" % text)
+                try:
+                    key = text.split("=", 1)[0]
+                    got = check.unit_made_paths(self.root)[2]
+                    self.assertEqual(len(got), 1, got)
+                    self.assertTrue(got[0].endswith(check.value_fix(key)), got)
+                    self.assertIn(check.INSTALL_KEYS[key], got[0])
+                    self.assertNotIn("NAME_ONLY_KEYS", got[0])
+                    self.assertIn(got[0], check.violations(self.root))
+                finally:
+                    d.unlink()
+        # A key on neither table still gets the route.
+        self.assertIn("add InventedKeyV999 to NAME_ONLY_KEYS", check.value_fix("InventedKeyV999"))
 
     def test_a_unit_made_directorys_way_is_roots_alone(self):
         # #5167 re-plan 2: systemd 257's setup_exec_directory makes the missing steps, then chmods and chowns

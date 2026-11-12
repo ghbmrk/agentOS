@@ -182,6 +182,12 @@ class RootfsBuildTest(unittest.TestCase):
         self.assertEqual({c for c in compilers if not c.startswith(b"Debian ")}, set())
         # The build leaves nothing in the base the next guest build reads.
         self.assertFalse((base / "tmp/agentos-codex-build").exists())
+        # #5572: the packages whose archives the linker read into bwrap are recorded as shipped,
+        # with those of every file the guest copies, so the image vulnerability check scans them.
+        record = os.environ.get("GUEST_SHIPPED")
+        self.assertTrue(record, "set GUEST_SHIPPED, the file the build records shipped packages in")
+        shipped = set(pathlib.Path(record).read_text().split())
+        self.assertLessEqual({"libc6-dev", "libcap-dev", "libc6", "dash", "bash"}, shipped)
 
     # REQ: UPD-1a
     def test_no_host_tar_xz_or_patch_runs(self):

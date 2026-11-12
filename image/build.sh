@@ -76,6 +76,9 @@ chmod 0755 "$PHOTO/agentos-photo"
 # to OUT/guest/ for the reproduce job; the root is deleted once the guests are built.
 sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"
 export GUEST_BASE="$OUT/guest-base"
+# Each guest build records here the Debian packages whose files it copies (image/guest-shipped.sh).
+export GUEST_SHIPPED="$OUT/guest-base.shipped"
+true >"$GUEST_SHIPPED"
 # The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode on the
 # pinned libavcodec, built in the base by its own script (image/camdecode.sh), and libavcodec's
 # licence text.
@@ -91,8 +94,11 @@ sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/opencla
 # agentosd registers it (-image codex=); the CLI is pinned by npm's integrity hash.
 sh "$REPO/guest/codex/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/codex"
 sh "$HERE/check_codex_pin.sh" "$REPO" "$STAGE/usr/lib/agentos/images/codex"
-rm -rf --one-file-system "$GUEST_BASE"
-unset GUEST_BASE
+# The dpkg status of the packages whose files the guests carry, beside their manifest: the image
+# vulnerability check scans them as the "image/guest" tree (image/guest-shipped.sh, #5572).
+sh "$HERE/guest-shipped.sh" --status "$GUEST_BASE" "$OUT/guest"
+rm -rf --one-file-system "$GUEST_BASE" "$GUEST_SHIPPED"
+unset GUEST_BASE GUEST_SHIPPED
 # How agentosd starts the agent machine (W1): its -agent-launch default.
 install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/guest/launch.json"
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
