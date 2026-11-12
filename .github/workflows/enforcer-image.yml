@@ -54,6 +54,8 @@ jobs:
         run: python3 image/enforcer/test_finish_image.py -v
       - name: Tree check unit tests
         run: python3 image/enforcer/test_finalize.py -v
+      - name: Boot self-check unit tests
+        run: python3 image/enforcer/test_health.py -v
       - name: WAN router-advertisement check unit tests
         run: python3 image/enforcer/test_ci_wan.py -v
       - name: Throwaway feeds, and the key separation on them

@@ -33,7 +33,8 @@ RPF = ("net/ipv4/conf/all/rp_filter", "net/ipv4/conf/default/rp_filter", "net/ip
 # that names or globs an interface's accept_redirects in either family (iface_key).
 REDIRECTS = tuple("net/%s/conf/%s/accept_redirects" % (f, i) for f in ("ipv4", "ipv6") for i in ("all", "default", "*"))
 # Where systemd-sysctl reads sysctl.d, highest first: a name in a higher directory replaces the same
-# name lower down, and the files are read in name order.
+# name lower down, and the files are read in name order. systemd-sysctl never reads /etc/sysctl.conf
+# itself (the core's mkosi.finalize says the same); the 99-sysctl.conf link to it is refused below.
 SYSCTL_DIRS = ("etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d")
 
 
@@ -86,9 +87,8 @@ def iface_key(key, family, leaf):
 
 def sysctls(root):
     """What systemd-sysctl sets, key by key (sysctl_key), and the refusals: a link anywhere in
-    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL,
-    "#" and ";" start comments, a leading "-" only ignores errors, and the last assignment wins. A
-    glob key that matches a NODUMP key counts as setting it."""
+    sysctl.d, which the box could resolve differently from this check. Lines end at LF, CR or NUL, "#" and ";" start comments, a leading "-" only ignores errors,
+    and the last assignment wins. A glob key that matches a NODUMP key counts as setting it."""
     files, out = {}, []
     for d in SYSCTL_DIRS:
         p = root / d
@@ -104,7 +104,8 @@ def sysctls(root):
                 files.setdefault(f.name, f)
     vals = {}
     for name in sorted(files, key=os.fsencode):
-        for raw in re.split(rb"[\n\r\x00]", files[name].read_bytes()):
+        f = files[name]
+        for raw in re.split(rb"[\n\r\x00]", f.read_bytes()):
             ln = raw.strip(b" \t").decode(errors="replace")
             if not ln or ln[0] in "#;":
                 continue

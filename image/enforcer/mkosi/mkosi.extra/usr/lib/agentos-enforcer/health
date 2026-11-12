@@ -3,7 +3,7 @@
 # systemd-bless-boot blesses this boot's entry only when it passes; a release that fails it on every
 # try is abandoned by boot counting and the previous release boots (enforcer-fallback.service).
 # Secure Boot off is reported, not failed, as on the core (HW-5). ENFORCER_HEALTH_ROOT exists for
-# image/enforcer/test_scripts.py.
+# image/enforcer/test_health.py.
 R=${ENFORCER_HEALTH_ROOT:-}
 fail() { echo "enforcer-health: FAIL $*"; exit 1; }
 
