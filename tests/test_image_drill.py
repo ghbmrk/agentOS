@@ -272,8 +272,8 @@ class DrillTest(unittest.TestCase):
         self.assertEqual(self.log.read_text().count("systemctl reboot --check-inhibitors=yes"), 6)
         fails = [ln for ln in r.stdout.splitlines() if "FAIL" in ln]
         self.assertEqual(len(fails), 2, r.stdout)
-        self.assertTrue(fails[0].startswith("agentos-reboot: FAIL drill record not written (image=verified): "
-                                            "is /var full or failing?"), fails[0])
+        self.assertEqual(fails[0], "agentos-reboot: FAIL drill record not written (image=verified): likely /var "
+                                   "is full or failing. The reboot goes ahead; the next boot reports the drill missed")
         self.assertEqual(fails[0], fails[1])
         lines = r.stdout.splitlines()
         self.assertEqual(lines[-2:], [fails[1], "agentos-reboot: rebooting"])
@@ -403,8 +403,36 @@ class DrillTest(unittest.TestCase):
                 (self.drill / "pending").unlink(missing_ok=True)
                 r = subprocess.run(shell + [str(AG / "reboot-weekly")], env=self.env(), capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                self.assertIn("agentos-reboot: FAIL drill start not recorded: is /var full or failing?", r.stdout)
+                self.assertIn("agentos-reboot: FAIL drill start record not written: likely /var is full or failing. "
+                              "If the drill's record is lost too, no boot reports this drill", r.stdout)
                 self.assertEqual(self.log.read_text().splitlines()[-1], "systemctl reboot --check-inhibitors=yes")
+
+    def test_the_missed_report_is_promised_only_when_its_marker_was_written(self):
+        # DRILL-stamp-wording-fu (#5513) item 1: a record that cannot be written promises "the next boot
+        # reports the drill missed" only when unrecorded was written; with unrecorded not creatable either,
+        # no boot reports the drill, so the line does not say one will. Items 2 and 3: both FAIL lines name
+        # the "record", and each states a likely cause rather than asking one.
+        for marker in (True, False):
+            with self.subTest(marker=marker):
+                shutil.rmtree(self.drill, ignore_errors=True)
+                self.log.unlink(missing_ok=True)
+                self.break_write()
+                if not marker:
+                    write(self.root, "var/lib/agentos/drill/unrecorded/x")
+                self.inhibit.write_text("1\n")
+                write(self.root, "proc/uptime", "3600.42 12.00\n")
+                r = subprocess.run(["sh", str(AG / "reboot-weekly")], env=self.env(), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                fails = [ln for ln in r.stdout.splitlines() if "FAIL" in ln]
+                stamps = [ln for ln in fails if "FAIL drill record not written" in ln]
+                self.assertEqual(len(stamps), 2, r.stdout)
+                for ln in stamps:
+                    self.assertEqual(ln.endswith("; the next boot reports the drill missed"), marker, ln)
+                self.assertEqual(len(fails), len(stamps) + (0 if marker else 1), r.stdout)
+                for ln in fails:
+                    self.assertNotIn("?", ln)
+                    self.assertIn("record not written: likely /var is full or failing" if "start" in ln
+                                  else "): likely /var is full or failing. The reboot goes ahead", ln)
 
     def test_an_ordinary_reboot_leaves_nothing_to_report(self):
         write(self.root, "var/lib/agentos/drill/last.json", "{}\n")
