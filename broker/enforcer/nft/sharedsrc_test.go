@@ -969,12 +969,15 @@ func addrInt(a string) uint64 {
 // its address to another host until the element runs out. dnsmasq leases
 // three addresses on Guests; host A leases the first and renews it, so its
 // unicast messages to the server ride an established connection:
-//   - A's DHCPRELEASE (message type first, as clients write it) never
-//     reaches the server: B asking for A's address is refused (NAK);
+//   - A's DHCPRELEASE, byte for byte as dhcpcd 10.0.6 writes it (measured
+//     against this dnsmasq: unicast flags, the message type first, then
+//     the server identifier and the end, padded to 300 bytes), never
+//     reaches the server: B asking for A's address is refused (NAK), and
+//     nothing is held;
 //   - a forged RELEASE for A's lease, from another hardware address, with
 //     a pad before its message type, reaches the server, which frees the
 //     address and leases it to B (its lease file), but the ACK never
-//     leaves: B gets no answer and no element;
+//     leaves and is counted on LeaseHeld: B gets no answer and no element;
 //   - C leases the second address and moves to the third (a REQUEST
 //     naming it): the server frees the second and leases it to D, whose
 //     ACK never leaves, while C's elements for both stay;
@@ -982,8 +985,9 @@ func addrInt(a string) uint64 {
 //     is answered and leased.
 //
 // Catches a RELEASE drop after the established accept or matched by
-// another offset, an answer check missing or keyed by address alone, and a
-// snoop that adds the address but not the lease.
+// another offset, an answer check missing or keyed by address alone, a
+// snoop that adds the address but not the lease, and a held answer not
+// counted.
 func TestEarlyEndedLeasesStayHeld(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -1016,12 +1020,16 @@ func TestEarlyEndedLeasesStayHeld(t *testing.T) {
 		b, err := os.ReadFile(leases)
 		return err == nil && strings.Contains(string(b), " "+hw+" "+addr+" ")
 	}
+	// release is a RELEASE as dhcpcd 10.0.6 writes it, unless pad puts a
+	// pad option before its message type.
 	release := func(from, hw, addr string, pad bool) {
 		xid++
 		m := dhcpMsg(t, 7, xid, hw, netip.MustParseAddr(addr), append([]byte{54, 4}, server...)...)
+		m[10] = 0
 		if pad {
 			m = slices.Insert(m, 240, 0)
 		}
+		m = append(m, make([]byte, max(0, 300-len(m)))...)
 		dhcpAsk(t, h, x, from, m, enfAddr("guest"), 300*time.Millisecond)
 	}
 
@@ -1034,13 +1042,13 @@ func TestEarlyEndedLeasesStayHeld(t *testing.T) {
 	}
 
 	release(A, A, X, false)
-	if a := take(B, X, wait); dhcpType(a) != 6 || !listed(X, A) {
-		t.Errorf("after A's RELEASE, B asking for %s: answer %d (want NAK), A listed %v: the RELEASE reached the server", X, dhcpType(a), listed(X, A))
+	if a := take(B, X, wait); dhcpType(a) != 6 || !listed(X, A) || h.counter(LeaseHeld) != 0 {
+		t.Errorf("after A's RELEASE, B asking for %s: answer %d (want NAK), A listed %v, held %d: the RELEASE reached the server", X, dhcpType(a), listed(X, A), h.counter(LeaseHeld))
 	}
 
 	release(C, A, X, true)
-	if a := take(B, X, none); a != nil || !listed(X, B) || holds(X, B) || !holds(X, A) {
-		t.Errorf("after a padded RELEASE: B got answer %d, the server leased %s to B %v, B's element %v, A's %v; want the server to lease it and the ACK dropped", dhcpType(a), X, listed(X, B), holds(X, B), holds(X, A))
+	if a := take(B, X, none); a != nil || !listed(X, B) || holds(X, B) || !holds(X, A) || h.counter(LeaseHeld) != 1 {
+		t.Errorf("after a padded RELEASE: B got answer %d, the server leased %s to B %v, B's element %v, A's %v, held %d; want the server to lease it and the ACK dropped and counted once", dhcpType(a), X, listed(X, B), holds(X, B), holds(X, A), h.counter(LeaseHeld))
 	}
 
 	if a := take(C, Y, wait); dhcpType(a) != 5 {
@@ -1049,8 +1057,11 @@ func TestEarlyEndedLeasesStayHeld(t *testing.T) {
 	if a := take(C, Z, wait); dhcpType(a) != 5 || !holds(Z, C) || listed(Y, C) {
 		t.Fatalf("C did not move to %s: answer %d, element %v, still listed on %s %v", Z, dhcpType(a), holds(Z, C), Y, listed(Y, C))
 	}
-	if a := take(D, Y, none); a != nil || !listed(Y, D) || holds(Y, D) || !holds(Y, C) || !holds(Z, C) {
-		t.Errorf("after C moved: D got answer %d, the server leased %s to D %v, D's element %v, C's %v and %v; want the ACK dropped and C's kept", dhcpType(a), Y, listed(Y, D), holds(Y, D), holds(Y, C), holds(Z, C))
+	if a := take(D, Y, none); a != nil || !listed(Y, D) || holds(Y, D) || !holds(Y, C) || !holds(Z, C) || h.counter(LeaseHeld) != 2 {
+		t.Errorf("after C moved: D got answer %d, the server leased %s to D %v, D's element %v, C's %v and %v, held %d; want the ACK dropped and counted, and C's kept", dhcpType(a), Y, listed(Y, D), holds(Y, D), holds(Y, C), holds(Z, C), h.counter(LeaseHeld))
+	}
+	if _, n, err := Held([]byte(run(t, "nft", "-j", "list", "table", "inet", Table))); n != 2 || err != nil {
+		t.Errorf("Held reads %d, %v from the running table; want 2", n, err)
 	}
 
 	hwA, _ := net.ParseMAC(A)

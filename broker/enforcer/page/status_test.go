@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -576,6 +577,48 @@ func TestHomeShowsStoppedResolver(t *testing.T) {
 	g = newRig(t)
 	if h := g.homeHTML(); strings.Contains(h, "Names and addresses") {
 		t.Error("home shows a resolver it was not given")
+	}
+}
+
+// #5528 (NET-3; nft ASSUMPTIONS ENF-shared-src-1): a host the firewall
+// kept from an address another host had until recently shows on home in
+// one line, whether or not the resolver runs, beside an unread lease file
+// under one heading, and only while the daemon says so. The line is a
+// finding with a step: it names how long the wait lasts and what the
+// owner can do sooner, and names no address, hardware address, counter or
+// other identifier.
+func TestHomeShowsAHeldHost(t *testing.T) {
+	g := newRig(t)
+	res := &fakeResolver{}
+	cfg := g.s.cfg
+	cfg.Resolver = res
+	var err error
+	if g.s, err = New(cfg); err != nil {
+		t.Fatal(err)
+	}
+	const held = "<p>In the last 12 hours, a device on the Owner, Household or Guests network was offered an address another device had until recently and may still use, so the enforcer held that offer back. Such a device cannot join until the address is free, within 12 hours. To join it sooner, turn its private (random) Wi-Fi address off, or on, for that network and join again: it then usually gets another address.</p>"
+	if h := g.homeHTML(); strings.Contains(h, "Addresses handed out") || strings.Contains(h, "held that offer") {
+		t.Fatal("home shows a held host the daemon did not report")
+	}
+	for _, stopped := range []bool{false, true} {
+		res.stop = ResolverStop{Stopped: stopped, Held: true}
+		h := g.homeHTML()
+		if !strings.Contains(h, "<h2>Addresses handed out</h2>") || strings.Count(h, held) != 1 || strings.Contains(h, "could not read its list") {
+			t.Errorf("home (stopped %v) does not show a held host in its words alone:\n%s", stopped, h)
+		}
+	}
+	res.stop = ResolverStop{Held: true, Unseeded: true}
+	if h := g.homeHTML(); strings.Count(h, "<h2>Addresses handed out</h2>") != 1 || strings.Count(h, held) != 1 || !strings.Contains(h, "could not read its list") {
+		t.Errorf("home does not show a held host and an unread lease file under one heading:\n%s", h)
+	}
+	line := strings.TrimSuffix(strings.TrimPrefix(held, "<p>"), "</p>")
+	for _, step := range []string{"within 12 hours", "To join it sooner, turn its private (random) Wi-Fi address off, or on"} {
+		if !strings.Contains(line, step) {
+			t.Errorf("the held host's line names no %q", step)
+		}
+	}
+	if regexp.MustCompile(`[0-9a-f]{2}:[0-9a-f]{2}|[0-9]+\.[0-9]+\.[0-9]|[a-z][A-Z]|_|/|\.go|[0-9a-f]{8}`).MatchString(line) {
+		t.Errorf("the held host's line names an identifier: %s", line)
 	}
 }
 

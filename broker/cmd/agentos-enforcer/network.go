@@ -107,6 +107,12 @@ type network struct {
 	// lease file could not be read whole (zero: it seeded what the file
 	// holds), shown on home until every host has renewed (#5394).
 	unseeded time.Time
+	// heldAt is when a reading last found the address server's answers
+	// held (nft.LeaseHeld) risen, shown on home for a lease after it
+	// (#5528); heldTable and held are the table and count it read last,
+	// under d.fwMu.
+	heldAt          time.Time
+	heldTable, held uint64
 	// refreshErr is the resolver step's last failure, logged once while
 	// it lasts ("" while it works).
 	refreshErr string
@@ -278,6 +284,8 @@ func (d *Enforcer) loadNetwork(ctx context.Context, doc policy.Document) (err er
 		}
 		if err != nil {
 			running = nil
+		} else {
+			d.noteHeld(running) // answers held since the last reading
 		}
 		// A full load starts new counters (a new Gen), so the bytes since
 		// the last reading are read from the table it replaces first, or
@@ -657,6 +665,7 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.noteHeld(running)
 	// The table reads again: a full load that reads it ends the caps
 	// held spent since one that could not (holdDrop).
 	d.net.reload = d.net.reload || d.net.unread
@@ -665,6 +674,34 @@ func (d *Enforcer) refreshAnswers(ctx context.Context) error {
 		return err
 	}
 	return d.dp.Fire.Update(lctx, text)
+}
+
+// noteHeld reads nft.LeaseHeld in running, the running table; d.fwMu is
+// held. A count risen since the last reading of the same table, or above
+// 0 in a new one (a load starts it at 0), means the server's answer to a
+// host was held since (ENF-shared-src-1): home shows it for a lease. The
+// first reading since the daemon started (heldTable 0: the kernel numbers
+// tables from 1) is only where counting starts, since a table that
+// outlived the last run counted at times this run cannot tell.
+func (d *Enforcer) noteHeld(running []byte) {
+	table, held, err := nft.Held(running)
+	if err != nil {
+		return // the step that read the listing fails on it too, and logs it
+	}
+	n := &d.net
+	switch {
+	case n.heldTable == 0:
+		n.held = held
+	case table != n.heldTable:
+		n.held = 0
+	}
+	n.heldTable = table
+	if held > n.held {
+		n.resMu.Lock()
+		n.heldAt = d.dp.Now()
+		n.resMu.Unlock()
+	}
+	n.held = held
 }
 
 // counted are the ports whose received bytes the byte caps count: the

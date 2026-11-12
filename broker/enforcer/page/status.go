@@ -127,6 +127,12 @@ type ResolverStop struct {
 	// since (#5394): until it does, the firewall passes nothing of it.
 	// It shows whether or not the instances run.
 	Unseeded bool
+	// Held is whether, within a lease (12 hours), the firewall kept the
+	// address service from giving a host an address it ended early for
+	// another host, which may still use it (nft ASSUMPTIONS
+	// ENF-shared-src-1, #5528): the host asking gets no address until that
+	// address is free. It shows whether or not the instances run.
+	Held bool
 }
 
 // LoadStep is the step of a load that refused it.
@@ -389,7 +395,7 @@ func (s *Server) status() map[string]any {
 	}
 	if s.cfg.Resolver != nil {
 		r := s.cfg.Resolver.Stopped()
-		out["Unseeded"] = r.Unseeded
+		out["Unseeded"], out["Held"] = r.Unseeded, r.Held
 		if r.Stopped {
 			out["Resolver"] = plainStop(r)
 		} else if len(r.Restarting) > 0 {

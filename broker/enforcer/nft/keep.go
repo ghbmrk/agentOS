@@ -395,8 +395,9 @@ type Lease struct {
 // its next renewal, up to half a lease later. A lease on no shared
 // segment's interface, of no IPv4 address (or 0.0.0.0) or Ethernet
 // hardware address, with no time left or with more than LeaseTimeout, is
-// left out: its host waits for its next renewal (fails closed). Like records, the text goes only to
-// nft's input (NET-1, NET-3). Empty for no leases.
+// left out: its host waits for its next renewal (fails closed). Like
+// records, the text goes only to nft's input (NET-1, NET-3). Empty for
+// no leases.
 func Seed(l Layout, leases []Lease) string {
 	w := elems{}
 	for _, sg := range segments(l) {
@@ -506,6 +507,38 @@ func listed(listing []byte) ([]listedSet, error) {
 		}
 	}
 	return out, nil
+}
+
+// Held reads LeaseHeld in a JSON listing of the running table: table is
+// the table's handle, which the kernel gives each new table, so each load
+// (which starts the counter at 0) has its own, and held is how many of the
+// address server's answers the snoop has held since. A table with no such
+// counter (one loaded before it existed) holds none.
+func Held(listing []byte) (table, held uint64, err error) {
+	var doc struct {
+		Nftables []struct {
+			Table *struct {
+				Family, Name string
+				Handle       uint64
+			} `json:"table"`
+			Counter *struct {
+				Family, Table, Name string
+				Packets             uint64
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(listing, &doc); err != nil {
+		return 0, 0, fmt.Errorf("nft: running table listing: %v", err)
+	}
+	for _, o := range doc.Nftables {
+		switch t, c := o.Table, o.Counter; {
+		case t != nil && t.Family == "inet" && t.Name == Table:
+			table = t.Handle
+		case c != nil && c.Family == "inet" && c.Table == Table && c.Name == LeaseHeld:
+			held = c.Packets
+		}
+	}
+	return table, held, nil
 }
 
 // elements is each listed set with its plain address elements. An element
