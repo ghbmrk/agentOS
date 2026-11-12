@@ -71,7 +71,10 @@ with no config or no modules, an expected lockfile the OSV scan did not report, 
 outside every Go target (neither scanner would check it), a directory-replaced module the
 fork scan did not report, an image scan with no packages or with packages outside a
 versioned Debian ecosystem, or a scanner exit code other than its clean/found codes. The OSV scan ignores .gitignore, so a tracked lockfile cannot
-be hidden by one.
+be hidden by one. A record that accepts no finding of its scan fails that scan too: left in
+place after its advisory is withdrawn or its package upgraded or dropped, it would accept the
+same ID again unreviewed if the package came back. image.yml runs on every change to
+assurance/vulncheck.json, so a change to the image records alone is scanned against a build.
 
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
@@ -1423,7 +1426,12 @@ def summary(findings, problems, unused, out=None):
     if any(not (f["where"] in IMAGE_TREES and f["fixed"]) for f in failing):
         print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
-    return not failing and not problems
+    if unused and problems:
+        print("fix: clear the problems above first; a record can look unused when its tree was not read",
+              file=out)
+    elif unused:
+        print("fix: remove each unused record from assurance/vulncheck.json", file=out)
+    return not failing and not problems and not unused
 
 
 UNVERSIONED = re.compile(r"^npm/package-lock\.json: (\S+) inlines (\S+) \(marked ")
