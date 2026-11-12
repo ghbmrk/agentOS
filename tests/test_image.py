@@ -1546,14 +1546,16 @@ class DriveIdTest(unittest.TestCase):
 # command is flagged when, after leading reserved words, 'time -p' and assignments, its command word
 # is a special builtin and it carries a redirection that can fail (closing an fd with >&- or <&-
 # cannot; a here-document can, since bash may write it to a temporary file). SHELL_LIMITS names what
-# the lint does not read, and the failure message repeats it. The scan covers every tracked shell file.
+# the lint does not read, and the failure message repeats it. The scan covers every shell file outside
+# the record directories.
 SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
 SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
 SHELL_META = " \t\n;&|()<>"
 SHELL_REDIR = re.compile(r"[<>]+[&|]?")
 SHELL_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
-SHELL_LIMITS = ("The lint reads tracked shell files only (*.sh, or a sh, bash or dash #! line), not shell held "
-                "in other files (sh -c strings, workflow run: blocks; #5538). It does not read aliases or "
+SHELL_LIMITS = ("The lint reads shell files only (*.sh, or a sh, bash or dash #! line), not shell held in "
+                "other files (sh -c strings, workflow run: blocks; #5538), nor files in record directories "
+                "(reviews/, briefs/ and the rest in tools/ci_scope.py), which this test may not open. It does not read aliases or "
                 "functions named like a builtin, the text that eval, sh -c or a trap runs, escapes that spell a "
                 "name in $'...', a case whose 'in' is on a later line, bash's &> and &>>, the 'function name' "
                 "form, or nested backquotes; it reads a ' inside \"${...}\" as dash does (as text), not as bash "
@@ -1777,19 +1779,27 @@ def redirected_specials(text):
     return sorted(hits)
 
 
+CI_SCOPE = load("image_ci_scope", ROOT / "tools/ci_scope.py")
+
+
 def shell_files(root=ROOT):
-    """The shell files git tracks under ROOT: *.sh, or a #!/bin/sh, bash or dash line."""
-    names = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True).stdout
+    """The shell files under ROOT: *.sh, or a #!/bin/sh, bash or dash line. The walk opens no record
+    (ci_scope: a record file or directory, or .git), since CI's records-only step does not run this
+    module (tests/records_audit.py)."""
     out = []
-    for name in sorted(n.decode() for n in names.split(b"\0") if n):
-        f = root / name
-        if not f.is_file() or f.is_symlink():
-            continue
-        with f.open("rb") as fh:
-            head = fh.readline()
-        if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
-            out.append(f)
-    return out
+    for top, dirs, files in os.walk(root):
+        rel = pathlib.Path(top).relative_to(root).as_posix()
+        rel = "" if rel == "." else rel + "/"
+        dirs[:] = sorted(d for d in dirs if not (rel + d == ".git" or (rel + d + "/").startswith(CI_SCOPE.RECORD_DIRS)))
+        for name in files:
+            f = pathlib.Path(top, name)
+            if f.is_symlink() or not f.is_file() or CI_SCOPE.is_record(rel + name):
+                continue
+            with f.open("rb") as fh:
+                head = fh.readline()
+            if f.suffix == ".sh" or re.match(rb"#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba|da)?sh\b", head):
+                out.append(f)
+    return sorted(out)
 
 
 # Hits in another lane's files, each with the row that fixes it; an entry that no longer hits fails, so
@@ -2038,21 +2048,21 @@ class ImageShellLintTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(redirected_specials(line), [(1, name)])
 
-    def test_shell_files_are_the_tracked_shell_files(self):
+    def test_shell_files_are_the_shell_files_outside_records(self):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             files = {"a.sh": "echo\n", "sub/b": "#!/bin/sh\n", "c": "#!/bin/bash\n", "e": "#!/bin/dash\n",
                      "f": "#!/usr/bin/env sh\n", "g": "#! /usr/bin/bash\n", "h": "#!/usr/bin/python3\n",
-                     "i.py": "#!/bin/shx\n", "j": "echo\n", "k": "#!/bin/bash -p\n"}
+                     "i.py": "#!/bin/shx\n", "j": "echo\n", "k": "#!/bin/bash -p\n", "docs/l.sh": "echo\n",
+                     ".git/hooks/m.sh": "echo\n", "reviews/ux/n.sh": "echo\n", "briefs/o": "#!/bin/sh\n",
+                     "docs/security/p.sh": "echo\n", "README.md": "#!/bin/sh\n", "x/reviews/q.sh": "echo\n"}
             for name, body in files.items():
                 (d / name).parent.mkdir(parents=True, exist_ok=True)
                 (d / name).write_text(body)
             (d / "link.sh").symlink_to(d / "a.sh")
-            subprocess.run(["git", "init", "-q", str(d)], check=True)
-            subprocess.run(["git", "-C", str(d), "add", "."], check=True)
-            (d / "untracked.sh").write_text(": >x\n")
+            (d / "dir.sh").mkdir()
             self.assertEqual([str(f.relative_to(d)) for f in shell_files(d)],
-                             ["a.sh", "c", "e", "f", "g", "k", "sub/b"])
+                             ["a.sh", "c", "docs/l.sh", "e", "f", "g", "k", "sub/b", "x/reviews/q.sh"])
 
     def test_repository_shell_has_no_redirected_special_builtin(self):
         files = shell_files()
