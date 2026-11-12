@@ -945,6 +945,39 @@ class InitrdBluetoothTest(unittest.TestCase):
                     finish.check_initrd("agentos/initrd", data)
                 self.assertIn("could bring up Bluetooth (#1475)", str(e.exception.code))
 
+    # systemd v257's unit types (src/basic/unit-def.c unit_type_table), held here, not read from any list
+    # under test, so dropping an entry from one of them fails (#5489).
+    SYSTEMD_UNIT_TYPES = ("service", "socket", "target", "device", "mount", "automount", "swap", "timer", "path",
+                          "slice", "scope")
+
+    def test_each_initrd_unit_type_is_pinned(self):
+        # #5489 (from #5487 Potency): an enablement link to a unit file of each type is accepted, and a
+        # link to a directory under /usr/lib/systemd/system named after it is refused as one, so an entry
+        # dropped from INITRD_UNIT_TYPES fails here.
+        where = "etc/systemd/system/multi-user.target.wants/x."
+        link = stat.S_IFLNK | 0o777
+        for t in self.SYSTEMD_UNIT_TYPES:
+            with self.subTest(t=t):
+                ok = finish.initrd_violations([(where + t, link, b"/usr/lib/systemd/system/x." + t.encode(), None)])
+                self.assertEqual(ok, [])
+                bad = finish.initrd_violations([(where + t, link, b"/usr/lib/systemd/system/x.%s.d" % t.encode(), None)])
+                self.assertEqual(bad, ["%s%s: links to a directory, not a unit file, under /usr/lib/systemd/system"
+                                       % (where, t)])
+        self.assertEqual(finish.INITRD_UNIT_TYPES, self.SYSTEMD_UNIT_TYPES)
+
+    def test_unit_type_lists_agree(self):
+        # #5489 (from #5487 L3): three files list unit types. Each stays in its own module (unit_rules.py
+        # and unlock_graph.py are loaded alone by the image build), so they are pinned to one list here:
+        # a change to one that is not made in the others fails. unit_rules.py lists the types a unit file
+        # in a unit directory may define there; it lacks .device and .scope (see the second assertion).
+        graph = load("unlock_graph_types", IMG / "unlock_graph.py")
+        rules = load("unit_rules_types", IMG / "unit_rules.py")
+        named = re.fullmatch(r".*\\\.\(([a-z|]+)\)\\Z", graph.UNIT_NAME.pattern).group(1).split("|")
+        self.assertEqual(named, list(self.SYSTEMD_UNIT_TYPES))
+        self.assertEqual(sorted(t[1:] for t in rules.TYPES),
+                         sorted(set(self.SYSTEMD_UNIT_TYPES) - {"device", "scope"}))
+        self.assertEqual(finish.INITRD_UNIT_TYPES, self.SYSTEMD_UNIT_TYPES)
+
 
 def manifest_dir(root, side, text):
     d = root / side
@@ -1865,6 +1898,15 @@ class ConfigTest(unittest.TestCase):
         u = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")
         self.assertEqual(u["Service"]["EnvironmentFile"], "-/etc/agentos/agentosd.env")
         self.assertIn("/usr/lib/agentos/agentosd", u["Service"]["ExecStart"])
+
+    def test_gpt_auto_types_agree(self):
+        # #5489 (from #5495): mkosi.finalize's GPT_AUTO_MOUNTS lists every partition type gpt-auto mounts
+        # (a definition of any other type is refused); finish_image.py's REPART_TYPES the four the built
+        # disk may hold. They differ on purpose, so the difference is pinned: a type added to or dropped
+        # from either list that is not made in the other fails here.
+        self.assertLessEqual(set(finish.REPART_TYPES), set(check.GPT_AUTO_MOUNTS))
+        self.assertEqual(sorted(set(check.GPT_AUTO_MOUNTS) - set(finish.REPART_TYPES)),
+                         ["home", "root-verity", "root-verity-sig", "srv", "tmp", "usr-verity-sig", "var", "xbootldr"])
 
 
 class NoDumpTest(unittest.TestCase):
