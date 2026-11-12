@@ -142,8 +142,8 @@ func (h *home) move(seg, addr, from, to string, v6 bool) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	old, _ := lease(netip.MustParseAddr(addr), hw)
-	now, _ := lease(netip.MustParseAddr(addr), next)
+	old, _, _ := lease(netip.MustParseAddr(addr), hw)
+	now, _, _ := lease(netip.MustParseAddr(addr), next)
 	run(h.t, "nft", "delete", "element", "inet", Table, LeaseSet(nftSeg(seg)), "{ "+old+" }")
 	run(h.t, "nft", "add", "element", "inet", Table, LeaseSet(nftSeg(seg)), "{ "+now+" }")
 }
@@ -373,7 +373,9 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 			el(`{"concat": ["10.30.0.2", "02:00:00:00:00:01"]}`, 100),
 			el(`{"concat": [169738242]}`, 100),
 		},
-		LeasedSet("guests"): {el(`2199023255553`, 43200), el(`281474976710656`, 100), el(`"02:00:00:00:00:01"`, 100), el(`2199023255556`, 0)},
+		// Never carried: each load writes it from the leases it carries.
+		LeaseAddrSet("guests"): {el(`169738249`, 100)},
+		LeasedSet("guests"):    {el(`2199023255553`, 43200), el(`281474976710656`, 100), el(`"02:00:00:00:00:01"`, 100), el(`2199023255556`, 0)},
 		// A running table from before the leases: its IPv4 claims become
 		// leases, its IPv4 holds go.
 		"held_owner_4": {el(`"10.10.0.2"`, 21600)},
@@ -405,11 +407,13 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 	want := strings.Join([]string{
 		"add element inet enforcer claim_household_6 { fd10:20::2 . 02:00:00:00:00:02 expires 50s }",
 		"add element inet enforcer lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 60s, 0x0a0a0005 . 0x02000000000a expires 30s }",
+		"add element inet enforcer leaseaddr_owner_4 { 0x0a0a0002 expires 60s, 0x0a0a0005 expires 30s }",
 		"add element inet enforcer leased_owner { 0x02000000000a expires 60s }",
 		"add element inet enforcer held_owner_6 { fd10:10::2 expires 50s }",
 		"add element inet enforcer host_guests_4 { 123 . 10.30.0.2 . 10.30.0.2 . 02:00:00:00:00:01 expires 100s, 124 . 10.30.0.2 . 10.30.0.2 . 02:00:00:00:00:01 timeout 400000s expires 400000s }",
 		"add element inet enforcer host_household_6 { 7 . fd10:20::2 . fd10:20::2 . 02:00:00:00:00:02 expires 3600s }",
 		"add element inet enforcer lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s }",
+		"add element inet enforcer leaseaddr_guests_4 { 0x0a1e0002 expires 100s }",
 		"add element inet enforcer leased_guests { 0x020000000001 expires 43200s }",
 		"add element inet enforcer mac6_household { 0x020000000002 expires 50s }",
 	}, "\n") + "\n"
@@ -432,13 +436,16 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 //   - an address no one holds a lease of is refused to both hosts, before
 //     the server's ACK leases it to the first host, which the output chain
 //     reads as it leaves (snoop); after it the first host's datagram from
-//     it arrives and the second host's does not;
+//     it arrives and the second host's does not, and the server's ACK of
+//     that address to the second host never leaves (#5300);
 //   - an ACK of a shorter lease leases its address too, for the floor of
 //     its lease band (leaseBands): at each band edge the element's timeout
 //     is the band's floor, never longer than the lease, and a renewal ACK
 //     near a band's top refreshes it before half the lease (the client's
-//     renewal time) has run; an ACK with no address (to an INFORM) leases
-//     nothing;
+//     renewal time) has run; an ACK with no address (to an INFORM), or
+//     past LeaseTimeout, leases nothing; a later, shorter ACK of another
+//     address to a hardware address cuts its leased element to that
+//     band, and the first address keeps its own (#5300);
 //   - on IPv6 (in CI) the first host's first address holds and a second
 //     address of its hardware address is refused, and the second host,
 //     whose lease is taken away, holds none.
@@ -448,7 +455,8 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 // so a refusal is the datagram not arriving, whoever would get its answer.
 // Catches a claim without the lease check, a lease checked by address
 // alone, a snoop that misses dnsmasq's ACK, drops a shorter lease or keeps
-// it past its band's floor, takes an ACK with no address, no
+// it past its band's floor, takes an ACK with no address or past
+// LeaseTimeout, lets an ACK of a held address to another host leave, no
 // per-hardware-address IPv6 limit or leased check, and a load that drops
 // the leases or the limit.
 func TestSharedHoldsFollowLeases(t *testing.T) {
@@ -526,8 +534,9 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 	}
 	// ack is the server's DHCPACK leasing yiaddr to hw for lease seconds,
 	// written as dnsmasq writes it, sent from the enforcer out of seg's
-	// interface.
-	ack := func(seg, yiaddr, hw string, lease uint32) {
+	// interface; it reports whether the ACK left (the output chain's drop
+	// fails the send).
+	ack := func(seg, yiaddr, hw string, lease uint32) bool {
 		t.Helper()
 		b := make([]byte, 240)
 		b[0], b[1], b[2] = 2, 1, 6
@@ -552,9 +561,11 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_BROADCAST, 1); err != nil {
 			t.Fatal(err)
 		}
-		if err := unix.Sendto(fd, pkt, 0, &unix.SockaddrInet4{Addr: [4]byte{255, 255, 255, 255}}); err != nil {
+		err = unix.Sendto(fd, pkt, 0, &unix.SockaddrInet4{Addr: [4]byte{255, 255, 255, 255}})
+		if err != nil && err != unix.EPERM {
 			t.Fatal(err)
 		}
+		return err == nil
 	}
 
 	// leased is the timeout and time left, in seconds, of the element
@@ -631,6 +642,13 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 		if !arrives(seg, free[seg], seg+" leased 1") || arrives(seg+"2", free[seg], seg+" leased 2") {
 			t.Errorf("%s: after the ACK to the first host, its datagram must arrive and the second host's must not", seg)
 		}
+		// The server's ACK giving that address to the second host never
+		// leaves while the first host's element lasts (#5300).
+		macB := h.mac(h.hosts[seg+"2"], "eth0")
+		left := ack(seg, free[seg], macB, LeaseTimeout)
+		if _, _, ok := leased(seg, free[seg], macB); left || ok || arrives(seg+"2", free[seg], seg+" taken 2") {
+			t.Errorf("%s: an ACK of the first host's address to the second host leased it", seg)
+		}
 		ack(seg, short[seg], macA, 3600)
 		if !arrives(seg, short[seg], seg+" short") {
 			t.Errorf("%s: an ACK of a shorter lease did not lease its address", seg)
@@ -652,6 +670,26 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 			if to, left, ok := leased(seg, addr, macA); !ok || to != int64(floor) || left > to || 2*left <= int64(lease) {
 				t.Errorf("%s: a %d s lease: element %v, timeout %d s, %d s left; want its band's floor %d s, past half the lease", seg, lease, ok, to, left, floor)
 			}
+		}
+		// An ACK past LeaseTimeout, the top band, leases nothing (#5300).
+		const over, moved = "02:00:00:00:43:21", "02:00:00:00:53:00"
+		hwOver, _ := net.ParseMAC(over)
+		ack(seg, segAddr(seg, 80), over, LeaseTimeout+1)
+		_, ok1 := element(t, LeasedSet(nftSeg(seg)), hwInt(hwOver))
+		_, ok2 := element(t, LeaseAddrSet(nftSeg(seg)), addrInt(segAddr(seg, 80)))
+		if _, _, ok := leased(seg, segAddr(seg, 80), over); ok || ok1 || ok2 {
+			t.Errorf("%s: an ACK of %d s leased: lease %v, hardware address %v, address %v", seg, LeaseTimeout+1, ok, ok1, ok2)
+		}
+		// A later, shorter ACK of another address to the same hardware
+		// address cuts its leased element to that ACK's band, while the
+		// first address's element keeps its own (fails closed; ASSUMPTIONS
+		// ENF-shared-src-1).
+		hwMoved, _ := net.ParseMAC(moved)
+		ack(seg, segAddr(seg, 81), moved, LeaseTimeout)
+		ack(seg, segAddr(seg, 82), moved, MinLease)
+		cut, ok := element(t, LeasedSet(nftSeg(seg)), hwInt(hwMoved))
+		if _, first, ok1 := leased(seg, segAddr(seg, 81), moved); !ok1 || first <= MinLease || !ok || cut > MinLease {
+			t.Errorf("%s: after a shorter ACK of another address: first lease %v with %d s left, leased element %v with %d s left; want over and at most %d s", seg, ok1, first, ok, cut, MinLease)
 		}
 		ack(seg, "0.0.0.0", macA, LeaseTimeout)
 		if _, _, ok := leased(seg, "0.0.0.0", macA); ok {
@@ -702,17 +740,12 @@ func TestSharedHoldsFollowLeases(t *testing.T) {
 	}
 }
 
-// NET-3 (#5294): the snoop reads the real dnsmasq's DHCPACK. dnsmasq, run
-// as the enforcer runs it on the Guests segment, leases an address to a
-// host; the lease set then holds that address with the host's hardware
-// address, and the leased set the hardware address. A host that asks for
-// a shorter lease is granted it and leased too. Catches payload
-// offsets or an option order that do not match dnsmasq's ACK, which the
-// crafted ACKs of TestSharedHoldsFollowLeases would not show.
-func TestSnoopReadsDnsmasqACK(t *testing.T) {
-	if !inNetns(t) {
-		return
-	}
+// guestDnsmasq runs the real dnsmasq as the enforcer runs it on the
+// Guests segment, leasing segAddr("guest", lo) to segAddr("guest", hi),
+// behind the fixture ruleset with no lease seeded, and returns the home,
+// the guest host and dnsmasq's lease file.
+func guestDnsmasq(t *testing.T, lo, hi int) (*home, *host, string) {
+	t.Helper()
 	bin, err := exec.LookPath("dnsmasq")
 	if err != nil {
 		if required() {
@@ -739,7 +772,7 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 
 	dir := t.TempDir()
 	conf := strings.Join([]string{"port=0", "interface=" + l.Guests, "bind-interfaces", "no-ping", "dhcp-authoritative",
-		"dhcp-range=" + segAddr("guest", 98) + "," + segAddr("guest", 198) + "," + strconv.Itoa(LeaseTimeout/3600) + "h",
+		"dhcp-range=" + segAddr("guest", lo) + "," + segAddr("guest", hi) + "," + strconv.Itoa(LeaseTimeout/3600) + "h",
 		"dhcp-leasefile=" + dir + "/leases", "pid-file="}, "\n") + "\n"
 	if err := os.WriteFile(dir+"/conf", []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
@@ -758,71 +791,108 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 		}
 	})
 	time.Sleep(300 * time.Millisecond)
+	return h, x, dir + "/leases"
+}
+
+// dhcpMsg is a client's DHCP message of type typ (option 53, first) from
+// hardware address hw, asking for answers by broadcast, then opts.
+func dhcpMsg(t *testing.T, typ byte, xid uint32, hw string, ciaddr netip.Addr, opts ...byte) []byte {
+	m, err := net.ParseMAC(hw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 240)
+	b[0], b[1], b[2] = 1, 1, 6
+	binary.BigEndian.PutUint32(b[4:], xid)
+	b[10] = 0x80
+	if ciaddr.IsValid() {
+		copy(b[12:], ciaddr.AsSlice())
+	}
+	copy(b[28:], m)
+	copy(b[236:], []byte{99, 130, 83, 99})
+	return append(append(append(b, 53, 1, typ), opts...), 255)
+}
+
+// dhcpAsk sends msg from the guest host x, with hardware address hw, from
+// UDP port 68 to the server at to (broadcast if empty), and returns the
+// server's answer to msg's xid within wait, or nil.
+func dhcpAsk(t *testing.T, h *home, x *host, hw string, msg []byte, to string, wait time.Duration) []byte {
+	t.Helper()
+	h.in(x, "ip", "link", "set", "eth0", "address", hw)
+	var got []byte
+	within(t, x, func() {
+		lc := onDevice("eth0")
+		pc, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:68")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pc.Close()
+		dst := &net.UDPAddr{IP: net.IPv4bcast, Port: 67}
+		if to != "" {
+			dst.IP = net.ParseIP(to)
+		}
+		if _, err := pc.WriteTo(msg, dst); err != nil {
+			t.Fatal(err)
+		}
+		pc.SetReadDeadline(time.Now().Add(wait))
+		buf := make([]byte, 1500)
+		for {
+			n, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n > 243 && buf[0] == 2 && slices.Equal(buf[4:8], msg[4:8]) {
+				got = slices.Clone(buf[:n])
+				return
+			}
+		}
+	})
+	return got
+}
+
+// dhcpType is a DHCP message's type, when option 53 comes first.
+func dhcpType(m []byte) byte {
+	if len(m) > 242 && m[240] == 53 {
+		return m[242]
+	}
+	return 0
+}
+
+// NET-3 (#5294): the snoop reads the real dnsmasq's DHCPACK. dnsmasq, run
+// as the enforcer runs it on the Guests segment, leases an address to a
+// host; the lease set then holds that address with the host's hardware
+// address, and the leased set the hardware address. A host that asks for
+// a shorter lease is granted it and leased too. Catches payload
+// offsets or an option order that do not match dnsmasq's ACK, which the
+// crafted ACKs of TestSharedHoldsFollowLeases would not show.
+func TestSnoopReadsDnsmasqACK(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h, x, _ := guestDnsmasq(t, 98, 198)
+	l := fixtureLayout()
+	server := net.ParseIP(enfAddr("guest")).To4()
 
 	// leaseOf runs a client's DISCOVER and REQUEST from the guest host
 	// with hardware address hw, asking for lease seconds (0: none), and
 	// returns the address the ACK leased.
 	leaseOf := func(hw string, lease uint32) netip.Addr {
 		t.Helper()
-		h.in(x, "ip", "link", "set", "eth0", "address", hw)
-		m, err := net.ParseMAC(hw)
-		if err != nil {
-			t.Fatal(err)
+		var opts []byte
+		if lease != 0 {
+			opts = binary.BigEndian.AppendUint32([]byte{51, 4}, lease)
 		}
-		msg := func(typ byte, xid uint32, opts ...byte) []byte {
-			b := make([]byte, 240)
-			b[0], b[1], b[2] = 1, 1, 6
-			binary.BigEndian.PutUint32(b[4:], xid)
-			b[10] = 0x80 // answer by broadcast
-			copy(b[28:], m)
-			copy(b[236:], []byte{99, 130, 83, 99})
-			b = append(append(b, 53, 1, typ), opts...)
-			if lease != 0 {
-				b = binary.BigEndian.AppendUint32(append(b, 51, 4), lease)
-			}
-			return append(b, 255)
+		const xid = 0x5294
+		offer := dhcpAsk(t, h, x, hw, dhcpMsg(t, 1, xid, hw, netip.Addr{}, opts...), "", 10*time.Second)
+		if dhcpType(offer) != 2 {
+			t.Fatalf("no DHCPOFFER to %s", hw)
 		}
-		var yiaddr netip.Addr
-		within(t, x, func() {
-			lc := onDevice("eth0")
-			pc, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:68")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer pc.Close()
-			bcast := &net.UDPAddr{IP: net.IPv4bcast, Port: 67}
-			// answer reads the server's answer of type typ to xid.
-			answer := func(xid uint32, typ byte) []byte {
-				pc.SetReadDeadline(time.Now().Add(10 * time.Second))
-				buf := make([]byte, 1500)
-				for {
-					n, _, err := pc.ReadFrom(buf)
-					if err != nil {
-						t.Fatalf("no DHCP answer of type %d: %v", typ, err)
-					}
-					if n > 243 && buf[0] == 2 && binary.BigEndian.Uint32(buf[4:]) == xid && buf[240] == 53 && buf[242] == typ {
-						return slices.Clone(buf[:n])
-					}
-				}
-			}
-			const xid = 0x5294
-			if _, err := pc.WriteTo(msg(1, xid), bcast); err != nil {
-				t.Fatal(err)
-			}
-			offer := answer(xid, 2)
-			var server []byte
-			for i := 240; i+1 < len(offer) && offer[i] != 255; i += 2 + int(offer[i+1]) {
-				if offer[i] == 54 && offer[i+1] == 4 {
-					server = offer[i+2 : i+6]
-				}
-			}
-			if _, err := pc.WriteTo(msg(3, xid, append(append([]byte{50, 4}, offer[16:20]...), append([]byte{54, 4}, server...)...)...), bcast); err != nil {
-				t.Fatal(err)
-			}
-			ack := answer(xid, 5)
-			yiaddr = netip.AddrFrom4([4]byte(ack[16:20]))
-		})
-		return yiaddr
+		req := append(append([]byte{50, 4}, offer[16:20]...), 54, 4)
+		ack := dhcpAsk(t, h, x, hw, dhcpMsg(t, 3, xid, hw, netip.Addr{}, append(append(req, server...), opts...)...), "", 10*time.Second)
+		if dhcpType(ack) != 5 {
+			t.Fatalf("no DHCPACK to %s", hw)
+		}
+		return netip.AddrFrom4([4]byte(ack[16:20]))
 	}
 	carried := func() string {
 		out, err := Reload(fixturePolicy(), l, h.List())
@@ -837,8 +907,8 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 	b := leaseOf(short, 3600)
 	hwFull, _ := net.ParseMAC(full)
 	hwShort, _ := net.ParseMAC(short)
-	elem, leased := lease(a, hwFull)
-	shortElem, shortLeased := lease(b, hwShort)
+	elem, _, leased := lease(a, hwFull)
+	shortElem, _, shortLeased := lease(b, hwShort)
 	got := carried()
 	if !strings.Contains(got, "add element inet "+Table+" "+LeaseSet("guests")+" { "+elem+" expires ") ||
 		!strings.Contains(got, "add element inet "+Table+" "+LeasedSet("guests")+" { "+leased+" expires ") {
@@ -846,6 +916,148 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 	}
 	if !strings.Contains(got, shortElem+" expires ") || !strings.Contains(got, shortLeased+" expires ") {
 		t.Errorf("dnsmasq's shorter lease of %s to %s was not leased", b, short)
+	}
+}
+
+// element is the seconds left of set's element key (an integer, or a
+// concatenation of integers), as nft lists it, and whether the set holds
+// it. An update of an element sets its time left, not the timeout nft
+// lists for it.
+func element(t *testing.T, set string, key ...uint64) (int64, bool) {
+	t.Helper()
+	var doc struct {
+		Nftables []struct {
+			Set *struct {
+				Elem []struct {
+					Elem struct {
+						Val     json.RawMessage `json:"val"`
+						Expires int64           `json:"expires"`
+					} `json:"elem"`
+				} `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(run(t, "nft", "-j", "list", "set", "inet", Table, set)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range doc.Nftables {
+		if o.Set == nil {
+			continue
+		}
+		for _, e := range o.Set.Elem {
+			var c struct {
+				Concat []uint64 `json:"concat"`
+			}
+			var one uint64
+			if json.Unmarshal(e.Elem.Val, &c) == nil && slices.Equal(c.Concat, key) ||
+				len(key) == 1 && json.Unmarshal(e.Elem.Val, &one) == nil && one == key[0] {
+				return e.Elem.Expires, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// addrInt is IPv4 address a as nft reads a raw address field.
+func addrInt(a string) uint64 {
+	b := netip.MustParseAddr(a).As4()
+	return uint64(binary.BigEndian.Uint32(b[:]))
+}
+
+// NET-3, ENF-shared-src-1 (#5300): a lease the real dnsmasq ends early
+// stays the old holder's in the enforcer's sets, and the server cannot give
+// its address to another host until the element runs out. dnsmasq leases
+// three addresses on Guests; host A leases the first and renews it, so its
+// unicast messages to the server ride an established connection:
+//   - A's DHCPRELEASE (message type first, as clients write it) never
+//     reaches the server: B asking for A's address is refused (NAK);
+//   - a forged RELEASE for A's lease, from another hardware address, with
+//     a pad before its message type, reaches the server, which frees the
+//     address and leases it to B (its lease file), but the ACK never
+//     leaves: B gets no answer and no element;
+//   - C leases the second address and moves to the third (a REQUEST
+//     naming it): the server frees the second and leases it to D, whose
+//     ACK never leaves, while C's elements for both stay;
+//   - once A's elements are gone (as if run out), B's renewed REQUEST
+//     is answered and leased.
+//
+// Catches a RELEASE drop after the established accept or matched by
+// another offset, an answer check missing or keyed by address alone, and a
+// snoop that adds the address but not the lease.
+func TestEarlyEndedLeasesStayHeld(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h, x, leases := guestDnsmasq(t, 0, 2)
+	set, addrs := LeaseSet("guests"), LeaseAddrSet("guests")
+	server := net.ParseIP(enfAddr("guest")).To4()
+	X, Y, Z := segAddr("guest", 0), segAddr("guest", 1), segAddr("guest", 2)
+	const A, B, C, D = "02:00:00:00:53:0a", "02:00:00:00:53:0b", "02:00:00:00:53:0c", "02:00:00:00:53:0d"
+	none := 1500 * time.Millisecond
+	wait := 10 * time.Second
+	xid := uint32(0x5300)
+	// take is a REQUEST from hw naming addr, as a client sends it after
+	// an OFFER (or to move), and the server's answer, if any.
+	take := func(hw, addr string, w time.Duration) []byte {
+		xid++
+		opts := append(append(append([]byte{50, 4}, net.ParseIP(addr).To4()...), 54, 4), server...)
+		return dhcpAsk(t, h, x, hw, dhcpMsg(t, 3, xid, hw, netip.Addr{}, opts...), "", w)
+	}
+	holds := func(addr, hw string) bool {
+		m, _ := net.ParseMAC(hw)
+		_, ok := element(t, set, addrInt(addr), hwInt(m))
+		return ok
+	}
+	held := func(addr string) bool {
+		_, ok := element(t, addrs, addrInt(addr))
+		return ok
+	}
+	listed := func(addr, hw string) bool {
+		b, err := os.ReadFile(leases)
+		return err == nil && strings.Contains(string(b), " "+hw+" "+addr+" ")
+	}
+	release := func(from, hw, addr string, pad bool) {
+		xid++
+		m := dhcpMsg(t, 7, xid, hw, netip.MustParseAddr(addr), append([]byte{54, 4}, server...)...)
+		if pad {
+			m = slices.Insert(m, 240, 0)
+		}
+		dhcpAsk(t, h, x, from, m, enfAddr("guest"), 300*time.Millisecond)
+	}
+
+	if a := take(A, X, wait); dhcpType(a) != 5 || !holds(X, A) || !held(X) {
+		t.Fatalf("A was not leased %s: answer %d, element %v, address %v", X, dhcpType(a), holds(X, A), held(X))
+	}
+	xid++
+	if a := dhcpAsk(t, h, x, A, dhcpMsg(t, 3, xid, A, netip.MustParseAddr(X)), enfAddr("guest"), wait); dhcpType(a) != 5 {
+		t.Fatalf("A's renewal: answer %d", dhcpType(a))
+	}
+
+	release(A, A, X, false)
+	if a := take(B, X, wait); dhcpType(a) != 6 || !listed(X, A) {
+		t.Errorf("after A's RELEASE, B asking for %s: answer %d (want NAK), A listed %v: the RELEASE reached the server", X, dhcpType(a), listed(X, A))
+	}
+
+	release(C, A, X, true)
+	if a := take(B, X, none); a != nil || !listed(X, B) || holds(X, B) || !holds(X, A) {
+		t.Errorf("after a padded RELEASE: B got answer %d, the server leased %s to B %v, B's element %v, A's %v; want the server to lease it and the ACK dropped", dhcpType(a), X, listed(X, B), holds(X, B), holds(X, A))
+	}
+
+	if a := take(C, Y, wait); dhcpType(a) != 5 {
+		t.Fatalf("C was not leased %s: answer %d", Y, dhcpType(a))
+	}
+	if a := take(C, Z, wait); dhcpType(a) != 5 || !holds(Z, C) || listed(Y, C) {
+		t.Fatalf("C did not move to %s: answer %d, element %v, still listed on %s %v", Z, dhcpType(a), holds(Z, C), Y, listed(Y, C))
+	}
+	if a := take(D, Y, none); a != nil || !listed(Y, D) || holds(Y, D) || !holds(Y, C) || !holds(Z, C) {
+		t.Errorf("after C moved: D got answer %d, the server leased %s to D %v, D's element %v, C's %v and %v; want the ACK dropped and C's kept", dhcpType(a), Y, listed(Y, D), holds(Y, D), holds(Y, C), holds(Z, C))
+	}
+
+	hwA, _ := net.ParseMAC(A)
+	run(t, "nft", "delete", "element", "inet", Table, set, "{ "+leaseElem(uint32(addrInt(X)), hwInt(hwA))+" }")
+	run(t, "nft", "delete", "element", "inet", Table, addrs, "{ "+addrElem(uint32(addrInt(X)))+" }")
+	if a := take(B, X, wait); dhcpType(a) != 5 || !holds(X, B) || !held(X) {
+		t.Errorf("once A's elements ran out, B asking for %s: answer %d, element %v, address %v; want it leased", X, dhcpType(a), holds(X, B), held(X))
 	}
 }
 
@@ -871,6 +1083,7 @@ func TestSeedRendersLeases(t *testing.T) {
 	got := Seed(l, []Lease{
 		{l.Guests, a("10.30.0.3"), hw(one), 200},
 		{l.Guests, a("10.30.0.2"), hw(one), 100},
+		{l.Guests, a("10.30.0.3"), hw(ten), 300}, // an address listed with two hardware addresses
 		{l.Owner, a("10.10.0.2"), hw(ten), LeaseTimeout},
 		{l.Owner, a("10.10.0.3"), hw(ten), LeaseTimeout + 1},
 		{l.Owner, a("10.10.0.4"), hw(ten), 0},
@@ -882,9 +1095,11 @@ func TestSeedRendersLeases(t *testing.T) {
 		{l.Trunk + ".101", a("10.101.0.2"), hw(ten), 100},
 	})
 	want := strings.Join([]string{
-		"add element inet enforcer lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s, 0x0a1e0003 . 0x020000000001 expires 200s }",
-		"add element inet enforcer leased_guests { 0x020000000001 expires 200s }",
+		"add element inet enforcer lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s, 0x0a1e0003 . 0x020000000001 expires 200s, 0x0a1e0003 . 0x02000000000a expires 300s }",
+		"add element inet enforcer leaseaddr_guests_4 { 0x0a1e0002 expires 100s, 0x0a1e0003 expires 300s }",
+		"add element inet enforcer leased_guests { 0x020000000001 expires 200s, 0x02000000000a expires 300s }",
 		"add element inet enforcer lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 43200s }",
+		"add element inet enforcer leaseaddr_owner_4 { 0x0a0a0002 expires 43200s }",
 		"add element inet enforcer leased_owner { 0x02000000000a expires 43200s }",
 	}, "\n") + "\n"
 	if got != want {
