@@ -1534,35 +1534,115 @@ class DriveIdTest(unittest.TestCase):
         self.assertFalse((self.root / "run/agentos-drive-id").exists())
 
 
-# ':' is a POSIX special builtin: a redirection error on it exits a non-interactive shell before any
-# '||' handler or 'set -e' report runs (#5464). 'true' is a regular builtin, so its handler runs. Per
-# line, single-quoted text, ${...} expansions and comments are dropped, the rest is cut into simple
-# commands at ; & (not >& or <&) | ( ) { and backquotes (so after &&, ||, a case arm, $(...) and
-# `...`), and a command is flagged when, after leading reserved words, time, !, assignments and
-# redirections, its command word is ':' and it carries a redirection anywhere. Here-document bodies
-# are not parsed.
-SHELL_SEP = re.compile(r"[;|(){`]|(?<![<>])&")
-SHELL_PREFIX = re.compile(r"\s*(?:(?:then|do|else|if|elif|while|until|time|!)(?=\s)"
-                          r"|[A-Za-z_]\w*=\S*|(?P<redir>\d*[<>]+&?\s*[^\s<>;&|]+))")
-SHELL_COLON = re.compile(r"\s*:(?=[\s<>]|$)")
+# POSIX special builtins (':', '.', exec, eval, set, trap and the rest): a redirection error on one
+# exits a non-interactive shell before any '||' handler or 'set -e' report runs (#5464, #5524). A
+# regular command runs its handler: 'true >f' for ':', and the 'command' prefix, which drops the
+# special properties, for the rest ('command exec 9>f || fail ...'). Each line is read as the shell
+# reads it: quotes, backslashes, ${...} and $((...)) stay inside their word, $(...) and `...` are read
+# as commands of their own, and '#' starts a comment only where a word would start. A command is
+# flagged when, after leading reserved words and assignments, its command word is a special builtin
+# and it carries a redirection that can fail (closing an fd with >&- or <&- cannot). Here-document
+# bodies and backslash-newline continuations are read as lines of their own.
+SPECIAL_BUILTINS = frozenset(": . break continue eval exec exit export readonly return set shift times trap unset".split())
+SHELL_RESERVED = frozenset("! { if then elif else while until do time".split())
+SHELL_META = " \t;&|()<>"
+SHELL_REDIR = re.compile(r"[<>]+[&|]?")
+SHELL_SQUOTE = re.compile(r"'([^']*)'?")
 
 
-def colon_redirected(command):
-    pos, redirected = 0, False
-    while m := SHELL_PREFIX.match(command, pos):
-        redirected |= m.group("redir") is not None
-        pos = m.end()
-    m = SHELL_COLON.match(command, pos)
-    return bool(m) and (redirected or bool(re.search(r"[<>]", command[m.end():])))
+def shell_word(s, i, stop, out):
+    """Reads the word at s[i]: its text, its value (quotes removed, each expansion a NUL) and its end."""
+    start, value = i, []
+    while i < len(s) and s[i] not in SHELL_META and s[i] != stop:
+        c = s[i]
+        if c == "\\":
+            value.append(s[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            m = SHELL_SQUOTE.match(s, i)
+            value.append(m.group(1))
+            i = m.end()
+        elif c == '"':
+            i += 1
+            while i < len(s) and s[i] != '"':
+                if s[i] == "\\":
+                    value.append("\\")  # no special builtin's name has a backslash in it
+                    i += 2
+                elif s[i] in "$`":
+                    i = shell_expansion(s, i, out)
+                    value.append("\0")
+                else:
+                    value.append(s[i])
+                    i += 1
+            i += 1
+        elif c in "$`":
+            i = shell_expansion(s, i, out)
+            value.append("\0")
+        else:
+            value.append(c)
+            i += 1
+    return s[start:i], "".join(value), i
 
 
-def redirected_colons(text):
+def shell_expansion(s, i, out):
+    """Skips the expansion at s[i] ($x, ${...}, $((...)), $(...) or `...`) and returns its end; the
+    commands of a substitution go to out."""
+    if s[i] == "`":
+        return shell_scan(s, i + 1, "`", out)
+    if s.startswith("$((", i) or s.startswith("${", i):
+        opener, depth, i = s[i + 1], 0, i + 1
+        closer = ")" if opener == "(" else "}"
+        while i < len(s):
+            depth += (s[i] == opener) - (s[i] == closer)
+            i += 1
+            if depth == 0:
+                break
+        return i
+    if s.startswith("$(", i):
+        return shell_scan(s, i + 2, ")", out)
+    return i + 1
+
+
+def shell_scan(s, i, stop, out):
+    """Adds the simple commands in s[i:], up to an unquoted stop character, to out as (words,
+    redirected): each word's (text, value), and whether a redirection that can fail is on it.
+    Returns the index after the stop."""
+    words, redirected = [], False
+    while i < len(s) and s[i] != stop:
+        if s[i] in " \t":
+            i += 1
+        elif s[i] == "#":
+            i = len(s)
+        elif s[i] in ";&|()":
+            out.append((words, redirected))
+            words, redirected = [], False
+            i += 1
+        elif s[i] in "<>":
+            op = SHELL_REDIR.match(s, i).group()
+            i += len(op)
+            while i < len(s) and s[i] in " \t":
+                i += 1
+            target, _, i = shell_word(s, i, stop, out)
+            redirected |= not (op.endswith("&") and target == "-")
+        else:
+            text, value, i = shell_word(s, i, stop, out)
+            if not (text.isdigit() and i < len(s) and s[i] in "<>"):
+                words.append((text, value))
+    out.append((words, redirected))
+    return i + 1
+
+
+def special_redirected(words, redirected):
+    command = [value for text, value in words if text not in SHELL_RESERVED and not re.match(r"[A-Za-z_]\w*=", text)]
+    return redirected and bool(command) and command[0] in SPECIAL_BUILTINS
+
+
+def redirected_specials(text):
     out = []
     for n, line in enumerate(text.splitlines(), 1):
-        line = re.sub(r"'[^']*'", "''", line)
-        line = re.sub(r"\$\{[^}]*\}", "$P", line)
-        line = re.sub(r"(?:^|\s)#.*", "", line)
-        if any(colon_redirected(c) for c in SHELL_SEP.split(line)):
+        commands = []
+        shell_scan(line, 0, "", commands)
+        if any(special_redirected(*c) for c in commands):
             out.append(n)
     return out
 
@@ -1610,6 +1690,55 @@ class ImageShellLintTest(unittest.TestCase):
         ': x#y >f',
         ': a b >f',
         ': >&2',
+        # #5524 item 5: the leading-redirect forms.
+        '<&3 :',
+        'x= : >f',
+        '>>log :',
+        '> x :',
+        '2>/dev/null x=1 :',
+        # Items 2 and 6: a ' #' inside double quotes is not a comment.
+        'echo " # "; : >x',
+        'echo "a #b"; : >x',
+        # Item 3: a substitution stays inside its word, and its own commands are read.
+        ': $(cat) >x',
+        ': `cat` >x',
+        ': "$(cat)" >x',
+        ': $((1 + (2))) >x',
+        ': ${a:-${b}} >x',
+        'v="$(: >x)"',
+        'v=$(a "$(: >x)")',
+        # Item 1: the other special builtins.
+        'exec 9>"$R/run/x.lock"',
+        'exec >log 2>&1',
+        'exec 3<in',
+        '. ./lib >x',
+        'eval "$c" 2>/dev/null',
+        'set -x 2>/dev/null',
+        'trap - EXIT >x',
+        'if a; then exec 9>x; fi',
+        '":" >x',
+        "\\exec >x",
+        "e'x'ec >x",
+        "e''xec >x",
+        'break >x',
+        'continue 2>/dev/null',
+        'exit 1 >x',
+        'export A >x',
+        'readonly A >x',
+        'return 1 >x',
+        'shift >x',
+        'times >x',
+        'unset A >x',
+        'a;: >x',
+        'a&&: >x',
+        'a||: >x',
+        'exec >x 9>&-',
+        '3<in :',
+        '>|x :',
+        '>\tx :',
+        ': $>x',
+        'v="`: >x`"',
+        ': >',
     )
     CLEAN = (
         '#!/bin/sh',
@@ -1638,19 +1767,50 @@ class ImageShellLintTest(unittest.TestCase):
         '1x=2 : >f',
         'echo >x',
         'y 2>&1 && :',
+        '> :',
+        ': "a > b"',
+        ": 'a > b'",
+        ': a\\>b',
+        'echo " # " >x',
+        'echo "$(:)" >x',
+        'command exec 9>"$R/run/x.lock" || fail',
+        'command . ./lib >x',
+        'command eval "$c" 2>/dev/null',
+        'exec 9>&-',
+        'exec 3<&-',
+        'exec "$@"',
+        'echo exec >x',
+        'execute >x',
+        './run >x',
+        '.x >x',
+        'export A=1',
+        'evalx >x',
+        'echo "a; : >x',
+        'echo "a\\" : >x"',
+        '":\\"" >x',
+        "echo 'a; : >x",
+        'echo ${a; : >x',
+        'echo ${a:-;: >x}',
+        ': $((1 > 2))',
+        ': # >',
+        'shift 2',
+        '${x}: >y',
+        '"${x}": >y',
+        'echo `a;: b` >x',
+        ': ${a >',
     )
 
-    def test_lint_flags_a_redirected_colon(self):
+    def test_lint_flags_a_redirected_special_builtin(self):
         for line in self.FLAGGED:
             with self.subTest(line=line):
-                self.assertEqual(redirected_colons(line), [1])
-        self.assertEqual(redirected_colons("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
+                self.assertEqual(redirected_specials(line), [1])
+        self.assertEqual(redirected_specials("\n".join(self.CLEAN + self.FLAGGED[:1] + self.CLEAN)),
                          [len(self.CLEAN) + 1])
 
     def test_lint_passes_clean_shell(self):
         for line in self.CLEAN:
             with self.subTest(line=line):
-                self.assertEqual(redirected_colons(line), [])
+                self.assertEqual(redirected_specials(line), [])
 
     def test_image_shell_picks_shell_files(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1666,13 +1826,15 @@ class ImageShellLintTest(unittest.TestCase):
             self.assertEqual([str(f.relative_to(d)) for f in image_shell(d)],
                              ["a.sh", "c", "e", "f", "g", "sub/b"])
 
-    def test_image_shell_has_no_redirected_colon(self):
+    def test_image_shell_has_no_redirected_special_builtin(self):
         files = image_shell()
         self.assertIn(IMG / "ci_boot.sh", files)
         self.assertIn(MK / "mkosi.extra/usr/lib/agentos/drive-id", files)
+        self.assertIn(AGENTOS_LIB / "egress-setup", files)
         hits = ["%s:%d" % (f.relative_to(ROOT), n) for f in files
-                for n in redirected_colons(f.read_text(errors="replace"))]
-        self.assertEqual(hits, [], "use 'true >file': a failed redirect on ':' exits the shell before a handler runs")
+                for n in redirected_specials(f.read_text(errors="replace"))]
+        self.assertEqual(hits, [], "use 'true >file' for ':' and 'command exec ...' for the others: a failed "
+                                   "redirect on a special builtin exits the shell before a handler runs")
 
 
 class ConfigTest(unittest.TestCase):
@@ -6441,9 +6603,9 @@ class EgressSetupTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_setup(self, *args):
+    def run_setup(self, *args, shell=(), script=AGENTOS_LIB / "egress-setup"):
         env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]), AGENTOS_HEALTH_ROOT=str(self.root))
-        r = subprocess.run([str(AGENTOS_LIB / "egress-setup")] + list(args), env=env, capture_output=True, text=True)
+        r = subprocess.run(list(shell) + [str(script)] + list(args), env=env, capture_output=True, text=True)
         log = self.log.read_text() if self.log.exists() else ""
         if self.log.exists():
             self.log.unlink()
@@ -6489,6 +6651,27 @@ class EgressSetupTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("init held", log)
         self.assertIn("restart free", log)
+
+    def test_a_lock_it_cannot_open_is_named(self):
+        # #5524: a directory at the lock path makes the open fail. The script's own FAIL line runs
+        # under sh and bash --posix and no vault is made. With the 'command' prefix dropped, exec's
+        # redirect error exits the shell before that line.
+        (self.root / "run/agentos-egress-setup.lock").mkdir()
+        write(self.root, "var/lib/agentos-localui/claim.json", "{}")
+        src = (AGENTOS_LIB / "egress-setup").read_text()
+        bare = src.replace("command exec 9>", "exec 9>")
+        self.assertNotEqual(bare, src)
+        restored = self.root.parent / "egress-setup-bare"
+        restored.write_text(bare)
+        for shell in (("sh",), ("bash", "--posix")):
+            with self.subTest(shell=shell):
+                r, log = self.run_setup(shell=shell)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("egress-setup: FAIL cannot open the lock %s/run/agentos-egress-setup.lock" % self.root, r.stdout)
+                self.assertNotIn("egress", log)
+                r, log = self.run_setup(shell=shell, script=restored)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertNotIn("FAIL", r.stdout)
 
     def test_only_a_bounded_claim_is_read(self):
         stub(self.root / "usr/lib/agentos", "agentos-egress", 'wc -c <"$4" >>"%s"' % self.log)
