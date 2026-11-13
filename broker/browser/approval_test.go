@@ -881,13 +881,15 @@ func TestCloseDrainsAnUnaskedLine(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond) // the reader holds the line
 	g.Close()
+	// Close returns only once the line is drained and the channel closed,
+	// so nothing the test receives can race the drain (#5626).
 	select {
 	case _, open := <-g.lines:
 		if open {
 			t.Fatal("the unasked line was left for a reader")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the line channel was not closed")
+	default:
+		t.Fatal("Close returned before the line channel was closed")
 	}
 }
 

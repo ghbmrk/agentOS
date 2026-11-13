@@ -264,11 +264,12 @@ func (g *Gate) stop() {
 	if pid := g.cmd.Pid(); pid > 0 {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
-	go func() {
-		for range g.lines {
-		}
-	}()
 	_ = g.cmd.Wait()
+	// Wait closed the stdout pipe, so the reader ends once any line it
+	// holds is taken: drain here, not in a goroutine, so g.lines is
+	// closed when stop returns and no receiver races the drain (#5626).
+	for range g.lines {
+	}
 }
 
 var stoppedResult = Result{Error: "stopped", Detail: "the browser executor is not running"}
