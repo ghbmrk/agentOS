@@ -384,7 +384,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	// A .socket's Exec lines run under its own User= like a .service's
 	// (#4330); a socket with none runs them as root.
 	for name, c := range map[string]struct{ path, text string }{
-		"a .socket without User=":          {"image/mkosi/agentos-side.socket", "[Socket]\nListenStream=/run/x\nExecStartPre=/usr/lib/agentos/agentos-side\n"},
+		"a .socket without User=":          {"image/mkosi/agentos-side.socket", "[Socket]\nListenStream=/run/agentos-side/s\nExecStartPre=/usr/lib/agentos/agentos-side\n"},
 		"a + line in a .socket with User=": {"image/mkosi/agentos-side.socket", "[Socket]\nUser=agentos-side\nExecStopPost=+/usr/lib/agentos/agentos-side\n"},
 		"a .socket drop-in with User=root": {"image/mkosi/agentos-side.socket.d/z.conf", "[Socket]\nUser=root\n"},
 		"a socket.d drop-in with User=0":   {"image/mkosi/socket.d/z.conf", "[Socket]\nUser=0\n"},
@@ -913,7 +913,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// takes the package's endpoint.
 		"a socket of ours on a package socket's path":             {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"), ourEtc, `ListenSequentialPacket=/run/udev/control: a listen path of ours on a package socket's path`},
 		"a socket of ours in a package socket's directory":        {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/udev/x\n"), ourEtc, `ListenStream=/run/udev/x: a listen path of ours on a package socket's path`},
-		"a socket of ours on a package socket's path by /var/run": {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/var/run/udev//control\n"), ourEtc, `a listen path of ours on a package socket's path`},
+		"a socket of ours on a package socket's path by /var/run": {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/var/run/udev/control\n"), ourEtc, `a listen path of ours on a package socket's path, /run/udev/control`},
 		"a socket of ours on a package socket's path by %t":       {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=%t/udev/control\n"), ourEtc, `a listen path of ours on a package socket's path`},
 		"a socket of ours on a journal namespace's path":          {map[string]string{lib + "systemd-journald@.socket": "[Socket]\nService=systemd-journald@%i.service\nListenStream=/run/systemd/journal.%i/stdout\n", lib + "systemd-journald@.service": root, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/systemd/journal.ns/stdout\nSocketMode=0666\n"}, ourEtc, `ListenStream=/run/systemd/journal.ns/stdout: a listen path of ours on a package socket's path, /run/systemd/journal.%i/stdout`},
 		// #5614 L3 1: Symlinks= paths are endpoints too, on both sides.
@@ -925,6 +925,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"an escaped link of ours on a package socket's link": {with(devlog, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/dev/\\log\n"), ourEtc, `a listen path of ours is quoted or escaped`},
 		"a socket of ours on a package's quoted link":        {map[string]string{lib + "systemd-journald-dev-log.socket": "[Socket]\nService=systemd-journald.service\nListenDatagram=/run/systemd/journal/dev-log\nSymlinks=\"/dev/log\"\n", lib + "systemd-journald.service": root, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenDatagram=/dev/log\n"}, ourEtc, `on a package socket's path, /dev/log`},
 		"a socket of ours beside a package's escaped link":   {map[string]string{lib + "systemd-journald-dev-log.socket": "[Socket]\nService=systemd-journald.service\nListenDatagram=/run/systemd/journal/dev-log\nSymlinks=/dev/\\log\n", lib + "systemd-journald.service": root, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenDatagram=/run/agentos-x/log\n"}, ourEtc, `on a package socket's path, /dev/\log`},
+		"a socket of ours through /var/lock/..":              {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenSequentialPacket=/var/lock/../udev/control\nSocketMode=0666\n"), ourEtc, `ListenSequentialPacket=/var/lock/../udev/control: a listen path of ours is not canonical`},
 		"a socket of ours whose path holds a specifier":      {with(udev, etc+"agentos-x@.service", user, etc+"agentos-x@.socket", "[Socket]\nListenStream=/run/%I\n", etc+"sockets.target.wants/agentos-x@udev-control.socket", "-> ../agentos-x@.socket"), ourEtc, `ListenStream=/run/%I: a listen path of ours holds a specifier`},
 		// #5072 Security round 5 point 2: systemd adds the edge on both
 		// units, so a unit of ours naming one is the drop-in's route.
@@ -2799,23 +2800,31 @@ const (
 )
 
 // The system manager's specifiers, read by one model (systemd.unit(5)
-// "Specifiers", #5614 L3 round 2): fixedRoots have one value for the
-// system manager and are expanded; oneWord are names systemd validates to
-// hold no / (unit-name parts as escaped, user and group names and ids,
+// "Specifiers", #5614 L3 round 2): fixedRoots have one constant value for
+// the system manager and are expanded; oneWord are names systemd validates
+// to hold no / (unit-name parts as escaped, user and group names and ids,
 // host names, machine and boot ids), each within one component; any other
-// (%I, %J, %P and %f unescaped, %d, %y, %Y, %q, os-release fields, a lone
-// %) may span components.
-var fixedRoots = map[byte]string{'t': "/run", 'S': "/var/lib", 'C': "/var/cache", 'L': "/var/log", 'E': "/etc", 'T': "/tmp", 'V': "/var/tmp", 'h': "/root"}
+// (%T, %V and %h, which PID 1's environment sets; %I, %J, %P and %f
+// unescaped; %d, %y, %Y, %q, os-release fields, a lone %) may span
+// components (#5614 Security round 3 R-g).
+var fixedRoots = map[byte]string{'t': "/run", 'S': "/var/lib", 'C': "/var/cache", 'L': "/var/log", 'E': "/etc"}
 
 const oneWord = "ijnNpuUgGHlmb"
 
+// aliasLinks are the image's directory links an endpoint path may name
+// (Debian base-files and merged /usr), read as their targets on a
+// package's side. A path of ours may name none: it must lie in ourRuns.
+var aliasLinks = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock", "/bin": "/usr/bin", "/sbin": "/usr/sbin", "/lib": "/usr/lib", "/lib32": "/usr/lib32", "/lib64": "/usr/lib64", "/libx32": "/usr/libx32"}
+
 // expandListen reads an endpoint word as the system manager does, in one
 // left-to-right pass: %% is a literal %, a fixed root is expanded, and any
-// other specifier becomes a placeholder. The result is cleaned and
-// /var/run read as /run. ok is false only for a word that names no path (a
-// port, an address, an abstract socket, ListenNetlink=): one that begins
-// with / or with a placeholder is a path.
-func expandListen(v string) (p string, ok bool) {
+// other specifier becomes a placeholder. ok is false only for a word that
+// names no path (a port, an address, an abstract socket, ListenNetlink=, a
+// lone name): one that begins with / or with a placeholder that may hold
+// one is a path. canon is the word as expanded, before cleaning; p is
+// cleaned and read through aliasLinks, or "" when a .. component in it
+// names a place the kernel resolves only after following links.
+func expandListen(v string) (p, canon string, ok bool) {
 	var b strings.Builder
 	for i := 0; i < len(v); i++ {
 		switch {
@@ -2838,15 +2847,35 @@ func expandListen(v string) (p string, ok bool) {
 			b.WriteString(specPath)
 		}
 	}
-	p = b.String()
-	if !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, specWord) && !strings.HasPrefix(p, specPath) {
-		return "", false
+	canon = b.String()
+	if !strings.HasPrefix(canon, "/") && !strings.HasPrefix(canon, specPath) {
+		return "", "", false
 	}
-	p = path.Clean(p)
-	if p == "/var/run" || strings.HasPrefix(p, "/var/run/") {
-		p = "/run" + strings.TrimPrefix(p, "/var/run")
+	for _, c := range strings.Split(canon, "/") {
+		if c == ".." {
+			return "", canon, true
+		}
 	}
-	return p, true
+	p = path.Clean(canon)
+	for from, to := range aliasLinks {
+		if p == from || strings.HasPrefix(p, from+"/") {
+			p = to + strings.TrimPrefix(p, from)
+			break
+		}
+	}
+	return p, canon, true
+}
+
+// ourRuns is the only tree an endpoint path of ours may name: /run/agentos
+// and /run/agentos-*, and what lies under them. A path of ours elsewhere
+// may name an alias link the reader maps (/var/run, which an endpoint of
+// ours there would unlink), a tree it holds as shared, an ancestor of a
+// package's path, or a link the kernel follows before .., none of which
+// the reader can hold apart (#5614 Security round 3, L3 round 3).
+func inOurRuns(p string) bool {
+	rest, ok := strings.CutPrefix(p, "/run/")
+	first, _, _ := strings.Cut(rest, "/")
+	return ok && strings.HasPrefix(first, "agentos")
 }
 
 // endpointWords returns the words of a [Socket] line that name a path PID
@@ -2925,8 +2954,13 @@ func pkgListenPaths(recs unitRecords) []listenPat {
 						out = append(out, listenPat{raw: w, re: regexp.MustCompile("")})
 						continue
 					}
-					p, ok := expandListen(w)
+					p, _, ok := expandListen(w)
 					if !ok {
+						continue
+					}
+					if p == "" {
+						// A .. the kernel reads after links: any path.
+						out = append(out, listenPat{raw: w, re: regexp.MustCompile("")})
 						continue
 					}
 					lp := listenPat{raw: w, re: patternOf(p)}
@@ -2944,21 +2978,27 @@ func pkgListenPaths(recs unitRecords) []listenPat {
 }
 
 // onPkgListen says why an endpoint word of ours is refused: it holds a
-// specifier other than %t, or its path equals or lies under a package
-// socket's endpoint path, or that path's directory unless the directory is
-// one of sharedRuns; "" if it is not.
+// specifier other than a fixed root, it is not canonical (a . or ..
+// component, a doubled or trailing slash), its path equals or lies under a
+// package socket's endpoint path or that path's directory (unless one of
+// sharedRuns), or it lies outside ourRuns; "" if none.
 func (c *unitCheck) onPkgListen(v string) string {
-	p, ok := expandListen(v)
-	if !ok {
+	p, canon, ok := expandListen(v)
+	switch {
+	case !ok:
 		return ""
-	}
-	if strings.ContainsAny(p, specWord+specPath) {
+	case strings.ContainsAny(canon, specWord+specPath):
 		return "holds a specifier, whose value the reader cannot see"
+	case p == "" || canon != path.Clean(canon):
+		return "is not canonical (a . or .. component, or a doubled or trailing slash), and the kernel follows links before .."
 	}
 	for _, q := range c.pkgListen {
 		if q.re.MatchString(p) || q.dir != nil && q.dir.MatchString(p) {
 			return "on a package socket's path, " + q.raw
 		}
+	}
+	if !inOurRuns(path.Clean(canon)) {
+		return "lies outside /run/agentos*, the only tree the reader holds as ours"
 	}
 	return ""
 }
@@ -3151,7 +3191,7 @@ func TestBuiltUnitsPackageListenPatterns(t *testing.T) {
 	}{
 		// #5075 R3: a plain path, its /var/run and %t spellings, and its directory.
 		"a package's path":                {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/run/pkg/s", `on a package socket's path, /run/pkg/s`},
-		"a package's path by /var/run":    {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/var/run/pkg//s", `on a package socket's path, /run/pkg/s`},
+		"a package's path by /var/run":    {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/var/run/pkg/s", `on a package socket's path, /run/pkg/s`},
 		"a package's path by %t":          {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%t/pkg/s", `on a package socket's path, /run/pkg/s`},
 		"a package path's directory":      {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/run/pkg/x", `on a package socket's path, /run/pkg/s`},
 		"beside a package's path in /run": {"pkg.socket", "[Socket]\nListenStream=/run/pkg.sock\n", "/run/agentos-x/s", ""},
@@ -3164,7 +3204,7 @@ func TestBuiltUnitsPackageListenPatterns(t *testing.T) {
 		"a pattern's directory":         {"systemd-journald@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/systemd/journal.%i/stdout\n", "/run/systemd/journal.ns/x", `on a package socket's path`},
 		"beside a template in /run":     {"tpl@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/tpl-%i.sock\n", "/run/agentos-x/s", ""},
 		"beside a journal namespace":    {"systemd-journald@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/systemd/journal.%i/stdout\n", "/run/agentos-x/stdout", ""},
-		"a glob character in a package": {"tpl.socket", "[Socket]\nListenStream=/run/t[p]l/s\n", "/run/tpl/s", ""},
+		"a glob character in a package": {"tpl.socket", "[Socket]\nListenStream=/run/agentos-t[p]l/s\n", "/run/agentos-tpl/s", ""},
 		// #5614 L3 round 1: Symlinks= on both sides; %% before %t.
 		"ours on a package's link":           {"dev-log.socket", devlog, "[Socket]\nListenDatagram=/dev/log\n", `on a package socket's path, /dev/log`},
 		"a link of ours on a package's link": {"dev-log.socket", devlog, "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/run/agentos-x/l /dev/log\n", `on a package socket's path, /dev/log`},
@@ -3177,13 +3217,37 @@ func TestBuiltUnitsPackageListenPatterns(t *testing.T) {
 		"ours on a package's quoted link":      {"dev-log.socket", "[Socket]\nListenDatagram=/run/systemd/journal/dev-log\nSymlinks=\"/dev/log\"\n", "[Socket]\nListenDatagram=/dev/log\n", `on a package socket's path, /dev/log`},
 		"ours beside a package's escaped link": {"dev-log.socket", "[Socket]\nListenDatagram=/run/systemd/journal/dev-log\nSymlinks=/dev/\\log\n", "/run/agentos-x/log", `on a package socket's path, /dev/\log`},
 		// #5614 L3 round 2: a leading specifier is a path; %P may hold a /.
-		"ours by %S on a package's path":       {"pkg.socket", "[Socket]\nListenStream=/var/lib/pkg/s\n", "%S/pkg/s", `on a package socket's path, /var/lib/pkg/s`},
-		"a leading %T of ours":                 {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%T/x", ""},
-		"a leading %d of ours":                 {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%d/x", `holds a specifier`},
-		"ours on a package's %S path":          {"pkg.socket", "[Socket]\nListenStream=%S/pkg/s\n", "/var/lib/pkg/s", `on a package socket's path, %S/pkg/s`},
-		"ours on a package's %S link":          {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\nSymlinks=%S/pkg/l\n", "/var/lib/pkg/l", `on a package socket's path, %S/pkg/l`},
-		"ours on a package's leading %d":       {"pkg.socket", "[Socket]\nListenStream=%d/s\n", "/run/credentials/pkg.socket/s", `on a package socket's path, %d/s`},
-		"ours on a package's pretty hostname":  {"pkg.socket", "[Socket]\nListenStream=/run/%q.sock\n", "/run/a/b.sock", `on a package socket's path, /run/%q.sock`},
+		"ours by %S on a package's path":      {"pkg.socket", "[Socket]\nListenStream=/var/lib/pkg/s\n", "%S/pkg/s", `on a package socket's path, /var/lib/pkg/s`},
+		"a leading %T of ours":                {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%T/x", `holds a specifier`},
+		"a leading %d of ours":                {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%d/x", `holds a specifier`},
+		"ours on a package's %S path":         {"pkg.socket", "[Socket]\nListenStream=%S/pkg/s\n", "/var/lib/pkg/s", `on a package socket's path, %S/pkg/s`},
+		"ours on a package's %S link":         {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\nSymlinks=%S/pkg/l\n", "/var/lib/pkg/l", `on a package socket's path, %S/pkg/l`},
+		"ours on a package's leading %d":      {"pkg.socket", "[Socket]\nListenStream=%d/s\n", "/run/credentials/pkg.socket/s", `on a package socket's path, %d/s`},
+		"ours on a package's pretty hostname": {"pkg.socket", "[Socket]\nListenStream=/run/%q.sock\n", "/run/a/b.sock", `on a package socket's path, /run/%q.sock`},
+		// #5614 Security round 3: the kernel resolves .. after links
+		// (/var/lock -> /run/lock), so a path of ours must be canonical; a
+		// package's .. matches every path; /var/lock is read as /run/lock.
+		"ours through /var/lock/..":            {"pkg.socket", "[Socket]\nListenStream=/run/udev/control\n", "/var/lock/../udev/control", `is not canonical`},
+		"ours through /var/lock/.. on dbus":    {"dbus.socket", "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", "/var/lock/../dbus/system_bus_socket", `is not canonical`},
+		"ours through /var/lock/.. on dev-log": {"dev-log.socket", devlog, "[Socket]\nListenDatagram=/var/lock/../systemd/journal/dev-log\n", `is not canonical`},
+		"a dot of ours":                        {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/run/agentos-x/./s", `is not canonical`},
+		"a doubled slash of ours":              {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/run/agentos-x//s", `is not canonical`},
+		"a link of ours through ..":            {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/var/lock/../pkg/s\n", `is not canonical`},
+		"ours by /var/lock":                    {"pkg.socket", "[Socket]\nListenStream=/run/lock/pkg/s\n", "/var/lock/pkg/s", `on a package socket's path, /run/lock/pkg/s`},
+		"ours on a package's ..":               {"pkg.socket", "[Socket]\nListenStream=/run/pkg/../x/s\n", "/run/agentos-x/s", `on a package socket's path, /run/pkg/../x/s`},
+		"a %h of ours":                         {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "%h/s", `holds a specifier`},
+		"ours on a package's %T path":          {"pkg.socket", "[Socket]\nListenStream=%T/pkg/s\n", "/tmp/pkg/s", `on a package socket's path, %T/pkg/s`},
+		// #5614 L3 round 3: an alias the reader maps, or a tree it holds as
+		// shared, is no endpoint of ours: PID 1 would unlink or replace it.
+		"a link of ours on /var/run":           {"dbus.socket", "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", "[Socket]\nListenStream=/run/agentos-x/a\nSymlinks=/var/run\nRemoveOnStop=yes\n", `Symlinks=/var/run: a listen path of ours lies outside /run/agentos*`},
+		"ours on /var/run":                     {"dbus.socket", "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", "/var/run", `lies outside /run/agentos*`},
+		"a link of ours under /var/run":        {"dbus.socket", "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", "[Socket]\nListenStream=/run/agentos-x/b\nSymlinks=/var/run/agentos-x/l\nDirectoryMode=0777\n", `Symlinks=/var/run/agentos-x/l: a listen path of ours lies outside /run/agentos*`},
+		"ours on /var/lock":                    {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/var/lock/agentos-x", `lies outside /run/agentos*`},
+		"ours on /run":                         {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/run\n", `Symlinks=/run: a listen path of ours lies outside /run/agentos*`},
+		"ours above a package's path":          {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/run/pkg\n", `Symlinks=/run/pkg: a listen path of ours`},
+		"ours on /tmp":                         {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/tmp/agentos-x", `lies outside /run/agentos*`},
+		"ours by /lib":                         {"pkg.socket", "[Socket]\nListenStream=/usr/lib/pkg/s\n", "/lib/pkg/s", `on a package socket's path, /usr/lib/pkg/s`},
+		"a package's port by a name specifier": {"pkg@agentos-unit-lint.socket", "[Socket]\nListenStream=%i\n", "/run/agentos-x/s", ""},
 		"ours on a package's unescaped prefix": {"a-b.socket", "[Socket]\nListenStream=/run/%P.sock\n", "/run/a/b.sock", `on a package socket's path, /run/%P.sock`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -3221,16 +3285,16 @@ func TestBuiltUnitsPackageSocketsAndFed(t *testing.T) {
 		path, text string
 		ours       bool
 	}
-	pkgSock := file{lib + "s.socket", "[Socket]\nListenStream=/run/s\n", false}
+	pkgSock := file{lib + "s.socket", "[Socket]\nListenStream=/run/agentos-s\n", false}
 	pkgSvc := file{lib + "f.service", "[Service]\nUser=f\nExecStart=/usr/bin/f\n", false}
-	ourSock := file{etc + "s.socket", "[Socket]\nListenStream=/run/s\nReusePort=yes\n", true}
+	ourSock := file{etc + "s.socket", "[Socket]\nListenStream=/run/agentos-s\nReusePort=yes\n", true}
 	for name, c := range map[string]struct {
 		unit                 string
 		alone, package_, fed bool
 		files                []file
 		want                 string // "" passes
 	}{
-		"socket by mark":        {"s.socket", false, true, false, []file{ourSock}, `ListenStream=/run/s: a line of ours on a package's socket`},
+		"socket by mark":        {"s.socket", false, true, false, []file{ourSock}, `ListenStream=/run/agentos-s: a line of ours on a package's socket`},
 		"socket by a file":      {"s.socket", false, false, false, []file{pkgSock, {etc + "s.socket.d/z.conf", "[Socket]\nReusePort=yes\n", true}}, `ReusePort=yes: a line of ours on a package's socket`},
 		"socket alone":          {".socket", true, false, false, []file{{etc + "socket.d/z.conf", "[Socket]\nMark=7\n", true}}, `Mark=7: a line of ours`},
 		"socket of ours":        {"s.socket", false, false, false, []file{ourSock}, ""},
