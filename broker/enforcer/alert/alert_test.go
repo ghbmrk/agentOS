@@ -315,7 +315,7 @@ func TestWordsFixed(t *testing.T) {
 }
 
 // TestOnlyTripsLight (NET-2 Texts and calls, KRN-12, D-254): an
-// unusual-time unlock, a recovery-code use, an enrolment, a factory reset, a paused
+// unusual-time unlock, a recovery-code use, a new recovery code, an enrolment, a factory reset, a paused
 // channel, a pending recovery and a silent core each leave the light off
 // and show on the page; a trip at the enforcer, from any box or device,
 // turns it red until its cut lifts or the owner resolves it on the page.
@@ -332,7 +332,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	for _, e := range []struct {
 		k   Kind
 		dev string
-	}{{UnusualUnlock, "front-door"}, {UnusualDisarm, "hall"}, {RecoveryCodeUsed, ""}, {Enrolment, ""}, {FactoryReset, ""},
+	}{{UnusualUnlock, "front-door"}, {UnusualDisarm, "hall"}, {RecoveryCodeUsed, ""}, {RecoveryCodeChanged, ""}, {Enrolment, ""}, {FactoryReset, ""},
 		{SafetyOff, "boiler"}, {SafetyShut, "main-valve"}, {HeadFork, ""},
 		{AlarmTriggered, "hall"}, {DoorForced, "back-door"}, {FailedUnlocks, "front-door"}} {
 		if _, err := r.a.Raise(e.k, e.dev); err != nil {
@@ -345,7 +345,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	r.a.Core(false)
 	off("core silent")
 	st := r.a.Status()
-	if len(st.Open) != 12 || !st.CoreDown {
+	if len(st.Open) != 13 || !st.CoreDown {
 		t.Fatalf("not on the page: %d open, core down %v", len(st.Open), st.CoreDown)
 	}
 	r.a.Core(true)
@@ -442,7 +442,7 @@ func TestOnlyTripsLight(t *testing.T) {
 	if err := r.a.Resolve(p[i].ID); !errors.Is(err, ErrResolved) {
 		t.Fatalf("resolving a pause without resuming: %v", err)
 	}
-	if err := r.a.Resumed(); err != nil || len(r.a.Status().Open) != 11 {
+	if err := r.a.Resumed(); err != nil || len(r.a.Status().Open) != 12 {
 		t.Fatalf("resumed: %v %d", err, len(r.a.Status().Open))
 	}
 }
