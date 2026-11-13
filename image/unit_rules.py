@@ -373,17 +373,20 @@ def unread(view, shown, dirs, packaged):
     return out
 
 
-def tree_links(view):
+def tree_links(view, usr_view=None):
     """{link: its target resolved in the tree} for every link of the tree (/proc and /sys aside) that does
     not resolve to a file other than a directory: one an endpoint path's directory may pass through, a
     dangling one included (#5620 R-c, R-i). A loop, or a link the reader cannot follow (into /proc), maps to
-    itself."""
+    itself. With USR_VIEW (a fixture's own tree), /usr is listed there, not in the view's /usr, which is
+    the fixture over the runner's whole /usr: walking that took the privfile tests past 10 minutes (#5652 L3).
+    Each link is still resolved in the view."""
     out, todo = {}, ["/"]
     while todo:
         d = todo.pop()
-        for e in view.entries(d):
+        lister = usr_view if usr_view and (d == "/usr" or d.startswith("/usr/")) else view
+        for e in lister.entries(d):
             p = os.path.join(d, e)
-            kind = view.kind(p)
+            kind = (usr_view if usr_view and p == "/usr" else lister).kind(p)
             if p in ("/proc", "/sys"):
                 continue
             if kind == 0o040000:
@@ -398,7 +401,7 @@ def tree_links(view):
     return out
 
 
-def records(view, shown, dirs, prov):
+def records(view, shown, dirs, prov, usr_view=None):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
     "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}], "links": tree_links()}, from SHOWN, systemctl's
     reply for every name names() found. package marks a socket whose endpoint is a package's
@@ -488,11 +491,11 @@ def records(view, shown, dirs, prov):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks, "links": tree_links(view),
+    return {"units": recs, "fstab": fstab, "masks": masks, "links": tree_links(view, usr_view),
             "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
 
 
-def lint(root, usr, cmdline, packaged, plant_files=None):
+def lint(root, usr, cmdline, packaged, plant_files=None, own_usr=False):
     """Boot the tree's systemd (with PLANT_FILES over the tree), ask it for every unit name and return
     the records."""
     with tempfile.TemporaryDirectory() as plant:
@@ -511,7 +514,7 @@ def lint(root, usr, cmdline, packaged, plant_files=None):
                 # a failed generator wrote none or only some of its units, which a boot may write and start
                 raise SystemExit("unit rules: generators failed, so their units are not all in the tree: %s"
                                  % ", ".join(sorted(failed)))
-            return records(view, shown, dirs, Provenance(view, dirs, packaged(view)))
+            return records(view, shown, dirs, Provenance(view, dirs, packaged(view)), View(root) if own_usr else None)
         finally:
             m.stop()
 
@@ -598,7 +601,7 @@ def fixture(root, packaged_list):
         subprocess.run(["mount", "-t", "overlay", "-o", "ro,lowerdir=%s:/usr" % (root / "usr"), "overlay", m],
                        check=True)
         try:
-            return lint(root, m, "", lambda view: packaged)
+            return lint(root, m, "", lambda view: packaged, own_usr=True)
         finally:
             subprocess.run(["umount", m], check=False)
 
