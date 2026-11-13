@@ -761,6 +761,15 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 	if err != nil || !strings.Contains(w, "if one is waiting") {
 		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
 	}
+	// Nor that one is in force after the wait, and with none waiting the
+	// code is still unspent, so the text asks for a new one, outside the
+	// 10-minute frame and after the factory reset, so a late reader does
+	// not reset for nothing (ENF-c-f4 item 3, #5613 UX 3).
+	const none = "If none is waiting and your passkey still works, make a new recovery code there."
+	if !strings.Contains(w, "a waiting replacement is in force") || !strings.Contains(w, none) ||
+		strings.Index(w, none) < strings.Index(w, "takes it back") {
+		t.Errorf("after a failed save the text reads as a replacement in force: %q", w)
+	}
 	// After the wait the text must not read as all-clear: it names the
 	// deadline, which is Wait, and the factory reset as the way back
 	// (ENF-c-f3 item 1, NET-4, ENF-c-4).
@@ -1036,7 +1045,9 @@ func TestRetryCardSurvivesRestart(t *testing.T) {
 // tap, spends it and shows a new one once. The old code then starts no
 // replacement; the new one does. It refuses with no passkey in force and
 // with a replacement waiting (Cancel does that), and a failed save leaves
-// the old code valid.
+// the old code valid. A saved rotation texts the owner once, so a holder
+// of the passkey cannot silently spend the written code (ENF-c-f4 item 1,
+// #5042 L3 point 1).
 func TestRotateRecoveryCode(t *testing.T) {
 	g, _, code := enrolled(t)
 	g.bs.failAt = g.bs.n + 1
@@ -1044,13 +1055,36 @@ func TestRotateRecoveryCode(t *testing.T) {
 		t.Fatalf("stop at the save: %v", err)
 	}
 	g.bs.failAt = g.bs.n + 1
+	g.alerts.raised = nil
 	if fresh, err := g.b.Rotate(); !errors.Is(err, errStopped) || fresh != "" {
 		t.Fatalf("rotate over a failing save: %q %v", fresh, err)
+	}
+	// A rotation is texted once it is saved, never before: a failed save
+	// leaves the written code working, so a text then would be false
+	// (ENF-c-f4 item 1).
+	if len(g.alerts.raised) != 0 {
+		t.Errorf("a failed rotation texted: %v", g.alerts.raised)
 	}
 	g.bs.failAt = 0
 	fresh, err := g.b.Rotate()
 	if err != nil || len(fresh) != CodeLen || fresh == code {
 		t.Fatalf("rotate: %q %v", fresh, err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
+		t.Errorf("rotate texts %v, want one RecoveryCodeChanged", g.alerts.raised)
+	}
+	// The whole text is pinned: it says the old code is spent in the
+	// page's words (not "the code you wrote down", which an owner who just
+	// wrote the new one reads as dead too), and, if it was not the owner,
+	// names the cause before the steps: the synced passkey's cloud account
+	// first, then a new code used to replace the passkey, since a new code
+	// alone leaves the other holder's passkey in force (#5613 UX 1, 2;
+	// Potency 1).
+	const changed = "Enforcer: a new recovery code was made with your passkey, so your old recovery code no longer works. " +
+		"If it was not you, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code " +
+		"on the enforcer's page at home and use it there to replace your passkey. Clear this there too."
+	if w, err := alert.Words(alert.RecoveryCodeChanged, ""); err != nil || w != changed {
+		t.Errorf("the rotation's text:\n got %q %v\nwant %q", w, err, changed)
 	}
 	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
 		t.Errorf("the spent code still starts a replacement: %v", err)
