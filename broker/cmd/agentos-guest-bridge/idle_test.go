@@ -94,6 +94,44 @@ func TestBackgroundStopsWhenItsContextEnds(t *testing.T) {
 	}
 }
 
+// A failed owner poll is retried after its 2 s back-off, neither at once
+// nor never (mutgate on #5640, main.go:177 and :179). Failure paths: with
+// the back-off select deleted, the owner loop spins on /owner/next against
+// a failing broker; with its timer case deleted, the first failure parks
+// the loop until cancel and owner messages stop arriving.
+func TestOwnerPollBacksOffThenRetries(t *testing.T) {
+	var mu sync.Mutex
+	polls := 0
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/owner/next" {
+			mu.Lock()
+			polls++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusInternalServerError) // every poll fails
+	}))
+	defer broker.Close()
+	u, _ := url.Parse(broker.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := background(ctx, &http.Client{Transport: rewrite{u}}, "http://127.0.0.1:1", "m", "tok")
+	time.Sleep(2700 * time.Millisecond) // one back-off and a margin, short of a second
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle work outlived its context")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if polls < 2 {
+		t.Errorf("owner poll ran %d time(s) in 2.7 s; a failed poll must be retried after its back-off", polls)
+	}
+	if polls > 3 {
+		t.Errorf("owner poll ran %d times in 2.7 s; a failed poll must back off 2 s before retrying", polls)
+	}
+}
+
 // A cancel also ends an /owner/next request the broker is holding open
 // (L3 release 2 on #5640). Failure path: the poll's request ignores ctx,
 // so a held-open poll keeps the idle work alive after its caller stops.
