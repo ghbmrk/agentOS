@@ -183,6 +183,10 @@ type Status struct {
 	// verified backups on two append-only places count: fixed text with
 	// no count, date or name.
 	Backups []string `json:"backups,omitempty"`
+	// Machines is the note on the box's machines, empty while they are
+	// fine: one machine or more will not stop and needs a restart (#5099).
+	// Fixed text with a count and no machine name.
+	Machines []string `json:"machines,omitempty"`
 }
 
 // SignIn carries a code-generator code or the grid cell's answer.

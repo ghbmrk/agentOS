@@ -17,7 +17,35 @@ import (
 // box's cgroups or they lack a controller, so no machine may start (RES-2:
 // none runs unbudgeted). It names no controller (UX ruling on #155); the
 // log line lists the missing ones.
-const agentNoLimits = "Your agent is off: I can't yet keep it within its limits, so I need an update."
+const agentNoLimits = "Your agent is off: I cannot yet keep it within its limits; a later box version fixes this."
+
+// agentLimitsStuck is that line when what blocks the limits is something
+// an earlier run left that will not clear (errBrokerGroupStuck, #5186): a
+// restart clears it, an update does not. It names no mechanism either.
+const agentLimitsStuck = "Your agent is off: something left from my last run will not clear; " + fixRestart + "."
+
+// brokerGroupStuck is a broker group an earlier run left that cannot be
+// removed (newBrokerGroup). Its text is the log's, naming the cause.
+type brokerGroupStuck struct {
+	path string
+	err  error
+}
+
+func (e *brokerGroupStuck) Error() string {
+	return fmt.Sprintf("the broker's group %s, left by an earlier run, cannot be removed because something is still in it; restart the computer to clear it (reused, it could stop every service and machine from starting): %v", e.path, e.err)
+}
+
+func (e *brokerGroupStuck) Unwrap() error { return e.err }
+
+// agentLimitsLine is the agent line for a failed opening of the machines'
+// groups (boxMachines).
+func agentLimitsLine(err error) string {
+	var stuck *brokerGroupStuck
+	if errors.As(err, &stuck) {
+		return agentLimitsStuck
+	}
+	return agentNoLimits
+}
 
 // cgroupHost is where the broker reads its cgroup facts; tests point it at
 // a fake cgroupfs.

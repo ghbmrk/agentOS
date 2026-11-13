@@ -39,6 +39,9 @@ const (
 	// C1: the machine plane (machines, their disk or the guest plane)
 	// did not start.
 	agentNoMachines = "Agent and worker tools: off, their machines did not start; " + fixRestart + "."
+	// C1: the -machines path is one vm.Open refuses (vm.ErrStateDirExposed,
+	// #4976): a setting to fix, which a restart does not.
+	agentMachinesUnsafe = "Agent and worker tools: off, their files are in an unsafe place; whoever set me up must move them."
 	// C1: the agent's image or launch file is missing.
 	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
@@ -107,6 +110,29 @@ func unreadGoneNotice(n int, forgotten bool) string {
 	return "Disk space: " + what + " deleted to make room, and I could not tell what " + held + "."
 }
 
+// wedgedLine is STATUS's line for machines whose kills never end
+// (vm.Manager.Wedged, #5099): each still runs and counts against the
+// memory budget (RES-2), and only a restart of the box frees it. By count:
+// a machine ID tells the owner nothing.
+func wedgedLine(ids []string) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return "Machines: one will not stop and still takes room from other machines; " + fixRestart + "."
+	}
+	return fmt.Sprintf("Machines: %d will not stop and still take room from other machines; %s.", len(ids), fixRestart)
+}
+
+// machinesOffLine is C1's line when the machines did not open: a refused
+// -machines path is a setting to fix (#4976); anything else, a restart.
+func machinesOffLine(err error) string {
+	if errors.Is(err, vm.ErrStateDirExposed) {
+		return agentMachinesUnsafe
+	}
+	return agentNoMachines
+}
+
 // openVM opens the agent machines with cfg and wires what the owner
 // reads of their unread restore points: the STATUS line, and the notice
 // when any are deleted (main's seam, as openMachineDisk).
@@ -121,16 +147,18 @@ func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(stri
 		return nil, err
 	}
 	caps.snapsUnread(m.Unread)
+	caps.machinesWedged(m.Wedged)
 	return m, nil
 }
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
-	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
+	return []string{agentNoRuntime, agentNoMachines, agentMachinesUnsafe, agentNoLimits, agentLimitsStuck, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotErased,
 		forgetRecordUnread, forgetReadsUnknown, forgetUnreached, forgetHeldLine([]string{"helper.1"}), forgetHeldLine([]string{"a", "b"}),
 		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}}),
-		unreadLine([]string{"s0000000007"}), unreadLine([]string{"s0000000007", "s0000000123"})}
+		unreadLine([]string{"s0000000007"}), unreadLine([]string{"s0000000007", "s0000000123"}),
+		wedgedLine([]string{"agent.0"}), wedgedLine([]string{"agent.0", "helper.3"})}
 }
 
 // forgetHeldLine is STATUS's line for agents that read erased content and
@@ -215,6 +243,7 @@ func newCapLines(s *capState) *capLines {
 	r.add("workers", capConfig, s.workersLine)
 	r.add("update-checks", capHeld, s.updatesLine)
 	r.add("restore-points", capHost, s.unreadLine)
+	r.add("machines-wedged", capHost, s.wedgedLine)
 	return r
 }
 
@@ -290,8 +319,16 @@ func ownerWorded(l string) error {
 	if !ok || strings.TrimSpace(strings.TrimSuffix(fix, ".")) == "" {
 		return errors.New("no fix clause")
 	}
+	if onlyNegates.MatchString(fix) {
+		// "a restart will not fix it" leaves the owner no step (UX on
+		// #5612, second occurrence): the clause names one that works.
+		return errors.New("fix clause names only what does not work")
+	}
 	return nil
 }
+
+// onlyNegates is a fix clause that says only what will not fix the line.
+var onlyNegates = regexp.MustCompile(`(?i)\b(not|never) (fix|help|clear|work)`)
 
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
@@ -304,6 +341,7 @@ type capState struct {
 	workersOff   atomic.Bool                     // C10
 	updates      atomic.Bool                     // C11: an update check runs
 	unread       atomic.Pointer[func() []string] // the machines' restore points kept unread (vm Unread)
+	wedged       atomic.Pointer[func() []string] // machines whose kills never end (vm Wedged)
 }
 
 func newCapState(modelSocket string) *capState {
@@ -344,6 +382,25 @@ func (s *capState) unreadLine() string {
 		return unreadLine((*l)())
 	}
 	return ""
+}
+
+// machinesWedged wires the wedged line to the machines' live list.
+func (s *capState) machinesWedged(list func() []string) { s.wedged.Store(&list) }
+
+func (s *capState) wedgedLine() string {
+	if l := s.wedged.Load(); l != nil {
+		return wedgedLine((*l)())
+	}
+	return ""
+}
+
+// machineNotes is the owner page's note on the machines (#5099): the
+// wedged line while any is wedged, else none.
+func (s *capState) machineNotes() []string {
+	if l := s.wedgedLine(); l != "" {
+		return []string{l}
+	}
+	return nil
 }
 
 func (s *capState) agentLine() string {
