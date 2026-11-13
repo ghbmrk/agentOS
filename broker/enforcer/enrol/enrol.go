@@ -541,7 +541,7 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 			// gets the recovery code, and the log keeps the failure.
 			b.cfg.Log(fmt.Sprintf("enrol: the passkey enrolled, but the policy hand-over failed and waits for its Keep: %v", err))
 		}
-		b.raise(alert.Enrolment, "Enrolment")
+		b.raise(alert.Enrolment)
 		res.Recovery = code
 		return res, nil
 	case Enrolled:
@@ -550,7 +550,7 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		// The owner is texted before the replacement is saved, so a stop
 		// between the two never leaves one waiting unannounced; a failed
 		// save leaves only a false alarm the owner clears on the page.
-		b.raise(alert.RecoveryCodeUsed, "RecoveryCodeUsed")
+		b.raise(alert.RecoveryCodeUsed)
 		if err := b.save(st); err != nil {
 			return Result{}, err
 		}
@@ -616,18 +616,21 @@ func (b *Book) Cancel() (string, error) {
 	}
 	// The written code is spent, so the owner is texted, once saved, as
 	// Rotate does (ENF-c-10): a holder of a synced passkey who cancels the
-	// owner's own recovery does not go unseen (ENF-c-f5).
-	b.raise(alert.RecoveryCodeChanged, "RecoveryCodeChanged")
+	// owner's own recovery does not go unseen (ENF-c-f5). The text says a
+	// waiting replacement was cancelled, and it closes the open
+	// RecoveryCodeUsed, so one incident is one open alert (ENF-c-f7).
+	b.raise(alert.RecoveryCancelled)
 	return code, nil
 }
 
-// raise raises alert k and sends a failed raise to the log, named, so an
-// alert that fails to record is not lost unseen (NET-2 Texts and calls,
-// ENF-c-f6). The step that raised it goes on: the alerts keep a record
-// they could not journal on the page and still send it (alert.Raise).
-func (b *Book) raise(k alert.Kind, name string) {
+// raise raises alert k and sends a failed raise to the log, named by its
+// kind, so an alert that fails to record is not lost unseen (NET-2 Texts
+// and calls, ENF-c-f6, ENF-c-f7). The step that raised it goes on: the
+// alerts keep a record they could not journal on the page and still send
+// it (alert.Raise).
+func (b *Book) raise(k alert.Kind) {
 	if _, err := b.cfg.Alerts.Raise(k, ""); err != nil {
-		b.cfg.Log(fmt.Sprintf("enrol: the %s alert failed to record, so its text may not reach the owner: %v", name, err))
+		b.cfg.Log(fmt.Sprintf("enrol: the %v alert was not journalled: shown and sent now, but lost on a restart: %v", k, err))
 	}
 }
 
@@ -654,7 +657,7 @@ func (b *Book) Rotate() (string, error) {
 	}
 	// Texted once saved, never before: a failed save leaves the written
 	// code working, so a text then would be false (ASSUMPTIONS ENF-c-10).
-	b.raise(alert.RecoveryCodeChanged, "RecoveryCodeChanged")
+	b.raise(alert.RecoveryCodeChanged)
 	return code, nil
 }
 
@@ -674,7 +677,7 @@ func (b *Book) Tick() (bool, error) {
 	if err := b.take(&st); err != nil {
 		return false, err
 	}
-	b.raise(alert.Enrolment, "Enrolment")
+	b.raise(alert.Enrolment)
 	return true, nil
 }
 
@@ -698,7 +701,7 @@ func (b *Book) FactoryReset(caseCode string) error {
 	// The owner is texted before anything is dropped, so a reset cut short
 	// still shows on the page, and one whose text the core refuses is
 	// offered again (alert.Raise logs first).
-	b.raise(alert.FactoryReset, "FactoryReset")
+	b.raise(alert.FactoryReset)
 	b.cfg.Lock.Lock()
 	defer b.cfg.Lock.Unlock()
 	for _, p := range b.pol.Pending() {

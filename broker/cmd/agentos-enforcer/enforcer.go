@@ -286,7 +286,7 @@ func (d *Enforcer) send(a wire.Alert) error {
 
 func (d *Enforcer) fork(seq uint64) {
 	if _, err := d.alerts.Raise(alert.HeadFork, ""); err != nil {
-		d.dp.Logf(fmt.Sprintf("heads: fork at %d: alert: %v", seq, err))
+		d.dp.Logf(fmt.Sprintf("heads: fork at %d: %v alert: %v", seq, alert.HeadFork, err))
 	}
 }
 

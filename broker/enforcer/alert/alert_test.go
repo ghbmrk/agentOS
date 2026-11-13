@@ -924,3 +924,93 @@ func TestOneOfferPerTelling(t *testing.T) {
 		t.Fatalf("a core coming up was offered %d texts, want 1", g.got)
 	}
 }
+
+// TestKindNames (NET-2 Texts and calls; ENF-c-f7, #5645 point 3): every
+// kind on the list has a distinct, non-empty name, so a log line built from
+// the kind cannot name another alert, and a kind off the list still reads
+// as one. Catches a raise-failure log line that points the reader at the
+// wrong alert.
+func TestKindNames(t *testing.T) {
+	seen := map[string]Kind{}
+	for k := range kinds {
+		n := k.String()
+		if n == "" {
+			t.Fatalf("kind %d has no name", k)
+		}
+		if o, dup := seen[n]; dup {
+			t.Fatalf("kinds %d and %d share the name %q", o, k, n)
+		}
+		seen[n] = k
+	}
+	if RecoveryCodeChanged.String() != "RecoveryCodeChanged" || Trip.String() != "Trip" {
+		t.Fatalf("names do not follow the constants: %v %v", RecoveryCodeChanged, Trip)
+	}
+	if n := Kind(99).String(); n != "Kind(99)" {
+		t.Fatalf("a kind off the list reads %q", n)
+	}
+	if got := fmt.Sprintf("%v", HeadFork); got != "HeadFork" {
+		t.Fatalf("%%v of a kind reads %q", got)
+	}
+}
+
+// TestCancelClosesRecoveryUsed (NET-2 Texts and calls, NET-4; ENF-c-f7,
+// #5645 points 1 and 2): a cancelled replacement raises RecoveryCancelled,
+// whose text says the waiting replacement was cancelled and the old code
+// no longer works, and it resolves the open RecoveryCodeUsed, so the page
+// and the log keep one open alert for the incident, across a restart. Its
+// number follows RecoveryCodeChanged's, so journalled kinds keep their
+// meaning. Catches an owner whose recovery stops with no reason given, and
+// two unrelated-looking alerts for one incident.
+func TestCancelClosesRecoveryUsed(t *testing.T) {
+	if RecoveryCancelled != RecoveryCodeChanged+1 {
+		t.Fatalf("RecoveryCancelled is %d, want %d", RecoveryCancelled, RecoveryCodeChanged+1)
+	}
+	w, err := Words(RecoveryCancelled, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"replacement", "was cancelled with your passkey", "will not happen",
+		"old one no longer works", "closes the earlier alert", "enforcer's page at home"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("RecoveryCancelled text lacks %q: %q", want, w)
+		}
+	}
+	j := &journal{}
+	r := newRig(t, j)
+	other, err := r.a.Raise(UnusualUnlock, "front-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	used, err := r.a.Raise(RecoveryCodeUsed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := r.a.Raise(RecoveryCancelled, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(what string, a *Alerts) {
+		t.Helper()
+		var open []uint64
+		for _, x := range a.Status().Open {
+			open = append(open, x.ID)
+		}
+		if !slices.Equal(open, []uint64{other.ID, cancelled.ID}) {
+			t.Fatalf("%s: open %v, want %v (RecoveryCodeUsed %d closed)", what, open, []uint64{other.ID, cancelled.ID}, used.ID)
+		}
+		for _, x := range a.Log() {
+			if x.ID == used.ID && (x.Open || x.Resolved.IsZero()) {
+				t.Fatalf("%s: RecoveryCodeUsed not resolved: %+v", what, x)
+			}
+		}
+	}
+	check("raised", r.a)
+	check("after a restart", newRig(t, j).a)
+	if n := len(r.core.got); n != 3 || r.core.got[2].Text != w {
+		t.Fatalf("texts sent %d, last %+v", n, r.core.got[n-1])
+	}
+	// Nothing open to close: the cancel text is raised alone.
+	if _, err := newRig(t, &journal{}).a.Raise(RecoveryCancelled, ""); err != nil {
+		t.Fatal(err)
+	}
+}

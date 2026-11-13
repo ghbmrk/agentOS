@@ -67,8 +67,13 @@ const (
 	RecordMissing
 	// The passkey in force made a new recovery code, spending the written
 	// one (ENF-c-f4, #5042): a holder of a synced passkey on the Owner
-	// Wi-Fi cannot do it unseen. Appended last.
+	// Wi-Fi cannot do it unseen. Appended after RecordMissing.
 	RecoveryCodeChanged
+	// The passkey in force cancelled the replacement a recovery code
+	// started, which also made a new recovery code (ENF-c-f7, #5645): it
+	// ends the open RecoveryCodeUsed, so one incident leaves one open
+	// alert whose text tells the whole story. Appended last.
+	RecoveryCancelled
 )
 
 // Delivery is how a kind reaches the owner.
@@ -81,30 +86,37 @@ const (
 )
 
 type spec struct {
+	name     string // the kind's name in logs (String)
 	delivery Delivery
 	device   bool   // the wording names a device
 	words    string // fixed wording; %s is the device
 }
 
 var kinds = map[Kind]spec{
-	UnusualUnlock:       {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
-	UnusualDisarm:       {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
-	RecoveryCodeUsed:    {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home within 10 minutes and cancel the replacement there if one is waiting. After 10 minutes a waiting replacement is in force and only a factory reset with the code inside the enforcer's case takes it back. If none is waiting and your passkey still works, make a new recovery code there. Clear this there too."},
-	RecoveryCodeChanged: {Text, false, "Enforcer: a new recovery code was made with your passkey, so your old recovery code no longer works. If it was not you, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code on the enforcer's page at home and use it there to replace your passkey. Clear this there too."},
-	Enrolment:           {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
-	ChannelPaused:       {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
-	SafetyOff:           {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
-	SafetyShut:          {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too."},
-	HeadFork:            {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home."},
-	AlarmTriggered:      {Call, true, "Enforcer: the alarm %s was triggered."},
-	DoorForced:          {Call, true, "Enforcer: %s was forced open."},
-	FailedUnlocks:       {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
-	RoutineUnlock:       {LogOnly, true, "%s unlocked."},
-	RoutineLock:         {LogOnly, true, "%s locked."},
-	Trip:                {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
-	FactoryReset:        {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
-	RecordMissing:       {Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
+	UnusualUnlock:       {"UnusualUnlock", Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
+	UnusualDisarm:       {"UnusualDisarm", Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
+	RecoveryCodeUsed:    {"RecoveryCodeUsed", Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home within 10 minutes and cancel the replacement there if one is waiting. After 10 minutes a waiting replacement is in force and only a factory reset with the code inside the enforcer's case takes it back. If none is waiting and your passkey still works, make a new recovery code there. Clear this there too."},
+	RecoveryCodeChanged: {"RecoveryCodeChanged", Text, false, "Enforcer: a new recovery code was made with your passkey, so your old recovery code no longer works. If it was not you, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code on the enforcer's page at home and use it there to replace your passkey. Clear this there too."},
+	RecoveryCancelled:   {"RecoveryCancelled", Text, false, "Enforcer: the passkey replacement your recovery code started was cancelled with your passkey, so it will not happen, and a new recovery code was made, so your old one no longer works. This closes the earlier alert about the recovery code. If you did not cancel it, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code on the enforcer's page at home and use it there to replace your passkey. Clear this there too."},
+	Enrolment:           {"Enrolment", Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
+	ChannelPaused:       {"ChannelPaused", Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
+	SafetyOff:           {"SafetyOff", Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
+	SafetyShut:          {"SafetyShut", Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too."},
+	HeadFork:            {"HeadFork", Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home."},
+	AlarmTriggered:      {"AlarmTriggered", Call, true, "Enforcer: the alarm %s was triggered."},
+	DoorForced:          {"DoorForced", Call, true, "Enforcer: %s was forced open."},
+	FailedUnlocks:       {"FailedUnlocks", Call, true, "Enforcer: repeated failed attempts to unlock %s."},
+	RoutineUnlock:       {"RoutineUnlock", LogOnly, true, "%s unlocked."},
+	RoutineLock:         {"RoutineLock", LogOnly, true, "%s locked."},
+	Trip:                {"Trip", Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
+	FactoryReset:        {"FactoryReset", Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
+	RecordMissing:       {"RecordMissing", Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
 }
+
+// ends maps a kind to the kind whose open alert for the same device it
+// resolves when raised: the later event closes the earlier story, so one
+// incident leaves one open alert (ENF-c-f7).
+var ends = map[Kind]Kind{RecoveryCancelled: RecoveryCodeUsed}
 
 // Fold windows: a repeat of an open alert within its delivery's window
 // after the owner was last told counts on it and sends nothing; a repeat
@@ -120,6 +132,15 @@ func (d Delivery) fold() time.Duration {
 		return FoldCall
 	}
 	return FoldText
+}
+
+// String is k's name for logs, from the list, so a log line cannot name
+// another kind than the one raised; a kind not on the list reads Kind(n).
+func (k Kind) String() string {
+	if s, ok := kinds[k]; ok {
+		return s.name
+	}
+	return fmt.Sprintf("Kind(%d)", uint8(k))
 }
 
 // Delivery is k's delivery; ok is false for a kind not on the list.
@@ -334,7 +355,9 @@ func (a *Alerts) write(r Record) error {
 // same device counts on that alert; it sends nothing more within the
 // delivery's fold window after the owner was last told, so a burst costs
 // one text or call, and sends again after it, so a later event is never
-// silenced by an earlier one left open.
+// silenced by an earlier one left open. A kind that ends another resolves
+// that kind's open alert for the same device, so the page keeps one alert
+// for the incident.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	text, err := Words(k, device)
 	if err != nil {
@@ -359,6 +382,11 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	// must not depend on the disk either (P6).
 	werr := a.write(r)
 	a.put(r)
+	if e, ok := ends[k]; ok {
+		if i := a.open(e, device); i >= 0 {
+			werr = errors.Join(werr, a.resolve(i))
+		}
+	}
 	a.mu.Unlock()
 	if d != LogOnly {
 		a.show()

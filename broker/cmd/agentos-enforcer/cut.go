@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/alert"
@@ -86,7 +87,7 @@ func (c *cut) Trip(reason string) {
 		c.logf("cut: trip not saved, retried each tick; the channel takes no connection until it is: " + err.Error())
 	}
 	if _, err := c.alerts.Raise(alert.Trip, coreDevice); err != nil {
-		c.logf("cut: trip alert: " + err.Error())
+		c.logf(fmt.Sprintf("cut: %v alert for %s: %v", alert.Trip, coreDevice, err))
 	}
 	c.alerts.Paused()
 }
@@ -152,6 +153,6 @@ func (c *cut) Resume() error {
 // or resume resolves it (alert.Lifted).
 func recordMissing(alerts *alert.Alerts, device string, logf func(string)) {
 	if _, err := alerts.Raise(alert.RecordMissing, device); err != nil {
-		logf("cut: missing record alert: " + err.Error())
+		logf(fmt.Sprintf("cut: %v alert for %s: %v", alert.RecordMissing, device, err))
 	}
 }
