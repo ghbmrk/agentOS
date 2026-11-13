@@ -1009,6 +1009,17 @@ func TestCancelClosesRecoveryUsed(t *testing.T) {
 	if n := len(r.core.got); n != 3 || r.core.got[2].Text != w {
 		t.Fatalf("texts sent %d, last %+v", n, r.core.got[n-1])
 	}
+	// RecoveryCodeUsed as the very first record (index 0) closes too.
+	first := newRig(t, &journal{})
+	if _, err := first.a.Raise(RecoveryCodeUsed, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.a.Raise(RecoveryCancelled, ""); err != nil {
+		t.Fatal(err)
+	}
+	if st := first.a.Status(); len(st.Open) != 1 || st.Open[0].Kind != RecoveryCancelled {
+		t.Fatalf("first record not closed: open %+v", st.Open)
+	}
 	// Nothing open to close: the cancel text is raised alone.
 	if _, err := newRig(t, &journal{}).a.Raise(RecoveryCancelled, ""); err != nil {
 		t.Fatal(err)
