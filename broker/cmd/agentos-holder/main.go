@@ -206,7 +206,13 @@ func checkerOK(sock string, euid uint32) error {
 	if !filepath.IsAbs(sock) {
 		return errors.New("-checker needs an absolute socket path")
 	}
-	dir := filepath.Dir(filepath.Clean(sock))
+	// A path Clean would change is refused: the kernel follows a link
+	// before resolving "..", so the directory checked here could differ
+	// from the one checker.Redeemer dials (#5663).
+	if filepath.Clean(sock) != sock {
+		return errors.New("-checker needs a clean path (no \"..\", \".\", \"//\" or trailing slash)")
+	}
+	dir := filepath.Dir(sock)
 	for p := dir; ; p = filepath.Dir(p) {
 		fi, err := os.Lstat(p)
 		if err != nil {

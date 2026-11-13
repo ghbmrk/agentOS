@@ -49,7 +49,13 @@ func checkerFlagAs(dir string, euid uint32) error {
 	if !filepath.IsAbs(dir) {
 		return errors.New("-checker needs the checker's absolute socket directory")
 	}
-	abs := filepath.Clean(dir)
+	// A path Clean would change is refused: the kernel follows a link
+	// before resolving "..", so a checked lexical path could name another
+	// directory than the one dialled (#5663).
+	if filepath.Clean(dir) != dir {
+		return errors.New("-checker needs a clean path (no \"..\", \".\", \"//\" or trailing slash)")
+	}
+	abs := dir
 	for p := abs; ; p = filepath.Dir(p) {
 		if err := ownedDir(p, euid, p == abs); err != nil {
 			return fmt.Errorf("-checker %s: %w", dir, err)

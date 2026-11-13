@@ -444,6 +444,17 @@ func TestCheckerFlag(t *testing.T) {
 	if err := os.Symlink(ok, link); err != nil {
 		t.Fatal(err)
 	}
+	// ok/lnk/../y is ok/y to Clean, but the kernel follows lnk first and
+	// lands in open/y, a directory every uid writes (#5663).
+	for _, d := range []string{filepath.Join(ok, "y"), filepath.Join(open, "sub"), filepath.Join(open, "y")} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(open, "sub"), filepath.Join(ok, "lnk")); err != nil {
+		t.Fatal(err)
+	}
+	dotdot := ok + "/lnk/../y"
 	trust := euid
 	if euid == 0 {
 		// root is always trusted, so the owner case needs another owner.
@@ -461,6 +472,8 @@ func TestCheckerFlag(t *testing.T) {
 		"a parent writable by all": {under, euid},
 		"another uid's":            {other, trust},
 		"a link":                   {link, euid},
+		"a link then ..":           {dotdot, euid},
+		"a trailing slash":         {ok + "/", euid},
 		"missing":                  {filepath.Join(ok, "absent"), euid},
 	} {
 		if checkerFlagAs(c.dir, c.euid) == nil {
