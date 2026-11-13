@@ -716,6 +716,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 	badRoot := "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 	udevSocket := "[Socket]\nService=systemd-udevd.service\nListenSequentialPacket=/run/udev/control\nSocketMode=0600\n"
 	udev := map[string]string{lib + "systemd-udevd.service": root, lib + "systemd-udevd-control.socket": udevSocket}
+	devlog := map[string]string{lib + "systemd-journald-dev-log.socket": "[Socket]\nService=systemd-journald.service\nListenDatagram=/run/systemd/journal/dev-log\nSymlinks=/dev/log\nSocketMode=0666\n", lib + "systemd-journald.service": root}
 	dbus := map[string]string{lib + "dbus.socket": "[Socket]\nListenStream=/run/dbus/system_bus_socket\n", lib + "dbus.service": "[Service]\nUser=messagebus\nExecStart=/usr/bin/dbus-daemon --system\n"}
 	foo := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nIPAddressDeny=any\nPrivateNetwork=yes\n", lib + "foo.service": root}
 	inst := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nService=bar@x.service\n"}
@@ -914,7 +915,12 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a socket of ours in a package socket's directory":        {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/udev/x\n"), ourEtc, `ListenStream=/run/udev/x: a listen path of ours on a package socket's path`},
 		"a socket of ours on a package socket's path by /var/run": {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/var/run/udev//control\n"), ourEtc, `a listen path of ours on a package socket's path`},
 		"a socket of ours on a package socket's path by %t":       {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=%t/udev/control\n"), ourEtc, `a listen path of ours on a package socket's path`},
-		"a socket of ours whose path holds a specifier":           {with(udev, etc+"agentos-x@.service", user, etc+"agentos-x@.socket", "[Socket]\nListenStream=/run/%I\n", etc+"sockets.target.wants/agentos-x@udev-control.socket", "-> ../agentos-x@.socket"), ourEtc, `ListenStream=/run/%I: a listen path of ours holds a specifier`},
+		"a socket of ours on a journal namespace's path":          {map[string]string{lib + "systemd-journald@.socket": "[Socket]\nService=systemd-journald@%i.service\nListenStream=/run/systemd/journal.%i/stdout\n", lib + "systemd-journald@.service": root, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/systemd/journal.ns/stdout\nSocketMode=0666\n"}, ourEtc, `ListenStream=/run/systemd/journal.ns/stdout: a listen path of ours on a package socket's path, /run/systemd/journal.%i/stdout`},
+		// #5614 L3 1: Symlinks= paths are endpoints too, on both sides.
+		"a socket of ours on a package socket's link":   {with(devlog, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenDatagram=/dev/log\n"), ourEtc, `ListenDatagram=/dev/log: a listen path of ours on a package socket's path, /dev/log`},
+		"a link of ours on a package socket's link":     {with(devlog, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/run/agentos-x/l /dev/log\n"), ourEtc, `Symlinks=/run/agentos-x/l /dev/log: a listen path of ours on a package socket's path, /dev/log`},
+		"a link of ours on a package socket's path":     {with(devlog, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\nSymlinks=/run/systemd/journal/dev-log\n"), ourEtc, `on a package socket's path, /run/systemd/journal/dev-log`},
+		"a socket of ours whose path holds a specifier": {with(udev, etc+"agentos-x@.service", user, etc+"agentos-x@.socket", "[Socket]\nListenStream=/run/%I\n", etc+"sockets.target.wants/agentos-x@udev-control.socket", "-> ../agentos-x@.socket"), ourEtc, `ListenStream=/run/%I: a listen path of ours holds a specifier`},
 		// #5072 Security round 5 point 2: systemd adds the edge on both
 		// units, so a unit of ours naming one is the drop-in's route.
 		"a unit of ours joining a fed service's namespace":      {with(dbus, etc+"agentos-x.service", "[Unit]\nJoinsNamespaceOf=dbus.service\n[Service]\nUser=agentos-x\nPrivateTmp=yes\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `JoinsNamespaceOf=dbus.service: a [Unit] line of ours naming a package's socket`},
@@ -2462,8 +2468,8 @@ type unitCheck struct {
 	// fed templates (unit_rules.py's held).
 	held    map[string]bool
 	heldPre []string
-	// The paths a package's socket listens on (pkgListenPaths).
-	pkgListen []string
+	// The paths a package's socket listens on or links (pkgListenPaths).
+	pkgListen []listenPat
 }
 
 // namesHeld returns the first word of a [Unit] line, key k, that names a
@@ -2575,9 +2581,12 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {
 				takes = filepath.ToSlash(rel) + ": " + k + "=" + v
 			}
-			if listen == "" && section == "Socket" && line.section == section && !trusted[f] && strings.HasPrefix(k, "Listen") {
-				if why := c.onPkgListen(v); why != "" {
-					listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours " + why
+			if listen == "" && section == "Socket" && line.section == section && !trusted[f] {
+				for _, w := range endpointWords(k, v) {
+					if why := c.onPkgListen(w); why != "" {
+						listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours " + why
+						break
+					}
 				}
 			}
 			if line.section == section && !trusted[f] {
@@ -2773,31 +2782,86 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 // directory among them holds no path of ours to it (#5075 R3).
 var sharedRuns = map[string]bool{"/": true, "/run": true, "/tmp": true, "/var/tmp": true, "/dev": true, "/dev/shm": true}
 
-// listenPath returns a Listen*= value's file system path as the system
-// manager binds it, /var/run read as /run and %t expanded; ok is false for
-// a value that names no path (a port, an address, an abstract socket,
-// ListenNetlink=) and bad true for one holding another specifier, whose
-// value the reader cannot see.
-func listenPath(v string) (p string, ok, bad bool) {
-	v = strings.ReplaceAll(v, "%t", "/run")
-	if substitutes(v, '%') {
-		return "", false, true
+// Specifier placeholders in an expanded path: one whose value holds no
+// slash (noSlash), and one whose value may (a path, an unescaped name).
+const (
+	specWord = "\x00"
+	specPath = "\x01"
+)
+
+// noSlash are the specifiers whose value never holds a /: names, ids and
+// the instance and prefix as escaped (systemd.unit(5) "Specifiers").
+const noSlash = "aAbBgGHijlmMnNopPquUvwW"
+
+// expandListen reads a Listen*= or Symlinks= word as the system manager
+// does, in one left-to-right pass: %% is a literal %, %t is /run, and any
+// other specifier becomes a placeholder (specWord or specPath). The result
+// is cleaned and /var/run read as /run; ok is false for a word that names
+// no path (a port, an address, an abstract socket, ListenNetlink=).
+func expandListen(v string) (p string, ok bool) {
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		switch {
+		case v[i] != '%':
+			b.WriteByte(v[i])
+		case i+1 < len(v) && v[i+1] == '%':
+			b.WriteByte('%')
+			i++
+		case i+1 < len(v) && v[i+1] == 't':
+			b.WriteString("/run")
+			i++
+		case i+1 < len(v) && strings.IndexByte(noSlash, v[i+1]) >= 0:
+			b.WriteString(specWord)
+			i++
+		default: // any other specifier, or a lone %
+			b.WriteString(specPath)
+			i++
+		}
 	}
-	v = strings.ReplaceAll(v, "%%", "%")
-	if !strings.HasPrefix(v, "/") {
-		return "", false, false
+	if p = b.String(); !strings.HasPrefix(p, "/") {
+		return "", false
 	}
-	p = path.Clean(v)
+	p = path.Clean(p)
 	if p == "/var/run" || strings.HasPrefix(p, "/var/run/") {
 		p = "/run" + strings.TrimPrefix(p, "/var/run")
 	}
-	return p, true, false
+	return p, true
+}
+
+// endpointWords returns the words of a [Socket] line that name a path PID
+// 1 binds, creates or unlinks for the socket: a Listen*= value, and each
+// Symlinks= word (#5614 L3 1).
+func endpointWords(k, v string) []string {
+	switch {
+	case strings.HasPrefix(k, "Listen"):
+		return []string{v}
+	case k == "Symlinks":
+		return strings.Fields(v)
+	}
+	return nil
+}
+
+// listenPat is a package socket's endpoint path as a pattern: re matches
+// the path and every path under it, dir its directory and every path under
+// that, or nil when the directory is one of sharedRuns. A specifier
+// matches any value it may take (#5614 Security 1).
+type listenPat struct {
+	raw     string
+	re, dir *regexp.Regexp
+}
+
+// patternOf compiles an expanded path, its placeholders read as wildcards.
+func patternOf(p string) *regexp.Regexp {
+	q := regexp.QuoteMeta(p)
+	q = strings.ReplaceAll(q, specWord, "[^/]*")
+	q = strings.ReplaceAll(q, specPath, ".*")
+	return regexp.MustCompile("^" + strings.TrimSuffix(q, "/") + "(/.*)?$")
 }
 
 // pkgListenPaths returns every path a package's file in a socket unit of
-// recs listens on.
-func pkgListenPaths(recs unitRecords) []string {
-	var out []string
+// recs listens on or links, a word with a specifier as a pattern.
+func pkgListenPaths(recs unitRecords) []listenPat {
+	var out []listenPat
 	for _, u := range recs.Units {
 		if path.Ext(u.Unit) != ".socket" {
 			continue
@@ -2808,8 +2872,19 @@ func pkgListenPaths(recs unitRecords) []string {
 				continue
 			}
 			for _, l := range ul {
-				if p, ok, _ := listenPath(l.value); ok && l.section == "Socket" && strings.HasPrefix(l.key, "Listen") {
-					out = append(out, p)
+				if l.section != "Socket" {
+					continue
+				}
+				for _, w := range endpointWords(l.key, l.value) {
+					p, ok := expandListen(w)
+					if !ok {
+						continue
+					}
+					lp := listenPat{raw: w, re: patternOf(p)}
+					if d := path.Dir(p); !sharedRuns[d] {
+						lp.dir = patternOf(d)
+					}
+					out = append(out, lp)
 				}
 			}
 		}
@@ -2817,22 +2892,21 @@ func pkgListenPaths(recs unitRecords) []string {
 	return out
 }
 
-// onPkgListen says why a Listen*= value of ours is refused: it holds a
-// specifier, or its path equals or lies under a package socket's listen
-// path or that path's directory, unless the directory is one of
-// sharedRuns; "" if it is not.
+// onPkgListen says why an endpoint word of ours is refused: it holds a
+// specifier other than %t, or its path equals or lies under a package
+// socket's endpoint path, or that path's directory unless the directory is
+// one of sharedRuns; "" if it is not.
 func (c *unitCheck) onPkgListen(v string) string {
-	p, ok, bad := listenPath(v)
-	if bad {
-		return "holds a specifier, whose value the reader cannot see"
-	}
+	p, ok := expandListen(v)
 	if !ok {
 		return ""
 	}
-	in := func(p, q string) bool { return p == q || strings.HasPrefix(p, strings.TrimSuffix(q, "/")+"/") }
+	if strings.ContainsAny(p, specWord+specPath) {
+		return "holds a specifier, whose value the reader cannot see"
+	}
 	for _, q := range c.pkgListen {
-		if in(p, q) || !sharedRuns[path.Dir(q)] && in(p, path.Dir(q)) {
-			return "on a package socket's path, " + q
+		if q.re.MatchString(p) || q.dir != nil && q.dir.MatchString(p) {
+			return "on a package socket's path, " + q.raw
 		}
 	}
 	return ""
@@ -3006,6 +3080,47 @@ func TestBuiltUnitsRefusedUnitPrograms(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("got %v, want every refusal, with %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+// TestBuiltUnitsPackageListenPatterns: a package socket's listen path
+// holding a specifier is held as a pattern, so a socket of ours on any of
+// its values is refused (#5614 Security 1).
+func TestBuiltUnitsPackageListenPatterns(t *testing.T) {
+	const lib, etc = "/usr/lib/systemd/system/", "/etc/systemd/system/"
+	for name, c := range map[string]struct {
+		pkgUnit, pkgText, ours, want string
+	}{
+		"a journal namespace's socket": {"systemd-journald@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/systemd/journal.%i/stdout\n", "/run/systemd/journal.ns/stdout", `on a package socket's path, /run/systemd/journal.%i/stdout`},
+		"a template's socket":          {"tpl@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/tpl/%i.sock\n", "/run/tpl/a.sock", `on a package socket's path, /run/tpl/%i.sock`},
+		"an instance path in /run":     {"tpl@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/tpl-%i.sock\n", "/run/tpl-a.sock", `on a package socket's path, /run/tpl-%i.sock`},
+		"an unescaped instance path":   {"tpl@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/%I.sock\n", "/run/a/b.sock", `on a package socket's path, /run/%I.sock`},
+		"a pattern's directory":        {"systemd-journald@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/systemd/journal.%i/stdout\n", "/run/systemd/journal.ns/x", `on a package socket's path`},
+		"beside a template in /run":    {"tpl@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/tpl-%i.sock\n", "/run/agentos-x/s", ""},
+		"beside a journal namespace":   {"systemd-journald@agentos-unit-lint.socket", "[Socket]\nListenStream=/run/systemd/journal.%i/stdout\n", "/run/agentos-x/stdout", ""},
+		// #5614 L3 2: %% is read before any specifier, so %%t is a literal %t.
+		"a literal %t in a package's path": {"pkg.socket", "[Socket]\nListenStream=/run/pkg/%%t\n", "/run/pkg/%%t", `on a package socket's path, /run/pkg/%%t`},
+		"a literal %t in ours":             {"pkg.socket", "[Socket]\nListenStream=/run/pkg/s\n", "/run/agentos-x/%%t", ""},
+		"a glob character in a package":    {"tpl.socket", "[Socket]\nListenStream=/run/t[p]l/s\n", "/run/tpl/s", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			u := func(unit, p, text string, ours bool) map[string]any {
+				return map[string]any{"unit": unit, "files": []any{map[string]any{"path": p, "ours": ours, "text": text}}}
+			}
+			b, _ := json.Marshal(map[string]any{"units": []any{
+				u(c.pkgUnit, lib+c.pkgUnit, c.pkgText, false),
+				u("agentos-x.service", etc+"agentos-x.service", "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/x\n", true),
+				u("agentos-x.socket", etc+"agentos-x.socket", "[Socket]\nListenStream="+c.ours+"\nSocketMode=0666\n", true),
+			}})
+			var recs unitRecords
+			if err := json.Unmarshal(b, &recs); err != nil {
+				t.Fatal(err)
+			}
+			err := builtUnits(recs, t.TempDir())
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+				t.Fatalf("got %v, want %q", err, c.want)
 			}
 		})
 	}
