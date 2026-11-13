@@ -190,12 +190,12 @@ func newAEAD(key [32]byte) (cipher.AEAD, error) {
 
 func aad(seq uint64) []byte { return binary.BigEndian.AppendUint64(nil, seq) }
 
-// Open reads, authenticates and checks the whole log against its anchor.
-// A torn final frame is trimmed. A log shorter than its anchor, or with a
-// different entry at the anchored seq, is refused. A widening entry that no
-// anchor covers, as the last entry, is dropped: only an owner-confirmed
-// widening counts (KRN-7). Narrowing, dispatch and result entries are
-// always kept, since dropping one could repeat an effect (KRN-8).
+// Open reads, authenticates and checks the whole log against its anchor. A
+// log shorter than its anchor, or with another entry at the anchored seq, is
+// refused before a torn final frame is trimmed, so a refusal cuts no byte
+// (LOG-2). A last widening entry no anchor covers is dropped: only an
+// owner-confirmed widening counts (KRN-7). Narrowing, dispatch and result
+// entries are always kept, since dropping one could repeat an effect (KRN-8).
 func Open(cfg Config) (*Log, error) {
 	a, err := newAEAD(cfg.Key)
 	if err != nil {
@@ -242,8 +242,6 @@ func Open(cfg Config) (*Log, error) {
 		off += 4 + n
 		ends = append(ends, off)
 	}
-	// The anchor is checked before any cut, so a refused open leaves every
-	// byte for recovery (LOG-2).
 	if err := f.checkAnchor(); err != nil {
 		return nil, err
 	}
