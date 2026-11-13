@@ -762,8 +762,12 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
 	}
 	// Nor that one is in force after the wait, and with none waiting the
-	// code is still unspent, so the text asks for a new one (ENF-c-f4 item 3).
-	if !strings.Contains(w, "a waiting replacement is in force") || !strings.Contains(w, "if none is waiting, make a new recovery code there") {
+	// code is still unspent, so the text asks for a new one, outside the
+	// 10-minute frame and after the factory reset, so a late reader does
+	// not reset for nothing (ENF-c-f4 item 3, #5613 UX 3).
+	const none = "If none is waiting and your passkey still works, make a new recovery code there."
+	if !strings.Contains(w, "a waiting replacement is in force") || !strings.Contains(w, none) ||
+		strings.Index(w, none) < strings.Index(w, "takes it back") {
 		t.Errorf("after a failed save the text reads as a replacement in force: %q", w)
 	}
 	// After the wait the text must not read as all-clear: it names the
@@ -1069,9 +1073,18 @@ func TestRotateRecoveryCode(t *testing.T) {
 	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
 		t.Errorf("rotate texts %v, want one RecoveryCodeChanged", g.alerts.raised)
 	}
-	if w, err := alert.Words(alert.RecoveryCodeChanged, ""); err != nil || !strings.Contains(w, "no longer works") ||
-		!strings.Contains(w, "If it was not you") || !strings.Contains(w, "make a new recovery code") {
-		t.Errorf("the rotation's text does not say the written code is spent and what to do: %q %v", w, err)
+	// The whole text is pinned: it says the old code is spent in the
+	// page's words (not "the code you wrote down", which an owner who just
+	// wrote the new one reads as dead too), and, if it was not the owner,
+	// names the cause before the steps: the synced passkey's cloud account
+	// first, then a new code used to replace the passkey, since a new code
+	// alone leaves the other holder's passkey in force (#5613 UX 1, 2;
+	// Potency 1).
+	const changed = "Enforcer: a new recovery code was made with your passkey, so your old recovery code no longer works. " +
+		"If it was not you, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code " +
+		"on the enforcer's page at home and use it there to replace your passkey. Clear this there too."
+	if w, err := alert.Words(alert.RecoveryCodeChanged, ""); err != nil || w != changed {
+		t.Errorf("the rotation's text:\n got %q %v\nwant %q", w, err, changed)
 	}
 	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
 		t.Errorf("the spent code still starts a replacement: %v", err)
