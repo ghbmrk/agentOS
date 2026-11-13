@@ -902,6 +902,19 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a conflicts line of ours on a fed implicit service":          {with(dbus, etc+"dbus.service.d/z.conf", "[Unit]\nConflicts=agentos-x.service\n"), ourEtc, `Conflicts=agentos-x.service: a [Unit] line of ours`},
 		"a mask of ours on a package socket's drop-in":                {with(udev, lib+"systemd-udevd-control.socket.d/p.conf", "[Socket]\nSocketMode=0600\n", etc+"systemd-udevd-control.socket.d/p.conf", "-> /dev/null"), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd-control.socket.d/p.conf`},
 		"an empty file of ours on a fed service's drop-in":            {with(udev, lib+"systemd-udevd.service.d/p.conf", "[Service]\nUser=systemd-x\n", etc+"systemd-udevd.service.d/p.conf", ""), ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/systemd-udevd.service.d/p.conf`},
+		// #5075 R1: on a service no package's socket feeds, a /dev/null link
+		// or an empty file of ours named as a package's User= drop-in makes
+		// the package's unit run as root.
+		"a mask of ours on a package's owner drop-in":        {map[string]string{lib + "pkgd.service": "[Service]\nExecStart=/usr/bin/pkgd\n", lib + "pkgd.service.d/user.conf": "[Service]\nUser=pkgd\n", etc + "pkgd.service.d/user.conf": "-> /dev/null"}, ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/pkgd.service.d/user.conf`},
+		"an empty file of ours on a package's owner drop-in": {map[string]string{lib + "pkgd.service": "[Service]\nExecStart=/usr/bin/pkgd\n", lib + "pkgd.service.d/user.conf": "[Service]\nUser=pkgd\n", etc + "pkgd.service.d/user.conf": ""}, ourEtc, `hides a package's drop-in, /usr/lib/systemd/system/pkgd.service.d/user.conf`},
+		// #5075 R3: a socket of ours, name and service ours, on a package
+		// socket's path: systemd unlinks and binds again, and our daemon
+		// takes the package's endpoint.
+		"a socket of ours on a package socket's path":             {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenSequentialPacket=/run/udev/control\nSocketMode=0666\n"), ourEtc, `ListenSequentialPacket=/run/udev/control: a listen path of ours on a package socket's path`},
+		"a socket of ours in a package socket's directory":        {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/udev/x\n"), ourEtc, `ListenStream=/run/udev/x: a listen path of ours on a package socket's path`},
+		"a socket of ours on a package socket's path by /var/run": {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/var/run/udev//control\n"), ourEtc, `a listen path of ours on a package socket's path`},
+		"a socket of ours on a package socket's path by %t":       {with(udev, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=%t/udev/control\n"), ourEtc, `a listen path of ours on a package socket's path`},
+		"a socket of ours whose path holds a specifier":           {with(udev, etc+"agentos-x@.service", user, etc+"agentos-x@.socket", "[Socket]\nListenStream=/run/%I\n", etc+"sockets.target.wants/agentos-x@udev-control.socket", "-> ../agentos-x@.socket"), ourEtc, `ListenStream=/run/%I: a listen path of ours holds a specifier`},
 		// #5072 Security round 5 point 2: systemd adds the edge on both
 		// units, so a unit of ours naming one is the drop-in's route.
 		"a unit of ours joining a fed service's namespace":      {with(dbus, etc+"agentos-x.service", "[Unit]\nJoinsNamespaceOf=dbus.service\n[Service]\nUser=agentos-x\nPrivateTmp=yes\nExecStart=/usr/lib/agentos/x\n"), ourEtc, `JoinsNamespaceOf=dbus.service: a [Unit] line of ours naming a package's socket`},
@@ -944,7 +957,9 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// cannot read, on a unit none of ours touches.
 		"a package's specifier directory": {map[string]string{lib + "foo@.service": "[Service]\nExecStart=/usr/bin/foo\nDynamicUser=yes\nStateDirectory=foo/%i\n"}, pkg},
 		// A socket all of whose files are ours sets its own owner and mode.
-		"a socket of ours with its owner": {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nSocketUser=root\nSocketGroup=agentos-x\nSocketMode=0660\nDirectoryMode=0755\nReusePort=yes\nFreeBind=yes\n"}, ourEtc},
+		// #5075 R3: a socket of ours beside a package's in a shared tree.
+		"a socket of ours beside a package's in /run": {map[string]string{lib + "pkgs.socket": "[Socket]\nListenStream=/run/pkgs.sock\n", lib + "pkgs.service": user, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=%t/agentos-x.sock\nListenStream=/run/agentos-x/100%%\n"}, ourEtc},
+		"a socket of ours with its owner":             {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nSocketUser=root\nSocketGroup=agentos-x\nSocketMode=0660\nDirectoryMode=0755\nReusePort=yes\nFreeBind=yes\n"}, ourEtc},
 		// A package's socket feeding a package's service, with the package's
 		// own [Service] drop-in and [Unit]-only drop-ins of ours (as the
 		// image's networkd and resolved ones are).
@@ -2447,6 +2462,8 @@ type unitCheck struct {
 	// fed templates (unit_rules.py's held).
 	held    map[string]bool
 	heldPre []string
+	// The paths a package's socket listens on (pkgListenPaths).
+	pkgListen []string
 }
 
 // namesHeld returns the first word of a [Unit] line, key k, that names a
@@ -2528,6 +2545,10 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	unitOurs := ""                // the first [Unit] line not trusted, but an ordering one (orderKeys)
 	edgeOurs := ""                // the first such line naming a package's socket or a service it feeds
 	pkgFile := false              // a file in trusted
+	listen := ""                  // the first Listen*= line of ours on a package socket's path (pkgListen)
+	// Every refusal the unit reaches is reported, and reading goes on past
+	// it, so its root programs still reach c.progs for grantsHeld (#5075 R2).
+	var errs []error
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -2536,7 +2557,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		rel, _ := filepath.Rel(c.root, f)
 		ul, err := unitLines(string(b))
 		if err != nil {
-			return fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
+			errs = append(errs, fmt.Errorf("%s: %v", filepath.ToSlash(rel), err))
+			continue
 		}
 		pkgFile = pkgFile || trusted[f]
 		for _, line := range ul {
@@ -2552,6 +2574,11 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			}
 			if takes == "" && section == "Service" && line.section == section && !trusted[f] && k == "Sockets" {
 				takes = filepath.ToSlash(rel) + ": " + k + "=" + v
+			}
+			if listen == "" && section == "Socket" && line.section == section && !trusted[f] && strings.HasPrefix(k, "Listen") {
+				if why := c.onPkgListen(v); why != "" {
+					listen = filepath.ToSlash(rel) + ": " + k + "=" + v + ": a listen path of ours " + why
+				}
 			}
 			if line.section == section && !trusted[f] {
 				userOurs = userOurs || owners[k]
@@ -2596,7 +2623,7 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	// ours would change how those read (a package's grant becomes ours), so
 	// alone is the worst context only without one (#4779 re-plan).
 	if alone && reread != "" {
-		return fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread)
+		errs = append(errs, fmt.Errorf("%s: a file read alone may apply to units not in view, so it may not set a directory's owner or mode", reread))
 	}
 	// A package's socket and what it activates are the package's: no
 	// [Socket] line of ours on a socket one of whose files, its name or the
@@ -2606,24 +2633,30 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	// form: each key list before it missed a route (#5072 Security rounds
 	// 1-3). Our own sockets, all of whose files are ours, set their own.
 	if section == "Socket" && ours != "" && (alone || pkgFile || c.pkgSockets[name]) {
-		return fmt.Errorf("%s: a line of ours on a package's socket (by a file, its name or the service it feeds), or in a file read alone, may not set any [Socket] setting", ours)
+		errs = append(errs, fmt.Errorf("%s: a line of ours on a package's socket (by a file, its name or the service it feeds), or in a file read alone, may not set any [Socket] setting", ours))
 	}
 	if section == "Service" && ours != "" && c.pkgFed[name] {
-		return fmt.Errorf("%s: a line of ours on a service a package's socket feeds (its connections or listening fds) may not set any [Service] setting", ours)
+		errs = append(errs, fmt.Errorf("%s: a line of ours on a service a package's socket feeds (its connections or listening fds) may not set any [Service] setting", ours))
+	}
+	// A socket of ours, name and service ours, on a package socket's path
+	// takes the package's endpoint: systemd unlinks a path in use and binds
+	// again (#5075 R3).
+	if listen != "" {
+		errs = append(errs, errors.New(listen))
 	}
 	pkgSocket := section == "Socket" && (alone || pkgFile || c.pkgSockets[name])
 	if unitOurs != "" && (pkgSocket || section == "Service" && c.pkgFed[name]) {
-		return fmt.Errorf("%s: a [Unit] line of ours on a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", unitOurs)
+		errs = append(errs, fmt.Errorf("%s: a [Unit] line of ours on a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", unitOurs))
 	}
 	// systemd puts an edge on both units (JoinsNamespaceOf= is symmetric,
 	// Conflicts= adds ConflictedBy=, PropagatesStopTo= StopPropagatedFrom=),
 	// so the same keys are held from our side too, in every unit (#5072
 	// Security round 5 point 2).
 	if edgeOurs != "" {
-		return fmt.Errorf("%s: a [Unit] line of ours naming a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", edgeOurs)
+		errs = append(errs, fmt.Errorf("%s: a [Unit] line of ours naming a package's socket or a service it feeds may set only After=, Before=, Requires= or Wants=", edgeOurs))
 	}
 	if alone && takes != "" {
-		return fmt.Errorf("%s: a file read alone may not make a service take a socket", takes)
+		errs = append(errs, fmt.Errorf("%s: a file read alone may not make a service take a socket", takes))
 	}
 	rootCmd := false
 	for _, l := range lines {
@@ -2639,7 +2672,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		rel, _ := filepath.Rel(c.root, l.file)
 		cmds, err := execWords(l.value)
 		if err != nil {
-			return fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err))
+			continue
 		}
 		for _, words := range cmds {
 			if len(words) == 0 {
@@ -2654,11 +2688,13 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			// no $ substitution either, and no word holds a % specifier
 			// (agentos-%i in a template); $$ and %% are literal.
 			if strings.Contains(prefix, "|") || !strings.HasPrefix(prog, "/") || substitutes(prog, '$') || path.Clean(prog) != prog {
-				return fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value)
+				errs = append(errs, fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value))
+				continue
 			}
 			for _, w := range words {
 				if substitutes(w, '%') {
-					return fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w)
+					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w))
+					break
 				}
 			}
 			if asUser && !asRoot && !strings.ContainsAny(prefix, "+!") {
@@ -2671,7 +2707,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			// ${X} of unitVars (#4494).
 			for i, w := range words[1:] {
 				if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
-					return fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
+					errs = append(errs, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w))
+					break
 				}
 			}
 			// A program's arguments may name another a wrapper (with-uids
@@ -2711,7 +2748,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 			// root command's are (#4737 Security 6588498486 R1).
 			continue
 		case err != nil:
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		if !pkgGrant {
 			c.grants = append(c.grants, g...)
@@ -2720,15 +2758,84 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 	}
 	if !rootCmd && !alone {
-		return nil
+		return errors.Join(errs...)
 	}
 	for _, l := range append(settings, env...) {
 		if err := rootPathSetting(l.key, l.value); err != nil {
 			rel, _ := filepath.Rel(c.root, l.file)
-			return fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+			errs = append(errs, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// sharedRuns are trees many units' sockets sit in, so a package socket's
+// directory among them holds no path of ours to it (#5075 R3).
+var sharedRuns = map[string]bool{"/": true, "/run": true, "/tmp": true, "/var/tmp": true, "/dev": true, "/dev/shm": true}
+
+// listenPath returns a Listen*= value's file system path as the system
+// manager binds it, /var/run read as /run and %t expanded; ok is false for
+// a value that names no path (a port, an address, an abstract socket,
+// ListenNetlink=) and bad true for one holding another specifier, whose
+// value the reader cannot see.
+func listenPath(v string) (p string, ok, bad bool) {
+	v = strings.ReplaceAll(v, "%t", "/run")
+	if substitutes(v, '%') {
+		return "", false, true
+	}
+	v = strings.ReplaceAll(v, "%%", "%")
+	if !strings.HasPrefix(v, "/") {
+		return "", false, false
+	}
+	p = path.Clean(v)
+	if p == "/var/run" || strings.HasPrefix(p, "/var/run/") {
+		p = "/run" + strings.TrimPrefix(p, "/var/run")
+	}
+	return p, true, false
+}
+
+// pkgListenPaths returns every path a package's file in a socket unit of
+// recs listens on.
+func pkgListenPaths(recs unitRecords) []string {
+	var out []string
+	for _, u := range recs.Units {
+		if path.Ext(u.Unit) != ".socket" {
+			continue
+		}
+		for _, f := range u.Files {
+			ul, err := unitLines(f.Text)
+			if f.Ours || err != nil {
+				continue
+			}
+			for _, l := range ul {
+				if p, ok, _ := listenPath(l.value); ok && l.section == "Socket" && strings.HasPrefix(l.key, "Listen") {
+					out = append(out, p)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// onPkgListen says why a Listen*= value of ours is refused: it holds a
+// specifier, or its path equals or lies under a package socket's listen
+// path or that path's directory, unless the directory is one of
+// sharedRuns; "" if it is not.
+func (c *unitCheck) onPkgListen(v string) string {
+	p, ok, bad := listenPath(v)
+	if bad {
+		return "holds a specifier, whose value the reader cannot see"
+	}
+	if !ok {
+		return ""
+	}
+	in := func(p, q string) bool { return p == q || strings.HasPrefix(p, strings.TrimSuffix(q, "/")+"/") }
+	for _, q := range c.pkgListen {
+		if in(p, q) || !sharedRuns[path.Dir(q)] && in(p, path.Dir(q)) {
+			return "on a package socket's path, " + q
+		}
+	}
+	return ""
 }
 
 // execProgs returns the programs an Exec line names, read loosely: each
@@ -2799,7 +2906,7 @@ func builtUnits(recs unitRecords, dir string) error {
 		return f, os.WriteFile(f, []byte(text), 0o644)
 	}
 	c := &unitCheck{root: dir, seen: map[string]bool{}, pkgSockets: map[string]bool{}, pkgFed: map[string]bool{},
-		held: map[string]bool{}, heldPre: recs.Held.Prefixes}
+		held: map[string]bool{}, heldPre: recs.Held.Prefixes, pkgListen: pkgListenPaths(recs)}
 	for _, n := range recs.Held.Names {
 		c.held[n] = true
 	}
@@ -2872,6 +2979,35 @@ func TestBuiltUnitsEveryRefusal(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("got %v, want every refusal, with %q", err, want)
 		}
+	}
+}
+
+// TestBuiltUnitsRefusedUnitPrograms: a unit refused before or among its
+// commands still gives grantsHeld every program it runs as root, so the
+// report names a grant above one (#5075 R2).
+func TestBuiltUnitsRefusedUnitPrograms(t *testing.T) {
+	grant := `{"unit": "c.service", "alone": false, "files": [{"path": "/etc/systemd/system/c.service", "ours": true, "text": "[Service]\nUser=c\nExecStart=/usr/bin/c\nStateDirectory=c\nStateDirectoryMode=0777\n"}]}`
+	for name, c := range map[string]struct {
+		unit string
+		want string
+	}{
+		"refused before its commands": {`{"unit": "d.service", "alone": false, "fed": true, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nExecStart=/var/lib/c/run\n"}]}`, `a line of ours on a service a package's socket feeds`},
+		"refused among its commands":  {`{"unit": "d.service", "alone": false, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nExecStartPre=run\nExecStart=/var/lib/c/run\n"}]}`, `want a program that is a plain absolute path`},
+		"refused for a word":          {`{"unit": "d.service", "alone": false, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nExecStart=/var/lib/c/run %i\n"}]}`, `holds a % specifier`},
+		"refused for a setting":       {`{"unit": "d.service", "alone": false, "files": [{"path": "/etc/systemd/system/d.service", "ours": true, "text": "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\nExecStart=/var/lib/c/run\n"}]}`, `variable "LD_PRELOAD"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var recs unitRecords
+			if err := json.Unmarshal([]byte(`{"units": [`+c.unit+`, `+grant+`]}`), &recs); err != nil {
+				t.Fatal(err)
+			}
+			err := builtUnits(recs, t.TempDir())
+			for _, want := range []string{c.want, `in or above /var/lib/c/run`} {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("got %v, want every refusal, with %q", err, want)
+				}
+			}
+		})
 	}
 }
 
