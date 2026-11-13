@@ -19,23 +19,6 @@ import (
 
 const maxMCPBody = 1 << 20
 
-// TreeTool is the broker tool through which a guest's bridge fetches the
-// managed tree (W4). Its answer goes to the guest whole, never folded and
-// never bigger than MaxTreeAnswer: a fold record for each poll would share
-// the machine's fold budget with the agent's own held results and evict
-// them (TREE-fold-evict, #1461). It carries no step-snapshot note either,
-// since the bridge reads only its first item (#1488).
-const TreeTool = "managed_tree"
-
-// MaxTreeAnswer bounds a TreeTool answer as the bridge reads it: the whole
-// JSON-RPC response on the wire. The tree in it is JSON-encoded twice, by
-// agentosd and again here as a text string, so an escaped character in a
-// path costs up to 7 bytes and no count of the tree's raw bytes can keep
-// this bound. The plane measures the answer it would write and refuses one
-// over the bound whole, so the bridge never reads one cut short
-// (TREE-answer-bound, #1487).
-const MaxTreeAnswer = 8 << 20
-
 var protocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 type rpcRequest struct {
@@ -183,8 +166,6 @@ func (p *Plane) mcp(m *machine, w http.ResponseWriter, r *http.Request) {
 			text, handled, err := p.cfg.Tools.Call(r.Context(), m.id, lineage, call.Name, call.Arguments)
 			if handled {
 				switch {
-				case call.Name == TreeTool:
-					p.writeTree(w, req.ID, m, text, err)
 				case err != nil:
 					writeRPC(w, req.ID, m.result(guesterr.Filter(m.id, call.Name, err).Error(), true), nil)
 				default:
@@ -234,24 +215,6 @@ func (m *machine) whole(text string, isErr bool) map[string]any {
 
 func toolResult(text string, isErr bool) map[string]any {
 	return map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": isErr}
-}
-
-// writeTree answers a TreeTool call for machine m. The answer is never
-// folded (G19) and carries no step note: the bridge reads only its first
-// item, so a note on it would never reach the agent (#1488 O-1). An answer
-// over MaxTreeAnswer is refused whole.
-func (p *Plane) writeTree(w http.ResponseWriter, id json.RawMessage, m *machine, text string, err error) {
-	res := toolResult(text, false)
-	if err != nil {
-		res = toolResult(guesterr.Filter(m.id, TreeTool, err).Error(), true)
-	}
-	b := encodeRPC(id, res, nil)
-	if len(b) > MaxTreeAnswer {
-		p.cfg.Logf("guest %s: managed tree not sent: a %d-byte answer, over %d", m.id, len(b), MaxTreeAnswer)
-		b = encodeRPC(id, toolResult("the managed tree is too large to send", true), nil)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(b)
 }
 
 func writeRPC(w http.ResponseWriter, id json.RawMessage, result any, e *rpcError) {
