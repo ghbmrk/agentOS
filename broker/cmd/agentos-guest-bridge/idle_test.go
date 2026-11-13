@@ -1,6 +1,6 @@
 package main
 
-// REQ: ARC-6, ARC-7
+// REQ: PLN-5
 
 import (
 	"context"
@@ -94,11 +94,45 @@ func TestBackgroundStopsWhenItsContextEnds(t *testing.T) {
 	}
 }
 
+// A cancel also ends an /owner/next request the broker is holding open
+// (L3 release 2 on #5640). Failure path: the poll's request ignores ctx,
+// so a held-open poll keeps the idle work alive after its caller stops.
+func TestBackgroundCancelsAHeldPoll(t *testing.T) {
+	held := make(chan struct{}, 1)
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case held <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer broker.Close()
+	u, _ := url.Parse(broker.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := background(ctx, &http.Client{Transport: rewrite{u}}, "http://127.0.0.1:1", "m", "tok")
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the owner poll never reached the broker")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a held-open poll kept the idle work alive after its context ended")
+	}
+}
+
 // Every goroutine the bridge starts is one of a fixed set: the request
 // server and the signal relay in main, which act only when the guest or
 // the system asks, and the idle work, which background starts and
-// TestBridgeMakesNoToolCallAtIdle covers. A new go statement anywhere in
-// the command fails this test, so idle work cannot be started around
+// TestBridgeMakesNoToolCallAtIdle covers. Any other go statement or timer
+// start anywhere in the command's files (goroutineStarts) fails this test, so idle work cannot be started around
 // background (GUEST-bridge-tree-dead-fu, acceptance 3 of #4491).
 // Failure path: a goroutine started directly from main brings back an
 // idle tool poll, and the idle test still passes.
@@ -117,29 +151,16 @@ func TestEveryGoroutineIsKnown(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				g, ok := n.(*ast.GoStmt)
-				if !ok {
-					return true
-				}
-				got = append(got, fn.Name.Name+": "+callee(g.Call.Fun))
-				return true
-			})
-		}
+		got = append(got, goroutineStarts(f)...)
 	}
 	sort.Strings(got)
 	want := []string{
-		"background: owner",
-		"main: func literal",
-		"main: http.Serve",
+		"background: go owner",
+		"main: go func literal",
+		"main: go http.Serve",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("go statements:\n%s\nwant:\n%s\n(route new idle work through background)",
+		t.Fatalf("goroutine starts:\n%s\nwant:\n%s\n(route new idle work through background)",
 			strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	// The signal relay only forwards a signal to the runtime.
@@ -161,6 +182,75 @@ func TestEveryGoroutineIsKnown(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// The inventory sees a goroutine start anywhere in a file: in a package
+// variable's initializer as well as a function body, and a timer that
+// runs a function or ticks (time.AfterFunc, time.NewTicker, time.Tick) as
+// well as a go statement (L3 blocker 1 and Potency release 2 on #5640).
+// Failure path: a poll started from a var initializer or a timer slips
+// past TestEveryGoroutineIsKnown.
+func TestGoroutineStartsSeesTheWholeFile(t *testing.T) {
+	src := `package main
+
+import "time"
+
+var _ = func() int { go poll(); return 0 }()
+
+var t = time.AfterFunc(time.Second, poll)
+
+func f() {
+	_ = time.NewTicker(time.Second)
+	for range time.Tick(time.Second) {
+	}
+}
+
+func poll() {}
+`
+	f, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := goroutineStarts(f)
+	sort.Strings(got)
+	want := []string{
+		"f: time.NewTicker",
+		"f: time.Tick",
+		"var: go poll",
+		"var: time.AfterFunc",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("goroutine starts:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// goroutineStarts lists each go statement and each timer that starts
+// work in f, labelled with its enclosing function, or with the declaring
+// keyword (var, const) for a package-level initializer.
+func goroutineStarts(f *ast.File) []string {
+	var got []string
+	for _, d := range f.Decls {
+		where := ""
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			where = d.Name.Name
+		case *ast.GenDecl:
+			where = d.Tok.String()
+		}
+		ast.Inspect(d, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.GoStmt:
+				got = append(got, where+": go "+callee(n.Call.Fun))
+			case *ast.CallExpr:
+				switch c := callee(n.Fun); c {
+				case "time.AfterFunc", "time.NewTicker", "time.Tick":
+					got = append(got, where+": "+c)
+				}
+			}
+			return true
+		})
+	}
+	return got
 }
 
 func callee(e ast.Expr) string {

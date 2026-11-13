@@ -89,8 +89,9 @@ func main() {
 // nothing else. The tree directory is what the machine was seeded with;
 // the bridge fetches no tree, since agentosd serves no managed_tree tool
 // (GUEST-bridge-tree-dead). Every idle goroutine starts here, so the idle
-// test covers it (TestEveryGoroutineIsKnown); it stops once ctx ends, and
-// done closes when it has (GUEST-bridge-tree-dead-fu).
+// test covers it (TestEveryGoroutineIsKnown); it stops once ctx ends
+// (between messages, see owner), and done closes when it has
+// (GUEST-bridge-tree-dead-fu).
 func background(ctx context.Context, broker *http.Client, gateway, model, token string) (done <-chan struct{}) {
 	d := make(chan struct{})
 	go owner(ctx, d, broker, gateway, model, token)
@@ -164,7 +165,10 @@ func reap(child *childproc.Cmd) {
 // owner moves owner messages from the broker into the guest and answers
 // back. Failures wait and retry: an unanswered message is handed out again,
 // and an answer is posted until the broker has stored it.
-// It returns, closing done, once ctx ends.
+// Between messages it returns, closing done, once ctx ends, a held-open
+// /owner/next request included. A message already handed out is first
+// answered and its reply stored: the ask and reply retries do not read ctx,
+// so a cancel never drops an owner message (DEL-1d).
 func owner(ctx context.Context, done chan<- struct{}, broker *http.Client, gateway, model, token string) {
 	defer close(done)
 	for ctx.Err() == nil {
