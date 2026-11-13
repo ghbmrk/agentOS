@@ -240,7 +240,7 @@ func arabicIndic(s string) string {
 // REQ: CH-10, CH-11
 // TestUnicodeDigitResumeCodeIsQuarantined: the live RESUME code re-sent
 // in non-ASCII digits or letters, locked, unlocked and challenged, gets
-// the fixed unclear reply: it never reaches the agent or the held queue,
+// the fixed digits reply (#5616): it never reaches the agent or the held queue,
 // is never checked or counted, and never resumes, so the ASCII code stays
 // unspent and still works (CTL-unicode-code, #5454).
 func TestUnicodeDigitResumeCodeIsQuarantined(t *testing.T) {
@@ -272,8 +272,8 @@ func TestUnicodeDigitResumeCodeIsQuarantined(t *testing.T) {
 				sent := len(r.agent.got())
 				st := r.ch.codes.st
 				wrong, held := len(st.Wrong), len(st.Waiting)
-				if got := r.say(text); got != control.UnclearReply {
-					t.Fatalf("%q: %q, want the unclear reply", text, got)
+				if got := r.say(text); got != control.FoldedCodeReply {
+					t.Fatalf("%q: %q, want the digits reply", text, got)
 				}
 				now := r.ch.codes.st
 				if len(r.agent.got()) != sent || len(now.Wrong) != wrong || len(now.Waiting) != held || !r.eng.Stopped() {

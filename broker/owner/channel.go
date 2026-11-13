@@ -640,6 +640,12 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			return route{replies: []string{"No open requests."}, limited: !unlocked}
 		}
 	}
+	// A RESUME, YES or NO with a code in other digits is never checked;
+	// the reply says codes need 0-9 (#5616). One with ASCII digits and
+	// look-alike letters gets the unclear reply below.
+	if strings.ContainsFunc(text, foreignNumber) && foldedCodeWord(text) {
+		return route{replies: []string{control.FoldedCodeReply}, limited: !unlocked}
+	}
 	switch control.Parse(text).Word {
 	case control.WordStop:
 		c.resume = nil // a code issued before STOP must not lift it
@@ -649,8 +655,18 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		return route{delegate: text, run: true, limited: !unlocked}
 	}
 	rest, code := splitCode(text)
-	if foldedCodeWord(text) || code == "" && foldedCode(text) {
+	if foldedCodeWord(text) {
 		return route{replies: []string{control.UnclearReply}, limited: !unlocked}
+	}
+	if code == "" && foldedCode(text) {
+		// Chat ending in a code in other digits routes as chat ending in
+		// an ASCII code does, with the token stripped and never checked
+		// (#5616). Anything else holding one gets the digits reply.
+		r, ok := stripFoldedCode(text)
+		if !ok {
+			return route{replies: []string{control.FoldedCodeReply}, limited: !unlocked}
+		}
+		text, rest = r, r
 	}
 	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
 		return route{delegate: text, run: true, limited: true}
@@ -686,6 +702,39 @@ func foldedCodeWord(text string) bool {
 func foldedCode(text string) bool {
 	_, code := splitCode(fold(text))
 	return code != ""
+}
+
+// foreignNumber is a number rune outside ASCII.
+func foreignNumber(r rune) bool { return r >= 0x80 && unicode.IsNumber(r) }
+
+// stripFoldedCode removes a trailing token that, read through fold, is a
+// 6-digit code, and returns the chat before it. ok is false unless that
+// chat is plain task chat holding no other folded code: a lone code, a
+// control word, a reply or a name command keeps the whole message out
+// (CH-10, CH-14; CTL-unicode-chat-code-fu, #5616).
+func stripFoldedCode(text string) (rest string, ok bool) {
+	s := strings.TrimRightFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
+	i := strings.LastIndexFunc(s, unicode.IsSpace)
+	if i < 0 {
+		return "", false
+	}
+	if t := fold(s[i+1:]); len(t) != codeDigits || !allDigits(t) {
+		return "", false
+	}
+	rest = strings.TrimSpace(s[:i])
+	f := fold(rest)
+	if rest == "" || foldedCode(rest) || control.Parse(f).Word != control.WordNone {
+		return "", false
+	}
+	for _, m := range []string{f, fold(text)} {
+		if _, isReply := parseReply(m); isReply {
+			return "", false
+		}
+		if _, isName := parseName(m); isName {
+			return "", false
+		}
+	}
+	return rest, true
 }
 
 // splitCode finds a code that is the whole message or a separate trailing
