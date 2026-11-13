@@ -460,3 +460,37 @@ func TestTIM1AStepUseAgesFromLatest(t *testing.T) {
 		}
 	}
 }
+
+// A task takes an approval only while it is live on the reading's Latest,
+// where its timeout fires (KRN-5, #5395): a reading whose Earliest is short
+// of the timeout and whose Latest is past it refuses, live and in the fold.
+// Mutant: approve on now.Earliest in ApproveTask and the late approval logs;
+// fold it on e.At and the forged one folds.
+func TestATaskApprovalNeedsTheTaskLiveOnLatest(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "t1", 0))
+	r.k.UseClock(func() kernel.Reading {
+		return kernel.Reading{Earliest: kernel.TaskTimeout - 30, Latest: kernel.TaskTimeout - 1}
+	})
+	must(t, r.k.ApproveTask(0, "t1", approval("t1", 0, r.owner)))
+	r.k.UseClock(func() kernel.Reading {
+		return kernel.Reading{Earliest: kernel.TaskTimeout - 20, Latest: kernel.TaskTimeout}
+	})
+	n := r.k.Log().Len()
+	if err := r.k.ApproveTask(0, "t1", approval("t1", 1, r.owner)); !errors.Is(err, kernel.ErrTask) {
+		t.Fatalf("an approval past the timeout on Latest: %v", err)
+	}
+	if r.k.Log().Len() != n {
+		t.Fatal("a refused approval was logged")
+	}
+	r.replays()
+	late := kernel.TaskTimeout + 10
+	forged := entryAt(t, uint64(n+1), kernel.TaskTimeout-20, kernel.TTaskApproved, map[string]any{"task": "t1", "approval": approval("t1", 1, r.owner)})
+	forged.Late = &late
+	es := r.k.Log().Entries()
+	st, err := kernel.Replay(r.anchors(), append(es[:len(es):len(es)], forged))
+	must(t, err)
+	if tk, _ := st.Task("t1", kernel.TaskTimeout-20); tk.Taps != 1 {
+		t.Fatalf("an approval logged past the timeout on Latest folded: %d taps", tk.Taps)
+	}
+}
