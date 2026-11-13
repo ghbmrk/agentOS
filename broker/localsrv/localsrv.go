@@ -114,6 +114,9 @@ type Config struct {
 	// BackupNotes is the only-copy notice for the status page, in its
 	// fixed words; nil shows none.
 	BackupNotes func() []string
+	// MachineNotes is the status page's note on the machines (#5099), in
+	// its fixed words; nil shows none.
+	MachineNotes func() []string
 	// Held, when set, serves OpHeld (#993); nil leaves it unregistered.
 	Held func() localapi.HeldList
 }
@@ -262,6 +265,9 @@ func (s *Server) status(context.Context, sockets.Peer, json.RawMessage) (any, er
 	}
 	if s.cfg.BackupNotes != nil {
 		out.Backups = s.cfg.BackupNotes()
+	}
+	if s.cfg.MachineNotes != nil {
+		out.Machines = s.cfg.MachineNotes()
 	}
 	return out, nil
 }

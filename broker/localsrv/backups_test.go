@@ -199,3 +199,25 @@ func TestStatusCarriesTheBackupNotice(t *testing.T) {
 		t.Fatalf("status %+v", st)
 	}
 }
+
+// VM-wedged-status-owner (#5099): the status page carries the machines'
+// note when set, and none when unset.
+func TestStatusCarriesTheMachineNotes(t *testing.T) {
+	// REQ: KRN-7
+	r := newRig(t)
+	out, err := r.call(localapi.OpStatus, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := out.(localapi.Status); st.Machines != nil {
+		t.Fatalf("unset notes: %+v", st)
+	}
+	line := "Machines: one will not stop and still counts against my memory; restart me."
+	r.srv.cfg.MachineNotes = func() []string { return []string{line} }
+	if out, err = r.call(localapi.OpStatus, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if st := out.(localapi.Status); len(st.Machines) != 1 || st.Machines[0] != line {
+		t.Fatalf("status %+v", st)
+	}
+}

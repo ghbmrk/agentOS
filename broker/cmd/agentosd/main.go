@@ -286,7 +286,7 @@ func main() {
 	flag.BoolVar(&cgroupVouched, "cgroup-delegated", false, "-cgroup-root is delegated to the broker (without it, systemd's delegate mark is required)")
 	flag.StringVar(&accelMode, "accel", "auto", "accelerator discovery: auto or off (RES-3)")
 	flag.Float64Var(&cfg.MaxPressure, "max-pressure", 10, "memory PSI (some avg10, %) above which only foreground is admitted")
-	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", "agent-machine layers and snapshots (created 0700)")
+	flag.StringVar(&stateDir, "machines", "/var/lib/agentos/machines", machinesFlagHelp)
 	flag.StringVar(&runsc, "runsc", "", "gVisor runsc binary; empty runs no agent machines")
 	flag.Int64Var(&diskReserveMB, "disk-reserve-mb", budget.FloorDisk().ReserveBytes()>>20, "state-disk space snapshots never use (RES-4 reserve), MB")
 	flag.StringVar(&diskQuota, "disk-quota", "on", "per-machine disk quotas (RES-4): on needs -machines on a file system mounted with prjquota; off lets a guest fill the disk")
@@ -496,7 +496,7 @@ func main() {
 			log.Printf("agent machines disabled: %v", err)
 			runsc = ""
 			if agentOff == "" {
-				agentOff = agentNoLimits
+				agentOff = agentLimitsLine(err)
 			}
 		} else {
 			cg, psiPath = g, filepath.Join(g.Path, "memory.pressure")
@@ -528,6 +528,10 @@ func main() {
 	caps.machinesUnset(runsc, agentOff)
 	capLines := newCapLines(caps)
 	capLines.wire(&cfg)
+	if cfg.PageSocket != nil {
+		// The owner page's note on wedged machines (#5099).
+		cfg.PageSocket.MachineNotes = caps.machineNotes
+	}
 	// No update-check loop (Loop 3, W5b) runs: STATUS says update checks
 	// are not running.
 	agent := &lateAgent{}
@@ -796,7 +800,7 @@ func main() {
 		m, err := openVM(ctx, vmc, caps, informOwner(d.Owner))
 		if err != nil {
 			log.Printf("agent machines disabled: %v", err)
-			caps.agentOff(agentNoMachines)
+			caps.agentOff(machinesOffLine(err))
 		} else {
 			pre.m.Store(m)
 			// Held lineages go back before any machine is served or
@@ -907,6 +911,10 @@ func capacityFor(meminfo string, cores int, explicit bool, flagMB int64, floor b
 
 // n95CapacityMB is capacityFor's figure on the N95 (about 7680 MB).
 const n95CapacityMB = 4096
+
+// machinesFlagHelp is -machines' help: vm.Open refuses a path that breaks
+// it (vm.ErrStateDirExposed, #4976), and a restart does not fix that.
+const machinesFlagHelp = "agent-machine layers and snapshots (created 0700); an absolute, clean path, every directory on it reached by no link, owned by root or the broker, and writable by no group or other unless sticky"
 
 // memPlan is agentosd's start-time memory plan (PE6, P2-5r).
 type memPlan struct {
@@ -1190,7 +1198,7 @@ var removeBrokerDir = os.Remove
 func newBrokerGroup(root string) (*cgroup.Group, error) {
 	b := &cgroup.Group{Path: filepath.Join(root, "broker")}
 	if err := removeBrokerDir(b.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("the broker's group %s, left by an earlier run, cannot be removed because something is still in it; restart the computer to clear it (reused, it could stop every service and machine from starting): %w", b.Path, err)
+		return nil, &brokerGroupStuck{path: b.Path, err: err}
 	}
 	if err := os.Mkdir(b.Path, 0o755); err != nil {
 		return nil, err

@@ -296,3 +296,23 @@ func TestBackupScriptMatchesItsCSPHash(t *testing.T) {
 		}
 	}
 }
+
+// VM-wedged-status-owner (#5099): the status page shows the machines'
+// note to any phone, and nothing when there is none.
+func TestStatusPageShowsTheMachineNote(t *testing.T) {
+	// REQ: KRN-7
+	line := "Machines: one will not stop and still counts against my memory; restart me."
+	srv := newRig(t).srv
+	for _, signedIn := range []bool{false, true} {
+		w := httptest.NewRecorder()
+		srv.render(w, "status", statusView{HasOwner: true, Owner: localapi.Status{Machines: []string{line}}, SignedIn: signedIn})
+		if p := html.UnescapeString(w.Body.String()); !strings.Contains(p, line) {
+			t.Fatalf("signed in %v:\n%s", signedIn, p)
+		}
+	}
+	w := httptest.NewRecorder()
+	srv.render(w, "status", statusView{HasOwner: true})
+	if strings.Contains(w.Body.String(), "will not stop") {
+		t.Fatal("a machine note with no lines")
+	}
+}

@@ -1,0 +1,157 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/ghbmrk/agentos/broker/admission"
+	"github.com/ghbmrk/agentos/broker/budget"
+	"github.com/ghbmrk/agentos/broker/vm"
+)
+
+// REQ: RES-2, KRN-7, KRN-2
+
+// VM-wedged-status-owner (#5099): a machine whose kills never end
+// (vm.Manager.Wedged) shows in STATUS and on the owner page by count,
+// never by internal ID, saying it still counts and that only a restart
+// frees it; none, no line and no page note.
+func TestWedgedMachinesLine(t *testing.T) {
+	var wedged []string
+	s := &capState{}
+	if got := s.wedgedLine(); got != "" {
+		t.Fatalf("machines not open: %q", got)
+	}
+	if got := s.machineNotes(); got != nil {
+		t.Fatalf("page notes, machines not open: %q", got)
+	}
+	s.machinesWedged(func() []string { return wedged })
+	if got := s.wedgedLine(); got != "" {
+		t.Fatalf("none wedged: %q", got)
+	}
+	if got := s.machineNotes(); got != nil {
+		t.Fatalf("page notes, none wedged: %q", got)
+	}
+	wedged = []string{"agent.0"}
+	const one = "Machines: one will not stop and still counts against my memory; restart me."
+	if got := s.wedgedLine(); got != one {
+		t.Fatalf("one wedged: %q", got)
+	}
+	if got := s.machineNotes(); !slices.Equal(got, []string{one}) {
+		t.Fatalf("page notes, one wedged: %q", got)
+	}
+	wedged = append(wedged, "helper.3")
+	const two = "Machines: 2 will not stop and still count against my memory; restart me."
+	if got := s.wedgedLine(); got != two {
+		t.Fatalf("two wedged: %q", got)
+	}
+	for _, l := range []string{one, two} {
+		if err := ownerWorded(l); err != nil {
+			t.Errorf("%q: %v", l, err)
+		}
+		if strings.Contains(l, "agent.0") || strings.Contains(l, "helper") {
+			t.Errorf("%q names an internal ID", l)
+		}
+	}
+	// The registry carries it, so STATUS and the digest show it.
+	if d := newCapLines(s).Digest(); !slices.Contains(d, two) {
+		t.Fatalf("digest %q lacks the wedged line", d)
+	}
+}
+
+// The seam main opens the machines through wires the wedged line to the
+// manager's live list; with nothing wedged it says nothing.
+func TestOpenVMWiresWedgedLine(t *testing.T) {
+	var m *vm.Manager
+	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+	must(t, err)
+	caps := &capState{}
+	m, err = openVM(context.Background(), vm.Config{
+		StateDir: t.TempDir(), Images: map[string]string{"base": t.TempDir()},
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+	}, caps, func(string) error { return nil })
+	must(t, err)
+	if caps.wedged.Load() == nil {
+		t.Fatal("the wedged line is not wired to the open machines")
+	}
+	if got := caps.wedgedLine(); got != "" {
+		t.Fatalf("nothing wedged: %q", got)
+	}
+}
+
+// AGENTOSD-broker-group-status (#5186): a leftover broker group that will
+// not go turns the agent off with a line that says a restart clears it,
+// not that an update is needed, and names no mechanism. Other causes keep
+// the update line.
+func TestRES2BrokerGroupStuckSaysRestart(t *testing.T) {
+	own := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(own, "broker", "held"), 0o755))
+	mem, err := budget.ForHost(7680, 4, budget.Floor())
+	must(t, err)
+	_, err = openPool(own, mem)
+	var stuck *brokerGroupStuck
+	if !errors.As(err, &stuck) {
+		t.Fatalf("leftover that will not go: %v, want a brokerGroupStuck", err)
+	}
+	got := agentLimitsLine(err)
+	if got != agentLimitsStuck {
+		t.Fatalf("status line %q, want %q", got, agentLimitsStuck)
+	}
+	if !strings.Contains(got, "restart me") || strings.Contains(got, "update") {
+		t.Errorf("line %q does not name a restart, or names an update", got)
+	}
+	for _, mech := range []string{"cgroup", "group", "broker", "kill"} {
+		if strings.Contains(got, mech) {
+			t.Errorf("line %q names a mechanism (%s)", got, mech)
+		}
+	}
+	if s := (&lateStatus{off: got}).Status(); s != got {
+		t.Errorf("STATUS %q", s)
+	}
+	for _, other := range []error{errNotDelegated, fmt.Errorf("root lacks cpu: %w", errors.New("x"))} {
+		if l := agentLimitsLine(other); l != agentNoLimits {
+			t.Errorf("%v: line %q, want the update line", other, l)
+		}
+	}
+}
+
+// REV-CHK-links-vm-ux (#4976): a -machines path vm.Open refuses is a
+// setting to fix, which a restart does not; STATUS says so. Any other
+// open failure keeps the restart line. The flag help names the rule.
+func TestMachinesPathRefusalIsASettingNotARestart(t *testing.T) {
+	var m *vm.Manager
+	adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+	must(t, err)
+	_, err = openVM(context.Background(), vm.Config{
+		StateDir: "relative/machines", Images: map[string]string{"base": t.TempDir()},
+		Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+		FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+	}, &capState{}, func(string) error { return nil })
+	if !errors.Is(err, vm.ErrStateDirExposed) {
+		t.Fatalf("relative state path: %v, want ErrStateDirExposed", err)
+	}
+	got := machinesOffLine(err)
+	if got != agentMachinesUnsafe {
+		t.Fatalf("line %q, want %q", got, agentMachinesUnsafe)
+	}
+	if strings.Contains(got, fixRestart) {
+		t.Errorf("line %q asks for a restart", got)
+	}
+	if err := ownerWorded(got); err != nil {
+		t.Errorf("%q: %v", got, err)
+	}
+	if l := machinesOffLine(errors.New("runsc failed")); l != agentNoMachines {
+		t.Errorf("other failure: %q, want %q", l, agentNoMachines)
+	}
+	for _, want := range []string{"absolute", "clean", "root", "group", "sticky"} {
+		if !strings.Contains(machinesFlagHelp, want) {
+			t.Errorf("-machines help %q lacks %q", machinesFlagHelp, want)
+		}
+	}
+}
