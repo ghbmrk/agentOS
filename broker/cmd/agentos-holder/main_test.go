@@ -21,6 +21,11 @@ func TestParseRefusesWhatAHolderCannotKeep(t *testing.T) {
 	if err != nil || len(c.adapters) != 1 || c.adapters[0].Credential != "openai" {
 		t.Fatalf("%+v %v", c, err)
 	}
+	// -checker still parses into the config (it fails closed at redeem
+	// since D-244, not at start).
+	if c, err := parse(append(ok, "-checker", "/x"), io.Discard); err != nil || c.checker != "/x" {
+		t.Fatalf("-checker: %q %v", c.checker, err)
+	}
 	for name, args := range map[string][]string{
 		"no uid":          {"-dir", "/run/x", "-credential", "k", "-adapter", "openai"},
 		"one uid for two": {"-dir", "/run/x", "-credential", "k", "-adapter", "openai", "-request-uid", "1", "-hand-uid", "1"},
