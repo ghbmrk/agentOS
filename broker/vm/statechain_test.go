@@ -179,16 +179,78 @@ func TestOpenRefusesStateDirAForeignOwnerReports(t *testing.T) {
 
 // An Lstat error other than a missing name is returned, not read past:
 // a name longer than NAME_MAX fails Lstat with ENAMETOOLONG, as root too.
+// It is a refusal of the path as set, which a restart repeats, so it
+// carries ErrStateDirUnreachable as well as the errno (#5617).
 func TestOpenReturnsAStateDirLstatError(t *testing.T) {
 	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
 	cfg := newCfg(t)
 	cfg.StateDir = filepath.Join(top, strings.Repeat("n", 300), "state")
 	before := snapshotTree(t, top)
-	if m, err := Open(context.Background(), cfg); !errors.Is(err, syscall.ENAMETOOLONG) || m != nil {
-		t.Errorf("Open = %v, %v; want ENAMETOOLONG and no manager", m, err)
+	if m, err := Open(context.Background(), cfg); !errors.Is(err, syscall.ENAMETOOLONG) || !errors.Is(err, ErrStateDirUnreachable) || m != nil {
+		t.Errorf("Open = %v, %v; want ENAMETOOLONG, ErrStateDirUnreachable and no manager", m, err)
 	}
 	if after := snapshotTree(t, top); after != before {
 		t.Errorf("Open changed the tree:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// REV-CHK-links-vm-lstat (#5617): a directory on the path that this uid
+// cannot search fails Lstat with EACCES on every try, so Open refuses it
+// as a setting (ErrStateDirUnreachable), not as a fault a restart clears.
+// Root searches any directory, so this runs only without root; the seam
+// test below pins the mapping in every job.
+func TestOpenRefusesAStateDirUnderAnUnreadableParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root searches a mode-0 directory")
+	}
+	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+	shut := filepath.Join(top, "shut")
+	if err := os.MkdirAll(filepath.Join(shut, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shut, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shut, 0o700) })
+	cfg := newCfg(t)
+	cfg.StateDir = filepath.Join(shut, "inner", "state")
+	if m, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirUnreachable) || !errors.Is(err, syscall.EACCES) || m != nil {
+		t.Errorf("Open = %v, %v; want EACCES as ErrStateDirUnreachable and no manager", m, err)
+	}
+}
+
+// Each Lstat refusal the path's setting causes (EACCES, EPERM, ENOTDIR,
+// ELOOP, ENAMETOOLONG) is ErrStateDirUnreachable; any other error (EIO)
+// is returned as it came, with neither sentinel, so it keeps the restart
+// line (#5617).
+func TestStateDirLstatRefusalsAreSettings(t *testing.T) {
+	for errno, setting := range map[syscall.Errno]bool{
+		syscall.EACCES: true, syscall.EPERM: true, syscall.ENOTDIR: true, syscall.ELOOP: true, syscall.ENAMETOOLONG: true,
+		syscall.EIO: false, syscall.ENOMEM: false,
+	} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+			cfg := newCfg(t)
+			cfg.StateDir = filepath.Join(top, "refused", "state")
+			real := stateDirLstat
+			t.Cleanup(func() { stateDirLstat = real })
+			stateDirLstat = func(p string) (fs.FileInfo, error) {
+				if filepath.Base(p) == "refused" {
+					return nil, &fs.PathError{Op: "lstat", Path: p, Err: errno}
+				}
+				return real(p)
+			}
+			_, err := Open(context.Background(), cfg)
+			if !errors.Is(err, errno) {
+				t.Fatalf("Open = %v, want %v in the chain", err, errno)
+			}
+			if got := errors.Is(err, ErrStateDirUnreachable); got != setting {
+				t.Errorf("Open = %v: ErrStateDirUnreachable %v, want %v", err, got, setting)
+			}
+			if errors.Is(err, ErrStateDirExposed) {
+				t.Errorf("Open = %v: says the path is open to another uid", err)
+			}
+		})
 	}
 }
 

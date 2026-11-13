@@ -46,6 +46,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -503,12 +504,25 @@ type Manager struct {
 // ErrStateDirExposed refuses a StateDir another uid could swap for a link.
 var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
 
-// stateDirOwner and stateDirsMade are seams: tests give a directory a
-// foreign owner without root, and change a directory between Open's two
-// checks: stateDirsChecked runs after the first and before MkdirAll,
-// stateDirsMade after MkdirAll and before the second.
+// ErrStateDirUnreachable refuses a StateDir whose path this uid cannot
+// walk: a component it may not search (EACCES, EPERM), or a path the
+// kernel will not resolve as written (ENOTDIR, ELOOP, ENAMETOOLONG).
+// Each fails the same way on every start, so it is the path's setting
+// to fix, not a fault a restart clears (#5617). Other Lstat errors (EIO,
+// say) are returned as they came.
+var ErrStateDirUnreachable = errors.New("vm: the state directory's path cannot be walked")
+
+// stateDirRefusals are the Lstat errnos ErrStateDirUnreachable covers.
+var stateDirRefusals = []error{syscall.EACCES, syscall.EPERM, syscall.ENOTDIR, syscall.ELOOP, syscall.ENAMETOOLONG}
+
+// stateDirOwner, stateDirLstat and stateDirsMade are seams: tests give a
+// directory a foreign owner or an Lstat errno without root, and change a
+// directory between Open's two checks: stateDirsChecked runs after the
+// first and before MkdirAll, stateDirsMade after MkdirAll and before the
+// second.
 var (
 	stateDirOwner    = overlay.Owner
+	stateDirLstat    = os.Lstat
 	stateDirsChecked = func() {}
 	stateDirsMade    = func() {}
 )
@@ -546,11 +560,16 @@ func checkStateDirs(dirs []string, all bool) error {
 			if i >= 0 {
 				path = filepath.Join(path, parts[i])
 			}
-			fi, err := os.Lstat(path)
+			fi, err := stateDirLstat(path)
 			if errors.Is(err, fs.ErrNotExist) && !all {
 				break
 			}
 			if err != nil {
+				for _, r := range stateDirRefusals {
+					if errors.Is(err, r) {
+						return fmt.Errorf("%w: %w", ErrStateDirUnreachable, err)
+					}
+				}
 				return err
 			}
 			uid, ok := stateDirOwner(fi)

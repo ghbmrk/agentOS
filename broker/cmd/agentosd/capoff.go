@@ -40,7 +40,8 @@ const (
 	// did not start.
 	agentNoMachines = "Agent and worker tools: off, their machines did not start; " + fixRestart + "."
 	// C1: the -machines path is one vm.Open refuses (vm.ErrStateDirExposed,
-	// #4976): a setting to fix, which a restart does not.
+	// #4976) or cannot walk (vm.ErrStateDirUnreachable, #5617): a setting
+	// to fix, which a restart does not; the step is the same for both.
 	agentMachinesUnsafe = "Agent and worker tools: off, their files are in an unsafe place; whoever set me up must move them."
 	// C1: the agent's image or launch file is missing.
 	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
@@ -125,9 +126,10 @@ func wedgedLine(ids []string) string {
 }
 
 // machinesOffLine is C1's line when the machines did not open: a refused
-// -machines path is a setting to fix (#4976); anything else, a restart.
+// or unwalkable -machines path is a setting to fix (#4976, #5617);
+// anything else, a restart.
 func machinesOffLine(err error) string {
-	if errors.Is(err, vm.ErrStateDirExposed) {
+	if errors.Is(err, vm.ErrStateDirExposed) || errors.Is(err, vm.ErrStateDirUnreachable) {
 		return agentMachinesUnsafe
 	}
 	return agentNoMachines
@@ -327,8 +329,10 @@ func ownerWorded(l string) error {
 	return nil
 }
 
-// onlyNegates is a fix clause that says only what will not fix the line.
-var onlyNegates = regexp.MustCompile(`(?i)\b(not|never) (fix|help|clear|work)`)
+// onlyNegates is a fix clause that says only what will not fix the line:
+// "will not fix", "cannot help" ("cannot" is the house form, S9), "does
+// nothing", "is no fix", "nothing helps" (#5632).
+var onlyNegates = regexp.MustCompile(`(?i)\b((not|never|cannot) (fix|help|clear|work)|(does|do|did|will) nothing|no (fix|help|cure)|nothing (helps|works|fixes|will))`)
 
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
