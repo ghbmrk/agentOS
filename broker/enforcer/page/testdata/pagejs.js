@@ -2,23 +2,23 @@
 // the server rendered (#4929 R-P1), and asserts what the owner is shown.
 // An id page.js reads that the screen lacks is null here, as in a browser.
 //
-//   node pagejs.js page.js factory.html reset.html enrolled.html home.html
+//   node pagejs.js page.js factory.html reset.html enrolled.html home.html own.html
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const [script, factoryHTML, resetHTML, enrolledHTML, homeHTML] = process.argv.slice(2).map(p => fs.readFileSync(p, "utf8"));
+const [script, factoryHTML, resetHTML, enrolledHTML, homeHTML, ownHTML] = process.argv.slice(2).map(p => fs.readFileSync(p, "utf8"));
 
 // dom is a flat stub of html's elements: each tag with an id, a form's
 // button and named inputs, its hidden attribute, and the page actions'
 // buttons (class "act") by their data-action.
 function dom(html) {
-  const byId = {}, forms = [], acts = [];
+  const byId = {}, forms = [], acts = [], divs = [];
   let form = null;
   for (const m of html.matchAll(/<(\/?)(\w+)([^>]*)>/g)) {
     const [, close, tag, attrs] = m;
-    if (close) { if (tag === "form") form = null; continue; }
+    if (close) { if (tag === "form") form = null; if (tag === "div") divs.pop(); continue; }
     const attr = n => { const a = attrs.match(new RegExp("\\b" + n + "=\"([^\"]*)\"")); return a && a[1]; };
     const el = {
       tag, id: attr("id"), hidden: /\shidden\b/.test(attrs), textContent: "", disabled: false, value: "",
@@ -26,7 +26,10 @@ function dom(html) {
       addEventListener(t, f) { this.listeners[t] = f; },
       setAttribute() {}, appendChild(c) { this.children.push(c); },
       querySelector(s) { return s === "button" ? this.button : null; },
+      parentElement: divs[divs.length - 1] || null,
+      replaceChildren(...c) { this.children = c; }, prepend(c) { this.children.unshift(c); },
     };
+    if (tag === "div") divs.push(el);
     for (const d of ["rp", "action", "target", "confirm"]) {
       const v = attr("data-" + d);
       if (v !== null) el.dataset[d] = v;
@@ -57,6 +60,7 @@ function run(html, answers, confirmed = true) {
       querySelector: () => ({ content: "token" }),
       addEventListener: (t, f) => { ready = f; },
       createElementNS: () => ({ tag: "rect", setAttribute() {} }),
+      createElement: tag => ({ tag, className: "", textContent: "" }),
     },
     navigator: { credentials: { create: async () => cred, get: async () => cred } },
     crypto: { getRandomValues: a => a },
@@ -185,6 +189,18 @@ const cases = {
     await acts.find(b => b.dataset.action === "revoke-core").listeners.click();
     assert.deepEqual(posted, ["/challenge", "/act"]);
     assert.equal(ctx.reloaded, true);
+  },
+  // A new recovery code: its box shows the code once and says a new one
+  // was made, not "Done." nor "Cancelled." (ENF-c-f4 item 4).
+  async newRecoveryResult() {
+    const { acts, ctx } = run(ownHTML, { "/challenge": begin, "/act": [200, { done: true, recovery: "ABCD-EFGH", rotated: true }] });
+    const b = acts.find(b => b.dataset.action === "new-recovery");
+    assert.ok(b, "no new-recovery button on the owner's home page");
+    await b.listeners.click();
+    const [said, code] = b.parentElement.children;
+    assert.match(said, /^New code made\. Your old recovery code no longer works\./);
+    assert.equal(code.textContent, "ABCD-EFGH");
+    assert.equal(ctx.reloaded, undefined);
   },
   // A step that can be undone asks nothing before the tap.
   async clearAsksNothing() {

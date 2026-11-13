@@ -621,7 +621,8 @@ func (b *Book) Cancel() (string, error) {
 // It is for an owner whose recovery code may be known to someone else, such
 // as after a replacement whose save failed (the code stays unspent then).
 // With a replacement waiting, Cancel does the same and more. The page calls
-// it only after a tap of the passkey in force (NET-4).
+// it only after a tap of the passkey in force (NET-4), and the owner is
+// texted.
 func (b *Book) Rotate() (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -637,6 +638,9 @@ func (b *Book) Rotate() (string, error) {
 	if err := b.save(st); err != nil {
 		return "", err
 	}
+	// Texted once saved, never before: a failed save leaves the written
+	// code working, so a text then would be false (ASSUMPTIONS ENF-c-10).
+	b.cfg.Alerts.Raise(alert.RecoveryCodeChanged, "")
 	return code, nil
 }
 
