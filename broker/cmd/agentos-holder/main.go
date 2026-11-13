@@ -8,13 +8,14 @@
 // It listens on dir/request.sock for egress (request-uid) and on
 // dir/hand.sock for the unlock step (hand-uid), and starts empty: the
 // unlock step's keeper hands it the login, and hands it again after a
-// restart. -checker names a redeem socket that would approve the adapters'
-// irreversible operations one exact request at a time (CH-4); since D-244
-// no process serves one (agentos-checker serves only verify.sock), so
-// with or without it the holder serves reads only, unless something
-// listens there, which then approves every irreversible operation: name
-// only a path in a directory writable only by the checker's uid. It
-// refuses to run as either peer uid and makes itself non-dumpable.
+// restart. Without -checker the holder serves reads only. -checker names a
+// redeem socket that would approve the adapters' irreversible operations
+// one exact request at a time (CH-4); since D-244 no process serves one
+// (agentos-checker serves only verify.sock), so it still serves reads
+// only. Whatever listens there approves every irreversible operation, so
+// a socket in a directory not owned by root or this uid, or writable by
+// another uid, is refused at start. It refuses to run as either peer uid
+// and makes itself non-dumpable.
 // Adapters whose operations exchange credentials need a swapper the
 // holder does not have yet, and are refused.
 package main
@@ -78,7 +79,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.dir, "dir", "", "run directory for the two sockets")
 	fs.Var(&names, "adapter", "an adapter to serve (repeatable)")
 	fs.IntVar(&c.requestUID, "request-uid", -1, "uid of egress, the only peer on request.sock")
-	fs.StringVar(&c.checker, "checker", "", "a CH-4 redeem socket; since D-244 no process serves one, so every irreversible operation is refused and only reads are served, unless something listens there, which then approves every irreversible operation: name only a path in a directory writable only by the checker's uid")
+	fs.StringVar(&c.checker, "checker", "", "leave empty to serve reads only, as any value does since D-244 (nothing serves a redeem socket). Otherwise a CH-4 redeem socket; whatever listens there approves every irreversible operation, so a socket in a directory not owned by root or this uid, or writable by another uid, is refused at start")
 	fs.IntVar(&c.handUID, "hand-uid", -1, "uid of the unlock step, the only peer on hand.sock")
 	fs.BoolVar(&c.publicFetch, "public-fetch", false, "the owner lets public machines use provider-side fetch with this login; without it, every body is held to the strict form")
 	if err := fs.Parse(args); err != nil {
@@ -122,6 +123,9 @@ func (c config) holderConfig(guard *netguard.Policy) holder.Config {
 func run(args []string, stderr io.Writer) error {
 	c, err := parse(args, stderr)
 	if err != nil {
+		return err
+	}
+	if err := checkerOK(c.checker, uint32(os.Geteuid())); err != nil {
 		return err
 	}
 	if err := procguard.Isolate(c.requestUID, c.handUID); err != nil {
@@ -186,4 +190,39 @@ func runDir(dir string) error {
 		return fmt.Errorf("%s is not a directory owned by uid %d", dir, os.Getuid())
 	}
 	return os.Chmod(dir, 0o711)
+}
+
+// checkerOK refuses a -checker socket that a uid other than root or euid
+// could listen at (#5649): the holder redeems against whatever answers
+// there with no peer-uid check (W-3, H-9). The socket's directory and
+// every parent must be a real directory owned by root or euid and writable
+// by no other uid; a sticky parent such as /tmp may be writable by all,
+// since no other uid may rename what it does not own, but the socket's
+// own directory may not. Empty passes: the holder then serves reads only.
+func checkerOK(sock string, euid uint32) error {
+	if sock == "" {
+		return nil
+	}
+	if !filepath.IsAbs(sock) {
+		return errors.New("-checker needs an absolute socket path")
+	}
+	dir := filepath.Dir(filepath.Clean(sock))
+	for p := dir; ; p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return fmt.Errorf("-checker %s: %w", sock, err)
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		switch {
+		case !fi.IsDir():
+			return fmt.Errorf("-checker %s: %s is not a directory", sock, p)
+		case !ok || st.Uid != 0 && st.Uid != euid:
+			return fmt.Errorf("-checker %s: %s is not owned by root or uid %d", sock, p, euid)
+		case fi.Mode().Perm()&0o022 != 0 && (p == dir || fi.Mode()&os.ModeSticky == 0):
+			return fmt.Errorf("-checker %s: %s is writable by other uids", sock, p)
+		}
+		if filepath.Dir(p) == p {
+			return nil
+		}
+	}
 }

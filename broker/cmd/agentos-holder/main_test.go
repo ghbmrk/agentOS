@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,8 +24,8 @@ func TestParseRefusesWhatAHolderCannotKeep(t *testing.T) {
 	if err != nil || len(c.adapters) != 1 || c.adapters[0].Credential != "openai" {
 		t.Fatalf("%+v %v", c, err)
 	}
-	// -checker still parses into the config (it fails closed at redeem
-	// since D-244, not at start).
+	// -checker parses into the config; run checks its directory
+	// (checkerOK).
 	if c, err := parse(append(ok, "-checker", "/x"), io.Discard); err != nil || c.checker != "/x" {
 		t.Fatalf("-checker: %q %v", c.checker, err)
 	}
@@ -96,20 +97,100 @@ func (okUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // REQ: CH-4
-// The -checker help and the package usage are true only while nothing
-// listens at the redeem socket: a planted one that answers approves every
-// irreversible operation (W-3, H-9), so both say so (#5633).
+// The -checker help and the package usage say what empty does and that a
+// directory where another uid could listen is refused: a planted redeem
+// socket approves every irreversible operation (W-3, H-9, #5633, #5649).
+// The usage is read from the package's doc, whichever file holds it.
 func TestCheckerHelpNamesTheListenerCaveat(t *testing.T) {
 	var out strings.Builder
 	parse([]string{"-h"}, &out)
-	if !strings.Contains(out.String(), "unless something listens there") {
-		t.Errorf("-checker help omits the listener caveat:\n%s", out.String())
+	for _, want := range []string{"leave empty to serve reads only", "is refused at start"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("-checker help lacks %q:\n%s", want, out.String())
+		}
 	}
-	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, parser.ParseComments)
+	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc := strings.Join(strings.Fields(f.Doc.Text()), " "); !strings.Contains(doc, "unless something listens there") {
-		t.Errorf("package usage omits the listener caveat:\n%s", doc)
+	var doc strings.Builder
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ParseComments|parser.PackageClauseOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Doc != nil {
+			doc.WriteString(f.Doc.Text())
+		}
+	}
+	d := strings.Join(strings.Fields(doc.String()), " ")
+	for _, want := range []string{"Without -checker the holder serves reads only", "is refused at start"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("package usage lacks %q:\n%s", want, d)
+		}
+	}
+}
+
+// REQ: CH-4
+// -checker fails closed on a socket whose directory a uid other than root
+// or this one could plant a listener in (#5649, W-3, H-9).
+func TestCheckerRefusesAnUnsafeDirectory(t *testing.T) {
+	euid := uint32(os.Geteuid())
+	if err := checkerOK("", euid); err != nil {
+		t.Errorf("empty -checker: %v", err)
+	}
+	if checkerOK("redeem.sock", euid) == nil {
+		t.Error("accepted a relative -checker")
+	}
+	ok := filepath.Join(t.TempDir(), "checker")
+	if err := os.Mkdir(ok, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkerOK(filepath.Join(ok, "redeem.sock"), euid); err != nil {
+		t.Fatalf("a directory only this uid writes: %v", err)
+	}
+	shared := filepath.Join(t.TempDir(), "shared")
+	open := filepath.Join(t.TempDir(), "open")
+	under := filepath.Join(open, "checker")
+	other := filepath.Join(t.TempDir(), "other")
+	link := filepath.Join(t.TempDir(), "link")
+	for _, d := range []string{shared, open, under, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{shared, open} {
+		if err := os.Chmod(d, 0o777); err != nil { // no sticky bit
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(ok, link); err != nil {
+		t.Fatal(err)
+	}
+	trust := euid
+	if euid == 0 {
+		// root is always trusted, so the owner case needs another owner.
+		if err := os.Chown(other, 4242, 4242); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		trust = euid + 1
+	}
+	for name, c := range map[string]struct {
+		dir  string
+		euid uint32
+	}{
+		"writable by others":       {shared, euid},
+		"a parent writable by all": {under, euid},
+		"another uid's":            {other, trust},
+		"a link":                   {link, euid},
+		"missing":                  {filepath.Join(ok, "absent"), euid},
+	} {
+		if checkerOK(filepath.Join(c.dir, "redeem.sock"), c.euid) == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

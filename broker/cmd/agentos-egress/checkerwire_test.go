@@ -408,14 +408,63 @@ func TestEnrollCodeSpentOnTheChecker(t *testing.T) {
 	}
 }
 
-// -checker names an absolute directory.
+// REQ: CH-4
+// -checker fails closed on a directory where a uid other than root or this
+// one could plant a listener at hand.sock and take the seed (#5649, W-3).
 func TestCheckerFlag(t *testing.T) {
+	euid := uint32(os.Geteuid())
+	if err := checkerFlagOK(""); err != nil {
+		t.Errorf("empty -checker: %v", err)
+	}
 	if checkerFlagOK("run/agentos-checker") == nil {
 		t.Error("accepted a relative -checker")
 	}
-	for _, ok := range []string{"", "/run/agentos-checker"} {
-		if err := checkerFlagOK(ok); err != nil {
-			t.Errorf("-checker %q: %v", ok, err)
+	ok := filepath.Join(t.TempDir(), "checker")
+	if err := os.Mkdir(ok, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkerFlagAs(ok, euid); err != nil {
+		t.Fatalf("a directory only this uid writes: %v", err)
+	}
+	shared := filepath.Join(t.TempDir(), "shared")
+	open := filepath.Join(t.TempDir(), "open")
+	under := filepath.Join(open, "checker")
+	other := filepath.Join(t.TempDir(), "other")
+	link := filepath.Join(t.TempDir(), "link")
+	for _, d := range []string{shared, open, under, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{shared, open} {
+		if err := os.Chmod(d, 0o777); err != nil { // no sticky bit
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(ok, link); err != nil {
+		t.Fatal(err)
+	}
+	trust := euid
+	if euid == 0 {
+		// root is always trusted, so the owner case needs another owner.
+		if err := os.Chown(other, 4242, 4242); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		trust = euid + 1
+	}
+	for name, c := range map[string]struct {
+		dir  string
+		euid uint32
+	}{
+		"writable by others":       {shared, euid},
+		"a parent writable by all": {under, euid},
+		"another uid's":            {other, trust},
+		"a link":                   {link, euid},
+		"missing":                  {filepath.Join(ok, "absent"), euid},
+	} {
+		if checkerFlagAs(c.dir, c.euid) == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }
@@ -597,11 +646,14 @@ func TestAMidRequestResetIsNotDown(t *testing.T) {
 }
 
 // REQ: CH-4
-// "any value fails closed" holds only while nothing listens at
-// dir/hand.sock: a planted listener receives the seed and approves every
-// act (W-3), so the -checker help says so (#5633).
+// The -checker help leads with the safe value, then says why any other
+// directory is refused: a planted listener receives the seed and approves
+// every act (W-3, #5633, #5649).
 func TestCheckerHelpNamesTheListenerCaveat(t *testing.T) {
-	for _, want := range []string{"unless something listens there", "receives the seed", "writable only by the checker's uid"} {
+	if !strings.HasPrefix(checkerHelp, "leave empty") {
+		t.Errorf("-checker help does not lead with the safe value: %s", checkerHelp)
+	}
+	for _, want := range []string{"receives the seed", "is refused at start"} {
 		if !strings.Contains(checkerHelp, want) {
 			t.Errorf("-checker help lacks %q: %s", want, checkerHelp)
 		}

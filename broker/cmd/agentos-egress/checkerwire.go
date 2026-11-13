@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 
@@ -25,16 +26,57 @@ import (
 //
 // Since D-244 no process serves the hand socket (agentos-checker serves
 // only verify.sock, through clerk/codecheck), so with -checker set every
-// hand fails and the unlock and every tier-4 approval are refused.
+// hand fails and the unlock and every tier-4 approval are refused, and
+// checkerFlagOK refuses a directory where another uid could listen.
 
 // errOnChecker refuses a code-generator code on this process's verify
 // socket while the checker checks them.
 var errOnChecker = errors.New("code-generator codes are checked by the checker (-checker)")
 
-// checkerFlagOK checks serve's -checker: an absolute directory.
-func checkerFlagOK(dir string) error {
-	if dir != "" && !filepath.IsAbs(dir) {
+// checkerFlagOK checks serve's -checker: empty, or an absolute directory
+// that only root or this uid could plant a listener in (#5649). The client
+// hands the seed to whatever listens at dir/hand.sock with no peer-uid
+// check (W-3), so a directory another uid could write, replace or relink
+// is refused at start rather than warned about.
+func checkerFlagOK(dir string) error { return checkerFlagAs(dir, uint32(os.Geteuid())) }
+
+// checkerFlagAs is checkerFlagOK trusting uid euid besides root; tests name
+// another uid to reach the owner case.
+func checkerFlagAs(dir string, euid uint32) error {
+	if dir == "" {
+		return nil
+	}
+	if !filepath.IsAbs(dir) {
 		return errors.New("-checker needs the checker's absolute socket directory")
+	}
+	abs := filepath.Clean(dir)
+	for p := abs; ; p = filepath.Dir(p) {
+		if err := ownedDir(p, euid, p == abs); err != nil {
+			return fmt.Errorf("-checker %s: %w", dir, err)
+		}
+		if filepath.Dir(p) == p {
+			return nil
+		}
+	}
+}
+
+// ownedDir refuses p unless it is a real directory, not a link, owned by
+// root or euid and writable by no other uid. A sticky parent such as /tmp
+// may be writable by all, since no other uid may rename what it does not
+// own; the socket directory itself (last) may not.
+func ownedDir(p string, euid uint32, last bool) error {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	switch {
+	case !fi.IsDir():
+		return fmt.Errorf("%s is not a directory", p)
+	case !ok || st.Uid != 0 && st.Uid != euid:
+		return fmt.Errorf("%s is not owned by root or uid %d", p, euid)
+	case fi.Mode().Perm()&0o022 != 0 && (last || fi.Mode()&os.ModeSticky == 0):
+		return fmt.Errorf("%s is writable by other uids", p)
 	}
 	return nil
 }
