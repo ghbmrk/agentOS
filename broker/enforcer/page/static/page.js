@@ -147,7 +147,7 @@ document.addEventListener("DOMContentLoaded", () => {
         box.replaceChildren(code);
         code.className = "code";
         code.textContent = r.recovery;
-        box.prepend((r.rotated ? "Done." : "Cancelled.") + " Your old recovery code no longer works. Write down this new one and keep it safe at home. It is shown only now.");
+        box.prepend((r.rotated ? "New code made." : "Cancelled.") + " Your old recovery code no longer works. Write down this new one and keep it safe at home. It is shown only now.");
         return;
       }
       say("Done.");

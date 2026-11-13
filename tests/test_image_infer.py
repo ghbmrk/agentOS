@@ -65,6 +65,13 @@ def licence(data):
                               capture_output=True, text=True)
 
 
+def script_line(text, prefix):
+    """The one line of a shell script that starts with prefix (after indentation)."""
+    found = [ln.strip() for ln in text.splitlines() if ln.strip().startswith(prefix)]
+    assert len(found) == 1, (prefix, found)
+    return found[0]
+
+
 def infer_real_step(name):
     """The run: body of the named infer-real step, as the runner gets it."""
     lines = (ROOT / ".github/workflows/infer-real.yml").read_text().splitlines()
@@ -190,6 +197,65 @@ class TestInferImage(unittest.TestCase):
         self.assertIn('sh image/llamaserver.sh "$RUNNER_TEMP/llama/server"', wf)
         self.assertIn('AGENTOS_LLAMA_SERVER=$d/server/llama-server', wf)
         self.assertIn("image/llamaserver.sh", wf.split("workflow_dispatch")[0])
+
+    def test_the_build_info_comes_from_the_pins_never_from_git(self):
+        # #5022: llama.cpp's cmake asks git for the commit and commit count from the source directory;
+        # from a WORK inside a git checkout it found that checkout and compiled its commit in, so a
+        # local rebuild differed from CI's. The tag and commit come from llama.pins instead, and git
+        # finds no repository during the build.
+        s = (IMG / "llamaserver.sh").read_text()
+        self.assertIn('-DLLAMA_BUILD_NUMBER="$TAG" -DLLAMA_BUILD_COMMIT="$(pin llama_src_commit)"', s)
+        cmake = s[s.index("\ncmake -S "):s.index("\nUI_H=")]
+        self.assertEqual(cmake.count("-DLLAMA_BUILD_NUMBER="), 1)
+        tag = script_line(s, "TAG=")
+        check = script_line(s, '[ -n "$TAG" ]')
+        for url, rc, want in ((pins()["llama_src_url"], 0, "11900"),
+                              ("https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz", 1, ""),
+                              ("https://github.com/ggml-org/llama.cpp/archive/refs/tags/b12x.tar.gz", 1, ""),
+                              ("https://example.com/ggml-org/llama.cpp/archive/refs/tags/b1.tar.gz", 1, "")):
+            with self.subTest(url=url):
+                r = subprocess.run(["sh", "-eu", "-c", '%s\n%s\necho "$TAG"' % (tag, check)],
+                                   env={"URL": url, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+                self.assertEqual(r.returncode, rc, r.stderr)
+                self.assertEqual(r.stdout.strip(), want)
+                if rc:
+                    self.assertIn("is not a bNNNN tag archive", r.stderr)
+        # The script's own GIT_DIR line stops the discovery cmake relies on, here inside a real repo.
+        iso = script_line(s, "export GIT_DIR=")
+        self.assertLess(s.index(iso), s.index("\ncmake -S "))
+        self.assertGreater(s.index(iso), s.index("git get-tar-commit-id"))
+        with tempfile.TemporaryDirectory() as t:
+            sub = pathlib.Path(t) / "work" / "src"
+            sub.mkdir(parents=True)
+            env = git_env({"PATH": "/usr/bin:/bin", "HOME": t, "GIT_CONFIG_NOSYSTEM": "1"})
+            subprocess.run(["git", "-C", t, "init", "-q"], env=env, check=True)
+            subprocess.run(["git", "-C", t, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-q", "--allow-empty", "-m", "x"], env=env, check=True)
+            for cmd in ("git rev-parse --short HEAD", "git rev-list --count HEAD"):
+                with self.subTest(cmd=cmd):
+                    ok = subprocess.run(["sh", "-c", cmd], cwd=sub, env=env, capture_output=True)
+                    self.assertEqual(ok.returncode, 0, "control: the fixture repo is found without the line")
+                    r = subprocess.run(["sh", "-eu", "-c", "WORK=%s\n%s\n%s" % (sub.parent, iso, cmd)],
+                                       cwd=sub, env=env, capture_output=True, text=True)
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+
+    def test_the_web_ui_check_runs_on_fixture_headers(self):
+        # #5022: the two check lines, as the script has them, against each ui.h the build can generate.
+        s = (IMG / "llamaserver.sh").read_text()
+        lines = "\n".join((script_line(s, '[ -f "$UI_H" ]'),
+                           script_line(s, "! grep -q '^#define LLAMA_UI_HAS_ASSETS'"), "echo checked"))
+        cases = ((None, 1, "was not generated"),
+                 ("#pragma once\n#define LLAMA_UI_HAS_ASSETS 1\n", 1, "embeds a web UI"),
+                 ("#pragma once\n/* #undef LLAMA_UI_HAS_ASSETS */\n", 0, "checked"))
+        for body, rc, msg in cases:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as t:
+                ui = pathlib.Path(t) / "ui.h"
+                if body is not None:
+                    ui.write_text(body)
+                r = subprocess.run(["sh", "-eu", "-c", lines], env={"UI_H": str(ui), "PATH": "/usr/bin:/bin"},
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, rc, r.stderr)
+                self.assertIn(msg, r.stdout + r.stderr)
 
     def test_the_build_installs_the_service_runtime_model_and_licences(self):
         b = (IMG / "build.sh").read_text()
