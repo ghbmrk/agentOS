@@ -139,8 +139,8 @@ type Config struct {
 	Now  func() time.Time // nil means time.Now
 	Rand io.Reader        // nil means crypto/rand
 	// Log takes one line for each failure the owner is not shown: one
-	// inside the policy hand-over after the passkey was saved. Nil means
-	// the standard logger.
+	// inside the policy hand-over after the passkey was saved, and each
+	// failed alert raise. Nil means the standard logger.
 	Log func(string)
 }
 
@@ -541,7 +541,7 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 			// gets the recovery code, and the log keeps the failure.
 			b.cfg.Log(fmt.Sprintf("enrol: the passkey enrolled, but the policy hand-over failed and waits for its Keep: %v", err))
 		}
-		b.cfg.Alerts.Raise(alert.Enrolment, "")
+		b.raise(alert.Enrolment, "Enrolment")
 		res.Recovery = code
 		return res, nil
 	case Enrolled:
@@ -550,7 +550,7 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		// The owner is texted before the replacement is saved, so a stop
 		// between the two never leaves one waiting unannounced; a failed
 		// save leaves only a false alarm the owner clears on the page.
-		b.cfg.Alerts.Raise(alert.RecoveryCodeUsed, "")
+		b.raise(alert.RecoveryCodeUsed, "RecoveryCodeUsed")
 		if err := b.save(st); err != nil {
 			return Result{}, err
 		}
@@ -597,8 +597,8 @@ func (b *Book) take(st *state) error {
 
 // Cancel drops the replacement waiting and spends the recovery code that
 // started it: whoever used it cannot start another, and the owner is
-// shown, once, the new code that replaces it. The page calls it only
-// after a tap of the passkey in force (NET-4).
+// shown, once, the new code that replaces it, and texted once it is saved.
+// The page calls it only after a tap of the passkey in force (NET-4).
 func (b *Book) Cancel() (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -614,7 +614,21 @@ func (b *Book) Cancel() (string, error) {
 	if err := b.save(st); err != nil {
 		return "", err
 	}
+	// The written code is spent, so the owner is texted, once saved, as
+	// Rotate does (ENF-c-10): a holder of a synced passkey who cancels the
+	// owner's own recovery does not go unseen (ENF-c-f5).
+	b.raise(alert.RecoveryCodeChanged, "RecoveryCodeChanged")
 	return code, nil
+}
+
+// raise raises alert k and sends a failed raise to the log, named, so an
+// alert that fails to record is not lost unseen (NET-2 Texts and calls,
+// ENF-c-f6). The step that raised it goes on: the alerts keep a record
+// they could not journal on the page and still send it (alert.Raise).
+func (b *Book) raise(k alert.Kind, name string) {
+	if _, err := b.cfg.Alerts.Raise(k, ""); err != nil {
+		b.cfg.Log(fmt.Sprintf("enrol: the %s alert failed to record, so its text may not reach the owner: %v", name, err))
+	}
 }
 
 // Rotate spends the recovery code and returns its replacement, shown once.
@@ -640,7 +654,7 @@ func (b *Book) Rotate() (string, error) {
 	}
 	// Texted once saved, never before: a failed save leaves the written
 	// code working, so a text then would be false (ASSUMPTIONS ENF-c-10).
-	b.cfg.Alerts.Raise(alert.RecoveryCodeChanged, "")
+	b.raise(alert.RecoveryCodeChanged, "RecoveryCodeChanged")
 	return code, nil
 }
 
@@ -660,7 +674,7 @@ func (b *Book) Tick() (bool, error) {
 	if err := b.take(&st); err != nil {
 		return false, err
 	}
-	b.cfg.Alerts.Raise(alert.Enrolment, "")
+	b.raise(alert.Enrolment, "Enrolment")
 	return true, nil
 }
 
@@ -684,7 +698,7 @@ func (b *Book) FactoryReset(caseCode string) error {
 	// The owner is texted before anything is dropped, so a reset cut short
 	// still shows on the page, and one whose text the core refuses is
 	// offered again (alert.Raise logs first).
-	b.cfg.Alerts.Raise(alert.FactoryReset, "")
+	b.raise(alert.FactoryReset, "FactoryReset")
 	b.cfg.Lock.Lock()
 	defer b.cfg.Lock.Unlock()
 	for _, p := range b.pol.Pending() {
