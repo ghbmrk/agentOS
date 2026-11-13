@@ -22,7 +22,9 @@ NONE = [(a, "none") for a in g.ACTIONS]
 def graph(spec):
     """graph()'s shape from {unit: ["Kind: target", ...]}."""
     return {name: {"edges": [tuple(e.split(": ")) for e in edges], "actions": list(NONE), "load": "loaded",
-                   "job_modes": [(m, "replace") for m in g.JOB_MODES]} for name, edges in spec.items()}
+                   "job_modes": [(m, "replace") for m in g.JOB_MODES],
+                   "restart": "no" if name.endswith(".service") else None}
+            for name, edges in spec.items()}
 
 
 SHIPPED = {U: ["Wants: agentos-link.service", "Requires: agentos-keeper.slice"],
@@ -44,19 +46,26 @@ class FakeManager:
     """show() over a fixed graph, as offline_systemd.Manager answers it."""
 
     def __init__(self, spec):
-        self.spec, self.asked = spec, []
+        self.spec, self.asked, self.props = spec, [], []
 
     def show(self, units, props):
         self.asked.append(sorted(units))
+        self.props.append(tuple(props))
         out = {}
         for u in units:
             p = {k: "" for k in props}
             p.update({a: "none" for a in g.ACTIONS}, LoadState="loaded", OnFailureJobMode="replace",
-                     OnSuccessJobMode="fail")
+                     OnSuccessJobMode="fail", Restart="no")
             for e in self.spec.get(u, ()):
                 k, t = e.split(": ")
-                p[k] = (p[k] + " " + ('"%s"' % t.replace("\\", "\\\\") if "\\" in t else t)).strip()
-            out[u] = p
+                if k in g.RESTART:
+                    p[k] = t
+                else:
+                    p[k] = (p.get(k, "") + " " + ('"%s"' % t.replace("\\", "\\\\") if "\\" in t else t)).strip()
+            # systemctl shows only the properties the unit's type has: Restart= is a service's.
+            if not u.endswith(".service") and set(props) & set(g.RESTART):
+                raise SystemExit("%s has no %s" % (u, props))
+            out[u] = {k: p[k] for k in props}
         return out
 
 
@@ -73,12 +82,16 @@ class ReachTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertIn("x.service", g.graph(FakeManager({U: ["%s: x.service" % kind]})))
         # A unit starting stops is shown too, and so is what its stop goes on to (#4823); what it would start
-        # is not, and a stop dependency that acts only when the started unit stops is listed, not walked.
+        # is not, and a stop dependency that acts only when a started unit stops is listed, not walked, unless
+        # that unit is the unlock unit, whose stop is the reboot (#4919).
         for kind in g.STOP_KINDS:
             with self.subTest(kind=kind):
-                got = g.graph(FakeManager({U: ["%s: x.service" % kind], "x.service": ["Wants: y.service",
-                                                                                     "RequiredBy: z.service"]}))
-                self.assertEqual(set(got), {U, "x.service", "z.service"} if kind in g.STOP_ON_START else {U})
+                tail = {"x.service": ["Wants: y.service", "RequiredBy: z.service"]}
+                got = g.graph(FakeManager(dict(tail, **{U: ["%s: x.service" % kind]})))
+                self.assertEqual(set(got), {U, "x.service", "z.service"})
+                got = g.graph(FakeManager(dict(tail, **{U: ["Wants: a.service"], "a.service": ["%s: x.service" % kind]})))
+                self.assertEqual(set(got), {U, "a.service"} | ({"x.service", "z.service"} if kind in g.STOP_ON_START
+                                                               else set()))
 
     def test_a_quoted_name_is_unquoted_and_a_bad_one_refused(self):
         got = g.graph(FakeManager({U: ["Wants: sys-subsystem-net-devices-agentos\\x2dlink.device"]}))
@@ -102,7 +115,12 @@ class ReachTest(unittest.TestCase):
         self.assertEqual(g.STOP_ON_START, ("Conflicts", "ConflictedBy"))
         self.assertEqual(g.PROPAGATE_STOP, ("PropagatesStopTo", "BoundBy", "RequiredBy", "RequisiteOf", "ConsistsOf"))
         self.assertEqual(g.STOP_STARTS, ("OnSuccess", "OnFailure"))
-        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | {"LoadState", "OnFailureJobMode", "OnSuccessJobMode"})
+        self.assertEqual(set(g.PROPS), acting | set(g.ACTIONS) | set(g.RESTART_KINDS)
+                         | {"LoadState", "OnFailureJobMode", "OnSuccessJobMode"})
+        # #4919: the reverse lists of Upholds= and Triggers=, by which a stopped unit is started again, and
+        # the two enums that say whether a service's automatic restart stops it on the way back.
+        self.assertEqual(g.RESTART_KINDS, ("TriggeredBy", "UpheldBy"))
+        self.assertEqual(g.RESTART, ("Restart",))
 
     def test_facts_are_the_root_each_edge_taken_and_failed_generators(self):
         units = graph(SHIPPED)
@@ -213,7 +231,7 @@ class ViolationsTest(unittest.TestCase):
                                          "Conflicts: agentosd.service"]
                 spec["initrd-fs.target"] = []
                 stopped = g.closure(graph(spec))[1]
-                self.assertEqual(stopped, {"initrd.target", "initrd-fs.target"})
+                self.assertEqual(stopped, {U, "initrd.target", "initrd-fs.target"})
                 self.assertEqual(self.v(spec), [
                     "stop agentos-inbound.service Conflicts initrd.target: not on unlock.allow; review it and add the "
                     "line there",
@@ -244,12 +262,82 @@ class ViolationsTest(unittest.TestCase):
                  "x.service": {"edges": [("Wants", "bad.service"), ("RequiredBy", "y.service")]}}
         started, stopped, edges = g.closure(units)
         self.assertEqual(started, {U, "x.service", "bad.service"})
-        self.assertEqual(stopped, {"x.service", "y.service"})
+        self.assertEqual(stopped, {U, "x.service", "y.service"})
         self.assertIn("start bad.service Wants from x.service", edges)
         self.assertIn("stop x.service RequiredBy y.service", edges)
         # And in the other order: a unit started first is still walked as stopped.
         units[U]["edges"].reverse()
         self.assertEqual(g.closure(units)[:2], (started, stopped))
+
+    def test_the_unlock_units_own_stop_is_walked(self):
+        # #4919, the issue's failure path: P is PartOf= the unlock unit and has SuccessAction=reboot. The unlock
+        # unit's stop (its one reboot) stops P cleanly, which would reboot outside the rate-limited path.
+        for kind in g.PROPAGATE_STOP:
+            with self.subTest(kind=kind):
+                spec = copy(SHIPPED)
+                spec[U] = spec[U] + ["%s: p.service" % kind]
+                spec["p.service"] = ["OnSuccess: rescue.target"]
+                spec["rescue.target"] = []
+                allowed = g.facts(graph(spec), ())
+                self.assertIn("stop %s %s p.service" % (U, kind), allowed)
+                self.assertIn("start rescue.target OnSuccess from p.service", allowed)
+                started, stopped, _ = g.closure(graph(spec))
+                self.assertIn(U, stopped)
+                self.assertEqual(stopped - {U}, {"p.service"})
+                self.assertIn("rescue.target", started)
+                units = graph(spec)
+                units["p.service"]["actions"] = [(a, "reboot" if a == "SuccessAction" else "none") for a in g.ACTIONS]
+                self.assertEqual(g.violations(units, set(), allowed, "257.13", FSTAB),
+                                 ["p.service, which %s stops, has SuccessAction=reboot; %s" % (U, g.WHY)])
+
+    def test_a_stopped_unit_its_trigger_or_upholder_starts_again_is_walked_as_started(self):
+        # #4919: a unit the walk stops is started again by its TriggeredBy= or UpheldBy= unit, so what it
+        # starts is walked as well; a unit only started is not restarted by them.
+        for kind in g.RESTART_KINDS:
+            with self.subTest(kind=kind):
+                spec = copy(SHIPPED)
+                spec["agentos-inbound.service"] = ["Conflicts: x.service"]
+                spec["x.service"] = ["%s: x.socket" % kind, "Wants: reboot.target"]
+                spec["x.socket"] = []
+                spec["reboot.target"] = []
+                started, stopped, edges = g.closure(graph(spec))
+                self.assertIn("x.service", started & stopped)
+                self.assertIn("restart x.service %s x.socket" % kind, edges)
+                self.assertIn("%s starts reboot.target; %s" % (U, g.WHY), self.v(spec))
+                spec["agentos-inbound.service"] = ["Wants: x.service"]
+                self.assertNotIn("restart x.service %s x.socket" % kind, g.closure(graph(spec))[2])
+                self.assertNotIn("x.service", g.closure(graph(spec))[1])
+
+    def test_a_started_service_that_restarts_is_walked_as_stopped(self):
+        # #4919: a started service's automatic restart stops the units that require or bind to it, whatever its
+        # RestartMode= (on systemd 255 a direct restart still stopped a Requires= dependent, #5403 L3 round 1);
+        # Restart=no does not. (Its OnFailure= is a start kind, walked either way.)
+        spec = copy(SHIPPED)
+        spec["agentos-inbound.service"] = ["RequiredBy: y.service", "OnFailure: f.service"]
+        spec["y.service"] = []
+        spec["f.service"] = []
+        for restart, walked in (("always", True), ("on-failure", True), ("on-abnormal", True), ("no", False)):
+            with self.subTest(restart=restart):
+                units = graph(spec)
+                units["agentos-inbound.service"]["restart"] = restart
+                started, stopped, edges = g.closure(units)
+                self.assertEqual("y.service" in stopped, walked)
+                self.assertIn("f.service", started)
+                self.assertEqual("restart agentos-inbound.service Restart %s" % restart in edges, walked)
+                self.assertIn("stop agentos-inbound.service RequiredBy y.service", edges)
+                units["y.service"]["actions"] = [(a, "reboot" if a == "SuccessAction" else "none") for a in g.ACTIONS]
+                self.assertEqual("y.service, which %s stops, has SuccessAction=reboot; %s" % (U, g.WHY)
+                                 in g.violations(units, set(), g.facts(units, ()), "257.13", FSTAB), walked)
+        # A unit that is not a service has no Restart=, and graph() asks only services for it.
+        self.assertFalse(g.restarts({"restart": None}))
+        # RestartMode= is not asked for, so RestartMode=direct exempts nothing.
+        m = FakeManager({U: ["Requires: agentos-keeper.slice", "Wants: x.service"],
+                         "x.service": ["Restart: always", "RestartMode: direct"]})
+        got = g.graph(m)
+        self.assertNotIn("RestartMode", {k for asked in m.props for k in asked})
+        self.assertEqual(got["x.service"]["restart"], "always")
+        self.assertIsNone(got["agentos-keeper.slice"]["restart"])
+        self.assertIn("restart x.service Restart always", g.closure(got)[2])
 
     def test_a_stopped_unit_with_an_action_or_isolate_is_refused(self):
         # #4823's failure path: a unit with SuccessAction=reboot that the unlock step's Conflicts= stops.
@@ -494,11 +582,12 @@ class AllowFileTest(unittest.TestCase):
         self.assertIn("start " + U, allowed)
         self.assertFalse({"start " + s for s in g.SHUTDOWN} & allowed)
         for line in allowed - {"start " + U}:
-            self.assertRegex(line, r"^(start \S+ (%s) from \S+|stop \S+ (%s) \S+|generator \S+ failed)$"
-                             % ("|".join(g.START_KINDS), "|".join(g.STOP_KINDS)))
+            self.assertRegex(line, r"^(start \S+ (%s) from \S+|stop \S+ (%s) \S+|restart \S+ (%s) \S+|"
+                                   r"generator \S+ failed)$"
+                             % ("|".join(g.START_KINDS), "|".join(g.STOP_KINDS), "|".join(g.RESTART_KINDS + ("Restart",))))
 
     def test_each_control_is_a_path_a_review_found(self):
-        self.assertEqual(len(g.CONTROLS), 5)
+        self.assertEqual(len(g.CONTROLS), 8)
         first = g.CONTROLS[next(iter(g.CONTROLS))][1]
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as dst:
             os.makedirs(os.path.join(root, "etc"))

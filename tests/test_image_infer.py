@@ -27,6 +27,14 @@ SERVER = "/usr/lib/agentos/infer/llama-server"
 HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
+def git_dir_changes(s, iso):
+    """The lines from after the script's GIT_DIR export through the cmake configure that name GIT_DIR,
+    so an unset, reassignment or env -u in that span is found (#5622, IMG-2)."""
+    start = s.index(iso) + len(iso)
+    end = s.index("\nUI_H=")
+    return [ln for ln in s[start:end].splitlines() if re.search(r"\bGIT_DIR\b", ln)]
+
+
 def pins():
     out = {}
     for line in PINS.read_text().splitlines():
@@ -212,18 +220,31 @@ class TestInferImage(unittest.TestCase):
         for url, rc, want in ((pins()["llama_src_url"], 0, "11900"),
                               ("https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz", 1, ""),
                               ("https://github.com/ggml-org/llama.cpp/archive/refs/tags/b12x.tar.gz", 1, ""),
-                              ("https://example.com/ggml-org/llama.cpp/archive/refs/tags/b1.tar.gz", 1, "")):
+                              ("https://example.com/ggml-org/llama.cpp/archive/refs/tags/b1.tar.gz", 1, ""),
+                              # #5622: the end anchor and the refs/tags/ path each have a fixture.
+                              ("https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11900.tar.gz?x", 1, ""),
+                              ("https://github.com/ggml-org/llama.cpp/archive/refs/heads/b11900.tar.gz", 1, "")):
             with self.subTest(url=url):
                 r = subprocess.run(["sh", "-eu", "-c", '%s\n%s\necho "$TAG"' % (tag, check)],
-                                   env={"URL": url, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+                                   env={"URL": url, "PINS": "/fixture/llama.pins", "PATH": "/usr/bin:/bin"},
+                                   capture_output=True, text=True)
                 self.assertEqual(r.returncode, rc, r.stderr)
                 self.assertEqual(r.stdout.strip(), want)
                 if rc:
-                    self.assertIn("is not a bNNNN tag archive", r.stderr)
+                    # #5622: the refusal names the pins file, the form it wants and the rejected value.
+                    self.assertIn("llama_src_url in /fixture/llama.pins is not a https://github.com/ggml-org/"
+                                  "llama.cpp/archive/refs/tags/bNNNN.tar.gz URL: %s" % url, r.stderr)
         # The script's own GIT_DIR line stops the discovery cmake relies on, here inside a real repo.
         iso = script_line(s, "export GIT_DIR=")
         self.assertLess(s.index(iso), s.index("\ncmake -S "))
         self.assertGreater(s.index(iso), s.index("git get-tar-commit-id"))
+        # #5622: nothing between that line and the end of the cmake configure unsets or resets GIT_DIR.
+        self.assertEqual(git_dir_changes(s, iso), [])
+        for mutant in ("unset GIT_DIR\n", "GIT_DIR=$WORK/.git\n", "export GIT_DIR=$REPO/.git\n",
+                       "env -u GIT_DIR "):
+            with self.subTest(mutant=mutant):
+                at = s.index("\ncmake -S ") + 1
+                self.assertNotEqual(git_dir_changes(s[:at] + mutant + s[at:], iso), [], mutant)
         with tempfile.TemporaryDirectory() as t:
             sub = pathlib.Path(t) / "work" / "src"
             sub.mkdir(parents=True)
