@@ -89,7 +89,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| KRN-clock | KRN-clock: the kernel reads time through the TIM-1 guard and never backward, so a clock step neither revives an expired key nor ends a hold early (TIM-1, KEY-7, KEY-8) | #5138 (D-111), `clock` off `durable` | building (tier A; Opus; Defect: STO-2b) |
 | KRN-clock-one-writer | KRN-clock-one-writer: the TIM-1 guard's state file keeps one writer when #5147 b wires the guard into the kernel (TIM-1) | #5147 b | queued (tier A; Opus) |
 
 ## Harness and operating model
@@ -327,7 +326,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | building (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
-| IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
+| IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | building (release; tier A; size S; from #4454 / #4987) |
 | INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
@@ -433,7 +432,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | AGENTOSD-broker-group-status | AGENTOSD-broker-group-status: a leftover broker/ group that will not go shows STATUS 'update needed', not 'restart'. From #5172. | #5172 | queued (release; tier A) |
-| IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
+| IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | building (release; tier A) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
@@ -446,7 +445,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
-| KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
+| KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | queued (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
@@ -455,12 +454,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | VULN-debian-r6 | VULN-debian-r6: accept (or clear by a snapshot bump) glibc's two new Debian 13 advisories DEBIAN-CVE-2026-100290 and DEBIAN-CVE-2026-115819 so image-vulncheck passes again. Release; second glibc round after openssl. | #2919, #5338 | queued (release; tier A; Mark pastes the IDs into #2919) |
-| GUEST-resolv-true-fu | GUEST-resolv-true-fu: the guest rootfs builds write resolv.conf with true, not ':', so a failed redirect reaches their error path. Release; from #5533. | #5533, #5524 | queued (release; tier A) |
-| IMG-guest-vulncheck | IMG-guest-vulncheck: image-vulncheck scans the guests' Debian package list. | #5570 | building (release; tier A) |
+| GUEST-resolv-true-fu | GUEST-resolv-true-fu: the guest rootfs builds write resolv.conf with true, not ':', so a failed redirect reaches their error path. Release; from #5533. | #5533, #5524 | building (release; tier A) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
-| IMG-camdecode-toolchain | IMG-camdecode-toolchain: the camera decoder and its libavcodec are compiled with the pinned root's toolchain, not the runner's cc. | #5571 | building (release; tier A) |
-| IMG-keeper-install-keys | IMG-keeper-install-keys: the keeper's unit-key check handles the [Install] keys (Alias=, WantedBy=, Also=, DefaultInstance=) explicitly, not through the NAME_ONLY_KEYS route. Release; from #5584. | #5191, #5584 | building (release; tier A; gate file) |
-| IMG-keeper-install-keys-fu | IMG-keeper-install-keys-fu: the four [Install] description texts are pinned as literals, and the Alias= text says why the slash form is refused. Release; from #5595. | #5588, #5595 | queued (release; tier A; gate file) |
+| IMG-camdecode-shipped | IMG-camdecode-shipped: the camera decoder's statically linked Debian archives are recorded as shipped, so the image vulnerability check scans them. | #5582 | building (release; tier A) |
+| IMG-camdecode-build-fu | IMG-camdecode-build-fu: the decoder build's guards, GOROOT copy, vcs stamps and Go link cache are pinned, and libavcodec is built once. Release; from #5593. | #5582, #5593 | queued (release; tier A; gate file) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
