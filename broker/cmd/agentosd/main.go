@@ -914,7 +914,7 @@ const n95CapacityMB = 4096
 
 // machinesFlagHelp is -machines' help: vm.Open refuses a path that breaks
 // it (vm.ErrStateDirExposed, #4976), and a restart does not fix that.
-const machinesFlagHelp = "agent-machine layers and snapshots (created 0700); an absolute, clean path, every directory on it reached by no link, owned by root or the broker, and writable by no group or other unless sticky"
+const machinesFlagHelp = "agent-machine layers and snapshots (created 0700); an absolute, clean path, with no symbolic link on it, every directory on it owned by root or the broker, and writable by no group or other unless sticky"
 
 // memPlan is agentosd's start-time memory plan (PE6, P2-5r).
 type memPlan struct {

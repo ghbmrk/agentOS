@@ -38,7 +38,7 @@ func TestWedgedMachinesLine(t *testing.T) {
 		t.Fatalf("page notes, none wedged: %q", got)
 	}
 	wedged = []string{"agent.0"}
-	const one = "Machines: one will not stop and still counts against my memory; restart me."
+	const one = "Machines: one will not stop and still takes room from other machines; restart me."
 	if got := s.wedgedLine(); got != one {
 		t.Fatalf("one wedged: %q", got)
 	}
@@ -46,7 +46,7 @@ func TestWedgedMachinesLine(t *testing.T) {
 		t.Fatalf("page notes, one wedged: %q", got)
 	}
 	wedged = append(wedged, "helper.3")
-	const two = "Machines: 2 will not stop and still count against my memory; restart me."
+	const two = "Machines: 2 will not stop and still take room from other machines; restart me."
 	if got := s.wedgedLine(); got != two {
 		t.Fatalf("two wedged: %q", got)
 	}
@@ -149,7 +149,14 @@ func TestMachinesPathRefusalIsASettingNotARestart(t *testing.T) {
 	if l := machinesOffLine(errors.New("runsc failed")); l != agentNoMachines {
 		t.Errorf("other failure: %q, want %q", l, agentNoMachines)
 	}
-	for _, want := range []string{"absolute", "clean", "root", "group", "sticky"} {
+	// A fix clause that only says what does not work is refused (UX on
+	// #5612): the line names a step that works.
+	for _, l := range []string{"Agent and worker tools: off, x; a restart will not fix it.", "Model: off; restarting does not help."} {
+		if ownerWorded(l) == nil {
+			t.Errorf("ownerWorded accepts %q", l)
+		}
+	}
+	for _, want := range []string{"absolute", "clean", "symbolic link", "root", "group", "sticky"} {
 		if !strings.Contains(machinesFlagHelp, want) {
 			t.Errorf("-machines help %q lacks %q", machinesFlagHelp, want)
 		}

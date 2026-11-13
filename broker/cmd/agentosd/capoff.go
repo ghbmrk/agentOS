@@ -41,7 +41,7 @@ const (
 	agentNoMachines = "Agent and worker tools: off, their machines did not start; " + fixRestart + "."
 	// C1: the -machines path is one vm.Open refuses (vm.ErrStateDirExposed,
 	// #4976): a setting to fix, which a restart does not.
-	agentMachinesUnsafe = "Agent and worker tools: off, their files are set to an unsafe place; a restart will not fix it."
+	agentMachinesUnsafe = "Agent and worker tools: off, their files are in an unsafe place; whoever set me up must move them."
 	// C1: the agent's image or launch file is missing.
 	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
@@ -119,9 +119,9 @@ func wedgedLine(ids []string) string {
 	case 0:
 		return ""
 	case 1:
-		return "Machines: one will not stop and still counts against my memory; " + fixRestart + "."
+		return "Machines: one will not stop and still takes room from other machines; " + fixRestart + "."
 	}
-	return fmt.Sprintf("Machines: %d will not stop and still count against my memory; %s.", len(ids), fixRestart)
+	return fmt.Sprintf("Machines: %d will not stop and still take room from other machines; %s.", len(ids), fixRestart)
 }
 
 // machinesOffLine is C1's line when the machines did not open: a refused
@@ -153,7 +153,7 @@ func openVM(ctx context.Context, cfg vm.Config, caps *capState, inform func(stri
 
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
-	return []string{agentNoRuntime, agentNoMachines, agentMachinesUnsafe, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
+	return []string{agentNoRuntime, agentNoMachines, agentMachinesUnsafe, agentNoLimits, agentLimitsStuck, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
 		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotErased,
 		forgetRecordUnread, forgetReadsUnknown, forgetUnreached, forgetHeldLine([]string{"helper.1"}), forgetHeldLine([]string{"a", "b"}),
 		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}}),
@@ -319,8 +319,16 @@ func ownerWorded(l string) error {
 	if !ok || strings.TrimSpace(strings.TrimSuffix(fix, ".")) == "" {
 		return errors.New("no fix clause")
 	}
+	if onlyNegates.MatchString(fix) {
+		// "a restart will not fix it" leaves the owner no step (UX on
+		// #5612, second occurrence): the clause names one that works.
+		return errors.New("fix clause names only what does not work")
+	}
 	return nil
 }
+
+// onlyNegates is a fix clause that says only what will not fix the line.
+var onlyNegates = regexp.MustCompile(`(?i)\b(not|never) (fix|help|clear|work)`)
 
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).

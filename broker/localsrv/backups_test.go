@@ -212,7 +212,7 @@ func TestStatusCarriesTheMachineNotes(t *testing.T) {
 	if st := out.(localapi.Status); st.Machines != nil {
 		t.Fatalf("unset notes: %+v", st)
 	}
-	line := "Machines: one will not stop and still counts against my memory; restart me."
+	line := "Machines: one will not stop and still takes room from other machines; restart me."
 	r.srv.cfg.MachineNotes = func() []string { return []string{line} }
 	if out, err = r.call(localapi.OpStatus, struct{}{}); err != nil {
 		t.Fatal(err)

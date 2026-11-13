@@ -301,7 +301,7 @@ func TestBackupScriptMatchesItsCSPHash(t *testing.T) {
 // note to any phone, and nothing when there is none.
 func TestStatusPageShowsTheMachineNote(t *testing.T) {
 	// REQ: KRN-7
-	line := "Machines: one will not stop and still counts against my memory; restart me."
+	line := "Machines: one will not stop and still takes room from other machines; restart me."
 	srv := newRig(t).srv
 	for _, signedIn := range []bool{false, true} {
 		w := httptest.NewRecorder()
