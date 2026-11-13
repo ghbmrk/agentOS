@@ -64,9 +64,10 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          the template why the image records use (#5628); it accepts nothing itself.
 propose  The same records from REPORT, an `image --report` file such as the
          image-vulncheck-report.json artifact image.yml and vulncheck.yml upload, citing ISSUE,
-         so a round needs no local build or scanner (#5631). A report with problems, or with no
-         findings list, fails (exit 2) rather than proposing nothing. --config only names the
-         file the records go in.
+         so a round needs no local build or scanner (#5631). A report with problems, no
+         findings or problems list, a malformed finding, or not written by `image` (its "scan"
+         key; `run`'s vulncheck-report.json is refused) fails (exit 2) rather than proposing
+         nothing (#5647). --config only names the file the records go in.
 reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
          closing a cited issue withdraws its records' acceptance and fails every scan that
          applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
@@ -1503,10 +1504,16 @@ def shown(path):
     return str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(path)
 
 
+FINDING_FIELDS = {"id": str, "where": str, "package": str, "module": str, "version": str, "fixed": str,
+                  "fails": bool}
+
+
 def report_findings(path):
     """The findings of a report `image --report` wrote (CI uploads image.yml's and vulncheck.yml's
     as image-vulncheck-report.json), or a ScanError when the report cannot back a proposal: a scan
-    with problems may have missed findings, and a report with no findings would propose nothing."""
+    with problems may have missed findings, and a report with no findings would propose nothing.
+    So would `run`'s report (vulncheck-report.json, in the same artifact), whose findings are not
+    image findings, or a report from before the "scan" key (#5647)."""
     try:
         report = json.loads(pathlib.Path(path).read_text())
     except (OSError, ValueError) as e:
@@ -1514,9 +1521,21 @@ def report_findings(path):
     findings = report.get("findings") if isinstance(report, dict) else None
     if not isinstance(findings, list) or not all(isinstance(f, dict) for f in findings):
         raise ScanError(f"report {path} has no findings list")
-    if report.get("problems"):
+    if report.get("scan") != "image":
+        raise ScanError(f"report {path} is not a report `image` wrote (its scan is {report.get('scan')!r}); "
+                        "use image-vulncheck-report.json from a run of this version, not vulncheck-report.json")
+    if not isinstance(report.get("problems"), list):
+        raise ScanError(f"report {path} has no problems list, so it cannot show its scan was complete")
+    if report["problems"]:
         raise ScanError(f"report {path} has problems, so its scan may have missed findings: "
                         + "; ".join(map(str, report["problems"])))
+    for f in findings:
+        for k, t in FINDING_FIELDS.items():
+            if k not in f:
+                raise ScanError(f'report {path}: a finding has no "{k}" field')
+            if not isinstance(f[k], t):
+                raise ScanError(f'report {path}: a finding\'s "{k}" field is '
+                                + ("not true or false" if t is bool else "not a string"))
     return findings
 
 
@@ -1674,9 +1693,10 @@ def main(argv=None):
     i.add_argument("--check-issues", action="store_true")
     i.add_argument("--propose", type=issue_number, metavar="ISSUE")
     p = sub.add_parser("propose")
-    p.add_argument("report")
-    p.add_argument("issue", type=issue_number)
-    p.add_argument("--config", default="assurance/vulncheck.json")
+    p.add_argument("report", help="the report `image --report` wrote, such as CI's image-vulncheck-report.json")
+    p.add_argument("issue", type=issue_number, help="the issue each record cites")
+    p.add_argument("--config", default=shown(CONFIG),
+                   help="the file the records go in, named in the output only (default: %(default)s)")
     o = sub.add_parser("reopen")
     o.add_argument("issue", type=int)
     o.add_argument("--config", default=str(CONFIG))
@@ -1694,9 +1714,8 @@ def main(argv=None):
     if a.cmd == "propose":
         try:
             records = propose(report_findings(a.report), a.issue)
-        except (ScanError, KeyError, TypeError) as e:
-            print(f"vulncheck: {e if isinstance(e, ScanError) else f'cannot read report {a.report}: {e!r}'}",
-                  file=sys.stderr)
+        except ScanError as e:
+            print(f"vulncheck: {e}", file=sys.stderr)
             return 2
         print_proposed(records, a.issue, a.config)
         return 0
@@ -1728,7 +1747,7 @@ def main(argv=None):
         print_proposed(extra["proposed"], a.propose, shown(a.config))
     if a.report:
         pathlib.Path(a.report).write_text(json.dumps(
-            {"findings": [{**f, "verdict": verdict(f)} for f in findings],
+            {"scan": a.cmd, "findings": [{**f, "verdict": verdict(f)} for f in findings],
              "problems": problems, "unused_records": unused, **extra}, indent=1) + "\n")
     return 0 if ok else 1
 
