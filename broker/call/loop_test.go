@@ -292,6 +292,19 @@ func TestNothingEmptyIsPlayed(t *testing.T) {
 	r.hangup()
 }
 
+// With no Failed clip set, a recognizer that stops plays nothing and the
+// call still ends deaf (#5305).
+func TestAnUnsetFailedClipPlaysNothing(t *testing.T) {
+	r := newRig(t, fixed("Hi."))
+	r.cfg.Clips.Failed = nil
+	r.serve()
+	<-r.rec.ctx
+	close(r.rec.out)
+	if _, err := r.end(); err != call.ErrDeaf { // end fails on empty audio
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // The one-moment clip waits 1 s by default, on the real clock when none
 // is given.
 func TestOneMomentDefaults(t *testing.T) {
