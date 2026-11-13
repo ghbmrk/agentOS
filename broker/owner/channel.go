@@ -648,13 +648,13 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		control.WordMore, control.WordResume, control.WordUnclear:
 		return route{delegate: text, run: true, limited: !unlocked}
 	}
-	if foldedCodeWord(text) {
+	rest, code := splitCode(text)
+	if foldedCodeWord(text) || code == "" && foldedCode(text) {
 		return route{replies: []string{control.UnclearReply}, limited: !unlocked}
 	}
 	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
 		return route{delegate: text, run: true, limited: true}
 	}
-	rest, code := splitCode(text)
 	if unlocked {
 		return c.unlockedChatLocked(text, rest, code, now)
 	}
@@ -676,6 +676,16 @@ func foldedCodeWord(text string) bool {
 		return true
 	}
 	return false
+}
+
+// foldedCode reports whether text, read through fold, is or ends in a
+// code, such as the live code typed in Arabic-Indic or full-width digits
+// ("book the table ٣٨٢٩١٠", "UNLOCK HKMP １２３４５６"). It may be the live
+// code, so it never reaches the agent or the held queue; it is never
+// checked, since codes are ASCII digits only (CTL-unicode-chat-code, #5458).
+func foldedCode(text string) bool {
+	_, code := splitCode(fold(text))
+	return code != ""
 }
 
 // splitCode finds a code that is the whole message or a separate trailing
