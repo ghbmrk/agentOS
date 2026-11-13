@@ -559,11 +559,15 @@ func checkStateDirs(dirs []string, all bool) error {
 		// Each prefix of abs, "/" first.
 		path := "/"
 		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+		// Every name, before the walk: one below a missing component is
+		// never Lstat-ed, and MkdirAll would fail on it plain (#5641).
+		for _, p := range parts {
+			if len(p) > nameMax {
+				return fmt.Errorf("%w: a name on %q is longer than %d bytes", ErrStateDirUnreachable, d, nameMax)
+			}
+		}
 		for i := -1; i < len(parts); i++ {
 			if i >= 0 {
-				if len(parts[i]) > nameMax {
-					return fmt.Errorf("%w: a name on %q is longer than %d bytes", ErrStateDirUnreachable, d, nameMax)
-				}
 				path = filepath.Join(path, parts[i])
 			}
 			fi, err := stateDirLstat(path)

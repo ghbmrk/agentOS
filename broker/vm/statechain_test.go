@@ -181,16 +181,38 @@ func TestOpenRefusesStateDirAForeignOwnerReports(t *testing.T) {
 // a name longer than NAME_MAX fails Lstat with ENAMETOOLONG, as root too.
 // A name that long is refused before Lstat as ErrStateDirUnreachable: a
 // restart repeats it (#5617).
+// Boundary (Potency on #5641): 255 bytes is NAME_MAX and opens; 256 is
+// refused. A long name below a missing component is refused too, with
+// nothing made, though the walk stops at the missing one.
 func TestOpenReturnsAStateDirLstatError(t *testing.T) {
-	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
-	cfg := newCfg(t)
-	cfg.StateDir = filepath.Join(top, strings.Repeat("n", 300), "state")
-	before := snapshotTree(t, top)
-	if m, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirUnreachable) || m != nil {
-		t.Errorf("Open = %v, %v; want ErrStateDirUnreachable and no manager", m, err)
-	}
-	if after := snapshotTree(t, top); after != before {
-		t.Errorf("Open changed the tree:\nbefore %s\nafter  %s", before, after)
+	for name, tc := range map[string]struct {
+		path    func(top string) string
+		refused bool
+	}{
+		"300 bytes":                  {func(top string) string { return filepath.Join(top, strings.Repeat("n", 300), "state") }, true},
+		"256 bytes":                  {func(top string) string { return filepath.Join(top, strings.Repeat("n", 256)) }, true},
+		"256 bytes below a missing":  {func(top string) string { return filepath.Join(top, "missing", strings.Repeat("n", 256)) }, true},
+		"255 bytes (NAME_MAX) opens": {func(top string) string { return filepath.Join(top, strings.Repeat("n", 255)) }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
+			cfg := newCfg(t)
+			cfg.StateDir = tc.path(top)
+			before := snapshotTree(t, top)
+			m, err := Open(context.Background(), cfg)
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("Open = %v, want a manager", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrStateDirUnreachable) || m != nil {
+				t.Errorf("Open = %v, %v; want ErrStateDirUnreachable and no manager", m, err)
+			}
+			if after := snapshotTree(t, top); after != before {
+				t.Errorf("Open changed the tree:\nbefore %s\nafter  %s", before, after)
+			}
+		})
 	}
 }
 
