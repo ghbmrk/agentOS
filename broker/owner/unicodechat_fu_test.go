@@ -174,3 +174,32 @@ func TestFoldedCodeReplyIsOneGSM7Segment(t *testing.T) {
 		t.Fatalf("%q does not name the cause and the outcome", r)
 	}
 }
+
+// REQ: CH-10, CH-11
+// TestFoldedCodeQuarantineEdges: the folded path fails closed. Unlocked,
+// none of these reaches the agent, with or without its number: a RESUME in
+// look-alike letters with ASCII digits (the unclear reply, not the digits
+// reply, since its digits are 0-9); a NAME command ending in a code in
+// other digits; and chat whose folded tail is a code but whose last
+// separate token is not, so stripping it would cut other text (the digits
+// reply) (CTL-unicode-chat-code-fu, #5616; mutgate on #5644).
+func TestFoldedCodeQuarantineEdges(t *testing.T) {
+	r := newRig(t, nil)
+	r.unlock()
+	code := r.totp()
+	wrong := "1" + code[1:] // never the live code
+	if code[0] == '1' {
+		wrong = "2" + code[1:]
+	}
+	for _, c := range []struct{ text, want string }{
+		{"RΕSUME " + wrong, control.UnclearReply}, // Greek capital epsilon
+		{"NAME bob " + arabicIndic(code), control.FoldedCodeReply},
+		{"book x€" + arabicIndic(code), control.FoldedCodeReply},
+	} {
+		sent := len(r.agent.got())
+		wrongs := len(r.ch.codes.st.Wrong)
+		if got := r.say(c.text); got != c.want || len(r.agent.got()) != sent || len(r.ch.codes.st.Wrong) != wrongs {
+			t.Fatalf("%q: %q, agent %v; want %q, nothing sent or counted", c.text, got, r.agent.got(), c.want)
+		}
+	}
+}
