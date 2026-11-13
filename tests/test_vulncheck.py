@@ -714,6 +714,100 @@ class ImageTest(unittest.TestCase):
         self.assertIn("fix: rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
 
+
+class ProposeTest(unittest.TestCase):
+    """#5628 option A: `image --propose ISSUE` prints the record each unaccepted no-fix image
+    finding needs, so a new Debian advisory is cleared by one small PR."""
+
+    def found(self, where, *pkgs):
+        fs, probs = vulncheck.image_findings(ImageTest.image(ImageTest, *pkgs), where)
+        self.assertEqual(probs, [])
+        return fs
+
+    def fixed(self, name, version, vid):
+        return {**osv_pkg(name, version, "Debian:13", vid, binary=name),
+                "vulnerabilities": [{"id": vid, "affected": [{"package": {"ecosystem": "Debian:13", "name": name},
+                                                              "ranges": [{"events": [{"fixed": "9.9-1"}]}]}]}]}
+
+    def test_one_record_per_unaccepted_no_fix_finding_and_source_package(self):
+        fs = self.found("image",
+                        osv_pkg("glibc", "2.41-12", "Debian:13", "DEBIAN-CVE-9", "DEBIAN-CVE-8", binary="libc6"),
+                        osv_pkg("glibc", "2.41-12", "Debian:13", "DEBIAN-CVE-9", "DEBIAN-CVE-8", binary="libc-bin"),
+                        self.fixed("openssl", "3.5.1-1", "DEBIAN-CVE-7"))
+        old = [{"id": "DEBIAN-CVE-8", "issue": 2919, "where": "image", "package": "glibc", "why": "x"}]
+        fs, probs, unused = ImageTest.scan(ImageTest, old, fs)
+        self.assertEqual((probs, unused), ([], []))
+        self.assertEqual(vulncheck.propose(fs, 5628), [
+            {"id": "DEBIAN-CVE-9", "issue": 5628, "where": "image", "package": "glibc",
+             "why": "Image package glibc 2.41-12 (libc-bin, libc6); Debian 13 has no fix. "
+                    "Fails again once Debian ships one."}])
+
+    def test_the_proposed_records_clear_exactly_the_no_fix_findings(self):
+        # Applied, the records leave only the finding Debian has fixed failing, and none is unused.
+        fs = (self.found("image", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"),
+                         self.fixed("openssl", "3.5.1-1", "DEBIAN-CVE-7"))
+              + self.found("image/initrd", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"))
+              + self.found("image/guest", osv_pkg("zlib", "1.3-1", "Debian:13", "DEBIAN-CVE-6", binary="zlib1g")))
+        recs = vulncheck.propose(ImageTest.scan(ImageTest, [], fs)[0], 5628)
+        self.assertEqual(vulncheck.record_problems(recs), [])
+        self.assertEqual([(r["where"], r["id"]) for r in recs],
+                         [("image", "DEBIAN-CVE-5"), ("image/initrd", "DEBIAN-CVE-5"), ("image/guest", "DEBIAN-CVE-6")])
+        after, probs, unused = ImageTest.scan(ImageTest, recs, fs)
+        self.assertEqual(([(f["id"], vulncheck.verdict(f)) for f in after if vulncheck.verdict(f) == "FAIL"],
+                          probs, unused), ([("DEBIAN-CVE-7", "FAIL")], [], []))
+        self.assertEqual(vulncheck.propose(after, 5628), [])
+
+    def test_a_second_tree_cites_the_main_trees_record_only_when_main_has_the_advisory(self):
+        fs = (self.found("image", osv_pkg("glibc", "2.41-12", "Debian:13", "DEBIAN-CVE-9", binary="libc6"))
+              + self.found("image/initrd", osv_pkg("glibc", "2.41-12", "Debian:13", "DEBIAN-CVE-9", binary="libc6"))
+              + self.found("image/guest", osv_pkg("glibc", "2.41-12", "Debian:13", "DEBIAN-CVE-9", binary="libc6"),
+                           osv_pkg("zlib", "1.3-1", "Debian:13", "DEBIAN-CVE-6", binary="zlib1g")))
+        old = [{"id": "DEBIAN-CVE-9", "issue": 2919, "where": "image", "package": "glibc", "why": "x"}]
+        whys = {(r["where"], r["id"]): r["why"] for r in vulncheck.propose(ImageTest.scan(ImageTest, old, fs)[0], 1)}
+        tail = "Debian 13 has no fix. Fails again once Debian ships one."
+        self.assertEqual(whys, {
+            ("image/initrd", "DEBIAN-CVE-9"): "Initrd package glibc (libc6), also in the main tree, whose image "
+                                              "record accepts the same advisory; " + tail,
+            ("image/guest", "DEBIAN-CVE-9"): "Guest package glibc (libc6), also in the main tree, whose image "
+                                             "record accepts the same advisory; " + tail,
+            ("image/guest", "DEBIAN-CVE-6"): "Guest package zlib 1.3-1 (zlib1g); " + tail})
+
+    def test_only_image_findings_are_proposed(self):
+        # A lockfile or Go finding needs a version and a reason no template can give.
+        self.assertEqual(vulncheck.propose([fail("GHSA-1", "broker")], 1), [])
+
+    def run_main(self, *args):
+        saved = vulncheck.scan_image
+        fs = self.found("image", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"))
+        vulncheck.scan_image = lambda config, src: ([dict(f) for f in fs], [], [])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg, report = pathlib.Path(tmp.name) / "c.json", pathlib.Path(tmp.name) / "r.json"
+        cfg.write_text('{"accepted": []}')
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = vulncheck.main(["image", "d", "--config", str(cfg), "--report", str(report), *args])
+        finally:
+            vulncheck.scan_image = saved
+        return code, out.getvalue(), json.loads(report.read_text())
+
+    def test_propose_prints_paste_ready_records_and_still_fails(self):
+        code, out, report = self.run_main("--propose", "5628")
+        self.assertEqual(code, 1)  # proposing accepts nothing; the scan fails until the records merge
+        want = [{"id": "DEBIAN-CVE-5", "issue": 5628, "where": "image", "package": "dpkg",
+                 "why": "Image package dpkg 1.22.21 (dpkg); Debian 13 has no fix. Fails again once Debian ships one."}]
+        self.assertIn("issue #5628 must name each id", out)
+        self.assertEqual(json.loads(out[out.index("\n[") + 1:]), want)
+        self.assertEqual(report["proposed"], want)
+        code, out, report = self.run_main()
+        self.assertEqual((code, "proposed" in report, "must name each id" in out), (1, False, False))
+
+    def test_propose_needs_an_issue_number(self):
+        for bad in ([], ["0"], ["x"]):
+            with self.subTest(bad), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                vulncheck.main(["image", "d", "--propose", *bad])
+
 def tgz(files):
     """A gzipped npm tarball holding FILES (path -> text) under package/."""
     raw = io.BytesIO()
