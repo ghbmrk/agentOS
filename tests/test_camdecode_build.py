@@ -5,6 +5,10 @@
 # between builds a and b would fail the image's reproduce job). The build half needs root, GUEST_BASE
 # and the network: set AGENTOS_CAMDECODE_BUILD=1 (CI's broker-checks job does). Without it, only the
 # refusals that run before the base is touched run.
+#
+# #5599: the decoder statically links libc6-dev's libc.a and libgcc's archives, so the build records
+# their Debian packages as shipped (image/guest-shipped.sh) for the image vulnerability check; and
+# CI's decoder tests build in a build cache that starts empty, so none links a stale libavcodec.
 # REQ: UPD-1a, NET-2
 import os
 import pathlib
@@ -17,6 +21,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LIBAVCODEC = ROOT / "image/libavcodec.sh"
 CAMDECODE = ROOT / "image/camdecode.sh"
+CI = ROOT / ".github/workflows/ci.yml"
 HOST_TOOLS = ("tar", "xz", "patch")
 
 
@@ -79,6 +84,85 @@ class RefusalTest(unittest.TestCase):
             self.assertIn("GUEST_BASE", r.stderr)
             self.assertFalse(out.exists())
 
+    # REQ: UPD-1a
+    def test_camdecode_needs_a_shipped_record(self):
+        # A decoder build that recorded nothing would ship libc.a's code unscanned (#5599).
+        with tempfile.TemporaryDirectory(prefix="agentos-camdecode-") as d:
+            env = {k: v for k, v in os.environ.items() if k != "GUEST_SHIPPED"}
+            env["GUEST_BASE"] = d
+            out = pathlib.Path(d) / "root"
+            r = subprocess.run(["sh", str(CAMDECODE), str(out), str(pathlib.Path(d) / "lic")],
+                               env=env, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("GUEST_SHIPPED", r.stderr)
+            self.assertFalse(out.exists())
+            self.assertEqual(os.listdir(d), [])
+
+
+class LoadedTest(unittest.TestCase):
+    """camdecode.sh's list of the link's inputs from outside $lib, run on a map shaped as ld writes it."""
+
+    def loaded(self, map_text):
+        line = next(l for l in CAMDECODE.read_text().splitlines() if l.startswith("loaded=$(awk "))
+        with tempfile.TemporaryDirectory(prefix="agentos-camdecode-") as d:
+            m = pathlib.Path(d) / "camdecode.map"
+            m.write_text(map_text)
+            code = 'lib=/tmp/agentos-camdecode base=""\n' + line.replace('"$base$lib/camdecode.map"', '"$1"') + '\nprintf "%s\\n" "$loaded"'
+            r = subprocess.run(["sh", "-c", code, "sh", str(m)], capture_output=True, text=True, check=True)
+        return r.stdout.split()
+
+    # REQ: UPD-1a
+    def test_each_input_outside_lib_is_listed_once(self):
+        gcc = "/usr/lib/gcc/x86_64-linux-gnu/14"
+        libc = gcc + "/../../../x86_64-linux-gnu/libc.a"
+        m = "\n".join([
+            "Archive member included to satisfy reference by file (symbol)",
+            "",
+            libc + "(printf.o)  /tmp/agentos-camdecode/tmp/go-link-1/go.o (printf)",
+            "",
+            "Linker script and memory map",
+            "",
+            "LOAD " + gcc + "/../../../x86_64-linux-gnu/crt1.o",
+            "LOAD " + gcc + "/crtbeginT.o",
+            "LOAD /tmp/agentos-camdecode/tmp/go-link-1/go.o",
+            "LOAD /tmp/agentos-camdecode/opt/agentos-libavcodec/lib/libavcodec.a",
+            "LOAD go.o",
+            "START GROUP",
+            "LOAD " + gcc + "/libgcc.a",
+            "LOAD " + libc,
+            "END GROUP",
+            "LOAD " + libc,
+            "LOAD linker stubs",
+            "                0x0000000000400000                PROVIDE (__executable_start = SEGMENT_START (\"text-segment\", 0x400000))",
+            "",
+        ])
+        self.assertEqual(self.loaded(m), sorted([
+            gcc + "/../../../x86_64-linux-gnu/crt1.o", gcc + "/crtbeginT.o", gcc + "/libgcc.a", libc,
+            # A relative input is not under $lib: listed, so guest-shipped.sh fails on it.
+            "go.o"]))
+
+    # REQ: UPD-1a
+    def test_the_list_feeds_guest_shipped_and_gos_objects_stay_under_lib(self):
+        src = CAMDECODE.read_text()
+        self.assertIn('sh "$HERE/guest-shipped.sh" "$base" $loaded\n', src)
+        self.assertLess(src.index("loaded=$(awk "), src.index('install -m 0755 "$base$lib/agentos-camdecode"'))
+        self.assertIn(' TMPDIR="$lib/tmp" ', src)
+
+
+class CICacheTest(unittest.TestCase):
+    # REQ: NET-2
+    def test_decoder_tests_build_in_an_empty_cache(self):
+        # #5599: go's build cache does not key a cgo package or a link on libavcodec's headers or
+        # .a files, so a cache restored from main could link another library. The step's go test
+        # and fuzz runs use a cache of their own, checked absent first.
+        step = CI.read_text().split("- name: Camera H.264 decoder on the pinned libavcodec", 1)[1].split("\n      - name:", 1)[0]
+        check = step.index('[ ! -e "$RUNNER_TEMP/gocache-libavcodec" ] || {')
+        export = step.index('GOCACHE="$RUNNER_TEMP/gocache-libavcodec"\n')
+        self.assertLess(check, export)
+        self.assertLess(export, step.index("go test -count=1 -json ./cmd/agentos-camdecode/camdecode"))
+        self.assertLess(export, step.index("tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode"))
+        self.assertEqual(step.count("GOCACHE="), 2)  # the image build's in the jail, and this one
+
 
 @unittest.skipUnless(os.environ.get("AGENTOS_CAMDECODE_BUILD") == "1", "set AGENTOS_CAMDECODE_BUILD=1 (root, GUEST_BASE) to build")
 class BuildTest(unittest.TestCase):
@@ -90,8 +174,11 @@ class BuildTest(unittest.TestCase):
         cls.tmp = pathlib.Path(tempfile.mkdtemp(prefix="agentos-camdecode-"))
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.out, cls.lic = cls.tmp / "root", cls.tmp / "licenses"
+        cls.shipped = cls.tmp / "shipped"
+        cls.shipped.write_text("")
         cls.r = subprocess.run(["sh", str(CAMDECODE), str(cls.out), str(cls.lic)],
-                               env=dict(os.environ, PATH=shims(cls.tmp)), capture_output=True, text=True)
+                               env=dict(os.environ, PATH=shims(cls.tmp), GUEST_SHIPPED=str(cls.shipped)),
+                               capture_output=True, text=True)
 
     def setUp(self):
         ran = self.tmp / "ran"
@@ -123,6 +210,14 @@ class BuildTest(unittest.TestCase):
     # REQ: UPD-1a
     def test_build_leaves_nothing_in_the_base(self):
         self.assertFalse((self.base / "tmp/agentos-camdecode").exists())
+
+    # REQ: UPD-1a
+    def test_linked_debian_packages_are_recorded_as_shipped(self):
+        # #5599: libc.a, libm.a and the start-up files are libc6-dev's; crtbeginT.o and libgcc.a
+        # are the base gcc's libgcc-N-dev. Both carry code into the decoder.
+        shipped = set(self.shipped.read_text().split())
+        self.assertIn("libc6-dev", shipped)
+        self.assertTrue(any(re.fullmatch(r"libgcc-\d+-dev", p) for p in shipped), shipped)
 
     # REQ: NET-2
     def test_built_decoder_runs(self):
