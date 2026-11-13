@@ -72,7 +72,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	background(broker, *gateway, *model, token)
+	background(context.Background(), broker, *gateway, *model, token)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -88,9 +88,13 @@ func main() {
 // background starts the bridge's own idle work: the owner poll, and
 // nothing else. The tree directory is what the machine was seeded with;
 // the bridge fetches no tree, since agentosd serves no managed_tree tool
-// (GUEST-bridge-tree-dead).
-func background(broker *http.Client, gateway, model, token string) {
-	go owner(broker, gateway, model, token)
+// (GUEST-bridge-tree-dead). Every idle goroutine starts here, so the idle
+// test covers it (TestEveryGoroutineIsKnown); it stops once ctx ends, and
+// done closes when it has (GUEST-bridge-tree-dead-fu).
+func background(ctx context.Context, broker *http.Client, gateway, model, token string) (done <-chan struct{}) {
+	d := make(chan struct{})
+	go owner(ctx, d, broker, gateway, model, token)
+	return d
 }
 
 // runtimeVars are the variables the runtime gets from the bridge's own
@@ -160,17 +164,26 @@ func reap(child *childproc.Cmd) {
 // owner moves owner messages from the broker into the guest and answers
 // back. Failures wait and retry: an unanswered message is handed out again,
 // and an answer is posted until the broker has stored it.
-func owner(broker *http.Client, gateway, model, token string) {
-	for {
-		if err := ownerOnce(broker, gateway, model, token); err != nil {
+// It returns, closing done, once ctx ends.
+func owner(ctx context.Context, done chan<- struct{}, broker *http.Client, gateway, model, token string) {
+	defer close(done)
+	for ctx.Err() == nil {
+		if err := ownerOnce(ctx, broker, gateway, model, token); err != nil && ctx.Err() == nil {
 			log.Printf("owner message: %v", err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}
 }
 
-func ownerOnce(broker *http.Client, gateway, model, token string) error {
-	resp, err := broker.Get("http://broker.localhost/owner/next")
+func ownerOnce(ctx context.Context, broker *http.Client, gateway, model, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker.localhost/owner/next", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := broker.Do(req)
 	if err != nil {
 		return err
 	}
