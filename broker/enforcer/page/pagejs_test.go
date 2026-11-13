@@ -122,7 +122,14 @@ func TestPageScript(t *testing.T) {
 	if err := os.WriteFile(home, []byte(sg.homeHTML()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, "testdata/pagejs.js", "static/page.js", factory, reset, enrolled, home).CombinedOutput()
+	eg := newEnrolRig(t) // home with a passkey in force: the new-recovery action
+	eg.enrolAs(newAuthenticator(t), caseCode)
+	eg.build()
+	own := filepath.Join(dir, "own.html")
+	if err := os.WriteFile(own, []byte(eg.homeHTML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, "testdata/pagejs.js", "static/page.js", factory, reset, enrolled, home, own).CombinedOutput()
 	if err != nil {
 		t.Fatalf("page.js: %v\n%s", err, out)
 	}
