@@ -7,21 +7,19 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 )
 
-// REQ: CH-10, CH-14
+// REQ: CH-10, CH-12, CH-14
 // TestUnicodeDigitChatCodeNeverReachesTheAgent: the live code typed in
-// non-ASCII digits at the end of chat, alone, or in UNLOCK, locked,
-// unlocked and challenged, never reaches the agent or the held queue, is
-// never checked or counted, and never unlocks: the ASCII code stays
-// unspent and still works afterwards. Each gets the fixed unclear reply,
-// as a non-ASCII RESUME code does (CTL-unicode-chat-code, #5458).
+// non-ASCII digits alone or in UNLOCK, locked, unlocked and challenged,
+// never reaches the agent or the held queue, is never checked or counted,
+// and never unlocks: the ASCII code stays unspent and still works
+// afterwards. Each gets the fixed digits reply, as a non-ASCII RESUME code
+// does (CTL-unicode-chat-code, #5458; reply #5616). Chat ending in such a
+// code is TestNativeDigitTrailingTokenIsStripped.
 func TestUnicodeDigitChatCodeNeverReachesTheAgent(t *testing.T) {
 	forms := []struct {
 		name string
 		text func(code, token string) string
 	}{
-		{"chat, arabic-indic", func(c, _ string) string { return "book the table " + arabicIndic(c) }},
-		{"chat, full-width", func(c, _ string) string { return "book the table " + fullWidth(c) + "." }},
-		{"chat, one digit folded", func(c, _ string) string { return "book the table " + c[:5] + arabicIndic(c[5:]) }},
 		{"code alone", func(c, _ string) string { return arabicIndic(c) }},
 		{"UNLOCK, full-width", func(c, tok string) string { return "UNLOCK " + tok + " " + fullWidth(c) }},
 		{"UNLOCK, arabic-indic", func(c, tok string) string { return "unlock " + tok + " " + arabicIndic(c) }},
@@ -46,8 +44,8 @@ func TestUnicodeDigitChatCodeNeverReachesTheAgent(t *testing.T) {
 				st := r.ch.codes.st
 				wrong, held := len(st.Wrong), len(st.Waiting)
 				got := r.say(text)
-				if got != control.UnclearReply {
-					t.Fatalf("%q: %q, want the unclear reply", text, got)
+				if got != control.FoldedCodeReply {
+					t.Fatalf("%q: %q, want the digits reply", text, got)
 				}
 				now := r.ch.codes.st
 				if len(r.agent.got()) != sent || len(now.Wrong) != wrong || len(now.Waiting) != held {

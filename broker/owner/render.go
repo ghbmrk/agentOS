@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -52,8 +53,8 @@ func fieldChar(r rune) bool {
 
 // fold maps text to the plain form every fixed-pattern check runs on, a
 // small stand-in for NFKC (golang.org/x/text is third-party, DEP-1):
-// fullwidth forms become ASCII, every Unicode decimal digit becomes its
-// ASCII digit, look-alike letters fold to Latin, and combining marks and
+// fullwidth forms become ASCII, every Unicode decimal digit and every
+// enclosed number (circled, parenthesised) becomes its ASCII digits, look-alike letters fold to Latin, and combining marks and
 // format characters (zero-width joiners and the like) are dropped.
 func fold(s string) string {
 	var b strings.Builder
@@ -75,6 +76,8 @@ func fold(s string) string {
 			b.WriteRune(r)
 		case unicode.IsDigit(r):
 			b.WriteByte(byte('0' + digitValue(r)))
+		case enclosedValue(r) >= 0:
+			b.WriteString(strconv.Itoa(enclosedValue(r)))
 		case lookalikes[r] != "":
 			b.WriteString(lookalikes[r])
 		case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Cf, r):
@@ -85,6 +88,42 @@ func fold(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// enclosed lists the enclosed number blocks: circled, parenthesised,
+// with a full stop or comma, negative and double circled. Unicode classes
+// them No, not decimal digits, so unicode.IsDigit misses them, yet a
+// phone's symbol keyboard types a code in them (CTL-unicode-chat-code-fu,
+// #5616). Each entry is a run of code points and the value of its first.
+var enclosed = []struct {
+	lo, hi rune
+	first  int
+}{
+	{0x2460, 0x2473, 1},   // ① to ⑳
+	{0x2474, 0x2487, 1},   // ⑴ to ⒇
+	{0x2488, 0x249B, 1},   // ⒈ to ⒛
+	{0x24EA, 0x24EA, 0},   // ⓪
+	{0x24EB, 0x24F4, 11},  // ⓫ to ⓴
+	{0x24F5, 0x24FE, 1},   // ⓵ to ⓾
+	{0x24FF, 0x24FF, 0},   // ⓿
+	{0x2776, 0x277F, 1},   // ❶ to ❿
+	{0x2780, 0x2789, 1},   // ➀ to ➉
+	{0x278A, 0x2793, 1},   // ➊ to ➓
+	{0x3251, 0x325F, 21},  // ㉑ to ㉟
+	{0x32B1, 0x32BF, 36},  // ㊱ to ㊿
+	{0x1F100, 0x1F100, 0}, // 🄀
+	{0x1F101, 0x1F10A, 0}, // 🄁 to 🄊
+	{0x1F10B, 0x1F10C, 0}, // 🄋 🄌
+}
+
+// enclosedValue is an enclosed number's value, or -1.
+func enclosedValue(r rune) int {
+	for _, e := range enclosed {
+		if r >= e.lo && r <= e.hi {
+			return e.first + int(r-e.lo)
+		}
+	}
+	return -1
 }
 
 // digitValue is a decimal digit's value. Unicode lays every decimal digit
