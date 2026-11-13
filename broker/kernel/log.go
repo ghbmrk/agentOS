@@ -242,13 +242,15 @@ func Open(cfg Config) (*Log, error) {
 		off += 4 + n
 		ends = append(ends, off)
 	}
+	// The anchor is checked before any cut, so a refused open leaves every
+	// byte for recovery (LOG-2).
+	if err := f.checkAnchor(); err != nil {
+		return nil, err
+	}
 	if off < len(raw) {
 		if err := cfg.Store.Truncate(off); err != nil {
 			return nil, err
 		}
-	}
-	if err := f.checkAnchor(); err != nil {
-		return nil, err
 	}
 	if err := f.dropUnconfirmed(ends); err != nil {
 		return nil, err
