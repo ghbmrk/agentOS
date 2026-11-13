@@ -182,11 +182,9 @@ func (s *State) EdgeReplaces(k ed25519.PublicKey) ed25519.PublicKey {
 func (s *State) EdgeChanges() int { return s.edge.changes }
 
 // candidateOK is the check a candidate passes, live and on replay: a hello
-// that verifies, from a key never revoked, a minute after the last
-// candidate and from another key. The minute runs from the last candidate's
-// Latest to at, the new reading's Earliest, so it holds on true time however
-// wide either reading. Whether the key is live is the kernel's check, since
-// the fold knows no head key.
+// that verifies, from another key never revoked, a minute of true time after
+// the last candidate (from its Latest to at, an Earliest). Whether the key is
+// live is the kernel's check, since the fold knows no head key.
 func (s *State) candidateOK(b edgeCandidate, at int64) error {
 	if !edgeKey(b.Key) || len(b.Nonce) != HelloNonce || len(b.Sig) != ed25519.SignatureSize {
 		return ErrEdgeKey
