@@ -322,18 +322,29 @@ func TestEnrolAnswerFollowsState(t *testing.T) {
 // passkey's tap does nothing, the owner's spends the old code and shows the
 // new one once, and the page offers none while a replacement waits (the
 // cancel does that) or with no passkey enrolled. Catches an owner stuck
-// with an unspent code after a failed recovery save.
+// with an unspent code after a failed recovery save. A page with no book
+// (no Enrol) offers no action whose tap would answer 404 (ENF-c-f4 item 2).
 func TestNewRecoveryCodeAction(t *testing.T) {
+	if strings.Contains(newRig(t).homeHTML(), "new-recovery") {
+		t.Error("a page with no book offers a new recovery code")
+	}
 	g := newEnrolRig(t)
-	if w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery}); w.Code == http.StatusOK {
+	if w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery}); w.Code != http.StatusForbidden {
 		t.Fatalf("offered with no passkey enrolled: %d", w.Code)
 	}
 	a := newAuthenticator(t)
 	_, out := g.enrolAs(a, caseCode)
 	old, _ := out["recovery"].(string)
 	g.build()
-	if w := g.do(http.MethodGet, "/", nil); !strings.Contains(w.Body.String(), "Make a new recovery code") {
-		t.Fatalf("home lacks the action:\n%s", w.Body)
+	home := g.do(http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(home, "Make a new recovery code") {
+		t.Fatalf("home lacks the action:\n%s", home)
+	}
+	// A standing action, not something waiting: it sits under "Your
+	// passkey", outside every pending box (ENF-c-f4 item 4).
+	at, passkey := strings.Index(home, `data-action="new-recovery"`), strings.Index(home, "<h2>Your passkey</h2>")
+	if passkey < 0 || at < passkey || strings.Contains(home[strings.LastIndex(home[:at], "<div"):at], "pending") {
+		t.Errorf("the action is not under Your passkey, outside a pending box:\n%s", home)
 	}
 	if code, _ := g.tapAct(newAuthenticator(t), ActNewRecovery); code != http.StatusForbidden {
 		t.Errorf("another passkey's tap: %d", code)

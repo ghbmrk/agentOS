@@ -761,6 +761,11 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 	if err != nil || !strings.Contains(w, "if one is waiting") {
 		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
 	}
+	// Nor that one is in force after the wait, and with none waiting the
+	// code is still unspent, so the text asks for a new one (ENF-c-f4 item 3).
+	if !strings.Contains(w, "a waiting replacement is in force") || !strings.Contains(w, "if none is waiting, make a new recovery code there") {
+		t.Errorf("after a failed save the text reads as a replacement in force: %q", w)
+	}
 	// After the wait the text must not read as all-clear: it names the
 	// deadline, which is Wait, and the factory reset as the way back
 	// (ENF-c-f3 item 1, NET-4, ENF-c-4).
@@ -1036,7 +1041,9 @@ func TestRetryCardSurvivesRestart(t *testing.T) {
 // tap, spends it and shows a new one once. The old code then starts no
 // replacement; the new one does. It refuses with no passkey in force and
 // with a replacement waiting (Cancel does that), and a failed save leaves
-// the old code valid.
+// the old code valid. A saved rotation texts the owner once, so a holder
+// of the passkey cannot silently spend the written code (ENF-c-f4 item 1,
+// #5042 L3 point 1).
 func TestRotateRecoveryCode(t *testing.T) {
 	g, _, code := enrolled(t)
 	g.bs.failAt = g.bs.n + 1
@@ -1044,13 +1051,27 @@ func TestRotateRecoveryCode(t *testing.T) {
 		t.Fatalf("stop at the save: %v", err)
 	}
 	g.bs.failAt = g.bs.n + 1
+	g.alerts.raised = nil
 	if fresh, err := g.b.Rotate(); !errors.Is(err, errStopped) || fresh != "" {
 		t.Fatalf("rotate over a failing save: %q %v", fresh, err)
+	}
+	// A rotation is texted once it is saved, never before: a failed save
+	// leaves the written code working, so a text then would be false
+	// (ENF-c-f4 item 1).
+	if len(g.alerts.raised) != 0 {
+		t.Errorf("a failed rotation texted: %v", g.alerts.raised)
 	}
 	g.bs.failAt = 0
 	fresh, err := g.b.Rotate()
 	if err != nil || len(fresh) != CodeLen || fresh == code {
 		t.Fatalf("rotate: %q %v", fresh, err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
+		t.Errorf("rotate texts %v, want one RecoveryCodeChanged", g.alerts.raised)
+	}
+	if w, err := alert.Words(alert.RecoveryCodeChanged, ""); err != nil || !strings.Contains(w, "no longer works") ||
+		!strings.Contains(w, "If it was not you") || !strings.Contains(w, "make a new recovery code") {
+		t.Errorf("the rotation's text does not say the written code is spent and what to do: %q %v", w, err)
 	}
 	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
 		t.Errorf("the spent code still starts a replacement: %v", err)

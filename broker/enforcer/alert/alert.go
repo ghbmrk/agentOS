@@ -62,8 +62,13 @@ const (
 	// The enforcer's record of a box's cut is missing or does not read
 	// back (#5399): provisioning wrote it and nothing removes it, so its
 	// loss means root on the enforcer or lost state. The box stays cut;
-	// like Trip it lights the bulb until the cut lifts. Appended last.
+	// like Trip it lights the bulb until the cut lifts. Appended after
+	// FactoryReset.
 	RecordMissing
+	// The passkey in force made a new recovery code, spending the written
+	// one (ENF-c-f4, #5042): a holder of a synced passkey on the Owner
+	// Wi-Fi cannot do it unseen. Appended last.
+	RecoveryCodeChanged
 )
 
 // Delivery is how a kind reaches the owner.
@@ -82,22 +87,23 @@ type spec struct {
 }
 
 var kinds = map[Kind]spec{
-	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
-	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
-	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home within 10 minutes and cancel the replacement there if one is waiting. After 10 minutes a replacement is in force and only a factory reset with the code inside the enforcer's case takes it back. Clear this there too."},
-	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
-	ChannelPaused:    {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
-	SafetyOff:        {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
-	SafetyShut:       {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too."},
-	HeadFork:         {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home."},
-	AlarmTriggered:   {Call, true, "Enforcer: the alarm %s was triggered."},
-	DoorForced:       {Call, true, "Enforcer: %s was forced open."},
-	FailedUnlocks:    {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
-	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
-	RoutineLock:      {LogOnly, true, "%s locked."},
-	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
-	FactoryReset:     {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
-	RecordMissing:    {Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
+	UnusualUnlock:       {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
+	UnusualDisarm:       {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
+	RecoveryCodeUsed:    {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, open the enforcer's page at home within 10 minutes and cancel the replacement there if one is waiting; if none is waiting, make a new recovery code there. After 10 minutes a waiting replacement is in force and only a factory reset with the code inside the enforcer's case takes it back. Clear this there too."},
+	RecoveryCodeChanged: {Text, false, "Enforcer: a new recovery code was made with your passkey, so the code you wrote down no longer works. If it was not you, someone else can use your passkey: make a new recovery code on the enforcer's page at home and keep it safe. Clear this there too."},
+	Enrolment:           {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
+	ChannelPaused:       {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
+	SafetyOff:           {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
+	SafetyShut:          {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too."},
+	HeadFork:            {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home."},
+	AlarmTriggered:      {Call, true, "Enforcer: the alarm %s was triggered."},
+	DoorForced:          {Call, true, "Enforcer: %s was forced open."},
+	FailedUnlocks:       {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
+	RoutineUnlock:       {LogOnly, true, "%s unlocked."},
+	RoutineLock:         {LogOnly, true, "%s locked."},
+	Trip:                {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
+	FactoryReset:        {Text, false, "Enforcer: a factory reset was run with the code inside its case, which drops its passkey and recovery code. Anyone who opened the case has that code, so someone else may have run it. Nothing can loosen its rules until a new passkey enrols. Enrol one and clear this on the enforcer's page at home. Until a passkey enrols, the page says \"This enforcer was factory reset.\" If it does not say so and you have not enrolled a passkey since, the reset did not finish: run it again there."},
+	RecordMissing:       {Text, true, "Enforcer: its record of %[1]s's cut is missing or unreadable, so %[1]s stays cut. Someone may have tampered with the enforcer: check it before you let %[1]s back on the enforcer's page at home. Its light stays red until you do or you clear this there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window

@@ -534,7 +534,8 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusNotFound, errMalformed)
 			return
 		}
-		if _, waiting := s.cfg.Enrol.Recovery(); waiting || s.cfg.Enrol.Phase() != enrol.Enrolled {
+		// No phase check: with no passkey in force live() answers 403 first.
+		if _, waiting := s.cfg.Enrol.Recovery(); waiting {
 			fail(w, http.StatusNotFound, enrol.ErrPhase)
 			return
 		}
