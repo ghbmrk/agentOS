@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,41 +71,5 @@ func TestVerifyTOTPReadsEachAnswer(t *testing.T) {
 	}
 	if _, ok, err := VerifyClient(filepath.Join(dir, "absent.sock")).VerifyTOTP("123456", 0, true); ok || !errors.Is(err, ErrDown) {
 		t.Errorf("down: %v %v", ok, err)
-	}
-}
-
-// CH-4 (#5050 item 9, moved here from agentos-egress by #5633 so the pin
-// on VerifyTOTP's dial-versus-other label outlives the old-core egress): a
-// checker that drops the connection mid-request refuses, and is not read
-// as one that is not running.
-func TestAMidRequestResetIsNotDown(t *testing.T) {
-	dir, err := os.MkdirTemp("", "cks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "v.sock")
-	l, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			c.Read(make([]byte, 1)) // leave the rest unread so the close resets
-			c.Close()
-		}
-	}()
-	_, ok, err := VerifyClient(path).VerifyTOTP("123456", 0, true)
-	if ok || err == nil || errors.Is(err, ErrDown) {
-		t.Fatalf("a reset mid-request: %t %v", ok, err)
-	}
-	var oe *net.OpError
-	if !errors.As(err, &oe) || oe.Op == "dial" {
-		t.Fatalf("the reset is not a non-dial OpError, so this test checks nothing: %v", err)
 	}
 }

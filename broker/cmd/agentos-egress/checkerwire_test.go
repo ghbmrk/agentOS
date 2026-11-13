@@ -566,6 +566,36 @@ func TestAPausedCheckerReadsAsPaused(t *testing.T) {
 	}
 }
 
+// CH-4 (#5050 item 9): a checker that drops the connection mid-request
+// refuses, and is not read as one that is not running.
+func TestAMidRequestResetIsNotDown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Read(make([]byte, 1)) // leave the rest unread so the close resets
+			c.Close()
+		}
+	}()
+	_, ok, err := checkersock.VerifyClient(path).VerifyTOTP("123456", 0, true)
+	if ok || err == nil || errors.Is(err, checkersock.ErrDown) {
+		t.Fatalf("a reset mid-request: %t %v", ok, err)
+	}
+	var oe *net.OpError
+	if !errors.As(err, &oe) || oe.Op == "dial" {
+		t.Fatalf("the reset is not a non-dial OpError, so this test checks nothing: %v", err)
+	}
+}
+
 // REQ: CH-4
 // "any value fails closed" holds only while nothing listens at
 // dir/hand.sock: a planted listener receives the seed and approves every
