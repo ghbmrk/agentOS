@@ -62,6 +62,11 @@ image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg
          must be in that manifest at its version. --propose ISSUE also prints, and adds to the
          report as "proposed", the record each failing no-fix finding needs, citing ISSUE, with
          the template why the image records use (#5628); it accepts nothing itself.
+propose  The same records from REPORT, an `image --report` file such as the
+         image-vulncheck-report.json artifact image.yml and vulncheck.yml upload, citing ISSUE,
+         so a round needs no local build or scanner (#5631). A report with problems, or with no
+         findings list, fails (exit 2) rather than proposing nothing. --config only names the
+         file the records go in.
 reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the config cites it:
          closing a cited issue withdraws its records' acceptance and fails every scan that
          applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
@@ -85,6 +90,7 @@ assurance/vulncheck.json, so a change to the image records alone is scanned agai
 Usage:
   vulncheck.py run [--config F] [--root DIR] [--report F] [--check-issues]
   vulncheck.py image DIR [--config F] [--report F] [--check-issues] [--propose ISSUE]
+  vulncheck.py propose REPORT ISSUE [--config F]
   vulncheck.py reopen ISSUE [--config F]
   vulncheck.py control
 Exit 0 pass, 1 unaccepted findings or a failed check, 2 a scanner or usage error.
@@ -1468,17 +1474,50 @@ def propose(findings, issue):
         g = groups.setdefault((f["where"], f["id"], f["module"]), {"release": m[1], "bins": set(), "versions": set()})
         g["bins"].add(m[2])
         g["versions"].add(f["version"])
-    main = {(f["id"], f["module"]) for f in findings if f["where"] == IMAGE and not f["fixed"]}
+    in_main = {(f["id"], f["module"]) for f in findings if f["where"] == IMAGE and not f["fixed"]}
     out = []
     for (where, vid, src), g in sorted(groups.items(), key=lambda kv: (IMAGE_TREES.index(kv[0][0]), kv[0][1:])):
         bins, tail = ", ".join(sorted(g["bins"])), f"Debian {g['release']} has no fix. Fails again once Debian ships one."
-        if where != IMAGE and (vid, src) in main:
+        if where != IMAGE and (vid, src) in in_main:
             why = (f"{TREE_NAMES[where]} package {src} ({bins}), also in the main tree, whose image record "
                    f"accepts the same advisory; {tail}")
         else:
             why = f"{TREE_NAMES[where]} package {src} {', '.join(sorted(g['versions']))} ({bins}); {tail}"
         out.append({"id": vid, "issue": issue, "where": where, "package": src, "why": why})
     return out
+
+
+def print_proposed(records, issue, config):
+    """Print RECORDS paste-ready for CONFIG's "accepted" list, or that there are none."""
+    if not records:
+        print("nothing to propose: no failing image finding without a Debian fix")
+        return
+    print(f"proposed records for \"accepted\" in {config}: issue #{issue} must "
+          "name each id, and each why is a template to check against its advisory")
+    print("[" + ",".join("\n  " + json.dumps(r) for r in records) + "\n]")
+
+
+def shown(path):
+    """PATH as a message names it: relative to the repository when inside it (the default config)."""
+    p = pathlib.Path(path).resolve()
+    return str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(path)
+
+
+def report_findings(path):
+    """The findings of a report `image --report` wrote (CI uploads image.yml's and vulncheck.yml's
+    as image-vulncheck-report.json), or a ScanError when the report cannot back a proposal: a scan
+    with problems may have missed findings, and a report with no findings would propose nothing."""
+    try:
+        report = json.loads(pathlib.Path(path).read_text())
+    except (OSError, ValueError) as e:
+        raise ScanError(f"cannot read report {path}: {e}")
+    findings = report.get("findings") if isinstance(report, dict) else None
+    if not isinstance(findings, list) or not all(isinstance(f, dict) for f in findings):
+        raise ScanError(f"report {path} has no findings list")
+    if report.get("problems"):
+        raise ScanError(f"report {path} has problems, so its scan may have missed findings: "
+                        + "; ".join(map(str, report["problems"])))
+    return findings
 
 
 def issue_number(text):
@@ -1494,7 +1533,7 @@ def verdict(f):
     return f"accepted #{f['accepted_by']}" if "accepted_by" in f else "FAIL"
 
 
-def summary(findings, problems, unused, out=None):
+def summary(findings, problems, unused, out=None, config="assurance/vulncheck.json"):
     out = out or sys.stdout
     for f in findings:
         alias = f" ({', '.join(f['aliases'])})" if f["aliases"] else ""
@@ -1512,13 +1551,13 @@ def summary(findings, problems, unused, out=None):
         print("fix: rebuild the image; Debian has fixed each image finding that names a fixed "
               "version, and no record can accept those", file=out)
     if any(not (f["where"] in IMAGE_TREES and f["fixed"]) for f in failing):
-        print("fix: upgrade to the fixed version, or add a record to assurance/vulncheck.json "
+        print(f"fix: upgrade to the fixed version, or add a record to {config} "
               "naming an open issue that names the vulnerability and says why it is accepted", file=out)
     if unused and problems:
         print("fix: clear the problems above first; a record can look unused when its tree was not read",
               file=out)
     elif unused:
-        print("fix: remove each unused record from assurance/vulncheck.json", file=out)
+        print(f"fix: remove each unused record from {config}", file=out)
     return not failing and not problems and not unused
 
 
@@ -1634,6 +1673,10 @@ def main(argv=None):
     i.add_argument("--report")
     i.add_argument("--check-issues", action="store_true")
     i.add_argument("--propose", type=issue_number, metavar="ISSUE")
+    p = sub.add_parser("propose")
+    p.add_argument("report")
+    p.add_argument("issue", type=issue_number)
+    p.add_argument("--config", default="assurance/vulncheck.json")
     o = sub.add_parser("reopen")
     o.add_argument("issue", type=int)
     o.add_argument("--config", default=str(CONFIG))
@@ -1647,6 +1690,15 @@ def main(argv=None):
         config = json.loads(pathlib.Path(a.config).read_text())
         n = reopen_cited(config.get("accepted", []), a.issue, repo, token)
         print(f"issue #{a.issue}: " + (f"cited by {n} record(s); reopened" if n else "not cited; left closed"))
+        return 0
+    if a.cmd == "propose":
+        try:
+            records = propose(report_findings(a.report), a.issue)
+        except (ScanError, KeyError, TypeError) as e:
+            print(f"vulncheck: {e if isinstance(e, ScanError) else f'cannot read report {a.report}: {e!r}'}",
+                  file=sys.stderr)
+            return 2
+        print_proposed(records, a.issue, a.config)
         return 0
     try:
         if a.cmd == "control":
@@ -1669,13 +1721,11 @@ def main(argv=None):
             problems.append("--check-issues needs GITHUB_REPOSITORY and GITHUB_TOKEN")
         else:
             problems += issue_problems(issue_records(config, a.cmd), repo, token)
-    ok = summary(findings, problems, unused)
+    ok = summary(findings, problems, unused, config=shown(a.config))
     extra = {}
     if getattr(a, "propose", None):
         extra["proposed"] = propose(findings, a.propose)
-        print(f"proposed records for \"accepted\" in assurance/vulncheck.json: issue #{a.propose} must "
-              "name each id, and each why is a template to check against its advisory")
-        print("[" + ",".join("\n  " + json.dumps(r) for r in extra["proposed"]) + "\n]")
+        print_proposed(extra["proposed"], a.propose, shown(a.config))
     if a.report:
         pathlib.Path(a.report).write_text(json.dumps(
             {"findings": [{**f, "verdict": verdict(f)} for f in findings],
