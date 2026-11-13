@@ -46,7 +46,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -505,15 +504,19 @@ type Manager struct {
 var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
 
 // ErrStateDirUnreachable refuses a StateDir whose path this uid cannot
-// walk: a component it may not search (EACCES, EPERM), or a path the
-// kernel will not resolve as written (ENOTDIR, ELOOP, ENAMETOOLONG).
-// Each fails the same way on every start, so it is the path's setting
-// to fix, not a fault a restart clears (#5617). Other Lstat errors (EIO,
-// say) are returned as they came.
+// walk: a component it may not search (EACCES or EPERM, fs.ErrPermission)
+// or a name longer than nameMax. Each fails the same way on every start,
+// so it is the path's setting to fix, not a fault a restart clears
+// (#5617). Other Lstat errors (EIO, say) are returned as they came.
+// ENOTDIR and ELOOP cannot arise: the walk Lstats each prefix in order,
+// so a file or link component is refused first as ErrStateDirExposed.
+// The package may not import syscall (ARC2, daemon/arc2_test.go), so the
+// errno classes are read through fs and a length check.
 var ErrStateDirUnreachable = errors.New("vm: the state directory's path cannot be walked")
 
-// stateDirRefusals are the Lstat errnos ErrStateDirUnreachable covers.
-var stateDirRefusals = []error{syscall.EACCES, syscall.EPERM, syscall.ENOTDIR, syscall.ELOOP, syscall.ENAMETOOLONG}
+// nameMax is Linux's NAME_MAX: a longer name fails Lstat with
+// ENAMETOOLONG on every filesystem the box mounts.
+const nameMax = 255
 
 // stateDirOwner, stateDirLstat and stateDirsMade are seams: tests give a
 // directory a foreign owner or an Lstat errno without root, and change a
@@ -558,18 +561,19 @@ func checkStateDirs(dirs []string, all bool) error {
 		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
 		for i := -1; i < len(parts); i++ {
 			if i >= 0 {
+				if len(parts[i]) > nameMax {
+					return fmt.Errorf("%w: a name on %q is longer than %d bytes", ErrStateDirUnreachable, d, nameMax)
+				}
 				path = filepath.Join(path, parts[i])
 			}
 			fi, err := stateDirLstat(path)
 			if errors.Is(err, fs.ErrNotExist) && !all {
 				break
 			}
+			if errors.Is(err, fs.ErrPermission) {
+				return fmt.Errorf("%w: %w", ErrStateDirUnreachable, err)
+			}
 			if err != nil {
-				for _, r := range stateDirRefusals {
-					if errors.Is(err, r) {
-						return fmt.Errorf("%w: %w", ErrStateDirUnreachable, err)
-					}
-				}
 				return err
 			}
 			uid, ok := stateDirOwner(fi)

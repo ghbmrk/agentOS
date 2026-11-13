@@ -179,15 +179,15 @@ func TestOpenRefusesStateDirAForeignOwnerReports(t *testing.T) {
 
 // An Lstat error other than a missing name is returned, not read past:
 // a name longer than NAME_MAX fails Lstat with ENAMETOOLONG, as root too.
-// It is a refusal of the path as set, which a restart repeats, so it
-// carries ErrStateDirUnreachable as well as the errno (#5617).
+// A name that long is refused before Lstat as ErrStateDirUnreachable: a
+// restart repeats it (#5617).
 func TestOpenReturnsAStateDirLstatError(t *testing.T) {
 	top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
 	cfg := newCfg(t)
 	cfg.StateDir = filepath.Join(top, strings.Repeat("n", 300), "state")
 	before := snapshotTree(t, top)
-	if m, err := Open(context.Background(), cfg); !errors.Is(err, syscall.ENAMETOOLONG) || !errors.Is(err, ErrStateDirUnreachable) || m != nil {
-		t.Errorf("Open = %v, %v; want ENAMETOOLONG, ErrStateDirUnreachable and no manager", m, err)
+	if m, err := Open(context.Background(), cfg); !errors.Is(err, ErrStateDirUnreachable) || m != nil {
+		t.Errorf("Open = %v, %v; want ErrStateDirUnreachable and no manager", m, err)
 	}
 	if after := snapshotTree(t, top); after != before {
 		t.Errorf("Open changed the tree:\nbefore %s\nafter  %s", before, after)
@@ -219,14 +219,12 @@ func TestOpenRefusesAStateDirUnderAnUnreadableParent(t *testing.T) {
 	}
 }
 
-// Each Lstat refusal the path's setting causes (EACCES, EPERM, ENOTDIR,
-// ELOOP, ENAMETOOLONG) is ErrStateDirUnreachable; any other error (EIO)
-// is returned as it came, with neither sentinel, so it keeps the restart
-// line (#5617).
+// Each Lstat refusal of permission (EACCES, EPERM) is
+// ErrStateDirUnreachable; any other error (EIO, ENOMEM) is returned as it
+// came, with neither sentinel, so it keeps the restart line (#5617).
 func TestStateDirLstatRefusalsAreSettings(t *testing.T) {
 	for errno, setting := range map[syscall.Errno]bool{
-		syscall.EACCES: true, syscall.EPERM: true, syscall.ENOTDIR: true, syscall.ELOOP: true, syscall.ENAMETOOLONG: true,
-		syscall.EIO: false, syscall.ENOMEM: false,
+		syscall.EACCES: true, syscall.EPERM: true, syscall.EIO: false, syscall.ENOMEM: false,
 	} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			top := mode(t, filepath.Join(t.TempDir(), "top"), 0o700)
