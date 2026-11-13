@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -416,5 +417,181 @@ func TestCheckerFlag(t *testing.T) {
 		if err := checkerFlagOK(ok); err != nil {
 			t.Errorf("-checker %q: %v", ok, err)
 		}
+	}
+}
+
+// handSock is a checker hand socket whose n-th PUT /secret (from 0) gets
+// put(n) as its status, holding the seed only on 204, and whose POST
+// /verify is verify. GET /state and DELETE /secret keep the seed held.
+type handSock struct {
+	mu   sync.Mutex
+	puts int
+	held bool
+}
+
+func (h *handSock) Held() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.held }
+
+func handAt(t *testing.T, put func(n int) int, verify http.HandlerFunc) (string, *handSock) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := &handSock{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]bool{"held": h.Held()})
+	})
+	mux.HandleFunc("PUT /secret", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		code := put(h.puts)
+		h.puts++
+		h.held = h.held || code == http.StatusNoContent
+		h.mu.Unlock()
+		w.WriteHeader(code)
+	})
+	mux.HandleFunc("DELETE /secret", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.held = false
+		h.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /verify", verify)
+	l, err := sockets.ListenPeers(filepath.Join(dir, checker.HandSocket), os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	return dir, h
+}
+
+// verifyAnswer answers every POST /verify with match, whatever the code.
+func verifyAnswer(match bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(checkersock.VerifyResponse{Step: 1 << 40, OK: match})
+	}
+}
+
+// pausedUntil answers every POST /verify with a paused bucket ending at until.
+func pausedUntil(until time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(checkersock.PausedHeader, strconv.FormatInt(until.Unix(), 10))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+}
+
+func always(code int) func(int) int { return func(int) int { return code } }
+
+// CH-4 (#5050 item 5): a checker that refuses the seed refuses the unlock,
+// even though its verify would match: no code is checked on a checker the
+// seed did not reach.
+func TestAFailedHandRefusesTheUnlock(t *testing.T) {
+	r := newFastRig(t, true)
+	r.c.checker, _ = handAt(t, always(http.StatusInternalServerError), verifyAnswer(true))
+	if err := r.c.confirm(r.unlock(t), r.code()); err != errInternal {
+		t.Fatalf("unlock with a checker that refused the seed: %v", err)
+	}
+	if r.phase() == open {
+		t.Fatal("the vault opened")
+	}
+}
+
+// CH-4 (#5050 item 6): a refused enrolment whose hand-back of the channel
+// seed fails takes the pending seed back, so the checker holds none.
+func TestAFailedHandBackLeavesNoSeed(t *testing.T) {
+	r := newSetupRig(t)
+	checkerAt(t, r)
+	r.c.keepEvery = time.Hour
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	uri, err := r.c.enroll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := enrolledSeed(t, uri)
+	// The pending seed's hand succeeds and the checker refuses its code;
+	// the hand-back of the channel's seed then fails.
+	dir, h := handAt(t, func(n int) int {
+		if n == 0 {
+			return http.StatusNoContent
+		}
+		return http.StatusInternalServerError
+	}, verifyAnswer(false))
+	r.c.checker = dir
+	r.clk.add(30 * time.Second)
+	if ok, err := r.c.confirmEnroll(totp(fresh, r.clk.now())); ok || err != nil {
+		t.Fatalf("a code the checker refused confirmed: %t %v", ok, err)
+	}
+	if h.puts != 2 {
+		t.Fatalf("%d hands, want the pending seed's and the failed hand-back", h.puts)
+	}
+	if h.Held() {
+		t.Fatal("the checker kept the pending seed after a failed hand-back")
+	}
+}
+
+// CH-18 (#5050 items 7 and 8): a paused checker reads as locked out at the
+// unlock and as paused at the enrolment, never as an internal error.
+func TestAPausedCheckerReadsAsPaused(t *testing.T) {
+	r := newFastRig(t, true)
+	until := r.clk.now().Add(time.Minute)
+	r.c.checker, _ = handAt(t, always(http.StatusNoContent), pausedUntil(until))
+	err := r.c.confirm(r.unlock(t), r.code())
+	if err == nil || err.Error() != errLockedOut(until).Error() {
+		t.Fatalf("unlock on a paused checker: %v", err)
+	}
+
+	r = newSetupRig(t)
+	checkerAt(t, r)
+	r.c.keepEvery = time.Hour
+	if err := r.c.confirm(r.unlock(t), r.code()); err != nil {
+		t.Fatal(err)
+	}
+	uri, err := r.c.enroll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := enrolledSeed(t, uri)
+	until = r.clk.now().Add(time.Minute)
+	r.c.checker, _ = handAt(t, always(http.StatusNoContent), pausedUntil(until))
+	r.clk.add(30 * time.Second)
+	_, err = r.c.confirmEnroll(totp(fresh, r.clk.now()))
+	var pe *pausedError
+	if !errors.As(err, &pe) || !pe.until.Equal(until) {
+		t.Fatalf("enrolment on a paused checker: %v", err)
+	}
+}
+
+// CH-4 (#5050 item 9): a checker that drops the connection mid-request
+// refuses, and is not read as one that is not running.
+func TestAMidRequestResetIsNotDown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Read(make([]byte, 1)) // leave the rest unread so the close resets
+			c.Close()
+		}
+	}()
+	_, ok, err := checkersock.VerifyClient(path).VerifyTOTP("123456", 0, true)
+	if ok || err == nil || errors.Is(err, checkersock.ErrDown) {
+		t.Fatalf("a reset mid-request: %t %v", ok, err)
+	}
+	var oe *net.OpError
+	if !errors.As(err, &oe) || oe.Op == "dial" {
+		t.Fatalf("the reset is not a non-dial OpError, so this test checks nothing: %v", err)
 	}
 }

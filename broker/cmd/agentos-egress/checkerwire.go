@@ -13,8 +13,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/holder"
 )
 
-// With -checker (SIM-split-wire part 3, CH-4) the code-generator seed is
-// the checker's to check against: the unlock step hands it there while the
+// With -checker (SIM-split-wire part 3, CH-4) the code-generator seed would
+// be the checker's to check against: the unlock step hands it there while the
 // vault is open and takes it back at a lock, as it does each API key with
 // its holder. The broker's code checks go to the checker's verify socket,
 // and the unlock step's own code goes to the checker's hand socket, so the
@@ -22,6 +22,10 @@ import (
 // cannot then unlock the vault, nor the other way round. This process
 // keeps only the unlock proof (owner.UnlockProofPrefix) on its verify
 // socket. Without -checker nothing changes.
+//
+// Since D-244 no process serves the hand socket (agentos-checker serves
+// only verify.sock, through clerk/codecheck), so with -checker set every
+// hand fails and the unlock and every tier-4 approval are refused.
 
 // errOnChecker refuses a code-generator code on this process's verify
 // socket while the checker checks them.
