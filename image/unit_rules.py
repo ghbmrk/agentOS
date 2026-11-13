@@ -373,9 +373,34 @@ def unread(view, shown, dirs, packaged):
     return out
 
 
+def tree_links(view):
+    """{link: its target resolved in the tree} for every link of the tree (/proc and /sys aside) that does
+    not resolve to a file other than a directory: one an endpoint path's directory may pass through, a
+    dangling one included (#5620 R-c, R-i). A loop, or a link the reader cannot follow (into /proc), maps to
+    itself."""
+    out, todo = {}, ["/"]
+    while todo:
+        d = todo.pop()
+        for e in view.entries(d):
+            p = os.path.join(d, e)
+            kind = view.kind(p)
+            if p in ("/proc", "/sys"):
+                continue
+            if kind == 0o040000:
+                todo.append(p)
+            elif kind == 0o120000:
+                try:
+                    final, _ = view.resolve(p)
+                except (SystemExit, OSError):  # a loop, or a link into /proc (/dev/fd)
+                    final = p
+                if view.kind(final) in (None, 0o040000) or final == p:
+                    out[p] = final
+    return out
+
+
 def records(view, shown, dirs, prov):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
-    "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}]}, from SHOWN, systemctl's
+    "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}], "links": tree_links()}, from SHOWN, systemctl's
     reply for every name names() found. package marks a socket whose endpoint is a package's
     (package_sockets), fed a service such a socket hands its connections to (fed_services); a mask is a
     file of ours that hides a package's drop-in."""
@@ -463,7 +488,7 @@ def records(view, shown, dirs, prov):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks,
+    return {"units": recs, "fstab": fstab, "masks": masks, "links": tree_links(view),
             "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
 
 
