@@ -356,8 +356,8 @@ func (a *Alerts) write(r Record) error {
 // delivery's fold window after the owner was last told, so a burst costs
 // one text or call, and sends again after it, so a later event is never
 // silenced by an earlier one left open. A kind that ends another resolves
-// that kind's open alert for the same device, so the page keeps one alert
-// for the incident.
+// that kind's open alert for the same device once its own record is
+// journalled, so the page keeps one alert for the incident.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	text, err := Words(k, device)
 	if err != nil {
@@ -382,7 +382,9 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	// must not depend on the disk either (P6).
 	werr := a.write(r)
 	a.put(r)
-	if e, ok := ends[k]; ok {
+	// The ended alert closes only once this one is journalled: closing it
+	// after a refused write would leave a restart with neither (#5655).
+	if e, ok := ends[k]; ok && werr == nil {
 		if i := a.open(e, device); i >= 0 {
 			werr = errors.Join(werr, a.resolve(i))
 		}

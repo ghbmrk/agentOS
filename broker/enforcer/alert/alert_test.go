@@ -1014,3 +1014,46 @@ func TestCancelClosesRecoveryUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// refusing is a journal that refuses the append numbered refuse (1-based,
+// counted from when refuse is set).
+type refusing struct {
+	journal
+	refuse, n int
+}
+
+func (j *refusing) Append(b []byte) error {
+	if j.refuse > 0 {
+		if j.n++; j.n == j.refuse {
+			return errors.New("CANARY-JOURNAL-REFUSED")
+		}
+	}
+	return j.journal.Append(b)
+}
+
+// TestRefusedCancelKeepsRecoveryUsed (NET-2 Texts and calls, P6; ENF-c-f7,
+// #5655 L3 point 1): when the journal refuses the RecoveryCancelled record
+// and the core is down, so no Sent write re-journals it, the open
+// RecoveryCodeUsed is not closed: a restart still finds an open alert,
+// offered again when the core is back. Catches a cancel that leaves the
+// owner no trace at all after a restart.
+func TestRefusedCancelKeepsRecoveryUsed(t *testing.T) {
+	j := &refusing{}
+	r := newRig(t, &j.journal)
+	r.a, _ = New(Config{Send: r.core.Send, Light: r.bulb, Journal: j,
+		Now: func() time.Time { return time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC) }})
+	r.core.refuse = true
+	used, err := r.a.Raise(RecoveryCodeUsed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.refuse = 1
+	if _, err := r.a.Raise(RecoveryCancelled, ""); err == nil {
+		t.Fatal("a refused cancel record raised no error")
+	}
+	r2 := newRigCore(t, &j.journal, &core{refuse: true})
+	st := r2.a.Status()
+	if len(st.Open) != 1 || st.Open[0].ID != used.ID || st.Open[0].Kind != RecoveryCodeUsed {
+		t.Fatalf("after a restart: open %+v, want RecoveryCodeUsed %d", st.Open, used.ID)
+	}
+}
