@@ -110,11 +110,14 @@ func (k *Kernel) OpenTask(at int64, id string, rung key.Proof) error {
 
 // ApproveTask records the owner's approval of a live task's requests on
 // a.Site, in place of any earlier one for that site. It widens what the
-// task's requests may do, so it anchors (KRN-7).
+// task's requests may do, so it anchors (KRN-7). The task must be live on
+// the reading's Latest, where its timeout fires (KRN-5): a task past its
+// timeout on the latest credible time takes no approval, even before endDue
+// logs its end.
 func (k *Kernel) ApproveTask(at int64, id string, a TaskApproval) error {
 	now := k.read(at)
 	b := taskApproved{id, a}
-	if err := k.s.approveOK(b, now.Earliest); err != nil {
+	if err := k.s.approveOK(b, now.Latest); err != nil {
 		return err
 	}
 	return k.owner(now, TTaskApproved, b)
@@ -239,7 +242,7 @@ func (s *State) applyTask(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if s.approveOK(b, e.At) == nil {
+		if s.approveOK(b, e.reading().Latest) == nil {
 			a := b.Approval
 			a.At = e.At
 			t := s.tasks[b.Task]

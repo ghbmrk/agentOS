@@ -92,7 +92,7 @@ type edgeState struct {
 	last    *edgeEnrolled   // the last enrolment, at any head, cut or not
 	revoked map[string]bool // every key revoked or replaced, at any head
 	cand    *edgeCandidate  // the latest candidate
-	candAt  int64
+	candAt  int64           // the latest candidate's reading's Latest
 }
 
 // HelloMsg is what the edge's key signs on a connection: the domain and the
@@ -183,8 +183,10 @@ func (s *State) EdgeChanges() int { return s.edge.changes }
 
 // candidateOK is the check a candidate passes, live and on replay: a hello
 // that verifies, from a key never revoked, a minute after the last
-// candidate and from another key. Whether the key is live is the kernel's
-// check, since the fold knows no head key.
+// candidate and from another key. The minute runs from the last candidate's
+// Latest to at, the new reading's Earliest, so it holds on true time however
+// wide either reading. Whether the key is live is the kernel's check, since
+// the fold knows no head key.
 func (s *State) candidateOK(b edgeCandidate, at int64) error {
 	if !edgeKey(b.Key) || len(b.Nonce) != HelloNonce || len(b.Sig) != ed25519.SignatureSize {
 		return ErrEdgeKey
@@ -288,7 +290,7 @@ func (s *State) applyEdge(e Entry) error {
 			return err
 		}
 		if s.candidateOK(b, e.At) == nil {
-			s.edge.cand, s.edge.candAt = &b, e.At
+			s.edge.cand, s.edge.candAt = &b, e.reading().Latest
 		}
 	case TEdgeRevoked:
 		b, err := body[edgeRevoked](e)
