@@ -154,6 +154,9 @@ type Turn struct {
 	FirstAudio, FirstContent time.Duration
 	Sentences                int
 	Held                     bool
+	// ended is set once the held or failed clip starts; Held and Err are
+	// set even when the notice keeps that clip from starting (#5684).
+	ended bool
 	// Stopped means 0, barge-in, hang-up or the end of the loop cut it short.
 	Stopped bool
 	Err     error
@@ -458,7 +461,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		cur.cancel()
 		<-cur.done
 		t := cur.turn
-		unheard := cur.hushed && t.FirstContent == 0 && !t.Held && t.Err == nil
+		unheard := cur.hushed && t.FirstContent == 0 && !t.ended
 		if keep && (!cur.asked || unheard) {
 			carry = cur.text
 		}
@@ -702,11 +705,11 @@ func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func
 			return false
 		}
 		t.Err = s.err
-		play(cfg.Clips.Failed, false)
+		t.ended = play(cfg.Clips.Failed, false)
 		return false
 	case s.held:
 		t.Held = true
-		play(cfg.Clips.Held, false)
+		t.ended = play(cfg.Clips.Held, false)
 		return false
 	case !play(s.pcm, true):
 		return false

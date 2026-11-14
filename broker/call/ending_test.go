@@ -3,6 +3,8 @@ package call_test
 // REQ: CH-5
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -267,4 +269,72 @@ func TestTheEndingNoticeCarriesAnUnspokenAnswer(t *testing.T) {
 		}
 		r.hangup()
 	})
+}
+
+// A held or failed answer ready the moment the notice falls due, while
+// "One moment" still plays, never gets its clip played: the turn's select
+// may take the sound or the hush, and either way the clip does not start,
+// so the question is carried (#5684, L3 on #5696: 17 of 40 runs dropped
+// it). Forty runs of each, so a carry that reads Held or Err as "the clip
+// played" fails in some run.
+func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
+	boom := errors.New("boom")
+	for _, c := range []struct {
+		name, answer, clip string
+	}{
+		{"held", "Press 4 now.", "CLIP:held"},
+		{"failed", "Boom.", "CLIP:failed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for range 40 {
+				synctest.Test(t, func(t *testing.T) {
+					release := make(chan struct{})
+					r := newRig(t, func(q call.Ask) []string {
+						if q.Turn == 1 {
+							<-release
+						}
+						return []string{c.answer}
+					})
+					r.bubble = true
+					r.cfg.Synthesizer = synthFunc(func(ctx context.Context, s string) ([]byte, error) {
+						if s == "Boom." {
+							return nil, boom
+						}
+						return synth{}.Speak(ctx, s)
+					})
+					r.cfg.Clips.Ending = []byte("CLIP:ending")
+					r.cfg.After = time.After
+					r.l.saying = make(chan string) // Say waits for the test to take each sound
+					ends := r.records()
+					r.serve()
+					time.Sleep(29*time.Minute - 10*time.Second)
+					r.say("what's in my mail")
+					time.Sleep(time.Second) // "One moment" is playing
+					synctest.Wait()
+					close(release) // the answer's sound waits on the turn
+					time.Sleep(9 * time.Second)
+					synctest.Wait() // the notice is due
+					for _, want := range []string{"CLIP:moment", "CLIP:ending"} {
+						if got := <-r.l.saying; got != want {
+							t.Fatalf("played %q, want %q", got, want)
+						}
+					}
+					if tu := <-ends; !tu.Stopped || tu.FirstContent != 0 {
+						t.Fatalf("turn 1 = %+v", tu)
+					}
+					go r.say("from today")
+					if got := <-r.l.saying; got != c.clip {
+						t.Fatalf("after the notice: played %q", got)
+					}
+					r.ans.mu.Lock()
+					got := append([]asked(nil), r.ans.asks...)
+					r.ans.mu.Unlock()
+					if len(got) != 2 || got[1].Text != "what's in my mail from today" {
+						t.Fatalf("asks = %+v", got)
+					}
+					r.hangup()
+				})
+			}
+		})
+	}
 }
