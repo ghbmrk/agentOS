@@ -343,7 +343,8 @@ type StopCanceller interface {
 // cancels each unsent step, and RESUME never brings one back (KRN-7,
 // #5138), so an owner who expected a pause is told not to wait for it
 // (#5151), with the count, and only when the STOP cancelled something
-// (#5665). A count that cannot be read gets StopCancelledNote, since
+// (#5665). A count that cannot be read, or is not yet known, gets
+// StopCancelledNote, since
 // silence could hide a loss; an Engine whose STOP only holds gets none.
 // It starts with a space.
 func CancelledNote(e Engine) string {
@@ -364,9 +365,9 @@ func CancelledNote(e Engine) string {
 }
 
 // RESUME's notes on what the STOP cancelled. StopCancelledNote is the one
-// for a count that cannot be read.
+// for a count that cannot be read or is not yet known.
 const (
-	StopCancelledNote = "Anything else STOP cancelled stays cancelled; ask again for anything you still want."
+	StopCancelledNote = "STOP may have cancelled some actions; any it cancelled stay cancelled, so ask again for any you still want."
 	oneCancelledNote  = "STOP cancelled 1 action; it stays cancelled, so ask again if you still want it."
 	cancelledNote     = "STOP cancelled %d actions; they stay cancelled, so ask again for any you still want."
 )

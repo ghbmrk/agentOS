@@ -17,8 +17,9 @@ import (
 // A STOP with nothing unsent counts none; one over a held two-step plan
 // counts both; one over a plan whose first step is in flight counts only
 // the second, since the first still reconciles (KRN-8). A second STOP
-// while stopped adds to the count, a STOP after a RESUME starts it again,
-// and a replay of the log folds the same count. Catches a count that says
+// while stopped adds to the count, as does one logged right after the
+// lift; one after anything else was logged starts it again; a replay of
+// the log folds the same count. Catches a count that says
 // a loss with none, misses an unsent step, or counts a sent one.
 func TestStopCountsTheStepsItCancels(t *testing.T) {
 	r := newRig(t)
@@ -57,10 +58,57 @@ func TestStopCountsTheStepsItCancels(t *testing.T) {
 	if n := r.k.State().StopCancelled; n != 1 {
 		t.Fatalf("a STOP over a plan with its first step in flight counts %d, want 1", n)
 	}
+	// agentosd's re-STOP right after a lift, when the RESUME failed partway,
+	// keeps the count (L3 on #5734).
 	must(t, r.k.Resume(70, r.k.State().Stops))
-	must(t, r.k.Stop(80))
-	if n := r.k.State().StopCancelled; n != 0 {
-		t.Fatalf("a STOP after a RESUME over nothing new counts %d", n)
+	must(t, r.k.Stop(71))
+	if n := r.k.State().StopCancelled; n != 1 {
+		t.Fatalf("a re-STOP right after the lift left %d, want 1", n)
+	}
+	// Once anything is logged after the lift, the next STOP starts over.
+	must(t, r.k.Resume(72, r.k.State().Stops))
+	seq := r.k.State().Seq
+	must(t, r.tick(2*kernel.ProbeEvery))
+	if r.k.State().Seq == seq {
+		t.Fatal("the tick logged nothing")
+	}
+	must(t, r.k.Stop(2*kernel.ProbeEvery+1))
+	if n, open := r.k.State().StopLoss(); n != 0 || open {
+		t.Fatalf("a STOP after the plans ran counts %d, open %v", n, open)
+	}
+	r.replays()
+}
+
+// A step in flight at the STOP whose clerk never acted is cancelled for
+// the STOP later, outside its fold: StopLoss counts it once it is known,
+// and reads the loss as open while the step is still unsettled, so RESUME
+// never goes silent on it (Security on #5734). The repro: a dropped
+// request, STOP, then the probes that find it never acted. Catches a
+// count that leaves out a STOP-caused cancel made after the fold.
+func TestStopLossCountsAnInFlightStepLaterCancelled(t *testing.T) {
+	r := newRig(t)
+	drop := 1
+	r.mail.Fault = func(op string, _ kernel.Request) string {
+		if op == "do" && drop > 0 {
+			drop--
+			return clerk.FaultDrop
+		}
+		return ""
+	}
+	r.plan("p1", r.ck, st(key.Trash, "m1"))
+	must(t, r.tick(0))
+	must(t, r.k.Stop(1))
+	if n, open := r.k.State().StopLoss(); n != 0 || !open {
+		t.Fatalf("with the step in flight: %d, open %v; want 0, open", n, open)
+	}
+	must(t, r.tick(kernel.ProbeEvery))
+	must(t, r.tick(2*kernel.ProbeEvery))
+	p := r.k.State().Plans["p1"]
+	if p.Steps[0].Phase != kernel.PCancelled || p.Cancel != key.RStopped || len(r.mail.Effects()) != 0 {
+		t.Fatalf("phase %s, cancel %s, %d effects", p.Steps[0].Phase, p.Cancel, len(r.mail.Effects()))
+	}
+	if n, open := r.k.State().StopLoss(); n != 1 || open {
+		t.Fatalf("after the probes: %d, open %v; want 1, settled", n, open)
 	}
 	r.replays()
 }

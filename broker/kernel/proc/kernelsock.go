@@ -145,11 +145,13 @@ type (
 		Stops uint64 `json:"stops"`
 	}
 	// changesRead is the key's changes view, the STOPs logged, which a
-	// RESUME names, and the steps the STOP in force cancelled (#5665).
+	// RESUME names, and the steps the STOP in force cancelled, with
+	// whether one's outcome is still open (State.StopLoss, #5665).
 	changesRead struct {
 		key.Changes
 		Stops         uint64 `json:"stops"`
 		StopCancelled int    `json:"stopcancelled"`
+		StopUnsettled bool   `json:"stopunsettled"`
 	}
 	targetArgs struct {
 		Target kernel.BackupTarget `json:"target"`
@@ -287,7 +289,8 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return enrolled{es, un}
 	}),
 	"changes": read(func(s *kernel.State, _ int64, _ none) changesRead {
-		return changesRead{*s.ChangesView(), s.Stops, s.StopCancelled}
+		n, open := s.StopLoss()
+		return changesRead{*s.ChangesView(), s.Stops, n, open}
 	}),
 	"plan": read(func(s *kernel.State, _ int64, id string) kernel.PlanView { return s.PlanView(id) }),
 	"granted": read(func(s *kernel.State, _ int64, id key.ID) grantRead {

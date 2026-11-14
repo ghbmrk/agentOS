@@ -42,6 +42,7 @@ func TestBothStopsReadsTheCancelsOfTheStopInForce(t *testing.T) {
 		{"setup only", &fakeKernel{setup: true, cancelled: 3}, 0, false},
 		{"down", &fakeKernel{down: true, stopped: true, cancelled: 3}, 0, true},
 		{"read refused", &fakeKernel{stopped: true, uncounted: true}, 0, true},
+		{"count still open", &fakeKernel{stopped: true, cancelled: 1, open: true}, 0, true},
 	} {
 		b := &bothStops{k: c.k}
 		n, err := b.StopCancelled()
@@ -49,7 +50,29 @@ func TestBothStopsReadsTheCancelsOfTheStopInForce(t *testing.T) {
 			t.Errorf("%s: %d %v, want %d (error %v)", c.name, n, err, c.n, c.wantErr)
 		}
 	}
-	if r := (&bothStops{k: &fakeKernel{down: true}}); !strings.Contains(control.CancelledNote(r), "Anything else STOP cancelled") {
+	if r := (&bothStops{k: &fakeKernel{down: true}}); !strings.Contains(control.CancelledNote(r), "STOP may have cancelled some") {
 		t.Errorf("a kernel not answering dropped the note: %q", control.CancelledNote(r))
+	}
+}
+
+// A RESUME that fails after the kernel may have lifted its STOP is
+// followed by a re-STOP, which may restart the kernel's count; the next
+// RESUME then keeps the general note rather than read a 0 as no loss, and
+// one after a RESUME that succeeded reads the count again (L3 on #5734).
+// Catches the retried RESUME going silent on the first STOP's cancels.
+func TestAFailedResumeLeavesTheLossOpen(t *testing.T) {
+	k := &fakeKernel{cancelled: 2, lost: true}
+	dir := withKernel(t, k)
+	text(t, dir, owner, "STOP")
+	if r := resume(t, dir); !strings.HasPrefix(r, "RESUME failed") {
+		t.Fatalf("RESUME with its answer lost: %q", r)
+	}
+	k.set(func(k *fakeKernel) { k.lost, k.cancelled = false, 0 }) // the re-STOP restarted the count
+	if r, want := resume(t, dir), "Resumed. Held actions may now run. "+control.StopCancelledNote; r != want {
+		t.Fatalf("the retried RESUME: %q, want %q", r, want)
+	}
+	text(t, dir, owner, "STOP")
+	if r, want := resume(t, dir), "Resumed. Held actions may now run."; r != want {
+		t.Fatalf("after a RESUME that succeeded: %q, want %q", r, want)
 	}
 }

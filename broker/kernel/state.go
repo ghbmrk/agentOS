@@ -428,9 +428,38 @@ func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) (n int
 		case p.Ended == "":
 			p.Ended, p.EndedDetail = code, detail
 			n += len(p.Steps) - p.Next - 1
+			if code == key.RStopped {
+				s.stopEnded = append(s.stopEnded, endedStep{id, p.Next})
+			}
 		}
 	}
 	return n
+}
+
+// endedStep is a plan a STOP marked ended and the sent step it left
+// reconciling.
+type endedStep struct {
+	plan  string
+	index int
+}
+
+// StopLoss is the steps the STOP in force cancelled for good: those its
+// folds left unsent, and each sent step of a plan they ended that has
+// since proved unsent and been cancelled (#5665, Security on #5734).
+// unsettled is true while such a step's outcome is still open (in flight,
+// unknown or parked), so RESUME cannot yet tell whether it is lost.
+func (s *State) StopLoss() (n int, unsettled bool) {
+	n = s.StopCancelled
+	for _, e := range s.stopEnded {
+		switch s.Plans[e.plan].Steps[e.index].Phase {
+		case PCancelled:
+			n++
+		case PDone, PFailed:
+		default:
+			unsettled = true
+		}
+	}
+	return n, unsettled
 }
 
 // ended is why step st of plan p may not be sent: its plan ended with its
@@ -459,10 +488,14 @@ type State struct {
 	Seq        uint64
 	Stopped    bool
 	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
-	// StopCancelled is the steps the STOP in force left unsent for good,
-	// summed over the STOPs logged since the last lift: RESUME says so only
-	// when there are any (#5665).
+	// StopCancelled is the steps the STOP in force left unsent for good in
+	// its fold, summed over the STOPs logged since the last lift, and
+	// stopEnded the plans those folds marked ended with their sent step,
+	// whose outcome StopLoss reads later: RESUME names a loss only when it
+	// is known and above zero (#5665).
 	StopCancelled int
+	stopEnded     []endedStep
+	liftSeq       uint64 // the entry of the last RESUME that lifted a STOP
 	Changes       key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
@@ -1046,8 +1079,11 @@ func (s *State) Apply(e Entry) error {
 	case TPoolRead, TPoolReset, TReserveUp, TReserveDown:
 		return s.applyPool(e)
 	case TStop:
-		if !s.Stopped {
-			s.StopCancelled = 0
+		// A STOP logged right after the lift (agentosd's re-STOP when a
+		// RESUME fails partway) keeps the count, so the owner's RESUME
+		// still names what the first STOP cancelled (L3 on #5734).
+		if !s.Stopped && e.Seq != s.liftSeq+1 {
+			s.StopCancelled, s.stopEnded = 0, nil
 		}
 		s.Stopped, s.Changes.Stopped = true, true
 		s.Stops++
@@ -1059,7 +1095,7 @@ func (s *State) Apply(e Entry) error {
 		s.StopCancelled += s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
 	case TResume:
 		if !s.decoys.held() { // ErrTripResume
-			s.Stopped, s.Changes.Stopped = false, false
+			s.Stopped, s.Changes.Stopped, s.liftSeq = false, false, e.Seq
 		}
 	case TPlanSubmit:
 		b, err := body[Plan](e)

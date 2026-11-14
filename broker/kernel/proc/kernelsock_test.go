@@ -1336,8 +1336,8 @@ func TestAForgetErasesOverTheOwnerSocketOnlyOnItsYes(t *testing.T) {
 // The changes read sends the steps the STOP in force cancelled under the
 // name owner/kernelsock reads (#5665).
 func TestChangesReadNamesTheStopsCancels(t *testing.T) {
-	b, err := json.Marshal(changesRead{Stops: 3, StopCancelled: 2})
-	if err != nil || !strings.Contains(string(b), `"stops":3,"stopcancelled":2`) {
+	b, err := json.Marshal(changesRead{Stops: 3, StopCancelled: 2, StopUnsettled: true})
+	if err != nil || !strings.Contains(string(b), `"stops":3,"stopcancelled":2,"stopunsettled":true`) {
 		t.Fatalf("%s %v", b, err)
 	}
 }
