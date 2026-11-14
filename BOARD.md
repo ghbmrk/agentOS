@@ -155,7 +155,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | queued (tier A) |
 | KEY-9-reach-b2a | KEY-9-reach-b2a: graph reach over declarations, a decl.reach log entry and its fold (KEY-9, D-307) | #5060 | building (release; tier A; lane primary) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
-| KEY-9-reach-inbound-wiring | KEY-9-reach-inbound-wiring: count the root-run inbound renderer in the trusted base (KRN-2, D-310) | #5677 | queued (release; tier A; lane primary; waits for #5677) |
+| KEY-9-reach-inbound-wiring | KEY-9-reach-inbound-wiring: count the root-run inbound renderer in the trusted base (KRN-2, D-310) | #5677 | building (release; tier A; lane primary; waits for #5677) |
+| KEY-9-reach-inbound-offset | KEY-9-reach-inbound-offset: move kernel/proc's unreached client types out of the trusted core (KRN-2, D-310) | #5678 | queued (release; tier A; lane primary; after #5678's PR) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -324,6 +325,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
 | ENF-shared-nd-input | ENF-shared-nd-input: an IPv6 address that only talks to the enforcer gets a neighbour hold | #4686 (ENF-shared-nd) | building(tier A; lane primary) |
+| ENF-shared-nd-ll | ENF-shared-nd-ll: a host's link-local address gets a neighbour hold on a shared segment | #5686 (ENF-shared-nd-input) | queued(tier A; lane primary) |
 
 ## Model routes and the Codex lane
 
@@ -416,7 +418,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
-| KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | building (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
 | VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | queued (release) |
 | CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | queued (release; tier A) |
@@ -431,13 +432,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
 | TEST-flake-browser-close-drain | TEST-flake-browser-close-drain: TestCloseDrainsAnUnaskedLine no longer races its own receive against Close's drain goroutine. | none | building (release) |
-| CTL-unicode-chat-code-fu2 | CTL-unicode-chat-code-fu2: enclosed-zero value fixed and pinned, the digits reply only for 6-digit runs with a next step, and an unlocked stripped native-digit number gets a notice. | none | building (release; tier A) |
-| OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | queued (release; tier A) |
+| OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | building (release; tier A) |
 | CLK-run-open-wipe | CLK-run-open-wipe: a plaintext handed back with an Open error is wiped too. Release; from #5662. | #5324 | queued (release; tier A) |
-| VOICE-ro-d-ending-wait-size | VOICE-ro-d-ending-wait-size: size the ending notice's sentence wait from hardware timing. Release (UX); from #5668. | #5668, #5304 | building (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | queued (release; tier A) |
-| VULN-debian-r6-f2 | VULN-debian-r6-f2: confirm glibc regex and wide-scanf reachability on the Debian image tree CI builds, as a CI sweep, and drop the Ubuntu caveat. Release follow-up of #5695. | #5695, #5624, #5503 | building (release; tier A) |
+| VULN-debian-r6-f2 | VULN-debian-r6-f2: confirm glibc regex and wide-scanf reachability on the Debian image tree CI builds, as a CI sweep, and drop the Ubuntu caveat. Release follow-up of #5695. | #5695, #5624, #5503 | in review (release; tier A) |
 | TEST-flake-ap-abandoned-call-token | TEST-flake-ap-abandoned-call-token: TestAbandonedOpensCountedAndCapped keeps one open counted; TestNoTokenTryFollowsTheCall hangs up before rung P2 (broker-race). Release; from #5712. | #5438, #5592, #5712 | building (release; tier A) |
+| VOICE-ro-d-ending-lateness | VOICE-ro-d-ending-lateness: the ending clip's 'one minute' matches the time left after a late notice. Release (UX); from #5724. | #5683, #5304 | queued (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -483,4 +483,5 @@ issue #5202: body has no board-row block
 issue #5216: body has no board-row block
 issue #5708: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #5736: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
