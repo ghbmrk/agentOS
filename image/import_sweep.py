@@ -9,16 +9,23 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
 
   import_sweep.py OUT VERSION     the build in OUT (as root: offline_systemd.built_tree mounts it)
   import_sweep.py --tree DIR      a plain directory, read as a main tree
-  import_sweep.py --summary FILE  the JSON the two forms print, as lines and as ::notice annotations
+  import_sweep.py --summary FILE [ALLOW]
+                                  the JSON the two forms print, as lines and as ::notice annotations,
+                                  held to ALLOW (default image/import_sweep.allow)
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
 ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
 libraries. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
 
-The control is the scan itself: it exits 1 when the main tree or every initrd read no ELF file, or the
-main tree has no importer of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
+--summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
+or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
+(each a file the image -100290 record names); a glob that matches nothing also fails, so the list
+stays the record's. The control is the scan itself: it also exits 1 when the main tree or every
+initrd read no ELF file, or the main tree has no importer of regcomp (bash and grep always import
+it), so a clean result is not a scan that read nothing.
 """
+import fnmatch
 import json
 import os
 import pathlib
@@ -29,12 +36,15 @@ import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
+ALLOW = HERE / "import_sweep.allow"
 sys.path.insert(0, str(HERE))
 
 # DEBIAN-CVE-2026-100290 (regcomp/regexec and the GNU re_* interface over the same engine) and
 # DEBIAN-CVE-2026-115819 (the wide scanf family, with the C99/C23 aliases glibc's headers bind them to).
+# glibc's own callers of the regex engine count as it: rpmatch (stdlib/rpmatch.c, the locale's
+# YESEXPR) and the compat step/advance (misc/regexp.c). The wide scanf family has none.
 GROUPS = {
-    "regex": re.compile(r"(regcomp|regexec|re_\w+)$"),
+    "regex": re.compile(r"(regcomp|regexec|re_\w+|rpmatch|step|advance)$"),
     "wscanf": re.compile(r"(__isoc(99|23)_)?v?(sw|fw|w)scanf$"),
 }
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
@@ -157,6 +167,43 @@ def problems(places):
     return errs
 
 
+def reach(places):
+    """{(group, path): [places]} of every file that imports or reaches a function of the group."""
+    out = {}
+    for place, v in places.items():
+        for p, syms in v["imports"].items():
+            for g in {group_of(x) for x in syms}:
+                out.setdefault((g, p), []).append(place)
+        for p, libs in v["via"].items():
+            for g in {group_of(x) for lib in libs for x in v["imports"].get(lib, [])}:
+                out.setdefault((g, p), []).append(place)
+    return out
+
+
+def load_allow(path):
+    """The globs of ALLOW: one per line, after any '#' comment."""
+    return [l.split("#", 1)[0].strip() for l in pathlib.Path(path).read_text().splitlines()
+            if l.split("#", 1)[0].strip()]
+
+
+def refusals(places, allow):
+    """Each claim of the glibc records that PLACES break, against the regex globs ALLOW."""
+    errs, used = [], set()
+    for (g, p), where in sorted(reach(places).items()):
+        if g == "wscanf":
+            errs.append("%s: %s imports or reaches a wide scanf function; the -115819 records say nothing does"
+                        % (" ".join(where), p))
+            continue
+        hit = [a for a in allow if fnmatch.fnmatchcase(p, a)]
+        used.update(hit)
+        if not hit:
+            errs.append("%s: %s imports or reaches a regex function and is not in import_sweep.allow; review it, "
+                        "name it in the image -100290 record, then add the entry: %s" % (" ".join(where), p, p))
+    errs += ["import_sweep.allow: %s matches no file that reaches a regex function; remove it" % a
+             for a in allow if a not in used]
+    return errs
+
+
 def summary(places):
     lines = []
     for place, v in places.items():
@@ -185,11 +232,13 @@ def annotations(lines, size=3500):
 
 
 def main(argv):
-    if len(argv) == 2 and argv[0] == "--summary":
+    if argv[:1] == ["--summary"] and len(argv) in (2, 3):
         places = json.loads(pathlib.Path(argv[1]).read_text())
         lines = summary(places)
         print("\n".join(lines + annotations(lines)))
-        errs = problems(places)
+        errs = problems(places) + refusals(places, load_allow(argv[2] if len(argv) == 3 else ALLOW))
+        for e in errs[:10]:
+            print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
     elif len(argv) == 2 and argv[0] == "--tree":
         places = run_tree(argv[1])
         json.dump(places, sys.stdout, indent=1, sort_keys=True)
@@ -197,7 +246,7 @@ def main(argv):
     elif len(argv) == 2:
         places = run_build(*argv)
         json.dump(places, sys.stdout, indent=1, sort_keys=True)
-        errs = problems(places)
+        errs = []  # --summary holds the result to the control and the allowlist
     else:
         sys.exit(__doc__)
     for e in errs:
