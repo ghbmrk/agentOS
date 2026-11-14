@@ -426,6 +426,12 @@ func TestCheckerFlag(t *testing.T) {
 	if err := checkerFlagAs(ok, euid); err != nil {
 		t.Fatalf("a directory only this uid writes: %v", err)
 	}
+	// A relative name is refused even where it would name a safe
+	// directory: the kernel resolves it from the real working directory.
+	t.Chdir(filepath.Dir(ok))
+	if checkerFlagAs(filepath.Base(ok), euid) == nil {
+		t.Error("accepted a relative -checker naming a safe directory")
+	}
 	shared := filepath.Join(t.TempDir(), "shared")
 	open := filepath.Join(t.TempDir(), "open")
 	under := filepath.Join(open, "checker")
@@ -455,6 +461,10 @@ func TestCheckerFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	dotdot := ok + "/lnk/../y"
+	file := filepath.Join(ok, "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	trust := euid
 	if euid == 0 {
 		// root is always trusted, so the owner case needs another owner.
@@ -473,6 +483,7 @@ func TestCheckerFlag(t *testing.T) {
 		"another uid's":            {other, trust},
 		"a link":                   {link, euid},
 		"a link then ..":           {dotdot, euid},
+		"a file":                   {file, euid},
 		"a trailing slash":         {ok + "/", euid},
 		"missing":                  {filepath.Join(ok, "absent"), euid},
 	} {

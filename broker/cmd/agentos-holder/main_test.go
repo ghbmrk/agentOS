@@ -54,6 +54,22 @@ func TestRunRefusesItsPeerUID(t *testing.T) {
 	}
 }
 
+// REQ: CH-4
+// run checks -checker before anything else, so an unsafe one stops the
+// holder at start (#5649); the peer uid here would stop it next, with
+// another error.
+func TestRunRefusesAnUnsafeChecker(t *testing.T) {
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	me, other := strconv.Itoa(os.Getuid()), strconv.Itoa(os.Getuid()+1)
+	args := []string{"-dir", t.TempDir(), "-credential", "k", "-adapter", "openai", "-request-uid", me, "-hand-uid", other, "-checker", shared + "/redeem.sock"}
+	if err := run(args, io.Discard); err == nil || !strings.Contains(err.Error(), "writable by other uids") {
+		t.Errorf("an unsafe -checker: %v", err)
+	}
+}
+
 // REQ: ADP-10
 // Provider-side fetch is the owner's per-login choice: a holder started
 // without -public-fetch holds every body to the strict form, so a server
@@ -181,6 +197,10 @@ func TestCheckerRefusesAnUnsafeDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	dotdot := ok + "/lnk/../y"
+	file := filepath.Join(ok, "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	trust := euid
 	if euid == 0 {
 		// root is always trusted, so the owner case needs another owner.
@@ -199,6 +219,7 @@ func TestCheckerRefusesAnUnsafeDirectory(t *testing.T) {
 		"another uid's":            {other, trust},
 		"a link":                   {link, euid},
 		"a link then ..":           {dotdot, euid},
+		"a file":                   {file, euid},
 		"a trailing slash":         {ok + "/", euid},
 		"missing":                  {filepath.Join(ok, "absent"), euid},
 	} {
