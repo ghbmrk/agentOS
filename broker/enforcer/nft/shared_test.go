@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -302,9 +303,19 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 	// address too. From the first host's address as well it is that host
 	// to the enforcer and its error passes (ENF-ct-bind-2's stated limit),
 	// which shows the copied hardware address does reach the check.
+	// The enforcer believes no ARP or neighbour discovery from the copied
+	// hardware address about the second host's own address, which another
+	// hardware address holds (#4686), so the second host's entries for the
+	// gateway, which a new hardware address flushes, are fixed.
 	setMAC := func(seg, mac string) {
 		x := h.hosts[seg+"2"]
 		h.in(x, "ip", "link", "set", "eth0", "address", mac)
+		gw := strings.Fields(run(t, "ip", "-o", "link", "show", "dev", segIfc(seg)))
+		gwMAC := gw[slices.Index(gw, "link/ether")+1]
+		h.in(x, "ip", "neigh", "replace", enfAddr(seg), "lladdr", gwMAC, "dev", "eth0", "nud", "permanent")
+		if h.v6 {
+			h.in(x, "ip", "neigh", "replace", seg6Net(seg)+"1", "lladdr", gwMAC, "dev", "eth0", "nud", "permanent")
+		}
 	}
 	for _, seg := range segs {
 		setMAC(seg, h.mac(h.hosts[seg], "eth0"))

@@ -78,9 +78,7 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 			}
 		}
 	}
-	for _, r := range records(sets, l) {
-		w.line("add element inet " + Table + " " + r.set + " { " + strings.Join(r.elems, ", ") + " }")
-	}
+	w.b.WriteString(addLines(records(sets, l), l))
 	return text + w.b.String(), nil
 }
 
@@ -287,6 +285,22 @@ func records(sets []listedSet, l Layout) []carried {
 			return []string{a + " . " + hw}, ok1 && ok2
 		}, ClaimTimeout, ClaimTimeout}
 		by[MACSet(sg.name)] = carry{[]string{MACSet(sg.name)}, rawHW, ClaimTimeout, ClaimTimeout}
+		// A neighbour hold's address set is written again from its key
+		// set, as LeaseAddrSet is.
+		neighOf := func(raw json.RawMessage) ([]string, bool) {
+			c, ok := concat(raw, 2)
+			if !ok {
+				return nil, false
+			}
+			a, ok1 := addrOf(c[0], true)
+			hw, ok2 := rawHW(c[1])
+			if !ok1 || !ok2 {
+				return nil, false
+			}
+			return []string{a + " . " + hw[0], a}, true
+		}
+		by[NeighSet(sg.name)] = carry{[]string{NeighSet(sg.name), NeighAddrSet(sg.name)}, neighOf, ClaimTimeout, ClaimTimeout}
+		by[NeighTCPSet(sg.name)] = carry{[]string{NeighTCPSet(sg.name), NeighTCPAddrSet(sg.name)}, neighOf, HostTCPTimeout, HostTCPTimeout}
 	}
 	w := elems{}
 	for _, s := range sets {
@@ -411,9 +425,25 @@ func Seed(l Layout, leases []Lease) string {
 			w.add(LeasedSet(sg.name), h, ls.Left, LeaseTimeout)
 		}
 	}
+	return addLines(w.carried(), l)
+}
+
+// addLines is the text that adds the carried elements to their sets in
+// Table, and a lease set's (LeaseSet, LeaseAddrSet) to its copy in
+// NeighTable as well, so the two tables hold the same leases from every
+// load (#4686).
+func addLines(cs []carried, l Layout) string {
+	mirrored := map[string]bool{}
+	for _, sg := range segments(l) {
+		mirrored[LeaseSet(sg.name)], mirrored[LeaseAddrSet(sg.name)] = true, true
+	}
 	var b strings.Builder
-	for _, c := range w.carried() {
-		b.WriteString("add element inet " + Table + " " + c.set + " { " + strings.Join(c.elems, ", ") + " }\n")
+	for _, c := range cs {
+		el := " " + c.set + " { " + strings.Join(c.elems, ", ") + " }\n"
+		b.WriteString("add element inet " + Table + el)
+		if mirrored[c.set] {
+			b.WriteString("add element netdev " + NeighTable + el)
+		}
 	}
 	return b.String()
 }
