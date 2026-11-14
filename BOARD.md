@@ -436,8 +436,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | queued (release; tier A) |
 | CLK-run-open-wipe | CLK-run-open-wipe: a plaintext handed back with an Open error is wiped too. Release; from #5662. | #5324 | queued (release; tier A) |
 | VOICE-ro-d-ending-wait-size | VOICE-ro-d-ending-wait-size: size the ending notice's sentence wait from hardware timing. Release (UX); from #5668. | #5668, #5304 | queued (release; tier A) |
-| VOICE-ro-d-ending-fu | VOICE-ro-d-ending-fu: the ending notice never starts over an owner who is speaking; C9 states the hush race and ctx-ignoring Say. Release (UX); from #5668. | #5668, #5684 | building (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | queued (release; tier A) |
+| VULN-debian-r6-f2 | VULN-debian-r6-f2: confirm glibc regex and wide-scanf reachability on the Debian image tree CI builds, as a CI sweep, and drop the Ubuntu caveat. Release follow-up of #5695. | #5695, #5624, #5503 | building (release; tier A) |
+| TEST-flake-ap-abandoned-call-token | TEST-flake-ap-abandoned-call-token: TestAbandonedOpensCountedAndCapped keeps one open counted; TestNoTokenTryFollowsTheCall hangs up before rung P2 (broker-race). Release; from #5712. | #5438, #5592, #5712 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -481,8 +482,6 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
-issue #5697: body has no board-row block
-issue #5705: body has no board-row block
 issue #5707: body has no board-row block
 issue #5708: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
