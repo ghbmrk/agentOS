@@ -401,7 +401,7 @@ func TestServeOwnerBootsServesAndStopsWithNoModem(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan struct{})
-	go func() { serveOwner(ctx, ch, false); close(served) }()
+	go func() { serveOwner(ctx, ch, false, time.Minute); close(served) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		mu.Lock()
@@ -425,6 +425,97 @@ func TestServeOwnerBootsServesAndStopsWithNoModem(t *testing.T) {
 	case <-served:
 	case <-time.After(5 * time.Second):
 		t.Fatal("serveOwner did not return once its context ended")
+	}
+}
+
+// With no modem to run, serveOwner's own tick expires an open request
+// once its deadline passes (CH-13).
+func TestServeOwnerTickExpiresARequestWithNoModemRun(t *testing.T) {
+	dir := t.TempDir()
+	_, d := start(t, dir)
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+	var decided []string
+	ch, err := ownerch.New(ownerch.Config{
+		Owner: owner, Engine: d.Owned(), Store: &ownerch.MemStore{},
+		Modem: modem.NewCarrier().Line("+15550000009"),
+		Now: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		},
+		Decide: func(dc ownerch.Decision) {
+			mu.Lock()
+			decided = append(decided, dc.Ref+" "+dc.Why)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := ownerch.Item{Ref: "inv/1", Object: "invoice 1042", Recipient: "billing@acme.example",
+		Facts: ownerch.Facts{Verb: "send", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true}}
+	if _, err := ch.Request([]ownerch.Item{it}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { serveOwner(ctx, ch, false, time.Millisecond); close(served) }()
+	defer func() { cancel(); <-served }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := slices.Clone(decided)
+		mu.Unlock()
+		if slices.Contains(got, "inv/1 expired") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("decided %q: want the request expired by the tick", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// With a modem, serveOwner is the channel's Run and nothing else: when Run
+// ends (here at once, for a channel that has no modem), serveOwner returns
+// rather than falling back to the modemless loop, so the restart report is
+// never made a second way and no minute tick outlives the modem's Run
+// (CH-13, OP-4).
+func TestServeOwnerWithAModemEndsWithRun(t *testing.T) {
+	dir := t.TempDir()
+	_, d := start(t, dir)
+	var mu sync.Mutex
+	var decided []string
+	store := &ownerch.MemStore{}
+	store.Save(ownerch.State{Pending: []ownerch.PendingRef{{ID: "7", Refs: []string{"old/1"}}}})
+	ch, err := ownerch.New(ownerch.Config{
+		Owner: owner, Engine: d.Owned(), Store: store,
+		Decide: func(dc ownerch.Decision) {
+			mu.Lock()
+			decided = append(decided, dc.Ref+" "+dc.Why)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan struct{})
+	go func() { serveOwner(ctx, ch, true, time.Minute); close(served) }()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveOwner kept serving after the modem's Run ended")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(decided) != 0 {
+		t.Fatalf("decided %q after Run ended: want nothing", decided)
 	}
 }
 
