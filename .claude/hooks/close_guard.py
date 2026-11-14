@@ -16,7 +16,11 @@ union of the working tree's file and `origin/main`'s, so a checkout older than a
 still guards it. The hook loads in a session rooted at this checkout through settings.json, and
 in a session rooted elsewhere (a project thread starts in /home/user) once tools/session_hooks.py
 has copied the hook block into the user's settings. A cited issue is denied with the reason; a close whose issue number it cannot
-read, or whose records it cannot load, goes to the permission ask. Every other call passes.
+read, or whose records it cannot load, goes to the permission ask, wherever the words stand: the
+hook does not parse the shell, so it cannot tell run text from data, and it fails closed (#5714).
+There is no exemption, not even for a commit message: git can hand a message to a runner through
+its own outputs, editor and hooks (#5716 reviews), so a message that mentions the command asks.
+The hook stops accidents, not a session set on evading it. Every other call passes.
 tests/test_close_guard_hook.py pins the decisions and the settings.json wiring.
 """
 import json
@@ -31,7 +35,7 @@ CONFIG = "assurance/vulncheck.json"
 REPO = ("ghbmrk", "agentos")
 MCP_TOOLS = {"mcp__github__issue_write", "mcp__github__update_issue"}
 # `gh issue close`, with the repository flag (gh's one flag that goes before the subcommand) between.
-_GH_CLOSE = re.compile(r"\bgh\s+issue\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*close\b", re.I)
+_GH_CLOSE = re.compile(r"gh\s+issue\s+(?:(?:-R\s*|--repo(?:\s+|=))\S+\s+)*close\b", re.I)
 _STATE_CLOSED = re.compile(r"""\bstate["']?\s*[:=]\s*["']?closed\b""", re.I)
 _CLOSE_ARG = re.compile(r"#?([1-9][0-9]{0,6})|https://github\.com/[^/]+/[^/]+/issues/([1-9][0-9]{0,6})")
 _ISSUE_PATH = re.compile(r"\bissues/([1-9][0-9]{0,6})\b")
@@ -39,6 +43,13 @@ _ISSUE_PATH = re.compile(r"\bissues/([1-9][0-9]{0,6})\b")
 # comes from --input, or GraphQL's closeIssue mutation.
 _OPAQUE = re.compile(r"\bcloseIssue\b|\bissues/[1-9][0-9]{0,6}(?![/0-9]).*--input\b"
                      r"|--input\b.*\bissues/[1-9][0-9]{0,6}(?![/0-9])", re.I | re.S)
+
+
+def loose_numbers(command):
+    """Every number on the rest of a line after `gh issue close`, quotes ignored: used only to turn
+    an ask into a deny, so reading too many numbers cannot let a close through."""
+    return {int(a or b) for m in _GH_CLOSE.finditer(command)
+            for a, b in _CLOSE_ARG.findall(command[m.end():].split("\n", 1)[0])}
 
 
 def bash_closes(command):
@@ -104,8 +115,8 @@ def cited(recs, num):
 def decide(event, root=ROOT):
     """None lets the call go on; otherwise (decision, reason) with decision "deny" or "ask"."""
     tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
+    command = tool_input.get("command", "")
     if tool == "Bash":
-        command = tool_input.get("command", "")
         nums = bash_closes(command) if isinstance(command, str) else None
     elif tool in MCP_TOOLS:
         nums = mcp_closes(tool_input)
@@ -114,12 +125,23 @@ def decide(event, root=ROOT):
     if nums == []:
         return None
     if nums is None:
+        # An unreadable close may still name a cited number in words this could not split (an
+        # unterminated quote, a nested shell): a cited number anywhere on such a line denies.
+        recs = records(root)
+        loose = loose_numbers(command) if tool == "Bash" and isinstance(command, str) else ()
+        hits = {n: cited(recs, n) for n in loose if cited(recs, n)}
+        if hits:
+            return _deny(hits)
         return ("ask", "close_guard hook: this closes an issue whose number it cannot read; check "
                 "`python3 tools/vulncheck.py cited N` first (a cited issue stays open)")
     recs = records(root)
     hits = {n: cited(recs, n) for n in nums if cited(recs, n)}
     if not hits:
         return None
+    return _deny(hits)
+
+
+def _deny(hits):
     named = ", ".join(f"#{n} ({c} record(s))" for n, c in sorted(hits.items()))
     return ("deny", f"close_guard hook: {CONFIG} cites {named}. Closing a cited issue withdraws its "
             "acceptance and fails image-vulncheck on every PR until the queued reopen runs (#5692). "
