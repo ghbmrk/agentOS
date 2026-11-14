@@ -3,6 +3,8 @@ package clock
 // REQ: TIM-1, KEY-4, CLK-2
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -192,5 +194,78 @@ func TestTIM1SlewingNTSDoesNotBoundAnHonestCarrier(t *testing.T) {
 	})
 	if _, _, s := g.Interval(bg); !s.Authenticated {
 		t.Fatalf("converged NTS: %+v", s)
+	}
+}
+
+// syncAs makes the rig's sync whatever *k says at each check.
+func syncAs(k *SyncKind) func(*Config) {
+	return func(c *Config) { c.Sync = func() (SyncKind, error) { return *k, nil } }
+}
+
+func TestTIM1AuthenticatedOutlierLosingItsCarrierStaysDisagree(t *testing.T) {
+	// L3 blocker 1 on #5754: a forged +5h carrier under NTS, then the
+	// carrier goes quiet and NTS drops. The disagreement stays in force and
+	// STATUS names the wide interval, never "not checked".
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	kind := SyncedNTS
+	g := r.guard(t, syncAs(&kind))
+	if s := g.Check(bg); s.State != Disagree || !s.Authenticated {
+		t.Fatalf("status = %+v", s)
+	}
+	r.mu.Lock()
+	r.carrier = time.Time{}
+	r.mu.Unlock()
+	r.advance(20 * time.Minute)
+	if s := g.Check(bg); s.State != Disagree {
+		t.Fatalf("carrier lost: status = %+v, want the disagreement kept", s)
+	}
+	kind = NotSynced
+	r.advance(20 * time.Minute)
+	s := g.Check(bg)
+	lo, hi, _ := g.Interval(bg)
+	if s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour {
+		t.Fatalf("NTS lost: status = %+v, width %v", s, hi.Sub(lo))
+	}
+	if l := s.IntervalLine(time.UTC); !strings.Contains(l, "differ by about 5 hours") {
+		t.Fatalf("line = %q, want the wide interval named", l)
+	}
+}
+
+func TestTIM1AuthenticatedDisagreementSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	kind := SyncedNTS
+	edit := func(c *Config) { syncAs(&kind)(c); c.StatePath = path }
+	g := r.guard(t, edit)
+	if s := g.Check(bg); s.State != Disagree {
+		t.Fatalf("status = %+v", s)
+	}
+	r.mu.Lock()
+	r.carrier = time.Time{}
+	r.mu.Unlock()
+	g = r.guard(t, edit)
+	if s := g.Check(bg); s.State != Disagree || s.Skew != -5*time.Hour {
+		t.Fatalf("after restart: status = %+v, want the disagreement kept", s)
+	}
+}
+
+func TestTIM1LostStateUnderNTSStaysDisagree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clock.json")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := noCarrier()
+	kind := SyncedNTS
+	g := r.guard(t, func(c *Config) { syncAs(&kind)(c); c.StatePath = path })
+	for i := range 2 {
+		if s := g.Check(bg); s.State != Disagree {
+			t.Fatalf("check %d: status = %+v, want the lost check kept until carrier time agrees", i, s)
+		}
+		r.advance(20 * time.Minute)
+	}
+	if txt := r.sent(); len(txt) != 1 || txt[0] != StateLostText {
+		t.Fatalf("texts = %q", txt)
 	}
 }

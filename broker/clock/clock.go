@@ -114,7 +114,8 @@ type Status struct {
 }
 
 // Restricted reports that plain sources disagree, for Guard.Now's callers
-// not yet on the interval. A disagreement with authenticated network time
+// not yet on the interval, and for nothing else: whether a disagreement is
+// in force is State == Disagree (L3 blocker 1 on #5754). A disagreement with authenticated network time
 // is an outlier carrier and restricts nothing.
 func (s Status) Restricted() bool { return s.State == Disagree && !s.Authenticated }
 
@@ -589,7 +590,7 @@ func (g *Guard) check(ctx context.Context) Status {
 			}
 			g.anchored, g.anchorWall, g.anchorMono = true, now, mono
 		}
-	case prev.Restricted():
+	case prev.State == Disagree:
 		// A disagreement ends only when carrier time agrees again: losing
 		// the carrier (jammed, unplugged, a network that stops sending time,
 		// a module clock reset before the floor) must not lift it.
@@ -870,6 +871,8 @@ func (g *Guard) Run(ctx context.Context) {
 
 // saved is the state file (security C2 on #68).
 type saved struct {
+	// Restricted: a disagreement is in force, authenticated or not (the
+	// field keeps the restricted mode's name so older files still load).
 	Restricted bool          `json:"restricted"`
 	Skew       time.Duration `json:"skew"`
 	Since      time.Time     `json:"since"`
@@ -955,7 +958,7 @@ func (g *Guard) saveLocked() {
 		return
 	}
 	v := saved{
-		Restricted: g.status.Restricted(), Told: g.told,
+		Restricted: g.status.State == Disagree, Told: g.told,
 		Boot: g.cfg.BootID(), Anchored: g.anchored, AnchorWall: g.anchorWall, AnchorMono: g.anchorMono,
 		Alerts: g.alerts, SavedMono: g.cfg.Elapsed(),
 	}
