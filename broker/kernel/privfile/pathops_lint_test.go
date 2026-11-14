@@ -902,6 +902,9 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a tmpfiles copy of a tree with a link":   {with(udev, tmpf+"x.conf", "C /run/pkgdir - - - - /usr/share/pkg\n", "/usr/share/pkg/a/lnk", "-> /run/agentos-x"), ourEtc, `its source is or holds a link, /usr/share/pkg/a/lnk`},
 		"a tmpfiles copy through a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/foo - - - - /usr/share/pkg\n", tmpf+"x.conf", "C /run/pkgdir - - - - /var/lib/foo/a\n"), ourEtc, `its source passes through a link (/var/lib/foo)`},
 		"a tmpfiles copy from /run":               {with(udev, tmpf+"x.conf", "C /run/pkgdir - - - - /run/udev\n"), ourEtc, `its source is under /run`},
+		// #5715 L3 6874735402, Security 6874738412: an L line's link under the source; a source outside /usr.
+		"a tmpfiles copy over a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/pkg/lnk - - - - /run/agentos-x\n", tmpf+"x.conf", "C /run/x - - - - /var/lib/pkg\n", "/var/lib/pkg/f", "x"), ourEtc, `an L line makes a link at, under or above its source, /var/lib/pkg/lnk`},
+		"a tmpfiles copy from /etc":            {with(udev, tmpf+"x.conf", "C /run/x - - - - /etc/pkg\n", "/etc/pkg/f", "x"), ourEtc, `its source is not under /usr`},
 		// #5620 R-a, R-b.
 		"an open directory mode of ours":  {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a directory mode of ours`},
 		"a port of ours":                  {with(foo, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=2222\nReusePort=yes\n"), ourEtc, `ListenStream=2222: a listen path of ours names no path`},

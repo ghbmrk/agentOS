@@ -582,9 +582,12 @@ def tmpfiles_copies(view, links, usr_view=None):
     LINKS (boot_links) do not hold: the run fails. VIEW is a BootView. Its source (the factory copy when it
     names none) is read like an L line's target: a specifier, quote or escape, an encoded (~) or credential
     (^) source, one not absolute and normal, one under a boot mount (empty in VIEW, filled at boot), or one
-    passing through a link, the tree's or one in LINKS, fails the run too. A source the tree does not hold
-    copies nothing (systemd skips the line: the image's /.extra lines)."""
-    for f, line in tmpfiles_lines(view, usr_view):
+    passing through a link, the tree's or one in LINKS, fails the run too, as does one at, under or above
+    any L line's path, or one outside /usr but a /.extra file the tree does not hold (systemd skips that
+    line: the image's own C lines)."""
+    lines = tmpfiles_lines(view, usr_view)
+    ls = [w[1] for w in (line.split() for _, line in lines) if w[0].startswith("L") and len(w) > 1]
+    for f, line in lines:
         w = line.split(None, 6)
         if not w[0].startswith("C"):
             continue
@@ -615,6 +618,21 @@ def tmpfiles_copies(view, links, usr_view=None):
         if via:
             raise SystemExit("unit rules: %s: C line %r: its source passes through a link (%s), which the "
                              "reader does not read" % (f, line, via[0]))
+        # #5715 L3 6874735402, Security 6874738412: an L line's link at or under the source is made at boot
+        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and tmpfiles_links drops
+        # some L keys (a link to a file, a loop), so every L line counts, at, under or above the source.
+        under = src.rstrip("/") + "/"
+        for k in ls:
+            if k == src or k.startswith(under) or src.startswith(k.rstrip("/") + "/"):
+                raise SystemExit("unit rules: %s: C line %r: an L line makes a link at, under or above its "
+                                 "source, %s, which systemd-tmpfiles may copy as a link" % (f, line, k))
+        # A source in persistent writable state copies what a running service left there between boots,
+        # which no lint of the tree sees: only read-only /usr, or a /.extra file the tree does not hold
+        # (systemd-stub's, absent at boot, so systemd skips the line), is a source.
+        if not (src.startswith("/usr/") or src == "/usr"
+                or (src.startswith("/.extra/") and view.kind(src) is None)):
+            raise SystemExit("unit rules: %s: C line %r: its source is not under /usr, so a service may "
+                             "leave a link there between boots" % (f, line))
 
 
 # #5703 L3 6872796820: the kernel's own links under /proc, /sys and /dev (/proc/self/root, /proc/<pid>/root,
