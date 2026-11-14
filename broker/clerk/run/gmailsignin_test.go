@@ -398,8 +398,15 @@ func TestARevokedGmailAccountServesNoStep(t *testing.T) {
 }
 
 // giveBack called without h.mu takes it: it neither asks Google nor tells
-// the owner while another change of the account holds it.
+// the owner while another change of the account holds it, and it returns
+// promptly once that change lets go. Both sides are checked with no time
+// window (#5324 item 3): the give-back is seen blocked in h.mu's Lock (the
+// runtime's goroutine stacks, read by gmailtest.Waiting), so a give-back
+// that never waits fails however slow it is, and each wait is bounded by a
+// named timeout only as a backstop for a hang. The file imports no time,
+// so the bounds are contexts.
 func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
+	const parkTimeout, returnTimeout = 30e9, 30e9 // 30 s each
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
 	if err != nil {
@@ -413,21 +420,104 @@ func TestAGiveBackWaitsForTheHostsLock(t *testing.T) {
 	h.mu.Lock()
 	done := make(chan struct{})
 	go func() { h.giveBack(g, false); close(done) }()
-	wait, cancel := context.WithTimeout(context.Background(), 100e6) // 100 ms
-	defer cancel()
+	park, cancelPark := context.WithTimeout(context.Background(), parkTimeout)
+	defer cancelPark()
+	for !gmailtest.Waiting(").giveBack", "sync.Mutex.Lock") {
+		select {
+		case <-done:
+			h.mu.Unlock()
+			t.Fatal("giveBack returned while h.mu was held")
+		case <-park.Done():
+			h.mu.Unlock()
+			t.Fatal("giveBack was not seen waiting for h.mu within the park timeout")
+		default:
+		}
+	}
 	select {
 	case <-done:
 		h.mu.Unlock()
-		t.Fatal("giveBack ran while h.mu was held")
-	case <-wait.Done():
+		t.Fatal("giveBack returned while h.mu was held")
+	default:
 	}
+	early := slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == noteGmailKept })
 	h.mu.Unlock()
-	<-done
+	if early {
+		t.Fatal("the owner was told while h.mu was held")
+	}
+	back, cancelBack := context.WithTimeout(context.Background(), returnTimeout)
+	defer cancelBack()
+	select {
+	case <-done:
+	case <-back.Done():
+		t.Fatal("giveBack did not return within the return timeout of h.mu's release")
+	}
 	h.mu.Lock()
 	told := slices.ContainsFunc(h.notices, func(n notice) bool { return n.text == noteGmailKept })
 	h.mu.Unlock()
 	if !told {
 		t.Fatal("the grant Google kept was not told")
+	}
+}
+
+// A re-read that overlaps the read in flight waits for that read and starts
+// none of its own (#5324, refresh's shared read): it is seen blocked in the
+// host's wait while the first read is held (gmailtest.Waiting), so one that
+// does not wait fails however slow it is; it returns once the held read
+// ends; and the overlap makes only the connections one read makes. The
+// timeouts are named backstops for a hang; the file imports no time, so
+// they are contexts.
+func TestAnOverlappingRereadWaitsForTheReadInFlight(t *testing.T) {
+	const parkTimeout, returnTimeout = 30e9, 30e9 // 30 s each
+	r := newHostRig(t, imaptest.Password)
+	// One re-read alone, of a moved mailbox: the connections one read makes.
+	r.moved()
+	dials := r.dials.Load()
+	if _, err := r.planner.Reread(); err != nil {
+		t.Fatal(err)
+	}
+	one := r.dials.Load() - dials
+	r.moved()
+	r.hold.Store(true)
+	asks, dials := r.asks.Load(), r.dials.Load()
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() { _, err := r.planner.Reread(); first <- err }()
+	<-r.held
+	go func() { _, err := r.planner.Reread(); second <- err }()
+	park, cancelPark := context.WithTimeout(context.Background(), parkTimeout)
+	defer cancelPark()
+	for !gmailtest.Waiting(").wait", "chan receive") {
+		select {
+		case err := <-second:
+			close(r.release)
+			t.Fatalf("the overlapping re-read returned (%v) while the read was in flight", err)
+		case <-park.Done():
+			close(r.release)
+			t.Fatal("the overlapping re-read was not seen waiting within the park timeout")
+		default:
+		}
+	}
+	select {
+	case err := <-second:
+		close(r.release)
+		t.Fatalf("the overlapping re-read returned (%v) while the read was in flight", err)
+	default:
+	}
+	r.hold.Store(false)
+	close(r.release)
+	back, cancelBack := context.WithTimeout(context.Background(), returnTimeout)
+	defer cancelBack()
+	for _, c := range []chan error{first, second} {
+		select {
+		case err := <-c:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-back.Done():
+			t.Fatal("a re-read did not return within the return timeout of the read's end")
+		}
+	}
+	if n, d := r.asks.Load()-asks, r.dials.Load()-dials; n != 3 || d != one {
+		t.Fatalf("two overlapping re-reads classed %d mails in %d connections; want one read's 3 in %d", n, d, one)
 	}
 }
 
@@ -572,6 +662,92 @@ func TestTheSeenRecordsPlaintextIsWiped(t *testing.T) {
 	}
 	if n, wiped := k.Wiped(); n != 1 || !wiped {
 		t.Fatalf("saveSeen left %d plaintexts, wiped %v", n, wiped)
+	}
+	if got, st := loadSeen(dir, k, GmailSlot(gmailtest.User)); st != seenLoaded || got.Log.Since != rec.Log.Since {
+		t.Fatalf("loadSeen = %+v, %v", got.Log, st)
+	}
+	if n, wiped := k.Wiped(); n != 2 || !wiped {
+		t.Fatalf("loadSeen left %d plaintexts, wiped %v", n, wiped)
+	}
+}
+
+// A sealer that fails after it decrypted loads no record of read mail:
+// loadSeen trusts no plaintext handed back with an error, so the record
+// reads as unreadable and begins again (#5324, seen.go's Open check).
+func TestAFailedOpenLoadsNoSeenRecord(t *testing.T) {
+	dir := shortDir(t)
+	slot := GmailSlot(gmailtest.User)
+	var rec sealedSeen
+	rec.Log.Since = "2026-10-21"
+	if err := saveSeen(dir, testSealer(), slot, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
+	if got, st := loadSeen(dir, k, slot); st != seenBad || got.Log.Since != "" {
+		t.Fatalf("loadSeen with a failing open = %+v, %v; want nothing, %v", got.Log, st, seenBad)
+	}
+}
+
+// loadSeen closes the record's file once read (#5324, seen.go's deferred
+// Close): each fd still open on it right after a load is one the load left,
+// read from /proc/self/fd as TestReadingTheSettingsClosesTheFile reads it,
+// so the GC finalizing a leaked file cannot hide the leak.
+func TestLoadingTheSeenRecordClosesItsFile(t *testing.T) {
+	dir := shortDir(t)
+	slot := GmailSlot(gmailtest.User)
+	var rec sealedSeen
+	rec.Log.Since = "2026-10-21"
+	if err := saveSeen(dir, testSealer(), slot, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, seenFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func() bool {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
+	}
+	for range 64 {
+		if got, st := loadSeen(dir, testSealer(), slot); st != seenLoaded || got.Log.Since != rec.Log.Since {
+			t.Fatalf("loadSeen = %+v, %v", got.Log, st)
+		}
+		if held() {
+			t.Fatalf("loadSeen left %s open", path)
+		}
+	}
+}
+
+// A seal that fails saves no record of read mail: saveSeen returns the
+// sealer's error, wipes the plaintext, and the record before it still
+// loads (#5324 item 2, seen.go's Seal check, no longer waived).
+func TestAFailedSealSavesNoSeenRecord(t *testing.T) {
+	dir := shortDir(t)
+	slot := GmailSlot(gmailtest.User)
+	var rec sealedSeen
+	rec.Log.Since = "2026-10-21"
+	if err := saveSeen(dir, testSealer(), slot, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), SealErr: os.ErrClosed} // any error
+	next := rec
+	next.Log.Since = "2026-10-22"
+	if err := saveSeen(dir, k, slot, next, nil); err != os.ErrClosed {
+		t.Fatalf("saveSeen with a failing sealer = %v; want %v", err, os.ErrClosed)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed seal left %d plaintexts, wiped %v", n, wiped)
+	}
+	if got, st := loadSeen(dir, testSealer(), slot); st != seenLoaded || got.Log.Since != "2026-10-21" {
+		t.Fatalf("after a failed seal the record is %q (state %v); want the one before", got.Log.Since, st)
 	}
 }
 

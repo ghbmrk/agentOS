@@ -316,6 +316,95 @@ func TestTheRegistrationsPlaintextIsWiped(t *testing.T) {
 	}
 }
 
+// A seal that fails saves no registration: saveReg returns the sealer's
+// error, wipes the plaintext, and the registration before it stays
+// (#5324 item 2, gmailreg.go's Seal check).
+func TestAFailedSealSavesNoRegistration(t *testing.T) {
+	dir := shortDir(t)
+	if err := saveReg(dir, testSealer(), clerk.Registration{ID: "old-client", Secret: "old-secret"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), SealErr: os.ErrClosed} // any error
+	if err := saveReg(dir, k, *fakeClient, nil); err != os.ErrClosed {
+		t.Fatalf("saveReg with a failing sealer = %v; want %v", err, os.ErrClosed)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed seal left %d plaintexts, wiped %v", n, wiped)
+	}
+	if r, ok := loadReg(dir, testSealer()); !ok || r != (clerk.Registration{ID: "old-client", Secret: "old-secret"}) {
+		t.Fatalf("after a failed seal the registration is %q, %v; want the one before", r.ID, ok)
+	}
+}
+
+// gmailtest.Kept, the sealer probe these tests read wipes through (#5324
+// item 1): it seals and opens as its Sealer does, keeps each non-empty
+// plaintext it is handed or hands back, counts them, and reads wiped only
+// when every one is all zeros. With SealErr set it seals nothing and
+// returns that error.
+func TestTheKeptProbeKeepsEachPlaintext(t *testing.T) {
+	k := &gmailtest.Kept{Sealer: testSealer()}
+	if n, wiped := k.Wiped(); n != 0 || !wiped {
+		t.Fatalf("a new probe holds %d plaintexts, wiped %v", n, wiped)
+	}
+	in := []byte("canary-kept-plain")
+	blob, err := k.Seal(in, []byte("aad"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := testSealer().Open(blob, []byte("aad")); err != nil || string(plain) != "canary-kept-plain" {
+		t.Fatalf("Kept sealed what its Sealer cannot open: %q, %v", plain, err)
+	}
+	if n, wiped := k.Wiped(); n != 1 || wiped {
+		t.Fatalf("after Seal: %d plaintexts, wiped %v; want 1, false", n, wiped)
+	}
+	out, err := k.Open(blob, []byte("aad"))
+	if err != nil || string(out) != "canary-kept-plain" {
+		t.Fatalf("Open = %q, %v", out, err)
+	}
+	if _, err := k.Open(blob, []byte("other")); err == nil {
+		t.Fatal("Kept opened a blob under another aad")
+	}
+	if n, _ := k.Wiped(); n != 2 { // the failed open's empty plaintext is not counted
+		t.Fatalf("after Open: %d plaintexts; want 2", n)
+	}
+	clear(in)
+	if _, wiped := k.Wiped(); wiped {
+		t.Fatal("Wiped with the opened plaintext still in the clear")
+	}
+	clear(out)
+	if n, wiped := k.Wiped(); n != 2 || !wiped {
+		t.Fatalf("after both are cleared: %d plaintexts, wiped %v", n, wiped)
+	}
+	k.SealErr = os.ErrClosed
+	if blob, err := k.Seal([]byte("x"), nil); err != os.ErrClosed || blob != nil {
+		t.Fatalf("Seal with SealErr = %v, %v; want nil, %v", blob, err, os.ErrClosed)
+	}
+	if n, wiped := k.Wiped(); n != 3 || wiped {
+		t.Fatalf("a refused seal's plaintext is kept too: %d, wiped %v", n, wiped)
+	}
+	k.OpenErr = os.ErrClosed
+	if plain, err := k.Open(blob, []byte("aad")); err != os.ErrClosed || string(plain) != "canary-kept-plain" {
+		t.Fatalf("Open with OpenErr = %q, %v; want the plaintext and %v", plain, err, os.ErrClosed)
+	}
+	if n, _ := k.Wiped(); n != 4 {
+		t.Fatalf("after a refused open: %d plaintexts; want 4", n)
+	}
+}
+
+// A sealer that fails after it decrypted loads no registration: loadReg
+// trusts no plaintext handed back with an error (#5324,
+// gmailreg.go's Open check, before waived as equivalent on #5362).
+func TestAFailedOpenLoadsNoRegistration(t *testing.T) {
+	dir := shortDir(t)
+	if err := saveReg(dir, testSealer(), *fakeClient, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
+	if r, ok := loadReg(dir, k); ok || r != (clerk.Registration{}) {
+		t.Fatalf("loadReg with a failing open = %q, %v; want nothing", r.ID, ok)
+	}
+}
+
 // sealReg replaces path with plain sealed as a registration.
 func sealReg(t *testing.T, path, plain string) {
 	t.Helper()

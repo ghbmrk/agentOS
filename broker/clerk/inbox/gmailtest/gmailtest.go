@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -744,26 +745,38 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 // Kept is a sealer probe for the mail clerk's tests: it seals and opens
 // with Sealer, and keeps each plaintext it is handed or hands back, so a
 // test can check that the caller wiped the registration's client secret,
-// or any other plaintext, once done with it.
+// or any other plaintext, once done with it. With SealErr set, Seal seals
+// nothing and returns it, so a test can check what a failed seal leaves.
+// With OpenErr set, Open returns it beside the plaintext Sealer opened, a
+// sealer failing after it decrypted, so a test can check that the caller
+// trusts no plaintext handed back with an error.
 type Kept struct {
 	Sealer interface {
 		Seal(plain, aad []byte) ([]byte, error)
 		Open(blob, aad []byte) ([]byte, error)
 	}
-	mu    sync.Mutex
-	plain [][]byte
+	SealErr, OpenErr error
+	mu               sync.Mutex
+	plain            [][]byte
 }
 
-// Seal keeps plain and seals it with k.Sealer.
+// Seal keeps plain and seals it with k.Sealer, or returns k.SealErr.
 func (k *Kept) Seal(plain, aad []byte) ([]byte, error) {
 	k.keep(plain)
+	if k.SealErr != nil {
+		return nil, k.SealErr
+	}
 	return k.Sealer.Seal(plain, aad)
 }
 
-// Open opens blob with k.Sealer and keeps the plaintext.
+// Open opens blob with k.Sealer and keeps the plaintext. With k.OpenErr
+// set, it returns that error with the plaintext.
 func (k *Kept) Open(blob, aad []byte) ([]byte, error) {
 	plain, err := k.Sealer.Open(blob, aad)
 	k.keep(plain)
+	if err == nil && k.OpenErr != nil {
+		err = k.OpenErr
+	}
 	return plain, err
 }
 
@@ -789,4 +802,28 @@ func (k *Kept) Wiped() (n int, wiped bool) {
 		}
 	}
 	return n, wiped
+}
+
+// Waiting reports whether a goroutine running a function whose name ends
+// in fn is blocked on what the runtime's goroutine dump names on (such as
+// "sync.Mutex.Lock" or "chan receive"), read from the runtime's own
+// goroutine stacks: a mail clerk test's sign that a call is waiting for
+// something another holds, with no time window (#5324).
+func Waiting(fn, on string) bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		header, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(header, "["+on) && strings.Contains(g, fn+"(") {
+			return true
+		}
+	}
+	return false
 }
