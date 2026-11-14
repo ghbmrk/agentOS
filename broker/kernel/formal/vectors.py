@@ -157,24 +157,33 @@ def step_list():
     return [{"verb": s["verb"], "labels": sorted(s["labels"])} for s in parse(m.group(1))]
 
 
+def held_list():
+    """KeyVerdict's HeldList: the verbs each state's windows are for, in order."""
+    src = (FORMAL / "KeyVerdict.tla").read_text()
+    m = re.search(r"^HeldList == (.*?)$", src, flags=re.M)
+    return list(parse(m.group(1)))
+
+
 def key_vectors(dump):
-    steps = step_list()
+    steps, held = step_list(), held_list()
     every, sample, seen = [], [], set()
     for n, st in enumerate(states(dump)):
         chain = [[lk["sig"], lk["cav"]["k"], sorted(lk["cav"]["s"]), lk["cav"]["n"], lk["cav"]["m"]]
                  for lk in st["chain"]]
         v = {"root": st["rootOK"], "chain": chain, "now": st["now"], "used": st["used"],
              "cut": [st["cut"]["k"], st["cut"]["i"]], "verdict": list(st["verdict"]),
-             "window": list(st["window"])}
+             "window": [list(w) for w in st["window"]]}
         if len(v["verdict"]) != len(steps):
             sys.exit("formal: a verdict table does not match StepList")
+        if len(v["window"]) != len(held):
+            sys.exit("formal: a window table does not match HeldList")
         every.append(v)
         plain = v["now"] == 0 and v["used"] == 0 and v["cut"] == ["none", 0]
         ident = json.dumps([v["root"], chain])
         if (plain and ident not in seen) or n % SAMPLE == 0:
             seen.add(ident)
             sample.append(v)
-    return ({"steps": steps, "states": every}, {"steps": steps, "states": sample})
+    return ({"steps": steps, "held": held, "states": every}, {"steps": steps, "held": held, "states": sample})
 
 
 def hold_vectors(dump):
@@ -209,7 +218,8 @@ def dumps(v):
     # One state per line keeps the committed files diffable.
     if "states" in v:
         lines = ",\n".join(json.dumps(s, separators=(",", ":")) for s in v["states"])
-        return '{"steps":' + json.dumps(v["steps"], separators=(",", ":")) + ',"states":[\n' + lines + "\n]}\n"
+        return ('{"steps":' + json.dumps(v["steps"], separators=(",", ":")) + ',"held":' +
+                json.dumps(v["held"], separators=(",", ":")) + ',"states":[\n' + lines + "\n]}\n")
     lines = ",\n".join(json.dumps(s, separators=(",", ":")) for s in v["scenarios"])
     return '{"unit":"hour","scenarios":[\n' + lines + "\n]}\n"
 

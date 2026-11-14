@@ -128,11 +128,14 @@ type renewCase struct {
 }
 
 type verdict struct {
-	Valid  bool     `json:"valid"`
-	Bad    string   `json:"bad"`
-	Codes  []string `json:"codes"`
-	Hold   []int64  `json:"hold"`
-	Scopes []string `json:"scopes"`
+	Valid bool     `json:"valid"`
+	Bad   string   `json:"bad"`
+	Codes []string `json:"codes"`
+	Hold  []int64  `json:"hold"`
+	// Windows is each verb's hold (Verified.Window, KEY-9), for every verb
+	// on the closed list and one off it.
+	Windows map[string][]int64 `json:"windows"`
+	Scopes  []string           `json:"scopes"`
 	// ByOwner and Narrowers: the owner narrowed the tip, and which
 	// passkeys narrowed any link (Verified.ByOwner, Verified.Narrowers).
 	ByOwner   bool     `json:"by_owner"`
@@ -206,7 +209,8 @@ type gen struct {
 // Edge inputs every sweep must draw: each is a place the two checkers once
 // disagreed or could.
 var edges = []string{"empty-clerk", "no-verbs", "empty-arg-name", "off-curve-holder", "huge-amount",
-	"root-not-canonical", "fitted-step", "quiet-view", "no-view", "no-ledger", "by-owner", "narrowed-mid", "within", "not-within"}
+	"root-not-canonical", "fitted-step", "quiet-view", "no-view", "no-ledger", "by-owner", "narrowed-mid", "within", "not-within",
+	"owner-one-use", "huge-hold", "bare-root"}
 
 func (g gen) edge(name string, pct int) bool {
 	if g.p(pct) {
@@ -280,6 +284,12 @@ func (g gen) caveat(first bool) key.Caveat {
 	case 9:
 		return key.Caveat{Kind: key.KUses, N: g.num(-1, 6)}
 	case 10:
+		if g.edge("huge-hold", 4) {
+			// Within the largest worth term of the int64 limit, where the
+			// hold's sum must saturate (Verified.Window).
+			a, b := math.MaxInt64-g.num(0, 5*3600_000), math.MaxInt64-g.num(0, 5*3600_000)
+			return key.Caveat{Kind: key.KHold, N: min(a, b), M: max(a, b)}
+		}
 		return key.Caveat{Kind: key.KHold, N: g.num(-1, 5) * 1000, M: g.num(-1, 8) * 1000}
 	case 11:
 		c := key.Caveat{Kind: key.KTask, Set: []string{pick(g, tasks)}}
@@ -398,6 +408,9 @@ func (g gen) key() world {
 			signer = pick(g, []party{pass1, pass2})
 		case next.pub.Equal(w.holder.pub) && g.p(30):
 			signer = pick(g, []party{pass1, pass2}) // the owner narrows it
+			if g.p(40) {
+				cav = append(cav, key.LimitUses(1)) // to one step (KEY-9's exemption)
+			}
 		default:
 			signer = *w.holder
 		}
@@ -747,6 +760,20 @@ func one(c *checker, seed int64, t *tally) string {
 		g.reached["by-owner"] = true
 	} else if len(narrowers) > 0 {
 		g.reached["narrowed-mid"] = true
+	}
+	if len(got.Windows) != len(verbs)+1 {
+		return fmt.Sprintf("windows: keycheck gave %d verbs, want %d", len(got.Windows), len(verbs)+1)
+	}
+	for _, vb := range append(slices.Clone(verbs), "teleport") {
+		if want := []int64{v.Window(vb, false), v.Window(vb, true)}; !slices.Equal(want, got.Windows[string(vb)]) {
+			return fmt.Sprintf("window %s: library %v, keycheck %v", vb, want, got.Windows[string(vb)])
+		}
+	}
+	switch tip := len(w.k.Links) - 1; {
+	case tip < 0:
+		g.reached["bare-root"] = true
+	case v.ByOwner && slices.ContainsFunc(w.k.Links[tip].Caveats, func(c key.Caveat) bool { return c.Kind == key.KUses && c.N == 1 }):
+		g.reached["owner-one-use"] = true
 	}
 	var r *key.Refusal
 	switch op {

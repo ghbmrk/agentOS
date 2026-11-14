@@ -1,14 +1,15 @@
 ---------------------------- MODULE KeyVerdict ----------------------------
-(* The key check of SPEC KEY-1..KEY-7, as broker/kernel/key implements it   *)
-(* (Verify, then Verified.Authorize and Limits.Window).                     *)
+(* The key check of SPEC KEY-1..KEY-9, as broker/kernel/key implements it   *)
+(* (Verify, then Verified.Authorize and Verified.Window).                   *)
 (*                                                                          *)
 (* A key is a root, the passkey's grant (the first link: an expiry and a    *)
 (* daily spend cap, KEY-4), then up to MaxLinks further links. Each further *)
 (* link adds one caveat and is signed by the key's holder, by a passkey     *)
 (* narrowing for that holder (key.Narrow), or by a stranger. The state is   *)
 (* one key plus the context a check reads (time, prior uses, a stop, a      *)
-(* revocation or a pause), and `verdict` is the check's answer for every    *)
-(* step in Steps. Every reachable state is a test vector: vectors.py,       *)
+(* revocation or a pause), `verdict` is the check's answer for every step   *)
+(* in Steps, and `window` the hold of every verb in HeldList. Every         *)
+(* reachable state is a test vector: vectors.py,                            *)
 (* beside this file, turns TLC's state dump into                            *)
 (* broker/kernel/key/testdata/formal/.                                      *)
 (*                                                                          *)
@@ -53,6 +54,32 @@ Codes == {"ok", "invalid", "stopped", "revoked", "paused", "expired", "verb", "l
 
 None == -1
 
+\* The verbs a hold is computed for (KEY-9). The hold's worth term reads only
+\* the held step's verb and the key's caps, not the key's verbs, so the two
+\* verbs above plus two whose capped worth lengthens the hold: buy (money,
+\* capped rank 2, one hour) and change-account (identity, rank 3, four hours).
+\* One hour is the model's time unit.
+HeldList == <<"organize", "unsubscribe", "buy", "change-account">>
+HeldIx == 1..Len(HeldList)
+HeldVerbs == {HeldList[i] : i \in HeldIx}
+
+\* What each verb reaches directly, and each class's worth under a spend cap
+\* (worth.go's reaches and ranks tables, the capped column). The grant link
+\* always carries ClerkKey's daily cap, so every key here is capped.
+Reach(v) == CASE v = "organize"       -> {"none"}
+              [] v = "unsubscribe"    -> {"data"}
+              [] v = "buy"            -> {"money"}
+              [] v = "change-account" -> {"identity", "data", "money"}
+CappedRank(a) == CASE a = "none" -> 0 [] a = "data" -> 1 [] a = "money" -> 2 [] a = "identity" -> 3
+Worth(v) == CHOOSE r \in 0..3 : (\E a \in Reach(v) : CappedRank(a) = r) /\ \A a \in Reach(v) : CappedRank(a) <= r
+\* holdExtra by rank, in hours.
+HoldExtra(r) == CASE r = 0 -> 0 [] r = 1 -> 0 [] r = 2 -> 1 [] r = 3 -> 4
+
+\* The table's own rules: a reach that holds more is worth no less, and a
+\* higher worth never holds less.
+ASSUME \A v, w \in HeldVerbs : Reach(v) \subseteq Reach(w) => Worth(v) <= Worth(w)
+ASSUME \A r, q \in 0..3 : r <= q => HoldExtra(r) <= HoldExtra(q)
+
 (* ---- the chain ---------------------------------------------------------- *)
 
 \* The limits a valid chain sets: the conjunction of its links (KEY-3).
@@ -80,8 +107,17 @@ FoldFrom(l, ch, i) == IF i > Len(ch) THEN l ELSE FoldFrom(AddLink(l, ch[i]), ch,
 \* A root its owner did not sign is no key (KEY-1).
 Limits(rootOK, ch) == IF rootOK THEN FoldFrom(Init0, ch, 1) ELSE [Init0 EXCEPT !.ok = FALSE]
 
-\* The hold before an irreversible step (KEY-8).
+\* The key's hold before an irreversible step (KEY-8).
 Window(l, novel) == IF novel THEN l.nov ELSE l.base
+
+\* The owner approved the step one by one: the tip is a further link the
+\* passkey signed (a narrowing, so ByOwner) whose caveat is `uses` 1.
+OwnerOneUse(ch) == Len(ch) > 0 /\ ch[Len(ch)].sig = "passkey" /\ ch[Len(ch)].cav = Cav("uses", {}, 1, 0)
+
+\* The hold before an irreversible step of verb v (KEY-8, KEY-9): the key's
+\* window lengthened by the worth term of what v reaches, except for a step
+\* the owner approved one by one (Verified.Window).
+Held(l, ch, v, novel) == Window(l, novel) + IF OwnerOneUse(ch) THEN 0 ELSE HoldExtra(Worth(v))
 
 (* ---- the check ---------------------------------------------------------- *)
 
@@ -103,10 +139,11 @@ Table(rootOK, ch, now, used, cut) == [i \in StepIx |-> Verdict(rootOK, ch, now, 
 
 (* ---- the state machine -------------------------------------------------- *)
 
-\* The windows a check of a valid key would hold an irreversible step for,
-\* <<base, novelty>>; <<-1, -1>> for a key that does not check out.
+\* The windows a check of a valid key would hold an irreversible step of each
+\* verb in HeldList for, <<base, novelty>>; <<-1, -1>> each for a key that
+\* does not check out.
 Windows(rootOK, ch) == LET l == Limits(rootOK, ch) IN
-  IF l.ok THEN <<Window(l, FALSE), Window(l, TRUE)>> ELSE <<-1, -1>>
+  [i \in HeldIx |-> IF l.ok THEN <<Held(l, ch, HeldList[i], FALSE), Held(l, ch, HeldList[i], TRUE)>> ELSE <<-1, -1>>]
 
 VARIABLES rootOK, chain, now, used, cut, verdict, window
 vars == <<rootOK, chain, now, used, cut, verdict, window>>
@@ -166,14 +203,28 @@ NoWidening ==
   /\ ~rootOK => \A i \in StepIx : verdict[i] = "invalid"
   /\ \A j \in 1..Len(chain) : chain[j].sig = "stranger" => \A i \in StepIx : verdict[i] = "invalid"
 
-\* KEY-3/KEY-8: holds never shorten. Along a chain each window is at least the
-\* parent's, and novelty only lengthens a window.
+\* KEY-3/KEY-8/KEY-9: holds never shorten. Along a chain the key's window is
+\* at least the parent's, novelty only lengthens a window, and so for each
+\* verb's hold, with one carve-out: the owner's one-use passkey narrowing
+\* may drop the worth term (Mark, #4999 comment 6705669120), never the key's
+\* own window.
 HoldsNeverShorten ==
   LET l == Limits(rootOK, chain) IN
   l.ok =>
     /\ Window(l, TRUE) >= Window(l, FALSE)
     /\ Len(chain) > 0 =>
          \A nv \in BOOLEAN : Window(l, nv) >= Window(Limits(rootOK, Parent), nv)
+    /\ \A v \in HeldVerbs :
+         /\ Held(l, chain, v, TRUE) >= Held(l, chain, v, FALSE)
+         /\ Held(l, chain, v, FALSE) >= Window(l, FALSE)
+         /\ (Len(chain) > 0 /\ ~OwnerOneUse(chain)) =>
+              \A nv \in BOOLEAN : Held(l, chain, v, nv) >= Held(Limits(rootOK, Parent), Parent, v, nv)
+
+\* KEY-9: a verb that reaches more never waits less under the same key.
+WorthTermMonotone ==
+  LET l == Limits(rootOK, chain) IN
+  l.ok => \A v, w \in HeldVerbs, nv \in BOOLEAN :
+            (Reach(v) \subseteq Reach(w) \/ Worth(v) <= Worth(w)) => Held(l, chain, v, nv) <= Held(l, chain, w, nv)
 
 \* PLN-3/KEY-2: labels only accumulate. A chain's allowed labels only shrink,
 \* and a step that carries more labels is never admitted where fewer were not.
