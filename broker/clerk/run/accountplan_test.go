@@ -249,33 +249,11 @@ func TestAccountPlanReadsSendersOverIMAP(t *testing.T) {
 	}
 }
 
-// A sign-in the IMAP server refuses while the plan is read is that
-// account's grant death: the typed reason and no plan, and the clerk stops
-// signing in until the owner sets the account up again.
-func TestAccountPlanOverIMAPReportsARefusedSignIn(t *testing.T) {
-	r := newMailRig(t, "<a@shop.test>")
-	r.srv.Deliver("INBOX", imapMail(googleMail("mx.google.com")))
-	h, owner := imapPlanHost(t, r, "mx.google.com")
-	if _, stop := h.clerk(); stop != nil {
-		t.Fatalf("the account did not open: %v", stop)
-	}
-	if err := SetMail(r.dir, r.sec, MailSettings{Address: imaptest.User, IMAP: r.srv.IMAP, SMTP: r.srv.SMTP}, "a-wrong-password-1"); err != nil {
-		t.Fatal(err)
-	}
-	p, err := owner.AccountPlan()
-	if err != nil || p.Reason != DSignInRefused || len(p.Items) != 0 {
-		t.Fatalf("sign-in refused: %+v %v", p, err)
-	}
-	if _, stop := h.clerk(); !errors.Is(stop, imapsmtp.ErrLoginRefused) {
-		t.Fatalf("the clerk goes on signing in: stop %v", stop)
-	}
-}
-
-// The kept plan is served from memory until the account changes through
-// the host: the mail settings rewritten on disk behind its back (here, the
-// account turned into an IMAP one, whose Gmail item is no longer marked
-// connected) change nothing it answers.
 func TestAccountPlanKeptIsServedFromMemory(t *testing.T) {
+	// The kept plan is served from memory until the account changes through
+	// the host: the mail settings rewritten on disk behind its back (here, the
+	// account turned into an IMAP one, whose Gmail item is no longer marked
+	// connected) change nothing it answers.
 	srv, dir, sec := newGmailAccount(t)
 	srv.Deliver(googleMail("mx.google.com"))
 	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
@@ -311,13 +289,38 @@ func TestAccountPlanWhileStoppedIsTheReasonAlone(t *testing.T) {
 }
 
 // A mailbox read that fails without stopping the clerk is an error, never
-// a plan short of the senders it could not read.
+// a plan short of the senders it could not read, and the host goes on
+// answering after it.
 func TestAccountPlanSendersReadErrorIsAnError(t *testing.T) {
 	srv, dir, sec := newGmailAccount(t)
 	srv.Deliver(googleMail("mx.google.com"))
 	srv.Fail("/messages", 500)
 	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
-	if p, err := h.accountPlan(); err == nil {
-		t.Fatalf("a failed senders read planned %+v", p)
+	for i := range 2 { // the second also shows the first let the host go
+		if p, err := h.accountPlan(); err == nil {
+			t.Fatalf("read %d: a failed senders read planned %+v", i, p)
+		}
+	}
+}
+
+// A sign-in the IMAP server refuses while the plan is read is that
+// account's grant death: the typed reason and no plan, and the clerk stops
+// signing in until the owner sets the account up again.
+func TestAccountPlanOverIMAPReportsARefusedSignIn(t *testing.T) {
+	r := newMailRig(t, "<a@shop.test>")
+	r.srv.Deliver("INBOX", imapMail(googleMail("mx.google.com")))
+	h, owner := imapPlanHost(t, r, "mx.google.com")
+	if _, stop := h.clerk(); stop != nil {
+		t.Fatalf("the account did not open: %v", stop)
+	}
+	if err := SetMail(r.dir, r.sec, MailSettings{Address: imaptest.User, IMAP: r.srv.IMAP, SMTP: r.srv.SMTP}, "a-wrong-password-1"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := owner.AccountPlan()
+	if err != nil || p.Reason != DSignInRefused || len(p.Items) != 0 {
+		t.Fatalf("sign-in refused: %+v %v", p, err)
+	}
+	if _, stop := h.clerk(); !errors.Is(stop, imapsmtp.ErrLoginRefused) {
+		t.Fatalf("the clerk goes on signing in: stop %v", stop)
 	}
 }

@@ -142,55 +142,9 @@ func TestSecretsWrongKeyRefused(t *testing.T) {
 	}
 }
 
-// A clerk's Secrets live in its own directory, closed to every other uid: a
-// directory or file open to others, a symlink, or one owned by another uid is
-// refused, so no clerk process loads another's store (CLK-1). As root the
-// test also shows another uid cannot open the file.
-func TestSecretsFileIsTheClerksOwn(t *testing.T) {
-	dir := clerkDir(t)
-	sec, _ := OpenSecrets(dir, testSealer())
-	if err := sec.Put("web", clerk.KindStatic, []byte("s")); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, secretsName)
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("secrets file mode %v, want 0600", fi.Mode().Perm())
-	}
-	try := func(what string, mod, undo func()) {
-		t.Helper()
-		mod()
-		defer undo()
-		if _, err := OpenSecrets(dir, testSealer()); err == nil {
-			t.Fatalf("%s: opened", what)
-		}
-	}
-	try("directory open to others", func() { os.Chmod(dir, 0o755) }, func() { os.Chmod(dir, 0o700) })
-	try("file open to others", func() { os.Chmod(path, 0o640) }, func() { os.Chmod(path, 0o600) })
-	link := filepath.Join(t.TempDir(), "link")
-	os.Symlink(dir, link)
-	if _, err := OpenSecrets(link, testSealer()); err == nil {
-		t.Fatal("opened through a symlinked directory")
-	}
-	if err := loadsWhole(dir); err != nil {
-		t.Fatal(err)
-	}
-	if os.Geteuid() != 0 {
-		t.Log("not root: the other-uid cases need root")
-		return
-	}
-	const nobody = 65534
-	os.Chmod(filepath.Dir(dir), 0o755)
-	out, err := exec.Command("setpriv", "--reuid", "65534", "--regid", "65534", "--clear-groups", "cat", path).CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "denied") {
-		t.Fatalf("uid %d read the file: %v %s", nobody, err, out)
-	}
-	try("directory owned by another uid", func() { os.Chown(dir, nobody, nobody) }, func() { os.Chown(dir, 0, 0) })
-	try("file owned by another uid", func() { os.Chown(path, nobody, nobody) }, func() { os.Chown(path, 0, 0) })
-}
-
-// A secrets file that is a symbolic link is refused at its open, as the
-// link it is (O_NOFOLLOW), not read through.
 func TestSecretsFileThatIsALinkIsRefusedAtOpen(t *testing.T) {
+	// A secrets file that is a symbolic link is refused at its open, as the
+	// link it is (O_NOFOLLOW), not read through.
 	dir := clerkDir(t)
 	other := filepath.Join(t.TempDir(), "other")
 	if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
@@ -242,4 +196,50 @@ func TestSecretsOpenBoundsAndClosesItsFile(t *testing.T) {
 	if _, err := OpenSecrets(dir, testSealer()); !errors.Is(err, errSecretsTooLarge) {
 		t.Fatalf("a file past maxSecrets: %v", err)
 	}
+}
+
+// A clerk's Secrets live in its own directory, closed to every other uid: a
+// directory or file open to others, a symlink, or one owned by another uid is
+// refused, so no clerk process loads another's store (CLK-1). As root the
+// test also shows another uid cannot open the file.
+func TestSecretsFileIsTheClerksOwn(t *testing.T) {
+	dir := clerkDir(t)
+	sec, _ := OpenSecrets(dir, testSealer())
+	if err := sec.Put("web", clerk.KindStatic, []byte("s")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, secretsName)
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("secrets file mode %v, want 0600", fi.Mode().Perm())
+	}
+	try := func(what string, mod, undo func()) {
+		t.Helper()
+		mod()
+		defer undo()
+		if _, err := OpenSecrets(dir, testSealer()); err == nil {
+			t.Fatalf("%s: opened", what)
+		}
+	}
+	try("directory open to others", func() { os.Chmod(dir, 0o755) }, func() { os.Chmod(dir, 0o700) })
+	try("file open to others", func() { os.Chmod(path, 0o640) }, func() { os.Chmod(path, 0o600) })
+	link := filepath.Join(t.TempDir(), "link")
+	os.Symlink(dir, link)
+	if _, err := OpenSecrets(link, testSealer()); err == nil {
+		t.Fatal("opened through a symlinked directory")
+	}
+	if err := loadsWhole(dir); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		t.Log("not root: the other-uid cases need root")
+		return
+	}
+	const nobody = 65534
+	os.Chmod(filepath.Dir(dir), 0o755)
+	out, err := exec.Command("setpriv", "--reuid", "65534", "--regid", "65534", "--clear-groups", "cat", path).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "denied") {
+		t.Fatalf("uid %d read the file: %v %s", nobody, err, out)
+	}
+	try("directory owned by another uid", func() { os.Chown(dir, nobody, nobody) }, func() { os.Chown(dir, 0, 0) })
+	try("file owned by another uid", func() { os.Chown(path, nobody, nobody) }, func() { os.Chown(path, 0, 0) })
 }
