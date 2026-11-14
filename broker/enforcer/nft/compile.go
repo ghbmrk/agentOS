@@ -122,8 +122,8 @@ const LeaseTimeout = 12 * 3600
 // hold one. An IPv6 packet from a shared segment passes only from the
 // hardware address that holds its source address, or from a free address
 // when its hardware address is leased and holds none, which it then
-// holds. Each hold lasts ClaimTimeout from the address's last forwarded
-// packet, at most half the DHCPv6 lease (the constant below fails to
+// holds. Each hold lasts ClaimTimeout from the address's last packet
+// claim passed (forwarded, or to the enforcer itself, #5686), at most half the DHCPv6 lease (the constant below fails to
 // compile otherwise), so an address the server gives again after its
 // lease ran out is free by then, unless the client had requested a
 // shorter lease (ENF-shared-src-1); each set holds at most HostSize
@@ -906,6 +906,19 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, sg := range segments(l) {
 		w.line("iifname " + q(sg.iface) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump " + nd(sg.name))
 	}
+	// Every other IPv6 packet from a shared segment to the enforcer itself
+	// passes its segment's claim, as a forwarded one does, so an address
+	// that speaks only to the enforcer (its resolver, DHCPv6, the page) is
+	// held, and with it its neighbour entry (#5686). Neighbour discovery
+	// that nd passed is accepted first: it sets no hold, as before. A
+	// link-local or unspecified source is not a host's address on the
+	// segment (DHCPv6 gives one), so it takes no hold.
+	w.line("iifname { " + strings.Join(sharedIfs, ", ") + " } icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept")
+	var claims []string
+	for _, sg := range segments(l) {
+		claims = append(claims, q(sg.iface)+" : jump "+claim(sg.name))
+	}
+	w.line("ip6 saddr != { ::, fe80::/10 } iifname vmap { " + strings.Join(claims, ", ") + " }")
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
 	w.line("icmpv6 type nd-router-advert iifname != " + wan + " counter name " + q(RADropped) + " drop")

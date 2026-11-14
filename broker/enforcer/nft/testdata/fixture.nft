@@ -873,6 +873,8 @@ table inet enforcer {
 		iifname "gst0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_guests
 		iifname "own0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_owner
 		iifname "hh0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_household
+		iifname { "gst0", "own0", "hh0" } icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+		ip6 saddr != { ::, fe80::/10 } iifname vmap { "gst0" : jump claim_guests, "own0" : jump claim_owner, "hh0" : jump claim_household }
 		ct state invalid drop
 		ct state established,related accept
 		icmpv6 type nd-router-advert iifname != "wan0" counter name "ra_dropped" drop
