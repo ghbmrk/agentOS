@@ -12,10 +12,12 @@ import (
 // the table's column for the act at the key's worth. worth_test.go checks the
 // table's own rules: no rank, price or hold falls as worth rises.
 //
-// Reach here is a key's own verbs; the closure over the declarations' edges
-// (CLK-10, CLK-14) and grows-then-narrows are #4999's second part. A grant is
-// priced at its key's worth (kernel cosign.go), a held step at what its own
-// verb reaches (Window; Mark, 2026-11-07, #4999 comment 6705669120).
+// A grant is priced at its key's worth over its own verbs and, when one
+// reaches data or more, what its clerk's node reaches over the declarations'
+// edges (WorthOver; CLK-10, CLK-14; kernel cosign.go). A held step is priced
+// at what its own verb reaches (Window; Mark, 2026-11-07, #4999 comment
+// 6705669120): the verbs that take a node over already reach identity, the
+// top rank, so the graph adds nothing to their hold.
 
 // Proof is a rung of the CH-3 ladder, ordered by what an attacker must hold.
 type Proof uint8
@@ -144,7 +146,13 @@ func (l Limits) Capped() bool {
 
 // Worth is k's worth from its own verbs and caps; a malformed key is worth
 // the most, with its error. It checks no signature.
-func Worth(k Key) (Rank, error) {
+func Worth(k Key) (Rank, error) { return WorthOver(k, nil) }
+
+// WorthOver is Worth with graph, what k's clerk's node reaches over the
+// declarations' edges (the kernel's GraphReach), counted when some verb of k
+// reaches data or more directly: a key that can read can read a reset code,
+// an edge the graph cannot rule out (KEY-9, #5672).
+func WorthOver(k Key, graph []Asset) (Rank, error) {
 	v, err := verifyChain(k, nil)
 	if err != nil {
 		return MaxRank, err
@@ -152,6 +160,9 @@ func Worth(k Key) (Rank, error) {
 	var reach []Asset
 	for _, vb := range v.Limits.Verbs {
 		reach = append(reach, AssetsOf(Verb(vb))...)
+	}
+	if slices.ContainsFunc(reach, func(a Asset) bool { return a >= AssetData }) {
+		reach = append(reach, graph...)
 	}
 	return WorthOf(reach, v.Limits.Capped()), nil
 }

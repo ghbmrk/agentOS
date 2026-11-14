@@ -109,3 +109,32 @@ func TestAZeroHoldIsNoHold(t *testing.T) {
 		t.Fatalf("a post with no window: %+v, %d effects", s, len(r.mail.Effects()))
 	}
 }
+
+// A grant prices its clerk's graph reach (KEY-9, #5672): a read key on the
+// mail clerk asks only the tap until a declaration says the mailbox resets
+// an identity account, then it asks the hardware key. A key with no verb
+// that reaches data, a draft key, still asks only the tap.
+func TestAGrantPricesItsGraphReach(t *testing.T) {
+	r := newRig(t)
+	live := kernel.GrantHold
+	read := func(serial string, vs ...key.Verb) key.Key {
+		return key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: vs, Serial: serial})
+	}
+	must(t, r.issue(0, read("r0", key.Read), read("d0", key.Draft))) // new verbs: big, co-signed
+	if err := r.k.Issue(live, nil, read("r1", key.Read)); err != nil {
+		t.Fatalf("a read mail key before any declaration: %v", err)
+	}
+	must(t, r.k.DeclareReach(live, kernel.DeclReach{
+		Nodes: []kernel.DeclNode{{ID: "mailbox", Clerk: "mail", Assets: []key.Asset{key.AssetData}}, {ID: "id", Assets: []key.Asset{key.AssetIdentity}}},
+		Edges: []kernel.DeclEdge{{Kind: "reset", From: []string{"mailbox"}, To: "id"}},
+	}))
+	if err := r.k.Issue(live, nil, read("r2", key.Read)); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("a read mail key that reaches an identity: %v", err)
+	}
+	if err := r.issue(live, read("r3", key.Read)); err != nil {
+		t.Fatalf("with the hardware key: %v", err)
+	}
+	if err := r.k.Issue(live, nil, read("d1", key.Draft)); err != nil {
+		t.Fatalf("a draft key reaches no data, so no graph: %v", err)
+	}
+}
