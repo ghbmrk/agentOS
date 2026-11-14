@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -150,8 +151,9 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 // REQ: TIM-1
 func TestTIM1AChronyReadsTheHullOfBothSources(t *testing.T) {
 	dir := t.TempDir()
-	corr := uint32(corrZero)
-	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corr) }), filepath.Join(dir, "reply.sock"))
+	var corr atomic.Uint32 // the fake's goroutine reads it
+	corr.Store(corrZero)
+	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte { return tracking(seq, corr.Load()) }), filepath.Join(dir, "reply.sock"))
 	defer s.Close()
 	b0 := time.Now().UnixMilli()
 	r := s.Read()
@@ -159,7 +161,7 @@ func TestTIM1AChronyReadsTheHullOfBothSources(t *testing.T) {
 	if r.Earliest < b0-3 || r.Earliest > b1 || r.Latest < b0 || r.Latest > b1+3 {
 		t.Fatalf("an agreeing chronyd read %+v around the box's [%d, %d]", r, b0, b1)
 	}
-	corr = corrTwoDays
+	corr.Store(corrTwoDays)
 	b0 = time.Now().UnixMilli()
 	r = s.Read()
 	b1 = time.Now().UnixMilli()
