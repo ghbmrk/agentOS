@@ -877,3 +877,64 @@ func TestOneRETRYAsksAboutAtMostRetryMax(t *testing.T) {
 		t.Fatalf("one RETRY asks about %d items (%v), want %d", len(items), err, retryMax)
 	}
 }
+
+// unclearUntilChecked is an executor whose every attempt ends unclear and
+// whose check then finds it done.
+type unclearUntilChecked struct{}
+
+func (unclearUntilChecked) Execute(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultUnknown}
+}
+
+func (unclearUntilChecked) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
+	return journal.Outcome{Result: journal.ResultSucceeded, Evidence: "sent"}
+}
+
+// OP-2: the settle loop runs again every every, so an effect that ends
+// unclear after a round is checked by the next one, not left to the
+// owner.
+func TestOP2SettleLoopChecksAgainEachRound(t *testing.T) {
+	eng, err := journal.Open(&journal.MemStore{}, allowAll{}, map[string]journal.Executor{"x": unclearUntilChecked{}}, func(s string) string { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(id string) {
+		t.Helper()
+		in := journal.Intent{ID: id, Origin: "guest:agent", Account: "mail", Action: "send",
+			Params: map[string]any{"record": "inv-" + id}, Executor: "x"}
+		if _, err := eng.Submit(in); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eng.Authorize(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := eng.Dispatch(context.Background(), id); st.State != journal.OutcomeUnknown {
+			t.Fatalf("%s: %+v", id, st)
+		}
+	}
+	settled := func(id string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			st, _ := eng.Get(id)
+			if st.State == journal.Succeeded {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %+v, want checked and settled by a round", id, st)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	send("a")
+	ctx, cancel := context.WithCancel(context.Background())
+	looped := make(chan struct{})
+	go func() {
+		settleLoop(ctx, eng, time.Millisecond, time.Millisecond, time.Millisecond, eng.Dispatch)
+		close(looped)
+	}()
+	defer func() { cancel(); <-looped }()
+	settled("a") // the first round's
+	send("b")
+	settled("b") // a later round's
+}
