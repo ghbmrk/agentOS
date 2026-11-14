@@ -29,6 +29,21 @@ type fakeEngine struct {
 	resumes int
 	list    []control.Status
 	stopErr error // set: Stop fails to record, as a broken journal does
+	// cancelled is the steps the STOP in force cancelled, read only while
+	// stopped, as daemon's bothStops reads the kernel; cancelErr fails
+	// that read (control.StopCanceller, #5665).
+	cancelled int
+	cancelErr error
+	resumeErr error // set: Resume fails to record
+}
+
+func (f *fakeEngine) StopCancelled() (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.stopped {
+		return 0, f.cancelErr
+	}
+	return f.cancelled, f.cancelErr
 }
 
 func (f *fakeEngine) Stop(context.Context) (control.StopReport, error) {
@@ -44,6 +59,9 @@ func (f *fakeEngine) Stop(context.Context) (control.StopReport, error) {
 func (f *fakeEngine) Resume() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.resumeErr != nil {
+		return f.resumeErr
+	}
 	f.stopped = false
 	f.resumes++
 	return nil
@@ -717,7 +735,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed. "+control.StopCancelledNote || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed." || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {
@@ -728,7 +746,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 // TestResumeCountsWhatStopKept: the reply counts the actions STOP kept
 // from running, in plain English (L3 on #76).
 func TestResumeCountsWhatStopKept(t *testing.T) {
-	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run. " + control.StopCancelledNote, 2: "Resumed. 2 stopped actions may now run. " + control.StopCancelledNote} {
+	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run.", 2: "Resumed. 2 stopped actions may now run."} {
 		r := newRig(t, nil)
 		for range n {
 			r.eng.list = append(r.eng.list, control.Status{Phase: control.Held})

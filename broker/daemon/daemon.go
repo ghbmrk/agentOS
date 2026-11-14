@@ -704,6 +704,10 @@ type KernelOwner interface {
 	// kernel refuses it once a later STOP is logged (#3078).
 	Resume(ctx context.Context, stops uint64) error
 	Stopped(context.Context) (stopped bool, stops uint64, err error)
+	// StopCancelled is whether a STOP is in force and the steps the STOPs
+	// since the last lift cancelled for good, which RESUME names (#5665);
+	// known is false while that count may still grow.
+	StopCancelled(context.Context) (stopped bool, steps int, known bool, err error)
 	SetupOpen(context.Context) (bool, error)
 	Status(context.Context) ([]KernelStep, error)
 	// Retry returns KernelRefused for the kernel's refusal and
@@ -776,6 +780,15 @@ type bothStops struct {
 	mu       sync.Mutex
 	unread   bool // the last read of the kernel's stop failed
 	unlisted bool // the last read of the kernel's unsettled steps failed
+	// whole: the kernel's count covers the STOP in force, since this
+	// process saw that STOP land while neither the journal nor the kernel
+	// was stopped (freshStop). It is false at start (a STOP in force may
+	// predate this process, such as a re-STOP after a RESUME that failed
+	// before a restart) and after a RESUME that failed once the kernel may
+	// have lifted its STOP, whose re-STOP restarted the count; RESUME then
+	// gives the general note (L3, Security on #5734), and such a failed
+	// RESUME's reply names the count read before it.
+	whole bool
 }
 
 // Stop records a STOP in the journal and on the kernel, and reports done
@@ -783,8 +796,39 @@ type bothStops struct {
 // plan and runs nothing, so its refusal is not a failure; one that cannot
 // be reached is, since it may hold plans it runs again once it answers.
 func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
+	fresh := b.freshStop(ctx)
 	rep, err := b.Engine.Stop(ctx)
-	return rep, errors.Join(err, b.kernel(ctx, b.k.Stop))
+	kerr := b.kernel(ctx, b.k.Stop)
+	if fresh && kerr == nil {
+		b.mu.Lock()
+		b.whole = true
+		b.mu.Unlock()
+	}
+	return rep, errors.Join(err, kerr)
+}
+
+// freshStop is whether a STOP sent now starts the kernel's count, read
+// only while the count is not known whole (one read per process in
+// practice): neither the journal nor the kernel is stopped, or the kernel
+// waits for setup and holds no plan. A kernel that cannot be read is not;
+// nor is a journal still stopped with the kernel lifted, which may be a
+// RESUME whose kernel lift landed before this process died untold
+// (Security on #5734).
+func (b *bothStops) freshStop(ctx context.Context) bool {
+	b.mu.Lock()
+	whole := b.whole
+	b.mu.Unlock()
+	if whole || b.Engine.Stopped() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, kernelFor)
+	defer cancel()
+	stopped, _, err := b.k.Stopped(ctx)
+	if err != nil {
+		open, oerr := b.k.SetupOpen(ctx)
+		return oerr == nil && open
+	}
+	return !stopped
 }
 
 // Resume lifts the kernel's STOP first: if that fails the journal stays
@@ -794,15 +838,22 @@ func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
 // for both. A STOP only the kernel holds leaves the journal as it is.
 func (b *bothStops) Resume() error {
 	if err := b.kernel(context.Background(), b.resumeKernel); err != nil {
-		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
+		return b.restop(err)
 	}
-	if !b.Engine.Stopped() {
-		return nil
-	}
-	if err := b.Engine.Resume(); err != nil {
-		return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
+	if b.Engine.Stopped() {
+		if err := b.Engine.Resume(); err != nil {
+			return b.restop(err)
+		}
 	}
 	return nil
+}
+
+// restop STOPs the kernel again after a RESUME that failed with err.
+func (b *bothStops) restop(err error) error {
+	b.mu.Lock()
+	b.whole = false
+	b.mu.Unlock()
+	return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 }
 
 // resumeKernel lifts the STOP the kernel holds now: the RESUME names the
@@ -815,6 +866,44 @@ func (b *bothStops) resumeKernel(ctx context.Context) error {
 	}
 	return b.k.Resume(ctx, stops)
 }
+
+// StopCancelled is the steps the kernel's STOP in force cancelled for
+// good, read before RESUME lifts it (#5665). A kernel not stopped
+// cancelled nothing this RESUME lifts (a STOP only the journal holds),
+// and a setup-only kernel holds no plan; the journal's STOP holds its
+// actions and cancels none. A kernel that cannot be read, or whose count
+// is not yet known (a step the STOP ended still unsettled, or a kernel
+// that predates the count), is an error, and RESUME names that it may
+// have cancelled some; so is any count after a RESUME that failed partway
+// (whole).
+func (b *bothStops) StopCancelled() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
+	defer cancel()
+	b.mu.Lock()
+	whole := b.whole
+	b.mu.Unlock()
+	if !whole {
+		return 0, errStopLossOpen
+	}
+	stopped, n, known, err := b.k.StopCancelled(ctx)
+	if err != nil {
+		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
+			return 0, nil
+		}
+		return 0, err
+	}
+	switch {
+	case !stopped:
+		return 0, nil
+	case !known:
+		return 0, errStopLossOpen
+	}
+	return n, nil
+}
+
+// errStopLossOpen is a kernel STOP whose count of cancelled steps is not
+// yet known.
+var errStopLossOpen = errors.New("daemon: what the kernel's STOP cancelled is not yet known")
 
 // kernel runs a STOP or RESUME on the kernel; a setup-only kernel's
 // refusal is nothing to stop or lift.

@@ -40,6 +40,13 @@ type fakeKernel struct {
 	retried  []string
 	attempts []int
 	retryErr error
+	// cancelled is the steps the STOP in force cancelled for good, which
+	// StopCancelled reads; uncounted refuses that read alone, and open
+	// reads it as not yet known.
+	cancelled       int
+	uncounted, open bool
+	// unread refuses the stop read alone (Stopped).
+	unread bool
 }
 
 var (
@@ -107,7 +114,22 @@ func (k *fakeKernel) Stopped(context.Context) (bool, uint64, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.reads++
+	if k.unread && k.refuse() == nil {
+		return false, 0, errors.New("changes refused")
+	}
 	return k.stopped, uint64(k.stops), k.refuse()
+}
+
+func (k *fakeKernel) StopCancelled(context.Context) (bool, int, bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.refuse(); err != nil {
+		return false, 0, false, err
+	}
+	if k.uncounted {
+		return false, 0, false, errors.New("changes refused")
+	}
+	return k.stopped, k.cancelled, !k.open, nil
 }
 
 // serve serves the queued RESUMEs, after whatever was served since.

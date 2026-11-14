@@ -1032,3 +1032,50 @@ func TestApproveCodeSendsTheKernelsOwnCall(t *testing.T) {
 		t.Fatalf("approvecode sends %q; kernel/proc sends %q", got, want)
 	}
 }
+
+// StopCancelled reads the changes read's count of the steps the STOP in
+// force cancelled, under the names kernel/proc sends (#5665), and whether
+// a STOP is in force. A count with a step still unsettled, or none at all
+// (a kernel that predates it), is not known, so RESUME keeps the general
+// note (Security on #5734). Catches a field name that drifts from the
+// kernel's, or a missing count read as none.
+func TestStopCancelledReadsTheKernelsCount(t *testing.T) {
+	needRoot(t)
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	answers := make(chan string, 1)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			bufio.NewReader(c).ReadString('\n')
+			c.Write([]byte(`{"result":` + <-answers + "}\n"))
+			c.Close()
+		}
+	}()
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+	for _, c := range []struct {
+		answer string
+		n      int
+		known  bool
+	}{
+		{`{"Stopped":true,"stops":3,"stopcancelled":2,"stopunsettled":false}`, 2, true},
+		{`{"Stopped":true,"stops":3,"stopcancelled":0,"stopunsettled":true}`, 0, false},
+		{`{"Stopped":true,"stops":3}`, 0, false},
+	} {
+		answers <- c.answer
+		stopped, n, known, err := o.StopCancelled(context.Background())
+		if err != nil || !stopped || n != c.n || known != c.known {
+			t.Errorf("%s: %v %d %v %v, want true %d %v", c.answer, stopped, n, known, err, c.n, c.known)
+		}
+	}
+}

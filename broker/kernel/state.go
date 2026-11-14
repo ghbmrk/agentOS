@@ -408,19 +408,58 @@ const (
 // (cancel). An active plan whose current step was sent or parked keeps
 // reconciling it (KRN-8), and a RETRY of it may still send it (KRN-5), so
 // the plan is marked ended instead, and Next and the send check refuse any
-// other step of it. Either way no step that was unsent at the end is sent
+// other step of it. n is the steps it leaves unsent for good, less a step
+// it parks for RETRY. Either way no step that was unsent at the end is sent
 // after it, whatever the log folds next, a RESUME included (KRN-7).
-func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) {
+func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) (n int) {
 	for _, id := range s.Order {
 		p := s.Plans[id]
 		switch {
 		case p.Status != SPending && p.Status != SActive || !ends(p):
-		case p.Status == SPending || sendable(p.Steps[p.Next].Phase):
+		case p.Status == SPending:
 			s.cancel(p, code, detail)
+			n += len(p.Plan.Steps)
+		case sendable(p.Steps[p.Next].Phase):
+			s.cancel(p, code, detail)
+			n += len(p.Steps) - p.Next
+			if p.Steps[p.Next].Phase == PParked {
+				n--
+			}
 		case p.Ended == "":
 			p.Ended, p.EndedDetail = code, detail
+			n += len(p.Steps) - p.Next - 1
+			if code == key.RStopped {
+				s.stopEnded = append(s.stopEnded, endedStep{id, p.Next})
+			}
 		}
 	}
+	return n
+}
+
+// endedStep is a plan a STOP marked ended and the sent step it left
+// reconciling.
+type endedStep struct {
+	plan  string
+	index int
+}
+
+// StopLoss is the steps the STOP in force cancelled for good: those its
+// folds left unsent, and each sent step of a plan they ended that has
+// since proved unsent and been cancelled (#5665, Security on #5734).
+// unsettled is true while such a step's outcome is still open (in flight,
+// unknown or parked), so RESUME cannot yet tell whether it is lost.
+func (s *State) StopLoss() (n int, unsettled bool) {
+	n = s.StopCancelled
+	for _, e := range s.stopEnded {
+		switch s.Plans[e.plan].Steps[e.index].Phase {
+		case PCancelled:
+			n++
+		case PDone, PFailed:
+		default:
+			unsettled = true
+		}
+	}
+	return n, unsettled
 }
 
 // ended is why step st of plan p may not be sent: its plan ended with its
@@ -449,7 +488,14 @@ type State struct {
 	Seq        uint64
 	Stopped    bool
 	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
-	Changes    key.Changes
+	// StopCancelled is the steps the STOP in force left unsent for good in
+	// its fold, summed over the STOPs logged since the last lift, and
+	// stopEnded the plans those folds marked ended with their sent step,
+	// whose outcome StopLoss reads later: RESUME names a loss only when it
+	// is known and above zero (#5665).
+	StopCancelled int
+	stopEnded     []endedStep
+	Changes       key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
 	Grants map[key.ID]Grant
@@ -1032,6 +1078,9 @@ func (s *State) Apply(e Entry) error {
 	case TPoolRead, TPoolReset, TReserveUp, TReserveDown:
 		return s.applyPool(e)
 	case TStop:
+		if !s.Stopped {
+			s.StopCancelled, s.stopEnded = 0, nil
+		}
 		s.Stopped, s.Changes.Stopped = true, true
 		s.Stops++
 		for _, t := range s.tasks {
@@ -1039,7 +1088,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		// The STOP cancels in its own fold, so a RESUME before the next
 		// tick cannot send what it stopped (KRN-7, KEY-8).
-		s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
+		s.StopCancelled += s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
 	case TResume:
 		if !s.decoys.held() { // ErrTripResume
 			s.Stopped, s.Changes.Stopped = false, false
