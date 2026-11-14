@@ -572,3 +572,24 @@ func TestTheEndingNoticeLetsALongSentenceEnd(t *testing.T) {
 		})
 	}
 }
+
+// The ending clip's words promise no more time than is left when it
+// starts (#5728): it starts between EndingNotice and EndingNotice less
+// SentenceWait and EndingWait before MaxCall, so the words promise under a
+// minute, never a full one, and the clip keeps the owner's way back (call
+// again). The figures are literal, so a longer notice or a "one minute"
+// wording fails (UX-5303-1, #5303).
+func TestTheEndingClipPromisesNoMoreThanIsLeft(t *testing.T) {
+	const want = "This call ends in under a minute. Call again to carry on."
+	if call.EndingText != want {
+		t.Fatalf("EndingText %q, want the reviewed %q", call.EndingText, want)
+	}
+	most := call.EndingNotice
+	least := call.EndingNotice - call.SentenceWait - call.EndingWait
+	if most > time.Minute {
+		t.Fatalf("the clip can start %v before the end, more than the minute it bounds", most)
+	}
+	if least <= 0 {
+		t.Fatalf("the clip can start %v before the end: none left", least)
+	}
+}
