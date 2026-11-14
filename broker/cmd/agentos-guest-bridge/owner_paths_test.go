@@ -128,13 +128,18 @@ func TestOwnerNextStatusIsChecked(t *testing.T) {
 	}
 }
 
-// An unreachable broker is an error from ownerOnce, not a crash.
+// An unreachable broker, or a request that cannot be built (no
+// context), is an error from ownerOnce, not a crash.
 func TestOwnerNextUnreachable(t *testing.T) {
 	broker := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("no broker")
 	})}
 	if err := ownerOnce(context.Background(), broker, "http://127.0.0.1:0", "m", "t"); err == nil || !strings.Contains(err.Error(), "no broker") {
 		t.Fatalf("error %v", err)
+	}
+	var none context.Context
+	if err := ownerOnce(none, broker, "http://127.0.0.1:0", "m", "t"); err == nil || !strings.Contains(err.Error(), "nil Context") {
+		t.Fatalf("nil context: error %v", err)
 	}
 }
 
