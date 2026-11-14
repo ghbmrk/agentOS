@@ -2,7 +2,8 @@
 
 Pure functions only (no browser), so CI can test them without Playwright.
 
-A request is one JSON object: {"v": 0, "verb": <verb>, ...args}. Targets are refs
+A request is one JSON object: {"v": 0, "verb": <verb>, ...args}, plus the broker
+gate's "id", which the reply echoes so a stray line answers nothing (K9). Targets are refs
 ("e12", "f1e3") taken from the latest snapshot, never CSS/XPath selectors, so the
 agent supplies no query language the executor would evaluate.
 """
@@ -44,7 +45,9 @@ def validate(req):
     if verb not in VERBS:
         raise ProtocolError(f"unknown verb {verb!r}")
     spec = VERBS[verb]
-    extra = set(req) - {"v", "verb"} - set(spec)
+    if "id" in req and not request_id(req):
+        raise ProtocolError("id must be a non-negative integer")
+    extra = set(req) - {"v", "verb", "id"} - set(spec)
     if extra:
         raise ProtocolError(f"unknown argument(s) {sorted(extra)} for {verb}")
     for arg, typ in spec.items():
@@ -61,6 +64,12 @@ def validate(req):
     if verb == "type" and len(req["text"]) > MAX_TEXT:
         raise ProtocolError("text too long")
     return req
+
+
+def request_id(req):
+    """The number the broker gate put on a request, which the reply echoes (K9), or None."""
+    i = req.get("id") if isinstance(req, dict) else None
+    return i if type(i) is int and 0 <= i < 1 << 64 else None
 
 
 def check_url(url):

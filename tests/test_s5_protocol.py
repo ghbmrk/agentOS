@@ -51,6 +51,15 @@ class Verbs(unittest.TestCase):
                     "https://user:pw@a.example/"):
             self.bad(verb="navigate", url=url)
 
+    def test_gate_request_id(self):
+        # K9: the gate's number passes validation and is read back for the reply.
+        req = P.validate({"v": 0, "verb": "snapshot", "id": 7})
+        self.assertEqual(P.request_id(req), 7)
+        self.assertIsNone(P.request_id({"v": 0, "verb": "snapshot"}))
+        for bad in (-1, True, 1.0, "7", None, 1 << 64):
+            with self.assertRaises(P.ProtocolError):
+                P.validate({"v": 0, "verb": "snapshot", "id": bad})
+
     def test_types_and_version(self):
         self.bad(verb="type", ref="e1", text=1)
         self.bad(verb="type", ref="e1", text="x", submit="yes")

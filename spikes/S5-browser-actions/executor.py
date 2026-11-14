@@ -252,10 +252,12 @@ class Executor:
 
     def handle(self, line):
         t0 = time.monotonic()
-        req = {}
+        req, rid = {}, None
         try:
-            req = P.validate(json.loads(line))
-            args = {k: v for k, v in req.items() if k not in ("v", "verb")}
+            raw = json.loads(line)
+            rid = P.request_id(raw)
+            req = P.validate(raw)
+            args = {k: v for k, v in req.items() if k not in ("v", "verb", "id")}
             res = getattr(self, req["verb"])(**args)
         except P.ProtocolError as e:
             res = {"ok": False, "error": "protocol", "detail": str(e)}
@@ -281,6 +283,8 @@ class Executor:
             res["refused_navigations"] = list(dict.fromkeys(self.refused))
             self.refused = []
         res["ms"] = round((time.monotonic() - t0) * 1000)
+        if rid is not None:
+            res["id"] = rid  # the gate matches the reply to its request (K9)
         return res
 
     def close(self):

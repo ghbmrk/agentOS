@@ -114,6 +114,9 @@ type Gate struct {
 	stdin   io.WriteCloser
 	lines   chan []byte
 	stopped bool
+	// seq numbers the requests written to the driver; each reply must echo
+	// its request's number (K9).
+	seq uint64
 	// refs is what the last snapshot the driver returned showed, per ref.
 	refs map[string]link
 	// shown is the same refs as the agent saw them, read from the snapshot
@@ -704,13 +707,17 @@ func (g *Gate) send(ctx context.Context, req Request) Result {
 // roundtrip sends one canonical request and filters the reply. ok is false
 // when the executor was stopped. The write and the reply share one
 // deadline, so a driver that stops reading stops the executor rather than
-// block the step (K8).
+// block the step (K8). Each request carries a number the reply must echo, so
+// a line the driver wrote unasked cannot answer it (K9).
 func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	t := time.NewTimer(g.cfg.Timeout)
 	defer t.Stop()
+	g.seq++
+	id := g.seq
+	wire := req.wire(id)
 	wrote := make(chan error, 1)
 	go func() {
-		_, err := g.stdin.Write(append(req.Encode(), '\n'))
+		_, err := g.stdin.Write(wire)
 		wrote <- err
 	}()
 	select {
@@ -745,6 +752,15 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	if err := json.Unmarshal(line, &res); err != nil {
 		g.stop()
 		return Result{Error: "driver", Detail: "malformed executor reply; executor stopped"}, false
+	}
+	var echo struct {
+		ID *uint64 `json:"id"`
+	}
+	if json.Unmarshal(line, &echo) != nil || echo.ID == nil || *echo.ID != id {
+		// A reply to another request, or to none, is not this request's
+		// answer: the step's outcome is unknown, so the executor stops.
+		g.stop()
+		return Result{Error: "driver", Detail: "executor reply did not answer the request; executor stopped"}, false
 	}
 	if res.Snapshot != "" {
 		// Read before filtering: a redaction must not hide a link's target.
