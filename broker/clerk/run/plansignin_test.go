@@ -1146,3 +1146,28 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 		}
 	})
 }
+
+// Waiting for the code reads the CLI again every Poll until it prints one,
+// and a wait ended by the sign-in's own stop is a stop, not a time-out.
+func TestPlanSignInAwaitCodeReadsAgainAndTellsAStop(t *testing.T) {
+	h := &PlanHost{Prompt: CodexSignIn()}
+	cli := newFakeCLI(nil, "Welcome to Codex\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cli.mu.Lock()
+		cli.printed = codexPrinted
+		cli.mu.Unlock()
+	}()
+	if code, detail := h.awaitCode(ctx, context.Background(), cli, quick); code != "ABCD-12345" || detail != "" {
+		t.Fatalf("a code printed late: %q %q", code, detail)
+	}
+	bg, stop := context.WithCancel(context.Background())
+	ctx, cancel = context.WithTimeout(bg, 5*time.Second)
+	defer cancel()
+	stop()
+	if code, detail := h.awaitCode(ctx, bg, newFakeCLI(nil, ""), quick); code != "" || detail != DSignInStopped {
+		t.Fatalf("a stopped sign-in: %q %q", code, detail)
+	}
+}

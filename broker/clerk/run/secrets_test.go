@@ -187,3 +187,59 @@ func TestSecretsFileIsTheClerksOwn(t *testing.T) {
 	try("directory owned by another uid", func() { os.Chown(dir, nobody, nobody) }, func() { os.Chown(dir, 0, 0) })
 	try("file owned by another uid", func() { os.Chown(path, nobody, nobody) }, func() { os.Chown(path, 0, 0) })
 }
+
+// A secrets file that is a symbolic link is refused at its open, as the
+// link it is (O_NOFOLLOW), not read through.
+func TestSecretsFileThatIsALinkIsRefusedAtOpen(t *testing.T) {
+	dir := clerkDir(t)
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.WriteFile(other, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, filepath.Join(dir, secretsName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSecrets(dir, testSealer()); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("a linked secrets file: %v, want ELOOP", err)
+	}
+}
+
+// A secrets file past maxSecrets is refused as too large at open, and
+// opening the store leaves no descriptor of its file behind.
+func TestSecretsOpenBoundsAndClosesItsFile(t *testing.T) {
+	dir := clerkDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.Put("web", clerk.KindStatic, []byte("canary-static")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, secretsName)
+	held := func() bool {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
+	}
+	for range 64 {
+		if err := loadsWhole(dir); err != nil {
+			t.Fatal(err)
+		}
+		if held() {
+			t.Fatalf("OpenSecrets left %s open", path)
+		}
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat(" ", maxSecrets+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSecrets(dir, testSealer()); !errors.Is(err, errSecretsTooLarge) {
+		t.Fatalf("a file past maxSecrets: %v", err)
+	}
+}

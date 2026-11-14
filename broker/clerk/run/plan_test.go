@@ -627,3 +627,21 @@ func TestPlanOwnerSocketCalls(t *testing.T) {
 		t.Fatalf("remove answered %q %v, want no result", line, err)
 	}
 }
+
+// A call's end: nothing sent is ErrNotSent, an answer read to its end is
+// no error, and one cut short is errCut.
+func TestPlanCallEnded(t *testing.T) {
+	for _, c := range []struct {
+		u    plan.Used
+		want error
+	}{
+		{plan.Used{}, model.ErrNotSent},
+		{plan.Used{Done: true}, model.ErrNotSent},
+		{plan.Used{Sent: true, Done: true}, nil},
+		{plan.Used{Sent: true}, errCut},
+	} {
+		if got := ended(c.u); got != c.want {
+			t.Errorf("ended(%+v) = %v, want %v", c.u, got, c.want)
+		}
+	}
+}
