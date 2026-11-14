@@ -376,6 +376,24 @@ func TestCutBounds(t *testing.T) {
 	if !ok || s == "" || !strings.HasPrefix(rest, " ") || strings.HasSuffix(s, "wor") {
 		t.Errorf("not cut at a space: %q | %q", s[len(s)-10:], rest[:10])
 	}
+	// An end mark past MaxSentence runes does not lengthen the sentence
+	// (#5683): it is cut at a space within MaxSentence runes, as one with
+	// no end mark is, so SentenceWait bounds every sentence.
+	over := strings.Repeat("word ", 90)[:449] + ". Next."
+	if s, rest, ok := call.Cut(over); !ok || len([]rune(s)) > call.MaxSentence || s+rest != over || strings.HasSuffix(s, "wor") {
+		t.Errorf("end mark past MaxSentence: %d runes, ok %v", len([]rune(s)), ok)
+	}
+	// An end mark that is rune MaxSentence still ends the sentence there.
+	at := strings.Repeat("a", call.MaxSentence-1) + ". Next."
+	if s, rest, ok := call.Cut(at); !ok || len([]rune(s)) != call.MaxSentence || rest != " Next." {
+		t.Errorf("end mark at MaxSentence: %d runes, rest %q, ok %v", len([]rune(s)), rest, ok)
+	}
+	// One rune later it does not: with no space before it, the cut falls
+	// at MaxSentence runes.
+	after := strings.Repeat("a", call.MaxSentence) + ". Next."
+	if s, rest, ok := call.Cut(after); !ok || len([]rune(s)) != call.MaxSentence || rest != ". Next." {
+		t.Errorf("end mark past MaxSentence: %d runes, rest %q, ok %v", len([]rune(s)), rest, ok)
+	}
 }
 
 // serve runs Serve on the rig's line and returns the report on r.rep.
@@ -950,7 +968,7 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 }
 
 // A call that reaches MaxCall hears the ending clip EndingNotice before it
-// is hung up, cutting at EndingWait a sentence that never ends (a wedged
+// is hung up, cutting at SentenceWait a sentence that never ends (a wedged
 // Say, #5304); a call that ends sooner
 // hears none; and the clip plays on the call's ctx, so a clip still playing
 // at MaxCall ends with the call and Serve returns at MaxCall (#5262).
@@ -992,18 +1010,18 @@ func TestTheOwnerHearsTheEndBeforeMaxCall(t *testing.T) {
 		if got := played(r); got != "" { // the notice waits for the sentence
 			t.Fatalf("the notice did not wait for the sentence: played %q", got)
 		}
-		time.Sleep(call.EndingWait - time.Nanosecond)
+		time.Sleep(call.SentenceWait - time.Nanosecond)
 		synctest.Wait()
 		if got := played(r); got != "" {
-			t.Fatalf("played %q before EndingWait", got)
+			t.Fatalf("played %q before SentenceWait", got)
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
 		if got := played(r); got != "CLIP:ending" || hungUp(r) {
-			t.Fatalf("at EndingWait: played %q, hung up %v", got, hungUp(r))
+			t.Fatalf("at SentenceWait: played %q, hung up %v", got, hungUp(r))
 		}
 		r.l.wasCut(t) // the sentence that never ends is cut at the bound
-		time.Sleep(time.Minute - call.EndingWait)
+		time.Sleep(time.Minute - call.SentenceWait)
 		synctest.Wait()
 		rep, err := r.end()
 		if !errors.Is(err, call.ErrTooLong) || !hungUp(r) || time.Since(start) != 30*time.Minute {
@@ -1132,7 +1150,7 @@ func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
 		if got := <-r.l.saying; got != "S:Hi." {
 			t.Fatalf("the answer played %q", got)
 		}
-		time.Sleep(29*time.Minute + call.EndingWait)
+		time.Sleep(29*time.Minute + call.SentenceWait)
 		synctest.Wait()
 		if got := <-r.l.saying; got != "CLIP:ending" {
 			t.Fatalf("a minute before MaxCall: played %q", got)

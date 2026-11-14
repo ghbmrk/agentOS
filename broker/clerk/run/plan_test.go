@@ -537,6 +537,24 @@ func TestPlanStatusFromDetail(t *testing.T) {
 	}
 }
 
+func TestPlanCallEnded(t *testing.T) {
+	// A call's end: nothing sent is ErrNotSent, an answer read to its end is
+	// no error, and one cut short is errCut.
+	for _, c := range []struct {
+		u    plan.Used
+		want error
+	}{
+		{plan.Used{}, model.ErrNotSent},
+		{plan.Used{Done: true}, model.ErrNotSent},
+		{plan.Used{Sent: true, Done: true}, nil},
+		{plan.Used{Sent: true}, errCut},
+	} {
+		if got := ended(c.u); got != c.want {
+			t.Errorf("ended(%+v) = %v, want %v", c.u, got, c.want)
+		}
+	}
+}
+
 // The owner socket sends the key calls to the API keys and each plan call
 // to its plan, answers no other call, passes a refused Resume's error on,
 // and answers a Remove with no result (MIG-4-exit m1).

@@ -249,6 +249,60 @@ func TestAccountPlanReadsSendersOverIMAP(t *testing.T) {
 	}
 }
 
+func TestAccountPlanKeptIsServedFromMemory(t *testing.T) {
+	// The kept plan is served from memory until the account changes through
+	// the host: the mail settings rewritten on disk behind its back (here, the
+	// account turned into an IMAP one, whose Gmail item is no longer marked
+	// connected) change nothing it answers.
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
+	first, err := h.accountPlan()
+	if err != nil || !slices.ContainsFunc(first.Items, func(it PlanItem) bool { return it.Connected }) {
+		t.Fatalf("first: %+v %v", first, err)
+	}
+	if err := SetMail(dir, sec, MailSettings{Address: "a@imap.test", IMAP: "127.0.0.1:1", SMTP: "127.0.0.1:1"}, "canary-password-1"); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := h.accountPlan(); err != nil || !reflect.DeepEqual(again, first) {
+		t.Fatalf("kept: %+v %v, want %+v", again, err, first)
+	}
+}
+
+// While a stop holds, the answer is its typed reason alone, even with a
+// plan kept from before it, and the host goes on answering after it.
+func TestAccountPlanWhileStoppedIsTheReasonAlone(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
+	if p, err := h.accountPlan(); err != nil || len(p.Items) == 0 {
+		t.Fatalf("first: %+v %v", p, err)
+	}
+	h.mu.Lock()
+	h.stop = inbox.ErrReconnect
+	h.mu.Unlock()
+	for i := range 2 { // the second also shows the first let the host go
+		if p, err := h.accountPlan(); err != nil || p.Reason != DReconnect || len(p.Items) != 0 {
+			t.Fatalf("answer %d while stopped: %+v %v", i, p, err)
+		}
+	}
+}
+
+// A mailbox read that fails without stopping the clerk is an error, never
+// a plan short of the senders it could not read, and the host goes on
+// answering after it.
+func TestAccountPlanSendersReadErrorIsAnError(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	srv.Fail("/messages", 500)
+	h := NewMailHost(context.Background(), dir, sec, planConfig(srv))
+	for i := range 2 { // the second also shows the first let the host go
+		if p, err := h.accountPlan(); err == nil {
+			t.Fatalf("read %d: a failed senders read planned %+v", i, p)
+		}
+	}
+}
+
 // A sign-in the IMAP server refuses while the plan is read is that
 // account's grant death: the typed reason and no plan, and the clerk stops
 // signing in until the owner sets the account up again.

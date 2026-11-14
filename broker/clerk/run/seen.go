@@ -85,10 +85,11 @@ func loadSeen(dir string, s clerk.Sealer, slot string) (r sealedSeen, st seenSta
 		return r, seenBad
 	}
 	plain, err := s.Open(blob, seenAAD(slot))
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return r, seenBad
 	}
-	defer clear(plain)
 	if gob.NewDecoder(bytes.NewReader(plain)).Decode(&r) != nil {
 		return sealedSeen{}, seenBad
 	}
