@@ -1,6 +1,6 @@
 package main
 
-// REQ: ARC-6 (DEL-1d)
+// Tests for the owner-message paths in owner_test.go's requirement (its file marker).
 
 import (
 	"bytes"
