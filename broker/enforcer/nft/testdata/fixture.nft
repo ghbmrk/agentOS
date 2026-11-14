@@ -590,6 +590,30 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 21600s;
 	}
+	set neighaddr_guests_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neigh_guests_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neightcpaddr_guests_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
+	}
+	set neightcp_guests_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
+	}
 	set host_owner_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
@@ -638,6 +662,30 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 21600s;
 	}
+	set neighaddr_owner_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neigh_owner_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neightcpaddr_owner_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
+	}
+	set neightcp_owner_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
+	}
 	set host_household_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
@@ -685,6 +733,30 @@ table inet enforcer {
 		size 65535;
 		flags dynamic,timeout;
 		timeout 21600s;
+	}
+	set neighaddr_household_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neigh_household_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
+	set neightcpaddr_household_6 {
+		typeof ip6 saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
+	}
+	set neightcp_household_6 {
+		typeof ip6 saddr . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 432000s;
 	}
 	set t101_4 {
 		type ipv4_addr;
@@ -798,6 +870,9 @@ table inet enforcer {
 		iif "lo" accept
 		iifname "edge0" counter name "edge_in" drop
 		iifname { "gst0", "own0", "hh0" } udp dport 67 @th,1952,56 0x63825363350107 drop
+		iifname "gst0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_guests
+		iifname "own0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_owner
+		iifname "hh0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_household
 		ct state invalid drop
 		ct state established,related accept
 		icmpv6 type nd-router-advert iifname != "wan0" counter name "ra_dropped" drop
@@ -917,12 +992,43 @@ table inet enforcer {
 	}
 	chain claim_guests {
 		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_guests_4 return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_guests_6 update @claim_guests_6 { ip6 saddr . ether saddr } update @held_guests_6 { ip6 saddr } update @mac6_guests { @ll,48,48 } return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_guests_6 update @claim_guests_6 { ip6 saddr . ether saddr } update @held_guests_6 { ip6 saddr } update @mac6_guests { @ll,48,48 } goto neigh_guests
 		meta nfproto ipv6 ip6 saddr @held_guests_6 drop
 		meta nfproto ipv6 @ll,48,48 != @leased_guests drop
 		meta nfproto ipv6 @ll,48,48 @mac6_guests drop
-		meta nfproto ipv6 add @claim_guests_6 { ip6 saddr . ether saddr } add @held_guests_6 { ip6 saddr } add @mac6_guests { @ll,48,48 } return
+		meta nfproto ipv6 add @claim_guests_6 { ip6 saddr . ether saddr } add @held_guests_6 { ip6 saddr } add @mac6_guests { @ll,48,48 } goto neigh_guests
 		drop
+	}
+	chain neigh_guests {
+		ip6 saddr @neightcpaddr_guests_6 ip6 saddr . @ll,48,48 != @neightcp_guests_6 return
+		ip6 saddr @neighaddr_guests_6 ip6 saddr . @ll,48,48 != @neigh_guests_6 return
+		ct protocol tcp ct status assured update @neightcpaddr_guests_6 { ip6 saddr } update @neightcp_guests_6 { ip6 saddr . @ll,48,48 }
+		update @neighaddr_guests_6 { ip6 saddr } update @neigh_guests_6 { ip6 saddr . @ll,48,48 }
+	}
+	chain nd_guests {
+		ip6 nexthdr != ipv6-icmp drop
+		icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return
+		icmpv6 type nd-router-solicit ip6 length 8 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neightcp_guests_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neigh_guests_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neightcpaddr_guests_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neighaddr_guests_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 return
+		icmpv6 type nd-router-solicit drop
+		icmpv6 type nd-neighbor-solicit ip6 length 24 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neightcp_guests_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neigh_guests_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neightcpaddr_guests_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neighaddr_guests_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 return
+		icmpv6 type nd-neighbor-solicit drop
+		icmpv6 type nd-neighbor-advert ip6 length 24 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neightcp_guests_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neigh_guests_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neightcpaddr_guests_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neighaddr_guests_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 return
+		icmpv6 type nd-neighbor-advert drop
 	}
 	chain learn_owner {
 		ct label 0 accept
@@ -939,12 +1045,43 @@ table inet enforcer {
 	}
 	chain claim_owner {
 		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_owner_4 return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_owner_6 update @claim_owner_6 { ip6 saddr . ether saddr } update @held_owner_6 { ip6 saddr } update @mac6_owner { @ll,48,48 } return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_owner_6 update @claim_owner_6 { ip6 saddr . ether saddr } update @held_owner_6 { ip6 saddr } update @mac6_owner { @ll,48,48 } goto neigh_owner
 		meta nfproto ipv6 ip6 saddr @held_owner_6 drop
 		meta nfproto ipv6 @ll,48,48 != @leased_owner drop
 		meta nfproto ipv6 @ll,48,48 @mac6_owner drop
-		meta nfproto ipv6 add @claim_owner_6 { ip6 saddr . ether saddr } add @held_owner_6 { ip6 saddr } add @mac6_owner { @ll,48,48 } return
+		meta nfproto ipv6 add @claim_owner_6 { ip6 saddr . ether saddr } add @held_owner_6 { ip6 saddr } add @mac6_owner { @ll,48,48 } goto neigh_owner
 		drop
+	}
+	chain neigh_owner {
+		ip6 saddr @neightcpaddr_owner_6 ip6 saddr . @ll,48,48 != @neightcp_owner_6 return
+		ip6 saddr @neighaddr_owner_6 ip6 saddr . @ll,48,48 != @neigh_owner_6 return
+		ct protocol tcp ct status assured update @neightcpaddr_owner_6 { ip6 saddr } update @neightcp_owner_6 { ip6 saddr . @ll,48,48 }
+		update @neighaddr_owner_6 { ip6 saddr } update @neigh_owner_6 { ip6 saddr . @ll,48,48 }
+	}
+	chain nd_owner {
+		ip6 nexthdr != ipv6-icmp drop
+		icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return
+		icmpv6 type nd-router-solicit ip6 length 8 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neightcp_owner_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neigh_owner_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neightcpaddr_owner_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neighaddr_owner_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 return
+		icmpv6 type nd-router-solicit drop
+		icmpv6 type nd-neighbor-solicit ip6 length 24 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neightcp_owner_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neigh_owner_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neightcpaddr_owner_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neighaddr_owner_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 return
+		icmpv6 type nd-neighbor-solicit drop
+		icmpv6 type nd-neighbor-advert ip6 length 24 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neightcp_owner_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neigh_owner_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neightcpaddr_owner_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neighaddr_owner_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 return
+		icmpv6 type nd-neighbor-advert drop
 	}
 	chain learn_household {
 		ct label 0 accept
@@ -961,12 +1098,43 @@ table inet enforcer {
 	}
 	chain claim_household {
 		meta nfproto ipv4 @nh,96,32 . @ll,48,48 @lease_household_4 return
-		meta nfproto ipv6 ip6 saddr . ether saddr @claim_household_6 update @claim_household_6 { ip6 saddr . ether saddr } update @held_household_6 { ip6 saddr } update @mac6_household { @ll,48,48 } return
+		meta nfproto ipv6 ip6 saddr . ether saddr @claim_household_6 update @claim_household_6 { ip6 saddr . ether saddr } update @held_household_6 { ip6 saddr } update @mac6_household { @ll,48,48 } goto neigh_household
 		meta nfproto ipv6 ip6 saddr @held_household_6 drop
 		meta nfproto ipv6 @ll,48,48 != @leased_household drop
 		meta nfproto ipv6 @ll,48,48 @mac6_household drop
-		meta nfproto ipv6 add @claim_household_6 { ip6 saddr . ether saddr } add @held_household_6 { ip6 saddr } add @mac6_household { @ll,48,48 } return
+		meta nfproto ipv6 add @claim_household_6 { ip6 saddr . ether saddr } add @held_household_6 { ip6 saddr } add @mac6_household { @ll,48,48 } goto neigh_household
 		drop
+	}
+	chain neigh_household {
+		ip6 saddr @neightcpaddr_household_6 ip6 saddr . @ll,48,48 != @neightcp_household_6 return
+		ip6 saddr @neighaddr_household_6 ip6 saddr . @ll,48,48 != @neigh_household_6 return
+		ct protocol tcp ct status assured update @neightcpaddr_household_6 { ip6 saddr } update @neightcp_household_6 { ip6 saddr . @ll,48,48 }
+		update @neighaddr_household_6 { ip6 saddr } update @neigh_household_6 { ip6 saddr . @ll,48,48 }
+	}
+	chain nd_household {
+		ip6 nexthdr != ipv6-icmp drop
+		icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return
+		icmpv6 type nd-router-solicit ip6 length 8 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neightcp_household_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr . @th,80,48 @neigh_household_6 return
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neightcpaddr_household_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 ip6 saddr @neighaddr_household_6 drop
+		icmpv6 type nd-router-solicit ip6 length 16 @th,64,16 0x0101 return
+		icmpv6 type nd-router-solicit drop
+		icmpv6 type nd-neighbor-solicit ip6 length 24 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neightcp_household_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr . @th,208,48 @neigh_household_6 return
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neightcpaddr_household_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 ip6 saddr @neighaddr_household_6 drop
+		icmpv6 type nd-neighbor-solicit ip6 length 32 @th,192,16 0x0101 return
+		icmpv6 type nd-neighbor-solicit drop
+		icmpv6 type nd-neighbor-advert ip6 length 24 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neightcp_household_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr . @th,208,48 @neigh_household_6 return
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neightcpaddr_household_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 icmpv6 taddr @neighaddr_household_6 drop
+		icmpv6 type nd-neighbor-advert ip6 length 32 @th,192,16 0x0201 return
+		icmpv6 type nd-neighbor-advert drop
 	}
 	chain forward_live {
 		ct direction original iifname "wan0" drop
@@ -1243,5 +1411,116 @@ table arp enforcer_arp {
 	chain input {
 		type filter hook input priority filter; policy accept;
 		iifname "edge0" arp operation request arp daddr ip != 10.60.0.1 drop
+	}
+}
+
+table netdev enforcer_neigh {
+	set lease_guests_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leaseaddr_guests_4 {
+		typeof @nh,96,32;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set lease_owner_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leaseaddr_owner_4 {
+		typeof @nh,96,32;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set lease_household_4 {
+		typeof @nh,96,32 . @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	set leaseaddr_household_4 {
+		typeof @nh,96,32;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 43200s;
+	}
+	chain arp_guests {
+		type filter hook ingress device "gst0" priority filter; policy accept;
+		meta protocol arp @nh,112,32 . @nh,64,48 @lease_guests_4 accept
+		meta protocol arp @nh,112,32 @leaseaddr_guests_4 drop
+	}
+	chain ack_guests {
+		type filter hook egress device "gst0" priority filter; policy accept;
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_guests_4 { @th,192,32 timeout 120s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 120s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_guests_4 { @th,192,32 timeout 149s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 149s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_guests_4 { @th,192,32 timeout 223s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 223s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 334-499 update @leaseaddr_guests_4 { @th,192,32 timeout 334s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 334s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 500-749 update @leaseaddr_guests_4 { @th,192,32 timeout 500s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 500s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 750-1124 update @leaseaddr_guests_4 { @th,192,32 timeout 750s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 750s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1125-1686 update @leaseaddr_guests_4 { @th,192,32 timeout 1125s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 1125s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1687-2529 update @leaseaddr_guests_4 { @th,192,32 timeout 1687s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 1687s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 2530-3793 update @leaseaddr_guests_4 { @th,192,32 timeout 2530s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 2530s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 3794-5689 update @leaseaddr_guests_4 { @th,192,32 timeout 3794s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 3794s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 5690-8533 update @leaseaddr_guests_4 { @th,192,32 timeout 5690s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 5690s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 8534-12799 update @leaseaddr_guests_4 { @th,192,32 timeout 8534s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 8534s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 12800-19199 update @leaseaddr_guests_4 { @th,192,32 timeout 12800s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 12800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 19200-28799 update @leaseaddr_guests_4 { @th,192,32 timeout 19200s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 19200s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 28800-43199 update @leaseaddr_guests_4 { @th,192,32 timeout 28800s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 28800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 43200 update @leaseaddr_guests_4 { @th,192,32 timeout 43200s } update @lease_guests_4 { @th,192,32 . @th,288,48 timeout 43200s }
+	}
+	chain arp_owner {
+		type filter hook ingress device "own0" priority filter; policy accept;
+		meta protocol arp @nh,112,32 . @nh,64,48 @lease_owner_4 accept
+		meta protocol arp @nh,112,32 @leaseaddr_owner_4 drop
+	}
+	chain ack_owner {
+		type filter hook egress device "own0" priority filter; policy accept;
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_owner_4 { @th,192,32 timeout 120s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 120s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_owner_4 { @th,192,32 timeout 149s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 149s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_owner_4 { @th,192,32 timeout 223s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 223s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 334-499 update @leaseaddr_owner_4 { @th,192,32 timeout 334s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 334s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 500-749 update @leaseaddr_owner_4 { @th,192,32 timeout 500s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 500s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 750-1124 update @leaseaddr_owner_4 { @th,192,32 timeout 750s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 750s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1125-1686 update @leaseaddr_owner_4 { @th,192,32 timeout 1125s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 1125s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1687-2529 update @leaseaddr_owner_4 { @th,192,32 timeout 1687s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 1687s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 2530-3793 update @leaseaddr_owner_4 { @th,192,32 timeout 2530s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 2530s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 3794-5689 update @leaseaddr_owner_4 { @th,192,32 timeout 3794s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 3794s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 5690-8533 update @leaseaddr_owner_4 { @th,192,32 timeout 5690s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 5690s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 8534-12799 update @leaseaddr_owner_4 { @th,192,32 timeout 8534s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 8534s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 12800-19199 update @leaseaddr_owner_4 { @th,192,32 timeout 12800s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 12800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 19200-28799 update @leaseaddr_owner_4 { @th,192,32 timeout 19200s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 19200s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 28800-43199 update @leaseaddr_owner_4 { @th,192,32 timeout 28800s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 28800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 43200 update @leaseaddr_owner_4 { @th,192,32 timeout 43200s } update @lease_owner_4 { @th,192,32 . @th,288,48 timeout 43200s }
+	}
+	chain arp_household {
+		type filter hook ingress device "hh0" priority filter; policy accept;
+		meta protocol arp @nh,112,32 . @nh,64,48 @lease_household_4 accept
+		meta protocol arp @nh,112,32 @leaseaddr_household_4 drop
+	}
+	chain ack_household {
+		type filter hook egress device "hh0" priority filter; policy accept;
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 120-148 update @leaseaddr_household_4 { @th,192,32 timeout 120s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 120s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 149-222 update @leaseaddr_household_4 { @th,192,32 timeout 149s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 149s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 223-333 update @leaseaddr_household_4 { @th,192,32 timeout 223s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 223s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 334-499 update @leaseaddr_household_4 { @th,192,32 timeout 334s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 334s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 500-749 update @leaseaddr_household_4 { @th,192,32 timeout 500s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 500s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 750-1124 update @leaseaddr_household_4 { @th,192,32 timeout 750s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 750s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1125-1686 update @leaseaddr_household_4 { @th,192,32 timeout 1125s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 1125s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 1687-2529 update @leaseaddr_household_4 { @th,192,32 timeout 1687s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 1687s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 2530-3793 update @leaseaddr_household_4 { @th,192,32 timeout 2530s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 2530s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 3794-5689 update @leaseaddr_household_4 { @th,192,32 timeout 3794s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 3794s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 5690-8533 update @leaseaddr_household_4 { @th,192,32 timeout 5690s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 5690s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 8534-12799 update @leaseaddr_household_4 { @th,192,32 timeout 8534s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 8534s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 12800-19199 update @leaseaddr_household_4 { @th,192,32 timeout 12800s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 12800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 19200-28799 update @leaseaddr_household_4 { @th,192,32 timeout 19200s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 19200s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 28800-43199 update @leaseaddr_household_4 { @th,192,32 timeout 28800s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 28800s }
+		udp sport 67 udp dport 68 @th,64,24 0x020106 @th,192,32 != 0 @th,1952,32 0x63825363 @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 43200 update @leaseaddr_household_4 { @th,192,32 timeout 43200s } update @lease_household_4 { @th,192,32 . @th,288,48 timeout 43200s }
 	}
 }

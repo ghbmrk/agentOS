@@ -362,6 +362,16 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 		HeldSet("owner"):           {el(`"fd10:10::2"`, 50), el(`"10.10.0.2"`, 50), el(`"fe80::1%eth0"`, 50), el(`"::ffff:10.10.0.2"`, 50)},
 		ClaimSet("household"):      {el(`{"concat": ["fd10:20::2", "02:00:00:00:00:02"]}`, 50), el(`{"concat": ["10.20.0.2", "02:00:00:00:00:02"]}`, 50), el(`"fd10:20::3"`, 50)},
 		MACSet("household"):        {el(`2199023255554`, 50), el(`"02:00:00:00:00:02"`, 50), el(`2199023255555`, 21601)},
+		// Neighbour holds (#4686): each writes its address set again.
+		NeighSet("household"): {
+			el(`{"concat": ["fd10:20::2", 2199023255554]}`, 50),
+			el(`{"concat": ["fd10:20::3", 2199023255554]}`, 21601), // past ClaimTimeout
+			el(`{"concat": ["10.20.0.2", 2199023255554]}`, 50),
+			el(`{"concat": ["fd10:20::4", "02:00:00:00:00:02"]}`, 50),
+			el(`{"concat": ["fd10:20::5", 281474976710656]}`, 50),
+		},
+		NeighAddrSet("household"): {el(`"fd10:20::9"`, 50)},
+		NeighTCPSet("household"):  {el(`{"concat": ["fd10:20::2", 2199023255554]}`, 400000), el(`{"concat": ["fd10:20::6", 2199023255554]}`, 432001)},
 		// 10.30.0.2 is 169738242; 02:00:00:00:00:01 is 2199023255553.
 		LeaseSet("guests"): {
 			el(`{"concat": [169738242, 2199023255553]}`, 100),
@@ -407,15 +417,23 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 	want := strings.Join([]string{
 		"add element inet enforcer claim_household_6 { fd10:20::2 . 02:00:00:00:00:02 expires 50s }",
 		"add element inet enforcer lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 60s, 0x0a0a0005 . 0x02000000000a expires 30s }",
+		"add element netdev enforcer_neigh lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 60s, 0x0a0a0005 . 0x02000000000a expires 30s }",
 		"add element inet enforcer leaseaddr_owner_4 { 0x0a0a0002 expires 60s, 0x0a0a0005 expires 30s }",
+		"add element netdev enforcer_neigh leaseaddr_owner_4 { 0x0a0a0002 expires 60s, 0x0a0a0005 expires 30s }",
 		"add element inet enforcer leased_owner { 0x02000000000a expires 60s }",
 		"add element inet enforcer held_owner_6 { fd10:10::2 expires 50s }",
 		"add element inet enforcer host_guests_4 { 123 . 10.30.0.2 . 10.30.0.2 . 02:00:00:00:00:01 expires 100s, 124 . 10.30.0.2 . 10.30.0.2 . 02:00:00:00:00:01 timeout 400000s expires 400000s }",
 		"add element inet enforcer host_household_6 { 7 . fd10:20::2 . fd10:20::2 . 02:00:00:00:00:02 expires 3600s }",
 		"add element inet enforcer lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s }",
+		"add element netdev enforcer_neigh lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s }",
 		"add element inet enforcer leaseaddr_guests_4 { 0x0a1e0002 expires 100s }",
+		"add element netdev enforcer_neigh leaseaddr_guests_4 { 0x0a1e0002 expires 100s }",
 		"add element inet enforcer leased_guests { 0x020000000001 expires 43200s }",
 		"add element inet enforcer mac6_household { 0x020000000002 expires 50s }",
+		"add element inet enforcer neigh_household_6 { fd10:20::2 . 0x020000000002 expires 50s }",
+		"add element inet enforcer neighaddr_household_6 { fd10:20::2 expires 50s }",
+		"add element inet enforcer neightcp_household_6 { fd10:20::2 . 0x020000000002 expires 400000s }",
+		"add element inet enforcer neightcpaddr_household_6 { fd10:20::2 expires 400000s }",
 	}, "\n") + "\n"
 	if extra != want {
 		t.Errorf("carried:\n%s\nwant:\n%s", extra, want)
@@ -819,6 +837,12 @@ func dhcpMsg(t *testing.T, typ byte, xid uint32, hw string, ciaddr netip.Addr, o
 func dhcpAsk(t *testing.T, h *home, x *host, hw string, msg []byte, to string, wait time.Duration) []byte {
 	t.Helper()
 	h.in(x, "ip", "link", "set", "eth0", "address", hw)
+	// x's address can be leased to another of the hardware addresses it
+	// takes, and the enforcer then drops its ARP (#4686), so each end's
+	// entry for the other is fixed; a new hardware address flushes x's.
+	enf := strings.Fields(run(t, "ip", "-o", "link", "show", "dev", segIfc("guest")))
+	run(t, "ip", "neigh", "replace", segAddr("guest", 0), "lladdr", hw, "dev", segIfc("guest"), "nud", "permanent")
+	h.in(x, "ip", "neigh", "replace", enfAddr("guest"), "lladdr", enf[slices.Index(enf, "link/ether")+1], "dev", "eth0", "nud", "permanent")
 	var got []byte
 	within(t, x, func() {
 		lc := onDevice("eth0")
@@ -917,6 +941,17 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 	if !strings.Contains(got, shortElem+" expires ") || !strings.Contains(got, shortLeased+" expires ") {
 		t.Errorf("dnsmasq's shorter lease of %s to %s was not leased", b, short)
 	}
+	// NeighTable's own copy reads the same ACKs as they leave (#4686).
+	for _, ls := range []struct {
+		a  netip.Addr
+		hw net.HardwareAddr
+	}{{a, hwFull}, {b, hwShort}} {
+		_, lok := elementIn(t, "netdev "+NeighTable, LeaseSet("guests"), addrInt(ls.a.String()), hwInt(ls.hw))
+		_, aok := elementIn(t, "netdev "+NeighTable, LeaseAddrSet("guests"), addrInt(ls.a.String()))
+		if !lok || !aok {
+			t.Errorf("dnsmasq leased %s to %s, and the neighbour table's lease sets hold it %v, its address %v", ls.a, ls.hw, lok, aok)
+		}
+	}
 }
 
 // element is the seconds left of set's element key (an integer, or a
@@ -924,6 +959,12 @@ func TestSnoopReadsDnsmasqACK(t *testing.T) {
 // it. An update of an element sets its time left, not the timeout nft
 // lists for it.
 func element(t *testing.T, set string, key ...uint64) (int64, bool) {
+	t.Helper()
+	return elementIn(t, "inet "+Table, set, key...)
+}
+
+// elementIn is element of a set in table (its family and name).
+func elementIn(t *testing.T, table, set string, key ...uint64) (int64, bool) {
 	t.Helper()
 	var doc struct {
 		Nftables []struct {
@@ -937,7 +978,7 @@ func element(t *testing.T, set string, key ...uint64) (int64, bool) {
 			} `json:"set"`
 		} `json:"nftables"`
 	}
-	if err := json.Unmarshal([]byte(run(t, "nft", "-j", "list", "set", "inet", Table, set)), &doc); err != nil {
+	if err := json.Unmarshal([]byte(run(t, "nft", append(append([]string{"-j", "list", "set"}, strings.Fields(table)...), set)...)), &doc); err != nil {
 		t.Fatal(err)
 	}
 	for _, o := range doc.Nftables {
@@ -1107,10 +1148,14 @@ func TestSeedRendersLeases(t *testing.T) {
 	})
 	want := strings.Join([]string{
 		"add element inet enforcer lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s, 0x0a1e0003 . 0x020000000001 expires 200s, 0x0a1e0003 . 0x02000000000a expires 300s }",
+		"add element netdev enforcer_neigh lease_guests_4 { 0x0a1e0002 . 0x020000000001 expires 100s, 0x0a1e0003 . 0x020000000001 expires 200s, 0x0a1e0003 . 0x02000000000a expires 300s }",
 		"add element inet enforcer leaseaddr_guests_4 { 0x0a1e0002 expires 100s, 0x0a1e0003 expires 300s }",
+		"add element netdev enforcer_neigh leaseaddr_guests_4 { 0x0a1e0002 expires 100s, 0x0a1e0003 expires 300s }",
 		"add element inet enforcer leased_guests { 0x020000000001 expires 200s, 0x02000000000a expires 300s }",
 		"add element inet enforcer lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 43200s }",
+		"add element netdev enforcer_neigh lease_owner_4 { 0x0a0a0002 . 0x02000000000a expires 43200s }",
 		"add element inet enforcer leaseaddr_owner_4 { 0x0a0a0002 expires 43200s }",
+		"add element netdev enforcer_neigh leaseaddr_owner_4 { 0x0a0a0002 expires 43200s }",
 		"add element inet enforcer leased_owner { 0x02000000000a expires 43200s }",
 	}, "\n") + "\n"
 	if got != want {
