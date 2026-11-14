@@ -428,3 +428,222 @@ func TestPaddedMailsDoNotStopTheRead(t *testing.T) {
 		})
 	}
 }
+
+// loadSenders closes the record's file once read (#5325, senders.go's
+// deferred Close): each fd still open on it right after a load is one the
+// load left, read from /proc/self/fd as TestLoadingTheSeenRecordClosesItsFile
+// reads it, so the GC finalizing a leaked file cannot hide the leak.
+func TestLoadingTheSendersRecordClosesItsFile(t *testing.T) {
+	dir := shortDir(t)
+	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": day(0).Unix()}}}
+	if err := saveSenders(dir, testSealer(), "slot", rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, sendersFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func() bool {
+		fds, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fd := range fds {
+			if to, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && to == path {
+				return true
+			}
+		}
+		return false
+	}
+	for range 64 {
+		if got := loadSenders(dir, testSealer(), "slot"); got.Rec.Senders["a@one.test"] != day(0).Unix() {
+			t.Fatalf("loadSenders = %+v", got)
+		}
+		if held() {
+			t.Fatalf("loadSenders left %s open", path)
+		}
+	}
+}
+
+// A record another uid could read or write is not the clerk's own and
+// loads as an empty one (#5325, senders.go's privfile check), however well
+// it is sealed; made the clerk's own again, it loads.
+func TestASendersRecordOthersCanReachDoesNotLoad(t *testing.T) {
+	dir := shortDir(t)
+	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": day(0).Unix()}}}
+	if err := saveSenders(dir, testSealer(), "slot", rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, sendersFile)
+	for _, c := range []struct {
+		mode os.FileMode
+		load bool
+	}{{0o640, false}, {0o606, false}, {0o600, true}} {
+		if err := os.Chmod(path, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		if got := loadSenders(dir, testSealer(), "slot"); (got.Rec.Senders != nil) != c.load {
+			t.Fatalf("mode %v: loaded %+v; want loaded %v", c.mode, got, c.load)
+		}
+	}
+}
+
+// A sealed record past maxSendersRec is not saved, and the one saved
+// before stays (#5325, senders.go's size bound on save).
+func TestASendersRecordPastItsSizeIsNotSaved(t *testing.T) {
+	dir := shortDir(t)
+	small := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": day(0).Unix()}}}
+	if err := saveSenders(dir, testSealer(), "slot", small, nil); err != nil {
+		t.Fatal(err)
+	}
+	big := sealedSenders{Over: true, Rec: inbox.SendersRecord{Senders: map[string]int64{}}}
+	for i := 0; i*48 < maxSendersRec+maxSendersRec/4; i++ {
+		big.Rec.Senders[fmt.Sprintf("%040d@big.test", i)] = int64(i)
+	}
+	if err := saveSenders(dir, testSealer(), "slot", big, nil); err == nil {
+		t.Fatal("a record past its bound was saved")
+	}
+	fi, err := os.Stat(filepath.Join(dir, sendersFile))
+	if err != nil || fi.Size() > maxSendersRec {
+		t.Fatalf("the record on disk: %v, %v", fi, err)
+	}
+	if got := loadSenders(dir, testSealer(), "slot"); got.Over || got.Rec.Senders["a@one.test"] != day(0).Unix() {
+		t.Fatalf("after a refused save the record is %+v; want the one before", got)
+	}
+}
+
+// history gives one Delivery per sender, sorted by sender like the
+// senders and contacts it gives beside it (#5325, senders.go's sort of h),
+// whatever order the record's map gives them in.
+func TestHistoryIsSortedBySender(t *testing.T) {
+	r := inbox.SendersRecord{Senders: map[string]int64{}, Sent: map[string]bool{}}
+	for i := range 32 {
+		r.Senders[fmt.Sprintf("s%02d@many.test", 31-i)] = day(i).Unix()
+		r.Sent[fmt.Sprintf("c%02d@many.test", i)] = true
+	}
+	h, known, contacts := history(r)
+	if len(h) != 32 || len(known) != 32 || len(contacts) != 32 {
+		t.Fatalf("history %d, known %d, contacts %d; want 32 each", len(h), len(known), len(contacts))
+	}
+	for i, d := range h {
+		if d.From != known[i] || d.Folder != "inbox" || d.Date != time.Unix(r.Senders[d.From], 0).UTC().Format(time.DateOnly) {
+			t.Fatalf("history[%d] = %+v; want %s's earliest arrival in inbox", i, d, known[i])
+		}
+	}
+	if !slices.IsSorted(known) || !slices.IsSorted(contacts) {
+		t.Fatalf("known %v, contacts %v; want each sorted", known, contacts)
+	}
+}
+
+// One step of the senders read, run as the worker runs it (h.mu held, no
+// worker beside it): it keeps its record and the world's fields for the
+// account it read, says why a step failed until one reads, stops the clerk
+// on a refused sign-in, marks itself in flight while it reads, and reads
+// nothing while the clerk is stopped or there is no account (#5325,
+// senders.go's readSenders).
+func TestASendersStepKeepsWhatItRead(t *testing.T) {
+	type told struct{ more, full bool }
+	host := func(t *testing.T, srv *imaptest.Server, password string) (*MailHost, *[]told) {
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if srv != nil {
+			if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, password); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var steps []told
+		c := mailConfig()
+		c.stepped = func(more, full bool) { steps = append(steps, told{more, full}) }
+		// No worker: World is set, so the test runs each step itself.
+		return &MailHost{ctx: t.Context(), dir: dir, sec: sec, cfg: c, kick: make(chan struct{}, 1)}, &steps
+	}
+	step := func(h *MailHost) bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.readSenders()
+	}
+	noRecord := func(t *testing.T, h *MailHost) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(h.dir, sendersFile)); !os.IsNotExist(err) {
+			t.Fatalf("a senders record was written: %v", err)
+		}
+	}
+
+	t.Run("a step that reads", func(t *testing.T) {
+		srv := imaptest.Start(t)
+		srv.DeliverAt("INBOX", day(0), mailFrom("a@one.test", "<a1@one.test>"))
+		h, steps := host(t, srv, imaptest.Password)
+		var during []bool
+		srv.AfterFetch(func(string) {
+			h.mu.Lock()
+			during = append(during, h.stepping != nil)
+			h.mu.Unlock()
+		})
+		if step(h) {
+			t.Fatal("a one-mail mailbox has more to read")
+		}
+		srv.AfterFetch(nil)
+		if len(during) == 0 || slices.Contains(during, false) {
+			t.Fatalf("in flight while it read: %v; want marked at every fetch", during)
+		}
+		if !slices.Equal(*steps, []told{{false, true}}) {
+			t.Fatalf("steps told %v", *steps)
+		}
+		if h.ws.sendersNow() != sendersFull || h.srec == nil || h.srec.Rec.Senders["a@one.test"] == 0 || h.stepping != nil {
+			t.Fatalf("after the step: state %v, record %+v, stepping %v", h.ws.sendersNow(), h.srec, h.stepping)
+		}
+		if w := h.worldAt(-1); !slices.Equal(w.KnownSenders, []string{"a@one.test"}) {
+			t.Fatalf("the world's senders after the step: %v", w.KnownSenders)
+		}
+	})
+
+	t.Run("a step that fails, then one that reads", func(t *testing.T) {
+		srv := imaptest.Start(t)
+		srv.DeliverAt("INBOX", day(0), mailFrom("a@one.test", "<a1@one.test>"))
+		h, steps := host(t, srv, imaptest.Password)
+		srv.FailList("INBOX", true)
+		step(h)
+		if h.sendersWhy == "" || h.ws.sendersNow() != sendersFailed || h.stop != nil {
+			t.Fatalf("after a failed step: why %q, state %v, stop %v", h.sendersWhy, h.ws.sendersNow(), h.stop)
+		}
+		srv.FailList("INBOX", false)
+		step(h)
+		if h.sendersWhy != "" || h.ws.sendersNow() != sendersFull {
+			t.Fatalf("after a good step: why %q, state %v; want none and full", h.sendersWhy, h.ws.sendersNow())
+		}
+		if len(*steps) != 2 {
+			t.Fatalf("steps told %v", *steps)
+		}
+	})
+
+	t.Run("a refused sign-in stops the clerk", func(t *testing.T) {
+		srv := imaptest.Start(t)
+		h, _ := host(t, srv, imaptest.Password+"-not")
+		step(h)
+		if !stops(h.stop) || !strings.HasPrefix(h.why, "I stopped working in your mailbox: ") {
+			t.Fatalf("after a refused sign-in: stop %v, why %q", h.stop, h.why)
+		}
+	})
+
+	t.Run("a stopped clerk reads nothing", func(t *testing.T) {
+		srv := imaptest.Start(t)
+		srv.DeliverAt("INBOX", day(0), mailFrom("a@one.test", "<a1@one.test>"))
+		h, steps := host(t, srv, imaptest.Password)
+		h.stop = errors.New("synthetic: stopped until setup")
+		if step(h) || len(*steps) != 0 || len(srv.Logins()) != 0 {
+			t.Fatalf("a stopped clerk stepped: told %v, logins %v", *steps, srv.Logins())
+		}
+		noRecord(t, h)
+	})
+
+	t.Run("no account reads nothing", func(t *testing.T) {
+		h, steps := host(t, nil, "")
+		if step(h) || len(*steps) != 0 || h.sendersWhy != "" || h.ws.sendersNow() != sendersReading {
+			t.Fatalf("with no account: told %v, why %q, state %v", *steps, h.sendersWhy, h.ws.sendersNow())
+		}
+		noRecord(t, h)
+	})
+}
