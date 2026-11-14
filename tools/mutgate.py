@@ -635,12 +635,12 @@ def resolve_record(pkg, entries, keys):
         where = f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r}"
         if not lines:
             problems.append(f"{where} names no statement at the head: the statement or the func around it "
-                            "changed; read the proof again and rewrite it with `mutgate.py waive` at its current line "
-                            "(which replaces it), or delete its line from the record")
+                            "changed; delete its line from the record, read the proof again, and if it holds add it "
+                            "back with `mutgate.py waive` at its current line")
         elif len(lines) != n:
             problems.append(f"{where} was written for occurrence {i} of {n}, and the head has {len(lines)}: "
-                            "read the proof again and rewrite it with `mutgate.py waive` at its current line (which "
-                            "replaces it), or delete its line from the record")
+                            "delete its line from the record, read the proof again, and if it holds add it back with "
+                            "`mutgate.py waive` at its current line")
         elif (f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"]) in found:
             problems.append(f"{where} names the same line and mutant as another entry")
         else:
@@ -716,23 +716,22 @@ def cmd_waive(args):
                 print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
                       file=sys.stderr)
                 return 1
-            # A site already in the record is rewritten, not doubled; a stale entry for the same statement
-            # and mutant in a file written here (its func or count changed) is the one being rewritten.
+            # waive never guesses which stale entry a new one rewrites (L3 and UX on #5780): while a file it
+            # writes holds one, it writes nothing and names each, for the builder to delete by hand.
+            if stale := [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys)[1]]:
+                for e in stale:
+                    print(f"mutgate: broker/{pkg}/{RECORD} holds a stale entry for {e['file']} {e['func'] or '(top level)'} "
+                          f"{e['stmt'][e['at']]!r} ({e['mutant']}, occurrence {e['occurrence'][0]} of "
+                          f"{e['occurrence'][1]}): delete its line, then run waive again", file=sys.stderr)
+                return 1
+            # The same site and mutant written again is rewritten, not doubled.
             have = {(e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) for e in new}
-            same = {(e["file"], e["mutant"], e["func"], tuple(e["stmt"]), e["at"]) for e in new}
-            stale = [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys)[1]]
-            replaced = [e for e in stale if (e["file"], e["mutant"], e["func"], tuple(e["stmt"]), e["at"]) in same]
-            kept = [e for e in entries if (e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) not in have
-                    and not any(e is r for r in replaced)]
+            kept = [e for e in entries if (e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) not in have]
             head = [r for r in (text or "").split("\n") if r.lstrip().startswith("#")] or [
                 f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py."]
             body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"], e["mutant"]))
             (BROKER / pkg / RECORD).write_text("\n".join(head + [json.dumps(e, ensure_ascii=False) for e in body]) + "\n")
-            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written ({len(replaced)} replacing stale ones), {len(body)} in all")
-            for e in stale:
-                if not any(e is r for r in replaced):
-                    print(f"mutgate: still stale: {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r} "
-                          f"({e['mutant']}): waive it at its current line, or delete its line", file=sys.stderr)
+            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {len(body)} in all")
     return 0
 
 

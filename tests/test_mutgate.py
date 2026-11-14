@@ -2380,24 +2380,44 @@ class Record(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertIn("names no statement at the head", r.stderr)
 
-    def test_waive_replaces_the_stale_entry_it_rewrites(self):
-        # L3 and UX on #5780: following the stale message must turn the gate green, not add a second entry.
+    def test_waive_writes_nothing_while_a_stale_entry_remains(self):
+        # L3 and UX on #5780: waive never guesses which stale entry a new one rewrites. Each way an entry goes
+        # stale (an edit elsewhere in the func, the statement edited, the func renamed, a twin's count) leaves
+        # the record untouched and names every stale entry; deleting those lines and waiving again goes green.
+        twins = "package netguard\n\nfunc f(x int) int {\n\tx++\n\tg(x)\n\tx++\n\tg(x)\n\treturn x\n}\n\nfunc g(int) {}\n"
+        for src, lines, edit, again in (
+                (self.SRC, (8, 11), lambda t: t.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2"), (9, 12)),
+                (self.SRC, (8, 11), lambda t: t.replace("\t}\n\tif x > 1 {\n\t\treturn 3", "\t}\n\tif x >= 1 {\n\t\treturn 3"), (8, 11)),
+                (self.SRC, (8, 11), lambda t: t.replace("func f(", "func h("), (8, 11)),
+                (twins, (5, 7), lambda t: t.replace("\treturn x\n", "\tx--\n\treturn x\n"), (5, 7))):
+            with self.subTest(edit(src)), tempfile.TemporaryDirectory() as d:
+                run = self.repo(d, src, src)
+                for n in lines:
+                    rec = self.waive(d, run, n, reason=f"proof number {n} for this site, read by review")
+                (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(edit(src))
+                self.assertEqual(run("records", "netguard").returncode, 1)
+                (pathlib.Path(d) / "w.txt").write_text(f"Mutant-equivalent: broker/netguard/a.go:{again[0]} a fresh proof read again\n")
+                r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#5780")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(r.stderr.count("holds a stale entry"), 2, r.stderr)
+                path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+                self.assertEqual(path.read_text(), rec)  # no reviewed proof dropped, none added
+                path.write_text("\n".join(l for l in rec.split("\n") if not l.startswith("{")) + "\n")
+                for n in again:
+                    self.waive(d, run, n, reason=f"proof number {n} for this site, read again")
+                r = run("records", "netguard")
+                self.assertEqual((r.returncode, len(r.stdout.strip().split("\n"))), (0, 2), r.stdout + r.stderr)
+
+    def test_a_method_is_named_by_its_receiver_type(self):
+        # Potency on #5780: generic receivers (IndexExpr, IndexListExpr) name the type, not its parameters.
+        src = ("package netguard\n\ntype T[K any] struct{ n int }\n\ntype U[K, V any] struct{ n int }\n\n"
+               "func (t *T[K]) m() {\n\tt.n++\n}\n\nfunc (u U[K, V]) m() {\n\tu.n++\n}\n\nfunc (t2 *T[K]) p() {\n\tt2.n--\n}\n")
         with tempfile.TemporaryDirectory() as d:
-            run = self.repo(d, self.SRC, self.SRC)
+            run = self.repo(d, src, src)
             self.waive(d, run, 8)
-            self.waive(d, run, 11, reason="x is returned unchanged, so no caller can tell the line apart")
-            edited = self.SRC.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2")
-            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(edited)
-            self.assertEqual(run("records", "netguard").returncode, 1)
-            rec = self.waive(d, run, 9)
-            self.assertEqual(len([l for l in rec.split("\n") if l.startswith("{")]), 2, rec)
-            r = run("records", "netguard")
-            self.assertEqual(r.returncode, 1, r.stdout)  # the other entry in f is stale too, and is named
-            self.assertEqual(r.stderr.count("names no statement"), 1, r.stderr)
-            self.waive(d, run, 12, reason="x is returned unchanged, so no caller can tell the line apart")
-            r = run("records", "netguard")
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(len(r.stdout.strip().split("\n")), 2, r.stdout)
+            self.waive(d, run, 12)
+            rec = self.waive(d, run, 16)
+            self.assertEqual(sorted(json.loads(l)["func"] for l in rec.split("\n") if l.startswith("{")), ["T.m", "T.p", "U.m"])
 
     def test_twins_are_told_apart_by_occurrence(self):
         src = "package netguard\n\nfunc f(x int) int {\n\tx++\n\tg(x)\n\tx++\n\tg(x)\n\treturn x\n}\n\nfunc g(int) {}\n"
@@ -2437,6 +2457,8 @@ class Record(unittest.TestCase):
                     r = run("records", "netguard")
                     self.assertEqual(r.returncode, 1, r.stdout)
                     self.assertIn(mutgate.RECORD, r.stderr)
+                    # Refused as malformed, not merely stale (Potency on #5780).
+                    self.assertTrue("is not an entry of" in r.stderr or "is not one JSON object" in r.stderr, r.stderr)
             path.unlink()
             (pathlib.Path(d) / "elsewhere").write_text(json.dumps(good) + "\n")
             path.symlink_to(pathlib.Path(d) / "elsewhere")
