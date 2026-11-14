@@ -3,6 +3,7 @@ package page
 // REQ: NET-4, NET-6, HW-10
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -389,5 +390,22 @@ func TestNewRecoveryChallengeRefusals(t *testing.T) {
 	w = g.do(http.MethodPost, "/challenge", map[string]string{"action": ActNewRecovery})
 	if w.Code != http.StatusNotFound || strings.Count(w.Body.String(), "{") != 1 || strings.Contains(w.Body.String(), "challenge") {
 		t.Errorf("a replacement waiting: %d %s", w.Code, w.Body)
+	}
+}
+
+// CH-9: the enrolment step serves each certificate authority the daemon
+// gave the page, byte for byte, and a certificate it was not given is not
+// found rather than an empty answer the phone would try to install
+// (ENF-c-f3b, #5041).
+func TestEnrolCertificateNotGivenIsNotFound(t *testing.T) {
+	g := newEnrolRig(t)
+	w := g.do(http.MethodGet, "/enrol/enforcer.crt", nil)
+	if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), g.cert.Root) ||
+		w.Header().Get("Content-Type") != "application/x-x509-ca-cert" {
+		t.Errorf("enforcer certificate: %d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	if w := g.do(http.MethodGet, "/enrol/core.crt", nil); w.Code != http.StatusNotFound ||
+		w.Header().Get("Content-Type") == "application/x-x509-ca-cert" {
+		t.Errorf("core certificate the page was not given: %d %q", w.Code, w.Header().Get("Content-Type"))
 	}
 }
