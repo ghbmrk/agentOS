@@ -959,6 +959,33 @@ class StandinTest(unittest.TestCase):
             with self.subTest(old):
                 self.assertNotEqual(self.exits(self.init.replace(old, new)), self.exits(self.init))
 
+    def loop(self, init, cmds):
+        """Run the init's command loop on CMDS with its exits stubbed: each prints EXIT and ends the
+        shell, as a real `-f` exit never returns; mor_clear prints CLEAR. Nothing real is called."""
+        body = re.search(r"^while :; do\n.*?^done$", init, re.S | re.M).group(0)
+        stubs = "".join(f'{t}() {{ echo "EXIT {t}"; exit 0; }}\n' for t in ("reboot", "poweroff", "halt"))
+        stubs += 'mor_clear() { echo CLEAR; }\nsync() { :; }\ndd() { :; }\nplant() { :; }\nMOR=/nonexistent\n'
+        with tempfile.TemporaryDirectory() as d:  # the end-of-input branch execs poweroff by PATH
+            pathlib.Path(d, "poweroff").write_text("#!/bin/sh\necho 'EXIT poweroff'\n")
+            pathlib.Path(d, "poweroff").chmod(0o755)
+            p = subprocess.run(["/bin/sh", "-c", stubs + body], input=cmds, capture_output=True, text=True,
+                               timeout=30, env={"PATH": d})
+        return [ln for ln in p.stdout.splitlines() if ln != "HOSTCHECK-READY"]
+
+    def test_a_guest_in_shutdown_does_not_answer(self):
+        # HOST-1h (#5267): the power cut's answer proves the guest was running at the quit only if no
+        # answer can come once an exit has begun, and every MOR clear follows the last answer.
+        for exit_, clears in (("reboot", True), ("poweroff", True), ("halt", False)):
+            with self.subTest(exit_):
+                out = self.loop(self.init, f"alive A\n{exit_}\nalive B\n")
+                self.assertEqual(out, ["HOSTCHECK-ALIVE A"] + ["CLEAR"] * clears + [f"EXIT {exit_}"])
+        self.assertEqual(self.loop(self.init, "alive A\n"), ["HOSTCHECK-ALIVE A", "CLEAR", "EXIT poweroff"])
+        # The test can fail: a loop that goes on reading while its exit runs answers B.
+        backgrounded = self.init.replace('poweroff) sync; mor_clear "$MOR"; poweroff -f ;;',
+                                         'poweroff) sync; mor_clear "$MOR"; poweroff -f & wait ;;')
+        self.assertNotEqual(backgrounded, self.init)
+        self.assertIn("HOSTCHECK-ALIVE B", self.loop(backgrounded, "alive A\npoweroff\nalive B\n"))
+
     def clear(self, data, failing=()):
         with tempfile.TemporaryDirectory() as d:
             stubs = pathlib.Path(d, "bin")
