@@ -12,14 +12,14 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py plan --git BASE [--targets-out FILE]
                                              the `mutants` matrix as JSON: K shards for each claimed
                                              package, K from its target lines, deletion sites and
-                                             suite time (#4961, #5069); FILE gets each test-only
-                                             package's target lines
+                                             suite time (#4961, #5069); FILE gets the lines each
+                                             package's changed tests cover
   tools/mutgate.py run [PKG...] [--out DIR] [--git BASE [--shard I --of K] [--targets FILE]]
                                              run gremlins per package (default: all listed),
                                              one JSON file per package in DIR (default mutants/);
                                              with --git, only on the package's target lines (below),
                                              and with --shard, only on shard I of K of them; with
-                                             --targets, a test-only package's lines are plan's FILE's
+                                             --targets, changed tests' lines are plan's FILE's
   tools/mutgate.py delete PKG... [--out DIR] --git BASE [--jobs N]
                                              delete each statement a target line belongs to, alone,
                                              on N parallel workers (default: one per usable CPU; a
@@ -39,14 +39,15 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              #4602, #4961)
 
 Target lines. A package's target lines are the lines the diff adds or changes in its non-test .go
-files (no `REQ:` marker is needed, #4908). When the diff changes only the package's _test.go files,
-they are the lines of its non-test files that the changed test functions run: `run` names them
+files (no `REQ:` marker is needed, #4908). When the diff also changes or deletes the package's
+_test.go files, they include the lines of its non-test files that the changed test functions run,
+even beside an added line, which would otherwise hide a deleted test's lines (#5762): `run` names them
 with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
 no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
 every test, so the set is at most the package's covered lines. Coverage can differ from run to run
 (a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
 (`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
-lines only: its `-D` reads `git diff --merge-base`, so for a test-only package `run` points HEAD for
+lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
 that one call at a commit whose parent differs from the tree on exactly those lines.
 A LIVED mutant on a target line is code the package's tests run (gremlins mutates only covered
 code) but do not check, and fails the gate, unless the PR body holds the line
@@ -270,6 +271,20 @@ def diff_targets(added, pkg):
     return {p: ls for p, ls in added.items() if is_source(p) and package_of(p) == pkg}
 
 
+def tests_changed(tests, pkg):
+    """Whether the diff changes or deletes a _test.go file of broker/<pkg>/."""
+    return any(package_of(p) == pkg for p in tests)
+
+
+def union(*parts):
+    """{path: lines} holding every line of each {path: lines} part."""
+    out = {}
+    for part in parts:
+        for p, ls in part.items():
+            out.setdefault(p, set()).update(ls)
+    return out
+
+
 def test_functions(text, lines):
     """The names of the test functions holding lines (1-based) of a _test.go file's text, or None
     when one is outside every test function: a helper, TestMain, a method, a declaration or the
@@ -306,17 +321,18 @@ def changed_tests(tests, pkg):
 
 
 def targets_for(pkg, added, tests, data):
-    """({path: lines}, None) of a claimed package's target lines, or (None, problem). From the diff
-    when it changes a non-test file there; else the record `run` wrote in data of the lines the
-    changed tests cover, which must name exactly the tests changed_tests names here."""
+    """({path: lines}, None) of a claimed package's target lines, or (None, problem): the lines the
+    diff adds to its non-test files there and, when the diff changes or deletes a test there, the
+    lines those tests cover, from the record `run` wrote in data, which must name exactly the tests
+    changed_tests names here. A diff that also adds a non-test line keeps that widening (#5762)."""
     own = diff_targets(added, pkg)
-    if own:
+    if not tests_changed(tests, pkg):
         return own, None
     want = changed_tests(tests, pkg)
     rec = data.get("targets") if isinstance(data, dict) else None
     if not isinstance(rec, dict) or rec.get("tests") != want or not isinstance(rec.get("lines"), dict):
         return None, (f"holds no record of the lines that {'every test' if want is None else want} covers, "
-                      f"the tests this test-only diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
+                      f"the tests this diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
     out = {}
     for name, lines in rec["lines"].items():
         f = BROKER / pkg / name if isinstance(name, str) else None
@@ -324,7 +340,7 @@ def targets_for(pkg, added, tests, data):
                 or not isinstance(lines, list) or not all(type(n) is int and n > 0 for n in lines)):
             return None, f"records covered lines {str(name)[:80]!r}: {str(lines)[:80]}, not lines of a non-test .go file in broker/{pkg}/"
         out[f"broker/{pkg}/{name}"] = set(lines)
-    return out, None
+    return union(own, out), None
 
 
 def waivers(body):
@@ -594,12 +610,12 @@ def outside_lines(data, pkg, mine):
 
 
 def coverage_record(names, targets):
-    """The record of a test-only package's target lines that `run` writes and targets_for reads."""
+    """The record of the lines a package's changed tests cover that `run` writes and targets_for reads."""
     return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
 
 
 def planned_targets(planned, pkg, added, tests):
-    """({path: lines}, None) of a test-only package's target lines from plan's --targets-out file, or
+    """({path: lines}, None) of a package's target lines with plan's --targets-out record, or
     (None, problem). The record is checked as verify checks the one a result carries (targets_for).
     A package the plan does not name is a problem, never a coverage run here: that run could name
     other lines than the other shards' (#4970)."""
@@ -649,19 +665,22 @@ def cmd_run(args):
     for pkg in pkgs:
         dest = out / result_name(pkg)
         targets, record = (diff_targets(added, pkg) if args.git else None), None
-        if args.git and not targets:
-            # A test-only diff (#4908): the lines its changed test functions run are the targets,
-            # from plan's one coverage run when given, so every shard names the same lines (#4970).
+        if args.git and tests_changed(tests, pkg):
+            # A diff that changes or deletes tests (#4908): the lines its changed test functions run
+            # are targets too, beside any line it adds (#5762), from plan's one coverage run when
+            # given, so every shard names the same lines (#4970).
             names = changed_tests(tests, pkg)
             if planned is not None:
-                targets, problem = planned_targets(planned, pkg, added, tests)
+                full, problem = planned_targets(planned, pkg, added, tests)
+                record = None if problem else planned[pkg]
             else:
-                targets, problem = covered_by(pkg, names, cfgdir.name)
+                covered, problem = covered_by(pkg, names, cfgdir.name)
+                full, record = (None, None) if problem else (union(targets, covered), coverage_record(names, covered))
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
                 continue
-            record = coverage_record(names, targets)
+            targets = full
         if args.git:
             # #4961: this job's share of the target lines; the record keeps them all.
             mine = shard_lines(targets, args.shard, args.of)
@@ -670,8 +689,8 @@ def cmd_run(args):
                 # Gremlins' -D mutates every line when its diff is empty; none is a target here.
                 dest.write_text(json.dumps({"files": [], "mutants_total": 0, "mutants_lived": 0, **extra}))
                 continue
-            # The base's own diff marks exactly the target lines, so one unsharded run of a
-            # non-test diff keeps it; a share or a test-only diff marks its lines on a commit.
+            # The base's own diff marks exactly the target lines, so one unsharded run of a diff
+            # that changes no test keeps it; a share or a test change marks its lines on a commit.
             marked = record or args.of > 1
             try:
                 with marked_base(pkg, mine, cfgdir.name) if marked else contextlib.nullcontext(args.git) as base:
@@ -1194,8 +1213,8 @@ def decide(results, added, tests, args):
     waived = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
     targets = {pkg: t for pkg, (_, t) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived)
-    tested = {pkg: changed_tests(tests, pkg) for pkg in results if not diff_targets(added, pkg)}
-    write_summary(args.summary, summary(results, tested, waived))
+    tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
+    write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)}))
     return report_violations(found)
 
 
@@ -1215,17 +1234,19 @@ VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NO
 ROWS = 2000
 
 
-def summary(results, tested, waived):
+def summary(results, tested, waived, own=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
-    tested names the changed tests of each test-only package (None: every test)."""
+    tested names the changed tests of each package whose tests changed (None: every test); own
+    names the packages where the diff also adds non-test lines."""
     lines = ["### mutgate", ""]
     rows, used = [], set()
     for pkg, (data, targets) in sorted(results.items()):
         n = sum(len(v) for v in targets.values())
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
             "the lines the diff changes" if pkg not in tested
-            else "the lines every test covers (a change outside one test function)" if tested[pkg] is None
-            else "the lines " + cell(", ".join(tested[pkg])) + " cover"))
+            else ("the lines the diff changes and " if pkg in own else "") + (
+                "the lines every test covers (a change outside one test function)" if tested[pkg] is None
+                else "the lines " + cell(", ".join(tested[pkg])) + " cover")))
         for f in data["files"]:
             path = f"broker/{pkg}/{f['file_name']}"
             for m in f.get("mutations") or []:
@@ -1306,7 +1327,7 @@ def broker_diff(base, head):
 
 def cmd_plan(args):
     """The `mutants` matrix (#4961): [{pkg, shard, of}] for each package `claimed` names, K from its
-    target lines and deletion sites. It runs the PR's tests (a test-only diff's coverage), so only in
+    target lines and deletion sites. It runs the PR's tests (changed tests' coverage), so only in
     an untrusted job; K is a schedule, and `verify` checks the shards whatever K is."""
     diff = broker_diff(args.git, "HEAD")
     added, tests = added_lines(diff)
@@ -1316,14 +1337,15 @@ def cmd_plan(args):
             return 1
         for pkg in claimed(diff):
             targets = diff_targets(added, pkg)
-            if not targets:
+            if tests_changed(tests, pkg):
                 names = changed_tests(tests, pkg)
-                targets, problem = covered_by(pkg, names, tmp)
+                covered, problem = covered_by(pkg, names, tmp)
                 if problem:
                     print(f"mutgate: {problem}", file=sys.stderr)
                     return 1
                 # The one coverage run every shard reads (#4970): a run of their own could differ.
-                planned[pkg] = coverage_record(names, targets)
+                planned[pkg] = coverage_record(names, covered)
+                targets = union(targets, covered)
             sites, problem = deletion_sites(pkg, targets, lister)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -1402,14 +1424,14 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("plan")
     p.add_argument("--git", required=True, metavar="BASE")
-    p.add_argument("--targets-out", metavar="FILE", help="write each test-only package's target lines here")
+    p.add_argument("--targets-out", metavar="FILE", help="write the lines each package's changed tests cover here")
     p = sub.add_parser("run")
     p.add_argument("pkg", nargs="*")
     p.add_argument("--out", default="mutants")
     p.add_argument("--git", metavar="BASE")
     p.add_argument("--shard", type=int, default=0, metavar="I")
     p.add_argument("--of", type=int, default=1, metavar="K")
-    p.add_argument("--targets", metavar="FILE", help="plan's --targets-out file: a test-only package's lines")
+    p.add_argument("--targets", metavar="FILE", help="plan's --targets-out file: the lines changed tests cover")
     p = sub.add_parser("delete")
     p.add_argument("pkg", nargs="+")
     p.add_argument("--out", default="mutants")
