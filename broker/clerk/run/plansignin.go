@@ -47,8 +47,10 @@ type SignInWorkers interface {
 // SignInWorker is one running sign-in CLI.
 type SignInWorker interface {
 	// Read returns what the CLI has printed so far and whether it has
-	// exited, and returns once ctx ends. Its text is the guest's: only the
-	// code is taken from it.
+	// exited, and returns once ctx ends. ctx bounds only the call, and a
+	// sign-in's contexts end with it: Begin's with Begin, as Start's do,
+	// and the rest when the sign-in ends. Its text is the guest's: only
+	// the code is taken from it.
 	Read(ctx context.Context) (printed string, exited bool)
 	// Stop destroys the sandbox.
 	Stop()

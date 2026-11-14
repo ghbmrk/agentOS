@@ -42,16 +42,20 @@ type fakeCLI struct {
 	guest   string
 	stopped chan struct{}
 	err     error
+	// startCtx and readCtx are the contexts of the last Start and Read,
+	// so a test can see that a sign-in's contexts end with it.
+	startCtx, readCtx context.Context
 }
 
 func newFakeCLI(login *plan.Login, printed string) *fakeCLI {
 	return &fakeCLI{login: login, printed: printed, stopped: make(chan struct{})}
 }
 
-func (f *fakeCLI) Start(_ context.Context, planName, guest string) (SignInWorker, error) {
+func (f *fakeCLI) Start(ctx context.Context, planName, guest string) (SignInWorker, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts++
+	f.startCtx = ctx
 	f.plan, f.guest = planName, guest
 	if f.err != nil {
 		return nil, f.err
@@ -69,10 +73,18 @@ func usercodeRequest() *http.Request {
 	return r
 }
 
-func (f *fakeCLI) Read(context.Context) (string, bool) {
+func (f *fakeCLI) Read(ctx context.Context) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readCtx = ctx
 	return f.printed, f.exited
+}
+
+// contexts returns the contexts of the last Start and Read.
+func (f *fakeCLI) contexts() (start, read context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.startCtx, f.readCtx
 }
 
 func (f *fakeCLI) Stop() { close(f.stopped) }
@@ -1045,6 +1057,30 @@ func TestPlanStateNamesThePoolWithoutFigures(t *testing.T) {
 // sign-in ended, with the login still stored, whether or not it ended a
 // sign-in; once a later Remove deletes the login, last follows. A failed
 // Remove does not hold off the next sign-in.
+// SIC-2 (brief CLK-run-signin-ctx). The context Begin hands the worker's
+// start ends when Begin returns, while the sign-in still waits for the
+// owner: Link and Wall are an hour, and no code exchange has ended the
+// sign-in.
+func TestPlanSignInStartContextEndsWithBegin(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	cli := newFakeCLI(login, codexPrinted)
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: SignInTimes{Poll: time.Millisecond, Link: time.Hour, Wall: time.Hour}}
+	if b := h.Begin(context.Background()); b.Code == "" {
+		t.Fatalf("begun: %+v", b)
+	}
+	if st := h.State(); !st.Signing {
+		t.Fatalf("the sign-in no longer waits for the owner: %+v", st)
+	}
+	if ctx, _ := cli.contexts(); ctx == nil || ctx.Err() == nil {
+		t.Fatalf("the start's context outlived Begin: %v", ctx)
+	}
+	if err := h.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	cli.waitStopped(t)
+}
+
 func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 	var calls atomic.Int32
 	var failing atomic.Bool
@@ -1080,6 +1116,12 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 		until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
 		if st := h.State(); st.Last != DSignedIn || !st.SignedIn {
 			t.Fatalf("signed in: %+v", st)
+		}
+		// SIC-3 (brief CLK-run-signin-ctx). The watcher's last read was
+		// handed the sign-in's context; no Remove has run, so only the
+		// sign-in's end ends it.
+		if _, ctx := cli.contexts(); ctx == nil || ctx.Err() == nil {
+			t.Fatalf("the sign-in's context outlived it: %v", ctx)
 		}
 		failing.Store(true)
 		if err := h.Remove(); err == nil {
