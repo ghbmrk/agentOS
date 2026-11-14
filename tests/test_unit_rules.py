@@ -715,7 +715,26 @@ class BootLinksTest(unittest.TestCase):
                  ETC + "local-fs.target.wants/opt-pkg.mount": "-> /usr/lib/systemd/system/opt-pkg.mount"}
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(r.mount_points(tree(d, files)),
-                             ["/boot", "/efi", "/opt/pkg", "/proc/sys/fs/binfmt_misc", "/srv/a-b", "/var/lib/foo"])
+                             ["/boot", "/efi", "/opt/pkg", "/srv/a-b", "/var/lib/foo"])
+
+    # #5735 L3 6878105739: a mount at or under a boot mount is read as BootView reads that tree (empty), so the
+    # stock lines that end there pass, and a walk on past it still fails the run.
+    def test_a_mount_under_a_boot_mount_is_read_as_the_boot_mount(self):
+        stock = {"/usr/lib/systemd/system/run-lock.mount": "[Mount]\nWhat=tmpfs\nWhere=/run/lock\n",
+                 "/usr/lib/systemd/system/dev-hugepages.mount": "[Mount]\nWhere=/dev/hugepages\n",
+                 "/usr/lib/systemd/system/sys-kernel-debug.mount": "[Mount]\nWhere=/sys/kernel/debug\n",
+                 "/usr/lib/systemd/system/tmp.mount": "[Mount]\nWhere=/tmp\n",
+                 "/usr/lib/tmpfiles.d/legacy.conf": "L /var/lock - - - - ../run/lock\n",
+                 "/usr/lib/tmpfiles.d/debian.conf": "L /run/shm - - - - /dev/shm\n"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, stock)
+            self.assertEqual(r.mount_points(v), ["/boot", "/efi"])
+            got = r.boot_links(v)
+            self.assertEqual((got["/var/lock"], got["/run/shm"]), ("/run/lock", "/dev/shm"))
+        for more in ({"/etc/a": "-> /run/lock/../../var/lib/foo/x"}, {"/etc/a": "-> /run/lock/x/../y"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "/etc/a: a link \\(the tree's\\) resolving to /run/lock/.*keeps a \\. or \\.\\."):
+                    r.boot_links(tree(d, {**stock, **self.MOUNT, **more}))
 
     def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
         # A tree link under a mount the reader cannot see is not there at boot, so none is followed.
@@ -850,6 +869,14 @@ class BootLinksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             got = r.boot_links(tree(d, {**base, "/etc/a": "-> ../var/lib/x", "/etc/0": "-> /etc/a/y"}))
             self.assertEqual((got["/etc/a"], got["/etc/0"]), ("/var/lib/x", "/var/lib/x/y"))
+
+    # #5735 Potency 6877660419 3: a kept path records the tree link's endpoint, which other L lines' links (made
+    # only at the MountView) can move away from the line's.
+    def test_a_kept_path_records_the_tree_links_endpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/z.conf": "L /etc/a - - - - /etc/x\nL+ /etc/b - - - - /srv\n",
+                                        "/etc/a": "-> /etc/b/../x", "/etc/b/.keep": "", "/srv/.keep": ""}))
+            self.assertEqual(got["/etc/a"], "/x")
 
     # #5731 L3 6877540425: an L+ line over a tree directory replaces it, links below it included.
     def test_a_tree_link_under_an_l_line_path_fails_the_run(self):

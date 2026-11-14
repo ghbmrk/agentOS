@@ -631,7 +631,9 @@ GPT_AUTO_MOUNTS = ("/boot", "/efi")
 def mount_points(view):
     """#5708: the Where= of every .mount and .automount unit name in the tree's unit directories, generators'
     included (systemd loads such a unit only under the name its Where= escapes to), and GPT_AUTO_MOUNTS,
-    but / and BOOT_MOUNTS, which BootView already reads as the tree or as empty. Ours count with a
+    but / and any at or under BOOT_MOUNTS, which BootView already reads as the tree or as empty (#5735 L3
+    6878105739: debian's run-lock.mount, under which legacy.conf's stock /var/lock line ends): a walk into an
+    empty BOOT_MOUNTS tree keeps the rest of its path as given, so a link there or a .. after it fails the run. Ours count with a
     package's: what a mounted file system holds at a path is not in the tree, whoever ships the unit."""
     out = set(GPT_AUTO_MOUNTS)
     for n in names(view, unit_dirs(view)):
@@ -640,7 +642,7 @@ def mount_points(view):
             continue
         w = os.path.normpath("/" + re.sub(r"\\x([0-9a-fA-F]{2})", lambda x: chr(int(x.group(1), 16)),
                                           base.replace("-", "/")))
-        if w != "/" and w not in BOOT_MOUNTS:
+        if w != "/" and not any(w == b or w.startswith(b + "/") for b in BOOT_MOUNTS):
             out.add(w)
     return sorted(out)
 
