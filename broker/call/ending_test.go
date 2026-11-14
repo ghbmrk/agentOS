@@ -275,8 +275,10 @@ func TestTheEndingNoticeCarriesAnUnspokenAnswer(t *testing.T) {
 // "One moment" still plays, never gets its clip played: the turn's select
 // may take the sound or the hush, and either way the clip does not start,
 // so the question is carried (#5684, L3 on #5696: 17 of 40 runs dropped
-// it). Forty runs of each, so a carry that reads Held or Err as "the clip
-// played" fails in some run.
+// it). With no clip set, nothing of the answer plays whichever case the
+// select takes, so that question is carried too (L3 on #5696: 24 of 40
+// runs dropped it). Forty runs of each, so a carry that reads Held, Err or
+// play's result as "the clip started" fails in some run.
 func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
 	boom := errors.New("boom")
 	for _, c := range []struct {
@@ -284,6 +286,8 @@ func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
 	}{
 		{"held", "Press 4 now.", "CLIP:held"},
 		{"failed", "Boom.", "CLIP:failed"},
+		{"held, no clip", "Press 4 now.", ""},
+		{"failed, no clip", "Boom.", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for range 40 {
@@ -303,6 +307,9 @@ func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
 						return synth{}.Speak(ctx, s)
 					})
 					r.cfg.Clips.Ending = []byte("CLIP:ending")
+					if c.clip == "" {
+						r.cfg.Clips.Held, r.cfg.Clips.Failed = nil, nil
+					}
 					r.cfg.After = time.After
 					r.l.saying = make(chan string) // Say waits for the test to take each sound
 					ends := r.records()
@@ -319,11 +326,13 @@ func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
 							t.Fatalf("played %q, want %q", got, want)
 						}
 					}
-					if tu := <-ends; !tu.Stopped || tu.FirstContent != 0 {
+					if tu := <-ends; tu.FirstContent != 0 || (c.clip != "" && !tu.Stopped) {
 						t.Fatalf("turn 1 = %+v", tu)
 					}
 					go r.say("from today")
-					if got := <-r.l.saying; got != c.clip {
+					if c.clip == "" {
+						synctest.Wait() // the answer, held or failed again, plays nothing
+					} else if got := <-r.l.saying; got != c.clip {
 						t.Fatalf("after the notice: played %q", got)
 					}
 					r.ans.mu.Lock()
@@ -335,6 +344,59 @@ func TestTheEndingNoticeCarriesAnAnswerItKeptFromItsClip(t *testing.T) {
 					r.hangup()
 				})
 			}
+		})
+	}
+}
+
+// A held or failed clip that started is the answer heard, even if it was
+// then cut (a barge-in, or EndingWait while hushed): the question is not
+// carried past the notice, as for a sentence the notice cut. The cut is
+// stood in for by a Say that fails once the clip has started (#5684, L3 on
+// #5696).
+func TestTheEndingNoticeKeepsNoQuestionWhoseClipStarted(t *testing.T) {
+	boom := errors.New("boom")
+	for _, c := range []struct {
+		name, answer, clip string
+	}{
+		{"held", "Press 4 now.", "CLIP:held"},
+		{"failed", "Boom.", "CLIP:failed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newRig(t, fixed(c.answer))
+				r.bubble = true
+				r.cfg.Synthesizer = synthFunc(func(ctx context.Context, s string) ([]byte, error) {
+					if s == "Boom." {
+						return nil, boom
+					}
+					return synth{}.Speak(ctx, s)
+				})
+				r.cfg.Clips.Ending = []byte("CLIP:ending")
+				r.l.saying = make(chan string) // Say waits for the test to take each sound
+				r.l.sayErr = errors.New("cut") // every sound is cut once it starts
+				r.serve()
+				time.Sleep(29*time.Minute - time.Second)
+				r.say("what's in my mail")
+				synctest.Wait() // the clip has started
+				time.Sleep(time.Second)
+				synctest.Wait() // the notice is due while it plays
+				for _, want := range []string{c.clip, "CLIP:ending"} {
+					if got := <-r.l.saying; got != want {
+						t.Fatalf("played %q, want %q", got, want)
+					}
+				}
+				go r.say("from today")
+				if got := <-r.l.saying; got != c.clip {
+					t.Fatalf("after the notice: played %q", got)
+				}
+				r.ans.mu.Lock()
+				got := append([]asked(nil), r.ans.asks...)
+				r.ans.mu.Unlock()
+				if len(got) != 2 || got[1].Text != "from today" {
+					t.Fatalf("asks = %+v", got)
+				}
+				r.hangup()
+			})
 		})
 	}
 }

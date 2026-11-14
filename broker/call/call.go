@@ -154,9 +154,11 @@ type Turn struct {
 	FirstAudio, FirstContent time.Duration
 	Sentences                int
 	Held                     bool
-	// ended is set once the held or failed clip starts; Held and Err are
-	// set even when the notice keeps that clip from starting (#5684).
-	ended bool
+	// answered is set as any sound of the answer (a sentence, the held or
+	// the failed clip, not "One moment") starts, before Say, so a sound cut
+	// once started counts and an empty or hushed one does not. It is the
+	// one record the ending notice's carry reads (#5684).
+	answered bool
 	// Stopped means 0, barge-in, hang-up or the end of the loop cut it short.
 	Stopped bool
 	Err     error
@@ -460,8 +462,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		}
 		cur.cancel()
 		<-cur.done
-		t := cur.turn
-		unheard := cur.hushed && t.FirstContent == 0 && !t.ended
+		unheard := cur.hushed && !cur.turn.answered
 		if keep && (!cur.asked || unheard) {
 			carry = cur.text
 		}
@@ -636,7 +637,9 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 	default:
 	}
 	moment := cfg.After(cfg.OneMomentAfter - cfg.Now().Sub(end))
-	play := func(pcm []byte, content bool) bool {
+	// play starts pcm on the line and reports whether it played to the
+	// end; an empty pcm plays nothing and goes on.
+	play := func(pcm []byte, k kind) bool {
 		if len(pcm) == 0 {
 			return true
 		}
@@ -649,8 +652,11 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 		if t.FirstAudio == 0 {
 			t.FirstAudio = nonZero(cfg.Now().Sub(end))
 		}
-		if content && t.FirstContent == 0 {
+		if k == sentence && t.FirstContent == 0 {
 			t.FirstContent = nonZero(cfg.Now().Sub(end))
+		}
+		if k != filler {
+			t.answered = true
 		}
 		if err := l.Say(ctx, pcm); err != nil {
 			t.Stopped = true
@@ -679,7 +685,7 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 					return
 				}
 			default:
-				if !play(cfg.Clips.OneMoment, false) {
+				if !play(cfg.Clips.OneMoment, filler) {
 					return
 				}
 			}
@@ -691,12 +697,22 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 	}
 }
 
+// kind is what a played sound is to its turn: "One moment" fills the wait,
+// and the held and failed clips and the sentences are the answer.
+type kind int
+
+const (
+	filler kind = iota
+	answerClip
+	sentence
+)
+
 // take plays s, one sound from the producer, into t and reports whether
 // the answer goes on. An error that arrives once ctx is done is a stop, not
 // a failure. The turn receives an error only before ctx ends (a send loses
 // to ctx.Done after), so that case is a stop landing between the receive
 // and the check here; it is tested on take itself.
-func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func([]byte, bool) bool) bool {
+func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func([]byte, kind) bool) bool {
 	switch {
 	case !ok:
 		return false
@@ -705,13 +721,13 @@ func (cfg Config) take(ctx context.Context, s sound, ok bool, t *Turn, play func
 			return false
 		}
 		t.Err = s.err
-		t.ended = play(cfg.Clips.Failed, false)
+		play(cfg.Clips.Failed, answerClip)
 		return false
 	case s.held:
 		t.Held = true
-		t.ended = play(cfg.Clips.Held, false)
+		play(cfg.Clips.Held, answerClip)
 		return false
-	case !play(s.pcm, true):
+	case !play(s.pcm, sentence):
 		return false
 	}
 	t.Sentences++
