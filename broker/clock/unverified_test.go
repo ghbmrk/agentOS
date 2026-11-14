@@ -172,7 +172,7 @@ func TestHW8FloorAdvancesOnlyFromVerifiedTime(t *testing.T) {
 	}
 
 	// A plain disagreeing check never verifies. (A converged NTS one does:
-	// the carrier is the outlier, K16; TestTIM1OutlierAfterReboot...)
+	// the carrier is the outlier, TIM-1-interval-fu-1; TestTIM1OutlierAfterReboot...)
 	r.reboot(floor.Add(3 * time.Hour))
 	r.carrier = floor.Add(9 * time.Hour)
 	r.synced = true

@@ -637,7 +637,7 @@ func (g *Guard) check(ctx context.Context) Status {
 		g.belowFloorLogged = true
 	}
 	// A converged NTS check verifies the clock even while the carrier
-	// disagrees: the carrier is the outlier (K16), and the floor must not
+	// disagrees: the carrier is the outlier (TIM-1-interval-fu-1), and the floor must not
 	// hold Earliest at the last boot's time (Potency 1 on #5754).
 	verifiedNow := (syncOK || carrierOK) && (s.State != Disagree || nts) && s.State != Held
 	if verifiedNow {
