@@ -741,6 +741,62 @@ class MagicLinkTest(unittest.TestCase):
             self.assertEqual(got.get("/etc/systemd/system/x.service"), "/dev/null")
 
 
+class CopyLineTest(unittest.TestCase):
+    """#5707 (KRN-2): systemd-tmpfiles copies a link as a link for a C line, so a C line whose source is, or
+    holds, a link fails the run, and so does one whose source the reader cannot read."""
+
+    def run_line(self, d, line, more=None):
+        return r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n", **(more or {})}))
+
+    def test_a_source_that_is_or_holds_a_link_fails_the_run(self):
+        for line, more, at in (
+                ("C /run/x - - - - /usr/share/pkg/lnk", {"/usr/share/pkg/lnk": "-> /run/agentos-x"}, "/usr/share/pkg/lnk"),
+                ("C /run/x - - - - /usr/share/pkg/f", {"/usr/share/pkg/f": "-> /etc/f", "/etc/f": "x"}, "/usr/share/pkg/f"),
+                ("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/b/lnk": "-> /run/agentos-x"}, "/usr/share/pkg/a/b/lnk"),
+                ("C+ /run/x - - - - /etc/pkg", {"/etc/pkg/lnk": "-> ../../run/agentos-x"}, "/etc/pkg/lnk"),
+                ("C /run/x", {"/usr/share/factory/run/x/lnk": "-> /run/agentos-x"}, "/usr/share/factory/run/x/lnk"),
+                ("C! /run/x - - - - /etc/pkg", {"/etc/pkg/dangling": "-> /nowhere"}, "/etc/pkg/dangling")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is or holds a link, %s" % at):
+                    self.run_line(d, line, more)
+
+    def test_a_source_through_a_link_fails_the_run(self):
+        for line, more, at in (
+                ("C /run/x - - - - /var/pkg/f", {"/var/pkg": "-> /etc/pkg", "/etc/pkg/f": "x"}, "/var/pkg"),
+                ("C /run/x - - - - /var/lib/foo/f", {"/usr/lib/tmpfiles.d/a.conf": "L /var/lib/foo - - - - /etc/pkg\n",
+                                                    "/etc/pkg/f": "x"}, "/var/lib/foo")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, r"C line .*: its source passes through a link \(%s\)" % at):
+                    self.run_line(d, line, more)
+
+    def test_a_source_the_reader_cannot_read_fails_the_run(self):
+        for line, want in (
+                ("C /run/x - - - - /usr/share/%b/f", "holds a specifier, a quote or an escape"),
+                ("C /run/x - - - - \"/usr/share/pkg\"", "holds a specifier, a quote or an escape"),
+                ("C~ /run/x - - - - L3Vzci9zaGFyZQ==", "its source is encoded or a credential"),
+                ("C^ /run/x - - - - cred", "its source is encoded or a credential"),
+                ("C /run/x - - - - usr/share/pkg", "its source is not absolute and normal"),
+                ("C /run/x - - - - /usr/share/../../run/udev", "its source is not absolute and normal"),
+                ("C /run/x - - - - /run/pkg", "its source is under /run"),
+                ("C /run/x - - - - /proc/self/root", "its source is under /proc"),
+                ("C /run/x - - - - /tmp", "its source is under /tmp")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*" + want):
+                    self.run_line(d, line)
+
+    def test_a_source_of_files_or_none_passes(self):
+        # The image's own lines: /.extra is not in the tree, so systemd skips them.
+        stub = ("C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"
+                "C /run/systemd/tpm2-pcr-public-key.pem 0444 root root - /.extra/tpm2-pcr-public-key.pem")
+        for line, more in ((stub, {}),
+                           ("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/f": "x", "/usr/share/pkg/g": "y"}),
+                           ("C /run/x", {"/usr/share/factory/run/x": "x"}),
+                           ("c /dev/x 0600 - - - 1:3", {})):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                got = self.run_line(d, line, more)
+                self.assertNotIn("/run/x", got)
+
+
 class LintTest(unittest.TestCase):
     """lint() refuses a run in which a generator failed (#4817, from #4767's harness)."""
 

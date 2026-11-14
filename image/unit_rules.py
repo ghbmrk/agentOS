@@ -576,6 +576,47 @@ def tmpfiles_links(view, links, usr_view=None):
     return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
 
 
+def tmpfiles_copies(view, links, usr_view=None):
+    """#5707 (KRN-2): systemd-tmpfiles copies a link as a link for a C line (copy_tree_at), so a C line
+    whose source is a link, or a directory holding one anywhere below it, would make a link at boot that
+    LINKS (boot_links) do not hold: the run fails. VIEW is a BootView. Its source (the factory copy when it
+    names none) is read like an L line's target: a specifier, quote or escape, an encoded (~) or credential
+    (^) source, one not absolute and normal, one under a boot mount (empty in VIEW, filled at boot), or one
+    passing through a link, the tree's or one in LINKS, fails the run too. A source the tree does not hold
+    copies nothing (systemd skips the line: the image's /.extra lines)."""
+    for f, line in tmpfiles_lines(view, usr_view):
+        w = line.split(None, 6)
+        if not w[0].startswith("C"):
+            continue
+        if any(ch in line for ch in "%\"\'\\"):
+            raise SystemExit("unit rules: %s: C line %r holds a specifier, a quote or an escape, which the "
+                             "reader does not read" % (f, line))
+        if "~" in w[0] or "^" in w[0]:
+            raise SystemExit("unit rules: %s: C line %r: its source is encoded or a credential, which the "
+                             "reader does not read" % (f, line))
+        arg = w[6].strip() if len(w) > 6 else "-"
+        src = "/usr/share/factory" + (w[1] if len(w) > 1 else "") if arg in ("", "-") else arg
+        if not src.startswith("/") or os.path.normpath(src) != src:
+            raise SystemExit("unit rules: %s: C line %r: its source is not absolute and normal" % (f, line))
+        if any(src == m or src.startswith(m + "/") for m in BOOT_MOUNTS):
+            raise SystemExit("unit rules: %s: C line %r: its source is under %s, whose content at boot the "
+                             "reader does not see" % (f, line, "/" + src.split("/")[1]))
+        todo = [src]
+        while todo:
+            p = todo.pop()
+            kind = view.kind(p)
+            if kind == 0o120000:
+                raise SystemExit("unit rules: %s: C line %r: its source is or holds a link, %s, which "
+                                 "systemd-tmpfiles copies as a link" % (f, line, p))
+            if kind == 0o040000:
+                todo += [os.path.join(p, e) for e in view.entries(p)]
+        _, via = view.resolve(src)
+        via += [k for k, v in links.items() if v != k and (src == k or src.startswith(k + "/"))]
+        if via:
+            raise SystemExit("unit rules: %s: C line %r: its source passes through a link (%s), which the "
+                             "reader does not read" % (f, line, via[0]))
+
+
 # #5703 L3 6872796820: the kernel's own links under /proc, /sys and /dev (/proc/self/root, /proc/<pid>/root,
 # /proc/thread-self, /dev/fd) lead back into /, and the reader cannot follow them, so a link whose target
 # resolves at or under one fails the run, but at exactly these: none is a directory a path steps through
@@ -587,9 +628,11 @@ API_TARGETS = ("/dev/null", "/dev/shm", "/proc/self/mounts")
 
 def boot_links(view, usr_view=None):
     """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView. A link
-    into an API mount but API_TARGETS, or one whose resolved target keeps a . or .. component, fails the run."""
+    into an API mount but API_TARGETS, or one whose resolved target keeps a . or .. component, fails the run,
+    and so does a tmpfiles.d C line that may copy a link (tmpfiles_copies)."""
     boot = BootView(view)
     out = tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
+    tmpfiles_copies(boot, out, usr_view)
     for k, v in sorted(out.items()):
         if v != k and os.path.normpath(v) != v:  # #5703 Security 6872976172: resolve keeps .. past a missing
             raise SystemExit("unit rules: %s: a link to %s, a target with . or .. the reader does not "
