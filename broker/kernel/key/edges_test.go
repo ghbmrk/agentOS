@@ -13,7 +13,11 @@ import (
 
 // The edges of the key check that the main tests reach without pinning:
 // each test here fails when one statement of the check is deleted (mutgate,
-// #5676).
+// #5676). Five deletions no test can tell are named, with the reason, on the
+// PR's Mutant-equivalent lines: the two `l.Sig = nil` in passkeyLink and
+// Extend (no signed message reads Sig), and in passkey.go the assertion
+// decoder's unknown-field and decode-error exits (Verify also requires the
+// canonical encoding) and asn1.Marshal's error on two parsed integers.
 
 // A malformed caveat is ErrMalformed and a widening one ErrLoosens, never
 // the other or nothing (KEY-3).
