@@ -393,7 +393,8 @@ func TestTheKeptProbeKeepsEachPlaintext(t *testing.T) {
 
 // A sealer that fails after it decrypted loads no registration: loadReg
 // trusts no plaintext handed back with an error (#5324,
-// gmailreg.go's Open check, before waived as equivalent on #5362).
+// gmailreg.go's Open check, before waived as equivalent on #5362), and
+// wipes it all the same (#5666).
 func TestAFailedOpenLoadsNoRegistration(t *testing.T) {
 	dir := shortDir(t)
 	if err := saveReg(dir, testSealer(), *fakeClient, nil); err != nil {
@@ -402,6 +403,9 @@ func TestAFailedOpenLoadsNoRegistration(t *testing.T) {
 	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
 	if r, ok := loadReg(dir, k); ok || r != (clerk.Registration{}) {
 		t.Fatalf("loadReg with a failing open = %q, %v; want nothing", r.ID, ok)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed open left %d plaintexts, wiped %v; want 1, wiped", n, wiped)
 	}
 }
 
