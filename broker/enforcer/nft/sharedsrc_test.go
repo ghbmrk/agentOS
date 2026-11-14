@@ -369,6 +369,7 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 			el(`{"concat": ["10.20.0.2", 2199023255554]}`, 50),
 			el(`{"concat": ["fd10:20::4", "02:00:00:00:00:02"]}`, 50),
 			el(`{"concat": ["fd10:20::5", 281474976710656]}`, 50),
+			el(`"fd10:20::7"`, 50), // not a concatenation
 		},
 		NeighAddrSet("household"): {el(`"fd10:20::9"`, 50)},
 		NeighTCPSet("household"):  {el(`{"concat": ["fd10:20::2", 2199023255554]}`, 400000), el(`{"concat": ["fd10:20::6", 2199023255554]}`, 432001)},
