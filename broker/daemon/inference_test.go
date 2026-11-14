@@ -568,10 +568,11 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 				if lit, ok := n.Args[0].(*ast.BasicLit); !ok || (lit.Value != `"unix"` && lit.Value != `"unixgram"` && lit.Value != `"unixpacket"`) {
 					at(n, "DialUnix on a network other than a unix one")
 				}
-				for _, a := range n.Args[1:] {
-					if !configuredUnixAddr(a, f, sel) {
-						at(n, "DialUnix to an address not taken from configuration")
-					}
+				// The remote address may not be nil: an unconnected
+				// datagram socket sends anywhere through WriteToUnix
+				// (#5757 S2); only the local address may be.
+				if len(n.Args) < 3 || !configuredUnixAddr(n.Args[1], f, sel, true) || !configuredUnixAddr(n.Args[2], f, sel, false) {
+					at(n, "DialUnix to an address not taken from configuration")
 				}
 				return true
 			}
@@ -587,6 +588,12 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 		case *ast.SelectorExpr:
 			if _, isDial := dials[n.Sel.Name]; isDial && !callee[n] {
 				at(n, n.Sel.Name+" used as a value, not called")
+			}
+			// A package that dials unix sockets itself sends only on
+			// its connected sockets: a send naming its own address
+			// would skip the dial's check (#5757 S2).
+			if unixDialCalls[rel] != nil && (n.Sel.Name == "WriteToUnix" || n.Sel.Name == "WriteMsgUnix" || n.Sel.Name == "WriteTo") {
+				at(n, "sends to an address of its own ("+n.Sel.Name+")")
 			}
 			full := sel(n)
 			if full == "" {
@@ -640,12 +647,12 @@ func configured(e ast.Expr, f *ast.File) bool {
 	return true
 }
 
-// configuredUnixAddr reports a DialUnix address that is nil or
-// &net.UnixAddr{...} whose Name is configured and whose other fields are
-// literals; any other expression is not.
-func configuredUnixAddr(e ast.Expr, f *ast.File, sel func(ast.Expr) string) bool {
+// configuredUnixAddr reports a DialUnix address that is &net.UnixAddr{...}
+// whose Name is configured and whose other fields are literals, or nil
+// where orNil allows it; any other expression is not.
+func configuredUnixAddr(e ast.Expr, f *ast.File, sel func(ast.Expr) string, orNil bool) bool {
 	if id, ok := e.(*ast.Ident); ok && id.Name == "nil" && id.Obj == nil {
-		return true
+		return orNil
 	}
 	u, ok := e.(*ast.UnaryExpr)
 	if !ok || u.Op != token.AND {
@@ -772,6 +779,13 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"kernel/proc", src(`"net"`, `func g(a *net.UnixAddr) { net.DialUnix("unixgram", nil, a) }`)},
 		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("tcp", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
 		{"kernel/proc", src(`"net"`, `var f = net.DialUnix`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) {
+	c, _ := net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil)
+	c.WriteToUnix([]byte("x"), &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"})
+}`)},
+		{"kernel/proc", src(`"net"`, `func g(reply string) { net.DialUnix("unixgram", &net.UnixAddr{Name: reply, Net: "unixgram"}, nil) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteMsgUnix(nil, nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(c *net.UnixConn) { c.WriteTo(nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
