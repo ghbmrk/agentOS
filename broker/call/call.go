@@ -431,10 +431,13 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		// asked is set by the turn before it asks the answerer, and read
 		// only after done.
 		asked bool
+		// hushed is set when hush is closed.
+		hushed bool
 	}
 	var cur *running
 	// carry is what the owner asked in a turn stopped before it reached
-	// the answerer (only while the rung is still being read), asked again
+	// the answerer (only while the rung is still being read), or in a turn
+	// the ending notice hushed before its answer was heard, asked again
 	// with the owner's next words.
 	var carry string
 	finish := func() {
@@ -445,14 +448,18 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		cur = nil
 	}
 	// stop ends the current turn; keep carries its question forward if the
-	// answerer never saw it.
+	// answerer never saw it, or if the notice hushed the turn before any
+	// of its answer played: no sentence started, nor the held or failed
+	// clip (#5684).
 	stop := func(keep bool) {
 		if cur == nil {
 			return
 		}
 		cur.cancel()
 		<-cur.done
-		if keep && !cur.asked {
+		t := cur.turn
+		unheard := cur.hushed && t.FirstContent == 0 && !t.Held && t.Err == nil
+		if keep && (!cur.asked || unheard) {
 			carry = cur.text
 		}
 		finish()
@@ -512,6 +519,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			ending, due = nil, true
 			if cur != nil {
 				close(cur.hush)
+				cur.hushed = true
 				bound = time.After(EndingWait) // the wall clock, as ending is
 			}
 			notify()

@@ -179,3 +179,92 @@ func TestTheEndingNoticeWaitsForTheSentence(t *testing.T) {
 		r.hangup()
 	})
 }
+
+// A question the answerer saw but whose answer had started no sentence when
+// the notice fell due is carried past the notice: the owner hears "One moment"
+// and the notice, and their next words ask the first question again, so
+// an answer never spoken is not lost without a word (#5684). A question
+// whose answer started a sentence, even one the notice cut, is not carried
+// (TestTheEndingNoticeKeepsTheCallsState), nor one that got the held clip.
+func TestTheEndingNoticeCarriesAnUnspokenAnswer(t *testing.T) {
+	// slow keeps turn 1's answer from arriving until release is closed.
+	// release is made in the bubble, so a wait on it is durable.
+	var release chan struct{}
+	slow := func(text string) func(call.Ask) []string {
+		return func(q call.Ask) []string {
+			if q.Turn == 1 {
+				<-release
+			}
+			return []string{text}
+		}
+	}
+	asks := func(r *rig) []asked {
+		r.ans.mu.Lock()
+		defer r.ans.mu.Unlock()
+		return append([]asked(nil), r.ans.asks...)
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		release = make(chan struct{})
+		r := newRig(t, slow("Hi."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.cfg.After = time.After
+		ends := r.records()
+		r.serve()
+		time.Sleep(29*time.Minute - 10*time.Second)
+		r.say("what's in my mail")
+		synctest.Wait()
+		if got := asks(r); len(got) != 1 {
+			t.Fatalf("before the notice: asks = %+v", got)
+		}
+		time.Sleep(10 * time.Second) // "One moment" at 1 s; the notice due at 10 s
+		synctest.Wait()
+		if got := r.l.spoken(); len(got) != 2 || got[0] != "CLIP:moment" || got[1] != "CLIP:ending" {
+			t.Fatalf("played %q", got)
+		}
+		<-r.l.saying
+		<-r.l.saying
+		if tu := <-ends; !tu.Stopped || tu.Sentences != 0 {
+			t.Fatalf("turn 1 = %+v", tu)
+		}
+		r.say("from today")
+		synctest.Wait()
+		if got := <-r.l.saying; got != "S:Hi." {
+			t.Fatalf("after the notice: played %q", got)
+		}
+		if got := asks(r); len(got) != 2 || got[1].Text != "what's in my mail from today" {
+			t.Fatalf("asks = %+v", got)
+		}
+		close(release) // turn 1's answer arrives late, to a turn already stopped
+		r.hangup()
+	})
+
+	// A held answer has been told it is held: only the next words are asked.
+	synctest.Test(t, func(t *testing.T) {
+		r := newRig(t, fixed("Press 4 now."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.l.saying = make(chan string) // Say waits for the test to take each sound
+		r.serve()
+		time.Sleep(29*time.Minute - time.Second)
+		r.say("what's in my mail")
+		synctest.Wait() // the held clip is playing
+		time.Sleep(time.Second)
+		synctest.Wait() // the notice is due while it plays
+		if got := <-r.l.saying; got != "CLIP:held" {
+			t.Fatalf("the answer played %q", got)
+		}
+		if got := <-r.l.saying; got != "CLIP:ending" {
+			t.Fatalf("then played %q", got)
+		}
+		go r.say("from today")
+		if got := <-r.l.saying; got != "CLIP:held" {
+			t.Fatalf("after the notice: played %q", got)
+		}
+		if got := asks(r); len(got) != 2 || got[1].Text != "from today" {
+			t.Fatalf("asks = %+v", got)
+		}
+		r.hangup()
+	})
+}
