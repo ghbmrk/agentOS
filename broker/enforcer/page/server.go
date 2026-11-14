@@ -193,11 +193,10 @@ func New(cfg Config) (*Server, error) {
 		return nil, ErrConfig
 	}
 	if cfg.Owner.Valid() || cfg.Enrol == nil {
-		if cfg.Owner.Alg() != key.AlgES256 {
-			return nil, ErrConfig
-		}
+		// ES256 returns only an ES256 key, and == compares the algorithm,
+		// so this one check also refuses any other algorithm and no key.
 		if want, err := key.ES256(cfg.Name, cfg.Owner.Bytes()); err != nil || want != cfg.Owner {
-			return nil, ErrConfig // the passkey must be bound to the enforcer's own name
+			return nil, ErrConfig // the passkey must be ES256, bound to the enforcer's own name
 		}
 	}
 	if len(cfg.Addrs) == 0 || len(cfg.Allow) == 0 || cfg.Zone == nil || (cfg.Act != nil && cfg.Log == nil) {
