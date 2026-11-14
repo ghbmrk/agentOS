@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -45,7 +46,10 @@ func fakeDriver() {
 	for sc.Scan() {
 		line := sc.Text()
 		fmt.Fprintf(log, "REQ %s\n", line)
-		var req struct{ Verb, URL string }
+		var req struct {
+			Verb, URL string
+			ID        json.RawMessage
+		}
 		_ = json.Unmarshal([]byte(line), &req)
 		if req.Verb == "screenshot" || req.Verb == "download" || os.Getenv("BROWSER_FAKE_ANYFILE") == "1" {
 			// The file the driver says it wrote, or a link to a file outside
@@ -121,12 +125,40 @@ func fakeDriver() {
 			// ordered by construction, not by a timing bound (#4083).
 			os.Exit(3)
 		}
+		extra := false
+		switch string(r) {
+		case `"noid"`:
+			// A reply that names no request (K9).
+			r, _ = json.Marshal(map[string]any{"ok": true, "url": page})
+			os.Stdout.Write(append(r, '\n'))
+			continue
+		case `"extra"`:
+			// The answer, then the same line again unasked (K9).
+			r, _ = json.Marshal(map[string]any{"ok": true, "url": page})
+			extra = true
+		}
 		var on struct{ URL *string }
 		if json.Unmarshal(r, &on) == nil && on.URL != nil {
 			page = *on.URL
 		}
-		os.Stdout.Write(append(r, '\n'))
+		out := echoID(r, req.ID)
+		os.Stdout.Write(append(out, '\n'))
+		if extra {
+			os.Stdout.Write(append(out, '\n'))
+		}
 	}
+}
+
+// echoID puts the request's number on a scripted reply object, as the real
+// driver does (K9).
+func echoID(r, id json.RawMessage) []byte {
+	if len(id) == 0 || len(r) < 2 || r[0] != '{' {
+		return r
+	}
+	if string(r) == "{}" {
+		return []byte(`{"id":` + string(id) + `}`)
+	}
+	return append([]byte(`{"id":`+string(id)+`,`), r[1:]...)
 }
 
 type harness struct {
@@ -213,13 +245,16 @@ func (h *harness) shown(s string) string {
 	return t
 }
 
+var wireID = regexp.MustCompile(`,"id":[0-9]+\}$`)
+
 func (h *harness) received(t *testing.T) []string {
 	t.Helper()
 	b, _ := os.ReadFile(h.log)
 	var out []string
 	for _, l := range strings.Split(string(b), "\n") {
 		if strings.HasPrefix(l, "REQ ") {
-			out = append(out, strings.TrimPrefix(l, "REQ "))
+			// The canonical request, without the gate's number (K9).
+			out = append(out, wireID.ReplaceAllString(strings.TrimPrefix(l, "REQ "), "}"))
 		}
 	}
 	return out
@@ -954,7 +989,8 @@ func TestGateGuessEchoAfterOverflowIsNoOracle(t *testing.T) {
 func TestADriverThatStopsReadingIsStopped(t *testing.T) {
 	ws := t.TempDir()
 	g, err := Start(context.Background(), Config{
-		Driver:    []string{"/bin/sh", "-c", `exec yes '{"ok":true,"url":"https://shop.example.test/"}'`},
+		// Answers every request by its number, in order, and never reads.
+		Driver:    []string{"/bin/sh", "-c", `exec awk 'BEGIN { for (i = 1; ; i++) printf "{\"id\":%d,\"ok\":true,\"url\":\"https://shop.example.test/\"}\n", i }'`},
 		Origins:   []string{"https://shop.example.test"},
 		Workspace: ws,
 		Timeout:   500 * time.Millisecond,
@@ -983,5 +1019,50 @@ func TestADriverThatStopsReadingIsStopped(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		_ = syscall.Kill(-g.cmd.Pid(), syscall.SIGKILL) // unblock the write so cleanup can run
 		t.Fatal("a blocked write held the step")
+	}
+}
+
+// K9: each request carries the gate's number and a reply must echo it, so a
+// line the driver wrote unasked cannot answer the next request.
+func TestRequestsCarryTheGatesNumber(t *testing.T) {
+	h := newHarness(t, nil, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/a"}`)
+	b, _ := os.ReadFile(h.log)
+	var got []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, "REQ ") {
+			got = append(got, strings.TrimPrefix(l, "REQ "))
+		}
+	}
+	want := []string{`{"v":0,"verb":"snapshot","id":1}`, `{"v":0,"verb":"navigate","url":"https://shop.example.test/a","id":2}`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("driver got %q, want %q", got, want)
+	}
+	// The number is the gate's: an agent cannot send one.
+	if res := h.do(t, `{"v":0,"verb":"snapshot","id":3}`); res.Error != "protocol" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestAStrayDriverLineDoesNotAnswerTheNextRequest(t *testing.T) {
+	h := newHarness(t, map[string]any{"click": "extra"}, "", 0)
+	if res := h.do(t, `{"v":0,"verb":"click","ref":"e1"}`); !res.OK {
+		t.Fatalf("click: %+v", res)
+	}
+	res := h.do(t, `{"v":0,"verb":"snapshot"}`)
+	if res.OK || res.Error != "driver" || !h.g.stopped {
+		t.Fatalf("the click's second line answered the snapshot: %+v", res)
+	}
+}
+
+func TestAReplyThatNamesNoRequestStopsTheExecutor(t *testing.T) {
+	h := newHarness(t, map[string]any{"click": "noid"}, "", 0)
+	res := h.do(t, `{"v":0,"verb":"click","ref":"e1"}`)
+	if res.OK || res.Error != "driver" || !h.g.stopped {
+		t.Fatalf("%+v", res)
+	}
+	if res := h.do(t, `{"v":0,"verb":"snapshot"}`); res.OK || res.Error != "stopped" {
+		t.Fatalf("after: %+v", res)
 	}
 }

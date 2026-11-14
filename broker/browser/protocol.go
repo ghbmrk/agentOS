@@ -165,6 +165,14 @@ func (r Request) Encode() []byte {
 	return b.Bytes()
 }
 
+// wire is the line written to the driver: the canonical request with the
+// number its reply must echo (K9). The number is the gate's, never the
+// agent's, so Parse refuses an "id" and approvals print Encode alone.
+func (r Request) wire(id uint64) []byte {
+	b := r.Encode()
+	return append(fmt.Appendf(b[:len(b)-1:len(b)-1], `,"id":%d}`, id), '\n')
+}
+
 func js(v any) []byte { b, _ := json.Marshal(v); return b }
 
 func hasArg(args []string, a string) bool {
