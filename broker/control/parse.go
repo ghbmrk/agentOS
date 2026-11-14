@@ -33,7 +33,7 @@ const UnclearReply = "Not understood, and not sent to your agent. Reply HELP for
 // (Arabic-Indic, full-width, circled and the like). Such a code is never
 // checked, so the reply names the cause and the next step (CH-12,
 // CTL-unicode-chat-code-fu, #5616; CTL-unicode-chat-code-fu2, #5650).
-const FoldedCodeReply = "Codes work only in digits 0-9. Not sent to your agent: send it again using 0-9."
+const FoldedCodeReply = "Not sent to your agent. Send it again using 0-9."
 
 // StrippedNumberReply is the fixed notice sent when unlocked chat ending
 // in a 6-digit number in other digits is forwarded without that number,
