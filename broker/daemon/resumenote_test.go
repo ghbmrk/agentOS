@@ -11,11 +11,11 @@ import (
 
 // RESUME names the steps the kernel's STOP cancelled, read through
 // bothStops before the lift, and says nothing of a cancel when it
-// cancelled none (#5665); the first RESUME since agentosd started gives
-// the general note, since the STOP in force may predate it (L3, Security
-// on #5734). Catches a note said after a STOP that cancelled nothing, one
-// dropped after a STOP that cancelled two, or a count trusted across a
-// restart.
+// cancelled none (#5665), from the first STOP this process sends to a
+// kernel not stopped; a STOP in force when agentosd started may predate
+// it, so its RESUME gives the general note (L3, Security on #5734).
+// Catches a note said after a STOP that cancelled nothing, one dropped
+// after a STOP that cancelled two, or a count trusted across a restart.
 func TestResumeNamesTheKernelsCancelsOnlyWhenThereAreAny(t *testing.T) {
 	head := "Resumed. Held actions may now run."
 	for n, want := range map[int]string{
@@ -25,13 +25,20 @@ func TestResumeNamesTheKernelsCancelsOnlyWhenThereAreAny(t *testing.T) {
 		k := &fakeKernel{cancelled: n}
 		dir := withKernel(t, k)
 		text(t, dir, owner, "STOP")
-		if r := resume(t, dir); r != head+" "+control.StopCancelledNote {
-			t.Errorf("%d cancelled, the first RESUME since start: %q", n, r)
-		}
-		text(t, dir, owner, "STOP")
 		if r := resume(t, dir); r != want {
 			t.Errorf("%d cancelled: %q, want %q", n, r, want)
 		}
+	}
+	// The kernel was stopped when this process started.
+	k := &fakeKernel{stopped: true}
+	dir := withKernel(t, k)
+	text(t, dir, owner, "STOP")
+	if r, want := resume(t, dir), head+" "+control.StopCancelledNote; r != want {
+		t.Errorf("a STOP in force at start: %q, want %q", r, want)
+	}
+	text(t, dir, owner, "STOP")
+	if r := resume(t, dir); r != head {
+		t.Errorf("the next STOP, seen whole: %q, want %q", r, head)
 	}
 }
 
@@ -52,37 +59,40 @@ func TestBothStopsReadsTheCancelsOfTheStopInForce(t *testing.T) {
 		{"read refused", &fakeKernel{stopped: true, uncounted: true}, 0, true},
 		{"count still open", &fakeKernel{stopped: true, cancelled: 1, open: true}, 0, true},
 	} {
-		b := &bothStops{k: c.k}
+		b := &bothStops{k: c.k, whole: true}
 		n, err := b.StopCancelled()
 		if n != c.n || (err != nil) != c.wantErr {
 			t.Errorf("%s: %d %v, want %d (error %v)", c.name, n, err, c.n, c.wantErr)
 		}
 	}
-	if r := (&bothStops{k: &fakeKernel{down: true}}); !strings.Contains(control.CancelledNote(r), "STOP may have cancelled some") {
+	if _, err := (&bothStops{k: &fakeKernel{stopped: true}}).StopCancelled(); err == nil {
+		t.Error("a count not seen whole was trusted")
+	}
+	if r := (&bothStops{k: &fakeKernel{down: true}, whole: true}); !strings.Contains(control.CancelledNote(r), "STOP may have cancelled some") {
 		t.Errorf("a kernel not answering dropped the note: %q", control.CancelledNote(r))
 	}
 }
 
 // A RESUME that fails after the kernel may have lifted its STOP is
 // followed by a re-STOP, which may restart the kernel's count: its failure
-// reply names what was read before it, and the next RESUME keeps the
-// general note, in this process (lossOpen) and after a restart (a fresh
-// bothStops starts open); one after a RESUME that succeeded reads the
-// count again (L3, Security on #5734). Security's repro: three lost, a
-// plan logged before the re-STOP, agentosd restarted, the kernel's count
-// now 1. Catches the owner told less than the first STOP's loss.
+// reply names what was read before it, in a form that waits for a RESUME
+// that works, and the next RESUME keeps the general note, in this process
+// (whole) and after a restart (the kernel is stopped at start); one after
+// a RESUME that succeeded reads the count again (L3, Security on #5734).
+// Security's repro: three lost, a plan logged before the re-STOP,
+// agentosd restarted, the kernel's count now 1. Catches the owner told
+// less than the first STOP's loss.
 func TestAFailedResumeLeavesTheLossOpen(t *testing.T) {
 	head := "Resumed. Held actions may now run."
 	k := &fakeKernel{cancelled: 3}
 	dir := withKernel(t, k)
 	text(t, dir, owner, "STOP")
 	k.set(func(k *fakeKernel) { k.lost = true })
-	// The first RESUME since start: the count is not yet trusted, so the
-	// failure names the general note (control's handler test pins the count).
-	if r, want := resume(t, dir), "RESUME failed to record. Still stopped. "+control.StopCancelledNote; r != want {
+	if r, want := resume(t, dir), "RESUME failed to record. Still stopped. STOP cancelled 3 actions; they stay cancelled; once RESUME works, ask again for any you still want."; r != want {
 		t.Fatalf("RESUME with its answer lost: %q, want %q", r, want)
 	}
 	k.set(func(k *fakeKernel) { k.lost, k.cancelled = false, 1 }) // the re-STOP restarted the count
+	text(t, dir, owner, "STOP")                                   // a STOP on the stopped kernel trusts nothing
 	if r, want := resume(t, dir), head+" "+control.StopCancelledNote; r != want {
 		t.Fatalf("the retried RESUME: %q, want %q", r, want)
 	}

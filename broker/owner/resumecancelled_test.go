@@ -73,20 +73,44 @@ func TestResumeSaysWhatStopCancelled(t *testing.T) {
 
 	// A RESUME that fails names what it read before the attempt, so the
 	// owner hears it before a re-STOP can restart the count (Security on
-	// #5734).
+	// #5734), and asks again only once RESUME works (L3 on #5734): texted,
+	// after a challenge, and on the owner page.
+	failed := " STOP cancelled 2 actions; they stay cancelled; once RESUME works, ask again for any you still want."
 	r = newRig(t, nil)
 	r.eng.cancelled, r.eng.resumeErr = 2, errors.New("the journal's write failed")
 	r.say("STOP")
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got, want := r.say("RESUME "+code), "RESUME failed to record. Still stopped."+two; got != want {
+	if got, want := r.say("RESUME "+code), "RESUME failed to record. Still stopped."+failed; got != want {
 		t.Errorf("failed: %q, want %q", got, want)
+	}
+	r = newRig(t, nil)
+	r.eng.cancelled, r.eng.resumeErr = 2, errors.New("the journal's write failed")
+	r.say("STOP")
+	tok := enterChallenge(t, r)
+	if got, want := r.say("RESUME "+tok+" "+r.totp()), " RESUME failed to record. Still stopped."+failed; !strings.HasSuffix(got, want) {
+		t.Errorf("failed after a challenge: %q, want the suffix %q", got, want)
+	}
+	for n, want := range map[int]string{2: "RESUME failed to record. Still stopped." + failed} {
+		r = newRig(t, nil)
+		r.eng.cancelled, r.eng.resumeErr = n, errors.New("the journal's write failed")
+		r.say("STOP")
+		if msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks, r.ch.StopGen()); err != nil || msg != want {
+			t.Errorf("failed on the page: %q %v, want %q", msg, err, want)
+		}
+	}
+	// With nothing to name, the page keeps its own failure line.
+	r = newRig(t, nil)
+	r.eng.resumeErr = errors.New("the journal's write failed")
+	r.say("STOP")
+	if msg, err := r.ch.LocalResume(r.ch.LocalStatus().Locks, r.ch.StopGen()); err == nil || msg != "" {
+		t.Errorf("failed on the page with nothing cancelled: %q %v, want the error", msg, err)
 	}
 
 	// RESUME after a lockout's challenge.
 	r = newRig(t, nil)
 	r.eng.cancelled = 2
 	r.say("STOP")
-	tok := enterChallenge(t, r)
+	tok = enterChallenge(t, r)
 	if got := r.say("RESUME " + tok + " " + r.totp()); !strings.HasSuffix(got, " Resumed."+two) || r.eng.Stopped() {
 		t.Errorf("challenge: %q", got)
 	}
@@ -105,7 +129,14 @@ func TestResumeNoteFitsTheTextBudget(t *testing.T) {
 		err error
 	}{{1, nil}, {999999, nil}, {0, errors.New("unread")}} {
 		f := &fakeEngine{stopped: true, cancelled: c.n, cancelErr: c.err}
-		notes = append(notes, control.CancelledNote(f))
+		cancels := control.ReadCancels(f)
+		notes = append(notes, cancels.Resumed())
+		// The failure replies, with every head they start with (L3 on #5734).
+		for _, h := range []string{"RESUME failed to record. Still stopped.", "Codes work normally again. RESUME failed to record. Still stopped."} {
+			if !fits(h + cancels.Failed()) {
+				t.Errorf("%q does not fit", h+cancels.Failed())
+			}
+		}
 	}
 	for _, note := range notes {
 		for _, n := range []int{0, 1, 2, 10, 999} {

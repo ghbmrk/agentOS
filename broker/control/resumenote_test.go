@@ -63,12 +63,14 @@ func (failingResume) Resume() error { return errors.New("the journal's write fai
 
 // A RESUME that fails names the count it read before the attempt, so the
 // owner hears it before a re-STOP can restart the count (Security on
-// #5734). Catches a failure reply that drops what the STOP cancelled.
+// #5734), and asks again only once RESUME works, since planning is
+// stopped (L3 on #5734). Catches a failure reply that drops what the STOP
+// cancelled, or one that tells the owner to ask now.
 func TestAFailedResumeNamesWhatStopCancelled(t *testing.T) {
 	h, _ := newHandler(t, &fakeEngine{}, fakeAuth{}, forbiddenAgent{t})
 	h.Engine = failingResume{cancelEngine{fakeEngine: &fakeEngine{stopped: true}, cancelled: 3}}
 	one(t, h.Handle(context.Background(), owner, "RESUME"))
-	want := "RESUME failed to record. Still stopped. STOP cancelled 3 actions; they stay cancelled, so ask again for any you still want."
+	want := "RESUME failed to record. Still stopped. STOP cancelled 3 actions; they stay cancelled; once RESUME works, ask again for any you still want."
 	if got := one(t, h.Handle(context.Background(), owner, "RESUME 111111")); got != want {
 		t.Fatalf("%q, want %q", got, want)
 	}

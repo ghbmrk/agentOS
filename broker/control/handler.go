@@ -325,11 +325,11 @@ func (h *Handler) resumeCmd(args []string) string {
 		return "Wrong code. Reply RESUME <code>."
 	}
 	h.resume = nil
-	note := CancelledNote(h.Engine)
+	cancels := ReadCancels(h.Engine)
 	if err := h.Engine.Resume(); err != nil {
-		return "RESUME failed to record. Still stopped." + note
+		return "RESUME failed to record. Still stopped." + cancels.Failed()
 	}
-	return "Resumed. Held actions may now run." + note
+	return "Resumed. Held actions may now run." + cancels.Resumed()
 }
 
 // StopCanceller is an Engine whose STOP cancels steps for good, as the
@@ -339,38 +339,55 @@ type StopCanceller interface {
 	StopCancelled() (int, error)
 }
 
-// CancelledNote ends a RESUME reply, read before the RESUME, and the reply
-// of one that fails, so the owner hears it before a re-STOP can restart
-// the count: a STOP cancels each unsent step, and RESUME never brings one
-// back (KRN-7, #5138), so an owner who expected a pause is told not to
-// wait for it (#5151), with the count, and only when the STOP cancelled
+// Cancels is what the STOP in force cancelled, read before a RESUME:
+// a STOP cancels each unsent step, and RESUME never brings one back
+// (KRN-7, #5138), so an owner who expected a pause is told not to wait
+// for it (#5151), with the count, and only when the STOP cancelled
 // something (#5665). A count that cannot be read, or is not yet known,
-// gets StopCancelledNote, since silence could hide a loss; an Engine whose
-// STOP only holds gets none. It starts with a space.
-func CancelledNote(e Engine) string {
-	c, ok := e.(StopCanceller)
-	if !ok {
-		return ""
-	}
-	switch n, err := c.StopCancelled(); {
-	case err != nil:
-		return " " + StopCancelledNote
-	case n == 0:
-		return ""
-	case n == 1:
-		return " " + oneCancelledNote
-	default:
-		return fmt.Sprintf(" "+cancelledNote, n)
-	}
+// gets the general note, since silence could hide a loss; an Engine whose
+// STOP only holds cancels none.
+type Cancels struct {
+	n     int
+	known bool
 }
 
-// RESUME's notes on what the STOP cancelled. StopCancelledNote is the one
-// for a count that cannot be read or is not yet known.
-const (
-	StopCancelledNote = "STOP may have cancelled some actions; any it cancelled stay cancelled, so ask again for any you still want."
-	oneCancelledNote  = "STOP cancelled 1 action; it stays cancelled, so ask again if you still want it."
-	cancelledNote     = "STOP cancelled %d actions; they stay cancelled, so ask again for any you still want."
-)
+// ReadCancels reads e's count; read it before the RESUME, whose reply,
+// or failure reply, names it (Resumed, Failed).
+func ReadCancels(e Engine) Cancels {
+	c, ok := e.(StopCanceller)
+	if !ok {
+		return Cancels{known: true}
+	}
+	n, err := c.StopCancelled()
+	return Cancels{n, err == nil}
+}
+
+// Resumed ends a RESUME reply. It starts with a space, or is empty.
+func (c Cancels) Resumed() string { return c.note(", so ask again") }
+
+// Failed ends a failed RESUME's reply, so the owner hears it before a
+// re-STOP can restart the count (Security on #5734); asking again waits
+// for a RESUME that works, since planning is stopped (KRN-7).
+func (c Cancels) Failed() string { return c.note("; once RESUME works, ask again") }
+
+func (c Cancels) note(ask string) string {
+	switch {
+	case !c.known:
+		return " STOP may have cancelled some actions; any it cancelled stay cancelled" + ask + " for any you still want."
+	case c.n == 0:
+		return ""
+	case c.n == 1:
+		return " STOP cancelled 1 action; it stays cancelled" + ask + " if you still want it."
+	}
+	return fmt.Sprintf(" STOP cancelled %d actions; they stay cancelled%s for any you still want.", c.n, ask)
+}
+
+// CancelledNote is ReadCancels(e).Resumed().
+func CancelledNote(e Engine) string { return ReadCancels(e).Resumed() }
+
+// StopCancelledNote is the RESUME note for a count that cannot be read or
+// is not yet known.
+var StopCancelledNote = Cancels{}.Resumed()[1:]
 
 // codeText sends text unless the hourly cap on RESUME texts is spent, in
 // which case the broker stays silent.

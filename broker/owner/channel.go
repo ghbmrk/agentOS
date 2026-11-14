@@ -494,16 +494,16 @@ func gridLabel(w string) bool {
 var errStoppedMeanwhile = errors.New("stopped while the code was checked")
 
 // resumeUnlessStopped lifts STOP only if no STOP arrived since stops was
-// gen, checked and applied under stopMu, and returns the reply's note on
-// what the STOP cancelled, read before the lift (control.CancelledNote).
-func (c *Channel) resumeUnlessStopped(gen int64) (string, error) {
+// gen, checked and applied under stopMu, and returns what the STOP
+// cancelled, read before the lift, for the reply (control.ReadCancels).
+func (c *Channel) resumeUnlessStopped(gen int64) (control.Cancels, error) {
 	c.stopMu.Lock()
 	defer c.stopMu.Unlock()
 	if c.stops.Load() != gen {
-		return "", errStoppedMeanwhile
+		return control.Cancels{}, errStoppedMeanwhile
 	}
-	note := control.CancelledNote(c.cfg.Engine)
-	return note, c.cfg.Engine.Resume()
+	cancels := control.ReadCancels(c.cfg.Engine)
+	return cancels, c.cfg.Engine.Resume()
 }
 
 const stoppedMeanwhile = "A STOP arrived while the code was checked, so nothing resumed. Still stopped."
@@ -866,14 +866,14 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		msg := "Codes work normally again."
 		if r.word == "RESUME" {
 			c.resume = nil
-			note, err := c.resumeUnlessStopped(gen)
+			cancels, err := c.resumeUnlessStopped(gen)
 			switch {
 			case err == errStoppedMeanwhile:
 				return route{replies: []string{msg + " " + stoppedMeanwhile}}, true
 			case err != nil:
-				return route{replies: []string{msg + " RESUME failed to record. Still stopped." + note}}, true
+				return route{replies: []string{msg + " RESUME failed to record. Still stopped." + cancels.Failed()}}, true
 			}
-			msg += " Resumed." + c.rewindowLocked(now, note)
+			msg += " Resumed." + c.rewindowLocked(now, cancels.Resumed())
 		}
 		return route{replies: []string{msg}}, true
 	}
@@ -1084,12 +1084,12 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{"Wrong code. Reply RESUME <code>." + lockNote(locked)}, false
 	}
 	c.resume = nil
-	note, err := c.resumeUnlessStopped(p.stops)
+	cancels, err := c.resumeUnlessStopped(p.stops)
 	switch {
 	case err == errStoppedMeanwhile:
 		return []string{stoppedMeanwhile}, true
 	case err != nil:
-		return []string{"RESUME failed to record. Still stopped." + note}, true
+		return []string{"RESUME failed to record. Still stopped." + cancels.Failed()}, true
 	}
 	n := 0
 	for _, s := range c.cfg.Engine.List() {
@@ -1104,7 +1104,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 	case n > 1:
 		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
 	}
-	return []string{text + c.rewindowLocked(now, note)}, true
+	return []string{text + c.rewindowLocked(now, cancels.Resumed())}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

@@ -60,7 +60,7 @@ func TestStopCountsTheStepsItCancels(t *testing.T) {
 	// Any STOP after a lift starts the count over, one right after it
 	// included: the kernel cannot tell agentosd's re-STOP from the owner's
 	// next STOP, so it never carries a count onto a STOP that cancelled
-	// nothing (L3 on #5734); agentosd covers its re-STOP (bothStops.lossOpen).
+	// nothing (L3 on #5734); agentosd covers its re-STOP (bothStops.whole).
 	must(t, r.k.Resume(70, r.k.State().Stops))
 	must(t, r.k.Stop(71))
 	if n, open := r.k.State().StopLoss(); n != 0 || open {

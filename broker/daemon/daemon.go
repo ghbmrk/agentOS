@@ -405,7 +405,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// journal engine when a kernel is configured (#2783).
 	var owned control.Engine = journalowner.Engine{Engine: eng}
 	if cfg.Kernel != nil {
-		b := &bothStops{Engine: journalowner.Engine{Engine: eng}, k: cfg.Kernel, lossOpen: true}
+		b := &bothStops{Engine: journalowner.Engine{Engine: eng}, k: cfg.Kernel}
 		owned, notes = b, append([]func() string{b.note}, notes...)
 	}
 	h := &control.Handler{Engine: owned, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
@@ -780,13 +780,15 @@ type bothStops struct {
 	mu       sync.Mutex
 	unread   bool // the last read of the kernel's stop failed
 	unlisted bool // the last read of the kernel's unsettled steps failed
-	// lossOpen: the kernel's count may not cover the STOP in force,
-	// since this process started (a STOP from before it, or a RESUME that
-	// failed partway before a restart) or since a RESUME failed after the
-	// kernel may have lifted its STOP and the re-STOP restarted the count;
-	// until a RESUME succeeds the count is not trusted (L3, Security on
-	// #5734). Such a failed RESUME's reply names the count read before it.
-	lossOpen bool
+	// whole: the kernel's count covers the STOP in force, since this
+	// process saw that STOP land on a kernel that was not stopped, or saw
+	// a RESUME succeed since. It is false at start (a STOP in force may
+	// predate this process, such as a re-STOP after a RESUME that failed
+	// before a restart) and after a RESUME that failed once the kernel may
+	// have lifted its STOP, whose re-STOP restarted the count; RESUME then
+	// gives the general note (L3, Security on #5734), and such a failed
+	// RESUME's reply names the count read before it.
+	whole bool
 }
 
 // Stop records a STOP in the journal and on the kernel, and reports done
@@ -794,8 +796,36 @@ type bothStops struct {
 // plan and runs nothing, so its refusal is not a failure; one that cannot
 // be reached is, since it may hold plans it runs again once it answers.
 func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
+	fresh := b.freshStop(ctx)
 	rep, err := b.Engine.Stop(ctx)
-	return rep, errors.Join(err, b.kernel(ctx, b.k.Stop))
+	kerr := b.kernel(ctx, b.k.Stop)
+	if fresh && kerr == nil {
+		b.mu.Lock()
+		b.whole = true
+		b.mu.Unlock()
+	}
+	return rep, errors.Join(err, kerr)
+}
+
+// freshStop is whether a STOP sent now starts the kernel's count, read
+// only while the count is not known whole (one read per process in
+// practice): the kernel is not stopped, or waits for setup and holds no
+// plan. A kernel that cannot be read is not.
+func (b *bothStops) freshStop(ctx context.Context) bool {
+	b.mu.Lock()
+	whole := b.whole
+	b.mu.Unlock()
+	if whole {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, kernelFor)
+	defer cancel()
+	stopped, _, err := b.k.Stopped(ctx)
+	if err != nil {
+		open, oerr := b.k.SetupOpen(ctx)
+		return oerr == nil && open
+	}
+	return !stopped
 }
 
 // Resume lifts the kernel's STOP first: if that fails the journal stays
@@ -813,7 +843,7 @@ func (b *bothStops) Resume() error {
 		}
 	}
 	b.mu.Lock()
-	b.lossOpen = false
+	b.whole = true
 	b.mu.Unlock()
 	return nil
 }
@@ -821,7 +851,7 @@ func (b *bothStops) Resume() error {
 // restop STOPs the kernel again after a RESUME that failed with err.
 func (b *bothStops) restop(err error) error {
 	b.mu.Lock()
-	b.lossOpen = true
+	b.whole = false
 	b.mu.Unlock()
 	return errors.Join(err, b.kernel(context.Background(), b.k.Stop))
 }
@@ -845,14 +875,14 @@ func (b *bothStops) resumeKernel(ctx context.Context) error {
 // is not yet known (a step the STOP ended still unsettled, or a kernel
 // that predates the count), is an error, and RESUME names that it may
 // have cancelled some; so is any count after a RESUME that failed partway
-// (lossOpen).
+// (whole).
 func (b *bothStops) StopCancelled() (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
 	defer cancel()
 	b.mu.Lock()
-	open := b.lossOpen
+	whole := b.whole
 	b.mu.Unlock()
-	if open {
+	if !whole {
 		return 0, errStopLossOpen
 	}
 	stopped, n, known, err := b.k.StopCancelled(ctx)
