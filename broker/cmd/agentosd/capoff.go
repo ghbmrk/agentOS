@@ -46,7 +46,7 @@ const (
 	// C1: the agent's image or launch file is missing.
 	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
-	modelUnset = "Model: not set up, so the agent cannot think or learn; " + fixUpdate + "."
+	modelUnset = "Model: none yet, so your agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
 	modelUnreachable = "Model: not reachable, so your agent cannot think; " + fixRestart + "."
 	// C2: no model provider is granted (A11's no-grant cause): no -grant
