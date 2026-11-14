@@ -4,7 +4,7 @@
 It runs on both trees the box boots. mkosi.postinst runs it with the image tree's path, before it
 copies dpkg's status file out for the known-vulnerability scan (EVL-5), so the scan and the package
 manifest see the packages gone. The default initrd's mkosi.postinst is a link to this file, which
-mkosi runs with no tree argument and the initrd's tree in $BUILDROOT: there it purges INITRD_DROP
+mkosi runs with the argument `final` and the initrd's tree in $BUILDROOT: there it purges INITRD_DROP
 with the same checks, then copies the initrd's dpkg status to INITRD_STATUS for the scan (#4927). Each
 package below is a hard dependency of one the box keeps, so apt would remove the keeper with it;
 dpkg purges it with --force-depends instead, and FILES removes what used it. The NEEDED check then
@@ -221,11 +221,12 @@ def owners(root):
     return out
 
 
-def interpreter_violations(root, gone, allowed=(), top="usr"):
+def interpreter_violations(root, gone, allowed=(), top="usr", name="drop.py's PERL_TOOLS"):
     """One line per executable script under TOP whose #! runs a program in GONE, the programs the
     dropped packages shipped, unless a package in ALLOWED owns it: a forced purge must not leave a
     script the box could start and that cannot run. A bare name (from env) matches a dropped
-    program of that name. Also one line per package in ALLOWED that owns no such script."""
+    program of that name. Also one line per package in ALLOWED that owns no such script, naming
+    NAME as the stale list."""
     names = {os.path.basename(g) for g in gone}
     owner = owners(root)
     out, used = [], set()
@@ -246,19 +247,20 @@ def interpreter_violations(root, gone, allowed=(), top="usr"):
                 used.add(pkg)
             else:
                 out.append("%s: runs %s, which a dropped package shipped" % (rel, prog))
-    out += ["%s: owns no script a dropped program runs; drop.py's PERL_TOOLS is stale" % p
+    out += ["%s: owns no script a dropped program runs; %s is stale" % (p, name)
             for p in sorted(set(allowed) - used)]
     return out
 
 
-def remove_files(root, patterns=None):
+def remove_files(root, patterns=None, name="drop.py's FILES"):
     """Delete PATTERNS (FILES by default) from the tree, and the links under etc/systemd that
-    enabled a unit among them; one line per pattern that matched nothing."""
+    enabled a unit among them; one line per pattern that matched nothing, naming NAME as the stale
+    list."""
     out, units = [], set()
     for pattern in FILES if patterns is None else patterns:
         hits = sorted(glob.glob(os.path.join(root, pattern)))
         if not hits:
-            out.append("%s: matches nothing; drop.py's FILES is stale" % pattern)
+            out.append("%s: matches nothing; %s is stale" % (pattern, name))
         for h in hits:
             os.unlink(h)
             if "/systemd/system/" in h:
@@ -288,7 +290,8 @@ def installed(root):
 def main(root, initrd=False):
     """Purge DROP from the image tree at ROOT, or with INITRD, INITRD_DROP from the initrd's, and
     check the tree; 1 if a check fails. PERL_TOOLS lists the main tree's packages; in the initrd
-    only those it installs apply, and each of them must still own a perl script."""
+    only those it installs apply, and each of them must still own a perl script. In the initrd each
+    problem line starts "initrd:" and names the initrd's lists."""
     pkgs = INITRD_DROP if initrd else DROP
     files = INITRD_FILES if initrd else FILES
     tools = {p: w for p, w in PERL_TOOLS.items() if p in installed(root)} if initrd else PERL_TOOLS
@@ -303,10 +306,12 @@ def main(root, initrd=False):
                     SHELL], check=True)
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
                     *ESSENTIAL], check=True)
-    problems = (remove_files(root, files) + needed_violations(root, shipped(listed))
-                + interpreter_violations(root, programs(listed) - {SH}, tools))
+    names = (("drop.py's INITRD_FILES", "drop.py's PERL_TOOLS, as filtered to the initrd's packages")
+             if initrd else ("drop.py's FILES", "drop.py's PERL_TOOLS"))
+    problems = (remove_files(root, files, names[0]) + needed_violations(root, shipped(listed))
+                + interpreter_violations(root, programs(listed) - {SH}, tools, name=names[1]))
     for p in problems:
-        print("drop.py: " + p, file=sys.stderr)
+        print("drop.py: " + ("initrd: " if initrd else "") + p, file=sys.stderr)
     return 1 if problems else 0
 
 
@@ -317,10 +322,20 @@ def keep_initrd_status(root):
     shutil.copyfile(os.path.join(root, "var/lib/dpkg/status"), dest)
 
 
+# The argument mkosi passes a postinst script (mkosi v24.3); it selects initrd mode.
+MKOSI_ARG = "final"
+
+
 def run(argv, env):
-    """The main tree when ARGV names one directory (mkosi.postinst); otherwise the initrd, whose
-    postinst mkosi runs as this file with no tree argument and the tree in $BUILDROOT."""
-    if len(argv) == 1 and os.path.isdir(argv[0]):
+    """The initrd, on the tree in $BUILDROOT, when ARGV is mkosi's `final` or empty: its postinst is
+    this file. The main tree when ARGV names one directory (mkosi.postinst). Anything else is
+    refused, so a mistyped tree never runs initrd mode on $BUILDROOT unannounced."""
+    if len(argv) > 1:
+        raise SystemExit("drop.py: takes one argument, the image tree; got %d" % len(argv))
+    if argv and argv[0] != MKOSI_ARG:
+        if not os.path.isdir(argv[0]):
+            raise SystemExit("drop.py: %s is not a directory; pass the image tree, or run as the initrd's "
+                             "mkosi.postinst (argument %s or none, with $BUILDROOT set)" % (argv[0], MKOSI_ARG))
         return main(argv[0])
     root = env.get("BUILDROOT", "")
     if not os.path.isdir(root):
