@@ -186,7 +186,8 @@ func recent(sets []listedSet) map[string][]aging {
 }
 
 // carried is one shared segment's set (HostSet, LeaseSet, LeaseAddrSet,
-// LeasedSet, HeldSet, ClaimSet, MACSet) with its elements as add element
+// LeasedSet, HeldSet, ClaimSet, MACSet, the neighbour holds and
+// LinkLocalMACSet) with its elements as add element
 // reads them, each with the time it has left.
 type carried struct {
 	set   string
@@ -285,6 +286,7 @@ func records(sets []listedSet, l Layout) []carried {
 			return []string{a + " . " + hw}, ok1 && ok2
 		}, ClaimTimeout, ClaimTimeout}
 		by[MACSet(sg.name)] = carry{[]string{MACSet(sg.name)}, rawHW, ClaimTimeout, ClaimTimeout}
+		by[LinkLocalMACSet(sg.name)] = carry{[]string{LinkLocalMACSet(sg.name)}, rawHW, ClaimTimeout, ClaimTimeout}
 		// A neighbour hold's address set is written again from its key
 		// set, as LeaseAddrSet is.
 		neighOf := func(raw json.RawMessage) ([]string, bool) {
