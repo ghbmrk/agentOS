@@ -89,7 +89,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-keys-print-factors | KRN-keys-print-factors: the sealed store's factors print no passphrase, recovery key or PIN (DECOY-b-8, CLK-1) | #4833 | queued(release; tier A; size S; waits on #4833, #4845 and sub B's OK for localui/recovery_test.go) |
 | MIG-5-dead-cut | MIG-5-dead-cut: delete old-core code no binary reaches, to bring trusted lines under D-310's ceiling | D-310; MIG-5 | in review (tier A) |
 | MIG-4-plan-login-texts | Owner texts for the plan sign-in's `signin-code` and the late-exchange end, once the home page runs on the plan host (#3180 item 2; CH-12, CLK-7). | MIG-4-plan-login-texts | queued (release; after #2780; sub B) |
-| KRN-clock | KRN-clock: the kernel reads time through the TIM-1 guard and never backward, so a clock step neither revives an expired key nor ends a hold early (TIM-1, KEY-7, KEY-8) | #5138 (D-111), `clock` off `durable` | building (tier A; Opus; Defect: STO-2b) |
 | KRN-clock-one-writer | KRN-clock-one-writer: the TIM-1 guard's state file keeps one writer when #5147 b wires the guard into the kernel (TIM-1) | #5147 b | queued (tier A; Opus) |
 
 ## Harness and operating model
@@ -327,12 +326,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-offline-verity | IMG-offline-verity: the offline manager mounts /usr through dm-verity (#4767 Security 6) | UNLOCK-unit-deps (#4667) | queued (release; tier A) |
 | UNLOCK-closure-root-stop | UNLOCK-closure-root-stop: the root's own stop and restarts are walked (#4894 L3 3, Security 1) | UNLOCK-unit-deps (#4667) | building (release; tier A) |
 | UNLOCK-allow-wording | UNLOCK-allow-wording: one direction for unlock.allow lines (#4894 L3 4, 5) | UNLOCK-unit-deps (#4667) | queued (release; tier B) |
-| IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | queued (release; tier A; size S; from #4454 / #4987) |
-| INFER-image-buildinfo | INFER-image-buildinfo: llama-server's build info comes from the pins, and the web UI check has fixture tests. | — | queued (release; tier A; size S; from #4987) |
+| IMG-repro-security-pin | IMG-repro-security-pin: builds a and b of one run read the same security.debian.org snapshot. | — | building (release; tier A; size S; from #4454 / #4987) |
 | NET-2-cap-basis-required | NET-2-cap-basis-required: every signed byte cap names its basis (D-248) | #4578, #5165 | queued (release; tier A) |
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
+| INFER-image-buildinfo-fu | INFER-image-buildinfo-fu: the llama_src_url tag error names the pins file and the value, two more TAG fixtures, and a test that GIT_DIR holds until cmake. | — | queued (release; tier A; size S; from #5608) |
 
 ## Model routes and the Codex lane
 
@@ -406,7 +405,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4h | MIG-4-recovery-r4h: the localui r4b-3 assumption row says what r4c changed | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
-| GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
 | REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | escalated(tier A; kernel lane) |
 | REV-CHK-links-egress | REV-CHK-links-egress: agentos-egress, which egress-setup runs as root, joins the root side | #4493 | queued (release; tier A; from #4493) |
 | MIG-4-plan-labels | MIG-4-plan-labels: close the Codex turn-metadata labels to the CLI's word lists | #3133 live Codex capture; #4595 (#4630) | queued (release; tier A; waits on the live Codex capture, #3133) |
@@ -420,20 +418,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4j | MIG-4-recovery-r4j: the Recovery key page says it cannot tell the shown card when the recipient read fails | MIG-4-recovery-r4g (#4883) | queued (release; tier A; from #4883 L3) |
 | MIG-4-recovery-r4k | MIG-4-recovery-r4k: a route-A replacement leaves a superseded lost-card request's and ready card's prompts | MIG-4-recovery-r4i (#4883) | queued (release; tier A; from #4883 L3) |
 | REV-CHK-names-2-ux | REV-CHK-names-2-ux: the backup folder refusal names a space-padded folder name | #3953 | queued |
-| REV-CHK-links-vm-ux | REV-CHK-links-vm-ux: agentosd names a refused -machines path as a config error, not "restart me" | #4968 | queued |
 | MUT-localui-sr33 | MUT-localui-sr33: kill the 61 localui statement-deletion survivors that TestSR3_3ASuggestionIsNotTheFinalCard runs (blocks #4945) | #4945 | in review |
-| ENF-c-f4 | ENF-c-f4: rotate alert, new-recovery block placement and guard, false-alarm recovery text | #5042 | queued |
-| MIG-5-checker-server-f1 | MIG-5-checker-server-f1: dead -checker socket wording, egress checker-wire test gaps | #5044 | queued |
-| UNIT-RULES-release-3 | UNIT-RULES-release-3: a drop-in of ours masking a package's owner drop-in; builtUnits keeps a refused unit's programs for grantsHeld. Release; from #5072. | #5072 | queued (release) |
 | ENF-c-f3-ux | ENF-c-f3-ux: the new-recovery block moves under "Your passkey" and shows only with an enrol book and no recovery in progress | #5042 | queued (release; tier A; peer lane; from #5042 UX accept) |
-| VM-wedged-status-owner | VM-wedged-status-owner: STATUS and the owner page say a machine is wedged and the host needs a restart. Sub B half of #5098; release; from #5096. | #5098 | queued (release; tier A) |
 | KRN-forget-c-confirm-owner | KRN-forget-c-confirm-owner: the owner side routes the YES reply to the kernel's pending erase and the page shows the waiting state. Sub B half; from #5092 Security finding 1. | #5124 | queued (release; tier A) |
 | ENF-restart-unit | ENF-restart-unit: the real agentos-enforcer.service sets Restart= with a start limit one fresh-day exit cannot hit, and its acceptance test covers the restart. Release; from #5133 (R1). | #5133, ENF-m (#3671) | queued (release; tier A) |
 | OWN-resume-says-cancelled | OWN-resume-says-cancelled: RESUME's reply says what STOP cancelled stays cancelled, and the owner lines for the task and stopped codes are checked. Release; from #5138 (R1, R2). | #5138 | queued (release; tier A; sub B) |
 | KRN-forget-c-confirm-close | KRN-forget-c-confirm-close: drop the bare erase op from the owner socket once agentosd erases only through forgetreply, so the kernel alone enforces D-314. From #5124. | #5124, #5125 | queued (release; tier A) |
 | NET-2-cap-sizing-owner | NET-2-cap-sizing-owner: the agentosd call site and backups wording call enflist.Propose, show ErrNoDailyBytes, and hand the owner the link. Sub B half of #4578. | #4578 | queued (release; tier A; sub B) |
-| AGENTOSD-broker-group-status | AGENTOSD-broker-group-status: a leftover broker/ group that will not go shows STATUS 'update needed', not 'restart'. From #5172. | #5172 | queued (release; tier A) |
-| IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | queued (release; tier A) |
+| IMG-keeper-reach-sysd-doc | IMG-keeper-reach-sysd-doc: image/ASSUMPTIONS.md I23 describes service_dirs (units' own directories derived) instead of the old hand-listed SERVICE_DIRS. Release; from #5167. | #5167 | building (release; tier A) |
 | ENF-down-report | ENF-down-report: a refused first firewall load exits the enforcer before any page is served and nothing reports the down enforcer. Release; from #5243. | #5243 | queued (release; tier A) |
 | KRN-proc-mut | KRN-proc-mut: seams for the 24 kernel/proc mutants #5138 leaves surviving, then tests that kill them. Release; from #5138. | #5138 | queued (release; tier A) |
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
@@ -446,21 +438,29 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
-| KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
+| KRN-clock-reading-ends | KRN-clock-reading-ends: ApproveTask checks a task live on Latest, and the edge candidate's throttle measures from the conservative end of the reading. Release; from #5387. | #5147, #5387 | building (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
 | IMG-keeper-reach-gen-doc | IMG-keeper-reach-gen-doc: image/ASSUMPTIONS.md records the partition-type pin and the extra-unit/fstab.extra firmware routes (I21, I22). Release; from #5289. | #5289 | queued (release; tier A) |
 | CTL-owner-text-lost | CTL-owner-text-lost: an owner text that arrives while the agent has no open services is dropped, and the reply says it was lost and to resend. Release; from #5427. | #5425, #5427 | queued (release; tier A; sub B) |
 | LOG-open-anchor-first | LOG-open-anchor-first: kernel log Open checks the anchor before truncating an unread tail, so a refused open keeps every byte (LOG-2). | #5387 | queued (release; tier A; after #5387) |
-| CTL-unicode-chat-code | CTL-unicode-chat-code: a trailing code in non-ASCII digits in chat or UNLOCK is stripped or quarantined before the agent; codes stay ASCII-only. | none | queued (release; tier A) |
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
-| VULN-debian-r6 | VULN-debian-r6: accept (or clear by a snapshot bump) glibc's two new Debian 13 advisories DEBIAN-CVE-2026-100290 and DEBIAN-CVE-2026-115819 so image-vulncheck passes again. Release; second glibc round after openssl. | #2919, #5338 | queued (release; tier A; Mark pastes the IDs into #2919) |
-| GUEST-resolv-true-fu | GUEST-resolv-true-fu: the guest rootfs builds write resolv.conf with true, not ':', so a failed redirect reaches their error path. Release; from #5533. | #5533, #5524 | queued (release; tier A) |
-| IMG-guest-vulncheck | IMG-guest-vulncheck: image-vulncheck scans the guests' Debian package list. | #5570 | building (release; tier A) |
+| GUEST-resolv-true-fu | GUEST-resolv-true-fu: the guest rootfs builds write resolv.conf with true, not ':', so a failed redirect reaches their error path. Release; from #5533. | #5533, #5524 | building (release; tier A) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
-| IMG-camdecode-toolchain | IMG-camdecode-toolchain: the camera decoder and its libavcodec are compiled with the pinned root's toolchain, not the runner's cc. | #5571 | building (release; tier A) |
-| IMG-keeper-install-keys | IMG-keeper-install-keys: the keeper's unit-key check handles the [Install] keys (Alias=, WantedBy=, Also=, DefaultInstance=) explicitly, not through the NAME_ONLY_KEYS route. Release; from #5584. | #5191, #5584 | building (release; tier A; gate file) |
-| IMG-keeper-install-keys-fu | IMG-keeper-install-keys-fu: the four [Install] description texts are pinned as literals, and the Alias= text says why the slash form is refused. Release; from #5595. | #5588, #5595 | queued (release; tier A; gate file) |
+| IMG-camdecode-shipped | IMG-camdecode-shipped: the camera decoder's statically linked Debian archives are recorded as shipped, so the image vulnerability check scans them. | #5582 | building (release; tier A) |
+| IMG-camdecode-build-fu | IMG-camdecode-build-fu: the decoder build's guards, GOROOT copy, vcs stamps and Go link cache are pinned, and libavcodec is built once. Release; from #5593. | #5582, #5593 | queued (release; tier A; gate file) |
+| CTL-unicode-chat-code-fu | CTL-unicode-chat-code-fu: circled digits are folded, a native-digit trailing code is stripped rather than the whole message dropped, and the quarantine reply says codes need 0-9 digits. | none | queued (release; tier A) |
+| REV-CHK-links-vm-lstat | REV-CHK-links-vm-lstat: a state-dir Lstat error other than not-exist gets the restart line, not the setting line. From #5612. | #5612 | queued (release; tier A) |
+| ENF-c-f5 | ENF-c-f5: text the owner when Cancel spends the recovery code | #5613 | queued |
+| ENF-c-f6 | ENF-c-f6: log a failed alert raise in enrol | #5613 | queued |
+| UNIT-RULES-release-4 | UNIT-RULES-release-4: socket endpoints of ours: DirectoryMode= over a package path's ancestor, ReusePort= on a package's port, links resolved in the tree, self-bound package endpoints. Release; from #5614. | #5614 | queued (release) |
+| GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
+| VULN-debian-r6-f1 | VULN-debian-r6-f1: state the flaw class and main-tree/initrd reachability of glibc DEBIAN-CVE-2026-100290 and -115819 in their vulncheck records; alert if remote-reachable. | #5503, #5623 | queued (release; tier A) |
+| TEST-flake-browser-close-drain | TEST-flake-browser-close-drain: TestCloseDrainsAnUnaskedLine no longer races its own receive against Close's drain goroutine. | none | queued (release) |
+| VULN-debian-r7 | VULN-debian-r7: accept dpkg's new Debian 13 advisory DEBIAN-CVE-2026-91094 so image-vulncheck passes again. Release; third no-fix Debian round on 2026-11-13. | #2919, #5503 | building (release; tier A) |
+| VULN-drift | VULN-drift: a no-fix Debian advisory on a package the PR does not change reports DRIFT on PRs and still fails main's runs; vulncheck.py image --propose prints the ready records. | #2919, #3532 | queued (release; option B needs Mark's decision) |
+| STATUS-wording-f1 | STATUS-wording-f1: widen onlyNegates (cannot, does nothing, no fix), build agentNoLimits from fixUpdate, settle the agent-off head form. From #5612. | #5612 | queued (release; tier A) |
+| MIG-5-checker-server-f2 | MIG-5-checker-server-f2: -checker help omits the listener caveat; item-9 test placement vs old-core deletion | #5610 | queued |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -504,4 +504,5 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
+issue #5631: title "VULN-drift follow-up: `vulncheck.py propose REPORT ISSUE` reads CI's report; --propose output fixes (EVL-5)" does not start with '<ID>: '
 ```

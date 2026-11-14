@@ -84,8 +84,9 @@ func SecurityDropHash(n int, id string) [32]byte {
 
 // AddSecurityCase logs a case. It narrows, but it anchors, so a log rolled
 // back to before it is caught at boot like any other (KRN-7).
-func (k *Kernel) AddSecurityCase(now int64, c SecurityCase) error {
-	if err := k.s.caseOK(c, now); err != nil {
+func (k *Kernel) AddSecurityCase(at int64, c SecurityCase) error {
+	now := k.read(at)
+	if err := k.s.caseOK(c, now.Earliest); err != nil {
 		return err
 	}
 	return k.owner(now, TSecurityCase, c)
@@ -101,20 +102,21 @@ func (s *State) SecurityDrop(id string) (n int, ok bool) {
 
 // DropSecurityCase drops id on the owner's passkey, live after GrantHold. It
 // widens, so it anchors.
-func (k *Kernel) DropSecurityCase(now int64, id string, by key.Cosign) error {
+func (k *Kernel) DropSecurityCase(at int64, id string, by key.Cosign) error {
 	n, ok := k.s.SecurityDrop(id)
 	b := securityDrop{n, id, by}
 	if !ok || !k.s.dropOK(b) {
 		return ErrSecurityDrop
 	}
-	return k.owner(now, TSecurityDrop, b)
+	return k.owner(k.read(at), TSecurityDrop, b)
 }
 
 // KeepSecurityCase cancels a drop of id still in its hold, at the owner's
 // word: it narrows, but it anchors, so a log rolled back past it cannot let
 // the drop go live (KRN-7).
-func (k *Kernel) KeepSecurityCase(now int64, id string) error {
-	if d, ok := k.s.sec.drops[id]; !ok || now >= d.From {
+func (k *Kernel) KeepSecurityCase(at int64, id string) error {
+	now := k.read(at)
+	if d, ok := k.s.sec.drops[id]; !ok || now.Earliest >= d.From {
 		return ErrSecurityKeep
 	}
 	return k.owner(now, TSecurityKept, securityKept{id})
@@ -215,7 +217,7 @@ func (s *State) applySecurity(e Entry) error {
 			return err
 		}
 		if s.dropOK(b) {
-			s.sec.drops[b.ID] = pendingDrop{e.At + GrantHold, b.By.By}
+			s.sec.drops[b.ID] = pendingDrop{e.reading().Latest + GrantHold, b.By.By}
 			s.sec.n++
 		}
 	case TSecurityKept:

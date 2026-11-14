@@ -37,7 +37,11 @@ type Refusal struct {
 // Admit decides a submitted plan against the state. It is pure: the same state
 // and plan give the same answer in the live kernel, a replay and the sim (KRN-1).
 // The plan is authorized whole, every step charged against the ones before it.
-func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
+func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) { return admit(s, p, At(now)) }
+
+// admit is Admit at a reading: a grant must be live by Earliest, and a key
+// or task must not have ended by Latest.
+func admit(s *State, p Plan, now Reading) (key.ID, []key.ID, *Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}}
 	}
@@ -52,19 +56,19 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
 		return key.ID{}, nil, &Refusal{Refusal: key.Refusal{Code: CKey, Detail: err.Error()}}
 	}
 	on := func(r *key.Refusal, step *int) *Refusal { return &Refusal{*r, step, v.Limits.Task} }
-	if r := Live(s, v, now); r != nil {
+	if r := Live(s, v, now.Earliest); r != nil {
 		return key.ID{}, nil, on(r, nil)
 	}
-	if r := OneOff(s, s.owners(p.Key), s.Anchors, p, now); r != nil {
+	if r := oneOff(s.oneOffLine(p.Key.Tip(), now), s.owners(p.Key), s.Anchors, p); r != nil {
 		return key.ID{}, nil, on(r, nil)
 	}
 	if t := v.Limits.Task; t != "" {
-		if _, ok := s.Task(t, now); !ok {
+		if _, ok := s.Task(t, now.Latest); !ok {
 			return key.ID{}, nil, on(&key.Refusal{Code: CTask, Detail: "the key's task is not live"}, nil)
 		}
 	}
 	ov := overlay{base: s.Ledger(), extra: map[key.ID][]key.Use{}}
-	ctx := key.Context{Now: now, Changes: &s.Changes, Ledger: ov}
+	ctx := s.context(now, ov)
 	fresh := map[string]bool{}
 	for i := range p.Steps {
 		st := p.Step(i)
@@ -84,10 +88,15 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *Refusal) {
 			fresh[fp] = true
 		}
 		for _, id := range v.Scopes() {
-			ov.extra[id] = append(ov.extra[id], key.Use{At: now, Amount: st.Amount, Recipient: st.Recipient, Task: st.Task})
+			ov.extra[id] = append(ov.extra[id], key.Use{At: now.Latest, Amount: st.Amount, Recipient: st.Recipient, Task: st.Task})
 		}
 	}
 	return v.Root(), v.Scopes(), nil
+}
+
+// context is a key check at now: uses count back a day from Earliest; expiries fire by Latest.
+func (s *State) context(now Reading, l key.Ledger) key.Context {
+	return key.Context{Now: now.Earliest, Late: now.Latest, Changes: &s.Changes, Ledger: l}
 }
 
 type overlay struct {
@@ -103,9 +112,9 @@ func (o overlay) Uses(id key.ID) []key.Use {
 // repeats reports whether the exact effect completed under this root within a
 // day, or is unreconciled in another plan, cancelled or not: a cancel never
 // settles an effect that may have happened (KRN-8).
-func repeats(s *State, root key.ID, st key.Step, self string, now int64) bool {
+func repeats(s *State, root key.ID, st key.Step, self string, now Reading) bool {
 	fp := Fingerprint(st)
-	if at, ok := s.recent[root][fp]; ok && at > now-key.DayMS {
+	if at, ok := s.recent[root][fp]; ok && at > now.Earliest-key.DayMS {
 		return true
 	}
 	for _, id := range s.Order {
@@ -148,7 +157,11 @@ type Act struct {
 // Next is the kernel's whole scheduling rule, pure over the state: re-authorize
 // the plan's current step, hold it if irreversible, dispatch it, or probe an
 // unknown result (KRN-5, KRN-8).
-func Next(s *State, id string, now int64) Act {
+func Next(s *State, id string, now int64) Act { return next(s, id, At(now)) }
+
+// next is Next at a reading: a hold ends and a probe is due by Earliest, and
+// a key or task ends by Latest.
+func next(s *State, id string, now Reading) Act {
 	p := s.Plans[id]
 	if p == nil || len(p.Steps) == 0 {
 		return Act{}
@@ -161,14 +174,14 @@ func Next(s *State, id string, now int64) Act {
 	}
 	switch st.Phase {
 	case PUnknown:
-		if now < st.NextProbe {
+		if now.Earliest < st.NextProbe {
 			a.WakeAt = st.NextProbe
 			return a
 		}
 		a.Kind = ActProbe
 		return a
 	case PUnsent:
-		if now < st.NextProbe {
+		if now.Earliest < st.NextProbe {
 			a.WakeAt = st.NextProbe
 			return a
 		}
@@ -181,7 +194,7 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Refusal = ActCancel, &key.Refusal{Code: CKey, Detail: err.Error()}
 		return a
 	}
-	if r := s.ended(p, &st, v.Limits.Task, now); r != nil {
+	if r := s.ended(p, &st, v.Limits.Task, now.Latest); r != nil {
 		a.Kind, a.Refusal = ActCancel, r
 		return a
 	}
@@ -192,8 +205,8 @@ func Next(s *State, id string, now int64) Act {
 	class, _ := key.ClassOf(sp.Verb)
 	holds := class.Irreversible() && max(v.Window(sp.Verb, false), v.Window(sp.Verb, true)) > 0
 	due := v.Due(sp.Verb, st.HeldAt, st.Novel)
-	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now < due))
-	if r := v.Authorize(sp, key.Context{Now: now, Changes: &s.Changes, Ledger: led}); r != nil {
+	sp.Rung = s.Rung(v.Limits.Task, st.Approved || holds && (st.Phase == PQueued || st.Phase == PHeld && now.Earliest < due))
+	if r := v.Authorize(sp, s.context(now, led)); r != nil {
 		if r.Code == key.RPaused {
 			return a // waits for key.resumed
 		}
@@ -208,7 +221,7 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Novel = ActHold, s.seen[p.Root][Shape(sp)] <= 0
 		return a
 	}
-	if st.Phase == PHeld && !st.Approved && now < due {
+	if st.Phase == PHeld && !st.Approved && now.Earliest < due {
 		a.WakeAt = due
 		return a
 	}
@@ -323,6 +336,7 @@ type Kernel struct {
 	// checker is the checker process's key, from the store's pins (PinChecker).
 	checker ed25519.PublicKey
 	forget  *forgetAsk // the Forget waiting for the owner's YES (forget.go)
+	clock   Clock      // the TIM-1 guard's reading (UseClock); nil reads only the caller's now
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")
@@ -331,7 +345,13 @@ var ErrDuplicatePlan = errors.New("kernel: plan id already used")
 // submitted but not decided, and mark every step that was in flight unknown,
 // to be probed (KRN-8). pinned is the image's pinned roots (Pin). A Log
 // Open did not make is refused, so the kernel never reaches a nil record.
-func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, pinned ...key.Key) (*Kernel, error) {
+func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, at int64, pinned ...key.Key) (*Kernel, error) {
+	return BootClock(l, anchors, clerks, nil, at, pinned...)
+}
+
+// BootClock is Boot on clock c, which the kernel reads at each decision from
+// the first (UseClock).
+func BootClock(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, c Clock, at int64, pinned ...key.Key) (*Kernel, error) {
 	if _, err := l.fields(); err != nil {
 		return nil, err
 	}
@@ -339,7 +359,8 @@ func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, p
 	if err != nil {
 		return nil, err
 	}
-	k := &Kernel{log: l, s: s, clerks: clerks, asked: map[stepRef]bool{}}
+	k := &Kernel{log: l, s: s, clerks: clerks, asked: map[stepRef]bool{}, clock: c}
+	now := k.read(at)
 	for _, id := range append([]string(nil), s.Order...) {
 		if s.Plans[id].Status == SPending {
 			if err := k.decide(now, id); err != nil {
@@ -364,8 +385,9 @@ func (k *Kernel) State() *State           { return k.s }
 func (k *Kernel) Log() *Log               { return k.log }
 
 // emit logs first, then folds: a failed write leaves the state as it was.
-func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
-	e, err := k.log.Append(now, typ, schema[typ], body)
+// t is the reading the move was decided at, which the entry carries.
+func (k *Kernel) emit(t Reading, typ string, body any) (Entry, error) {
+	e, err := k.log.append(t, typ, schema[typ], body)
 	if err != nil {
 		return e, err
 	}
@@ -377,7 +399,8 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
-func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
+func (k *Kernel) Issue(at int64, cos []key.Cosign, keys ...key.Key) error {
+	now := k.read(at)
 	keys, err := k.ownerKeys(now, OpIssue, "", keys...)
 	if err != nil {
 		return err
@@ -391,12 +414,12 @@ func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
 // SetLine sets the owner's line for a big change. Lowering it narrows; a raise
 // is itself big, so it needs two passkeys, one an anchor, over
 // LineHash(State.LineChanges(), percent).
-func (k *Kernel) SetLine(now, percent int64, cos ...key.Cosign) error {
+func (k *Kernel) SetLine(at, percent int64, cos ...key.Cosign) error {
 	b := lineSet{percent, cos}
 	if err := k.s.lineOK(b); err != nil {
 		return err
 	}
-	return k.owner(now, TLine, b)
+	return k.owner(k.read(at), TLine, b)
 }
 
 // ErrNotEnrolled refuses an enrollment no anchor signed.
@@ -404,11 +427,11 @@ var ErrNotEnrolled = errors.New("kernel: enrollment not signed by an anchor")
 
 // Enroll adds a passkey, such as a new phone, to the owner's set (D-146). An
 // anchor signs it, so it is live at once; it is a widening, so it anchors.
-func (k *Kernel) Enroll(now int64, e key.Enrollment) error {
+func (k *Kernel) Enroll(at int64, e key.Enrollment) error {
 	if !key.In(key.Passkeys(k.s.Anchors, []key.Enrollment{e}, k.s.Unenrolled), e.Passkey) {
 		return ErrNotEnrolled
 	}
-	return k.owner(now, TEnrolled, enrolled{e})
+	return k.owner(k.read(at), TEnrolled, enrolled{e})
 }
 
 // ErrNotUnenrolled refuses a cut-off no hardware key signed (KEY-4, #3209).
@@ -418,14 +441,14 @@ var ErrNotUnenrolled = errors.New("kernel: cut-off not signed by an anchor")
 // anchor's signature over key.UnenrollMsg; a phone passkey's, or none, logs
 // nothing. Keys derived from its grants in the log stand until they lapse;
 // it signs no new grant and no plan under a bare root.
-func (k *Kernel) Unenroll(now int64, u key.Unenrollment) error {
+func (k *Kernel) Unenroll(at int64, u key.Unenrollment) error {
 	if key.In(k.s.Anchors, u.Passkey) {
 		return ErrAnchor
 	}
 	if !u.Signed(k.s.Anchors) {
 		return ErrNotUnenrolled
 	}
-	return k.owner(now, TUnenrolled, unenrolled{u})
+	return k.owner(k.read(at), TUnenrolled, unenrolled{u})
 }
 
 // ErrAnchor refuses cutting off a hardware key: an anchor is replaced only
@@ -437,12 +460,12 @@ var ErrAnchor = errors.New("kernel: an anchor is cut off only by recovery")
 // It is for keys the log already vouches for: a plan's key was held when the
 // plan was admitted (VerifyPlan), and an extension comes over the owner
 // channel. The result can be charged but never authorizes a step.
-func (k *Kernel) owned(now int64, ky key.Key) (*key.Verified, *key.Refusal) {
+func (k *Kernel) owned(now Reading, ky key.Key) (*key.Verified, *key.Refusal) {
 	v, err := key.Chain(ky, k.s.owners(ky))
 	if err != nil {
 		return nil, &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	if r := Live(k.s, v, now); r != nil {
+	if r := Live(k.s, v, now.Earliest); r != nil {
 		return nil, r
 	}
 	return v, nil
@@ -452,7 +475,7 @@ func (k *Kernel) owned(now int64, ky key.Key) (*key.Verified, *key.Refusal) {
 // extension the owner's envelope gave it, else the key it cites. Callers name
 // the plan, never a key or a task, so renaming cannot escape a cap or a hold
 // (LOG-7). The task is the plan, as it is for a plan's own steps.
-func (k *Kernel) funding(now int64, plan string) (*PlanState, *key.Verified, *key.Refusal) {
+func (k *Kernel) funding(now Reading, plan string) (*PlanState, *key.Verified, *key.Refusal) {
 	ps := k.s.Plans[plan]
 	if ps == nil {
 		return nil, nil, &key.Refusal{Code: CPlan, Detail: "unknown plan"}
@@ -471,12 +494,12 @@ func (k *Kernel) funding(now int64, plan string) (*PlanState, *key.Verified, *ke
 // citedLive refuses once the key the plan cites is paused, revoked or expired,
 // or a stop is in force, whatever extension now funds the plan: an owner who
 // pauses a key stops its plan's spend (KEY-6).
-func (k *Kernel) citedLive(now int64, ps *PlanState) *key.Refusal {
+func (k *Kernel) citedLive(now Reading, ps *PlanState) *key.Refusal {
 	cited, r := k.owned(now, ps.Plan.Key)
 	if r != nil {
 		return r
 	}
-	return cited.Live(key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()})
+	return cited.Live(k.s.context(now, k.s.Ledger()))
 }
 
 // Admitted is a metered call's admission: the worst case it may spend,
@@ -492,7 +515,8 @@ type Admitted struct {
 // counts against every cap until Meter settles it, so calls admitted at once,
 // by one clerk or several, never share the same remaining budget (#2613 item
 // 1). One that is never settled stays charged at its worst case.
-func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *key.Refusal) {
+func (k *Kernel) AdmitSpend(at int64, plan string, amount int64) (Admitted, *key.Refusal) {
+	now := k.read(at)
 	if (*k.log.p).broken {
 		// A call admitted now could not be metered, and may follow a
 		// widening whose anchor failed (KRN-5).
@@ -509,8 +533,8 @@ func (k *Kernel) AdmitSpend(now int64, plan string, amount int64) (Admitted, *ke
 		return Admitted{}, &key.Refusal{Code: CHeld, Detail: h.Code}
 	}
 	task := ps.Plan.Task()
-	if r := v.Spend(task, amount, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
-		settled := key.Context{Now: now, Changes: &k.s.Changes, Ledger: ledger{s: k.s, settled: true}}
+	if r := v.Spend(task, amount, k.s.context(now, k.s.Ledger())); r != nil {
+		settled := k.s.context(now, ledger{s: k.s, settled: true})
 		sr := v.Spend(task, amount, settled)
 		if sr != nil {
 			// The cap settled usage alone exhausts, which is the one a hold
@@ -546,7 +570,7 @@ var ErrNotAdmitted = errors.New("kernel: usage is metered against its own open a
 // amount is refused, since spend never refunds. source says whose count
 // amount is: the provider's, the clerk's own or the worst case admitted
 // (LOG-7).
-func (k *Kernel) Meter(now int64, a Admitted, route string, amount int64, source string) error {
+func (k *Kernel) Meter(at int64, a Admitted, route string, amount int64, source string) error {
 	if amount < 0 {
 		return errors.New("kernel: metered usage is never negative")
 	}
@@ -554,14 +578,15 @@ func (k *Kernel) Meter(now int64, a Admitted, route string, amount int64, source
 	if rs == nil || rs.Task != a.Plan {
 		return ErrNotAdmitted
 	}
-	_, err := k.emit(now, TModelUsed, modelUsed{rs.Root, rs.Scopes, a.Plan, route, amount, source, a.Seq})
+	_, err := k.emit(k.read(at), TModelUsed, modelUsed{rs.Root, rs.Scopes, a.Plan, route, amount, source, a.Seq})
 	return err
 }
 
 // Hold stops a plan's spend after rf, the refusal of one of its spend caps,
 // used up or too small for the call (MIG-4-spend-b1). It stays held until
 // the owner extends it (LOG-7).
-func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
+func (k *Kernel) Hold(at int64, plan string, rf *key.Refusal) error {
+	now := k.read(at)
 	if rf == nil || (rf.Code != key.RSpendTask && rf.Code != key.RSpendDay) {
 		return errors.New("kernel: only a refused spend cap holds a plan")
 	}
@@ -582,7 +607,8 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 // carry a per-task cap in its chain and have room left. The envelope's ceilings,
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
-func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
+func (k *Kernel) Extend(at int64, ext key.Key, plan string) error {
+	now := k.read(at)
 	logged, err := k.ownerKeys(now, OpExtend, plan, ext)
 	if err != nil {
 		return err
@@ -605,21 +631,23 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if !slices.ContainsFunc(v.Limits.Caps, func(c key.Cap) bool { return c.Kind == key.KSpendTask }) {
 		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
 	}
-	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
+	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, k.s.context(now, k.s.Ledger())); r != nil {
 		return r
 	}
 	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
 }
 
-func (k *Kernel) Revoke(now int64, id key.ID) error { return k.owner(now, TKeyRevoked, keyID{id}) }
-func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPaused, keyID{id}) }
-func (k *Kernel) Unpause(now int64, id key.ID) error {
+func (k *Kernel) Revoke(at int64, id key.ID) error {
+	return k.owner(k.read(at), TKeyRevoked, keyID{id})
+}
+func (k *Kernel) Pause(at int64, id key.ID) error { return k.owner(k.read(at), TKeyPaused, keyID{id}) }
+func (k *Kernel) Unpause(at int64, id key.ID) error {
 	if _, tripped := k.s.decoys.paused[id]; tripped {
 		return ErrTripResume
 	}
-	return k.owner(now, TKeyResumed, keyID{id})
+	return k.owner(k.read(at), TKeyResumed, keyID{id})
 }
-func (k *Kernel) Stop(now int64) error { k.forget = nil; return k.owner(now, TStop, struct{}{}) }
+func (k *Kernel) Stop(at int64) error { k.forget = nil; return k.owner(k.read(at), TStop, struct{}{}) }
 
 // ErrStaleResume refuses a RESUME sent before a STOP the kernel has since
 // logged: an owner told that STOP holds must not see it lifted (#3078).
@@ -627,14 +655,14 @@ var ErrStaleResume = errors.New("kernel: a STOP was logged after this RESUME was
 
 // Resume lifts the STOP whose count it names (State.Stops), and only that
 // one: a RESUME that waited behind a later STOP is refused, unlogged.
-func (k *Kernel) Resume(now int64, stops uint64) error {
+func (k *Kernel) Resume(at int64, stops uint64) error {
 	if k.s.decoys.held() {
 		return ErrTripResume
 	}
 	if stops != k.s.Stops {
 		return ErrStaleResume
 	}
-	return k.owner(now, TResume, struct{}{})
+	return k.owner(k.read(at), TResume, struct{}{})
 }
 
 // owner records an owner action and anchors the head at once, so a widening
@@ -643,7 +671,7 @@ func (k *Kernel) Resume(now int64, stops uint64) error {
 // log is marked broken: nothing builds on it until Open drops it. A narrowing
 // (Revoke, Pause, Stop) stays in force and the log stays usable, since Open
 // keeps it either way.
-func (k *Kernel) owner(now int64, typ string, body any) error {
+func (k *Kernel) owner(now Reading, typ string, body any) error {
 	if _, err := k.emit(now, typ, body); err != nil {
 		return err
 	}
@@ -655,14 +683,15 @@ func (k *Kernel) owner(now int64, typ string, body any) error {
 }
 
 // Cancel ends an active plan at the owner's word.
-func (k *Kernel) Cancel(now int64, plan string) error {
-	_, err := k.emit(now, TPlanCancel, planCancel{Plan: plan, Code: "owner"})
+func (k *Kernel) Cancel(at int64, plan string) error {
+	_, err := k.emit(k.read(at), TPlanCancel, planCancel{Plan: plan, Code: "owner"})
 	return err
 }
 
 // Undo marks a done step as undone, so its shape counts as new again. The
 // effect itself is undone by the owner through the clerk's own undo (KEY-8).
-func (k *Kernel) Undo(now int64, plan string, index int) error {
+func (k *Kernel) Undo(at int64, plan string, index int) error {
+	now := k.read(at)
 	_, err := k.emit(now, TStepUndone, stepRef{plan, index})
 	return err
 }
@@ -685,7 +714,8 @@ var ErrRetryMoved = errors.New("kernel: the step was retried since that ask")
 // every widening it anchors before it counts. attempt is the dispatch
 // attempt the owner was asked about (Unsettled.Attempt); a RETRY of a step
 // sent again since is refused.
-func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
+func (k *Kernel) Retry(at int64, plan string, index, attempt int) error {
+	now := k.read(at)
 	p, st := k.s.step(stepRef{plan, index})
 	if st == nil || !retryable(p, st) {
 		return ErrNotParked
@@ -711,7 +741,8 @@ func (k *Kernel) Retry(now int64, plan string, index, attempt int) error {
 }
 
 // Submit logs a plan and decides it at once.
-func (k *Kernel) Submit(now int64, p Plan) error {
+func (k *Kernel) Submit(at int64, p Plan) error {
+	now := k.read(at)
 	p, err := asLogged(p) // decided as the log holds it, as Issue and Extend decide on keys
 	if err != nil {
 		return err
@@ -725,9 +756,9 @@ func (k *Kernel) Submit(now int64, p Plan) error {
 	return k.decide(now, p.ID)
 }
 
-func (k *Kernel) decide(now int64, id string) error {
+func (k *Kernel) decide(now Reading, id string) error {
 	p := k.s.Plans[id]
-	root, scopes, r := Admit(k.s, p.Plan, now)
+	root, scopes, r := admit(k.s, p.Plan, now)
 	if r != nil {
 		_, err := k.emit(now, TPlanRejected, k.s.rejection(p, r))
 		return err
@@ -736,11 +767,11 @@ func (k *Kernel) decide(now int64, id string) error {
 	return err
 }
 
-func (k *Kernel) result(now int64, id string, i int, outcome, detail string) error {
+func (k *Kernel) result(now Reading, id string, i int, outcome, detail string) error {
 	return k.answer(now, id, i, Result{Outcome: outcome, Detail: detail})
 }
 
-func (k *Kernel) answer(now int64, id string, i int, res Result) error {
+func (k *Kernel) answer(now Reading, id string, i int, res Result) error {
 	if !shown(res.Covered) { // bounded before it is logged, not only when folded
 		res.Covered = ""
 	}
@@ -762,14 +793,15 @@ type Call struct {
 // cancels and dispatches, and returns the calls now due, each
 // once until Answer has its answer. A step whose clerk the kernel does not
 // have fails here.
-func (k *Kernel) Calls(now int64) ([]Call, error) {
-	if err := k.endDue(now); err != nil {
+func (k *Kernel) Calls(at int64) ([]Call, error) {
+	if err := k.endDue(k.read(at)); err != nil {
 		return nil, err
 	}
 	var out []Call
 	for _, id := range append([]string(nil), k.s.Order...) {
 		for n := 0; n < 4*MaxSteps; n++ {
-			a := Next(k.s, id, now)
+			now := k.read(at) // each decision on a fresh reading
+			a := next(k.s, id, now)
 			if a.Kind == ActNone || k.asked[stepRef{a.Plan, a.Index}] {
 				break
 			}
@@ -789,7 +821,9 @@ func (k *Kernel) Calls(now int64) ([]Call, error) {
 
 // Answer logs a clerk's answer to c: for a dispatch its Result, for a probe
 // its finding in Outcome (done, notdone, unknown or OUnreached).
-func (k *Kernel) Answer(now int64, c Call, res Result) error {
+func (k *Kernel) Answer(at int64, c Call, res Result) error { return k.answerCall(k.read(at), c, res) }
+
+func (k *Kernel) answerCall(now Reading, c Call, res Result) error {
 	delete(k.asked, stepRef{c.Req.Plan.ID, c.Req.Index})
 	// A clerk's text is logged as JSON would write it (Log.Append refuses
 	// other text): nothing looks it up, so no answer is lost over it.
@@ -812,7 +846,8 @@ func (k *Kernel) Answer(now int64, c Call, res Result) error {
 // answered unsent, since nothing was sent; a refusal other than a pause then
 // cancels its plan. A probe is always sent: reconciliation outlives a stop
 // (KRN-8).
-func (k *Kernel) Send(now int64, c Call) (bool, error) {
+func (k *Kernel) Send(at int64, c Call) (bool, error) {
+	now := k.read(at)
 	if c.Kind != ActDispatch {
 		return true, nil
 	}
@@ -829,7 +864,7 @@ func (k *Kernel) Send(now int64, c Call) (bool, error) {
 	if r == nil {
 		return true, nil
 	}
-	if err := k.Answer(now, c, Result{Outcome: OUnsent}); err != nil {
+	if err := k.answerCall(now, c, Result{Outcome: OUnsent}); err != nil {
 		return false, err
 	}
 	if p.Status != SActive || r.Code == key.RPaused {
@@ -842,17 +877,17 @@ func (k *Kernel) Send(now int64, c Call) (bool, error) {
 // sendCheck checks step i of p as Next did before its dispatch, against the
 // ledger before that dispatch, so the dispatch's own charge is not counted
 // twice. It is pure over the state, so Rederive makes the same check.
-func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Refusal {
+func sendCheck(s *State, p *PlanState, st *StepState, i int, now Reading) *key.Refusal {
 	v, err := VerifyPlan(p.Plan, s.owners(p.Plan.Key))
 	if err != nil {
 		return &key.Refusal{Code: CKey, Detail: err.Error()}
 	}
-	if r := s.ended(p, st, v.Limits.Task, now); r != nil {
+	if r := s.ended(p, st, v.Limits.Task, now.Latest); r != nil {
 		return r
 	}
 	sp := p.Plan.Step(i)
 	sp.Rung = s.Rung(v.Limits.Task, st.Approved)
-	return v.Authorize(sp, key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
+	return v.Authorize(sp, s.context(now, s.LedgerBefore(st.DispatchSeq)))
 }
 
 // Tick retries the erases not yet confirmed and the backup re-seals due
@@ -860,20 +895,20 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Ref
 // far as the clock allows, calling the in-process clerks it was booted with
 // as it goes. A step that cannot move
 // yet is left for a later Tick.
-func (k *Kernel) Tick(now int64) error {
+func (k *Kernel) Tick(at int64) error {
 	if k.keys != nil {
-		if err := k.confirmErases(now); err != nil {
+		if err := k.confirmErases(k.read(at)); err != nil {
 			return err
 		}
-		k.ResealBackups(now)
+		k.ResealBackups(at)
 	}
 	for n := 0; n < 4*MaxSteps; n++ {
-		cs, err := k.Calls(now)
+		cs, err := k.Calls(at)
 		if err != nil || len(cs) == 0 {
 			return err
 		}
 		for _, c := range cs {
-			ok, err := k.Send(now, c)
+			ok, err := k.Send(at, c)
 			if err != nil {
 				return err
 			}
@@ -887,7 +922,7 @@ func (k *Kernel) Tick(now int64) error {
 			} else {
 				res = cl.Do(c.Req, k.s)
 			}
-			if err := k.Answer(now, c, res); err != nil {
+			if err := k.Answer(at, c, res); err != nil {
 				return err
 			}
 		}
@@ -896,7 +931,7 @@ func (k *Kernel) Tick(now int64) error {
 }
 
 // act logs what a returns from Next, and returns the clerk call it needs, if any.
-func (k *Kernel) act(now int64, a Act) (*Call, error) {
+func (k *Kernel) act(now Reading, a Act) (*Call, error) {
 	ref := stepRef{a.Plan, a.Index}
 	p := k.s.Plans[a.Plan]
 	switch a.Kind {

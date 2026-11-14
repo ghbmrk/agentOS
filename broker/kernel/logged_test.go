@@ -42,8 +42,8 @@ func TestOwnerCallsDecideOnTheLoggedKey(t *testing.T) {
 	})
 	t.Run("Extend", func(t *testing.T) {
 		r := newRig(t)
-		modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 		env := envelope(r, 500, 800)
+		modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 		exhaust(r, "t1", 100)
 		ext := extension(r, env, key.LimitSpendTask(300), key.LimitLabels("l\xff"))
 		rewritten(t, ext)

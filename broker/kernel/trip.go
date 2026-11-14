@@ -155,21 +155,21 @@ func HoneyKey(r io.Reader) (string, error) {
 var HoneyKeys = decoy.Own{Kind: decoy.KHoneyKey, Place: decoy.PPlannerView, Make: HoneyKey}
 
 // LogDecoyTable logs the box's decoy table, once, at first boot (KRN-1).
-func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
+func (k *Kernel) LogDecoyTable(at int64, t decoy.Table) error {
 	if k.s.decoys.table != nil {
 		return ErrDecoysSet
 	}
 	if t.Len() == 0 {
 		return decoy.ErrBadTable
 	}
-	_, err := k.emit(now, TDecoyTable, decoy.Event(t))
+	_, err := k.emit(k.read(at), TDecoyTable, decoy.Event(t))
 	return err
 }
 
 // CallTrip logs an exit's trip, a connection it refused because its address
 // at connect time, after any redirect, was a table destination in any form
 // ipform.Forms reads (KRN-12 Trips). Only that call stopped; an input, it neither waits on nor moves a resume.
-func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
+func (k *Kernel) CallTrip(at int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
 		return errors.New("kernel: a call trip names its exit")
 	}
@@ -178,7 +178,7 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	}
 	for _, f := range ipform.Forms(a) {
 		if id, ok := (*k.s.decoys.table).m.Dest(f); ok {
-			_, err := k.emit(now, TTrip, Trip{Cause: CauseDest, Exit: exit, Entry: id, Response: RespCall})
+			_, err := k.emit(k.read(at), TTrip, Trip{Cause: CauseDest, Exit: exit, Entry: id, Response: RespCall})
 			return err
 		}
 	}
@@ -210,7 +210,7 @@ func (s *State) TripResume() (n int, last uint64, ok bool) {
 // ResumeTrip lifts every trip's pause and planning stop on the owner's
 // passkey (KEY-4): a live passkey's co-signature over TripResumeHash. It
 // widens, so it anchors.
-func (k *Kernel) ResumeTrip(now int64, by key.Cosign) error {
+func (k *Kernel) ResumeTrip(at int64, by key.Cosign) error {
 	n, last, ok := k.s.TripResume()
 	if !ok {
 		return errors.New("kernel: no trip's pause is in force")
@@ -219,7 +219,7 @@ func (k *Kernel) ResumeTrip(now int64, by key.Cosign) error {
 	if !k.s.resumeOK(b) {
 		return ErrTripSig
 	}
-	return k.owner(now, TTripResumed, b)
+	return k.owner(k.read(at), TTripResumed, b)
 }
 
 // Tripped reports whether a trip's pause or planning stop is in force.
@@ -381,7 +381,7 @@ type ownerTrip struct {
 // for every later check, so the live decision is the fold's (KRN-6, #4322):
 // a link that is not valid UTF-8 is rewritten and fails its signature. A
 // honey key among them refuses the call and logs its trip (KRN-12 Response).
-func (k *Kernel) ownerKeys(now int64, op, plan string, given ...key.Key) ([]key.Key, error) {
+func (k *Kernel) ownerKeys(now Reading, op, plan string, given ...key.Key) ([]key.Key, error) {
 	keys := make([]key.Key, len(given))
 	for i, g := range given {
 		var err error

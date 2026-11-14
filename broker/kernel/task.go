@@ -99,21 +99,22 @@ var (
 
 // OpenTask opens task id, for TaskTimeout, stamped with the rung the owner
 // event that started it reached (CH-3).
-func (k *Kernel) OpenTask(now int64, id string, rung key.Proof) error {
+func (k *Kernel) OpenTask(at int64, id string, rung key.Proof) error {
 	t := Task{ID: id, Rung: rung}
 	if err := k.s.openOK(t); err != nil {
 		return err
 	}
-	_, err := k.emit(now, TTaskOpened, t)
+	_, err := k.emit(k.read(at), TTaskOpened, t)
 	return err
 }
 
-// ApproveTask records the owner's approval of a live task's requests on
-// a.Site, in place of any earlier one for that site. It widens what the
-// task's requests may do, so it anchors (KRN-7).
-func (k *Kernel) ApproveTask(now int64, id string, a TaskApproval) error {
+// ApproveTask records the owner's approval of a task live on Latest (KRN-5)
+// for its requests on a.Site, replacing any earlier one for that site. It
+// widens what the task's requests may do, so it anchors (KRN-7).
+func (k *Kernel) ApproveTask(at int64, id string, a TaskApproval) error {
+	now := k.read(at)
 	b := taskApproved{id, a}
-	if err := k.s.approveOK(b, now); err != nil {
+	if err := k.s.approveOK(b, now.Latest); err != nil {
 		return err
 	}
 	return k.owner(now, TTaskApproved, b)
@@ -121,8 +122,9 @@ func (k *Kernel) ApproveTask(now int64, id string, a TaskApproval) error {
 
 // EndTask ends a live task at its final result, or when the planner's run
 // ends without one. Its fold cancels the task's plans' unsent steps.
-func (k *Kernel) EndTask(now int64, id string) error {
-	if _, ok := k.s.Task(id, now); !ok {
+func (k *Kernel) EndTask(at int64, id string) error {
+	now := k.read(at)
+	if _, ok := k.s.Task(id, now.Latest); !ok {
 		return ErrTask
 	}
 	_, err := k.emit(now, TTaskEnded, taskEnded{id})
@@ -132,9 +134,9 @@ func (k *Kernel) EndTask(now int64, id string) error {
 // endDue logs the end of each task whose timeout has come, before Calls
 // schedules any step at now (KRN-5), so the end's fold cancels what the task
 // bound before a step of it could be sent. Rederive derives it (taskDue).
-func (k *Kernel) endDue(now int64) error {
+func (k *Kernel) endDue(now Reading) error {
 	for _, id := range slices.Sorted(maps.Keys(k.s.tasks)) {
-		if k.s.taskDue(id, now) {
+		if k.s.taskDue(id, now.Latest) {
 			if _, err := k.emit(now, TTaskEnded, taskEnded{id}); err != nil {
 				return err
 			}
@@ -237,7 +239,7 @@ func (s *State) applyTask(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if s.approveOK(b, e.At) == nil {
+		if s.approveOK(b, e.reading().Latest) == nil {
 			a := b.Approval
 			a.At = e.At
 			t := s.tasks[b.Task]

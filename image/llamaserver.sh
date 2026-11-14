@@ -20,11 +20,19 @@
 # build number) and silently skipped when the fetch fails, so two builds of one commit embedded
 # different UIs and the image's reproduce check failed. agentos-infer runs the server with --no-webui,
 # so the UI is off here, and the build fails if the generated ui.h still embeds one.
+#
+# The build info comes from the pins, never from git (#5022): llama.cpp's and ggml's cmake ask git for
+# the commit and commit count from the source directory, and from a WORK inside a git checkout git
+# found that checkout, so its commit went into the binary and a local rebuild differed from CI's.
+# The build number is llama_src_url's release tag, the commit is llama_src_commit, and GIT_DIR names
+# no repository for the build, so ggml's own commit reads "unknown" wherever WORK is.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 PINS=$REPO/broker/cmd/agentos-infer/llama.pins
 pin() { sed -n "s/^$1=//p" "$PINS"; }
 URL=$(pin llama_src_url); WANT=$(pin llama_src_sha256)
+TAG=$(printf '%s\n' "$URL" | sed -n 's|^https://github\.com/ggml-org/llama\.cpp/archive/refs/tags/b\([0-9][0-9]*\)\.tar\.gz$|\1|p')
+[ -n "$TAG" ] || { echo "llama.cpp source: llama_src_url in $PINS is not a https://github.com/ggml-org/llama.cpp/archive/refs/tags/bNNNN.tar.gz URL: $URL" >&2; exit 1; }
 DEST=$(realpath -m "$1"); WORK=$(realpath -m "$2")
 rm -rf "$WORK"; mkdir -p "$WORK" "$DEST"
 if [ -n "${LLAMA_TARBALL:-}" ]; then
@@ -39,6 +47,7 @@ COMMIT=$(gzip -dc "$WORK/src.tar.gz" | git get-tar-commit-id) || COMMIT=none
 echo "llama.cpp source: $URL sha256 $GOT commit $COMMIT (pinned: $WANT, $(pin llama_src_commit))"
 [ "$GOT" = "$WANT" ] || { echo "llama.cpp source: the download does not match llama_src_sha256 in $PINS" >&2; exit 1; }
 [ "$COMMIT" = "$(pin llama_src_commit)" ] || { echo "llama.cpp source: the archive's commit is not llama_src_commit in $PINS" >&2; exit 1; }
+export GIT_DIR=/dev/null
 mkdir "$WORK/src" && tar -xzf "$WORK/src.tar.gz" -C "$WORK/src" --strip-components=1
 
 FLAGS="-ffile-prefix-map=$WORK=."
@@ -48,7 +57,8 @@ cmake -S "$WORK/src" -B "$WORK/build" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Rel
 	-DGGML_NATIVE=OFF -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
 	-DGGML_BMI2=ON -DGGML_AVX512=OFF -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF \
 	-DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
-	-DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF >/dev/null
+	-DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+	-DLLAMA_BUILD_NUMBER="$TAG" -DLLAMA_BUILD_COMMIT="$(pin llama_src_commit)" >/dev/null
 cmake --build "$WORK/build" --target llama-server -j"$(nproc)" >/dev/null
 UI_H=$WORK/build/tools/ui/ui.h
 [ -f "$UI_H" ] || { echo "llama-server: $UI_H was not generated; the web UI check cannot run" >&2; exit 1; }

@@ -96,13 +96,14 @@ func (k *Kernel) Box() ed25519.PublicKey { return slices.Clone((*k.log.p).cfg.Pu
 // is the log's first entry and anchors before it returns; from then on the
 // kernel serves as any other. The owner channel authenticates the caller as
 // the phone setup paired (CH-9, HW-10), as for every owner action.
-func (k *Kernel) Setup(now int64, f FirstAnchors) error { return k.SetupWithEdge(now, f, nil) }
+func (k *Kernel) Setup(at int64, f FirstAnchors) error { return k.SetupWithEdge(at, f, nil) }
 
 // SetupWithEdge is Setup on a box whose link port captured a first edge key
 // before the Owner Card confirm (HW-15, brief EDGE-link-core decision 3):
 // the key is logged right after the anchors, as the log's second entry, and
 // no later step logs a first key. A nil edge logs none.
-func (k *Kernel) SetupWithEdge(now int64, f FirstAnchors, edge ed25519.PublicKey) error {
+func (k *Kernel) SetupWithEdge(at int64, f FirstAnchors, edge ed25519.PublicKey) error {
+	now := k.read(at)
 	if edge != nil && !edgeKey(edge) {
 		return ErrEdgeKey
 	}

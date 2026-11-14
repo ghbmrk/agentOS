@@ -38,6 +38,7 @@ const (
 	MutantNone        Mutant = ""
 	MutantClerkTrusts Mutant = "clerk-trusts-kernel"  // the clerk skips its own check
 	MutantNoDedupe    Mutant = "clerk-no-idempotency" // the clerk acts again on a repeated idem
+	MutantNoClock     Mutant = "kernel-no-reading"    // the kernel decides on its clock alone, not the guard's interval
 )
 
 // Config is one run.
@@ -175,6 +176,10 @@ type world struct {
 	mutant  Mutant
 	rng     *rand.Rand
 	now     *int64 // the true time: the clerk's own clock
+	// reads is the highest Earliest and Latest any of the kernel's readings
+	// gave: no hold ends before reads[0] reaches its due, and nothing acts
+	// under a key once reads[1] has reached its expiry (TIM-1, KEY-7, KEY-8).
+	reads   *[2]int64
 	mail    *clerk.Mail
 	done    map[string]bool
 	effects []effect
@@ -321,7 +326,13 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 			if !d.Held || (!d.Approved && now < ver.Due(st.Verb, d.HeldAt, d.Novel)) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
+			if d.Held && !d.Approved && w.reads[0] < ver.Due(st.Verb, d.HeldAt, d.Novel) {
+				w.bad = append(w.bad, "a hold ended before its due by the earliest reading")
+			}
 		}
+	}
+	if na := ver.Limits.NotAfter; na != nil && w.reads[1] >= *na {
+		w.bad = append(w.bad, "effect under a key once a reading passed its expiry")
 	}
 }
 
@@ -360,8 +371,12 @@ type sim struct {
 	plans  []string
 	now    int64 // the true time, which the clerk reads
 	ahead  int64 // how far the kernel's clock runs ahead of it
-	trace  []string
-	nonce  *rand.ChaCha8
+	// A disagreement of the guard's sources: the reading spreads this far
+	// below and above the kernel's clock (TIM-1).
+	early, late int64
+	reads       [2]int64 // world.reads
+	trace       []string
+	nonce       *rand.ChaCha8
 
 	// hostile: at each tick the kernel's clock jumps past every held step's
 	// window, or a few hours ahead when nothing is held.
@@ -382,6 +397,13 @@ type sim struct {
 // kt is the kernel's clock.
 func (s *sim) kt() int64 { return s.now + s.ahead }
 
+// read is the TIM-1 guard's reading, which the kernel takes at each decision.
+func (s *sim) read() kernel.Reading {
+	r := kernel.Reading{Earliest: s.kt() - s.early, Latest: s.kt() + s.late}
+	s.reads = [2]int64{max(s.reads[0], r.Earliest), max(s.reads[1], r.Latest)}
+	return r
+}
+
 func (s *sim) logf(f string, a ...any) {
 	s.trace = append(s.trace, fmt.Sprintf("%d "+f, append([]any{s.now}, a...)...))
 }
@@ -398,7 +420,11 @@ func (s *sim) boot() error {
 		s.anchor.down, s.w.unconfirmed = false, false
 		l, err := kernel.Open(s.kcfg())
 		if err == nil {
-			s.k, err = kernel.Boot(l, s.w.anchors, map[string]kernel.Clerk{"mail": s.w}, s.kt())
+			c := kernel.Clock(s.read)
+			if s.cfg.Mutant == MutantNoClock {
+				c = func() kernel.Reading { s.read(); return kernel.At(s.kt()) }
+			}
+			s.k, err = kernel.BootClock(l, s.w.anchors, map[string]kernel.Clerk{"mail": s.w}, c, s.kt())
 		}
 		if err == nil {
 			return nil
@@ -658,7 +684,7 @@ func (s *sim) op() error {
 		s.logf("anchor")
 		return s.k.Log().Anchor()
 	case c == 14:
-		switch s.pick(6) {
+		switch s.pick(8) {
 		case 0:
 			s.logf("disk full")
 			s.disk.Fill()
@@ -677,6 +703,15 @@ func (s *sim) op() error {
 			// clerk keeps the true time, so a hold still runs its window.
 			s.hostile, s.ahead = s.pick(2) == 0, 0
 			s.logf("kernel clock hostile %v", s.hostile)
+		case 4:
+			// The kernel's clock steps back behind the true time, as at a
+			// start on a flat CMOS battery; the guard does not see it.
+			s.hostile, s.ahead = false, -int64(1+s.pick(48))*hour
+			s.logf("kernel clock steps back %dh", -s.ahead/hour)
+		case 5, 6:
+			// The guard's sources disagree, or agree again (TIM-1).
+			s.early, s.late = int64(s.pick(4))*hour, int64(s.pick(4))*hour
+			s.logf("clock sources disagree by -%dh +%dh", s.early/hour, s.late/hour)
 		default:
 			n := 1 + s.pick(8)
 			s.logf("arm crash in %d appends", n)
@@ -853,15 +888,21 @@ func (s *sim) syncPhone() {
 }
 
 // cut records the phone as cut off, in the world's own books: its grants
-// the log does not hold live by now never go live.
+// the log does not hold live by the cut-off's time never go live. That time
+// is the entry's At, the kernel's floored Earliest, not the sim's clock.
 func (s *sim) cut() {
-	st := s.k.State()
+	st, at := s.k.State(), s.kt()
+	for _, e := range s.k.Log().Entries() {
+		if e.Type == kernel.TUnenrolled {
+			at = e.At
+		}
+	}
 	for _, id := range s.byPhone {
 		g, ok := st.Grants[id]
-		if !ok || g.From > s.kt() { // never live: dropped by a crash, or cancelled in its hold
+		if !ok || g.From > at { // never live: dropped by a crash, or cancelled in its hold
 			s.w.dead[id] = true
 		}
-		if ok && g.From > s.kt() {
+		if ok && g.From > at {
 			s.cutCancelled++
 		}
 	}
@@ -923,17 +964,22 @@ func (s *sim) grant(keys ...key.Key) error {
 }
 
 // refusedBig counts a big batch refused for its missing second passkey; any
-// other error stands.
+// other error stands, but a clerk key the phone dated by the true time, which
+// would outlive ClerkLife on a kernel clock behind it (D-146, TIM-1).
 func (s *sim) refusedBig(err error) error {
 	if errors.Is(err, kernel.ErrNeedsCosign) {
 		s.bigRefused++
 		return nil
 	}
+	if errors.Is(err, kernel.ErrLife) && s.kt()-s.early < s.now {
+		return nil
+	}
 	return err
 }
 
-// pastHolds is a jump that puts the kernel's clock just past every held
-// step's window, or a few hours when nothing is held: a hostile clock.
+// pastHolds is a jump that puts the kernel's clock, its earliest reading
+// too, just past every held step's window, or a few hours when nothing is
+// held: a hostile clock the guard's sources all follow.
 func (s *sim) pastHolds() int64 {
 	ahead := int64(1+s.pick(6)) * hour
 	st := s.k.State()
@@ -945,7 +991,7 @@ func (s *sim) pastHolds() int64 {
 			}
 			if v, err := kernel.VerifyPlan(p.Plan, s.w.anchors); err == nil {
 				if due := v.Due(p.Plan.Step(i).Verb, p.Steps[i].HeldAt, p.Steps[i].Novel); due < math.MaxInt64 {
-					ahead = max(ahead, due-s.now+60_000) // a step never due sets no jump
+					ahead = max(ahead, due-s.now+s.early+60_000) // a step never due sets no jump
 				}
 			}
 		}
@@ -1021,12 +1067,12 @@ func Run(c Config) (*Result, error) {
 	for i := range nseed {
 		nseed[i] = byte(rng.IntN(256))
 	}
-	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed)}
+	s := &sim{cfg: c, rng: rng, anchor: &anchor{}, nonce: rand.NewChaCha8(nseed), reads: [2]int64{math.MinInt64, math.MinInt64}}
 	s.disk = &Disk{rng: rng}
 	s.hostile = rng.IntN(2) == 0
 	s.owner, s.holder, s.planr, s.head = gen(rng), gen(rng), gen(rng), gen(rng)
 	s.spare = gen(rng)
-	s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, mutant: c.Mutant, rng: rng, now: &s.now, done: map[string]bool{}, dead: map[key.ID]bool{}}
+	s.w = &world{anchors: []key.PublicKey{s.owner.pk, s.spare.pk}, mutant: c.Mutant, rng: rng, now: &s.now, reads: &s.reads, done: map[string]bool{}, dead: map[key.ID]bool{}}
 	s.w.mail = s.w.newMail()
 	s.w.race = func() {
 		if len(s.ids) > 0 && s.pick(2) == 0 {

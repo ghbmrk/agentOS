@@ -1,6 +1,8 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,11 @@ func TestParseRefusesWhatAHolderCannotKeep(t *testing.T) {
 	c, err := parse(ok, io.Discard)
 	if err != nil || len(c.adapters) != 1 || c.adapters[0].Credential != "openai" {
 		t.Fatalf("%+v %v", c, err)
+	}
+	// -checker still parses into the config (it fails closed at redeem
+	// since D-244, not at start).
+	if c, err := parse(append(ok, "-checker", "/x"), io.Discard); err != nil || c.checker != "/x" {
+		t.Fatalf("-checker: %q %v", c.checker, err)
 	}
 	for name, args := range map[string][]string{
 		"no uid":          {"-dir", "/run/x", "-credential", "k", "-adapter", "openai"},
@@ -86,4 +93,23 @@ type okUpstream struct{}
 
 func (okUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+}
+
+// REQ: CH-4
+// The -checker help and the package usage are true only while nothing
+// listens at the redeem socket: a planted one that answers approves every
+// irreversible operation (W-3, H-9), so both say so (#5633).
+func TestCheckerHelpNamesTheListenerCaveat(t *testing.T) {
+	var out strings.Builder
+	parse([]string{"-h"}, &out)
+	if !strings.Contains(out.String(), "unless something listens there") {
+		t.Errorf("-checker help omits the listener caveat:\n%s", out.String())
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc := strings.Join(strings.Fields(f.Doc.Text()), " "); !strings.Contains(doc, "unless something listens there") {
+		t.Errorf("package usage omits the listener caveat:\n%s", doc)
+	}
 }

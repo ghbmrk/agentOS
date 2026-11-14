@@ -12,9 +12,6 @@
 //     /skills/mcp (CAP-5, package skill). A skill runs here, in the guest,
 //     and sends each step to the broker as an ordinary one-step plan, so
 //     it carries no authority the guest lacks.
-//   - Keep the tree directory a copy of the box's adopted procedures,
-//     skills and context, fetched with the broker tool managed_tree, which
-//     answers only a private machine (W4, tree.go).
 //   - Fetch owner messages from the broker (/owner/next), hand each to the
 //     guest's own inbound API (OpenAI-compatible chat completions on the
 //     gateway), and post the answer back (/owner/reply) (ARC-6 (c)).
@@ -52,7 +49,6 @@ func main() {
 	gateway := flag.String("gateway", "http://127.0.0.1:18789", "the guest's inbound API")
 	model := flag.String("inbound-model", "openclaw", "model name the inbound API expects")
 	tree := flag.String("tree", "/etc/agentos/tree", "the managed tree's skills and procedures (CAP-5)")
-	treeEvery := flag.Duration("tree-sync", 30*time.Second, "how often to fetch the managed tree from the broker (W4); 0 never")
 	flag.Parse()
 
 	var b [24]byte
@@ -76,10 +72,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	go owner(broker, *gateway, *model, token)
-	if *treeEvery > 0 {
-		go syncTree(context.Background(), broker, *tree, *treeEvery)
-	}
+	background(context.Background(), broker, *gateway, *model, token)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
@@ -90,6 +83,19 @@ func main() {
 		}
 	}()
 	reap(child)
+}
+
+// background starts the bridge's own idle work: the owner poll, and
+// nothing else. The tree directory is what the machine was seeded with;
+// the bridge fetches no tree, since agentosd serves no managed_tree tool
+// (GUEST-bridge-tree-dead). Every idle goroutine starts here, so the idle
+// test covers it (TestEveryGoroutineIsKnown); it stops once ctx ends
+// (between messages, see owner), and done closes when it has
+// (GUEST-bridge-tree-dead-fu).
+func background(ctx context.Context, broker *http.Client, gateway, model, token string) (done <-chan struct{}) {
+	d := make(chan struct{})
+	go owner(ctx, d, broker, gateway, model, token)
+	return d
 }
 
 // runtimeVars are the variables the runtime gets from the bridge's own
@@ -159,17 +165,29 @@ func reap(child *childproc.Cmd) {
 // owner moves owner messages from the broker into the guest and answers
 // back. Failures wait and retry: an unanswered message is handed out again,
 // and an answer is posted until the broker has stored it.
-func owner(broker *http.Client, gateway, model, token string) {
-	for {
-		if err := ownerOnce(broker, gateway, model, token); err != nil {
+// Between messages it returns, closing done, once ctx ends, a held-open
+// /owner/next request included. A message already handed out is first
+// answered and its reply stored: the ask and reply retries do not read ctx,
+// so a cancel never drops an owner message (DEL-1d).
+func owner(ctx context.Context, done chan<- struct{}, broker *http.Client, gateway, model, token string) {
+	defer close(done)
+	for ctx.Err() == nil {
+		if err := ownerOnce(ctx, broker, gateway, model, token); err != nil && ctx.Err() == nil {
 			log.Printf("owner message: %v", err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}
 }
 
-func ownerOnce(broker *http.Client, gateway, model, token string) error {
-	resp, err := broker.Get("http://broker.localhost/owner/next")
+func ownerOnce(ctx context.Context, broker *http.Client, gateway, model, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker.localhost/owner/next", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := broker.Do(req)
 	if err != nil {
 		return err
 	}

@@ -96,14 +96,17 @@ func (m *memStore) Save(b []byte) error {
 	return nil
 }
 
-// fakeAlerts records what enrolment told the owner.
+// fakeAlerts records what enrolment told the owner; with fail set, each
+// raise is recorded and answers fail, as an alert journal refusing the
+// write does.
 type fakeAlerts struct {
 	raised []alert.Kind
+	fail   error
 }
 
 func (f *fakeAlerts) Raise(k alert.Kind, _ string) (alert.Record, error) {
 	f.raised = append(f.raised, k)
-	return alert.Record{}, nil
+	return alert.Record{}, f.fail
 }
 
 // accessPoint is slice g's access point as the daemon wires it: the keys
@@ -761,6 +764,15 @@ func TestRecoveryTextBeforeSave(t *testing.T) {
 	if err != nil || !strings.Contains(w, "if one is waiting") {
 		t.Errorf("the text promises a replacement to cancel: %q %v", w, err)
 	}
+	// Nor that one is in force after the wait, and with none waiting the
+	// code is still unspent, so the text asks for a new one, outside the
+	// 10-minute frame and after the factory reset, so a late reader does
+	// not reset for nothing (ENF-c-f4 item 3, #5613 UX 3).
+	const none = "If none is waiting and your passkey still works, make a new recovery code there."
+	if !strings.Contains(w, "a waiting replacement is in force") || !strings.Contains(w, none) ||
+		strings.Index(w, none) < strings.Index(w, "takes it back") {
+		t.Errorf("after a failed save the text reads as a replacement in force: %q", w)
+	}
 	// After the wait the text must not read as all-clear: it names the
 	// deadline, which is Wait, and the factory reset as the way back
 	// (ENF-c-f3 item 1, NET-4, ENF-c-4).
@@ -1036,7 +1048,9 @@ func TestRetryCardSurvivesRestart(t *testing.T) {
 // tap, spends it and shows a new one once. The old code then starts no
 // replacement; the new one does. It refuses with no passkey in force and
 // with a replacement waiting (Cancel does that), and a failed save leaves
-// the old code valid.
+// the old code valid. A saved rotation texts the owner once, so a holder
+// of the passkey cannot silently spend the written code (ENF-c-f4 item 1,
+// #5042 L3 point 1).
 func TestRotateRecoveryCode(t *testing.T) {
 	g, _, code := enrolled(t)
 	g.bs.failAt = g.bs.n + 1
@@ -1044,13 +1058,36 @@ func TestRotateRecoveryCode(t *testing.T) {
 		t.Fatalf("stop at the save: %v", err)
 	}
 	g.bs.failAt = g.bs.n + 1
+	g.alerts.raised = nil
 	if fresh, err := g.b.Rotate(); !errors.Is(err, errStopped) || fresh != "" {
 		t.Fatalf("rotate over a failing save: %q %v", fresh, err)
+	}
+	// A rotation is texted once it is saved, never before: a failed save
+	// leaves the written code working, so a text then would be false
+	// (ENF-c-f4 item 1).
+	if len(g.alerts.raised) != 0 {
+		t.Errorf("a failed rotation texted: %v", g.alerts.raised)
 	}
 	g.bs.failAt = 0
 	fresh, err := g.b.Rotate()
 	if err != nil || len(fresh) != CodeLen || fresh == code {
 		t.Fatalf("rotate: %q %v", fresh, err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
+		t.Errorf("rotate texts %v, want one RecoveryCodeChanged", g.alerts.raised)
+	}
+	// The whole text is pinned: it says the old code is spent in the
+	// page's words (not "the code you wrote down", which an owner who just
+	// wrote the new one reads as dead too), and, if it was not the owner,
+	// names the cause before the steps: the synced passkey's cloud account
+	// first, then a new code used to replace the passkey, since a new code
+	// alone leaves the other holder's passkey in force (#5613 UX 1, 2;
+	// Potency 1).
+	const changed = "Enforcer: a new recovery code was made with your passkey, so your old recovery code no longer works. " +
+		"If it was not you, someone else can use your passkey: take back your phone's cloud account, then make a new recovery code " +
+		"on the enforcer's page at home and use it there to replace your passkey. Clear this there too."
+	if w, err := alert.Words(alert.RecoveryCodeChanged, ""); err != nil || w != changed {
+		t.Errorf("the rotation's text:\n got %q %v\nwant %q", w, err, changed)
 	}
 	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
 		t.Errorf("the spent code still starts a replacement: %v", err)
@@ -1096,4 +1133,102 @@ func TestRotateNeedsEntropy(t *testing.T) {
 	if _, _, err := g.b.Begin(code, newAuthenticator(t).Public()); err != nil {
 		t.Errorf("the unspent code stopped working: %v", err)
 	}
+}
+
+// TestCancelTextsOwner (NET-4; ENF-c-f5, #5613 UX point 4): Cancel spends
+// the written recovery code, so once its save lands the owner is texted
+// RecoveryCodeChanged, once, as Rotate does; a failed save leaves the
+// written code working and raises nothing (ASSUMPTIONS ENF-c-10). Catches
+// a holder of a synced passkey cancelling the owner's own recovery with
+// the owner never told the written code is dead.
+func TestCancelTextsOwner(t *testing.T) {
+	g, _, code := enrolled(t)
+	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
+		t.Fatal(err)
+	}
+	g.alerts.raised = nil
+	g.bs.failAt = g.bs.n + 1
+	if fresh, err := g.b.Cancel(); !errors.Is(err, errStopped) || fresh != "" {
+		t.Fatalf("cancel over a failing save: %q %v", fresh, err)
+	}
+	if len(g.alerts.raised) != 0 {
+		t.Errorf("a failed cancel texted: %v", g.alerts.raised)
+	}
+	if _, ok := g.b.Recovery(); !ok {
+		t.Fatal("a failed cancel dropped the replacement")
+	}
+	g.bs.failAt = 0
+	if _, err := g.b.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
+		t.Errorf("cancel texts %v, want one RecoveryCodeChanged", g.alerts.raised)
+	}
+}
+
+// TestFailedRaiseIsLogged (NET-2 Texts and calls; ENF-c-f6, #5613 Security
+// point 1): each of enrolment's five raises (Enrolment at Finish and Tick,
+// RecoveryCodeUsed, RecoveryCodeChanged at Rotate and Cancel, FactoryReset)
+// sends a failed raise to Config.Log, naming the alert and the error, and
+// the step itself goes on. Catches an alert journal write that fails with
+// the owner never texted and nothing recording why.
+func TestFailedRaiseIsLogged(t *testing.T) {
+	const canary = "CANARY-ALERT-JOURNAL-REFUSED"
+	g := newRig(t)
+	g.alerts.fail = errors.New(canary)
+	logged := func(step, name string) {
+		t.Helper()
+		for _, l := range g.logged {
+			if strings.Contains(l, canary) && strings.Contains(l, name) {
+				g.logged = nil
+				return
+			}
+		}
+		t.Errorf("%s: no log line for the failed %s raise: %q", step, name, g.logged)
+		g.logged = nil
+	}
+	a := newAuthenticator(t)
+	res, err := g.enrol(a, caseCode)
+	if err != nil {
+		t.Fatalf("first enrolment: %v", err)
+	}
+	logged("Finish", "Enrolment")
+	if _, err := g.propose(a, home(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.e.Tick(g.now.UnixMilli() + policy.Wait); err != nil {
+		t.Fatal(err)
+	}
+	code := res.Recovery
+
+	fresh, err := g.b.Rotate()
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	logged("Rotate", "RecoveryCodeChanged")
+	code = fresh
+
+	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	logged("Finish (replacement)", "RecoveryCodeUsed")
+	if code, err = g.b.Cancel(); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	logged("Cancel", "RecoveryCodeChanged")
+
+	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
+		t.Fatalf("second replacement: %v", err)
+	}
+	g.logged = nil
+	g.now = g.now.Add(Wait)
+	if done, err := g.b.Tick(); !done || err != nil {
+		t.Fatalf("tick: %v %v", done, err)
+	}
+	logged("Tick", "Enrolment")
+
+	if err := g.b.FactoryReset(caseCode); err != nil {
+		t.Fatalf("factory reset: %v", err)
+	}
+	logged("FactoryReset", "FactoryReset")
 }

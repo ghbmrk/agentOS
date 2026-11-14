@@ -92,7 +92,7 @@ type edgeState struct {
 	last    *edgeEnrolled   // the last enrolment, at any head, cut or not
 	revoked map[string]bool // every key revoked or replaced, at any head
 	cand    *edgeCandidate  // the latest candidate
-	candAt  int64
+	candAt  int64           // the latest candidate's reading's Latest
 }
 
 // HelloMsg is what the edge's key signs on a connection: the domain and the
@@ -182,9 +182,9 @@ func (s *State) EdgeReplaces(k ed25519.PublicKey) ed25519.PublicKey {
 func (s *State) EdgeChanges() int { return s.edge.changes }
 
 // candidateOK is the check a candidate passes, live and on replay: a hello
-// that verifies, from a key never revoked, a minute after the last
-// candidate and from another key. Whether the key is live is the kernel's
-// check, since the fold knows no head key.
+// that verifies, from another key never revoked, a minute of true time after
+// the last candidate (from its Latest to at, an Earliest). Whether the key is
+// live is the kernel's check, since the fold knows no head key.
 func (s *State) candidateOK(b edgeCandidate, at int64) error {
 	if !edgeKey(b.Key) || len(b.Nonce) != HelloNonce || len(b.Sig) != ed25519.SignatureSize {
 		return ErrEdgeKey
@@ -288,7 +288,7 @@ func (s *State) applyEdge(e Entry) error {
 			return err
 		}
 		if s.candidateOK(b, e.At) == nil {
-			s.edge.cand, s.edge.candAt = &b, e.At
+			s.edge.cand, s.edge.candAt = &b, e.reading().Latest
 		}
 	case TEdgeRevoked:
 		b, err := body[edgeRevoked](e)
@@ -312,7 +312,7 @@ func (s *State) applyEdge(e Entry) error {
 
 // edgeFirst logs the key setup captured on the link port before the Owner
 // Card confirm, right after anchors.set. Only Setup calls it.
-func (k *Kernel) edgeFirst(now int64, edge ed25519.PublicKey) error {
+func (k *Kernel) edgeFirst(now Reading, edge ed25519.PublicKey) error {
 	return k.owner(now, TEdgeEnrolled, edgeEnrolled{Key: edge, Head: k.Box(), First: true})
 }
 
@@ -330,12 +330,13 @@ func (k *Kernel) EdgeReplaces(edge ed25519.PublicKey) ed25519.PublicKey {
 // HelloMsg. Only the link process's uid reaches it (kernel process). The
 // live key's hello, a revoked key's, a bad one and any within a minute of the
 // last candidate log nothing.
-func (k *Kernel) EdgeCandidate(now int64, edge ed25519.PublicKey, nonce, sig []byte) error {
+func (k *Kernel) EdgeCandidate(at int64, edge ed25519.PublicKey, nonce, sig []byte) error {
+	now := k.read(at)
 	if edgeKey(edge) && k.LiveEdge().Equal(edge) {
 		return ErrEdgeLive
 	}
 	b := edgeCandidate{edge, nonce, sig}
-	if err := k.s.candidateOK(b, now); err != nil {
+	if err := k.s.candidateOK(b, now.Earliest); err != nil {
 		return err
 	}
 	_, err := k.emit(now, TEdgeCandidate, b)
@@ -347,35 +348,35 @@ func (k *Kernel) EdgeCandidate(now int64, edge ed25519.PublicKey, nonce, sig []b
 // EdgeEnrollHash(State.EdgeChanges(), Box(), edge, EdgeReplaces(edge)),
 // revoking the last enrolled key in the same entry, after a restore or a cut
 // too. It is a widening, so it anchors.
-func (k *Kernel) EdgeEnroll(now int64, edge ed25519.PublicKey, c key.Cosign) error {
+func (k *Kernel) EdgeEnroll(at int64, edge ed25519.PublicKey, c key.Cosign) error {
 	b := edgeEnrolled{Key: edge, Head: k.Box(), Replaces: k.s.EdgeReplaces(edge), Sig: c}
 	if err := k.s.enrollOK(b); err != nil {
 		return err
 	}
-	return k.owner(now, TEdgeEnrolled, b)
+	return k.owner(k.read(at), TEdgeEnrolled, b)
 }
 
 // EdgeRevoke cuts edge for good with no replacement. It narrows, so it
 // needs no signature.
-func (k *Kernel) EdgeRevoke(now int64, edge ed25519.PublicKey) error {
+func (k *Kernel) EdgeRevoke(at int64, edge ed25519.PublicKey) error {
 	if !edgeKey(edge) {
 		return ErrEdgeKey
 	}
 	if k.s.EdgeRevoked(edge) {
 		return ErrEdgeRevoked
 	}
-	return k.owner(now, TEdgeRevoked, edgeRevoked{edge})
+	return k.owner(k.read(at), TEdgeRevoked, edgeRevoked{edge})
 }
 
 // EdgeCut stops trusting the live edge at a start the unlock step reports
 // was not by this PC's TPM slot, naming that slot (§12.2). Only a page-step
 // enrolment trusts an edge again. With nothing live it logs nothing.
-func (k *Kernel) EdgeCut(now int64, slot string) error {
+func (k *Kernel) EdgeCut(at int64, slot string) error {
 	if len(slot) == 0 || len(slot) > MaxSlot || !graphic(slot) {
 		return ErrEdgeSlot
 	}
 	if k.LiveEdge() == nil {
 		return nil
 	}
-	return k.owner(now, TEdgeCut, edgeCut{slot})
+	return k.owner(k.read(at), TEdgeCut, edgeCut{slot})
 }

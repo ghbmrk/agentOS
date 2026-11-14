@@ -28,6 +28,12 @@ const (
 // UnclearReply is the fixed reply to WordUnclear.
 const UnclearReply = "Not understood, and not sent to your agent. Reply HELP for commands."
 
+// FoldedCodeReply is the fixed reply to a code, or a RESUME, YES or NO
+// with a number, typed in digits other than ASCII 0-9 (Arabic-Indic,
+// full-width, circled and the like). Such a code is never checked, so the
+// reply names the cause (CH-12, CTL-unicode-chat-code-fu, #5616).
+const FoldedCodeReply = "Codes work only in digits 0-9, and this was not sent to your agent."
+
 // Command is a parsed owner message. For task chat, Word is WordNone and
 // Text is what the agent receives; Public is set by a leading PUBLIC.
 type Command struct {

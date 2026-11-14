@@ -124,5 +124,5 @@ sh "$here/../../image/guest-userland.sh" "$base" "$out" \
 printf 'root:x:0:0:root:/root:/bin/sh\n' >etc/passwd
 printf 'root:x:0:\n' >etc/group
 printf '127.0.0.1 localhost\n::1 localhost\n' >etc/hosts
-: >etc/resolv.conf # no resolver: the machine has no network but its socket
+true >etc/resolv.conf # no resolver: the machine has no network but its socket
 echo "rootfs ready: $out ($(du -sh "$out" | cut -f1))"

@@ -503,12 +503,29 @@ type Manager struct {
 // ErrStateDirExposed refuses a StateDir another uid could swap for a link.
 var ErrStateDirExposed = errors.New("vm: the state directory's path is open to another uid")
 
-// stateDirOwner and stateDirsMade are seams: tests give a directory a
-// foreign owner without root, and change a directory between Open's two
-// checks: stateDirsChecked runs after the first and before MkdirAll,
-// stateDirsMade after MkdirAll and before the second.
+// ErrStateDirUnreachable refuses a StateDir whose path this uid cannot
+// walk: a component it may not search (EACCES or EPERM, fs.ErrPermission)
+// or a name longer than nameMax. Each fails the same way on every start,
+// so it is the path's setting to fix, not a fault a restart clears
+// (#5617). Other Lstat errors (EIO, say) are returned as they came.
+// ENOTDIR and ELOOP cannot arise: the walk Lstats each prefix in order,
+// so a file or link component is refused first as ErrStateDirExposed.
+// The package may not import syscall (ARC2, daemon/arc2_test.go), so the
+// errno classes are read through fs and a length check.
+var ErrStateDirUnreachable = errors.New("vm: the state directory's path cannot be walked")
+
+// nameMax is Linux's NAME_MAX: a longer name fails Lstat with
+// ENAMETOOLONG on every filesystem the box mounts.
+const nameMax = 255
+
+// stateDirOwner, stateDirLstat and stateDirsMade are seams: tests give a
+// directory a foreign owner or an Lstat errno without root, and change a
+// directory between Open's two checks: stateDirsChecked runs after the
+// first and before MkdirAll, stateDirsMade after MkdirAll and before the
+// second.
 var (
 	stateDirOwner    = overlay.Owner
+	stateDirLstat    = os.Lstat
 	stateDirsChecked = func() {}
 	stateDirsMade    = func() {}
 )
@@ -542,13 +559,23 @@ func checkStateDirs(dirs []string, all bool) error {
 		// Each prefix of abs, "/" first.
 		path := "/"
 		parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+		// Every name, before the walk: one below a missing component is
+		// never Lstat-ed, and MkdirAll would fail on it plain (#5641).
+		for _, p := range parts {
+			if len(p) > nameMax {
+				return fmt.Errorf("%w: a name on %q is longer than %d bytes", ErrStateDirUnreachable, d, nameMax)
+			}
+		}
 		for i := -1; i < len(parts); i++ {
 			if i >= 0 {
 				path = filepath.Join(path, parts[i])
 			}
-			fi, err := os.Lstat(path)
+			fi, err := stateDirLstat(path)
 			if errors.Is(err, fs.ErrNotExist) && !all {
 				break
+			}
+			if errors.Is(err, fs.ErrPermission) {
+				return fmt.Errorf("%w: %w", ErrStateDirUnreachable, err)
 			}
 			if err != nil {
 				return err

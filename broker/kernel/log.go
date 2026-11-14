@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"unicode/utf8"
 )
@@ -46,6 +47,7 @@ var (
 	ErrBroken    = errors.New("log: a write failed; reopen")
 	ErrNoSigner  = errors.New("log: no head signer")
 	ErrNoLog     = errors.New("log: not opened; Open is the only constructor")
+	ErrBackward  = errors.New("log: an entry's time is before the entry before it")
 )
 
 // Hash is the chain link.
@@ -65,9 +67,12 @@ func (h *Hash) UnmarshalText(b []byte) error {
 // Entry is one typed, versioned log record (LOG-5). Hash covers every field,
 // so one change anywhere breaks every later link (LOG-2).
 type Entry struct {
-	Seq  uint64          `json:"seq"`
-	Prev Hash            `json:"prev"`
-	At   int64           `json:"at"` // unix ms, the kernel's clock
+	Seq  uint64 `json:"seq"`
+	Prev Hash   `json:"prev"`
+	At   int64  `json:"at"` // unix ms: the kernel's reading's Earliest, never below the entry before
+	// Late is the reading's Latest when it is past At (TIM-1), so Rederive
+	// checks a move that time decided from the log alone.
+	Late *int64          `json:"late,omitempty"`
 	Type string          `json:"type"`
 	V    int             `json:"v"`
 	Body json.RawMessage `json:"body"`
@@ -185,12 +190,12 @@ func newAEAD(key [32]byte) (cipher.AEAD, error) {
 
 func aad(seq uint64) []byte { return binary.BigEndian.AppendUint64(nil, seq) }
 
-// Open reads, authenticates and checks the whole log against its anchor.
-// A torn final frame is trimmed. A log shorter than its anchor, or with a
-// different entry at the anchored seq, is refused. A widening entry that no
-// anchor covers, as the last entry, is dropped: only an owner-confirmed
-// widening counts (KRN-7). Narrowing, dispatch and result entries are
-// always kept, since dropping one could repeat an effect (KRN-8).
+// Open reads, authenticates and checks the whole log against its anchor. A
+// log shorter than its anchor, or with another entry at the anchored seq, is
+// refused before a torn final frame is trimmed, so a refusal cuts no byte
+// (LOG-2). A last widening entry no anchor covers is dropped: only an
+// owner-confirmed widening counts (KRN-7). Narrowing, dispatch and result
+// entries are always kept, since dropping one could repeat an effect (KRN-8).
 func Open(cfg Config) (*Log, error) {
 	a, err := newAEAD(cfg.Key)
 	if err != nil {
@@ -237,13 +242,13 @@ func Open(cfg Config) (*Log, error) {
 		off += 4 + n
 		ends = append(ends, off)
 	}
+	if err := f.checkAnchor(); err != nil {
+		return nil, err
+	}
 	if off < len(raw) {
 		if err := cfg.Store.Truncate(off); err != nil {
 			return nil, err
 		}
-	}
-	if err := f.checkAnchor(); err != nil {
-		return nil, err
 	}
 	if err := f.dropUnconfirmed(ends); err != nil {
 		return nil, err
@@ -305,6 +310,21 @@ func (f *logFields) dropUnconfirmed(ends []int) error {
 // everything until reopened, so a torn frame is trimmed by Open and never
 // built on.
 func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
+	return l.append(At(at), typ, v, body)
+}
+
+// lastAt is the last entry's time; an empty or unopened log floors nothing.
+func (l *Log) lastAt() int64 {
+	f, err := l.fields()
+	if err != nil || len(f.entries) == 0 {
+		return math.MinInt64
+	}
+	return f.entries[len(f.entries)-1].At
+}
+
+// append logs body at reading r. A reading before the last entry is
+// refused, so the log's times never decrease (TIM-1).
+func (l *Log) append(r Reading, typ string, v int, body any) (Entry, error) {
 	f, err := l.fields()
 	if err != nil {
 		return Entry{}, err
@@ -325,9 +345,16 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 	if bytes.Contains(bytes.ReplaceAll(bb, []byte(`\\`), nil), []byte(`\ufffd`)) || !utf8.Valid(bb) {
 		return Entry{}, ErrNotText
 	}
-	e := Entry{Seq: uint64(len(f.entries) + 1), At: at, Type: typ, V: v, Body: bb}
+	e := Entry{Seq: uint64(len(f.entries) + 1), At: r.Earliest, Type: typ, V: v, Body: bb}
+	if r.Latest > r.Earliest {
+		e.Late = &r.Latest
+	}
 	if len(f.entries) > 0 {
-		e.Prev = f.entries[len(f.entries)-1].Hash()
+		last := f.entries[len(f.entries)-1]
+		if e.At < last.At {
+			return Entry{}, ErrBackward
+		}
+		e.Prev = last.Hash()
 	}
 	pt, _ := json.Marshal(e)
 	nonce := make([]byte, f.aead.NonceSize())

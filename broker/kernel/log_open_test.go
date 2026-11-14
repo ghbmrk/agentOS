@@ -1,6 +1,6 @@
 package kernel_test
 
-// REQ: KRN-1
+// REQ: KRN-1, LOG-2
 
 import (
 	"bytes"
@@ -166,5 +166,55 @@ func TestLogChecksHold(t *testing.T) {
 	st.appendErr = false
 	if _, err := l.Append(10, kernel.TTaskOpened, 1, map[string]string{"task": "y"}); !errors.Is(err, kernel.ErrBroken) {
 		t.Fatalf("after a failed write: %v", err)
+	}
+}
+
+// A refused open leaves the store's bytes unchanged (LOG-2): an anchor past
+// the readable prefix, or one that forks from it, refuses the open before a
+// corrupt tail that looks torn is cut, so the suffix stays for recovery.
+// Catches a tail truncated before the anchor check.
+func TestRefusedOpenKeepsEveryByte(t *testing.T) {
+	st := &kernel.MemStore{}
+	anc := &kernel.MemAnchor{}
+	l, err := kernel.Open(logCfg(st, anc))
+	must(t, err)
+	appendN(t, l, "t", 3)
+	must(t, l.Anchor())
+	st.B[len(st.B)-1] ^= 1 // the last frame no longer opens, so it reads as torn
+	want := bytes.Clone(st.B)
+	if _, err := kernel.Open(logCfg(st, anc)); !errors.Is(err, kernel.ErrTruncated) {
+		t.Fatalf("an anchor past the readable prefix: %v", err)
+	}
+	if !bytes.Equal(st.B, want) {
+		t.Fatal("a refused open (ErrTruncated) changed the store")
+	}
+	fork := &kernel.MemAnchor{}
+	must(t, fork.Put(kernel.SignHead(gen(3).priv, 2, kernel.Hash{1})))
+	if _, err := kernel.Open(logCfg(st, fork)); !errors.Is(err, kernel.ErrFork) {
+		t.Fatalf("an anchor that forks from the prefix: %v", err)
+	}
+	if !bytes.Equal(st.B, want) {
+		t.Fatal("a refused open (ErrFork) changed the store")
+	}
+}
+
+// A torn tail under a satisfied anchor is still trimmed, and the log
+// reopens on the trimmed bytes (LOG-2). Catches the trim lost when it moved
+// behind the anchor check.
+func TestTornTailUnderAnchorIsTrimmed(t *testing.T) {
+	st := &kernel.MemStore{}
+	anc := &kernel.MemAnchor{}
+	l, err := kernel.Open(logCfg(st, anc))
+	must(t, err)
+	appendN(t, l, "t", 3)
+	must(t, l.Anchor())
+	whole := bytes.Clone(st.B)
+	st.B = append(st.B, frames(whole)[0][:10]...) // a torn fourth frame
+	for range 2 {
+		l, err = kernel.Open(logCfg(st, anc))
+		must(t, err)
+		if l.Len() != 3 || !bytes.Equal(st.B, whole) {
+			t.Fatalf("reopen kept %d entries and %d bytes, want 3 and %d", l.Len(), len(st.B), len(whole))
+		}
 	}
 }

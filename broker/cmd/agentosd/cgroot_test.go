@@ -150,7 +150,12 @@ func TestRES2DelegatedRootWithoutPidsOpensNoPool(t *testing.T) {
 // Whichever controller is missing, the owner reads one line that names
 // none of them, and the log lists every missing one (UX ruling on #155).
 func TestRES2MissingControllerSaysSoInStatus(t *testing.T) {
-	const want = "Your agent is off: I can't yet keep it within its limits, so I need an update."
+	const want = "Your agent is off: I cannot yet keep it in its limits; nothing to do; a later box version adds it."
+	// STATUS-wording-f1 (#5632): its step is fixUpdate, so a rewording
+	// of that step is one edit.
+	if !strings.HasSuffix(agentNoLimits, "; "+fixUpdate+".") {
+		t.Errorf("agentNoLimits %q does not end in fixUpdate", agentNoLimits)
+	}
 	mem, err := budget.ForHost(7680, 4, budget.Floor())
 	if err != nil {
 		t.Fatal(err)

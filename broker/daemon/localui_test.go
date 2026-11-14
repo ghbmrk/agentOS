@@ -231,9 +231,10 @@ func startPage(t *testing.T) (sock, token string, d *Daemon) {
 			PlanSignIn: pagePlan{},
 			Accounts:   map[string]localsrv.AccountSignIn{"mail": pageAccount{}},
 			Passkeys:   pagePasskeys{}, Backups: pageBackups{}, Recovery: pageRecovery{}, Erase: pageErase{},
-			BackupNotes: func() []string { return []string{"only one copy"} },
-			Held:        func() localapi.HeldList { return localapi.HeldList{} },
-			Forget:      pageForget{},
+			BackupNotes:  func() []string { return []string{"only one copy"} },
+			MachineNotes: func() []string { return []string{"one will not stop"} },
+			Held:         func() localapi.HeldList { return localapi.HeldList{} },
+			Forget:       pageForget{},
 			DescribeRoot: func(context.Context, []byte, [][]byte) (localapi.RootSummary, error) {
 				return localapi.RootSummary{Version: 7}, nil
 			},
@@ -267,6 +268,9 @@ func TestEveryPagePartAgentosdIsGivenReachesThePage(t *testing.T) {
 	var st localapi.Status
 	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || json.Unmarshal(r.Result, &st) != nil || !slices.Equal(st.Backups, []string{"only one copy"}) {
 		t.Errorf("status's backups notice: %+v", r)
+	}
+	if r := send(t, sock, localapi.OpStatus, struct{}{}); !r.OK || json.Unmarshal(r.Result, &st) != nil || !slices.Equal(st.Machines, []string{"one will not stop"}) {
+		t.Errorf("status's machines note: %+v", r)
 	}
 	for _, op := range []string{localapi.OpBackups, localapi.OpRecoveryBegin, localapi.OpEraseFind, localapi.OpEraseConfirm, localapi.OpHeld} {
 		if r := send(t, sock, op, struct{}{}); r.Error == "unknown op" {

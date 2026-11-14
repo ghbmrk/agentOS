@@ -65,6 +65,7 @@ func TestGrantWaitsItsHoldAndARevokeCancelsIt(t *testing.T) {
 // #2670 item 5).
 func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 	r := newRig(t)
+	limited := r.grant(trashRoot(r, "r3", r.owner), 10, key.LimitUses(3), key.LimitHold(hour, hour))
 	at := 10 * hour
 	renew := func(name string, holder pair, spendDay, life int64, c ...key.Caveat) key.Key {
 		t.Helper()
@@ -94,7 +95,6 @@ func TestOnlyASameOrNarrowerRenewalIsLiveAtOnce(t *testing.T) {
 		}
 	}
 	// A renewal that drops or loosens a limit of the old key waits the hold.
-	limited := r.grant(trashRoot(r, "r3", r.owner), 10, key.LimitUses(3), key.LimitHold(hour, hour))
 	for name, c := range map[string]struct {
 		cs   []key.Caveat
 		live bool
@@ -326,8 +326,8 @@ func TestARenewalOfARevokedKeyWaits(t *testing.T) {
 func TestAPhoneRenewsTheClerkKeyWithinOneBudget(t *testing.T) {
 	r := newRig(t)
 	phone := gen(8)
-	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	old := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "model", Verbs: []key.Verb{key.Read}, Serial: "m"}), 15)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
 	at := 10 * hour
 	k, err := key.ClerkKey(key.Key{Root: old.Root}, phone.pass, r.holder.pub, at, 15)
 	must(t, err)
@@ -446,5 +446,107 @@ func TestAnAnchorIsNotCutOff(t *testing.T) {
 	}
 	if !slices.Contains(re.Pending(2), held.Tip()) {
 		t.Fatal("the anchor's grant in its hold was cancelled")
+	}
+}
+
+// A renewal is live at once only while the key it renews has not lapsed by
+// the latest credible time: a key already expired by Latest, though not by
+// Earliest, is renewed only after the hold, which starts at Latest (TIM-1,
+// KEY-7, D-146).
+//
+// REQ: TIM-1, KEY-7
+func TestTIM1ARenewalOfAKeyLapsedByLatestWaitsTheHold(t *testing.T) {
+	r := newRig(t)
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: 0, Latest: 1 << 50} })
+	k, err := key.ClerkKey(key.Key{Root: r.ck.Root}, r.owner.pass, r.holder.pub, 0, 1<<39) // narrower: a renewal by its limits
+	must(t, err)
+	must(t, r.issue(0, k))
+	if from, _ := r.k.State().Granted(k.Tip()); from != 1<<50+kernel.GrantHold {
+		t.Fatalf("a renewal of a key lapsed by Latest is live from %d, want a hold after Latest", from)
+	}
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A clerk key's grant is judged at a wide reading as a narrowing where it
+// could run long and as a widening where it could start early: its life is
+// bounded from Earliest, a renewal is live at once only of a grant live by
+// Earliest and within ClerkLife of Earliest, and it is then live from
+// Earliest (TIM-1, D-146).
+// REQ: TIM-1, KEY-4
+func TestTIM1AClerkKeyGrantsAtAWideReading(t *testing.T) {
+	const e = 10 * hour
+	ck := func(r *rig, root key.Key, at int64) key.Key {
+		k, err := key.ClerkKey(key.Key{Root: root.Root}, r.owner.pass, r.holder.pub, at, 1<<40)
+		must(t, err)
+		return k
+	}
+	from := func(r *rig, k key.Key) int64 { f, _ := r.k.State().Granted(k.Tip()); return f }
+
+	r := newRig(t)
+	wide(r, e)
+	if err := r.issue(0, ck(r, r.ck, e+kernel.GrantHold+1)); !errors.Is(err, kernel.ErrLife) {
+		t.Fatalf("a clerk key living past ClerkLife from Earliest: %v", err)
+	}
+	renewal := ck(r, r.ck, e)
+	must(t, r.issue(0, renewal))
+	if f := from(r, renewal); f != e {
+		t.Fatalf("a renewal is live from Earliest %d, got %d", e, f)
+	}
+	long := ck(r, r.ck, e+1)
+	must(t, r.issue(0, long))
+	if f := from(r, long); f != e+hour+kernel.GrantHold {
+		t.Fatalf("a key past ClerkLife from Earliest renews nothing: live from %d, want a hold after Latest", f)
+	}
+
+	r = newRig(t)
+	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize}, Serial: "g"})
+	held := ck(r, root, 0)
+	must(t, r.issue(0, root, held))
+	wide(r, kernel.GrantHold-1)
+	again := ck(r, root, kernel.GrantHold-1)
+	must(t, r.issue(0, again))
+	if f := from(r, again); f != 2*kernel.GrantHold-1+hour {
+		t.Fatalf("a grant live only by Latest renews nothing: live from %d, want a hold after Latest", f)
+	}
+}
+
+// A renewal's edges at a wide reading: an old grant live from exactly
+// Earliest renews; one whose expiry is exactly Latest has lapsed and renews
+// nothing; a renewal may keep the old key's expiry (TIM-1, D-146).
+// REQ: TIM-1, KEY-4
+func TestTIM1ARenewalEdgesAtAWideReading(t *testing.T) {
+	ck := func(r *rig, root key.Key, at int64) key.Key {
+		k, err := key.ClerkKey(key.Key{Root: root.Root}, r.owner.pass, r.holder.pub, at, 1<<39) // narrower: never r.ck itself
+		must(t, err)
+		return k
+	}
+	from := func(r *rig, k key.Key) int64 { f, _ := r.k.State().Granted(k.Tip()); return f }
+
+	r := newRig(t) // r.ck is live from 0 and lapses at ClerkLife
+	wide(r, 10*hour)
+	same := ck(r, r.ck, 0)
+	must(t, r.issue(0, same))
+	if f := from(r, same); f != 10*hour {
+		t.Fatalf("a renewal keeping the old expiry is live from %d, want Earliest %d", f, 10*hour)
+	}
+
+	r = newRig(t)
+	span(r, key.ClerkLife-hour, key.ClerkLife)
+	late := ck(r, r.ck, key.ClerkLife-hour)
+	must(t, r.issue(0, late))
+	if f := from(r, late); f != key.ClerkLife+kernel.GrantHold {
+		t.Fatalf("a renewal of a key lapsing at Latest is live from %d, want a hold after Latest", f)
+	}
+
+	r = newRig(t)
+	root := key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Organize}, Serial: "g"})
+	must(t, r.issue(0, root, ck(r, root, 0)))
+	wide(r, kernel.GrantHold)
+	edge := ck(r, root, kernel.GrantHold)
+	must(t, r.issue(0, edge))
+	if f := from(r, edge); f != kernel.GrantHold {
+		t.Fatalf("a renewal of a grant live from exactly Earliest is live from %d, want %d", f, kernel.GrantHold)
 	}
 }

@@ -5,7 +5,7 @@
 # (gvisor.Stream.Root). Its own script, so image/build.sh keeps no build tag: the libavcodec tag
 # applies to this cgo binary alone (TestImageBuildShipsTheUntaggedBuild).
 #
-# Usage: camdecode.sh ROOT LICENSES    (as root, with GUEST_BASE set)
+# Usage: camdecode.sh ROOT LICENSES    (as root, with GUEST_BASE and GUEST_SHIPPED set)
 # Writes ROOT/agentos-camdecode, ROOT/{proc,dev,sys} and libavcodec's licence text at
 # LICENSES/libavcodec/COPYING.LGPLv2.1. Both libavcodec and the decoder are built inside GUEST_BASE,
 # a root from image/guest-base.sh, at a fixed path (reproducibility) removed after, by chroot with a
@@ -13,6 +13,11 @@
 # the base's, from the image's pinned apt sources, never the build host's, and no host tar, xz or
 # patch runs. The build host gives only Go: the toolchain broker/go.mod pins (go env GOROOT) and the
 # module's source, copied in. Needs what libavcodec.sh needs, plus Go.
+#
+# The decoder carries the code of every archive and object its link read from the base: libc6-dev's
+# libc.a and start-up files, libgcc's. Each input the link map loads from outside $lib is recorded
+# as shipped (image/guest-shipped.sh, #5599), so the image vulnerability check scans its Debian
+# package. Go's and cgo's own objects stay under $lib: the jail's TMPDIR is there.
 #
 # What the decoder links is pinned beyond h264.go's #cgo lines (TestDecoderCgoIsPinned; NET-2,
 # #3816): the build stops unless go env gives cgo exactly the default tools and flags; unless
@@ -27,6 +32,7 @@ export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 ROOT=$(realpath -m "$1"); LICENSES=$(realpath -m "$2")
 base=${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}
+: "${GUEST_SHIPPED:?set GUEST_SHIPPED to the file that records the packages the guests ship (#5572)}"
 # The build's fixed path inside the base; every path the jail sees is under it.
 lib=/tmp/agentos-camdecode
 
@@ -50,7 +56,7 @@ linkfaults() {
 jail() {
 	chroot "$base" /usr/bin/env -i PATH="$lib/go/bin:/usr/bin:/bin" LC_ALL=C HOME=/nonexistent \
 		GOROOT="$lib/go" GOCACHE="$lib/gocache" GOMODCACHE="$lib/gomodcache" GOENV=off GOTOOLCHAIN=local \
-		GOPROXY=off GOWORK=off \
+		GOPROXY=off GOWORK=off TMPDIR="$lib/tmp" \
 		PKG_CONFIG_PATH="$lib/opt/agentos-libavcodec/lib/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$lib" \
 		sh -c 'cd "$0" && exec "$@"' "$lib/broker" "$@"
 }
@@ -59,7 +65,7 @@ mkdir -p "$ROOT/proc" "$ROOT/dev" "$ROOT/sys"
 trap 'rm -rf "${base:?}$lib"' EXIT
 sh "$HERE/libavcodec.sh" "$base" "$lib"
 goroot=$(cd "$REPO/broker" && go env GOROOT)
-mkdir "$base$lib/go" "$base$lib/broker"
+mkdir "$base$lib/go" "$base$lib/broker" "$base$lib/tmp"
 cp -a "$goroot/." "$base$lib/go/"
 cp -a "$REPO/broker/." "$base$lib/broker/"
 # go env CC CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_FFLAGS CGO_LDFLAGS PKG_CONFIG, Go's defaults.
@@ -84,6 +90,12 @@ done
 	-o "$lib/agentos-camdecode" ./cmd/agentos-camdecode)
 faults=$(linkfaults "$base$lib/camdecode.map")
 [ -z "$faults" ] || { printf 'agentos-camdecode links a network call:\n%s\n' "$faults" >&2; exit 1; }
+# Each file the link loaded from outside $lib, by its LOAD line in the map ("LOAD linker stubs" names
+# no file). A relative path is passed on too, and fails there, so no input goes unrecorded.
+loaded=$(awk -v lib="$lib/" '/^LOAD / && $2 != "linker" && index($2, lib) != 1 { print $2 }' "$base$lib/camdecode.map" | sort -u)
+[ -n "$loaded" ] || { echo "agentos-camdecode: the link map loads nothing from outside $lib" >&2; exit 1; }
+# shellcheck disable=SC2086  # one path per word
+sh "$HERE/guest-shipped.sh" "$base" $loaded
 ! jail readelf -l "$lib/agentos-camdecode" | grep -q INTERP || { echo "agentos-camdecode is not static" >&2; exit 1; }
 install -m 0755 "$base$lib/agentos-camdecode" "$ROOT/agentos-camdecode"
 install -D -m 0644 "$base$lib/opt/agentos-libavcodec/share/COPYING.LGPLv2.1" "$LICENSES/libavcodec/COPYING.LGPLv2.1"

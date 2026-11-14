@@ -94,7 +94,8 @@ type Synthesizer interface {
 	Speak(ctx context.Context, sentence string) ([]byte, error)
 }
 
-// Clips are the box's own fixed audio, never written by a model.
+// Clips are the box's own fixed audio, never written by a model. An
+// unset clip plays nothing.
 type Clips struct {
 	// OneMoment covers an answer slower than Config.OneMomentAfter.
 	OneMoment []byte
@@ -492,7 +493,9 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		case h, ok := <-heard:
 			if !ok {
 				stop(false)
-				l.Say(ctx, cfg.Clips.Failed)
+				if len(cfg.Clips.Failed) > 0 { // nothing empty is played (#5305)
+					l.Say(ctx, cfg.Clips.Failed)
+				}
 				return rep, ErrDeaf
 			}
 			if !h.Final {

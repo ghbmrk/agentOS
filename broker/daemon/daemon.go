@@ -229,6 +229,9 @@ type PageSocket struct {
 	// BackupNotes is the status page's only-copy notice. nil is none.
 	Backups     localsrv.Backups
 	BackupNotes func() []string
+	// MachineNotes is the status page's note on the machines (#5099).
+	// nil is none.
+	MachineNotes func() []string
 	// Recovery serves the Recovery key page's ops (REC-4, r4a) with
 	// Passkeys; nil is none.
 	Recovery localsrv.Recovery
@@ -494,6 +497,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.Accounts = cfg.PageSocket.Accounts
 		lcfg.Passkeys = cfg.PageSocket.Passkeys
 		lcfg.Backups, lcfg.BackupNotes = cfg.PageSocket.Backups, cfg.PageSocket.BackupNotes
+		lcfg.MachineNotes = cfg.PageSocket.MachineNotes
 		lcfg.Recovery = cfg.PageSocket.Recovery
 		lcfg.Erase = cfg.PageSocket.Erase
 		lcfg.Certify = cfg.PageSocket.Certify

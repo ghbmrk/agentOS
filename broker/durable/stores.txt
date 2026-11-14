@@ -18,7 +18,6 @@
 # kind (journal.Lifecycle), not a new line here.
 change debt debt:audit-2.5
 cmd/agentos-egress debt debt:#1947
-cmd/agentos-guest-bridge content
 cmd/agentosd debt debt:audit-2.7
 follow debt debt:#1947
 guest debt debt:#1947
