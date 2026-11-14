@@ -29,7 +29,9 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
                                              exit 1 if a LIVED mutant sits on a target line that no
-                                             `Mutant-equivalent:` line in FILE (the PR body) names
+                                             `Mutant-equivalent:` line in FILE (the PR body) and no
+                                             entry of its package's record names, or a record
+                                             entry is stale
   tools/mutgate.py verify DIR --git BASE [HEAD] [--body FILE] [--summary FILE]
                                              `gate`, after checking that DIR/*/ holds exactly
                                              one readable result for each shard of every package
@@ -37,6 +39,10 @@ reports the surviving mutants, and fails a PR where a mutant survives on a line 
                                              one deletion verdict for each site it lists itself,
                                              then joining the shards: CI's trusted job (#4106,
                                              #4602, #4961)
+  tools/mutgate.py waive FILE --accepted '#PR' write the `Mutant-equivalent:` lines in FILE into
+                                             their packages' records, keyed by statement (#5776)
+  tools/mutgate.py records [PKG...]          each record entry's line at the working tree, or why
+                                             it names none (default: every gated package's record)
 
 Target lines. A package's target lines are the lines the diff adds or changes in its non-test .go
 files (no `REQ:` marker is needed, #4908). When the diff also changes or deletes the package's
@@ -58,6 +64,9 @@ A LIVED mutant on a target line is code the package's tests run (gremlins mutate
 code) but do not check, and fails the gate, unless the PR body holds the line
 `Mutant-equivalent: broker/<pkg>/<file>.go:<line> <reason>` for its site: one site, one reason
 the reviewer checks, never a range or pattern. The body is read as text by this file, never run.
+A proof accepted once moves into the package's record, broker/<pkg>/MUTANTS-EQUIVALENT (`waive`;
+see RECORD below), keyed by statement, so a later run that widens the targets reads it without the
+body line and a moved line keeps it; an entry whose statement changed is stale and fails (#5776).
 Not covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
 The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
 target lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins
@@ -487,6 +496,228 @@ def waivers(body):
         if m and re.search(r"[A-Za-z]{2}", m.group(3)):
             out[(m.group(1), int(m.group(2)))] = m.group(3)
     return out
+
+
+# The waiver record (MUT-waiver-store, #5776). A reviewed `Mutant-equivalent:` proof lives on in
+# broker/<pkg>/MUTANTS-EQUIVALENT, keyed by its statement rather than its line number, so a run whose
+# targets widen past the PR's own lines (a test-only change, #5743) does not bring back survivors
+# already proven, and a line moved by an edit above it keeps its proof. One JSON object per line
+# (a `#` line or a blank one is a comment): file (a non-test .go file of the package), func (the
+# top-level declaration the line sits in, `Recv.Name` for a method, "" outside any), stmt (the text
+# of each line of the statement's own syntax, as `mutgate_stmts.go` lists them, or the line alone
+# when it is in no listed statement, whitespace runs as one space), at (which of stmt's lines),
+# after (the code line before the statement's first), occurrence ([i, n]: the i-th of the n lines
+# of the file with that same key), reason, and accepted (`#<PR>` whose review accepted the proof).
+# The head's statements are resolved to lines each run; an entry whose key is now on no line, or
+# whose count n differs, is stale and fails the gate, so an edit to the statement, the line before
+# it, or a twin of it in the same declaration needs the proof read again. The record is the PR's
+# text, read as data: a new or changed entry shows as such in the summary, for review as a body line is.
+RECORD = "MUTANTS-EQUIVALENT"
+RECORD_KEYS = {"file", "func", "stmt", "at", "after", "occurrence", "reason", "accepted"}
+RECORD_MAX = 1 << 20
+RECORD_FILE = re.compile(r"[A-Za-z0-9_.-]+\.go")
+FUNC = re.compile(r"func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
+
+
+def _norm(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _code(text):
+    """Whether a source line holds code: not blank, not only a `//` comment."""
+    s = text.strip()
+    return bool(s) and not s.startswith("//")
+
+
+def statement_keys(src, sites):
+    """{line: key} for every line of one file's source src, sites being the lister's sites for that
+    file; a key is (func, stmt, at, after) as the record holds them (see RECORD)."""
+    lines = src.split("\n")
+    funcs, cur = [], ""
+    for text in lines:
+        if text.startswith("func"):
+            m = FUNC.match(text)
+            cur = (f"{m.group(1)}.{m.group(2)}" if m.group(1) else m.group(2)) if m else ""
+        funcs.append(cur)
+        if text.startswith("}"):
+            cur = ""  # a top-level declaration's closing brace: gofmt puts it in column 0
+    owner = {}
+    for s in sorted(sites, key=lambda s: s["end"] - s["start"], reverse=True):
+        for n in s["lines"]:
+            owner[n] = s  # the innermost listed statement whose own syntax stands on n
+    keys = {}
+    for n in range(1, len(lines) + 1):
+        own = owner.get(n, {}).get("lines") or [n]
+        first = own[0]
+        prev = next((lines[i - 1] for i in range(first - 1, 0, -1) if _code(lines[i - 1])), "")
+        keys[n] = (funcs[first - 1], tuple(_norm(lines[i - 1]) for i in own if 0 < i <= len(lines)),
+                   own.index(n), _norm(prev))
+    return keys
+
+
+def record_entries(text):
+    """([entry], None) of a record's text, or (None, problem). Each entry is checked for shape only."""
+    out = []
+    for i, row in enumerate(text.split("\n"), 1):
+        if not row.strip() or row.lstrip().startswith("#"):
+            continue
+        try:
+            e = json.loads(row)
+        except ValueError:
+            return None, f"line {i} is not one JSON object"
+        ok = (isinstance(e, dict) and set(e) == RECORD_KEYS
+              and isinstance(e["file"], str) and RECORD_FILE.fullmatch(e["file"]) and not e["file"].endswith("_test.go")
+              and isinstance(e["func"], str)
+              and isinstance(e["stmt"], list) and e["stmt"] and all(isinstance(s, str) for s in e["stmt"])
+              and type(e["at"]) is int and 0 <= e["at"] < len(e["stmt"])
+              and isinstance(e["after"], str)
+              and isinstance(e["occurrence"], list) and len(e["occurrence"]) == 2
+              and all(type(x) is int for x in e["occurrence"]) and 1 <= e["occurrence"][0] <= e["occurrence"][1]
+              and isinstance(e["reason"], str) and re.search(r"[A-Za-z]{2}", e["reason"])
+              and isinstance(e["accepted"], str) and re.fullmatch(r"#[1-9]\d*", e["accepted"]))
+        if not ok:
+            return None, f"line {i} is not an entry of {sorted(RECORD_KEYS)} as tools/mutgate.py's RECORD says"
+        out.append(e)
+    return out, None
+
+
+def _entry_key(e):
+    return e["func"], tuple(e["stmt"]), e["at"], e["after"]
+
+
+def file_keys(pkg, names, lister, pkg_dir=None):
+    """({file: {line: key}}, None) for the named files of broker/<pkg>/ (those present), or (None, problem)."""
+    pkg_dir = pkg_dir or BROKER / pkg
+    files = [pkg_dir / n for n in sorted(set(names)) if (pkg_dir / n).is_file()]
+    if links := [p.name for p in files if p.is_symlink()]:
+        return None, f"broker/{pkg}/ holds .go files that are symbolic links, which mutgate does not follow: {links}"
+    if not files:
+        return {}, None
+    r = subprocess.run([str(lister), *map(str, files)], capture_output=True)
+    if r.returncode != 0:
+        return None, f"cannot list the statements of broker/{pkg}/: {r.stderr.decode(errors='replace')}"
+    sites = collections.defaultdict(list)
+    for s in json.loads(r.stdout):
+        sites[s["file"]].append(s)
+    return {p.name: statement_keys(p.read_bytes().decode("utf-8", "replace"), sites[p.name]) for p in files}, None
+
+
+def read_record(pkg, pkg_dir=None):
+    """(text or None, problem or None) of broker/<pkg>/MUTANTS-EQUIVALENT in the working tree."""
+    path = (pkg_dir or BROKER / pkg) / RECORD
+    if path.is_symlink():
+        return None, f"broker/{pkg}/{RECORD} is a symbolic link, which mutgate does not follow"
+    if not path.exists():
+        return None, None
+    if not path.is_file() or path.stat().st_size > RECORD_MAX:
+        return None, f"broker/{pkg}/{RECORD} is not a regular file of at most {RECORD_MAX} bytes"
+    return path.read_bytes().decode("utf-8", "replace"), None
+
+
+def resolve_record(pkg, entries, keys):
+    """({(path, line): entry}, [problem]): each entry's line at the head, or why it names none."""
+    found, problems = {}, []
+    for e in entries:
+        lines = sorted(n for n, k in keys.get(e["file"], {}).items() if k == _entry_key(e))
+        i, n = e["occurrence"]
+        where = f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r}"
+        if not lines:
+            problems.append(f"{where} names no statement at the head: the statement, or the line before it, "
+                            "changed; read the proof again and rewrite the entry (`mutgate.py waive`), or drop it")
+        elif len(lines) != n:
+            problems.append(f"{where} was written for occurrence {i} of {n}, and the head has {len(lines)}: "
+                            "read the proof again and rewrite the entry (`mutgate.py waive`)")
+        elif (path := f"broker/{pkg}/{e['file']}", lines[i - 1]) in found:
+            problems.append(f"{where} names the same line as another entry")
+        else:
+            found[(path, lines[i - 1])] = e
+    return found, problems
+
+
+def record_waivers(pkgs, lister, base=None, head="HEAD"):
+    """({(path, line): (reason, accepted, new)}, [problem]) of the records of pkgs at the working
+    tree; new is True for an entry that the merge base's record does not hold word for word."""
+    mb = merge_base(base, head) if base else None
+    out, problems = {}, []
+    for pkg in sorted(pkgs):
+        text, problem = read_record(pkg)
+        if problem:
+            problems.append(problem)
+        if text is None:
+            continue
+        entries, problem = record_entries(text)
+        if problem:
+            problems.append(f"broker/{pkg}/{RECORD}: {problem}")
+            continue
+        keys, problem = file_keys(pkg, [e["file"] for e in entries], lister)
+        if problem:
+            problems.append(problem)
+            continue
+        found, bad = resolve_record(pkg, entries, keys)
+        problems += bad
+        old = set()
+        if mb and (prior := base_text(mb, f"broker/{pkg}/{RECORD}")) is not None:
+            old = {json.dumps(e, sort_keys=True) for e in (record_entries(prior)[0] or [])}
+        for site, e in found.items():
+            out[site] = (e["reason"], e["accepted"], json.dumps(e, sort_keys=True) not in old)
+    return out, problems
+
+
+def record_entry(pkg, fname, line, reason, accepted, keys):
+    """The record entry for broker/<pkg>/<fname>:<line> at the working tree, keys being file_keys'."""
+    k = keys[fname][line]
+    same = sorted(n for n, o in keys[fname].items() if o == k)
+    return {"file": fname, "func": k[0], "stmt": list(k[1]), "at": k[2], "after": k[3],
+            "occurrence": [same.index(line) + 1, len(same)], "reason": reason, "accepted": accepted}
+
+
+def cmd_waive(args):
+    """Append an entry to each named site's package record, from `Mutant-equivalent:` lines in FILE."""
+    rows = waivers(pathlib.Path(args.lines).read_text(encoding="utf-8", errors="replace"))
+    if not rows:
+        print(f"mutgate: {args.lines} holds no `Mutant-equivalent: <path>:<line> <reason>` line", file=sys.stderr)
+        return 1
+    by_pkg = collections.defaultdict(list)
+    for (path, line), reason in sorted(rows.items()):
+        by_pkg[package_of(path)].append((path.rsplit("/", 1)[1], line, reason))
+    with tempfile.TemporaryDirectory() as tmp:
+        if (lister := build_lister(tmp)) is None:
+            return 1
+        for pkg, sites in sorted(by_pkg.items()):
+            keys, problem = file_keys(pkg, [f for f, _, _ in sites], lister)
+            missing = [f"broker/{pkg}/{f}:{n}" for f, n, _ in sites if n not in (keys or {}).get(f, {})]
+            if problem or missing:
+                print(f"mutgate: {problem or 'no such line: ' + ', '.join(missing)}", file=sys.stderr)
+                return 1
+            text, problem = read_record(pkg)
+            entries, bad = record_entries(text or "")
+            if problem or bad:
+                print(f"mutgate: {problem or bad}", file=sys.stderr)
+                return 1
+            new = [record_entry(pkg, f, n, reason, args.accepted, keys) for f, n, reason in sites]
+            # A site already in the record is rewritten, not doubled.
+            have = {(e["file"], _entry_key(e), tuple(e["occurrence"])) for e in new}
+            kept = [e for e in entries if (e["file"], _entry_key(e), tuple(e["occurrence"])) not in have]
+            head = [r for r in (text or "").split("\n") if r.lstrip().startswith("#")] or [
+                f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py."]
+            body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"]))
+            (BROKER / pkg / RECORD).write_text("\n".join(head + [json.dumps(e, ensure_ascii=False) for e in body]) + "\n")
+            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {len(body)} in all")
+    return 0
+
+
+def cmd_records(args):
+    """Resolve every named package's record (default: every gated package's) at the working tree."""
+    pkgs = args.pkg or [p for p in gated_packages() if (BROKER / p / RECORD).exists()]
+    with tempfile.TemporaryDirectory() as tmp:
+        if (lister := build_lister(tmp)) is None:
+            return 1
+        found, problems = record_waivers(pkgs, lister)
+    for (path, line), (reason, accepted, _) in sorted(found.items()):
+        print(f"{path}:{line} {accepted} {reason}")
+    for problem in problems:
+        print(f"mutgate: {problem}", file=sys.stderr)
+    return 1 if problems else 0
 
 
 def violations(targets, live, waived=None):
@@ -1382,16 +1613,21 @@ def cmd_verify(args):
             return 1
         results, problems = read_results(pkgs, args.dir, added, tests, lister,
                                          bases_for(diff, args.git, args.head, tests, pkgs))
+        records = record_waivers(pkgs, lister, args.git, args.head)
     for problem in problems:
         print(f"mutgate: {problem}", file=sys.stderr)
     if problems:
         return 1
-    return decide(results, added, tests, args)
+    return decide(results, added, tests, args, records)
 
 
-def decide(results, added, tests, args):
-    """Gate the read results against the PR body's waivers, and write the summary table."""
-    waived = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+def decide(results, added, tests, args, records=({}, [])):
+    """Gate the read results against the PR body's waivers and the packages' records (record_waivers'
+    pair; a stale entry fails), and write the summary table. A body line wins over a record entry."""
+    body = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
+    kept, stale = records
+    waived = {**{site: f"{reason} (record, {accepted}{', new in this PR' if new else ''})"
+                 for site, (reason, accepted, new) in kept.items()}, **body}
     targets = {pkg: t for pkg, (_, t) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived)
     # A package whose tests change must run every target line (#5762, Security on #5770): a weakened
@@ -1399,8 +1635,11 @@ def decide(results, added, tests, args):
     lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
                       {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived)
     tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
-    write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)}))
-    return report_violations(found, lost)
+    write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)},
+                                        set(body), stale))
+    for problem in stale:
+        print(f"mutgate: {problem}")
+    return report_violations(found, lost) or (1 if stale else 0)
 
 
 def write_summary(path, text):
@@ -1419,7 +1658,7 @@ VERDICTS = {"TIMED OUT": "killed (timed out)", "NOT COVERED": "not covered", "NO
 ROWS = 2000
 
 
-def summary(results, tested, waived, own=()):
+def summary(results, tested, waived, own=(), body=None, stale=()):
     """One Markdown table of every mutant on a target line, survivors first, and its verdict.
     tested names the changed tests of each package whose tests changed (None: every test); own
     names the packages where the diff also adds non-test lines."""
@@ -1462,9 +1701,11 @@ def summary(results, tested, waived, own=()):
     lines += ["", "| Site | Mutant | Verdict |", "| --- | --- | --- |", *(r[2] for r in rows[:ROWS])]
     if len(rows) > ROWS:
         lines.append(f"| {len(rows) - ROWS} more rows | | not shown |")
-    if unused := sorted(set(waived) - used):
+    if unused := sorted((set(waived) if body is None else body) - used):
         lines += ["", "Mutant-equivalent lines naming no surviving mutant on a target line: "
                   + ", ".join(cell(f"{p}:{n}") for p, n in unused)]
+    if stale:
+        lines += ["", f"Stale {RECORD} entries (each fails the gate):", *(f"- {cell(p)}" for p in stale)]
     return "\n".join(lines) + "\n"
 
 
@@ -1584,7 +1825,13 @@ def cmd_gate(args):
             bad += 1
             continue
         results[pkg] = (data, targets)
-    return decide(results, added, tests, args) or (1 if bad else 0)
+    with tempfile.TemporaryDirectory() as tmp:
+        records = ({}, [])
+        if any((BROKER / pkg / RECORD).exists() or (BROKER / pkg / RECORD).is_symlink() for pkg in results):
+            if (lister := build_lister(tmp)) is None:
+                return 1
+            records = record_waivers(results, lister, args.git, args.head)
+    return decide(results, added, tests, args, records) or (1 if bad else 0)
 
 
 def report_violations(found, lost=()):
@@ -1609,6 +1856,12 @@ def default_jobs():
         return len(os.sched_getaffinity(0))
     except AttributeError:
         return os.cpu_count() or 1
+
+
+def pr_ref(v):
+    if not re.fullmatch(r"#[1-9]\d*", v):
+        raise argparse.ArgumentTypeError("give the PR as #<number>")
+    return v
 
 
 def main(argv=None):
@@ -1636,6 +1889,11 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=default_jobs(), metavar="N")
     p = sub.add_parser("report")
     p.add_argument("dir")
+    p = sub.add_parser("waive")
+    p.add_argument("lines", metavar="FILE", help="`Mutant-equivalent: <path>:<line> <reason>` lines, as a PR body holds them")
+    p.add_argument("--accepted", required=True, metavar="#PR", type=pr_ref, help="the PR whose review accepted these proofs")
+    p = sub.add_parser("records")
+    p.add_argument("pkg", nargs="*")
     for name in ("gate", "verify"):
         p = sub.add_parser(name)
         p.add_argument("dir")
@@ -1650,7 +1908,7 @@ def main(argv=None):
         print("\n".join(gated_packages()))
         return 0
     return {"claimed": cmd_claimed, "plan": cmd_plan, "run": cmd_run, "delete": cmd_delete, "report": cmd_report, "gate": cmd_gate,
-            "verify": cmd_verify}[args.cmd](args)
+            "verify": cmd_verify, "waive": cmd_waive, "records": cmd_records}[args.cmd](args)
 
 
 if __name__ == "__main__":

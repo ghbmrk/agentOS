@@ -2286,6 +2286,192 @@ class Equivalent(unittest.TestCase):
         self.assertEqual(mutgate.waivers(hostile), {("broker/netguard/a.go", 3): "waives another site | <img src=x> `x`"})
 
 
+class Record(unittest.TestCase):
+    """MUT-waiver-store (#5776): accepted proofs live in broker/<pkg>/MUTANTS-EQUIVALENT, keyed by statement."""
+    # REQ: MUT-waiver-store
+
+    SRC = "package netguard\n\n// x\nfunc f(x int) int {\n\tif x > 1 {\n\t\treturn 2\n\t}\n\tif x > 1 {\n\t\treturn 3\n\t}\n\treturn x\n}\n"
+
+    def repo(self, d, base, head, base_record=None, record=None, body=None):
+        """A temp repo whose base commit holds broker/netguard/a.go = base (and base_record) and whose
+        last commit makes it head (and record); returns a function running tools/mutgate.py there."""
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+        shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+        shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+        pkg = pathlib.Path(d) / "broker" / "netguard"
+        pkg.mkdir(parents=True)
+        for text, rec in ((base, base_record), (head, record)):
+            (pkg / "a.go").write_text(text)
+            if rec is not None:
+                (pkg / mutgate.RECORD).write_text(rec)
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c")
+        return lambda *a: subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *a],
+                                         capture_output=True, text=True, cwd=d)
+
+    def waive(self, d, run, line, reason="the two branches return the same value for every input here"):
+        (pathlib.Path(d) / "w.txt").write_text(f"Mutant-equivalent: broker/netguard/a.go:{line} {reason}\n")
+        r = run("waive", str(pathlib.Path(d) / "w.txt"), "--accepted", "#5743")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return (pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD).read_text()
+
+    def test_an_entry_follows_its_statement_when_lines_move_above_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.SRC, self.SRC)
+            rec = self.waive(d, run, 8)
+            entry = json.loads(rec.split("\n")[1])
+            self.assertEqual({k: entry[k] for k in ("file", "func", "stmt", "at", "after", "occurrence", "accepted")},
+                             {"file": "a.go", "func": "f", "stmt": ["if x > 1 {"], "at": 0, "after": "}",
+                              "occurrence": [1, 1], "accepted": "#5743"})
+            r = run("records", "netguard")
+            self.assertEqual((r.returncode, r.stdout.split(" ")[0]), (0, "broker/netguard/a.go:8"), r.stderr)
+            # Lines added above the statement, in the file and in its function: the entry moves with it.
+            for moved, line in ((self.SRC.replace("// x\n", "// x\n// y\n\nvar z = 1\n"), 11),
+                                (self.SRC.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2"), 9)):
+                with self.subTest(moved):
+                    (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(moved)
+                    r = run("records", "netguard")
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertEqual(r.stdout.split(" ")[0], f"broker/netguard/a.go:{line}")
+
+    def test_an_edited_or_deleted_statement_is_stale(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.SRC, self.SRC)
+            self.waive(d, run, 8)
+            for changed in (self.SRC.replace("\t}\n\tif x > 1 {\n\t\treturn 3", "\t}\n\tif x >= 1 {\n\t\treturn 3"),  # the statement
+                            self.SRC.replace("\t}\n\tif x > 1 {\n\t\treturn 3\n\t}\n", "\t}\n"),                   # deleted
+                            self.SRC.replace("\t\treturn 2\n\t}\n", "\t\treturn 2\n\t}\n\tx--\n"),                # the line before it
+                            self.SRC.replace("func f(", "func g(")):                                              # another declaration
+                with self.subTest(changed):
+                    (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(changed)
+                    r = run("records", "netguard")
+                    self.assertEqual(r.returncode, 1, r.stdout)
+                    self.assertIn("names no statement at the head", r.stderr)
+            # A twin of the statement with the same line before it: the count changes, so the entry is stale.
+            twin = self.SRC.replace("\treturn x\n", "\tif x > 1 {\n\t\treturn 4\n\t}\n\treturn x\n")
+            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(twin)
+            r = run("records", "netguard")
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("was written for occurrence 1 of 1, and the head has 2", r.stderr)
+
+    def test_twins_are_told_apart_by_occurrence(self):
+        src = "package netguard\n\nfunc f(x int) int {\n\tx++\n\tg(x)\n\tx++\n\tg(x)\n\treturn x\n}\n\nfunc g(int) {}\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, src, src)
+            rec = self.waive(d, run, 7)
+            self.assertEqual([json.loads(r)["occurrence"] for r in rec.strip().split("\n")[1:]], [[2, 2]])
+            rec = self.waive(d, run, 5)
+            self.assertEqual(sorted(json.loads(r)["occurrence"] for r in rec.strip().split("\n")[1:]), [[1, 2], [2, 2]])
+            r = run("records", "netguard")
+            self.assertEqual((r.returncode, sorted(l.split(" ")[0] for l in r.stdout.strip().split("\n"))),
+                             (0, ["broker/netguard/a.go:5", "broker/netguard/a.go:7"]), r.stderr)
+
+    def test_a_multi_line_statement_is_keyed_by_every_line_of_its_own_syntax(self):
+        src = "package netguard\n\nfunc f(x int) int {\n\tg(x,\n\t\t1)\n\treturn x\n}\n\nfunc g(int, int) {}\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, src, src)
+            entry = json.loads(self.waive(d, run, 4).split("\n")[1])
+            self.assertEqual((entry["stmt"], entry["at"]), (["g(x,", "1)"], 0))
+            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(src.replace("\t\t1)", "\t\t2)"))
+            r = run("records", "netguard")
+            self.assertEqual(r.returncode, 1, r.stdout)  # an edit to a continuation line is an edit to the statement
+
+    def test_a_malformed_or_linked_record_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.SRC, self.SRC)
+            good = json.loads(self.waive(d, run, 8).split("\n")[1])
+            path = pathlib.Path(d) / "broker" / "netguard" / mutgate.RECORD
+            for bad in ("{", "[]", json.dumps({**good, "extra": 1}), json.dumps({**good, "file": "../x.go"}),
+                        json.dumps({**good, "file": "a_test.go"}), json.dumps({**good, "reason": "."}),
+                        json.dumps({**good, "accepted": "5743"}), json.dumps({**good, "occurrence": [2, 1]}),
+                        json.dumps({**good, "at": 1}), json.dumps({**good, "stmt": []})):
+                with self.subTest(bad):
+                    path.write_text(bad + "\n")
+                    r = run("records", "netguard")
+                    self.assertEqual(r.returncode, 1, r.stdout)
+                    self.assertIn(mutgate.RECORD, r.stderr)
+            path.unlink()
+            (pathlib.Path(d) / "elsewhere").write_text(json.dumps(good) + "\n")
+            path.symlink_to(pathlib.Path(d) / "elsewhere")
+            r = run("records", "netguard")
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("symbolic link", r.stderr)
+
+    VAR = "package netguard\n\nvar a = 1 + 1\n"
+
+    @staticmethod
+    def result(*lines):
+        muts = [{"type": "ARITHMETIC_BASE", "status": "LIVED", "line": n, "column": 9} for n in lines]
+        return {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": len(muts), "statement_deletions": 0}
+
+    def verify(self, d, run, *lines, body=""):
+        res = pathlib.Path(d) / "res" / "mutants-0"
+        res.mkdir(parents=True, exist_ok=True)
+        (res / "netguard.json").write_text(json.dumps(self.result(*lines)))
+        (pathlib.Path(d) / "body.md").write_text(body)
+        r = run("verify", str(res.parent), "--git", "HEAD~1", "--body", str(pathlib.Path(d) / "body.md"),
+                "--summary", str(pathlib.Path(d) / "summary.md"))
+        r.summary = (pathlib.Path(d) / "summary.md").read_text() if (pathlib.Path(d) / "summary.md").exists() else ""
+        return r
+
+    def test_a_record_entry_waives_its_site_with_no_body_line(self):
+        head = self.VAR + "var b = 2 + 2\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.VAR, head)
+            r = self.verify(d, run, 4)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+        with tempfile.TemporaryDirectory() as d:
+            rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+                              "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
+            run = self.repo(d, self.VAR, head, record=rec)
+            r = self.verify(d, run, 4)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("| broker/netguard/a.go:4:9 | ARITHMETIC\\_BASE | equivalent: b is never read "
+                          "(record, \\#5743, new in this PR) |", r.summary)
+        with tempfile.TemporaryDirectory() as d:
+            # A survivor the entry does not name still fails.
+            run = self.repo(d, self.VAR, head + "var c = 3 + 3\n", record=rec)
+            r = self.verify(d, run, 4, 5)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:5 ARITHMETIC_BASE survives", r.stdout)
+            self.assertNotIn("a.go:4 ", r.stdout)
+        with tempfile.TemporaryDirectory() as d:
+            # The base's entry, unchanged, on a line the PR moves and edits around: not marked new.
+            base = self.VAR + "var b = 2 + 2\n"
+            rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+                              "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
+            run = self.repo(d, base, "package netguard\n\n// moved\nvar a = 1 + 1\nvar b = 2 + 2\nvar c = 3 + 3\n",
+                            base_record=rec)
+            r = self.verify(d, run, 6, body="Mutant-equivalent: broker/netguard/a.go:6 c is never read\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("new in this PR", r.summary)
+
+    def test_a_stale_entry_fails_the_gate(self):
+        rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
+                          "occurrence": [1, 1], "reason": "a is never read", "accepted": "#5743"}) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.VAR, "package netguard\n\nvar a = 1 + 2\n", base_record=rec)
+            r = self.verify(d, run, 3, body="Mutant-equivalent: broker/netguard/a.go:3 a is never read, still\n")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("names no statement at the head", r.stdout)
+            self.assertIn("Stale MUTANTS-EQUIVALENT entries", r.summary)
+
+    def test_every_record_in_the_repository_resolves(self):
+        # A record-only PR, or an edit to a proven statement in any package, fails here as well as in mutgate.
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records"],
+                           capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_clerk_run_record_holds_the_5743_proofs(self):
+        # Acceptance (#5776): the 27 proofs L3 checked on #5743 resolve at the head with no body line.
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records", "clerk/run"],
+                           capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertGreaterEqual(len(r.stdout.strip().split("\n")), 26)
+
+
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""
     m = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][\w-]*:\n|\Z)", text.split("\njobs:\n", 1)[1])
