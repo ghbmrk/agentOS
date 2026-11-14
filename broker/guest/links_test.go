@@ -227,3 +227,25 @@ func TestTheStoreClosesItsFiles(t *testing.T) {
 		t.Fatalf("%d files open after 50 writes and reads, %d before", after, before)
 	}
 }
+
+// A goal whose time cannot be encoded (past year 9999) fails the write
+// and leaves the file as it was, never an empty one (G5, G14).
+func TestAnUnencodableGoalLeavesTheFileWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.json")
+	s, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := storedMsg{ID: "a", Text: "one"}
+	if err := s.set("m1", []storedMsg{msg}); err != nil {
+		t.Fatal(err)
+	}
+	s.setGoal("l1", "m", storedGoal{}.Last.AddDate(10000, 0, 0))
+	s2, err := openStore(path)
+	if err != nil {
+		t.Fatalf("after an unencodable goal: %v", err)
+	}
+	if got := s2.load("m1"); len(got) != 1 || got[0] != msg {
+		t.Fatalf("after an unencodable goal the inbox holds %+v", got)
+	}
+}
