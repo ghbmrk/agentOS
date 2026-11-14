@@ -41,6 +41,8 @@ type line struct {
 	hangErr   error
 	hangLeft  time.Duration
 	stuck     bool
+	// sayFor is how long each sentence takes to play, until ctx ends.
+	sayFor    time.Duration
 	answerErr error
 	// answerWait delays a failing Answer; answerCtx is the ctx it got.
 	answerWait time.Duration
@@ -89,7 +91,7 @@ func (l *line) Answer(ctx context.Context) error {
 }
 func (l *line) Say(ctx context.Context, pcm []byte) error {
 	l.mu.Lock()
-	gate, err := l.gate, l.sayErr
+	gate, err, dur := l.gate, l.sayErr, l.sayFor
 	l.inSay++
 	l.overlap = l.overlap || l.inSay > 1
 	l.empty = l.empty || len(pcm) == 0
@@ -103,6 +105,14 @@ func (l *line) Say(ctx context.Context, pcm []byte) error {
 		<-ctx.Done()
 		l.cut <- struct{}{}
 		return ctx.Err()
+	}
+	if dur > 0 && strings.HasPrefix(string(pcm), "S:") {
+		select {
+		case <-time.After(dur):
+		case <-ctx.Done():
+			l.cut <- struct{}{}
+			return ctx.Err()
+		}
 	}
 	l.mu.Lock()
 	l.said = append(l.said, string(pcm))
