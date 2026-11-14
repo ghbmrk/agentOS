@@ -163,7 +163,7 @@ var netOK = map[string]allowance{
 	// they come in, which serves and dials only unix sockets (its dials are
 	// unixDialCalls), locks its own store and refuses to be dumpable.
 	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store and restore lock, O_NOFOLLOW opens, O_NONBLOCK so the restore lock's open never waits on a FIFO; no network client",
-		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixAddr", "net.UnixConn",
 			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
 			"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
@@ -211,9 +211,11 @@ var rawOK = map[string]map[string]string{
 
 // unixDialCalls are the dial functions a package may call directly, and
 // why; dials still checks each is on "unix" to a configured address.
-// kernel/proc dials its clerks' and its owner seam's sockets (#3430).
+// kernel/proc dials its clerks' and its owner seam's sockets (#3430), and
+// chronyd's command socket (#5391).
 var unixDialCalls = map[string]map[string]string{
-	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
+	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid",
+		"net.DialUnix": "dials only chronyd's unixgram command socket (-chrony), from its own reply socket (#5391)"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
