@@ -751,6 +751,16 @@ def coverage_record(names, targets):
     return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
 
 
+def base_member(member, dest):
+    """tarfile's "data" filter, except that a member it refuses (a symlink to an absolute path or out
+    of the tree, such as spikes/S1S2-testkit's systemd unit link, #5523) is left out of the base tree
+    rather than failing every plan: such a link names no file of the base tree."""
+    try:
+        return tarfile.data_filter(member, dest)
+    except tarfile.FilterError:
+        return None
+
+
 def base_covered(pkg, mb, names, tmp, diff_text):
     """({path: head lines}, None) that the base's named tests (None: every test) cover in the base
     tree's broker/<pkg>/, moved to their head lines (a line the diff changes or deletes is dropped:
@@ -762,7 +772,7 @@ def base_covered(pkg, mb, names, tmp, diff_text):
     # The whole tree, not only broker/: tests read files beside it (guest/, image/, tools/; L3 on #5770).
     with subprocess.Popen(["git", "archive", "--format=tar", mb], cwd=ROOT, stdout=subprocess.PIPE) as git:
         with tarfile.open(fileobj=git.stdout, mode="r|") as t:
-            t.extractall(tree, filter="data")
+            t.extractall(tree, filter=base_member)
     if git.returncode:
         return None, f"`git archive {mb[:12]}` failed (exit {git.returncode})"
     if not (tree / "broker" / pkg).is_dir():
