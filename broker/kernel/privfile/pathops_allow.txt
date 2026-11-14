@@ -135,6 +135,9 @@ allow broker/vm/overlay/overlay.go copyObj os.Link prev is a file this copy just
 # name, and os.RemoveAll descends with O_NOFOLLOW. What these lines rest on,
 # and when to re-check them, is broker/kernel/proc/ASSUMPTIONS.md
 # REV-CHK-links-kernel-1.
+allow broker/kernel/proc/chrony.go Chrony.ask os.Remove the reply socket a last start left, -chrony-reply /run/agentos-kernel/chrony.sock, in the 0711 directory only root and the kernel uid write; unlink(2) removes a link at the name and never follows it
+allow broker/kernel/proc/chrony.go Chrony.ask os.Chmod the reply socket this process just bound, so chronyd's uid can answer on it; it is in the 0711 directory only root and the kernel uid write, so no other uid can have put a link at the name
+allow broker/kernel/proc/chrony.go Chrony.drop os.Remove the reply socket this process bound, in that 0711 directory, as Chrony.ask
 allow broker/kernel/proc/backup.go openBackups os.Mkdir the backup directory, -backup-dir /var/lib/agentos-kernel/backups, in the kernel uid's 0700 directory; privfile.Check refuses it next unless it is a directory of that uid's alone
 allow broker/kernel/proc/backup.go openBackups os.Link names os.Link as the snapshot's link function (no call here); see backups.snapItems
 allow broker/kernel/proc/backup.go backups.checkDir os.Stat a dir target's locator after EvalSymlinks resolved it, to refuse one in the kernel's own folders; a target is owner-chosen and may be written by other uids, and a swap after this check can only land fresh <id>.table.<n> or <id>.content names (ASSUMPTIONS MIG-4-recovery-e3-c)

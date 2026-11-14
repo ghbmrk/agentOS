@@ -58,6 +58,11 @@ type MainConfig struct {
 	// one refused at its start, which every boot repeats (#2998). "" makes
 	// none.
 	Up string
+	// Chrony is chronyd's command socket, bound read-only into the
+	// kernel's sandbox, and ChronyReply the socket the kernel binds for its
+	// answers, in a directory chronyd can reach (#5391); "" reads the box
+	// clock alone.
+	Chrony, ChronyReply string
 }
 
 // markUp makes path, empty. It never follows a link nor replaces what is
@@ -345,11 +350,19 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err != nil {
 		return err
 	}
-	// The kernel reads the box clock at each decision; OpenKernel floors it
-	// at the log and carries it forward on the monotonic clock (onLog), so
-	// its time never goes back (TIM-1, #5147).
-	read := func() kernel.Reading { return kernel.At(time.Now().UnixMilli()) }
-	clock := func() int64 { return read().Earliest }
+	// The kernel reads its source at each decision; OpenKernel floors it at
+	// the log and carries it forward on the monotonic clock (onLog), so its
+	// time never goes back (TIM-1, #5147). The source is chronyd when the
+	// unit binds its socket in (#5391), else the box clock, which vouches
+	// for no lower bound. A kernel on a clock reads it, not the time each
+	// call is handed below.
+	read := func() kernel.Reading { return kernel.Reading{Latest: time.Now().UnixMilli()} }
+	if cfg.Chrony != "" {
+		s := NewChrony(cfg.Chrony, cfg.ChronyReply)
+		defer s.Close()
+		read = s.Read
+	}
+	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log.Get(),
 		Pub: keys.Head.Get().Public().(ed25519.PublicKey), Sign: keys.Head.Get(),

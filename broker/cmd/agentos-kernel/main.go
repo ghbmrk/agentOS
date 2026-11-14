@@ -139,6 +139,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.Var(clerks(c.Content), "content", "a content clerk's socket, store=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
+	fs.StringVar(&c.Chrony, "chrony", "", "chronyd's command socket, the second time source (TIM-1); the box clock alone without it")
+	fs.StringVar(&c.ChronyReply, "chrony-reply", "", "the socket chronyd answers the kernel on, an absolute path; with -chrony")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -157,6 +159,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("an absolute -content-dir is required")
 	case c.Up != "" && !filepath.IsAbs(c.Up):
 		return c, errors.New("-up must be an absolute path")
+	case (c.Chrony == "") != (c.ChronyReply == "") || c.Chrony != "" && (!filepath.IsAbs(c.Chrony) || !filepath.IsAbs(c.ChronyReply)):
+		return c, errors.New("-chrony and -chrony-reply come together, as absolute paths")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
 	case (c.LinkSock == "") != (c.LinkUID == -1):

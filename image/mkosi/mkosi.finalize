@@ -1824,6 +1824,7 @@ KERNEL_EXEC_TEXT = b"""ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/age
         -clerk-key camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service \\
         -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \\
         -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \\
+        -chrony /run/chrony/chronyd.sock -chrony-reply /run/agentos-kernel/chrony.sock \\
         -up /run/agentos-kernel/up
 """
 KERNEL_EXEC = config_lines(b"[Service]\n" + KERNEL_EXEC_TEXT)[0][2]

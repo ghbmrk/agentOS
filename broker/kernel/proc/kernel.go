@@ -411,21 +411,34 @@ func (h *Kernel) Close() error {
 	return h.store.Close()
 }
 
-// onLog is the kernel process's clock from source c. Earliest runs on the
-// monotonic clock from the later of the log's last time and c's Latest at the
-// start; c only raises Latest. So a step of the box clock while running, back
-// or forward, never moves Earliest, which the log's times and the floor take:
-// a step back neither stops time nor revives a key, and a step forward ends no
-// hold and leaves the log as it was, its Latest firing expiries only while it
-// lasts (TIM-1, KEY-7, KEY-8). A start whose clock is behind the log reads the
-// log's time; one ahead of true time is not seen.
+// onLog is the kernel process's clock from source c, whose Earliest is the
+// time true time is vouched past (0 for none: the box clock alone vouches for
+// nothing, TIM-1) and whose Latest bounds it above. Earliest starts at the
+// later of the log's last time and c's Earliest, or c's Latest when c vouches
+// for none (a box with no second source starts as before), runs on the
+// monotonic clock, and rises to c's Earliest whenever that is later; Latest
+// is the later of it and c's Latest. So a box clock ahead at a start ends no
+// hold early when the second source disagrees, a step while running moves
+// Earliest only as far as the second source vouches, a start behind the log
+// neither revives a key nor stops time and catches up once the source
+// vouches, and the log's times never go back (TIM-1, KEY-7, KEY-8).
 func onLog(l *kernel.Log, c kernel.Clock) kernel.Clock {
-	base, start := c().Latest, time.Now()
+	r, start := c(), time.Now()
+	base := r.Earliest
+	if base == 0 {
+		base = r.Latest
+	}
 	if es := l.Entries(); len(es) > 0 {
 		base = max(base, es[len(es)-1].At)
 	}
+	var mu sync.Mutex
 	return func() kernel.Reading {
-		e := base + time.Since(start).Milliseconds()
-		return kernel.Reading{Earliest: e, Latest: max(e, c().Latest)}
+		r := c()
+		mu.Lock()
+		defer mu.Unlock()
+		since := time.Since(start).Milliseconds()
+		base = max(base, r.Earliest-since)
+		e := base + since
+		return kernel.Reading{Earliest: e, Latest: max(e, r.Latest)}
 	}
 }
