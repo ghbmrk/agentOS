@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -400,6 +401,22 @@ func TestServedOnlyToOwnerAndAdmin(t *testing.T) {
 	c.Owner, _ = key.ES256("agentos.home.arpa", g.a.Public().Bytes())
 	if _, err := New(c); !errors.Is(err, ErrConfig) {
 		t.Errorf("a passkey on another RP ID: %v, want refused", err)
+	}
+	// One check refuses any owner that is not an ES256 key on the
+	// enforcer's name: another algorithm, or no key with no enrolment.
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, owner := range map[string]key.PublicKey{
+		"an Ed25519 owner": key.Ed25519(edPub),
+		"no owner":         {},
+	} {
+		c := cfg
+		c.Owner, c.Enrol = owner, nil
+		if _, err := New(c); !errors.Is(err, ErrConfig) {
+			t.Errorf("%s: %v, want refused", name, err)
+		}
 	}
 
 	// The root the phone trusts vouches for the enforcer's name only.
