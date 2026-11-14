@@ -819,6 +819,103 @@ func TestUnreadableSettingsAreToldInFixedWords(t *testing.T) {
 	}
 }
 
+// A warm-up notice already waiting keeps its place and takes the newer
+// text, so the owner side's Told for it still covers it (#5324, notify).
+func TestAWaitingWarmUpNoticeTakesTheNewerText(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMailHost(context.Background(), dir, sec, mailConfig())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.notify(true, "warm one")
+	h.notify(false, "other")
+	h.notify(true, "warm two")
+	if len(h.notices) != 2 || !h.notices[0].warm || h.notices[0].text != "warm two" || h.notices[1].text != "other" {
+		t.Fatalf("notices %+v; want the warm-up notice first with the newer text, then the other", h.notices)
+	}
+}
+
+// A setup or removal that fails at its write changes nothing the host
+// holds: the account is not counted as changed, the owner is told of no
+// replacement or removal, and the settings write window it opened ends,
+// so the world is not left reading no account (#5324, the failure returns
+// of setmail and removemail).
+func TestAFailedChangeLeavesTheHostAsItWas(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		do   func(*hostRig) error
+	}{
+		{"setup", func(r *hostRig) error {
+			return r.owner.SetMail(MailSettings{Address: imaptest.User, IMAP: "imap.other.test:993", SMTP: r.srv.SMTP}, imaptest.Password)
+		}},
+		{"removal", func(r *hostRig) error { return r.owner.RemoveMail() }},
+	} {
+		r := newHostRig(t, imaptest.Password)
+		r.h.mu.Lock()
+		changes := r.h.changes
+		r.h.mu.Unlock()
+		if err := os.Chmod(r.h.dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := c.do(r)
+		if err := os.Chmod(r.h.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err == nil {
+			t.Fatalf("%s in a directory others can reach did not fail", c.name)
+		}
+		r.h.mu.Lock()
+		counted, told := r.h.changes != changes, slices.ContainsFunc(r.h.notices, func(n notice) bool {
+			return n.text == noteMailReplaced || n.text == noteMailRemoved
+		})
+		r.h.mu.Unlock()
+		r.h.ws.mu.Lock()
+		writes := r.h.ws.writes
+		r.h.ws.mu.Unlock()
+		if counted || told || writes != 0 {
+			t.Fatalf("failed %s: counted as a change %v, told %v, writes still open %d", c.name, counted, told, writes)
+		}
+		if s, err := readMail(r.h.dir); err != nil || s.IMAP != r.imap {
+			t.Fatalf("after a failed %s the settings are %+v, %v; want the account's", c.name, s, err)
+		}
+	}
+}
+
+// A setup whose settings or password are refused is refused before the
+// host takes any step of a change: no settings write is begun (the wrote
+// seam does not run) and the account stands (#5324, setmail's first check,
+// which also keeps a Gmail grant from being given back for nothing).
+func TestARefusedSetupBeginsNoChange(t *testing.T) {
+	r := newHostRig(t, imaptest.Password)
+	var wrote atomic.Int64
+	r.h.mu.Lock()
+	r.h.cfg.wrote = func() { wrote.Add(1) }
+	changes := r.h.changes
+	r.h.mu.Unlock()
+	for _, c := range []struct {
+		imap, password string
+	}{
+		{"imap.other.test:993", "short"},
+		{":993", imaptest.Password},
+	} {
+		if err := r.owner.SetMail(MailSettings{Address: imaptest.User, IMAP: c.imap, SMTP: r.srv.SMTP}, c.password); err == nil {
+			t.Fatalf("SetMail to %q with a refused setup succeeded", c.imap)
+		}
+	}
+	r.h.mu.Lock()
+	counted := r.h.changes != changes
+	r.h.mu.Unlock()
+	if n := wrote.Load(); n != 0 || counted {
+		t.Fatalf("refused setups began %d settings writes, counted as a change %v", n, counted)
+	}
+	if s, err := readMail(r.h.dir); err != nil || s.IMAP != r.imap {
+		t.Fatalf("after refused setups the settings are %+v, %v; want the account's", s, err)
+	}
+}
+
 // After a read fails, the lines of the last read that worked are told as
 // that, under the reason, not as news of the failed read (#2742 item 3).
 func TestAFailedReadLabelsTheLastGoodReadsLines(t *testing.T) {

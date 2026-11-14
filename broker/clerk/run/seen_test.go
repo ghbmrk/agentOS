@@ -502,6 +502,36 @@ func TestAFailingReadSavesTheSendersItFound(t *testing.T) {
 	}
 }
 
+// A failing read that found read mail tells the owner how the record it
+// saves began, as a good read does: begun today when there was none, begun
+// again when the one there could not be read (#5324, seen.go's began on
+// the failing path).
+func TestAFailingReadSaysHowItsRecordBegan(t *testing.T) {
+	for _, c := range []struct {
+		name, want string
+		bad        bool
+	}{
+		{"missing", "I began my record of the mail you read today.", false},
+		{"unreadable", "My saved record of the mail you read could not be read, so I began it again today.", true},
+	} {
+		r := newSeenRig(t)
+		if c.bad {
+			if err := os.WriteFile(filepath.Join(r.dir, seenFile), []byte("not a sealed record"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.srv.Deliver("INBOX", mailFrom("sam@example.test", "<s1@example.test>"), `\Seen`)
+		r.srv.Deliver("INBOX", "From: x@spam.test\nMessage-ID: <"+strings.Repeat("l", 9<<10)+">\n\nbody\n", `\Seen`)
+		_, st := r.opened(today)
+		if !has(st.Lines, "Unsubscribing is paused") || !has(st.Lines, c.want) {
+			t.Fatalf("%s record: status %v after a failing read; want the pause and %q", c.name, st.Lines, c.want)
+		}
+		if rec, loaded := loadSeen(r.dir, testSealer(), r.slot); loaded != seenLoaded || len(rec.Log.Seen) != 1 {
+			t.Fatalf("%s record: saved %+v (%v); want sam's entry", c.name, rec.Log, loaded)
+		}
+	}
+}
+
 // The clerk's mailbox sends live unsubscribes (#2841): its Post goes to the
 // Poster, which judges the URL, rather than refusing for want of one.
 func TestTheClerksMailboxHasAPoster(t *testing.T) {

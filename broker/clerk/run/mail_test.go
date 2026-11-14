@@ -518,3 +518,84 @@ func TestWhenAMailboxIsReadAgainWithinTheDay(t *testing.T) {
 		}
 	}
 }
+
+// The settings' sign-in name, when set, is the name the clerk signs in
+// with; with none, the address is (#5324, MailSettings.login). The server
+// here knows only its own user, so an account whose address is another
+// name reads only if its sign-in name is used.
+func TestTheSignInNameIsTheLoginWhenSet(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.Deliver("INBOX", "From: news@shop.test\nTo: "+imaptest.User+"\nSubject: Sale\nMessage-ID: <u1@shop.test>\n\nsynthetic body\n")
+	for _, c := range []struct {
+		s    MailSettings
+		read bool
+	}{
+		{MailSettings{Address: "alias@example.test", User: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, true},
+		{MailSettings{Address: "alias@example.test", IMAP: srv.IMAP, SMTP: srv.SMTP}, false},
+	} {
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetMail(dir, sec, c.s, imaptest.Password); err != nil {
+			t.Fatal(err)
+		}
+		acct, err := OpenMail(context.Background(), dir, sec, mailConfig())
+		if read := err == nil && len(acct.Listing()) == 1; read != c.read {
+			t.Fatalf("sign-in name %q: read %v (%v); want %v", c.s.User, read, err, c.read)
+		}
+	}
+}
+
+// A server is a host name or address and a port: no empty host, none past
+// 253 bytes, and no byte a host name cannot hold (#5324, hostPort).
+func TestAServerNeedsAHostItCanName(t *testing.T) {
+	long := strings.Repeat("a", 249) + ".test" // 254 bytes
+	for _, c := range []struct {
+		imap string
+		err  error
+	}{
+		{"imap.example.test:993", nil},
+		{long[1:] + ":993", nil}, // 253 bytes
+		{":993", ErrMailServer},
+		{long + ":993", ErrMailServer},
+		{"imap_example.test:993", ErrMailServer},
+		{"imap.example.test/x:993", ErrMailServer},
+		{"imap.example.test", ErrMailServer},
+		{"imap.example.test:0", ErrMailServer},
+	} {
+		s := MailSettings{Address: imaptest.User, IMAP: c.imap, SMTP: "smtp.example.test:465"}
+		if err := s.check(); err != c.err {
+			t.Fatalf("IMAP server %.40q: check = %v; want %v", c.imap, err, c.err)
+		}
+	}
+}
+
+// SetMail refuses a directory others can reach before it writes anything:
+// no password is sealed and no settings are written (#5324, setMail's
+// directory check).
+func TestSetMailRefusesADirectoryOthersCanReach(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:465"}
+	err = SetMail(dir, sec, s, imaptest.Password)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err == nil {
+		t.Fatal("SetMail set up an account in a directory others can reach")
+	}
+	if sec.Has(slotOf(s)) {
+		t.Fatal("a refused SetMail sealed the password")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, mailSettings)); !os.IsNotExist(err) {
+		t.Fatalf("a refused SetMail wrote the settings (%v)", err)
+	}
+}
