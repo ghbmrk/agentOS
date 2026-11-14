@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,14 +41,15 @@ func TestShowHeldExactForms(t *testing.T) {
 	}
 }
 
-// failSaves is a store whose saves fail once fail is set.
+// failSaves is a store whose saves fail once fail is set. fail is atomic
+// because the channel saves from its own goroutines.
 type failSaves struct {
 	owner.MemStore
-	fail bool
+	fail atomic.Bool
 }
 
 func (f *failSaves) Save(s owner.State) error {
-	if f.fail {
+	if f.fail.Load() {
 		return errors.New("disk full")
 	}
 	return f.MemStore.Save(s)
@@ -124,7 +126,7 @@ func TestTheInboxPageRefusesBadRequestsAndShowsCounts(t *testing.T) {
 	if w := r.post("/inbox/", url.Values{"shown": {long}, "tok": {r.srv.formToken(sess, "inbox", long)}}); !strings.Contains(w.Body.String(), stalePage) {
 		t.Fatalf("over a page: %s", w.Body.String())
 	}
-	st.fail = true
+	st.fail.Store(true)
 	if w := r.post("/inbox/", url.Values{"shown": {shown[1]}, "tok": {tok[1]}, "run": {shown[1]}}); !strings.Contains(w.Body.String(), html.EscapeString(inboxUnreachable)) {
 		t.Fatalf("failed run: %s", w.Body.String())
 	}
