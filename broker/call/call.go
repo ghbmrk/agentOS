@@ -159,6 +159,9 @@ type Turn struct {
 	// once started counts and an empty or hushed one does not. It is the
 	// one record the ending notice's carry reads (#5684).
 	answered bool
+	// asked is set before the answerer is asked; the carry reads it with
+	// answered.
+	asked bool
 	// Stopped means 0, barge-in, hang-up or the end of the loop cut it short.
 	Stopped bool
 	Err     error
@@ -433,11 +436,6 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		// hush, closed once the ending notice is due, ends the turn at
 		// its next sound boundary.
 		hush chan struct{}
-		// asked is set by the turn before it asks the answerer, and read
-		// only after done.
-		asked bool
-		// hushed is set when hush is closed.
-		hushed bool
 	}
 	var cur *running
 	// carry is what the owner asked in a turn stopped before it reached
@@ -462,8 +460,13 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		}
 		cur.cancel()
 		<-cur.done
-		unheard := cur.hushed && !cur.turn.answered
-		if keep && (!cur.asked || unheard) {
+		var hushed bool
+		select {
+		case <-cur.hush:
+			hushed = true
+		default:
+		}
+		if keep && (!cur.turn.asked || hushed && !cur.turn.answered) {
 			carry = cur.text
 		}
 		finish()
@@ -473,12 +476,18 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	// turn runs; a turn still playing at bound is stopped (#5304). Until
 	// then the loop acts on events as before: a 0 or a final transcript
 	// that stops the turn lets the notice play at once, before a new turn
-	// starts; a barge-in stops the turn and the notice waits for the
-	// owner's final words, up to the bound, so it never talks over them.
+	// starts. It never starts while the owner speaks (#5690): a barge-in
+	// stops the turn, and the notice waits for the owner's final words, a 0,
+	// or EndingWait from when they began, so an owner who keeps talking
+	// hears it at most twice EndingWait after it fell due; due while they
+	// speak with no turn running, it waits the same way from falling due.
 	var due bool
 	var bound <-chan time.Time
+	// speaking is set by the owner's words and cleared by their final
+	// words, a 0 or the bound.
+	var speaking bool
 	notify := func() {
-		if !due || cur != nil {
+		if !due || cur != nil || speaking {
 			return
 		}
 		due, bound = false, nil
@@ -495,7 +504,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		}
 		go func() {
 			defer close(r.done)
-			cfg.turn(tctx, l, text, n, cr, end, r.turn, &r.asked, r.hush)
+			cfg.turn(tctx, l, text, n, cr, end, r.turn, r.hush)
 		}()
 	}
 	for {
@@ -523,12 +532,14 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			ending, due = nil, true
 			if cur != nil {
 				close(cur.hush)
-				cur.hushed = true
+			}
+			if cur != nil || speaking {
 				bound = time.After(EndingWait) // the wall clock, as ending is
 			}
 			notify()
 		case <-bound: // the sentence still playing is cut
 			stop(true)
+			speaking = false
 			notify()
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
@@ -539,7 +550,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			// anything on a read-only call: none means yes.
 			if k == '0' {
 				stop(false)
-				carry = ""
+				carry, speaking = "", false
 				notify()
 			}
 		case h, ok := <-heard:
@@ -553,10 +564,16 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			if !h.Final {
 				if strings.TrimSpace(h.Text) != "" {
 					stop(true) // barge-in
+					if due && !speaking {
+						// the owner's words get a bound of their own
+						bound = time.After(EndingWait)
+					}
+					speaking = true
 				}
 				continue
 			}
 			stop(true)
+			speaking = false
 			notify()
 			text := strings.TrimSpace(carry + " " + h.Text)
 			carry = ""
@@ -609,7 +626,7 @@ type sound struct {
 // time, and a sentence ready when the deadline falls goes before the clip.
 // Once hush closes the turn starts no further sound and ends, stopped,
 // when the one playing ends (#5304).
-func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool, hush <-chan struct{}) {
+func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, hush <-chan struct{}) {
 	var sounds chan sound // nil until the rung is known
 	pctx, cancel := context.WithCancel(ctx)
 	defer func() { // the producer ends with its turn (#5252)
@@ -627,7 +644,7 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 	rung := cr.ready
 	ask := func() {
 		rung = nil
-		*asked = true
+		t.asked = true
 		sounds = make(chan sound)
 		go cfg.produce(pctx, Ask{Text: text, Turn: n, rung: cr.g}, sounds)
 	}
