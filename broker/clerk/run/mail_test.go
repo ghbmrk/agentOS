@@ -599,3 +599,41 @@ func TestSetMailRefusesADirectoryOthersCanReach(t *testing.T) {
 		t.Fatalf("a refused SetMail wrote the settings (%v)", err)
 	}
 }
+
+// The settings carry no STARTTLS setting, since the clerk submits no mail
+// and one would change nothing it does: a setup whose request names one
+// sets up the account without it, the settings written and the account
+// the owner's page reads back hold no such field, and the password is in
+// the slot of the settings without it (#5694, StartTLS delivering nothing).
+func TestASetupKeepsNoStartTLSSetting(t *testing.T) {
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := serveMail(t, NewMailHost(context.Background(), dir, sec, mailConfig()), MailOwnerSide)
+	s := MailSettings{Address: imaptest.User, IMAP: "imap.example.test:993", SMTP: "smtp.example.test:587"}
+	req := map[string]any{"settings": map[string]any{"address": s.Address, "imap": s.IMAP, "smtp": s.SMTP, "starttls": true}, "password": imaptest.Password}
+	if err := owner.Call("setmail", req, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, mailSettings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var account map[string]json.RawMessage
+	if err := owner.Call("account", nil, &account); err != nil {
+		t.Fatal(err)
+	}
+	for what, got := range map[string][]byte{"the settings written": b, "the account read back": account["settings"]} {
+		if bytes.Contains(bytes.ToLower(got), []byte("starttls")) {
+			t.Fatalf("%s hold a STARTTLS setting: %s", what, got)
+		}
+	}
+	if got, err := readMail(dir); err != nil || got != s {
+		t.Fatalf("the account set up = %+v, %v; want %+v", got, err, s)
+	}
+	if !sec.Has(slotOf(s)) {
+		t.Fatal("the password is not in the slot of the settings without STARTTLS")
+	}
+}

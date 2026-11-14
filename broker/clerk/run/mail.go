@@ -44,18 +44,18 @@ const (
 	maxSettings  = 4 << 10
 )
 
-// MailSettings is the account as the owner enters it. IMAP is implicit TLS;
-// SMTP is implicit TLS, or STARTTLS when StartTLS is set, with a password or
-// app password. An API account (API "gmail", D-150) names only its address:
-// its sealed grant is put by the owner's sign-in (#2852), and the clerk
-// works through the API's declared calls (#2925).
+// MailSettings is the account as the owner enters it. IMAP and SMTP are
+// implicit TLS, with a password or app password. It has no STARTTLS setting:
+// the clerk submits no mail, so one would change nothing it does (#5694).
+// An API account (API "gmail", D-150) names only its address: its sealed
+// grant is put by the owner's sign-in (#2852), and the clerk works through
+// the API's declared calls (#2925).
 type MailSettings struct {
-	Address  string `json:"address"`
-	IMAP     string `json:"imap,omitempty"` // host:port
-	SMTP     string `json:"smtp,omitempty"` // host:port
-	StartTLS bool   `json:"starttls,omitempty"`
-	User     string `json:"user,omitempty"` // sign-in name; empty is Address
-	API      string `json:"api,omitempty"`  // "gmail", or "" for IMAP and SMTP
+	Address string `json:"address"`
+	IMAP    string `json:"imap,omitempty"` // host:port
+	SMTP    string `json:"smtp,omitempty"` // host:port
+	User    string `json:"user,omitempty"` // sign-in name; empty is Address
+	API     string `json:"api,omitempty"`  // "gmail", or "" for IMAP and SMTP
 }
 
 // APIGmail is the API a Gmail account's settings name.
@@ -88,7 +88,7 @@ func (s MailSettings) check() error {
 	switch s.API {
 	case "":
 	case APIGmail:
-		if s.IMAP != "" || s.SMTP != "" || s.StartTLS || s.User != "" {
+		if s.IMAP != "" || s.SMTP != "" || s.User != "" {
 			return ErrMailAPI
 		}
 		return nil
@@ -535,9 +535,6 @@ func boxFor(s MailSettings, sec *clerk.Secrets, c MailConfig) (mailbox, error) {
 			l, err := login(ctx)
 			return imapsmtp.Login{User: l.User, Secret: l.Secret}, err
 		}, From: s.Address, Guard: c.Guard, Conn: c.Conn}
-	if s.StartTLS {
-		cfg.SMTPSec = imapsmtp.StartTLS
-	}
 	if c.plain {
 		cfg.IMAPSec, cfg.SMTPSec = imapsmtp.Plain, imapsmtp.Plain
 	}

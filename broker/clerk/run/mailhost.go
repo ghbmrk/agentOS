@@ -265,10 +265,15 @@ func (h *MailHost) wrote() {
 }
 
 // notify adds a notice. A warm-up notice already waiting keeps its place
-// with the newer text, so the owner side's Told for it still covers it.
+// and takes the newer text; a text that differs takes a new seq too, so a
+// Told for what the owner side read before cannot drop the newer text
+// unshown (#5694).
 func (h *MailHost) notify(warm bool, text string) {
 	if i := slices.IndexFunc(h.notices, func(n notice) bool { return n.warm }); warm && i >= 0 {
-		h.notices[i].text = text
+		if h.notices[i].text != text {
+			h.seq++
+			h.notices[i] = notice{h.seq, true, text}
+		}
 		return
 	}
 	h.seq++

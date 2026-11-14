@@ -804,26 +804,95 @@ func (k *Kept) Wiped() (n int, wiped bool) {
 	return n, wiped
 }
 
-// Waiting reports whether a goroutine running a function whose name ends
-// in fn is blocked on what the runtime's goroutine dump names on (such as
-// "sync.Mutex.Lock" or "chan receive"), read from the runtime's own
-// goroutine stacks: a mail clerk test's sign that a call is waiting for
-// something another holds, with no time window (#5324).
-func Waiting(fn, on string) bool {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
+// G is one goroutine and those it started, directly or through others
+// still running: its Waiting reads only their stacks, so a goroutine an
+// earlier test leaked, parked in the same function, cannot pass for one
+// under test (#5694). A goroutine whose creator has exited belongs to no
+// G but its own.
+type G struct{ id string }
+
+// Go runs f on a new goroutine and returns its G once that goroutine is
+// known.
+func Go(f func()) G {
+	id := make(chan string, 1)
+	go func() {
+		id <- goID(stacks(false))
+		f()
+	}()
+	return known(<-id)
+}
+
+// Self is the caller's own G: in a test, the goroutines the test started,
+// such as a socket's server and its handlers, and none of another test's.
+func Self() G { return known(goID(stacks(false))) }
+
+func known(id string) G {
+	if id == "" {
+		panic("gmailtest: the runtime's goroutine dump names no goroutine")
 	}
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	return G{id}
+}
+
+// Waiting reports whether a goroutine of g, in a function whose name ends
+// in fn, is blocked on what the runtime's goroutine dump names (such as
+// "sync.Mutex.Lock" or "chan receive"), read from the runtime's own
+// stacks: a mail clerk test's sign that a call is waiting for something
+// another holds, with no time window (#5324). A false answer yields the
+// processor first, so a caller's spin on it lets g run.
+func (g G) Waiting(fn, on string) bool { return waiting(g.id, fn, on) }
+
+// Waiting is G.Waiting over every goroutine in the process: any one so
+// blocked satisfies it, a leaked one included. Prefer a G's Waiting.
+func Waiting(fn, on string) bool { return waiting("", fn, on) }
+
+// createdIn reads a dump's "created by ... in goroutine N" line.
+var createdIn = regexp.MustCompile(`(?m)^created by .* in goroutine (\d+)$`)
+
+// waiting is Waiting over the G numbered id, or over every goroutine when
+// id is empty.
+func waiting(id, fn, on string) bool {
+	dump := strings.Split(stacks(true), "\n\n")
+	parent := make(map[string]string, len(dump))
+	for _, g := range dump {
+		if m := createdIn.FindStringSubmatch(g); m != nil {
+			parent[goID(g)] = m[1]
+		}
+	}
+	in := func(g string) bool {
+		for n := 0; g != "" && n <= len(parent); g, n = parent[g], n+1 {
+			if g == id {
+				return true
+			}
+		}
+		return false
+	}
+	for _, g := range dump {
 		header, _, _ := strings.Cut(g, "\n")
-		if strings.Contains(header, "["+on) && strings.Contains(g, fn+"(") {
+		if (id == "" || in(goID(header))) && strings.Contains(header, "["+on) && strings.Contains(g, fn+"(") {
 			return true
 		}
 	}
+	runtime.Gosched()
 	return false
+}
+
+// stacks is the runtime's goroutine dump: every goroutine's, or the
+// caller's own.
+func stacks(all bool) string {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, all)
+		if n < len(buf) {
+			return string(buf[:n])
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// goID is the number in a dump's "goroutine N [...]:" header line.
+func goID(dump string) string {
+	if f := strings.Fields(dump); len(f) > 1 && f[0] == "goroutine" {
+		return f[1]
+	}
+	return ""
 }
