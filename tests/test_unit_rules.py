@@ -662,7 +662,7 @@ class BootLinksTest(unittest.TestCase):
 
     def test_an_l_target_at_or_under_a_mount_fails_the_run(self):
         for mod in ("L", "L+"):
-            for target in ("/var/lib/foo", "/var/lib/foo/d", "../var/lib/foo/d"):
+            for target in ("/var/lib/foo/x", "/var/lib/foo/d", "../var/lib/foo/d"):
                 line = {"/usr/lib/tmpfiles.d/foo.conf": "%s /run/agentos-y - - - - %s\n" % (mod, target)}
                 with self.subTest(mod=mod, target=target), tempfile.TemporaryDirectory() as d:
                     with self.assertRaisesRegex(SystemExit, "a link /run/agentos-y \\(.*L line .*\\) steps on the "
@@ -712,14 +712,17 @@ class BootLinksTest(unittest.TestCase):
         files = {ETC + "var-lib-foo.mount": "x", "/usr/lib/systemd/system/proc-sys-fs-binfmt_misc.automount": "x",
                  "/run/systemd/generator/srv-a\\x2db.mount": "x", "/run/systemd/generator/-.mount": "x",
                  "/usr/lib/systemd/system/tmp.mount": "x", "/usr/lib/systemd/system/x.service": "x",
+                 "/usr/lib/systemd/system/sysroot.mount": "x", "/usr/lib/systemd/system/runner.mount": "x",
+                 "/usr/lib/systemd/system/run-lock.mount": "x",
                  ETC + "local-fs.target.wants/opt-pkg.mount": "-> /usr/lib/systemd/system/opt-pkg.mount"}
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(r.mount_points(tree(d, files)),
-                             ["/boot", "/efi", "/opt/pkg", "/srv/a-b", "/var/lib/foo"])
+                             ["/boot", "/efi", "/opt/pkg", "/proc/sys/fs/binfmt_misc", "/run/lock", "/runner", "/srv/a-b",
+                              "/sysroot", "/var/lib/foo"])
 
-    # #5735 L3 6878105739: a mount at or under a boot mount is read as BootView reads that tree (empty), so the
-    # stock lines that end there pass, and a walk on past it still fails the run.
-    def test_a_mount_under_a_boot_mount_is_read_as_the_boot_mount(self):
+    # #5735 L3 6878105739, Security 6878175777: a mount point is a directory at boot whatever is mounted there,
+    # so a walk may end at one, or step back out with .., but not step past it, under /run and /tmp too.
+    def test_a_walk_may_end_at_a_mount_point_but_not_step_past_it(self):
         stock = {"/usr/lib/systemd/system/run-lock.mount": "[Mount]\nWhat=tmpfs\nWhere=/run/lock\n",
                  "/usr/lib/systemd/system/dev-hugepages.mount": "[Mount]\nWhere=/dev/hugepages\n",
                  "/usr/lib/systemd/system/sys-kernel-debug.mount": "[Mount]\nWhere=/sys/kernel/debug\n",
@@ -727,14 +730,31 @@ class BootLinksTest(unittest.TestCase):
                  "/usr/lib/tmpfiles.d/legacy.conf": "L /var/lock - - - - ../run/lock\n",
                  "/usr/lib/tmpfiles.d/debian.conf": "L /run/shm - - - - /dev/shm\n"}
         with tempfile.TemporaryDirectory() as d:
-            v = tree(d, stock)
-            self.assertEqual(r.mount_points(v), ["/boot", "/efi"])
-            got = r.boot_links(v)
+            got = r.boot_links(tree(d, stock))
             self.assertEqual((got["/var/lock"], got["/run/shm"]), ("/run/lock", "/dev/shm"))
-        for more in ({"/etc/a": "-> /run/lock/../../var/lib/foo/x"}, {"/etc/a": "-> /run/lock/x/../y"}):
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {**self.MOUNT, "/var/lib/.keep": "", "/etc/x": "-> ../var/lib/foo", "/etc/y": "-> /var/lib/foo/../z",
+                                        "/etc/w": "-> /etc/x/../q", "/usr/lib/tmpfiles.d/a.conf": "L /etc/v - - - - /var/lib/foo\n"}))
+            self.assertEqual((got["/etc/x"], got["/etc/y"], got["/etc/w"], got["/etc/v"]),
+                             ("/var/lib/foo", "/var/lib/z", "/var/lib/q", "/var/lib/foo"))
+        for more, mount in (
+                ({"/etc/a": "-> /run/lock/x"}, "/run/lock"), ({"/etc/a": "-> /var/lock/x"}, "/run/lock"),
+                ({"/etc/a": "-> /etc/x/d", "/etc/x": "-> /var/lib/foo"}, "/var/lib/foo"),
+                # Security 6878175777: a disk under /run and a bind under /tmp holding a link out.
+                ({"/usr/lib/systemd/system/run-data.mount": "[Mount]\nWhat=/dev/sdb1\nWhere=/run/data\n",
+                  "/usr/lib/tmpfiles.d/b.conf": "L /etc/b - - - - /run/data/sock\n"}, "/run/data"),
+                ({"/usr/lib/systemd/system/tmp-x.mount": "[Mount]\nWhat=/var/lib/x\nWhere=/tmp/x\nOptions=bind\n",
+                  "/var/lib/x/y": "-> /etc/shadow", "/etc/a": "-> /tmp/x/y"}, "/tmp/x")):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "/etc/a: a link \\(the tree's\\) resolving to /run/lock/.*keeps a \\. or \\.\\."):
+                with self.assertRaisesRegex(SystemExit, "steps on the mount point %s on its way" % mount):
                     r.boot_links(tree(d, {**stock, **self.MOUNT, **more}))
+        # systemd mounts nothing over a link (a non-canonical Where=), so a tree link at a mount point stays.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "a link /var/lib/foo \\(the tree's\\) sits at or under /var/lib/foo"):
+                r.boot_links(tree(d, {**self.MOUNT, "/var/lib/foo": "-> /etc"}))
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "a link /etc/a \\(the tree's\\) to /var/lib/foo steps on the mount point"):
+                r.boot_links(tree(d, {**self.MOUNT, "/var/lib/foo": "-> /etc", "/etc/a": "-> /var/lib/foo"}))
 
     def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
         # A tree link under a mount the reader cannot see is not there at boot, so none is followed.
@@ -761,10 +781,8 @@ class BootLinksTest(unittest.TestCase):
     def test_a_chained_link_into_a_mount_fails_the_run(self):
         for lines, more in (
                 (("L /etc/a - - - - /var/lib", "L /etc/b - - - - /etc/a/foo/s"), {}),
-                (("L /etc/a - - - - /var/lib", "L+ /etc/b - - - - a/foo"), {}),
                 (("L+ /etc/a - - - - /var/lib", "L /etc/b - - - - /etc/a/foo/s"), {"/etc/a/foo/s": "a file"}),
                 (("L /etc/a - - - - /var", "L /etc/b - - - - /etc/a/lib", "L /etc/c - - - - /etc/b/foo/d"), {}),
-                (("L /etc/a - - - - /var/lib",), {"/etc/c": "-> /etc/a/foo"}),
                 (("L+ /etc/a - - - - /var/lib",), {"/etc/a/foo/f": "a file", "/etc/c": "-> a/foo/f"})):
             conf = {"/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in lines)}
             with self.subTest(lines=lines, more=more), tempfile.TemporaryDirectory() as d:
@@ -775,9 +793,9 @@ class BootLinksTest(unittest.TestCase):
 
     def test_a_tree_link_into_or_under_a_mount_fails_the_run(self):
         drop = ", or drop it \\(mkosi.conf RemoveFiles=\\) if a package makes it$"
-        for more in ({"/etc/x": "-> /var/lib/foo/d"}, {"/etc/x": "-> ../var/lib/foo"},
+        for more in ({"/etc/x": "-> /var/lib/foo/d"}, {"/etc/x": "-> ../var/lib/foo/d"},
                      {"/etc/x": "-> /var/lib/foo/f", "/var/lib/foo/f": "a file"},
-                     {"/etc/x": "-> /etc/y/foo", "/etc/y": "-> /var/lib"}):
+                     {"/etc/x": "-> /etc/y/foo/d", "/etc/y": "-> /var/lib"}):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
                 with self.assertRaisesRegex(SystemExit, "a link /etc/x \\(the tree's\\) to [a-z/.]+ "
                                             + self.STEPS + "; point the link at a path no mount covers" + drop):
@@ -808,7 +826,7 @@ class BootLinksTest(unittest.TestCase):
                            ({"/etc/x": "-> /var/lib/foo/y/z", "/var/lib/foo/y": "-> /etc/x"}, on),
                            ({"/etc/a": "-> /var/lib/foo/y", "/var/lib/foo": "-> /etc/a"}, on),
                            ({"/var/lib/foo/l": "-> l"}, on), ({"/var/lib/foo": "-> foo"}, on), (chain, on),
-                           ({"/etc/x": "-> /var/lib/foo/../../../etc/x", "/var/lib/foo/.keep": ""}, on),
+                           ({"/etc/x": "-> /var/lib/foo/d/../../../../etc/x", "/var/lib/foo/d/.keep": ""}, on),
                            ({"/etc/x": "-> y", "/etc/y": "-> x"}, loop),
                            ({k: v for k, v in chain.items() if k != "/etc/l0"}, loop)):  # 41 links, no mount
             with self.subTest(more=sorted(more)[:2]), tempfile.TemporaryDirectory() as d:
@@ -836,7 +854,7 @@ class BootLinksTest(unittest.TestCase):
     def test_a_walk_stepping_on_a_mount_and_back_out_fails_the_run(self):
         keep = {"/var/lib/foo/d/.keep": "", "/etc/real/.keep": ""}
         for more in ({"/etc/a": "-> /var/lib/foo/d/../../x"}, {"/etc/a": "-> /var/lib/foo/d/../../../../etc/real"},
-                     {"/etc/a": "-> ../var/lib/foo/d/../../../../etc/b"}, {"/etc/a": "-> /var/lib/foo/../x"},
+                     {"/etc/a": "-> ../var/lib/foo/d/../../../../etc/b"}, {"/etc/a": "-> /var/lib/foo/d/../x"},
                      {"/etc/a": "-> /etc/y/../x", "/etc/y": "-> /var/lib/foo/d"},
                      {"/etc/a": "-> /etc/y/../../x", "/etc/y": "-> /var/lib/foo/d"}):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
@@ -890,7 +908,7 @@ class BootLinksTest(unittest.TestCase):
     # component, and each of its components is still held to the mounts.
     def test_a_path_past_a_missing_directory_is_held_to_the_mounts(self):
         mount = {"/usr/lib/systemd/system/srv-a-b.mount": "[Mount]\nWhat=tmpfs\nWhere=/srv/a/b\n"}
-        for more in ({"/etc/x": "-> /srv/a/b/c"}, {"/etc/x": "-> /srv/a/b"},
+        for more in ({"/etc/x": "-> /srv/a/b/c/d"}, {"/etc/x": "-> /srv/a/b/c/d"},
                      {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/x - - - - /srv/a/b/c\n"},
                      {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/y - - - - /srv/a\n", "/etc/x": "-> /etc/y/b/c"}):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:

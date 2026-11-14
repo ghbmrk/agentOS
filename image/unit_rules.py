@@ -631,9 +631,7 @@ GPT_AUTO_MOUNTS = ("/boot", "/efi")
 def mount_points(view):
     """#5708: the Where= of every .mount and .automount unit name in the tree's unit directories, generators'
     included (systemd loads such a unit only under the name its Where= escapes to), and GPT_AUTO_MOUNTS,
-    but / and any at or under BOOT_MOUNTS, which BootView already reads as the tree or as empty (#5735 L3
-    6878105739: debian's run-lock.mount, under which legacy.conf's stock /var/lock line ends): a walk into an
-    empty BOOT_MOUNTS tree keeps the rest of its path as given, so a link there or a .. after it fails the run. Ours count with a
+    but / and BOOT_MOUNTS, which BootView already reads as the tree or as empty. Ours count with a
     package's: what a mounted file system holds at a path is not in the tree, whoever ships the unit."""
     out = set(GPT_AUTO_MOUNTS)
     for n in names(view, unit_dirs(view)):
@@ -642,7 +640,7 @@ def mount_points(view):
             continue
         w = os.path.normpath("/" + re.sub(r"\\x([0-9a-fA-F]{2})", lambda x: chr(int(x.group(1), 16)),
                                           base.replace("-", "/")))
-        if w != "/" and not any(w == b or w.startswith(b + "/") for b in BOOT_MOUNTS):
+        if w != "/" and w not in BOOT_MOUNTS:
             out.add(w)
     return sorted(out)
 
@@ -683,8 +681,8 @@ class Dotted(Exception):
 class MountView(BootView):
     """VIEW (a BootView) with LINES ({path: target}, the tmpfiles.d L lines' links) made, where no walk may step
     at or under one of MOUNTS (mount_points). #5725 re-plan: at boot a mounted file system, not the tree, holds
-    what is at and under its Where=, so where a walk goes once it steps there (a link, a .. after a directory,
-    a nested mount) is not the tree's to say. The refusal sits in the host primitive _lstat, which resolve()
+    what is under its Where=, so where a walk goes once it steps past one (a link, a .. after a directory, a
+    nested mount) is not the tree's to say; the Where= itself is a directory, which a walk may end at. The refusal sits in the host primitive _lstat, which resolve()
     calls on every component it steps on, a link's target, a chain's next link and a .. included, so every walk
     onto a mount raises OnMount, by construction, and none is read on. A path kept as given past a missing
     component is held to the same: each of its own components is checked against MOUNTS, and one keeping a .
@@ -700,13 +698,22 @@ class MountView(BootView):
                 q = os.path.dirname(q)
                 self.parents.add(q)
 
+    # #5735 L3 6878105739, Security 6878175777: a mount point is a directory at boot, whatever file system is
+    # mounted there, so a walk may end at one or step back out of it with .. (the kernel's .. at a mount's root
+    # goes to the mount point's parent); only a step past it, into what is mounted, is refused. So debian's
+    # `L /var/lock - - - - ../run/lock` over run-lock.mount passes, and /var/lock/x is still refused.
     def _refuse(self, q):
         for m in self.mounts:
-            if q == m or q.startswith(m + "/"):
+            if q.startswith(m + "/"):
                 raise OnMount(m)
 
     def _lstat(self, q):
         self._refuse(q)
+        if q in self.mounts:
+            st = super()._lstat(q)  # systemd mounts nothing over a link (a non-canonical Where=): it stays
+            if st is not None and st.st_mode & 0o170000 == 0o120000:
+                raise OnMount(q)
+            return os.stat_result((0o040755,) + (0,) * 9)
         if q in self.lines:
             return os.stat_result((0o120777,) + (0,) * 9)  # the link the L line makes at boot
         st = super()._lstat(q)
