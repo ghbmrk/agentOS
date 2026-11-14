@@ -156,6 +156,13 @@ func TestMachinesPathUnreachableIsASettingNotARestart(t *testing.T) {
 	if l := machinesOffLine(fmt.Errorf("vm: %w", vm.ErrStateDirUnreachable)); l != agentMachinesUnsafe {
 		t.Errorf("wrapped unreachable: %q", l)
 	}
+	// STATUS-wording-f2 (#5648): one line serves an exposed path and an
+	// unwalkable one, so it names neither cause alone ("unsafe place"
+	// sends the installer looking for an exposure that is not there).
+	const want = "Agent and worker tools: off, I cannot safely use their files; whoever set me up must move them."
+	if agentMachinesUnsafe != want {
+		t.Errorf("agentMachinesUnsafe %q, want %q", agentMachinesUnsafe, want)
+	}
 }
 
 // REV-CHK-links-vm-ux (#4976): a -machines path vm.Open refuses is a
@@ -191,9 +198,22 @@ func TestMachinesPathRefusalIsASettingNotARestart(t *testing.T) {
 	for _, l := range []string{"Agent and worker tools: off, x; a restart will not fix it.", "Model: off; restarting does not help.",
 		// STATUS-wording-f1 (#5632): the house "cannot" and the other
 		// clauses that name no step.
-		"Model: off; a restart cannot fix it.", "Model: off; restarting does nothing.", "Model: off; a restart is no fix.", "Model: off; nothing helps."} {
+		"Model: off; a restart cannot fix it.", "Model: off; restarting does nothing.", "Model: off; a restart is no fix.", "Model: off; nothing helps.",
+		// STATUS-wording-f2 (#5667 L3 and Potency F1): inflected verbs,
+		// "nothing will <verb>" and every "do nothing" are refused too.
+		"Model: off; nothing will fix it.", "Model: off; nothing will help.", "Model: off; restarting will do nothing.",
+		"Model: off; you can do nothing.", "Model: off; do nothing.", "Model: off; a restart never works.",
+		"Model: off; restarting is not working.", "Model: off; it is not fixable.", "Model: off; a restart is not helpful."} {
 		if ownerWorded(l) == nil {
 			t.Errorf("ownerWorded accepts %q", l)
+		}
+	}
+	// STATUS-wording-f2 (#5648): a clause that does name a working step
+	// is accepted, though it holds a word the refusals use.
+	for _, l := range []string{"Model: off; nothing will be lost; restart me.",
+		"Model: off; no fixed plan is set; connect one on the setup page.", "Model: off; nothing to do; a later box version adds this."} {
+		if err := ownerWorded(l); err != nil {
+			t.Errorf("ownerWorded refuses %q: %v", l, err)
 		}
 	}
 	for _, want := range []string{"absolute", "clean", "symbolic link", "root", "group", "sticky"} {

@@ -562,7 +562,7 @@ func TestModelNoPrivateNamesTheWiFiPage(t *testing.T) {
 // names only a step the box serves. Since P2-2w c4e the page's API-key
 // step is served during setup only; the line shows on a box past setup,
 // whose agentosd serves no setup op, so the line names no page and says a
-// later box version adds it. When agentosd serves the step past setup
+// later box version adds this. When agentosd serves the step past setup
 // this fails, and the line must name where the owner adds one.
 func TestModelNoGrantNamesAServedStep(t *testing.T) {
 	pastSetup := localui.AgentosdSetup{Owner: localui.InProcess(localsrv.New(localsrv.Config{}).Ops())}
