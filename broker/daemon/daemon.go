@@ -704,6 +704,9 @@ type KernelOwner interface {
 	// kernel refuses it once a later STOP is logged (#3078).
 	Resume(ctx context.Context, stops uint64) error
 	Stopped(context.Context) (stopped bool, stops uint64, err error)
+	// StopCancelled is whether a STOP is in force and the steps the STOPs
+	// since the last lift cancelled for good, which RESUME names (#5665).
+	StopCancelled(context.Context) (stopped bool, steps int, err error)
 	SetupOpen(context.Context) (bool, error)
 	Status(context.Context) ([]KernelStep, error)
 	// Retry returns KernelRefused for the kernel's refusal and
@@ -814,6 +817,28 @@ func (b *bothStops) resumeKernel(ctx context.Context) error {
 		return err
 	}
 	return b.k.Resume(ctx, stops)
+}
+
+// StopCancelled is the steps the kernel's STOP in force cancelled for
+// good, read before RESUME lifts it (#5665). A kernel not stopped
+// cancelled nothing this RESUME lifts (a STOP only the journal holds),
+// and a setup-only kernel holds no plan; the journal's STOP holds its
+// actions and cancels none. A kernel that cannot be read is an error, and
+// RESUME names that it may have cancelled some.
+func (b *bothStops) StopCancelled() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), kernelFor)
+	defer cancel()
+	stopped, n, err := b.k.StopCancelled(ctx)
+	if err != nil {
+		if open, oerr := b.k.SetupOpen(ctx); oerr == nil && open {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !stopped {
+		return 0, nil
+	}
+	return n, nil
 }
 
 // kernel runs a STOP or RESUME on the kernel; a setup-only kernel's

@@ -408,19 +408,29 @@ const (
 // (cancel). An active plan whose current step was sent or parked keeps
 // reconciling it (KRN-8), and a RETRY of it may still send it (KRN-5), so
 // the plan is marked ended instead, and Next and the send check refuse any
-// other step of it. Either way no step that was unsent at the end is sent
+// other step of it. n is the steps it leaves unsent for good, less a step
+// it parks for RETRY. Either way no step that was unsent at the end is sent
 // after it, whatever the log folds next, a RESUME included (KRN-7).
-func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) {
+func (s *State) endPlans(ends func(*PlanState) bool, code, detail string) (n int) {
 	for _, id := range s.Order {
 		p := s.Plans[id]
 		switch {
 		case p.Status != SPending && p.Status != SActive || !ends(p):
-		case p.Status == SPending || sendable(p.Steps[p.Next].Phase):
+		case p.Status == SPending:
 			s.cancel(p, code, detail)
+			n += len(p.Plan.Steps)
+		case sendable(p.Steps[p.Next].Phase):
+			s.cancel(p, code, detail)
+			n += len(p.Steps) - p.Next
+			if p.Steps[p.Next].Phase == PParked {
+				n--
+			}
 		case p.Ended == "":
 			p.Ended, p.EndedDetail = code, detail
+			n += len(p.Steps) - p.Next - 1
 		}
 	}
+	return n
 }
 
 // ended is why step st of plan p may not be sent: its plan ended with its
@@ -449,7 +459,11 @@ type State struct {
 	Seq        uint64
 	Stopped    bool
 	Stops      uint64 // STOPs logged; a RESUME names the count it lifts (#3078)
-	Changes    key.Changes
+	// StopCancelled is the steps the STOP in force left unsent for good,
+	// summed over the STOPs logged since the last lift: RESUME says so only
+	// when there are any (#5665).
+	StopCancelled int
+	Changes       key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
 	Grants map[key.ID]Grant
@@ -1032,6 +1046,9 @@ func (s *State) Apply(e Entry) error {
 	case TPoolRead, TPoolReset, TReserveUp, TReserveDown:
 		return s.applyPool(e)
 	case TStop:
+		if !s.Stopped {
+			s.StopCancelled = 0
+		}
 		s.Stopped, s.Changes.Stopped = true, true
 		s.Stops++
 		for _, t := range s.tasks {
@@ -1039,7 +1056,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		// The STOP cancels in its own fold, so a RESUME before the next
 		// tick cannot send what it stopped (KRN-7, KEY-8).
-		s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
+		s.StopCancelled += s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
 	case TResume:
 		if !s.decoys.held() { // ErrTripResume
 			s.Stopped, s.Changes.Stopped = false, false

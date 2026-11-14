@@ -714,6 +714,10 @@ func (k *ctxKernel) Stopped(ctx context.Context) (bool, uint64, error) {
 	k.keep(ctx)
 	return false, 0, k.stoppedErr
 }
+func (k *ctxKernel) StopCancelled(ctx context.Context) (bool, int, error) {
+	k.keep(ctx)
+	return false, 0, k.stoppedErr
+}
 func (k *ctxKernel) SetupOpen(ctx context.Context) (bool, error) { k.keep(ctx); return false, nil }
 func (k *ctxKernel) Status(ctx context.Context) ([]KernelStep, error) {
 	k.keep(ctx)

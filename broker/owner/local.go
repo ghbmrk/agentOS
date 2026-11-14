@@ -476,13 +476,14 @@ func (c *Channel) LocalResume(locks uint64, gen int64) (string, error) {
 	if !c.cfg.Engine.Stopped() {
 		return "Not stopped. Nothing to resume.", nil
 	}
-	switch err := c.resumeUnlessStopped(gen); {
+	note, err := c.resumeUnlessStopped(gen)
+	switch {
 	case err == errStoppedMeanwhile:
 		return stoppedMeanwhile, nil
 	case err != nil:
 		return "", fmt.Errorf("owner: resume failed to record, still stopped: %w", err)
 	}
-	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now()), nil
+	return "Resumed. Stopped actions may now run." + c.rewindowLocked(c.cfg.Now(), note), nil
 }
 
 // alert texts the owner a broker template, if a modem is attached. It is

@@ -1032,3 +1032,35 @@ func TestApproveCodeSendsTheKernelsOwnCall(t *testing.T) {
 		t.Fatalf("approvecode sends %q; kernel/proc sends %q", got, want)
 	}
 }
+
+// StopCancelled reads the changes read's count of the steps the STOP in
+// force cancelled, under the name kernel/proc sends it (#5665), and
+// whether a STOP is in force. Catches a field name that drifts from the
+// kernel's, which would read every count as none.
+func TestStopCancelledReadsTheKernelsCount(t *testing.T) {
+	needRoot(t)
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			bufio.NewReader(c).ReadString('\n')
+			c.Write([]byte(`{"result":{"Stopped":true,"stops":3,"stopcancelled":2}}` + "\n"))
+			c.Close()
+		}
+	}()
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+	if stopped, n, err := o.StopCancelled(context.Background()); err != nil || !stopped || n != 2 {
+		t.Fatalf("StopCancelled: %v %d %v, want true 2", stopped, n, err)
+	}
+}

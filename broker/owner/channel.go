@@ -494,14 +494,16 @@ func gridLabel(w string) bool {
 var errStoppedMeanwhile = errors.New("stopped while the code was checked")
 
 // resumeUnlessStopped lifts STOP only if no STOP arrived since stops was
-// gen, checked and applied under stopMu.
-func (c *Channel) resumeUnlessStopped(gen int64) error {
+// gen, checked and applied under stopMu, and returns the reply's note on
+// what the STOP cancelled, read before the lift (control.CancelledNote).
+func (c *Channel) resumeUnlessStopped(gen int64) (string, error) {
 	c.stopMu.Lock()
 	defer c.stopMu.Unlock()
 	if c.stops.Load() != gen {
-		return errStoppedMeanwhile
+		return "", errStoppedMeanwhile
 	}
-	return c.cfg.Engine.Resume()
+	note := control.CancelledNote(c.cfg.Engine)
+	return note, c.cfg.Engine.Resume()
 }
 
 const stoppedMeanwhile = "A STOP arrived while the code was checked, so nothing resumed. Still stopped."
@@ -864,13 +866,14 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 		msg := "Codes work normally again."
 		if r.word == "RESUME" {
 			c.resume = nil
-			switch err := c.resumeUnlessStopped(gen); {
+			note, err := c.resumeUnlessStopped(gen)
+			switch {
 			case err == errStoppedMeanwhile:
 				return route{replies: []string{msg + " " + stoppedMeanwhile}}, true
 			case err != nil:
 				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
 			}
-			msg += " Resumed." + c.rewindowLocked(now)
+			msg += " Resumed." + c.rewindowLocked(now, note)
 		}
 		return route{replies: []string{msg}}, true
 	}
@@ -1081,7 +1084,8 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 		return []string{"Wrong code. Reply RESUME <code>." + lockNote(locked)}, false
 	}
 	c.resume = nil
-	switch err := c.resumeUnlessStopped(p.stops); {
+	note, err := c.resumeUnlessStopped(p.stops)
+	switch {
 	case err == errStoppedMeanwhile:
 		return []string{stoppedMeanwhile}, true
 	case err != nil:
@@ -1100,7 +1104,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 	case n > 1:
 		text = fmt.Sprintf("Resumed. %d stopped actions may now run.", n)
 	}
-	return []string{text + c.rewindowLocked(now)}, true
+	return []string{text + c.rewindowLocked(now, note)}, true
 }
 
 // checkLocked checks a reply code against a texted code, or against the

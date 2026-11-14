@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
@@ -307,8 +306,8 @@ func (c *Channel) undoElsewhere(ctx context.Context, id string) string {
 // rewindowLocked gives every queued reply and held effect due within
 // ResumeWindow a fresh ResumeWindow, after a RESUME, and returns the
 // RESUME reply's tail: the sentence naming them (UX-76-1), if any, then
-// control.StopCancelledNote (#5151).
-func (c *Channel) rewindowLocked(now time.Time) string {
+// note, control.CancelledNote's, read before the RESUME (#5151, #5665).
+func (c *Channel) rewindowLocked(now time.Time, note string) string {
 	at := now.Add(ResumeWindow)
 	var ids []string
 	for id, q := range c.queued {
@@ -318,14 +317,14 @@ func (c *Channel) rewindowLocked(now time.Time) string {
 		}
 	}
 	sort.Strings(ids)
-	return resumeTail(ids, c.clock(at))
+	return resumeTail(ids, c.clock(at), note)
 }
 
 // resumeTail is the RESUME reply after its head: the re-windowed ids' run
-// time at, then the note. Many ids fall back to their count, so the
-// longest head fits the text budget.
-func resumeTail(ids []string, at string) string {
-	note := " " + control.StopCancelledNote
+// time at, then note (empty, or starting with a space). Many ids fall back
+// to their count, so the longest head with the longest note fits the
+// text budget.
+func resumeTail(ids []string, at, note string) string {
 	switch len(ids) {
 	case 0:
 		return note

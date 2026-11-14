@@ -325,16 +325,51 @@ func (h *Handler) resumeCmd(args []string) string {
 		return "Wrong code. Reply RESUME <code>."
 	}
 	h.resume = nil
+	note := CancelledNote(h.Engine)
 	if err := h.Engine.Resume(); err != nil {
 		return "RESUME failed to record. Still stopped."
 	}
-	return "Resumed. Held actions may now run. " + StopCancelledNote
+	return "Resumed. Held actions may now run." + note
 }
 
-// StopCancelledNote ends every RESUME reply: a STOP cancels each unsent
-// step, and RESUME never brings one back (KRN-7, #5138), so an owner who
-// expected a pause is told not to wait for it (#5151).
-const StopCancelledNote = "Anything else STOP cancelled stays cancelled; ask again for anything you still want."
+// StopCanceller is an Engine whose STOP cancels steps for good, as the
+// kernel's does: StopCancelled is how many the STOP in force cancelled,
+// read before RESUME lifts it (#5665).
+type StopCanceller interface {
+	StopCancelled() (int, error)
+}
+
+// CancelledNote ends a RESUME reply, read before the RESUME: a STOP
+// cancels each unsent step, and RESUME never brings one back (KRN-7,
+// #5138), so an owner who expected a pause is told not to wait for it
+// (#5151), with the count, and only when the STOP cancelled something
+// (#5665). A count that cannot be read gets StopCancelledNote, since
+// silence could hide a loss; an Engine whose STOP only holds gets none.
+// It starts with a space.
+func CancelledNote(e Engine) string {
+	c, ok := e.(StopCanceller)
+	if !ok {
+		return ""
+	}
+	switch n, err := c.StopCancelled(); {
+	case err != nil:
+		return " " + StopCancelledNote
+	case n == 0:
+		return ""
+	case n == 1:
+		return " " + oneCancelledNote
+	default:
+		return fmt.Sprintf(" "+cancelledNote, n)
+	}
+}
+
+// RESUME's notes on what the STOP cancelled. StopCancelledNote is the one
+// for a count that cannot be read.
+const (
+	StopCancelledNote = "Anything else STOP cancelled stays cancelled; ask again for anything you still want."
+	oneCancelledNote  = "STOP cancelled 1 action; it stays cancelled, so ask again if you still want it."
+	cancelledNote     = "STOP cancelled %d actions; they stay cancelled, so ask again for any you still want."
+)
 
 // codeText sends text unless the hourly cap on RESUME texts is spent, in
 // which case the broker stays silent.
