@@ -682,3 +682,28 @@ func TestSmallOrderEdgeKeysRefuse(t *testing.T) {
 		t.Fatal("a real key no longer enrols")
 	}
 }
+
+// The minute between candidates runs from the last candidate's Latest to
+// the new reading's Earliest, so it holds on true time however wide either
+// reading (#5395). Mutant: keep candAt at e.At in applyEdge and the second
+// hello, a minute after the first's Earliest but not its Latest, logs.
+func TestCandidateMinuteRunsFromTheLastLatest(t *testing.T) {
+	r := newRig(t)
+	a, b := gen(70), gen(71)
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: 10, Latest: 30_010} })
+	must(t, candidate(r, 0, a, 1))
+	n := r.k.Log().Len()
+	r.k.UseClock(func() kernel.Reading { return kernel.Reading{Earliest: 60_010, Latest: 90_000} })
+	if err := candidate(r, 0, b, 2); !errors.Is(err, kernel.ErrEdgeBusy) {
+		t.Fatalf("a hello a minute after the last candidate's Earliest, not its Latest: %v", err)
+	}
+	if r.k.Log().Len() != n {
+		t.Fatal("a throttled hello was logged")
+	}
+	r.k.UseClock(func() kernel.Reading { return kernel.At(90_010) })
+	must(t, candidate(r, 0, b, 3))
+	if !r.k.State().PendingEdge(r.k.Box()).Equal(b.pub) {
+		t.Fatal("the hello a minute after the last candidate's Latest is not the candidate")
+	}
+	edgeReplays(r, r.anchors())
+}

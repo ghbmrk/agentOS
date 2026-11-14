@@ -595,3 +595,15 @@ func TestAMidRequestResetIsNotDown(t *testing.T) {
 		t.Fatalf("the reset is not a non-dial OpError, so this test checks nothing: %v", err)
 	}
 }
+
+// REQ: CH-4
+// "any value fails closed" holds only while nothing listens at
+// dir/hand.sock: a planted listener receives the seed and approves every
+// act (W-3), so the -checker help says so (#5633).
+func TestCheckerHelpNamesTheListenerCaveat(t *testing.T) {
+	for _, want := range []string{"unless something listens there", "receives the seed", "writable only by the checker's uid"} {
+		if !strings.Contains(checkerHelp, want) {
+			t.Errorf("-checker help lacks %q: %s", want, checkerHelp)
+		}
+	}
+}

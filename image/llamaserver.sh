@@ -32,7 +32,7 @@ PINS=$REPO/broker/cmd/agentos-infer/llama.pins
 pin() { sed -n "s/^$1=//p" "$PINS"; }
 URL=$(pin llama_src_url); WANT=$(pin llama_src_sha256)
 TAG=$(printf '%s\n' "$URL" | sed -n 's|^https://github\.com/ggml-org/llama\.cpp/archive/refs/tags/b\([0-9][0-9]*\)\.tar\.gz$|\1|p')
-[ -n "$TAG" ] || { echo "llama.cpp source: llama_src_url is not a bNNNN tag archive" >&2; exit 1; }
+[ -n "$TAG" ] || { echo "llama.cpp source: llama_src_url in $PINS is not a https://github.com/ggml-org/llama.cpp/archive/refs/tags/bNNNN.tar.gz URL: $URL" >&2; exit 1; }
 DEST=$(realpath -m "$1"); WORK=$(realpath -m "$2")
 rm -rf "$WORK"; mkdir -p "$WORK" "$DEST"
 if [ -n "${LLAMA_TARBALL:-}" ]; then

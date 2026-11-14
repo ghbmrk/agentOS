@@ -11,9 +11,12 @@
 // restart. -checker names a redeem socket that would approve the adapters'
 // irreversible operations one exact request at a time (CH-4); since D-244
 // no process serves one (agentos-checker serves only verify.sock), so
-// with or without it the holder serves reads only. It refuses to run as either peer uid and makes
-// itself non-dumpable. Adapters whose operations exchange credentials need a swapper
-// the holder does not have yet, and are refused.
+// with or without it the holder serves reads only, unless something
+// listens there, which then approves every irreversible operation: name
+// only a path in a directory writable only by the checker's uid. It
+// refuses to run as either peer uid and makes itself non-dumpable.
+// Adapters whose operations exchange credentials need a swapper the
+// holder does not have yet, and are refused.
 package main
 
 import (
@@ -75,7 +78,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.dir, "dir", "", "run directory for the two sockets")
 	fs.Var(&names, "adapter", "an adapter to serve (repeatable)")
 	fs.IntVar(&c.requestUID, "request-uid", -1, "uid of egress, the only peer on request.sock")
-	fs.StringVar(&c.checker, "checker", "", "a CH-4 redeem socket; since D-244 no process serves one, so every irreversible operation is refused and only reads are served")
+	fs.StringVar(&c.checker, "checker", "", "a CH-4 redeem socket; since D-244 no process serves one, so every irreversible operation is refused and only reads are served, unless something listens there, which then approves every irreversible operation: name only a path in a directory writable only by the checker's uid")
 	fs.IntVar(&c.handUID, "hand-uid", -1, "uid of the unlock step, the only peer on hand.sock")
 	fs.BoolVar(&c.publicFetch, "public-fetch", false, "the owner lets public machines use provider-side fetch with this login; without it, every body is held to the strict form")
 	if err := fs.Parse(args); err != nil {
