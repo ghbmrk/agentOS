@@ -171,11 +171,12 @@ func TestHW8FloorAdvancesOnlyFromVerifiedTime(t *testing.T) {
 		t.Fatalf("floor %v", got)
 	}
 
-	// A restricted check never verifies.
+	// A plain disagreeing check never verifies. (A converged NTS one does:
+	// the carrier is the outlier, TIM-1-interval-fu-1; TestTIM1OutlierAfterReboot...)
 	r.reboot(floor.Add(3 * time.Hour))
 	r.carrier = floor.Add(9 * time.Hour)
 	r.synced = true
-	g = rtcGuard(t, r, path, &rtc)
+	g = rtcGuard(t, r, path, &rtc, func(c *Config) { c.Sync = func() (SyncKind, error) { return SyncedPlain, nil } })
 	g.Check(bg)
 	if s := g.Status(); s.Verified || s.State != Disagree {
 		t.Fatalf("disagreeing check verified: %+v", s)
