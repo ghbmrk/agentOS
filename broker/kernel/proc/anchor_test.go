@@ -456,12 +456,11 @@ func ownDir(t *testing.T) string {
 
 // The kernel process's Earliest runs on the monotonic clock from the later of
 // the log's last time and its source's Earliest, or the box clock at the
-// start when the source vouches for none, and rises to the source's Earliest
-// when that is later; the box clock alone raises only Latest. A start behind
-// the log reads the log's time and moves on, a step of a lone box clock while
-// running, back or forward, leaves Earliest where the monotonic clock has it,
-// and a second source moves it only up to what it vouches (TIM-1, KEY-7,
-// KEY-8, #5147, #5391).
+// start when the source vouches for none; while running the source raises
+// only Latest. A start behind the log reads the log's time and moves on, and
+// a step of the box clock while running, back or forward, leaves Earliest
+// where the monotonic clock has it, even when a second source follows the
+// step (TIM-1, KEY-7, KEY-8, #5147, #5391).
 //
 // REQ: TIM-1, KEY-7, KEY-8
 func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
@@ -502,14 +501,18 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	if r := w(); r.Earliest >= 3*last || r.Latest != 6*last {
 		t.Fatalf("a wide source at the start read %+v: Earliest is not its Earliest", r)
 	}
-	// Earliest rises to what the source vouches, and no further back when
-	// it stops vouching: a box behind the log catches up once chronyd syncs.
-	src = kernel.Reading{Earliest: 4 * last, Latest: 8 * last}
-	if r := w(); r.Earliest < 4*last || r.Earliest >= 5*last || r.Latest != 8*last {
-		t.Fatalf("a source vouching for more while running read %+v: Earliest did not rise to it", r)
+	// A source's Earliest raises nothing while running: chronyd misses a box
+	// step under 10 s until its next sample, so its Earliest follows each
+	// small forward step while its sample stays the same (#5757 L3 1).
+	stale := int64(9_000) // ms: one step chronyd does not see
+	for i := int64(1); i <= 200; i++ {
+		src = kernel.Reading{Earliest: 2*last + i*stale, Latest: 6*last + i*stale}
+		if r := w(); r.Earliest >= 2*last+stale || r.Latest != src.Latest {
+			t.Fatalf("after %d small forward steps a source following them read %+v: Earliest moved", i, r)
+		}
 	}
 	src = kernel.Reading{Latest: last}
-	if r := w(); r.Earliest < 4*last || r.Latest != r.Earliest {
+	if r := w(); r.Earliest < 2*last || r.Latest != r.Earliest {
 		t.Fatalf("a source that stopped vouching read %+v: Earliest went back", r)
 	}
 }
