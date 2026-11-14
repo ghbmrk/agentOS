@@ -149,10 +149,18 @@ const ClaimTimeout = 6 * 3600 // seconds
 // entry while any of those records lives (neigh). Neighbour discovery from
 // the segment that would set an entry for an address to another hardware
 // address is dropped (nd).
+//
+// A host's link-local address is held the same way, in NeighSet and
+// NeighAddrSet, by the first leased hardware address that sends from it
+// to the enforcer itself, one per hardware address (LinkLocalMACSet), and
+// every such packet from its holder keeps it for ClaimTimeout (ll, #5726).
+// It takes no ClaimSet hold: that rule gives a hardware address one
+// address, its DHCPv6 one, and a link-local address is never forwarded.
 func NeighSet(seg string) string        { return "neigh_" + seg + "_6" }
 func NeighAddrSet(seg string) string    { return "neighaddr_" + seg + "_6" }
 func NeighTCPSet(seg string) string     { return "neightcp_" + seg + "_6" }
 func NeighTCPAddrSet(seg string) string { return "neightcpaddr_" + seg + "_6" }
+func LinkLocalMACSet(seg string) string { return "llmac_" + seg + "_6" }
 
 // neighKey is a NeighSet element as nft reads it from a forwarded packet:
 // its source address and its raw hardware source address (hwField), the
@@ -227,12 +235,14 @@ var ndForms = []struct {
 }
 
 // neigh keeps the neighbour holds (NeighSet) of a packet claim passed from
-// shared segment seg; nd drops neighbour discovery from seg that would set
+// shared segment seg; ll keeps or takes the hold of a link-local address
+// that sends from seg to the enforcer itself; nd drops neighbour discovery from seg that would set
 // a held address's entry to another hardware address; arpIn (ARP that
 // reaches the enforcer on seg) and ackOut (the server's DHCPACK leaving on
 // seg) are NeighTable's chains for seg.
 func neigh(seg string) string  { return "neigh_" + seg }
 func nd(seg string) string     { return "nd_" + seg }
+func ll(seg string) string     { return "ll_" + seg }
 func arpIn(seg string) string  { return "arp_" + seg }
 func ackOut(seg string) string { return "ack_" + seg }
 
@@ -823,6 +833,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.dynamic(NeighSet(sg.name), neighKey, ClaimTimeout)
 		w.dynamic(NeighTCPAddrSet(sg.name), "ip6 saddr", HostTCPTimeout)
 		w.dynamic(NeighTCPSet(sg.name), neighKey, HostTCPTimeout)
+		w.dynamic(LinkLocalMACSet(sg.name), hwField, ClaimTimeout)
 	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
@@ -910,15 +921,24 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// passes its segment's claim, as a forwarded one does, so an address
 	// that speaks only to the enforcer (its resolver, DHCPv6, the page) is
 	// held, and with it its neighbour entry (#5686). Neighbour discovery
-	// that nd passed is accepted first: it sets no hold, as before. A
-	// link-local or unspecified source is not a host's address on the
-	// segment (DHCPv6 gives one), so it takes no hold.
+	// that nd passed is accepted first: it sets no hold, as before. An
+	// unspecified source is no one's address and takes no hold. A
+	// link-local source is not the host's one address on the segment
+	// (DHCPv6 gives that), so it takes no claim; it takes its own
+	// neighbour hold in its segment's ll chain, so another host cannot
+	// move the enforcer's entry for it and read the enforcer's answers to
+	// it, such as its DHCPv6 replies (#5726).
 	w.line("iifname { " + strings.Join(sharedIfs, ", ") + " } icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept")
 	var claims []string
 	for _, sg := range segments(l) {
 		claims = append(claims, q(sg.iface)+" : jump "+claim(sg.name))
 	}
 	w.line("ip6 saddr != { ::, fe80::/10 } iifname vmap { " + strings.Join(claims, ", ") + " }")
+	var lls []string
+	for _, sg := range segments(l) {
+		lls = append(lls, q(sg.iface)+" : jump "+ll(sg.name))
+	}
+	w.line("ip6 saddr fe80::/10 iifname vmap { " + strings.Join(lls, ", ") + " }")
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
 	w.line("icmpv6 type nd-router-advert iifname != " + wan + " counter name " + q(RADropped) + " drop")
@@ -1230,6 +1250,27 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.line("ip6 saddr @" + na + " " + neighKey + " != @" + ns + " return")
 		w.line("ct protocol tcp ct status assured update @" + ta + " { ip6 saddr } update @" + ts + " { " + neighKey + " }")
 		w.line("update @" + na + " { ip6 saddr } update @" + ns + " { " + neighKey + " }")
+		w.close()
+
+		// A packet from a link-local address on the segment to the
+		// enforcer itself keeps its hardware address's neighbour hold of
+		// the address (NeighSet), or takes the address's hold when no
+		// hardware address has one and its own is leased (LeasedSet) and
+		// holds no other link-local address (LinkLocalMACSet), its mark
+		// and address before its key, as neigh does. A packet from an
+		// address another hardware address holds passes on with no hold,
+		// as neigh's does: the hold guards the entry, not the packet.
+		// Every verdict returns to the input chain. The lease and the one
+		// address per hardware address bound the holds to the segment's
+		// leases, so no host can fill the set that holds every host's
+		// entry with forged hardware addresses.
+		w.open("chain " + ll(sg.name))
+		lm := LinkLocalMACSet(sg.name)
+		w.line(neighKey + " @" + ns + " update @" + lm + " { " + hwField + " } update @" + na + " { ip6 saddr } update @" + ns + " { " + neighKey + " } return")
+		w.line("ip6 saddr @" + na + " return")
+		w.line(hwField + " != @" + LeasedSet(sg.name) + " return")
+		w.line(hwField + " @" + lm + " return")
+		w.line("add @" + lm + " { " + hwField + " } add @" + na + " { ip6 saddr } add @" + ns + " { " + neighKey + " }")
 		w.close()
 
 		// Neighbour discovery from the segment that names a link-layer
