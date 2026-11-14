@@ -16,8 +16,8 @@ read; "imports", each file importing an affected glibc symbol and those symbols;
 ELF file whose NEEDED closure (by file name, within that place) holds an importing library, and those
 libraries. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
 
-The control is the scan itself: it exits 1 when a place read no ELF file, or the main tree has no
-importer of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
+The control is the scan itself: it exits 1 when the main tree or every initrd read no ELF file, or the
+main tree has no importer of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
 """
 import json
 import os
@@ -144,7 +144,12 @@ def run_build(out, version):
 
 
 def problems(places):
-    errs = ["%s: no ELF file read" % k for k, v in places.items() if not v["scanned"]]
+    # An initrd of only kernel modules (compressed .ko files) holds no ELF file, so the initrds count
+    # together: some initrd must hold one.
+    initrds = [v["scanned"] for k, v in places.items() if k.startswith("initrd:")]
+    errs = [] if places.get("tree", {}).get("scanned") else ["tree: no ELF file read"]
+    if initrds and not any(initrds):
+        errs.append("initrd: no ELF file read in any initrd")
     if "regcomp" not in {s for syms in places.get("tree", {}).get("imports", {}).values() for s in syms}:
         errs.append("tree: no file imports regcomp, so the scan read nothing it should have (control)")
     return errs

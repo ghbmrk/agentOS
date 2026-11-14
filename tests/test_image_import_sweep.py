@@ -105,8 +105,12 @@ class ImportSweepTest(unittest.TestCase):
         self.assertEqual(sweep.problems(tree), [])
         no_regcomp = {"tree": {"scanned": 3, "imports": {"/usr/bin/wtool": ["swscanf"]}, "via": {}}}
         self.assertEqual(len(sweep.problems(no_regcomp)), 1)
-        empty = dict(tree, **{"initrd:x": {"scanned": 0, "imports": {}, "via": {}}})
-        self.assertEqual(sweep.problems(empty), ["initrd:x: no ELF file read"])
+        # A modules-only initrd holds no ELF file; it fails only when no initrd holds one.
+        mods = {"scanned": 0, "imports": {}, "via": {}}
+        one = dict(tree, **{"initrd:modules": mods, "initrd:main": dict(mods, scanned=4)})
+        self.assertEqual(sweep.problems(one), [])
+        none = dict(tree, **{"initrd:modules": mods})
+        self.assertEqual(sweep.problems(none), ["initrd: no ELF file read in any initrd"])
 
     def test_summary_names_importers_and_reach(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))

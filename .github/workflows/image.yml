@@ -274,8 +274,11 @@ jobs:
         if: matrix.run == 'a'
         run: |
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
-          sudo python3 -I image/import_sweep.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/import-sweep.json"
-          python3 -I image/import_sweep.py --summary "$RUNNER_TEMP/import-sweep.json"
+          # The summary is printed even when the scan's control fails, so a failure shows what was read.
+          s=0
+          sudo python3 -I image/import_sweep.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/import-sweep.json" || s=1
+          python3 -I image/import_sweep.py --summary "$RUNNER_TEMP/import-sweep.json" || s=1
+          exit $s
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e
