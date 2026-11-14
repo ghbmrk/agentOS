@@ -44,7 +44,11 @@ _test.go files, they include the lines of its non-test files that the changed te
 even beside an added line, which would otherwise hide a deleted test's lines (#5762): `run` names them
 with one `go test -run '^(T1|T2)$' -coverprofile` run and records them in the result, and a change
 no single test function holds (a helper, TestMain, an import, a deleted declaration or file) runs
-every test, so the set is at most the package's covered lines. Coverage can differ from run to run
+every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
+return, a build tag, a deletion) runs nothing at the head, so the base's version of the changed
+tests (every base test when the head's change reaches every test) also runs, on a `git archive` of
+the base, its lines moved to the head's; the record holds both, and a mutant NOT COVERED on a line
+the base's tests ran fails the gate, as the PR drops a test of it (#5762). Coverage can differ from run to run
 (a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
 (`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
@@ -86,6 +90,7 @@ import collections
 import concurrent.futures
 import contextlib
 import glob
+import io
 import json
 import math
 import os
@@ -95,6 +100,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import types
@@ -150,6 +156,17 @@ def survivors(results_dir):
         pkg = f.stem.replace("+", "/")
         out[pkg] = survivors_of(json.loads(f.read_text()))
     return out
+
+
+def uncovered_of(data):
+    """[(file, line, type)] of NOT COVERED mutants in one package's JSON, sorted: on a line the base's
+    changed tests covered, the PR's tests run it no more (#5762), which no LIVED mutant shows."""
+    return sorted(
+        (m_file["file_name"], m["line"], m["type"])
+        for m_file in data.get("files") or []
+        for m in m_file.get("mutations") or []
+        if m.get("status") == "NOT COVERED"
+    )
 
 
 def survivors_of(data):
@@ -285,6 +302,114 @@ def union(*parts):
     return out
 
 
+def base_test_lines(diff_text):
+    """{path: set(base line) or None} of the broker/ _test.go files the base has and a -U0 diff
+    changes: the base lines it deletes or changes and, for a hunk that only adds, the base line
+    either side; None when the diff deletes the file. The base side of added_lines' tests (#5762)."""
+    out, old, path, in_hunk, line = {}, None, None, False, 0
+
+    def touch(lines):
+        if out.get(old, ()) is not None:
+            out.setdefault(old, set()).update(lines)
+
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            in_hunk, path, old = False, None, None
+            continue
+        m = HUNKS.match(raw)
+        if m:
+            in_hunk, line = True, int(m[1])
+            if old is not None and is_test(old):
+                if path is None:
+                    out[old] = None  # the file is deleted
+                elif m[2] == "0":
+                    touch({line, line + 1})  # the hunk adds after base line `line`
+            continue
+        if not in_hunk:
+            if raw.startswith("--- "):
+                old = _header_path(raw, "a/")
+            elif raw.startswith("+++ "):
+                path = _header_path(raw)
+            continue
+        if raw.startswith("-"):
+            if old is not None and is_test(old):
+                touch({line})
+            line += 1
+    return out
+
+
+def head_line_of(diff_text):
+    """{path: f} for a -U0 diff, where f(n) is the head line of the base's line n of path, or None
+    when the diff deletes or changes that line (or the file). Paths the diff leaves alone keep theirs."""
+    hunks, gone, old, path, in_hunk = {}, set(), None, None, False
+    for raw in diff_text.split("\n"):
+        if raw.startswith("diff "):
+            old, path, in_hunk = None, None, False
+        elif m := HUNKS.match(raw):
+            in_hunk = True
+            if old is not None:
+                if path is None:
+                    gone.add(old)
+                o, oc, nc = int(m[1]), int(m[2] or 1), int(m[4] or 1)
+                hunks.setdefault(old, []).append((o, oc, nc - oc))
+        elif not in_hunk:
+            if raw.startswith("--- "):
+                old = _header_path(raw, "a/")
+            elif raw.startswith("+++ "):
+                path = _header_path(raw)
+
+    def mover(hs):
+        def f(n):
+            if any(oc and o <= n < o + oc for o, oc, _ in hs):
+                return None
+            # A hunk changing oc lines from o, or adding after line o when oc is 0, ends before n here.
+            return n + sum(d for o, oc, d in hs if (o + oc if oc else o + 1) <= n)
+        return f
+    return {**{p: mover(hs) for p, hs in hunks.items()}, **{p: (lambda n: None) for p in gone}}
+
+
+def merge_base(base, head):
+    """The commit `git diff BASE...HEAD` diffs from."""
+    return subprocess.run(["git", "merge-base", base, head], cwd=ROOT, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def base_text(mb, path):
+    """The text of path in commit mb when it is a regular file there, else None (a link is not read)."""
+    r = subprocess.run(["git", "ls-tree", mb, "--", path], cwd=ROOT, capture_output=True, text=True, check=True)
+    if not r.stdout.startswith(("100644 ", "100755 ")):
+        return None
+    blob = subprocess.run(["git", "cat-file", "blob", f"{mb}:{path}"], cwd=ROOT, capture_output=True, check=True)
+    return blob.stdout.decode("utf-8", "replace")
+
+
+def base_changed_tests(btests, pkg, mb, head_names):
+    """Sorted names of the base's test functions holding the base lines btests names in
+    broker/<pkg>/, or None for every test. head_names None (a change every head test may run, such as
+    a new file's init or a helper) is every base test too, so no head-wide change hides a base test."""
+    if head_names is None:
+        return None
+    names = set()
+    for path, lines in sorted(btests.items()):
+        if package_of(path) != pkg:
+            continue
+        text = None if lines is None else base_text(mb, path)
+        found = None if text is None else test_functions(text, lines)
+        if found is None:
+            return None
+        names |= found
+    return sorted(names)
+
+
+def bases_for(diff_text, base, head, tests, pkgs):
+    """{pkg: base_changed_tests} for each of pkgs whose tests the diff changes."""
+    pkgs = [pkg for pkg in pkgs if tests_changed(tests, pkg)]
+    if not pkgs:
+        return {}
+    mb, btests = merge_base(base, head), base_test_lines(diff_text)
+    return {pkg: base_changed_tests(btests, pkg, mb, changed_tests(tests, pkg)) for pkg in pkgs}
+
+
 def test_functions(text, lines):
     """The names of the test functions holding lines (1-based) of a _test.go file's text, or None
     when one is outside every test function: a helper, TestMain, a method, a declaration or the
@@ -320,27 +445,47 @@ def changed_tests(tests, pkg):
     return sorted(names)
 
 
-def targets_for(pkg, added, tests, data):
+def _recorded_lines(pkg, lines):
+    """({path: lines}, None) of a record's {name: [line]}, or (None, problem)."""
+    out = {}
+    for name, ls in lines.items():
+        f = BROKER / pkg / name if isinstance(name, str) else None
+        if (f is None or "/" in name or "\\" in name or not is_source(name) or f.is_symlink() or not f.is_file()
+                or not isinstance(ls, list) or not all(type(n) is int and n > 0 for n in ls)):
+            return None, f"records covered lines {str(name)[:80]!r}: {str(ls)[:80]}, not lines of a non-test .go file in broker/{pkg}/"
+        out[f"broker/{pkg}/{name}"] = set(ls)
+    return out, None
+
+
+def base_lines(data, pkg):
+    """{path: lines} a result's record names as covered by the base's changed tests (targets_for checks it)."""
+    rec = data.get("targets") if isinstance(data, dict) else None
+    base = rec.get("base") if isinstance(rec, dict) else None
+    if not isinstance(base, dict) or not isinstance(base.get("lines"), dict):
+        return {}
+    return _recorded_lines(pkg, base["lines"])[0] or {}
+
+
+def targets_for(pkg, added, tests, data, bases):
     """({path: lines}, None) of a claimed package's target lines, or (None, problem): the lines the
     diff adds to its non-test files there and, when the diff changes or deletes a test there, the
     lines those tests cover, from the record `run` wrote in data, which must name exactly the tests
-    changed_tests names here. A diff that also adds a non-test line keeps that widening (#5762)."""
+    changed_tests names here. A diff that also adds a non-test line keeps that widening (#5762).
+    The record's `base` part is the same for the base's version of the changed tests, run on the
+    base tree, its lines moved to the head's (bases[pkg] names the tests): a weakened or deleted test
+    covers nothing at the head, so only the base's run shows what it checked."""
     own = diff_targets(added, pkg)
     if not tests_changed(tests, pkg):
         return own, None
-    want = changed_tests(tests, pkg)
     rec = data.get("targets") if isinstance(data, dict) else None
-    if not isinstance(rec, dict) or rec.get("tests") != want or not isinstance(rec.get("lines"), dict):
-        return None, (f"holds no record of the lines that {'every test' if want is None else want} covers, "
-                      f"the tests this diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
-    out = {}
-    for name, lines in rec["lines"].items():
-        f = BROKER / pkg / name if isinstance(name, str) else None
-        if (f is None or "/" in name or "\\" in name or not is_source(name) or f.is_symlink() or not f.is_file()
-                or not isinstance(lines, list) or not all(type(n) is int and n > 0 for n in lines)):
-            return None, f"records covered lines {str(name)[:80]!r}: {str(lines)[:80]}, not lines of a non-test .go file in broker/{pkg}/"
-        out[f"broker/{pkg}/{name}"] = set(lines)
-    return union(own, out), None
+    base = rec.get("base") if isinstance(rec, dict) else None
+    for part, want, where in ((rec, changed_tests(tests, pkg), ""), (base, bases.get(pkg, ()), " at the base")):
+        if not isinstance(part, dict) or part.get("tests") != want or not isinstance(part.get("lines"), dict):
+            return None, (f"holds no record of the lines that {'every test' if want is None else want} covers{where}, "
+                          f"the tests this diff changes in broker/{pkg}/ (`mutgate.py run --git` writes it)")
+    out, problem = _recorded_lines(pkg, rec["lines"])
+    was, problem = (None, problem) if problem else _recorded_lines(pkg, base["lines"])
+    return (None, problem) if problem else (union(own, out, was), None)
 
 
 def waivers(body):
@@ -483,21 +628,22 @@ def result_problem(data, pkg, pkg_dir, added, sites=None):
     return None
 
 
-def covered_by(pkg, names, tmp):
+def covered_by(pkg, names, tmp, broker=None):
     """({path: lines}, None) of the non-test .go files directly in broker/<pkg>/ that the named
     test functions (every test, for None) run, from one -coverprofile run of the PR's tests (so in
     the untrusted job only); or (None, problem). A block's lines from its start to its end count."""
+    broker = BROKER if broker is None else broker
     profile = pathlib.Path(tmp) / "tests.cover"
     profile.unlink(missing_ok=True)
     cmd = ["go", "test", "-count=1", "-covermode=set", f"-coverprofile={profile}"]
     if names is not None:
         cmd += ["-run", "^(" + "|".join(names) + ")$"]
     # Its output goes to stderr: `plan` prints the matrix on stdout (#4961).
-    if subprocess.run([*cmd, "."], cwd=BROKER / pkg, stdout=sys.stderr).returncode or not profile.exists():
+    if subprocess.run([*cmd, "."], cwd=broker / pkg, stdout=sys.stderr).returncode or not profile.exists():
         return None, f"broker/{pkg}/'s tests {'(all)' if names is None else names} fail under -coverprofile"
     out = {}
     for name, blocks in covered_blocks(profile.read_text()).items():
-        f = BROKER / pkg / name
+        f = broker / pkg / name
         if is_source(name) and f.is_file() and not f.is_symlink():
             for (first, _), (last, _) in blocks:
                 out.setdefault(f"broker/{pkg}/{name}", set()).update(range(first, last + 1))
@@ -614,7 +760,43 @@ def coverage_record(names, targets):
     return {"tests": names, "lines": {p.rsplit("/", 1)[1]: sorted(ls) for p, ls in sorted(targets.items())}}
 
 
-def planned_targets(planned, pkg, added, tests):
+def base_covered(pkg, mb, names, tmp, diff_text):
+    """({path: head lines}, None) that the base's named tests (None: every test) cover in the base
+    tree's broker/<pkg>/, moved to their head lines (a line the diff changes or deletes is dropped:
+    a changed one is the diff's own); or (None, problem). The base tree is `git archive`d to tmp."""
+    tree = pathlib.Path(tmp) / "base-tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    tree.mkdir()
+    blob = subprocess.run(["git", "archive", "--format=tar", mb, "--", "broker"], cwd=ROOT, capture_output=True, check=True)
+    with tarfile.open(fileobj=io.BytesIO(blob.stdout)) as t:
+        t.extractall(tree, filter="data")
+    if not (tree / "broker" / pkg).is_dir():
+        return {}, None
+    got, problem = covered_by(pkg, names, tmp, tree / "broker")
+    if problem:
+        return None, f"at the base ({mb[:12]}), {problem}"
+    move, out = head_line_of(diff_text), {}
+    for p, ls in got.items():
+        f = BROKER / p.split("/", 1)[1]
+        if f.is_file() and not f.is_symlink():
+            out[p] = {h for n in ls if (h := move.get(p, lambda n: n)(n)) is not None}
+    return {p: ls for p, ls in out.items() if ls}, None
+
+
+def record_for(pkg, tests, bases, diff_text, base, tmp):
+    """(record, None) of the lines the changed tests of broker/<pkg>/ cover at the head and, as its
+    `base` part, at the base (#5762); or (None, problem). Runs the PR's tests: untrusted jobs only."""
+    names = changed_tests(tests, pkg)
+    covered, problem = covered_by(pkg, names, tmp)
+    if problem:
+        return None, problem
+    was, problem = base_covered(pkg, merge_base(base, "HEAD"), bases[pkg], tmp, diff_text)
+    if problem:
+        return None, problem
+    return {**coverage_record(names, covered), "base": coverage_record(bases[pkg], was)}, None
+
+
+def planned_targets(planned, pkg, added, tests, bases):
     """({path: lines}, None) of a package's target lines with plan's --targets-out record, or
     (None, problem). The record is checked as verify checks the one a result carries (targets_for).
     A package the plan does not name is a problem, never a coverage run here: that run could name
@@ -622,7 +804,7 @@ def planned_targets(planned, pkg, added, tests):
     rec = planned.get(pkg) if isinstance(planned, dict) else None
     if rec is None:
         return None, f"the plan names no target lines for broker/{pkg}/; rerun the mutgate workflow"
-    targets, problem = targets_for(pkg, added, tests, {"targets": rec})
+    targets, problem = targets_for(pkg, added, tests, {"targets": rec}, bases)
     return (None, f"the plan {problem}") if problem else (targets, None)
 
 
@@ -646,7 +828,9 @@ def cmd_run(args):
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    added, tests = added_lines(broker_diff(args.git, "HEAD")) if args.git else (None, None)
+    diff = broker_diff(args.git, "HEAD") if args.git else None
+    added, tests = added_lines(diff) if args.git else (None, None)
+    bases = bases_for(diff, args.git, "HEAD", tests, pkgs) if args.git else {}
     planned = None
     if args.targets is not None:
         try:
@@ -669,13 +853,12 @@ def cmd_run(args):
             # A diff that changes or deletes tests (#4908): the lines its changed test functions run
             # are targets too, beside any line it adds (#5762), from plan's one coverage run when
             # given, so every shard names the same lines (#4970).
-            names = changed_tests(tests, pkg)
             if planned is not None:
-                full, problem = planned_targets(planned, pkg, added, tests)
+                full, problem = planned_targets(planned, pkg, added, tests, bases)
                 record = None if problem else planned[pkg]
             else:
-                covered, problem = covered_by(pkg, names, cfgdir.name)
-                full, record = (None, None) if problem else (union(targets, covered), coverage_record(names, covered))
+                record, problem = record_for(pkg, tests, bases, diff, args.git, cfgdir.name)
+                full, problem = (None, problem) if problem else targets_for(pkg, added, tests, {"targets": record}, bases)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
                 bad += 1
@@ -1064,7 +1247,9 @@ def add_mutants(data, mutants):
 
 def cmd_delete(args):
     out = pathlib.Path(args.out).resolve()
-    added, tests = added_lines(broker_diff(args.git, "HEAD"))
+    diff = broker_diff(args.git, "HEAD")
+    added, tests = added_lines(diff)
+    bases = bases_for(diff, args.git, "HEAD", tests, args.pkg)
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -1082,7 +1267,7 @@ def cmd_delete(args):
                 print(f"mutgate: {dest} is not one gremlins result without deletions", file=sys.stderr)
                 bad += 1
                 continue
-            targets, problem = targets_for(pkg, added, tests, data)
+            targets, problem = targets_for(pkg, added, tests, data, bases)
             if not problem and (shard := shard_of(data)) is None:
                 problem = f"{dest} records a shard that is not 0 <= index < of <= {MATRIX_MAX}"
             mutants, problem = (None, problem) if problem else deletion_mutants(pkg, targets, tmp, lister, args.jobs, shard)
@@ -1094,7 +1279,7 @@ def cmd_delete(args):
     return 1 if bad else 0
 
 
-def read_results(pkgs, root, added, tests, lister):
+def read_results(pkgs, root, added, tests, lister, bases):
     """({pkg: (data, targets)}, problems) for each package's shards under root/*/, each rechecked as
     `run` and `delete` check it, with the deletion sites listed here (#4106, #4602), then joined (#4961)."""
     out, problems = {}, []
@@ -1112,7 +1297,7 @@ def read_results(pkgs, root, added, tests, lister):
             except (OSError, ValueError) as e:
                 problem = f"no readable result for {pkg} ({f}: {e})"
                 break
-        joined, problem = (None, problem) if problem else join_shards(pkg, shards, added, tests, lister)
+        joined, problem = (None, problem) if problem else join_shards(pkg, shards, added, tests, lister, bases)
         if problem:
             problems.append(problem)
             continue
@@ -1124,7 +1309,7 @@ TOTALS = ("mutants_total", "mutants_killed", "mutants_lived", "mutants_not_viabl
           "statement_deletions")
 
 
-def join_shards(pkg, shards, added, tests, lister):
+def join_shards(pkg, shards, added, tests, lister, bases):
     """((data, targets), None) of one package's shards [(file, data)] joined, or (None, problem).
     The shards must agree on K and on the target lines, number 0..K-1 once each, and each must pass
     `run`'s and `delete`'s checks on its own lines and sites with no mutant on another shard's line."""
@@ -1139,7 +1324,7 @@ def join_shards(pkg, shards, added, tests, lister):
                 return None, f"{f} and {seen[shard]} are both results for {pkg}: one run gives one result"
             return None, f"{f} and {seen[shard]} are both shard {shard[0]} of {shard[1]} for {pkg}: shards overlap"
         seen[shard] = f
-        mine, problem = targets_for(pkg, added, tests, data)
+        mine, problem = targets_for(pkg, added, tests, data, bases)
         if problem:
             return None, f"{f} {problem}"
         if targets is None:
@@ -1200,7 +1385,8 @@ def cmd_verify(args):
         # The base's lister reads the PR's files as data (go/parser) and runs none of their code (#4602).
         if (lister := build_lister(tmp)) is None:
             return 1
-        results, problems = read_results(pkgs, args.dir, added, tests, lister)
+        results, problems = read_results(pkgs, args.dir, added, tests, lister,
+                                         bases_for(diff, args.git, args.head, tests, pkgs))
     for problem in problems:
         print(f"mutgate: {problem}", file=sys.stderr)
     if problems:
@@ -1213,9 +1399,11 @@ def decide(results, added, tests, args):
     waived = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
     targets = {pkg: t for pkg, (_, t) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived)
+    lost = violations({pkg: base_lines(d, pkg) for pkg, (d, _) in results.items()},
+                      {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived)
     tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)}))
-    return report_violations(found)
+    return report_violations(found, lost)
 
 
 def write_summary(path, text):
@@ -1241,6 +1429,7 @@ def summary(results, tested, waived, own=()):
     lines = ["### mutgate", ""]
     rows, used = [], set()
     for pkg, (data, targets) in sorted(results.items()):
+        was = base_lines(data, pkg)
         n = sum(len(v) for v in targets.values())
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
             "the lines the diff changes" if pkg not in tested
@@ -1260,6 +1449,11 @@ def summary(results, tested, waived, own=()):
                     rank, verdict = 1, "equivalent: " + cell(reason)
                 elif status == "LIVED":
                     rank, verdict = 0, "**LIVED**: no test fails"
+                elif status == "NOT COVERED" and m["line"] in was.get(path, ()) and reason:
+                    used.add((path, m["line"]))
+                    rank, verdict = 1, "equivalent: " + cell(reason)
+                elif status == "NOT COVERED" and m["line"] in was.get(path, ()):
+                    rank, verdict = 0, "**NOT COVERED**: the base's tests ran it, no test does now"
                 elif status == "KILLED":
                     by = m.get("killed_by")
                     rank, verdict = 2, (f"killed by {cell(by)}" if isinstance(by, str) and FAILED.fullmatch(
@@ -1332,20 +1526,21 @@ def cmd_plan(args):
     diff = broker_diff(args.git, "HEAD")
     added, tests = added_lines(diff)
     include, planned = [], {}
+    bases = bases_for(diff, args.git, "HEAD", tests, claimed(diff))
     with tempfile.TemporaryDirectory() as tmp:
         if (lister := build_lister(tmp)) is None:
             return 1
         for pkg in claimed(diff):
             targets = diff_targets(added, pkg)
             if tests_changed(tests, pkg):
-                names = changed_tests(tests, pkg)
-                covered, problem = covered_by(pkg, names, tmp)
+                record, problem = record_for(pkg, tests, bases, diff, args.git, tmp)
+                if not problem:
+                    targets, problem = targets_for(pkg, added, tests, {"targets": record}, bases)
                 if problem:
                     print(f"mutgate: {problem}", file=sys.stderr)
                     return 1
                 # The one coverage run every shard reads (#4970): a run of their own could differ.
-                planned[pkg] = coverage_record(names, covered)
-                targets = union(targets, covered)
+                planned[pkg] = record
             sites, problem = deletion_sites(pkg, targets, lister)
             if problem:
                 print(f"mutgate: {problem}", file=sys.stderr)
@@ -1378,14 +1573,16 @@ def cmd_claimed(args):
 
 def cmd_gate(args):
     """`verify` without its checks, on DIR/<pkg>.json as `run` and `delete` write them (local use)."""
-    added, tests = added_lines(broker_diff(args.git, args.head))
+    diff = broker_diff(args.git, args.head)
+    added, tests = added_lines(diff)
+    bases = bases_for(diff, args.git, args.head, tests, touched(added, tests))
     results, bad = {}, 0
     for pkg in sorted(touched(added, tests)):
         try:
             data = json.loads((pathlib.Path(args.dir) / result_name(pkg)).read_text())
         except (OSError, ValueError):
             continue
-        targets, problem = targets_for(pkg, added, tests, data)
+        targets, problem = targets_for(pkg, added, tests, data, bases)
         if problem:
             print(f"mutgate: {pkg} {problem}", file=sys.stderr)
             bad += 1
@@ -1394,11 +1591,15 @@ def cmd_gate(args):
     return decide(results, added, tests, args) or (1 if bad else 0)
 
 
-def report_violations(found):
+def report_violations(found, lost=()):
     for pkg, path, line, kind in found:
         # A deletion's line is the first added line of its statement, which may start earlier (#4603).
         what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
         print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests")
+    for pkg, path, line, kind in sorted(set(lost)):
+        print(f"mutgate: {path}:{line} is run by the base's version of the tests this PR changes, and by no "
+              f"test of package {pkg} at the head ({kind} not covered): the PR drops a test of it")
+    found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
               "`Mutant-equivalent: <path>:<line> <reason>` to the PR body for that site")
