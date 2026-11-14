@@ -638,22 +638,41 @@ class BootLinksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertNotIn("/run/agentos-x", self.links(d, {"/etc/tmpfiles.d/x.conf": "-> /dev/null"}))
 
-    # #5703 Security 6872820441: a package .mount unit hides the tree's content under its Where= at boot,
-    # so what the tree holds at an L path, mounted over or not, never drops the link: with nothing there it
-    # counts, and with a tree entry there the run fails (L3 6872965749, RetainedEntryTest).
-    def test_a_tree_entry_under_a_package_mount_does_not_stop_the_link(self):
-        mount = {"/usr/lib/tmpfiles.d/foo.conf": "L /var/lib/foo/s - - - - /run/agentos-x/s\n",
-                 "/usr/lib/systemd/system/var-lib-foo.mount":
-                     "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nOptions=nosuid,nodev,noexec\n",
-                 "/usr/lib/systemd/system/local-fs.target.wants/var-lib-foo.mount": "-> ../var-lib-foo.mount"}
-        for more in ({}, {"/var/agentos-x/.keep": ""}):
-            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
-                got = r.boot_links(tree(d, {**mount, **more}))
-                self.assertEqual(got.get("/var/lib/foo/s"), "/run/agentos-x/s")
-        for more in ({"/var/lib/foo/s/.keep": ""}, {"/var/lib/foo/s": "a file"}):
-            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "a plain L leaves in place"):
-                    r.boot_links(tree(d, {**mount, **more}))
+    # #5703 Security 6872820441: a .mount unit hides the tree's content under its Where= at boot, so what the
+    # tree holds at an L path under a mount never drops the link. #5708 (L3 release on #5703): the mounted
+    # file system may hold an entry there that a plain L leaves in place, so a plain L at, under or above a
+    # mount fails the run, whatever the tree holds; L+ removes the entry, so its link counts.
+    MOUNT = {"/usr/lib/systemd/system/var-lib-foo.mount":
+             "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nOptions=nosuid,nodev,noexec\n",
+             "/usr/lib/systemd/system/local-fs.target.wants/var-lib-foo.mount": "-> ../var-lib-foo.mount"}
+
+    def test_a_plain_l_at_under_or_above_a_mount_fails_the_run(self):
+        for mod in ("L", "L?", "L!", "L$"):
+            for path in ("/var/lib/foo", "/var/lib/foo/s", "/var/lib/foo/a/s", "/var/lib"):
+                for more in ({}, {path + "/.keep": ""}):
+                    line = {"/usr/lib/tmpfiles.d/foo.conf": "%s %s - - - - /run/agentos-x/s\n" % (mod, path)}
+                    with self.subTest(mod=mod, path=path, more=more), tempfile.TemporaryDirectory() as d:
+                        with self.assertRaisesRegex(SystemExit, "L line .*: its path is at, under or above "
+                                                    "/var/lib/foo, where a .mount or .automount unit mounts .*; "
+                                                    "use L\\+, or move the line off the mount"):
+                            r.boot_links(tree(d, {**self.MOUNT, **line, **more}))
+
+    def test_an_l_plus_under_a_mount_or_a_plain_l_beside_one_counts(self):
+        for line, key in (("L+ /var/lib/foo/s - - - - /run/agentos-x/s", "/var/lib/foo/s"),
+                          ("L /var/lib/foobar - - - - /run/agentos-x/s", "/var/lib/foobar"),
+                          ("L /var/lib/fo - - - - /run/agentos-x/s", "/var/lib/fo")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                got = r.boot_links(tree(d, {**self.MOUNT, "/usr/lib/tmpfiles.d/foo.conf": line + "\n"}))
+                self.assertEqual(got.get(key), "/run/agentos-x/s")
+
+    def test_mount_points_read_every_mount_and_automount_name(self):
+        files = {ETC + "var-lib-foo.mount": "x", "/usr/lib/systemd/system/proc-sys-fs-binfmt_misc.automount": "x",
+                 "/run/systemd/generator/srv-a\\x2db.mount": "x", "/run/systemd/generator/-.mount": "x",
+                 "/usr/lib/systemd/system/tmp.mount": "x", "/usr/lib/systemd/system/x.service": "x",
+                 ETC + "local-fs.target.wants/opt-pkg.mount": "-> /usr/lib/systemd/system/opt-pkg.mount"}
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(r.mount_points(tree(d, files)),
+                             ["/opt/pkg", "/proc/sys/fs/binfmt_misc", "/srv/a-b", "/var/lib/foo"])
 
     def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
         # A tree link under a mount the reader cannot see is not there at boot, so none is followed.
@@ -682,7 +701,9 @@ class RetainedEntryTest(unittest.TestCase):
                           {"/var/pkglink": "a file"}, {"/var/pkglink": "-> /run/pkgdir/x"}):
                 line = {"/usr/lib/tmpfiles.d/x.conf": "%s /var/pkglink - - - - /run/pkgdir\n" % mod}
                 with self.subTest(mod=mod, entry=entry), tempfile.TemporaryDirectory() as d:
-                    with self.assertRaisesRegex(SystemExit, "the tree already holds /var/pkglink there"):
+                    with self.assertRaisesRegex(SystemExit, "L line '.*/var/pkglink .*': the tree already has an "
+                                                "entry there, which a plain L leaves in place; use L\\+, remove "
+                                                "the entry, or make it a link to the same target"):
                         r.boot_links(tree(d, {**line, **entry}))
 
     def test_a_tree_link_to_the_same_target_or_l_plus_passes(self):
@@ -724,10 +745,11 @@ class MagicLinkTest(unittest.TestCase):
                      "L /run/pkglink - - - - /run/x/./y",
                      "L /run/a - - - - /run/lock\nL /run/pkglink - - - - /run/a/../../proc/self/root/run/agentos-x"):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "a target with . or .. the reader does not follow"):
+                with self.assertRaisesRegex(SystemExit, "/run/pkglink: a link .* resolving to .*, which keeps a "
+                                            "\\. or \\.\\. component .*; write the target without \\. or \\.\\."):
                     r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"}))
         with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(SystemExit, "/etc/pkglink: a link to .*, a target with . or .."):
+            with self.assertRaisesRegex(SystemExit, "/etc/pkglink: a link .* resolving to .*, which keeps a \\. or"):
                 r.boot_links(tree(d, {"/etc/pkglink": "-> /run/systemd/../../proc/self/root/run/agentos-x"}))
 
     def test_the_images_own_api_targets_pass(self):
@@ -789,6 +811,30 @@ class CopyLineTest(unittest.TestCase):
             with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
                 with self.assertRaisesRegex(SystemExit, "C line .*: an L line makes a link at, under or above "
                                                         "its source, %s" % at):
+                    r.boot_links(tree(d, files))
+
+    # #5708 item 6: a mount at, under or above the source supplies it at boot, so a link the tree walk never
+    # saw may be copied; the run fails whatever the tree holds there.
+    def test_a_source_at_under_or_above_a_mount_fails_the_run(self):
+        mount = {"/usr/lib/systemd/system/usr-share-pkg.mount": "[Mount]\nWhat=tmpfs\nWhere=/usr/share/pkg\n",
+                 "/usr/share/pkg/d/f": "x", "/usr/share/f": "x"}
+        for src in ("/usr/share/pkg", "/usr/share/pkg/d", "/usr/share"):
+            with self.subTest(src=src), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is at, under or above /usr/share/pkg, "
+                                                        "where a .mount or .automount unit mounts .*; copy from a "
+                                                        "path no mount covers"):
+                    self.run_line(d, "C /run/x - - - - " + src, mount)
+        with tempfile.TemporaryDirectory() as d:  # a source beside the mount is read from the tree
+            self.assertNotIn("/run/x", self.run_line(d, "C /run/x - - - - /usr/share/pkgx", {**mount, "/usr/share/pkgx": "x"}))
+
+    def test_a_refused_source_names_its_remedy(self):
+        for files, want in (
+                ({"/usr/lib/tmpfiles.d/x.conf": "L /usr/share/pkg/l - - - - /run/agentos-x\nC /run/x - - - - /usr/share/pkg\n",
+                  "/usr/share/pkg/f": "x"}, "; drop the L line or move the source"),
+                ({"/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /etc/pkg\n", "/etc/pkg": "x"},
+                 "not under /usr, the one tree no service writes between boots .*; copy from /usr")):
+            with self.subTest(want=want), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, want):
                     r.boot_links(tree(d, files))
 
     def test_a_source_outside_usr_fails_the_run(self):
