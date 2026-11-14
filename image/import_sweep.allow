@@ -22,11 +22,22 @@
 /usr/bin/sed
 /usr/bin/tac
 
-# The guests' bash: an agent-driven shell inside the guest sandbox, linking the guest's own glibc
-# (the image/guest -100290 record).
-/usr/lib/agentos/images/*/bin/bash
+# Tools that import only glibc's rpmatch, which runs the locale's YESEXPR on a yes/no answer to an
+# interactive prompt (cp -i, rm -i and the like).
+/usr/bin/cp
+/usr/bin/install
+/usr/bin/ln
+/usr/bin/mv
+/usr/bin/rename.ul
+/usr/bin/rm
 
-# libsmartcols (filters) and the util-linux tools that need it.
+# The guests' bash, an agent-driven shell inside the guest sandbox, and their rm (rpmatch), both
+# linking the guest's own glibc (the image/guest -100290 record).
+/usr/lib/agentos/images/*/bin/bash
+/usr/lib/agentos/images/*/bin/rm
+
+# libsmartcols (filters, and rpmatch) and the util-linux tools that need it; fdisk, sfdisk and cfdisk
+# also import rpmatch for their prompts.
 /usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
 /usr/bin/findmnt
 /usr/bin/lsblk
