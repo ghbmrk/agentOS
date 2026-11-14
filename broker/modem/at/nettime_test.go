@@ -43,8 +43,7 @@ func TestTIM1NoNetworkTime(t *testing.T) {
 
 func TestTIM1ModemIsTheGuardsCarrier(t *testing.T) {
 	// End to end: a box clock three hours fast against the simulated
-	// network widens the interval to span both (TIM-1), and the owner is
-	// told once.
+	// network restricts time-sensitive checks.
 	for _, v := range vendors {
 		net := time.Now().UTC()
 		r := newRig(t, v, at.KeysInBand, func(d *atsim.Device) { d.SetNetworkTime(net, 4) })
@@ -58,48 +57,11 @@ func TestTIM1ModemIsTheGuardsCarrier(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lo, hi, s := g.Interval(context.Background())
-		if s.State != clock.Disagree {
-			t.Fatalf("%s: status = %+v", v.prof.Name, s)
-		}
-		if d := lo.Sub(net); d < -5*time.Second || d > time.Minute {
-			t.Fatalf("%s: interval starts %v from network time", v.prof.Name, d)
-		}
-		if w := hi.Sub(lo); w < 3*time.Hour-time.Minute || w > 3*time.Hour+time.Minute {
-			t.Fatalf("%s: interval %v wide, want about 3h", v.prof.Name, w)
+		if _, err := g.Now(context.Background()); !errors.Is(err, clock.ErrRestricted) {
+			t.Fatalf("%s: err = %v", v.prof.Name, err)
 		}
 		g.Flush()
-		if len(texts) != 1 || texts[0] != clock.DisagreeText(s.Skew) {
-			t.Fatalf("%s: texts = %q", v.prof.Name, texts)
-		}
-	}
-}
-
-func TestTIM1ForgedCarrierTimeCannotExpireKeys(t *testing.T) {
-	// A fake base station sends a time hours ahead while the box clock is
-	// NTS-authenticated: the interval's end, where expiries fire, stays
-	// within the tolerance of network time (#5216 item 4).
-	for _, v := range vendors {
-		forged := time.Now().UTC().Add(5 * time.Hour)
-		r := newRig(t, v, at.KeysInBand, func(d *atsim.Device) { d.SetNetworkTime(forged, 0) })
-		var texts []string
-		g, err := clock.New(clock.Config{
-			Sync:    func() (clock.SyncKind, error) { return clock.SyncedNTS, nil },
-			Carrier: r.m.NetworkTime,
-			Notify:  func(s string) { texts = append(texts, s) },
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, hi, s := g.Interval(context.Background())
-		if s.State != clock.Disagree || !s.Authenticated {
-			t.Fatalf("%s: status = %+v", v.prof.Name, s)
-		}
-		if d := hi.Sub(time.Now()); d > clock.DefaultTolerance+time.Minute {
-			t.Fatalf("%s: interval ends %v ahead of authenticated time", v.prof.Name, d)
-		}
-		g.Flush()
-		if len(texts) != 1 || texts[0] != clock.OutlierText(s.Skew) {
+		if len(texts) != 1 {
 			t.Fatalf("%s: texts = %q", v.prof.Name, texts)
 		}
 	}

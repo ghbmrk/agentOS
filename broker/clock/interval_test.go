@@ -399,3 +399,22 @@ func TestTIM1HoldEscalatesToAnOutlierEvenAtTheCap(t *testing.T) {
 		t.Fatalf("status = %+v, texts = %q, want OutlierText fourth", s, got)
 	}
 }
+
+func TestTIM1AuthenticatedOutlierIsToldOnce(t *testing.T) {
+	// mutgate on #5754 (clock.go, the `break` after OutlierText): later
+	// checks of the same authenticated disagreement, with room under the
+	// cap, send nothing more, and never DisagreeText.
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	g := r.guard(t, nts)
+	s := g.Check(bg)
+	for i := 0; i < 2; i++ {
+		r.advance(10 * time.Minute)
+		if s2 := g.Check(bg); s2.State != Disagree || !s2.Authenticated {
+			t.Fatalf("check %d: status = %+v", i, s2)
+		}
+	}
+	if got := r.sent(); len(got) != 1 || got[0] != OutlierText(s.Skew) {
+		t.Fatalf("texts = %q, want only %q", got, OutlierText(s.Skew))
+	}
+}

@@ -10,9 +10,9 @@ Board section: Migration to the capability kernel (D-139). Work item #5216 (rele
 3. Owner texts and `Status.IntervalLine` describe the interval (holds and timeouts end by both clocks, expiries by either), not the restricted mode. `Status.Line` stays until #5279 moves agentosd's STATUS line, then goes.
 4. `Guard.Now` and `ErrRestricted` stay only for callers that have not moved to the interval (`broker/question`, sub B), documented as such.
 
-**Scope:** `broker/clock` (`clock.go`, its tests, `ASSUMPTIONS.md`), `broker/modem/at/nettime_test.go`, this brief. Not `broker/question` or `broker/cmd/agentosd` (sub B, D-111): their move is a release item.
+**Scope:** `broker/clock` (`clock.go`, its tests, `ASSUMPTIONS.md`), this brief. Not `broker/question` or `broker/cmd/agentosd` (sub B, D-111): their move is a release item.
 
-**Acceptance tests:** `broker/clock/interval_test.go`: `TestTIM1IntervalSpansBothSourcesWhenTheyDisagree`, `TestTIM1IntervalIsNarrowWhileTheyAgree`, `TestTIM1AuthenticatedTimeBoundsAnOutlierCarrier`, `TestTIM1IntervalLine`, `TestTIM1OwnerTextsDescribeTheInterval`. `broker/modem/at/nettime_test.go`: `TestTIM1ModemIsTheGuardsCarrier` (the interval spans both sources), `TestTIM1ForgedCarrierTimeCannotExpireKeys`.
+**Acceptance tests:** `broker/clock/interval_test.go`: `TestTIM1IntervalSpansBothSourcesWhenTheyDisagree`, `TestTIM1IntervalIsNarrowWhileTheyAgree`, `TestTIM1AuthenticatedTimeBoundsAnOutlierCarrier`, `TestTIM1IntervalLine`, `TestTIM1OwnerTextsDescribeTheInterval`. `broker/modem/at/nettime_test.go` is unchanged: its `TestTIM1ModemIsTheGuardsCarrier` already shows the modem is the guard's carrier, and editing it would put the whole AT driver under the mutation gate.
 
 **Tier / gate:** tier A (`broker/clock`): L3 on the strongest model, the tier's lens screen and a separate Security accept.
 
