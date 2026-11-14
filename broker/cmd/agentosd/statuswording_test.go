@@ -156,6 +156,13 @@ func TestMachinesPathUnreachableIsASettingNotARestart(t *testing.T) {
 	if l := machinesOffLine(fmt.Errorf("vm: %w", vm.ErrStateDirUnreachable)); l != agentMachinesUnsafe {
 		t.Errorf("wrapped unreachable: %q", l)
 	}
+	// STATUS-wording-f2 (#5648): one line serves an exposed path and an
+	// unwalkable one, so it names neither cause alone ("unsafe place"
+	// sends the installer looking for an exposure that is not there).
+	const want = "Agent and worker tools: off, I cannot safely use their files; whoever set me up must move them."
+	if agentMachinesUnsafe != want {
+		t.Errorf("agentMachinesUnsafe %q, want %q", agentMachinesUnsafe, want)
+	}
 }
 
 // REV-CHK-links-vm-ux (#4976): a -machines path vm.Open refuses is a
@@ -194,6 +201,14 @@ func TestMachinesPathRefusalIsASettingNotARestart(t *testing.T) {
 		"Model: off; a restart cannot fix it.", "Model: off; restarting does nothing.", "Model: off; a restart is no fix.", "Model: off; nothing helps."} {
 		if ownerWorded(l) == nil {
 			t.Errorf("ownerWorded accepts %q", l)
+		}
+	}
+	// STATUS-wording-f2 (#5648): a clause that does name a working step
+	// is accepted, though it holds a word the refusals use.
+	for _, l := range []string{"Model: off; nothing will be lost; restart me.", "Model: off; do nothing; a later box version turns it on.",
+		"Model: off; no fixed plan is set; connect one on the setup page.", "Model: off; nothing to do; a later box version adds this."} {
+		if err := ownerWorded(l); err != nil {
+			t.Errorf("ownerWorded refuses %q: %v", l, err)
 		}
 	}
 	for _, want := range []string{"absolute", "clean", "symbolic link", "root", "group", "sticky"} {

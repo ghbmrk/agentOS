@@ -27,7 +27,7 @@ import (
 // The fix clauses are the brief's Q1 default (open with Mark): kept here
 // so a rewording is one edit.
 const (
-	fixUpdate  = "nothing to do; a later box version adds it"
+	fixUpdate  = "nothing to do; a later box version adds this"
 	fixRestart = "restart me"
 )
 
@@ -42,11 +42,11 @@ const (
 	// C1: the -machines path is one vm.Open refuses (vm.ErrStateDirExposed,
 	// #4976) or cannot walk (vm.ErrStateDirUnreachable, #5617): a setting
 	// to fix, which a restart does not; the step is the same for both.
-	agentMachinesUnsafe = "Agent and worker tools: off, their files are in an unsafe place; whoever set me up must move them."
+	agentMachinesUnsafe = "Agent and worker tools: off, I cannot safely use their files; whoever set me up must move them."
 	// C1: the agent's image or launch file is missing.
 	agentNoSoftware = "Agent software: missing here, so it is not set up; " + fixUpdate + "."
 	// C2: no model route is configured.
-	modelUnset = "Model: not set up, so your agent cannot think or learn; " + fixUpdate + "."
+	modelUnset = "Model: not set up, so the agent cannot think or learn; " + fixUpdate + "."
 	// C2: the model route does not answer.
 	modelUnreachable = "Model: not reachable, so your agent cannot think; " + fixRestart + "."
 	// C2: no model provider is granted (A11's no-grant cause): no -grant
@@ -331,8 +331,11 @@ func ownerWorded(l string) error {
 
 // onlyNegates is a fix clause that says only what will not fix the line:
 // "will not fix", "cannot help" ("cannot" is the house form, S9), "does
-// nothing", "is no fix", "nothing helps" (#5632).
-var onlyNegates = regexp.MustCompile(`(?i)\b((not|never|cannot) (fix|help|clear|work)|(does|do|did|will) nothing|no (fix|help|cure)|nothing (helps|works|fixes|will))`)
+// nothing", "is no fix", "nothing helps" (#5632). Each verb group ends at
+// a word boundary, and "do nothing" and "nothing will" are left out, so a
+// clause that names a working step ("nothing will be lost; restart me",
+// "no fixed plan is set; ...") is not refused (#5648).
+var onlyNegates = regexp.MustCompile(`(?i)\b((not|never|cannot) (fix|help|clear|work)\b|(does|did|will) nothing\b|no (fix|help|cure)\b|nothing (helps|works|fixes)\b)`)
 
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
