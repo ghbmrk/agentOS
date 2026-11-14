@@ -98,6 +98,7 @@ TIER_A_BROKER = {
     "recovery",
     # (b) gates an effect or approval
     "apply", "card", "claim", "clock", "firstboot",
+    "change",                     # the change store; an allow-line package until #2785 c3 deleted its pipeline, and c4 deletes it
     "follow",                     # switches the update root of trust
     "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders

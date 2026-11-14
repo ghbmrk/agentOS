@@ -807,6 +807,11 @@ func TestChangeIntentDenied(t *testing.T) {
 		if st.State != journal.Denied || st.Permission.Reason != "the change pipeline is not running" {
 			t.Errorf("%s: %s %q", in.Action, st.State, st.Permission.Reason)
 		}
+		// Nor can the local page confirm one: ConfirmLocal takes only a
+		// pending grant, evidence or update-source intent.
+		if err := r.g.ConfirmLocal(in.ID); err == nil || !strings.Contains(err.Error(), "nothing to confirm") {
+			t.Errorf("%s: ConfirmLocal %v", in.Action, err)
+		}
 	}
 	if len(ex.ran) != 0 {
 		t.Fatalf("ran %q", ex.ran)

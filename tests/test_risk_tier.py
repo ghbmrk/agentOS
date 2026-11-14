@@ -412,10 +412,10 @@ class RiskTierTest(unittest.TestCase):
     # core write path is itself a core write path, so it is tier A)
     def test_allow_line_packages_are_a(self):
         allowed = rt.core_list()[2]
-        # change holds journal.Engine.Authorize/Dispatch and grants.Gate.Authorize/Dispatch.
-        self.assertIn("change", allowed)
-        self.assertEqual(rt.tier_of("broker/change/change.go"),
-                         ("A", "core list: broker/change/"))
+        # loops reads kernel.State.Ledger and records journal quality notes.
+        self.assertIn("loops", allowed)
+        self.assertEqual(rt.tier_of("broker/loops/doc.go"),
+                         ("A", "core list: broker/loops/"))
         for pkg in sorted(allowed):
             with self.subTest(pkg=pkg):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")

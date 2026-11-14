@@ -145,10 +145,10 @@ type Config struct {
 	// RecallExecutor, recalltool W10) once the owner approves them. Nil:
 	// none can run.
 	Recall journal.Executor
-	// BrokerExecutors are the broker's own setting executors (the change
-	// pipeline and the loop scheduler, W3). They declare no operations: no
-	// grant can name them, and only the intents the gate's Changes and
-	// Loops policies allow reach them.
+	// BrokerExecutors are the broker's own setting executors (the loop
+	// scheduler, W3; the change pipeline is deleted, #2785 c3). They declare
+	// no operations: no grant can name them, and only the intents the gate's
+	// Loops policy allows reach them.
 	BrokerExecutors map[string]journal.Executor
 	// Settings answers an owner text that is a box setting (the loop
 	// scheduler's Text) and HelpExtra is appended to HELP; Narrows marks
