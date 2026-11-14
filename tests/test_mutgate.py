@@ -1725,7 +1725,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:4 CONDITIONALS_NEGATION survives", r.stdout)
             # `return 10` only TestUp ran: no test runs it now.
-            self.assertIn("broker/hint/hint.go:5 is run by the base's version of the tests this PR changes", r.stdout)
+            self.assertIn("broker/hint/hint.go:5 is a target line no test of package hint runs at the head", r.stdout)
             self.assertIn("the lines the diff changes and the lines every test covers", summary.read_text())
             # The record is still required beside the added line: without it verify refuses.
             data = json.loads((out / "hint.json").read_text())
@@ -1736,13 +1736,16 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
             self.assertIn("holds no record of the lines that every test covers", r.stderr)
             self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
 
-    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None):
-        """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, and extra
-        {name: text} new files in broker/hint/), through plan, run, delete and verify."""
+    def gate_run(self, d, pr_test, base_test, src_pr=None, extra=None, move=None):
+        """(verify's result, the lines gremlins was given) for a PR of pr_test (and src_pr, extra
+        {name: text} new files in broker/hint/, and hint.go renamed to move), through plan, run,
+        delete and verify."""
         git = self.repo(d, pr_test, test_base=base_test, src_pr=src_pr)
         for name, text in (extra or {}).items():
             (pathlib.Path(d) / "broker" / "hint" / name).write_text(text)
-        if extra:
+        if move:
+            git("mv", "broker/hint/hint.go", f"broker/hint/{move}")
+        if extra or move:
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--amend", "--no-edit")
         env, plan = self.line_stub(d), pathlib.Path(d) / "targets.json"
@@ -1753,7 +1756,7 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         r = self.mutgate(d, "delete", "hint", "--git", "HEAD~1", "--out", str(out), "--jobs", "1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        seen = json.loads((pathlib.Path(d) / "seen-lines").read_text().splitlines()[0])["hint.go"]
+        seen = json.loads((pathlib.Path(d) / "seen-lines").read_text().splitlines()[0])[move or "hint.go"]
         self.assertEqual(git("status", "--porcelain", "--", "broker").stdout, "")
         return self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1"), set(seen)
 
@@ -1769,22 +1772,33 @@ open(a[a.index("-o") + 1], "w").write(json.dumps({{"files": files, "mutants_tota
         comment = TWO_SRC + "// Down is Up's inverse below the clamp.\n"
         main = ('package hint\n\nimport (\n\t"flag"\n\t"os"\n\t"testing"\n)\n\n'
                 'func TestMain(m *testing.M) {\n\tflag.Set("test.run", "^$")\n\tos.Exit(m.Run())\n}\n')
+        skip = base.replace(first, first + '\tt.Skip("flaky")\n')
+        outside = (base.replace('import "testing"', 'import (\n\t"os"\n\t"testing"\n)')
+                   .replace(first, first + '\tif _, err := os.Stat("../../tools/mutgate.py"); err != nil {\n\t\tt.Fatal(err)\n\t}\n'))
+        # Security on 87b77d3c: an edit to each line the skipped test ran, or a moved file, takes those
+        # lines out of the base record's mapping, so every target line of the package must run.
+        marked = "\n".join(row + (" // c" if n in (4, 5, 7) else "") for n, row in enumerate(TWO_SRC.split("\n"), 1))
         cases = {
-            "skip, beside an added line": (base.replace(first, first + '\tt.Skip("flaky")\n'), base, comment, None),
-            "early return, beside an added line": (base.replace(first, first + "\treturn\n"), base, comment, None),
-            "skip, test-only": (base.replace(first, first + '\tt.Skip("flaky")\n'), base, None, None),
-            "build tag": ("//go:build never\n\n" + base, base, comment, None),
+            "skip, beside an added line": (skip, base, comment, None, None),
+            "early return, beside an added line": (base.replace(first, first + "\treturn\n"), base, comment, None, None),
+            "skip, test-only": (skip, base, None, None, None),
+            "build tag": ("//go:build never\n\n" + base, base, comment, None, None),
             "the only test of Up deleted": (TWO_TEST[:TWO_TEST.index("func TestUp")] + TWO_TEST[TWO_TEST.index("func TestDown"):],
-                                            TWO_TEST, comment, None),
-            "a new file's TestMain runs no test": (base, base, comment, {"main_test.go": main}),
+                                            TWO_TEST, comment, None, None),
+            "a new file's TestMain runs no test": (base, base, comment, {"main_test.go": main}, None),
+            "skip, and the lines it ran edited": (skip, base, marked, None, None),
+            "skip, and the file moved": (skip, base, None, None, "clamp.go"),
+            # L3 on #5770: the base's tests read files outside broker/, so the whole base tree is archived.
+            "skip, where the base's test reads tools/": (outside.replace(first, first + '\tt.Skip("flaky")\n'),
+                                                         outside, comment, None, None),
         }
-        for name, (pr, was, src, extra) in cases.items():
+        for name, (pr, was, src, extra, move) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
-                r, seen = self.gate_run(d, pr, was, src, extra)
+                r, seen = self.gate_run(d, pr, was, src, extra, move)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertIn(5, seen)
-                self.assertIn("broker/hint/hint.go:5 is run by the base's version of the tests this PR changes, "
-                              "and by no test of package hint at the head", r.stdout)
+                self.assertIn(f"broker/hint/{move or 'hint.go'}:5 is a target line no test of package hint runs at the head",
+                              r.stdout)
 
     def test_a_helper_edit_beside_an_added_line_widens_to_every_covered_line(self):
         # #5753: a helper change reads as every test, and an added comment line used to narrow the
@@ -2141,10 +2155,11 @@ class Summary(unittest.TestCase):
         body = [l for l in text.split("\n") if l.startswith("| broker/")]
         self.assertEqual(body, [
             "| broker/p/a.go:2:1 | B | **LIVED**: no test fails |",
+            # The package's tests change ({"p": None}), so a target line no test runs fails (#5762).
+            "| broker/p/a.go:4:1 | D | **NOT COVERED**: the PR changes this package's tests, and none runs it |",
             "| broker/p/a.go:3:2 | STATEMENT\\_DELETION | killed by TestX |",
             "| broker/p/a.go:3:4 | STATEMENT\\_DELETION | killed |",
             "| broker/p/a.go:3:5 | C | killed (gremlins names no test) |",
-            "| broker/p/a.go:4:1 | D | not covered |",
             "| broker/p/a.go:4:2 | E | killed (timed out) |",
             "| broker/p/a.go:4:3 | F | not viable (does not build) |",
             "| broker/p/a.go:5:1 | G \\| broker/forged.go:1 \\| X \\| killed \\| | WEIRD STATUS |",

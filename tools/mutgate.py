@@ -47,8 +47,9 @@ no single test function holds (a helper, TestMain, an import, a deleted declarat
 every test, so the set is at most the package's covered lines. A weakened test (a t.Skip, an early
 return, a build tag, a deletion) runs nothing at the head, so the base's version of the changed
 tests (every base test when the head's change reaches every test) also runs, on a `git archive` of
-the base, its lines moved to the head's; the record holds both, and a mutant NOT COVERED on a line
-the base's tests ran fails the gate, as the PR drops a test of it (#5762). Coverage can differ from run to run
+the base, its lines moved to the head's; the record holds both. In a package whose tests change, a
+mutant NOT COVERED on any target line fails the gate (#5762): a weakened test plus an edit to the
+lines it ran, or a moved file, drops those lines from the base record's mapping. Coverage can differ from run to run
 (a timing branch, a retry), so in CI `plan` measures it once and every shard reads that one record
 (`--targets`), never a coverage run of its own: K shards of one package then name the same lines (#4970). Gremlins mutates a package's target
 lines only: its `-D` reads `git diff --merge-base`, so for a package whose tests changed `run` points HEAD for
@@ -90,7 +91,6 @@ import collections
 import concurrent.futures
 import contextlib
 import glob
-import io
 import json
 import math
 import os
@@ -159,8 +159,8 @@ def survivors(results_dir):
 
 
 def uncovered_of(data):
-    """[(file, line, type)] of NOT COVERED mutants in one package's JSON, sorted: on a line the base's
-    changed tests covered, the PR's tests run it no more (#5762), which no LIVED mutant shows."""
+    """[(file, line, type)] of NOT COVERED mutants in one package's JSON, sorted: on a target line of a
+    package whose tests change, no test runs it at the head (#5762), which no LIVED mutant shows."""
     return sorted(
         (m_file["file_name"], m["line"], m["type"])
         for m_file in data.get("files") or []
@@ -455,15 +455,6 @@ def _recorded_lines(pkg, lines):
             return None, f"records covered lines {str(name)[:80]!r}: {str(ls)[:80]}, not lines of a non-test .go file in broker/{pkg}/"
         out[f"broker/{pkg}/{name}"] = set(ls)
     return out, None
-
-
-def base_lines(data, pkg):
-    """{path: lines} a result's record names as covered by the base's changed tests (targets_for checks it)."""
-    rec = data.get("targets") if isinstance(data, dict) else None
-    base = rec.get("base") if isinstance(rec, dict) else None
-    if not isinstance(base, dict) or not isinstance(base.get("lines"), dict):
-        return {}
-    return _recorded_lines(pkg, base["lines"])[0] or {}
 
 
 def targets_for(pkg, added, tests, data, bases):
@@ -763,13 +754,17 @@ def coverage_record(names, targets):
 def base_covered(pkg, mb, names, tmp, diff_text):
     """({path: head lines}, None) that the base's named tests (None: every test) cover in the base
     tree's broker/<pkg>/, moved to their head lines (a line the diff changes or deletes is dropped:
-    a changed one is the diff's own); or (None, problem). The base tree is `git archive`d to tmp."""
+    a changed one is the diff's own, and decide fails every unrun target line of the package); or
+    (None, problem). The base's whole tree is `git archive`d to tmp."""
     tree = pathlib.Path(tmp) / "base-tree"
     shutil.rmtree(tree, ignore_errors=True)
     tree.mkdir()
-    blob = subprocess.run(["git", "archive", "--format=tar", mb, "--", "broker"], cwd=ROOT, capture_output=True, check=True)
-    with tarfile.open(fileobj=io.BytesIO(blob.stdout)) as t:
-        t.extractall(tree, filter="data")
+    # The whole tree, not only broker/: tests read files beside it (guest/, image/, tools/; L3 on #5770).
+    with subprocess.Popen(["git", "archive", "--format=tar", mb], cwd=ROOT, stdout=subprocess.PIPE) as git:
+        with tarfile.open(fileobj=git.stdout, mode="r|") as t:
+            t.extractall(tree, filter="data")
+    if git.returncode:
+        return None, f"`git archive {mb[:12]}` failed (exit {git.returncode})"
     if not (tree / "broker" / pkg).is_dir():
         return {}, None
     got, problem = covered_by(pkg, names, tmp, tree / "broker")
@@ -1399,7 +1394,9 @@ def decide(results, added, tests, args):
     waived = waivers(pathlib.Path(args.body).read_text(encoding="utf-8", errors="replace") if args.body else "")
     targets = {pkg: t for pkg, (_, t) in results.items()}
     found = violations(targets, {pkg: survivors_of(d) for pkg, (d, _) in results.items()}, waived)
-    lost = violations({pkg: base_lines(d, pkg) for pkg, (d, _) in results.items()},
+    # A package whose tests change must run every target line (#5762, Security on #5770): a weakened
+    # test plus an edit to the lines it ran (or a moved file) would otherwise leave them unrun unseen.
+    lost = violations({pkg: t for pkg, t in targets.items() if tests_changed(tests, pkg)},
                       {pkg: uncovered_of(d) for pkg, (d, _) in results.items()}, waived)
     tested = {pkg: changed_tests(tests, pkg) for pkg in results if tests_changed(tests, pkg)}
     write_summary(args.summary, summary(results, tested, waived, {pkg for pkg in results if diff_targets(added, pkg)}))
@@ -1429,7 +1426,6 @@ def summary(results, tested, waived, own=()):
     lines = ["### mutgate", ""]
     rows, used = [], set()
     for pkg, (data, targets) in sorted(results.items()):
-        was = base_lines(data, pkg)
         n = sum(len(v) for v in targets.values())
         lines.append(f"- {cell(pkg)}: {n} target lines, " + (
             "the lines the diff changes" if pkg not in tested
@@ -1449,11 +1445,11 @@ def summary(results, tested, waived, own=()):
                     rank, verdict = 1, "equivalent: " + cell(reason)
                 elif status == "LIVED":
                     rank, verdict = 0, "**LIVED**: no test fails"
-                elif status == "NOT COVERED" and m["line"] in was.get(path, ()) and reason:
+                elif status == "NOT COVERED" and pkg in tested and reason:
                     used.add((path, m["line"]))
                     rank, verdict = 1, "equivalent: " + cell(reason)
-                elif status == "NOT COVERED" and m["line"] in was.get(path, ()):
-                    rank, verdict = 0, "**NOT COVERED**: the base's tests ran it, no test does now"
+                elif status == "NOT COVERED" and pkg in tested:
+                    rank, verdict = 0, "**NOT COVERED**: the PR changes this package's tests, and none runs it"
                 elif status == "KILLED":
                     by = m.get("killed_by")
                     rank, verdict = 2, (f"killed by {cell(by)}" if isinstance(by, str) and FAILED.fullmatch(
@@ -1597,8 +1593,8 @@ def report_violations(found, lost=()):
         what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
         print(f"mutgate: {path}:{line} {what} survives, on a line of package {pkg} that this PR changes or tests")
     for pkg, path, line, kind in sorted(set(lost)):
-        print(f"mutgate: {path}:{line} is run by the base's version of the tests this PR changes, and by no "
-              f"test of package {pkg} at the head ({kind} not covered): the PR drops a test of it")
+        print(f"mutgate: {path}:{line} is a target line no test of package {pkg} runs at the head ({kind} not "
+              f"covered), and this PR changes that package's tests: cover it, or name it in a Mutant-equivalent line")
     found = [*found, *lost]
     if found:
         print("mutgate: add a test that fails when the line changes; if no test can tell, add a line "
