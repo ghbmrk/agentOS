@@ -639,16 +639,21 @@ class BootLinksTest(unittest.TestCase):
             self.assertNotIn("/run/agentos-x", self.links(d, {"/etc/tmpfiles.d/x.conf": "-> /dev/null"}))
 
     # #5703 Security 6872820441: a package .mount unit hides the tree's content under its Where= at boot,
-    # so what the tree holds at an L path, mounted over or not, never stops the link.
+    # so what the tree holds at an L path, mounted over or not, never drops the link: with nothing there it
+    # counts, and with a tree entry there the run fails (L3 6872965749, RetainedEntryTest).
     def test_a_tree_entry_under_a_package_mount_does_not_stop_the_link(self):
         mount = {"/usr/lib/tmpfiles.d/foo.conf": "L /var/lib/foo/s - - - - /run/agentos-x/s\n",
                  "/usr/lib/systemd/system/var-lib-foo.mount":
                      "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nOptions=nosuid,nodev,noexec\n",
                  "/usr/lib/systemd/system/local-fs.target.wants/var-lib-foo.mount": "-> ../var-lib-foo.mount"}
-        for more in ({}, {"/var/lib/foo/s/.keep": ""}, {"/var/lib/foo/s": "a file"}, {"/var/agentos-x/.keep": ""}):
+        for more in ({}, {"/var/agentos-x/.keep": ""}):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
                 got = r.boot_links(tree(d, {**mount, **more}))
                 self.assertEqual(got.get("/var/lib/foo/s"), "/run/agentos-x/s")
+        for more in ({"/var/lib/foo/s/.keep": ""}, {"/var/lib/foo/s": "a file"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a plain L leaves in place"):
+                    r.boot_links(tree(d, {**mount, **more}))
 
     def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
         # A tree link under a mount the reader cannot see is not there at boot, so none is followed.
@@ -666,6 +671,34 @@ class BootLinksTest(unittest.TestCase):
                     r.boot_links(v)
 
 
+class RetainedEntryTest(unittest.TestCase):
+    """#5703 L3 6872965749: a plain L line leaves a link, directory or file the tree already has at its path
+    (systemd 255), so the records would move the path away from where it lands at boot: the run fails,
+    but at a tree link that resolves where the line's does. L+ removes the entry, so its link counts."""
+
+    def test_a_tree_entry_at_a_plain_l_path_fails_the_run(self):
+        for mod in ("L", "L?", "L!", "L$"):
+            for entry in ({"/var/pkglink": "-> ../run/agentos-x"}, {"/var/pkglink/.keep": ""},
+                          {"/var/pkglink": "a file"}, {"/var/pkglink": "-> /run/pkgdir/x"}):
+                line = {"/usr/lib/tmpfiles.d/x.conf": "%s /var/pkglink - - - - /run/pkgdir\n" % mod}
+                with self.subTest(mod=mod, entry=entry), tempfile.TemporaryDirectory() as d:
+                    with self.assertRaisesRegex(SystemExit, "the tree already holds /var/pkglink there"):
+                        r.boot_links(tree(d, {**line, **entry}))
+
+    def test_a_tree_link_to_the_same_target_or_l_plus_passes(self):
+        for line, entry, key, want in (
+                ("L /var/pkglink - - - - /run/pkgdir", {"/var/pkglink": "-> ../run/pkgdir"}, "/var/pkglink", "/run/pkgdir"),
+                ("L /etc/mtab - - - - ../proc/self/mounts", {"/etc/mtab": "-> ../proc/self/mounts"}, "/etc/mtab",
+                 "/proc/self/mounts"),
+                ("L /var/lock - - - - ../run/lock", {"/var/lock": "-> /run/lock"}, "/var/lock", "/run/lock"),
+                ("L+ /var/pkglink - - - - /run/pkgdir", {"/var/pkglink": "-> ../run/agentos-x"}, "/var/pkglink", "/run/pkgdir"),
+                ("L+ /etc/default/locale - - - - ../locale.conf", {"/etc/default/locale": "LANG=C\n",
+                                                                  "/etc/locale.conf": "LANG=C\n"}, "/etc/default/locale", None)):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n", **entry}))
+                self.assertEqual(got.get(key), want)
+
+
 class MagicLinkTest(unittest.TestCase):
     """#5703 L3 6872796820: the kernel's links under /proc, /sys and /dev lead back into /, so a link, an L
     line's or the tree's, whose target resolves there fails the run, but at exactly API_TARGETS."""
@@ -680,6 +713,22 @@ class MagicLinkTest(unittest.TestCase):
                 with self.subTest(target=t, how=how), tempfile.TemporaryDirectory() as d:
                     with self.assertRaisesRegex(SystemExit, "whose own links the reader does not follow"):
                         r.boot_links(tree(d, files))
+
+    # #5703 Security 6872976172: resolve keeps a target as given from its first missing component on, so a
+    # .. after a directory that is there only at boot (or after a link's rewrite) would leave /proc unseen.
+    def test_a_target_keeping_dot_or_dotdot_fails_the_run(self):
+        for line in ("L /run/pkglink - - - - /run/systemd/../../proc/self/root/run/agentos-x",
+                     "L /run/pkglink - - - - lock/../../proc/self/root/run/agentos-x",
+                     "L /run/pkglink - - - - /var/lib/zz/../../../proc/1/root/run/agentos-x",
+                     "L /run/pkglink - - - - /run/lock/../../dev/fd/0/run/agentos-x",
+                     "L /run/pkglink - - - - /run/x/./y",
+                     "L /run/a - - - - /run/lock\nL /run/pkglink - - - - /run/a/../../proc/self/root/run/agentos-x"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a target with . or .. the reader does not follow"):
+                    r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n"}))
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "/etc/pkglink: a link to .*, a target with . or .."):
+                r.boot_links(tree(d, {"/etc/pkglink": "-> /run/systemd/../../proc/self/root/run/agentos-x"}))
 
     def test_the_images_own_api_targets_pass(self):
         lines = ("L /run/shm - - - - /dev/shm\nL+ /etc/mtab - - - - ../proc/self/mounts\n"
