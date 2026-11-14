@@ -193,3 +193,17 @@ func TestCodePassesOnlyListedValues(t *testing.T) {
 		}
 	}
 }
+
+// A plan a STOP cancelled ("stopped", key.RStopped) or its task's end
+// cancelled ("task", kernel.CTask) reaches the planner with that code, so
+// the agent can tell the owner why it ended; a STOP's cancel stays after
+// RESUME (KRN-7, #5151 R2). read hands a cancelled plan's code to code
+// (TestACancelledPlanGivesOnlyItsCode). Catches either code dropped from
+// the list, or the list not filtering.
+func TestStopAndTaskCancelCodesReachThePlanner(t *testing.T) {
+	for in, want := range map[string]string{"stopped": "stopped", "task": "task", "wire-funds": ""} {
+		if got := code(in); got != want {
+			t.Errorf("code(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
