@@ -1,8 +1,8 @@
 package grants
 
 // SR2-3j: the gate's refusals carry fixed text for the guest, apart from
-// the owner's reason, which may echo a parse error, a pipeline's refusal
-// or the owner's own words.
+// the owner's reason, which may echo a parse error or the owner's own
+// words.
 //
 // REQ: RES-4, CAP-8
 
@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/journal"
 )
 
@@ -36,19 +35,10 @@ func (r *rig) checkGuestReasons(t *testing.T) {
 }
 
 func TestRefusalsShowTheGuestOnlyFixedText(t *testing.T) {
-	r, _ := changeRig(t)
-	// A pipeline refusal is the owner's detail; the guest sees fixed words.
-	st := r.submit(journal.Intent{ID: "chg:c77:revert:n1:owner", Origin: change.OriginOwner, Account: journal.BrokerAccount,
-		Action: change.ActionRevert, Executor: change.Executor, Params: map[string]any{"adoption": "c77", "why": "owner"}})
-	if st.State != journal.Denied || !strings.Contains(st.Permission.Reason, "no active adoption") {
-		t.Fatalf("%s %q", st.State, st.Permission.Reason)
-	}
-	if g := st.Permission.GuestReason; g != "the change pipeline refused it" {
-		t.Fatalf("pipeline refusal shown to the guest as %q", g)
-	}
+	r := newRigExecs(t, nil, map[string]journal.Executor{"change": &recordExec{}})
 	// A literal refusal is the same text for both.
-	st = r.submit(journal.Intent{ID: "chg:policy:n1:auto_adopt:off", Origin: "guest:agent", Account: journal.BrokerAccount,
-		Action: change.ActionPolicyOff, Executor: change.Executor, Params: map[string]any{"setting": "auto_adopt", "value": "off"}})
+	st := r.submit(journal.Intent{ID: "chg:policy:n1:auto_adopt:off", Origin: "guest:agent", Account: journal.BrokerAccount,
+		Action: journal.ActionChangePolicyOff, Executor: "change", Params: map[string]any{"setting": "auto_adopt", "value": "off"}})
 	if st.Permission.GuestReason != st.Permission.Reason || st.Permission.Reason != "broker actions are not available to agents" {
 		t.Fatalf("%q %q", st.Permission.Reason, st.Permission.GuestReason)
 	}

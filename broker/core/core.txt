@@ -16,8 +16,7 @@
 # declares an interface that a core type satisfies through one (wiring can
 # then hand it the core type), and when a line names a package or symbol
 # that does not exist. An interface finding names the package that declares
-# the interface, which an alias elsewhere (loops.Journal = change.Journal)
-# shares.
+# the interface, which an alias elsewhere shares.
 
 core journal
 core grants
@@ -192,15 +191,8 @@ allow clerk/inbox/cmd/slice kernel.* -- the eval runner boots a kernel on a fake
 allow clerk/inbox/cmd/slice clerk/inbox.* -- the eval runner builds the mail clerk it runs the kernel against
 
 # Interfaces a core type satisfies through a write path (see the header).
-# Authorize and Dispatch move an intent the caller already submitted through
-# the gate's policy and the journal's dispatch; they run nothing the journal
-# did not judge.
 allow apply kernel.SignPlan -- the update clerk signs its one activate plan as holder of the image-pinned update key (#3423 decision 2); the kernel admits it and the clerk re-checks it before it acts
 allow apply kernel.Kernel.Submit -- apply.Kernel submits the activate plan; the kernel decides it and dispatches it back to the clerk, which re-checks it (CLK-2)
-allow change journal.Engine.Authorize -- change.Journal (also loops.Journal) moves the intent it submitted through policy
-allow change journal.Engine.Dispatch -- change.Journal (also loops.Journal) dispatches the intent it submitted once authorized
-allow change grants.Gate.Authorize -- change.Journal is the grants gate on the box; same as journal.Engine.Authorize
-allow change grants.Gate.Dispatch -- change.Journal is the grants gate on the box; same as journal.Engine.Dispatch
 allow daemon/journalowner journal.Engine.Stop -- the owner's STOP text, mapped onto control.Engine until #2783 (c) (#2778)
 allow daemon/journalowner journal.Engine.Resume -- the owner's code-checked RESUME text, mapped onto control.Engine until #2783 (c) (#2778)
 allow control guest.OwnerAgent.Deliver -- owner chat goes to the owner's agent machine (control.Agent)

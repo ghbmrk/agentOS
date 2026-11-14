@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
@@ -1689,11 +1688,4 @@ func TestTransientDropRefusalStays(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.dropsAre("a1", "a1")
-}
-
-// apply's WhySecurity is the pipeline's.
-func TestWhySecurityMatchesThePipeline(t *testing.T) {
-	if WhySecurity != change.WhySecurity {
-		t.Fatalf("%q != %q", WhySecurity, change.WhySecurity)
-	}
 }

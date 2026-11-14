@@ -220,9 +220,8 @@ var learningPlane = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	// change reads the closed verb list to check an adapter's demo runs
-	// before adoption (ADP-8b); verb is standard library only.
-	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
+	// change is only the file store the deleted pipeline used (#2785 c3).
+	"change": {nil, forbiddenStd},
 	// loops is the probe vocabulary and the settings-text parser; its
 	// scheduler, spare envelope and Guard went with the change pipeline
 	// (#2785, MIG-4-untrusted-change-c2).

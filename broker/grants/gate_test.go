@@ -786,3 +786,29 @@ func TestGrantsUseOwnerQuietAndAllowance(t *testing.T) {
 		t.Fatal("URGENT APPROVAL ON: not sent at once")
 	}
 }
+
+// TestChangeIntentDenied: the change pipeline is deleted (#2785 c3), so
+// every meta.change.* intent, the authority-narrowing revert and setting
+// off included, is denied with the fixed reason the gate gave while no
+// pipeline was configured. It catches a gate whose deleted branch falls
+// through to allow, or to an ask the owner could approve.
+func TestChangeIntentDenied(t *testing.T) {
+	ex := &recordExec{}
+	r := newRigExecs(t, nil, map[string]journal.Executor{"change": ex})
+	for _, in := range []journal.Intent{
+		{ID: "chg:c1:adopt", Action: "meta.change.adopt"},
+		{ID: "chg:c1:revert:n1:owner", Action: journal.ActionChangeRevert, Params: map[string]any{"adoption": "c1", "why": "owner"}},
+		{ID: "chg:policy:n1:auto_adopt:on", Action: "meta.change.policy", Params: map[string]any{"setting": "auto_adopt", "value": "on"}},
+		{ID: "chg:policy:n1:auto_adopt:off", Action: journal.ActionChangePolicyOff, Params: map[string]any{"setting": "auto_adopt", "value": "off"}},
+		{ID: "chg:suite:n1", Action: "meta.change.suite"},
+	} {
+		in.Origin, in.Account, in.Executor = "owner", journal.BrokerAccount, "change"
+		st := r.submit(in)
+		if st.State != journal.Denied || st.Permission.Reason != "the change pipeline is not running" {
+			t.Errorf("%s: %s %q", in.Action, st.State, st.Permission.Reason)
+		}
+	}
+	if len(ex.ran) != 0 {
+		t.Fatalf("ran %q", ex.ran)
+	}
+}

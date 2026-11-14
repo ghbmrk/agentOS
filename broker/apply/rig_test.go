@@ -148,7 +148,7 @@ func (r *rig) recheck(id string) error {
 	if r.pipe.reverted == nil {
 		r.pipe.reverted = map[string]string{}
 	}
-	r.pipe.reverted[id] = change.WhySecurity
+	r.pipe.reverted[id] = WhySecurity
 	return nil
 }
 
@@ -181,7 +181,7 @@ func (p *pipeline) StageDropped(_ context.Context, ref string) error {
 		return err
 	}
 	if slices.Contains(p.confirmed, ref) {
-		return fmt.Errorf("change: %s is %w", ref, change.ErrNotStaged)
+		return fmt.Errorf("change: %s is %w", ref, errNotStaged)
 	}
 	if _, ok := p.reverted[ref]; ok {
 		return nil // the revert ran first: nothing to do
@@ -474,3 +474,12 @@ func (r *rig) plans() []*kernel.PlanState {
 }
 
 var errInstall = errors.New("slot write failed")
+
+// errNotStaged stands in for the deleted pipeline's refusal to drop an
+// adoption that is no longer staged: the same every time, so permanent.
+var errNotStaged error = notStaged{}
+
+type notStaged struct{}
+
+func (notStaged) Error() string   { return "not a staged adoption" }
+func (notStaged) Permanent() bool { return true }
