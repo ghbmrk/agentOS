@@ -262,10 +262,95 @@ func poll() {}
 	}
 }
 
+// The inventory sees a timer start whatever name the file imports "time"
+// under: an alias or a dot import as well as the plain name (L3 release
+// on #5640, GUEST-bridge-time-alias). Failure path: a file that does
+// import tm "time" and calls tm.Tick starts timed work the inventory never
+// sees, and TestEveryGoroutineIsKnown still passes. A local named "time"
+// in a file that imports it under another name is not the package.
+func TestGoroutineStartsSeesAnAliasedTimeImport(t *testing.T) {
+	for _, c := range []struct {
+		name, src string
+		want      []string
+	}{
+		{"alias", `package main
+
+import tm "time"
+
+func f() {
+	_ = tm.NewTicker(tm.Second)
+	for range tm.Tick(tm.Second) {
+	}
+	tm.AfterFunc(tm.Second, f)
+}
+`, []string{"f: time.AfterFunc", "f: time.NewTicker", "f: time.Tick"}},
+		{"dot", `package main
+
+import . "time"
+
+var t = AfterFunc(Second, f)
+
+func f() {
+	_ = NewTicker(Second)
+	for range Tick(Second) {
+	}
+}
+`, []string{"f: time.NewTicker", "f: time.Tick", "var: time.AfterFunc"}},
+		{"double", `package main
+
+import (
+	"time"
+	tm "time"
+)
+
+var _ = time.Second
+
+func f() { tm.AfterFunc(tm.Second, f) }
+`, []string{"f: time.AfterFunc"}},
+		{"double-dot", `package main
+
+import (
+	"time"
+	. "time"
+)
+
+var _ = time.Second
+
+func f() { _ = NewTicker(Second) }
+`, []string{"f: time.NewTicker"}},
+		{"shadowed", `package main
+
+import tm "time"
+
+type clock struct{}
+
+func (clock) Tick(tm.Duration) {}
+
+func f() {
+	var time clock
+	time.Tick(tm.Second)
+}
+`, nil},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", c.src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := goroutineStarts(f)
+		sort.Strings(got)
+		if strings.Join(got, "\n") != strings.Join(c.want, "\n") {
+			t.Errorf("%s: goroutine starts:\n%s\nwant:\n%s", c.name, strings.Join(got, "\n"), strings.Join(c.want, "\n"))
+		}
+	}
+}
+
 // goroutineStarts lists each go statement and each timer that starts
 // work in f, labelled with its enclosing function, or with the declaring
-// keyword (var, const) for a package-level initializer.
+// keyword (var, const) for a package-level initializer. A timer is
+// matched under the name the file imports "time" as (timeName), so an
+// aliased or dot import is seen too; each is reported as time.<Func>.
 func goroutineStarts(f *ast.File) []string {
+	prefixes := timeNames(f)
 	var got []string
 	for _, d := range f.Decls {
 		where := ""
@@ -280,9 +365,13 @@ func goroutineStarts(f *ast.File) []string {
 			case *ast.GoStmt:
 				got = append(got, where+": go "+callee(n.Call.Fun))
 			case *ast.CallExpr:
-				switch c := callee(n.Fun); c {
-				case "time.AfterFunc", "time.NewTicker", "time.Tick":
-					got = append(got, where+": "+c)
+				c := callee(n.Fun)
+				for _, prefix := range prefixes {
+					switch fn := strings.TrimPrefix(c, prefix); {
+					case !strings.HasPrefix(c, prefix):
+					case fn == "AfterFunc", fn == "NewTicker", fn == "Tick":
+						got = append(got, where+": time."+fn)
+					}
 				}
 			}
 			return true
@@ -301,4 +390,35 @@ func callee(e ast.Expr) string {
 		return "func literal"
 	}
 	return "?"
+}
+
+// timeNames lists every qualifier a call into package time carries in f,
+// one per import of "time": "time." or "<alias>." for a named import, ""
+// for a dot import. Go allows a file to import "time" more than once
+// under different names, so each import counts (L3 fix-list 1 on #5681).
+// A blank import adds nothing; with no list, no call in f starts a timer.
+func timeNames(f *ast.File) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, imp := range f.Imports {
+		if imp.Path.Value != `"time"` {
+			continue
+		}
+		name := "time."
+		if imp.Name != nil {
+			switch imp.Name.Name {
+			case "_":
+				continue
+			case ".":
+				name = ""
+			default:
+				name = imp.Name.Name + "."
+			}
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names
 }
