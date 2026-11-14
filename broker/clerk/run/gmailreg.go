@@ -45,10 +45,11 @@ func loadReg(dir string, s clerk.Sealer) (r clerk.Registration, ok bool) {
 		return r, false
 	}
 	plain, err := s.Open(blob, regAAD())
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return r, false
 	}
-	defer clear(plain)
 	var g gmailRegistration
 	if json.Unmarshal(plain, &g) != nil || g.ID == "" || g.Secret == "" {
 		return r, false

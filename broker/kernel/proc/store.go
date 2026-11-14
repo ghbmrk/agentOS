@@ -14,7 +14,19 @@ import (
 // FileStore is the log on disk: a kernel.Store whose Append returns only once
 // the bytes are synced. The file is locked for as long as it is open, so a
 // second kernel process cannot open the same log and fork it (LOG-1).
-type FileStore struct{ f *os.File }
+type FileStore struct{ f logFile }
+
+// logFile is the log's *os.File as FileStore uses it, so a test can make a
+// write or a sync fail (KRN-proc-mut, #5273).
+type logFile interface {
+	io.ReaderAt
+	io.WriterAt
+	io.Seeker
+	Stat() (os.FileInfo, error)
+	Sync() error
+	Truncate(int64) error
+	Close() error
+}
 
 var ErrLogInUse = errors.New("run: the log is open in another kernel process")
 

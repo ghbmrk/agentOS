@@ -331,8 +331,8 @@ func TestSharedSourceBound(t *testing.T) {
 // allows, or in another table, is left out, so nothing in a listing
 // reaches the load as text. Catches a carry that copies a listing's text,
 // that drops a segment's sets (a lease, a leased hardware address, an IPv6
-// hold), or that writes a long record past its set's timeout (nft refuses
-// the load).
+// hold, a link-local hold or its mark, #5726), or that writes a long record
+// past its set's timeout (nft refuses the load).
 func TestReloadCarriesSharedRecords(t *testing.T) {
 	l := fixtureLayout()
 	d := cutPolicy()
@@ -370,9 +370,13 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 			el(`{"concat": ["fd10:20::4", "02:00:00:00:00:02"]}`, 50),
 			el(`{"concat": ["fd10:20::5", 281474976710656]}`, 50),
 			el(`"fd10:20::7"`, 50), // not a concatenation
+			// A link-local hold (#5726).
+			el(`{"concat": ["fe80::2", 2199023255554]}`, 50),
 		},
 		NeighAddrSet("household"): {el(`"fd10:20::9"`, 50)},
 		NeighTCPSet("household"):  {el(`{"concat": ["fd10:20::2", 2199023255554]}`, 400000), el(`{"concat": ["fd10:20::6", 2199023255554]}`, 432001)},
+		// The link-local marks (#5726).
+		LinkLocalMACSet("household"): {el(`2199023255554`, 50), el(`"02:00:00:00:00:02"`, 50), el(`2199023255555`, 21601)},
 		// 10.30.0.2 is 169738242; 02:00:00:00:00:01 is 2199023255553.
 		LeaseSet("guests"): {
 			el(`{"concat": [169738242, 2199023255553]}`, 100),
@@ -430,9 +434,10 @@ func TestReloadCarriesSharedRecords(t *testing.T) {
 		"add element inet enforcer leaseaddr_guests_4 { 0x0a1e0002 expires 100s }",
 		"add element netdev enforcer_neigh leaseaddr_guests_4 { 0x0a1e0002 expires 100s }",
 		"add element inet enforcer leased_guests { 0x020000000001 expires 43200s }",
+		"add element inet enforcer llmac_household_6 { 0x020000000002 expires 50s }",
 		"add element inet enforcer mac6_household { 0x020000000002 expires 50s }",
-		"add element inet enforcer neigh_household_6 { fd10:20::2 . 0x020000000002 expires 50s }",
-		"add element inet enforcer neighaddr_household_6 { fd10:20::2 expires 50s }",
+		"add element inet enforcer neigh_household_6 { fd10:20::2 . 0x020000000002 expires 50s, fe80::2 . 0x020000000002 expires 50s }",
+		"add element inet enforcer neighaddr_household_6 { fd10:20::2 expires 50s, fe80::2 expires 50s }",
 		"add element inet enforcer neightcp_household_6 { fd10:20::2 . 0x020000000002 expires 400000s }",
 		"add element inet enforcer neightcpaddr_household_6 { fd10:20::2 expires 400000s }",
 	}, "\n") + "\n"

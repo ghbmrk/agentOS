@@ -640,11 +640,13 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 			return route{replies: []string{"No open requests."}, limited: !unlocked}
 		}
 	}
-	// A RESUME, YES or NO with a code in other digits is never checked;
-	// the reply says codes need 0-9 (#5616). One with ASCII digits and
-	// look-alike letters gets the unclear reply below.
-	if strings.ContainsFunc(text, foreignNumber) && foldedCodeWord(text) {
-		return route{replies: []string{control.FoldedCodeReply}, limited: !unlocked}
+	// A RESUME, YES or NO with a number in other digits is never checked;
+	// a 6-digit one gets the reply that codes need 0-9, any other the
+	// unclear reply (#5616, #5650). One with ASCII digits and look-alike
+	// letters gets the unclear reply below, after control.Parse.
+	quarantine := foldedCodeWord(text)
+	if quarantine && strings.ContainsFunc(text, foreignNumber) {
+		return route{replies: []string{foldedWordReply(text)}, limited: !unlocked}
 	}
 	switch control.Parse(text).Word {
 	case control.WordStop:
@@ -655,24 +657,32 @@ func (c *Channel) routeLocked(text string, now time.Time, decided *[]Decision) r
 		return route{delegate: text, run: true, limited: !unlocked}
 	}
 	rest, code := splitCode(text)
-	if foldedCodeWord(text) {
+	if quarantine {
 		return route{replies: []string{control.UnclearReply}, limited: !unlocked}
 	}
+	stripped := false
 	if code == "" && foldedCode(text) {
-		// Chat ending in a code in other digits routes as chat ending in
-		// an ASCII code does, with the token stripped and never checked
-		// (#5616). Anything else holding one gets the digits reply.
+		// Chat ending in a 6-digit token in other digits has the token
+		// stripped and never checked (#5616). Locked, it is held without
+		// it as a message ending in an ASCII code is. Unlocked, unlike an
+		// ASCII number that is not the live code, it is always cut, so
+		// the owner is told (#5650). Anything else holding one gets the
+		// digits reply.
 		r, ok := stripFoldedCode(text)
 		if !ok {
 			return route{replies: []string{control.FoldedCodeReply}, limited: !unlocked}
 		}
-		text, rest = r, r
+		text, rest, stripped = r, r, true
 	}
 	if !unlocked && c.cfg.Narrows != nil && c.cfg.Narrows(text) {
 		return route{delegate: text, run: true, limited: true}
 	}
 	if unlocked {
-		return c.unlockedChatLocked(text, rest, code, now)
+		rt := c.unlockedChatLocked(text, rest, code, now)
+		if stripped {
+			rt.replies = append([]string{control.StrippedNumberReply}, rt.replies...)
+		}
+		return rt
 	}
 	return c.lockedLocked(rest, code, now)
 }
@@ -694,6 +704,25 @@ func foldedCodeWord(text string) bool {
 	return false
 }
 
+// foldedWordReply is the reply to a quarantined RESUME, YES or NO with a
+// number in other digits: the digits reply when, read through fold, it
+// holds a run of exactly 6 digits, the length of a code; otherwise the
+// unclear reply, since retyping "yes ②" in 0-9 would not help (#5650).
+func foldedWordReply(text string) string {
+	n, f := 0, fold(text)
+	for i := 0; i <= len(f); i++ {
+		if i < len(f) && f[i] >= '0' && f[i] <= '9' {
+			n++
+			continue
+		}
+		if n == codeDigits {
+			return control.FoldedCodeReply
+		}
+		n = 0
+	}
+	return control.UnclearReply
+}
+
 // foldedCode reports whether text, read through fold, is or ends in a
 // code, such as the live code typed in Arabic-Indic or full-width digits
 // ("book the table ٣٨٢٩١٠", "UNLOCK HKMP １２３４５６"). It may be the live
@@ -713,17 +742,10 @@ func foreignNumber(r rune) bool { return r >= 0x80 && unicode.IsNumber(r) }
 // control word, a reply or a name command keeps the whole message out
 // (CH-10, CH-14; CTL-unicode-chat-code-fu, #5616).
 func stripFoldedCode(text string) (rest string, ok bool) {
-	s := strings.TrimRightFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
-	i := strings.LastIndexFunc(s, unicode.IsSpace)
-	if i < 0 {
-		return "", false
-	}
-	if t := fold(s[i+1:]); len(t) != codeDigits || !allDigits(t) {
-		return "", false
-	}
-	rest = strings.TrimSpace(s[:i])
+	rest, _, ok = trailingToken(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) },
+		func(t string) bool { return isTrailingCode(fold(t)) })
 	f := fold(rest)
-	if rest == "" || foldedCode(rest) || control.Parse(f).Word != control.WordNone {
+	if !ok || rest == "" || foldedCode(rest) || control.Parse(f).Word != control.WordNone {
 		return "", false
 	}
 	for _, m := range []string{f, fold(text)} {

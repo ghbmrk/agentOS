@@ -81,11 +81,13 @@ func TestCircledDigitCodeNeverReachesTheAgent(t *testing.T) {
 
 // REQ: CH-10, CH-14
 // TestNativeDigitTrailingTokenIsStripped: chat ending in a separate
-// 6-digit token in non-ASCII digits is routed as the ASCII path routes
-// chat with a trailing code, with the token stripped and never checked:
-// unlocked, the agent gets the rest; locked, the rest is held. The token
-// is never counted, and the live ASCII code stays unspent afterwards
-// (CTL-unicode-chat-code-fu, #5616, Potency and UX finding 2).
+// 6-digit token in non-ASCII digits has the token stripped and never
+// checked: unlocked, the agent gets the rest and the owner gets the
+// stripped-number notice, since an ASCII number that is not the live code
+// would have passed on (#5650); locked, the rest is held, as with an ASCII
+// trailing code. The token is never counted, and the live ASCII code stays
+// unspent afterwards (CTL-unicode-chat-code-fu, #5616, Potency and UX
+// finding 2).
 func TestNativeDigitTrailingTokenIsStripped(t *testing.T) {
 	forms := []struct {
 		name string
@@ -109,8 +111,12 @@ func TestNativeDigitTrailingTokenIsStripped(t *testing.T) {
 				sent := len(r.agent.got())
 				st := r.ch.codes.st
 				wrong, held := len(st.Wrong), len(st.Waiting)
-				if got := r.say(text); got == control.UnclearReply || got == control.FoldedCodeReply {
+				got := r.say(text)
+				if got == control.UnclearReply || got == control.FoldedCodeReply {
 					t.Fatalf("%q: %q, want it routed as chat", text, got)
+				}
+				if notice := strings.Contains(got, control.StrippedNumberReply); notice != (mode == "unlocked") {
+					t.Fatalf("%q %s: reply %q; want the stripped-number notice only unlocked", text, mode, got)
 				}
 				now := r.ch.codes.st
 				if len(now.Wrong) != wrong {
@@ -170,7 +176,7 @@ func TestFoldedCodeReplyIsOneGSM7Segment(t *testing.T) {
 			t.Fatalf("non-ASCII %q in the reply", r)
 		}
 	}
-	if !strings.Contains(r, "0-9") || !strings.Contains(r, "not sent to your agent") {
+	if !strings.Contains(r, "0-9") || !strings.Contains(strings.ToLower(r), "not sent to your agent") {
 		t.Fatalf("%q does not name the cause and the outcome", r)
 	}
 }

@@ -113,7 +113,8 @@ var enclosed = []struct {
 	{0x32B1, 0x32BF, 36},  // ㊱ to ㊿
 	{0x1F100, 0x1F100, 0}, // 🄀
 	{0x1F101, 0x1F10A, 0}, // 🄁 to 🄊
-	{0x1F10B, 0x1F10C, 0}, // 🄋 🄌
+	{0x1F10B, 0x1F10B, 0}, // 🄋
+	{0x1F10C, 0x1F10C, 0}, // 🄌 (#5650: each is zero)
 }
 
 // enclosedValue is an enclosed number's value, or -1.

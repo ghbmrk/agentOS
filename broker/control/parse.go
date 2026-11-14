@@ -29,10 +29,16 @@ const (
 const UnclearReply = "Not understood, and not sent to your agent. Reply HELP for commands."
 
 // FoldedCodeReply is the fixed reply to a code, or a RESUME, YES or NO
-// with a number, typed in digits other than ASCII 0-9 (Arabic-Indic,
-// full-width, circled and the like). Such a code is never checked, so the
-// reply names the cause (CH-12, CTL-unicode-chat-code-fu, #5616).
-const FoldedCodeReply = "Codes work only in digits 0-9, and this was not sent to your agent."
+// with a 6-digit number, typed in digits other than ASCII 0-9
+// (Arabic-Indic, full-width, circled and the like). Such a code is never
+// checked, so the reply names the cause and the next step (CH-12,
+// CTL-unicode-chat-code-fu, #5616; CTL-unicode-chat-code-fu2, #5650).
+const FoldedCodeReply = "Not sent to your agent. Send it again using 0-9."
+
+// StrippedNumberReply is the fixed notice sent when unlocked chat ending
+// in a 6-digit number in other digits is forwarded without that number,
+// which is never checked (CH-12, CH-14; CTL-unicode-chat-code-fu2, #5650).
+const StrippedNumberReply = "The number at the end was not sent to your agent. Use digits 0-9 for numbers and codes."
 
 // Command is a parsed owner message. For task chat, Word is WordNone and
 // Text is what the agent receives; Public is set by a leading PUBLIC.

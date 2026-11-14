@@ -33,12 +33,10 @@ func settleLoop(ctx context.Context, eng *journal.Engine, every, wait, maxWait t
 	for {
 		eng.SettleUnknown(ctx, wait, maxWait)
 		eng.Release(ctx, dispatch)
-		t := time.NewTimer(every)
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return
-		case <-t.C:
+		case <-time.After(every): // collected unfired once unreferenced (Go 1.23+)
 		}
 	}
 }
@@ -325,41 +323,54 @@ func kernelAsk(s KernelStep, currency string, now func() (object, detail string)
 // on one request never runs or drops another request's line.
 func (r *retrier) decide(next func(ownerch.Decision)) func(ownerch.Decision) {
 	return func(d ownerch.Decision) {
-		if strings.HasPrefix(d.Ref, kernelRefPrefix) {
-			r.mu.Lock()
-			a, known := r.lines[d.Ref]
-			delete(r.lines, d.Ref)
-			r.mu.Unlock()
-			if !d.Approved || !known || a.step == nil {
-				return
-			}
-			page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
-			r.running.Add(1)
-			go func() {
-				defer r.running.Done()
-				r.runKernel(d.Request, a, page)
-			}()
-			return
-		}
-		if !strings.HasPrefix(d.Ref, retryRefPrefix) {
+		switch {
+		case strings.HasPrefix(d.Ref, kernelRefPrefix):
+			r.decideKernel(d)
+		case strings.HasPrefix(d.Ref, retryRefPrefix):
+			r.decideRetry(d)
+		default:
 			next(d)
-			return
 		}
-		id, n, ok := parseRetryRef(d.Ref)
-		r.mu.Lock()
-		a, known := r.lines[d.Ref]
-		delete(r.lines, d.Ref)
-		r.mu.Unlock()
-		if !ok || !d.Approved || !known || a.id != id || a.attempt != n {
-			return
-		}
-		page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
-		r.running.Add(1)
-		go func() {
-			defer r.running.Done()
-			r.run(d.Request, a, page)
-		}()
 	}
+}
+
+// take removes and returns the line ref's request showed.
+func (r *retrier) take(ref string) (retryAsk, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, known := r.lines[ref]
+	delete(r.lines, ref)
+	return a, known
+}
+
+// decideKernel runs an approved kernel step's retry (decide).
+func (r *retrier) decideKernel(d ownerch.Decision) {
+	a, known := r.take(d.Ref)
+	if !d.Approved || !known || a.step == nil {
+		return
+	}
+	page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
+	r.running.Add(1)
+	go func() {
+		defer r.running.Done()
+		r.runKernel(d.Request, a, page)
+	}()
+}
+
+// decideRetry runs an approved parked effect's retry, for the attempt its
+// ref names (decide).
+func (r *retrier) decideRetry(d ownerch.Decision) {
+	id, n, ok := parseRetryRef(d.Ref)
+	a, known := r.take(d.Ref)
+	if !ok || !d.Approved || !known || a.id != id || a.attempt != n {
+		return
+	}
+	page := d.Page && d.Sum == ownerch.ItemSum(a.line.Shown)
+	r.running.Add(1)
+	go func() {
+		defer r.running.Done()
+		r.run(d.Request, a, page)
+	}()
 }
 
 // run retries and texts the owner how it ended.

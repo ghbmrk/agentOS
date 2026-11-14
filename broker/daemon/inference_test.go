@@ -213,7 +213,7 @@ var rawOK = map[string]map[string]string{
 // why; dials still checks each is on "unix" to a configured address.
 // kernel/proc dials its clerks' and its owner seam's sockets (#3430).
 var unixDialCalls = map[string]map[string]string{
-	"kernel/proc": {"net.DialTimeout": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
+	"kernel/proc": {"net.Dial": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked

@@ -285,7 +285,7 @@ func (c remote) call(op string, r kernel.Request, s snapshot) (a *answer, sent, 
 	if d == 0 {
 		d = 5 * time.Minute
 	}
-	conn, err := net.DialTimeout("unix", c.Socket, 10*time.Second)
+	conn, err := net.Dial("unix", c.Socket) // a unix dial never waits (TestAUnixDialNeverWaits)
 	if err != nil {
 		return nil, false, false
 	}
@@ -341,7 +341,6 @@ func serve(conn net.Conn, c kernel.Clerk, anchors []key.PublicKey) {
 	if json.NewDecoder(io.LimitReader(conn, maxCall)).Decode(&in) != nil {
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
 	var out answer
 	switch {
 	case in.Op == opProbe:

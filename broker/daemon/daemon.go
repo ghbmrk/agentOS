@@ -544,7 +544,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	d := &Daemon{engine: eng, owned: owned, gate: gate, store: store, srv: srv, adm: adm, owner: ch, retry: rt, done: make(chan struct{})}
 	if ch != nil {
-		go serveOwner(ctx, ch, cfg.Modem != nil)
+		go serveOwner(ctx, ch, cfg.Modem != nil, time.Minute)
 	}
 	go gate.Run(ctx, 0)
 	// A restart fences each account an in-flight effect may have landed on
@@ -632,20 +632,20 @@ func validID(id string) bool {
 
 // serveOwner runs the owner channel: on the modem when there is one (Run
 // reports what a restart dropped, then serves texts and ticks), otherwise
-// only the restart report and the minute tick that expires requests.
-func serveOwner(ctx context.Context, ch *ownerch.Channel, hasModem bool) {
+// only the restart report and the tick, every every (the daemon's: a
+// minute), that expires requests.
+func serveOwner(ctx context.Context, ch *ownerch.Channel, hasModem bool, every time.Duration) {
 	if hasModem {
 		ch.Run(ctx)
 		return
 	}
 	ch.Boot()
-	t := time.NewTicker(time.Minute)
-	defer t.Stop()
+	tick := time.Tick(every) // collected once unreferenced (Go 1.23+)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-tick:
 			ch.Tick()
 		}
 	}
