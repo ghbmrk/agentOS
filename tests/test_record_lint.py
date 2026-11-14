@@ -111,6 +111,10 @@ class Lint(unittest.TestCase):
         out = self.problems(draft(rec(), "<!-- record: L3 -->"))
         self.assertTrue(any("must be exactly" in p for p in out), out)
 
+    def test_fenced_marker_is_quoted(self):  # #5680 L3 release 1: premerge reads only the record block's markers
+        body = draft(rec(), "<!-- record: l3 -->") + "```text\n<!-- record: security -->\n<!-- record:bad -->\n```\n"
+        self.assertEqual(self.problems(body), [])
+
     def test_security_beside_l3(self):  # D-137: one comment cannot be both
         out = self.problems(draft(rec(), "<!-- record: l3 -->", "<!-- record: security -->"))
         self.assertEqual(len(out), 1)
@@ -150,6 +154,7 @@ class Main(unittest.TestCase):
         self.assertTrue(out.startswith("record-lint: head 6d78023c9e"), out)
         self.assertEqual(self.run_main(["nope"], "")[0], 2)
         self.assertEqual(self.run_main([str(PR), "--head"], "")[0], 2)
+        self.assertEqual(self.run_main([str(PR), os.path.join(REPO, "no-such-draft.md")], "")[0], 2)  # #5680 L3 release 2
 
     def test_crlf_draft(self):
         code, _ = self.run_main([str(PR)], draft(rec(), "<!-- record: l3 -->").replace("\n", "\r\n"))

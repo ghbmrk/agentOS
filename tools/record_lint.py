@@ -68,6 +68,18 @@ def _full(sha, cwd="."):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _unfenced(body):
+    """The lines of `body` outside code fences, with premerge's fence rule (a fence left open runs to the end)."""
+    fence = None
+    for line in body.split("\n"):
+        if fence is None and premerge._FENCE.match(line):
+            fence = premerge._FENCE.match(line).group(1)
+        elif fence is None:
+            yield line
+        elif line.rstrip(" \t") == fence:
+            fence = None
+
+
 def lint(body, pr, head=None, cwd="."):
     """(problems, summary): every problem premerge would have with `body` as PR `pr`'s verdict comment;
     the heads resolve in the git checkout at `cwd`."""
@@ -80,7 +92,7 @@ def lint(body, pr, head=None, cwd="."):
         out.append(f"verdict {state!r} must be one of {', '.join(VERDICTS)}")
     _, _, line = premerge._record_block(body)
     lenses = []
-    for raw in body.split("\n"):
+    for raw in _unfenced(body):  # a fenced marker is quoted text, as premerge reads an accept (#4261)
         m = _ANY_MARKER.match(raw)
         if not m:
             continue
@@ -139,7 +151,11 @@ def main(argv):
     if not 1 <= len(args) <= 2 or not re.fullmatch(r"[1-9][0-9]{0,9}", args[0]):
         print(__doc__)
         return 2
-    body = open(args[1], encoding="utf-8").read() if len(args) == 2 else sys.stdin.read()
+    try:
+        body = open(args[1], encoding="utf-8").read() if len(args) == 2 else sys.stdin.read()
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"record-lint: cannot read the draft: {e}", file=sys.stderr)
+        return 2
     body = body.replace("\r\n", "\n")
     problems, summary = lint(body, int(args[0]), head)
     for p in problems:
