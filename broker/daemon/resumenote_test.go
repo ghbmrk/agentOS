@@ -11,15 +11,23 @@ import (
 
 // RESUME names the steps the kernel's STOP cancelled, read through
 // bothStops before the lift, and says nothing of a cancel when it
-// cancelled none (#5665). Catches a note said after a STOP that cancelled
-// nothing, or one dropped after a STOP that cancelled two.
+// cancelled none (#5665); the first RESUME since agentosd started gives
+// the general note, since the STOP in force may predate it (L3, Security
+// on #5734). Catches a note said after a STOP that cancelled nothing, one
+// dropped after a STOP that cancelled two, or a count trusted across a
+// restart.
 func TestResumeNamesTheKernelsCancelsOnlyWhenThereAreAny(t *testing.T) {
+	head := "Resumed. Held actions may now run."
 	for n, want := range map[int]string{
-		0: "Resumed. Held actions may now run.",
-		2: "Resumed. Held actions may now run. STOP cancelled 2 actions; they stay cancelled, so ask again for any you still want.",
+		0: head,
+		2: head + " STOP cancelled 2 actions; they stay cancelled, so ask again for any you still want.",
 	} {
 		k := &fakeKernel{cancelled: n}
 		dir := withKernel(t, k)
+		text(t, dir, owner, "STOP")
+		if r := resume(t, dir); r != head+" "+control.StopCancelledNote {
+			t.Errorf("%d cancelled, the first RESUME since start: %q", n, r)
+		}
 		text(t, dir, owner, "STOP")
 		if r := resume(t, dir); r != want {
 			t.Errorf("%d cancelled: %q, want %q", n, r, want)
@@ -56,23 +64,39 @@ func TestBothStopsReadsTheCancelsOfTheStopInForce(t *testing.T) {
 }
 
 // A RESUME that fails after the kernel may have lifted its STOP is
-// followed by a re-STOP, which may restart the kernel's count; the next
-// RESUME then keeps the general note rather than read a 0 as no loss, and
-// one after a RESUME that succeeded reads the count again (L3 on #5734).
-// Catches the retried RESUME going silent on the first STOP's cancels.
+// followed by a re-STOP, which may restart the kernel's count: its failure
+// reply names what was read before it, and the next RESUME keeps the
+// general note, in this process (lossOpen) and after a restart (a fresh
+// bothStops starts open); one after a RESUME that succeeded reads the
+// count again (L3, Security on #5734). Security's repro: three lost, a
+// plan logged before the re-STOP, agentosd restarted, the kernel's count
+// now 1. Catches the owner told less than the first STOP's loss.
 func TestAFailedResumeLeavesTheLossOpen(t *testing.T) {
-	k := &fakeKernel{cancelled: 2, lost: true}
+	head := "Resumed. Held actions may now run."
+	k := &fakeKernel{cancelled: 3}
 	dir := withKernel(t, k)
 	text(t, dir, owner, "STOP")
-	if r := resume(t, dir); !strings.HasPrefix(r, "RESUME failed") {
-		t.Fatalf("RESUME with its answer lost: %q", r)
+	k.set(func(k *fakeKernel) { k.lost = true })
+	// The first RESUME since start: the count is not yet trusted, so the
+	// failure names the general note (control's handler test pins the count).
+	if r, want := resume(t, dir), "RESUME failed to record. Still stopped. "+control.StopCancelledNote; r != want {
+		t.Fatalf("RESUME with its answer lost: %q, want %q", r, want)
 	}
-	k.set(func(k *fakeKernel) { k.lost, k.cancelled = false, 0 }) // the re-STOP restarted the count
-	if r, want := resume(t, dir), "Resumed. Held actions may now run. "+control.StopCancelledNote; r != want {
+	k.set(func(k *fakeKernel) { k.lost, k.cancelled = false, 1 }) // the re-STOP restarted the count
+	if r, want := resume(t, dir), head+" "+control.StopCancelledNote; r != want {
 		t.Fatalf("the retried RESUME: %q, want %q", r, want)
 	}
 	text(t, dir, owner, "STOP")
-	if r, want := resume(t, dir), "Resumed. Held actions may now run."; r != want {
+	if r, want := resume(t, dir), head+" STOP cancelled 1 action; it stays cancelled, so ask again if you still want it."; r != want {
 		t.Fatalf("after a RESUME that succeeded: %q, want %q", r, want)
+	}
+
+	// agentosd restarted after the failed RESUME: the kernel is still
+	// stopped with the restarted count, and the fresh process trusts none.
+	k2 := &fakeKernel{stopped: true, cancelled: 1}
+	dir2 := withKernel(t, k2)
+	text(t, dir2, owner, "STOP") // the owner STOPs again: the kernel adds nothing
+	if r, want := resume(t, dir2), head+" "+control.StopCancelledNote; r != want {
+		t.Fatalf("the RESUME after a restart: %q, want %q", r, want)
 	}
 }

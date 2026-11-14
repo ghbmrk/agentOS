@@ -405,7 +405,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	// journal engine when a kernel is configured (#2783).
 	var owned control.Engine = journalowner.Engine{Engine: eng}
 	if cfg.Kernel != nil {
-		b := &bothStops{Engine: journalowner.Engine{Engine: eng}, k: cfg.Kernel}
+		b := &bothStops{Engine: journalowner.Engine{Engine: eng}, k: cfg.Kernel, lossOpen: true}
 		owned, notes = b, append([]func() string{b.note}, notes...)
 	}
 	h := &control.Handler{Engine: owned, Auth: cfg.Auth, Agent: cfg.Agent, Machines: machines, Notes: notes,
@@ -780,9 +780,12 @@ type bothStops struct {
 	mu       sync.Mutex
 	unread   bool // the last read of the kernel's stop failed
 	unlisted bool // the last read of the kernel's unsettled steps failed
-	// lossOpen: a RESUME failed after the kernel may have lifted its STOP,
-	// so the re-STOP may have restarted its count; until a RESUME succeeds
-	// the count is not trusted (L3 on #5734).
+	// lossOpen: the kernel's count may not cover the STOP in force,
+	// since this process started (a STOP from before it, or a RESUME that
+	// failed partway before a restart) or since a RESUME failed after the
+	// kernel may have lifted its STOP and the re-STOP restarted the count;
+	// until a RESUME succeeds the count is not trusted (L3, Security on
+	// #5734). Such a failed RESUME's reply names the count read before it.
 	lossOpen bool
 }
 

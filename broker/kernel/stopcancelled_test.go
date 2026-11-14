@@ -17,10 +17,9 @@ import (
 // A STOP with nothing unsent counts none; one over a held two-step plan
 // counts both; one over a plan whose first step is in flight counts only
 // the second, since the first still reconciles (KRN-8). A second STOP
-// while stopped adds to the count, as does one logged right after the
-// lift; one after anything else was logged starts it again; a replay of
-// the log folds the same count. Catches a count that says
-// a loss with none, misses an unsent step, or counts a sent one.
+// while stopped adds to the count, any STOP after a lift starts it again,
+// and a replay of the log folds the same count. Catches a count that says
+// a loss with none (a stale one carried onto a later STOP), misses an unsent step, or counts a sent one.
 func TestStopCountsTheStepsItCancels(t *testing.T) {
 	r := newRig(t)
 	must(t, r.k.Stop(1))
@@ -58,20 +57,17 @@ func TestStopCountsTheStepsItCancels(t *testing.T) {
 	if n := r.k.State().StopCancelled; n != 1 {
 		t.Fatalf("a STOP over a plan with its first step in flight counts %d, want 1", n)
 	}
-	// agentosd's re-STOP right after a lift, when the RESUME failed partway,
-	// keeps the count (L3 on #5734).
+	// Any STOP after a lift starts the count over, one right after it
+	// included: the kernel cannot tell agentosd's re-STOP from the owner's
+	// next STOP, so it never carries a count onto a STOP that cancelled
+	// nothing (L3 on #5734); agentosd covers its re-STOP (bothStops.lossOpen).
 	must(t, r.k.Resume(70, r.k.State().Stops))
 	must(t, r.k.Stop(71))
-	if n := r.k.State().StopCancelled; n != 1 {
-		t.Fatalf("a re-STOP right after the lift left %d, want 1", n)
+	if n, open := r.k.State().StopLoss(); n != 0 || open {
+		t.Fatalf("a STOP right after the lift carried %d, open %v; want 0, settled", n, open)
 	}
-	// Once anything is logged after the lift, the next STOP starts over.
 	must(t, r.k.Resume(72, r.k.State().Stops))
-	seq := r.k.State().Seq
 	must(t, r.tick(2*kernel.ProbeEvery))
-	if r.k.State().Seq == seq {
-		t.Fatal("the tick logged nothing")
-	}
 	must(t, r.k.Stop(2*kernel.ProbeEvery+1))
 	if n, open := r.k.State().StopLoss(); n != 0 || open {
 		t.Fatalf("a STOP after the plans ran counts %d, open %v", n, open)

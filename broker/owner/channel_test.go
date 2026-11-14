@@ -34,6 +34,7 @@ type fakeEngine struct {
 	// that read (control.StopCanceller, #5665).
 	cancelled int
 	cancelErr error
+	resumeErr error // set: Resume fails to record
 }
 
 func (f *fakeEngine) StopCancelled() (int, error) {
@@ -58,6 +59,9 @@ func (f *fakeEngine) Stop(context.Context) (control.StopReport, error) {
 func (f *fakeEngine) Resume() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.resumeErr != nil {
+		return f.resumeErr
+	}
 	f.stopped = false
 	f.resumes++
 	return nil

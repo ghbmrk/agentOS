@@ -71,6 +71,17 @@ func TestResumeSaysWhatStopCancelled(t *testing.T) {
 		}
 	}
 
+	// A RESUME that fails names what it read before the attempt, so the
+	// owner hears it before a re-STOP can restart the count (Security on
+	// #5734).
+	r = newRig(t, nil)
+	r.eng.cancelled, r.eng.resumeErr = 2, errors.New("the journal's write failed")
+	r.say("STOP")
+	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
+	if got, want := r.say("RESUME "+code), "RESUME failed to record. Still stopped."+two; got != want {
+		t.Errorf("failed: %q, want %q", got, want)
+	}
+
 	// RESUME after a lockout's challenge.
 	r = newRig(t, nil)
 	r.eng.cancelled = 2

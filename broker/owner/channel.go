@@ -871,7 +871,7 @@ func (c *Channel) challengeLocked(text string, now time.Time) (route, bool) {
 			case err == errStoppedMeanwhile:
 				return route{replies: []string{msg + " " + stoppedMeanwhile}}, true
 			case err != nil:
-				return route{replies: []string{msg + " RESUME failed to record. Still stopped."}}, true
+				return route{replies: []string{msg + " RESUME failed to record. Still stopped." + note}}, true
 			}
 			msg += " Resumed." + c.rewindowLocked(now, note)
 		}
@@ -1089,7 +1089,7 @@ func (c *Channel) resumeLocked(r reply, now time.Time) (out []string, accepted b
 	case err == errStoppedMeanwhile:
 		return []string{stoppedMeanwhile}, true
 	case err != nil:
-		return []string{"RESUME failed to record. Still stopped."}, true
+		return []string{"RESUME failed to record. Still stopped." + note}, true
 	}
 	n := 0
 	for _, s := range c.cfg.Engine.List() {

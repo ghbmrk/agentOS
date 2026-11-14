@@ -495,7 +495,6 @@ type State struct {
 	// is known and above zero (#5665).
 	StopCancelled int
 	stopEnded     []endedStep
-	liftSeq       uint64 // the entry of the last RESUME that lifted a STOP
 	Changes       key.Changes
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
@@ -1079,10 +1078,7 @@ func (s *State) Apply(e Entry) error {
 	case TPoolRead, TPoolReset, TReserveUp, TReserveDown:
 		return s.applyPool(e)
 	case TStop:
-		// A STOP logged right after the lift (agentosd's re-STOP when a
-		// RESUME fails partway) keeps the count, so the owner's RESUME
-		// still names what the first STOP cancelled (L3 on #5734).
-		if !s.Stopped && e.Seq != s.liftSeq+1 {
+		if !s.Stopped {
 			s.StopCancelled, s.stopEnded = 0, nil
 		}
 		s.Stopped, s.Changes.Stopped = true, true
@@ -1095,7 +1091,7 @@ func (s *State) Apply(e Entry) error {
 		s.StopCancelled += s.endPlans(func(*PlanState) bool { return true }, key.RStopped, stopDetail)
 	case TResume:
 		if !s.decoys.held() { // ErrTripResume
-			s.Stopped, s.Changes.Stopped, s.liftSeq = false, false, e.Seq
+			s.Stopped, s.Changes.Stopped = false, false
 		}
 	case TPlanSubmit:
 		b, err := body[Plan](e)

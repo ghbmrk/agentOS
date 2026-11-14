@@ -327,7 +327,7 @@ func (h *Handler) resumeCmd(args []string) string {
 	h.resume = nil
 	note := CancelledNote(h.Engine)
 	if err := h.Engine.Resume(); err != nil {
-		return "RESUME failed to record. Still stopped."
+		return "RESUME failed to record. Still stopped." + note
 	}
 	return "Resumed. Held actions may now run." + note
 }
@@ -339,14 +339,14 @@ type StopCanceller interface {
 	StopCancelled() (int, error)
 }
 
-// CancelledNote ends a RESUME reply, read before the RESUME: a STOP
-// cancels each unsent step, and RESUME never brings one back (KRN-7,
-// #5138), so an owner who expected a pause is told not to wait for it
-// (#5151), with the count, and only when the STOP cancelled something
-// (#5665). A count that cannot be read, or is not yet known, gets
-// StopCancelledNote, since
-// silence could hide a loss; an Engine whose STOP only holds gets none.
-// It starts with a space.
+// CancelledNote ends a RESUME reply, read before the RESUME, and the reply
+// of one that fails, so the owner hears it before a re-STOP can restart
+// the count: a STOP cancels each unsent step, and RESUME never brings one
+// back (KRN-7, #5138), so an owner who expected a pause is told not to
+// wait for it (#5151), with the count, and only when the STOP cancelled
+// something (#5665). A count that cannot be read, or is not yet known,
+// gets StopCancelledNote, since silence could hide a loss; an Engine whose
+// STOP only holds gets none. It starts with a space.
 func CancelledNote(e Engine) string {
 	c, ok := e.(StopCanceller)
 	if !ok {
