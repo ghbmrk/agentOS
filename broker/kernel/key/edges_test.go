@@ -21,7 +21,7 @@ func TestEveryCaveatRuleHoldsAlone(t *testing.T) {
 	_, holder, k := root(t)
 	next := gen(3)
 	lo, hi := int64(1), int64(5)
-	k2, err := Derive(k, holder.priv, next.pub, LimitArg(ArgBound{Name: "n", Min: &lo, Max: &hi}), LimitTask("t1"))
+	k2, err := Derive(k, holder.priv, next.pub, LimitArg(ArgBound{Name: "n", Min: &lo, Max: &hi}), LimitArg(ArgBound{Name: "s", OneOf: []string{"a"}}), LimitTask("t1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +35,7 @@ func TestEveryCaveatRuleHoldsAlone(t *testing.T) {
 		{"unknown verb", k, Caveat{Kind: KVerbs, Set: []string{"bogus"}}, ErrMalformed},
 		{"arg bound with no name", k, Caveat{Kind: KArg, Arg: &ArgBound{}}, ErrMalformed},
 		{"arg min lowered", k2, LimitArg(ArgBound{Name: "n", Min: &lower, Max: &hi}), ErrLoosens},
+		{"arg set widened", k2, LimitArg(ArgBound{Name: "s", OneOf: []string{"a", "b"}}), ErrLoosens},
 		{"negative cap", k, Caveat{Kind: KUses, N: -1}, ErrMalformed},
 		{"two tasks", k, Caveat{Kind: KTask, Set: []string{"a", "b"}}, ErrMalformed},
 		{"another task", k2, LimitTask("t2"), ErrLoosens},
@@ -54,7 +55,7 @@ func TestEveryCaveatRuleHoldsAlone(t *testing.T) {
 func TestARootAndLinkAreWellFormed(t *testing.T) {
 	owner := gen(1)
 	owners := []PublicKey{owner.pk}
-	for name, vs := range map[string][]Verb{"unknown": {Organize, "bogus"}, "unsorted": {Trash, Organize}} {
+	for name, vs := range map[string][]Verb{"unknown": {"bogus", Organize}, "unsorted": {Trash, Organize}} {
 		r := Root{Owner: owner.pk, Clerk: "mail", Verbs: vs, Serial: "r1"}
 		if _, err := Chain(AttachRoot(r, owner.pass.Sign(RootMsg(r))), owners); !errors.Is(err, ErrMalformed) {
 			t.Errorf("root verbs %s: %v", name, err)
