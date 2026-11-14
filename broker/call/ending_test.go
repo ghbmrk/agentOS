@@ -514,18 +514,26 @@ func TestTheEndingNoticeNeverStartsOverTheOwner(t *testing.T) {
 }
 
 // A sentence of typical length (80-120 characters, 6-8 s spoken) or of
-// MaxSentence runes at SpeakRate (20 s) plays to its end before the
-// notice, uncut (#5683): the wait for it is SentenceWait, sized from
-// MaxSentence, and it and the owner's EndingWait still fit inside the
-// EndingNotice margin, so the clip never outlasts MaxCall.
+// MaxSentence runes at the slowest rate in #5683's figures (80 characters
+// in 8 s: 10 runes a second, 30 s) that starts as the notice falls due
+// plays to its end before the notice, uncut (#5683), and the owner's
+// EndingWait still fits inside the EndingNotice margin, so the clip never
+// outlasts MaxCall. The rate and the durations here are the issue's
+// figures, not call.SpeakRate, so a faster SpeakRate or a shorter
+// SentenceWait fails.
 func TestTheEndingNoticeLetsALongSentenceEnd(t *testing.T) {
-	if want := call.MaxSentence * time.Second / call.SpeakRate; call.SentenceWait < want {
-		t.Fatalf("SentenceWait %v < MaxSentence at SpeakRate %v", call.SentenceWait, want)
+	const slowest = 10 // runes a second: 80 characters in 8 s (#5683)
+	longest := time.Duration(call.MaxSentence) * time.Second / slowest
+	if call.SpeakRate != slowest {
+		t.Fatalf("SpeakRate %d, want the issue's slowest %d runes a second", call.SpeakRate, slowest)
+	}
+	if call.SentenceWait < 30*time.Second || call.SentenceWait < longest {
+		t.Fatalf("SentenceWait %v < 30 s, or < MaxSentence at %d runes a second (%v)", call.SentenceWait, slowest, longest)
 	}
 	if late := call.SentenceWait + call.EndingWait; late >= call.EndingNotice {
 		t.Fatalf("the notice can start %v late, past its %v margin", late, call.EndingNotice)
 	}
-	for _, long := range []time.Duration{8 * time.Second, call.MaxSentence * time.Second / call.SpeakRate} {
+	for _, long := range []time.Duration{8 * time.Second, longest} {
 		synctest.Test(t, func(t *testing.T) {
 			start := time.Now()
 			r := newRig(t, fixed("One."))
@@ -533,13 +541,15 @@ func TestTheEndingNoticeLetsALongSentenceEnd(t *testing.T) {
 			r.cfg.Clips.Ending = []byte("CLIP:ending")
 			r.l.sayFor = long
 			r.serve()
-			time.Sleep(29*time.Minute - time.Second)
+			time.Sleep(29*time.Minute - time.Millisecond)
 			r.say("q")
 			synctest.Wait()
 			if got := <-r.l.saying; got != "S:One." {
 				t.Fatalf("the answer played %q", got)
 			}
-			time.Sleep(long - time.Nanosecond) // the notice fell due at 1 s
+			// The notice falls due 1 ms in, so almost all of the sentence
+			// plays after it.
+			time.Sleep(long - time.Nanosecond)
 			synctest.Wait()
 			select {
 			case got := <-r.l.saying:

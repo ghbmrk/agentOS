@@ -180,22 +180,25 @@ const EndingNotice = time.Minute
 
 // SentenceWait bounds how long Clips.Ending waits for the sentence playing
 // when it falls due, so the owner hears that sentence to its end and not
-// cut mid-word (#5304); a sentence still playing then is cut. It is
-// MaxSentence at SpeakRate (20 s), so a sentence of any length the answer
-// makes ends first at that rate (#5683); a slower voice is cut.
+// cut mid-word (#5304). It is MaxSentence at SpeakRate (30 s), and Cut ends
+// every sentence within MaxSentence runes, end mark or not, so any sentence
+// the answer makes ends first if spoken at SpeakRate or faster (#5683). A
+// voice slower than SpeakRate can still be cut at the bound.
 const SentenceWait = MaxSentence * time.Second / SpeakRate
 
-// SpeakRate is the slowest speaking rate SentenceWait is sized for, in
-// runes a second: an 80-120 character sentence takes about 6-8 s (#5683).
-const SpeakRate = 15
+// SpeakRate is the speaking rate SentenceWait is sized for, in runes a
+// second: the slowest rate in #5683's figures (80 characters in 8 s), not
+// a measured one; VOICE-ro-b timing on hardware is to confirm it.
+const SpeakRate = 10
 
 // EndingWait bounds how long Clips.Ending waits for the owner's final words
 // once they speak (#5690). The notice starts at most SentenceWait plus
-// EndingWait (25 s) after it falls due, inside EndingNotice, so it still
+// EndingWait (35 s) after it falls due, inside EndingNotice, so it still
 // never outlasts MaxCall.
 const EndingWait = 5 * time.Second
 
-// MaxSentence caps a sentence that has no end mark, in runes.
+// MaxSentence caps every sentence Cut takes, in runes, whether or not it
+// has an end mark.
 const MaxSentence = 300
 
 // ErrDeaf is returned when the recognizer stops during a call: nothing
@@ -543,8 +546,6 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			ending, due = nil, true
 			if cur != nil {
 				close(cur.hush)
-			}
-			if cur != nil {
 				bound = time.After(SentenceWait) // the wall clock, as ending is
 			} else if speaking {
 				bound = time.After(EndingWait)
@@ -866,17 +867,24 @@ func nonZero(d time.Duration) time.Duration {
 }
 
 // Cut takes the first complete sentence off s: text up to an end mark
-// (. ! ? or a line break) followed by space, or MaxSentence runes cut at
-// the last space. cut is false while the sentence may still go on.
+// (. ! ? or a line break) followed by space within its first MaxSentence
+// runes, or else MaxSentence runes cut at the last space, so no sentence
+// is longer than MaxSentence runes (#5683). cut is false while the
+// sentence may still go on.
 func Cut(s string) (sentence, rest string, cut bool) {
+	n := 0
 	for i, r := range s {
+		if n == MaxSentence {
+			break
+		}
+		n++
 		switch r {
 		case '\n':
 			return s[:i], s[i+1:], true
 		case '.', '!', '?':
 			// At the end of s, s[j:] is "", which decodes as RuneError, not space.
 			j := i + utf8.RuneLen(r)
-			if n, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(n) {
+			if next, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(next) {
 				return s[:j], s[j:], true
 			}
 		}

@@ -376,6 +376,24 @@ func TestCutBounds(t *testing.T) {
 	if !ok || s == "" || !strings.HasPrefix(rest, " ") || strings.HasSuffix(s, "wor") {
 		t.Errorf("not cut at a space: %q | %q", s[len(s)-10:], rest[:10])
 	}
+	// An end mark past MaxSentence runes does not lengthen the sentence
+	// (#5683): it is cut at a space within MaxSentence runes, as one with
+	// no end mark is, so SentenceWait bounds every sentence.
+	over := strings.Repeat("word ", 90)[:449] + ". Next."
+	if s, rest, ok := call.Cut(over); !ok || len([]rune(s)) > call.MaxSentence || s+rest != over || strings.HasSuffix(s, "wor") {
+		t.Errorf("end mark past MaxSentence: %d runes, ok %v", len([]rune(s)), ok)
+	}
+	// An end mark that is rune MaxSentence still ends the sentence there.
+	at := strings.Repeat("a", call.MaxSentence-1) + ". Next."
+	if s, rest, ok := call.Cut(at); !ok || len([]rune(s)) != call.MaxSentence || rest != " Next." {
+		t.Errorf("end mark at MaxSentence: %d runes, rest %q, ok %v", len([]rune(s)), rest, ok)
+	}
+	// One rune later it does not: with no space before it, the cut falls
+	// at MaxSentence runes.
+	after := strings.Repeat("a", call.MaxSentence) + ". Next."
+	if s, rest, ok := call.Cut(after); !ok || len([]rune(s)) != call.MaxSentence || rest != ". Next." {
+		t.Errorf("end mark past MaxSentence: %d runes, rest %q, ok %v", len([]rune(s)), rest, ok)
+	}
 }
 
 // serve runs Serve on the rig's line and returns the report on r.rep.
