@@ -652,7 +652,7 @@ func (s *Store) encode(nf file, e map[string][]byte) ([]byte, error) {
 // they were. Once the rename is done the file holds the new slots, so the
 // store takes them even if the directory sync then fails, and returns that
 // error: otherwise the next commit would write the old slots back, and a
-// failed Replace of a compromised passphrase would revive it (REC-4).
+// failed ReplaceAndPut of a compromised factor would revive it (REC-4).
 func (s *Store) commit(slots []slot, e map[string][]byte) error {
 	nf := s.f
 	nf.Slots = slots
@@ -821,13 +821,13 @@ type Swap struct {
 	F  Factor
 }
 
-// ReplaceAndPut is Replace of each swap's slot and Put of entry name in one
-// write: a new recovery key's slot and its backup recipient (REC-4, BAK-1,
-// MIG-4-recovery-r2), and on the lost-card route the new card's passphrase
-// slot with them (MIG-4-recovery-r4d). A crash leaves every old slot and
-// the old entry, or every new slot and the new entry, never a mix. Like
-// Replace it returns the new slots' IDs, in the swaps' order, once they
-// are in place, even with the directory sync's error.
+// ReplaceAndPut puts a new slot for each swap's factor in place of its slot,
+// and entry name, in one write: a new recovery key's slot and its backup
+// recipient (REC-4, BAK-1, MIG-4-recovery-r2), and on the lost-card route
+// the new card's passphrase slot with them (MIG-4-recovery-r4d). A crash
+// leaves every old slot and the old entry, or every new slot and the new
+// entry, never a mix. It returns the new slots' IDs, in the swaps' order,
+// once they are in place, even with the directory sync's error.
 func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

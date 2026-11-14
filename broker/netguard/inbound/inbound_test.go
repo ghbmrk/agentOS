@@ -680,3 +680,20 @@ func TestInboundExemptElementsAreSorted(t *testing.T) {
 		}
 	}
 }
+
+// REQ: DEV-2
+// A listed device's family follows its address: an IPv6 device's rule
+// matches ip6 saddr, an IPv4 one's ip saddr, and neither admits the other
+// family (KEY-9-reach-b2-cut: the family choice was a surviving deletion).
+func TestInboundDeviceRuleFollowsTheAddressFamily(t *testing.T) {
+	v4, v6 := netip.MustParseAddr("192.168.1.60"), netip.MustParseAddr("fd00::5")
+	r := render(t, Inbound{Devices: []DeviceAllow{{Addr: v4, TCPPorts: []uint16{8080}}, {Addr: v6, TCPPorts: []uint16{8443}}}})
+	for _, want := range []string{"    ip saddr 192.168.1.60 tcp dport { 8080 } accept\n", "    ip6 saddr fd00::5 tcp dport { 8443 } accept\n"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("no rule %q in:\n%s", want, r)
+		}
+	}
+	if strings.Contains(r, "ip saddr fd00::5") || strings.Contains(r, "ip6 saddr 192.168.1.60") {
+		t.Errorf("a device's rule names the wrong family:\n%s", r)
+	}
+}

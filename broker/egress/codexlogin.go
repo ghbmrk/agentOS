@@ -95,7 +95,7 @@ type refreshFlight struct {
 	ready   chan struct{}
 	res     *Exchanged
 	err     error
-	joined  int // refreshes that joined the leader's exchange
+	joined  int // refreshes that joined the leader's exchange (tests read it)
 	members int // refreshes not yet done with this flight
 }
 
