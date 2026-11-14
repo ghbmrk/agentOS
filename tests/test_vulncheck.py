@@ -300,6 +300,24 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(seen[1][:2], ("POST", "https://api.github.com/repos/o/r/issues/7/comments"))
         self.assertIn("cites this issue for 2 accepted record(s)", seen[1][2]["body"])
 
+    def test_cited_exit_code(self):
+        # REQ: EVL-5. #5692: a close step runs `cited N` first: 1 keeps a cited issue
+        # open (#5660 was closed while a record cited it), 0 lets an uncited one close, 2 when
+        # the config cannot be read, so a broken config never reads as "not cited".
+        with tempfile.TemporaryDirectory() as d:
+            cfg = pathlib.Path(d) / "vulncheck.json"
+            cfg.write_text(json.dumps({"accepted": [{"id": "V1", "issue": 7}, {"id": "V2", "issue": 7}]}))
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(vulncheck.main(["cited", "7", "--config", str(cfg)]), 1)
+                self.assertEqual(vulncheck.main(["cited", "9", "--config", str(cfg)]), 0)
+            self.assertIn("issue #7: cited by 2 record(s); keep it open", out.getvalue())
+            self.assertIn("issue #9: not cited", out.getvalue())
+            cfg.write_text("{not json")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(vulncheck.main(["cited", "7", "--config", str(cfg)]), 2)
+                self.assertEqual(vulncheck.main(["cited", "7", "--config", str(cfg) + ".missing"]), 2)
+        self.assertEqual(vulncheck.cited([{"issue": 7}, {"issue": 8}, {}], 7), 1)
+
     def test_reopen_without_a_token_fails(self):
         env = dict(vulncheck.os.environ)
         try:

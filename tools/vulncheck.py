@@ -72,6 +72,10 @@ reopen   Reopen ISSUE on GITHUB_REPOSITORY, with a comment, when a record in the
          closing a cited issue withdraws its records' acceptance and fails every scan that
          applies them (#2919, closed 2026-11-03 while 71 image records cited it). The
          `acceptance` workflow runs it on each issue close; an uncited issue is left closed.
+cited    Exit 1 when a record in the config cites ISSUE, else 0: run before closing an issue.
+         The `acceptance` reopen waits on the runner queue, and every scan finishing first
+         fails (#5660, #5692), so a close step skips a cited issue and leaves it open with
+         `state:merged`; .claude/hooks/close_guard.py denies a session's close of one.
 control  The same scans against tests/fixtures/vulncheck with planted synthetic databases,
          offline: every planted vulnerability must fail, the unreachable standard-library one
          must not, and the fixture's acceptance records must clear the rest. The workflows run
@@ -453,20 +457,25 @@ REOPEN_NOTE = ("Reopened by `tools/vulncheck.py reopen`: `assurance/vulncheck.js
                "`state:merged` issue stays off BOARD.md and the build queue while open.")
 
 
+def cited(records, num):
+    """The number of records that cite issue num."""
+    return sum(1 for r in records if r.get("issue") == num)
+
+
 def reopen_cited(records, num, repo, token, opener=urllib.request.urlopen):
     """Reopen issue num with a comment when a record cites it; return the cited count."""
-    cited = sum(1 for r in records if r.get("issue") == num)
-    if not cited:
+    n = cited(records, num)
+    if not n:
         return 0
     base = f"https://api.github.com/repos/{repo}/issues/{num}"
     headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
                "Content-Type": "application/json"}
     for url, method, body in ((base, "PATCH", {"state": "open"}),
-                              (f"{base}/comments", "POST", {"body": REOPEN_NOTE.format(n=cited)})):
+                              (f"{base}/comments", "POST", {"body": REOPEN_NOTE.format(n=n)})):
         req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method=method)
         with opener(req, timeout=30) as resp:
             resp.read()
-    return cited
+    return n
 
 
 def run_govulncheck(target_dir, db=None):
@@ -1700,8 +1709,19 @@ def main(argv=None):
     o = sub.add_parser("reopen")
     o.add_argument("issue", type=int)
     o.add_argument("--config", default=str(CONFIG))
+    c = sub.add_parser("cited")
+    c.add_argument("issue", type=int)
+    c.add_argument("--config", default=str(CONFIG))
     sub.add_parser("control")
     a = ap.parse_args(argv)
+    if a.cmd == "cited":
+        try:
+            n = cited(json.loads(pathlib.Path(a.config).read_text()).get("accepted", []), a.issue)
+        except (OSError, ValueError, AttributeError) as e:
+            print(f"vulncheck: cannot read {a.config}: {e}", file=sys.stderr)
+            return 2
+        print(f"issue #{a.issue}: " + (f"cited by {n} record(s); keep it open" if n else "not cited"))
+        return 1 if n else 0
     if a.cmd == "reopen":
         repo, token = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
         if not repo or not token:
