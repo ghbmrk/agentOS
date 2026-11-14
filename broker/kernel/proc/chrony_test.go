@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -36,6 +37,7 @@ func tracking(seq uint32, corr uint32) []byte {
 const (
 	corrZero    = 0x00000000 // 0 s
 	corrTwoDays = 0x27574000 // -172800 s: the box clock two days fast
+	corrTwoSlow = 0x26a8c000 // 172800 s: the box clock two days slow
 )
 
 // fakeChronyd answers each well-formed REQ_TRACKING at dir/chronyd.sock with
@@ -80,6 +82,7 @@ func TestTIM1AChronyFloat(t *testing.T) {
 		{0x27574000, -172800}, {0xea80f990, 0.0001230000052601099},
 		{0xcb0f7b59, -3.5000000675466936e-09}, {0x24a8c020, 86400.25},
 		{0xf283126f, 0.0020000000949949026}, {0xf083126f, 0.0010000000474974513}, {0x3cbebc20, 4e8},
+		{0x80800000, math.Ldexp(1, -66)}, // the least negative exponent, -64
 	} {
 		if got := chronyFloat(v.x); got != v.want {
 			t.Errorf("chronyFloat(%#08x) = %v, want %v", v.x, got, v.want)
@@ -120,6 +123,18 @@ func TestTIM1AChronyReplyGivesNoLowerBoundUnlessSynced(t *testing.T) {
 	} {
 		if _, _, ok := parseTracking(bad(tracking(9, corrZero)), 9); ok {
 			t.Errorf("%s: read as synced", name)
+		}
+	}
+	// The limits themselves are in: a bound of none or of a day, and a
+	// correction of ten years either way.
+	for name, edge := range map[string]func([]byte) []byte{
+		"no bound":         func(p []byte) []byte { return put32(96, 0)(put32(92, 0)(p)) },
+		"a bound of a day": func(p []byte) []byte { return put32(96, 0x32015180)(put32(92, 0)(p)) }, // 86400 s
+		"ten years slow":   put32(68, 0x4212cc03),                                                   // 315360000 s
+		"ten years fast":   put32(68, 0x43ed33fd),                                                   // -315360000 s
+	} {
+		if _, _, ok := parseTracking(edge(tracking(9, corrZero)), 9); !ok {
+			t.Errorf("%s: refused", name)
 		}
 	}
 
@@ -264,4 +279,106 @@ func TestTIM1AStartAheadWithChronySyncedEndsNoHoldEarly(t *testing.T) {
 	if e := stop(); e.At < from {
 		t.Fatalf("without chronyd the start logged at %d, before the hold's end %d: the contrast is gone", e.At, from)
 	}
+}
+
+// The box clock two days slow, chronyd's interval lies wholly past it: the
+// reading's Latest is the box clock plus the correction and the bound, so a
+// wider bound reaches further (TIM-1).
+//
+// REQ: TIM-1
+func TestTIM1AChronyAheadOfTheBoxReachesPastItByTheBound(t *testing.T) {
+	dir := t.TempDir()
+	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte {
+		p := tracking(seq, corrTwoSlow)
+		binary.BigEndian.PutUint32(p[92:], 0)          // root delay none
+		binary.BigEndian.PutUint32(p[96:], 0x04800000) // root dispersion 1 s
+		return p
+	}), filepath.Join(dir, "reply.sock"))
+	defer s.Close()
+	b0 := time.Now().UnixMilli()
+	r := s.Read()
+	b1 := time.Now().UnixMilli()
+	reach := 2*key.DayMS + 1000 // the correction, then the bound's 1 s
+	if r.Earliest < b0 || r.Earliest > b1 || r.Latest < b0+reach || r.Latest > b1+reach {
+		t.Fatalf("a box two days slow read %+v around the box's [%d, %d], want Latest %d past it", r, b0, b1, reach)
+	}
+}
+
+// Each request carries a new sequence number from 1, so an answer to an
+// earlier request, replayed, vouches for nothing (TIM-1).
+//
+// REQ: TIM-1
+func TestTIM1AChronyRefusesAnAnswerToAnEarlierRequest(t *testing.T) {
+	dir := t.TempDir()
+	s := NewChrony(fakeChronyd(t, dir, func(uint32) []byte { return tracking(1, corrZero) }), filepath.Join(dir, "reply.sock"))
+	defer s.Close()
+	if r := s.Read(); r.Earliest == 0 {
+		t.Fatalf("the answer to the first request read %+v", r)
+	}
+	if r := s.Read(); r.Earliest != 0 {
+		t.Fatalf("the first answer replayed to the second request read %+v", r)
+	}
+}
+
+// The reply socket replaces a stale file a crash left at its path and is
+// open to chronyd's uid (0666); Close closes it and removes its file, and a
+// later Read binds it again. A failed answer drops the socket the same way.
+//
+// REQ: TIM-1
+func TestTIM1AChronyReplySocketLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	var synced atomic.Bool
+	synced.Store(true)
+	reply := filepath.Join(dir, "reply.sock")
+	if err := os.WriteFile(reply, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewChrony(fakeChronyd(t, dir, func(seq uint32) []byte {
+		p := tracking(seq, corrZero)
+		if !synced.Load() {
+			binary.BigEndian.PutUint16(p[54:], chronyUnsynced)
+		}
+		return p
+	}), reply)
+	defer s.Close()
+	if r := s.Read(); r.Earliest == 0 {
+		t.Fatalf("over a stale file the reply socket read %+v", r)
+	}
+	if fi, err := os.Stat(reply); err != nil || fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o666 {
+		t.Fatalf("the reply socket is %v, %v: want a socket of mode 0666", fi, err)
+	}
+	closed := func(c *net.UnixConn, when string) {
+		t.Helper()
+		if s.c != nil {
+			t.Fatalf("%s: the socket is still held", when)
+		}
+		if _, err := c.Write(make([]byte, chronyLen)); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("%s: the old socket still writes: %v", when, err)
+		}
+		if _, err := os.Lstat(reply); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: the reply socket's file is left: %v", when, err)
+		}
+	}
+	c := s.c
+	s.Close()
+	closed(c, "closed")
+
+	// Close leaves Read usable: it binds the socket again.
+	done := make(chan kernel.Reading, 1)
+	go func() { done <- s.Read() }()
+	select {
+	case r := <-done:
+		if r.Earliest == 0 {
+			t.Fatalf("a Read after Close read %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Read after Close never returned: Close kept the lock")
+	}
+
+	c = s.c
+	synced.Store(false)
+	if r := s.Read(); r.Earliest != 0 {
+		t.Fatalf("an unsynced chronyd read %+v", r)
+	}
+	closed(c, "after a failed answer")
 }
