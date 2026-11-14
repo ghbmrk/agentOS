@@ -905,6 +905,8 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #5715 L3 6874735402, Security 6874738412: an L line's link under the source; a source outside /usr.
 		"a tmpfiles copy over a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/pkg/lnk - - - - /run/agentos-x\n", tmpf+"x.conf", "C /run/x - - - - /var/lib/pkg\n", "/var/lib/pkg/f", "x"), ourEtc, `an L line makes a link at, under or above its source, /var/lib/pkg/lnk`},
 		"a tmpfiles copy from /etc":            {with(udev, tmpf+"x.conf", "C /run/x - - - - /etc/pkg\n", "/etc/pkg/f", "x"), ourEtc, `its source is not under /usr`},
+		// #5715 Security 6874832725: a tmpfiles line makes /.extra in the persistent root.
+		"a tmpfiles copy from a /.extra a tmpfiles line makes": {with(udev, tmpf+"x.conf", "d /.extra/profile 0777 - - -\nC /run/x - - - - /.extra/profile\n"), ourEtc, `its source is under /.extra, which a tmpfiles.d line names (/.extra/profile)`},
 		// #5620 R-a, R-b.
 		"an open directory mode of ours":  {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a directory mode of ours`},
 		"a port of ours":                  {with(foo, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=2222\nReusePort=yes\n"), ourEtc, `ListenStream=2222: a listen path of ours names no path`},

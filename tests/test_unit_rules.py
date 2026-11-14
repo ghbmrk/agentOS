@@ -795,12 +795,29 @@ class CopyLineTest(unittest.TestCase):
         # #5715 L3 6874735402: /etc and /var keep what a service left there between boots.
         for line, more in (("C /run/x - - - - /etc/pkg", {"/etc/pkg/f": "x"}),
                            ("C /run/x - - - - /var/lib/pkg/f", {"/var/lib/pkg/f": "x"}),
-                           ("C /run/x - - - - /.extra/profile", {"/.extra/profile": "x"}),
                            ("C /run/x - - - - /usrx/f", {"/usrx/f": "x"}),
                            ("C /run/x - - - - /", {})):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 with self.assertRaisesRegex(SystemExit, "C line .*: its source is not under /usr"):
                     self.run_line(d, line, more)
+
+    def test_a_extra_source_present_at_boot_fails_the_run(self):
+        # #5715 Security 6874832725: root is persistent and writable, so a tmpfiles.d line (any type) at, under
+        # or above /.extra, or a /.extra in the tree, lets a non-root writer plant a link the C line copies.
+        c = "C /run/x - - - - /.extra/profile\n"
+        for files, want in (
+                ({"/usr/lib/tmpfiles.d/x.conf": "d /.extra/profile 0777 - - -\n" + c}, r"a tmpfiles.d line names \(/.extra/profile\)"),
+                ({"/usr/lib/tmpfiles.d/x.conf": "d /.extra 1777 - - -\n" + c}, r"a tmpfiles.d line names \(/.extra\)"),
+                ({"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/other": "x"}, "which the tree holds"),
+                ({"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/profile": "x"}, "which the tree holds"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "Z / - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(/\)"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "C /.extra/profile - - - - /usr/share/f\n",
+                  "/usr/lib/tmpfiles.d/x.conf": c, "/usr/share/f": "x"}, r"names \(/.extra/profile\)"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "d /.ext*/p 0777 - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(/.ext\*/p\)"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "d %h/../.extra 0777 - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(%h")):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is under /.extra, .*" + want):
+                    r.boot_links(tree(d, files))
 
     def test_a_source_the_reader_cannot_read_fails_the_run(self):
         for line, want in (

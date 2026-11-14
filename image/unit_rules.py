@@ -583,10 +583,22 @@ def tmpfiles_copies(view, links, usr_view=None):
     names none) is read like an L line's target: a specifier, quote or escape, an encoded (~) or credential
     (^) source, one not absolute and normal, one under a boot mount (empty in VIEW, filled at boot), or one
     passing through a link, the tree's or one in LINKS, fails the run too, as does one at, under or above
-    any L line's path, or one outside /usr but a /.extra file the tree does not hold (systemd skips that
-    line: the image's own C lines)."""
+    any L line's path, or one outside /usr but a /.extra file (systemd skips that line: the image's own C
+    lines) when the tree holds no /.extra and no tmpfiles.d line names a path at, under or above it."""
     lines = tmpfiles_lines(view, usr_view)
     ls = [w[1] for w in (line.split() for _, line in lines) if w[0].startswith("L") and len(w) > 1]
+    # #5715 Security 6874832725: root is persistent and writable, so a /.extra source is absent at boot only
+    # if the tree holds no /.extra and no tmpfiles.d line of any type names a path that may be /.extra, at,
+    # under or above it (fail closed: a path with a specifier, glob, quote or escape is read up to that
+    # character, and counts if that prefix and /.extra may meet).
+    extra = []
+    for _, line in lines:
+        w = line.split()
+        p = w[1] if len(w) > 1 else ""
+        lit = re.split(r"[%*?\[\\\"']", p, 1)[0]
+        if (lit == p and (p in ("/", "/.extra") or p.startswith("/.extra/"))
+                or lit != p and ("/.extra".startswith(lit) or lit.startswith("/.extra"))):
+            extra.append(p)
     for f, line in lines:
         w = line.split(None, 6)
         if not w[0].startswith("C"):
@@ -627,10 +639,13 @@ def tmpfiles_copies(view, links, usr_view=None):
                 raise SystemExit("unit rules: %s: C line %r: an L line makes a link at, under or above its "
                                  "source, %s, which systemd-tmpfiles may copy as a link" % (f, line, k))
         # A source in persistent writable state copies what a running service left there between boots,
-        # which no lint of the tree sees: only read-only /usr, or a /.extra file the tree does not hold
-        # (systemd-stub's, absent at boot, so systemd skips the line), is a source.
-        if not (src.startswith("/usr/") or src == "/usr"
-                or (src.startswith("/.extra/") and view.kind(src) is None)):
+        # which no lint of the tree sees: only read-only /usr, or a /.extra file absent at boot (systemd-stub's,
+        # so systemd skips the line; nothing in the tree or a tmpfiles.d line makes /.extra), is a source.
+        if src.startswith("/.extra/") and (view.kind("/.extra") is not None or extra):
+            raise SystemExit("unit rules: %s: C line %r: its source is under /.extra, which %s, so a "
+                             "service may leave a link there between boots" % (f, line, "the tree holds"
+                             if view.kind("/.extra") is not None else "a tmpfiles.d line names (%s)" % extra[0]))
+        if not (src.startswith("/usr/") or src == "/usr" or src.startswith("/.extra/")):
             raise SystemExit("unit rules: %s: C line %r: its source is not under /usr, so a service may "
                              "leave a link there between boots" % (f, line))
 
