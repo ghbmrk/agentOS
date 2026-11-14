@@ -519,6 +519,30 @@ func TestAnotherVerbGoesOnToTheClerk(t *testing.T) {
 	}
 }
 
+func TestAnotherVerbIsProbedByTheClerk(t *testing.T) {
+	// Only a change-account step is probed at the exit host: any other is the
+	// clerk's to probe, here a post the remote dedupes, which the clerk never
+	// sent and so reads as not done.
+	sec, err := OpenSecrets(shortDir(t), testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.Put("web", clerk.KindStatic, []byte("canary-static-secret")); err != nil {
+		t.Fatal(err)
+	}
+	post := ops("https://example.com:1")
+	post[0].Idempotent = true
+	d := clerk.Declaration{Name: "web", Ops: post, Guard: guard("127.0.0.1:1"), Clock: func() int64 { return 1 }}
+	x, err := clerk.NewExit(d, anchors, sec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := kernel.Request{Plan: kernel.Plan{ID: "p1", Steps: []kernel.PlanStep{{Verb: key.Post, Clerk: "web"}}}}
+	if got := NewExitHost(x, d, anchors).Probe(r, nil); got.Outcome != "notdone" {
+		t.Fatalf("probe of a post never sent: %+v", got)
+	}
+}
+
 // A grant leaves memory once it is spent or replaced: its bytes are wiped,
 // not only let go.
 func TestASpentOrReplacedGrantIsWiped(t *testing.T) {
