@@ -1,4 +1,4 @@
-package netguard
+package inbound
 
 // REQ: DEV-2, REV-5, DEV-net-e
 
@@ -341,12 +341,12 @@ func TestInboundRulesAreValidNft(t *testing.T) {
 }
 
 // imageRules is the file the image loads at boot (agentos-inbound.service).
-const imageRules = "../../image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
+const imageRules = "../../../image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 
 // DEV-net-e 2a: the image loads exactly the rules of Image (the zero value,
 // the owner page's ports, WIFI-del-a3, and the edge link's port,
 // EDGE-link-core c2c), after its header comment.
-// Regenerate with AGENTOS_WRITE_INBOUND=1 go test ./netguard.
+// Regenerate with AGENTOS_WRITE_INBOUND=1 go test ./netguard/inbound.
 func TestInboundImageFileIsTheDefault(t *testing.T) {
 	if Image.Devices != nil || Image.Discovery != nil || Image.Exempt != nil || !Image.Page || !Image.Link {
 		t.Fatalf("the image's rules are not the zero value, the page and the link: %+v", Image)
@@ -354,7 +354,7 @@ func TestInboundImageFileIsTheDefault(t *testing.T) {
 	want := render(t, Image)
 	if os.Getenv("AGENTOS_WRITE_INBOUND") == "1" {
 		hdr := "#!/usr/sbin/nft -f\n" +
-			"# Generated from broker/netguard InboundRules(Image); TestInboundImageFileIsTheDefault\n" +
+			"# Generated from broker/netguard/inbound InboundRules(Image); TestInboundImageFileIsTheDefault\n" +
 			"# checks it. agentos-inbound.service loads it before any network or listener (DEV-net-e 2a).\n"
 		if err := os.WriteFile(imageRules, []byte(hdr+want), 0o644); err != nil {
 			t.Fatal(err)
@@ -664,5 +664,19 @@ func TestInboundLinkPortOnTheLinkOnly(t *testing.T) {
 	}
 	if !strings.Contains(r, "  set link {\n    type ifname\n  }\n") {
 		t.Errorf("the link set is not rendered empty:\n%s", r)
+	}
+}
+
+// REQ: DEV-2
+// The exempt set's elements are rendered sorted, so the image file and a
+// rule set rendered twice compare equal whatever order the map yields
+// (KEY-9-reach-b2-cut: inbound.go's sort was a surviving deletion).
+func TestInboundExemptElementsAreSorted(t *testing.T) {
+	c := Inbound{Exempt: []string{"wlan0", "eth9", "ap0", "usb0", "br1"}}
+	want := `    elements = { "ap0", "br1", "eth9", "lo", "usb0", "wlan0" }` + "\n"
+	for range 32 {
+		if r := render(t, c); !strings.Contains(r, want) {
+			t.Fatalf("the exempt set is not rendered sorted:\n%s", r)
+		}
 	}
 }

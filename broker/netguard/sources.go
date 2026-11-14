@@ -291,13 +291,6 @@ func Prefixes(as []net.Addr) []netip.Prefix {
 	return out
 }
 
-// Gateway4 returns the default gateway in /proc/net/route text: the
-// lowest-metric row whose destination and mask are zero.
-func Gateway4(table string) netip.Addr {
-	gw, _ := gateway4(table)
-	return gw
-}
-
 // gateway4 is Gateway4 with the route's interface.
 func gateway4(table string) (netip.Addr, string) {
 	var best netip.Addr
@@ -356,13 +349,6 @@ func NeighbourMAC(table string, ip netip.Addr, dev string) string {
 		return hw.String()
 	}
 	return ""
-}
-
-// Gateway6 returns the default gateway in /proc/net/ipv6_route text: the
-// lowest-metric row whose destination prefix length is zero.
-func Gateway6(table string) netip.Addr {
-	gw, _ := gateway6(table)
-	return gw
 }
 
 // gateway6 is Gateway6 with the route's interface.

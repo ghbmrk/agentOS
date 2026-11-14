@@ -703,3 +703,16 @@ func TestACommitReportsItsOutcome(t *testing.T) {
 		}
 	}
 }
+
+// Rewrap is the tests' one call for a re-seal; the kernel's goes through
+// Set. It re-seals rec's key table at t without the subjects erased since
+// (D-168). The new table holds rec.Subjects that are still live, with
+// their keys from the live table, sealed fresh to rec.Recipient (so a
+// backup from before a recovery-key rotation still opens with the key
+// that opens its content) as generation max(listed)+1. It is put, read
+// back and compared, and then every other generation is deleted. It
+// returns the new Record once the new table is confirmed, and rec
+// otherwise; the caller persists what it returns.
+func Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Outcome) {
+	return snapshot(rec, keys, state).rewrap(t, rec)
+}

@@ -14,7 +14,7 @@ import (
 // table says (HW-15). The core's address there comes from DHCP and may
 // change, so no address is bound. The server also checks every request's
 // source (homeSource) and the inbound table admits the page's ports only
-// from private sources (netguard.InboundRules).
+// from private sources (inbound.InboundRules).
 func Listen(ctx context.Context, p Page, port int) (net.Listener, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err

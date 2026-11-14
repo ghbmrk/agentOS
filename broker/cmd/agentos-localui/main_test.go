@@ -25,7 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
-	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/netguard/inbound"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -1241,8 +1241,8 @@ func TestUnitAdmitsPort1AsRootAndClosesOnStop(t *testing.T) {
 			t.Errorf("%s=%q does not name agentos-inbound.service", k, set[k])
 		}
 	}
-	if close := strings.TrimPrefix(set["ExecStopPost"][0], "+/usr/sbin/nft ") + "\n"; close != netguard.InboundPageClose {
-		t.Errorf("the stop runs %q, not netguard.InboundPageClose %q", close, netguard.InboundPageClose)
+	if close := strings.TrimPrefix(set["ExecStopPost"][0], "+/usr/sbin/nft ") + "\n"; close != inbound.InboundPageClose {
+		t.Errorf("the stop runs %q, not inbound.InboundPageClose %q", close, inbound.InboundPageClose)
 	}
 }
 

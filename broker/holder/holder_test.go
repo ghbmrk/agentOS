@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -380,4 +381,11 @@ func TestNewChecksTheDeclaration(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("no adapter accepted")
 	}
+}
+
+// holds reports whether the holder's secret is b (tests).
+func (h *Holder) holds(b []byte) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.secret) > 0 && subtle.ConstantTimeCompare(h.secret, b) == 1
 }

@@ -756,28 +756,6 @@ func (s *Store) RemoveSlot(id string) error {
 	return s.commit(slices.Delete(slices.Clone(s.f.Slots), i, i+1), s.entries.Get())
 }
 
-// Replace puts a new slot for f in place of slot id in one write: a new
-// passphrase or recovery key (REC-4), or a TPM slot sealed again. The old
-// slot no longer opens the store once Replace returns.
-func (s *Store) Replace(id string, f Factor) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.live(); err != nil {
-		return "", err
-	}
-	i := s.find(id)
-	if i < 0 {
-		return "", ErrNoSlot
-	}
-	sl, err := makeSlot(s.f.ID, s.key.Get(), f)
-	if err != nil {
-		return "", err
-	}
-	slots := slices.Clone(s.f.Slots)
-	slots[i] = sl
-	return s.committed(sl.ID, s.commit(slots, s.entries.Get()))
-}
-
 // SetPolicies replaces a tpm slot's signed boot paths: an update adds the
 // next release's path before it reboots (HW-5a). Each must be signed by the
 // policy key the slot was sealed under; the TPM checks that again at unseal.

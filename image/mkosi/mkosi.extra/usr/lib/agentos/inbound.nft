@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# Generated from broker/netguard InboundRules(Image); TestInboundImageFileIsTheDefault
+# Generated from broker/netguard/inbound InboundRules(Image); TestInboundImageFileIsTheDefault
 # checks it. agentos-inbound.service loads it before any network or listener (DEV-net-e 2a).
 table inet agentos_inbound {
   set exempt {
