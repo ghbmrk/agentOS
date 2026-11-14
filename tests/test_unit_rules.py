@@ -741,6 +741,125 @@ class MagicLinkTest(unittest.TestCase):
             self.assertEqual(got.get("/etc/systemd/system/x.service"), "/dev/null")
 
 
+class CopyLineTest(unittest.TestCase):
+    """#5707 (KRN-2): systemd-tmpfiles copies a link as a link for a C line, so a C line whose source is, or
+    holds, a link fails the run, and so does one whose source the reader cannot read."""
+
+    def run_line(self, d, line, more=None):
+        return r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n", **(more or {})}))
+
+    def test_a_source_that_is_or_holds_a_link_fails_the_run(self):
+        for line, more, at in (
+                ("C /run/x - - - - /usr/share/pkg/lnk", {"/usr/share/pkg/lnk": "-> /run/agentos-x"}, "/usr/share/pkg/lnk"),
+                ("C /run/x - - - - /usr/share/pkg/f", {"/usr/share/pkg/f": "-> /etc/f", "/etc/f": "x"}, "/usr/share/pkg/f"),
+                ("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/b/lnk": "-> /run/agentos-x"}, "/usr/share/pkg/a/b/lnk"),
+                ("C+ /run/x - - - - /etc/pkg", {"/etc/pkg/lnk": "-> ../../run/agentos-x"}, "/etc/pkg/lnk"),
+                ("C /run/x", {"/usr/share/factory/run/x/lnk": "-> /run/agentos-x"}, "/usr/share/factory/run/x/lnk"),
+                ("C! /run/x - - - - /etc/pkg", {"/etc/pkg/dangling": "-> /nowhere"}, "/etc/pkg/dangling")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is or holds a link, %s" % at):
+                    self.run_line(d, line, more)
+
+    def test_a_source_through_a_link_fails_the_run(self):
+        for line, more, at in (
+                ("C /run/x - - - - /var/pkg/f", {"/var/pkg": "-> /etc/pkg", "/etc/pkg/f": "x"}, "/var/pkg"),
+                ("C /run/x - - - - /var/lib/foo/f", {"/usr/lib/tmpfiles.d/a.conf": "L /var/lib/foo - - - - /etc/pkg\n",
+                                                    "/etc/pkg/f": "x"}, "/var/lib/foo")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, r"C line .*: its source passes through a link \(%s\)" % at):
+                    self.run_line(d, line, more)
+
+    def test_a_source_at_under_or_above_an_l_line_fails_the_run(self):
+        # #5715 L3 6874735402 and Security 6874738412: an L line's link at boot, not in the tree.
+        for files, at in (
+                ({"/usr/lib/tmpfiles.d/x.conf": "L /etc/pkg/lnk - - - - /var/lib\nC /run/x - - - - /etc/pkg\n",
+                  "/etc/pkg/f": "x", "/var/lib/k": "y"}, "/etc/pkg/lnk"),
+                ({"/usr/lib/tmpfiles.d/x.conf": "L /var/lib/foo - - - - /etc/f\nC /run/x - - - - /var/lib/foo\n",
+                  "/etc/f": "x"}, "/var/lib/foo"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /var/lib/pkg/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /var/lib/pkg\n", "/var/lib/pkg/f": "x"}, "/var/lib/pkg/lnk"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /var/lib/pkgsrc/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /var/lib/pkgsrc\n"}, "/var/lib/pkgsrc/lnk"),
+                ({"/usr/lib/tmpfiles.d/x.conf": "L+ /etc/pkg/a/lnk - - - - /run/agentos-x\nC /run/x - - - - /etc/pkg\n"},
+                 "/etc/pkg/a/lnk"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /usr/share/factory/run/x/d/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x\n"}, "/usr/share/factory/run/x/d/lnk"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /usr/share/pkg - - - - /usr/share/f\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /usr/share/pkg/a\n", "/usr/share/f": "x"}, "/usr/share/pkg")):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: an L line makes a link at, under or above "
+                                                        "its source, %s" % at):
+                    r.boot_links(tree(d, files))
+
+    def test_a_source_outside_usr_fails_the_run(self):
+        # #5715 L3 6874735402: /etc and /var keep what a service left there between boots.
+        for line, more in (("C /run/x - - - - /etc/pkg", {"/etc/pkg/f": "x"}),
+                           ("C /run/x - - - - /var/lib/pkg/f", {"/var/lib/pkg/f": "x"}),
+                           ("C /run/x - - - - /usrx/f", {"/usrx/f": "x"}),
+                           ("C /run/x - - - - /", {})):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is not under /usr"):
+                    self.run_line(d, line, more)
+
+    def test_a_extra_source_fails_the_run(self):
+        # #5715 L3 6874919503 and Security 6874914212: a /.extra exception compared path text, so //, /./ or a
+        # link on the way (a tree link or an L line) made /.extra at boot with the lint passing. No source
+        # outside /usr is kept: the image's own stub lines (absent /.extra) fail too, and mkosi.conf drops them.
+        c = "C /run/x - - - - /.extra/profile\n"
+        for files in (
+                {"/usr/lib/tmpfiles.d/x.conf": c},
+                {"/usr/lib/tmpfiles.d/x.conf": "C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d //.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /./.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /usr/../.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "L /foo - - - - .\nd /foo/.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /foo/.extra/profile 0777 - - -\n" + c, "/foo": "-> ."},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /foo/.extra/profile 0777 - - -\n" + c, "/foo": "-> /"},
+                {"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/profile": "x"}):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is not under /usr"):
+                    r.boot_links(tree(d, files))
+
+    def test_a_non_normal_path_fails_the_run(self):
+        # normpath keeps a leading //, so a text match against an L line or /usr could miss it.
+        for files, want in (
+                ({"/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - //usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "C line .*: its source is not absolute and normal"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L //usr/share/pkg/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "L line .*: its path is not absolute and normal"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /usr/share/./pkg/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "L line .*: its path is not absolute and normal")):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, want):
+                    r.boot_links(tree(d, files))
+
+    def test_a_source_the_reader_cannot_read_fails_the_run(self):
+        for line, want in (
+                ("C /run/x - - - - /usr/share/%b/f", "holds a specifier, a quote or an escape"),
+                ("C /run/x - - - - \"/usr/share/pkg\"", "holds a specifier, a quote or an escape"),
+                ("C~ /run/x - - - - L3Vzci9zaGFyZQ==", "its source is encoded or a credential"),
+                ("C^ /run/x - - - - cred", "its source is encoded or a credential"),
+                ("C /run/x - - - - usr/share/pkg", "its source is not absolute and normal"),
+                ("C /run/x - - - - /usr/share/../../run/udev", "its source is not absolute and normal"),
+                ("C /run/x - - - - /run/pkg", "its source is under /run"),
+                ("C /run/x - - - - /proc/self/root", "its source is under /proc"),
+                ("C /run/x - - - - /tmp", "its source is under /tmp")):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "C line .*" + want):
+                    self.run_line(d, line)
+
+    def test_a_source_of_files_or_none_passes(self):
+        for line, more in (("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/f": "x", "/usr/share/pkg/g": "y"}),
+                           ("C /run/x", {"/usr/share/factory/run/x": "x"}),
+                           ("c /dev/x 0600 - - - 1:3", {})):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                got = self.run_line(d, line, more)
+                self.assertNotIn("/run/x", got)
+
+
 class LintTest(unittest.TestCase):
     """lint() refuses a run in which a generator failed (#4817, from #4767's harness)."""
 

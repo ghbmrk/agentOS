@@ -538,7 +538,7 @@ def tmpfiles_links(view, links, usr_view=None):
             raise SystemExit("unit rules: %s: L line %r: its target is encoded or a credential, which the "
                              "reader does not read" % (f, line))
         p = w[1] if len(w) > 1 else ""
-        if not p.startswith("/") or os.path.normpath(p) != p:
+        if not p.startswith("/") or p.startswith("//") or os.path.normpath(p) != p:  # normpath keeps a leading //
             raise SystemExit("unit rules: %s: L line %r: its path is not absolute and normal" % (f, line))
         if len(named[p]) > 1:
             raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
@@ -576,6 +576,64 @@ def tmpfiles_links(view, links, usr_view=None):
     return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
 
 
+def tmpfiles_copies(view, links, usr_view=None):
+    """#5707 (KRN-2): systemd-tmpfiles copies a link as a link for a C line (copy_tree_at), so a C line
+    whose source is a link, or a directory holding one anywhere below it, would make a link at boot that
+    LINKS (boot_links) do not hold: the run fails. VIEW is a BootView. Its source (the factory copy when it
+    names none) is read like an L line's target: a specifier, quote or escape, an encoded (~) or credential
+    (^) source, one not absolute and normal, one under a boot mount (empty in VIEW, filled at boot), or one
+    passing through a link, the tree's or one in LINKS, fails the run too, as does one at, under or above
+    any L line's path, or one outside /usr (#5715: no exception; the image drops systemd's /.extra lines)."""
+    lines = tmpfiles_lines(view, usr_view)
+    ls = [w[1] for w in (line.split() for _, line in lines) if w[0].startswith("L") and len(w) > 1]
+    for f, line in lines:
+        w = line.split(None, 6)
+        if not w[0].startswith("C"):
+            continue
+        if any(ch in line for ch in "%\"\'\\"):
+            raise SystemExit("unit rules: %s: C line %r holds a specifier, a quote or an escape, which the "
+                             "reader does not read" % (f, line))
+        if "~" in w[0] or "^" in w[0]:
+            raise SystemExit("unit rules: %s: C line %r: its source is encoded or a credential, which the "
+                             "reader does not read" % (f, line))
+        arg = w[6].strip() if len(w) > 6 else "-"
+        src = "/usr/share/factory" + (w[1] if len(w) > 1 else "") if arg in ("", "-") else arg
+        if not src.startswith("/") or src.startswith("//") or os.path.normpath(src) != src:
+            raise SystemExit("unit rules: %s: C line %r: its source is not absolute and normal" % (f, line))
+        if any(src == m or src.startswith(m + "/") for m in BOOT_MOUNTS):
+            raise SystemExit("unit rules: %s: C line %r: its source is under %s, whose content at boot the "
+                             "reader does not see" % (f, line, "/" + src.split("/")[1]))
+        todo = [src]
+        while todo:
+            p = todo.pop()
+            kind = view.kind(p)
+            if kind == 0o120000:
+                raise SystemExit("unit rules: %s: C line %r: its source is or holds a link, %s, which "
+                                 "systemd-tmpfiles copies as a link" % (f, line, p))
+            if kind == 0o040000:
+                todo += [os.path.join(p, e) for e in view.entries(p)]
+        _, via = view.resolve(src)
+        via += [k for k, v in links.items() if v != k and (src == k or src.startswith(k + "/"))]
+        if via:
+            raise SystemExit("unit rules: %s: C line %r: its source passes through a link (%s), which the "
+                             "reader does not read" % (f, line, via[0]))
+        # #5715 L3 6874735402, Security 6874738412: an L line's link at or under the source is made at boot
+        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and tmpfiles_links drops
+        # some L keys (a link to a file, a loop), so every L line counts, at, under or above the source.
+        under = src.rstrip("/") + "/"
+        for k in ls:
+            if k == src or k.startswith(under) or src.startswith(k.rstrip("/") + "/"):
+                raise SystemExit("unit rules: %s: C line %r: an L line makes a link at, under or above its "
+                                 "source, %s, which systemd-tmpfiles may copy as a link" % (f, line, k))
+        # A source in persistent writable state copies what a running service left there between boots,
+        # which no lint of the tree sees: only read-only /usr (verity, I4) is a source. #5715 L3 6874919503,
+        # Security 6874914212: a /.extra exception compared path text, which //, /./ or a link on the way
+        # bypassed; the image drops systemd's /.extra lines (mkosi.conf RemoveFiles), so none is kept.
+        if not (src == "/usr" or src.startswith("/usr/")):
+            raise SystemExit("unit rules: %s: C line %r: its source is not under /usr, so a service may "
+                             "leave a link there between boots" % (f, line))
+
+
 # #5703 L3 6872796820: the kernel's own links under /proc, /sys and /dev (/proc/self/root, /proc/<pid>/root,
 # /proc/thread-self, /dev/fd) lead back into /, and the reader cannot follow them, so a link whose target
 # resolves at or under one fails the run, but at exactly these: none is a directory a path steps through
@@ -587,9 +645,11 @@ API_TARGETS = ("/dev/null", "/dev/shm", "/proc/self/mounts")
 
 def boot_links(view, usr_view=None):
     """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView. A link
-    into an API mount but API_TARGETS, or one whose resolved target keeps a . or .. component, fails the run."""
+    into an API mount but API_TARGETS, or one whose resolved target keeps a . or .. component, fails the run,
+    and so does a tmpfiles.d C line that may copy a link (tmpfiles_copies)."""
     boot = BootView(view)
     out = tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
+    tmpfiles_copies(boot, out, usr_view)
     for k, v in sorted(out.items()):
         if v != k and os.path.normpath(v) != v:  # #5703 Security 6872976172: resolve keeps .. past a missing
             raise SystemExit("unit rules: %s: a link to %s, a target with . or .. the reader does not "
