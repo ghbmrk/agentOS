@@ -1057,30 +1057,6 @@ func TestPlanStateNamesThePoolWithoutFigures(t *testing.T) {
 // sign-in ended, with the login still stored, whether or not it ended a
 // sign-in; once a later Remove deletes the login, last follows. A failed
 // Remove does not hold off the next sign-in.
-// SIC-2 (brief CLK-run-signin-ctx). The context Begin hands the worker's
-// start ends when Begin returns, while the sign-in still waits for the
-// owner: Link and Wall are an hour, and no code exchange has ended the
-// sign-in.
-func TestPlanSignInStartContextEndsWithBegin(t *testing.T) {
-	var calls atomic.Int32
-	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
-	cli := newFakeCLI(login, codexPrinted)
-	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: SignInTimes{Poll: time.Millisecond, Link: time.Hour, Wall: time.Hour}}
-	if b := h.Begin(context.Background()); b.Code == "" {
-		t.Fatalf("begun: %+v", b)
-	}
-	if st := h.State(); !st.Signing {
-		t.Fatalf("the sign-in no longer waits for the owner: %+v", st)
-	}
-	if ctx, _ := cli.contexts(); ctx == nil || ctx.Err() == nil {
-		t.Fatalf("the start's context outlived Begin: %v", ctx)
-	}
-	if err := h.Remove(); err != nil {
-		t.Fatal(err)
-	}
-	cli.waitStopped(t)
-}
-
 func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 	var calls atomic.Int32
 	var failing atomic.Bool
@@ -1212,4 +1188,28 @@ func TestPlanRemoveKeepsLastWithTheLogin(t *testing.T) {
 			t.Fatalf("after the remove: %+v", st)
 		}
 	})
+}
+
+// SIC-2 (brief CLK-run-signin-ctx). The context Begin hands the worker's
+// start ends when Begin returns, while the sign-in still waits for the
+// owner: Link and Wall are an hour, and no code exchange has ended the
+// sign-in.
+func TestPlanSignInStartContextEndsWithBegin(t *testing.T) {
+	var calls atomic.Int32
+	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	cli := newFakeCLI(login, codexPrinted)
+	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: SignInTimes{Poll: time.Millisecond, Link: time.Hour, Wall: time.Hour}}
+	if b := h.Begin(context.Background()); b.Code == "" {
+		t.Fatalf("begun: %+v", b)
+	}
+	if st := h.State(); !st.Signing {
+		t.Fatalf("the sign-in no longer waits for the owner: %+v", st)
+	}
+	if ctx, _ := cli.contexts(); ctx == nil || ctx.Err() == nil {
+		t.Fatalf("the start's context outlived Begin: %v", ctx)
+	}
+	if err := h.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	cli.waitStopped(t)
 }
