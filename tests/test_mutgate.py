@@ -2361,6 +2361,44 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout)
             self.assertIn("was written for occurrence 1 of 1, and the head has 2", r.stderr)
 
+    def test_a_proof_premise_later_in_any_declaration_shape_is_keyed(self):
+        # Security delta on #5780: a multi-line signature closing in column 0, and a top-level func literal,
+        # still digest their whole declaration, so an edit after the statement makes the entry stale.
+        for src in ("package netguard\n\nfunc f(e interface {\n\tRead() error\n}) bool {\n\tif err := e.Read(); err != nil {\n"
+                    "\t\treturn false\n\t}\n\treturn check()\n}\n\nfunc check() bool { return false }\n",
+                    "package netguard\n\nvar f = func(err error) bool {\n\tif err != nil {\n\t\treturn false\n\t}\n"
+                    "\treturn check()\n}\n\nfunc check() bool { return false }\n"):
+            with self.subTest(src), tempfile.TemporaryDirectory() as d:
+                run = self.repo(d, src, src)
+                line = 1 + src.split("\n").index(next(l for l in src.split("\n") if l.startswith("\tif ")))
+                entry = json.loads(self.waive(d, run, line).split("\n")[1])
+                self.assertEqual(entry["func"], "f")
+                self.assertRegex(entry["decl"], "^[0-9a-f]{64}$")
+                self.assertEqual(run("records", "netguard").returncode, 0)
+                (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(src.replace("\treturn check()", "\treturn true"))
+                r = run("records", "netguard")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("names no statement at the head", r.stderr)
+
+    def test_waive_replaces_the_stale_entry_it_rewrites(self):
+        # L3 and UX on #5780: following the stale message must turn the gate green, not add a second entry.
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.SRC, self.SRC)
+            self.waive(d, run, 8)
+            self.waive(d, run, 11, reason="x is returned unchanged, so no caller can tell the line apart")
+            edited = self.SRC.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2")
+            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(edited)
+            self.assertEqual(run("records", "netguard").returncode, 1)
+            rec = self.waive(d, run, 9)
+            self.assertEqual(len([l for l in rec.split("\n") if l.startswith("{")]), 2, rec)
+            r = run("records", "netguard")
+            self.assertEqual(r.returncode, 1, r.stdout)  # the other entry in f is stale too, and is named
+            self.assertEqual(r.stderr.count("names no statement"), 1, r.stderr)
+            self.waive(d, run, 12, reason="x is returned unchanged, so no caller can tell the line apart")
+            r = run("records", "netguard")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(r.stdout.strip().split("\n")), 2, r.stdout)
+
     def test_twins_are_told_apart_by_occurrence(self):
         src = "package netguard\n\nfunc f(x int) int {\n\tx++\n\tg(x)\n\tx++\n\tg(x)\n\treturn x\n}\n\nfunc g(int) {}\n"
         with tempfile.TemporaryDirectory() as d:
@@ -2392,7 +2430,7 @@ class Record(unittest.TestCase):
                         json.dumps({**good, "file": "a_test.go"}), json.dumps({**good, "reason": "."}),
                         json.dumps({**good, "accepted": "5743"}), json.dumps({**good, "occurrence": [2, 1]}),
                         json.dumps({**good, "at": 1}), json.dumps({**good, "stmt": []}),
-                        json.dumps({**good, "mutant": "all"}), json.dumps({**good, "decl": "x"}),
+                        json.dumps({**good, "mutant": "all"}), json.dumps({**good, "decl": "x"}), json.dumps({**good, "decl": ""}),
                         json.dumps({k: v for k, v in good.items() if k != "mutant"})):
                 with self.subTest(bad):
                     path.write_text(bad + "\n")
@@ -2407,6 +2445,12 @@ class Record(unittest.TestCase):
             self.assertIn("symbolic link", r.stderr)
 
     VAR = "package netguard\n\nvar a = 1 + 1\n"
+
+    @staticmethod
+    def digest(text):
+        """A record's decl for a one-line top-level declaration."""
+        import hashlib
+        return hashlib.sha256(text.encode()).hexdigest()
 
     @staticmethod
     def result(*lines):
@@ -2431,7 +2475,7 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         with tempfile.TemporaryDirectory() as d:
-            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"), "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
                               "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
             run = self.repo(d, self.VAR, head, record=rec)
             r = self.verify(d, run, 4)
@@ -2448,7 +2492,7 @@ class Record(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             # The base's entry, unchanged, on a line the PR moves and edits around: not marked new.
             base = self.VAR + "var b = 2 + 2\n"
-            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "b", "decl": Record.digest("var b = 2 + 2"), "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
                               "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
             run = self.repo(d, base, "package netguard\n\n// moved\nvar a = 1 + 1\nvar b = 2 + 2\nvar c = 3 + 3\n",
                             base_record=rec)
@@ -2458,7 +2502,7 @@ class Record(unittest.TestCase):
 
     def test_an_entry_waives_only_its_mutant_kind(self):
         # Security on #5780: a deletion proof carried forward must not waive a gremlins mutant on its line.
-        rec = json.dumps({"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "", "decl": "", "stmt": ["var b = 2 + 2"],
+        rec = json.dumps({"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "b", "decl": Record.digest("var b = 2 + 2"), "stmt": ["var b = 2 + 2"],
                           "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1], "reason": "b is never read",
                           "accepted": "#5743"}) + "\n"
         with tempfile.TemporaryDirectory() as d:
@@ -2471,7 +2515,7 @@ class Record(unittest.TestCase):
                          [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
 
     def test_a_stale_entry_fails_the_gate(self):
-        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
+        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "a", "decl": Record.digest("var a = 1 + 1"), "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
                           "occurrence": [1, 1], "reason": "a is never read", "accepted": "#5743"}) + "\n"
         with tempfile.TemporaryDirectory() as d:
             run = self.repo(d, self.VAR, "package netguard\n\nvar a = 1 + 2\n", base_record=rec)
@@ -2491,7 +2535,10 @@ class Record(unittest.TestCase):
         r = subprocess.run([sys.executable, "-I", str(ROOT / "tools" / "mutgate.py"), "records", "clerk/run"],
                            capture_output=True, text=True, cwd=ROOT)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertGreaterEqual(len(r.stdout.strip().split("\n")), 26)
+        sites = sorted(l.split(" ")[0] for l in r.stdout.strip().split("\n"))
+        self.assertEqual(len(sites), 27, r.stdout)
+        self.assertEqual(len(set(sites)), 27, r.stdout)
+        self.assertEqual({l.split(" ")[1:3] == ["STATEMENT_DELETION", "#5743"] for l in r.stdout.strip().split("\n")}, {True})
 
 
 def job(text, name):

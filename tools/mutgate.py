@@ -505,23 +505,23 @@ def waivers(body):
 # already proven, and a line moved by an edit above it keeps its proof. One JSON object per line
 # (a `#` line or a blank one is a comment): file (a non-test .go file of the package), mutant (the one
 # mutant kind proven: STATEMENT_DELETION or a gremlins type; the entry waives no other kind on its
-# line), func (the top-level func the line sits in, `Recv.Name` for a method, "" outside any), decl
-# (sha256 of that func's whole text, whitespace runs as one space; "" outside any), stmt (the text
+# line), func (the top-level declaration the line sits in, as `mutgate_stmts.go -decls` names it:
+# `Recv.Name` for a method; "" outside any), decl (sha256 of that declaration's whole text from
+# go/parser's span, whitespace runs as one space; "" outside any), stmt (the text
 # of each line of the statement's own syntax, as `mutgate_stmts.go` lists them, or the line alone
 # when it is in no listed statement, whitespace runs as one space), at (which of stmt's lines),
 # after (the code line before the statement's first), occurrence ([i, n]: the i-th of the n lines
 # of the file with that same key), reason, and accepted (`#<PR>` whose review accepted the proof).
 # The head's statements are resolved to lines each run; an entry whose key is now on no line, or
-# whose count n differs, is stale and fails the gate, so any edit inside the enclosing func (the
-# statement, the code after it that a proof cites, a twin of it) needs the proof read again, while
-# lines moved outside that func keep it (Security on #5780). The record is the PR's
+# whose count n differs, is stale and fails the gate, so any edit inside the enclosing declaration
+# (the statement, the code after it that a proof cites, a twin of it) needs the proof read again,
+# while lines moved outside it keep it (Security on #5780). The record is the PR's
 # text, read as data: a new or changed entry shows as such in the summary, for review as a body line is.
 RECORD = "MUTANTS-EQUIVALENT"
 RECORD_KEYS = {"file", "mutant", "func", "decl", "stmt", "at", "after", "occurrence", "reason", "accepted"}
 MUTANT_KIND = re.compile(r"[A-Z][A-Z_]{0,63}")
 RECORD_MAX = 1 << 20
 RECORD_FILE = re.compile(r"[A-Za-z0-9_.-]+\.go")
-FUNC = re.compile(r"func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*)?(\w+)")
 
 
 def _norm(text):
@@ -534,24 +534,17 @@ def _code(text):
     return bool(s) and not s.startswith("//")
 
 
-def statement_keys(src, sites):
+def statement_keys(src, sites, decls=()):
     """{line: key} for every line of one file's source src, sites being the lister's sites for that
-    file; a key is (func, decl, stmt, at, after) as the record holds them (see RECORD)."""
+    file and decls its top-level declarations (`-decls`, go/parser's spans, Security on #5780); a key
+    is (func, decl, stmt, at, after) as the record holds them (see RECORD)."""
     lines = src.split("\n")
-    funcs, decls, cur, start = [], [], "", None
-    for i, text in enumerate(lines):
-        if text.startswith("func"):
-            m = FUNC.match(text)
-            cur, start = ((f"{m.group(1)}.{m.group(2)}" if m.group(1) else m.group(2)) if m else ""), i
-        funcs.append(cur)
-        decls.append("")
-        # A top-level func's closing brace (gofmt puts it in column 0), or a one-line func.
-        if start is not None and (text.startswith("}") or (i == start and text.rstrip().endswith("}"))):
-            digest = hashlib.sha256("\n".join(_norm(t) for t in lines[start:i + 1]).encode()).hexdigest()
-            decls[start:i + 1] = [digest] * (i + 1 - start)
-            cur, start = "", None
-    if start is not None:  # a func with no column-0 closing brace: no digest to key on
-        funcs[start:] = [""] * (len(lines) - start)
+    funcs, decls_of = [""] * len(lines), [""] * len(lines)
+    for d in decls:
+        lo, hi = d["start"] - 1, min(d["end"], len(lines))
+        digest = hashlib.sha256("\n".join(_norm(t) for t in lines[lo:hi]).encode()).hexdigest()
+        funcs[lo:hi] = [d["name"]] * (hi - lo)
+        decls_of[lo:hi] = [digest] * (hi - lo)
     owner = {}
     for s in sorted(sites, key=lambda s: s["end"] - s["start"], reverse=True):
         for n in s["lines"]:
@@ -561,7 +554,7 @@ def statement_keys(src, sites):
         own = owner.get(n, {}).get("lines") or [n]
         first = own[0]
         prev = next((lines[i - 1] for i in range(first - 1, 0, -1) if _code(lines[i - 1])), "")
-        keys[n] = (funcs[first - 1], decls[first - 1], tuple(_norm(lines[i - 1]) for i in own if 0 < i <= len(lines)),
+        keys[n] = (funcs[first - 1], decls_of[first - 1], tuple(_norm(lines[i - 1]) for i in own if 0 < i <= len(lines)),
                    own.index(n), _norm(prev))
     return keys
 
@@ -580,7 +573,7 @@ def record_entries(text):
               and isinstance(e["file"], str) and RECORD_FILE.fullmatch(e["file"]) and not e["file"].endswith("_test.go")
               and isinstance(e["mutant"], str) and MUTANT_KIND.fullmatch(e["mutant"])
               and isinstance(e["func"], str)
-              and isinstance(e["decl"], str) and re.fullmatch(r"(?:[0-9a-f]{64})?", e["decl"])
+              and isinstance(e["decl"], str) and re.fullmatch(r"[0-9a-f]{64}", e["decl"])
               and isinstance(e["stmt"], list) and e["stmt"] and all(isinstance(s, str) for s in e["stmt"])
               and type(e["at"]) is int and 0 <= e["at"] < len(e["stmt"])
               and isinstance(e["after"], str)
@@ -609,10 +602,16 @@ def file_keys(pkg, names, lister, pkg_dir=None):
     r = subprocess.run([str(lister), *map(str, files)], capture_output=True)
     if r.returncode != 0:
         return None, f"cannot list the statements of broker/{pkg}/: {r.stderr.decode(errors='replace')}"
-    sites = collections.defaultdict(list)
+    d = subprocess.run([str(lister), "-decls", *map(str, files)], capture_output=True)
+    if d.returncode != 0:
+        return None, f"cannot list the declarations of broker/{pkg}/: {d.stderr.decode(errors='replace')}"
+    sites, decls = collections.defaultdict(list), collections.defaultdict(list)
     for s in json.loads(r.stdout):
         sites[s["file"]].append(s)
-    return {p.name: statement_keys(p.read_bytes().decode("utf-8", "replace"), sites[p.name]) for p in files}, None
+    for s in json.loads(d.stdout):
+        decls[s["file"]].append(s)
+    return {p.name: statement_keys(p.read_bytes().decode("utf-8", "replace"), sites[p.name], decls[p.name])
+            for p in files}, None
 
 
 def read_record(pkg, pkg_dir=None):
@@ -636,10 +635,12 @@ def resolve_record(pkg, entries, keys):
         where = f"broker/{pkg}/{RECORD}: the entry for {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r}"
         if not lines:
             problems.append(f"{where} names no statement at the head: the statement or the func around it "
-                            "changed; read the proof again and rewrite the entry (`mutgate.py waive`), or drop it")
+                            "changed; read the proof again and rewrite it with `mutgate.py waive` at its current line "
+                            "(which replaces it), or delete its line from the record")
         elif len(lines) != n:
             problems.append(f"{where} was written for occurrence {i} of {n}, and the head has {len(lines)}: "
-                            "read the proof again and rewrite the entry (`mutgate.py waive`)")
+                            "read the proof again and rewrite it with `mutgate.py waive` at its current line (which "
+                            "replaces it), or delete its line from the record")
         elif (f"broker/{pkg}/{e['file']}", lines[i - 1], e["mutant"]) in found:
             problems.append(f"{where} names the same line and mutant as another entry")
         else:
@@ -710,14 +711,28 @@ def cmd_waive(args):
                 print(f"mutgate: {problem or bad}", file=sys.stderr)
                 return 1
             new = [record_entry(pkg, f, n, reason, args.accepted, keys, args.mutant) for f, n, reason in sites]
-            # A site already in the record is rewritten, not doubled.
+            # Every line of a parsed declaration has its digest; a line outside any has nothing to prove.
+            if nodigest := [f"broker/{pkg}/{e['file']}: {e['stmt'][e['at']]!r}" for e in new if not e["decl"]]:
+                print(f"mutgate: {', '.join(nodigest)} is in no top-level declaration, so no entry can key on one",
+                      file=sys.stderr)
+                return 1
+            # A site already in the record is rewritten, not doubled; a stale entry for the same statement
+            # and mutant in a file written here (its func or count changed) is the one being rewritten.
             have = {(e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) for e in new}
-            kept = [e for e in entries if (e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) not in have]
+            same = {(e["file"], e["mutant"], e["func"], tuple(e["stmt"]), e["at"]) for e in new}
+            stale = [e for e in entries if e["file"] in keys and resolve_record(pkg, [e], keys)[1]]
+            replaced = [e for e in stale if (e["file"], e["mutant"], e["func"], tuple(e["stmt"]), e["at"]) in same]
+            kept = [e for e in entries if (e["file"], e["mutant"], _entry_key(e), tuple(e["occurrence"])) not in have
+                    and not any(e is r for r in replaced)]
             head = [r for r in (text or "").split("\n") if r.lstrip().startswith("#")] or [
                 f"# Mutant-equivalent proofs for broker/{pkg}, keyed by statement: see RECORD in tools/mutgate.py."]
             body = sorted(kept + new, key=lambda e: (e["file"], e["func"], e["stmt"], e["at"], e["occurrence"], e["mutant"]))
             (BROKER / pkg / RECORD).write_text("\n".join(head + [json.dumps(e, ensure_ascii=False) for e in body]) + "\n")
-            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written, {len(body)} in all")
+            print(f"broker/{pkg}/{RECORD}: {len(new)} entries written ({len(replaced)} replacing stale ones), {len(body)} in all")
+            for e in stale:
+                if not any(e is r for r in replaced):
+                    print(f"mutgate: still stale: {e['file']} {e['func'] or '(top level)'} {e['stmt'][e['at']]!r} "
+                          f"({e['mutant']}): waive it at its current line, or delete its line", file=sys.stderr)
     return 0
 
 
