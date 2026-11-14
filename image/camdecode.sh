@@ -12,7 +12,17 @@
 # clean environment (IMG-camdecode-toolchain, #5582): cgo's gcc, the static libc and pkg-config are
 # the base's, from the image's pinned apt sources, never the build host's, and no host tar, xz or
 # patch runs. The build host gives only Go: the toolchain broker/go.mod pins (go env GOROOT) and the
-# module's source, copied in. Needs what libavcodec.sh needs, plus Go.
+# module's source, copied in. Needs what libavcodec.sh needs, plus Go. GOROOT is copied as it is, so
+# the build stops if it holds a symlink that is absolute or leaves it (a distro Go's may): the copy
+# in the base would point at nothing or at the base's files (#5600). setup-go's GOROOT is real files.
+#
+# The decoder carries no vcs.* stamps (#5600): -buildvcs=false, and the source is a copy without
+# .git. Intended: what the decoder was built from is the image's commit, which the image records;
+# a stamp would add nothing and would make the binary's bytes depend on the checkout's state.
+#
+# CAMDECODE_KEEP_LIBAVCODEC=/tmp/agentos-NAME (CI's decoder tests, #5600): this build's libavcodec is
+# moved, not copied, to BASE/NAME/opt before the clean-up, so CI builds the library once, not twice.
+# The image build leaves it unset.
 #
 # The decoder carries the code of every archive and object its link read from the base: libc6-dev's
 # libc.a and start-up files, libgcc's. Each input the link map loads from outside $lib is recorded
@@ -31,10 +41,13 @@ set -eu
 export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 ROOT=$(realpath -m "$1"); LICENSES=$(realpath -m "$2")
-base=${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}
-: "${GUEST_SHIPPED:?set GUEST_SHIPPED to the file that records the packages the guests ship (#5572)}"
 # The build's fixed path inside the base; every path the jail sees is under it.
 lib=/tmp/agentos-camdecode
+base=${GUEST_BASE:?set GUEST_BASE to a root from image/guest-base.sh}
+: "${GUEST_SHIPPED:?set GUEST_SHIPPED to the file that records the packages the guests ship (#5572)}"
+keep=${CAMDECODE_KEEP_LIBAVCODEC:-}
+case $keep in "") ok=1 ;; "$lib" | /tmp/agentos-*/* | *..*) ok= ;; /tmp/agentos-?*) ok=1 ;; *) ok= ;; esac
+[ -n "$ok" ] || { echo "camdecode.sh: CAMDECODE_KEEP_LIBAVCODEC must be /tmp/agentos-NAME, not $lib" >&2; exit 2; }
 
 # linkfaults MAP: each network call in the cross-reference table of the link map MAP (ld -Map
 # --cref) that a file outside libc.a defines or uses, one per line; a map without the table is a
@@ -64,7 +77,11 @@ jail() {
 mkdir -p "$ROOT/proc" "$ROOT/dev" "$ROOT/sys"
 trap 'rm -rf "${base:?}$lib"' EXIT
 sh "$HERE/libavcodec.sh" "$base" "$lib"
-goroot=$(cd "$REPO/broker" && go env GOROOT)
+goroot=$(realpath "$(cd "$REPO/broker" && go env GOROOT)")
+# Each symlink in GOROOT that is absolute or resolves outside it, one per line.
+links=$(find "$goroot" -type l -exec sh -c 'for l; do t=$(readlink "$l"); case $t in /*) echo "$l -> $t"; continue ;; esac
+	case $(realpath -m "$l") in "$0"/*) ;; *) echo "$l -> $t" ;; esac; done' "$goroot" {} +)
+[ -z "$links" ] || { printf 'agentos-camdecode: GOROOT %s holds symlinks a copy would break; use a Go of real files (setup-go):\n%s\n' "$goroot" "$links" >&2; exit 1; }
 mkdir "$base$lib/go" "$base$lib/broker" "$base$lib/tmp"
 cp -a "$goroot/." "$base$lib/go/"
 cp -a "$REPO/broker/." "$base$lib/broker/"
@@ -85,7 +102,7 @@ for f in --cflags --libs '--libs --static'; do
 	[ "$(echo $(jail pkg-config $f libavcodec libavutil))" = "$want" ] ||
 		{ echo "agentos-camdecode: pkg-config $f libavcodec libavutil is not the pinned set" >&2; exit 1; }
 done
-(jail env CGO_ENABLED=1 go build -tags libavcodec,netgo,osusergo -trimpath \
+(jail env CGO_ENABLED=1 go build -tags libavcodec,netgo,osusergo -trimpath -buildvcs=false \
 	-ldflags="-s -w -buildid= -linkmode=external '-extldflags=-static -Wl,-Map=$lib/camdecode.map,--cref'" \
 	-o "$lib/agentos-camdecode" ./cmd/agentos-camdecode)
 faults=$(linkfaults "$base$lib/camdecode.map")
@@ -99,3 +116,8 @@ sh "$HERE/guest-shipped.sh" "$base" $loaded
 ! jail readelf -l "$lib/agentos-camdecode" | grep -q INTERP || { echo "agentos-camdecode is not static" >&2; exit 1; }
 install -m 0755 "$base$lib/agentos-camdecode" "$ROOT/agentos-camdecode"
 install -D -m 0644 "$base$lib/opt/agentos-libavcodec/share/COPYING.LGPLv2.1" "$LICENSES/libavcodec/COPYING.LGPLv2.1"
+if [ -n "$keep" ]; then
+	rm -rf "${base:?}$keep"
+	mkdir -p "$base$keep"
+	mv "$base$lib/opt" "$base$keep/opt"
+fi

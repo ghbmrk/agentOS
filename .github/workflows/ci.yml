@@ -419,18 +419,19 @@ jobs:
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q mmdebstrap debian-archive-keyring
           sudo sh ../image/guest-base.sh "$RUNNER_TEMP/guest-base" "$RUNNER_TEMP/guest-base.manifest"
-          sudo sh ../image/libavcodec.sh "$RUNNER_TEMP/guest-base" /tmp/agentos-libavcodec
           # The image's own decoder build in that root, with a host tar, xz and patch that fail if run.
+          # It keeps its libavcodec at /tmp/agentos-libavcodec in the root, the one build of the
+          # library this step uses (#5600).
           (cd .. && sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
-            GUEST_BASE="$RUNNER_TEMP/guest-base" AGENTOS_CAMDECODE_BUILD=1 python3 -m unittest tests.test_camdecode_build -v)
+            GUEST_BASE="$RUNNER_TEMP/guest-base" CAMDECODE_KEEP_LIBAVCODEC=/tmp/agentos-libavcodec \
+            AGENTOS_CAMDECODE_BUILD=1 python3 -m unittest tests.test_camdecode_build -v)
           # The decoder's tests build against this run's library in a build cache of their own that
           # starts empty (#5599): go's cache keys a cgo package on its flags, not on the headers or
           # the .a files they name, and keys the link on the Go packages alone, so main's restored
           # cache could hold a package or test binary built on another libavcodec. Nothing this step
           # builds is saved either: the cache upload reads the default GOCACHE.
-          lib="$RUNNER_TEMP/libavcodec"
-          sudo cp -R "$RUNNER_TEMP/guest-base/tmp/agentos-libavcodec" "$lib"
-          sudo chown -R "$(id -u):$(id -g)" "$lib"
+          lib="$RUNNER_TEMP/guest-base/tmp/agentos-libavcodec"
+          [ -f "$lib/opt/agentos-libavcodec/lib/libavcodec.a" ] || { echo "the decoder build kept no libavcodec" >&2; exit 1; }
           [ ! -e "$RUNNER_TEMP/gocache-libavcodec" ] || { echo "the decoder's build cache is not new" >&2; exit 1; }
           export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$lib" \
             PKG_CONFIG_PATH="$lib/opt/agentos-libavcodec/lib/pkgconfig" GOCACHE="$RUNNER_TEMP/gocache-libavcodec"

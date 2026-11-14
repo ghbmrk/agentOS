@@ -9,6 +9,10 @@
 # #5599: the decoder statically links libc6-dev's libc.a and libgcc's archives, so the build records
 # their Debian packages as shipped (image/guest-shipped.sh) for the image vulnerability check; and
 # CI's decoder tests build in a build cache that starts empty, so none links a stale libavcodec.
+#
+# #5600: the host tar, xz and patch are also bind-mounted over by failing shims, so an absolute-path
+# call (/usr/bin/tar) is caught too; GOROOT symlinks a copy would break stop the build; the decoder
+# is built with -buildvcs=false; and CI builds libavcodec once, the decoder build's, kept in place.
 # REQ: UPD-1a, NET-2
 import os
 import pathlib
@@ -33,6 +37,26 @@ def shims(d):
         (bin_ / t).write_text(f'#!/bin/sh\necho "host {t} $*" >>"{d}/ran"\nexit 97\n')
         (bin_ / t).chmod(0o755)
     return f"{bin_}:{os.environ['PATH']}"
+
+
+def host_tools():
+    """Each host file a call of tar, xz or patch can reach, by PATH or by a usual absolute path."""
+    dirs = os.environ["PATH"].split(":") + ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+    found = {}
+    for t in HOST_TOOLS:
+        for d in dirs:
+            p = pathlib.Path(d or ".") / t
+            if p.is_file():
+                found[os.path.realpath(p)] = t
+    return found
+
+
+def guarded(d, argv):
+    """argv in a private mount namespace where each host tar, xz and patch file is bind-mounted over
+    by its shim (shims(d) must have run): a call by absolute path fails as a PATH lookup does. A copy
+    of one at another path is not caught. The base's own tools are other files, so they still run."""
+    binds = "".join(f'mount --bind "{d}/shims/{t}" "{real}"\n' for real, t in host_tools().items())
+    return ["unshare", "-m", "--propagation", "private", "sh", "-ec", binds + 'exec "$@"', "sh"] + argv
 
 
 def base_gcc(base):
@@ -99,6 +123,58 @@ class RefusalTest(unittest.TestCase):
             self.assertEqual(os.listdir(d), [])
 
 
+    # REQ: UPD-1a
+    def test_camdecode_refuses_a_kept_libavcodec_outside_the_base_s_tmp(self):
+        # #5600: the kept tree is moved to BASE/NAME, never over the build's own path or out of tmp.
+        for bad in ("/", "/tmp", "/tmp/agentos-", "/tmp/agentos-x/y", "/tmp/agentos-..", "/tmp/agentos-camdecode", "tmp/agentos-x", "/opt/x"):
+            with self.subTest(keep=bad), tempfile.TemporaryDirectory(prefix="agentos-camdecode-") as d:
+                shipped = pathlib.Path(d) / "shipped"
+                shipped.write_text("")
+                base = pathlib.Path(d) / "base"
+                base.mkdir()
+                out = pathlib.Path(d) / "root"
+                r = subprocess.run(["sh", str(CAMDECODE), str(out), str(pathlib.Path(d) / "lic")],
+                                   env=dict(os.environ, GUEST_BASE=str(base), GUEST_SHIPPED=str(shipped),
+                                            CAMDECODE_KEEP_LIBAVCODEC=bad),
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("CAMDECODE_KEEP_LIBAVCODEC must be /tmp/agentos-NAME", r.stderr)
+                self.assertFalse(out.exists())
+                self.assertEqual(os.listdir(base), [])
+
+
+class GorootLinksTest(unittest.TestCase):
+    """camdecode.sh's check that GOROOT holds no symlink its copy into the base would break (#5600)."""
+
+    def links(self, goroot):
+        src = CAMDECODE.read_text()
+        start = src.index("links=$(find ")
+        code = 'goroot=$(realpath "$1")\n' + src[start:src.index("\n", src.index("{} +)", start))] + '\nprintf "%s" "$links"'
+        return subprocess.run(["sh", "-c", code, "sh", str(goroot)], capture_output=True, text=True, check=True).stdout
+
+    # REQ: UPD-1a
+    def test_absolute_and_escaping_links_are_named_and_inner_ones_pass(self):
+        with tempfile.TemporaryDirectory(prefix="agentos-camdecode-") as d:
+            g = pathlib.Path(d) / "go"
+            (g / "src/a").mkdir(parents=True)
+            (g / "pkg").mkdir()
+            (g / "src/a/inner").symlink_to("../../pkg")
+            self.assertEqual(self.links(g), "")
+            (g / "abs").symlink_to("/usr/share/go/src")
+            (g / "src/out").symlink_to("../../share/go/src")
+            got = self.links(g)
+            self.assertIn("/abs -> /usr/share/go/src", got)
+            self.assertIn("/src/out -> ../../share/go/src", got)
+            self.assertNotIn("inner", got)
+
+    # REQ: UPD-1a
+    def test_the_check_runs_before_the_copy_and_stops_the_build(self):
+        src = CAMDECODE.read_text()
+        self.assertIn('goroot=$(realpath "$(cd "$REPO/broker" && go env GOROOT)")\n', src)
+        self.assertLess(src.index("links=$(find "), src.index('cp -a "$goroot/." "$base$lib/go/"'))
+        self.assertIn('[ -z "$links" ] || {', src)
+
+
 class LoadedTest(unittest.TestCase):
     """camdecode.sh's list of the link's inputs from outside $lib, run on a map shaped as ld writes it."""
 
@@ -163,6 +239,21 @@ class CICacheTest(unittest.TestCase):
         self.assertLess(export, step.index("tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode"))
         self.assertEqual(step.count("GOCACHE="), 2)  # the image build's in the jail, and this one
 
+    # REQ: UPD-1a
+    def test_libavcodec_is_built_once_and_used_in_place(self):
+        # #5600: the decoder build's own libavcodec, kept in the base, is the one the tests link;
+        # no second build of the library and no copy of it.
+        step = CI.read_text().split("- name: Camera H.264 decoder on the pinned libavcodec", 1)[1].split("\n      - name:", 1)[0]
+        self.assertNotIn("libavcodec.sh", step)
+        self.assertNotIn("cp -R", step)
+        self.assertIn("CAMDECODE_KEEP_LIBAVCODEC=/tmp/agentos-libavcodec ", step)
+        self.assertIn('lib="$RUNNER_TEMP/guest-base/tmp/agentos-libavcodec"\n', step)
+        self.assertLess(step.index("python3 -m unittest tests.test_camdecode_build"), step.index('lib="$RUNNER_TEMP/'))
+
+    # REQ: UPD-1a
+    def test_the_decoder_is_built_without_vcs_stamps(self):
+        self.assertIn("go build -tags libavcodec,netgo,osusergo -trimpath -buildvcs=false ", CAMDECODE.read_text())
+
 
 @unittest.skipUnless(os.environ.get("AGENTOS_CAMDECODE_BUILD") == "1", "set AGENTOS_CAMDECODE_BUILD=1 (root, GUEST_BASE) to build")
 class BuildTest(unittest.TestCase):
@@ -176,7 +267,7 @@ class BuildTest(unittest.TestCase):
         cls.out, cls.lic = cls.tmp / "root", cls.tmp / "licenses"
         cls.shipped = cls.tmp / "shipped"
         cls.shipped.write_text("")
-        cls.r = subprocess.run(["sh", str(CAMDECODE), str(cls.out), str(cls.lic)],
+        cls.r = subprocess.run(guarded(cls.tmp, ["sh", str(CAMDECODE), str(cls.out), str(cls.lic)]),
                                env=dict(os.environ, PATH=shims(cls.tmp), GUEST_SHIPPED=str(cls.shipped)),
                                capture_output=True, text=True)
 
@@ -187,8 +278,27 @@ class BuildTest(unittest.TestCase):
 
     # REQ: UPD-1a
     def test_no_host_tar_xz_or_patch_runs(self):
-        # setUp holds the check: the shims log any call and fail the build.
+        # setUp holds the check: the shims log any call and fail the build. The host's tar at
+        # least is bind-mounted over, so an absolute-path call is caught too (#5600).
+        self.assertIn("tar", host_tools().values())
         self.assertTrue((self.out / "agentos-camdecode").is_file())
+
+    # REQ: UPD-1a
+    def test_decoder_buildinfo_has_no_vcs_stamps(self):
+        # #5600: intended (camdecode.sh's header says why); the image records the commit.
+        info = subprocess.run(["go", "version", "-m", str(self.out / "agentos-camdecode")],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn("\tbuild\t-trimpath=true\n", info)
+        self.assertNotIn("vcs", info)
+
+    # REQ: UPD-1a
+    def test_kept_libavcodec_is_moved_out_of_the_build(self):
+        keep = os.environ.get("CAMDECODE_KEEP_LIBAVCODEC")
+        if not keep:
+            self.skipTest("CAMDECODE_KEEP_LIBAVCODEC unset")
+        tree = self.base / keep.lstrip("/") / "opt/agentos-libavcodec"
+        self.assertTrue((tree / "lib/libavcodec.a").is_file())
+        self.assertTrue((tree / "lib/pkgconfig/libavcodec.pc").is_file())
 
     # REQ: UPD-1a, NET-2
     def test_decoder_is_compiled_by_the_base_s_toolchain(self):
