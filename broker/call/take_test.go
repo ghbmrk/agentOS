@@ -529,7 +529,7 @@ func TestErrorAfterAStopIsNotAFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var played [][]byte
-	play := func(pcm []byte, _ bool) bool { played = append(played, pcm); return true }
+	play := func(pcm []byte, _ kind) bool { played = append(played, pcm); return true }
 	cfg := Config{Clips: Clips{Failed: []byte("CLIP:failed")}}
 	var tu Turn
 	if cfg.take(ctx, sound{err: errors.New("boom")}, true, &tu, play) {
