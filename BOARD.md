@@ -421,7 +421,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
 | VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | queued (release) |
 | CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | queued (release; tier A) |
-| CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
+| CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | building (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
 | KRN-clock-hold-gap | KRN-clock-hold-gap: a hold started while Latest-Earliest is wide is not lengthened by the gap (unit after time-sync, window from Earliest while monotonic, or bound via #5391); STATUS can say why. Release; from #5387. | #5147, #5387, #5391, #5279 | queued (release; tier A) |
@@ -431,14 +431,14 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
-| VULN-debian-r6-f1 | VULN-debian-r6-f1: state the flaw class and main-tree/initrd reachability of glibc DEBIAN-CVE-2026-100290 and -115819 in their vulncheck records; alert if remote-reachable. | #5503, #5623 | building (release; tier A) |
 | TEST-flake-browser-close-drain | TEST-flake-browser-close-drain: TestCloseDrainsAnUnaskedLine no longer races its own receive against Close's drain goroutine. | none | building (release) |
 | CTL-unicode-chat-code-fu2 | CTL-unicode-chat-code-fu2: enclosed-zero value fixed and pinned, the digits reply only for 6-digit runs with a next step, and an unlocked stripped native-digit number gets a notice. | none | building (release; tier A) |
 | OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | queued (release; tier A) |
 | CLK-run-open-wipe | CLK-run-open-wipe: a plaintext handed back with an Open error is wiped too. Release; from #5662. | #5324 | queued (release; tier A) |
 | VOICE-ro-d-ending-wait-size | VOICE-ro-d-ending-wait-size: size the ending notice's sentence wait from hardware timing. Release (UX); from #5668. | #5668, #5304 | queued (release; tier A) |
-| VOICE-ro-d-ending-fu | VOICE-ro-d-ending-fu: the ending notice never starts over an owner who is speaking; C9 states the hush race and ctx-ignoring Say. Release (UX); from #5668. | #5668, #5684 | queued (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | queued (release; tier A) |
+| VULN-debian-r6-f2 | VULN-debian-r6-f2: confirm glibc regex and wide-scanf reachability on the Debian image tree CI builds, as a CI sweep, and drop the Ubuntu caveat. Release follow-up of #5695. | #5695, #5624, #5503 | building (release; tier A) |
+| TEST-flake-ap-abandoned-call-token | TEST-flake-ap-abandoned-call-token: TestAbandonedOpensCountedAndCapped keeps one open counted; TestNoTokenTryFollowsTheCall hangs up before rung P2 (broker-race). Release; from #5712. | #5438, #5592, #5712 | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -482,7 +482,7 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
-issue #5705: body has no board-row block
 issue #5707: body has no board-row block
+issue #5708: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```

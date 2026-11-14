@@ -10,10 +10,6 @@
 usr/lib/tmpfiles.d/20-systemd-shell-extra.conf	L$ /etc/profile.d/70-systemd-shell-extra.sh - - - - /usr/lib/systemd/profile.d/70-systemd-shell-extra.sh
 usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf	L$ /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf - - - - /usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf
 usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf	d /run/sshd 0755
-usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/stub/profile 0444 root root - /.extra/profile
-usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/stub/os-release 0444 root root - /.extra/os-release
-usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/tpm2-pcr-signature.json 0444 root root - /.extra/tpm2-pcr-signature.json
-usr/lib/tmpfiles.d/20-systemd-stub.conf	C /run/systemd/tpm2-pcr-public-key.pem 0444 root root - /.extra/tpm2-pcr-public-key.pem
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-store 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-kernel 0700 agentos-kernel agentos-kernel -

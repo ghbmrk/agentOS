@@ -17,11 +17,10 @@ import (
 // never plays; and a 0 while it waits stops the sentence and lets the
 // notice play at once; a final transcript while it waits plays it before
 // the new answer; and a barge-in while it waits stops the sentence, and the
-// notice waits for the owner's final words, or for EndingWait if none come,
-// so it never talks over the owner. A sentence still playing at EndingWait
-// is cut
-// (TestTheOwnerHearsTheEndBeforeMaxCall), and the notice still never
-// outlasts MaxCall (the same test, at 10 min).
+// notice waits for the owner's final words, or for EndingWait from the
+// barge-in if none come, so it never talks over the owner. A sentence still
+// playing at EndingWait is cut (TestTheOwnerHearsTheEndBeforeMaxCall), and
+// the notice still never outlasts MaxCall (the same test, at 10 min).
 func TestTheEndingNoticeWaitsForTheSentence(t *testing.T) {
 	played := func(r *rig) string {
 		select {
@@ -161,21 +160,22 @@ func TestTheEndingNoticeWaitsForTheSentence(t *testing.T) {
 		r.hangup()
 	})
 
-	// A barge-in with no final transcript: the notice plays at EndingWait.
+	// A barge-in with no final transcript: the notice plays EndingWait
+	// after the barge-in (#5690).
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		r := waiting(t)
 		r.rec.out <- call.Heard{Text: "wait"}
 		synctest.Wait()
 		cut(r)
-		time.Sleep(call.EndingWait - time.Second - time.Nanosecond)
+		time.Sleep(call.EndingWait - time.Nanosecond)
 		synctest.Wait()
 		if got := played(r); got != "" {
 			t.Fatalf("before EndingWait: played %q", got)
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
-		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+call.EndingWait {
+		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+time.Second+call.EndingWait {
 			t.Fatalf("at EndingWait: played %q after %v", got, time.Since(start))
 		}
 		r.hangup()
@@ -399,4 +399,116 @@ func TestTheEndingNoticeKeepsNoQuestionWhoseClipStarted(t *testing.T) {
 			})
 		})
 	}
+}
+
+// The ending notice never starts over an owner who is speaking (#5690).
+// Due while the owner's words are still open and no turn runs, it waits for
+// their final words, a 0, or EndingWait from falling due. A barge-in late
+// in the wait for a sentence gives the owner EndingWait of their own before
+// the clip. An owner who keeps talking past every bound still hears the
+// clip, at most twice EndingWait after it fell due, so long before MaxCall
+// (TestTheOwnerHearsTheEndBeforeMaxCall).
+func TestTheEndingNoticeNeverStartsOverTheOwner(t *testing.T) {
+	played := func(r *rig) string {
+		select {
+		case s := <-r.l.saying:
+			return s
+		default:
+			return ""
+		}
+	}
+	partial := func(r *rig, text string) { r.rec.out <- call.Heard{Text: text} }
+	// speaking starts a call with no turn running whose owner starts to
+	// speak a second before the notice is due, and runs it to the moment
+	// the notice falls due.
+	speaking := func(t *testing.T) *rig {
+		r := newRig(t, fixed("One."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.serve()
+		time.Sleep(29*time.Minute - time.Second)
+		partial(r, "and")
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if got := played(r); got != "" {
+			t.Fatalf("as the notice fell due over the owner: played %q", got)
+		}
+		return r
+	}
+
+	// Their final words: the clip plays then, before the answer.
+	synctest.Test(t, func(t *testing.T) {
+		r := speaking(t)
+		time.Sleep(time.Second)
+		r.say("and the weather")
+		synctest.Wait()
+		if got := played(r); got != "CLIP:ending" {
+			t.Fatalf("at the final transcript: played %q", got)
+		}
+		if got := played(r); got != "S:One." {
+			t.Fatalf("after the notice: played %q", got)
+		}
+		r.hangup()
+	})
+
+	// A 0: the clip plays at once.
+	synctest.Test(t, func(t *testing.T) {
+		r := speaking(t)
+		r.l.keys <- '0'
+		synctest.Wait()
+		if got := played(r); got != "CLIP:ending" {
+			t.Fatalf("after 0: played %q", got)
+		}
+		r.hangup()
+	})
+
+	// No final words, the owner still talking: the clip plays at EndingWait.
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		r := speaking(t)
+		for range call.EndingWait / time.Second {
+			if got := played(r); got != "" {
+				t.Fatalf("while the owner speaks: played %q", got)
+			}
+			partial(r, "and the")
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+call.EndingWait {
+			t.Fatalf("at EndingWait: played %q after %v", got, time.Since(start)-29*time.Minute)
+		}
+		r.hangup()
+	})
+
+	// A barge-in just before the bound for a sentence still playing: the
+	// owner gets EndingWait from the barge-in, not the 0.1 s left, and words
+	// that keep coming do not extend it again.
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		r := newRig(t, fixed("One."))
+		r.bubble = true
+		r.cfg.Clips.Ending = []byte("CLIP:ending")
+		r.l.setGate(true) // the sentence never ends
+		r.serve()
+		r.say("q")
+		synctest.Wait()
+		<-r.l.saying
+		time.Sleep(29*time.Minute + call.EndingWait - 100*time.Millisecond)
+		synctest.Wait()
+		partial(r, "wait")
+		synctest.Wait()
+		r.l.wasCut(t)
+		for i := 0; time.Since(start) < 29*time.Minute+2*call.EndingWait-100*time.Millisecond; i++ {
+			if got := played(r); got != "" {
+				t.Fatalf("%v after the barge-in: played %q", time.Duration(i)*time.Second, got)
+			}
+			partial(r, "wait what")
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+2*call.EndingWait-100*time.Millisecond {
+			t.Fatalf("at EndingWait after the barge-in: played %q after %v", got, time.Since(start)-29*time.Minute)
+		}
+		r.hangup()
+	})
 }

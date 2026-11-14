@@ -27,10 +27,12 @@ import (
 var ErrPolicy = errors.New("nft: policy cannot be compiled")
 
 // Table is the one inet table the ruleset defines; ARPTable filters ARP on
-// the edge's segment.
+// the edge's segment; NeighTable filters ARP on the shared segments, from
+// its own copy of their leases (neighbour).
 const (
-	Table    = "enforcer"
-	ARPTable = "enforcer_arp"
+	Table      = "enforcer"
+	ARPTable   = "enforcer_arp"
+	NeighTable = "enforcer_neigh"
 )
 
 // CoreSet is the allow set slice f's resolver fills with the addresses the
@@ -133,6 +135,30 @@ func MACSet(seg string) string   { return "mac6_" + seg }
 
 const ClaimTimeout = 6 * 3600 // seconds
 
+// NeighSet and NeighAddrSet hold, for each IPv6 address on shared segment
+// seg, the one hardware address its neighbour entry may name (#4686):
+// NeighSet the address with its hardware address, NeighAddrSet the address.
+// The first hardware address to hold the address (ClaimSet) takes it, and
+// every packet it forwards from the address keeps it, for ClaimTimeout;
+// NeighTCPSet and NeighTCPAddrSet keep it the same way for HostTCPTimeout
+// from each packet of a TCP connection both ends answered. So a hardware
+// address keeps its neighbour hold at least as long as its hold of the
+// address (ClaimSet) and every host record of its connections from it
+// (HostSet), and another hardware address that takes the address once its
+// holder fell silent (ENF-shared-src-1) never moves the holder's neighbour
+// entry while any of those records lives (neigh). Neighbour discovery from
+// the segment that would set an entry for an address to another hardware
+// address is dropped (nd).
+func NeighSet(seg string) string        { return "neigh_" + seg + "_6" }
+func NeighAddrSet(seg string) string    { return "neighaddr_" + seg + "_6" }
+func NeighTCPSet(seg string) string     { return "neightcp_" + seg + "_6" }
+func NeighTCPAddrSet(seg string) string { return "neightcpaddr_" + seg + "_6" }
+
+// neighKey is a NeighSet element as nft reads it from a forwarded packet:
+// its source address and its raw hardware source address (hwField), the
+// form neighbour discovery's link-layer option is read in (nd).
+const neighKey = "ip6 saddr . " + hwField
+
 const _ uint = LeaseTimeout - 2*ClaimTimeout
 
 // HostSet is the set that records, for each connection a host on shared
@@ -181,6 +207,34 @@ const hostLabel = "0"
 func learn(seg string) string { return "learn_" + seg }
 func bound(seg string) string { return "bound_" + seg }
 func claim(seg string) string { return "claim_" + seg }
+
+// ndForms are the neighbour discovery messages that can set the
+// enforcer's neighbour entries, as nd reads them: the message type, the
+// length of its fixed part in bytes, the address whose entry it sets, and
+// the type and length (one 8-byte unit) of the link-layer option it names
+// it with (RFC 4861 4.1, 4.3, 4.4, 4.6.1). Linux reads only the first
+// option of a type (ndisc_parse_options), so with that option first and
+// alone the address nd reads is the one the kernel stores.
+var ndForms = []struct {
+	typ     string
+	hdr     int
+	subject string
+	opt     string
+}{
+	{"nd-router-solicit", 8, "ip6 saddr", "0x0101"},
+	{"nd-neighbor-solicit", 24, "ip6 saddr", "0x0101"},
+	{"nd-neighbor-advert", 24, "icmpv6 taddr", "0x0201"},
+}
+
+// neigh keeps the neighbour holds (NeighSet) of a packet claim passed from
+// shared segment seg; nd drops neighbour discovery from seg that would set
+// a held address's entry to another hardware address; arpIn (ARP that
+// reaches the enforcer on seg) and ackOut (the server's DHCPACK leaving on
+// seg) are NeighTable's chains for seg.
+func neigh(seg string) string  { return "neigh_" + seg }
+func nd(seg string) string     { return "nd_" + seg }
+func arpIn(seg string) string  { return "arp_" + seg }
+func ackOut(seg string) string { return "ack_" + seg }
 
 // hostKey is a HostSet element as nft reads it from a packet: its
 // connection's ID and original source address, then the packet's own
@@ -232,25 +286,46 @@ const (
 // one's lease and its answers are dropped until it runs out (fails
 // closed).
 func snoop(seg, iface string) []string {
-	const (
-		yiaddr = "@th,192,32"
-		chaddr = "@th,288,48"
-	)
 	out := []string{"oifname " + iface + " udp sport 67 udp dport 68 @th,64,24 0x020106 " + yiaddr + " @" + LeaseAddrSet(seg) +
 		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " counter name " + strconv.Quote(LeaseHeld) + " drop"}
 	for _, b := range leaseBands() {
-		times := strconv.Itoa(b[0])
-		if b[1] > b[0] {
-			times += "-" + strconv.Itoa(b[1])
-		}
-		out = append(out, "oifname "+iface+" udp sport 67 udp dport 68"+
-			" @th,64,24 0x020106 "+yiaddr+" != 0 @th,1952,32 0x63825363"+
-			" @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 "+times+
-			" update @"+LeaseAddrSet(seg)+" { "+yiaddr+" timeout "+secs(b[0])+" }"+
-			" update @"+LeaseSet(seg)+" { "+yiaddr+" . "+chaddr+" timeout "+secs(b[0])+" }"+
-			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }")
+		out = append(out, "oifname "+iface+" "+ackMatch(b)+leaseUpdates(seg, b[0])+
+			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }"+
+			" meta mark set meta mark or "+ownAck)
 	}
 	return out
+}
+
+// ownAck is the packet mark bit snoop sets on each ACK it reads, so
+// NeighTable's egress chain reads the same ACKs and no other: the netdev
+// egress hook also sees forwarded packets, which never cross the output
+// chain, and a host can have the internet answer it from port 67 with an
+// ACK-shaped reply (#5687). The mark lives on the packet inside the
+// enforcer only; nothing else in the ruleset sets or reads it.
+const ownAck = "0x00000100"
+
+// The leased address (yiaddr) and the client's hardware address (chaddr)
+// in a DHCPACK.
+const (
+	yiaddr = "@th,192,32"
+	chaddr = "@th,288,48"
+)
+
+// ackMatch matches a DHCPACK, as snoop reads it, whose lease time is in band b.
+func ackMatch(b [2]int) string {
+	times := strconv.Itoa(b[0])
+	if b[1] > b[0] {
+		times += "-" + strconv.Itoa(b[1])
+	}
+	return "udp sport 67 udp dport 68 @th,64,24 0x020106 " + yiaddr + " != 0 @th,1952,32 0x63825363" +
+		" @th,1984,40 0x3501053604 @th,2056,16 0x3304 @th,2072,32 " + times
+}
+
+// leaseUpdates is the updates that read an ACK's lease into segment seg's
+// LeaseAddrSet and LeaseSet for timeout seconds, the address first.
+func leaseUpdates(seg string, timeout int) string {
+	return " update @" + LeaseAddrSet(seg) + " { " + yiaddr + " timeout " + secs(timeout) + " }" +
+		" update @" + LeaseSet(seg) + " { " + yiaddr + " . " + chaddr + " timeout " + secs(timeout) + " }"
 }
 
 // MinLease is the shortest lease dnsmasq grants, in seconds.
@@ -744,6 +819,10 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.dynamic(HeldSet(sg.name), "ip6 saddr", ClaimTimeout)
 		w.dynamic(ClaimSet(sg.name), claimKey, ClaimTimeout)
 		w.dynamic(MACSet(sg.name), hwField, ClaimTimeout)
+		w.dynamic(NeighAddrSet(sg.name), "ip6 saddr", ClaimTimeout)
+		w.dynamic(NeighSet(sg.name), neighKey, ClaimTimeout)
+		w.dynamic(NeighTCPAddrSet(sg.name), "ip6 saddr", HostTCPTimeout)
+		w.dynamic(NeighTCPSet(sg.name), neighKey, HostTCPTimeout)
 	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
@@ -820,6 +899,13 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		sharedIfs = append(sharedIfs, q(sg.iface))
 	}
 	w.line("iifname { " + strings.Join(sharedIfs, ", ") + " } udp dport 67 @th,1952,56 0x63825363350107 drop")
+	// Neighbour discovery from a shared segment is judged by its segment's
+	// nd chain before anything accepts it (#4686). It is never tracked, so
+	// no established accept would take it, but the order does not rest on
+	// that.
+	for _, sg := range segments(l) {
+		w.line("iifname " + q(sg.iface) + " icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump " + nd(sg.name))
+	}
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
 	w.line("icmpv6 type nd-router-advert iifname != " + wan + " counter name " + q(RADropped) + " drop")
@@ -1108,12 +1194,55 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.line("meta nfproto ipv4 " + leaseKey + " @" + LeaseSet(sg.name) + " return")
 		pre := "meta nfproto ipv6 "
 		cs, hs, ms := ClaimSet(sg.name), HeldSet(sg.name), MACSet(sg.name)
-		w.line(pre + claimKey + " @" + cs + " update @" + cs + " { " + claimKey + " } update @" + hs + " { ip6 saddr } update @" + ms + " { " + hwField + " } return")
+		w.line(pre + claimKey + " @" + cs + " update @" + cs + " { " + claimKey + " } update @" + hs + " { ip6 saddr } update @" + ms + " { " + hwField + " } goto " + neigh(sg.name))
 		w.line(pre + "ip6 saddr @" + hs + " drop")
 		w.line(pre + hwField + " != @" + LeasedSet(sg.name) + " drop")
 		w.line(pre + hwField + " @" + ms + " drop")
-		w.line(pre + "add @" + cs + " { " + claimKey + " } add @" + hs + " { ip6 saddr } add @" + ms + " { " + hwField + " } return")
+		w.line(pre + "add @" + cs + " { " + claimKey + " } add @" + hs + " { ip6 saddr } add @" + ms + " { " + hwField + " } goto " + neigh(sg.name))
 		w.line("drop")
+		w.close()
+
+		// An IPv6 packet claim passed keeps its hardware address's
+		// neighbour hold of its source address, or takes the address's
+		// hold when no other hardware address has one: in NeighSet for
+		// ClaimTimeout, and in NeighTCPSet for HostTCPTimeout when it is
+		// of a TCP connection both ends answered, each address before its
+		// key, as claim does. A packet from an address another hardware
+		// address holds in either pair passes on with no hold (#4702).
+		// Every verdict here returns to the forward chain, as claim's
+		// would.
+		w.open("chain " + neigh(sg.name))
+		ns, na, ts, ta := NeighSet(sg.name), NeighAddrSet(sg.name), NeighTCPSet(sg.name), NeighTCPAddrSet(sg.name)
+		w.line("ip6 saddr @" + ta + " " + neighKey + " != @" + ts + " return")
+		w.line("ip6 saddr @" + na + " " + neighKey + " != @" + ns + " return")
+		w.line("ct protocol tcp ct status assured update @" + ta + " { ip6 saddr } update @" + ts + " { " + neighKey + " }")
+		w.line("update @" + na + " { ip6 saddr } update @" + ns + " { " + neighKey + " }")
+		w.close()
+
+		// Neighbour discovery from the segment that names a link-layer
+		// address sets the enforcer's entry for its subject (#4686): a
+		// solicitation's or router solicitation's source, an
+		// advertisement's target. Such a message passes only in the one
+		// form whose link-layer address nft reads where the kernel does:
+		// no extension header, and that option alone, first, of its
+		// Ethernet length; then only when no other hardware address holds
+		// its subject's neighbour entry (NeighSet, NeighTCPSet). One with
+		// no option sets no address, and a solicitation from the
+		// unspecified address none for its source; both pass on.
+		w.open("chain " + nd(sg.name))
+		w.line("ip6 nexthdr != ipv6-icmp drop")
+		w.line("icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return")
+		for _, m := range ndForms {
+			w.line("icmpv6 type " + m.typ + " ip6 length " + strconv.Itoa(m.hdr) + " return")
+			form := "icmpv6 type " + m.typ + " ip6 length " + strconv.Itoa(m.hdr+8) + " @th," + strconv.Itoa(8*m.hdr) + ",16 " + m.opt + " "
+			key := m.subject + " . @th," + strconv.Itoa(8*m.hdr+16) + ",48"
+			w.line(form + key + " @" + ts + " return")
+			w.line(form + key + " @" + ns + " return")
+			w.line(form + m.subject + " @" + ta + " drop")
+			w.line(form + m.subject + " @" + na + " drop")
+			w.line(form + "return")
+			w.line("icmpv6 type " + m.typ + " drop")
+		}
 		w.close()
 	}
 
@@ -1180,6 +1309,41 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("type filter hook input priority filter; policy accept;")
 	w.line("iifname " + edge + " arp operation request arp daddr ip != " + l.EdgeGateway.String() + " drop")
 	w.close()
+	w.close()
+	w.line("")
+
+	// ARP that reaches the enforcer on a shared segment sets its entry for
+	// the sender's address to the sender's hardware address, request or
+	// reply, asked for or not (#4686). It passes only from the hardware
+	// address that holds a lease of that address, or for an address no
+	// lease holds. An inet table never sees ARP and an arp table never sees
+	// DHCP, and a table's chains read only its own sets, so this netdev
+	// table keeps its own LeaseSet and LeaseAddrSet per segment: its egress
+	// chain reads each ACK that leaves the segment's interface marked
+	// ownAck, the ACKs snoop read in the output chain (after it dropped one
+	// the inet sets hold for another host), with snoop's own matches, and each load seeds and carries them as it
+	// does the inet sets (Seed, Reload). An ARP header with Ethernet and
+	// IPv4 addresses, the only one Linux takes on an Ethernet interface,
+	// has the sender's hardware address at byte 8 and its address at byte
+	// 14.
+	w.open("table netdev " + NeighTable)
+	for _, sg := range segments(l) {
+		w.dynamic(LeaseSet(sg.name), leaseKey, LeaseTimeout)
+		w.dynamic(LeaseAddrSet(sg.name), addrField, LeaseTimeout)
+	}
+	for _, sg := range segments(l) {
+		w.open("chain " + arpIn(sg.name))
+		w.line("type filter hook ingress device " + q(sg.iface) + " priority filter; policy accept;")
+		w.line("meta protocol arp @nh,112,32 . @nh,64,48 @" + LeaseSet(sg.name) + " accept")
+		w.line("meta protocol arp @nh,112,32 @" + LeaseAddrSet(sg.name) + " drop")
+		w.close()
+		w.open("chain " + ackOut(sg.name))
+		w.line("type filter hook egress device " + q(sg.iface) + " priority filter; policy accept;")
+		for _, b := range leaseBands() {
+			w.line("meta mark and " + ownAck + " != 0 " + ackMatch(b) + leaseUpdates(sg.name, b[0]))
+		}
+		w.close()
+	}
 	w.close()
 	return w.b.String(), devs, nil
 }

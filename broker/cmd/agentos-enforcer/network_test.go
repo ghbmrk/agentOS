@@ -407,7 +407,7 @@ func TestLoadSeedsLeases(t *testing.T) {
 		{Iface: l.Household, Addr: netip.MustParseAddr("10.20.0.21"), HW: hw("02:00:00:00:00:02"), Left: 700},
 		{Iface: l.Owner, Addr: netip.MustParseAddr("10.10.0.22"), HW: hw("02:00:00:00:00:03"), Left: 800},
 	})
-	if strings.Count(seed, "add element") != 9 { // lease, address and leased sets of three segments
+	if strings.Count(seed, "add element") != 15 { // lease, address and leased sets of three segments, and the neighbour table's copies of the first two (#4686)
 		t.Fatalf("fixture: seed %q", seed)
 	}
 	if got, want := x.fire.last(), x.seededLoad(x.current(), seed); got != want {
