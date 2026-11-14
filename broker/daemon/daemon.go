@@ -639,13 +639,12 @@ func serveOwner(ctx context.Context, ch *ownerch.Channel, hasModem bool) {
 		return
 	}
 	ch.Boot()
-	t := time.NewTicker(time.Minute)
-	defer t.Stop()
+	tick := time.Tick(time.Minute) // collected once unreferenced (Go 1.23+)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-tick:
 			ch.Tick()
 		}
 	}
