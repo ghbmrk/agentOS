@@ -776,9 +776,10 @@ class ProposeTest(unittest.TestCase):
         # A lockfile or Go finding needs a version and a reason no template can give.
         self.assertEqual(vulncheck.propose([fail("GHSA-1", "broker")], 1), [])
 
-    def run_main(self, *args):
+    def run_main(self, *args, findings=None):
         saved = vulncheck.scan_image
-        fs = self.found("image", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"))
+        fs = findings if findings is not None else self.found(
+            "image", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"))
         vulncheck.scan_image = lambda config, src: ([dict(f) for f in fs], [], [])
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -802,6 +803,120 @@ class ProposeTest(unittest.TestCase):
         self.assertEqual(report["proposed"], want)
         code, out, report = self.run_main()
         self.assertEqual((code, "proposed" in report, "must name each id" in out), (1, False, False))
+
+    def test_the_header_names_the_config_in_use(self):
+        # #5631 item 2: under --config F the instruction names F, not the default file.
+        code, out, _ = self.run_main("--propose", "5628")
+        # The summary's fix line names it too; the default config is named from the repository root.
+        self.assertRegex(out, r'"accepted" in /\S+/c\.json: issue #5628 must name each id')
+        self.assertRegex(out, r"add a record to /\S+/c\.json naming")
+        self.assertNotIn("assurance/vulncheck.json", out)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            vulncheck.summary([fail("GHSA-1", "broker")], [], [])
+        self.assertIn("add a record to assurance/vulncheck.json naming", out.getvalue())
+        self.assertEqual(vulncheck.shown(str(vulncheck.CONFIG)), "assurance/vulncheck.json")
+
+    def test_an_empty_list_says_nothing_to_propose(self):
+        # #5631 item 3: no failing no-fix finding prints one line, not the instruction and "[ ]".
+        code, out, report = self.run_main("--propose", "5628", findings=[])
+        self.assertEqual((code, report["proposed"]), (0, []))
+        self.assertIn("nothing to propose", out)
+        self.assertNotIn("must name each id", out)
+        self.assertNotIn("[", out)
+
+    def propose_report(self, report, *args):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = pathlib.Path(tmp.name) / "image-vulncheck-report.json"
+        path.write_text(report if isinstance(report, str) else json.dumps(report))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = vulncheck.main(["propose", str(path), *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_propose_reads_cis_report_and_gives_the_same_records(self):
+        # #5631 item 1: the report `image` writes, fed to `propose REPORT ISSUE`, gives the records
+        # `image --propose ISSUE` gives, so a round needs no local image build or osv-scanner.
+        fs = (self.found("image", osv_pkg("dpkg", "1.22.21", "Debian:13", "DEBIAN-CVE-5", binary="dpkg"),
+                         self.fixed("openssl", "3.5.1-1", "DEBIAN-CVE-7"))
+              + self.found("image/guest", osv_pkg("zlib", "1.3-1", "Debian:13", "DEBIAN-CVE-6", binary="zlib1g")))
+        _, direct, _ = self.run_main("--propose", "5628", findings=fs)
+        _, _, report = self.run_main(findings=fs)  # CI's run: no --propose
+        self.assertNotIn("proposed", report)
+        code, out, err = self.propose_report(report, "5628")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out[out.index("\n[") + 1:]), json.loads(direct[direct.index("\n[") + 1:]))
+        self.assertEqual([(r["where"], r["id"]) for r in json.loads(out[out.index("\n[") + 1:])],
+                         [("image", "DEBIAN-CVE-5"), ("image/guest", "DEBIAN-CVE-6")])
+        self.assertIn("assurance/vulncheck.json", out)  # the default config, which the records go in
+        code, out, _ = self.propose_report(report, "5628", "--config", "other.json")
+        self.assertIn('"accepted" in other.json:', out)
+
+    def test_propose_refuses_a_report_it_cannot_trust(self):
+        # A scan that hit a problem may have missed findings, and a report with no findings key
+        # (a truncated or wrong file) would otherwise propose nothing and read as clean.
+        # #5647: so would `run`'s report (vulncheck-report.json, uploaded beside the image's) or
+        # one with no "scan" key; a malformed finding is named in plain words, not a Python repr.
+        _, _, report = self.run_main()
+        self.assertEqual(report["scan"], "image")
+        f = report["findings"][0]
+        for bad, want in (({**report, "problems": ["guest: canary matched nothing"]}, "canary matched nothing"),
+                          ({k: v for k, v in report.items() if k != "findings"}, "no findings"),
+                          ({**report, "findings": {}}, "no findings"),
+                          ([], "no findings"),
+                          ("{not json", "cannot read"),
+                          ({k: v for k, v in report.items() if k != "problems"}, "no problems list"),
+                          ({**report, "problems": "bad"}, "no problems list"),
+                          ({k: v for k, v in report.items() if k != "scan"}, "not a report `image` wrote"),
+                          ({**report, "scan": "run"}, "not a report `image` wrote"),
+                          ({**report, "findings": [{}]}, 'a finding has no "id" field'),
+                          ({**report, "findings": [{k: v for k, v in f.items() if k != "package"}]},
+                           'a finding has no "package" field'),
+                          ({**report, "findings": [{**f, "package": 5}]}, 'a finding\'s "package" field is not a string'),
+                          ({**report, "findings": [{**f, "fails": "yes"}]}, 'a finding\'s "fails" field is not true or false')):
+            with self.subTest(want):
+                code, out, err = self.propose_report(bad, "5628")
+                self.assertEqual(code, 2)
+                self.assertIn(want, err)
+                self.assertNotIn("Error(", err)
+                self.assertNotIn("nothing to propose", out)
+                self.assertNotIn("must name each id", out)
+        code, _, err = self.propose_report(report, "5628", "--config", "x")
+        self.assertEqual(code, 0)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            vulncheck.main(["propose", "r.json", "0"])
+
+    def test_propose_refuses_runs_report(self):
+        # #5647 item 1: `run --report` writes vulncheck-report.json, which CI uploads in the same
+        # artifact as image-vulncheck-report.json; fed to `propose`, its failing finding is not an
+        # image finding, so it would print "nothing to propose" and exit 0, reading as clean.
+        saved = vulncheck.scan
+        vulncheck.scan = lambda config, root: ([fail("GHSA-1", "broker")], [], [])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cfg, path = pathlib.Path(tmp.name) / "c.json", pathlib.Path(tmp.name) / "vulncheck-report.json"
+        cfg.write_text('{"accepted": []}')
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(vulncheck.main(["run", "--config", str(cfg), "--report", str(path)]), 1)
+        finally:
+            vulncheck.scan = saved
+        report = json.loads(path.read_text())
+        self.assertEqual(report["scan"], "run")
+        code, out, err = self.propose_report(report, "5628")
+        self.assertEqual(code, 2)
+        self.assertIn("image-vulncheck-report.json", err)
+        self.assertNotIn("nothing to propose", out)
+
+    def test_propose_help_names_each_argument(self):
+        # #5647 item 6: `propose -h` explains REPORT, ISSUE and --config.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            vulncheck.main(["propose", "-h"])
+        for want in ("image-vulncheck-report.json", "the issue each record cites", "the file the records go in",
+                     "default: assurance/vulncheck.json"):
+            self.assertIn(want.replace(" ", ""), "".join(out.getvalue().split()))  # argparse wraps at hyphens
 
     def test_propose_needs_an_issue_number(self):
         for bad in ([], ["0"], ["x"]):

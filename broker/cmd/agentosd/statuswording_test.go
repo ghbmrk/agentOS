@@ -121,6 +121,43 @@ func TestRES2BrokerGroupStuckSaysRestart(t *testing.T) {
 	}
 }
 
+// REV-CHK-links-vm-lstat (#5617): a -machines path agentosd cannot walk
+// (a name too long, a directory it may not search) is refused the same
+// way on every start, so STATUS gives the setting line, not a restart.
+func TestMachinesPathUnreachableIsASettingNotARestart(t *testing.T) {
+	open := func(dir string) error {
+		var m *vm.Manager
+		adm, err := admission.New(admission.Config{CapacityMB: 8000}, lateManager{&m})
+		must(t, err)
+		_, err = openVM(context.Background(), vm.Config{
+			StateDir: dir, Images: map[string]string{"base": t.TempDir()},
+			Runtime: &sleepRuntime{running: map[string]bool{}}, Admit: adm, NoCgroups: true, NoQuota: true,
+			FreeBytes: func(string) (int64, error) { return 1 << 50, nil },
+		}, &capState{}, func(string) error { return nil })
+		return err
+	}
+	err := open(filepath.Join(t.TempDir(), strings.Repeat("n", 300), "machines"))
+	if !errors.Is(err, vm.ErrStateDirUnreachable) {
+		t.Fatalf("over-long state path: %v, want ErrStateDirUnreachable", err)
+	}
+	if got := machinesOffLine(err); got != agentMachinesUnsafe {
+		t.Fatalf("over-long state path: line %q, want %q", got, agentMachinesUnsafe)
+	}
+	if os.Geteuid() != 0 {
+		shut := filepath.Join(t.TempDir(), "shut")
+		must(t, os.MkdirAll(filepath.Join(shut, "inner"), 0o700))
+		must(t, os.Chmod(shut, 0))
+		t.Cleanup(func() { os.Chmod(shut, 0o700) })
+		err := open(filepath.Join(shut, "inner", "machines"))
+		if got := machinesOffLine(err); got != agentMachinesUnsafe {
+			t.Errorf("unreadable parent (%v): line %q, want %q", err, got, agentMachinesUnsafe)
+		}
+	}
+	if l := machinesOffLine(fmt.Errorf("vm: %w", vm.ErrStateDirUnreachable)); l != agentMachinesUnsafe {
+		t.Errorf("wrapped unreachable: %q", l)
+	}
+}
+
 // REV-CHK-links-vm-ux (#4976): a -machines path vm.Open refuses is a
 // setting to fix, which a restart does not; STATUS says so. Any other
 // open failure keeps the restart line. The flag help names the rule.
@@ -151,7 +188,10 @@ func TestMachinesPathRefusalIsASettingNotARestart(t *testing.T) {
 	}
 	// A fix clause that only says what does not work is refused (UX on
 	// #5612): the line names a step that works.
-	for _, l := range []string{"Agent and worker tools: off, x; a restart will not fix it.", "Model: off; restarting does not help."} {
+	for _, l := range []string{"Agent and worker tools: off, x; a restart will not fix it.", "Model: off; restarting does not help.",
+		// STATUS-wording-f1 (#5632): the house "cannot" and the other
+		// clauses that name no step.
+		"Model: off; a restart cannot fix it.", "Model: off; restarting does nothing.", "Model: off; a restart is no fix.", "Model: off; nothing helps."} {
 		if ownerWorded(l) == nil {
 			t.Errorf("ownerWorded accepts %q", l)
 		}

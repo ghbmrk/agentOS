@@ -1,6 +1,8 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -91,4 +93,23 @@ type okUpstream struct{}
 
 func (okUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+}
+
+// REQ: CH-4
+// The -checker help and the package usage are true only while nothing
+// listens at the redeem socket: a planted one that answers approves every
+// irreversible operation (W-3, H-9), so both say so (#5633).
+func TestCheckerHelpNamesTheListenerCaveat(t *testing.T) {
+	var out strings.Builder
+	parse([]string{"-h"}, &out)
+	if !strings.Contains(out.String(), "unless something listens there") {
+		t.Errorf("-checker help omits the listener caveat:\n%s", out.String())
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc := strings.Join(strings.Fields(f.Doc.Text()), " "); !strings.Contains(doc, "unless something listens there") {
+		t.Errorf("package usage omits the listener caveat:\n%s", doc)
+	}
 }

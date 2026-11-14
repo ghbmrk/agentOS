@@ -3,6 +3,7 @@ package main
 // REQ: ARC-6 (DEL-1d)
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -55,7 +56,7 @@ func TestDEL1BridgeRetriesTheReplyNotTheModel(t *testing.T) {
 	defer func() { sleep = time.Sleep }()
 
 	u, _ := url.Parse(broker.URL)
-	if err := ownerOnce(&http.Client{Transport: rewrite{u}}, gateway.URL, "m", "t"); err != nil {
+	if err := ownerOnce(context.Background(), &http.Client{Transport: rewrite{u}}, gateway.URL, "m", "t"); err != nil {
 		t.Fatal(err)
 	}
 	if asks != 1 || len(posts) != 4 || posts[0] != posts[1] || posts[0] != posts[2] || posts[0] != posts[3] || posts[0] != `{"id":"0a0b0c0d0e0f","text":"booked"}` {
@@ -85,7 +86,7 @@ func TestDEL1BridgeStopsOnFinalAnswers(t *testing.T) {
 		}))
 		sleep = func(time.Duration) { t.Fatal("retried a final answer") }
 		u, _ := url.Parse(broker.URL)
-		ownerOnce(&http.Client{Transport: rewrite{u}}, gateway.URL, "m", "t")
+		ownerOnce(context.Background(), &http.Client{Transport: rewrite{u}}, gateway.URL, "m", "t")
 		sleep = time.Sleep
 		broker.Close()
 		gateway.Close()

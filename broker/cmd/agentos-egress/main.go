@@ -401,6 +401,11 @@ type noAudit struct{}
 
 func (noAudit) Egress(egress.Event) {}
 
+// checkerHelp is the -checker help. It fails closed only while nothing
+// listens at dir/hand.sock: the client hands the seed to any listener,
+// with no peer-uid check (W-3).
+const checkerHelp = "directory of a checker hand socket (hand.sock), which would hold the code-generator seed while the vault is open and check every code (CH-4); since D-244 no process serves hand.sock (agentos-checker serves only verify.sock), so any value fails closed (no unlock and no tier-4 approval passes) unless something listens there, which then receives the seed and approves every act: name only a directory writable only by the checker's uid; empty keeps the seed here"
+
 func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	vaultPath := fs.String("vault", defaultVault, "sealed vault file")
@@ -415,7 +420,7 @@ func serveCmd(args []string) error {
 	mf := declareModelFlags(fs, "default routing.json beside the keys")
 	held := mf.held
 	proxyDir := fs.String("proxy", "", "socket directory of `agentos-egress proxy`, which then serves the model and routing sockets and is handed a view of the vault, never a value (ARC-1); needs -holder")
-	checkerDir := fs.String("checker", "", "directory of a checker hand socket (hand.sock), which would hold the code-generator seed while the vault is open and check every code (CH-4); since D-244 no process serves hand.sock (agentos-checker serves only verify.sock), so any value fails closed: no unlock and no tier-4 approval passes; empty keeps the seed here")
+	checkerDir := fs.String("checker", "", checkerHelp)
 	tpmPath := fs.String("tpm", defaultTPM, "this PC's TPM (trusted host, CRED-8); absent means every boot is an unknown host")
 	polPath := fs.String("pcr-policy", "", "approved boot paths: signed PCR policies (HW-5a); default vault.pcrpolicy beside the keys")
 	pcrList := fs.String("pcrs", defaultPCRs, "PCRs a trusted host's boot path is measured into (SHA-256 bank)")
