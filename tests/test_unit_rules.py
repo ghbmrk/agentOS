@@ -10,6 +10,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "image"))
@@ -664,8 +665,9 @@ class BootLinksTest(unittest.TestCase):
             for target in ("/var/lib/foo", "/var/lib/foo/d", "../var/lib/foo/d"):
                 line = {"/usr/lib/tmpfiles.d/foo.conf": "%s /run/agentos-y - - - - %s\n" % (mod, target)}
                 with self.subTest(mod=mod, target=target), tempfile.TemporaryDirectory() as d:
-                    with self.assertRaisesRegex(SystemExit, "L line .*: its target is at or under /var/lib/foo, "
-                                                "where a mount .*; point the line at a path no mount covers$"):
+                    with self.assertRaisesRegex(SystemExit, "a link /run/agentos-y \\(.*L line .*\\) steps on the "
+                                                "mount point /var/lib/foo on its way, where a mount .*; point the "
+                                                "line at a path no mount covers$"):
                         r.boot_links(tree(d, {**self.MOUNT, **line}))
 
     # #5725 Potency 6876845879: the mount points are read from the full view, so a generator's unit under
@@ -674,7 +676,7 @@ class BootLinksTest(unittest.TestCase):
         gen = {"/run/systemd/generator/var-lib-foo.mount": "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\n",
                "/usr/share/foo/f": "x"}
         for line, want in (("L /var/lib/foo/s - - - - /run/agentos-x/s", "its path is at, under or above /var/lib/foo"),
-                           ("L+ /run/agentos-y - - - - /var/lib/foo/d", "its target is at or under /var/lib/foo"),
+                           ("L+ /run/agentos-y - - - - /var/lib/foo/d", "steps on the mount point /var/lib/foo on its way"),
                            ("C /var/lib/foo/c - - - - /usr/share/foo", None)):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
                 v = tree(d, {**gen, "/usr/lib/tmpfiles.d/foo.conf": line + "\n"})
@@ -735,6 +737,7 @@ class BootLinksTest(unittest.TestCase):
     # records may hold, the tree's or an L line's, a link to a file included, is read through every other
     # one, and fails the run when it ends at or under a mount (or sits at or under one).
     MOUNTED = "at or under /var/lib/foo, where a mount puts a file system the unit lint does not see"
+    STEPS = "steps on the mount point /var/lib/foo on its way, where a mount puts a file system the unit lint does not see"
 
     def test_a_chained_link_into_a_mount_fails_the_run(self):
         for lines, more in (
@@ -747,8 +750,8 @@ class BootLinksTest(unittest.TestCase):
             conf = {"/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in lines)}
             with self.subTest(lines=lines, more=more), tempfile.TemporaryDirectory() as d:
                 want = "the tree's|/usr/lib/tmpfiles.d/foo.conf: L line '[^']*'"
-                with self.assertRaisesRegex(SystemExit, "a link /etc/[bc] \\((%s)\\) resolves to /var/lib/foo[/a-z]*, %s; "
-                                            "point the (line|link) at a path no mount covers" % (want, self.MOUNTED)):
+                with self.assertRaisesRegex(SystemExit, "a link /etc/[bc] \\((%s)\\)( to [a-z/]+)? %s; "
+                                            "point the (line|link) at a path no mount covers" % (want, self.STEPS)):
                     r.boot_links(tree(d, {**self.MOUNT, **conf, **more}))
 
     def test_a_tree_link_into_or_under_a_mount_fails_the_run(self):
@@ -757,8 +760,8 @@ class BootLinksTest(unittest.TestCase):
                      {"/etc/x": "-> /var/lib/foo/f", "/var/lib/foo/f": "a file"},
                      {"/etc/x": "-> /etc/y/foo", "/etc/y": "-> /var/lib"}):
             with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "a link /etc/x \\(the tree's\\) resolves to /var/lib/foo[/a-z]*, "
-                                            + self.MOUNTED + "; point the link at a path no mount covers" + drop):
+                with self.assertRaisesRegex(SystemExit, "a link /etc/x \\(the tree's\\) to [a-z/.]+ "
+                                            + self.STEPS + "; point the link at a path no mount covers" + drop):
                     r.boot_links(tree(d, {**self.MOUNT, **more}))
         # #5725 UX 6877151111 2: a link whose own path is under the mount is told to move, whatever its target
         for target in ("/etc", "/usr/bin", "/srv"):
@@ -767,35 +770,98 @@ class BootLinksTest(unittest.TestCase):
                                             + "; move the link off the mount" + drop):
                     r.boot_links(tree(d, {**self.MOUNT, "/var/lib/foo/l": "-> " + target}))
         with tempfile.TemporaryDirectory() as d:  # gpt-auto's /boot counts like any unit's mount
-            with self.assertRaisesRegex(SystemExit, "a link /vmlinuz .*at or under /boot, where a mount.*" + drop):
+            with self.assertRaisesRegex(SystemExit, "a link /vmlinuz .*steps on the mount point /boot on its way, "
+                                        "where a mount.*" + drop):
                 r.boot_links(tree(d, {"/vmlinuz": "-> boot/vmlinuz-6"}))
 
     # #5725 L3 6877157203 1, Security 6877163812 1 (blocker at 65c98866): a tree link the walk could not follow
     # (a loop, more than 40 links) was left out of the mount check, and a loop through a mount is a loop only
-    # in the tree: at boot the mount ends it. Every such link now fails the run, naming a mount on its walk.
+    # in the tree. #5725 re-plan: the walk stops at the first step on a mount, so a loop through one fails as
+    # a step on it, and a loop with no mount on its way fails as a loop (UX 6877297782 1: no mount clause).
     def test_a_link_loop_or_over_long_chain_fails_the_run(self):
         chain = {"/etc/l%d" % i: "-> /etc/l%d" % (i + 1) for i in range(1, 41)}
         chain.update({"/etc/l0": "-> /var/lib/foo/m0", "/var/lib/foo/m0": "-> /etc/l1", "/etc/l41": "-> /usr"})
-        for more, at in (({"/etc/x": "-> /var/lib/foo/y", "/var/lib/foo/y": "-> /etc/x"}, "/var/lib/foo"),
-                         ({"/etc/x": "-> /var/lib/foo/y/z", "/var/lib/foo/y": "-> /etc/x"}, "/var/lib/foo"),
-                         ({"/etc/a": "-> /var/lib/foo/y", "/var/lib/foo": "-> /etc/a"}, "/var/lib/foo"),
-                         ({"/var/lib/foo/l": "-> l"}, "/var/lib/foo"), ({"/var/lib/foo": "-> foo"}, "/var/lib/foo"),
-                         (chain, "/var/lib/foo"), ({"/etc/x": "-> /var/lib/foo/../../../etc/x", "/var/lib/foo/.keep": ""}, "/var/lib/foo"),
-                         ({"/etc/x": "-> y", "/etc/y": "-> x"}, None)):
+        on = "a link /[a-z/0-9]+ \\(the tree's\\) (sits %s|to [a-z/0-9.]+ %s)" % (self.MOUNTED, self.STEPS)
+        loop = ("a link /etc/[a-z0-9]+ \\(the tree's\\) to [a-z/0-9]+ is on a loop or a chain of more than 40 links, "
+                "which the unit lint cannot follow; remove the loop, or drop it \\(mkosi.conf RemoveFiles=\\) if a "
+                "package makes it$")
+        for more, want in (({"/etc/x": "-> /var/lib/foo/y", "/var/lib/foo/y": "-> /etc/x"}, on),
+                           ({"/etc/x": "-> /var/lib/foo/y/z", "/var/lib/foo/y": "-> /etc/x"}, on),
+                           ({"/etc/a": "-> /var/lib/foo/y", "/var/lib/foo": "-> /etc/a"}, on),
+                           ({"/var/lib/foo/l": "-> l"}, on), ({"/var/lib/foo": "-> foo"}, on), (chain, on),
+                           ({"/etc/x": "-> /var/lib/foo/../../../etc/x", "/var/lib/foo/.keep": ""}, on),
+                           ({"/etc/x": "-> y", "/etc/y": "-> x"}, loop),
+                           ({k: v for k, v in chain.items() if k != "/etc/l0"}, loop)):  # 41 links, no mount
             with self.subTest(more=sorted(more)[:2]), tempfile.TemporaryDirectory() as d:
-                want = "a link /[a-z/0-9]+ \\(the tree's\\) is on a loop or a chain of more than 40 links"
-                want += " through /[a-z/0-9]+, at or under %s," % at if at else ", which"
-                with self.assertRaisesRegex(SystemExit, want + ".*remove the loop, or drop the link"):
+                with self.assertRaisesRegex(SystemExit, want):
                     r.boot_links(tree(d, {**self.MOUNT, **more}))
 
-    def test_an_l_line_loop_fails_the_run(self):
+    def test_an_l_line_loop_or_over_long_chain_fails_the_run(self):
+        chain = tuple("L /etc/c%d - - - - /etc/c%d" % (i, i + 1) for i in range(45))  # Potency 6877296253 3
         for lines in (("L+ /etc/a - - - - /etc/a/x",), ("L /etc/a - - - - /etc/b", "L /etc/b - - - - /etc/a"),
-                      ("L /etc/a - - - - /etc/b/x", "L /etc/b - - - - /etc/a/y")):
+                      ("L /etc/a - - - - /etc/b/x", "L /etc/b - - - - /etc/a/y"), chain):
+            conf = {"/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in lines)}
+            with self.subTest(lines=lines[:2]), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link /etc/[abc0-9]+ \\(/usr/lib/tmpfiles.d/foo.conf: L line "
+                                            "'[^']*'\\) is on a loop or a chain of more than 40 links, which the unit "
+                                            "lint cannot follow; remove the line$"):
+                    r.boot_links(tree(d, {**self.MOUNT, **conf}))
+        with tempfile.TemporaryDirectory() as d:  # 40 links pass
+            got = r.boot_links(tree(d, {**self.MOUNT, "/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in chain[5:])}))
+            self.assertEqual(got["/etc/c5"], "/etc/c45")
+
+    # #5725 L3 6877308099 1, Security 6877300982 1 (the round cap's step back): the mount check read a link's own
+    # path and its final target, so a .. after a tree directory under a mount was read in the tree, though at
+    # boot the mounted file system decides where it lands. The resolver (MountView) now refuses every step at or
+    # under a mount, so no walk is read on past one, whatever brought it there.
+    def test_a_walk_stepping_on_a_mount_and_back_out_fails_the_run(self):
+        keep = {"/var/lib/foo/d/.keep": "", "/etc/real/.keep": ""}
+        for more in ({"/etc/a": "-> /var/lib/foo/d/../../x"}, {"/etc/a": "-> /var/lib/foo/d/../../../../etc/real"},
+                     {"/etc/a": "-> ../var/lib/foo/d/../../../../etc/b"}, {"/etc/a": "-> /var/lib/foo/../x"},
+                     {"/etc/a": "-> /etc/y/../x", "/etc/y": "-> /var/lib/foo/d"},
+                     {"/etc/a": "-> /etc/y/../../x", "/etc/y": "-> /var/lib/foo/d"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link /etc/a \\(the tree's\\) to [a-z/.]+ " + self.STEPS):
+                    r.boot_links(tree(d, {**self.MOUNT, **keep, **more}))
+        for lines in (("L /etc/a - - - - /var/lib/foo/d/../../x",), ("L /etc/a - - - - ../var/lib/foo/d/../../../etc/real",),
+                      ("L /etc/b - - - - /var/lib/foo/d", "L /etc/a - - - - /etc/b/../../x"),
+                      ("L /etc/b - - - - /var/lib", "L /etc/a - - - - /etc/b/foo/d/../../x")):
             conf = {"/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in lines)}
             with self.subTest(lines=lines), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "a link /etc/[ab] \\(/usr/lib/tmpfiles.d/foo.conf: L line .*\\) "
-                                            "resolving to .*never ends: a loop.*; remove the line$"):
-                    r.boot_links(tree(d, {**self.MOUNT, **conf}))
+                with self.assertRaisesRegex(SystemExit, "a link /etc/[ab] \\(/usr/lib/tmpfiles.d/foo.conf: L line '[^']*'\\) "
+                                            + self.STEPS + "; point the line at a path no mount covers$"):
+                    r.boot_links(tree(d, {**self.MOUNT, **keep, **conf}))
+
+    # A mount whose directories the tree does not hold: the walk keeps the path as given from the first missing
+    # component, and each of its components is still held to the mounts.
+    def test_a_path_past_a_missing_directory_is_held_to_the_mounts(self):
+        mount = {"/usr/lib/systemd/system/srv-a-b.mount": "[Mount]\nWhat=tmpfs\nWhere=/srv/a/b\n"}
+        for more in ({"/etc/x": "-> /srv/a/b/c"}, {"/etc/x": "-> /srv/a/b"},
+                     {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/x - - - - /srv/a/b/c\n"},
+                     {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/y - - - - /srv/a\n", "/etc/x": "-> /etc/y/b/c"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link /etc/x .*steps on the mount point /srv/a/b on its way"):
+                    r.boot_links(tree(d, {**mount, **more}))
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(r.boot_links(tree(d, {**mount, "/etc/x": "-> /srv/a/bc"}))["/etc/x"], "/srv/a/bc")
+
+    def test_an_l_path_through_another_l_line_fails_the_run(self):
+        conf = {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/a - - - - /srv\nL /etc/a/b - - - - /x\n"}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "/etc/a/b: a tmpfiles.d L line's path passes through another link"):
+                r.boot_links(tree(d, conf))
+
+    def test_a_link_the_lint_cannot_read_fails_the_run(self):
+        real = r.View._readlink
+
+        def broken(view, q):
+            if q == "/etc/x":
+                raise PermissionError(13, "Permission denied")
+            return real(view, q)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(r.View, "_readlink", broken):
+            with self.assertRaisesRegex(SystemExit, "a link /etc/x \\(the tree's\\) the unit lint cannot read "
+                                        "\\(.*Permission denied\\); drop the link"):
+                r.boot_links(tree(d, {"/etc/x": "-> /srv"}))
 
     def test_a_link_above_or_beside_a_mount_passes(self):
         conf = {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/a - - - - /var/lib\nL /etc/b - - - - /etc/a/foobar\n"}
