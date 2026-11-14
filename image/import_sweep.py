@@ -13,7 +13,7 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
 
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
-ELF file whose NEEDED closure (by file name, within that place) holds an importing library, and those
+ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
 libraries. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
 
 The control is the scan itself: it exits 1 when the main tree or every initrd read no ELF file, or the
@@ -38,7 +38,7 @@ GROUPS = {
     "wscanf": re.compile(r"(__isoc(99|23)_)?v?(sw|fw|w)scanf$"),
 }
 UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
-NEEDED = re.compile(r"^\s+NEEDED\s+(\S+)$")
+DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
 
 
 def group_of(sym):
@@ -46,18 +46,20 @@ def group_of(sym):
 
 
 def read_elf(path):
-    """(affected glibc symbols imported, NEEDED names) of the ELF file at PATH."""
+    """(affected glibc symbols imported, NEEDED names, SONAME or None) of the ELF file at PATH."""
     out = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          text=True, errors="replace").stdout
-    syms, needed = set(), []
+    syms, needed, soname = set(), [], None
     for line in out.splitlines():
         m = UND.search(line)
         if m and group_of(m.group(2)):
             syms.add(m.group(2))
-        m = NEEDED.match(line)
-        if m:
-            needed.append(m.group(1))
-    return sorted(syms), needed
+        m = DYNAMIC.match(line)
+        if m and m.group(1) == "NEEDED":
+            needed.append(m.group(2))
+        elif m:
+            soname = m.group(2)
+    return sorted(syms), needed, soname
 
 
 def is_elf(path):
@@ -70,14 +72,14 @@ def is_elf(path):
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed = {}, {}
+    imports, needed, by_name = {}, {}, {}
     for shown, real in files.items():
-        syms, needed[shown] = read_elf(real)
+        syms, needed[shown], soname = read_elf(real)
         if syms:
             imports[shown] = syms
-    by_name = {}
-    for shown in needed:
-        by_name.setdefault(os.path.basename(shown), []).append(shown)
+        # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
+        for n in {os.path.basename(shown), soname} - {None}:
+            by_name.setdefault(n, []).append(shown)
     importers = set(imports)
     via = {}
     for shown in needed:

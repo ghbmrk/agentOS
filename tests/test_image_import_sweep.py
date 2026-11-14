@@ -54,7 +54,11 @@ class ImportSweepTest(unittest.TestCase):
             (src / name).write_text(code)
             subprocess.run(["cc", "-o", str(out), str(src / name), *args], check=True)
         lib = cls.tree / "usr/lib"
-        cc("regex.c", REGEX_LIB, lib / "libregex-user.so", "-shared", "-fPIC")
+        # Named as a distribution installs it: the file carries the version, and the SONAME the
+        # daemon's NEEDED names is only a symbolic link (not read), so reach goes by SONAME.
+        cc("regex.c", REGEX_LIB, lib / "libregex-user.so.1.0.0", "-shared", "-fPIC",
+           "-Wl,-soname,libregex-user.so.1")
+        os.symlink("libregex-user.so.1.0.0", lib / "libregex-user.so")
         cc("own.c", OWN_RE, lib / "libownre.so", "-shared", "-fPIC")
         cc("uses.c", USES_LIB, cls.tree / "usr/bin/daemon", "-L" + str(lib), "-lregex-user")
         cc("wscanf.c", WSCANF, cls.tree / "usr/bin/wtool")
@@ -69,15 +73,15 @@ class ImportSweepTest(unittest.TestCase):
 
     def test_tree_imports_and_reach(self):
         got = sweep.run_tree(str(self.tree))["tree"]
-        # Six ELF files; the text file and the symbolic link are not read.
+        # Six ELF files; the text file and the symbolic links are not read.
         self.assertEqual(got["scanned"], 6)
-        self.assertEqual(got["imports"]["/usr/lib/libregex-user.so"], ["regcomp"])
+        self.assertEqual(got["imports"]["/usr/lib/libregex-user.so.1.0.0"], ["regcomp"])
         wide = got["imports"]["/usr/bin/wtool"]
         self.assertEqual(len(wide), 1)
         self.assertRegex(wide[0], r"^(__isoc(99|23)_)?swscanf$")
-        self.assertEqual(set(got["imports"]), {"/usr/lib/libregex-user.so", "/usr/bin/wtool"})
+        self.assertEqual(set(got["imports"]), {"/usr/lib/libregex-user.so.1.0.0", "/usr/bin/wtool"})
         # The daemon imports nothing itself and reaches regcomp through the library it needs.
-        self.assertEqual(got["via"], {"/usr/bin/daemon": ["/usr/lib/libregex-user.so"]})
+        self.assertEqual(got["via"], {"/usr/bin/daemon": ["/usr/lib/libregex-user.so.1.0.0"]})
 
     def test_main_tree_skips_usr_mount_point_and_reads_usr(self):
         with tempfile.TemporaryDirectory() as root:
@@ -115,7 +119,7 @@ class ImportSweepTest(unittest.TestCase):
     def test_summary_names_importers_and_reach(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
         self.assertIn("tree regex: 1 import, 1 reach one through NEEDED", lines)
-        self.assertIn("  via /usr/bin/daemon: /usr/lib/libregex-user.so", lines)
+        self.assertIn("  via /usr/bin/daemon: /usr/lib/libregex-user.so.1.0.0", lines)
         self.assertIn("tree wscanf: 1 import, 0 reach one through NEEDED", lines)
         notes = sweep.annotations(lines)
         self.assertTrue(notes and all(n.startswith("::notice title=import sweep ") for n in notes))
