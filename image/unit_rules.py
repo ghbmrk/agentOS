@@ -96,8 +96,9 @@ CONTROL_WANT = 'variable "LD_PRELOAD"'
 class View:
     """A tree at ROOT (optionally with USR as its /usr), every path absolute in the tree, links
     resolved in it, never on the runner: each public reader (lstat, kind, entries, text, data, readlink)
-    resolves every component of its path through resolve() first, and only _lstat, _list and resolve's
-    own readlink touch the host, each at a path no tree link is left in (#5703 Security delta)."""
+    resolves every component of its path through resolve() first. Only five calls touch the host, each
+    at a path resolve() gave and _lstat found, so no tree link is left in its directory: _lstat, _list,
+    resolve's own readlink, readlink()'s os.readlink and data()'s os.open (O_NOFOLLOW) (#5703)."""
 
     def __init__(self, root, usr=None):
         self.root, self.usr = str(root), usr and str(usr)
@@ -180,34 +181,35 @@ class View:
         return self.data(p).decode("utf-8", "surrogateescape")
 
 
-# #5703 L3 and Security 1: what the box mounts a tmpfs over at boot, so what the tree holds there is
-# hidden then; the link readers (tree_links, tmpfiles_links) read the tree through BootView.
-BOOT_EMPTY = ("/run", "/tmp")
-# The box's other mounts, whose content at boot the tree does not give (devtmpfs, proc, sysfs): an L line's
-# path there is taken to hold nothing, so its link counts.
-BOOT_UNREAD = ("/dev", "/proc", "/sys")
+# #5703: what is mounted over the tree before systemd-tmpfiles-setup runs, so nothing the tree holds there
+# is boot state. systemd's mount_table (src/shared/mount-setup.c, v255 to v257) mounts every API file
+# system at or under /proc, /sys, /dev or /run; tmp.mount mounts /tmp (its 50-agentos-noexec.conf
+# drop-in). A missing one here makes the tree's content there read as boot state, so the tmpfiles.d
+# reader also refuses any link on its way to a file (tmpfiles_lines): no tree link can lead it under
+# one of these, listed or not. The link readers (tree_links, tmpfiles_links) read through BootView.
+BOOT_MOUNTS = ("/dev", "/proc", "/sys", "/run", "/tmp")
 
 
 class BootView(View):
-    """VIEW as the box finds it when systemd-tmpfiles runs: each of BOOT_EMPTY holds nothing, whatever
-    the tree has there (the run's container mounts its own tmpfs there too, but a reader called on a
-    plain tree must not read the tree's /run as boot state). The hiding sits in the host primitives, so
-    every path, however its links lead there, is hidden once it resolves at or under BOOT_EMPTY."""
+    """VIEW as the box finds it when systemd-tmpfiles runs: each of BOOT_MOUNTS is a directory holding
+    nothing, whatever the tree has there (the run's container mounts its own /run too, but a reader
+    called on a plain tree must not read the tree's mounts as boot state). The hiding sits in the host
+    primitives, so every path, however its links lead there, is hidden once it resolves under one."""
 
     def __init__(self, view):
         super().__init__(view.root, view.usr)
 
     @staticmethod
     def hidden(p):
-        return any(p.startswith(m + "/") for m in BOOT_EMPTY)
+        return any(p.startswith(m + "/") for m in BOOT_MOUNTS)
 
     def _lstat(self, q):
-        if q in BOOT_EMPTY:
+        if q in BOOT_MOUNTS:
             return super()._lstat("/")  # a directory, as the mount is, whatever the tree has there
         return None if self.hidden(q) else super()._lstat(q)
 
     def _list(self, q):
-        return [] if self.hidden(q) or q in BOOT_EMPTY else super()._list(q)
+        return [] if self.hidden(q) or q in BOOT_MOUNTS else super()._list(q)
 
 
 def unit_dirs(view):
@@ -463,11 +465,22 @@ TMPFILES_DIRS = ("/etc/tmpfiles.d", "/run/tmpfiles.d", "/usr/local/lib/tmpfiles.
 def tmpfiles_lines(view, usr_view=None):
     """[(file, line)] for every line of the tree's tmpfiles.d files, each name read once from the highest
     directory holding it (one linked to /dev/null, or not a regular file, masks it), in name order. With
-    USR_VIEW, /usr's directories are listed there (tree_links)."""
+    USR_VIEW, /usr's directories are listed there (tree_links). #5703 Security delta 2: a link anywhere
+    on the way to a file, but a file's own link to exactly /dev/null, fails the run, so no file is read
+    from where the tree's content is not the box's at boot (BOOT_MOUNTS, or a mount the list misses).
+    mkosi.finalize refuses every link under tmpfiles.d in the built image, so the image needs none."""
     chosen = {}
     for d in TMPFILES_DIRS:
         lister = usr_view if usr_view and d.startswith("/usr/") else view
+        _, via = lister.resolve(d)
+        if via:
+            raise SystemExit("unit rules: %s: a tmpfiles.d directory reached through a link (%s), which "
+                             "the reader does not read" % (d, via[0]))
         for e in lister.entries(d):
+            t = lister.readlink(os.path.join(d, e))
+            if t is not None and t != "/dev/null":
+                raise SystemExit("unit rules: %s/%s: a tmpfiles.d file that is a link to %s, not a /dev/null "
+                                 "mask, which the reader does not read" % (d, e, t))
             if e.endswith(".conf"):
                 chosen.setdefault(e, os.path.join(d, e))
     out = []
@@ -499,9 +512,9 @@ def through(p, links):
 def tmpfiles_links(view, links, usr_view=None):
     """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): /run is a
     tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone.
-    VIEW is a BootView (boot_links), so nothing the tree holds under /run, however a link leads there, hides
-    a tmpfiles.d file, holds a path or steps a target (#5703). A line counts with any modifier, when its path holds nothing at
-    boot (or, with +, whatever it holds; one under BOOT_UNREAD always); its target, the factory copy
+    VIEW is a BootView (boot_links), so nothing the tree holds under BOOT_MOUNTS, however a link leads
+    there, holds a path or steps a target (#5703). A line counts with any modifier, when its path holds
+    nothing at boot (or, with +, whatever it holds); its target, the factory copy
     when it gives none, is resolved in the tree and through the other links, and every value is read
     again through them. An L line holding a specifier, quote or
     escape, an encoded (~) or credential (^) target, a path not absolute and normal, a path another
@@ -530,8 +543,7 @@ def tmpfiles_links(view, links, usr_view=None):
             raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
                              "applies is not read" % p)
         key = view.resolve(p, last=False)[0]
-        held = not key.startswith(tuple(m + "/" for m in BOOT_UNREAD)) and view.lstat(key) is not None
-        if "+" not in w[0] and held:
+        if "+" not in w[0] and view.lstat(key) is not None:
             continue  # tmpfiles leaves what the path holds at boot
         arg = w[6].strip() if len(w) > 6 else "-"
         target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
