@@ -16,8 +16,9 @@ import (
 // agentNoLimits is STATUS's agent line when the broker may not manage the
 // box's cgroups or they lack a controller, so no machine may start (RES-2:
 // none runs unbudgeted). It names no controller (UX ruling on #155); the
-// log line lists the missing ones.
-const agentNoLimits = "Your agent is off: I cannot yet keep it within its limits; a later box version fixes this."
+// log line lists the missing ones. Its step is fixUpdate, as its sibling
+// lines' are (#5632).
+const agentNoLimits = "Your agent is off: I cannot yet keep it in its limits; " + fixUpdate + "."
 
 // agentLimitsStuck is that line when what blocks the limits is something
 // an earlier run left that will not clear (errBrokerGroupStuck, #5186): a
