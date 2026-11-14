@@ -537,6 +537,39 @@ class ShowTest(unittest.TestCase):
                     self.show(reply, ["a.service", "b.service"])
 
 
+class NoHostLinkTest(unittest.TestCase):
+    """#5703 Security delta 1 and 2: every reader resolves each component of a path in the tree, so no
+    link the tree holds is followed on the runner's host, in a directory component or the last one."""
+
+    def test_a_linked_directory_is_listed_and_read_in_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            # absolute: on the host it would list the runner's own /usr/lib/tmpfiles.d
+            v = tree(d, {"/etc/tmpfiles.d": "-> /usr/lib/tmpfiles.d", "/usr/lib/tmpfiles.d/zz-agentos-only.conf": "x\n"})
+            self.assertEqual(v.entries("/etc/tmpfiles.d"), ["zz-agentos-only.conf"])
+            self.assertEqual(v.kind("/etc/tmpfiles.d/zz-agentos-only.conf"), 0o100000)
+            self.assertEqual(v.text("/etc/tmpfiles.d/zz-agentos-only.conf"), "x\n")
+
+    def test_a_link_out_of_the_tree_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "out"
+            out.mkdir()
+            (out / "secret.conf").write_text("host\n")
+            v = tree(d, {"/etc/x": "-> " + str(out)})  # in the tree, a dangling link
+            self.assertEqual(v.entries("/etc/x"), [])
+            self.assertIsNone(v.lstat("/etc/x/secret.conf"))
+            with self.assertRaises(OSError):
+                v.text("/etc/x/secret.conf")
+            self.assertIsNone(v.readlink("/etc/x/secret.conf"))
+
+    def test_boot_view_hides_a_file_reached_through_a_link_into_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = r.BootView(tree(d, {"/etc/td": "-> ../run/td", "/run/td/x.conf": "x\n"}))
+            self.assertEqual(b.entries("/etc/td"), [])
+            self.assertIsNone(b.lstat("/etc/td/x.conf"))
+            with self.assertRaises(OSError):
+                b.text("/etc/td/x.conf")
+
+
 class BootLinksTest(unittest.TestCase):
     """#5703 L3 and Security 1: /run is an empty tmpfs at boot, so the links the records hold read nothing
     the tree has under /run (or /tmp)."""
@@ -565,6 +598,18 @@ class BootLinksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.links(d, {"/run": "-> /var/run", "/var/run/agentos-x/.keep": ""}).get(
                 "/run/agentos-x"), "/run/udev")
+
+    def test_a_tmpfiles_d_directory_linked_into_the_trees_run_hides_nothing(self):
+        # #5703 Security delta 1 (6872531168): at boot the link dangles, so systemd-tmpfiles reads nothing there.
+        for link in ("../run/td", "/run/td", "/var/run/td"):
+            with self.subTest(link=link), tempfile.TemporaryDirectory() as d:
+                more = {"/etc/tmpfiles.d": "-> " + link, "/run/td/x.conf": "# benign\n", "/var/run": "-> ../run"}
+                self.assertEqual(self.links(d, more).get("/run/agentos-x"), "/run/udev")
+
+    def test_a_tmpfiles_d_file_under_a_linked_parent_in_the_trees_run_hides_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            more = {"/etc": "-> /run/etc", "/run/etc/tmpfiles.d/x.conf": "# benign\n"}
+            self.assertEqual(self.links(d, more).get("/run/agentos-x"), "/run/udev")
 
     def test_a_path_under_dev_counts_whatever_the_tree_holds(self):
         with tempfile.TemporaryDirectory() as d:

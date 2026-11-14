@@ -95,7 +95,9 @@ CONTROL_WANT = 'variable "LD_PRELOAD"'
 
 class View:
     """A tree at ROOT (optionally with USR as its /usr), every path absolute in the tree, links
-    resolved in it, never on the runner."""
+    resolved in it, never on the runner: each public reader (lstat, kind, entries, text, data, readlink)
+    resolves every component of its path through resolve() first, and only _lstat, _list and resolve's
+    own readlink touch the host, each at a path no tree link is left in (#5703 Security delta)."""
 
     def __init__(self, root, usr=None):
         self.root, self.usr = str(root), usr and str(usr)
@@ -105,11 +107,21 @@ class View:
             return self.usr + p[4:]
         return self.root + p
 
-    def lstat(self, p):
+    def _lstat(self, q):
+        """The lstat of Q, a path resolve() gave, so no tree link is left in its directory."""
         try:
-            return os.lstat(self.host(p))
-        except FileNotFoundError:
+            return os.lstat(self.host(q))
+        except (FileNotFoundError, NotADirectoryError):
             return None
+
+    def _list(self, q):
+        """The names in Q, a path resolve() gave with its last component followed."""
+        if self._lstat(q) is None:
+            return []
+        try:
+            return sorted(os.listdir(self.host(q)))
+        except (FileNotFoundError, NotADirectoryError):
+            return []
 
     def resolve(self, p, last=True):
         """(p resolved in the tree, [each link followed]). A link's target, absolute or not, is read in
@@ -124,7 +136,7 @@ class View:
                 done = os.path.dirname(done)
                 continue
             nxt = os.path.join(done, c)
-            st = self.lstat(nxt)
+            st = self._lstat(nxt)
             if st is None:
                 return os.path.join(nxt, *rest), links
             if not (st.st_mode & 0o170000 == 0o120000) or (not last and not rest):
@@ -139,20 +151,33 @@ class View:
             rest = [x for x in t.split("/") if x] + rest
         return done, links
 
+    def lstat(self, p):
+        return self._lstat(self.resolve(p, last=False)[0])
+
     def entries(self, d):
-        try:
-            return sorted(os.listdir(self.host(d)))
-        except (FileNotFoundError, NotADirectoryError):
-            return []
+        return self._list(self.resolve(d)[0])
 
     def kind(self, p):
         st = self.lstat(p)
         return st and st.st_mode & 0o170000
 
-    def text(self, p):
-        fd = os.open(self.host(p), os.O_RDONLY | os.O_NOFOLLOW)
+    def readlink(self, p):
+        """P's own link target, None when P is not a link (its directory resolved in the tree)."""
+        q = self.resolve(p, last=False)[0]
+        st = self._lstat(q)
+        return os.readlink(self.host(q)) if st and st.st_mode & 0o170000 == 0o120000 else None
+
+    def data(self, p):
+        """P's bytes, P's directory resolved in the tree; a link at P itself is refused (O_NOFOLLOW)."""
+        q = self.resolve(p, last=False)[0]
+        if self._lstat(q) is None:
+            raise FileNotFoundError(p)
+        fd = os.open(self.host(q), os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as f:
-            return f.read().decode("utf-8", "surrogateescape")
+            return f.read()
+
+    def text(self, p):
+        return self.data(p).decode("utf-8", "surrogateescape")
 
 
 # #5703 L3 and Security 1: what the box mounts a tmpfs over at boot, so what the tree holds there is
@@ -166,7 +191,8 @@ BOOT_UNREAD = ("/dev", "/proc", "/sys")
 class BootView(View):
     """VIEW as the box finds it when systemd-tmpfiles runs: each of BOOT_EMPTY holds nothing, whatever
     the tree has there (the run's container mounts its own tmpfs there too, but a reader called on a
-    plain tree must not read the tree's /run as boot state)."""
+    plain tree must not read the tree's /run as boot state). The hiding sits in the host primitives, so
+    every path, however its links lead there, is hidden once it resolves at or under BOOT_EMPTY."""
 
     def __init__(self, view):
         super().__init__(view.root, view.usr)
@@ -175,13 +201,13 @@ class BootView(View):
     def hidden(p):
         return any(p.startswith(m + "/") for m in BOOT_EMPTY)
 
-    def lstat(self, p):
-        if p in BOOT_EMPTY:
-            return super().lstat("/")  # a directory, as the mount is, whatever the tree has there
-        return None if self.hidden(p) else super().lstat(p)
+    def _lstat(self, q):
+        if q in BOOT_EMPTY:
+            return super()._lstat("/")  # a directory, as the mount is, whatever the tree has there
+        return None if self.hidden(q) else super()._lstat(q)
 
-    def entries(self, d):
-        return [] if self.hidden(d) or d in BOOT_EMPTY else super().entries(d)
+    def _list(self, q):
+        return [] if self.hidden(q) or q in BOOT_EMPTY else super()._list(q)
 
 
 def unit_dirs(view):
@@ -264,7 +290,7 @@ class Provenance:
         d, _ = self.view.resolve(os.path.dirname(p))
         if d not in self.dirs or self.view.kind(d + "/" + os.path.basename(p)) != 0o120000:
             return None
-        t = os.readlink(self.view.host(d + "/" + os.path.basename(p)))
+        t = self.view.readlink(d + "/" + os.path.basename(p))
         r, _ = self.view.resolve(t if t.startswith("/") else d + "/" + t, last=False)
         if os.path.dirname(r) in self.dirs and os.path.basename(r).endswith(TYPES):
             return r
@@ -473,8 +499,8 @@ def through(p, links):
 def tmpfiles_links(view, links, usr_view=None):
     """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): /run is a
     tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone.
-    VIEW is a BootView (boot_links), so nothing the tree holds under /run hides a tmpfiles.d file, holds
-    a path or steps a target (#5703). A line counts with any modifier, when its path holds nothing at
+    VIEW is a BootView (boot_links), so nothing the tree holds under /run, however a link leads there, hides
+    a tmpfiles.d file, holds a path or steps a target (#5703). A line counts with any modifier, when its path holds nothing at
     boot (or, with +, whatever it holds; one under BOOT_UNREAD always); its target, the factory copy
     when it gives none, is resolved in the tree and through the other links, and every value is read
     again through them. An L line holding a specifier, quote or
@@ -693,8 +719,7 @@ def dpkg_packaged(out):
         def packaged(p):
             if p not in want or view.kind(p) != 0o100000:
                 return False
-            with open(view.host(p), "rb") as f:
-                return hashlib.md5(f.read()).hexdigest() in want[p]
+            return hashlib.md5(view.data(p)).hexdigest() in want[p]
         # every path a package installed, whatever its links or bytes now: as dpkg laid it out, through a
         # merged top link to /usr/<its name> only (#5072 Security round 6: a link of ours took a listed
         # path out of want, so out of listed too)
