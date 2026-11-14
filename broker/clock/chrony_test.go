@@ -31,19 +31,22 @@ func chronycOut(tracking, sources, authdata string, authErr error) func(context.
 }
 
 const (
-	trackOK       = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
-	trackUnsynced = "00000000,,0,0.000000000,0.0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,Not synchronised\n"
-	trackStratum0 = "C0000201,192.0.2.1,0,1791230000.123456789,0,0,0,0,0,0,0,0,64.1,Normal\n"
-	trackStratum6 = "C0000201,192.0.2.1,16,1791230000.123456789,0,0,0,0,0,0,0,0,64.1,Normal\n"
-	srcNTS        = "^,*,192.0.2.1,1,6,377,12,-0.000010,-0.000011,0.000400\n^,?,198.51.100.7,2,6,0,-,0,0,0\n"
-	srcThree      = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
-	srcTwo        = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
-	authNTS       = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
-	trackLeapOff  = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Not synchronised\n"
-	srcRefclock   = "#,*,PPS0,0,4,377,8,0,0,0\n=,+,192.0.2.9,2,6,377,12,0,0,0\n#,+,GPS,0,4,377,8,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n"
-	authOtherNTS  = "192.0.2.1,-,0,0,0,-,0,0,0,0\n192.0.2.2,NTS,1,15,256,33m,0,0,8,100\n"
-	authNTSKey0   = "192.0.2.1,NTS,0,15,256,33m,0,0,8,100\n"
-	authNone      = "192.0.2.1,-,0,0,0,-,0,0,0,0\n"
+	trackOK        = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
+	trackUnsynced  = "00000000,,0,0.000000000,0.0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,Not synchronised\n"
+	trackStratum0  = "C0000201,192.0.2.1,0,1791230000.123456789,0,0,0,0,0,0,0,0,64.1,Normal\n"
+	trackStratum6  = "C0000201,192.0.2.1,16,1791230000.123456789,0,0,0,0,0,0,0,0,64.1,Normal\n"
+	srcNTS         = "^,*,192.0.2.1,1,6,377,12,-0.000010,-0.000011,0.000400\n^,?,198.51.100.7,2,6,0,-,0,0,0\n"
+	srcThree       = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,+,192.0.2.3,2,6,377,12,0,0,0\n^,-,192.0.2.4,2,6,377,12,0,0,0\n"
+	srcTwo         = "^,*,192.0.2.1,2,6,377,12,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n^,-,192.0.2.3,2,6,377,12,0,0,0\n"
+	authNTS        = "192.0.2.1,NTS,1,15,256,33m,0,0,8,100\n198.51.100.7,NTS,0,0,0,-,0,0,0,0\n"
+	trackLeapOff   = "C0000201,192.0.2.1,2,1791230000.123456789,-0.000001,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Not synchronised\n"
+	srcRefclock    = "#,*,PPS0,0,4,377,8,0,0,0\n=,+,192.0.2.9,2,6,377,12,0,0,0\n#,+,GPS,0,4,377,8,0,0,0\n^,+,192.0.2.2,2,6,377,12,0,0,0\n"
+	authOtherNTS   = "192.0.2.1,-,0,0,0,-,0,0,0,0\n192.0.2.2,NTS,1,15,256,33m,0,0,8,100\n"
+	authNTSKey0    = "192.0.2.1,NTS,0,15,256,33m,0,0,8,100\n"
+	authNone       = "192.0.2.1,-,0,0,0,-,0,0,0,0\n"
+	trackFast      = "C0000201,192.0.2.1,2,1791230000.123456789,10800.0,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
+	trackSlow      = "C0000201,192.0.2.1,2,1791230000.123456789,-10800.0,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
+	trackBadOffset = "C0000201,192.0.2.1,2,1791230000.123456789,NaN,0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
 )
 
 // Security T4, T5: a sync is verified when chronyd is synchronised at a
@@ -60,6 +63,12 @@ func TestHW8SyncedFromChrony(t *testing.T) {
 		want                    SyncKind
 	}{
 		{"NTS selected", trackOK, srcNTS, authNTS, nil, SyncedNTS},
+		// Security finding 1 on #5754: the source is authenticated, the clock
+		// still hours off it (a forged step, then slewing) is not.
+		{"NTS selected, clock 3h fast", trackFast, srcNTS, authNTS, nil, NotSynced},
+		{"NTS selected, clock 3h slow", trackSlow, srcNTS, authNTS, nil, NotSynced},
+		{"NTS selected among three, clock 3h fast", trackFast, srcThree, authNTS, nil, SyncedPlain},
+		{"NTS selected, offset unreadable", trackBadOffset, srcNTS, authNTS, nil, NotSynced},
 		{"NTS selected, key ID 0", trackOK, srcNTS, authNTSKey0, nil, SyncedNTS},
 		{"NTS selected among three", trackOK, srcThree, authNTS, nil, SyncedNTS},
 		{"three plain NTP agree", trackOK, srcThree, authNone, nil, SyncedPlain},
