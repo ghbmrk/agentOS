@@ -455,10 +455,12 @@ func ownDir(t *testing.T) string {
 }
 
 // The kernel process's Earliest runs on the monotonic clock from the later of
-// the log's last time and the box clock at the start; the box clock raises
+// the log's last time and its source's Earliest, or the box clock at the
+// start when the source vouches for none; while running the source raises
 // only Latest. A start behind the log reads the log's time and moves on, and
 // a step of the box clock while running, back or forward, leaves Earliest
-// where the monotonic clock has it (TIM-1, KEY-7, KEY-8, #5147).
+// where the monotonic clock has it, even when a second source follows the
+// step (TIM-1, KEY-7, KEY-8, #5147, #5391).
 //
 // REQ: TIM-1, KEY-7, KEY-8
 func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
@@ -472,7 +474,8 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 		t.Fatal(err)
 	}
 	box := int64(0) // a flat CMOS battery: the clock restarted in the past
-	c := onLog(l, func() kernel.Reading { return kernel.At(box) })
+	alone := func() kernel.Reading { return kernel.Reading{Latest: box} }
+	c := onLog(l, alone)
 	if r := c(); r.Earliest < last || r.Latest < r.Earliest {
 		t.Fatalf("a clock behind the log read %+v, below the log's %d", r, last)
 	}
@@ -487,20 +490,30 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 	if r := c(); r.Earliest <= last || r.Latest != r.Earliest {
 		t.Fatalf("a step back read %+v", r)
 	}
-	box = 5 * last // a start ahead of the log starts there
-	if r := onLog(l, func() kernel.Reading { return kernel.At(box) })(); r.Earliest < box {
+	box = 5 * last // a start ahead of the log with no second source starts there
+	if r := onLog(l, alone)(); r.Earliest < box {
 		t.Fatalf("a start ahead of the log read %+v", r)
 	}
-	// A source whose Latest is past its Earliest starts at its Latest, and
-	// Latest follows the source's Latest.
-	src := kernel.Reading{Earliest: last, Latest: 6 * last}
+	// A source that vouches starts at its Earliest, not its Latest (the box
+	// clock ahead of it), and Latest follows the source's Latest.
+	src := kernel.Reading{Earliest: 2 * last, Latest: 6 * last}
 	w := onLog(l, func() kernel.Reading { return src })
-	if r := w(); r.Earliest < 6*last {
-		t.Fatalf("a wide source at the start read %+v: Earliest is not its Latest", r)
+	if r := w(); r.Earliest >= 3*last || r.Latest != 6*last {
+		t.Fatalf("a wide source at the start read %+v: Earliest is not its Earliest", r)
 	}
-	src = kernel.Reading{Earliest: 7 * last, Latest: 8 * last}
-	if r := w(); r.Latest != 8*last {
-		t.Fatalf("a wide source while running read %+v: Latest is not its Latest", r)
+	// A source's Earliest raises nothing while running: chronyd misses a box
+	// step under 10 s until its next sample, so its Earliest follows each
+	// small forward step while its sample stays the same (#5757 L3 1).
+	stale := int64(9_000) // ms: one step chronyd does not see
+	for i := int64(1); i <= 200; i++ {
+		src = kernel.Reading{Earliest: 2*last + i*stale, Latest: 6*last + i*stale}
+		if r := w(); r.Earliest >= 2*last+stale || r.Latest != src.Latest {
+			t.Fatalf("after %d small forward steps a source following them read %+v: Earliest moved", i, r)
+		}
+	}
+	src = kernel.Reading{Latest: last}
+	if r := w(); r.Earliest < 2*last || r.Latest != r.Earliest {
+		t.Fatalf("a source that stopped vouching read %+v: Earliest went back", r)
 	}
 }
 
@@ -511,7 +524,7 @@ func TestTIM1AStartBehindTheLogCarriesItsTimeForward(t *testing.T) {
 func TestTIM1AnOpenedKernelReadsItsClockOnTheLog(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	box := b.now
-	b.cfg.Clock = func() kernel.Reading { return kernel.At(box) }
+	b.cfg.Clock = func() kernel.Reading { return kernel.Reading{Latest: box} }
 	b.restart()
 	box = 1 << 50 // a forward step while running
 	err := b.h.With(func(k *kernel.Kernel) error {
