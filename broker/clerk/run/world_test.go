@@ -582,8 +582,8 @@ func TestTheSendersRecordsPlaintextIsWiped(t *testing.T) {
 }
 
 // A sealer that fails after it decrypted loads no senders record:
-// loadSenders trusts no plaintext handed back with an error (#5325,
-// senders.go's Open check).
+// loadSenders trusts no plaintext handed back with an error and wipes it
+// (#5325, #5740, senders.go's Open check).
 func TestAFailedOpenLoadsNoSendersRecord(t *testing.T) {
 	dir := shortDir(t)
 	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": 1}}}
@@ -593,6 +593,9 @@ func TestAFailedOpenLoadsNoSendersRecord(t *testing.T) {
 	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
 	if got := loadSenders(dir, k, "slot"); got.Over || got.Rec.Senders != nil {
 		t.Fatalf("loadSenders with a failing open = %+v; want an empty record", got)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed open left %d plaintexts, wiped %v", n, wiped)
 	}
 }
 
