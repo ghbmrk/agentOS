@@ -19,6 +19,13 @@ var chronyc = "/usr/bin/chronyc"
 // chronycTimeout bounds one chronyc call.
 const chronycTimeout = 3 * time.Second
 
+// NTSConverged is how far the system clock may be from chronyd's selected
+// source (tracking's system time) for an NTS sync to count. The source is
+// authenticated; the clock is only once it has converged on it: a forged
+// plain-NTP step at boot is slewed back at 500 ppm, hours off for months,
+// while the NTS source is selected (security finding 1 on #5754).
+const NTSConverged = time.Second
+
 func runChronyc(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, chronycTimeout)
 	defer cancel()
@@ -37,8 +44,9 @@ func chronycCmd(ctx context.Context, args ...string) *childproc.Cmd {
 func chronycArgv(query []string) []string { return append([]string{"-c", "-n"}, query...) }
 
 // Sync reports how chronyd's sync is verified (HW-8; security T4, T5, and
-// R1 on #177): SyncedNTS when its selected source is NTS-authenticated,
-// SyncedPlain when at least three unauthenticated sources are combined.
+// R1 on #177): SyncedNTS when its selected source is NTS-authenticated and
+// the system clock is within NTSConverged of it, SyncedPlain when at least
+// three unauthenticated sources are combined.
 // It never reads the kernel's sync flag: chronyd keeps that set, so the
 // kernel never writes the host's hardware clock (chrony/chrony.conf).
 func Sync() (SyncKind, error) { return chronySync(context.Background(), runChronyc) }
@@ -88,6 +96,12 @@ func chronySync(ctx context.Context, run func(context.Context, ...string) ([]byt
 	plain := NotSynced
 	if combined >= 3 {
 		plain = SyncedPlain
+	}
+	// System time: the clock's offset from the source, in seconds. An
+	// unreadable or unconverged offset leaves the sync plain at most.
+	off, err := strconv.ParseFloat(f[4], 64)
+	if err != nil || off != off || off > NTSConverged.Seconds() || -off > NTSConverged.Seconds() {
+		return plain, nil
 	}
 	out, err = run(ctx, "authdata")
 	if err != nil {
