@@ -572,6 +572,12 @@ const MaxConns = 16
 // aborted) is waited out, never the end of the socket, so the owner's STOP
 // still lands once a flood ends.
 func ServeConns(ln net.Listener, n int, handle func(net.Conn)) error {
+	return serveConns(ln, n, handle, time.Sleep)
+}
+
+// serveConns is ServeConns waiting out a failed accept with sleep, so a
+// test reads the backoff without waiting it (KRN-proc-mut, #5273).
+func serveConns(ln net.Listener, n int, handle func(net.Conn), sleep func(time.Duration)) error {
 	slots := make(chan struct{}, n)
 	wait := 5 * time.Millisecond
 	for {
@@ -582,7 +588,7 @@ func ServeConns(ln net.Listener, n int, handle func(net.Conn)) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			time.Sleep(wait)
+			sleep(wait)
 			wait = min(2*wait, time.Second)
 			continue
 		}
@@ -657,7 +663,6 @@ func ServeOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 	if json.NewDecoder(io.LimitReader(conn, maxCall)).Decode(&in) != nil {
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
 	var out kernelAnswer
 	res, err := handle(in.Op, in.Args)
 	var rf *key.Refusal
@@ -790,7 +795,7 @@ func (c Conn) Call(op string, args, out any) error {
 	if d == 0 {
 		d = time.Minute
 	}
-	conn, err := net.DialTimeout("unix", c.Socket, 10*time.Second)
+	conn, err := net.Dial("unix", c.Socket) // a unix dial never waits (TestAUnixDialNeverWaits)
 	if err != nil {
 		return ErrUnreachable
 	}
