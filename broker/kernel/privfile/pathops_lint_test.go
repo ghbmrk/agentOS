@@ -882,14 +882,15 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a tmpfiles link over a tree entry in /run":    {with(udev, tmpf+"x.conf", "L /run/agentos-y - - - - /run/udev\n", "/run/agentos-y/.keep", "", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-y/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
 		"a tmpfiles link under a tree file in /run":    {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/udev\n", "/run/tmpfiles.d/x.conf", "# benign\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
 		"a tmpfiles link and another line on its path": {with(udev, tmpf+"x.conf", "d /run/agentos-x 0755\n", tmpf+"y.conf", "L /run/agentos-x - - - - /run/udev\n"), ourEtc, `/run/agentos-x: a tmpfiles.d L line and another line name it`},
-		// #5703 re-plan (Security 6872820441): a package .mount unit
-		// hides the tree under its Where= at boot, so what the tree holds
-		// there never drops an L+ line's link; (#5708) a plain L under
-		// a mount fails the run, since the mounted file system may hold an
-		// entry it leaves in place; (L3 6872796820) a target in /proc,
-		// /sys or /dev may lead back into / and fails the run.
-		"a package's path through a tmpfiles link over a package mount": {with(udev, tmpf+"foo.conf", "L+ /var/lib/foo/l - - - - /run/agentos-x\n", lib+"var-lib-foo.mount", "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nType=tmpfs\nOptions=nosuid,nodev,noexec\n", lib+"local-fs.target.wants/var-lib-foo.mount", "-> ../var-lib-foo.mount", lib+"pkg.socket", "[Socket]\nListenStream=/var/lib/foo/l/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `on a package socket's path, /var/lib/foo/l/s`},
-		"a plain tmpfiles link under a package mount":                   {with(udev, tmpf+"foo.conf", "L /var/lib/foo/l - - - - /run/agentos-x\n", "/var/lib/foo/l/.keep", "", lib+"var-lib-foo.mount", "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nType=tmpfs\nOptions=nosuid,nodev,noexec\n", lib+"local-fs.target.wants/var-lib-foo.mount", "-> ../var-lib-foo.mount", lib+"pkg.socket", "[Socket]\nListenStream=/var/lib/foo/l/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `its path is at, under or above /var/lib/foo, where a .mount or .automount unit mounts`},
+		// #5708, #5725 UX 6876845827: an L line under a mount fails the
+		// run with any modifier, since the mounted file system, not the
+		// tree, holds what is there and L+ cannot replace it; a mount
+		// fstab-generator writes under /run counts too (Potency
+		// 6876845879); (L3 6872796820) a target in /proc, /sys or /dev
+		// may lead back into / and fails the run.
+		"an L+ tmpfiles link under a package mount":   {with(udev, tmpf+"foo.conf", "L+ /var/lib/foo/l - - - - /run/agentos-x\n", lib+"var-lib-foo.mount", "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nType=tmpfs\nOptions=nosuid,nodev,noexec\n", lib+"local-fs.target.wants/var-lib-foo.mount", "-> ../var-lib-foo.mount", lib+"pkg.socket", "[Socket]\nListenStream=/var/lib/foo/l/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `its path is at, under or above /var/lib/foo, where a mount puts`},
+		"an L+ tmpfiles link under an fstab mount":    {with(udev, "/etc/fstab", "tmpfs /var/lib/foo tmpfs nosuid,nodev,noexec 0 0\n", tmpf+"foo.conf", "L+ /var/lib/foo/l - - - - /run/agentos-x\n"), ourEtc, `its path is at, under or above /var/lib/foo, where a mount puts`},
+		"a plain tmpfiles link under a package mount": {with(udev, tmpf+"foo.conf", "L /var/lib/foo/l - - - - /run/agentos-x\n", "/var/lib/foo/l/.keep", "", lib+"var-lib-foo.mount", "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nType=tmpfs\nOptions=nosuid,nodev,noexec\n", lib+"local-fs.target.wants/var-lib-foo.mount", "-> ../var-lib-foo.mount", lib+"pkg.socket", "[Socket]\nListenStream=/var/lib/foo/l/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `its path is at, under or above /var/lib/foo, where a mount puts`},
 		// #5703 L3 6872965749: a plain L leaves a tree entry at its path in
 		// place, so the run fails rather than record the line's link;
 		// (Security 6872976172) a target keeping .. fails the run.
@@ -903,7 +904,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a tmpfiles copy of a link":               {with(udev, tmpf+"x.conf", "C /run/pkglink - - - - /usr/share/pkg/lnk\n", "/usr/share/pkg/lnk", "-> /run/agentos-x"), ourEtc, `its source is or holds a link, /usr/share/pkg/lnk`},
 		"a tmpfiles copy of a tree with a link":   {with(udev, tmpf+"x.conf", "C /run/pkgdir - - - - /usr/share/pkg\n", "/usr/share/pkg/a/lnk", "-> /run/agentos-x"), ourEtc, `its source is or holds a link, /usr/share/pkg/a/lnk`},
 		"a tmpfiles copy through a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/foo - - - - /usr/share/pkg\n", tmpf+"x.conf", "C /run/pkgdir - - - - /var/lib/foo/a\n"), ourEtc, `its source passes through a link (/var/lib/foo)`},
-		"a tmpfiles copy under a package mount":   {with(udev, tmpf+"x.conf", "C /run/x - - - - /usr/share/pkg/d\n", "/usr/share/pkg/d/f", "x", lib+"usr-share-pkg.mount", "[Mount]\nWhat=tmpfs\nWhere=/usr/share/pkg\nType=tmpfs\nOptions=nosuid,nodev,noexec\n"), ourEtc, `its source is at, under or above /usr/share/pkg, where a .mount or .automount unit mounts`},
+		"a tmpfiles copy under a package mount":   {with(udev, tmpf+"x.conf", "C /run/x - - - - /usr/share/pkg/d\n", "/usr/share/pkg/d/f", "x", lib+"usr-share-pkg.mount", "[Mount]\nWhat=tmpfs\nWhere=/usr/share/pkg\nType=tmpfs\nOptions=nosuid,nodev,noexec\n"), ourEtc, `its source is at, under or above /usr/share/pkg, where a mount puts`},
 		"a tmpfiles copy from /run":               {with(udev, tmpf+"x.conf", "C /run/pkgdir - - - - /run/udev\n"), ourEtc, `its source is under /run`},
 		// #5715 L3 6874735402, Security 6874738412: an L line's link under the source; a source outside /usr.
 		"a tmpfiles copy over a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/pkg/lnk - - - - /run/agentos-x\n", tmpf+"x.conf", "C /run/x - - - - /var/lib/pkg\n", "/var/lib/pkg/f", "x"), ourEtc, `an L line makes a link at, under or above its source, /var/lib/pkg/lnk`},
