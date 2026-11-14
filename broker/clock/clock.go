@@ -1,13 +1,16 @@
-// Package clock checks the box's time (SPEC v0.12 TIM-1).
+// Package clock checks the box's time (SPEC TIM-1).
 //
-// The box's clock is set by network time (NTP) when online. Carrier network
-// time, which the modem receives from the mobile network, is the cross-check:
-// the two come over different paths, so one spoofed source shows up as a
-// disagreement. A large disagreement puts the box into restricted mode for
-// time-sensitive checks: Guard.Now refuses to give a time until the sources
-// agree again, so a caller deciding whether a code, a grant or update
-// metadata has expired fails closed instead of trusting a moved clock. Only
-// carrier time that agrees lifts it, and it survives a restart (StatePath).
+// Time is an interval (Guard.Interval): the box clock, set by network time
+// (NTP) when online, widened by carrier network time, which the modem
+// receives from the mobile network. The two come over different paths, so
+// one spoofed source shows up as a disagreement, and a disagreement widens
+// the interval instead of stopping time: a move that widens authority (a
+// hold's end, a default on timeout) waits until the interval's start,
+// Guard.Earliest, passes it, and one that narrows (an expiry) fires at its
+// end, Guard.Latest. While the NTP sync is NTS-authenticated, unauthenticated
+// carrier time widens the interval by at most the tolerance, so a fake base
+// station cannot expire every key (#5216). A disagreement is texted to the
+// owner and survives a restart (StatePath).
 //
 // The box clock is also held to an anchor: the last check carrier time
 // confirmed, or, before any carrier time this boot, the first check after
@@ -18,12 +21,12 @@
 // So a spoofed NTP step, or many small ones, never becomes the answer
 // without the carrier's word.
 //
-// Guard.Now answers from the last check, but checks again first when the
+// The guard answers from the last check, but checks again first when the
 // wall clock has moved against the monotonic clock since then, or when the
-// last check is stale and no Run loop keeps it fresh. Guard.Latest gives
-// expiry checks the latest credible time, and Guard.Earliest gives
-// minimum-age checks the earliest. With one source or none the box
-// keeps working on its own clock (DEP-2, DEP-4: offline is normal).
+// last check is stale and no Run loop keeps it fresh. With one source or
+// none the box keeps working on its own clock (DEP-2, DEP-4: offline is
+// normal). Guard.Now, which refuses a time while plain sources disagree,
+// stays only for callers not yet on the interval (broker/question).
 //
 // The package holds no credential and makes no network call; the carrier
 // source is the modem driver's (at.Modem.NetworkTime).
@@ -62,7 +65,8 @@ const (
 	// CarrierOnly: no NTP (offline); carrier time agrees with the box clock.
 	CarrierOnly
 	// Disagree: carrier time and the box clock differ by more than the
-	// tolerance. Time-sensitive checks are restricted.
+	// tolerance. The interval spans both, or, while the sync is
+	// authenticated, the tolerance around the box clock.
 	Disagree
 	// Held: the box clock moved from its anchor with no carrier time to
 	// confirm it. Now answers the anchor carried forward (Status.Held).
@@ -88,12 +92,12 @@ func (s State) String() string {
 // Status is the last check.
 type Status struct {
 	State State
-	// Skew is box clock minus carrier time when restricted, or box clock
+	// Skew is box clock minus carrier time when disagreeing, or box clock
 	// minus the held time when held; zero otherwise without carrier time.
 	Skew time.Duration
 	// At is the box clock when the check ran.
 	At time.Time
-	// Since is the box clock when the current restriction or hold began.
+	// Since is the box clock when the current disagreement or hold began.
 	Since time.Time
 	// Held is the anchor carried forward to the check, while held.
 	Held time.Time
@@ -104,14 +108,19 @@ type Status struct {
 	Verified bool
 	// Start is the box clock's reading of when this boot began.
 	Start time.Time
+	// Authenticated reports that the check's NTP sync was NTS-authenticated,
+	// so a disagreeing carrier widens the interval by at most the tolerance.
+	Authenticated bool
 }
 
-// Restricted reports whether time-sensitive checks must not proceed.
-func (s Status) Restricted() bool { return s.State == Disagree }
+// Restricted reports that plain sources disagree, for Guard.Now's callers
+// not yet on the interval. A disagreement with authenticated network time
+// is an outlier carrier and restricts nothing.
+func (s Status) Restricted() bool { return s.State == Disagree && !s.Authenticated }
 
 var (
-	// ErrRestricted is returned by Now while the sources disagree.
-	ErrRestricted = errors.New("clock: box time and carrier time disagree; time-sensitive checks are restricted")
+	// ErrRestricted is returned by Now while plain sources disagree.
+	ErrRestricted = errors.New("clock: box time and carrier time disagree; time-sensitive checks are held")
 	// ErrNoNetworkTime is what a carrier source returns when the network
 	// has sent no time.
 	ErrNoNetworkTime = errors.New("clock: no carrier network time")
@@ -130,7 +139,7 @@ const (
 	// DefaultCarrierTimeout bounds one modem read.
 	DefaultCarrierTimeout = 5 * time.Second
 	// AgreeAfter is how long carrier time must agree before the owner gets
-	// the all-clear. The restriction lifts at once; only the text waits, so
+	// the all-clear. The interval narrows at once; only the text waits, so
 	// flapping sources never leave "back to normal" as the last word.
 	AgreeAfter = time.Hour
 	// MaxAlertsPerDay caps disagreement and hold texts sent in any 24
@@ -149,21 +158,29 @@ const (
 	anchorSlack = 5 * time.Second
 )
 
-// AgreeText tells the owner a restriction or hold has ended.
+// AgreeText tells the owner a disagreement or hold has ended.
 const AgreeText = "My clock agrees with the phone network again. Time checks are back to normal."
 
 // AgreeLastText is the all-clear once the day's alerts are used up, so a
 // later disagreement the box does not text about is not a surprise.
 const AgreeLastText = AgreeText + LastSuffix
 
-// DisagreeText is the owner text for a disagreement of skew (at most two
-// text segments). It names what the wiring does while restricted (K7).
+// DisagreeText is the owner text for a disagreement of skew with plain
+// network time, or none (at most two text segments): the interval spans
+// both clocks (TIM-1, K7).
 func DisagreeText(skew time.Duration) string {
-	t := fmt.Sprintf("My clock and the phone network's time differ by %s, so I am playing safe: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual.", about(skew))
+	t := fmt.Sprintf("My clock and the phone network's time differ by %s, so I am playing safe: anything waiting for time to pass waits for both clocks, and anything that ends ends by either. Codes and STOP work as usual.", about(skew))
 	if zoneLike(skew) {
 		t += " A whole-hour difference is often a time-zone error on one side."
 	}
 	return t
+}
+
+// OutlierText is the owner text for carrier time that disagrees by skew with
+// NTS-authenticated network time: the carrier is the outlier and widens the
+// interval by at most the tolerance (#5216).
+func OutlierText(skew time.Duration) string {
+	return fmt.Sprintf("The phone network's time differs from my authenticated network time by %s, so I keep network time. A fake phone mast can do this. Nothing to do.", about(skew))
 }
 
 // HoldEndText ends a hold that no carrier time confirmed either way: the
@@ -174,8 +191,8 @@ const HoldEndText = "My clock is back in line with my own count of time. Time ch
 const LastSuffix = " If it happens again today I won't text; send STATUS to check."
 
 // StateLostText is the alert when the saved clock check could not be read
-// at start, so a restriction it may have held is kept.
-const StateLostText = "I couldn't read my saved clock check, so I am playing safe until the phone network's time confirms the clock: pre-allowances with an end date ask you first, requests won't expire, and updates wait. Codes and STOP work as usual."
+// at start, so a disagreement it may have held is kept.
+const StateLostText = "I couldn't read my saved clock check, so I am playing safe until the phone network's time confirms the clock. Codes and STOP work as usual."
 
 // HeldText is the owner text when the box clock jumps with no phone-network
 // time to confirm it.
@@ -196,7 +213,25 @@ func zoneLike(skew time.Duration) bool {
 	return r <= time.Minute || r >= 14*time.Minute
 }
 
-// Line is the status for the owner's STATUS reply, with times in loc.
+// IntervalLine is the status for the owner's STATUS reply, with times in
+// loc: Line, with a disagreement told as the moves its interval delays and
+// how it lifts (LOG-8, TIM-1).
+func (s Status) IntervalLine(loc *time.Location) string {
+	if s.State != Disagree {
+		return s.Line(loc)
+	}
+	since := s.Since.In(loc).Format("15:04")
+	switch {
+	case s.Skew == 0:
+		return fmt.Sprintf("Time check: playing safe since %s (saved check unreadable; waiting for phone-network time).", since)
+	case s.Authenticated:
+		return fmt.Sprintf("Time check: phone network differs from authenticated network time by %s since %s; network time stands.", about(s.Skew), since)
+	}
+	return fmt.Sprintf("Time check: box and phone network differ by %s since %s, so holds and timeouts end by both clocks and expiries by either, until they agree.", about(s.Skew), since)
+}
+
+// Line is the restricted mode's STATUS line, kept only until agentosd's
+// STATUS line moves to IntervalLine (#5279).
 func (s Status) Line(loc *time.Location) string {
 	if !s.Verified && s.State != Disagree && s.State != Held {
 		return fmt.Sprintf("Time check: not confirmed since start at %s (waiting for network or phone-network time). Nothing to do.", s.Start.In(loc).Format("15:04"))
@@ -278,9 +313,9 @@ type Config struct {
 	Tolerance time.Duration
 	// Interval is Run's period and the staleness bound (DefaultInterval).
 	Interval time.Duration
-	// StatePath, if set, keeps a restriction, a hold's anchor and the
+	// StatePath, if set, keeps a disagreement, a hold's anchor and the
 	// outstanding owner text across restarts (0600, written atomically).
-	// An unreadable file restricts until carrier time agrees.
+	// An unreadable file counts as a disagreement until carrier time agrees.
 	StatePath string
 	// Now is the box's wall clock (time.Now). Elapsed is monotonic time
 	// that keeps counting across restarts within one boot, and BootID names
@@ -295,7 +330,7 @@ type Config struct {
 	// slow modem cannot hold a time-sensitive caller.
 	CarrierTimeout time.Duration
 	// OnChange, if set, is called after a check that changed the state, so
-	// the wiring can re-run lapse sweeps when a restriction lifts. A change
+	// the wiring can re-run lapse sweeps when a disagreement ends. A change
 	// a later one supersedes before it is delivered may be skipped.
 	OnChange func(Status)
 	// Logf reports state-file faults. Nil is silent.
@@ -536,7 +571,7 @@ func (g *Guard) check(ctx context.Context) Status {
 	// Read the box clock after the modem answers, so the modem's latency
 	// does not count as skew.
 	now, mono := g.cfg.Now(), g.cfg.Elapsed()
-	s := Status{At: now, Start: now.Add(-mono)}
+	s := Status{At: now, Start: now.Add(-mono), Authenticated: nts}
 
 	g.mu.Lock()
 	prev, wasChecked := g.status, g.checked
@@ -624,7 +659,7 @@ func (g *Guard) check(ctx context.Context) Status {
 // disagreement, or a hold) when none is outstanding, a disagreement also
 // when only a hold text is, and the all-clear for an outstanding alert once
 // the alarm has been over for AgreeAfter: carrier agreement for either, or,
-// for a hold, the box clock back in line without a carrier. A restriction
+// for a hold, the box clock back in line without a carrier. A disagreement
 // or hold in between resets the wait. Alerts are capped at MaxAlertsPerDay,
 // except a hold's escalation to a disagreement; every alert sent gets its
 // all-clear.
@@ -646,8 +681,11 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	case Disagree:
 		g.agreeing = false
 		if g.told != toldDisagree && (room || g.told == toldHeld) {
-			if g.lost && s.Skew == 0 {
+			switch {
+			case g.lost && s.Skew == 0:
 				return alert(toldDisagree, StateLostText)
+			case s.Authenticated:
+				return alert(toldDisagree, OutlierText(s.Skew))
 			}
 			return alert(toldDisagree, DisagreeText(s.Skew))
 		}
@@ -688,8 +726,9 @@ func (g *Guard) Status() Status {
 	return g.status
 }
 
-// Now is the time for a time-sensitive check, or ErrRestricted while the
-// sources disagree. While held it is the held time.
+// Now is the box clock (the held time while held), or ErrRestricted while
+// plain sources disagree. It stays only for callers not yet on the interval
+// (broker/question); a time-due move reads Earliest or Latest instead.
 func (g *Guard) Now(ctx context.Context) (time.Time, error) {
 	now, s := g.refresh(ctx)
 	if err := ctx.Err(); err != nil {
@@ -701,44 +740,44 @@ func (g *Guard) Now(ctx context.Context) (time.Time, error) {
 	return now, nil
 }
 
-// Latest is the latest credible time: the later of the box clock (the held
-// time while held) and the last carrier reading carried forward on the
-// monotonic clock. A caller deciding whether something has expired uses
-// it, so a clock moved back cannot keep a grant alive (potency PT1 on #68).
-// It answers while restricted too; the caller reads the Status.
-//
-// Use it only where a later time is the stricter answer (has it expired?).
-// A check that something is old enough (a hold period, a soak, a quiet
-// window, a wait) uses Earliest instead.
-func (g *Guard) Latest(ctx context.Context) (time.Time, Status) {
+// Interval is the credible interval from one check (TIM-1): the box clock
+// (the held time while held) widened by the last carrier reading carried
+// forward on the monotonic clock, which authenticated network time bounds to
+// the tolerance (Status.Authenticated), and, until this boot has verified
+// time, by the floor: true time is not before it (HW-8). A move that widens
+// authority (a hold's end, a soak, a quiet window, a default on timeout)
+// waits until earliest passes it; one that narrows (an expiry) fires once
+// latest does, so a clock moved either way neither ends a wait early nor
+// keeps authority alive (L3 C4, potency PT1 on #68). It answers in every
+// state; the caller reads the Status.
+func (g *Guard) Interval(ctx context.Context) (earliest, latest time.Time, s Status) {
 	now, s := g.refresh(ctx)
 	mono := g.cfg.Elapsed()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	t := g.latestLocked(now, mono)
-	if !g.verified && g.floor.After(t) {
-		t = g.floor // a clock behind keeps nothing alive past the floor (HW-8)
+	earliest, latest = g.intervalLocked(now, mono)
+	if !g.verified && !g.floor.IsZero() {
+		if g.floor.After(latest) {
+			latest = g.floor // a clock behind keeps nothing alive past the floor
+		}
+		if g.floor.Before(earliest) {
+			earliest = g.floor // a clock ahead ends no wait early
+		}
 	}
+	return earliest, latest, s
+}
+
+// Latest is the interval's end, for a move that narrows (has it expired?).
+func (g *Guard) Latest(ctx context.Context) (time.Time, Status) {
+	_, t, s := g.Interval(ctx)
 	return t, s
 }
 
-// Earliest is the earliest credible time: the earlier of the box clock (the
-// held time while held) and the last carrier reading carried forward. A
-// caller deciding whether something is old enough uses it, so a clock moved
-// forward cannot end a hold, soak or quiet window early (L3 C4 on #68). It
-// answers while restricted too; the caller reads the Status.
+// Earliest is the interval's start, for a move that widens (is it old
+// enough?).
 func (g *Guard) Earliest(ctx context.Context) (time.Time, Status) {
-	now, s := g.refresh(ctx)
-	mono := g.cfg.Elapsed()
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if c := g.carrierForwardLocked(mono); !c.IsZero() && c.Before(now) {
-		now = c
-	}
-	if !g.verified && !g.floor.IsZero() && g.floor.Before(now) {
-		now = g.floor // a clock ahead ends no wait early (HW-8)
-	}
-	return now, s
+	t, _, s := g.Interval(ctx)
+	return t, s
 }
 
 func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
@@ -748,11 +787,33 @@ func (g *Guard) carrierForwardLocked(mono time.Duration) time.Time {
 	return g.carrier.Add(mono - g.carrierMono)
 }
 
-func (g *Guard) latestLocked(now time.Time, mono time.Duration) time.Time {
-	if c := g.carrierForwardLocked(mono); c.After(now) {
-		return c
+// intervalLocked widens now by the carrier reading carried forward to mono,
+// by at most the tolerance while the last check was authenticated.
+func (g *Guard) intervalLocked(now time.Time, mono time.Duration) (lo, hi time.Time) {
+	lo, hi = now, now
+	c := g.carrierForwardLocked(mono)
+	if c.IsZero() {
+		return lo, hi
 	}
-	return now
+	if g.status.Authenticated {
+		if top := now.Add(g.cfg.Tolerance); c.After(top) {
+			c = top
+		} else if bottom := now.Add(-g.cfg.Tolerance); c.Before(bottom) {
+			c = bottom
+		}
+	}
+	if c.Before(lo) {
+		lo = c
+	}
+	if c.After(hi) {
+		hi = c
+	}
+	return lo, hi
+}
+
+func (g *Guard) latestLocked(now time.Time, mono time.Duration) time.Time {
+	_, hi := g.intervalLocked(now, mono)
+	return hi
 }
 
 // refresh returns the time to answer and a status current enough to act
@@ -846,8 +907,8 @@ func (g *Guard) load() {
 		err = json.Unmarshal(b, &v)
 	}
 	if err != nil {
-		// Fail closed: an unreadable record may have held a restriction.
-		g.cfg.Logf("clock: state file unreadable, restricting until carrier time agrees: %v", err)
+		// Fail closed: an unreadable record may have held a disagreement.
+		g.cfg.Logf("clock: state file unreadable, disagreeing until carrier time agrees: %v", err)
 		g.status, g.lost = Status{State: Disagree}, true
 		return
 	}
