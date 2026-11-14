@@ -334,7 +334,7 @@ func (h *Handler) resumeCmd(args []string) string {
 // StopCancelledNote ends every RESUME reply: a STOP cancels each unsent
 // step, and RESUME never brings one back (KRN-7, #5138), so an owner who
 // expected a pause is told not to wait for it (#5151).
-const StopCancelledNote = "What STOP cancelled stays cancelled; ask again for anything you still want."
+const StopCancelledNote = "Anything else STOP cancelled stays cancelled; ask again for anything you still want."
 
 // codeText sends text unless the hourly cap on RESUME texts is spent, in
 // which case the broker stays silent.
