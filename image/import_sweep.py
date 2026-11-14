@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Which ELF files in a built image import glibc's POSIX regex or wide scanf functions (#5697, EVL-5).
+
+The image's glibc records (assurance/vulncheck.json, DEBIAN-CVE-2026-100290 and -115819) accept the
+advisories on the grounds that no long-lived or network-facing process calls the affected functions.
+This reads that from the tree CI builds, not from another distribution's builds: every ELF file's
+dynamic imports (objdump -pT), in the main tree (the root partition and the verified /usr) and in each
+initrd of the boot entry (OUT/initrd/, every cpio member).
+
+  import_sweep.py OUT VERSION     the build in OUT (as root: offline_systemd.built_tree mounts it)
+  import_sweep.py --tree DIR      a plain directory, read as a main tree
+  import_sweep.py --summary FILE [ALLOW]
+                                  the JSON the two forms print, as lines and as ::notice annotations,
+                                  held to ALLOW (default image/import_sweep.allow)
+
+The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
+read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
+ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
+libraries; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
+members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
+names do not.
+
+--summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
+or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
+(each a file the image -100290 record names); a glob that matches nothing also fails, so the list
+stays the record's. The control is the scan itself: it also exits 1 when objdump failed on a file,
+the main tree or an initrd with executable members read no ELF file, or the main tree has no importer
+of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
+"""
+import fnmatch
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+HERE = pathlib.Path(__file__).resolve().parent
+ALLOW = HERE / "import_sweep.allow"
+sys.path.insert(0, str(HERE))
+
+# DEBIAN-CVE-2026-100290 (regcomp/regexec and the GNU re_* interface over the same engine) and
+# DEBIAN-CVE-2026-115819 (the wide scanf family, with the C99/C23 aliases glibc's headers bind them to).
+# glibc's own callers of the regex engine count as it: rpmatch (stdlib/rpmatch.c, the locale's
+# YESEXPR) and the compat step/advance (misc/regexp.c). The wide scanf family has none.
+GROUPS = {
+    "regex": re.compile(r"(regcomp|regexec|re_\w+|rpmatch|step|advance)$"),
+    "wscanf": re.compile(r"(__isoc(99|23)_)?v?(sw|fw|w)scanf$"),
+}
+UND = re.compile(r"\*UND\*\s+\S+\s+(?:Base\s+)?\((GLIBC_[^)]*)\)\s+(\S+)$")
+DYNAMIC = re.compile(r"^\s+(NEEDED|SONAME)\s+(\S+)$")
+
+
+def group_of(sym):
+    return next((g for g, rx in GROUPS.items() if rx.match(sym)), None)
+
+
+def read_elf(path):
+    """(affected glibc symbols imported, NEEDED names, SONAME or None, read) of the ELF file at PATH. READ is
+    False when objdump fails on it for any reason but its having no dynamic section (a static or
+    relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean."""
+    r = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, errors="replace")
+    out = r.stdout
+    read = r.returncode == 0 or "not a dynamic object" in r.stderr
+    syms, needed, soname = set(), [], None
+    for line in out.splitlines():
+        m = UND.search(line)
+        if m and group_of(m.group(2)):
+            syms.add(m.group(2))
+        m = DYNAMIC.match(line)
+        if m and m.group(1) == "NEEDED":
+            needed.append(m.group(2))
+        elif m:
+            soname = m.group(2)
+    return sorted(syms), needed, soname, read
+
+
+def is_elf(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def sweep(files):
+    """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
+    imports, needed, by_name, unread = {}, {}, {}, []
+    for shown, real in files.items():
+        syms, needed[shown], soname, read = read_elf(real)
+        if not read:
+            unread.append(shown)
+        if syms:
+            imports[shown] = syms
+        # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
+        for n in {os.path.basename(shown), soname} - {None}:
+            by_name.setdefault(n, []).append(shown)
+    importers = set(imports)
+    via = {}
+    for shown in needed:
+        seen, todo, hits = set(), list(needed[shown]), set()
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            for lib in by_name.get(n, []):
+                if lib in importers and lib != shown:
+                    hits.add(lib)
+                todo += needed.get(lib, [])
+        if hits and shown not in importers:
+            via[shown] = sorted(hits)
+    return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
+            "unread": sorted(unread)}
+
+
+def tree_files(top, prefix="/", skip=()):
+    """Every regular ELF file under TOP (symbolic links not followed), as {prefix + relative path: path}."""
+    files = {}
+    for d, dirs, names in os.walk(top):
+        rel = os.path.relpath(d, top)
+        if rel == ".":
+            dirs[:] = [x for x in dirs if x not in skip]
+        for n in names:
+            p = os.path.join(d, n)
+            if stat.S_ISREG(os.lstat(p).st_mode) and is_elf(p):
+                files[os.path.normpath(os.path.join(prefix, rel, n))] = p
+    return files
+
+
+def initrd_place(path, scratch):
+    """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read."""
+    import finish_image
+    files, others = {}, 0
+    for i, (name, mode, body, _link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
+        if stat.S_ISREG(mode) and body[:4] == b"\x7fELF":
+            f = os.path.join(scratch, "%d" % i)
+            pathlib.Path(f).write_bytes(body)
+            files["/" + name.lstrip("/")] = f
+        elif stat.S_ISREG(mode) and mode & 0o111:
+            others += 1
+    # "others": executable regular members that are not ELF files (problems()). A modules initrd's
+    # modules, indexes and firmware are not executable.
+    return dict(sweep(files), others=others)
+
+
+def run_tree(root, usr=None):
+    files = tree_files(root, skip=("usr",) if usr else ())
+    if usr:
+        files.update(tree_files(usr, "/usr"))
+    return {"tree": sweep(files)}
+
+
+def run_build(out, version):
+    import offline_systemd
+    root, usr, _cmdline, cleanup = offline_systemd.built_tree(out, version)
+    try:
+        places = run_tree(root, usr)
+    finally:
+        cleanup()
+    initrds = pathlib.Path(out) / "initrd"
+    for p in sorted(x for x in initrds.rglob("*") if x.is_file()):
+        with tempfile.TemporaryDirectory() as scratch:
+            places["initrd:" + str(p.relative_to(initrds))] = initrd_place(p, scratch)
+    return places
+
+
+def problems(places):
+    # An initrd of only kernel modules (compressed .ko files, their indexes, firmware) holds no ELF
+    # file; one with executable members must hold one, as its records rest on what was read in it.
+    errs = [] if places.get("tree", {}).get("scanned") else ["tree: no ELF file read"]
+    errs += ["%s: no ELF file read among %d executable files" % (k, v.get("others", 0)) for k, v in places.items()
+             if k.startswith("initrd:") and not v["scanned"] and v.get("others", 1)]
+    errs += ["%s: objdump could not read %s" % (k, p) for k, v in places.items() for p in v.get("unread", [])]
+    if "regcomp" not in {s for syms in places.get("tree", {}).get("imports", {}).values() for s in syms}:
+        errs.append("tree: no file imports regcomp, so the scan read nothing it should have (control)")
+    return errs
+
+
+def reach(places):
+    """{(group, path): [places]} of every file that imports or reaches a function of the group."""
+    out = {}
+    for place, v in places.items():
+        for p, syms in v["imports"].items():
+            for g in {group_of(x) for x in syms}:
+                out.setdefault((g, p), []).append(place)
+        for p, libs in v["via"].items():
+            for g in {group_of(x) for lib in libs for x in v["imports"].get(lib, [])}:
+                out.setdefault((g, p), []).append(place)
+    return out
+
+
+def load_allow(path):
+    """The globs of ALLOW: one per line, after any '#' comment."""
+    return [l.split("#", 1)[0].strip() for l in pathlib.Path(path).read_text().splitlines()
+            if l.split("#", 1)[0].strip()]
+
+
+def refusals(places, allow):
+    """Each claim of the glibc records that PLACES break, against the regex globs ALLOW."""
+    errs, used = [], set()
+    for (g, p), where in sorted(reach(places).items()):
+        if g == "wscanf":
+            errs.append("%s: %s imports or reaches a wide scanf function; the -115819 records say nothing does"
+                        % (" ".join(where), p))
+            continue
+        hit = [a for a in allow if fnmatch.fnmatchcase(p, a)]
+        used.update(hit)
+        if not hit:
+            errs.append("%s: %s imports or reaches a regex function and is not in import_sweep.allow; review it, "
+                        "name it in the image -100290 record, then add the entry: %s" % (" ".join(where), p, p))
+    errs += ["import_sweep.allow: %s matches no file that reaches a regex function; remove it" % a
+             for a in allow if a not in used]
+    return errs
+
+
+def summary(places):
+    lines = []
+    for place, v in places.items():
+        lines.append("%s: %d ELF files read" % (place, v["scanned"]))
+        for g in GROUPS:
+            imp = {p: [s for s in syms if group_of(s) == g] for p, syms in v["imports"].items()}
+            imp = {p: s for p, s in imp.items() if s}
+            via = {p: [lib for lib in libs if lib in imp] for p, libs in v["via"].items()}
+            via = {p: libs for p, libs in via.items() if libs}
+            lines.append("%s %s: %d files import a function, %d more reach an importing library through NEEDED"
+                         % (place, g, len(imp), len(via)))
+            lines += ["  imports %s: %s" % (p, " ".join(s)) for p, s in imp.items()]
+            lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
+    return lines
+
+
+def annotations(lines, size=3500, cap=10):
+    """LINES as ::notice commands of about SIZE characters each. GitHub shows CAP notices per step and
+    drops the rest, so the last one shown says where the rest are."""
+    chunks, cur = [], ""
+    for line in lines:
+        if cur and len(cur) + len(line) + 1 > size:
+            chunks.append(cur)
+            cur = ""
+        cur += line[:size] + "\n"
+    chunks += [cur] if cur else []
+    if len(chunks) > cap:
+        chunks = chunks[:cap - 1] + [chunks[cap - 1] + "(%d more notices: the full list is in the step log)\n"
+                                     % (len(chunks) - cap)]
+    return ["::notice title=import sweep %d/%d::%s" % (i + 1, len(chunks), c.rstrip("\n").replace("%", "%25")
+            .replace("\r", "%0D").replace("\n", "%0A")) for i, c in enumerate(chunks)]
+
+
+def main(argv):
+    if argv[:1] == ["--summary"] and len(argv) in (2, 3):
+        places = json.loads(pathlib.Path(argv[1]).read_text())
+        lines = summary(places)
+        print("\n".join(lines + annotations(lines)))
+        errs = problems(places) + refusals(places, load_allow(argv[2] if len(argv) == 3 else ALLOW))
+        for e in errs[:10]:
+            print("::error title=import sweep::" + e.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+    elif len(argv) == 2 and argv[0] == "--tree":
+        places = run_tree(argv[1])
+        json.dump(places, sys.stdout, indent=1, sort_keys=True)
+        errs = []
+    elif len(argv) == 2:
+        places = run_build(*argv)
+        json.dump(places, sys.stdout, indent=1, sort_keys=True)
+        errs = []  # --summary holds the result to the control and the allowlist
+    else:
+        sys.exit(__doc__)
+    for e in errs:
+        print("import sweep: " + e, file=sys.stderr)
+    return 1 if errs else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

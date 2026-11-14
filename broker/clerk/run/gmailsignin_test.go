@@ -673,7 +673,8 @@ func TestTheSeenRecordsPlaintextIsWiped(t *testing.T) {
 
 // A sealer that fails after it decrypted loads no record of read mail:
 // loadSeen trusts no plaintext handed back with an error, so the record
-// reads as unreadable and begins again (#5324, seen.go's Open check).
+// reads as unreadable and begins again (#5324, seen.go's Open check), and
+// the plaintext is wiped all the same (#5666).
 func TestAFailedOpenLoadsNoSeenRecord(t *testing.T) {
 	dir := shortDir(t)
 	slot := GmailSlot(gmailtest.User)
@@ -685,6 +686,9 @@ func TestAFailedOpenLoadsNoSeenRecord(t *testing.T) {
 	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
 	if got, st := loadSeen(dir, k, slot); st != seenBad || got.Log.Since != "" {
 		t.Fatalf("loadSeen with a failing open = %+v, %v; want nothing, %v", got.Log, st, seenBad)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed open left %d plaintexts, wiped %v; want 1, wiped", n, wiped)
 	}
 }
 

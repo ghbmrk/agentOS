@@ -104,11 +104,10 @@ type Clips struct {
 	// Failed tells the owner a turn failed (the answerer or synthesizer
 	// erred, or the recognizer stopped), so a failure is never silence.
 	Failed []byte
-	// Ending tells the owner the call ends in a minute and they can call
-	// again ("This call ends in one minute. Call again to carry on."), so
-	// the hang-up at MaxCall is never a silent drop. It plays EndingNotice
-	// before the call's end, once the sentence then playing ends (up to
-	// EndingWait), and stops the rest of that answer.
+	// Ending says EndingText, so the hang-up at MaxCall is never a silent
+	// drop. It plays EndingNotice before the call's end, once the sentence
+	// then playing ends (up to SentenceWait), and stops the rest of that
+	// answer.
 	Ending []byte
 }
 
@@ -178,14 +177,34 @@ type Report struct {
 // Clips.Ending plays.
 const EndingNotice = time.Minute
 
-// EndingWait bounds how long Clips.Ending waits for the sentence playing
+// EndingText is the words of Clips.Ending (UX-5303-1), the one source the
+// step that records the box's clips reads. It promises no more time than
+// is left when the clip starts: that is at most EndingNotice, and at least
+// EndingNotice less SentenceWait and EndingWait (25 s), so it says "under
+// a minute", not "one minute" (#5728).
+const EndingText = "This call ends in under a minute. Call again to carry on."
+
+// SentenceWait bounds how long Clips.Ending waits for the sentence playing
 // when it falls due, so the owner hears that sentence to its end and not
-// cut mid-word (#5304); a sentence still playing then is cut. A sentence
-// is at most MaxSentence runes, and the notice's minute of margin is far
-// longer, so the notice still never outlasts MaxCall.
+// cut mid-word (#5304). It is MaxSentence at SpeakRate (30 s), and Cut ends
+// every sentence within MaxSentence runes, end mark or not, so any sentence
+// the answer makes ends first if spoken at SpeakRate or faster (#5683). A
+// voice slower than SpeakRate can still be cut at the bound.
+const SentenceWait = MaxSentence * time.Second / SpeakRate
+
+// SpeakRate is the speaking rate SentenceWait is sized for, in runes a
+// second: the slowest rate in #5683's figures (80 characters in 8 s), not
+// a measured one; VOICE-ro-b timing on hardware is to confirm it.
+const SpeakRate = 10
+
+// EndingWait bounds how long Clips.Ending waits for the owner's final words
+// once they speak (#5690). The notice starts at most SentenceWait plus
+// EndingWait (35 s) after it falls due, inside EndingNotice, so it still
+// never outlasts MaxCall.
 const EndingWait = 5 * time.Second
 
-// MaxSentence caps a sentence that has no end mark, in runes.
+// MaxSentence caps every sentence Cut takes, in runes, whether or not it
+// has an end mark.
 const MaxSentence = 300
 
 // ErrDeaf is returned when the recognizer stops during a call: nothing
@@ -473,14 +492,15 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	}
 	// The ending notice is one sound at a time: once due, it hushes the
 	// turn, which ends when the sentence playing ends, and plays once no
-	// turn runs; a turn still playing at bound is stopped (#5304). Until
+	// turn runs; a turn still playing at SentenceWait is stopped (#5304). Until
 	// then the loop acts on events as before: a 0 or a final transcript
 	// that stops the turn lets the notice play at once, before a new turn
 	// starts. It never starts while the owner speaks (#5690): a barge-in
 	// stops the turn, and the notice waits for the owner's final words, a 0,
 	// or EndingWait from when they began, so an owner who keeps talking
-	// hears it at most twice EndingWait after it fell due; due while they
-	// speak with no turn running, it waits the same way from falling due.
+	// hears it at most SentenceWait plus EndingWait after it fell due; due
+	// while they speak with no turn running, it waits EndingWait from
+	// falling due.
 	var due bool
 	var bound <-chan time.Time
 	// speaking is set by the owner's words and cleared by their final
@@ -532,9 +552,9 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			ending, due = nil, true
 			if cur != nil {
 				close(cur.hush)
-			}
-			if cur != nil || speaking {
-				bound = time.After(EndingWait) // the wall clock, as ending is
+				bound = time.After(SentenceWait) // the wall clock, as ending is
+			} else if speaking {
+				bound = time.After(EndingWait)
 			}
 			notify()
 		case <-bound: // the sentence still playing is cut
@@ -853,17 +873,24 @@ func nonZero(d time.Duration) time.Duration {
 }
 
 // Cut takes the first complete sentence off s: text up to an end mark
-// (. ! ? or a line break) followed by space, or MaxSentence runes cut at
-// the last space. cut is false while the sentence may still go on.
+// (. ! ? or a line break) followed by space within its first MaxSentence
+// runes, or else MaxSentence runes cut at the last space, so no sentence
+// is longer than MaxSentence runes (#5683). cut is false while the
+// sentence may still go on.
 func Cut(s string) (sentence, rest string, cut bool) {
+	n := 0
 	for i, r := range s {
+		if n == MaxSentence {
+			break
+		}
+		n++
 		switch r {
 		case '\n':
 			return s[:i], s[i+1:], true
 		case '.', '!', '?':
 			// At the end of s, s[j:] is "", which decodes as RuneError, not space.
 			j := i + utf8.RuneLen(r)
-			if n, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(n) {
+			if next, _ := utf8.DecodeRuneInString(s[j:]); unicode.IsSpace(next) {
 				return s[:j], s[j:], true
 			}
 		}
