@@ -108,7 +108,7 @@ type Clips struct {
 	// again ("This call ends in one minute. Call again to carry on."), so
 	// the hang-up at MaxCall is never a silent drop. It plays EndingNotice
 	// before the call's end, once the sentence then playing ends (up to
-	// EndingWait), and stops the rest of that answer.
+	// SentenceWait), and stops the rest of that answer.
 	Ending []byte
 }
 
@@ -178,11 +178,21 @@ type Report struct {
 // Clips.Ending plays.
 const EndingNotice = time.Minute
 
-// EndingWait bounds how long Clips.Ending waits for the sentence playing
+// SentenceWait bounds how long Clips.Ending waits for the sentence playing
 // when it falls due, so the owner hears that sentence to its end and not
-// cut mid-word (#5304); a sentence still playing then is cut. A sentence
-// is at most MaxSentence runes, and the notice's minute of margin is far
-// longer, so the notice still never outlasts MaxCall.
+// cut mid-word (#5304); a sentence still playing then is cut. It is
+// MaxSentence at SpeakRate (20 s), so a sentence of any length the answer
+// makes ends first at that rate (#5683); a slower voice is cut.
+const SentenceWait = MaxSentence * time.Second / SpeakRate
+
+// SpeakRate is the slowest speaking rate SentenceWait is sized for, in
+// runes a second: an 80-120 character sentence takes about 6-8 s (#5683).
+const SpeakRate = 15
+
+// EndingWait bounds how long Clips.Ending waits for the owner's final words
+// once they speak (#5690). The notice starts at most SentenceWait plus
+// EndingWait (25 s) after it falls due, inside EndingNotice, so it still
+// never outlasts MaxCall.
 const EndingWait = 5 * time.Second
 
 // MaxSentence caps a sentence that has no end mark, in runes.
@@ -473,14 +483,15 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	}
 	// The ending notice is one sound at a time: once due, it hushes the
 	// turn, which ends when the sentence playing ends, and plays once no
-	// turn runs; a turn still playing at bound is stopped (#5304). Until
+	// turn runs; a turn still playing at SentenceWait is stopped (#5304). Until
 	// then the loop acts on events as before: a 0 or a final transcript
 	// that stops the turn lets the notice play at once, before a new turn
 	// starts. It never starts while the owner speaks (#5690): a barge-in
 	// stops the turn, and the notice waits for the owner's final words, a 0,
 	// or EndingWait from when they began, so an owner who keeps talking
-	// hears it at most twice EndingWait after it fell due; due while they
-	// speak with no turn running, it waits the same way from falling due.
+	// hears it at most SentenceWait plus EndingWait after it fell due; due
+	// while they speak with no turn running, it waits EndingWait from
+	// falling due.
 	var due bool
 	var bound <-chan time.Time
 	// speaking is set by the owner's words and cleared by their final
@@ -533,8 +544,10 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			if cur != nil {
 				close(cur.hush)
 			}
-			if cur != nil || speaking {
-				bound = time.After(EndingWait) // the wall clock, as ending is
+			if cur != nil {
+				bound = time.After(SentenceWait) // the wall clock, as ending is
+			} else if speaking {
+				bound = time.After(EndingWait)
 			}
 			notify()
 		case <-bound: // the sentence still playing is cut

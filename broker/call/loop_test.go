@@ -950,7 +950,7 @@ func TestACallEndsAtMaxCall(t *testing.T) {
 }
 
 // A call that reaches MaxCall hears the ending clip EndingNotice before it
-// is hung up, cutting at EndingWait a sentence that never ends (a wedged
+// is hung up, cutting at SentenceWait a sentence that never ends (a wedged
 // Say, #5304); a call that ends sooner
 // hears none; and the clip plays on the call's ctx, so a clip still playing
 // at MaxCall ends with the call and Serve returns at MaxCall (#5262).
@@ -992,18 +992,18 @@ func TestTheOwnerHearsTheEndBeforeMaxCall(t *testing.T) {
 		if got := played(r); got != "" { // the notice waits for the sentence
 			t.Fatalf("the notice did not wait for the sentence: played %q", got)
 		}
-		time.Sleep(call.EndingWait - time.Nanosecond)
+		time.Sleep(call.SentenceWait - time.Nanosecond)
 		synctest.Wait()
 		if got := played(r); got != "" {
-			t.Fatalf("played %q before EndingWait", got)
+			t.Fatalf("played %q before SentenceWait", got)
 		}
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
 		if got := played(r); got != "CLIP:ending" || hungUp(r) {
-			t.Fatalf("at EndingWait: played %q, hung up %v", got, hungUp(r))
+			t.Fatalf("at SentenceWait: played %q, hung up %v", got, hungUp(r))
 		}
 		r.l.wasCut(t) // the sentence that never ends is cut at the bound
-		time.Sleep(time.Minute - call.EndingWait)
+		time.Sleep(time.Minute - call.SentenceWait)
 		synctest.Wait()
 		rep, err := r.end()
 		if !errors.Is(err, call.ErrTooLong) || !hungUp(r) || time.Since(start) != 30*time.Minute {
@@ -1132,7 +1132,7 @@ func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
 		if got := <-r.l.saying; got != "S:Hi." {
 			t.Fatalf("the answer played %q", got)
 		}
-		time.Sleep(29*time.Minute + call.EndingWait)
+		time.Sleep(29*time.Minute + call.SentenceWait)
 		synctest.Wait()
 		if got := <-r.l.saying; got != "CLIP:ending" {
 			t.Fatalf("a minute before MaxCall: played %q", got)

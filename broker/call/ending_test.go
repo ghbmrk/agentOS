@@ -19,7 +19,7 @@ import (
 // the new answer; and a barge-in while it waits stops the sentence, and the
 // notice waits for the owner's final words, or for EndingWait from the
 // barge-in if none come, so it never talks over the owner. A sentence still
-// playing at EndingWait is cut (TestTheOwnerHearsTheEndBeforeMaxCall), and
+// playing at SentenceWait is cut (TestTheOwnerHearsTheEndBeforeMaxCall), and
 // the notice still never outlasts MaxCall (the same test, at 10 min).
 func TestTheEndingNoticeWaitsForTheSentence(t *testing.T) {
 	played := func(r *rig) string {
@@ -404,10 +404,10 @@ func TestTheEndingNoticeKeepsNoQuestionWhoseClipStarted(t *testing.T) {
 // The ending notice never starts over an owner who is speaking (#5690).
 // Due while the owner's words are still open and no turn runs, it waits for
 // their final words, a 0, or EndingWait from falling due. A barge-in late
-// in the wait for a sentence gives the owner EndingWait of their own before
-// the clip. An owner who keeps talking past every bound still hears the
-// clip, at most twice EndingWait after it fell due, so long before MaxCall
-// (TestTheOwnerHearsTheEndBeforeMaxCall).
+// in the SentenceWait for a sentence gives the owner EndingWait of their
+// own before the clip. An owner who keeps talking past every bound still
+// hears the clip, at most SentenceWait plus EndingWait after it fell due,
+// long before MaxCall (TestTheOwnerHearsTheEndBeforeMaxCall).
 func TestTheEndingNoticeNeverStartsOverTheOwner(t *testing.T) {
 	played := func(r *rig) string {
 		select {
@@ -493,12 +493,12 @@ func TestTheEndingNoticeNeverStartsOverTheOwner(t *testing.T) {
 		r.say("q")
 		synctest.Wait()
 		<-r.l.saying
-		time.Sleep(29*time.Minute + call.EndingWait - 100*time.Millisecond)
+		time.Sleep(29*time.Minute + call.SentenceWait - 100*time.Millisecond)
 		synctest.Wait()
 		partial(r, "wait")
 		synctest.Wait()
 		r.l.wasCut(t)
-		for i := 0; time.Since(start) < 29*time.Minute+2*call.EndingWait-100*time.Millisecond; i++ {
+		for i := 0; time.Since(start) < 29*time.Minute+call.SentenceWait+call.EndingWait-100*time.Millisecond; i++ {
 			if got := played(r); got != "" {
 				t.Fatalf("%v after the barge-in: played %q", time.Duration(i)*time.Second, got)
 			}
@@ -506,9 +506,59 @@ func TestTheEndingNoticeNeverStartsOverTheOwner(t *testing.T) {
 			time.Sleep(time.Second)
 			synctest.Wait()
 		}
-		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+2*call.EndingWait-100*time.Millisecond {
+		if got := played(r); got != "CLIP:ending" || time.Since(start) != 29*time.Minute+call.SentenceWait+call.EndingWait-100*time.Millisecond {
 			t.Fatalf("at EndingWait after the barge-in: played %q after %v", got, time.Since(start)-29*time.Minute)
 		}
 		r.hangup()
 	})
+}
+
+// A sentence of typical length (80-120 characters, 6-8 s spoken) or of
+// MaxSentence runes at SpeakRate (20 s) plays to its end before the
+// notice, uncut (#5683): the wait for it is SentenceWait, sized from
+// MaxSentence, and it and the owner's EndingWait still fit inside the
+// EndingNotice margin, so the clip never outlasts MaxCall.
+func TestTheEndingNoticeLetsALongSentenceEnd(t *testing.T) {
+	if want := call.MaxSentence * time.Second / call.SpeakRate; call.SentenceWait < want {
+		t.Fatalf("SentenceWait %v < MaxSentence at SpeakRate %v", call.SentenceWait, want)
+	}
+	if late := call.SentenceWait + call.EndingWait; late >= call.EndingNotice {
+		t.Fatalf("the notice can start %v late, past its %v margin", late, call.EndingNotice)
+	}
+	for _, long := range []time.Duration{8 * time.Second, call.MaxSentence * time.Second / call.SpeakRate} {
+		synctest.Test(t, func(t *testing.T) {
+			start := time.Now()
+			r := newRig(t, fixed("One."))
+			r.bubble = true
+			r.cfg.Clips.Ending = []byte("CLIP:ending")
+			r.l.sayFor = long
+			r.serve()
+			time.Sleep(29*time.Minute - time.Second)
+			r.say("q")
+			synctest.Wait()
+			if got := <-r.l.saying; got != "S:One." {
+				t.Fatalf("the answer played %q", got)
+			}
+			time.Sleep(long - time.Nanosecond) // the notice fell due at 1 s
+			synctest.Wait()
+			select {
+			case got := <-r.l.saying:
+				t.Fatalf("%v sentence: played %q %v after the notice fell due", long, got, time.Since(start)-29*time.Minute)
+			case <-r.l.cut:
+				t.Fatalf("%v sentence: cut %v after the notice fell due", long, time.Since(start)-29*time.Minute)
+			default:
+			}
+			time.Sleep(time.Nanosecond) // the sentence ends
+			synctest.Wait()
+			if got := <-r.l.saying; got != "CLIP:ending" {
+				t.Fatalf("%v sentence: as it ended, played %q", long, got)
+			}
+			select {
+			case <-r.l.cut:
+				t.Fatalf("%v sentence: cut", long)
+			default:
+			}
+			r.hangup()
+		})
+	}
 }
