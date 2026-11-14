@@ -124,6 +124,9 @@ func TestTheInboxPageRefusesBadRequestsAndShowsCounts(t *testing.T) {
 	if w := r.post("/inbox/", url.Values{"shown": {long}, "tok": {r.srv.formToken(sess, "inbox", long)}}); !strings.Contains(w.Body.String(), stalePage) {
 		t.Fatalf("over a page: %s", w.Body.String())
 	}
+	// The unlock's sign-in text saves from the channel's own goroutine;
+	// wait for it so setting fail does not race that save (#5768).
+	ch.WaitSends()
 	st.fail = true
 	if w := r.post("/inbox/", url.Values{"shown": {shown[1]}, "tok": {tok[1]}, "run": {shown[1]}}); !strings.Contains(w.Body.String(), html.EscapeString(inboxUnreachable)) {
 		t.Fatalf("failed run: %s", w.Body.String())
