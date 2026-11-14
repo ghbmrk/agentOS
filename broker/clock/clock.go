@@ -697,8 +697,9 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 		g.agreeing = false
 		lost := g.lost && s.Skew == 0
 		if s.Authenticated && !lost {
-			// Told once under the cap; after DisagreeText only with room.
-			if g.told != toldOutlier && room {
+			// Told once under the cap, or past it when a hold escalates;
+			// after DisagreeText only with room.
+			if g.told != toldOutlier && (room || g.told == toldHeld) {
 				return alert(toldOutlier, OutlierText(s.Skew))
 			}
 			break

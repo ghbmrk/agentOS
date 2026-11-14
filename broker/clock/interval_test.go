@@ -344,3 +344,58 @@ func TestTIM1OutlierAfterRebootDoesNotPinTheIntervalToTheFloor(t *testing.T) {
 		r.advance(8 * time.Hour)
 	}
 }
+
+// setCarrier sets the rig's carrier reading (zero: none).
+func (r *rig) setCarrier(t time.Time) { r.mu.Lock(); r.carrier = t; r.mu.Unlock() }
+
+func TestTIM1NTSLapseEscalatesEvenAtTheCap(t *testing.T) {
+	// UX delta 1 on #5754: an OutlierText that used the day's last alert,
+	// then NTS lapses: the owner still hears DisagreeText, since questions
+	// are now held.
+	r := newRig()
+	kind := SyncedNTS
+	g := r.guard(t, syncAs(&kind))
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	g.Check(bg) // OutlierText: alert 1
+	r.setCarrier(r.wall)
+	g.Check(bg)
+	r.advance(AgreeAfter)
+	g.Check(bg) // AgreeText
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	g.Check(bg) // OutlierText: alert 2, the cap
+	kind = SyncedPlain
+	r.advance(10 * time.Minute)
+	g.Check(bg)
+	got := r.sent()
+	if len(got) != 4 || got[3] != DisagreeText(-5*time.Hour) {
+		t.Fatalf("texts = %q, want DisagreeText fourth", got)
+	}
+	if _, err := g.Now(bg); err != ErrRestricted {
+		t.Fatalf("Now err = %v", err)
+	}
+}
+
+func TestTIM1HoldEscalatesToAnOutlierEvenAtTheCap(t *testing.T) {
+	// L3 delta 1 on #5754: a hold at the cap that turns into an
+	// authenticated disagreement is told, so HeldText is not the owner's
+	// last word while the box keeps network time.
+	r := newRig()
+	g := r.guard(t, nts)
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	g.Check(bg) // OutlierText: alert 1
+	r.setCarrier(r.wall)
+	g.Check(bg)
+	r.advance(AgreeAfter)
+	g.Check(bg) // AgreeText
+	r.setCarrier(time.Time{})
+	r.step(2 * time.Hour)
+	if s := g.Check(bg); s.State != Held {
+		t.Fatalf("status = %+v, want held", s) // HeldText: alert 2, the cap
+	}
+	r.setCarrier(r.wall.Add(5 * time.Hour))
+	s := g.Check(bg)
+	got := r.sent()
+	if s.State != Disagree || !s.Authenticated || len(got) != 4 || got[3] != OutlierText(s.Skew) {
+		t.Fatalf("status = %+v, texts = %q, want OutlierText fourth", s, got)
+	}
+}
