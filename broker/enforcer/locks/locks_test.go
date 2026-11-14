@@ -655,8 +655,9 @@ func TestSecondAndCodeBounds(t *testing.T) {
 	if err := r.tap("front", action.Unlock); err != nil {
 		t.Fatal(err)
 	}
-	if !r.logged("not raised") {
-		t.Error("an alert the log refused was not logged")
+	// Named by its kind (ENF-c-f7, #5645 point 3).
+	if !r.logged("RoutineUnlock alert for front not raised") {
+		t.Error("an alert the log refused was not logged, named by its kind")
 	}
 }
 

@@ -1135,14 +1135,23 @@ func TestRotateNeedsEntropy(t *testing.T) {
 	}
 }
 
-// TestCancelTextsOwner (NET-4; ENF-c-f5, #5613 UX point 4): Cancel spends
-// the written recovery code, so once its save lands the owner is texted
-// RecoveryCodeChanged, once, as Rotate does; a failed save leaves the
-// written code working and raises nothing (ASSUMPTIONS ENF-c-10). Catches
-// a holder of a synced passkey cancelling the owner's own recovery with
-// the owner never told the written code is dead.
+// TestCancelTextsOwner (NET-4; ENF-c-f5, #5613 UX point 4; ENF-c-f7,
+// #5645 points 1 and 2): Cancel spends the written recovery code, so once
+// its save lands the owner is texted RecoveryCancelled, once, which says
+// the waiting replacement was cancelled and closes the open
+// RecoveryCodeUsed, so the incident leaves one open alert; a failed save
+// leaves the written code working and raises nothing (ASSUMPTIONS
+// ENF-c-10). Catches a holder of a synced passkey cancelling the owner's
+// own recovery with the owner never told why it stopped, or told in two
+// unrelated-looking alerts.
 func TestCancelTextsOwner(t *testing.T) {
 	g, _, code := enrolled(t)
+	real, err := alert.New(alert.Config{Send: func(wire.Alert) error { return nil },
+		Light: &lightMem{}, Journal: &journalMem{}, Now: func() time.Time { return g.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.b.cfg.Alerts = &teeAlerts{fake: g.alerts, real: real}
 	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
 		t.Fatal(err)
 	}
@@ -1161,16 +1170,20 @@ func TestCancelTextsOwner(t *testing.T) {
 	if _, err := g.b.Cancel(); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCodeChanged}) {
-		t.Errorf("cancel texts %v, want one RecoveryCodeChanged", g.alerts.raised)
+	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.RecoveryCancelled}) {
+		t.Errorf("cancel texts %v, want one RecoveryCancelled", g.alerts.raised)
+	}
+	if st := real.Status(); len(st.Open) != 1 || st.Open[0].Kind != alert.RecoveryCancelled {
+		t.Errorf("open after the cancel: %+v, want RecoveryCancelled alone", st.Open)
 	}
 }
 
 // TestFailedRaiseIsLogged (NET-2 Texts and calls; ENF-c-f6, #5613 Security
-// point 1): each of enrolment's five raises (Enrolment at Finish and Tick,
-// RecoveryCodeUsed, RecoveryCodeChanged at Rotate and Cancel, FactoryReset)
-// sends a failed raise to Config.Log, naming the alert and the error, and
-// the step itself goes on. Catches an alert journal write that fails with
+// point 1; ENF-c-f7, #5645 points 3 and 4): each of enrolment's raises
+// (Enrolment at Finish and Tick, RecoveryCodeUsed, RecoveryCodeChanged at
+// Rotate, RecoveryCancelled at Cancel, FactoryReset) sends a failed raise
+// to Config.Log, naming the alert by its kind, saying what was lost, and
+// carrying the error, and the step itself goes on. Catches an alert journal write that fails with
 // the owner never texted and nothing recording why.
 func TestFailedRaiseIsLogged(t *testing.T) {
 	const canary = "CANARY-ALERT-JOURNAL-REFUSED"
@@ -1179,7 +1192,7 @@ func TestFailedRaiseIsLogged(t *testing.T) {
 	logged := func(step, name string) {
 		t.Helper()
 		for _, l := range g.logged {
-			if strings.Contains(l, canary) && strings.Contains(l, name) {
+			if strings.Contains(l, canary) && strings.Contains(l, "the "+name+" alert was not journalled: shown and sent now, but lost on a restart") {
 				g.logged = nil
 				return
 			}
@@ -1215,7 +1228,7 @@ func TestFailedRaiseIsLogged(t *testing.T) {
 	if code, err = g.b.Cancel(); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	logged("Cancel", "RecoveryCodeChanged")
+	logged("Cancel", "RecoveryCancelled")
 
 	if _, err := g.enrol(newAuthenticator(t), code); err != nil {
 		t.Fatalf("second replacement: %v", err)

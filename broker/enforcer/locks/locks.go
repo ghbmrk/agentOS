@@ -338,7 +338,7 @@ func (g *Gate) teller() {
 			g.mu.Unlock()
 			for t := range batch {
 				if _, err := g.cfg.Alerts.Raise(t.kind, t.device); err != nil {
-					g.cfg.Log(fmt.Sprintf("locks: alert for %s not raised: %v", t.device, err))
+					g.cfg.Log(fmt.Sprintf("locks: %v alert for %s not raised: %v", t.kind, t.device, err))
 				}
 			}
 		}

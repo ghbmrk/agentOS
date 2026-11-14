@@ -110,7 +110,7 @@ func (c *edgeCut) Trip(day uint32, reason string) bool {
 		c.logf("edge cut: trip not saved, retried each tick; the edge is cut meanwhile: " + err.Error())
 	}
 	if _, err := c.alerts.Raise(alert.Trip, edgeDevice); err != nil {
-		c.logf("edge cut: trip alert: " + err.Error())
+		c.logf(fmt.Sprintf("edge cut: %v alert for %s: %v", alert.Trip, edgeDevice, err))
 	}
 	return true
 }
