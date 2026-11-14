@@ -70,32 +70,10 @@ type Owner interface {
 	Post(class owner.Class, text string) error
 }
 
-// Changes is the change pipeline (change.Pipeline) as the gate uses it:
-// the policy for meta.change.* intents (change C8). The gate does not
-// import the pipeline: its dependencies are outside the control path
-// (ARC-2).
-type Changes interface {
-	// Check returns nil to allow, change.ErrNeedsOwner itself (an error
-	// whose NeedsOwner() is true, not wrapped or joined) to ask the owner,
-	// and any other error to deny.
-	Check(ctx context.Context, phase journal.Phase, in journal.Intent) error
-	// Line is the approval item for an intent Check sends to the owner:
-	// verb, object, detail, how to reverse it, and its kind. The gate sets
-	// Ref, keeps it free of recipients and amounts, and treats any kind
-	// but Ordinary as GrantChange (high tier). Verb "install" marks the
-	// adoption of a release, which also needs the local page (CH-3).
-	Line(in journal.Intent) (owner.Item, error)
-	// Decided is called once the owner's request for a change intent has
-	// closed, answered or not (change C7). why is the denial's cause:
-	// "owner" for the owner's NO, "not chosen" for an item left out of a
-	// partial YES, "" when approved or closed for any other reason.
-	Decided(ctx context.Context, in journal.Intent, why string)
-}
-
 // Loops is the loop scheduler (loops.Scheduler) as the gate uses it: the
 // policy for meta.loops.* intents, the owner's spare-time settings
-// (LOOP-0, loops L2). Like Changes, it is an interface so the gate does
-// not import the scheduler (ARC-2).
+// (LOOP-0, loops L2). It is an interface so the gate does not import the
+// scheduler (ARC-2).
 type Loops interface {
 	// Check returns nil to allow, the scheduler's ErrNeedsOwner itself
 	// (NeedsOwner() true, not wrapped or joined) to ask the owner, and
@@ -109,7 +87,8 @@ type Loops interface {
 // loopsAction reports a loop setting action.
 func loopsAction(action string) bool { return strings.HasPrefix(action, "meta.loops.") }
 
-// changeAction reports a change pipeline action.
+// changeAction reports an action of the deleted change pipeline (#2785 c3):
+// the gate denies every one.
 func changeAction(action string) bool { return strings.HasPrefix(action, "meta.change.") }
 
 // Verifier reads, from the source system, the fields of one intent that
@@ -205,8 +184,6 @@ type Config struct {
 	// unstaged) by UNDO. A form reversible.Check refuses is dropped and
 	// logged, so its operation is asked with no undo window.
 	Forms map[string]map[string]reversible.Form
-	// Changes decides meta.change.* intents. Nil: they are denied.
-	Changes Changes
 	// Loops decides meta.loops.* intents. Nil: they are denied.
 	Loops Loops
 	// Outcome receives the owner's verdict on an agent's effect once it is
@@ -357,7 +334,6 @@ type wait struct {
 	base    owner.Item // without the queued note: what an approval covers
 	rep     repeat     // the repeat marks item shows (B10)
 	local   bool       // also needs local confirmation
-	onlyUI  bool       // waits for the local page (a hold); never texted
 	request string     // owner request ID, "" while batched
 	reply   string     // queued auto-reply ID
 	sendAt  time.Time
@@ -695,7 +671,6 @@ const (
 	NoPageGrant    = "a new or wider grant needs confirmation on the local Wi-Fi page, which is not running (CH-3)"
 	NoPageEvidence = "changing where private replies go needs confirmation on the local Wi-Fi page, which is not running (CH-20)"
 	NoPageFollow   = "changing where updates come from needs confirmation on the local Wi-Fi page, which is not running (OSS-10)"
-	NoPageSharing  = "turning sharing on needs confirmation on the local Wi-Fi page, which is not running (CHG-4)"
 )
 
 // onPage reports whether a waiting intent is asked on the local page:
@@ -788,7 +763,6 @@ type verdict struct {
 	// runs (SR3-2-f2).
 	note  string
 	local bool
-	hold  bool // waits for the local page without texting the owner
 	reply *owner.AutoReply
 	// rep is the same send under another request: one known to have gone
 	// within repeatWindow, or one that may have gone (recentRepeat,
@@ -1357,7 +1331,7 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		return verdict{kind: deny, why: "broker actions are not available to agents"}
 	}
 	if changeAction(in.Action) {
-		return g.evaluateChange(ctx, phase, in)
+		return verdict{kind: deny, why: "the change pipeline is not running"}
 	}
 	if loopsAction(in.Action) {
 		return g.evaluateLoops(ctx, phase, in)
@@ -1640,50 +1614,6 @@ func (g *Gate) Evidence() (address, account string) {
 	return g.evidence.Address, g.evidence.Account
 }
 
-// evaluateChange delegates a meta.change.* intent to the change pipeline
-// (change C8). What the pipeline's standing rules allow runs; what only the
-// owner may allow is a high-tier request whose line the pipeline renders
-// from broker-known fields; anything else is denied with the pipeline's
-// reason, which only the owner and the pipeline can read (no guest reaches
-// this point).
-func (g *Gate) evaluateChange(ctx context.Context, phase journal.Phase, in journal.Intent) verdict {
-	if g.cfg.Changes == nil {
-		return verdict{kind: deny, why: "the change pipeline is not running"}
-	}
-	err := g.cfg.Changes.Check(ctx, phase, in)
-	// Only the sentinel itself asks: an error that wraps or joins it with
-	// a refusal denies (fails closed).
-	no, ok := err.(interface{ NeedsOwner() bool })
-	switch {
-	case err == nil:
-		return verdict{kind: allow}
-	case !ok || !no.NeedsOwner():
-		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
-	}
-	l, err := g.cfg.Changes.Line(in)
-	if err != nil {
-		return verdict{kind: deny, why: "the change pipeline refused it", cause: err}
-	}
-	local := sharingOn(in)
-	if local && !g.cfg.LocalUI {
-		return verdict{kind: deny, why: NoPageSharing}
-	}
-	hold := false
-	if l.Facts.Verb == "install" {
-		// Adopting a release needs the code and the local page (CH-3).
-		// Without the page it is held, not denied, so the box can still
-		// take a security fix once the page exists; no code is texted
-		// for a request that cannot complete.
-		local, hold = true, !g.cfg.LocalUI
-	}
-	kind := owner.GrantChange
-	if l.Facts.Kind == owner.Ordinary && !local {
-		kind = owner.Ordinary // a tested, undoable learned change: low tier
-	}
-	return verdict{kind: ask, local: local, hold: hold, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
-		Facts: owner.Facts{Kind: kind, Verb: l.Facts.Verb, NoRecipient: true}}}
-}
-
 // evaluateLoops delegates a meta.loops.* intent to the loop scheduler
 // (GR18). What the scheduler allows on the owner's text runs; raising the
 // spare budget is an owner request with the scheduler's line, low tier
@@ -1706,13 +1636,6 @@ func (g *Gate) evaluateLoops(ctx context.Context, phase journal.Phase, in journa
 	}
 	return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: l.Object, Detail: l.Detail, UndoBy: l.UndoBy, Terms: l.Terms,
 		Facts: owner.Facts{Kind: l.Facts.Kind, Verb: l.Facts.Verb, NoRecipient: true}}}
-}
-
-// sharingOn reports the intent that turns sharing on: it changes what
-// leaves the box (CHG-4, CHG-5), so like a grant it also needs the local
-// page (CH-3). Turning learning on, or any setting off, needs only the code.
-func sharingOn(in journal.Intent) bool {
-	return in.Action == "meta.change.policy" && strings.HasSuffix(in.ID, ":sharing:on")
 }
 
 // Check is the journal policy (OP-3): it runs at authorize and again
@@ -1994,7 +1917,7 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 	case deny, allow:
 		return g.eng.Authorize(ctx, id)
 	case ask:
-		if !v.hold && !owner.SMSApprovable(v.item) && !g.cfg.LocalUI {
+		if !owner.SMSApprovable(v.item) && !g.cfg.LocalUI {
 			// Recipients that cannot be shown in an approval text are never
 			// approved by text (CH-10, CH-12). Without the local approvals
 			// page to wait for, the agent is told what to change
@@ -2002,29 +1925,19 @@ func (g *Gate) Authorize(ctx context.Context, id string) (journal.Status, error)
 			g.closeIntent(id, RecipientsNotTextable)
 			return g.eng.Get(id)
 		}
-		onlyUI := v.hold
 		g.mu.Lock()
-		fresh := g.waiting[id] == nil
-		if fresh {
-			g.waiting[id] = &wait{item: v.shown(), base: v.item, rep: v.rep, local: v.local, onlyUI: onlyUI}
-			if !onlyUI {
-				now := g.cfg.Now()
-				if len(g.batch) == 0 {
-					g.first = now
-				}
-				g.last = now
-				g.batch = append(g.batch, id)
+		if g.waiting[id] == nil {
+			g.waiting[id] = &wait{item: v.shown(), base: v.item, rep: v.rep, local: v.local}
+			now := g.cfg.Now()
+			if len(g.batch) == 0 {
+				g.first = now
 			}
+			g.last = now
+			g.batch = append(g.batch, id)
 		}
 		delete(g.failed, id)
 		delete(g.retry, id)
-		own := g.own
 		g.mu.Unlock()
-		if fresh && v.hold && own != nil {
-			// Arbitrator Q1 on #48: one fixed line, no code. It asks
-			// nothing, so it is an update (W5-Dc-r23 f1, #2066).
-			_ = own.Post(owner.ClassUpdate, HeldInstallNotice)
-		}
 	case autoReply:
 		g.queueReply(id, v)
 	}
@@ -2042,15 +1955,14 @@ func (g *Gate) reissuing(id string) bool {
 	return false
 }
 
-// annotate explains a pending intent to the guest. It never names the
-// request or its code.
-// HeldInstallNotice is the one text the gate sends when it holds an install
-// (a release adoption) for want of a local page. The gate holds one only
-// when no page exists, and no build has a recovery-key flow, so it names
-// neither and asks nothing: CH-12 allows a text to name only steps that work
-// (W5-Dc-r23 f1, #2066). The request stays pending, never denied (GR17).
+// HeldInstallNotice was the text the gate sent when it held a release
+// adoption for want of a local page. Only the deleted change pipeline
+// (#2785 c3) asked for one, so nothing sends it now; it stays only because
+// a cmd/agentosd test lists it, and c4, which holds that slot, removes both.
 const HeldInstallNotice = "A software update is waiting. I can install it once my Wi-Fi page is set up; nothing to do now."
 
+// annotate explains a pending intent to the guest. It never names the
+// request or its code.
 func (g *Gate) annotate(st *journal.Status) {
 	if st.State != journal.Pending {
 		return
@@ -2062,9 +1974,7 @@ func (g *Gate) annotate(st *journal.Status) {
 		st.Permission.Reason = "AgentOS restarted; the owner will be asked again"
 	} else if d, ok := g.decided[id]; ok && d.approved && d.local && !g.confirmed[id] {
 		st.Permission.Reason = "approved by code; waiting for the owner to confirm on the local Wi-Fi page"
-	} else if w := g.waiting[id]; w != nil && w.onlyUI {
-		st.Permission.Reason = "waiting for the owner's approval on the local Wi-Fi page"
-	} else if w != nil && w.held {
+	} else if w := g.waiting[id]; w != nil && w.held {
 		st.Permission.Reason = "approved; held for the owner's undo window until " + w.sendAt.UTC().Format("15:04") + " UTC"
 	} else if w != nil && w.reply != "" {
 		st.Permission.Reason = "auto-reply queued; it sends at " + w.sendAt.UTC().Format("15:04") + " UTC unless the owner cancels it"
@@ -2595,21 +2505,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		// broker action (UX lens and L3 on #329). Their other actions can
 		// still be asked on the page (onPage), but are not page-confirmed,
 		// so the step names no agent.
-		//
-		// A release adoption the pipeline proposed (Origin change, the
-		// pipeline's own origin) is page-confirmed too, but the owner made
-		// no request. The change is no decline (Decided is told so): the
-		// proposal drops and the next update check offers that version
-		// again (change C25). The notice promises no new offer: nothing is
-		// needed (P2-2a f2; L3 on #363); whether to say the offer comes
-		// back is the UX lens's call (GR27). The
-		// literal "change" is change.OriginPipeline, pinned by
-		// TestAPageChangeNoticeForAReleaseAdoptionSaysNothingIsNeeded.
-		step := "Make the request again if still needed."
-		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
-			step = "Nothing is needed."
-		}
-		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", owner.InformQuote(d.Request), step))
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. Make the request again if still needed.", owner.InformQuote(d.Request)))
 	}
 	if !wait {
 		g.settle(d.Ref)
@@ -2848,8 +2744,8 @@ func (g *Gate) runDerived(in journal.Intent) journal.Status {
 	return st
 }
 
-// isSetting reports a pending change pipeline or loop setting intent: one
-// whose unanswered request lapses rather than being declined.
+// isSetting reports a pending loop setting intent: one whose unanswered
+// request lapses rather than being declined.
 func (g *Gate) isSetting(id string) bool {
 	g.mu.Lock()
 	eng := g.eng
@@ -2859,14 +2755,12 @@ func (g *Gate) isSetting(id string) bool {
 	}
 	st, err := eng.Get(id)
 	return err == nil && st.State == journal.Pending && st.Intent.Account == journal.BrokerAccount &&
-		(changeAction(st.Intent.Action) || loopsAction(st.Intent.Action))
+		loopsAction(st.Intent.Action)
 }
 
-// lapse closes the owner's request for a change or loop setting intent
-// that ended without the owner's answer: expired, voided by wrong codes,
-// left out of a partial YES, or dropped by a restart (change C7). For a
-// change, the pipeline drops its
-// proposal without recording a decline, then the intent closes as "lapsed,
+// lapse closes the owner's request for a loop setting intent that ended
+// without the owner's answer: expired, voided by wrong codes, left out of
+// a partial YES, or dropped by a restart. The intent closes as "lapsed,
 // not declined" (arbitrator Q3 on #48): it never runs, the owner channel
 // lists the expired item in the digest (CH-13), and neither learning nor
 // Loop 1's backoff reads silence as a rejection. Only the owner's NO is a
@@ -2879,20 +2773,16 @@ func (g *Gate) lapse(d owner.Decision) {
 		return
 	}
 	delete(g.waiting, d.Ref)
-	eng := g.eng
 	g.mu.Unlock()
-	if st, err := eng.Get(d.Ref); err == nil && g.cfg.Changes != nil && changeAction(st.Intent.Action) {
-		g.cfg.Changes.Decided(context.Background(), st.Intent, d.Why)
-	}
 	g.closeIntent(d.Ref, lapsed)
 }
 
-// lapsed is the reason a change request closed without the owner's answer.
+// lapsed is the reason a setting request closed without the owner's answer.
 const lapsed = "lapsed, not declined: the owner did not answer"
 
 // ConfirmLocal records the owner's confirmation on the local page for a
-// grant intent (CH-3), or for a change that needs it: turning sharing on
-// or adopting a release (GR17). The local UI (P2-2) calls it after showing
+// grant intent (CH-3), an evidence change (CH-20) or an update-source
+// change (OSS-10). The local UI (P2-2) calls it after showing
 // Describe; the code and the confirmation may come in either order.
 func (g *Gate) ConfirmLocal(id string) error {
 	st, err := g.eng.Get(id)
@@ -2901,8 +2791,7 @@ func (g *Gate) ConfirmLocal(id string) error {
 	}
 	if st.State != journal.Pending || st.Intent.Account != journal.BrokerAccount ||
 		(st.Intent.Action != journal.ActionGrantChange && st.Intent.Action != journal.ActionEvidence &&
-			st.Intent.Action != journal.ActionUpdateFollow && !(changeAction(st.Intent.Action) &&
-			g.evaluate(context.Background(), journal.PhaseAuthorize, st.Intent).local)) {
+			st.Intent.Action != journal.ActionUpdateFollow) {
 		return errors.New("grants: nothing to confirm for " + clip(id))
 	}
 	// Journaled first, so a restart keeps it (OP-12, SM-AJ-2).
@@ -2965,17 +2854,6 @@ func (g *Gate) settle(id string) {
 			g.mu.Lock()
 			delete(g.derived, id)
 			g.mu.Unlock()
-		}
-		if g.cfg.Changes != nil && changeAction(st.Intent.Action) && st.Intent.Account == journal.BrokerAccount &&
-			(st.State == journal.Denied || st.State == journal.Succeeded || st.State == journal.NotApplied) {
-			// Only the owner's NO is a decline; a refusal at the recheck
-			// (stale approval, changed state) is not (change C7), and an
-			// item left out of a partial YES is neither (change C25).
-			why := ""
-			if !d.approved {
-				why = d.why
-			}
-			g.cfg.Changes.Decided(ctx, st.Intent, why)
 		}
 		switch v := (pending{ownerVerdict(d, st), d.req}); {
 		case v.v == "" || g.cfg.Outcome == nil:

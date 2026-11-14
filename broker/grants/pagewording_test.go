@@ -45,7 +45,7 @@ func TestReasonsNameTheWiFiPage(t *testing.T) {
 			return true
 		})
 	}
-	for _, s := range []string{NoPageGrant, NoPageEvidence, NoPageFollow, NoPageSharing} {
+	for _, s := range []string{NoPageGrant, NoPageEvidence, NoPageFollow} {
 		if !strings.Contains(s, "the local Wi-Fi page, which is not running") {
 			t.Errorf("%q", s)
 		}

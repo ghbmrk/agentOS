@@ -159,13 +159,6 @@
     "6eb792335661e8c9b70319d86aa51a1fc77b2598a9275772ff8942cd40365a29": 1,
     "bafb81a4b5b391a0d5e5c3933d593721d43b289ed2abf59250c75c611c9e5382": 1
   },
-  "broker/cmd/agentosd/apnetrot_test.go": {
-    "234074e97e697aa6483200e9fcff1994ed824dcaadbd7c668064c38718331cd4": 1,
-    "34c616703ccf736c20e8a63cfd9bfef7e76a349ccb8759ae87d642bba3bb7ff7": 1,
-    "7e490604b5ac71dbba8238671f2c93141c3e39327af4f1f27ae0da3f377787a4": 1,
-    "8cd9d27ecc3309ecaed8c75f44c3bf00c4671665bac84362f7d78896ad5ed750": 1,
-    "c37fccc982b9a1249d279cf083710483846d9a862c260a32788bf802a6e6b8c2": 1
-  },
   "broker/cmd/agentosd/main.go": {
     "5ac3b5f51f8129b747f7c47a0a5ba2a84cc6eb03ca2d81974b6d7dfcf69f043d": 1
   },
@@ -183,9 +176,6 @@
     "c5000511072ac8a2ef59cb08a091799ec7946bc591a84c00a976d02703521dfc": 1,
     "cc9d42d313b2eb5d7260492ad36c62986f0f85502fcc4b5c47bb614861e0b18e": 1,
     "cdc4875600d2bc44d3cc24af4b756a6159ef0410bc14a5b0020065540c738ac2": 1
-  },
-  "broker/daemon/follow_test.go": {
-    "d3e92f8cd26697c44ca9540f6aecc2fabe98624a44f0ffdc5c81a8ba7a71d107": 1
   },
   "broker/e2e/boxe2e/parse_test.go": {
     "164058efa518723aca917a8db0a6261c0064a680d47cf18e73c05b535aa60001": 1,
@@ -247,9 +237,6 @@
   "broker/localapi/setup_test.go": {
     "2c769e833f37f61bc208fe4ecc2b7004f2c313c30c3bd6bc91a0bbd212ba1bdc": 1
   },
-  "broker/localsrv/rotateapnet_test.go": {
-    "9de9975789c29112277398cca35bc6440da0ad39655a5aaab3f7136585b91736": 1
-  },
   "broker/localsrv/setup_test.go": {
     "d1fef5ab05065dc46e0b933fdaffe2559209d2c11bc9271a703f7fd22031abf0": 1
   },
@@ -286,10 +273,6 @@
     "afd075098852732322ab593c4016e69b654cdb825e1232062c903487b76280c6": 3,
     "d13fe273b1d19b1c50a67084b32b8fc8fb6c60d220715af3110c191dc41007b2": 1
   },
-  "broker/localui/rotwifi_test.go": {
-    "8b565168e64eb2c3dcce93f0716951eb7d005e0e3bf62202931685691e7bdab0": 1,
-    "f26f717ca235777a2d119669bc543a43ac19d0552a4d9f44faf653809bf4a5c6": 1
-  },
   "broker/localui/rotwire_test.go": {
     "1aa6e3e6c92cffafb4b450590fc53d5520024c8abe47e1a97242f9a94dd7b1ce": 1,
     "32964921c40a315ee611a15b493b6d4cf0aabfef845579870d21a68463e81ed2": 1,
@@ -322,27 +305,6 @@
   "broker/localui/vault_test.go": {
     "223363810b05ef7141dcbdb3aadcb25373f6b1686519b19f5e8f588bd5cb80e8": 1
   },
-  "broker/mail/ASSUMPTIONS.md": {
-    "9c0463fce7878d8698ed289e311055b4f23bb8cd3060c9a227a4f9052e71b26e": 1,
-    "a377fdaf82d1ed4f0846d61c5523253113d6aa7883010db0ca0d6111635236b1": 1
-  },
-  "broker/mail/declare.go": {
-    "f00c28aa6655fffa8d97a8f7bd83f6885cea7b4b6b61b678283e532cdfb89708": 1
-  },
-  "broker/mail/mail.go": {
-    "0bbdd477ccce72d09b201e4e654b439fbad92f46da3412c4116c34c55827bfa8": 1,
-    "9b1504aeb97480d6e148299eae2663f4e9b534ed5973b5c96022f59cf3415d5a": 1,
-    "dce0681d4ebedaf9a6b5713cbf86e06b09c446ff9e3c245ac89ccdc2700ea65f": 1
-  },
-  "broker/mail/organize_test.go": {
-    "2ee0d284e212870b1dffbc23416c533d255d47a8de742c66af3c5aa319cf3b02": 1,
-    "310bd975e7feea524b2f9e71fcf700efc6f85430ad04d58a3e41c87e3d2b00ed": 1,
-    "454daff143bafa8031ff5e167ff40a07b00e968fb015ac0b84e715a770682241": 1,
-    "7840f5963a922be32502b1a023aa349c2abb1e9e22dbdb12b81a25bd2e2ed025": 1,
-    "7e31e9b53054e4bc2fd656418b841e0ad7541fcb3a98423eb925435c88b631ff": 1,
-    "b7c78626909d53bd5905e4707472c95a0eb3700e956480a42da34b9be08d25d1": 1,
-    "bcfb0f2d9b28fef3dbc312d296f63f5f410742433c0ef0effb4208e42e00803e": 1
-  },
   "broker/maintain/ASSUMPTIONS.md": {
     "5edd2aaecdff7e3343d9dc95d47623127f32ecfa378681ef664183aa2655114e": 1,
     "bc137fea904ff2eb67fedf548d0f5824ba52133d979aede39344cfa367fe1aab": 1,
@@ -352,14 +314,6 @@
     "7130e3b3e54296e2e53c07e7009fb64ab4a64ac70a1780ef45e753244d3af8e0": 1,
     "781260a57de0bf3f1b95de330379791bd080f2c054f11a85fdafbd5bd6aaa736": 1,
     "ad3dba140509cb2d0ee94f069f747903617f83698ed408dc2fd952c22eab797d": 1
-  },
-  "broker/maintain/maintain.go": {
-    "67ea31fbdac524b6aa03f3c3e6a760fe3dae9de073136e29dd57daeef76992bc": 1,
-    "89b0f6da242105886169374259ed686c546107e80d2cfadffa6e3a106a2a9a3e": 1,
-    "d91be69c1eeb6618282c03d2473fb91baf0e0cd6308ce11293117ad115d40bac": 1
-  },
-  "broker/maintain/maintain_test.go": {
-    "d69ec4203babcd74b88d16fe6ec2fb91581ce1e5ec1c12f6593ebe204c2d2178": 1
   },
   "broker/modem/at/udev/71-agentos-modem.rules": {
     "8b39645546609a45eccf484ee70d0547f8a1fabaaf705efb253c141bbb26be04": 1

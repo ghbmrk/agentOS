@@ -60,3 +60,10 @@ func TestOnlyTheLoopsSentinelItselfAsks(t *testing.T) {
 		t.Fatal(v.kind)
 	}
 }
+
+func wrapErr(err error) error { return &wrapped{err} }
+
+type wrapped struct{ err error }
+
+func (w *wrapped) Error() string { return "wrapped: " + w.err.Error() }
+func (w *wrapped) Unwrap() error { return w.err }

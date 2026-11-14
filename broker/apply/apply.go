@@ -405,10 +405,9 @@ func New(cfg Config) (*Applier, error) {
 	return a, nil
 }
 
-// Schedule queues a verified release the change pipeline adopted as
-// staged. adoption is the adoption's exact ID (change.Report.ID, never
-// its short ID), the only form that settles it (SR3-4). A security fix is due at
-// once; an ordinary release after a random jitter (UPD-5). A newer
+// Schedule queues a verified release adopted as staged. adoption is the
+// adoption's exact ID (never its short ID), the only form that settles it
+// (SR3-4). A security fix is due at once; an ordinary release after a random jitter (UPD-5). A newer
 // schedule replaces an older one. An adoption the applier refuses, other
 // than one it holds or retired, and one a newer schedule replaces, is
 // retired and settled with StageDropped by the next Tick; a retired
@@ -760,8 +759,8 @@ func withdrawnKind(pt *point) string {
 	return doneNotHanded
 }
 
-// WhySecurity is the change pipeline's reason for a revert after a
-// failed security check (change.WhySecurity). It and WhyStable are the
+// WhySecurity is the reason for a revert after a failed security check.
+// It and WhyStable are the
 // reasons Withdraw undoes a handover (SR3-4f-3a).
 const WhySecurity = "security"
 
