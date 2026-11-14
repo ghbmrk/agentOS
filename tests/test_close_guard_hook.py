@@ -84,6 +84,37 @@ class CloseGuardTest(unittest.TestCase):
                   bash('gh issue close "$N"'), bash('gh issue close 5692 && gh issue close "$N"'), bash("gh issue close"), mcp("5660"), mcp(None)):
             self.assertEqual(self.verdict(e), "ask", e)
 
+    def test_unreadable_close_asks_only_where_run(self):
+        # VULN-close-guard-cmdpos (#5705): `gh issue close` with no readable number inside data, such
+        # as a commit message, closes nothing and must not stall an unattended session at the ask.
+        for c in ('git commit -m "docs: run gh issue close N only after cited"',
+                  "git commit -m \"$(cat <<'EOF'\nfix: guard\n\ngh issue close N only after cited\nEOF\n)\"",
+                  "echo gh issue close N", "> gh issue close $N", "grep -n 'gh issue close' tools/x.py 2>&1 | head",
+                  'git commit -m "don\'t run gh issue close N"', "cat <<'EOF' > n.md\ngh issue close N\nEOF",
+                  "grep -rn 'gh issue close' .", "printf '%s\\n' 'gh issue close \"$N\"; echo'"):
+            self.assertIsNone(close_guard.decide(bash(c), self.root), c)
+        # A cited number at every command position, and in a string a nested shell runs, denies.
+        for c in ("bash -c 'gh issue close 5660'", 'sh -c "echo x; gh issue close 5660"',
+                  "bash -c $'gh issue close 5660'", "bash -c $'echo x\\ngh issue close 5660'",
+                  'bash -c "bash -c \'gh issue close 5660\'"', 'ssh host "cd x && gh issue close 5660"',
+                  "GH_TOKEN=x gh issue close 5660", "sudo -u u gh issue close 5660", "env -i gh issue close 5660",
+                  "xargs -n1 gh issue close <<< 5660 && gh issue close 5660", "/usr/bin/gh issue close 5660",
+                  "(gh issue close 5660)", "echo $(gh issue close 5660)", "echo `gh issue close 5660`",
+                  "x | gh issue close 5660", "false || gh issue close 5660", "echo hi\ngh issue close 5660",
+                  "2>/dev/null gh issue close 5660", "> log gh issue close 5660", "{ gh issue close 5660; }",
+                  "if true; then gh issue close 5660; fi", "gh issue -Rghbmrk/agentOS close 5660",
+                  "gh issue close 5660 'unterminated", "cat <<EOF\n$(gh issue close 5660)\nEOF",
+                  "git commit -m \"x; gh issue close 5660\"", "grep 'gh issue close 5660' x",
+                  "bash <<'EOF'\ngh issue close 5660\nEOF", "cat <<'EOF'\nnotes\nEOF\ngh issue close 5660",
+                  # A literal cited number denies wherever it stands, wrapper known or not.
+                  "echo gh issue close 5660", "retry gh issue close 5660", "find . -exec gh issue close 5660 \\;"):
+            self.assertEqual(self.verdict(bash(c)), "deny", c)
+        for c in ("bash -c 'gh issue close \"$N\"'", "sudo gh issue close", "xargs gh issue close",
+                  "bash <<'EOF'\ngh issue close \"$N\"\nEOF", "ssh h 'cd x && gh issue close $N'",
+                  "sudo -u u bash -c \"bash -c 'gh issue close \\$N'\"", "nice -n 5 gh issue close $N",
+                  "find . -exec gh issue close $N \\;"):
+            self.assertEqual(self.verdict(bash(c)), "ask", c)
+
     def test_origin_main_records_also_guard(self):
         # A checkout older than a new record still guards it: origin/main's file counts too.
         d = tree([])

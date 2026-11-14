@@ -10,7 +10,9 @@ where a session makes it. A cited issue stays open with `state:merged` (tools/vu
 REOPEN_NOTE); `acceptance.yml` stays the backstop for every other close path.
 
 Closes it sees: the GitHub MCP issue tools with `state: closed` on ghbmrk/agentOS, and a Bash
-command that runs `gh issue [-R repo] close` or carries `state=closed` beside an `issues/N` path;
+command that holds `gh issue [-R repo] close N` (a target it cannot read goes to the ask only at
+a command position of text that is run, so a commit message naming the command passes, #5705) or
+carries `state=closed` beside an `issues/N` path;
 an `issues/N` call with `--input`, or `closeIssue`, goes to the ask. The records are the
 union of the working tree's file and `origin/main`'s, so a checkout older than a new record
 still guards it. The hook loads in a session rooted at this checkout through settings.json, and
@@ -30,8 +32,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONFIG = "assurance/vulncheck.json"
 REPO = ("ghbmrk", "agentos")
 MCP_TOOLS = {"mcp__github__issue_write", "mcp__github__update_issue"}
-# `gh issue close`, with the repository flag (gh's one flag that goes before the subcommand) between.
-_GH_CLOSE = re.compile(r"\bgh\s+issue\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*close\b", re.I)
 _STATE_CLOSED = re.compile(r"""\bstate["']?\s*[:=]\s*["']?closed\b""", re.I)
 _CLOSE_ARG = re.compile(r"#?([1-9][0-9]{0,6})|https://github\.com/[^/]+/[^/]+/issues/([1-9][0-9]{0,6})")
 _ISSUE_PATH = re.compile(r"\bissues/([1-9][0-9]{0,6})\b")
@@ -41,36 +41,192 @@ _OPAQUE = re.compile(r"\bcloseIssue\b|\bissues/[1-9][0-9]{0,6}(?![/0-9]).*--inpu
                      r"|--input\b.*\bissues/[1-9][0-9]{0,6}(?![/0-9])", re.I | re.S)
 
 
+# Shell lexing for `gh issue close` (#5705). A close of a literal issue number counts wherever the
+# words `gh issue close N` stand, in the command or in any string or here-document in it, so a
+# cited number is denied even inside text that `bash -c`, `ssh` or `eval` may run. A close whose
+# number is unreadable (a variable) asks only where the text is surely run: at a command position
+# (after the start, a separator `;`, `&`, `|`, `(`, `)`, a newline, a backtick or `$(`, environment
+# assignments, redirections, or anywhere after a wrapper such as `sudo` or `xargs`), in the command
+# itself or in a string or here-document given to a shell runner. Elsewhere it is data, such as a
+# commit message or grep pattern, and passes. An unterminated quote runs to the end.
+_SEPS = set(";|()\n`")
+_NESTED = re.compile(r"[\s;&|()`]")
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+_REDIR = re.compile(r"[0-9]*(?:<<<|&>>|&>|>>|<>|>\||<&|>&|<|>)(.*)", re.S)
+# Runners take a string they may run as shell code; a wrapper's later words stay command positions.
+_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "busybox", "ssh", "su", "eval",
+            "watch", "script", "tmux", "screen", "parallel", "xargs", "flock", "nix-shell", "docker", "podman",
+            "kubectl"}
+_WRAPPERS = _RUNNERS | {"sudo", "doas", "env", "command", "builtin", "exec", "nohup", "time", "nice", "ionice",
+                        "timeout", "stdbuf", "setsid", "chronic", "unbuffer", "strace", "find", "!", "{", "if",
+                        "then", "elif", "else", "while", "until", "do"}
+_ANSI = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f",
+         "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi(body):
+    """The text of a $'...' string."""
+    def one(m):
+        e = m.group(1)
+        if e[0] in "xu":
+            return chr(int(e[1:], 16)) if len(e) > 1 else m.group(0)
+        if e[0] in "01234567":
+            return chr(int(e, 8) & 0xFF)
+        return _ANSI.get(e, m.group(0))
+    return re.sub(r"\\(x[0-9a-fA-F]{0,2}|u[0-9a-fA-F]{0,4}|[0-7]{1,3}|.)", one, body, flags=re.S)
+
+
+def _word(s, i):
+    """One shell word from s[i]: (its text with quoting removed, next index)."""
+    out, n = [], len(s)
+    while i < n:
+        c = s[i]
+        if c in " \t" or c in _SEPS or s.startswith("$(", i):
+            break
+        if c == "&" and not (out and out[-1] in "<>"):
+            break
+        if s.startswith("<<", i) and not s.startswith("<<<", i) and not (out and out[-1] == "<"):
+            break
+        if c == "\\":
+            if s[i + 1:i + 2] not in ("", "\n"):
+                out.append(s[i + 1])
+            i += 2
+        elif c == "'" or s.startswith("$'", i):
+            ansi = c == "$"
+            i += 1 + ansi
+            j = i
+            while j < n and s[j] != "'":
+                j += 2 if ansi and s[j] == "\\" else 1
+            out.append(_ansi(s[i:j]) if ansi else s[i:j])
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while i < n and s[i] != '"':
+                if s[i] == "\\" and s[i + 1:i + 2] in ("$", "`", '"', "\\", "\n"):
+                    out.append(s[i + 1] if s[i + 1] != "\n" else "")
+                    i += 2
+                else:
+                    out.append(s[i])
+                    i += 1
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), i
+
+
+def _lex(s):
+    """(simple commands as word lists, here-document bodies as (text, index of their command))."""
+    cmds, bodies, pending, i, n = [[]], [], [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in " \t":
+            i += 1
+        elif s.startswith("\\\n", i):
+            i += 2
+        elif c in _SEPS or c == "&" or s.startswith("$(", i):
+            if cmds[-1]:
+                cmds.append([])
+            i += 1 + s.startswith("$(", i)
+            if c == "\n":
+                for delim, strip, owner in pending:  # each body runs to its delimiter line
+                    start = i
+                    while i < n:
+                        j = s.find("\n", i)
+                        j = n if j < 0 else j
+                        line = s[i:j].lstrip("\t") if strip else s[i:j]
+                        i = j + 1
+                        if line == delim:
+                            break
+                    bodies.append((s[start:i], owner))
+                pending = []
+        elif s.startswith("<<", i) and not s.startswith("<<<", i):
+            i += 2
+            strip = s.startswith("-", i)
+            i += strip
+            while i < n and s[i] in " \t":
+                i += 1
+            delim, i = _word(s, i)
+            pending.append((delim, strip, len(cmds) - 1))
+        else:
+            w, i = _word(s, i)
+            cmds[-1].append(w)
+    return cmds, bodies
+
+
+def _gh_close(rest):
+    """The issues the arguments after a `gh` command name close: [] for no close, None if unread."""
+    if not rest or rest[0].lower() != "issue":
+        return []
+    i = 1
+    while i < len(rest):  # gh's repository flag, its one flag that goes before the subcommand
+        if rest[i] in ("-R", "--repo"):
+            i += 2
+        elif rest[i].startswith(("-R", "--repo=")):
+            i += 1
+        else:
+            break
+    if i >= len(rest) or rest[i].lower() != "close":
+        return []
+    args = [m for t in rest[i + 1:] if (m := _CLOSE_ARG.fullmatch(t))]  # every number-shaped argument
+    return [int(m.group(1) or m.group(2)) for m in args] or None
+
+
+def _command_closes(words, run):
+    """The issues one simple command closes; None for an unreadable close at its command position."""
+    nums, position, skip = [], True, False  # position: True, False, or "wrapped" (stays a position)
+    for k, w in enumerate(words):
+        name = w.rsplit("/", 1)[-1].lower()
+        if name == "gh":
+            found = _gh_close(words[k + 1:])
+            if found is None and run and position and not skip:
+                return None
+            nums += found or []
+        if skip:
+            skip = False
+        elif position is True:
+            redirect = _REDIR.fullmatch(w)
+            if name in _WRAPPERS:
+                position = "wrapped"
+            elif redirect:
+                skip = not redirect.group(1)
+            elif not _ASSIGN.match(w):
+                position = False
+    return nums
+
+
+def _runs(words):
+    return any(w.rsplit("/", 1)[-1].lower() in _RUNNERS for w in words)
+
+
+def _closes(s, run=True, depth=0):
+    """The issues s closes, or None for an unreadable close where `run` says s is surely run, or
+    for strings nested past depth 8."""
+    if depth > 8:
+        return None
+    cmds, bodies = _lex(s)
+    parts = [(w, run and _runs(c[:k])) for c in cmds for k, w in enumerate(c) if w != s and _NESTED.search(w)]
+    parts += [(text, run and _runs(cmds[owner])) for text, owner in bodies]
+    found = [_closes(text, runs, depth + 1) for text, runs in parts]
+    found += [_command_closes(c, run) for c in cmds]
+    if None in found:
+        return None
+    return [n for f in found for n in f]
+
+
 def bash_closes(command):
     """The issue numbers a Bash command closes: [] when it closes none, None when it runs
     `gh issue close` on an issue it names in a way this cannot read (a variable), or may close
-    one through `--input` or GraphQL's `closeIssue`. `state=closed`
-    counts only beside an `issues/N` path, the only form an API close takes; a search or list
-    filter such as `issues?state=closed` names no issue and passes."""
+    one through `--input` or GraphQL's `closeIssue`; an unreadable `gh issue close` asks only at a
+    command position of text that is run (#5705). `state=closed` counts only beside an `issues/N` path, the only form an API
+    close takes; a search or list filter such as `issues?state=closed` names no issue and passes."""
     if _OPAQUE.search(command):
         return None
-    closes = list(_GH_CLOSE.finditer(command))
+    closes = _closes(command)
+    if closes is None:
+        return None
     nums = [int(n) for n in _ISSUE_PATH.findall(command)] if _STATE_CLOSED.search(command) else []
-    if not closes and not nums:
-        return []
-    for closing in closes:
-        try:
-            lex = shlex.shlex(command[closing.end():], posix=True, punctuation_chars=True)
-            lex.whitespace_split = True
-            tokens = list(lex)
-        except ValueError:
-            return None
-        args = []
-        for t in tokens:  # up to the end of this command; every number-shaped argument counts
-            if t and set(t) <= set(";&|()"):
-                break
-            m = _CLOSE_ARG.fullmatch(t)
-            if m:
-                args.append(int(m.group(1) or m.group(2)))
-        if not args:
-            return None
-        nums += args
-    return sorted(set(nums)) or None
+    return sorted(set(closes + nums))
 
 
 def mcp_closes(tool_input):
