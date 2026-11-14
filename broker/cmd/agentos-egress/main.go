@@ -401,10 +401,9 @@ type noAudit struct{}
 
 func (noAudit) Egress(egress.Event) {}
 
-// checkerHelp is the -checker help. It fails closed only while nothing
-// listens at dir/hand.sock: the client hands the seed to any listener,
-// with no peer-uid check (W-3).
-const checkerHelp = "directory of a checker hand socket (hand.sock), which would hold the code-generator seed while the vault is open and check every code (CH-4); since D-244 no process serves hand.sock (agentos-checker serves only verify.sock), so any value fails closed (no unlock and no tier-4 approval passes) unless something listens there, which then receives the seed and approves every act: name only a directory writable only by the checker's uid; empty keeps the seed here"
+// checkerHelp is the -checker help: the safe value first, then why any
+// other is refused unless only root or this uid could listen there (#5649).
+const checkerHelp = "leave empty: the seed stays here, and since D-244 nothing serves hand.sock. Otherwise the directory of a checker hand socket (hand.sock), which would hold the code-generator seed and check every code (CH-4); whatever listens there receives the seed and approves every act, so a directory not owned by root or this uid, or writable by another uid, is refused at start"
 
 func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
