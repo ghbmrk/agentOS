@@ -560,6 +560,248 @@ func TestAnOvertakenSettingsReadIsNotKept(t *testing.T) {
 	}
 }
 
+// The senders record's plaintext, which names who writes to the owner and
+// to whom the owner writes, is wiped once saveSenders has sealed it and
+// once loadSenders has decoded it (#5325, senders.go's two clears).
+func TestTheSendersRecordsPlaintextIsWiped(t *testing.T) {
+	dir := shortDir(t)
+	k := &gmailtest.Kept{Sealer: testSealer()}
+	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": 1}, Sent: map[string]bool{"b@two.test": true}}}
+	if err := saveSenders(dir, k, "slot", rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("saveSenders left %d plaintexts, wiped %v", n, wiped)
+	}
+	if got := loadSenders(dir, k, "slot"); got.Rec.Senders["a@one.test"] != 1 || !got.Rec.Sent["b@two.test"] {
+		t.Fatalf("loadSenders = %+v", got)
+	}
+	if n, wiped := k.Wiped(); n != 2 || !wiped {
+		t.Fatalf("loadSenders left %d plaintexts, wiped %v", n, wiped)
+	}
+}
+
+// A sealer that fails after it decrypted loads no senders record:
+// loadSenders trusts no plaintext handed back with an error (#5325,
+// senders.go's Open check).
+func TestAFailedOpenLoadsNoSendersRecord(t *testing.T) {
+	dir := shortDir(t)
+	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": 1}}}
+	if err := saveSenders(dir, testSealer(), "slot", rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), OpenErr: os.ErrClosed} // any error
+	if got := loadSenders(dir, k, "slot"); got.Over || got.Rec.Senders != nil {
+		t.Fatalf("loadSenders with a failing open = %+v; want an empty record", got)
+	}
+}
+
+// A seal that fails saves no senders record: saveSenders returns the
+// sealer's error, wipes the plaintext, and the record before it still
+// loads (#5325, senders.go's Seal check).
+func TestAFailedSealSavesNoSendersRecord(t *testing.T) {
+	dir := shortDir(t)
+	rec := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"a@one.test": 1}}}
+	if err := saveSenders(dir, testSealer(), "slot", rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	k := &gmailtest.Kept{Sealer: testSealer(), SealErr: os.ErrClosed} // any error
+	next := sealedSenders{Rec: inbox.SendersRecord{Senders: map[string]int64{"b@two.test": 2}}}
+	if err := saveSenders(dir, k, "slot", next, nil); err != os.ErrClosed {
+		t.Fatalf("saveSenders with a failing sealer = %v; want %v", err, os.ErrClosed)
+	}
+	if n, wiped := k.Wiped(); n != 1 || !wiped {
+		t.Fatalf("a failed seal left %d plaintexts, wiped %v", n, wiped)
+	}
+	if got := loadSenders(dir, testSealer(), "slot"); got.Rec.Senders["a@one.test"] != 1 || len(got.Rec.Senders) != 1 {
+		t.Fatalf("after a failed seal the record is %+v; want the one before", got)
+	}
+}
+
+// A snapshot reads the settings once per account and keeps them; a file
+// that does not load is not kept and is read again at the next snapshot;
+// no account is kept as none; and a read that a settings write spanned is
+// not kept (#5325, world.go's snapshot).
+func TestASnapshotKeepsOnlyAWholeSettingsRead(t *testing.T) {
+	var ws worldState
+	var loads int
+	answer := func() (MailSettings, error) { return MailSettings{Address: "owner@one.test"}, nil }
+	ws.load = func(string) (MailSettings, error) {
+		loads++
+		return answer()
+	}
+	for i := range 3 {
+		if sn, ok := ws.snapshot("dir", -1); !ok || sn.set.Address != "owner@one.test" {
+			t.Fatalf("snapshot %d: %+v, %v", i, sn, ok)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("three snapshots read the settings %d times; want once", loads)
+	}
+
+	ws.reset(1)
+	loads = 0
+	answer = func() (MailSettings, error) { return MailSettings{}, errors.New("a damaged settings file") }
+	if _, ok := ws.snapshot("dir", -1); ok {
+		t.Fatal("a snapshot with settings that do not load has an account")
+	}
+	answer = func() (MailSettings, error) { return MailSettings{Address: "owner@two.test"}, nil }
+	if sn, ok := ws.snapshot("dir", -1); !ok || sn.set.Address != "owner@two.test" || loads != 2 {
+		t.Fatalf("after a failed read: %+v, %v, %d reads; want the settings read again", sn, ok, loads)
+	}
+
+	ws.reset(2)
+	loads = 0
+	answer = func() (MailSettings, error) { return MailSettings{}, ErrNoMailAccount }
+	for range 2 {
+		if _, ok := ws.snapshot("dir", -1); ok {
+			t.Fatal("a snapshot with no account has one")
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("no account was read %d times; want once, then kept", loads)
+	}
+
+	ws.reset(3)
+	loads = 0
+	answer = func() (MailSettings, error) {
+		end := ws.writing() // a setter's write begins and ends during the read
+		end()
+		return MailSettings{Address: "owner@three.test"}, nil
+	}
+	if _, ok := ws.snapshot("dir", -1); ok {
+		t.Fatal("a read that a write spanned gave an account")
+	}
+	answer = func() (MailSettings, error) { return MailSettings{Address: "owner@four.test"}, nil }
+	if sn, ok := ws.snapshot("dir", -1); !ok || sn.set.Address != "owner@four.test" || loads != 2 {
+		t.Fatalf("after a spanned read: %+v, %v, %d reads; want the settings read again", sn, ok, loads)
+	}
+}
+
+// With no accounts table in its config, the host matches the senders
+// read's domains against the shipped one (#5325, world.go's held).
+func TestHeldFallsBackToTheShippedTable(t *testing.T) {
+	h := &MailHost{}
+	if got := h.held([]string{"spam.test", "accounts.google.com"}); !slices.Equal(got, []string{"accounts.google.com"}) {
+		t.Fatalf("held with the shipped table = %q; want only accounts.google.com", got)
+	}
+}
+
+// imapHost is the IMAP server's host, and none for an API account even
+// with an IMAP server named (#5325, world.go's imapHost).
+func TestImapHostIsNoneForAnAPIAccount(t *testing.T) {
+	for _, c := range []struct {
+		s    MailSettings
+		want string
+	}{
+		{MailSettings{IMAP: "imap.one.test:993"}, "imap.one.test"},
+		{MailSettings{API: "gmail", IMAP: "imap.one.test:993"}, ""},
+		{MailSettings{IMAP: "imap.one.test"}, ""},
+	} {
+		if got := imapHost(c.s); got != c.want {
+			t.Errorf("imapHost(%+v) = %q; want %q", c.s, got, c.want)
+		}
+	}
+}
+
+// A senders step waits for the step in flight before it reads (#5325,
+// senders.go's wait for h.stepping): while another step is marked in
+// flight, it reads nothing and tells nothing, and once that one ends it
+// runs.
+func TestASendersStepWaitsForTheStepInFlight(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), mailFrom("a@one.test", "<a1@one.test>"))
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	var steps atomic.Int32
+	c := mailConfig() // World set: no worker, the test runs the step
+	c.stepped = func(bool, bool) { steps.Add(1) }
+	h := &MailHost{ctx: t.Context(), dir: dir, sec: sec, cfg: c, kick: make(chan struct{}, 1)}
+	other := make(chan struct{})
+	h.mu.Lock()
+	h.stepping = other
+	h.mu.Unlock()
+	done := make(chan bool)
+	go func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		done <- h.readSenders()
+	}()
+	eventually(t, "the step waiting for the one in flight", func() bool {
+		select {
+		case <-done:
+			t.Fatal("the step ran while another was in flight")
+		default:
+		}
+		return gmailtest.Waiting("(*MailHost).wait", "chan receive")
+	})
+	if n := steps.Load(); n != 0 || len(srv.Logins()) != 0 {
+		t.Fatalf("while another step was in flight: %d steps told, logins %v", n, srv.Logins())
+	}
+	h.mu.Lock()
+	h.stepping = nil
+	close(other)
+	h.mu.Unlock()
+	<-done
+	if n := steps.Load(); n != 1 || len(srv.Logins()) == 0 {
+		t.Fatalf("after the other step ended: %d steps told, logins %v; want it run", n, srv.Logins())
+	}
+}
+
+// The PlanSenders read reads no mailbox while a sign-in failure stops the
+// clerk, giving the stop, nor with no account, giving that (#5325,
+// world.go's planSenders).
+func TestThePlanSendersReadNeedsAnAccountAndNoStop(t *testing.T) {
+	srv := imaptest.Start(t)
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mailConfig() // World set: no worker, the test runs the read
+	h := &MailHost{ctx: t.Context(), dir: dir, sec: sec, cfg: c, kick: make(chan struct{}, 1)}
+	plan := func() ([]string, error) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.planSenders(true)
+	}
+	if d, err := plan(); !errors.Is(err, ErrNoMailAccount) || d != nil {
+		t.Fatalf("with no account: %q, %v; want %v", d, err, ErrNoMailAccount)
+	}
+	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("synthetic: stopped until setup")
+	h.stop = stop
+	if d, err := plan(); err != stop || d != nil || len(srv.Logins()) != 0 {
+		t.Fatalf("while stopped: %q, %v, logins %v; want the stop and no read", d, err, srv.Logins())
+	}
+	h.stop = nil
+	if _, err := plan(); err != nil || len(srv.Logins()) == 0 {
+		t.Fatalf("with the stop cleared: %v, logins %v; want a read", err, srv.Logins())
+	}
+}
+
+// A host with no world of its config's has no authserv-id to match its
+// senders read against, rather than calling a world it does not have
+// (#5325; accountplan.go's authServ, a line #5326 lists, reached by the
+// senders step's tests).
+func TestAHostWithoutAWorldHasNoAuthServ(t *testing.T) {
+	if got := (&MailHost{}).authServ(); got != "" {
+		t.Fatalf("authServ with no world = %q; want none", got)
+	}
+	h := &MailHost{cfg: MailConfig{World: func() inbox.World { return inbox.World{AuthServ: "mx.one.test"} }}}
+	if got := h.authServ(); got != "mx.one.test" {
+		t.Fatalf("authServ = %q; want the world's", got)
+	}
+}
+
 // Each setter writes the settings inside its change (#3538 item 2): a world
 // for the old count, built between the write and the change being counted
 // with no settings cached, has no account, never the new one's.
