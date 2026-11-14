@@ -61,7 +61,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-adapters-h | MIG-4-adapters-h: A5 and A14 assurance runs rebuilt on the kernel and clerk exit; old-core e2e tests and `provagent` deleted (A5, A14, CRED-5). | MIG-4-adapters-g; #2780; #2571 | queued (tier A; slice h of #2579) |
 | MIG-4-recovery-retire-rotate | MIG-4-recovery-retire-rotate: the migration runbook has the owner rotate the recovery key (REC-4) once the old core and its vault are retired (ID-1). | MIG-4-recovery-r4a (#3409); old-core deletion | queued (later; tier B; from #3412 reviews) |
 | MIG-4-adapters-f2b | MIG-4-adapters-f2b: the update store records a follow step's idempotency key with the switch, so the follow clerk can prove a lost switch never landed (KRN-8). | MIG-4-adapters-f2 | queued (tier A; later) |
-| MIG-4-untrusted-change-c3 | MIG-4-untrusted-change-c3: delete the change engine, keeping only `change`'s store, so `change` imports neither `journal` nor `verb`; `grants` drops its `Changes` gate. | MIG-4-untrusted-change-c1 (#3455, merged), MIG-4-untrusted-loops (#2786) | building (sub B; tier A; gate file) |
 | MIG-4-exit-m2 | MIG-4-exit-m2: agentosd's guest model route and setup's API-key step call the model clerk, not the vault process; `modelroute`'s vault clients deleted (PLN-5, CLK-7, ONB-3). | #3680 (m1); #2780 b3; #2780 b2b-unit; #3427 or its fold; agentosd slot | queued (tier A; slice m2 of #2571; size M) |
 | MIG-4-exit-c3 | MIG-4-exit-c3: agentosd's owner channel and setup check approval codes through the checker and the kernel; agentosd's second-line code and notice pull go; agentosd imports no `modelroute` (CH-4, CH-14, CH-17). | #3683 (c2) and its unit; #3681 (m2); Decision 2 on #2571; agentosd slot | queued (tier A; slice c3 of #2571; size M) |
 | MIG-4-exit-p | MIG-4-exit-p: `localui` and `agentos-localui` dial no vault-process socket; old unlock, trust and setup-vault pages deleted, the private-data page onto the model clerk (STO-2, PLN-3, REC-4). | #3679; #3624; #3409; #3410; #3680 (m1); D-227 (delete the second line) | queued (tier A; slice p of #2571; size M) |
@@ -154,7 +153,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | OWN-page-session-e2e | OWN-page-session-e2e: the box e2e phone check opens the session on the page, not by a texted code (CH-14, D-311; release of #4941) | #4941 | queued (tier A) |
 | OWN-page-session-checks | OWN-page-session-checks: held owner text failing CH-19 or CH-21 shows as a pointer and cannot be run (CH-14; release of #4941) | #4941 | queued (tier A) |
 | OWN-page-session-hold | OWN-page-session-hold: owner-set hold size (MaxInbox to match) and mid-message code hygiene on held text (CH-14, CH-18; release of #4941) | #4941 | queued (tier A) |
-| KEY-9-reach-b2-cut | KEY-9-reach-b2-cut: cut 350+ trusted lines no binary reaches, room for b2a and b2b (D-310) | #5060 | building (release; tier A; lane primary) |
 | KEY-9-reach-b2a | KEY-9-reach-b2a: graph reach over declarations, a decl.reach log entry and its fold (KEY-9, D-307) | #5060 | building (release; tier A; lane primary) |
 | KEY-9-reach-b2b | KEY-9-reach-b2b: grows-then-narrows, the kernel narrows a grown key to its old worth and logs the offer (KEY-9, D-307) | #5060 | queued (release; tier A; lane primary) |
 | KEY-9-reach-inbound-wiring | KEY-9-reach-inbound-wiring: count the root-run inbound renderer in the trusted base (KRN-2, D-310) | #5677 | queued (release; tier A; lane primary; waits for #5677) |
@@ -326,8 +324,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HOST-1h | HOST-1h: an image's hostcheck liveness answer must stop before its MOR clear, or a shutdown in progress could answer and then halt. Release; from #5266. | #5266, #5256 | queued (release; tier A) |
 | ENF-shared-quota-b | ENF-shared-quota-b: a host cannot fill its shared segment's records (ct timeout plus per-MAC count and meter). Release; split from #4701; waits for Mark's card. | #4701 | queued (release; tier A; lane primary) |
 | VULN-debian-r5-reach | VULN-debian-r5-reach: on a built image, check whether cryptsetup or systemd can reach libssl3t64's AES-GCM-SIV through a cipher name read from a disk header; constrain it or record the reach in the #2919 records. Release; from #5338. | #5338, #2919 | queued (release; tier A; lane primary) |
-| INFER-image-buildinfo-fu2 | INFER-image-buildinfo-fu2: quote an empty llama_src_url in the refusal, catch env -i before cmake, and a fixture for the TAG regex's ^ anchor. | — | building (release; tier A; size S; from #5636) |
-| SPEC-core-join-f2 | SPEC-core-join-f2: REC-5 names the pre-marked join page (reciprocal of NET-4) | #5682 | building (release; tier B; lane primary) |
 | ENF-shared-nd-input | ENF-shared-nd-input: an IPv6 address that only talks to the enforcer gets a neighbour hold | #4686 (ENF-shared-nd) | queued(tier A; lane primary) |
 
 ## Model routes and the Codex lane
@@ -425,7 +421,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TIM-1-interval-fu-b | TIM-1-interval-fu-b: agentosd's STATUS line moves to the interval, and the PLAN ON reply says consent is withdrawn. Release; from #5215. | #5215, #5216 | queued (release; tier A) |
 | VOICE-ro-d-ending-wording | VOICE-ro-d-ending-wording: the call-limit notice's wording is recorded in SPEC or a UX entry. Release (spec-gap); from #5299. | #5299, #5262 | queued (release) |
 | CLK-run-signin-ctx | CLK-run-signin-ctx: SignInWorker contract, a sign-in's contexts end with it; kill plansignin.go:351 with a ctx-recording fake (needs clerk/run's package-wide survivors cleared). Release; from #5290. | #5290 | queued (release; tier A) |
-| CLK-run-mut-senders | CLK-run-mut-senders: kill or waive the old mutgate deletion survivors in senders, the sign-in socket and the world (50). Release; from #5290. | #5290, #5276 | building (release; tier A) |
 | CLK-run-mut-plan | CLK-run-mut-plan: kill or waive the old mutgate deletion survivors in the account plan, plan, secrets, plan sign-in and clerk (25). Release; from #5290. | #5290, #5276 | queued (release; tier A) |
 | KRN-forget-c-notice-words | KRN-forget-c-notice-words: the after-erase Forget notice names kinds in the kernel's household words, as the ask does, not raw class names. From #5163. | #5163, #5125 | queued (release; tier A) |
 | KRN-clock-second-source | KRN-clock-second-source: give the kernel's sandbox a second time source and pass the TIM-1 guard's reading as KernelConfig.Clock. Release; from #5387. | #5147, #5387 | queued (release; tier A) |
@@ -435,17 +430,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VM-snap-unread-notice-fu | VM-snap-unread-notice-fu: the unread-snapshot deletion notice is held and retried until the owner channel delivers it. Release; from #5499 (UX). | #5481, #5499 | queued (release; tier B) |
 | IMG-initrd-global-ext-dirs | IMG-initrd-global-ext-dirs: INITRD_IMAGE_DIRS adds /.extra/global_sysext and /.extra/global_confext when the image's systemd moves past v257. Release; blocked on that bump; from #5501 (Security). | #5488, #5501 | queued (release; tier A; blocked on the systemd bump) |
 | IMG-keyring-pin | IMG-keyring-pin: the Debian archive keyring is checked against committed fingerprints before any image or guest build uses it. Release; from #5573. | #5573 | queued (release; tier A; gate files) |
-| IMG-camdecode-build-fu | IMG-camdecode-build-fu: the decoder build's guards, GOROOT copy, vcs stamps and Go link cache are pinned, and libavcodec is built once. Release; from #5593. | #5582, #5593 | building (release; tier A; gate file) |
 | GUEST-bridge-tree-dead-fu | GUEST-bridge-tree-dead-fu: retire the stale TREE rows and B16, bound the idle-bridge test, drop the guest-plane tree exemption (#5611 reviews) | - | queued (release; tier B) |
 | VULN-debian-r6-f1 | VULN-debian-r6-f1: state the flaw class and main-tree/initrd reachability of glibc DEBIAN-CVE-2026-100290 and -115819 in their vulncheck records; alert if remote-reachable. | #5503, #5623 | building (release; tier A) |
 | TEST-flake-browser-close-drain | TEST-flake-browser-close-drain: TestCloseDrainsAnUnaskedLine no longer races its own receive against Close's drain goroutine. | none | building (release) |
-| CTL-unicode-chat-code-fu2 | CTL-unicode-chat-code-fu2: enclosed-zero value fixed and pinned, the digits reply only for 6-digit runs with a next step, and an unlocked stripped native-digit number gets a notice. | none | queued (release; tier A) |
-| GUEST-bridge-time-alias | GUEST-bridge-time-alias: goroutine inventory resolves an aliased or dot import of time before matching timer starts (#5640 L3 release) | - | in review (release; tier A) |
+| CTL-unicode-chat-code-fu2 | CTL-unicode-chat-code-fu2: enclosed-zero value fixed and pinned, the digits reply only for 6-digit runs with a next step, and an unlocked stripped native-digit number gets a notice. | none | building (release; tier A) |
 | OWN-resume-says-cancelled-fu | OWN-resume-says-cancelled-fu: RESUME's cancel note only when the STOP cancelled something. | #5664 | queued (release; tier A) |
 | CLK-run-open-wipe | CLK-run-open-wipe: a plaintext handed back with an Open error is wiped too. Release; from #5662. | #5324 | queued (release; tier A) |
 | VOICE-ro-d-ending-wait-size | VOICE-ro-d-ending-wait-size: size the ending notice's sentence wait from hardware timing. Release (UX); from #5668. | #5668, #5304 | queued (release; tier A) |
-| VOICE-ro-d-ending-carry | VOICE-ro-d-ending-carry: a question asked but not yet spoken is carried past the ending notice. Release (UX); from #5668. | #5668, #5304 | building (release; tier A) |
-| ENF-c-f3d | ENF-c-f3d: drop the redundant owner-algorithm check in page.New | #5688 | building (release; tier A; from #5688 L3) |
 | VOICE-ro-d-ending-fu | VOICE-ro-d-ending-fu: the ending notice never starts over an owner who is speaking; C9 states the hush race and ctx-ignoring Say. Release (UX); from #5668. | #5668, #5684 | queued (release; tier A) |
 | CLK-run-mut-mail-fu | CLK-run-mut-mail-fu: StartTLS setting delivers nothing, gmailtest.Waiting matches any goroutine, a replaced warm-up notice can go unshown. Release; from #5662. | #5324 | queued (release; tier A) |
 
@@ -491,8 +482,6 @@ issue #5062: body has no board-row block
 issue #5177: body has no board-row block
 issue #5202: body has no board-row block
 issue #5216: body has no board-row block
-issue #5651: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has ['review']
-issue #5692: body has no board-row block
 issue #5705: body has no board-row block
 issue #5707: body has no board-row block
 issue #5709: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
