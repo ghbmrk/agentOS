@@ -809,13 +809,16 @@ func (b *bothStops) Stop(ctx context.Context) (control.StopReport, error) {
 
 // freshStop is whether a STOP sent now starts the kernel's count, read
 // only while the count is not known whole (one read per process in
-// practice): the kernel is not stopped, or waits for setup and holds no
-// plan. A kernel that cannot be read is not.
+// practice): neither the journal nor the kernel is stopped, or the kernel
+// waits for setup and holds no plan. A kernel that cannot be read is not;
+// nor is a journal still stopped with the kernel lifted, which may be a
+// RESUME whose kernel lift landed before this process died untold
+// (Security on #5734).
 func (b *bothStops) freshStop(ctx context.Context) bool {
 	b.mu.Lock()
 	whole := b.whole
 	b.mu.Unlock()
-	if whole {
+	if whole || b.Engine.Stopped() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, kernelFor)

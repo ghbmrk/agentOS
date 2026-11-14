@@ -3,6 +3,7 @@ package daemon
 // REQ: KRN-7, CH-12
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -110,3 +111,38 @@ func TestAFailedResumeLeavesTheLossOpen(t *testing.T) {
 		t.Fatalf("the RESUME after a restart: %q, want %q", r, want)
 	}
 }
+
+// A RESUME whose kernel lift landed before agentosd died, untold, leaves
+// the journal stopped and the kernel lifted; the restarted process does
+// not take the owner's next STOP as starting the count whole, so its
+// RESUME gives the general note, not only the new count (Security on
+// #5734). Catches the first STOP's cancels never named.
+func TestALiftInterruptedByARestartLeavesTheLossOpen(t *testing.T) {
+	ctx := context.Background()
+	k := &fakeKernel{cancelled: 3}
+	j := &journalStopped{stopped: true} // the journal's STOP held; its RESUME never ran
+	b := &bothStops{Engine: j, k: k}
+	// The kernel's STOP is in force, then its lift lands and the process dies.
+	k.set(func(k *fakeKernel) { k.stopped, k.stops = false, 1 })
+	if _, err := b.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	k.set(func(k *fakeKernel) { k.cancelled = 0 }) // this STOP restarted the count
+	if n, err := b.StopCancelled(); err == nil {
+		t.Fatalf("the STOP after the interrupted lift was trusted: %d", n)
+	}
+	if r, want := control.CancelledNote(b), " "+control.StopCancelledNote; r != want {
+		t.Fatalf("RESUME note %q, want %q", r, want)
+	}
+}
+
+// journalStopped is the journal's control.Engine, stopped or not.
+type journalStopped struct{ stopped bool }
+
+func (j *journalStopped) Stop(context.Context) (control.StopReport, error) {
+	j.stopped = true
+	return control.StopReport{}, nil
+}
+func (j *journalStopped) Resume() error          { j.stopped = false; return nil }
+func (j *journalStopped) Stopped() bool          { return j.stopped }
+func (j *journalStopped) List() []control.Status { return nil }
