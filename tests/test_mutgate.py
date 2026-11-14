@@ -2321,14 +2321,15 @@ class Record(unittest.TestCase):
             run = self.repo(d, self.SRC, self.SRC)
             rec = self.waive(d, run, 8)
             entry = json.loads(rec.split("\n")[1])
-            self.assertEqual({k: entry[k] for k in ("file", "func", "stmt", "at", "after", "occurrence", "accepted")},
-                             {"file": "a.go", "func": "f", "stmt": ["if x > 1 {"], "at": 0, "after": "}",
-                              "occurrence": [1, 1], "accepted": "#5743"})
+            self.assertEqual({k: entry[k] for k in ("file", "mutant", "func", "stmt", "at", "after", "occurrence", "accepted")},
+                             {"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "f", "stmt": ["if x > 1 {"], "at": 0,
+                              "after": "}", "occurrence": [1, 1], "accepted": "#5743"})
+            self.assertRegex(entry["decl"], "^[0-9a-f]{64}$")
             r = run("records", "netguard")
             self.assertEqual((r.returncode, r.stdout.split(" ")[0]), (0, "broker/netguard/a.go:8"), r.stderr)
-            # Lines added above the statement, in the file and in its function: the entry moves with it.
+            # Lines added above the statement's func, and another func: the entry moves with it.
             for moved, line in ((self.SRC.replace("// x\n", "// x\n// y\n\nvar z = 1\n"), 11),
-                                (self.SRC.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2"), 9)):
+                                (self.SRC.replace("// x\n", "func g() {\n\tprintln()\n}\n\n// x\n"), 12)):
                 with self.subTest(moved):
                     (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(moved)
                     r = run("records", "netguard")
@@ -2342,15 +2343,20 @@ class Record(unittest.TestCase):
             for changed in (self.SRC.replace("\t}\n\tif x > 1 {\n\t\treturn 3", "\t}\n\tif x >= 1 {\n\t\treturn 3"),  # the statement
                             self.SRC.replace("\t}\n\tif x > 1 {\n\t\treturn 3\n\t}\n", "\t}\n"),                   # deleted
                             self.SRC.replace("\t\treturn 2\n\t}\n", "\t\treturn 2\n\t}\n\tx--\n"),                # the line before it
+                            self.SRC.replace("\treturn x\n", "\treturn x + 1\n"),                                # code after it (Security on #5780)
+                            self.SRC.replace("\tif x > 1 {\n\t\treturn 2", "\tx++\n\tif x > 1 {\n\t\treturn 2"),  # anywhere in its func
                             self.SRC.replace("func f(", "func g(")):                                              # another declaration
                 with self.subTest(changed):
                     (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(changed)
                     r = run("records", "netguard")
                     self.assertEqual(r.returncode, 1, r.stdout)
                     self.assertIn("names no statement at the head", r.stderr)
-            # A twin of the statement with the same line before it: the count changes, so the entry is stale.
-            twin = self.SRC.replace("\treturn x\n", "\tif x > 1 {\n\t\treturn 4\n\t}\n\treturn x\n")
-            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(twin)
+        # A twin outside any func (no digest), with the same line before it: the count changes, so it is stale.
+        src = "package netguard\n\nvar b = 0\nvar a = 1 + 1\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, src, src)
+            self.waive(d, run, 4)
+            (pathlib.Path(d) / "broker" / "netguard" / "a.go").write_text(src + "var b = 0\nvar a = 1 + 1\n")
             r = run("records", "netguard")
             self.assertEqual(r.returncode, 1, r.stdout)
             self.assertIn("was written for occurrence 1 of 1, and the head has 2", r.stderr)
@@ -2385,7 +2391,9 @@ class Record(unittest.TestCase):
             for bad in ("{", "[]", json.dumps({**good, "extra": 1}), json.dumps({**good, "file": "../x.go"}),
                         json.dumps({**good, "file": "a_test.go"}), json.dumps({**good, "reason": "."}),
                         json.dumps({**good, "accepted": "5743"}), json.dumps({**good, "occurrence": [2, 1]}),
-                        json.dumps({**good, "at": 1}), json.dumps({**good, "stmt": []})):
+                        json.dumps({**good, "at": 1}), json.dumps({**good, "stmt": []}),
+                        json.dumps({**good, "mutant": "all"}), json.dumps({**good, "decl": "x"}),
+                        json.dumps({k: v for k, v in good.items() if k != "mutant"})):
                 with self.subTest(bad):
                     path.write_text(bad + "\n")
                     r = run("records", "netguard")
@@ -2423,7 +2431,7 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
         with tempfile.TemporaryDirectory() as d:
-            rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
                               "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
             run = self.repo(d, self.VAR, head, record=rec)
             r = self.verify(d, run, 4)
@@ -2440,7 +2448,7 @@ class Record(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             # The base's entry, unchanged, on a line the PR moves and edits around: not marked new.
             base = self.VAR + "var b = 2 + 2\n"
-            rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
+            rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var b = 2 + 2"], "at": 0, "after": "var a = 1 + 1",
                               "occurrence": [1, 1], "reason": "b is never read", "accepted": "#5743"}) + "\n"
             run = self.repo(d, base, "package netguard\n\n// moved\nvar a = 1 + 1\nvar b = 2 + 2\nvar c = 3 + 3\n",
                             base_record=rec)
@@ -2448,8 +2456,22 @@ class Record(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertNotIn("new in this PR", r.summary)
 
+    def test_an_entry_waives_only_its_mutant_kind(self):
+        # Security on #5780: a deletion proof carried forward must not waive a gremlins mutant on its line.
+        rec = json.dumps({"file": "a.go", "mutant": "STATEMENT_DELETION", "func": "", "decl": "", "stmt": ["var b = 2 + 2"],
+                          "at": 0, "after": "var a = 1 + 1", "occurrence": [1, 1], "reason": "b is never read",
+                          "accepted": "#5743"}) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            run = self.repo(d, self.VAR, self.VAR + "var b = 2 + 2\n", record=rec)
+            r = self.verify(d, run, 4)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/a.go:4 ARITHMETIC_BASE survives", r.stdout)
+        self.assertEqual(mutgate.violations({"p": {"broker/p/a.go": {4}}}, {"p": [("a.go", 4, "STATEMENT_DELETION"),
+                         ("a.go", 4, "CONDITIONALS_NEGATION")]}, {("broker/p/a.go", 4, "STATEMENT_DELETION"): "r"}),
+                         [("p", "broker/p/a.go", 4, "CONDITIONALS_NEGATION")])
+
     def test_a_stale_entry_fails_the_gate(self):
-        rec = json.dumps({"file": "a.go", "func": "", "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
+        rec = json.dumps({"file": "a.go", "mutant": "ARITHMETIC_BASE", "func": "", "decl": "", "stmt": ["var a = 1 + 1"], "at": 0, "after": "package netguard",
                           "occurrence": [1, 1], "reason": "a is never read", "accepted": "#5743"}) + "\n"
         with tempfile.TemporaryDirectory() as d:
             run = self.repo(d, self.VAR, "package netguard\n\nvar a = 1 + 2\n", base_record=rec)
