@@ -3,6 +3,7 @@ package clock
 // REQ: TIM-1, KEY-4, CLK-2
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -139,5 +140,57 @@ func TestTIM1OwnerTextsDescribeTheInterval(t *testing.T) {
 	}
 	if !strings.Contains(texts[2], "about 3 hours") || !strings.Contains(texts[2], "Nothing to do.") {
 		t.Errorf("OutlierText = %q", texts[2])
+	}
+}
+
+// trackOffset is chronyc tracking with the system clock off its selected
+// source by off (field 5, seconds; chronyd slews it out).
+func trackOffset(off time.Duration) string {
+	return "C0000201,192.0.2.1,2,1791230000.123456789," + strconv.FormatFloat(off.Seconds(), 'f', 6, 64) + ",0.000002,0.000003,-1.234,0.001,0.010,0.012,0.001,64.1,Normal\n"
+}
+
+func TestTIM1SlewingNTSDoesNotBoundAnHonestCarrier(t *testing.T) {
+	// Security finding 1 on #5754: a forged plain-NTP step at boot leaves the
+	// box clock hours off while chronyd selects an NTS source and slews
+	// toward it at 500 ppm. The source is authenticated, the clock is not:
+	// the honest carrier must still widen the interval, so Earliest is true
+	// time and no hold ends early.
+	for _, off := range []time.Duration{3 * time.Hour, -3 * time.Hour} {
+		r := newRig()
+		truth := r.wall
+		r.wall = r.wall.Add(off) // box clock off; carrier honest
+		offset := off
+		g := r.guard(t, func(c *Config) {
+			c.Sync = func() (SyncKind, error) {
+				return chronySync(bg, chronycOut(trackOffset(offset), srcNTS, authNTS, nil))
+			}
+		})
+		lo, hi, s := g.Interval(bg)
+		if s.Authenticated {
+			t.Fatalf("offset %v: an unconverged clock counts as authenticated: %+v", off, s)
+		}
+		wantLo, wantHi := truth, truth.Add(off)
+		if off < 0 {
+			wantLo, wantHi = wantHi, wantLo
+		}
+		if !lo.Equal(wantLo) || !hi.Equal(wantHi) {
+			t.Fatalf("offset %v: interval [%v, %v], want it to span true time %v and the box clock", off, lo, hi, truth)
+		}
+		r.advance(DefaultInterval)
+		if e, _ := g.Earliest(bg); e.After(truth.Add(DefaultInterval)) {
+			t.Fatalf("offset %v: Earliest %v ahead of true time %v", off, e, truth.Add(DefaultInterval))
+		}
+	}
+	// Converged (offset within NTSConverged), the source's authentication
+	// stands for the clock.
+	r := newRig()
+	r.carrier = r.carrier.Add(3 * time.Hour)
+	g := r.guard(t, func(c *Config) {
+		c.Sync = func() (SyncKind, error) {
+			return chronySync(bg, chronycOut(trackOffset(-20*time.Millisecond), srcNTS, authNTS, nil))
+		}
+	})
+	if _, _, s := g.Interval(bg); !s.Authenticated {
+		t.Fatalf("converged NTS: %+v", s)
 	}
 }
