@@ -858,8 +858,11 @@ func waiting(id, fn, on string) bool {
 			parent[goID(g)] = m[1]
 		}
 	}
+	// A creator is older than what it created, and the runtime reuses no
+	// goroutine number, so each chain ends at a goroutine with no parent
+	// in the dump.
 	in := func(g string) bool {
-		for n := 0; g != "" && n <= len(parent); g, n = parent[g], n+1 {
+		for ; g != ""; g = parent[g] {
 			if g == id {
 				return true
 			}

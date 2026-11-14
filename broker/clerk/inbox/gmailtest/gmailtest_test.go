@@ -90,3 +90,14 @@ func TestGoIDReadsTheHeaderNumber(t *testing.T) {
 		}
 	}
 }
+
+// A goroutine whose number the dump does not give is no G at all, never
+// one that covers every goroutine.
+func TestAGoroutineWithNoNumberIsRefused(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("known accepted a goroutine with no number")
+		}
+	}()
+	known("")
+}
