@@ -91,7 +91,22 @@ func (u unsyncedStore) Save(s State) error {
 	if err := u.FileStore.Save(s); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: synthetic", privfile.ErrUnsynced)
+	return fmt.Errorf("%w: sync %s: synthetic", privfile.ErrUnsynced, unsyncedCanary)
+}
+
+// unsyncedCanary stands for the directory path an ErrUnsynced carries: it
+// may reach agentosd's log, never a reply.
+const unsyncedCanary = "/canary-dir-5047"
+
+// captureLog replaces the package log hook for one test and returns the
+// lines it was called with.
+func captureLog(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	old := logf
+	logf = func(format string, args ...any) { got = append(got, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { logf = old })
+	return &got
 }
 
 // REQ: CH-18
@@ -103,9 +118,19 @@ func (u unsyncedStore) Save(s State) error {
 func TestOwnerStateSaveUnsyncedKeepsMemoryEqualToTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "owner.json")
 	r := newRig(t, unsyncedStore{FileStore{Path: path}})
+	logged := captureLog(t)
 	code := r.totp()
-	if got := r.say(code); !strings.Contains(got, "That code is right") {
+	got := r.say(code)
+	if !strings.Contains(got, "That code is right") {
 		t.Fatalf("unsynced code replied %q", got)
+	}
+	// REV-CHK-save-owner-f1-r1 (#5047): the unsynced save is logged once,
+	// with the error; the reply names no path.
+	if len(*logged) != 1 || !strings.Contains((*logged)[0], privfile.ErrUnsynced.Error()) || !strings.Contains((*logged)[0], unsyncedCanary) {
+		t.Fatalf("the unsynced save logged %q, want one line with the error", *logged)
+	}
+	if strings.Contains(got, unsyncedCanary) {
+		t.Fatalf("the reply names the path: %q", got)
 	}
 	disk, err := FileStore{Path: path}.Load()
 	if err != nil {

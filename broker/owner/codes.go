@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -77,15 +78,23 @@ type codes struct {
 // (privfile.ErrUnsynced) renamed the new file into place, so it counts as
 // saved: memory keeping the old state would accept a spent code again and
 // the next commit would write that old state back over the file (#4971).
+// It is logged, since a crash may still lose the rename and the owner was
+// told the change took (#5047).
 func (c *codes) commit(f func(*State)) error {
 	next := copyState(c.st)
 	f(&next)
-	if err := c.store.Save(next); err != nil && !errors.Is(err, privfile.ErrUnsynced) {
-		return err
+	if err := c.store.Save(next); err != nil {
+		if !errors.Is(err, privfile.ErrUnsynced) {
+			return err
+		}
+		logf("owner: state save: %v", err)
 	}
 	c.st = next
 	return nil
 }
+
+// logf writes to agentosd's log. Tests replace it.
+var logf = log.Printf
 
 // strongResult says how a code-generator or grid code was checked.
 type strongResult int
