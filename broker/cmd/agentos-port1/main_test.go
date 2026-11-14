@@ -105,8 +105,8 @@ func TestAdmitPort1LoadsTheSetAndHandsOverTheName(t *testing.T) {
 	// Port1 itself names none here: the USB adapter is left out, so only
 	// eth0 counts; a second fixed port makes it refuse, and nothing loads.
 	add("enp2s0", "pci0000:00/0000:00:1c.1/0000:02:00.0", false)
-	if p, err := admitPort1(sys, "", file, nft, now); err == nil || len(loaded) != 0 {
-		t.Errorf("two fixed ports: admitted %q, %v, loaded %q", p, err, loaded)
+	if p, err := admitPort1(sys, "", file, nft, now); err == nil || len(loaded) != 0 || !strings.Contains(err.Error(), "more than one fixed Ethernet port") {
+		t.Errorf("two fixed ports: admitted %q, %v, loaded %q; want Port1's refusal", p, err, loaded)
 	}
 	failing := func(string) error { return errors.New("no such table") }
 	if err := os.Remove(file); err != nil {

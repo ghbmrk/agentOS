@@ -1,6 +1,8 @@
 package port1
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,5 +224,43 @@ func TestAdmitHoldsOneName(t *testing.T) {
 	}
 	if Close != "flush set inet agentos_inbound page\n" {
 		t.Errorf("close script %q", Close)
+	}
+}
+
+// HW12-port1-set (CH-9): each refusal names its own cause, so the journal
+// says why the page serves nothing: a missing sysfs tree is that read's
+// error, no fixed port says so, and Settled reports the read that failed
+// without waiting, or a port that changed name while it waited (mutgate
+// survivors on #5733).
+// REQ: CH-9, HW-12
+func TestRefusalsNameTheirCause(t *testing.T) {
+	type nic = struct {
+		dev, typ string
+		radio    bool
+	}
+	if _, err := Port1(filepath.Join(t.TempDir(), "none")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("no sysfs tree: %v, want the read's not-exist error", err)
+	}
+	none := sysNet(t, map[string]nic{"wlan0": {"pci0000:00/0000:00:14.3", "1", true}})
+	if _, err := Port1(none); err == nil || !strings.Contains(err.Error(), "no fixed PCI Ethernet port") {
+		t.Errorf("no fixed port: %v", err)
+	}
+	waited := false
+	if _, err := Settled(none, func() bool { waited = true; return true }); err == nil || waited {
+		t.Errorf("no port 1: waited %v, %v", waited, err)
+	}
+	// Port 1 goes away during the wait: Port1's refusal, not a move.
+	sys := sysNet(t, map[string]nic{"enp1s0": {"pci0000:00/0000:00:1c.0/0000:01:00.0", "1", false}})
+	gone := func() bool { return os.Remove(filepath.Join(sys, "class", "net", "enp1s0")) == nil }
+	if _, err := Settled(sys, gone); err == nil || !strings.Contains(err.Error(), "no fixed PCI Ethernet port") {
+		t.Errorf("port 1 gone while settling: %v", err)
+	}
+	// Port 1 is renamed during the wait (one port before, another after).
+	sys = sysNet(t, map[string]nic{"enp1s0": {"pci0000:00/0000:00:1c.0/0000:01:00.0", "1", false}})
+	renamed := func() bool {
+		return os.Rename(filepath.Join(sys, "class", "net", "enp1s0"), filepath.Join(sys, "class", "net", "eth0")) == nil
+	}
+	if p, err := Settled(sys, renamed); err == nil || !strings.Contains(err.Error(), "moved from enp1s0 to eth0") {
+		t.Errorf("port 1 renamed while settling: %q, %v", p, err)
 	}
 }
