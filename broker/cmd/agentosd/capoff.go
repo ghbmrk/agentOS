@@ -331,11 +331,11 @@ func ownerWorded(l string) error {
 
 // onlyNegates is a fix clause that says only what will not fix the line:
 // "will not fix", "cannot help" ("cannot" is the house form, S9), "does
-// nothing", "is no fix", "nothing helps" (#5632). Each verb group ends at
-// a word boundary, and "do nothing" and "nothing will" are left out, so a
-// clause that names a working step ("nothing will be lost; restart me",
-// "no fixed plan is set; ...") is not refused (#5648).
-var onlyNegates = regexp.MustCompile(`(?i)\b((not|never|cannot) (fix|help|clear|work)\b|(does|did|will) nothing\b|no (fix|help|cure)\b|nothing (helps|works|fixes)\b)`)
+// nothing", "is no fix", "nothing helps" (#5632), in any inflection
+// ("never works", "not fixable", "not helpful"), and "nothing will fix",
+// "will do nothing" (#5667). Look-alikes that name a working step pass:
+// "nothing will be lost; restart me", "no fixed plan is set; ..." (#5648).
+var onlyNegates = regexp.MustCompile(`(?i)\b((not|never|cannot) (fix|help|clear|work)(s|es|ed|ing|able|ful)?|(does|do|did|will) nothing|no (fix|help|cure)(s|es)?|nothing (will )?(fix|help|clear|work)(s|es)?)\b`)
 
 // capState is the live state the lines read. main sets it as the box
 // opens; the zero value of each field means "on" (no line).
