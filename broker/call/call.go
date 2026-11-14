@@ -107,7 +107,8 @@ type Clips struct {
 	// Ending tells the owner the call ends in a minute and they can call
 	// again ("This call ends in one minute. Call again to carry on."), so
 	// the hang-up at MaxCall is never a silent drop. It plays EndingNotice
-	// before the call's end, and stops an answer then playing.
+	// before the call's end, once the sentence then playing ends (up to
+	// EndingWait), and stops the rest of that answer.
 	Ending []byte
 }
 
@@ -168,6 +169,13 @@ type Report struct {
 // EndingNotice is how long before the end of a call (Config.MaxCall)
 // Clips.Ending plays.
 const EndingNotice = time.Minute
+
+// EndingWait bounds how long Clips.Ending waits for the sentence playing
+// when it falls due, so the owner hears that sentence to its end and not
+// cut mid-word (#5304); a sentence still playing then is cut. A sentence
+// is at most MaxSentence runes, and the notice's minute of margin is far
+// longer, so the notice still never outlasts MaxCall.
+const EndingWait = 5 * time.Second
 
 // MaxSentence caps a sentence that has no end mark, in runes.
 const MaxSentence = 300
@@ -417,6 +425,9 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		done   chan struct{}
 		turn   *Turn
 		text   string
+		// hush, closed once the ending notice is due, ends the turn at
+		// its next sound boundary.
+		hush chan struct{}
 		// asked is set by the turn before it asks the answerer, and read
 		// only after done.
 		asked bool
@@ -446,18 +457,32 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 		}
 		finish()
 	}
+	// The ending notice is one sound at a time: once due, it hushes the
+	// turn, which ends when the sentence playing ends, and plays once no
+	// turn runs; a turn still playing at bound is stopped (#5304). Until
+	// then the loop acts on events as before, and any event that stops the
+	// turn lets the notice play at once, before a new turn starts.
+	var due bool
+	var bound <-chan time.Time
+	notify := func() {
+		if !due || cur != nil {
+			return
+		}
+		due, bound = false, nil
+		l.Say(ctx, cfg.Clips.Ending)
+	}
 	n := 0
 	start := func(text string, end time.Time) {
 		n++
 		tctx, tcancel := context.WithCancel(ctx)
-		r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}, text: text}
+		r := &running{cancel: tcancel, done: make(chan struct{}), turn: &Turn{N: n}, text: text, hush: make(chan struct{})}
 		cur = r
 		if end.IsZero() {
 			end = cfg.Now()
 		}
 		go func() {
 			defer close(r.done)
-			cfg.turn(tctx, l, text, n, cr, end, r.turn, &r.asked)
+			cfg.turn(tctx, l, text, n, cr, end, r.turn, &r.asked, r.hush)
 		}()
 	}
 	for {
@@ -473,12 +498,24 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			stop(false)
 			return rep, nil
 		case <-done:
-			finish()
+			if due { // hushed: a question not yet asked is carried
+				stop(true)
+				notify()
+			} else {
+				finish()
+			}
 		case g := <-token:
 			known(g)
-		case <-ending: // one sound at a time: the notice stops the answer
+		case <-ending:
+			ending, due = nil, true
+			if cur != nil {
+				close(cur.hush)
+				bound = time.After(EndingWait) // the wall clock, as ending is
+			}
+			notify()
+		case <-bound: // the sentence still playing is cut
 			stop(true)
-			l.Say(ctx, cfg.Clips.Ending)
+			notify()
 		case k, ok := <-keys:
 			if !ok { // keys close when the call ends
 				stop(false)
@@ -489,6 +526,7 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			if k == '0' {
 				stop(false)
 				carry = ""
+				notify()
 			}
 		case h, ok := <-heard:
 			if !ok {
@@ -501,10 +539,12 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			if !h.Final {
 				if strings.TrimSpace(h.Text) != "" {
 					stop(true) // barge-in
+					notify()
 				}
 				continue
 			}
 			stop(true)
+			notify()
 			text := strings.TrimSpace(carry + " " + h.Text)
 			carry = ""
 			if stopWord(h.Text) || text == "" {
@@ -554,7 +594,9 @@ type sound struct {
 // Once the rung is known a producer writes, checks and synthesizes the
 // sentences while the one before plays; this loop plays them one at a
 // time, and a sentence ready when the deadline falls goes before the clip.
-func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool) {
+// Once hush closes the turn starts no further sound and ends, stopped,
+// when the one playing ends (#5304).
+func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *callRung, end time.Time, t *Turn, asked *bool, hush <-chan struct{}) {
 	var sounds chan sound // nil until the rung is known
 	pctx, cancel := context.WithCancel(ctx)
 	defer func() { // the producer ends with its turn (#5252)
@@ -586,6 +628,12 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 		if len(pcm) == 0 {
 			return true
 		}
+		select { // hushed: no sound starts after the notice is due
+		case <-hush:
+			t.Stopped = true
+			return false
+		default:
+		}
 		if t.FirstAudio == 0 {
 			t.FirstAudio = nonZero(cfg.Now().Sub(end))
 		}
@@ -602,6 +650,9 @@ func (cfg Config) turn(ctx context.Context, l Line, text string, n int, cr *call
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-hush:
+			t.Stopped = true
 			return
 		case <-rung:
 			ask()
