@@ -721,6 +721,7 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 	foo := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nIPAddressDeny=any\nPrivateNetwork=yes\n", lib + "foo.service": root}
 	inst := map[string]string{lib + "foo.socket": "[Socket]\nListenStream=2222\nService=bar@x.service\n"}
 	ssh := map[string]string{lib + "ssh.socket": "[Socket]\nListenStream=2222\nAccept=yes\n", lib + "ssh@.service": "[Service]\nExecStart=-/usr/sbin/sshd -i\nStandardInput=socket\n"}
+	const tmpf = "/usr/lib/tmpfiles.d/"
 	with := func(base map[string]string, more ...string) map[string]string {
 		out := map[string]string{}
 		for k, v := range base {
@@ -866,6 +867,16 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a package's path through a link in the tree":        {with(udev, "/var/pkglink", "-> ../run/agentos-x", lib+"pkg.socket", "[Socket]\nListenStream=/var/pkglink/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `on a package socket's path, /var/pkglink/s`},
 		"a package's path through a link in the tree's /usr": {with(udev, "/usr/pkglink", "-> /run/agentos-x", lib+"pkg.socket", "[Socket]\nListenStream=/usr/pkglink/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `on a package socket's path, /usr/pkglink/s`},
 		"a package's path through two links in the tree":     {with(udev, "/var/a", "-> /var/b", "/var/b", "-> /run", lib+"pkg.socket", "[Socket]\nListenStream=/var/a/agentos-x/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/t\n"), ourEtc, `on a package socket's path, /var/a/agentos-x/s`},
+		// #5651 (KRN-2): /run is a tmpfs at boot, so a link there is a
+		// tmpfiles.d L line's, which the records add to the tree's links.
+		"a socket of ours through a tmpfiles link":          {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/udev\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc, `ListenStream=/run/agentos-x/control: a listen path of ours on a package socket's path, /run/udev/control`},
+		"a socket of ours through a relative tmpfiles link": {with(udev, "/etc/tmpfiles.d/x.conf", "L+ /run/agentos-x - - - - udev\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
+		"a socket of ours through two tmpfiles links":       {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/agentos-y\n", tmpf+"y.conf", "L? /run/agentos-y - - - - /run/udev\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
+		"a socket of ours through a tmpfiles factory link":  {with(udev, tmpf+"x.conf", "L /run/agentos-x\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `passes through a link in the tree, /run/agentos-x -> /usr/share/factory/run/agentos-x`},
+		"a package's path through a tmpfiles link":          {with(udev, tmpf+"x.conf", "L /run/pkglink - - - - /run/agentos-x\n", lib+"pkg.socket", "[Socket]\nListenStream=/run/pkglink/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `on a package socket's path, /run/pkglink/s`},
+		"a specifier in a tmpfiles link":                    {with(udev, tmpf+"x.conf", "L /run/agentos-%b - - - - /run/udev\n"), ourEtc, `holds a specifier, a quote or an escape`},
+		"an encoded tmpfiles link target":                   {with(udev, tmpf+"x.conf", "L~ /run/agentos-x - - - - L3J1bi91ZGV2\n"), ourEtc, `its target is encoded`},
+		"a tmpfiles link and another line on its path":      {with(udev, tmpf+"x.conf", "d /run/agentos-x 0755\n", tmpf+"y.conf", "L /run/agentos-x - - - - /run/udev\n"), ourEtc, `/run/agentos-x: a tmpfiles.d L line and another line name it`},
 		// #5620 R-a, R-b.
 		"an open directory mode of ours":  {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a directory mode of ours`},
 		"a port of ours":                  {with(foo, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=2222\nReusePort=yes\n"), ourEtc, `ListenStream=2222: a listen path of ours names no path`},
@@ -976,6 +987,9 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #4737 Security 6588498486 R1: a package's own grant the reader
 		// cannot read, on a unit none of ours touches.
 		"a package's specifier directory": {map[string]string{lib + "foo@.service": "[Service]\nExecStart=/usr/bin/foo\nDynamicUser=yes\nStateDirectory=foo/%i\n"}, pkg},
+		// #5651: a tmpfiles link off our paths; one a higher file masks.
+		"a tmpfiles link beside a socket of ours": {with(udev, tmpf+"debian.conf", "L /run/shm - - - - /dev/shm\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc},
+		"a masked tmpfiles link":                  {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/udev\n", "/etc/tmpfiles.d/x.conf", "-> /dev/null", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc},
 		// A socket all of whose files are ours sets its own owner and mode.
 		// #5075 R3: a socket of ours beside a package's in a shared tree.
 		"a socket of ours beside a package's in /run": {map[string]string{lib + "pkgs.socket": "[Socket]\nListenStream=/run/pkgs.sock\n", lib + "pkgs.service": user, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=%t/agentos-x.sock\nListenStream=/run/agentos-x/100%%\n"}, ourEtc},

@@ -401,6 +401,102 @@ def tree_links(view, usr_view=None):
     return out
 
 
+# Where systemd-tmpfiles reads its files, highest first: a name in a higher one hides it in a lower one.
+TMPFILES_DIRS = ("/etc/tmpfiles.d", "/run/tmpfiles.d", "/usr/local/lib/tmpfiles.d", "/usr/lib/tmpfiles.d")
+
+
+def tmpfiles_lines(view, usr_view=None):
+    """[(file, line)] for every line of the tree's tmpfiles.d files, each name read once from the highest
+    directory holding it (one linked to /dev/null, or not a regular file, masks it), in name order. With
+    USR_VIEW, /usr's directories are listed there (tree_links)."""
+    chosen = {}
+    for d in TMPFILES_DIRS:
+        lister = usr_view if usr_view and d.startswith("/usr/") else view
+        for e in lister.entries(d):
+            if e.endswith(".conf"):
+                chosen.setdefault(e, os.path.join(d, e))
+    out = []
+    for e in sorted(chosen):
+        final, _ = view.resolve(chosen[e])
+        if final == "/dev/null" or view.kind(final) != 0o100000:
+            continue
+        for line in view.text(final).splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append((chosen[e], line))
+    return out
+
+
+def through(p, links):
+    """P with each directory component, and its last one, read through LINKS, until none is a link."""
+    for _ in range(41):
+        cur, comps = "/", [c for c in p.split("/") if c]
+        for i, c in enumerate(comps):
+            cur = os.path.join(cur, c)
+            if cur in links and links[cur] != cur:
+                p = os.path.join(links[cur], *comps[i + 1:])
+                break
+        else:
+            return p
+    raise SystemExit("unit rules: %s: more than 40 links" % p)
+
+
+def tmpfiles_links(view, links, usr_view=None):
+    """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): /run is a
+    tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone. A
+    line counts with any modifier, when its path holds nothing in the tree (or, with +, whatever it
+    holds); its target, the factory copy when it gives none, is resolved in the tree and through the
+    other links, and every value is read again through them. An L line holding a specifier, quote or
+    escape, an encoded (~) or credential (^) target, a path not absolute and normal, a path another
+    tmpfiles.d line also names (which one applies is systemd-tmpfiles' to decide), or one whose directory
+    passes through a link fails the run."""
+    lines, named = tmpfiles_lines(view, usr_view), {}
+    for f, line in lines:
+        w = line.split()
+        if len(w) > 1:
+            named.setdefault(w[1], []).append(w[0])
+    found = {}
+    for f, line in lines:
+        w = line.split(None, 6)
+        if not w[0].startswith("L"):
+            continue
+        if any(ch in line for ch in "%\"\'\\"):
+            raise SystemExit("unit rules: %s: L line %r holds a specifier, a quote or an escape, which the "
+                             "reader does not read" % (f, line))
+        if "~" in w[0] or "^" in w[0]:
+            raise SystemExit("unit rules: %s: L line %r: its target is encoded or a credential, which the "
+                             "reader does not read" % (f, line))
+        p = w[1] if len(w) > 1 else ""
+        if not p.startswith("/") or os.path.normpath(p) != p:
+            raise SystemExit("unit rules: %s: L line %r: its path is not absolute and normal" % (f, line))
+        if len(named[p]) > 1:
+            raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
+                             "applies is not read" % p)
+        key = view.resolve(p, last=False)[0]
+        if "+" not in w[0] and view.lstat(key) is not None:
+            continue  # tmpfiles leaves what the path holds
+        arg = w[6].strip() if len(w) > 6 else "-"
+        target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
+        found[key] = target
+    if not found:
+        return links
+    out = dict(links)
+    for key, target in found.items():
+        try:
+            final, _ = view.resolve(target)
+        except (SystemExit, OSError):
+            final = key
+        if view.kind(final) in (None, 0o040000) or final == key:
+            out[key] = final
+        else:
+            out.pop(key, None)  # a link to a file no endpoint's directory passes through
+    for key in found:
+        if through(os.path.dirname(key), out) != os.path.dirname(key):
+            raise SystemExit("unit rules: %s: a tmpfiles.d L line's path passes through another link, "
+                             "which the reader does not read" % key)
+    return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
+
+
 def records(view, shown, dirs, prov, usr_view=None):
     """The records of one run: {"units": [{"unit", "alone", "package", "fed", "files": [{"path", "ours",
     "text"}]}], "fstab": {"path", "text"} or None, "masks": [{"path", "hides"}], "links": tree_links()}, from SHOWN, systemctl's
@@ -491,7 +587,7 @@ def records(view, shown, dirs, prov, usr_view=None):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks, "links": tree_links(view, usr_view),
+    return {"units": recs, "fstab": fstab, "masks": masks, "links": tmpfiles_links(view, tree_links(view, usr_view), usr_view),
             "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
 
 
