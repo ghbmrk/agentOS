@@ -876,7 +876,12 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a package's path through a tmpfiles link":          {with(udev, tmpf+"x.conf", "L /run/pkglink - - - - /run/agentos-x\n", lib+"pkg.socket", "[Socket]\nListenStream=/run/pkglink/s\n", lib+"pkg.service", root, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc, `on a package socket's path, /run/pkglink/s`},
 		"a specifier in a tmpfiles link":                    {with(udev, tmpf+"x.conf", "L /run/agentos-%b - - - - /run/udev\n"), ourEtc, `holds a specifier, a quote or an escape`},
 		"an encoded tmpfiles link target":                   {with(udev, tmpf+"x.conf", "L~ /run/agentos-x - - - - L3J1bi91ZGV2\n"), ourEtc, `its target is encoded`},
-		"a tmpfiles link and another line on its path":      {with(udev, tmpf+"x.conf", "d /run/agentos-x 0755\n", tmpf+"y.conf", "L /run/agentos-x - - - - /run/udev\n"), ourEtc, `/run/agentos-x: a tmpfiles.d L line and another line name it`},
+		// #5703 L3 and Security 1: /run is an empty tmpfs at boot, so an
+		// entry the tree holds at an L line's path does not stop the link,
+		// and a file in the tree's /run/tmpfiles.d hides nothing.
+		"a tmpfiles link over a tree entry in /run":    {with(udev, tmpf+"x.conf", "L /run/agentos-y - - - - /run/udev\n", "/run/agentos-y/.keep", "", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-y/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
+		"a tmpfiles link under a tree file in /run":    {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/udev\n", "/run/tmpfiles.d/x.conf", "# benign\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc, `on a package socket's path, /run/udev/control`},
+		"a tmpfiles link and another line on its path": {with(udev, tmpf+"x.conf", "d /run/agentos-x 0755\n", tmpf+"y.conf", "L /run/agentos-x - - - - /run/udev\n"), ourEtc, `/run/agentos-x: a tmpfiles.d L line and another line name it`},
 		// #5620 R-a, R-b.
 		"an open directory mode of ours":  {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a directory mode of ours`},
 		"a port of ours":                  {with(foo, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=2222\nReusePort=yes\n"), ourEtc, `ListenStream=2222: a listen path of ours names no path`},

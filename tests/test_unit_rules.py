@@ -537,6 +537,48 @@ class ShowTest(unittest.TestCase):
                     self.show(reply, ["a.service", "b.service"])
 
 
+class BootLinksTest(unittest.TestCase):
+    """#5703 L3 and Security 1: /run is an empty tmpfs at boot, so the links the records hold read nothing
+    the tree has under /run (or /tmp)."""
+    LINE = {"/usr/lib/tmpfiles.d/x.conf": "L /run/agentos-x - - - - /run/udev\n"}
+
+    def links(self, d, more):
+        return r.boot_links(tree(d, {**self.LINE, **more}))
+
+    def test_a_tree_entry_at_the_path_does_not_stop_the_link(self):
+        for more in ({"/run/agentos-x/.keep": ""}, {"/run/agentos-x": "a file"}, {"/run/agentos-x": "-> /etc"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                self.assertEqual(self.links(d, more).get("/run/agentos-x"), "/run/udev")
+
+    def test_a_tree_file_in_run_tmpfiles_d_hides_nothing(self):
+        for more in ({"/run/tmpfiles.d/x.conf": "# benign\n"}, {"/run/tmpfiles.d/x.conf": "-> /dev/null"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                self.assertEqual(self.links(d, more).get("/run/agentos-x"), "/run/udev")
+
+    def test_a_target_is_not_stepped_through_the_trees_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            got = self.links(d, {"/run/udev": "-> /etc"})
+            self.assertEqual(got.get("/run/agentos-x"), "/run/udev")
+            self.assertNotIn("/run/udev", got)  # nor is a link the tree holds under /run one at boot
+
+    def test_a_tree_run_that_is_a_link_is_read_as_the_mount(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self.links(d, {"/run": "-> /var/run", "/var/run/agentos-x/.keep": ""}).get(
+                "/run/agentos-x"), "/run/udev")
+
+    def test_a_path_under_dev_counts_whatever_the_tree_holds(self):
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": "L /dev/agentos-x - - - - /run/udev\n",
+                                        "/dev/agentos-x/.keep": ""}))
+            self.assertEqual(got.get("/dev/agentos-x"), "/run/udev")
+
+    def test_an_entry_off_run_still_stops_the_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": "L /var/agentos-x - - - - /run/udev\n",
+                                        "/var/agentos-x/.keep": ""}))
+            self.assertNotIn("/var/agentos-x", got)
+
+
 class LintTest(unittest.TestCase):
     """lint() refuses a run in which a generator failed (#4817, from #4767's harness)."""
 

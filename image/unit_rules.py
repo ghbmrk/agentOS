@@ -155,6 +155,35 @@ class View:
             return f.read().decode("utf-8", "surrogateescape")
 
 
+# #5703 L3 and Security 1: what the box mounts a tmpfs over at boot, so what the tree holds there is
+# hidden then; the link readers (tree_links, tmpfiles_links) read the tree through BootView.
+BOOT_EMPTY = ("/run", "/tmp")
+# The box's other mounts, whose content at boot the tree does not give (devtmpfs, proc, sysfs): an L line's
+# path there is taken to hold nothing, so its link counts.
+BOOT_UNREAD = ("/dev", "/proc", "/sys")
+
+
+class BootView(View):
+    """VIEW as the box finds it when systemd-tmpfiles runs: each of BOOT_EMPTY holds nothing, whatever
+    the tree has there (the run's container mounts its own tmpfs there too, but a reader called on a
+    plain tree must not read the tree's /run as boot state)."""
+
+    def __init__(self, view):
+        super().__init__(view.root, view.usr)
+
+    @staticmethod
+    def hidden(p):
+        return any(p.startswith(m + "/") for m in BOOT_EMPTY)
+
+    def lstat(self, p):
+        if p in BOOT_EMPTY:
+            return super().lstat("/")  # a directory, as the mount is, whatever the tree has there
+        return None if self.hidden(p) else super().lstat(p)
+
+    def entries(self, d):
+        return [] if self.hidden(d) or d in BOOT_EMPTY else super().entries(d)
+
+
 def unit_dirs(view):
     """Each unit directory as resolved in the tree, once, in UNIT_DIRS' order."""
     out = []
@@ -443,10 +472,12 @@ def through(p, links):
 
 def tmpfiles_links(view, links, usr_view=None):
     """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): /run is a
-    tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone. A
-    line counts with any modifier, when its path holds nothing in the tree (or, with +, whatever it
-    holds); its target, the factory copy when it gives none, is resolved in the tree and through the
-    other links, and every value is read again through them. An L line holding a specifier, quote or
+    tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone.
+    VIEW is a BootView (boot_links), so nothing the tree holds under /run hides a tmpfiles.d file, holds
+    a path or steps a target (#5703). A line counts with any modifier, when its path holds nothing at
+    boot (or, with +, whatever it holds; one under BOOT_UNREAD always); its target, the factory copy
+    when it gives none, is resolved in the tree and through the other links, and every value is read
+    again through them. An L line holding a specifier, quote or
     escape, an encoded (~) or credential (^) target, a path not absolute and normal, a path another
     tmpfiles.d line also names (which one applies is systemd-tmpfiles' to decide), or one whose directory
     passes through a link fails the run."""
@@ -473,8 +504,9 @@ def tmpfiles_links(view, links, usr_view=None):
             raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
                              "applies is not read" % p)
         key = view.resolve(p, last=False)[0]
-        if "+" not in w[0] and view.lstat(key) is not None:
-            continue  # tmpfiles leaves what the path holds
+        held = not key.startswith(tuple(m + "/" for m in BOOT_UNREAD)) and view.lstat(key) is not None
+        if "+" not in w[0] and held:
+            continue  # tmpfiles leaves what the path holds at boot
         arg = w[6].strip() if len(w) > 6 else "-"
         target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
         found[key] = target
@@ -495,6 +527,12 @@ def tmpfiles_links(view, links, usr_view=None):
             raise SystemExit("unit rules: %s: a tmpfiles.d L line's path passes through another link, "
                              "which the reader does not read" % key)
     return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
+
+
+def boot_links(view, usr_view=None):
+    """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView."""
+    boot = BootView(view)
+    return tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
 
 
 def records(view, shown, dirs, prov, usr_view=None):
@@ -587,7 +625,7 @@ def records(view, shown, dirs, prov, usr_view=None):
                                  "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
-    return {"units": recs, "fstab": fstab, "masks": masks, "links": tmpfiles_links(view, tree_links(view, usr_view), usr_view),
+    return {"units": recs, "fstab": fstab, "masks": masks, "links": boot_links(view, usr_view),
             "held": {"names": sorted(held), "prefixes": sorted(fed.prefixes)}}
 
 
