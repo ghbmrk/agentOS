@@ -730,6 +730,44 @@ class BootLinksTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, want + " passes through a link in the tree"):
                     r.boot_links(v)
 
+    # #5725 Security and L3 (blocker at 40a8cc85): the mount refusal read only an L line's literal target, so
+    # `L /etc/a -> /var/lib` then `L /etc/b -> /etc/a/foo/s` recorded a link under a mount. Every link the
+    # records may hold, the tree's or an L line's, a link to a file included, is read through every other
+    # one, and fails the run when it ends at or under a mount (or sits at or under one).
+    MOUNTED = "at or under /var/lib/foo, where a mount puts a file system the unit lint does not see"
+
+    def test_a_chained_link_into_a_mount_fails_the_run(self):
+        for lines, more in (
+                (("L /etc/a - - - - /var/lib", "L /etc/b - - - - /etc/a/foo/s"), {}),
+                (("L /etc/a - - - - /var/lib", "L+ /etc/b - - - - a/foo"), {}),
+                (("L+ /etc/a - - - - /var/lib", "L /etc/b - - - - /etc/a/foo/s"), {"/etc/a/foo/s": "a file"}),
+                (("L /etc/a - - - - /var", "L /etc/b - - - - /etc/a/lib", "L /etc/c - - - - /etc/b/foo/d"), {}),
+                (("L /etc/a - - - - /var/lib",), {"/etc/c": "-> /etc/a/foo"}),
+                (("L+ /etc/a - - - - /var/lib",), {"/etc/a/foo/f": "a file", "/etc/c": "-> a/foo/f"})):
+            conf = {"/usr/lib/tmpfiles.d/foo.conf": "".join(l + "\n" for l in lines)}
+            with self.subTest(lines=lines, more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link .*resolving to /var/lib/foo[/a-z]*: it or its target is " + self.MOUNTED):
+                    r.boot_links(tree(d, {**self.MOUNT, **conf, **more}))
+
+    def test_a_tree_link_into_or_under_a_mount_fails_the_run(self):
+        for more in ({"/etc/x": "-> /var/lib/foo/d"}, {"/etc/x": "-> ../var/lib/foo"},
+                     {"/etc/x": "-> /var/lib/foo/f", "/var/lib/foo/f": "a file"},
+                     {"/etc/x": "-> /etc/y/foo", "/etc/y": "-> /var/lib"},
+                     {"/var/lib/foo/l": "-> /etc"}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link .*" + self.MOUNTED):
+                    r.boot_links(tree(d, {**self.MOUNT, **more}))
+        with tempfile.TemporaryDirectory() as d:  # gpt-auto's /boot counts like any unit's mount
+            with self.assertRaisesRegex(SystemExit, "a link /vmlinuz .*at or under /boot, where a mount"):
+                r.boot_links(tree(d, {"/vmlinuz": "-> boot/vmlinuz-6"}))
+
+    def test_a_link_above_or_beside_a_mount_passes(self):
+        conf = {"/usr/lib/tmpfiles.d/foo.conf": "L /etc/a - - - - /var/lib\nL /etc/b - - - - /etc/a/foobar\n"}
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {**self.MOUNT, **conf, "/etc/x": "-> /var/lib", "/etc/z": "-> /etc/a/fo"}))
+            self.assertEqual((got["/etc/a"], got["/etc/b"], got["/etc/x"], got["/etc/z"]),
+                             ("/var/lib", "/var/lib/foobar", "/var/lib", "/var/lib/fo"))
+
 
 class RetainedEntryTest(unittest.TestCase):
     """#5703 L3 6872965749: a plain L line leaves a link, directory or file the tree already has at its path
