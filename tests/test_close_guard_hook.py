@@ -54,6 +54,8 @@ class CloseGuardTest(unittest.TestCase):
                   bash("gh issue close 5660"), bash("gh issue close '#5660' --reason completed"),
                   bash("gh issue close -c done 5660"), bash("gh issue close 5692; gh issue close 5660"),
                   bash("gh issue close https://github.com/ghbmrk/agentOS/issues/5660"),
+                  # gh's repository flag goes before the subcommand too (#5702 Security 1).
+                  bash("gh issue -R ghbmrk/agentOS close 5660"), bash("gh issue --repo=ghbmrk/agentOS close 5660"),
                   bash(f"gh api -X PATCH {R}/issues/5660 -f state=closed"),
                   bash(f"echo hi && gh api -X PATCH {R}/issues/5660 -f state=closed -f state_reason=completed"),
                   bash(f"curl -X PATCH https://api.github.com/{R}/issues/5660 -d '{{\"state\": \"closed\"}}'")):
@@ -70,11 +72,16 @@ class CloseGuardTest(unittest.TestCase):
                   bash("gh issue close 5692"), bash(f"gh api -X PATCH {R}/issues/5692 -f state=closed"),
                   bash(f"gh api {R}/issues?state=closed"), bash("gh issue list --state closed"),
                   bash(f"gh api -X POST {R}/issues/5660/labels -f labels[]=state:merged"),
+                  bash(f"gh api -X POST {R}/issues/5660/comments --input body.json"),
                   bash("git status"), {"tool_name": "Read", "tool_input": {"file_path": "/x"}}):
             self.assertIsNone(close_guard.decide(e, self.root), e)
 
     def test_unreadable_close_target_asks(self):
-        for e in (bash('gh issue close "$N"'), bash('gh issue close 5692 && gh issue close "$N"'), bash("gh issue close"), mcp("5660"), mcp(None)):
+        # The body of an --input call on an issue, and GraphQL's closeIssue, are not read (#5702 Security 2).
+        for e in (bash(f"gh api -X PATCH {R}/issues/5660 --input body.json"),
+                  bash(f"echo '{{\"state\":\"closed\"}}' | gh api -X PATCH {R}/issues/5692 --input -"),
+                  bash("gh api graphql -f query='mutation{closeIssue(input:{issueId:\"I_x\"}){clientMutationId}}'"),
+                  bash('gh issue close "$N"'), bash('gh issue close 5692 && gh issue close "$N"'), bash("gh issue close"), mcp("5660"), mcp(None)):
             self.assertEqual(self.verdict(e), "ask", e)
 
     def test_origin_main_records_also_guard(self):
@@ -88,6 +95,9 @@ class CloseGuardTest(unittest.TestCase):
         subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
         (d / "assurance/vulncheck.json").write_text(json.dumps({"accepted": []}))
         self.assertEqual(close_guard.decide(mcp(77), d)[0], "deny")
+        # A record in both the working tree and origin/main counts once (#5702 L3 R1).
+        (d / "assurance/vulncheck.json").write_text(json.dumps({"accepted": [{"id": "V", "issue": 77}]}))
+        self.assertIn("#77 (1 record(s))", close_guard.decide(mcp(77), d)[1])
 
     def test_hook_process_output(self):
         def run(event, root):

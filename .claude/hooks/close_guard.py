@@ -10,9 +10,12 @@ where a session makes it. A cited issue stays open with `state:merged` (tools/vu
 REOPEN_NOTE); `acceptance.yml` stays the backstop for every other close path.
 
 Closes it sees: the GitHub MCP issue tools with `state: closed` on ghbmrk/agentOS, and a Bash
-command that runs `gh issue close` or carries `state=closed` beside an `issues/N` path. The records are the
+command that runs `gh issue [-R repo] close` or carries `state=closed` beside an `issues/N` path;
+an `issues/N` call with `--input`, or `closeIssue`, goes to the ask. The records are the
 union of the working tree's file and `origin/main`'s, so a checkout older than a new record
-still guards it. A cited issue is denied with the reason; a close whose issue number it cannot
+still guards it. The hook loads in a session rooted at this checkout through settings.json, and
+in a session rooted elsewhere (a project thread starts in /home/user) once tools/session_hooks.py
+has copied the hook block into the user's settings. A cited issue is denied with the reason; a close whose issue number it cannot
 read, or whose records it cannot load, goes to the permission ask. Every other call passes.
 tests/test_close_guard_hook.py pins the decisions and the settings.json wiring.
 """
@@ -27,17 +30,25 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONFIG = "assurance/vulncheck.json"
 REPO = ("ghbmrk", "agentos")
 MCP_TOOLS = {"mcp__github__issue_write", "mcp__github__update_issue"}
-_GH_CLOSE = re.compile(r"\bgh\s+issue\s+close\b", re.I)
+# `gh issue close`, with the repository flag (gh's one flag that goes before the subcommand) between.
+_GH_CLOSE = re.compile(r"\bgh\s+issue\s+(?:(?:-R|--repo)(?:\s+|=)\S+\s+)*close\b", re.I)
 _STATE_CLOSED = re.compile(r"""\bstate["']?\s*[:=]\s*["']?closed\b""", re.I)
 _CLOSE_ARG = re.compile(r"#?([1-9][0-9]{0,6})|https://github\.com/[^/]+/[^/]+/issues/([1-9][0-9]{0,6})")
 _ISSUE_PATH = re.compile(r"\bissues/([1-9][0-9]{0,6})\b")
+# A close whose state this cannot read: an API call on an issue itself (no sub-path) whose body
+# comes from --input, or GraphQL's closeIssue mutation.
+_OPAQUE = re.compile(r"\bcloseIssue\b|\bissues/[1-9][0-9]{0,6}(?![/0-9]).*--input\b"
+                     r"|--input\b.*\bissues/[1-9][0-9]{0,6}(?![/0-9])", re.I | re.S)
 
 
 def bash_closes(command):
     """The issue numbers a Bash command closes: [] when it closes none, None when it runs
-    `gh issue close` on an issue it names in a way this cannot read (a variable). `state=closed`
+    `gh issue close` on an issue it names in a way this cannot read (a variable), or may close
+    one through `--input` or GraphQL's `closeIssue`. `state=closed`
     counts only beside an `issues/N` path, the only form an API close takes; a search or list
     filter such as `issues?state=closed` names no issue and passes."""
+    if _OPAQUE.search(command):
+        return None
     closes = list(_GH_CLOSE.finditer(command))
     nums = [int(n) for n in _ISSUE_PATH.findall(command)] if _STATE_CLOSED.search(command) else []
     if not closes and not nums:
@@ -73,13 +84,15 @@ def mcp_closes(tool_input):
 
 
 def records(root=ROOT):
-    """Acceptance records from the working tree and from origin/main, if it is there."""
+    """Acceptance records from the working tree and from origin/main, if it is there; a record in
+    both counts once."""
     texts = [(root / CONFIG).read_text()]
     shown = subprocess.run(["git", "-C", str(root), "show", f"origin/main:{CONFIG}"],
                            capture_output=True, text=True, timeout=10)
     if shown.returncode == 0:
         texts.append(shown.stdout)
-    return [r for t in texts for r in json.loads(t).get("accepted", [])]
+    unique = {json.dumps(r, sort_keys=True): r for t in texts for r in json.loads(t).get("accepted", [])}
+    return list(unique.values())
 
 
 def cited(recs, num):
