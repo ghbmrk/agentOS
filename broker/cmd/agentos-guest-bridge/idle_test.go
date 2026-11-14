@@ -296,6 +296,28 @@ func f() {
 	}
 }
 `, []string{"f: time.NewTicker", "f: time.Tick", "var: time.AfterFunc"}},
+		{"double", `package main
+
+import (
+	"time"
+	tm "time"
+)
+
+var _ = time.Second
+
+func f() { tm.AfterFunc(tm.Second, f) }
+`, []string{"f: time.AfterFunc"}},
+		{"double-dot", `package main
+
+import (
+	"time"
+	. "time"
+)
+
+var _ = time.Second
+
+func f() { _ = NewTicker(Second) }
+`, []string{"f: time.NewTicker"}},
 		{"shadowed", `package main
 
 import tm "time"
@@ -328,7 +350,7 @@ func f() {
 // matched under the name the file imports "time" as (timeName), so an
 // aliased or dot import is seen too; each is reported as time.<Func>.
 func goroutineStarts(f *ast.File) []string {
-	prefix, imported := timeName(f)
+	prefixes := timeNames(f)
 	var got []string
 	for _, d := range f.Decls {
 		where := ""
@@ -343,16 +365,13 @@ func goroutineStarts(f *ast.File) []string {
 			case *ast.GoStmt:
 				got = append(got, where+": go "+callee(n.Call.Fun))
 			case *ast.CallExpr:
-				if !imported {
-					break
-				}
 				c := callee(n.Fun)
-				if !strings.HasPrefix(c, prefix) {
-					break
-				}
-				switch fn := strings.TrimPrefix(c, prefix); fn {
-				case "AfterFunc", "NewTicker", "Tick":
-					got = append(got, where+": time."+fn)
+				for _, prefix := range prefixes {
+					switch fn := strings.TrimPrefix(c, prefix); {
+					case !strings.HasPrefix(c, prefix):
+					case fn == "AfterFunc", fn == "NewTicker", fn == "Tick":
+						got = append(got, where+": time."+fn)
+					}
 				}
 			}
 			return true
@@ -373,25 +392,33 @@ func callee(e ast.Expr) string {
 	return "?"
 }
 
-// timeName reports the qualifier a call into package time carries in f:
-// "time." or "<alias>." for a named import, "" for a dot import. imported
-// is false when f does not import "time" (or imports it only for side
-// effects), so no call in f can start a timer.
-func timeName(f *ast.File) (prefix string, imported bool) {
+// timeNames lists every qualifier a call into package time carries in f,
+// one per import of "time": "time." or "<alias>." for a named import, ""
+// for a dot import. Go allows a file to import "time" more than once
+// under different names, so each import counts (L3 fix-list 1 on #5681).
+// A blank import adds nothing; with no list, no call in f starts a timer.
+func timeNames(f *ast.File) []string {
+	seen := map[string]bool{}
+	var names []string
 	for _, imp := range f.Imports {
 		if imp.Path.Value != `"time"` {
 			continue
 		}
-		switch {
-		case imp.Name == nil:
-			return "time.", true
-		case imp.Name.Name == ".":
-			return "", true
-		case imp.Name.Name == "_":
-			continue
-		default:
-			return imp.Name.Name + ".", true
+		name := "time."
+		if imp.Name != nil {
+			switch imp.Name.Name {
+			case "_":
+				continue
+			case ".":
+				name = ""
+			default:
+				name = imp.Name.Name + "."
+			}
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
 		}
 	}
-	return "", false
+	return names
 }
