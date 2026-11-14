@@ -781,8 +781,8 @@ type bothStops struct {
 	unread   bool // the last read of the kernel's stop failed
 	unlisted bool // the last read of the kernel's unsettled steps failed
 	// whole: the kernel's count covers the STOP in force, since this
-	// process saw that STOP land on a kernel that was not stopped, or saw
-	// a RESUME succeed since. It is false at start (a STOP in force may
+	// process saw that STOP land while neither the journal nor the kernel
+	// was stopped (freshStop). It is false at start (a STOP in force may
 	// predate this process, such as a re-STOP after a RESUME that failed
 	// before a restart) and after a RESUME that failed once the kernel may
 	// have lifted its STOP, whose re-STOP restarted the count; RESUME then
@@ -845,9 +845,6 @@ func (b *bothStops) Resume() error {
 			return b.restop(err)
 		}
 	}
-	b.mu.Lock()
-	b.whole = true
-	b.mu.Unlock()
 	return nil
 }
 

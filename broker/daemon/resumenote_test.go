@@ -146,3 +146,29 @@ func (j *journalStopped) Stop(context.Context) (control.StopReport, error) {
 func (j *journalStopped) Resume() error          { j.stopped = false; return nil }
 func (j *journalStopped) Stopped() bool          { return j.stopped }
 func (j *journalStopped) List() []control.Status { return nil }
+
+// A STOP whose kernel stop read fails is not taken as fresh, even when
+// the STOP itself lands, unless the kernel waits for setup: the count
+// stays untrusted and RESUME gives the general note (mutgate on #5734).
+// Catches an unread kernel taken as not stopped.
+func TestAnUnreadKernelAtTheStopLeavesTheCountUntrusted(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		k     *fakeKernel
+		fresh bool
+	}{
+		{"unread", &fakeKernel{unread: true}, false},
+		{"setup only", &fakeKernel{setup: true}, true},
+		{"not stopped", &fakeKernel{}, true},
+	} {
+		b := &bothStops{Engine: &journalStopped{}, k: c.k}
+		if _, err := b.Stop(ctx); err != nil {
+			t.Fatalf("%s: STOP %v", c.name, err)
+		}
+		c.k.set(func(k *fakeKernel) { k.unread = false })
+		if b.whole != c.fresh {
+			t.Errorf("%s: whole %v, want %v", c.name, b.whole, c.fresh)
+		}
+	}
+}

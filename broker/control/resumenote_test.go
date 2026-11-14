@@ -75,3 +75,21 @@ func TestAFailedResumeNamesWhatStopCancelled(t *testing.T) {
 		t.Fatalf("%q, want %q", got, want)
 	}
 }
+
+// The notes' words, pinned as text (mutgate on #5734): StopCancelledNote
+// is built from the unknown form, so a test that compares against it
+// alone cannot tell the unknown form from the count's.
+func TestTheNotesWording(t *testing.T) {
+	for _, c := range []struct {
+		got, want string
+	}{
+		{Cancels{}.Resumed(), " STOP may have cancelled some actions; any it cancelled stay cancelled, so ask again for any you still want."},
+		{Cancels{}.Failed(), " STOP may have cancelled some actions; any it cancelled stay cancelled; once RESUME works, ask again for any you still want."},
+		{Cancels{known: true}.Resumed(), ""},
+		{Cancels{n: 1, known: true}.Failed(), " STOP cancelled 1 action; it stays cancelled; once RESUME works, ask again if you still want it."},
+	} {
+		if c.got != c.want {
+			t.Errorf("%q, want %q", c.got, c.want)
+		}
+	}
+}
