@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the AgentOS device image (PLAN P2-1). Run as root on Linux with network access to
-# snapshot.debian.org, security.debian.org, storage.googleapis.com (gVisor), nodejs.org and
+# snapshot.debian.org, storage.googleapis.com (gVisor), nodejs.org and
 # registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), github.com
 # (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this:
 # .github/workflows/image.yml
@@ -14,7 +14,11 @@
 # repository, each <name>/ holding a static `driver` binary and its entry.json (repository, commit,
 # declaration, class row, measure). The public release build passes none and ships none.
 #
-# Reproducibility: every input is pinned (Debian snapshot, gVisor and Node by hash, OpenClaw by
+# AGENTOS_SECURITY_SNAPSHOT, optional: the debian-security snapshot timestamp (YYYYMMDDTHHMMSSZ) the
+# image, its initrd and the guest roots install security packages from; image.yml resolves one per run
+# for both its builds (#5021). Unset, the build resolves the latest one itself.
+#
+# Reproducibility: every input is pinned (Debian snapshots, gVisor and Node by hash, OpenClaw by
 # lockfile, Go with -trimpath), file times are clamped to the commit time, and partition and
 # file-system IDs come from mkosi.conf's Seed, so two builds of one commit give the same /usr
 # root hash. VERSION defaults to the commit time, so releases sort in commit order.
@@ -29,6 +33,16 @@ GVISOR=release-20260928.0
 GVISOR_SHA512=c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a9725a602a846c81a8ed19c057a996515d31c081eba343ed4613a89951ba32ed59
 
 mkdir -p "$OUT"
+# One debian-security snapshot for the whole build (IMG-repro-security-pin, #5021): the apt sources
+# with their security stanza on it go to mkosi as a package manager tree (mkosi v24.3 copies a
+# command-line tree after mkosi.pkgmngr, so this file replaces the committed one for the image and
+# its initrd) and to guest-base.sh, and stay in OUT for the reproduce job to compare.
+SECURITY_SNAPSHOT=${AGENTOS_SECURITY_SNAPSHOT-}
+[ -n "$SECURITY_SNAPSHOT" ] || SECURITY_SNAPSHOT=$(sh "$HERE/security-snapshot.sh" resolve)
+sh "$HERE/security-snapshot.sh" sources "$SECURITY_SNAPSHOT" >"$OUT/agentos.sources"
+rm -rf "$OUT/pkgmngr"
+install -D -m 0644 "$OUT/agentos.sources" "$OUT/pkgmngr/etc/apt/sources.list.d/mkosi.sources"
+echo "debian-security snapshot $SECURITY_SNAPSHOT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
 # The broker, the vault process, the owner page, the modem bridge, the keeper: enrollment, the
@@ -74,7 +88,7 @@ chmod 0755 "$PHOTO/agentos-photo"
 # come from, and whose toolchain compiles the camera decoder (#5582) and the Codex worker's bwrap
 # (#5571), never the build host's, so two runners give the same bytes (IMG-2). Its package list goes
 # to OUT/guest/ for the reproduce job; the root is deleted once the guests are built.
-sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest"
+sh "$HERE/guest-base.sh" "$OUT/guest-base" "$OUT/guest/agentos-guest.manifest" "$OUT/agentos.sources"
 export GUEST_BASE="$OUT/guest-base"
 # Each guest build records here the Debian packages whose files it copies (image/guest-shipped.sh).
 export GUEST_SHIPPED="$OUT/guest-base.shipped"
@@ -122,7 +136,9 @@ python3 "$HERE/finish_image.py" --stage-drivers "$DRIVERS" "$STAGE" "$OUT/driver
 rm -f "$OUT/drivercheck"
 chmod -R u+w,go-w "$STAGE"
 
-$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
+$MKOSI -C "$HERE/mkosi" -f --package-manager-tree="$OUT/pkgmngr" --image-version="$VERSION" --extra-tree="$STAGE:/" \
+	--output-dir "$OUT" build
+rm -rf "$OUT/pkgmngr"
 python3 "$HERE/finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"
 rm -rf "$STAGE"
 # The initrds the release's entry boots, copied out of the ESP to OUT/initrd/ under their ESP paths:

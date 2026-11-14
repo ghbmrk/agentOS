@@ -1,8 +1,10 @@
 # Build-time apt sources. mkosi v24 uses this file instead of generating its own, so the pinned
 # snapshot (keep the timestamp equal to Mirror= in mkosi.conf) can still be read after its Release
 # files' Valid-Until passes, a week after the timestamp: a snapshot never changes, and its
-# signatures are still checked. Live security.debian.org keeps the expiry check, which guards
-# against replayed, stale security metadata. mkosi's debug and deb-src entries are dropped.
+# signatures are still checked. The security stanza keeps the expiry check, which guards against
+# replayed, stale security metadata; image/build.sh points it at one debian-security snapshot per
+# build (image/security-snapshot.sh, #5021), and ci.yml's test roots read it live. mkosi's debug and
+# deb-src entries are dropped.
 # Components match Repositories= in mkosi.conf.
 Types: deb
 URIs: https://snapshot.debian.org/archive/debian/20261001T000000Z/

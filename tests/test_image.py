@@ -2614,9 +2614,12 @@ class ConfigTest(unittest.TestCase):
                     self.assertEqual(v, ["SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Oquota,project"], "%s: %s" % (where, why))
         # image.yml sets MKOSI only to the pinned v24.3 binary. What build.sh itself does before it
         # runs mkosi (its config dir, flags and tree) is #4690's row (from #4647): a line pin of shell cannot hold.
+        # AGENTOS_SECURITY_SNAPSHOT is the run's one debian-security timestamp (#5021), which
+        # build.sh checks (image/security-snapshot.sh) before apt reads it.
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
         self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
-            'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
+            'run: sudo env "PATH=$PATH" "AGENTOS_SECURITY_SNAPSHOT=$AGENTOS_SECURITY_SNAPSHOT" '
+            'HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
             'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
 
     # REQ: HW-10
