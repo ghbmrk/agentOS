@@ -14,6 +14,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1187,10 +1188,12 @@ func TestOpenAfterCloseReturns(t *testing.T) {
 // hostileOpens makes newSession, while on() is true, wait as x/crypto's
 // NewSession does when the access point ends the connection in its open
 // window (#4441, #4554), until wake is called; it then opens the session
-// for real and keeps it in got. The access point chooses when to end the
-// connection, so a hostile one can aim at that window on every Sync; the
-// hook stands in for the hit, which real x/crypto lands only now and
-// then.
+// for real and keeps it in got, or fails at once if the connection has
+// ended by then. The access point chooses when to end the connection, so
+// a hostile one can aim at that window on every Sync; the hook stands in
+// for the hit, which real x/crypto lands only now and then. A real open
+// on an ended connection can land that same hit and never return, so the
+// hook does not wait on one: woken opens always return (#5719).
 func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.Session) {
 	var mu sync.Mutex
 	hostile := false
@@ -1210,8 +1213,23 @@ func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.S
 		if !h {
 			return orig(c)
 		}
+		ended := make(chan struct{})
+		go func() { c.Wait(); close(ended) }()
 		<-release
-		s, err := orig(c)
+		type opened struct {
+			s   *ssh.Session
+			err error
+		}
+		res := make(chan opened, 1)
+		go func() { s, err := orig(c); res <- opened{s, err} }()
+		var s *ssh.Session
+		var err error
+		select {
+		case o := <-res:
+			s, err = o.s, o.err
+		case <-ended:
+			return nil, errors.New("hostile open: the connection ended")
+		}
 		if err == nil {
 			mu.Lock()
 			sessions = append(sessions, s)
@@ -1237,7 +1255,8 @@ func settles(t *testing.T, p *Pusher) {
 	t.Helper()
 	for end := time.Now().Add(10 * time.Second); p.abandoned() != 0; {
 		if time.Now().After(end) {
-			t.Fatalf("%d abandoned opens still counted", p.abandoned())
+			buf := make([]byte, 1<<20)
+			t.Fatalf("%d abandoned opens still counted; goroutines:\n%s", p.abandoned(), buf[:runtime.Stack(buf, true)])
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
