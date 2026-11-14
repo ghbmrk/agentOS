@@ -3,19 +3,46 @@
 REQ: RECORD-lint (#5679)
 """
 import io
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import record_lint  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _nogit_bg  # noqa: E402
 
-HEAD = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
-SHORT = HEAD[:10]
 PR = 5661
+# A repository of its own with two commits, so no test reads this checkout's object store (records_audit, CI-PATHS).
+_tmp = REPO = PARENT = HEAD = SHORT = None
+
+
+def setUpModule():
+    global _tmp, REPO, PARENT, HEAD, SHORT
+    _nogit_bg.setUpModule()
+    _tmp = tempfile.TemporaryDirectory()
+    REPO = _tmp.name
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=REPO, env=env, capture_output=True, text=True, check=True).stdout.strip()
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "one")
+    PARENT = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "two")
+    HEAD = git("rev-parse", "HEAD")
+    SHORT = HEAD[:10]
+
+
+def tearDownModule():
+    _tmp.cleanup()
+    _nogit_bg.tearDownModule()
 
 
 def draft(record, *markers, verdict="accept"):
@@ -23,16 +50,16 @@ def draft(record, *markers, verdict="accept"):
     return "\n".join(lines + [record, *markers, "", "1. note", "", "Next: arm; owed: none", ""])
 
 
-def rec(package="VULN-debian-r8", head=SHORT, pr=PR):
-    return f"Record: PR #{pr} · package {package} · head {head}"
+def rec(package="VULN-debian-r8", head=None, pr=PR):
+    return f"Record: PR #{pr} · package {package} · head {head or SHORT}"
 
 
 class Lint(unittest.TestCase):
     def problems(self, body, head=None):
-        return record_lint.lint(body, PR, head)[0]
+        return record_lint.lint(body, PR, head, REPO)[0]
 
     def test_well_formed_passes(self):
-        self.assertEqual(record_lint.lint(draft(rec(), "<!-- record: l3 -->"), PR), ([], f"accept {SHORT} l3"))
+        self.assertEqual(record_lint.lint(draft(rec(), "<!-- record: l3 -->"), PR, cwd=REPO), ([], f"accept {SHORT} l3"))
         self.assertEqual(self.problems(draft(rec(head=HEAD), "<!-- record: ux -->", "<!-- record: potency -->")), [])
         self.assertEqual(self.problems(draft(rec(), "<!-- record: combined -->", verdict="fix-list")), [])
         self.assertEqual(self.problems(draft(rec(), "<!-- record: security -->"), head=HEAD), [])
@@ -65,10 +92,7 @@ class Lint(unittest.TestCase):
         self.assertTrue(any(p.startswith("no Record line") for p in out), out)
 
     def test_head_other_than_reviewed(self):
-        parent = subprocess.run(["git", "rev-parse", "HEAD^"], cwd=ROOT, capture_output=True, text=True)
-        if parent.returncode:
-            self.skipTest("shallow checkout without HEAD^")
-        out = self.problems(draft(rec(), "<!-- record: l3 -->"), head=parent.stdout.strip())
+        out = self.problems(draft(rec(), "<!-- record: l3 -->"), head=PARENT)
         self.assertEqual(len(out), 1)
         self.assertIn("not the --head", out[0])
         out = self.problems(draft(rec(), "<!-- record: l3 -->"), head="0000000")
@@ -108,11 +132,14 @@ class Main(unittest.TestCase):
     def run_main(self, argv, body):
         buf = io.StringIO()
         stdin, sys.stdin = sys.stdin, io.StringIO(body)
+        cwd = os.getcwd()
+        os.chdir(REPO)
         try:
             with redirect_stdout(buf):
                 code = record_lint.main(["record_lint.py", *argv])
         finally:
             sys.stdin = stdin
+            os.chdir(cwd)
         return code, buf.getvalue()
 
     def test_exit_codes(self):

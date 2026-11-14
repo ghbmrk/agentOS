@@ -63,13 +63,14 @@ def _record_problems(line, pr):
     return out
 
 
-def _full(sha):
-    r = subprocess.run(["git", "rev-parse", "-q", "--verify", f"{sha}^{{commit}}"], capture_output=True, text=True)
+def _full(sha, cwd="."):
+    r = subprocess.run(["git", "rev-parse", "-q", "--verify", f"{sha}^{{commit}}"], cwd=cwd, capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def lint(body, pr, head=None):
-    """(problems, summary): every problem premerge would have with `body` as PR `pr`'s verdict comment."""
+def lint(body, pr, head=None, cwd="."):
+    """(problems, summary): every problem premerge would have with `body` as PR `pr`'s verdict comment;
+    the heads resolve in the git checkout at `cwd`."""
     out = []
     first = body.split("\n", 1)[0].strip()
     state = first.split(":", 1)[1].strip().lower() if first.startswith("Verdict:") else None
@@ -98,13 +99,13 @@ def lint(body, pr, head=None):
     if parts:
         return out, None
     sha = line.rsplit(" ", 1)[1].strip()
-    full = _full(sha)
+    full = _full(sha, cwd)
     if full is None:
         out.append(f"head {sha} names no single commit in this checkout: fetch the PR head, copy its sha"
                    " (`git rev-parse HEAD`), never retype it")
-    elif head is not None and _full(head) is None:
+    elif head is not None and _full(head, cwd) is None:
         out.append(f"--head {head} names no single commit in this checkout")
-    elif head is not None and full != _full(head):
+    elif head is not None and full != _full(head, cwd):
         out.append(f"head {sha} is {full[:12]}, not the --head {head}")
     if state is None:
         return out, None
