@@ -357,8 +357,6 @@ func TestOP1RetriesAndForksRunAPlanOnce(t *testing.T) {
 	}
 }
 
-// TestPLN5NoKeyNoPlan: a machine with no key, or a plane with no kernel,
-// has every plan refused in fixed words, and nothing reaches the kernel.
 func TestPlaneMutNewNeedsMachines(t *testing.T) {
 	// The TestPlaneMut tests each fail when one plane.go statement that
 	// mutgate found unchecked is deleted (GUEST-mut-plane, #5748).
@@ -814,6 +812,8 @@ func TestPlaneMutInboxWakesOnRequeueAndClose(t *testing.T) {
 	}
 }
 
+// TestPLN5NoKeyNoPlan: a machine with no key, or a plane with no kernel,
+// has every plan refused in fixed words, and nothing reaches the kernel.
 // Malformed calls are refused before anything is signed.
 func TestPLN5NoKeyNoPlan(t *testing.T) {
 	r := newRig(t, func(c *Config) {
