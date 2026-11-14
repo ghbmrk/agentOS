@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -181,8 +182,18 @@ func (f FileRecord) Save(r SetupRecord) error {
 // at the directory sync (privfile.ErrUnsynced) renamed the new record into
 // place, so it counts: setup keeping the old record in memory would answer
 // a finish failed that the file holds, and the next save would write the
-// old record back (#4971).
-func saved(err error) bool { return err == nil || errors.Is(err, privfile.ErrUnsynced) }
+// old record back (#4971). It is logged, since a crash may still lose the
+// rename after the page said the step took (#5047).
+func saved(err error) bool {
+	if errors.Is(err, privfile.ErrUnsynced) {
+		logf("localsrv: setup record save: %v", err)
+		return true
+	}
+	return err == nil
+}
+
+// logf writes to agentosd's log. Tests replace it.
+var logf = log.Printf
 
 var phoneRe = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 
