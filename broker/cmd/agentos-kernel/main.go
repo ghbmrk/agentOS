@@ -139,7 +139,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.Var(clerks(c.Content), "content", "a content clerk's socket, store=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
-	fs.StringVar(&c.Chrony, "chrony", "", "chronyd's command socket, the second time source (TIM-1); the box clock alone without it")
+	fs.StringVar(&c.Chrony, "chrony", "", "chronyd's command socket, the second time source (TIM-1); the system clock alone without it")
 	fs.StringVar(&c.ChronyReply, "chrony-reply", "", "the socket chronyd answers the kernel on, an absolute path; with -chrony")
 	if err := fs.Parse(args); err != nil {
 		return c, err
