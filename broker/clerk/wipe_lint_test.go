@@ -1,0 +1,352 @@
+package clerk_test
+
+// REQ: CLK-1, STO-2
+
+// The sealer wipe lint (CLK-open-wipe-lint). A plaintext a sealer's Open
+// hands back is a credential or a private record, and a sealer may fail
+// after it decrypted, returning the plaintext beside its error. Three PRs
+// in a row found a caller that returned on that error before its wipe
+// (#5666, #5772, and the keys, secrets and plan stores fixed with this
+// lint), so the shape is now refused here instead of in review.
+//
+// The rule, over every non-test file of every package under broker/clerk,
+// type-checked: a call of a method named Open whose signature is
+// func([]byte, []byte) ([]byte, error) (clerk.Sealer's Open, whatever type
+// or interface spells it) appears only as `v, err := x.Open(a, b)` (or =)
+// with v a named variable, and the very next statement is
+// `defer clear(v)` with the builtin clear, so the wipe covers every return
+// path, the error path included. The one exception is a sealer wrapper: a
+// method named Open with that same signature hands its plaintext to its
+// caller, which this rule then holds. Any other use fails: the plaintext
+// discarded to _, opened in an if or switch header, returned from a
+// function that is not itself such an Open, passed straight to another
+// call, or the method taken as a value.
+//
+// Bound: what the code does with v between the Open and its return (a copy
+// kept, v reassigned before the deferred clear runs, a string made of it)
+// is held by review; so are files a build tag leaves out of the default
+// build, and callers outside broker/clerk.
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
+)
+
+var wipeLoad = sync.OnceValues(func() (*lintload.Loaded, error) {
+	return lintload.Load(".", lintload.Build{}, "./...")
+})
+
+// TestEveryOpenedPlaintextIsWipedOnEveryPath runs the rule over the tree.
+func TestEveryOpenedPlaintextIsWipedOnEveryPath(t *testing.T) {
+	l, err := wipeLoad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var problems []string
+	opens := 0
+	for _, p := range l.Packages {
+		for _, f := range p.Files {
+			name := l.Fset.File(f.Pos()).Name()
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			rel, err := filepath.Rel(wd, name)
+			if err != nil {
+				rel = name
+			}
+			n, ps := wipeProblems(l.Fset, f, p.Info)
+			opens += n
+			for _, s := range ps {
+				problems = append(problems, filepath.ToSlash(rel)+":"+s)
+			}
+		}
+	}
+	// A loader that read nothing would pass every tree: the clerk's own
+	// stores alone call the sealer's Open more than this.
+	if opens < 5 {
+		t.Fatalf("the lint saw %d sealer Open calls; want the clerk's stores among them", opens)
+	}
+	sort.Strings(problems)
+	for _, s := range problems {
+		t.Error(s)
+	}
+}
+
+// wipeProblems returns how many sealer Open uses the file holds and, for
+// each one the rule refuses, its line and why.
+func wipeProblems(fset *token.FileSet, f *ast.File, info *types.Info) (int, []string) {
+	ok := map[*ast.Ident]bool{}     // Open selectors in an allowed shape
+	called := map[*ast.Ident]bool{} // Open selectors that are a call's callee
+	var problems []string
+	line := func(n ast.Node) string { return strconv.Itoa(fset.PositionFor(n.Pos(), false).Line) }
+
+	for _, decl := range f.Decls {
+		fd, isFn := decl.(*ast.FuncDecl)
+		wrapper := isFn && fd.Recv != nil && fd.Name.Name == "Open" && isSealerOpen(info.Defs[fd.Name])
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if c, isCall := n.(*ast.CallExpr); isCall {
+				if sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr); isSel && isSealerOpen(info.Uses[sel.Sel]) {
+					called[sel.Sel] = true
+					if wrapper {
+						ok[sel.Sel] = true
+					}
+				}
+			}
+			var list []ast.Stmt
+			switch b := n.(type) {
+			case *ast.BlockStmt:
+				list = b.List
+			case *ast.CaseClause:
+				list = b.Body
+			case *ast.CommClause:
+				list = b.Body
+			}
+			for i, s := range list {
+				id := openAssign(s, info)
+				if id == nil {
+					continue
+				}
+				if i+1 < len(list) && defersClear(list[i+1], s.(*ast.AssignStmt).Lhs[0], info) {
+					ok[id] = true
+				}
+			}
+			return true
+		})
+	}
+	uses := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		id, isID := n.(*ast.Ident)
+		if !isID || !isSealerOpen(info.Uses[id]) {
+			return true
+		}
+		uses++
+		switch {
+		case ok[id]:
+		case !called[id]:
+			problems = append(problems, line(id)+": a sealer's Open taken as a value; call it and defer clear on its plaintext")
+		default:
+			problems = append(problems, line(id)+": a sealer's Open plaintext is not wiped on every path; write `v, err := x.Open(...)` then `defer clear(v)` as the next statement")
+		}
+		return true
+	})
+	return uses, problems
+}
+
+// openAssign returns the Open selector of s when s is `v, err := x.Open(a,
+// b)` (or =) with v a named variable.
+func openAssign(s ast.Stmt, info *types.Info) *ast.Ident {
+	a, isAssign := s.(*ast.AssignStmt)
+	if !isAssign || len(a.Lhs) != 2 || len(a.Rhs) != 1 {
+		return nil
+	}
+	if v, isID := a.Lhs[0].(*ast.Ident); !isID || v.Name == "_" {
+		return nil
+	}
+	c, isCall := ast.Unparen(a.Rhs[0]).(*ast.CallExpr)
+	if !isCall {
+		return nil
+	}
+	sel, isSel := ast.Unparen(c.Fun).(*ast.SelectorExpr)
+	if !isSel || !isSealerOpen(info.Uses[sel.Sel]) {
+		return nil
+	}
+	return sel.Sel
+}
+
+// defersClear reports whether s is `defer clear(v)`, with the builtin
+// clear and v the same variable as lhs.
+func defersClear(s ast.Stmt, lhs ast.Expr, info *types.Info) bool {
+	d, isDefer := s.(*ast.DeferStmt)
+	if !isDefer || len(d.Call.Args) != 1 {
+		return false
+	}
+	fn, isID := ast.Unparen(d.Call.Fun).(*ast.Ident)
+	if !isID {
+		return false
+	}
+	if _, builtin := info.Uses[fn].(*types.Builtin); !builtin || fn.Name != "clear" {
+		return false
+	}
+	arg, isID := ast.Unparen(d.Call.Args[0]).(*ast.Ident)
+	v := lhs.(*ast.Ident)
+	want := info.ObjectOf(v)
+	return isID && want != nil && info.ObjectOf(arg) == want
+}
+
+// isSealerOpen reports whether obj is a method named Open with the
+// signature func([]byte, []byte) ([]byte, error).
+func isSealerOpen(obj types.Object) bool {
+	fn, isFn := obj.(*types.Func)
+	if !isFn || fn.Name() != "Open" {
+		return false
+	}
+	sig := fn.Type().(*types.Signature)
+	if sig.Recv() == nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 2 {
+		return false
+	}
+	bytes := types.NewSlice(types.Typ[types.Byte])
+	return types.Identical(sig.Params().At(0).Type(), bytes) &&
+		types.Identical(sig.Params().At(1).Type(), bytes) &&
+		types.Identical(sig.Results().At(0).Type(), bytes) &&
+		types.Identical(sig.Results().At(1).Type(), types.Universe.Lookup("error").Type())
+}
+
+// TestTheWipeLintRefusesEachShape checks the rule on synthetic sources: each
+// case is one function body, and want is the number of problems it has.
+func TestTheWipeLintRefusesEachShape(t *testing.T) {
+	l, err := wipeLoad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = `package p
+
+import "errors"
+
+type Sealer interface {
+	Seal(plain, aad []byte) ([]byte, error)
+	Open(blob, aad []byte) ([]byte, error)
+}
+
+type aead struct{}
+
+func (aead) Open(blob, aad []byte) ([]byte, error) { return blob, nil }
+
+type vm struct{}
+
+func (vm) Open(name string, n int) ([]byte, error) { return nil, nil }
+
+var _ = errors.New
+var sink []byte
+
+`
+	cases := []struct {
+		name, body string
+		want       int
+	}{
+		{"defer right after the open", `func f(s Sealer, b []byte) error {
+	plain, err := s.Open(b, nil)
+	// a comment between is no statement
+	defer clear(plain)
+	if err != nil {
+		return err
+	}
+	sink = plain[:0]
+	return nil
+}`, 0},
+		{"plain assignment, concrete sealer", `func f(s aead, b []byte) (err error) {
+	var plain []byte
+	plain, err = s.Open(b, nil)
+	defer clear(plain)
+	return err
+}`, 0},
+		{"a sealer wrapper hands its plaintext to its caller", `type kept struct{ Sealer }
+
+func (k kept) Open(blob, aad []byte) ([]byte, error) {
+	plain, err := k.Sealer.Open(blob, aad)
+	return plain, err
+}`, 0},
+		{"an Open of another shape is no sealer's", `func f(v vm) error {
+	m, err := v.Open("x", 1)
+	_ = m
+	return err
+}`, 0},
+		{"defer after the error check (#5772)", `func f(s Sealer, b []byte) error {
+	plain, err := s.Open(b, nil)
+	if err != nil {
+		return err
+	}
+	defer clear(plain)
+	return nil
+}`, 1},
+		{"wiped by hand after use", `func f(s Sealer, b []byte) error {
+	plain, err := s.Open(b, nil)
+	if err != nil {
+		return errors.New("no")
+	}
+	clear(plain)
+	return nil
+}`, 1},
+		{"defer clear of another buffer", `func f(s Sealer, b []byte) error {
+	plain, err := s.Open(b, nil)
+	defer clear(b)
+	_ = plain
+	return err
+}`, 1},
+		{"a clear that is not the builtin", `func clear(b []byte) {}
+
+func f(s Sealer, b []byte) error {
+	plain, err := s.Open(b, nil)
+	defer clear(plain)
+	_ = plain
+	return err
+}`, 1},
+		{"plaintext discarded", `func f(s Sealer, b []byte) error {
+	_, err := s.Open(b, nil)
+	return err
+}`, 1},
+		{"opened in an if header", `func f(s Sealer, b []byte) error {
+	if plain, err := s.Open(b, nil); err != nil {
+		return err
+	} else {
+		clear(plain)
+	}
+	return nil
+}`, 1},
+		{"returned from a helper that is no Open", `func f(s Sealer, b []byte) ([]byte, error) {
+	return s.Open(b, nil)
+}`, 1},
+		{"passed straight on", `func g(b []byte, err error) {}
+
+func f(s Sealer, b []byte) {
+	g(s.Open(b, nil))
+}`, 1},
+		{"taken as a value", `func f(s Sealer, b []byte) error {
+	o := s.Open
+	plain, err := o(b, nil)
+	defer clear(plain)
+	return err
+}`, 1},
+		{"in a closure and a switch case", `func f(s Sealer, b []byte, k int) {
+	go func() {
+		plain, err := s.Open(b, nil)
+		_, _ = plain, err
+	}()
+	switch k {
+	case 1:
+		plain, err := s.Open(b, nil)
+		defer clear(plain)
+		_ = err
+	}
+}`, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := parser.ParseFile(l.Fset, "case.go", head+c.body, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, info, err := l.Check("example.test/p", []*ast.File{f})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, got := wipeProblems(l.Fset, f, info); len(got) != c.want {
+				t.Fatalf("got %d problems %q; want %d", len(got), got, c.want)
+			}
+		})
+	}
+}

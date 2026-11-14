@@ -49,13 +49,13 @@ func (k *Keys) Load(atRest []byte) error {
 		return nil
 	}
 	plain, err := k.s.Open(atRest, keysAAD)
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return ErrKeysOpen
 	}
 	var m map[string]keyEntry
-	err = json.Unmarshal(plain, &m)
-	clear(plain)
-	if err != nil {
+	if json.Unmarshal(plain, &m) != nil {
 		return ErrKeysOpen
 	}
 	k.blob = append([]byte(nil), atRest...)
@@ -76,10 +76,11 @@ func (k *Keys) openLocked() (map[string]keyEntry, error) {
 		return m, nil
 	}
 	plain, err := k.s.Open(k.blob, keysAAD)
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return nil, ErrKeysOpen
 	}
-	defer clear(plain)
 	if json.Unmarshal(plain, &m) != nil {
 		return nil, ErrKeysOpen
 	}
