@@ -290,10 +290,19 @@ func snoop(seg, iface string) []string {
 		" " + yiaddr + " . " + chaddr + " != @" + LeaseSet(seg) + " counter name " + strconv.Quote(LeaseHeld) + " drop"}
 	for _, b := range leaseBands() {
 		out = append(out, "oifname "+iface+" "+ackMatch(b)+leaseUpdates(seg, b[0])+
-			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }")
+			" update @"+LeasedSet(seg)+" { "+chaddr+" timeout "+secs(b[0])+" }"+
+			" meta mark set meta mark or "+ownAck)
 	}
 	return out
 }
+
+// ownAck is the packet mark bit snoop sets on each ACK it reads, so
+// NeighTable's egress chain reads the same ACKs and no other: the netdev
+// egress hook also sees forwarded packets, which never cross the output
+// chain, and a host can have the internet answer it from port 67 with an
+// ACK-shaped reply (#5687). The mark lives on the packet inside the
+// enforcer only; nothing else in the ruleset sets or reads it.
+const ownAck = "0x00000100"
 
 // The leased address (yiaddr) and the client's hardware address (chaddr)
 // in a DHCPACK.
@@ -1310,9 +1319,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// lease holds. An inet table never sees ARP and an arp table never sees
 	// DHCP, and a table's chains read only its own sets, so this netdev
 	// table keeps its own LeaseSet and LeaseAddrSet per segment: its egress
-	// chain reads each ACK that leaves the segment's interface (the output
-	// chain has already dropped one the inet sets hold for another host)
-	// with snoop's own matches, and each load seeds and carries them as it
+	// chain reads each ACK that leaves the segment's interface marked
+	// ownAck, the ACKs snoop read in the output chain (after it dropped one
+	// the inet sets hold for another host), with snoop's own matches, and each load seeds and carries them as it
 	// does the inet sets (Seed, Reload). An ARP header with Ethernet and
 	// IPv4 addresses, the only one Linux takes on an Ethernet interface,
 	// has the sender's hardware address at byte 8 and its address at byte
@@ -1331,7 +1340,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.open("chain " + ackOut(sg.name))
 		w.line("type filter hook egress device " + q(sg.iface) + " priority filter; policy accept;")
 		for _, b := range leaseBands() {
-			w.line(ackMatch(b) + leaseUpdates(sg.name, b[0]))
+			w.line("meta mark and " + ownAck + " != 0 " + ackMatch(b) + leaseUpdates(sg.name, b[0]))
 		}
 		w.close()
 	}
