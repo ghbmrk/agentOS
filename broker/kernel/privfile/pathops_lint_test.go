@@ -905,8 +905,10 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #5715 L3 6874735402, Security 6874738412: an L line's link under the source; a source outside /usr.
 		"a tmpfiles copy over a tmpfiles link": {with(udev, tmpf+"a.conf", "L /var/lib/pkg/lnk - - - - /run/agentos-x\n", tmpf+"x.conf", "C /run/x - - - - /var/lib/pkg\n", "/var/lib/pkg/f", "x"), ourEtc, `an L line makes a link at, under or above its source, /var/lib/pkg/lnk`},
 		"a tmpfiles copy from /etc":            {with(udev, tmpf+"x.conf", "C /run/x - - - - /etc/pkg\n", "/etc/pkg/f", "x"), ourEtc, `its source is not under /usr`},
-		// #5715 Security 6874832725: a tmpfiles line makes /.extra in the persistent root.
-		"a tmpfiles copy from a /.extra a tmpfiles line makes": {with(udev, tmpf+"x.conf", "d /.extra/profile 0777 - - -\nC /run/x - - - - /.extra/profile\n"), ourEtc, `its source is under /.extra, which a tmpfiles.d line names (/.extra/profile)`},
+		// #5715 L3 6874919503, Security 6874914212: no /.extra source is kept, so
+		// neither a non-normal spelling nor the image's own stub line passes.
+		"a tmpfiles copy from a /.extra a tmpfiles line makes": {with(udev, tmpf+"x.conf", "d //.extra/profile 0777 - - -\nC /run/x - - - - /.extra/profile\n"), ourEtc, `its source is not under /usr`},
+		"a tmpfiles copy of no file":                           {with(udev, tmpf+"20-systemd-stub.conf", "C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"), ourEtc, `its source is not under /usr`},
 		// #5620 R-a, R-b.
 		"an open directory mode of ours":  {map[string]string{etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=/run/agentos-x/s\nDirectoryMode=0777\n"}, ourEtc, `DirectoryMode=0777: a directory mode of ours`},
 		"a port of ours":                  {with(foo, etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=2222\nReusePort=yes\n"), ourEtc, `ListenStream=2222: a listen path of ours names no path`},
@@ -1020,8 +1022,6 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		// #5651: a tmpfiles link off our paths; one a higher file masks.
 		"a tmpfiles link beside a socket of ours": {with(udev, tmpf+"debian.conf", "L /run/shm - - - - /dev/shm\n", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/s\n"), ourEtc},
 		"a masked tmpfiles link":                  {with(udev, tmpf+"x.conf", "L /run/agentos-x - - - - /run/udev\n", "/etc/tmpfiles.d/x.conf", "-> /dev/null", etc+"agentos-x.service", user, etc+"agentos-x.socket", "[Socket]\nListenStream=/run/agentos-x/control\n"), ourEtc},
-		// #5707: the image's own C lines copy files the tree does not hold.
-		"a tmpfiles copy of no file": {with(udev, tmpf+"20-systemd-stub.conf", "C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"), ourEtc},
 		// A socket all of whose files are ours sets its own owner and mode.
 		// #5075 R3: a socket of ours beside a package's in a shared tree.
 		"a socket of ours beside a package's in /run": {map[string]string{lib + "pkgs.socket": "[Socket]\nListenStream=/run/pkgs.sock\n", lib + "pkgs.service": user, etc + "agentos-x.service": user, etc + "agentos-x.socket": "[Socket]\nListenStream=%t/agentos-x.sock\nListenStream=/run/agentos-x/100%%\n"}, ourEtc},

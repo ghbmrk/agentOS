@@ -801,22 +801,39 @@ class CopyLineTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "C line .*: its source is not under /usr"):
                     self.run_line(d, line, more)
 
-    def test_a_extra_source_present_at_boot_fails_the_run(self):
-        # #5715 Security 6874832725: root is persistent and writable, so a tmpfiles.d line (any type) at, under
-        # or above /.extra, or a /.extra in the tree, lets a non-root writer plant a link the C line copies.
+    def test_a_extra_source_fails_the_run(self):
+        # #5715 L3 6874919503 and Security 6874914212: a /.extra exception compared path text, so //, /./ or a
+        # link on the way (a tree link or an L line) made /.extra at boot with the lint passing. No source
+        # outside /usr is kept: the image's own stub lines (absent /.extra) fail too, and mkosi.conf drops them.
         c = "C /run/x - - - - /.extra/profile\n"
-        for files, want in (
-                ({"/usr/lib/tmpfiles.d/x.conf": "d /.extra/profile 0777 - - -\n" + c}, r"a tmpfiles.d line names \(/.extra/profile\)"),
-                ({"/usr/lib/tmpfiles.d/x.conf": "d /.extra 1777 - - -\n" + c}, r"a tmpfiles.d line names \(/.extra\)"),
-                ({"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/other": "x"}, "which the tree holds"),
-                ({"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/profile": "x"}, "which the tree holds"),
-                ({"/usr/lib/tmpfiles.d/a.conf": "Z / - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(/\)"),
-                ({"/usr/lib/tmpfiles.d/a.conf": "C /.extra/profile - - - - /usr/share/f\n",
-                  "/usr/lib/tmpfiles.d/x.conf": c, "/usr/share/f": "x"}, r"names \(/.extra/profile\)"),
-                ({"/usr/lib/tmpfiles.d/a.conf": "d /.ext*/p 0777 - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(/.ext\*/p\)"),
-                ({"/usr/lib/tmpfiles.d/a.conf": "d %h/../.extra 0777 - - -\n", "/usr/lib/tmpfiles.d/x.conf": c}, r"names \(%h")):
+        for files in (
+                {"/usr/lib/tmpfiles.d/x.conf": c},
+                {"/usr/lib/tmpfiles.d/x.conf": "C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d //.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /./.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /usr/../.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "L /foo - - - - .\nd /foo/.extra/profile 0777 - - -\n" + c},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /foo/.extra/profile 0777 - - -\n" + c, "/foo": "-> ."},
+                {"/usr/lib/tmpfiles.d/x.conf": "d /foo/.extra/profile 0777 - - -\n" + c, "/foo": "-> /"},
+                {"/usr/lib/tmpfiles.d/x.conf": c, "/.extra/profile": "x"}):
             with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
-                with self.assertRaisesRegex(SystemExit, "C line .*: its source is under /.extra, .*" + want):
+                with self.assertRaisesRegex(SystemExit, "C line .*: its source is not under /usr"):
+                    r.boot_links(tree(d, files))
+
+    def test_a_non_normal_path_fails_the_run(self):
+        # normpath keeps a leading //, so a text match against an L line or /usr could miss it.
+        for files, want in (
+                ({"/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - //usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "C line .*: its source is not absolute and normal"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L //usr/share/pkg/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "L line .*: its path is not absolute and normal"),
+                ({"/usr/lib/tmpfiles.d/a.conf": "L /usr/share/./pkg/lnk - - - - /run/agentos-x\n",
+                  "/usr/lib/tmpfiles.d/x.conf": "C /run/x - - - - /usr/share/pkg\n", "/usr/share/pkg/f": "x"},
+                 "L line .*: its path is not absolute and normal")):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, want):
                     r.boot_links(tree(d, files))
 
     def test_a_source_the_reader_cannot_read_fails_the_run(self):
@@ -835,11 +852,7 @@ class CopyLineTest(unittest.TestCase):
                     self.run_line(d, line)
 
     def test_a_source_of_files_or_none_passes(self):
-        # The image's own lines: /.extra is not in the tree, so systemd skips them.
-        stub = ("C /run/systemd/stub/profile 0444 root root - /.extra/profile\n"
-                "C /run/systemd/tpm2-pcr-public-key.pem 0444 root root - /.extra/tpm2-pcr-public-key.pem")
-        for line, more in ((stub, {}),
-                           ("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/f": "x", "/usr/share/pkg/g": "y"}),
+        for line, more in (("C /run/x - - - - /usr/share/pkg", {"/usr/share/pkg/a/f": "x", "/usr/share/pkg/g": "y"}),
                            ("C /run/x", {"/usr/share/factory/run/x": "x"}),
                            ("c /dev/x 0600 - - - 1:3", {})):
             with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
