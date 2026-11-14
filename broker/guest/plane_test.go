@@ -526,6 +526,23 @@ func TestPlaneMutCloseStopsTheStepper(t *testing.T) {
 	}
 }
 
+func TestPlaneMutStepOnAStoppedMachineReleasesTheLock(t *testing.T) {
+	r := newRig(t, nil)
+	r.client("m1")
+	m := r.p.get("m1")
+	r.p.Close("m1")
+	r.p.step(m)
+	s := &m.steps
+	locked := make(chan struct{})
+	go func() { s.mu.Lock(); close(locked) }()
+	select {
+	case <-locked:
+		s.mu.Unlock()
+	case <-time.After(5 * time.Second):
+		t.Fatal("step on a stopped machine left the stepper locked")
+	}
+}
+
 func TestPlaneMutShutdownClosesEveryMachine(t *testing.T) {
 	r := newRig(t, nil)
 	r.client("m1")
