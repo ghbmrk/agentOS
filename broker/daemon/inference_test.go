@@ -265,8 +265,9 @@ var clientTypes = map[string]string{
 }
 
 // dials are method or function names that open a connection, and the
-// index of their network argument, which must be "unix".
-var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0}
+// index of their network argument, which must be "unix" (DialUnix's
+// may be any unix network).
+var dials = map[string]int{"Dial": 0, "DialTimeout": 0, "DialContext": 1, "Listen": 0, "DialUnix": 0}
 
 type listed struct {
 	path, dir string
@@ -560,6 +561,20 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			if !isDial || len(n.Args) <= i {
 				return true
 			}
+			// DialUnix takes a unix network and its addresses as
+			// *net.UnixAddr: each must be nil or &net.UnixAddr{Name: x}
+			// with x from configuration, as Dial's address (#5757 S1).
+			if se.Sel.Name == "DialUnix" {
+				if lit, ok := n.Args[0].(*ast.BasicLit); !ok || (lit.Value != `"unix"` && lit.Value != `"unixgram"` && lit.Value != `"unixpacket"`) {
+					at(n, "DialUnix on a network other than a unix one")
+				}
+				for _, a := range n.Args[1:] {
+					if !configuredUnixAddr(a, f, sel) {
+						at(n, "DialUnix to an address not taken from configuration")
+					}
+				}
+				return true
+			}
 			if lit, ok := n.Args[i].(*ast.BasicLit); !ok || lit.Value != `"unix"` {
 				at(n, se.Sel.Name+" on a network other than \"unix\"")
 			}
@@ -623,6 +638,42 @@ func configured(e ast.Expr, f *ast.File) bool {
 		}
 	}
 	return true
+}
+
+// configuredUnixAddr reports a DialUnix address that is nil or
+// &net.UnixAddr{...} whose Name is configured and whose other fields are
+// literals; any other expression is not.
+func configuredUnixAddr(e ast.Expr, f *ast.File, sel func(ast.Expr) string) bool {
+	if id, ok := e.(*ast.Ident); ok && id.Name == "nil" && id.Obj == nil {
+		return true
+	}
+	u, ok := e.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return false
+	}
+	c, ok := u.X.(*ast.CompositeLit)
+	if !ok || sel(c.Type) != "net.UnixAddr" {
+		return false
+	}
+	named := false
+	for _, el := range c.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return false
+		}
+		k, _ := kv.Key.(*ast.Ident)
+		switch {
+		case k != nil && k.Name == "Name" && configured(kv.Value, f):
+			named = true
+		case k != nil && k.Name == "Net":
+			if _, ok := kv.Value.(*ast.BasicLit); !ok {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return named
 }
 
 // setsChecked reports that a client literal sets field key to a value the
@@ -716,6 +767,11 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "tcp", "imap.example.com:993") }`)},
 		{"mail/mailsock", src(`"net"`, `func g() { (&net.Dialer{}).DialContext(nil, "unix", "/run/agentos-egress/mail.sock") }`)},
 		{"mail/mailsock", src(`"net"`, `var c, _ = net.Dial("tcp", "smtp.example.com:465")`)},
+		{"kernel/proc", src(`"net"`, `func g() { net.DialUnix("unixgram", nil, &net.UnixAddr{Name: "/run/proxy.sock", Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("unixgram", &net.UnixAddr{Name: "/run/r.sock", Net: "unixgram"}, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `func g(a *net.UnixAddr) { net.DialUnix("unixgram", nil, a) }`)},
+		{"kernel/proc", src(`"net"`, `func g(sock string) { net.DialUnix("tcp", nil, &net.UnixAddr{Name: sock, Net: "unixgram"}) }`)},
+		{"kernel/proc", src(`"net"`, `var f = net.DialUnix`)},
 	} {
 		path := filepath.Join(t.TempDir(), "p.go")
 		if err := os.WriteFile(path, []byte(c.src), 0o600); err != nil {
@@ -749,6 +805,17 @@ func (c *client) do(ctx context.Context) (net.Conn, error) {
 	}
 	if got := sourceUse(t, path, "mailsock.go", "mail/mailsock"); len(got) != 0 {
 		t.Errorf("mailsock's unix dial flagged: %q", got)
+	}
+	chrony := src(`"net"`, `type chrony struct{ sock, reply string }
+func (s *chrony) dial() (*net.UnixConn, error) {
+	return net.DialUnix("unixgram", &net.UnixAddr{Name: s.reply, Net: "unixgram"}, &net.UnixAddr{Name: s.sock, Net: "unixgram"})
+}`)
+	path = filepath.Join(t.TempDir(), "chrony.go")
+	if err := os.WriteFile(path, []byte(chrony), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := sourceUse(t, path, "chrony.go", "kernel/proc"); len(got) != 0 {
+		t.Errorf("kernel/proc's configured DialUnix flagged: %q", got)
 	}
 	// Imports: RPC, mail, raw sockets, and escape hatches.
 	reach := httpReach([]listed{{path: "net/rpc", imports: []string{"net/http"}}, {path: "net/http"}})
