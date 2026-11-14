@@ -460,8 +460,10 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 	// The ending notice is one sound at a time: once due, it hushes the
 	// turn, which ends when the sentence playing ends, and plays once no
 	// turn runs; a turn still playing at bound is stopped (#5304). Until
-	// then the loop acts on events as before, and any event that stops the
-	// turn lets the notice play at once, before a new turn starts.
+	// then the loop acts on events as before: a 0 or a final transcript
+	// that stops the turn lets the notice play at once, before a new turn
+	// starts; a barge-in stops the turn and the notice waits for the
+	// owner's final words, up to the bound, so it never talks over them.
 	var due bool
 	var bound <-chan time.Time
 	notify := func() {
@@ -539,7 +541,6 @@ func loop(ctx context.Context, cfg Config, l Line, token <-chan *grant) (Report,
 			if !h.Final {
 				if strings.TrimSpace(h.Text) != "" {
 					stop(true) // barge-in
-					notify()
 				}
 				continue
 			}

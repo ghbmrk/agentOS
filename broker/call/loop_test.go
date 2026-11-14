@@ -1098,8 +1098,13 @@ func TestTheEndingNoticeKeepsTheCallsState(t *testing.T) {
 		r.say("what's in my mail")
 		time.Sleep(29 * time.Minute)
 		synctest.Wait()
-		if got := <-r.l.saying; got != "CLIP:ending" {
-			t.Fatalf("a minute before MaxCall: played %q", got)
+		select { // at once: a turn with nothing playing ends when hushed
+		case got := <-r.l.saying:
+			if got != "CLIP:ending" {
+				t.Fatalf("a minute before MaxCall: played %q", got)
+			}
+		default:
+			t.Fatal("the notice waited while nothing played")
 		}
 		r.l.keys <- '#' // the token read ends: P0
 		r.say("from today")
