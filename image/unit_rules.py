@@ -184,9 +184,9 @@ class View:
 # #5703: what is mounted over the tree before systemd-tmpfiles-setup runs, so nothing the tree holds there
 # is boot state. systemd's mount_table (src/shared/mount-setup.c, v255 to v257) mounts every API file
 # system at or under /proc, /sys, /dev or /run; tmp.mount mounts /tmp (its 50-agentos-noexec.conf
-# drop-in). A missing one here makes the tree's content there read as boot state, so the tmpfiles.d
-# reader also refuses any link on its way to a file (tmpfiles_lines): no tree link can lead it under
-# one of these, listed or not. The link readers (tree_links, tmpfiles_links) read through BootView.
+# drop-in). Nothing rests on the list being whole (package .mount units may add more): a mount it
+# misses leaves a tree link that is not there at boot in the records, or fails the run (tmpfiles_lines,
+# tmpfiles_links), never drops a link. The link readers (tree_links, tmpfiles_links) read through BootView.
 BOOT_MOUNTS = ("/dev", "/proc", "/sys", "/run", "/tmp")
 
 
@@ -510,16 +510,16 @@ def through(p, links):
 
 
 def tmpfiles_links(view, links, usr_view=None):
-    """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): /run is a
-    tmpfs then, so the tree's /run holds none, and tmpfiles.allow gates these lines by review alone.
-    VIEW is a BootView (boot_links), so nothing the tree holds under BOOT_MOUNTS, however a link leads
-    there, holds a path or steps a target (#5703). A line counts with any modifier, when its path holds
-    nothing at boot (or, with +, whatever it holds); its target, the factory copy
-    when it gives none, is resolved in the tree and through the other links, and every value is read
-    again through them. An L line holding a specifier, quote or
-    escape, an encoded (~) or credential (^) target, a path not absolute and normal, a path another
-    tmpfiles.d line also names (which one applies is systemd-tmpfiles' to decide), or one whose directory
-    passes through a link fails the run."""
+    """LINKS (tree_links) with each link a tmpfiles.d L line makes at boot (#5651, KRN-2): tmpfiles.allow
+    gates these lines by review alone. VIEW is a BootView (boot_links). #5703 re-plan: nothing here rests
+    on knowing what is mounted at boot, which package .mount units leave open. Every L line counts, with
+    any modifier, whatever the tree holds at its path (an extra link only refuses more). Its path's
+    directory and its target (the factory copy when it gives none) are resolved in the tree, and a tree
+    link on either way fails the run, since it may sit under a mount the tree does not show; the target
+    is then read through the other L lines' links, and every value again through them. An L line
+    holding a specifier, quote or escape, an encoded (~) or credential (^) target, a path not absolute
+    and normal, a path another tmpfiles.d line also names (which one applies is systemd-tmpfiles' to
+    decide), or one whose directory passes through another L line's link fails the run too."""
     lines, named = tmpfiles_lines(view, usr_view), {}
     for f, line in lines:
         w = line.split()
@@ -542,20 +542,21 @@ def tmpfiles_links(view, links, usr_view=None):
         if len(named[p]) > 1:
             raise SystemExit("unit rules: %s: a tmpfiles.d L line and another line name it, and which "
                              "applies is not read" % p)
-        key = view.resolve(p, last=False)[0]
-        if "+" not in w[0] and view.lstat(key) is not None:
-            continue  # tmpfiles leaves what the path holds at boot
+        _, via = view.resolve(os.path.dirname(p))
+        if via:
+            raise SystemExit("unit rules: %s: L line %r: its path's directory passes through a link in the "
+                             "tree (%s), which may not be there at boot" % (f, line, via[0]))
         arg = w[6].strip() if len(w) > 6 else "-"
         target = "/usr/share/factory" + p if arg in ("", "-") else os.path.join(os.path.dirname(p), arg)
-        found[key] = target
+        found[p] = (f, line, target)
     if not found:
         return links
     out = dict(links)
-    for key, target in found.items():
-        try:
-            final, _ = view.resolve(target)
-        except (SystemExit, OSError):
-            final = key
+    for key, (f, line, target) in found.items():
+        final, via = view.resolve(target)
+        if via:
+            raise SystemExit("unit rules: %s: L line %r: its target passes through a link in the tree (%s), "
+                             "which may not be there at boot" % (f, line, via[0]))
         if view.kind(final) in (None, 0o040000) or final == key:
             out[key] = final
         else:
@@ -567,10 +568,25 @@ def tmpfiles_links(view, links, usr_view=None):
     return {k: (v if v == k else through(v, {a: b for a, b in out.items() if a != k})) for k, v in out.items()}
 
 
+# #5703 L3 6872796820: the kernel's own links under /proc, /sys and /dev (/proc/self/root, /proc/<pid>/root,
+# /proc/thread-self, /dev/fd) lead back into /, and the reader cannot follow them, so a link whose target
+# resolves at or under one fails the run, but at exactly these: none is a directory a path steps through
+# into / (/dev/shm is a plain tmpfs). /dev/null masks; /dev/shm and /proc/self/mounts are debian.conf's
+# /run/shm and /etc/mtab lines.
+API_MOUNTS = ("/proc", "/sys", "/dev")
+API_TARGETS = ("/dev/null", "/dev/shm", "/proc/self/mounts")
+
+
 def boot_links(view, usr_view=None):
-    """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView."""
+    """The links a path may pass through at boot: the tree's and tmpfiles.d's, read at BootView. A link
+    into an API mount but API_TARGETS fails the run."""
     boot = BootView(view)
-    return tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
+    out = tmpfiles_links(boot, tree_links(boot, usr_view), usr_view)
+    for k, v in sorted(out.items()):
+        if v != k and v not in API_TARGETS and any(v == m or v.startswith(m + "/") for m in API_MOUNTS):
+            raise SystemExit("unit rules: %s: a link to %s, under %s, whose own links the reader does not "
+                             "follow" % (k, v, "/" + v.split("/")[1]))
+    return out
 
 
 def records(view, shown, dirs, prov, usr_view=None):

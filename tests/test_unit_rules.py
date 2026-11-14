@@ -606,6 +606,10 @@ class BootLinksTest(unittest.TestCase):
                     v = tree(d, {**line, **more})
                     b = r.BootView(v)
                     self.assertEqual((b.kind(m), b.entries(m)), (0o040000, []))
+                    if m in r.API_MOUNTS:  # a target there fails the run (MagicLinkTest)
+                        with self.assertRaisesRegex(SystemExit, "a link to %s/t, under %s" % (m, m)):
+                            r.boot_links(v)
+                        continue
                     got = r.boot_links(v)
                     self.assertEqual(got.get(m + "/agentos-x"), m + "/t")
                     self.assertNotIn(m + "/t", got)
@@ -634,11 +638,58 @@ class BootLinksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertNotIn("/run/agentos-x", self.links(d, {"/etc/tmpfiles.d/x.conf": "-> /dev/null"}))
 
-    def test_an_entry_off_run_still_stops_the_link(self):
+    # #5703 Security 6872820441: a package .mount unit hides the tree's content under its Where= at boot,
+    # so what the tree holds at an L path, mounted over or not, never stops the link.
+    def test_a_tree_entry_under_a_package_mount_does_not_stop_the_link(self):
+        mount = {"/usr/lib/tmpfiles.d/foo.conf": "L /var/lib/foo/s - - - - /run/agentos-x/s\n",
+                 "/usr/lib/systemd/system/var-lib-foo.mount":
+                     "[Mount]\nWhat=tmpfs\nWhere=/var/lib/foo\nOptions=nosuid,nodev,noexec\n",
+                 "/usr/lib/systemd/system/local-fs.target.wants/var-lib-foo.mount": "-> ../var-lib-foo.mount"}
+        for more in ({}, {"/var/lib/foo/s/.keep": ""}, {"/var/lib/foo/s": "a file"}, {"/var/agentos-x/.keep": ""}):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                got = r.boot_links(tree(d, {**mount, **more}))
+                self.assertEqual(got.get("/var/lib/foo/s"), "/run/agentos-x/s")
+
+    def test_a_tree_link_on_the_path_or_the_target_fails_the_run(self):
+        # A tree link under a mount the reader cannot see is not there at boot, so none is followed.
+        for line, more, want in (
+                ("L /var/lib/foo/s - - - - /run/agentos-x", {"/var/lib/foo": "-> /var/lib/bar"}, "its path's directory"),
+                ("L /run/agentos-y - - - - /var/lib/foo/t", {"/var/lib/foo": "-> /run/udev"}, "its target"),
+                ("L /run/agentos-y - - - - /var/run/udev", {"/var/run": "-> ../run"}, "its target"),
+                ("L /run/agentos-y - - - - t/u", {"/run/t": "-> /etc"}, None)):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {"/usr/lib/tmpfiles.d/x.conf": line + "\n", **more})
+                if want is None:  # a tree link the boot view hides is not followed, nor refused
+                    self.assertEqual(r.boot_links(v).get("/run/agentos-y"), "/run/t/u")
+                    continue
+                with self.assertRaisesRegex(SystemExit, want + " passes through a link in the tree"):
+                    r.boot_links(v)
+
+
+class MagicLinkTest(unittest.TestCase):
+    """#5703 L3 6872796820: the kernel's links under /proc, /sys and /dev lead back into /, so a link, an L
+    line's or the tree's, whose target resolves there fails the run, but at exactly API_TARGETS."""
+
+    def test_a_target_in_an_api_mount_fails_the_run(self):
+        for t in ("/proc/self/root/run/agentos-x", "/proc/1/root/run/agentos-x", "/proc/thread-self/root/run",
+                  "/dev/fd/3", "/proc/self/cwd", "/sys/fs/cgroup", "/dev", "/proc", "../proc/self/root",
+                  "/dev/shm/x", "/proc/self/mounts/x"):
+            for how in ("L", "tree"):
+                files = ({"/usr/lib/tmpfiles.d/x.conf": "L /run/pkglink - - - - %s\n" % t} if how == "L"
+                         else {"/etc/pkglink": "-> " + t})
+                with self.subTest(target=t, how=how), tempfile.TemporaryDirectory() as d:
+                    with self.assertRaisesRegex(SystemExit, "whose own links the reader does not follow"):
+                        r.boot_links(tree(d, files))
+
+    def test_the_images_own_api_targets_pass(self):
+        lines = ("L /run/shm - - - - /dev/shm\nL+ /etc/mtab - - - - ../proc/self/mounts\n"
+                 "L /run/agentos-m - - - - /dev/null\n")
         with tempfile.TemporaryDirectory() as d:
-            got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/x.conf": "L /var/agentos-x - - - - /run/udev\n",
-                                        "/var/agentos-x/.keep": ""}))
-            self.assertNotIn("/var/agentos-x", got)
+            got = r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/debian.conf": lines,
+                                        "/etc/systemd/system/x.service": "-> /dev/null"}))
+            self.assertEqual((got.get("/run/shm"), got.get("/etc/mtab"), got.get("/run/agentos-m")),
+                             ("/dev/shm", "/proc/self/mounts", "/dev/null"))
+            self.assertEqual(got.get("/etc/systemd/system/x.service"), "/dev/null")
 
 
 class LintTest(unittest.TestCase):
