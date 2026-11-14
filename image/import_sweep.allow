@@ -1,0 +1,76 @@
+# The files of the built image (main tree and initrds) that may import or reach glibc's regex engine
+# (DEBIAN-CVE-2026-100290, #5697): one glob per line, each a file the image -100290 record in
+# assurance/vulncheck.json names. image/import_sweep.py --summary fails on a file that matches none,
+# and on a glob that matches no file. Only command-line tools, the guests' shells and libraries whose
+# regex use the record explains belong here; a long-lived or network-facing process never does.
+
+# Shell and text tools, run locally.
+/usr/bin/bash
+/usr/bin/csplit
+/usr/bin/du
+/usr/bin/expr
+/usr/bin/find
+/usr/bin/grep
+/usr/bin/hardlink
+/usr/bin/kmod
+/usr/bin/less
+/usr/bin/localedef
+/usr/bin/more
+/usr/bin/nl
+/usr/bin/ptx
+/usr/bin/run-parts
+/usr/bin/sed
+/usr/bin/tac
+
+# Tools that import only glibc's rpmatch, which runs the locale's YESEXPR on a yes/no answer to an
+# interactive prompt (cp -i, rm -i and the like).
+/usr/bin/cp
+/usr/bin/install
+/usr/bin/ln
+/usr/bin/mv
+/usr/bin/rename.ul
+/usr/bin/rm
+
+# The guests' bash, an agent-driven shell inside the guest sandbox, and their rm (rpmatch), both
+# linking the guest's own glibc (the image/guest -100290 record).
+/usr/lib/agentos/images/*/bin/bash
+/usr/lib/agentos/images/*/bin/rm
+
+# libsmartcols (filters, and rpmatch) and the util-linux tools that need it; fdisk, sfdisk and cfdisk
+# also import rpmatch for their prompts.
+/usr/lib/x86_64-linux-gnu/libsmartcols.so.1.*
+/usr/bin/findmnt
+/usr/bin/lsblk
+/usr/bin/lscpu
+/usr/bin/lsipc
+/usr/bin/lslocks
+/usr/bin/lsmem
+/usr/bin/lsns
+/usr/bin/partx
+/usr/bin/prlimit
+/usr/bin/wdctl
+/usr/sbin/cfdisk
+/usr/sbin/fdisk
+/usr/sbin/losetup
+/usr/sbin/sfdisk
+/usr/sbin/swapon
+/usr/sbin/wipefs
+/usr/sbin/zramctl
+
+# libcryptsetup (its one regcomp parses FileVault2 metadata) and what needs it.
+/usr/lib/x86_64-linux-gnu/libcryptsetup.so.12.*
+/usr/lib/x86_64-linux-gnu/cryptsetup/libcryptsetup-token-systemd-*.so
+/usr/bin/systemd-cryptenroll
+/usr/bin/systemd-cryptsetup
+/usr/lib/systemd/systemd-integritysetup
+/usr/lib/systemd/systemd-veritysetup
+/usr/sbin/cryptsetup
+/usr/sbin/integritysetup
+/usr/sbin/veritysetup
+
+# libedit (line editing) and nft, which needs it for its interactive mode; nft itself is a one-shot ruleset load.
+/usr/lib/x86_64-linux-gnu/libedit.so.2.*
+/usr/sbin/nft
+
+# libformw (ncurses forms); nothing in the image needs it.
+/usr/lib/x86_64-linux-gnu/libformw.so.6.*
