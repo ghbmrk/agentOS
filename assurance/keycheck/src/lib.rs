@@ -44,6 +44,79 @@ pub fn verb_args(v: &str) -> Option<&'static [&'static str]> {
     VERBS.iter().find(|(n, _)| *n == v).map(|(_, a)| *a)
 }
 
+/// The asset classes a verb can reach (KEY-9), from least to most worth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asset {
+    Nothing,
+    Data,
+    Money,
+    Identity,
+    Safety,
+}
+
+/// What each verb on the closed list reaches directly (KEY-9, CLK-14):
+/// what a step can send, read or destroy is data, an account is identity, a
+/// purchase is money, and only `actuate-physical` reaches safety (a device a
+/// declaration marks safety is outside a key's own verbs).
+pub const REACH: &[(&str, &[Asset])] = &[
+    ("read", &[Asset::Data]),
+    ("fetch", &[Asset::Data]),
+    ("draft", &[Asset::Nothing]),
+    ("organize", &[Asset::Nothing]),
+    ("trash", &[Asset::Data]),
+    ("present", &[Asset::Data]),
+    ("unsubscribe", &[Asset::Data]),
+    ("send", &[Asset::Data]),
+    ("post", &[Asset::Data]),
+    ("actuate", &[Asset::Nothing]),
+    ("buy", &[Asset::Money]),
+    ("share", &[Asset::Data]),
+    ("delete-remote", &[Asset::Data, Asset::Identity]),
+    (
+        "change-account",
+        &[Asset::Identity, Asset::Data, Asset::Money],
+    ),
+    ("reveal-or-create-secret", &[Asset::Identity, Asset::Data]),
+    ("actuate-physical", &[Asset::Safety]),
+];
+
+/// The worth of a class: (under a spend cap, with none). Only a cap lowers
+/// it, and only for money.
+pub fn rank(a: Asset) -> (u8, u8) {
+    match a {
+        Asset::Nothing => (0, 0),
+        Asset::Data => (1, 1),
+        Asset::Money => (2, 3),
+        Asset::Identity | Asset::Safety => (3, 3),
+    }
+}
+
+/// The highest worth.
+pub const TOP_RANK: u8 = 3;
+
+/// How much a worth lengthens an irreversible step's hold, in ms: nothing
+/// below money, an hour for capped money, four hours above.
+pub fn hold_extra(r: u8) -> i64 {
+    const HOUR: i64 = 60 * 60 * 1000;
+    match r {
+        0 | 1 => 0,
+        2 => HOUR,
+        _ => 4 * HOUR,
+    }
+}
+
+/// The worth of what verb v reaches; a verb off the list reaches everything.
+pub fn worth(v: &str, capped: bool) -> u8 {
+    match REACH.iter().find(|(n, _)| *n == v) {
+        None => TOP_RANK,
+        Some((_, reach)) => reach
+            .iter()
+            .map(|a| if capped { rank(*a).0 } else { rank(*a).1 })
+            .max()
+            .unwrap_or(TOP_RANK),
+    }
+}
+
 // Refusal codes.
 pub const MALFORMED: &str = "malformed";
 pub const STOPPED: &str = "stopped";
@@ -133,6 +206,10 @@ pub struct Checked {
     /// The passkeys that signed such links, anywhere in the chain, so a
     /// passkey cut off since can be checked against them.
     pub narrowers: Vec<Vec<u8>>,
+    /// The chain has links: a bare root has none.
+    pub linked: bool,
+    /// The tip link carries a `uses` cap of exactly one.
+    pub tip_one_use: bool,
 }
 
 fn pk(b: &[u8]) -> Option<VerifyingKey> {
@@ -398,6 +475,13 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
         ids.push(id);
         prev_holder = Some(holder);
     }
+    let tip_one_use = links.last().is_some_and(|t| {
+        t.caveats
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|c| c.kind == "uses" && c.n == 1)
+    });
     Ok(Checked {
         ids,
         account,
@@ -406,6 +490,8 @@ pub fn chain(k: &Key, owners: &[Vec<u8>]) -> Result<Checked, Bad> {
         held: false,
         by_owner,
         narrowers,
+        linked: !links.is_empty(),
+        tip_one_use,
     })
 }
 
@@ -705,15 +791,30 @@ impl Checked {
             out.insert(MALFORMED);
             return out;
         }
-        if !self
-            .caps
-            .iter()
-            .any(|k| matches!(k.kind, CapKind::SpendTask | CapKind::SpendDay))
-        {
+        if !self.capped() {
             out.insert(MALFORMED);
         }
         self.money(task, amount, c, &mut out);
         out
+    }
+
+    /// Some link caps spend, by the task or by the day.
+    pub fn capped(&self) -> bool {
+        self.caps
+            .iter()
+            .any(|k| matches!(k.kind, CapKind::SpendTask | CapKind::SpendDay))
+    }
+
+    /// The hold before an irreversible step of verb v (KEY-8, KEY-9): the
+    /// key's window plus what v reaches is worth at the key's caps, saturating.
+    /// A step the owner approved one at a time gains nothing: under a bare
+    /// root, or under a tip the owner's passkey narrowed to one use.
+    pub fn hold(&self, v: &str, novel: bool) -> i64 {
+        let w = self.limits.window(novel);
+        if !self.linked || (self.by_owner && self.tip_one_use) {
+            return w;
+        }
+        w.saturating_add(hold_extra(worth(v, self.capped())))
     }
 }
 
@@ -826,6 +927,56 @@ mod tests {
         let t1 = extend(&k, &c, &g, vec![cav("task", 0, 0, Some(&["t1"]))]);
         let t2 = extend(&t1, &g, &g, vec![cav("task", 0, 0, Some(&["t2"]))]);
         assert!(matches!(chain(&t2, &owners), Err(Bad::Loosens(_))));
+    }
+
+    // REQ: KEY-9
+    #[test]
+    fn a_hold_lengthens_with_what_its_verb_reaches() {
+        const H: i64 = 60 * 60 * 1000;
+        let (o, c, g) = (party(1), party(3), party(4));
+        let owners = vec![pub_(&o)];
+        let bare = chain(&root(&o), &owners).unwrap();
+        assert_eq!(
+            bare.hold("change-account", true),
+            0,
+            "a bare root is the owner's own step"
+        );
+        let k = extend(&root(&o), &o, &c, bounds());
+        let held = extend(&k, &c, &c, vec![cav("hold", 10, 20, None)]);
+        let v = chain(&held, &owners).unwrap();
+        assert!(v.capped());
+        let got: Vec<i64> = [
+            "organize",
+            "unsubscribe",
+            "buy",
+            "change-account",
+            "actuate-physical",
+            "teleport",
+        ]
+        .iter()
+        .map(|vb| v.hold(vb, false))
+        .collect();
+        assert_eq!(
+            got,
+            vec![10, 10, 10 + H, 10 + 4 * H, 10 + 4 * H, 10 + 4 * H]
+        );
+        assert_eq!(v.hold("buy", true), 20 + H);
+        // The owner's one-use narrowing drops the term; a many-use one keeps it,
+        // and so does the holder's own one-use narrowing or a link after it.
+        let once = extend(&held, &o, &c, vec![cav("uses", 1, 0, None)]);
+        assert_eq!(chain(&once, &owners).unwrap().hold("buy", false), 10);
+        let twice = extend(&held, &o, &c, vec![cav("uses", 2, 0, None)]);
+        assert_eq!(chain(&twice, &owners).unwrap().hold("buy", false), 10 + H);
+        let own = extend(&held, &c, &c, vec![cav("uses", 1, 0, None)]);
+        assert_eq!(chain(&own, &owners).unwrap().hold("buy", false), 10 + H);
+        let after = extend(&once, &c, &g, vec![]);
+        assert_eq!(chain(&after, &owners).unwrap().hold("buy", false), 10 + H);
+        // Saturating at the limit.
+        let long = extend(&k, &c, &c, vec![cav("hold", i64::MAX - 5, i64::MAX, None)]);
+        assert_eq!(chain(&long, &owners).unwrap().hold("buy", false), i64::MAX);
+        // Without a spend cap, money is worth the most.
+        assert_eq!(worth("buy", false), TOP_RANK);
+        assert_eq!(worth("buy", true), 2);
     }
 
     #[test]

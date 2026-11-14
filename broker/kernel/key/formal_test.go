@@ -1,14 +1,15 @@
 package key_test
 
-// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8
+// REQ: KEY-1, KEY-2, KEY-3, KEY-4, KEY-6, KEY-7, KEY-8, KEY-9
 
 // The model-checked vectors (FRM-key, #2936). kernel/formal/KeyVerdict.tla
 // models the key check; TLC checks its invariants (no link widens authority, holds never
 // shorten, labels only accumulate, a stop, revocation, pause or expiry admits
 // nothing) over every state it reaches, and kernel/formal/vectors.py writes each
-// state's key, context and verdicts here. This test builds each key for real,
-// signs it, and requires Verify, Authorize and Window to give the model's
-// answer for every step. testdata/formal/key.json is a fixed sample; CI's
+// state's key, context, verdicts and per-verb holds here. This test builds
+// each key for real, signs it, and requires Verify and Authorize to give the
+// model's answer for every step, and Verified.Window (the key's window plus
+// the worth term, KEY-9) the model's hold for every verb in its HeldList. testdata/formal/key.json is a fixed sample; CI's
 // formal job sets FORMAL_VECTORS to a directory holding every state.
 
 import (
@@ -35,7 +36,7 @@ type fState struct {
 	Used    int               `json:"used"`
 	Cut     [2]any            `json:"cut"` // [kind, prefix index]
 	Verdict []string          `json:"verdict"`
-	Window  [2]int64          `json:"window"`
+	Window  [][2]int64        `json:"window"` // per verb of the file's held list
 }
 
 type fLink struct {
@@ -69,7 +70,7 @@ func (f fLedger) Uses(key.ID) []key.Use {
 	return out
 }
 
-func formalVectors(t *testing.T) (steps []fStep, states []fState) {
+func formalVectors(t *testing.T) (steps []fStep, held []key.Verb, states []fState) {
 	t.Helper()
 	path := filepath.Join("testdata", "formal", "key.json")
 	if d := os.Getenv("FORMAL_VECTORS"); d != "" {
@@ -80,20 +81,21 @@ func formalVectors(t *testing.T) (steps []fStep, states []fState) {
 		t.Fatal(err)
 	}
 	var f struct {
-		Steps  []fStep  `json:"steps"`
-		States []fState `json:"states"`
+		Steps  []fStep    `json:"steps"`
+		Held   []key.Verb `json:"held"`
+		States []fState   `json:"states"`
 	}
 	if err := json.Unmarshal(b, &f); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.States) == 0 || len(f.Steps) == 0 {
+	if len(f.States) == 0 || len(f.Steps) == 0 || len(f.Held) == 0 {
 		t.Fatalf("%s holds no vectors", path)
 	}
-	return f.Steps, f.States
+	return f.Steps, f.Held, f.States
 }
 
 func TestFormalKeyVerdict(t *testing.T) {
-	steps, states := formalVectors(t)
+	steps, held, states := formalVectors(t)
 	owner, ownerPriv := fParty(1)
 	holder, holderPriv := fParty(2)
 	_, strangerPriv := fParty(3)
@@ -161,8 +163,13 @@ func TestFormalKeyVerdict(t *testing.T) {
 		if b.err != nil {
 			continue
 		}
-		if got := [2]int64{b.ver.Limits.Window(false) / fHour, b.ver.Limits.Window(true) / fHour}; got != s.Window {
-			t.Fatalf("state %d: windows %v, the model %v (KEY-8)\n%s", n, got, s.Window, show(s))
+		if len(s.Window) != len(held) {
+			t.Fatalf("state %d: %d windows for %d held verbs", n, len(s.Window), len(held))
+		}
+		for i, vb := range held {
+			if got := [2]int64{b.ver.Window(vb, false) / fHour, b.ver.Window(vb, true) / fHour}; got != s.Window[i] {
+				t.Fatalf("state %d, verb %s: windows %v, the model %v (KEY-8, KEY-9)\n%s", n, vb, got, s.Window[i], show(s))
+			}
 		}
 		ch := &key.Changes{Revoked: map[key.ID]bool{}, Paused: map[key.ID]bool{}}
 		switch kind, i := s.Cut[0].(string), int(s.Cut[1].(float64)); kind {

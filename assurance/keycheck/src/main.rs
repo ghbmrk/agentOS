@@ -2,11 +2,13 @@
 //! differential harness (broker/test/keydiff). A case is
 //! {"op": "chain"|"verify"|"authorize"|"spend", "key", "owners", "use", "sig",
 //! "step", "task", "amount", "ctx"}; a verdict is {"valid", "bad", "codes",
-//! "hold", "scopes", "by_owner", "narrowers"}. A case {"op": "within", "renew",
-//! "was"} compares two first links' caveats; its verdict is {"valid",
-//! "within"}, valid when both fold.
+//! "hold", "windows", "scopes", "by_owner", "narrowers"}, where "windows" is
+//! each verb's hold, [base, novelty], for every verb on the closed list and
+//! one off it ("teleport"). A case {"op": "within", "renew", "was"} compares
+//! two first links' caveats; its verdict is {"valid", "within"}, valid when
+//! both fold.
 
-use keycheck::{chain, fold, verify, wire, within, Context, Step};
+use keycheck::{chain, fold, verify, wire, within, Context, Step, VERBS};
 use serde::Deserialize;
 use std::io::{self, BufRead, Write};
 
@@ -57,6 +59,12 @@ fn verdict(c: &Case) -> serde_json::Value {
         "valid": true,
         "codes": codes,
         "hold": [k.limits.window(false), k.limits.window(true)],
+        "windows": VERBS
+            .iter()
+            .map(|(v, _)| *v)
+            .chain(["teleport"])
+            .map(|v| (v.to_string(), serde_json::json!([k.hold(v, false), k.hold(v, true)])))
+            .collect::<serde_json::Map<_, _>>(),
         "scopes": k.scopes().iter().map(wire::hex).collect::<Vec<_>>(),
         "by_owner": k.by_owner,
         "narrowers": k.narrowers.iter().map(|p| p.iter().map(|b| format!("{b:02x}")).collect::<String>()).collect::<Vec<_>>(),
