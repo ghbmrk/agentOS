@@ -139,7 +139,8 @@ func TestPlanResultsPassOnlyCodes(t *testing.T) {
 }
 
 // A cancelled plan's code reaches the guest when it is a listed one, the
-// owner's, a trip's or an erase's, so a planner can say why its plan ended;
+// owner's, a trip's, an erase's, a STOP's or a task end's, so a planner can
+// say why its plan ended (a STOP's cancel stays after RESUME, #5151 R2);
 // anything else in the cancel is dropped, and a cancelled view's rejection
 // field is never read for it (PLN-1, LOG-4, #4812). Catches the plane
 // dropping the cancel code or passing it unfiltered.
@@ -147,6 +148,7 @@ func TestACancelledPlanGivesOnlyItsCode(t *testing.T) {
 	snapshot := `{"snapshot":"` + denialCanary + `"}`
 	for _, c := range []struct{ cancel, reject, want string }{
 		{kernel.CErased, "", kernel.CErased}, {"owner", "", "owner"}, {kernel.CTrip, "", kernel.CTrip},
+		{key.RStopped, "", "stopped"}, {kernel.CTask, "", "task"},
 		{snapshot, "", ""}, {"", key.RVerb, ""},
 	} {
 		r := newRig(t, func(cf *Config) {

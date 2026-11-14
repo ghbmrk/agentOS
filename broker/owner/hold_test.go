@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 // REQ: REV-3, CH-16
@@ -169,7 +171,7 @@ func TestUndoWorksUntilReleaseAndResumeGivesAFreshWindow(t *testing.T) {
 	r.decisions()
 	code := regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
 	got := r.say("RESUME " + code)
-	if got != "Resumed. "+k2+" runs at 13:02 unless you reply UNDO "+k2+"." {
+	if got != "Resumed. "+k2+" runs at 13:02 unless you reply UNDO "+k2+". "+control.StopCancelledNote {
 		t.Fatalf("resume: %q", got)
 	}
 	if due := r.ch.DueAutoReplies(); len(due) != 0 {

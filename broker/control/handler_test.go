@@ -206,7 +206,7 @@ func TestResumeNeedsTheTextedCode(t *testing.T) {
 		t.Fatal("wrong code resumed")
 	}
 	r = one(t, h.Handle(ctx, owner, "resume 111111"))
-	if eng.resumes != 1 || !strings.HasPrefix(r, "Resumed.") {
+	if eng.resumes != 1 || r != "Resumed. Held actions may now run. "+StopCancelledNote {
 		t.Fatalf("right code: resumes=%d %q", eng.resumes, r)
 	}
 	// Single use.

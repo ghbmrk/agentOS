@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 // Tests for the PR #22 review fix-list, one per item.
@@ -255,7 +257,7 @@ func TestChallengeExpiresAndResumeUsesIt(t *testing.T) {
 	if m == nil || m[1] == tok {
 		t.Fatalf("RESUME challenge: %q", got)
 	}
-	if got := r.say("RESUME " + m[1] + " " + r.totp()); !strings.HasSuffix(got, "Resumed.") || r.eng.Stopped() {
+	if got := r.say("RESUME " + m[1] + " " + r.totp()); !strings.HasSuffix(got, " Resumed. "+control.StopCancelledNote) || r.eng.Stopped() {
 		t.Fatalf("RESUME: %q", got)
 	}
 }
