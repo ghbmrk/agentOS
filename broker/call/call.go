@@ -104,11 +104,10 @@ type Clips struct {
 	// Failed tells the owner a turn failed (the answerer or synthesizer
 	// erred, or the recognizer stopped), so a failure is never silence.
 	Failed []byte
-	// Ending tells the owner the call ends in a minute and they can call
-	// again ("This call ends in one minute. Call again to carry on."), so
-	// the hang-up at MaxCall is never a silent drop. It plays EndingNotice
-	// before the call's end, once the sentence then playing ends (up to
-	// SentenceWait), and stops the rest of that answer.
+	// Ending says EndingText, so the hang-up at MaxCall is never a silent
+	// drop. It plays EndingNotice before the call's end, once the sentence
+	// then playing ends (up to SentenceWait), and stops the rest of that
+	// answer.
 	Ending []byte
 }
 
@@ -177,6 +176,13 @@ type Report struct {
 // EndingNotice is how long before the end of a call (Config.MaxCall)
 // Clips.Ending plays.
 const EndingNotice = time.Minute
+
+// EndingText is the words of Clips.Ending (UX-5303-1), the one source the
+// step that records the box's clips reads. It promises no more time than
+// is left when the clip starts: that is at most EndingNotice, and at least
+// EndingNotice less SentenceWait and EndingWait (25 s), so it says "under
+// a minute", not "one minute" (#5728).
+const EndingText = "This call ends in under a minute. Call again to carry on."
 
 // SentenceWait bounds how long Clips.Ending waits for the sentence playing
 // when it falls due, so the owner hears that sentence to its end and not
