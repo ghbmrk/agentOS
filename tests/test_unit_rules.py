@@ -783,7 +783,7 @@ class BootLinksTest(unittest.TestCase):
         chain.update({"/etc/l0": "-> /var/lib/foo/m0", "/var/lib/foo/m0": "-> /etc/l1", "/etc/l41": "-> /usr"})
         on = "a link /[a-z/0-9]+ \\(the tree's\\) (sits %s|to [a-z/0-9.]+ %s)" % (self.MOUNTED, self.STEPS)
         loop = ("a link /etc/[a-z0-9]+ \\(the tree's\\) to [a-z/0-9]+ is on a loop or a chain of more than 40 links, "
-                "which the unit lint cannot follow; remove the loop, or drop it \\(mkosi.conf RemoveFiles=\\) if a "
+                "which the unit lint cannot follow; remove the loop or shorten the chain, or drop it \\(mkosi.conf RemoveFiles=\\) if a "
                 "package makes it$")
         for more, want in (({"/etc/x": "-> /var/lib/foo/y", "/var/lib/foo/y": "-> /etc/x"}, on),
                            ({"/etc/x": "-> /var/lib/foo/y/z", "/var/lib/foo/y": "-> /etc/x"}, on),
@@ -831,6 +831,33 @@ class BootLinksTest(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "a link /etc/[ab] \\(/usr/lib/tmpfiles.d/foo.conf: L line '[^']*'\\) "
                                             + self.STEPS + "; point the line at a path no mount covers$"):
                     r.boot_links(tree(d, {**self.MOUNT, **keep, **conf}))
+
+    # #5731 Security 6877511165: a plain L leaves the tree's link at its path, so that link, not the line's,
+    # is what the boot walk (and every walk through the path) reads, and it is held to the mounts too.
+    def test_a_plain_l_over_a_tree_link_walks_the_tree_link(self):
+        base = {**self.MOUNT, "/usr/lib/tmpfiles.d/z.conf": "L /etc/a - - - - /var/lib/x\n", "/var/lib/foo/d/.keep": ""}
+        for more, key in (({"/etc/a": "-> /var/lib/foo/d/../../x"}, "/etc/a"),
+                          ({"/etc/a": "-> ../var/lib/foo/d/../../x"}, "/etc/a"),
+                          ({"/etc/a": "-> /var/lib/foo/d/../../x", "/etc/0": "-> /etc/a/y"}, "/etc/0")):
+            with self.subTest(more=more), tempfile.TemporaryDirectory() as d:
+                with self.assertRaisesRegex(SystemExit, "a link %s \\(the tree's\\) to [a-z/.0]+ %s" % (key, self.STEPS)):
+                    r.boot_links(tree(d, {**base, **more}))
+        # The line's own target is walked too, though the tree's link is what stays.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "a link /etc/a \\(/usr/lib/tmpfiles.d/z.conf: L line '[^']*'\\) " + self.STEPS):
+                r.boot_links(tree(d, {**base, "/etc/a": "-> /var/lib/x",
+                                      "/usr/lib/tmpfiles.d/z.conf": "L /etc/a - - - - /var/lib/foo/d/../../x\n"}))
+        with tempfile.TemporaryDirectory() as d:
+            got = r.boot_links(tree(d, {**base, "/etc/a": "-> ../var/lib/x", "/etc/0": "-> /etc/a/y"}))
+            self.assertEqual((got["/etc/a"], got["/etc/0"]), ("/var/lib/x", "/var/lib/x/y"))
+
+    # #5731 L3 6877540425: an L+ line over a tree directory replaces it, links below it included.
+    def test_a_tree_link_under_an_l_line_path_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(SystemExit, "a link /etc/a/l \\(the tree's\\) sits under /etc/a, which "
+                                        "/usr/lib/tmpfiles.d/t.conf: L line 'L\\+ /etc/a - - - - /usr' replaces at boot; "
+                                        "remove the link or the line$"):
+                r.boot_links(tree(d, {"/usr/lib/tmpfiles.d/t.conf": "L+ /etc/a - - - - /usr\n", "/etc/a/l": "-> /etc"}))
 
     # A mount whose directories the tree does not hold: the walk keeps the path as given from the first missing
     # component, and each of its components is still held to the mounts.

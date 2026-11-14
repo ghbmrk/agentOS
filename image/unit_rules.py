@@ -191,7 +191,7 @@ class View:
 # system at or under /proc, /sys, /dev or /run; tmp.mount mounts /tmp (its 50-agentos-noexec.conf
 # drop-in). Nothing rests on the list being whole (package .mount units may add more): a mount it
 # misses leaves a tree link that is not there at boot in the records, or fails the run (tmpfiles_lines,
-# tmpfiles_links), never drops a link. The link readers (tree_links, tmpfiles_links) read through BootView.
+# tmpfiles_links), never drops a link. boot_links resolves every link at a MountView over BootView.
 BOOT_MOUNTS = ("/dev", "/proc", "/sys", "/run", "/tmp")
 
 
@@ -599,13 +599,13 @@ def tmpfiles_copies(view, links, usr_view=None, mounts=()):
             if kind == 0o040000:
                 todo += [os.path.join(p, e) for e in view.entries(p)]
         _, via = view.resolve(src)
-        via += [k for k, v in links.items() if v != k and (src == k or src.startswith(k + "/"))]
+        via += [k for k in links if (src == k or src.startswith(k + "/"))]
         if via:
             raise SystemExit("unit rules: %s: C line %r: its source passes through a link (%s), which the "
                              "unit lint does not read" % (f, line, via[0]))
         # #5715 L3 6874735402, Security 6874738412: an L line's link at or under the source is made at boot
-        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and tmpfiles_links drops
-        # some L keys (a link to a file, a loop), so every L line counts, at, under or above the source.
+        # (and stays in a persistent /etc or /var), not in the tree the walk reads, and boot_links drops an
+        # L key whose link resolves to a file, so every L line counts, at, under or above the source.
         under = src.rstrip("/") + "/"
         for k in ls:
             if k == src or k.startswith(under) or src.startswith(k.rstrip("/") + "/"):
@@ -740,20 +740,30 @@ def boot_links(view, usr_view=None):
     link (tmpfiles_copies)."""
     boot, mounts = BootView(view), mount_points(view)
     lines = tmpfiles_links(boot, usr_view, mounts)
-    mv = MountView(boot, mounts, {k: t for k, (_, _, t) in lines.items()})
+    # #5731 Security 6877511165: a plain L leaves a tree entry at its path (tmpfiles_links lets only a link
+    # through there), so at boot that path is the tree's link, not the line's: the MountView keeps it, and
+    # every walk through it reads the tree's link.
+    kept = {k for k, (_, l, _) in lines.items() if "+" not in l.split()[0] and boot.lstat(k) is not None}
+    mv = MountView(boot, mounts, {k: t for k, (_, _, t) in lines.items() if k not in kept})
     drop = ", or drop it (mkosi.conf RemoveFiles=) if a package makes it"
-    out = {}
-    for k in sorted(set(tree_links(boot, usr_view)) | set(lines)):
-        line = k in lines
+
+    def walk(k, line, p):
         what = "%s: L line %r" % lines[k][:2] if line else "the tree's"
-        thing, fix = ("line", "remove the line") if line else ("link", "remove the loop" + drop)
+        thing, fix = ("line", "remove the line") if line else ("link", "remove the loop or shorten the chain" + drop)
         to = ""
         try:
-            to = "" if line else " to " + mv.readlink(k)
+            if not line:
+                # #5731 L3 6877540425: an L line's path above a tree link replaces the directory holding it.
+                over = [l for l in lines if k.startswith(l + "/")]
+                if over:
+                    raise SystemExit("unit rules: a link %s (the tree's) sits under %s, which %s: L line %r "
+                                     "replaces at boot; remove the link or the line"
+                                     % ((k, over[0]) + lines[over[0]][:2]))
+                to = " to " + mv.readlink(k)
             if line and mv.resolve(os.path.dirname(k))[1]:
                 raise SystemExit("unit rules: %s: a tmpfiles.d L line's path passes through another link, "
                                  "which the unit lint does not read" % k)
-            final = mv.resolve(k)[0]
+            return mv.resolve(p)[0]
         except OnMount as e:
             if k == e.mount or k.startswith(e.mount + "/"):
                 raise SystemExit("unit rules: a link %s (%s) sits at or under %s, where a mount puts a file system "
@@ -774,6 +784,15 @@ def boot_links(view, usr_view=None):
                 raise
             raise SystemExit("unit rules: a link %s (%s)%s is on a loop or a chain of more than 40 links, which "
                              "the unit lint cannot follow; %s" % (k, what, to, fix))
+
+    out = {}
+    for k in sorted(set(tree_links(boot, usr_view)) | set(lines)):
+        # A kept path records the tree's link, which is what is there at boot; its line's target is walked
+        # too, so a refusal of either fails the run (tmpfiles_links held both to one path at the BootView).
+        if k in lines:
+            final = walk(k, True, lines[k][2] if k in kept else k)
+        if k not in lines or k in kept:
+            final = walk(k, False, k)
         if mv.kind(final) in (None, 0o040000):
             out[k] = final
     tmpfiles_copies(boot, out, usr_view, mounts)
