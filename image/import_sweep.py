@@ -16,14 +16,16 @@ initrd of the boot entry (OUT/initrd/, every cpio member).
 The JSON maps each place ("tree", and "initrd:<path>" for each initrd) to: "scanned", the ELF files
 read; "imports", each file importing an affected glibc symbol and those symbols; and "via", each other
 ELF file whose NEEDED closure (by SONAME or file name, within that place) holds an importing library, and those
-libraries. Only symbols bound to a GLIBC_ version count, so a library's own re_* names do not.
+libraries; "unread", each ELF file objdump failed on; and, for an initrd, "others", its executable
+members that are not ELF files. Only symbols bound to a GLIBC_ version count, so a library's own re_*
+names do not.
 
 --summary exits 1 when a claim the glibc records rest on stops holding: any file, in any place, imports
 or reaches a wide scanf function, or imports or reaches a regex function and matches no glob in ALLOW
 (each a file the image -100290 record names); a glob that matches nothing also fails, so the list
-stays the record's. The control is the scan itself: it also exits 1 when the main tree or every
-initrd read no ELF file, or the main tree has no importer of regcomp (bash and grep always import
-it), so a clean result is not a scan that read nothing.
+stays the record's. The control is the scan itself: it also exits 1 when objdump failed on a file,
+the main tree or an initrd with executable members read no ELF file, or the main tree has no importer
+of regcomp (bash and grep always import it), so a clean result is not a scan that read nothing.
 """
 import fnmatch
 import json
@@ -56,9 +58,13 @@ def group_of(sym):
 
 
 def read_elf(path):
-    """(affected glibc symbols imported, NEEDED names, SONAME or None) of the ELF file at PATH."""
-    out = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         text=True, errors="replace").stdout
+    """(affected glibc symbols imported, NEEDED names, SONAME or None, read) of the ELF file at PATH. READ is
+    False when objdump fails on it for any reason but its having no dynamic section (a static or
+    relocatable file, which imports nothing), so a file objdump cannot parse is never counted clean."""
+    r = subprocess.run(["objdump", "-pT", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, errors="replace")
+    out = r.stdout
+    read = r.returncode == 0 or "not a dynamic object" in r.stderr
     syms, needed, soname = set(), [], None
     for line in out.splitlines():
         m = UND.search(line)
@@ -69,7 +75,7 @@ def read_elf(path):
             needed.append(m.group(2))
         elif m:
             soname = m.group(2)
-    return sorted(syms), needed, soname
+    return sorted(syms), needed, soname, read
 
 
 def is_elf(path):
@@ -82,9 +88,11 @@ def is_elf(path):
 
 def sweep(files):
     """FILES maps a shown path to a readable path. Returns the place's record (module docstring)."""
-    imports, needed, by_name = {}, {}, {}
+    imports, needed, by_name, unread = {}, {}, {}, []
     for shown, real in files.items():
-        syms, needed[shown], soname = read_elf(real)
+        syms, needed[shown], soname, read = read_elf(real)
+        if not read:
+            unread.append(shown)
         if syms:
             imports[shown] = syms
         # A NEEDED entry names a library's SONAME, which on disk is a symbolic link to the file read.
@@ -105,7 +113,8 @@ def sweep(files):
                 todo += needed.get(lib, [])
         if hits and shown not in importers:
             via[shown] = sorted(hits)
-    return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items()))}
+    return {"scanned": len(files), "imports": dict(sorted(imports.items())), "via": dict(sorted(via.items())),
+            "unread": sorted(unread)}
 
 
 def tree_files(top, prefix="/", skip=()):
@@ -125,13 +134,17 @@ def tree_files(top, prefix="/", skip=()):
 def initrd_place(path, scratch):
     """The record of the initrd at PATH: each regular ELF member written under SCRATCH and read."""
     import finish_image
-    files = {}
+    files, others = {}, 0
     for i, (name, mode, body, _link) in enumerate(finish_image.cpio_members(pathlib.Path(path).read_bytes())):
         if stat.S_ISREG(mode) and body[:4] == b"\x7fELF":
             f = os.path.join(scratch, "%d" % i)
             pathlib.Path(f).write_bytes(body)
             files["/" + name.lstrip("/")] = f
-    return sweep(files)
+        elif stat.S_ISREG(mode) and mode & 0o111:
+            others += 1
+    # "others": executable regular members that are not ELF files (problems()). A modules initrd's
+    # modules, indexes and firmware are not executable.
+    return dict(sweep(files), others=others)
 
 
 def run_tree(root, usr=None):
@@ -156,12 +169,12 @@ def run_build(out, version):
 
 
 def problems(places):
-    # An initrd of only kernel modules (compressed .ko files) holds no ELF file, so the initrds count
-    # together: some initrd must hold one.
-    initrds = [v["scanned"] for k, v in places.items() if k.startswith("initrd:")]
+    # An initrd of only kernel modules (compressed .ko files, their indexes, firmware) holds no ELF
+    # file; one with executable members must hold one, as its records rest on what was read in it.
     errs = [] if places.get("tree", {}).get("scanned") else ["tree: no ELF file read"]
-    if initrds and not any(initrds):
-        errs.append("initrd: no ELF file read in any initrd")
+    errs += ["%s: no ELF file read among %d executable files" % (k, v.get("others", 0)) for k, v in places.items()
+             if k.startswith("initrd:") and not v["scanned"] and v.get("others", 1)]
+    errs += ["%s: objdump could not read %s" % (k, p) for k, v in places.items() for p in v.get("unread", [])]
     if "regcomp" not in {s for syms in places.get("tree", {}).get("imports", {}).values() for s in syms}:
         errs.append("tree: no file imports regcomp, so the scan read nothing it should have (control)")
     return errs
@@ -213,13 +226,16 @@ def summary(places):
             imp = {p: s for p, s in imp.items() if s}
             via = {p: [lib for lib in libs if lib in imp] for p, libs in v["via"].items()}
             via = {p: libs for p, libs in via.items() if libs}
-            lines.append("%s %s: %d import, %d reach one through NEEDED" % (place, g, len(imp), len(via)))
+            lines.append("%s %s: %d files import a function, %d more reach an importing library through NEEDED"
+                         % (place, g, len(imp), len(via)))
             lines += ["  imports %s: %s" % (p, " ".join(s)) for p, s in imp.items()]
             lines += ["  via %s: %s" % (p, " ".join(libs)) for p, libs in via.items()]
     return lines
 
 
-def annotations(lines, size=3500):
+def annotations(lines, size=3500, cap=10):
+    """LINES as ::notice commands of about SIZE characters each. GitHub shows CAP notices per step and
+    drops the rest, so the last one shown says where the rest are."""
     chunks, cur = [], ""
     for line in lines:
         if cur and len(cur) + len(line) + 1 > size:
@@ -227,6 +243,9 @@ def annotations(lines, size=3500):
             cur = ""
         cur += line[:size] + "\n"
     chunks += [cur] if cur else []
+    if len(chunks) > cap:
+        chunks = chunks[:cap - 1] + [chunks[cap - 1] + "(%d more notices: the full list is in the step log)\n"
+                                     % (len(chunks) - cap)]
     return ["::notice title=import sweep %d/%d::%s" % (i + 1, len(chunks), c.rstrip("\n").replace("%", "%25")
             .replace("\r", "%0D").replace("\n", "%0A")) for i, c in enumerate(chunks)]
 

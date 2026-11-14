@@ -116,18 +116,50 @@ class ImportSweepTest(unittest.TestCase):
         self.assertEqual(sweep.problems(tree), [])
         no_regcomp = {"tree": {"scanned": 3, "imports": {"/usr/bin/wtool": ["swscanf"]}, "via": {}}}
         self.assertEqual(len(sweep.problems(no_regcomp)), 1)
-        # A modules-only initrd holds no ELF file; it fails only when no initrd holds one.
-        mods = {"scanned": 0, "imports": {}, "via": {}}
+        # A modules-only initrd holds no ELF file and passes; any other initrd must hold one (Potency 3).
+        mods = {"scanned": 0, "imports": {}, "via": {}, "others": 0}
         one = dict(tree, **{"initrd:modules": mods, "initrd:main": dict(mods, scanned=4)})
         self.assertEqual(sweep.problems(one), [])
-        none = dict(tree, **{"initrd:modules": mods})
-        self.assertEqual(sweep.problems(none), ["initrd: no ELF file read in any initrd"])
+        empty_main = dict(one, **{"initrd:main": dict(mods, others=12)})
+        self.assertEqual(sweep.problems(empty_main), ["initrd:main: no ELF file read among 12 executable files"])
+        # A file objdump cannot read is never counted clean (Potency 2).
+        unread = dict(tree, **{"initrd:main": dict(mods, scanned=1, unread=["/usr/bin/x"])})
+        self.assertEqual(sweep.problems(unread), ["initrd:main: objdump could not read /usr/bin/x"])
+
+    def test_objdump_failure_is_unread_static_is_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = pathlib.Path(d) / "bad"
+            bad.write_bytes(b"\x7fELF" + b"\xff" * 60)
+            got = sweep.sweep({"/usr/bin/bad": str(bad), "/usr/bin/plain": str(self.tree / "usr/bin/plain")})
+        self.assertEqual(got["unread"], ["/usr/bin/bad"])
+        if shutil.which("cc"):
+            with tempfile.TemporaryDirectory() as d:
+                (pathlib.Path(d) / "s.c").write_text(PLAIN)
+                r = subprocess.run(["cc", "-static", "-o", d + "/st", d + "/s.c"], capture_output=True)
+                if r.returncode == 0:
+                    self.assertEqual(sweep.sweep({"/st": d + "/st"})["unread"], [])
+
+    def test_initrd_counts_executable_non_elf_files(self):
+        data = newc([("usr/lib/modules/x/a.ko.zst", 0o100644, b"\x28\xb5\x2f\xfd"),
+                     ("usr/lib/modules/x/modules.dep", 0o100644, b""), ("usr/lib/firmware/f.bin", 0o100644, b"x"),
+                     ("usr/bin/script", 0o100755, b"#!/bin/sh\n")])
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "initrd"
+            p.write_bytes(data)
+            with tempfile.TemporaryDirectory() as scratch:
+                got = sweep.initrd_place(p, scratch)
+        self.assertEqual((got["scanned"], got["others"]), (0, 1))
+
+    def test_notices_capped_at_ten(self):
+        notes = sweep.annotations(["x" * 3000] * 15)
+        self.assertEqual(len(notes), 10)
+        self.assertIn("5 more notices: the full list is in the step log", notes[-1])
 
     def test_summary_names_importers_and_reach(self):
         lines = sweep.summary(sweep.run_tree(str(self.tree)))
-        self.assertIn("tree regex: 2 import, 1 reach one through NEEDED", lines)
+        self.assertIn("tree regex: 2 files import a function, 1 more reach an importing library through NEEDED", lines)
         self.assertIn("  via /usr/bin/daemon: /usr/lib/libregex-user.so.1.0.0", lines)
-        self.assertIn("tree wscanf: 1 import, 0 reach one through NEEDED", lines)
+        self.assertIn("tree wscanf: 1 files import a function, 0 more reach an importing library through NEEDED", lines)
         notes = sweep.annotations(lines)
         self.assertTrue(notes and all(n.startswith("::notice title=import sweep ") for n in notes))
         self.assertNotIn("\n", "".join(notes))
