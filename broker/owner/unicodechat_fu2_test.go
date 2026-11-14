@@ -122,3 +122,31 @@ func TestStrippedNumberReplyIsOneGSM7Segment(t *testing.T) {
 		}
 	}
 }
+
+// REQ: CH-10, CH-14
+// TestStrippedNumberOnlyFromPlainChat: a 6-digit token in other digits is
+// cut only from plain task chat. When what is left is empty, a control
+// word or a reply (" ", "help", "retry", "pause g12"), the whole message
+// gets the digits reply and nothing reaches the agent or is checked
+// (CTL-unicode-chat-code-fu2, #5650; each case pins one guard in
+// stripFoldedCode, the #5712 mutgate survivors among them).
+func TestStrippedNumberOnlyFromPlainChat(t *testing.T) {
+	r, f := newVerifierRig(t)
+	r.unlock()
+	n := arabicIndic("482913")
+	for _, text := range []string{
+		" " + n,          // nothing left before the token
+		"help " + n,      // a control word
+		"retry " + n,     // a reply that only the text before the token forms
+		"pause g12 " + n, // the same, with an argument
+	} {
+		if rest, ok := stripFoldedCode(text); ok {
+			t.Errorf("stripFoldedCode(%q) = %q, true; want the whole message kept out", text, rest)
+		}
+		sent, wrong, checks := len(r.agent.got()), len(r.ch.codes.st.Wrong), f.calls()
+		if got := r.say(text); got != control.FoldedCodeReply || len(r.agent.got()) != sent ||
+			len(r.ch.codes.st.Wrong) != wrong || f.calls() != checks {
+			t.Errorf("%q: %q, agent %v; want %q, nothing sent, checked or counted", text, got, r.agent.got(), control.FoldedCodeReply)
+		}
+	}
+}

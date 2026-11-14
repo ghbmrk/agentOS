@@ -744,11 +744,8 @@ func foreignNumber(r rune) bool { return r >= 0x80 && unicode.IsNumber(r) }
 func stripFoldedCode(text string) (rest string, ok bool) {
 	rest, _, ok = trailingToken(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) },
 		func(t string) bool { return isTrailingCode(fold(t)) })
-	if !ok {
-		return "", false
-	}
 	f := fold(rest)
-	if rest == "" || foldedCode(rest) || control.Parse(f).Word != control.WordNone {
+	if !ok || rest == "" || foldedCode(rest) || control.Parse(f).Word != control.WordNone {
 		return "", false
 	}
 	for _, m := range []string{f, fold(text)} {
