@@ -60,7 +60,7 @@ const (
 	// which on the image passes no -iface (#4816).
 	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
 	pageConf   = "[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\nExecStartPre=\n" +
-		"ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -iface enowner0 -port1-file /run/agentos-localui/port1\n"
+		"ExecStartPre=+/usr/lib/agentos/agentos-port1 -iface enowner0 -port1-file /run/agentos-localui/port1\n"
 )
 
 // publishedAuthority is the first-boot page certificate

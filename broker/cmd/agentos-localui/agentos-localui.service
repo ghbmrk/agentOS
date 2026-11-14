@@ -29,10 +29,11 @@ StateDirectory=agentos-localui
 StateDirectoryMode=0700
 # The page serves on port 1, the core's cable to the enforcer (CH-9, HW-12, D-178): an empty
 # -iface is the one fixed PCI Ethernet port, read from sysfs, never from routes a peer could set;
-# with none or several, the page serves nothing (localui.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
+# with none or several, the page serves nothing (netguard/port1.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
 # name another for the page (broker/e2e/boxe2e).
 # The inbound firewall boots with the page's ports closed on every link (an empty page set,
-# netguard/inbound InboundPageSet). Before each start, one step runs as root (+) and takes port 1 itself:
+# netguard/inbound InboundPageSet). Before each start, one step runs as root (+), agentos-port1, its own small
+# binary so the trusted core counts what root runs (tools/trusted_core.txt, #5678), and takes port 1 itself:
 # it refuses a radio or a missing link, makes port 1 the set's only element and hands its name to
 # the page through the runtime directory; the page serves only if that is its port 1. Every stop,
 # failed starts included, empties the set (HW12-port1-set). The root step passes no -iface: the
@@ -40,7 +41,7 @@ StateDirectoryMode=0700
 # the link the firewall opens (#4816). A test harness replaces this line in a drop-in of its own.
 RuntimeDirectory=agentos-localui
 RuntimeDirectoryMode=0700
-ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -port1-file /run/agentos-localui/port1
+ExecStartPre=+/usr/lib/agentos/agentos-port1 -port1-file /run/agentos-localui/port1
 ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface ${AGENTOS_PAGE_IFACE} \
         -port1-file /run/agentos-localui/port1 \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \

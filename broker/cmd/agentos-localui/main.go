@@ -7,9 +7,10 @@
 // plan). It listens on port 1's interface only, the core's cable to the
 // enforcer (CH-9, HW-12, D-178; Security L5), and logs no request or form
 // field. One step runs as root, before the page and under its unit
-// (-admit-port1): it opens the page's ports in the inbound firewall on
-// port 1 alone and hands the page that name (-port1-file), and the page
-// serves only on the port the firewall admits (HW12-port1-set).
+// (agentos-port1, its own binary since #5678): it opens the page's ports
+// in the inbound firewall on port 1 alone and hands the page that name
+// (-port1-file), and the page serves only on the port the firewall admits
+// (HW12-port1-set).
 //
 // Setup runs through agentosd (P2-2w c4; Security L6): the page asks
 // localui.sock's setup ops, which agentosd serves only until setup's
@@ -57,12 +58,11 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localui"
-	"github.com/ghbmrk/agentos/broker/netguard/inbound"
+	"github.com/ghbmrk/agentos/broker/netguard/port1"
 )
 
 // memoryLimit is the Go heap's soft ceiling, under the unit's MemoryMax,
@@ -82,9 +82,9 @@ func main() {
 	flag.StringVar(&fb.PageCA, "page-ca-cert", publishedAuthority, "the first-boot page authority's certificate agentos-keeper-pageca.service publishes, which the first-boot Owner Card prints (HW-1); absent, the card takes agentosd's")
 	flag.StringVar(&fb.KeeperSock, "keeper-setup-sock", localui.KeeperSetupSock, "the keeper's Owner Card hand-off socket (agentos-keeper-setup.socket); the card's confirm hands its factors there before the vault (OWN-card-flow)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
-	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the one fixed PCI Ethernet port (localui.Port1), and none if two or more")
-	flag.BoolVar(&admit, "admit-port1", false, "run as root before the page (its unit's ExecStartPre=+): choose port 1 as the page does, open the page's ports in the inbound firewall on it alone, write its name to -port1-file, and exit")
-	flag.StringVar(&port1File, "port1-file", "", "the port 1 the firewall admits (-admit-port1); the page serves only if it is its own port 1; empty: no check, for a page run outside the image")
+	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the one fixed PCI Ethernet port (port1.Port1), and none if two or more")
+	flag.BoolVar(&admit, "admit-port1", false, "moved to agentos-port1 (#5678): given, the page exits naming the unit line that replaces it")
+	flag.StringVar(&port1File, "port1-file", "", "the port 1 the firewall admits (agentos-port1); the page serves only if it is its own port 1; empty: no check, for a page run outside the image")
 	flag.IntVar(&port, "port", localui.UIPort, "TCP port")
 	flag.StringVar(&pageName, "page-name", localui.DefaultPageName, "the owner page's name over HTTPS, the one name its authority admits (#3153)")
 	flag.StringVar(&passkeyRPID, "passkey-rp-id", "", "serve the passkey page at /passkeys/ (#2779a) with this WebAuthn RP ID, through agentosd's passkey ops (agentosd -passkey-rp-id, the same name); it must be -page-name, and the page refuses to start unless the HTTPS listener is up")
@@ -95,12 +95,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if admit {
-		p, err := admitPort1("/sys", iface, port1File, runNft, func() bool { return pause(ctx, port1Recheck) })
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("the page's ports are open on port 1, %s, and nowhere else", p)
-		return
+		log.Fatal(errMovedAdmit)
 	}
 	if port1File != "" {
 		p, err := watchedPort1(ctx, stop, "/sys", iface, port1File, port1Recheck)
@@ -110,7 +105,7 @@ func main() {
 		iface = p
 	} else if iface == "" {
 		// Port 1 from the hardware, never from routes a peer could set.
-		p, err := settledPort1("/sys", func() bool { return pause(ctx, port1Recheck) })
+		p, err := port1.Settled("/sys", func() bool { return pause(ctx, port1Recheck) })
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -133,83 +128,10 @@ func main() {
 // port1Recheck is how often the page reads sysfs again for port 1.
 const port1Recheck = 10 * time.Second
 
-// settledPort1 is Port1 read twice, wait apart, and only when both reads
-// agree, so a port 1 whose driver probes after another port's within that
-// wait refuses instead of serving on the other port until the watcher's
-// first tick (Security release 1 on e867557). wait reports false when the
-// page is stopping.
-func settledPort1(sys string, wait func() bool) (string, error) {
-	p, err := localui.Port1(sys)
-	if err != nil {
-		return "", err
-	}
-	if !wait() {
-		return "", errors.New("stopped before port 1 settled")
-	}
-	q, err := localui.Port1(sys)
-	if err != nil {
-		return "", err
-	}
-	if q != p {
-		return "", errors.New("port 1 moved from " + p + " to " + q + " while starting; the unit picks again")
-	}
-	return p, nil
-}
-
-// admitPort1 is the page unit's root step (HW12-port1-set; CH-9, HW-12):
-// port 1 is iface, or settledPort1 when iface is empty, and must be a
-// wired link (localui.Wired); nft makes it the inbound table's page set's
-// only element, and its name goes to file for the page. The unit's stop
-// empties the set again, so a failure here, or a page that is not
-// running, leaves the page's ports dropped on every link.
-func admitPort1(sys, iface, file string, nft func(script string) error, wait func() bool) (string, error) {
-	if file == "" {
-		return "", errors.New("-admit-port1 needs -port1-file")
-	}
-	p := iface
-	if p == "" {
-		var err error
-		if p, err = settledPort1(sys, wait); err != nil {
-			return "", err
-		}
-	}
-	if err := localui.Wired(sys, p); err != nil {
-		return "", err
-	}
-	script, err := inbound.InboundPageAdmit(p)
-	if err != nil {
-		return "", err
-	}
-	if err := nft(script); err != nil {
-		return "", errors.New("could not open the page's ports on port 1 " + p + " in the inbound firewall: " + err.Error())
-	}
-	// Root writes into the page user's runtime directory: a fresh file,
-	// never through a link left there. The unit's UMask=0077 binds `+`
-	// commands too, so the mode is set on the open file: the page reads it
-	// as another uid (#3382 L3 1, Security 1).
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
-	if err != nil {
-		return "", err
-	}
-	if err := f.Chmod(0o644); err != nil {
-		f.Close()
-		return "", err
-	}
-	if _, err := f.WriteString(p + "\n"); err != nil {
-		f.Close()
-		return "", err
-	}
-	return p, f.Close()
-}
-
-// runNft loads script with one nft -f, a single transaction.
-func runNft(script string) error {
-	cmd := childproc.Command(context.Background(), childproc.NewEnv(), childproc.Options{Stdin: strings.NewReader(script)}, "/usr/sbin/nft", "-f", "-")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return errors.New(strings.TrimSpace(string(out)) + " (" + err.Error() + ")")
-	}
-	return nil
-}
+// errMovedAdmit refuses agentos-localui -admit-port1, the root step's old
+// line, which a drop-in written before #5678 may still name: the page's
+// ports stay closed and the journal names the line that replaces it.
+var errMovedAdmit = errors.New("-admit-port1 moved to its own binary (#5678): replace the drop-in's line with \"ExecStartPre=+/usr/lib/agentos/agentos-port1 -iface <port> -port1-file /run/agentos-localui/port1\"; the page's ports stay closed until then")
 
 // servedPort1 is the port the page serves on: the one the root step
 // admitted (file), which must be the page's own port 1, iface or one Port1
@@ -219,12 +141,12 @@ func runNft(script string) error {
 func servedPort1(sys, iface, file string) (string, error) {
 	b, err := os.ReadFile(file)
 	if err != nil {
-		return "", errors.New("the inbound firewall has not opened the page's ports on any port (" + err.Error() + "); the unit's -admit-port1 step did not run, so the page serves nothing")
+		return "", errors.New("the inbound firewall has not opened the page's ports on any port (" + err.Error() + "); the unit's agentos-port1 step did not run, so the page serves nothing")
 	}
 	admitted := strings.TrimSpace(string(b))
 	p := iface
 	if p == "" {
-		if p, err = localui.Port1(sys); err != nil {
+		if p, err = port1.Port1(sys); err != nil {
 			return "", err
 		}
 	}
@@ -273,17 +195,17 @@ func pause(ctx context.Context, d time.Duration) bool {
 // serves nothing until one fixed port is left (Security 4 on 713fd31).
 func watchPort1(ctx context.Context, stop func(), sys, chosen string, every time.Duration) {
 	watchLink(ctx, stop, every, func() bool {
-		p, err := localui.Port1(sys)
+		p, err := port1.Port1(sys)
 		return err == nil && p == chosen
 	})
 }
 
 // namedLink is what a port 1 named by -iface is: its device path and
-// ifindex in the sysfs tree at sys, once localui.Wired holds for it. A
+// ifindex in the sysfs tree at sys, once port1.Wired holds for it. A
 // rename, a driver reload or another device taking the name changes it
 // (#4882; CH-9, HW-12).
 func namedLink(sys, name string) (string, error) {
-	if err := localui.Wired(sys, name); err != nil {
+	if err := port1.Wired(sys, name); err != nil {
 		return "", err
 	}
 	dir := filepath.Join(sys, "class", "net", name)
