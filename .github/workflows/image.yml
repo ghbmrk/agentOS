@@ -267,6 +267,18 @@ jobs:
           v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
           sudo python3 -I image/unlock_graph.py --control "$RUNNER_TEMP/out" "$v"
           sudo python3 -I image/unlock_graph.py "$RUNNER_TEMP/out" "$v"
+      # #5697: which files of this tree and its initrds import glibc's regex or wide scanf functions,
+      # directly or through a library, as notices: the glibc records' reachability (assurance/vulncheck.json)
+      # is read from here, not from another distribution's builds. Fails only if the scan read nothing.
+      - name: Glibc regex and wide scanf importers (image/import_sweep.py)
+        if: matrix.run == 'a'
+        run: |
+          v=$(jq -r .version "$RUNNER_TEMP"/out/*.release.json)
+          # The summary is printed even when the scan's control fails, so a failure shows what was read.
+          s=0
+          sudo python3 -I image/import_sweep.py "$RUNNER_TEMP/out" "$v" > "$RUNNER_TEMP/import-sweep.json" || s=1
+          python3 -I image/import_sweep.py --summary "$RUNNER_TEMP/import-sweep.json" || s=1
+          exit $s
       - name: Build the end-to-end driver
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/e2e/box-e2e" ./e2e/boxe2e

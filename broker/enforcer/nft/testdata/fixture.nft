@@ -614,6 +614,12 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 432000s;
 	}
+	set llmac_guests_6 {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
 	set host_owner_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
@@ -686,6 +692,12 @@ table inet enforcer {
 		flags dynamic,timeout;
 		timeout 432000s;
 	}
+	set llmac_owner_6 {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
+	}
 	set host_household_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
@@ -757,6 +769,12 @@ table inet enforcer {
 		size 65535;
 		flags dynamic,timeout;
 		timeout 432000s;
+	}
+	set llmac_household_6 {
+		typeof @ll,48,48;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 21600s;
 	}
 	set t101_4 {
 		type ipv4_addr;
@@ -875,6 +893,7 @@ table inet enforcer {
 		iifname "hh0" icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } jump nd_household
 		iifname { "gst0", "own0", "hh0" } icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
 		ip6 saddr != { ::, fe80::/10 } iifname vmap { "gst0" : jump claim_guests, "own0" : jump claim_owner, "hh0" : jump claim_household }
+		ip6 saddr fe80::/10 iifname vmap { "gst0" : jump ll_guests, "own0" : jump ll_owner, "hh0" : jump ll_household }
 		ct state invalid drop
 		ct state established,related accept
 		icmpv6 type nd-router-advert iifname != "wan0" counter name "ra_dropped" drop
@@ -1007,6 +1026,13 @@ table inet enforcer {
 		ct protocol tcp ct status assured update @neightcpaddr_guests_6 { ip6 saddr } update @neightcp_guests_6 { ip6 saddr . @ll,48,48 }
 		update @neighaddr_guests_6 { ip6 saddr } update @neigh_guests_6 { ip6 saddr . @ll,48,48 }
 	}
+	chain ll_guests {
+		ip6 saddr . @ll,48,48 @neigh_guests_6 update @llmac_guests_6 { @ll,48,48 } update @neighaddr_guests_6 { ip6 saddr } update @neigh_guests_6 { ip6 saddr . @ll,48,48 } return
+		ip6 saddr @neighaddr_guests_6 return
+		@ll,48,48 != @leased_guests return
+		@ll,48,48 @llmac_guests_6 return
+		add @llmac_guests_6 { @ll,48,48 } add @neighaddr_guests_6 { ip6 saddr } add @neigh_guests_6 { ip6 saddr . @ll,48,48 }
+	}
 	chain nd_guests {
 		ip6 nexthdr != ipv6-icmp drop
 		icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return
@@ -1060,6 +1086,13 @@ table inet enforcer {
 		ct protocol tcp ct status assured update @neightcpaddr_owner_6 { ip6 saddr } update @neightcp_owner_6 { ip6 saddr . @ll,48,48 }
 		update @neighaddr_owner_6 { ip6 saddr } update @neigh_owner_6 { ip6 saddr . @ll,48,48 }
 	}
+	chain ll_owner {
+		ip6 saddr . @ll,48,48 @neigh_owner_6 update @llmac_owner_6 { @ll,48,48 } update @neighaddr_owner_6 { ip6 saddr } update @neigh_owner_6 { ip6 saddr . @ll,48,48 } return
+		ip6 saddr @neighaddr_owner_6 return
+		@ll,48,48 != @leased_owner return
+		@ll,48,48 @llmac_owner_6 return
+		add @llmac_owner_6 { @ll,48,48 } add @neighaddr_owner_6 { ip6 saddr } add @neigh_owner_6 { ip6 saddr . @ll,48,48 }
+	}
 	chain nd_owner {
 		ip6 nexthdr != ipv6-icmp drop
 		icmpv6 type { nd-neighbor-solicit, nd-router-solicit } ip6 saddr :: return
@@ -1112,6 +1145,13 @@ table inet enforcer {
 		ip6 saddr @neighaddr_household_6 ip6 saddr . @ll,48,48 != @neigh_household_6 return
 		ct protocol tcp ct status assured update @neightcpaddr_household_6 { ip6 saddr } update @neightcp_household_6 { ip6 saddr . @ll,48,48 }
 		update @neighaddr_household_6 { ip6 saddr } update @neigh_household_6 { ip6 saddr . @ll,48,48 }
+	}
+	chain ll_household {
+		ip6 saddr . @ll,48,48 @neigh_household_6 update @llmac_household_6 { @ll,48,48 } update @neighaddr_household_6 { ip6 saddr } update @neigh_household_6 { ip6 saddr . @ll,48,48 } return
+		ip6 saddr @neighaddr_household_6 return
+		@ll,48,48 != @leased_household return
+		@ll,48,48 @llmac_household_6 return
+		add @llmac_household_6 { @ll,48,48 } add @neighaddr_household_6 { ip6 saddr } add @neigh_household_6 { ip6 saddr . @ll,48,48 }
 	}
 	chain nd_household {
 		ip6 nexthdr != ipv6-icmp drop

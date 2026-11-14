@@ -69,10 +69,11 @@ func loadSenders(dir string, s clerk.Sealer, slot string) sealedSenders {
 		return sealedSenders{}
 	}
 	plain, err := s.Open(blob, sendersAAD(slot))
+	// Wiped on the error path too: a sealer may fail after it decrypted.
+	defer clear(plain)
 	if err != nil {
 		return sealedSenders{}
 	}
-	defer clear(plain)
 	var r sealedSenders
 	if gob.NewDecoder(bytes.NewReader(plain)).Decode(&r) != nil || !r.Over && r.Rec.Over() {
 		return sealedSenders{}

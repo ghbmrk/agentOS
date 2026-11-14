@@ -265,6 +265,12 @@ class InitrdTest(unittest.TestCase):
         self.assertEqual({src for p, (src, _) in drop.INITRD_DROP.items() if p not in drop.INITRD_PARTIAL},
                          {"tar", "diffutils", "perl", "bzip2", "sqlite3", "dash", "shadow", "p11-kit", "adduser",
                           "libsemanage", "libsepol"})
+        # The packages, not only their sources: a source keeps its record off while one of its
+        # packages still goes (Potency 2 on #5051).
+        self.assertEqual(set(drop.INITRD_DROP),
+                         {"tar", "diffutils", "perl-base", "libsqlite3-0", "liblastlog2-2", "libbz2-1.0", "dash",
+                          "adduser", "passwd", "login.defs", "libsemanage2", "libsemanage-common", "libsepol2",
+                          "p11-kit", "p11-kit-modules", "libp11-kit0"})
         self.assertTrue(set(drop.ESSENTIAL) <= set(drop.INITRD_DROP))
         self.assertIn("usr/bin/lslogins", drop.INITRD_FILES)
         self.assertIn("usr/bin/dpkg-deb", drop.INITRD_FILES)
@@ -303,12 +309,66 @@ class InitrdTest(unittest.TestCase):
         (self.root / "usr/sbin/dpkg-reconfigure").unlink()
         self.assertEqual(self.calls([], stdout="/usr/bin/perl\n")[0], 1)
 
+    def test_the_initrd_files_go(self):
+        # INITRD_FILES unpatched, over a tree that holds each (Potency 1 on #5051).
+        want = ("usr/bin/lslogins", "usr/bin/dpkg-deb", "usr/lib/systemd/system/dpkg-db-backup.service",
+                "usr/lib/systemd/system/dpkg-db-backup.timer", "usr/libexec/dpkg/dpkg-db-backup")
+        for f in want:
+            (self.root / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / f).write_bytes(b"")
+        timers = self.root / "etc/systemd/system/timers.target.wants"
+        timers.mkdir(parents=True)
+        (timers / "dpkg-db-backup.timer").symlink_to("/usr/lib/systemd/system/dpkg-db-backup.timer")
+        calls = []
+
+        def run(a, **kw):
+            calls.append(a)
+            return mock.Mock(stdout="")
+
+        with mock.patch.object(drop.subprocess, "run", run):
+            self.assertEqual(drop.run(["final"], {"BUILDROOT": str(self.root)}), 0)
+        self.assertEqual([f for f in want if (self.root / f).exists()], [])
+        self.assertFalse(os.path.lexists(timers / "dpkg-db-backup.timer"))
+
+    def test_initrd_problems_say_initrd_and_name_its_lists(self):
+        # UX 1 on #5051: the lists to edit in initrd mode are INITRD_FILES and the filtered PERL_TOOLS.
+        (self.root / "var/lib/dpkg/info/debconf.list").write_text("/usr/sbin/dpkg-reconfigure\n")
+        out = []
+        with mock.patch.object(drop, "INITRD_FILES", ("usr/bin/nothing",)), \
+                mock.patch.object(drop.subprocess, "run", lambda a, **kw: mock.Mock(stdout="/usr/bin/perl\n")), \
+                mock.patch.object(drop.sys, "stderr", mock.Mock(write=out.append)):
+            self.assertEqual(drop.run([], {"BUILDROOT": str(self.root)}), 1)
+        lines = [line for line in "".join(out).splitlines() if line]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(line.startswith("drop.py: initrd: ") for line in lines), lines)
+        self.assertIn("INITRD_FILES is stale", lines[0])
+        self.assertNotIn("FILES is stale", lines[0].replace("INITRD_FILES", ""))
+        self.assertIn("debconf", lines[1])
+        self.assertIn("PERL_TOOLS", lines[1])
+        self.assertIn("filtered to the initrd's packages", lines[1])
+
     def test_a_tree_argument_is_the_main_tree_and_nothing_is_refused(self):
         with mock.patch.object(drop, "main", return_value=0) as m:
             self.assertEqual(drop.run([str(self.root)], {}), 0)
         m.assert_called_once_with(str(self.root))
-        with self.assertRaises(SystemExit):
-            drop.run([], {})
+        # The $BUILDROOT guard itself, not main's missing-bash line (Potency 3 on #5051).
+        for argv in ([], ["final"]):
+            with self.assertRaisesRegex(SystemExit, r"\$BUILDROOT"):
+                drop.run(argv, {})
+
+    def test_an_argument_that_is_not_a_tree_is_refused(self):
+        # L3 1 and UX 2 on #5051: no silent fall-back to initrd mode on $BUILDROOT.
+        env = {"BUILDROOT": str(self.root)}
+        missing = str(self.root / "no-such-tree")
+        with mock.patch.object(drop, "main", return_value=0) as m:
+            with self.assertRaisesRegex(SystemExit, "no-such-tree.* is not a directory"):
+                drop.run([missing], env)
+            with self.assertRaisesRegex(SystemExit, "one argument"):
+                drop.run([str(self.root), "final"], env)
+            m.assert_not_called()
+            self.assertEqual(drop.run(["final"], env), 0)
+            self.assertEqual(drop.run([], env), 0)
+        self.assertEqual(m.call_args_list, [mock.call(str(self.root), initrd=True)] * 2)
 
 
 class InterpreterTest(unittest.TestCase):

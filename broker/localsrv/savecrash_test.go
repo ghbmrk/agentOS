@@ -2,6 +2,7 @@ package localsrv
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
@@ -77,7 +78,32 @@ func (u unsyncedRecord) Save(rec SetupRecord) error {
 	if err := u.FileRecord.Save(rec); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: synthetic", privfile.ErrUnsynced)
+	return fmt.Errorf("%w: sync %s: synthetic", privfile.ErrUnsynced, unsyncedCanary)
+}
+
+// unsyncedCanary stands for the directory path an ErrUnsynced carries: it
+// may reach agentosd's log, never the page.
+const unsyncedCanary = "/canary-dir-5047"
+
+// captureLog replaces the package log hook for one test and returns the
+// lines it was called with.
+func captureLog(t *testing.T) *[]string {
+	t.Helper()
+	var got []string
+	old := logf
+	logf = func(format string, args ...any) { got = append(got, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { logf = old })
+	return &got
+}
+
+// loggedOnce fails unless exactly one line was logged and it carries the
+// unsynced error.
+func loggedOnce(t *testing.T, what string, logged *[]string) {
+	t.Helper()
+	if len(*logged) != 1 || !strings.Contains((*logged)[0], privfile.ErrUnsynced.Error()) || !strings.Contains((*logged)[0], unsyncedCanary) {
+		t.Fatalf("%s: the unsynced save logged %q, want one line with the error", what, *logged)
+	}
+	*logged = nil
 }
 
 // REQ: ONB-3, ONB-6
@@ -89,9 +115,13 @@ func TestFinishUnsyncedKeepsMemoryEqualToTheRecord(t *testing.T) {
 	r := newSetupRig(t)
 	r.enrollAndConfirm()
 	r.s.cfg.Record = unsyncedRecord{FileRecord{Path: r.path}}
+	logged := captureLog(t)
 	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner}, nil); err != nil {
 		t.Fatalf("unsynced finish answered %v", err)
 	}
+	// REV-CHK-save-owner-f1-r1 (#5047): logged once, with the error. The
+	// finish answers nil, so no page text can carry the path.
+	loggedOnce(t, "finish", logged)
 	if got, ok := r.s.Owner(); !ok || got != owner || len(r.finished) != 1 {
 		t.Fatalf("memory does not hold the finish: %q %v (finished %v)", got, ok, r.finished)
 	}
@@ -110,9 +140,11 @@ func TestFinishUnsyncedKeepsMemoryEqualToTheRecord(t *testing.T) {
 func TestEnrolledAndOwedUnsyncedKeepMemoryEqualToTheRecord(t *testing.T) {
 	r := newSetupRig(t)
 	r.s.cfg.Record = unsyncedRecord{FileRecord{Path: r.path}}
+	logged := captureLog(t)
 	if err := r.s.setEnrolled(true); err != nil {
 		t.Fatalf("unsynced enrolled mark: %v", err)
 	}
+	loggedOnce(t, "enrolled", logged)
 	if rec, err := (FileRecord{Path: r.path}).Load(); err != nil || !rec.Enrolled || !r.s.rec.Enrolled {
 		t.Fatalf("enrolled: memory %+v, record %+v %v", r.s.rec, rec, err)
 	}
@@ -123,6 +155,7 @@ func TestEnrolledAndOwedUnsyncedKeepMemoryEqualToTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unsynced owed answer: %v", err)
 	}
+	loggedOnce(t, "owed", logged)
 	rec, err := FileRecord{Path: r.path}.Load()
 	if err != nil || !rec.Owed["openai"] || !r.s.rec.Owed["openai"] {
 		t.Fatalf("owed: memory %+v, record %+v %v", r.s.rec, rec, err)

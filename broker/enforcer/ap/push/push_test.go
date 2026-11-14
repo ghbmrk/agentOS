@@ -14,6 +14,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -49,6 +50,8 @@ type fakeAP struct {
 	failWrite  map[string]bool // writes of these paths fail
 	cut        map[string]bool // stdin of writes to these paths ends halfway
 	readFails  map[string]bool // reads of these paths print the file, then exit 1
+	dropRead   map[string]int  // the nth read of a path (from 1) drops the connection
+	reads      map[string]int  // reads of each path so far
 	failReload int             // the next this many reloads fail
 	failClaim  bool            // claims fail, as on an access point without flock
 	noTimeout  bool            // claims exit noTimeoutExit, as on an access point without timeout
@@ -56,6 +59,7 @@ type fakeAP struct {
 	drop       map[string]bool // a write of these paths drops the connection
 	silent     bool            // answers no session open, keeping the connection
 	conns      map[int]net.Conn
+	ends       int // connections whose client has gone
 
 	// newest is the login number of the newest connection that has run
 	// a command; interleaved is set when an older one runs a command
@@ -177,6 +181,9 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 		}
 		go f.session(login, ch, creqs)
 	}
+	f.mu.Lock()
+	f.ends++
+	f.mu.Unlock()
 }
 
 func (f *fakeAP) session(login int, ch ssh.Channel, reqs <-chan *ssh.Request) {
@@ -206,6 +213,14 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		if cmd == readCmd(p) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			if f.reads == nil {
+				f.reads = map[string]int{}
+			}
+			f.reads[p]++
+			if n, ok := f.dropRead[p]; ok && n == f.reads[p] {
+				f.conns[login].Close()
+				return 1
+			}
 			b, ok := f.files[p]
 			if !ok {
 				return 1
@@ -1187,10 +1202,12 @@ func TestOpenAfterCloseReturns(t *testing.T) {
 // hostileOpens makes newSession, while on() is true, wait as x/crypto's
 // NewSession does when the access point ends the connection in its open
 // window (#4441, #4554), until wake is called; it then opens the session
-// for real and keeps it in got. The access point chooses when to end the
-// connection, so a hostile one can aim at that window on every Sync; the
-// hook stands in for the hit, which real x/crypto lands only now and
-// then.
+// for real and keeps it in got, or fails at once if the connection has
+// ended by then. The access point chooses when to end the connection, so
+// a hostile one can aim at that window on every Sync; the hook stands in
+// for the hit, which real x/crypto lands only now and then. A real open
+// on an ended connection can land that same hit and never return, so the
+// hook does not wait on one: woken opens always return (#5719).
 func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.Session) {
 	var mu sync.Mutex
 	hostile := false
@@ -1210,8 +1227,23 @@ func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.S
 		if !h {
 			return orig(c)
 		}
+		ended := make(chan struct{})
+		go func() { c.Wait(); close(ended) }()
 		<-release
-		s, err := orig(c)
+		type opened struct {
+			s   *ssh.Session
+			err error
+		}
+		res := make(chan opened, 1)
+		go func() { s, err := orig(c); res <- opened{s, err} }()
+		var s *ssh.Session
+		var err error
+		select {
+		case o := <-res:
+			s, err = o.s, o.err
+		case <-ended:
+			return nil, errors.New("hostile open: the connection ended")
+		}
 		if err == nil {
 			mu.Lock()
 			sessions = append(sessions, s)
@@ -1237,7 +1269,8 @@ func settles(t *testing.T, p *Pusher) {
 	t.Helper()
 	for end := time.Now().Add(10 * time.Second); p.abandoned() != 0; {
 		if time.Now().After(end) {
-			t.Fatalf("%d abandoned opens still counted", p.abandoned())
+			buf := make([]byte, 1<<20)
+			t.Fatalf("%d abandoned opens still counted; goroutines:\n%s", p.abandoned(), buf[:runtime.Stack(buf, true)])
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1345,5 +1378,142 @@ func TestSilentAccessPointLeavesNoCount(t *testing.T) {
 			t.Fatalf("sync %d succeeded with an access point that opens nothing", i)
 		}
 		settles(t, p)
+	}
+}
+
+// TestSyncLeavesNothingOpen: a Sync that succeeds closes the connection
+// it dialled, so the access point sees it end, and ends the context it
+// dialled with. Catches a Sync that leaks the admin-port connection or
+// its timer context.
+func TestSyncLeavesNothingOpen(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	var dialled context.Context
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Timeout: 30 * time.Second,
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialled = ctx
+			return dial(ctx, network, addr)
+		}}
+	if _, err := p.Sync(context.Background(), config()); err != nil {
+		t.Fatal(err)
+	}
+	if dialled.Err() == nil {
+		t.Error("the Sync's context is still live after it returned")
+	}
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		f.mu.Lock()
+		ends := f.ends
+		f.mu.Unlock()
+		if ends == 1 {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("a Sync that succeeded left its connection open")
+		}
+	}
+}
+
+// TestFailedDialEndsSync: an admin port that cannot be dialled fails
+// the Sync with the dial's error. Catches a connect that goes on with no
+// connection.
+func TestFailedDialEndsSync(t *testing.T) {
+	me := enforcerKey(t)
+	refused := errors.New("connection refused")
+	p := &Pusher{Addr: "127.0.0.1:1", HostKey: me.PublicKey(), Signer: me, Timeout: 5 * time.Second,
+		Dial: func(context.Context, string, string) (net.Conn, error) { return nil, refused }}
+	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, refused) || !strings.Contains(err.Error(), "push: dial") {
+		t.Fatalf("failed dial: %v", err)
+	}
+}
+
+// TestSilentHandshakeBoundedByTimeout: an admin port that accepts the
+// TCP connection and never speaks SSH ends the Sync at its Timeout.
+// Catches a connect whose handshake has no deadline, which would hold
+// Watch, and the revocations it carries, for ever.
+func TestSilentHandshakeBoundedByTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	me := enforcerKey(t)
+	p := &Pusher{Addr: ln.Addr().String(), HostKey: me.PublicKey(), Signer: me, Dial: dial, Timeout: 200 * time.Millisecond}
+	if _, err := syncWithin(t, p, config(), 5*time.Second); err == nil {
+		t.Fatal("synced with an admin port that never answered")
+	}
+}
+
+// TestCancelEndsARunningCommand: cancelling the caller's context while a
+// write is running on the access point ends the Sync at once, well
+// before its Timeout. Catches a Sync that only the connection's deadline
+// can end once a command has started.
+func TestCancelEndsARunningCommand(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, config()[0].Path, false)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 30 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.Sync(ctx, config())
+		errc <- err
+	}()
+	<-h.arrived
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("a cancelled Sync succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled Sync still running after 5s")
+	}
+}
+
+// TestDroppedReadIsAReadError: a connection that drops during a read,
+// in the drift check or in the closing verify, ends the Sync with that
+// read's error: no write after a failed drift read, and no ErrVerify for
+// a file the Pusher never read. Catches a read error taken as drift or
+// as a mismatch.
+func TestDroppedReadIsAReadError(t *testing.T) {
+	me := enforcerKey(t)
+	path := config()[0].Path
+	for _, c := range []struct {
+		name string
+		nth  int
+	}{{"drift check", 1}, {"verify", 2}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeAP(t, me.PublicKey())
+			f.dropRead = map[string]int{path: c.nth}
+			p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+			res, err := syncWithin(t, p, config(), 10*time.Second)
+			if err == nil || !strings.Contains(err.Error(), "push: read "+path) || errors.Is(err, ErrVerify) {
+				t.Fatalf("dropped read: %+v %v", res, err)
+			}
+			if _, writes, _, _ := f.n(); c.nth == 1 && (writes != 0 || len(res.Drift) != 0) {
+				t.Fatalf("a failed drift read went on to write: %+v, %d writes", res, writes)
+			}
+		})
 	}
 }
