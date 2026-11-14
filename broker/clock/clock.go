@@ -181,7 +181,11 @@ func DisagreeText(skew time.Duration) string {
 // NTS-authenticated network time: the carrier is the outlier and widens the
 // interval by at most the tolerance (#5216).
 func OutlierText(skew time.Duration) string {
-	return fmt.Sprintf("The phone network's time differs from my authenticated network time by %s, so I keep network time. A fake phone mast can do this. Nothing to do.", about(skew))
+	t := fmt.Sprintf("The phone network's time differs from my authenticated network time by %s, so I keep network time. A fake phone mast can do this. Nothing to do.", about(skew))
+	if zoneLike(skew) {
+		t += " A whole-hour difference is often a time-zone error on one side."
+	}
+	return t
 }
 
 // HoldEndText ends a hold that no carrier time confirmed either way: the
@@ -239,6 +243,9 @@ func (s Status) Line(loc *time.Location) string {
 	}
 	switch s.State {
 	case Disagree:
+		if s.Authenticated && s.Skew != 0 {
+			return s.IntervalLine(loc) // never "restricted" beside OutlierText (UX 1 on #5754)
+		}
 		if s.Skew == 0 {
 			return fmt.Sprintf("Time check: restricted since %s (saved check unreadable; waiting for phone-network time).", s.Since.In(loc).Format("15:04"))
 		}
@@ -345,6 +352,10 @@ const (
 	toldNone told = iota
 	toldHeld
 	toldDisagree
+	// toldOutlier: OutlierText, an authenticated disagreement. A lapse to
+	// plain while disagreeing escalates to DisagreeText, even at the cap,
+	// as a hold does (UX 2 on #5754).
+	toldOutlier
 )
 
 // Guard keeps the last check and answers time-sensitive callers.
@@ -625,7 +636,10 @@ func (g *Guard) check(ctx context.Context) Status {
 		g.cfg.Logf("clock: unauthenticated time %v is behind the saved floor %v; not verified", now, g.floor)
 		g.belowFloorLogged = true
 	}
-	verifiedNow := (syncOK || carrierOK) && s.State != Disagree && s.State != Held
+	// A converged NTS check verifies the clock even while the carrier
+	// disagrees: the carrier is the outlier (K16), and the floor must not
+	// hold Earliest at the last boot's time (Potency 1 on #5754).
+	verifiedNow := (syncOK || carrierOK) && (s.State != Disagree || nts) && s.State != Held
 	if verifiedNow {
 		g.verified = true
 		switch {
@@ -681,12 +695,17 @@ func (g *Guard) noticeLocked(s Status, mono time.Duration) string {
 	switch s.State {
 	case Disagree:
 		g.agreeing = false
-		if g.told != toldDisagree && (room || g.told == toldHeld) {
-			switch {
-			case g.lost && s.Skew == 0:
+		lost := g.lost && s.Skew == 0
+		if s.Authenticated && !lost {
+			// Told once under the cap; after DisagreeText only with room.
+			if g.told != toldOutlier && room {
+				return alert(toldOutlier, OutlierText(s.Skew))
+			}
+			break
+		}
+		if g.told != toldDisagree && (room || g.told == toldHeld || g.told == toldOutlier) {
+			if lost {
 				return alert(toldDisagree, StateLostText)
-			case s.Authenticated:
-				return alert(toldDisagree, OutlierText(s.Skew))
 			}
 			return alert(toldDisagree, DisagreeText(s.Skew))
 		}

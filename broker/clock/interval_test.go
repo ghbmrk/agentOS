@@ -140,7 +140,7 @@ func TestTIM1OwnerTextsDescribeTheInterval(t *testing.T) {
 	if !strings.Contains(texts[0], "both clocks") || !strings.Contains(texts[0], "Codes and STOP work as usual.") {
 		t.Errorf("DisagreeText = %q", texts[0])
 	}
-	if !strings.Contains(texts[2], "about 3 hours") || !strings.Contains(texts[2], "Nothing to do.") {
+	if !strings.Contains(texts[2], "about 3 hours") || !strings.Contains(texts[2], "Nothing to do.") || !strings.Contains(texts[2], "time-zone error") {
 		t.Errorf("OutlierText = %q", texts[2])
 	}
 }
@@ -267,5 +267,80 @@ func TestTIM1LostStateUnderNTSStaysDisagree(t *testing.T) {
 	}
 	if txt := r.sent(); len(txt) != 1 || txt[0] != StateLostText {
 		t.Fatalf("texts = %q", txt)
+	}
+}
+
+func TestTIM1LineNamesAnAuthenticatedOutlier(t *testing.T) {
+	// UX blocker 1 on #5754: agentosd's STATUS still renders Line (#5279);
+	// for an authenticated outlier it must not say "restricted" beside
+	// OutlierText's "Nothing to do".
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	g := r.guard(t, nts)
+	s := g.Check(bg)
+	if got, want := s.Line(time.UTC), s.IntervalLine(time.UTC); got != want || strings.Contains(got, "restricted") {
+		t.Fatalf("Line = %q, want %q", got, want)
+	}
+}
+
+func TestTIM1NTSChangingDuringADisagreementRealerts(t *testing.T) {
+	// UX blocker 2 on #5754 (L3 R1): NTS lapsing while the carrier still
+	// disagrees widens the interval to the full skew and holds questions,
+	// so the owner told "Nothing to do" hears DisagreeText; NTS returning
+	// is told under the cap.
+	r := newRig()
+	r.carrier = r.carrier.Add(5 * time.Hour)
+	kind := SyncedNTS
+	g := r.guard(t, syncAs(&kind))
+	g.Check(bg)
+	kind = SyncedPlain
+	r.advance(10 * time.Minute)
+	s := g.Check(bg)
+	if lo, hi, _ := g.Interval(bg); s.State != Disagree || s.Authenticated || hi.Sub(lo) != 5*time.Hour {
+		t.Fatalf("status = %+v, width %v", s, hi.Sub(lo))
+	}
+	want := []string{OutlierText(-5 * time.Hour), DisagreeText(-5 * time.Hour)}
+	if got := r.sent(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("texts = %q, want %q", got, want)
+	}
+	// At the cap now (two alerts): NTS returning is not texted, NTS lapsing
+	// again is not either, since the owner's last word is DisagreeText.
+	kind = SyncedNTS
+	r.advance(10 * time.Minute)
+	g.Check(bg)
+	kind = SyncedPlain
+	r.advance(10 * time.Minute)
+	g.Check(bg)
+	if got := r.sent(); len(got) != 2 {
+		t.Fatalf("flapping NTS at the cap: texts = %q", got)
+	}
+}
+
+func TestTIM1OutlierAfterRebootDoesNotPinTheIntervalToTheFloor(t *testing.T) {
+	// Potency blocker 1 on #5754: after a reboot, a fake mast disagreeing
+	// from the first check must not hold Earliest at the last boot's floor
+	// while converged NTS gives authenticated time.
+	path := filepath.Join(t.TempDir(), "clock.json")
+	r := newRig()
+	rtc := r.wall
+	g := rtcGuard(t, r, path, &rtc)
+	if s := g.Check(bg); !s.Verified {
+		t.Fatalf("boot b0 not verified: %+v", s)
+	}
+	r.advance(24 * time.Hour)
+	g.Check(bg)
+	r.reboot(r.wall)
+	r.carrier = r.wall.Add(5 * time.Hour)
+	g = rtcGuard(t, r, path, &rtc)
+	for i := range 7 {
+		s := g.Check(bg)
+		lo, _, _ := g.Interval(bg)
+		if s.State != Disagree || !s.Authenticated {
+			t.Fatalf("check %d: status = %+v", i, s)
+		}
+		if lag := r.wall.Sub(lo); lag > DefaultTolerance || lag < -DefaultTolerance {
+			t.Fatalf("check %d: Earliest lags authenticated time by %v", i, lag)
+		}
+		r.advance(8 * time.Hour)
 	}
 }
