@@ -635,14 +635,17 @@ func TestNoTokenTryFollowsTheCall(t *testing.T) {
 	for _, k := range []byte("4071#") {
 		r.l.keys <- k
 	}
-	for i := 0; i < 500 && tries() == 0; i++ {
-		time.Sleep(time.Millisecond)
-	}
+	// A try is not the rung: the grant reaches the loop after Token
+	// returns, and a hang-up the loop sees first records P0 (#5719). A
+	// turn asks the answerer only once the rung is known, so its answer
+	// playing means the loop holds the grant before the hang-up.
+	r.say("what's in my mail")
+	r.next()
 	if n := tries(); n != 1 {
 		t.Fatalf("live call: %d tries before the end", n)
 	}
-	if rep := r.hangup(); rep.Rung != call.P2 || tries() != 1 {
-		t.Fatalf("live call: rung %v, tried %q", rep.Rung, tried)
+	if rep := r.hangup(); rep.Rung != call.P2 || r.ans.asks[0].Rung != call.P2 || tries() != 1 {
+		t.Fatalf("live call: rung %v, asks %+v, tried %q", rep.Rung, r.ans.asks, tried)
 	}
 
 	for i := range 20 {
