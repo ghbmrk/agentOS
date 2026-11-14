@@ -948,9 +948,9 @@ class StandinTest(unittest.TestCase):
     def test_every_exit_clears_mor_first(self):
         self.assertEqual(self.exits(self.init), [
             'read -r cmd arg || { sync; mor_clear "$MOR"; exec poweroff -f; }',
-            'reboot) sync; mor_clear "$MOR"; reboot -f ;;',
-            'poweroff) sync; mor_clear "$MOR"; poweroff -f ;;',
-            'halt) sync; halt -f ;;'])  # the halting guest's: it must leave MOR set (#5256)
+            'reboot) sync; mor_clear "$MOR"; reboot -f; exit 1 ;;',
+            'poweroff) sync; mor_clear "$MOR"; poweroff -f; exit 1 ;;',
+            'halt) sync; halt -f; exit 1 ;;'])  # the halting guest's: it must leave MOR set (#5256)
         self.assertIn("\nMOR=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-"
                       "e20939be-32d4-41be-a150-897f85d49829\n", self.init)
         for old, new in (('reboot) sync; mor_clear "$MOR"; ', "reboot) sync; "),
@@ -959,11 +959,13 @@ class StandinTest(unittest.TestCase):
             with self.subTest(old):
                 self.assertNotEqual(self.exits(self.init.replace(old, new)), self.exits(self.init))
 
-    def loop(self, init, cmds):
+    def loop(self, init, cmds, returns=False):
         """Run the init's command loop on CMDS with its exits stubbed: each prints EXIT and ends the
-        shell, as a real `-f` exit never returns; mor_clear prints CLEAR. Nothing real is called."""
+        shell, as a real `-f` exit never returns (RETURNS: it returns instead); mor_clear prints CLEAR.
+        Nothing real is called."""
         body = re.search(r"^while :; do\n.*?^done$", init, re.S | re.M).group(0)
-        stubs = "".join(f'{t}() {{ echo "EXIT {t}"; exit 0; }}\n' for t in ("reboot", "poweroff", "halt"))
+        end = "" if returns else "; exit 0"
+        stubs = "".join(f'{t}() {{ echo "EXIT {t}"{end}; }}\n' for t in ("reboot", "poweroff", "halt"))
         stubs += 'mor_clear() { echo CLEAR; }\nsync() { :; }\ndd() { :; }\nplant() { :; }\nMOR=/nonexistent\n'
         with tempfile.TemporaryDirectory() as d:  # the end-of-input branch execs poweroff by PATH
             pathlib.Path(d, "poweroff").write_text("#!/bin/sh\necho 'EXIT poweroff'\n")
@@ -980,8 +982,14 @@ class StandinTest(unittest.TestCase):
                 out = self.loop(self.init, f"alive A\n{exit_}\nalive B\n")
                 self.assertEqual(out, ["HOSTCHECK-ALIVE A"] + ["CLEAR"] * clears + [f"EXIT {exit_}"])
         self.assertEqual(self.loop(self.init, "alive A\n"), ["HOSTCHECK-ALIVE A", "CLEAR", "EXIT poweroff"])
+        # An exit that returned would still not reach the loop again: the init's exit 1 follows it.
+        for exit_ in ("reboot", "poweroff", "halt"):
+            with self.subTest(returns=exit_):
+                self.assertNotIn("HOSTCHECK-ALIVE B", self.loop(self.init, f"{exit_}\nalive B\n", returns=True))
+                bare = self.init.replace(f"{exit_} -f; exit 1 ;;", f"{exit_} -f ;;")
+                self.assertIn("HOSTCHECK-ALIVE B", self.loop(bare, f"{exit_}\nalive B\n", returns=True))
         # The test can fail: a loop that goes on reading while its exit runs answers B.
-        backgrounded = self.init.replace('poweroff) sync; mor_clear "$MOR"; poweroff -f ;;',
+        backgrounded = self.init.replace('poweroff) sync; mor_clear "$MOR"; poweroff -f; exit 1 ;;',
                                          'poweroff) sync; mor_clear "$MOR"; poweroff -f & wait ;;')
         self.assertNotEqual(backgrounded, self.init)
         self.assertIn("HOSTCHECK-ALIVE B", self.loop(backgrounded, "alive A\npoweroff\nalive B\n"))

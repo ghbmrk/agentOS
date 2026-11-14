@@ -607,7 +607,10 @@ FIRMWARE_ONLY = [(r"Shell> |No bootable option or device was found", "qmp:quit")
 # begins: one that answered during a shutdown, then cleared MOR (or skipped it) and halted within a
 # poll, would pass as a cut. No host-side step closes that window, so the guest keeps the order: the
 # stand-in answers only from its command loop, which no exit returns to, and an image's responder
-# unit must stop before its MOR clear (Conflicts=shutdown.target, ordered Before= the clear; HOST-1h).
+# unit must stop before its MOR clear. The clear is agentos-mor.service's ExecStop and systemd stops
+# units in reverse start order, so the responder is ordered After=agentos-mor.service (default
+# dependencies imply it through sysinit.target) with Conflicts=shutdown.target; Before= would stop it
+# after the clear and make an ordering cycle (HOST-1h).
 UNCLEAN_PHASE, UNCLEAN_FLAG, POWER_CUT = "unclean", "unclean-end", "power-cut"
 ALIVE, ALIVE_WAIT, POLL = "HOSTCHECK-ALIVE", 30, 0.02
 

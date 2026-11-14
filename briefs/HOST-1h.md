@@ -11,13 +11,13 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #5267, a re
 - `tools/hostcheck.py` states the rule as the contract a guest's responder keeps, next to `ALIVE`, so the image's responder is built against it.
 - `tools/ASSUMPTIONS.md` records the assumption the power cut rests on.
 
-**Part 2 (with HOST-1e2, needs the image boot in CI):** the image's responder unit, ordered to stop before `agentos-mor.service`'s stop (`Conflicts=shutdown.target`, `Before=`), HOST-1e2's phases file, and a test that the image in shutdown does not answer. #5267 stays open for it.
+**Part 2 (with HOST-1e2, needs the image boot in CI):** the image's responder unit, ordered `After=agentos-mor.service` with `Conflicts=shutdown.target`: systemd stops units in reverse start order, so it stops before that unit's `ExecStop` clears MOR (`Before=` would stop it after the clear and make an ordering cycle; #5744 L3), HOST-1e2's phases file, and a test that the image in shutdown does not answer. #5267 stays open for it.
 
 **Acceptance tests:**
 - `tests/test_hostcheck.py::StandinTest::test_a_guest_in_shutdown_does_not_answer`: runs the stand-in's own command loop (stubbed exits) with `alive A`, an exit, then `alive B`; A is answered, B never is, and a MOR clear comes after A. Catches a stand-in whose loop answers after an exit has begun (a mutant that backgrounds `poweroff -f` must fail it).
 - `tests/test_hostcheck.py::StandinTest::test_every_exit_clears_mor_first` (existing): still pins which exits clear MOR.
 
-**Scope:** `tools/hostcheck_standin.sh` (comments only), `tools/hostcheck.py` (comments only), `tests/test_hostcheck.py`, `tools/ASSUMPTIONS.md` (one row), this brief.
+**Scope:** `tools/hostcheck_standin.sh` (comments, and `exit 1` after each `-f` exit from the #5744 Security review), `tools/hostcheck.py` (comments only), `tests/test_hostcheck.py`, `tools/ASSUMPTIONS.md` (one row), this brief.
 
 **Guard files:** none.
 
