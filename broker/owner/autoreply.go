@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
@@ -305,7 +306,8 @@ func (c *Channel) undoElsewhere(ctx context.Context, id string) string {
 
 // rewindowLocked gives every queued reply and held effect due within
 // ResumeWindow a fresh ResumeWindow, after a RESUME, and returns the
-// sentence naming them (UX-76-1), or "" for none.
+// RESUME reply's tail: the sentence naming them (UX-76-1), if any, then
+// control.StopCancelledNote (#5151).
 func (c *Channel) rewindowLocked(now time.Time) string {
 	at := now.Add(ResumeWindow)
 	var ids []string
@@ -316,15 +318,23 @@ func (c *Channel) rewindowLocked(now time.Time) string {
 		}
 	}
 	sort.Strings(ids)
+	return resumeTail(ids, c.clock(at))
+}
+
+// resumeTail is the RESUME reply after its head: the re-windowed ids' run
+// time at, then the note. Many ids fall back to their count, so the
+// longest head fits the text budget.
+func resumeTail(ids []string, at string) string {
+	note := " " + control.StopCancelledNote
 	switch len(ids) {
 	case 0:
-		return ""
+		return note
 	case 1:
-		return fmt.Sprintf(" %s runs at %s unless you reply UNDO %s.", ids[0], c.clock(at), ids[0])
+		return fmt.Sprintf(" %s runs at %s unless you reply UNDO %s.", ids[0], at, ids[0]) + note
 	}
-	s := fmt.Sprintf(" %s run at %s unless you reply UNDO and an ID.", strings.Join(ids, ", "), c.clock(at))
+	s := fmt.Sprintf(" %s run at %s unless you reply UNDO and an ID.", strings.Join(ids, ", "), at) + note
 	if !fits("Resumed. 999 stopped actions may now run." + s) {
-		s = fmt.Sprintf(" %d queued items run at %s unless you reply UNDO and an ID.", len(ids), c.clock(at))
+		s = fmt.Sprintf(" %d queued items run at %s unless you reply UNDO and an ID.", len(ids), at) + note
 	}
 	return s
 }

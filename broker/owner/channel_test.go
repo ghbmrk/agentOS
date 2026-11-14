@@ -717,7 +717,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 		t.Fatalf("code survived STOP: %q", got)
 	}
 	code = regexp.MustCompile(`RESUME ([0-9]{6})`).FindStringSubmatch(r.say("resume"))[1]
-	if got := r.say("Resume " + code + "."); got != "Resumed." || r.eng.Stopped() {
+	if got := r.say("Resume " + code + "."); got != "Resumed. "+control.StopCancelledNote || r.eng.Stopped() {
 		t.Fatalf("resume: %q", got)
 	}
 	if got := r.say("RESUME " + code); got != "Not stopped. Nothing to resume." {
@@ -728,7 +728,7 @@ func TestResumeNeedsATextedCodeAndStopVoidsIt(t *testing.T) {
 // TestResumeCountsWhatStopKept: the reply counts the actions STOP kept
 // from running, in plain English (L3 on #76).
 func TestResumeCountsWhatStopKept(t *testing.T) {
-	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run.", 2: "Resumed. 2 stopped actions may now run."} {
+	for n, want := range map[int]string{1: "Resumed. 1 stopped action may now run. " + control.StopCancelledNote, 2: "Resumed. 2 stopped actions may now run. " + control.StopCancelledNote} {
 		r := newRig(t, nil)
 		for range n {
 			r.eng.list = append(r.eng.list, control.Status{Phase: control.Held})
